@@ -411,7 +411,13 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
         : {}),
       ...(Array.isArray(r.channels) && r.channels.length
         ? { channels: r.channels.map(c => remapChannel(c, teamId)) } : {}),
-      triggers: (r.triggers || []).filter(t => !t.channel).map(bundleTrigger),
+      // Derived listeners are NOT exported: they are regenerated from the ports
+      // on the next import/materialise, and carrying one would freeze it —
+      // `expandWakeHandoffs` skips a role that already has a `wake-agent`
+      // trigger, so an exported #2031 listener would survive as hand-authored
+      // and keep naming whichever producer happened to wire it at export time
+      // (#2031; the `channel` half is the #380 precedent this follows).
+      triggers: (r.triggers || []).filter(t => !t.channel && !isWakeHandoffTrigger(t)).map(bundleTrigger),
     })),
     gates: (gates || []).map(g => ({ label: g.label })),
     labels: (labels || []).map(l => ({ name: l.name, humanGate: !!l.humanGate, brake: !!l.brake })),
@@ -670,7 +676,17 @@ function templateToCustomRoles(bundle) {
       // Trigger-level emits removed (#783) — label hand-offs ride on role `emits`.
       dataFlow: t.dataFlow,
       channel: t.channel,
-      // Informational provenance for a consolidated channel listener (#826).
+      // Derived-hand-off marker (#2031) — MUST survive for the same reason as
+      // `claim`/`transport` above, though the failure is quieter than either:
+      // it is what `expandWakeHandoffs` and `reconcileTeamWakeHandoffs` key on
+      // to strip and regenerate this listener. Dropped, a materialised listener
+      // reads as HAND-AUTHORED forever, so removing the last hand-off leaves it
+      // standing, re-pointing one leaves a stale sibling, and a re-imported
+      // bundle keeps telling the consumer a producer's name that no longer
+      // hands off to it — with no error anywhere.
+      ...(t.wakeHandoff ? { wakeHandoff: true } : {}),
+      // Informational provenance for a consolidated channel listener (#826) and
+      // for a derived hand-off listener (#2031).
       ...(Array.isArray(t.sources) ? { sources: t.sources } : {}),
       description: t.description,
       promptTemplate: t.prompt || '',
@@ -1656,6 +1672,18 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
       out.activatedAt = now;
     } else if (tr.type === 'cron') {
       out.cron = tr.cron;
+    } else if (tr.type === 'wake-agent') {
+      // Direct hand-off listener (#2031). Carried for the same reason as the
+      // `channel` marker above — `reconcileTeamWakeHandoffs` keys on it to strip
+      // and regenerate — and the failure is quieter: unmarked, this listener
+      // reads as hand-authored forever, so removing the last hand-off leaves it
+      // standing and re-pointing one leaves a stale sibling behind.
+      //
+      // Deliberately NO `repo`, `events` or `activatedAt`: nothing polls this
+      // type (`pollerSubscribes` requires `github-event`), so there is no
+      // history horizon to stamp, and stamping one would imply there is.
+      if (tr.wakeHandoff) out.wakeHandoff = true;
+      if (Array.isArray(tr.sources)) out.sources = tr.sources.slice();
     }
     if (tr.preCheckScript) out.preCheckScript = tr.preCheckScript;
     if (tr.preCheckEnv && typeof tr.preCheckEnv === 'object') {

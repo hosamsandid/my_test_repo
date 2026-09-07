@@ -170,3 +170,21 @@ test('#2031: a direct hand-off edge opens its OWN dialog, not the producer Outco
   // state to edit, so there is no dialog for them to open.
   assert.equal(edgeOpensProducerOutcome({ on: 'github', from: 'a', to: 'b', outcome: 'opens-pr' }), true);
 });
+
+test('#2031: consumerCandidates excludes the actor pseudo-nodes, not just humans', () => {
+  // On a LIVE team `peers` is the graph's node list, which carries @github /
+  // @external / @timer as `kind: 'actor'`. An exclusion list of `!== 'human'`
+  // offered all three as pickable consumers and hand-off targets, which the
+  // server then refuses as "not a role in this flow".
+  const peers = [
+    { id: 'dev', displayName: 'Developer' },
+    { id: 'lead', displayName: 'Tech Lead', kind: 'human' },
+    { id: '@github', displayName: 'GitHub', kind: 'actor' },
+    { id: '@external', displayName: 'External system', kind: 'actor' },
+    { id: '@timer', displayName: 'Schedule', kind: 'actor' },
+    { id: 'rev', displayName: 'Reviewer', kind: 'agent' },
+  ];
+  assert.deepEqual(consumerCandidates({ id: 'ba' }, peers).map(c => c.id), ['dev', 'rev']);
+  // A draft's roles carry no `kind` at all — they must still be candidates.
+  assert.deepEqual(consumerCandidates({ id: 'ba' }, [{ id: 'dev', displayName: 'D' }]).map(c => c.id), ['dev']);
+});

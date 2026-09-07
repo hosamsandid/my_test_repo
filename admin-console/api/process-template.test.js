@@ -1989,3 +1989,71 @@ test('#2031: isWakeHandoffTrigger / wakeTriggerId are the strip+find pair the re
   assert.equal(isWakeHandoffTrigger({ type: 'github-event', channel: true }), false);
   assert.equal(isWakeHandoffTrigger(null), false);
 });
+
+test('#2031: the derived listener SURVIVES materialise as marked, and is NOT exported', () => {
+  // The marker is the whole basis of strip-and-regenerate. Dropped by any of the
+  // three trigger projections, a materialised listener reads as HAND-AUTHORED
+  // forever — which is silent, and breaks three things at once (below).
+  const b = expandWakeHandoffs(wakeBundle([
+    handsOff('dev', 'rev'),
+    { id: 'rev', displayName: 'Reviewer', triggers: [] },
+  ]));
+  const roles = templateToCustomRoles(b);
+  const projected = roles.find(r => r.id === 'rev').triggers.find(t => t.type === 'wake-agent');
+  assert.equal(projected.wakeHandoff, true, 'templateToCustomRoles carries the marker');
+
+  const member = buildMemberFromTemplate(roles.find(r => r.id === 'rev'),
+    { teamId: 'acme', memberId: 'acme-rev', vars: { repoFullName: 'o/r' } });
+  const live = member.triggers.find(t => t.type === 'wake-agent');
+  assert.equal(live.wakeHandoff, true, 'buildMemberFromTemplate carries the marker');
+  assert.deepEqual(live.sources, ['dev']);
+  // Nothing polls this type, so there is no history horizon to stamp — and
+  // stamping one would imply there is.
+  for (const k of ['repo', 'events', 'activatedAt', 'createdAt']) {
+    assert.equal(live[k], undefined, `a wake listener must not be given \`${k}\``);
+  }
+
+  // Export DROPS it, like a channel listener: it is regenerated from the ports.
+  const exported = buildProcessTemplate({ name: 't', level: 'live', roles: b.roles, teamId: 'acme' });
+  assert.deepEqual(exported.roles.find(r => r.id === 'rev').triggers, [],
+    'an exported derived listener would survive re-import as hand-authored and freeze');
+});
+
+test('#2031: after a round-trip the listener still tracks who actually hands off', () => {
+  // The three failures the marker + export filter prevent, each silent.
+  const wired = expandWakeHandoffs(wakeBundle([
+    handsOff('dev', 'rev'),
+    { id: 'rev', displayName: 'Reviewer', triggers: [] },
+  ]));
+  const exportedRevTriggers = buildProcessTemplate({ name: 't', level: 'live', roles: wired.roles, teamId: 'acme' })
+    .roles.find(r => r.id === 'rev').triggers;
+
+  // (a) the producer changed while the bundle was a draft → re-derive names it.
+  const reimported = expandWakeHandoffs(wakeBundle([
+    handsOff('ba', 'rev'),
+    { id: 'rev', displayName: 'Reviewer', triggers: exportedRevTriggers },
+  ]));
+  const t = wakeTriggersOf(reimported, 'rev')[0];
+  assert.match(t.description, /Ba/, 'the listener names the CURRENT producer');
+  assert.doesNotMatch(t.description, /Dev\b/, 'and not the one that wired it at export time');
+
+  // (b) removing the last hand-off strips it, on the marked live shape too.
+  const removed = expandWakeHandoffs({
+    roles: [
+      { id: 'dev', displayName: 'Dev', triggers: [], outcomes: wakeOc([{ id: 'h', actions: [{ type: 'none' }] }]) },
+      { id: 'rev', displayName: 'Reviewer', triggers: wired.roles.find(r => r.id === 'rev').triggers },
+    ],
+  });
+  assert.deepEqual(wakeTriggersOf(removed, 'rev'), []);
+
+  // (c) re-pointing does not leave a stale sibling standing.
+  const repointed = expandWakeHandoffs({
+    roles: [
+      handsOff('dev', 'qa'),
+      { id: 'rev', displayName: 'Reviewer', triggers: wired.roles.find(r => r.id === 'rev').triggers },
+      { id: 'qa', displayName: 'QA', triggers: [] },
+    ],
+  });
+  assert.deepEqual(wakeTriggersOf(repointed, 'rev'), [], 'the old target loses its listener');
+  assert.equal(wakeTriggersOf(repointed, 'qa').length, 1, 'the new target gains one');
+});

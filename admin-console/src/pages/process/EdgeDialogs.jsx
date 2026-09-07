@@ -1128,25 +1128,31 @@ function EditWakeHandoffDialog({ edge, fromName, toName, graph, ops = liveOps, o
   const [error, setError] = useState(null);
   const A = fromName || from;
 
-  // Candidate targets: every OTHER agent in the flow. A person is excluded
-  // because a hand-off is delivered through the target's pending queue and a
-  // human role has none — the server refuses it (outcomes.js) and the graph
-  // draws nothing for it, so offering one here would be a dead end.
+  // Candidate targets: every OTHER agent in the flow. Positively filtered on
+  // `kind === 'agent'`, not merely `!== 'human'`: `graph.nodes` also carries the
+  // actor pseudo-nodes (`kind: 'actor'` — @github "GitHub", @external "External
+  // system", @timer "Schedule"), and an exclusion list would have listed all
+  // three as pickable targets that the server then refuses with "not a role in
+  // this flow". A person is excluded for the real reason — a hand-off is
+  // delivered to the target's pending queue and a human role has none.
   const candidates = (graph && Array.isArray(graph.nodes) ? graph.nodes : [])
-    .filter(n => n && n.id && n.id !== from && n.kind !== 'human');
+    .filter(n => n && n.id && n.id !== from && (n.kind || 'agent') === 'agent');
   const nameOf = (id) => candidates.find(n => n.id === id)?.displayName || toName || id;
 
   async function save() {
     setSaving(true); setError(null);
     try {
-      await updateWakeHandoff({ ops }, { from, to, newTo: target, note: clampWakeNote(note) });
+      // `outcome` scopes the write to THIS hand-off: the producer may hand off
+      // to the same target from another option, drawn as its own edge, and
+      // without it one click would rewrite both.
+      await updateWakeHandoff({ ops }, { from, to, outcome, newTo: target, note: clampWakeNote(note) });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); }
   }
   async function remove() {
     setSaving(true); setError(null);
     try {
-      await unwireWakeHandoff({ ops }, { from, to });
+      await unwireWakeHandoff({ ops }, { from, to, outcome });
       onDone?.();
     } catch (e) { setError(e.message); setSaving(false); setConfirmDel(false); }
   }

@@ -48,7 +48,14 @@ export function rowArtifact(option) {
 // picker / delivery, never as signal consumers here).
 export function consumerCandidates(node, peers) {
   return (Array.isArray(peers) ? peers : [])
-    .filter(p => p && p.id && p.id !== node?.id && p.kind !== 'human')
+    // Positively `agent`, not merely `!== 'human'` (#2031). On a LIVE team
+    // `peers` is the graph's node list, which also carries the actor
+    // pseudo-nodes (`kind: 'actor'` — @github "GitHub", @external "External
+    // system", @timer "Schedule"), so the exclusion list offered all three as
+    // pickable consumers. An actor can be neither a label consumer nor a
+    // hand-off target, and the server refuses one either way; a draft's `roles`
+    // carry no `kind` at all, hence the default.
+    .filter(p => p && p.id && p.id !== node?.id && (p.kind || 'agent') === 'agent')
     .map(p => ({ id: p.id, name: p.displayName || p.id }));
 }
 

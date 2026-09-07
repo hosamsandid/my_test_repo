@@ -153,3 +153,19 @@ test('a wake edge draws a filled chip and carries its note into the click payloa
   // edge to re-read it from, so losing it here loses it entirely.
   assert.match(src, /\.\.\.\(e\.note \? \{ note: e\.note \} : \{\}\)/);
 });
+
+test('the renderer resolves a target name from `title`, not `displayName`', () => {
+  // A `state.byId` entry is a *briefing* object, built in setData as
+  // `{ id, title: n.displayName || n.id, … }` — the unified node's
+  // `displayName` does not survive into it. Reading `displayName` there falls
+  // through to the raw id on EVERY chip and never reports anything, so the whole
+  // `↪ <Target>` affordance silently degrades to `↪ acme-code-reviewer`.
+  const src = renderSource();
+  assert.match(src, /state\.briefings = nodes\.map\(n => \(\{\s*id: n\.id,\s*title: n\.displayName \|\| n\.id/,
+    'the byId entry still puts the name on `title`');
+  const fn = src.match(/function nodeDisplayName\(id\) \{[\s\S]*?\n {2}\}/);
+  assert.ok(fn, 'nodeDisplayName is still a named function');
+  assert.match(fn[0], /n\.title \|\| n\.id/);
+  assert.doesNotMatch(fn[0], /n\.displayName/,
+    'reading displayName off a byId entry always yields undefined');
+});

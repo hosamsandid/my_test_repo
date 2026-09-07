@@ -350,7 +350,7 @@ test('updateLabelHandoff: toggles internal on and back off via an explicit githu
 test('wireWakeHandoff: one wakeAgent action on the producer, idempotent, no consumer write', async () => {
   const state = await onBoth(async (ctx) => {
     await wireWakeHandoff(ctx, { from: 'ba', to: 'dev', note: 'mind step 3' });
-    await wireWakeHandoff(ctx, { from: 'ba', to: 'dev', note: 'a different note' }); // re-run: no-op
+    await wireWakeHandoff(ctx, { from: 'ba', to: 'dev', note: 'mind step 3' }); // re-run: no-op
   });
   const ba = state.roles.ba;
   assert.equal(ba.outcomes.options.length, 1, 'exactly one option after two wires to the same target');
@@ -444,4 +444,71 @@ test('unwireWakeHandoff: removes only the named target', async () => {
     await unwireWakeHandoff(ctx, { from: 'ba', to: 'dev' });
   });
   assert.deepEqual(state.roles.ba.outcomes.options.map(o => o.id), ['hand-off-qa']);
+});
+
+// ── #2031 review findings: the ops must scope to the clicked hand-off ───────
+
+test('updateWakeHandoff: scoped to `outcome`, so a sibling hand-off is untouched', async () => {
+  // The canvas draws TWO edges here (edgeId keys wake edges on the outcome) and
+  // wakeChipText disambiguates them — so a click on one that rewrote both would
+  // be a silent data loss on an edge the user never touched.
+  const state = await onBoth(async (ctx) => {
+    await ctx.ops.setRoleOutcomes('ba', { mode: 'anyOf', options: [
+      { id: 'approved', actions: [{ type: 'wakeAgent', to: 'dev', note: 'looks good' }] },
+      { id: 'second-look', actions: [{ type: 'wakeAgent', to: 'dev', note: 'needs eyes' }] },
+    ] });
+    await updateWakeHandoff(ctx, { from: 'ba', to: 'dev', outcome: 'approved', newTo: 'qa', note: 'looks good' });
+  });
+  const byId = Object.fromEntries(state.roles.ba.outcomes.options.map(o => [o.id, o.actions]));
+  assert.deepEqual(byId.approved, [{ type: 'wakeAgent', to: 'qa', note: 'looks good' }]);
+  assert.deepEqual(byId['second-look'], [{ type: 'wakeAgent', to: 'dev', note: 'needs eyes' }],
+    'the sibling keeps its target AND its note');
+});
+
+test('unwireWakeHandoff: scoped to `outcome`, so a sibling hand-off survives', async () => {
+  const state = await onBoth(async (ctx) => {
+    await ctx.ops.setRoleOutcomes('ba', { mode: 'anyOf', options: [
+      { id: 'approved', actions: [{ type: 'wakeAgent', to: 'dev' }] },
+      { id: 'second-look', actions: [{ type: 'wakeAgent', to: 'dev' }] },
+    ] });
+    await unwireWakeHandoff(ctx, { from: 'ba', to: 'dev', outcome: 'approved' });
+  });
+  assert.deepEqual(state.roles.ba.outcomes.options.map(o => o.id), ['second-look']);
+});
+
+test('#2031: with no `outcome` the ops fall back to matching every hand-off to the target', async () => {
+  // The legacy / imported-data path: without an outcome there is nothing else to
+  // match on, so "this hand-off" honestly means all of them.
+  const state = await onBoth(async (ctx) => {
+    await ctx.ops.setRoleOutcomes('ba', { mode: 'anyOf', options: [
+      { id: 'a', actions: [{ type: 'wakeAgent', to: 'dev' }] },
+      { id: 'b', actions: [{ type: 'wakeAgent', to: 'dev' }] },
+    ] });
+    await unwireWakeHandoff(ctx, { from: 'ba', to: 'dev' });
+  });
+  assert.ok(!state.roles.ba.outcomes || !(state.roles.ba.outcomes.options || []).length);
+});
+
+test('#2031: re-wiring an existing hand-off APPLIES a supplied note instead of dropping it', async () => {
+  // The edge chooser's one-click tile for an already-wired hand-off is titled
+  // "edit the note it hands over" and pre-fills it; a bare idempotent return
+  // accepted the edit, closed the panel with no error, and discarded it.
+  const state = await onBoth(async (ctx) => {
+    await wireWakeHandoff(ctx, { from: 'ba', to: 'dev', note: 'first' });
+    await wireWakeHandoff(ctx, { from: 'ba', to: 'dev', note: 'second' });
+  });
+  assert.equal(state.roles.ba.outcomes.options.length, 1, 'still exactly one option');
+  assert.deepEqual(state.roles.ba.outcomes.options[0].actions,
+    [{ type: 'wakeAgent', to: 'dev', note: 'second' }]);
+});
+
+test('#2031: re-wiring with NO note leaves an existing note alone', async () => {
+  // Clearing a note is the Edit dialog's job (it passes one explicitly); a plain
+  // re-wire must not wipe a note nobody was editing.
+  const state = await onBoth(async (ctx) => {
+    await wireWakeHandoff(ctx, { from: 'ba', to: 'dev', note: 'keep me' });
+    await wireWakeHandoff(ctx, { from: 'ba', to: 'dev' });
+  });
+  assert.deepEqual(state.roles.ba.outcomes.options[0].actions,
+    [{ type: 'wakeAgent', to: 'dev', note: 'keep me' }]);
 });

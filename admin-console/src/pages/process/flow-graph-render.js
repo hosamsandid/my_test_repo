@@ -2279,8 +2279,14 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
   // a chip built from them always says something. Shared by outcomeEdgeText and
   // the #2031 wake chip — the same lookup, previously inline in the former.
   function nodeDisplayName(id) {
+    // `title`, NOT `displayName`: a `state.byId` entry is a *briefing* object
+    // (built in setData as `{ id, title: n.displayName || n.id, … }`), so the
+    // unified node's `displayName` does not survive into it — reading it would
+    // silently fall through to the raw id on every single chip, which is the
+    // one failure mode a name lookup can have and never report. The node cards
+    // read `bp.title` for the same reason.
     const n = state.byId[id];
-    return (n && (n.displayName || n.id)) || id || '';
+    return (n && (n.title || n.id)) || id || '';
   }
   function outcomeOptionTitle(fromId, outcomeId) {
     const src = state.byId[fromId];

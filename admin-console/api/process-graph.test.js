@@ -1446,3 +1446,74 @@ test('#1197: a plain label consumed by a person AND listened on by an agent draw
   assert.ok(g.edges.some(e => e.from === 'reworker' && e.to === 'lead' && e.handoff === 'human'),
     'the person delivery edge is also drawn');
 });
+
+// ─── #2031: direct agent-to-agent hand-off edges (on:'wake', concept §10) ────
+
+test('#2031: a wakeAgent outcome action draws a producer→target wake edge', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', displayName: 'Developer', triggers: [], outcomes: { mode: 'anyOf', options: [
+      { id: 'handed-off', title: 'Handed off', actions: [{ type: 'wakeAgent', to: 'rev', note: 'mind step 3' }] },
+    ] } },
+    { id: 'rev', displayName: 'Reviewer', triggers: [] },
+  ]);
+  const wake = g.edges.filter(e => e.kind === 'wake');
+  assert.equal(wake.length, 1);
+  assert.deepEqual(wake[0], { from: 'dev', to: 'rev', kind: 'wake', outcome: 'handed-off', note: 'mind step 3' });
+  // No label token anywhere: a direct hand-off is not a label hand-off.
+  assert.equal(wake[0].label, undefined);
+  assert.deepEqual(g.nodes.find(n => n.id === 'dev').emits, [],
+    'a wakeAgent contributes nothing to the emit projection');
+  assert.deepEqual(lintCodes(g), [], 'a wired hand-off raises no lint');
+});
+
+test('#2031: a note-less wakeAgent draws an edge with no note key', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', triggers: [], outcomes: { mode: 'anyOf', options: [
+      { id: 'h', actions: [{ type: 'wakeAgent', to: 'rev' }] },
+    ] } },
+    { id: 'rev', triggers: [] },
+  ]);
+  const e = g.edges.find(x => x.kind === 'wake');
+  assert.ok(e && !('note' in e), 'an absent note is omitted, never an empty string');
+});
+
+test('#2031: two hand-offs from one producer to the SAME target stay two edges', () => {
+  // The pair alone does not identify a hand-off — the outcome option does. Both
+  // must survive here, or unified-graph's edgeId has nothing to key on.
+  const g = buildProcessGraph([
+    { id: 'dev', triggers: [], outcomes: { mode: 'anyOf', options: [
+      { id: 'approved', actions: [{ type: 'wakeAgent', to: 'rev' }] },
+      { id: 'second-look', actions: [{ type: 'wakeAgent', to: 'rev' }] },
+    ] } },
+    { id: 'rev', triggers: [] },
+  ]);
+  assert.deepEqual(g.edges.filter(e => e.kind === 'wake').map(e => e.outcome),
+    ['approved', 'second-look']);
+});
+
+test('#2031: an unresolvable, self- or human-targeted hand-off draws NO edge', () => {
+  const mk = (to, opts) => buildProcessGraph([
+    { id: 'dev', triggers: [], outcomes: { mode: 'anyOf', options: [
+      { id: 'h', actions: [{ type: 'wakeAgent', to }] },
+    ] } },
+  ], opts);
+  assert.deepEqual(mk('ghost').edges.filter(e => e.kind === 'wake'), [],
+    'an unknown target draws no line into nothing');
+  assert.deepEqual(mk('dev').edges.filter(e => e.kind === 'wake'), [],
+    'a self-wake is refused server-side — never drawn as a legal loop');
+  // A person has no pending queue, so nothing could deliver the wake. `nodeIds`
+  // is the agent id set, which is what rejects the human role here.
+  const human = mk('lead', { humans: [{ id: 'lead', name: 'Tech Lead' }] });
+  assert.deepEqual(human.edges.filter(e => e.kind === 'wake'), []);
+  assert.ok(human.nodes.some(n => n.id === 'lead' && n.kind === 'human'),
+    'the human role is still a node — only the wake edge is withheld');
+});
+
+test('#2031: a legacy agent with flat emits and no authored outcomes is untouched', () => {
+  const g = buildProcessGraph([
+    { id: 'dev', emits: ['ready-for-review'], triggers: [] },
+    { id: 'rev', triggers: [{ id: 't', type: 'github-event', events: ['pull_request.labeled'], labelFilter: 'ready-for-review' }] },
+  ]);
+  assert.deepEqual(g.edges.filter(e => e.kind === 'wake'), []);
+  assert.ok(g.edges.some(e => e.from === 'dev' && e.to === 'rev' && e.label === 'ready-for-review'));
+});

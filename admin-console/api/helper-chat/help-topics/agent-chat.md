@@ -58,7 +58,7 @@ where its prompt and skills come from:
 |---|---|---|
 | **Agent** (standalone) | A single chat agent with its own system prompt. The prompt shapes its persona — a COBOL specialist, a code-review buddy, a release manager. Add cron / GitHub triggers later to make it run autonomously as well as answer messages. | One-of-a-kind agents that act on their own. |
 | **Agent Team** | A squad of agents working a repository. It stores a system-prompt template and hosts no agent itself — **Add member…** on the team's group header spawns agents that share the prompt and Working Environment but each get their own workspace and their own conversation. | Several copies of the same kind of agent — e.g. three reviewer agents in parallel. Start one from the **Create** launcher rather than by hand. |
-| **Team Member** | One agent spawned from an Agent Team. Its system prompt, skills and MCP servers **inherit** from the parent team unless you flip a field from *Inherit* to *Custom*. Role, Working Environment and parent team are fixed at creation and shown read-only. | You do not pick this role — it is assigned when you add a member to a team. |
+| **Team Member** | One agent spawned from an Agent Team. Its system prompt, skills and MCP servers **inherit** from the parent team unless you flip a field from *Inherit* to *Custom*. Role, Working Environment and parent team are fixed at creation; of those, only the parent team is shown in the Settings form. | You do not pick this role — it is assigned when you add a member to a team. |
 
 > An **Agent Team** is *not* the same thing as a **Team** on the **Access**
 > page. That Team is the human tenant / **access scope** every agent,
@@ -160,8 +160,9 @@ is off.
 
 **Adding an agent** is done from the page header, not the list. **New Agent**
 (top right) hands over to the create launcher, where *Configure an agent
-manually* — under **Advanced options** — opens the direct form; **Import Agent** next to it takes an exported agent ZIP
-and asks for an id and a team before it lands. The imported agent joins the list
+manually* — under **Advanced options** — opens the direct form; **Import Agent**
+next to it takes an exported agent ZIP and asks for an id and a team before it
+lands. The imported agent joins the list
 without a reload — but if the list filter is narrowed at the time, the
 confirmation says so rather than letting it arrive out of sight. Both buttons
 are greyed out with the reason when you may not create agents.
@@ -442,11 +443,15 @@ validity window on the Knowledge page records *why* it stopped applying instead.
 
 ## Settings — configuring the agent
 
-The **Settings** tab is the agent's own edit form — name, role, system prompt,
-Working Environment, skills, plugin grants, host context folders. It is the only
-place an existing agent is configured: the Agents page that used to host a second
-copy of this form was removed once the tab covered it (see *Where the Agents page
-went* below).
+The **Settings** tab is the agent's own edit form — name, system prompt, skills,
+plugin grants, host context folders. It is the only place an existing agent is
+configured: the Agents page that used to host a second copy of this form was
+removed once the tab covered it (see *Where the Agents page went* below).
+
+Its **role** and its **Working Environment** are fixed at creation and are not
+shown here — neither could be changed in this form anyway. The agent's role is
+what its list icon shows, and the environment's name sits under the agent's name
+in the list (on a team, once per group header).
 
 Three things behave differently from an ordinary form:
 
@@ -464,6 +469,9 @@ Three things behave differently from an ordinary form:
 
 ### What the form fields control
 
+The **System Prompt** comes first, directly under the display name: it is the
+most consequential thing in this form, so it is not below the plugin grants.
+
 - **System Prompt** — the persona Claude reads at startup: role, expertise,
   communication style, constraints. Markdown is fine. On an **Agent Team** it is
   a *template* stored once and reused by every member that inherits it; leave it
@@ -472,8 +480,6 @@ Three things behave differently from an ordinary form:
   set is copied into every member's workspace and members inherit it unless they
   set their own override. On the create form only global-pool skills are offered;
   team-tier skills become available once the agent belongs to a team.
-- **Working Environment** — where the agent runs, which repositories it clones
-  and which credentials it uses.
 - **Plugins** — governed capabilities beyond the container, reached through a
   broker that holds the privilege so the agent never does. Changes apply
   immediately, with no save and no restart. On a team agent the grant covers the

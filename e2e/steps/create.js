@@ -1,34 +1,73 @@
-// Unified "Create" launcher step library (#1665 / epic #1661).
+// Unified "Create" launcher step library (#1665 / epic #1661, re-sorted by #2027).
 //
 // The launcher (`/create`, also reachable from the persistent "+ Create" control
-// in the sidebar) is the single front door for starting anything new: four
-// equally-ranked, plainly-labelled tiles (Describe · Start from a ready-made
-// setup · Build it yourself · Just one assistant to chat with), plus the direct
-// "Create a single agent" form (#1956). It replaced the old scatter of separate
-// Single-Agent / Team-Wizard / Flows entry points, so a journey that used to
-// deep-link straight into `/team-setup` now enters through this launcher and
-// picks the "ready-made setup" tile.
+// in the sidebar) is the single front door for starting anything new. It began
+// as four equally-ranked tiles plus a set-apart direct form (#1956); #2027
+// replaced that flat grid with an explicit ranking, simplest → most advanced,
+// in three tiers:
+//
+//   hero      Chat with one assistant          (full width, first, primary)
+//   flow      Start from a ready-made team ·
+//             Describe what you need ·
+//             Design it on the canvas          (one group, one heading)
+//   advanced  Configure an agent manually      (behind a collapsed disclosure)
+//
+// It replaced the old scatter of separate Single-Agent / Team-Wizard / Flows
+// entry points, so a journey that used to deep-link straight into `/team-setup`
+// now enters through this launcher and picks the ready-made-team card.
 //
 // As with the other modules, every function takes (ctx, params); ctx bundles
-// { page, request }. The launcher tiles carry stable data-testids
+// { page, request }. The launcher entries carry stable data-testids
 // (`create-entry-<key>` in Create.jsx), which we prefer for the click targets;
 // the visible headings are asserted as the human-readable capture reference.
 const { expect } = require('@playwright/test');
 
-// The launcher tiles, keyed as in create-launcher-view.js. Heading text is the
-// visible title; testid is the stable click/selection hook.
+// The launcher entries, keyed and ORDERED as in create-launcher-view.js (the
+// order is the ranking, so it is part of what a journey captures). Heading text
+// is the visible title; testid is the stable click/selection hook. `tier` is
+// what decides whether an entry is on screen when the page loads — the advanced
+// one is not, by design, so `open()` must not assert it visible.
 const ENTRIES = {
-  describe: { testid: 'create-entry-describe', title: 'Describe what you need' },
-  template: { testid: 'create-entry-template', title: 'Start from a ready-made setup' },
-  build: { testid: 'create-entry-build', title: 'Build it yourself' },
-  chat: { testid: 'create-entry-chat', title: 'Just give me one assistant to chat with' },
-  'single-agent': { testid: 'create-entry-single-agent', title: 'Create a single agent' },
+  chat: {
+    testid: 'create-entry-chat',
+    title: 'Chat with one assistant',
+    tier: 'hero',
+  },
+  template: {
+    testid: 'create-entry-template',
+    title: 'Start from a ready-made team',
+    tier: 'flow',
+  },
+  describe: {
+    testid: 'create-entry-describe',
+    title: 'Describe what you need',
+    tier: 'flow',
+  },
+  build: {
+    testid: 'create-entry-build',
+    title: 'Design it on the canvas',
+    tier: 'flow',
+  },
+  'single-agent': {
+    testid: 'create-entry-single-agent',
+    title: 'Configure an agent manually',
+    tier: 'advanced',
+  },
 };
 
+// The disclosure that holds the advanced tier. Collapsed on every load for
+// every user (#2027 — the state is deliberately not persisted), so a journey
+// that wants the entry behind it has to open it first.
+const ADVANCED_TOGGLE = 'create-advanced-toggle';
+
+const visibleOnLoad = () => Object.values(ENTRIES).filter(e => e.tier !== 'advanced');
+
 /**
- * Open the unified "Create" launcher and confirm every entry tile is showing.
- * This is the single front door for starting something — the capture point for
- * the launcher screenshot.
+ * Open the unified "Create" launcher and confirm the ranked entries are showing:
+ * the hero, the three grouped flow cards, and the collapsed "Advanced options"
+ * disclosure (whose entry is deliberately NOT on screen yet). This is the single
+ * front door for starting something — the capture point for the launcher
+ * screenshot.
  *
  * @example
  * - action:
@@ -37,16 +76,23 @@ const ENTRIES = {
 async function open(ctx) {
   const { page } = ctx;
   await page.goto('/create');
-  for (const entry of Object.values(ENTRIES)) {
+  for (const entry of visibleOnLoad()) {
     await expect(page.getByTestId(entry.testid)).toBeVisible();
   }
+  // The disclosure is there and shut. Asserting both halves is what keeps this
+  // honest: the toggle being present would pass just as well if the advanced
+  // entry had been rendered next to it after all.
+  await expect(page.getByTestId(ADVANCED_TOGGLE)).toBeVisible();
+  await expect(page.getByTestId(ENTRIES['single-agent'].testid)).toBeHidden();
 }
 
 /**
- * Assert a specific launcher tile is present with its visible heading. Lets a
+ * Assert a specific launcher entry is present with its visible heading. Lets a
  * journey spot-check the plainly-labelled wording without clicking through.
+ * Expands the "Advanced options" disclosure first when the entry lives behind
+ * it, so a caller need not know which tier an entry is in.
  *
- * @param {string} params.entry - Which tile: describe | template | build | chat.
+ * @param {string} params.entry - Which entry: chat | template | describe | build | single-agent.
  * @example
  * - assert:
  *     do: create.expectEntry
@@ -55,13 +101,58 @@ async function open(ctx) {
 async function expectEntry(ctx, { entry }) {
   const meta = ENTRIES[entry];
   if (!meta) throw new Error(`create.expectEntry: unknown entry "${entry}" (expected one of ${Object.keys(ENTRIES).join(', ')})`);
+  if (meta.tier === 'advanced') await expandAdvanced(ctx);
   await expect(ctx.page.getByTestId(meta.testid)).toBeVisible();
   await expect(ctx.page.getByText(meta.title, { exact: true }).first()).toBeVisible();
 }
 
 /**
- * From the launcher, take the "Start from a ready-made setup" path: click that
- * tile and wait until the Team-Setup wizard's Process step (the template
+ * Expand the launcher's "Advanced options" disclosure, revealing the manual
+ * agent form entry. Idempotent — a second call on an already-open disclosure
+ * leaves it open rather than toggling it shut, so a journey can call it without
+ * tracking state.
+ *
+ * @example
+ * - action:
+ *     do: create.expandAdvanced
+ */
+async function expandAdvanced(ctx) {
+  const { page } = ctx;
+  const toggle = page.getByTestId(ADVANCED_TOGGLE);
+  await expect(toggle).toBeVisible();
+  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+  await expect(page.getByTestId(ENTRIES['single-agent'].testid)).toBeVisible();
+}
+
+/**
+ * Reveal an entry's "what you get" preview via its eye control (#2027) and
+ * confirm the schematic and its caption are showing. The control is the touch
+ * path — hover and keyboard focus reveal the same panel — and it is a sibling of
+ * the card's link, so clicking it previews instead of navigating. This step
+ * asserts exactly that: the preview appears AND we are still on the launcher.
+ *
+ * @param {string} params.entry - Which entry's preview to reveal.
+ * @example
+ * - action:
+ *     do: create.previewEntry
+ *     entry: chat
+ */
+async function previewEntry(ctx, { entry }) {
+  const { page } = ctx;
+  const meta = ENTRIES[entry];
+  if (!meta) throw new Error(`create.previewEntry: unknown entry "${entry}" (expected one of ${Object.keys(ENTRIES).join(', ')})`);
+  if (meta.tier === 'advanced') await expandAdvanced(ctx);
+  const eye = page.getByTestId(`create-preview-${entry}`);
+  await expect(eye).toBeVisible();
+  await eye.click();
+  await expect(eye).toHaveAttribute('aria-expanded', 'true');
+  // The tap must not have followed the card's link (AC5).
+  await expect(page).toHaveURL(/\/create(\?|$)/);
+}
+
+/**
+ * From the launcher, take the "Start from a ready-made team" path: click that
+ * card and wait until the Team-Setup wizard's Process step (the template
  * gallery) has loaded. Replaces the old direct `/team-setup` deep link so the
  * journey exercises the real entry point users now take.
  *
@@ -77,4 +168,6 @@ async function startFromTemplate(ctx) {
   await expect(page.getByText('Pick a process template')).toBeVisible();
 }
 
-module.exports = { open, expectEntry, startFromTemplate };
+module.exports = {
+  open, expectEntry, expandAdvanced, previewEntry, startFromTemplate,
+};

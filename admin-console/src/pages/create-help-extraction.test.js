@@ -189,14 +189,33 @@ test('AC5: the point-of-decision microcopy the chapters explain is still on the 
     quickstartPage.includes('Before you can start, please:'),
     'the disabled-submit checklist must not move to the topic',
   );
+  // #2027 replaced the tile copy wholesale with its binding inventory (and
+  // re-sorted the launcher into three tiers), so these are the current strings.
+  // The rule they guard is unchanged: what each entry *is* stays on the entry;
+  // only what it *produces in detail* lives in the topic.
   for (const tile of [
-    'Tell us in plain language what you want to get done.',
-    'Pick a proven starting point and adjust it.',
-    'Start talking right away — simply a team of one you can grow later.',
+    'Tell us in plain language what you want done; we draft the team for you.',
+    'Pick a proven setup and adjust it to fit.',
+    "The fastest way in. Get a single assistant you can talk to right away",
   ]) {
     assert.ok(
       launcherView.includes(tile),
-      `the launcher tile one-liner "${tile}" must stay on the tile`,
+      `the launcher entry one-liner "${tile}" must stay on the entry`,
+    );
+  }
+  // #2027 also put an outcome line and a "what you get" caption on every entry:
+  // those are point-of-decision copy too — a reader must be able to tell a chat
+  // from an editor from a canvas without opening the panel at all.
+  for (const outcome of [
+    '→ Opens a chat with your assistant',
+    '→ Review the team, then launch it',
+    '→ Opens an editable draft on the canvas',
+    '→ Opens the canvas',
+    '→ Opens the agent editor',
+  ]) {
+    assert.ok(
+      launcherView.includes(outcome),
+      `the outcome line "${outcome}" must stay on the entry, not move to the topic`,
     );
   }
 });

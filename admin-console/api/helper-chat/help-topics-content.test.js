@@ -702,10 +702,7 @@ const TOPIC_CONTENT = [
       'What you need before you start',
     ],
     concepts: [
-      'equally ranked',
       'Describe what you need',
-      'Start from a ready-made setup',
-      'Build it yourself',
       'one assistant',
       'draft',
       'team of one',
@@ -726,6 +723,26 @@ const TOPIC_CONTENT = [
       'chat history',
       'is normalised',
       'blocks the button',
+      // #2027 re-sorted the launcher from five equal tiles into three ranked
+      // tiers, so the topic's own framing changed with it. 'equally ranked' was
+      // an anchor here and is deliberately GONE — it now describes the opposite
+      // of what the page does. These replace it: the new entry titles, the
+      // ranking claim, the two grouping surfaces, and the previews.
+      'ranked',
+      'Chat with one assistant',
+      'Start from a ready-made team',
+      'Design it on the canvas',
+      'Configure an agent manually',
+      'Advanced options',
+      'a flow',
+      'end in the *same* flow',
+      'what you get',
+      'not a screenshot',
+      // The honest limit on Card C's promise: the canvas shows a prompt to add
+      // the first agent, and the guided first step is a separate improvement —
+      // this is what stops the softened outcome copy being reworded back.
+      'prompt to add your first agent',
+      'guided first step is a separate improvement',
     ],
   },
   {

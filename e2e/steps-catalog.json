@@ -350,15 +350,22 @@
       "example": "- action:\n    do: context.uploadFile\n    agentId: ctx-demo-agent\n    dir: specs\n    name: notes.txt\n    content: written through the console"
     },
     {
+      "name": "create.expandAdvanced",
+      "module": "create",
+      "description": "Expand the launcher's \"Advanced options\" disclosure, revealing the manual agent form entry. Idempotent — a second call on an already-open disclosure leaves it open rather than toggling it shut, so a journey can call it without tracking state.",
+      "params": [],
+      "example": "- action:\n    do: create.expandAdvanced"
+    },
+    {
       "name": "create.expectEntry",
       "module": "create",
-      "description": "Assert a specific launcher tile is present with its visible heading. Lets a journey spot-check the plainly-labelled wording without clicking through.",
+      "description": "Assert a specific launcher entry is present with its visible heading. Lets a journey spot-check the plainly-labelled wording without clicking through. Expands the \"Advanced options\" disclosure first when the entry lives behind it, so a caller need not know which tier an entry is in.",
       "params": [
         {
           "name": "entry",
           "required": true,
           "type": "string",
-          "description": "Which tile: describe | template | build | chat."
+          "description": "Which entry: chat | template | describe | build | single-agent."
         }
       ],
       "example": "- assert:\n    do: create.expectEntry\n    entry: template"
@@ -366,14 +373,28 @@
     {
       "name": "create.open",
       "module": "create",
-      "description": "Open the unified \"Create\" launcher and confirm every entry tile is showing. This is the single front door for starting something — the capture point for the launcher screenshot.",
+      "description": "Open the unified \"Create\" launcher and confirm the ranked entries are showing: the hero, the three grouped flow cards, and the collapsed \"Advanced options\" disclosure (whose entry is deliberately NOT on screen yet). This is the single front door for starting something — the capture point for the launcher screenshot.",
       "params": [],
       "example": "- action:\n    do: create.open"
     },
     {
+      "name": "create.previewEntry",
+      "module": "create",
+      "description": "Reveal an entry's \"what you get\" preview via its eye control (#2027) and confirm the schematic and its caption are showing. The control is the touch path — hover and keyboard focus reveal the same panel — and it is a sibling of the card's link, so clicking it previews instead of navigating. This step asserts exactly that: the preview appears AND we are still on the launcher.",
+      "params": [
+        {
+          "name": "entry",
+          "required": true,
+          "type": "string",
+          "description": "Which entry's preview to reveal."
+        }
+      ],
+      "example": "- action:\n    do: create.previewEntry\n    entry: chat"
+    },
+    {
       "name": "create.startFromTemplate",
       "module": "create",
-      "description": "From the launcher, take the \"Start from a ready-made setup\" path: click that tile and wait until the Team-Setup wizard's Process step (the template gallery) has loaded. Replaces the old direct `/team-setup` deep link so the journey exercises the real entry point users now take.",
+      "description": "From the launcher, take the \"Start from a ready-made team\" path: click that card and wait until the Team-Setup wizard's Process step (the template gallery) has loaded. Replaces the old direct `/team-setup` deep link so the journey exercises the real entry point users now take.",
       "params": [],
       "example": "- action:\n    do: create.startFromTemplate"
     },

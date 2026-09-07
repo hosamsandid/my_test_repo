@@ -65,6 +65,12 @@ One **"Create"** launcher, organised by **starting material** rather than by res
 3. **Build it yourself** — canvas / manual.
 4. **Fast lane** — one agent to chat with, right now.
 
+> **Superseded by #2027** — the flat, equally-ranked list above became an
+> explicit ranking, simplest → most advanced, in three tiers: the fast lane as a
+> full-width hero, the three flow paths in one named group, and the direct form
+> (#1956) behind a collapsed *Advanced options* disclosure. See
+> "Superseded after the fact — #2027" in §8.
+
 "Single agent vs. team" is determined by the described need / chosen template — an **outcome**, not an up-front question. Titles deliberately avoid the words *agent / team / flow / template / orchestrator* so a newcomer can start without first learning the taxonomy (AC3/AC7).
 
 The launcher is reachable **both** from a persistent global **"+ Create"** control and from its own dedicated route `/create` — both open the same launcher (D4/AC6), so real usage of each door can be observed before committing to one.
@@ -105,7 +111,7 @@ Keep "+ New Agent" (incl. the orchestrator role), Add Member and Add role as exp
 
 1. A single, discoverable **"Create"** entry point exists; every current creation surface is either reachable from it or explicitly demoted to an advanced/manage context.
 2. Starting a single agent no longer requires choosing a "repo vs LLM" mode — repo is one **optional** input on one form.
-3. The launcher presents a **small set of equally-ranked entries** (describe / template / build-yourself / fast-lane); a user can start **without** knowing the words *agent / team / flow / template / orchestrator*, and no single entry is forced as the default. *(Scoped to those four intent entries by #1956 — see "Widened after the fact" in §8.)*
+3. The launcher presents a **small set of equally-ranked entries** (describe / template / build-yourself / fast-lane); a user can start **without** knowing the words *agent / team / flow / template / orchestrator*, and no single entry is forced as the default. *(Scoped to those four intent entries by #1956, and the equal-ranking half superseded by #2027's three-tier ranking — see §8.)*
 4. Whether a single agent or a team is produced is decided by the described need / chosen template, **not** by a mandatory up-front toggle.
 5. There is exactly **one** action that turns a design into running agents (no separate Wizard-submit vs Materialize divergence for the same outcome).
 6. The launcher is reachable **both** from a persistent global "+ Create" control **and** from a dedicated route/page (both open the same launcher).
@@ -135,7 +141,7 @@ Delivered on the `integration/epic-1661` branch and merged to `main`. Every phas
 
 Captured from stakeholder review — these were the concept's open questions, now settled:
 
-- **D1 — Entry prominence.** The conversational entry is **one of several equally-ranked tiles**, not a forced default. The launcher is a peer-choice grid (describe / template / build-yourself / fast-lane).
+- **D1 — Entry prominence.** The conversational entry is **one of several equally-ranked tiles**, not a forced default. The launcher is a peer-choice grid (describe / template / build-yourself / fast-lane). *(Superseded by #2027 — see below.)*
 - **D2 — Structured Team Wizard.** **Keep** the existing 5-step wizard as the "Advanced" layer behind the launcher; it is not retired in this concept.
 - **D3 — Orchestrator role.** Stays on the **Agents page** (advanced/manual "+ New Agent"); the launcher does not offer it. *(Re-opened by #1956 — see below.)*
 - **D4 — Launcher invocation.** **Both** — a persistent global "+ Create" control **and** a dedicated page/route open the same launcher, so real usage of each can be observed before committing to one.
@@ -147,6 +153,17 @@ These decisions record what was settled *then*; they are not a ceiling on the to
 
 - **AC7 / D3 — the orchestrator role is no longer an Agents-page-only option.** The launcher gained a fifth entry, *Create a single agent*, which hosts the Agents page's own create form (moved unchanged to `admin-console/src/pages/agent-lifecycle/AgentCreateForm.jsx` and rendered by **both** surfaces, so they cannot drift). Its role picker includes `orchestrator`, so the launcher does now offer it. D3's *reasoning* survives in the shape of the change rather than in its letter: the fifth entry sits apart from the four peer tiles instead of joining them, so the guided path a newcomer walks is unchanged.
 - **AC3 / D1 — the jargon-free-title rule now scopes to the four intent tiles.** *Create a single agent* names the artifact on purpose: it is the "I already know exactly what I want" path, and a vaguer title would be indistinguishable from the fast lane directly above it. The four peer tiles keep both properties — no internal vocabulary, no forced default.
+
+### Superseded after the fact — #2027
+
+**D1 is superseded, deliberately.** The five entries are no longer a peer-choice grid; they are **explicitly ranked, simplest → most advanced, in three tiers** — a full-width hero (*Chat with one assistant*), one bordered group of three flow paths headed *Or build a team of agents that work together (a flow)*, and a collapsed *Advanced options* disclosure holding the direct form (*Configure an agent manually*, renamed from *Create a single agent*). D1's reasoning above is left intact and legible: no-forced-default was the right call for the sprawl this concept replaced, where the danger was one door being promoted over four that had just been consolidated. What the shipped launcher then taught, and what #2027 answers:
+
+- **Five equal tiles answered "what can I do", not "where do I begin".** Nothing on the page signalled a starting point, so the choice was left entirely to a newcomer who by definition had the least basis for making it.
+- **The two single-agent paths read as near-duplicates — with the expert one sounding simplest.** *Create a single agent* sat under the wordiest title on the page (*Just give me one assistant to chat with*) and looked like the plainer of the two, while actually being the specialist form. It is now the disclosure entry, renamed after what it costs you; the fast lane is the hero.
+- **The three flow paths were never named as a flow.** Describe / template / build-yourself were three unrelated-looking tiles; the group heading is the first place the product says *a flow is several agents that hand work off to each other*, and states that all three end in the same flow and differ only in how you start.
+- **No tile said what screen you would land on.** Each entry now carries a `→ …` outcome line and an optional hand-drawn "what you get" schematic of the *kind* of screen it opens.
+
+Nothing was rewired: every entry still hands off to exactly the route it did before, so this is a re-sort, a re-label and a preview. AC1/AC4/AC5/AC6/AC8 are untouched. AC3's jargon-free-title intent survives in a sharper form rather than by the letter: the titles a newcomer meets no longer require vocabulary they do not have, and where one does use a word like *team* or *flow* the group heading defines it on the spot — the disclosure entry keeps the #1956 exemption above and names the artifact on purpose. The `hasForcedDefault()` helper that asserted D1 in `create-launcher-view.js` was **deleted** rather than left asserting a rule the product no longer follows.
 
 ---
 

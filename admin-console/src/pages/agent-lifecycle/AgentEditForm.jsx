@@ -46,7 +46,6 @@ import { effectiveGrantFor } from '../plugin-grant-view.js';
 import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
 } from './form-kit.jsx';
-import { RoleDetailBanner } from './agent-form-fields.jsx';
 import { buildInitialForm, buildEditSubmit, hasOwnSkills } from './agent-edit-form-model.js';
 
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
@@ -400,40 +399,12 @@ export default function AgentEditForm({
         </div>
       </div>
 
-      <div>
-        <div style={labelStyle}>Role (read-only)</div>
-        <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
-          {agent.role}
-        </div>
-      </div>
-
-      <RoleDetailBanner role={agent.role} />
-
-      <div>
-        <div style={labelStyle}>Working Environment (read-only)</div>
-        <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
-          {agent.environmentId}
-        </div>
-      </div>
-
       <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} />
 
-      {ownSkills && (
-        <div>
-          <div style={labelStyle}>Skills</div>
-          <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
-            The agent's active skills, copied into its workspace at (re)seed time. For team agents this is the whole team's set — members inherit it unless they override.
-          </div>
-          <SkillPicker
-            skills={grantSkills}
-            selected={form.skills}
-            onChange={v => update('skills', v)}
-          />
-        </div>
-      )}
-
-      <PluginGrantSection agent={agent} parentTeam={parentTeam} />
-
+      {/* The prompt is the most important thing in this form, so it sits
+          directly under Display Name rather than below Plugins (#2026). Both
+          blocks read fields that only exist for their own role, so each keeps
+          the role guard it had inside the block it was lifted out of. */}
       {agent.role === 'team' && (
         <div>
           <label style={labelStyle}>
@@ -455,13 +426,6 @@ export default function AgentEditForm({
 
       {agent.role === 'team-member' && (
         <>
-          <div>
-            <div style={labelStyle}>Parent Team (read-only)</div>
-            <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
-              {agent.parentTeamId || '—'}
-            </div>
-          </div>
-
           <PromptModeControl
             mode={form.promptMode}
             onModeChange={v => update('promptMode', v)}
@@ -471,6 +435,33 @@ export default function AgentEditForm({
           />
           <div style={{ marginTop: 'calc(-1 * var(--eb-space-2))', marginBottom: 'var(--eb-space-3)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
             Prompt changes take effect from this agent's next session.
+          </div>
+        </>
+      )}
+
+      {ownSkills && (
+        <div>
+          <div style={labelStyle}>Skills</div>
+          <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+            The agent's active skills, copied into its workspace at (re)seed time. For team agents this is the whole team's set — members inherit it unless they override.
+          </div>
+          <SkillPicker
+            skills={grantSkills}
+            selected={form.skills}
+            onChange={v => update('skills', v)}
+          />
+        </div>
+      )}
+
+      <PluginGrantSection agent={agent} parentTeam={parentTeam} />
+
+      {agent.role === 'team-member' && (
+        <>
+          <div>
+            <div style={labelStyle}>Parent Team (read-only)</div>
+            <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
+              {agent.parentTeamId || '—'}
+            </div>
           </div>
 
           <InheritOrCustom

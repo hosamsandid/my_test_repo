@@ -81,12 +81,72 @@ test('the shared field controls are imported back, not re-typed', () => {
   // `MissionDirectoryField` / `repoDirName` left this list with the field
   // itself (#1964) — see the removal guard in `bp-removal-ui.test.js`, which
   // asserts neither is re-typed anywhere rather than merely not duplicated here.
-  for (const symbol of ['ROLE_INFO', 'RoleDetailBanner']) {
+  // `RoleDetailBanner` left it in #2026: the big blue box is gone, and its
+  // successor `RoleHelpTip` is rendered by the create form alone (the edit form
+  // dropped the read-only Role field and its explanation), so what is asserted
+  // here is that the create form imports it instead of re-typing the tip.
+  for (const symbol of ['ROLE_INFO', 'RoleHelpTip']) {
     assert.doesNotMatch(
       createForm, new RegExp(`(function|const) ${symbol}\\b\\s*[({=]`),
       `${symbol} must not be redefined in the create form`,
     );
   }
+  assert.match(createForm, /<RoleHelpTip role=\{form\.role\}/);
+});
+
+/* ── #2026: the settings form's field set and its ordering ───────── */
+
+test('the read-only Role and Working Environment fields are gone', () => {
+  // Both were dead weight in an already-created agent: neither is editable
+  // here, and the role callout explained a choice this dialog cannot make.
+  assert.doesNotMatch(editForm, /Role \(read-only\)/);
+  assert.doesNotMatch(editForm, /Working Environment \(read-only\)/);
+  // The role explanation went with the field — no import, no invocation.
+  assert.doesNotMatch(editForm, /RoleDetailBanner|RoleHelpTip/);
+  // …while the fields that stay are still here (so the assertions above cannot
+  // pass because the whole form vanished).
+  assert.match(editForm, /ID \(read-only\)/);
+  assert.match(editForm, /Parent Team \(read-only\)/);
+  assert.match(editForm, /label="Display Name \*"/);
+});
+
+test('the big-box role banner is not left behind as an orphan', () => {
+  const fields = code(read('../agent-lifecycle/agent-form-fields.jsx'));
+  assert.doesNotMatch(fields, /RoleDetailBanner/);
+  // The compact successor renders the shared InfoTip rather than a second
+  // hand-rolled popover, and still reads its copy from the one catalogue.
+  assert.match(fields, /import InfoTip from '\.\.\/\.\.\/components\/InfoTip'/);
+  assert.match(fields, /export function RoleHelpTip/);
+  assert.match(fields, /export const ROLE_INFO/);
+});
+
+test('the system prompt renders after Display Name and before Plugins', () => {
+  // The prompt is the point of this dialog, so its position is a contract, not
+  // a coincidence — and it must stay guarded by its own role check, since both
+  // blocks read fields that exist for one role only.
+  const at = re => {
+    const i = editForm.search(re);
+    assert.notEqual(i, -1, `${re} not found in the edit form`);
+    return i;
+  };
+  const displayName = at(/label="Display Name \*"/);
+  const teamPrompt = at(/Team Default Prompt/);
+  const memberPrompt = at(/<PromptModeControl/);
+  const plugins = at(/<PluginGrantSection/);
+
+  for (const [name, pos] of [['team prompt', teamPrompt], ['member prompt', memberPrompt]]) {
+    assert.ok(displayName < pos, `${name} must render after Display Name`);
+    assert.ok(pos < plugins, `${name} must render before Plugins`);
+  }
+  // Each block still carries its role guard, immediately before it.
+  assert.match(
+    editForm.slice(displayName, teamPrompt),
+    /agent\.role === 'team' &&\s*\(\s*$/m,
+  );
+  assert.match(
+    editForm.slice(displayName, memberPrompt),
+    /agent\.role === 'team-member' &&/,
+  );
 });
 
 test('the shape logic is the pure module, not inlined in the form again', () => {

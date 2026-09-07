@@ -89,7 +89,9 @@ test('every swept surface still contains its own code after the strip', () => {
     'agent-chat/agent-list-model.js': /export function buildGroups/,
     'agent-chat/rail-lifecycle.js': /export function deleteTargetFor/,
     'agent-lifecycle/AgentCreateForm.jsx': /function RoleCard/,
-    'agent-lifecycle/AgentEditForm.jsx': /RoleDetailBanner/,
+    // Was `RoleDetailBanner` until #2026 removed the role callout from this
+    // form; the sub-control it defines is a stabler canary than any field.
+    'agent-lifecycle/AgentEditForm.jsx': /function PromptModeControl/,
     'agent-lifecycle/AgentLifecycleDialogs.jsx': /export function renderDeleteMessage/,
     'agent-lifecycle/agent-form-fields.jsx': /export const ROLE_INFO/,
     'agent-lifecycle/agent-lifecycle-menu.js': /export function deleteDialogCopy/,

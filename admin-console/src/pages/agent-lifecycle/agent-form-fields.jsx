@@ -11,19 +11,23 @@
  * cards and the Mission Directory field (with the `repoDirName` helper that only
  * ever fed its picker) are gone, since neither role can be created or edited any
  * more.
+ *
+ * #2026 left only the *create* form as a consumer: the edit form no longer shows
+ * a read-only Role field, so it has no role explanation to render either. The
+ * catalogue stays here — it is the role copy's single home, and the create form
+ * renders both halves of it (the cards and the "?").
  */
 import React from 'react';
-import { User, Users, Info } from 'lucide-react';
-import PageHelpButton from '../../components/PageHelpButton';
+import { User, Users } from 'lucide-react';
+import InfoTip from '../../components/InfoTip';
 
 /* ── Role catalogue (single source of truth for labels + descriptions) ─
-   The long per-role explanation lives in the help topic of whichever page is
-   rendering this form — the `?` resolves against the live route, so it is
-   `create.md` on `/create` and `agent-chat.md` on `/chats`. It was
-   `help-topics/agents.md` until #1930 retired that topic into `agent-chat.md`
-   (*The agent roles* chapter). Here we keep only the one-line card label and
-   the one-line "when to use", so the form stays lean and the concept text has a
-   single home the "?" affordance opens. */
+   The long per-role explanation lives in a help topic — `help-topics/agents.md`
+   until #1930 retired that topic into `agent-chat.md` (*The agent roles*
+   chapter) — reached from the page's own header "?" rather than from inside the
+   form (#2026). Here we keep only the one-line card label and the one-line
+   "when to use", so the form stays lean and the concept text has a single
+   home. */
 export const ROLE_INFO = {
   'agent': {
     icon: User,
@@ -45,27 +49,21 @@ export const ROLE_INFO = {
   },
 };
 
-export function RoleDetailBanner({ role }) {
+/**
+ * The role explanation, as a compact "?" beside the Role label.
+ *
+ * This was `RoleDetailBanner` — a full-width blue info box carrying the same
+ * `when` sentence (#1875) — until #2026: the box was the largest thing in a
+ * form whose actual subject is the prompt, and it explained a *choice* rather
+ * than qualifying an input, so it reads better on demand. Only the CREATE form
+ * renders it, because that is the only place the role is picked; the edit form
+ * dropped the read-only Role field and this explanation with it.
+ *
+ * `InfoTip` is the console's rich multi-line "?" (hover / focus / tap), so the
+ * text follows the currently-selected role exactly as the box did.
+ */
+export function RoleHelpTip({ role }) {
   const info = ROLE_INFO[role];
   if (!info) return null;
-  return (
-    <div style={{
-      display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
-      padding: 'var(--eb-space-3)',
-      background: 'var(--eb-status-info-bg, var(--eb-bg-elevated))',
-      border: '1px solid var(--eb-status-info, var(--eb-border-default))',
-      borderRadius: 'var(--eb-radius-md)',
-      fontSize: 'var(--eb-text-xs)',
-      lineHeight: 1.6,
-      color: 'var(--eb-text-primary)',
-    }}>
-      <Info size={14} style={{ flexShrink: 0, marginTop: 2, color: 'var(--eb-status-info, var(--eb-text-secondary))' }} />
-      <div style={{ flex: '1 1 auto', minWidth: 0, color: 'var(--eb-text-muted)' }}>
-        <strong style={{ color: 'var(--eb-text-secondary)' }}>When to use:</strong> {info.when}
-      </div>
-      {/* The full role catalogue moved into the page help topic (#1875) — the
-          "?" is how you reach it from inside the form. */}
-      <PageHelpButton label="What the roles mean" size={14} style={{ padding: 0, flexShrink: 0 }} />
-    </div>
-  );
+  return <InfoTip title={`${info.title} — when to use`} text={info.when} size={14} />;
 }

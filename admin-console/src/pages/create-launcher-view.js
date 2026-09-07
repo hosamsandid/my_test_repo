@@ -19,6 +19,19 @@
 //   flow      three cards under one heading that names the concept
 //   advanced  collapsed disclosure, the specialist path (`single-agent`)
 //
+// **#1665's AC7 jargon-free-title rule is superseded too**, and for the same
+// reason. It said a first-time user must be able to choose without knowing the
+// words agent / team / flow / template, which is why the old titles talked
+// around them ("Start from a ready-made setup", "Build it yourself"). #2027's
+// AC3 requires the opposite of exactly one of those words: the flow group's
+// heading must NAME the concept ("…that work together (a flow)") and define it,
+// because talking around it is what left three of the five paths unidentifiable
+// as the same thing. So the guard that enforced the rule is gone as well; what
+// survives is the intent behind it — nobody has to ARRIVE knowing the
+// vocabulary, because the one heading that uses it explains it in the next
+// sentence. `template` and `orchestrator` still appear nowhere a newcomer
+// looks.
+//
 // This module is dependency-free and unit-tested (admin-console-src CI job);
 // Create.jsx is a thin renderer over it, and the technical routing (which
 // existing backend/flow each entry hands off to) lives here as data so it can

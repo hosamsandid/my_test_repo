@@ -259,6 +259,31 @@ test('AC3 — the flow group names the concept and says the three options conver
   assert.match(CREATE_COPY.flowIntro, /end in the same flow/);
 });
 
+test('#1665 AC7 (jargon-free titles) is superseded on purpose, not by accident', () => {
+  // AC7 said the titles must let a first-timer choose without knowing the words
+  // agent / team / flow / template — which is why the old ones talked around
+  // them. #2027 AC3 requires the opposite for one of those words: the flow
+  // heading must NAME and define "a flow", because talking around it is what
+  // left three of the five paths unidentifiable as the same thing. The old
+  // guard is therefore deleted; this asserts the REVERSAL is real, so nobody
+  // "restores" AC7 by rewording the heading back into a euphemism.
+  assert.match(CREATE_COPY.flowHeading, /\bagents\b/);
+  assert.match(CREATE_COPY.flowHeading, /\bteam\b/);
+  assert.match(entryByKey('template').title, /\bteam\b/);
+  // What survives of AC7: nobody has to ARRIVE knowing the vocabulary, so the
+  // heading that uses it defines it immediately...
+  assert.match(CREATE_COPY.flowIntro, /^A flow is /);
+  // ...and the two words with no plain-language meaning at all stay out of
+  // every title, heading and body a newcomer reads.
+  const opaque = /\b(template|orchestrator)s?\b/i;
+  for (const text of [
+    ...Object.values(CREATE_COPY),
+    ...createEntries().flatMap((e) => [e.title, e.description, e.outcome, e.preview.caption]),
+  ]) {
+    assert.ok(!opaque.test(text), `internal vocabulary leaked into launcher copy: ${text}`);
+  }
+});
+
 test('every entry has an icon and a route', () => {
   for (const e of createEntries()) {
     assert.equal(typeof e.icon, 'string');

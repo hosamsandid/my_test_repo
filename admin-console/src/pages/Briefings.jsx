@@ -267,7 +267,7 @@ export default function Briefings() {
   // keep the panel open (draft re-key on rename, team → draft bridge).
   const copilotParam = searchParams.get('copilot') === '1';
   // Create-launcher deep link (#1665): `?new=blank` starts a fresh draft in the
-  // canvas (the "Build it yourself" entry), `?new=describe` a fresh draft with
+  // canvas (the "Design it on the canvas" entry), `?new=describe` a fresh draft with
   // the Flow Copilot open (the conversational "Describe it" entry). Consumed
   // once on mount, then replaced by the resulting `?proc=draft:<id>` selection.
   const newParam = searchParams.get('new');

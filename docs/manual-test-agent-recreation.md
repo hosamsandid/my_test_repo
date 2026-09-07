@@ -60,7 +60,8 @@ ceiling so the loop gives up quickly, then force the race:
    login retry gives up after the first attempt).
 2. Delete `recreate-probe` and immediately re-create it with the same id.
 3. If the login hits `M_USER_DEACTIVATED` before the account settles, expected:
-   - The **Create a single agent** form (**+ Create** → *Create a single agent*, or **New
+   - The direct create form (**+ Create** → **Advanced options** → *Configure an agent
+     manually*, or **New
      Agent** in Agent Chat's header — the same component; the Agents page that used to host
      it was removed in #1930) shows:
      **"Matrix user is deactivated — wait a moment and try again, or use a

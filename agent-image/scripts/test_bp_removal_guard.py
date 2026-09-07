@@ -18,11 +18,12 @@ Two properties are asserted, and they are different in kind:
     absence assertion above would also pass against an empty or hollowed-out
     file, which is the classic way a removal guard goes quietly vacuous.
 
-`agent-image/CLAUDE.md` is deliberately NOT asserted on: the base instruction
-file still opens by telling every agent it is executing a BriefingPack, and
-changing it alters the behaviour of every agent on the platform. That is the
-epic's R5 decision and gets its own ticket — a guard here would either fail on
-main or freeze the wrong text.
+`agent-image/CLAUDE.md` — the base instruction file baked into the image — was
+deliberately NOT asserted on by #1967: it still opened by telling every agent it
+was executing a BriefingPack, and rewriting it was the epic's R5 decision with
+its own ticket, so a guard here would have frozen the wrong text. #1969 is that
+ticket, and `BaseInstructionFileUsesTheSupportedModel` below is the flipped
+assertion: no pack vocabulary, and the supported model actually described.
 """
 
 import re
@@ -185,12 +186,90 @@ class ConversationalPathSurvives(unittest.TestCase):
         # is what stops it being executed as a prompt.
         self.assertIn("bp-event-batch", ENTRYPOINT_CODE)
 
-    def test_the_base_instruction_file_is_untouched(self):
-        # AC6: agent-image/CLAUDE.md is the next ticket's, not this one's.
-        claude_md = (REPO_ROOT / "agent-image" / "CLAUDE.md").read_text(encoding="utf-8")
-        self.assertIn("BriefingPack", claude_md,
-                      "agent-image/CLAUDE.md was changed by this phase — it is "
-                      "scoped out (epic decision R5) and has its own ticket")
+
+# ---- the base instruction file (#1969) ----
+
+BASE_INSTRUCTIONS = REPO_ROOT / "agent-image" / "CLAUDE.md"
+
+# Deliberately NOT including the bare word "brief": it is ordinary English and
+# appears in live prose elsewhere in the repo ("append a brief note to
+# memory/log.md"). Each token below is either the model's own name or a symbol
+# that only ever existed to serve it.
+BP_VOCABULARY = (
+    r"briefingpack",
+    r"briefing pack",
+    r"brief\.md",
+    r"artifacts/briefings",
+    r"loopscript",
+    r"mentorscript",
+    r"consultation request protocol",
+    r"\bcrp\b",
+    r"\bbp\b",
+    r"bp[:-]",
+    r"\bmission\b",
+    r"\bpack\b",
+    r"dispatcher",
+    r"10-legacy",
+)
+
+
+def bp_vocabulary_hits(text: str) -> list[str]:
+    """Every BriefingPack-era pattern the text still matches.
+
+    A helper rather than an inline loop so the same predicate can be run over a
+    synthetic input that MUST fail it — a content guard whose pattern list has
+    quietly stopped matching anything is indistinguishable from a clean file.
+    """
+    return [p for p in BP_VOCABULARY
+            if re.search(p, text, re.IGNORECASE) is not None]
+
+
+class BaseInstructionFileUsesTheSupportedModel(unittest.TestCase):
+    """AC1 (#1969): the file baked into the image at /opt/ace/CLAUDE.md describes
+    an agent in terms of teams, triggers and outcomes — not of packs.
+
+    #1967 asserted the OPPOSITE here (the text was scoped out by epic decision
+    R5 and got its own ticket); #1969 is that ticket, so the assertion flips.
+    """
+
+    def setUp(self):
+        self.text = BASE_INSTRUCTIONS.read_text(encoding="utf-8")
+
+    def test_no_bp_vocabulary_survives(self):
+        self.assertEqual([], bp_vocabulary_hits(self.text),
+                         "BriefingPack-era vocabulary is back in "
+                         "agent-image/CLAUDE.md")
+
+    def test_the_supported_model_is_actually_described(self):
+        # Without this, an empty or gutted file would pass the absence check —
+        # the classic way a removal guard goes vacuous. Anchored on the three
+        # concepts AC1 names, not on their exact sentences.
+        for concept in ("standalone", "member of a team", "trigger", "outcome"):
+            self.assertIn(concept, self.text,
+                          f"the rewritten Role section no longer mentions {concept}")
+
+    def test_the_live_container_conventions_survive(self):
+        # SURVIVAL half: the sections that document this image's own tooling are
+        # what make the file worth keeping at all.
+        for kept in (
+            "gh-as-agent commit",
+            "gh-as-agent push",
+            "gh-as-agent pr",
+            "aee-artifact add",
+            "aee-emit",
+            "knowledge search",
+            "usage me",
+            "ticket.json",
+        ):
+            self.assertIn(kept, self.text, f"{kept} must still be documented")
+
+    def test_the_vocabulary_check_is_not_vacuous(self):
+        # Prove the predicate fires: the identity statement this ticket removed
+        # must still be recognised as BriefingPack vocabulary.
+        old = ("You are an AI agent executing a BriefingPack (BP) or responding "
+               "to direct Matrix messages. Commits and pushes from here are "
+               "part of your mission output.")
+        self.assertNotEqual([], bp_vocabulary_hits(old))
 
 
 def slice_def(code: str, header: str) -> str:

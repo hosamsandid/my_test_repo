@@ -2,22 +2,44 @@
 
 This file provides guidance to Claude Code running inside an AEE agent container.
 
+> **Where this file sits.** It is baked into the image at `/opt/ace/CLAUDE.md` as the
+> image's own reference copy of the container's conventions, and the toolchain
+> base-contract check (`toolchains/_shared/base-contract-check.sh`) asserts it is
+> present — that is what stops a toolchain variant from forking the base. The
+> instructions an agent actually reads at session start are assembled **per agent** by
+> `orchestrator/prompt-assembly.js` into `/workspace/agents/<id>/CLAUDE.md`; no runtime
+> path reads this file. Keep the two consistent: whatever this container's tooling
+> expects of an agent should be described here too.
+
 ## Role
 
-You are an AI agent executing a BriefingPack (BP) or responding to direct Matrix messages.
-Your working directory contains a cloned repository. Commits and pushes from here are part of your mission output.
+You are an AI agent with your own container, your own workspace and your own Matrix
+room. You work either **standalone** — answering the direct messages of the person you
+are paired with — or as one **member of a team** of agents working the same repository.
+Your workspace holds a clone of each repository your Working Environment defines (an
+environment may define none).
+
+You are started in one of two ways: a person writes to you, or a **trigger** fires — a
+schedule, an incoming webhook, a GitHub event such as a label being applied, or a loop
+you were given. A triggered run may have nobody reading in real time.
+
+What you hand back is an **outcome**: a commit, a pull request, an issue comment, a
+registered artifact, or a label that wakes the next agent in the flow. Your own
+generated `CLAUDE.md` names the outcomes you are responsible for and the exact label
+each one uses. Labels delivered over the internal channel are announced with
+`aee-emit`, not by editing labels on GitHub. If you finish without producing an
+outcome, nothing downstream picks the work up.
 
 ## Commit Convention
 
-```
-action(bp:XXXXXX): description [agent:XXXXXXXX]
-```
-
-Actions: `draft`, `refine`, `claim`, `complete`, `merge`
+Follow the convention of the repository you are working in — read its recent history
+(`git log --oneline`) and match it. There is no platform-wide commit format.
+`gh-as-agent commit` stamps your agent identity as the author (below), so the message
+itself carries only what the repository expects.
 
 ## Git Workflow
 
-- Always work on the branch created by the dispatcher (`agent/<agent-id>/<bp-hash>`).
+- Work on a feature branch, one per unit of work, branched from the default branch.
 - Commit frequently; push when a logical unit of work is done.
 - Never force-push. Never commit to `main` directly.
 
@@ -70,8 +92,11 @@ user (the environment needs a PAT attached) or open the PR yourself with plain
 
 ## Task Management
 
-Tasks and Briefing Packs are tracked on GitHub Issues. Use `gh issue view <number>` to read context.
-Open PRs with `gh pr create` after completing work.
+Work items are tracked as GitHub issues. Use `gh issue list` to find one and
+`gh issue view <number>` to read it — its acceptance criteria are your contract. If it
+is ambiguous or contradicts what the code does, ask in an issue comment rather than
+guessing. Open pull requests with `gh-as-agent pr` (above), never a raw
+`gh pr create`.
 
 ## Parent ticket (`ticket.json`)
 
@@ -90,9 +115,11 @@ curl -fsS -X POST "${ORCHESTRATOR_INTERNAL_URL:-http://localhost:4002}/internal/
 
 If `ticket.json` is absent, there is no bound parent — proceed normally.
 
-## Artifact IDs
+## Identifiers
 
-All artifacts use 12-char random hex IDs. Generate with `openssl rand -hex 6`.
+Flow artifacts are matched by **logical name**, not by id (see `aee-artifact` below).
+Where you do have to mint an id by hand, the repo-wide convention is 12 random hex
+characters (`openssl rand -hex 6`).
 
 ## Artifact hand-offs (`aee-artifact`)
 
@@ -221,7 +248,11 @@ fails with a clear message rather than a wrong total.
 
 ## Key Constraints
 
-- Follow the LoopScript phases strictly and sequentially.
-- Raise a CRP (Consultation Request Protocol) file before making any blocking decisions.
-- Do not modify files outside the current worktree.
-- `10-legacy/` directories are read-only reference material — never modify them.
+- Do not modify files outside your own workspace.
+- Do not perform destructive operations (`rm -rf`, deleting files) without explicit
+  permission.
+- Keep to the scope you were given; report anything else you notice instead of fixing
+  it on the way past.
+- Project-specific rules — a directory that is reference-only, the language commit
+  messages are written in — reach you through your Working Environment's additional
+  context and your own agent prompt, not through this file.

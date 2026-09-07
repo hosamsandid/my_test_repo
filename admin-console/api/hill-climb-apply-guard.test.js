@@ -49,6 +49,11 @@ test('triggerApplyGuardError: protects intrinsic/derived/human-gate triggers', (
   assert.match(triggerApplyGuardError({ intrinsic: true }), /intrinsic/);
   assert.match(triggerApplyGuardError({ dataFlow: true }), /data-flow|ports/);
   assert.match(triggerApplyGuardError({ channel: true }), /channel|ports/);
+  // #2032: the P3 direct hand-off listener is derived from the outcomes port,
+  // so the applier must not delete it — reached either by the wakeHandoff marker
+  // or by its type, since hill-climb-sweep flattens every trigger with an id.
+  assert.match(triggerApplyGuardError({ wakeHandoff: true }), /hand-off|outcomes/);
+  assert.match(triggerApplyGuardError({ type: 'wake-agent' }), /hand-off|outcomes/);
   assert.match(triggerApplyGuardError({ humanGate: true }), /human-gate/);
   assert.equal(triggerApplyGuardError(null), 'trigger not found');
 });

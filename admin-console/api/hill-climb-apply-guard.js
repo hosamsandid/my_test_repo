@@ -67,6 +67,15 @@ function triggerApplyGuardError(trigger, { humanGateLabels } = {}) {
   if (trigger.channel === true) {
     return 'channel triggers are derived from ports; edit the ports instead of deleting the trigger';
   }
+  // P3 (#2032) direct hand-off listener. hill-climb-sweep.js:triggerDefsFromMembers
+  // flattens EVERY trigger with an id (no type filter), so a wake-agent listener
+  // that has not fired within windowDays becomes a zero-fire trigger-hygiene card;
+  // at autonomy >= 2 the applier would delete it. It is derived from the producer's
+  // outcomes port exactly like channel/dataFlow, so it is off-limits here too —
+  // otherwise aee-wake keeps reporting "delivered" while the entry is dropped.
+  if (trigger.wakeHandoff === true || trigger.type === 'wake-agent') {
+    return 'hand-off listeners are derived from outcomes; edit the outcomes port instead of deleting the trigger';
+  }
   if (trigger.humanGate === true) {
     return 'human-gate listeners hold approval flow and cannot be deleted by the applier';
   }

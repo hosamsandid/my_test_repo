@@ -14,9 +14,14 @@
 import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
 import { parseCronState, describeCron } from '../agent-chat/cron-format.js';
 
-// Is this trigger reconciler-owned (derived from a channel / data-flow port)?
+// Is this trigger reconciler-owned (derived from a channel / data-flow / wake
+// hand-off port)? `wakeHandoff` is the P3 (#2032) direct hand-off listener: it
+// is regenerated from the producer's outcomes port exactly like `channel` /
+// `dataFlow`, so it belongs in the read-only DERIVED bucket, not the editable
+// manual one — otherwise the row gets a delete button and removing it leaves
+// `aee-wake` reporting "delivered" for a hand-off that is then silently dropped.
 export function isDerivedTrigger(t) {
-  return !!t && (t.channel === true || t.dataFlow === true);
+  return !!t && (t.channel === true || t.dataFlow === true || t.wakeHandoff === true);
 }
 
 // Split a trigger list into the human-authored (manual) and reconciler-owned

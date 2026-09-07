@@ -26,32 +26,39 @@ const { expect } = require('@playwright/test');
 // order is the ranking, so it is part of what a journey captures). Heading text
 // is the visible title; testid is the stable click/selection hook. `tier` is
 // what decides whether an entry is on screen when the page loads — the advanced
-// one is not, by design, so `open()` must not assert it visible.
+// one is not, by design, so `open()` must not assert it visible. `preview` says
+// whether the entry has a "what you get" reveal at all: since #2034 only the
+// three flow cards do, so the other two carry no eye control to click.
 const ENTRIES = {
   chat: {
     testid: 'create-entry-chat',
     title: 'Chat with one assistant',
     tier: 'hero',
+    preview: false,
   },
   template: {
     testid: 'create-entry-template',
     title: 'Start from a ready-made team',
     tier: 'flow',
+    preview: true,
   },
   describe: {
     testid: 'create-entry-describe',
     title: 'Describe what you need',
     tier: 'flow',
+    preview: true,
   },
   build: {
     testid: 'create-entry-build',
     title: 'Design it on the canvas',
     tier: 'flow',
+    preview: true,
   },
   'single-agent': {
     testid: 'create-entry-single-agent',
     title: 'Configure an agent manually',
     tier: 'advanced',
+    preview: false,
   },
 };
 
@@ -131,16 +138,26 @@ async function expandAdvanced(ctx) {
  * the card's link, so clicking it previews instead of navigating. This step
  * asserts exactly that: the preview appears AND we are still on the launcher.
  *
+ * Only the three flow entries have a preview (#2034 dropped it from the hero and
+ * the advanced entry), so `entry` must be one of `template` / `describe` /
+ * `build` — the other two carry no eye control to click.
+ *
  * @param {string} params.entry - Which entry's preview to reveal.
  * @example
  * - action:
  *     do: create.previewEntry
- *     entry: chat
+ *     entry: template
  */
 async function previewEntry(ctx, { entry }) {
   const { page } = ctx;
   const meta = ENTRIES[entry];
   if (!meta) throw new Error(`create.previewEntry: unknown entry "${entry}" (expected one of ${Object.keys(ENTRIES).join(', ')})`);
+  // Fail with the reason rather than on a locator timeout: the hero and the
+  // advanced entry have no preview at all since #2034.
+  if (!meta.preview) {
+    const previewable = Object.keys(ENTRIES).filter(k => ENTRIES[k].preview).join(', ');
+    throw new Error(`create.previewEntry: the "${entry}" entry has no "what you get" preview (#2034 — expected one of ${previewable})`);
+  }
   if (meta.tier === 'advanced') await expandAdvanced(ctx);
   const eye = page.getByTestId(`create-preview-${entry}`);
   await expect(eye).toBeVisible();

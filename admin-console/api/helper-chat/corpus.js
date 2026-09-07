@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 279 693 of 340 000 — 82.3% used, 60 307 left — against
+// neighbours) at 280 338 of 340 000 — 82.5% used, 59 662 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
@@ -131,7 +131,11 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // on EVERY context, docs/** being folded in full on every request; #2028's own
 // agent-chat.md edit (+347) is in this figure too, having landed on main while
 // this branch was open — the two were re-measured together on the merge rather
-// than added up, because both grow the same total. Re-measure
+// than added up, because both grow the same total. #2034 then narrowed the
+// launcher's preview to the flow cards, which cost +645 on top of 279 693: +250
+// in `create.md` (the crown-holding context IS that topic's, so a paragraph
+// there lands on this figure in full) and +395 in admin-console.md +
+// walkthrough/01-team-setup.md, which lands on EVERY context. Re-measure
 // rather than trust this comment — measureWorstCaseSystemPrompt() sweeps every
 // context.
 //

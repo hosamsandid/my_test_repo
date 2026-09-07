@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import {
-  createEntries, entriesByTier, CREATE_COPY,
+  createEntries, entriesByTier, hasPreview, CREATE_COPY,
 } from './create-launcher-view.js';
 
 // ─── #2027 Create-launcher wiring guard ──────────────────────────────────────
@@ -17,6 +17,10 @@ import {
 //
 //   • a preview schematic named by an entry with no component behind it — the
 //     reveal then renders nothing and looks like "this card has no preview";
+//   • a card that genuinely has no preview (#2034: the hero and the advanced
+//     entry) still rendering the reveal path — a hidden or inert eye control is
+//     indistinguishable from a removed one until a screen reader or the tab key
+//     reaches it;
 //   • the eye affordance sliding INSIDE the entry's <Link>, which is invalid
 //     HTML and makes the preview swallow the card's own tap (AC5);
 //   • the tiers being rendered out of order, or the disclosure defaulting open,
@@ -52,7 +56,7 @@ test('the comment strip really strips (a vacuous guard is worse than none)', () 
 });
 
 test('every schematic an entry names has a component behind it', () => {
-  for (const entry of createEntries()) {
+  for (const entry of createEntries().filter(hasPreview)) {
     const name = entry.preview.schematic;
     assert.match(
       previews,
@@ -62,8 +66,9 @@ test('every schematic an entry names has a component behind it', () => {
     );
   }
   // And nothing in the map is unreachable: a schematic no entry claims is dead
-  // weight that reads as coverage.
-  const claimed = new Set(createEntries().map((e) => e.preview.schematic));
+  // weight that reads as coverage. This is what made #2034 delete the chat and
+  // form drawings rather than leave them behind their removed entries.
+  const claimed = new Set(createEntries().filter(hasPreview).map((e) => e.preview.schematic));
   const mapped = [...previews.matchAll(/\n\s{2}(\w+):\s*\w+Schematic,/g)].map((m) => m[1]);
   assert.deepEqual(
     mapped.filter((k) => !claimed.has(k)), [],
@@ -151,6 +156,51 @@ test('AC5 — the preview affordance is a sibling of the card link, not a child'
   assert.ok(actionAt > linkOpen && actionAt < linkClose, 'the hero CTA stays inside the link');
 });
 
+test('#2034 — the reveal path is absent from a preview-less card, not hidden', () => {
+  // The whole edge case of #2034: a card with no preview must render no
+  // schematic, no eye control and no hover/focus state — so it leaves behind no
+  // orphan focus target and no screen-reader label for a preview that does not
+  // exist. CSS-hiding, or a rendered-but-disabled control, would pass the pure
+  // tests and fail the ticket.
+  const cardAt = page.indexOf('function EntryCard');
+  const previewCardAt = page.indexOf('function PreviewableEntryCard');
+  assert.ok(cardAt > -1, 'EntryCard must stay the one entry-point every tier renders');
+  assert.ok(
+    previewCardAt > cardAt,
+    'the preview-bearing card must be its own component, so its state exists only '
+    + 'where a reveal does',
+  );
+
+  // The gate is the pure helper, not a tier or a key list: the tier is only
+  // where the previews happen to live today.
+  assert.match(page, /if \(!hasPreview\(entry\)\)/);
+  assert.doesNotMatch(page, /entry\.tier === 'flow'/, 'the gate must not key on the tier');
+
+  // The preview-less branch renders the card and nothing else.
+  const plainBranch = page.slice(cardAt, previewCardAt);
+  assert.match(plainBranch, /<EntryLink entry=\{entry\} variant=\{variant\} \/>/);
+  for (const banned of ['setHovered', 'setPinned', 'create-preview-', 'PreviewReveal', '<Eye']) {
+    assert.ok(
+      !plainBranch.includes(banned),
+      `the preview-less branch still carries "${banned}" — the reveal path has to be `
+      + 'absent from the hero and the advanced entry, not merely inert',
+    );
+  }
+
+  // Exactly one of each affordance in the whole page: two copies would mean the
+  // preview-less branch grew its own.
+  assert.equal((page.match(/data-testid=\{`create-preview-/g) || []).length, 1);
+  assert.equal((page.match(/<PreviewReveal\b/g) || []).length, 1);
+  assert.equal((page.match(/<Eye\b/g) || []).length, 1);
+
+  // And the entries themselves still divide the way the ticket says.
+  assert.deepEqual(
+    createEntries().filter(hasPreview).map((e) => e.key),
+    ['template', 'describe', 'build'],
+    'AC3 — the three flow cards keep their preview; AC1/AC2 — the other two have none',
+  );
+});
+
 test('AC5 — the reveal is hover AND keyboard focus, with no animation at all', () => {
   // Parity per the shared-tooltip standard (#1850): a keyboard user gets the
   // same preview as a mouse user, and the eye control is the touch path.
@@ -202,7 +252,9 @@ test('every visible string comes from the pure module, never inlined in the JSX'
         `the ${entry.key} entry's ${field} is inlined in Create.jsx`,
       );
     }
-    assert.ok(!page.includes(entry.preview.caption), `${entry.key}'s caption is inlined`);
+    if (hasPreview(entry)) {
+      assert.ok(!page.includes(entry.preview.caption), `${entry.key}'s caption is inlined`);
+    }
   }
   for (const rendered of ['{entry.title}', '{entry.description}', '{entry.outcome}', '{entry.badge}']) {
     assert.ok(page.includes(rendered), `Create.jsx never renders ${rendered}`);

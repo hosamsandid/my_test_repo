@@ -380,7 +380,7 @@
     {
       "name": "create.previewEntry",
       "module": "create",
-      "description": "Reveal an entry's \"what you get\" preview via its eye control (#2027) and confirm the schematic and its caption are showing. The control is the touch path — hover and keyboard focus reveal the same panel — and it is a sibling of the card's link, so clicking it previews instead of navigating. This step asserts exactly that: the preview appears AND we are still on the launcher.",
+      "description": "Reveal an entry's \"what you get\" preview via its eye control (#2027) and confirm the schematic and its caption are showing. The control is the touch path — hover and keyboard focus reveal the same panel — and it is a sibling of the card's link, so clicking it previews instead of navigating. This step asserts exactly that: the preview appears AND we are still on the launcher. Only the three flow entries have a preview (#2034 dropped it from the hero and the advanced entry), so `entry` must be one of `template` / `describe` / `build` — the other two carry no eye control to click.",
       "params": [
         {
           "name": "entry",
@@ -389,7 +389,7 @@
           "description": "Which entry's preview to reveal."
         }
       ],
-      "example": "- action:\n    do: create.previewEntry\n    entry: chat"
+      "example": "- action:\n    do: create.previewEntry\n    entry: template"
     },
     {
       "name": "create.startFromTemplate",

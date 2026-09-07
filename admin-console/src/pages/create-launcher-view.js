@@ -32,6 +32,16 @@
 // sentence. `template` and `orchestrator` still appear nowhere a newcomer
 // looks.
 //
+// **#2034 narrows the "what you get" preview to the flow tier.** #2027 gave
+// every entry one; in practice it only earned its place where the destination is
+// genuinely non-obvious. On the hero a large chat-window schematic dominated the
+// page to say that a chat is a chat, and on the advanced entry it told a
+// specialist what a form looks like. So `preview` is now an OPTIONAL field —
+// present on the three flow entries, absent on the other two — and `hasPreview`
+// is what the renderer branches on, so the reveal path (schematic, eye
+// affordance, hover/focus handlers) is absent from those two cards rather than
+// hidden.
+//
 // This module is dependency-free and unit-tested (admin-console-src CI job);
 // Create.jsx is a thin renderer over it, and the technical routing (which
 // existing backend/flow each entry hands off to) lives here as data so it can
@@ -91,10 +101,9 @@ const CREATE_ENTRIES = [
     action: 'Start chatting',
     badge: 'Fastest start',
     outcome: '→ Opens a chat with your assistant',
-    preview: {
-      schematic: 'chat',
-      caption: "You'll land in a chat window, talking to your assistant.",
-    },
+    // No `preview` (#2034): a chat window is self-evident, and at hero width the
+    // schematic was the largest thing on the page. The outcome line above still
+    // says where you land.
     // The merged single-agent form from Phase A (#1664) — the "Fast lane" (AC6).
     // Promoted from a peer tile to the hero by #2027: it was the easy path that
     // read as the hard one, sitting under the wordiest title on the page.
@@ -172,10 +181,8 @@ const CREATE_ENTRIES = [
     // #2027 moved it behind the disclosure and renamed it after what it costs.
     description: 'Set the id, role, Working Environment and system prompt yourself. For specialists who want full control.',
     outcome: '→ Opens the agent editor',
-    preview: {
-      schematic: 'form',
-      caption: "You'll fill in an agent's details in a short form.",
-    },
+    // No `preview` (#2034): this is the deliberate specialist path, and someone
+    // who opens the disclosure to reach it does not need to be shown a form.
     // Stays ON the launcher (#1956): the direct create form is hosted here in a
     // side panel rather than on a route of its own, so `New Agent` in Agent
     // Chat's header can hand over to plain `/create` and the ranked entries
@@ -185,18 +192,38 @@ const CREATE_ENTRIES = [
   },
 ];
 
+// One entry, copied out. A shallow copy so callers can't mutate the module-level
+// list; the nested `preview` object is copied too — a renderer that memoised on
+// it would otherwise share one object with the module. An entry that carries no
+// preview (#2034) is handed out WITHOUT the key rather than with an empty
+// object: `{}` is truthy, so a renderer branching on the field would draw an
+// affordance for a preview that does not exist.
+function copyEntry(entry) {
+  return entry.preview
+    ? { ...entry, preview: { ...entry.preview } }
+    : { ...entry };
+}
+
 export function createEntries() {
-  // Return a shallow copy so callers can't mutate the module-level list. The
-  // nested `preview` object is copied too — a renderer that memoised on it
-  // would otherwise share one object with the module.
-  return CREATE_ENTRIES.map((e) => ({ ...e, preview: { ...e.preview } }));
+  return CREATE_ENTRIES.map(copyEntry);
 }
 
 export const CREATE_ENTRY_KEYS = CREATE_ENTRIES.map((e) => e.key);
 
 export function entryByKey(key) {
   const found = CREATE_ENTRIES.find((e) => e.key === key);
-  return found ? { ...found, preview: { ...found.preview } } : null;
+  return found ? copyEntry(found) : null;
+}
+
+// Does this entry reveal a "what you get" schematic? Since #2034 only the three
+// flow entries do, so this is the renderer's one branch — and it demands a named
+// schematic rather than merely a `preview` object, because an entry whose
+// preview named nothing would otherwise get an eye control that reveals an empty
+// panel (the reveal resolves the schematic BY NAME, and an unknown name renders
+// nothing at all).
+export function hasPreview(entry) {
+  const schematic = entry && entry.preview && entry.preview.schematic;
+  return typeof schematic === 'string' && schematic.trim().length > 0;
 }
 
 // The entries of one tier, in display order. An unknown tier yields `[]` rather

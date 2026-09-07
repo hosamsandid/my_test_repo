@@ -85,6 +85,15 @@ See §4 for the full discussion. Summary: **each human gets their own Matrix acc
 
 ## 3 — Authorization Model
 
+> **Successor design — [`decentralised-access-concept.md`](decentralised-access-concept.md) (#2041 / #2046).**
+> The two-level model below stays, but its per-team tier is **re-pointed**: after decision D1
+> the **Agent Team** is the access boundary, so a membership names an Agent Team rather than a
+> separate access scope. Rights administration also moves from central to decentralised — the
+> person who creates a team owns it and shares it themselves (D1–D3), while the System Admin
+> keeps full visibility (D5). The role names and semantics (**System Admin** / **Team Admin** /
+> **Team Member**) are unchanged. This section still describes what is live on `main`; the
+> successor doc is the design of record (this section is rewritten in phase P6).
+
 ### Recommendation
 
 A **two-level model**: a small set of **system-wide roles** plus **per-team membership with a per-team role**. This is neither fully flat nor a deep hierarchy — it is the minimum that expresses "system operator" vs. "scoped team work".

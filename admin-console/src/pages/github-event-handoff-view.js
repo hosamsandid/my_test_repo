@@ -59,6 +59,25 @@ export function handoffNote(row) {
   return typeof h.note === 'string' ? h.note.trim() : '';
 }
 
+// How much of the note the Title CELL renders. A note is capped at 1024 code
+// points, four times what GitHub allows a PR/issue title — and this column
+// opts into DataTable `wrap` (#1898), so an uncapped note wraps into ~20 lines
+// and one hand-off row dominates the table. The full note stays on the row's
+// filter key and in the cell's hover, so nothing is hidden, only folded.
+//
+// Cut in CODE POINTS, like every other cut this feature makes: `String#slice`
+// can land between a surrogate pair, and the lone surrogate renders as a
+// replacement character.
+export const HANDOFF_NOTE_DISPLAY_MAX = 180;
+
+export function handoffNoteDisplay(row) {
+  const note = handoffNote(row);
+  if (!note) return '';
+  const chars = Array.from(note);
+  if (chars.length <= HANDOFF_NOTE_DISPLAY_MAX) return note;
+  return `${chars.slice(0, HANDOFF_NOTE_DISPLAY_MAX).join('')}…`;
+}
+
 // Hover text for the Title cell, so a note is not mistaken for a PR/issue
 // title (the only other thing that column ever holds). Returns null when the
 // row is not a hand-off, leaving the existing behaviour untouched.

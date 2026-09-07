@@ -6,6 +6,8 @@ import {
   handoffPair,
   handoffNote,
   handoffTitleHint,
+  handoffNoteDisplay,
+  HANDOFF_NOTE_DISPLAY_MAX,
 } from './github-event-handoff-view.js';
 
 const row = (over = {}) => ({
@@ -95,4 +97,39 @@ test('handoffTitleHint is null for every non-hand-off row', () => {
   // (the full work-item title) on the rows that have one.
   assert.equal(handoffTitleHint(row({ event: 'issues.labeled' })), null);
   assert.equal(handoffTitleHint(null), null);
+});
+
+test('handoffNoteDisplay folds a long note but leaves a short one alone', () => {
+  // A note may run to 1024 code points — four times what GitHub allows a
+  // PR/issue title — and the Title column opts into DataTable `wrap`, so an
+  // uncapped note becomes a twenty-line row. The full note stays on the row's
+  // filter key and in the cell's hover.
+  const short = 'Check step 3.';
+  assert.equal(handoffNoteDisplay(row({ handoff: { from: 'a', to: 'b', note: short } })), short);
+  const long = 'x'.repeat(400);
+  const folded = handoffNoteDisplay(row({ handoff: { from: 'a', to: 'b', note: long } }));
+  assert.ok(Array.from(folded).length <= HANDOFF_NOTE_DISPLAY_MAX + 1);
+  assert.ok(folded.endsWith('…'), 'a folded note says it was folded');
+  assert.notEqual(folded, long);
+  // The full note is still what the filter key gets.
+  assert.equal(handoffNote(row({ handoff: { from: 'a', to: 'b', note: long } })), long);
+});
+
+test('handoffNoteDisplay folds in code points, never mid-surrogate', () => {
+  for (const pad of [0, 1, 2, 3]) {
+    const note = 'a'.repeat(178 + pad) + '😀'.repeat(10);
+    const out = handoffNoteDisplay(row({ handoff: { from: 'a', to: 'b', note } }));
+    for (const ch of out) {
+      const cp = ch.codePointAt(0);
+      assert.ok(cp < 0xd800 || cp > 0xdfff, `pad=${pad}: lone surrogate`);
+    }
+  }
+});
+
+test('handoffNoteDisplay is empty for a non-hand-off row, so `|| v` keeps the title', () => {
+  // The column renders `handoffNoteDisplay(row) || v`, so an empty string here
+  // is what makes a work-item row byte-identical to before.
+  assert.equal(handoffNoteDisplay(row({ event: 'issues.labeled' })), '');
+  assert.equal(handoffNoteDisplay(row({ handoff: { from: 'a', to: 'b' } })), '');
+  assert.equal(handoffNoteDisplay(null), '');
 });

@@ -33,7 +33,7 @@ test('AC5: a Title column renders via TitleCell and wraps (no fixed-width ellips
   // #2032 threads a per-row `hint` in: a direct-hand-off row has no work item,
   // so this column carries the producer's note instead of a title and the
   // hover has to say which. The title binding itself is unchanged.
-  assert.match(src, /label: 'Title', wrap: true, render: \(v, row\) => <TitleCell title={v} hint={handoffTitleHint\(row\)} \/>/);
+  assert.match(src, /label: 'Title', wrap: true, render: \(v, row\) => <TitleCell title={handoffNoteDisplay\(row\) \|\| v} hover={v} hint={handoffTitleHint\(row\)} \/>/);
   assert.doesNotMatch(src, /textOverflow: 'ellipsis'/);
 });
 

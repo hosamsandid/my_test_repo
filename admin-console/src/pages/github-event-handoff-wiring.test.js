@@ -14,7 +14,7 @@ const src = fs.readFileSync(path.join(import.meta.dirname, 'GithubEventLog.jsx')
 test('the page imports the hand-off view helpers from the pure module', () => {
   assert.match(
     src,
-    /import \{ isHandoffRow, handoffNote, handoffTitleHint \} from '\.\/github-event-handoff-view'/,
+    /import \{ isHandoffRow, handoffNote, handoffNoteDisplay, handoffTitleHint \} from '\.\/github-event-handoff-view'/,
   );
 });
 
@@ -32,11 +32,17 @@ test("the producer's note reaches the row key the Title column filters on", () =
 
 test('the Title cell is told when its content is a note, not a title', () => {
   assert.match(src, /hint=\{handoffTitleHint\(row\)\}/);
+  // The cell shows a FOLDED note (a note may be 1024 code points and the column
+  // wraps) while the hover carries it whole — so nothing is hidden, and one
+  // hand-off cannot turn into a twenty-line table row.
+  assert.match(src, /title=\{handoffNoteDisplay\(row\) \|\| v\} hover=\{v\}/);
   // ...and TitleCell must actually USE it: an unused prop would leave a note
   // hovering as if it were a PR title.
   const cell = src.slice(src.indexOf('function TitleCell'));
   const body = cell.slice(0, cell.indexOf('\n}'));
   assert.match(body, /hint \?/, 'TitleCell branches on the hint');
+  assert.match(body, /const full = hover \|\| title/,
+    'the hover falls back to the rendered title, so a work-item row is unchanged');
   assert.match(body, /title=\{/, 'and still sets a hover title');
 });
 

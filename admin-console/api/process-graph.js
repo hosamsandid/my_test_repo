@@ -1011,7 +1011,11 @@ function computeLints(nodes, edges, classifier) {
     if (labelReadElsewhere.has(e.label)) continue;
     if ((labelProducers.get(e.label) || new Set()).size !== 1) continue;
     if ((labelConsumers.get(e.label) || new Set()).size !== 1) continue;
-    const key = `${e.from} ${e.to} ${e.label}`;
+    // `\0` separator like `internalCandidates` above — three ids joined by a
+    // character none of them can contain. Written as the ESCAPE, not as a raw
+    // control byte: the raw ones already in this file are what make it read as
+    // git-binary (and therefore grep-invisible), so no more are added.
+    const key = `${e.from}\0${e.to}\0${e.label}`;
     if (handoffCandidates.has(key)) continue;
     handoffCandidates.add(key);
     lints.push({ code: 'direct-handoff-candidate', severity: 'info', label: e.label, nodeId: e.from,

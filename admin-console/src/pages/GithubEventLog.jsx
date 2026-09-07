@@ -10,7 +10,7 @@ import { kindLabel, kindTooltip, entryDetail, totalPending } from './pending-que
 import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip } from './event-outcome-view';
 import { eventLabel } from './agent-chat/trigger-summary';
 import { workItemTypeLabel } from './github-event-log-type';
-import { isHandoffRow, handoffNote, handoffTitleHint } from './github-event-handoff-view';
+import { isHandoffRow, handoffNote, handoffNoteDisplay, handoffTitleHint } from './github-event-handoff-view';
 import { GITHUB_EVENTS_HELP_SECTIONS } from './github-events-help-sections';
 
 /* ── Time-range presets ────────────────────────────────────────────── */
@@ -195,11 +195,15 @@ function TypeCell({ workItem }) {
    title now wraps onto multiple lines within the column (AC4), keeping the
    table at 100% width with no horizontal scrollbar. The full text is still
    offered on hover. */
-function TitleCell({ title, hint }) {
+function TitleCell({ title, hover, hint }) {
   if (!title) return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
-  // `hint` (#2032) is set for a direct-hand-off row, whose "title" is the
-  // producer's note rather than a PR/issue title — the hover says which.
-  return <span title={hint ? `${hint}: ${title}` : title}>{title}</span>;
+  // #2032: on a direct-hand-off row this column holds the producer's note
+  // rather than a PR/issue title, so `hint` says which — and because a note may
+  // run to 1024 code points, `title` is a folded preview while `hover` carries
+  // it whole. For every other row `hover` equals `title` and this is the same
+  // single-argument hover it has always been.
+  const full = hover || title;
+  return <span title={hint ? `${hint}: ${full}` : full}>{title}</span>;
 }
 
 /* ── Repository cell (#1827, restored to prominence in #1833) — the short repo
@@ -355,7 +359,7 @@ function ProcessedEventsView() {
     // scrollbar. Enabling wrap here changes only this page — the other ~11
     // DataTable pages stay single-line + ellipsis (AC9).
     { key: 'workItemNumber', label: 'Work item', wrap: true, render: (_v, row) => <WorkItemCell workItem={row.workItem} repo={row.repo} /> },
-    { key: 'workItemTitle', label: 'Title', wrap: true, render: (v, row) => <TitleCell title={v} hint={handoffTitleHint(row)} /> },
+    { key: 'workItemTitle', label: 'Title', wrap: true, render: (v, row) => <TitleCell title={handoffNoteDisplay(row) || v} hover={v} hint={handoffTitleHint(row)} /> },
     { key: 'event', label: 'Event', render: (v, row) => {
       // Plain-language event name (single source of truth: the shared eventLabel
       // map used by the trigger editor) so this log reads for someone who

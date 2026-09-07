@@ -25,19 +25,32 @@
 // keeps `canSubmit` byte-equivalent to the prior inline expression.
 const present = v => Boolean(String(v ?? ''));
 
+// First value that occurs more than once, or null. Order-preserving so the
+// message names the id the user sees first.
+function firstDuplicate(values) {
+  const seen = new Set();
+  for (const v of values) {
+    if (seen.has(v)) return v;
+    seen.add(v);
+  }
+  return null;
+}
+
 /**
  * Derive whether the Working Environment form can be submitted and, when it
  * cannot, the ordered list of unmet requirements to surface to the user. The
- * order follows the form top-to-bottom (Name → ID → Repositories).
+ * order follows the form top-to-bottom (Name → ID → Repositories → MCP servers).
  *
  * @param form.name          raw Name field
  * @param form.id            raw ID field (auto-derived from the name)
  * @param form.repositories  array of { url, branch, sshKeyId } repository rows
+ * @param form.mcpServers    array of { serverId, credentialId } picker rows (#2051)
  * @returns {{ canSubmit: boolean, reasons: Array<{field: string, message: string}> }}
  */
 export function describeWorkingEnvSubmitState(form = {}) {
   const { name, id } = form;
   const repositories = Array.isArray(form.repositories) ? form.repositories : [];
+  const mcpServers = Array.isArray(form.mcpServers) ? form.mcpServers : [];
 
   const reasons = [];
 
@@ -55,6 +68,28 @@ export function describeWorkingEnvSubmitState(form = {}) {
     reasons.push({
       field: 'repositories',
       message: 'Give every added repository a URL, or remove the empty row.',
+    });
+  }
+  // Same shape for the MCP picker rows (#2051): an "Add MCP server" click leaves
+  // a blank row behind, and the API silently DROPS an entry with no serverId
+  // (normalizeMcpServersInput), so a user who picked a credential but forgot the
+  // server would otherwise save and lose it without a word.
+  const hasEmptyMcp = mcpServers.some(r => !String(r?.serverId ?? '').trim());
+  if (hasEmptyMcp) {
+    reasons.push({
+      field: 'mcpServers',
+      message: 'Choose a server for every added MCP row, or remove the empty row.',
+    });
+  }
+  // Nothing on the server side dedupes: `mcpServers` is stored in order and the
+  // seeder writes one stanza per entry into the agent's settings, so a repeated
+  // server means the later row silently wins. Block it here rather than let the
+  // form express something whose outcome it cannot show.
+  const duplicateMcp = firstDuplicate(mcpServers.map(r => String(r?.serverId ?? '').trim()).filter(Boolean));
+  if (duplicateMcp) {
+    reasons.push({
+      field: 'mcpServersDuplicate',
+      message: `List each MCP server once — '${duplicateMcp}' is added twice.`,
     });
   }
 

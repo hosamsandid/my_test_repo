@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2, Cpu, Users, Info, Package } from 'lucide-react';
+import { Link } from 'react-router';
+import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2, Cpu, Users, Info, Package, Server } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
@@ -13,6 +14,7 @@ import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { describeWorkingEnvSubmitState } from './working-env-submit-state.js';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning, availableToolchains, versionSourceLine } from './toolchain-select-view.js';
+import { initialMcpRows, mcpSubmitValue, mcpRowHint, mcpChangeNotice, mcpServerLabel } from './working-env-mcp-view.js';
 import { ENVIRONMENTS_HELP_SECTIONS } from './environments-help-sections.js';
 import { usePageActions } from '../context/PageActionsContext';
 import { useHelpSubject } from '../context/HelperChatContext';
@@ -259,6 +261,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     description: initial?.description || '',
     additionalContext: initial?.additionalContext || '',
     repositories: initialRepositories(initial),
+    mcpServers: initialMcpRows(initial),
     githubTokenId: initial?.githubTokenId || '',
     llmEndpointId: initial?.llmEndpointId || '',
     defaultModelId: initial?.defaultModelId || '',
@@ -269,10 +272,18 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
   const { data: tokensData } = useApi('/api/github-tokens');
   const { data: endpointsData } = useApi('/api/llm-endpoints');
   const { data: toolchainData } = useApi('/api/toolchains');
+  // #2051. Both lists are team-scoped server-side, so the picker offers exactly
+  // what this admin may pair. A credential's own `serverId` is a HINT, not a
+  // pairing (McpServers.jsx says so) — so the credential select is never
+  // filtered by it, only sorted so the hinted one comes first.
+  const { data: mcpServerData, loading: mcpServersLoading } = useApi('/api/mcp-servers');
+  const { data: mcpCredentialData } = useApi('/api/mcp-credentials');
 
   const sshKeys = keysData || [];
   const ghTokens = tokensData || [];
   const llmEndpoints = endpointsData || [];
+  const mcpServers = mcpServerData || [];
+  const mcpCredentials = mcpCredentialData || [];
   // Agent toolchain (#1940). The registry is read-only here: registering an
   // image reference is a System-Admin action on the Toolchains list, and the
   // server refuses it from this form regardless of what the UI shows.
@@ -333,8 +344,39 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     setForm(f => ({ ...f, repositories: f.repositories.filter((_, i) => i !== idx) }));
   };
 
+  // Same three helpers for the MCP rows (#2051). Changing the server clears the
+  // credential: a credential is chosen *for* a server, and silently carrying one
+  // over is how a pair that reads fine ends up ignored at seed time.
+  const updateMcp = (idx, key, val) => {
+    setForm(f => {
+      const next = f.mcpServers.slice();
+      next[idx] = key === 'serverId'
+        ? { serverId: val, credentialId: '' }
+        : { ...next[idx], [key]: val };
+      return { ...f, mcpServers: next };
+    });
+  };
+  const addMcp = () => {
+    setForm(f => ({ ...f, mcpServers: [...f.mcpServers, { serverId: '', credentialId: '' }] }));
+  };
+  const removeMcp = (idx) => {
+    setForm(f => ({ ...f, mcpServers: f.mcpServers.filter((_, i) => i !== idx) }));
+  };
+
+  const mcpNotice = mcpChangeNotice({
+    isEdit,
+    initial,
+    rows: form.mcpServers,
+    agentCount: initial?.agentCount || 0,
+  });
+
   const submit = () => {
+    // Omitted entirely when the pairing was not touched, so an unrelated save
+    // still leaves `mcpServers` byte-identical on disk (#2051 AC2) — PUT only
+    // writes the field when the key is present. See working-env-mcp-view.js.
+    const mcpValue = mcpSubmitValue(initial, form.mcpServers);
     onSave({
+      ...(mcpValue === undefined ? {} : { mcpServers: mcpValue }),
       id: form.id,
       name: form.name,
       description: form.description,
@@ -586,6 +628,170 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
             <option key={t.id} value={t.id}>{t.name} ({t.preview})</option>
           ))}
         </select>
+      </div>
+
+      {/* MCP servers (#2051). `environment.mcpServers` has always been the place
+          the pairing lives — the API normalizes it, the orchestrator seeds from
+          it, and the Team-Setup wizard's Knowledge step points here for changes.
+          Until now the form neither rendered nor sent the field, so that pointer
+          led to a page with no such control. */}
+      <div style={{
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)',
+        padding: 'var(--eb-space-3)',
+        display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <Server size={14} />
+          <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+            MCP Servers
+          </span>
+          <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            ({form.mcpServers.length})
+          </span>
+          {/* Chapter 4 finally has a surface. It carries the substitution rules
+              the two row hints below are the short form of, and the seed-time
+              caveat the notice states. */}
+          <PageHelpButton
+            label="About MCP server references"
+            size={14}
+            style={{ padding: 0, marginLeft: 'auto', flexShrink: 0 }}
+            section={ENVIRONMENTS_HELP_SECTIONS.mcp}
+          />
+        </div>
+
+        <div style={helpTextStyle}>
+          Pair a server from the <em>MCP Servers</em> registry with a credential from the separate credential store.
+          At agent-creation time the pair is substituted per agent and merged into that agent's own <code>.claude/settings.json</code>,
+          which is how an agent reaches runtime data — a wiki, a vector store, a graph database.
+          Leave this empty for agents that need no runtime data source.
+        </div>
+
+        {/* The rows render whatever the environment holds, independently of what
+            the registry currently offers: an empty registry must not hide a
+            stored pair (which would leave it unremovable), and a ref whose
+            server was deleted is exactly the row a reader needs to see. */}
+        {form.mcpServers.map((row, idx) => {
+              const hint = mcpRowHint(row, mcpServers);
+              const unknownServer = row.serverId && !mcpServers.some(s => s.id === row.serverId);
+              return (
+                <div
+                  key={idx}
+                  style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+                    padding: 'var(--eb-space-2)',
+                    background: 'var(--eb-bg-elevated)',
+                    border: '1px solid var(--eb-border-default)',
+                    borderRadius: 'var(--eb-radius-md)',
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+                    <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+                      <div style={{ flex: '1 1 180px', minWidth: 0 }}>
+                        <div style={labelStyle}>Server</div>
+                        <select
+                          value={row.serverId}
+                          onChange={e => updateMcp(idx, 'serverId', e.target.value)}
+                          style={inputStyle}
+                        >
+                          <option value="">— choose a server —</option>
+                          {mcpServers.map(s => (
+                            <option key={s.id} value={s.id}>{mcpServerLabel(s.id, mcpServers)}</option>
+                          ))}
+                          {/* A ref whose server was removed from the registry
+                              stays selectable, so the row shows what it holds
+                              and can be removed deliberately. */}
+                          {unknownServer && (
+                            <option value={row.serverId}>{mcpServerLabel(row.serverId, mcpServers)}</option>
+                          )}
+                        </select>
+                      </div>
+                      <div style={{ flex: '1 1 180px', minWidth: 0 }}>
+                        <div style={labelStyle}>Credential</div>
+                        <select
+                          value={row.credentialId}
+                          onChange={e => updateMcp(idx, 'credentialId', e.target.value)}
+                          disabled={!row.serverId}
+                          style={{ ...inputStyle, opacity: row.serverId ? 1 : 0.5 }}
+                        >
+                          <option value="">— no credential —</option>
+                          {mcpCredentials.map(c => (
+                            <option key={c.id} value={c.id}>
+                              {c.name}{c.serverId === row.serverId ? ' (default for this server)' : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    {hint && (
+                      <div style={{
+                        display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+                        fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
+                      }}>
+                        {hint.tone === 'warn'
+                          ? <AlertTriangle size={13} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-status-warning)' }} />
+                          : <Info size={13} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-text-muted)' }} />}
+                        <span>{hint.message}</span>
+                      </div>
+                    )}
+                  </div>
+                  {/* IconButton takes no style prop, so the no-shrink lives on
+                      the wrapper — otherwise the button squeezes when a long
+                      server name widens the selects. */}
+                  <div style={{ flexShrink: 0, paddingTop: 18 }}>
+                    <IconButton icon={X} label="Remove MCP server" danger onClick={() => removeMcp(idx)} size={12} />
+                  </div>
+                </div>
+              );
+        })}
+
+        {/* Only the ADD affordance depends on the registry. While the list is
+            still loading nothing is claimed either way — announcing "none are
+            registered" and then contradicting it a moment later is worse than
+            a beat of silence. */}
+        {mcpServersLoading ? null : mcpServers.length === 0 ? (
+          <div style={{ ...helpTextStyle, marginTop: 0 }}>
+            No MCP servers are registered yet. Register one on the{' '}
+            <Link to="/mcp" style={{ color: 'var(--eb-accent-primary)' }}>MCP Servers</Link> page,
+            then pair it here.
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={addMcp}
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              gap: 'var(--eb-space-2)',
+              padding: 'var(--eb-space-2) var(--eb-space-3)',
+              background: 'var(--eb-bg-elevated)',
+              border: '1px dashed var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-md)',
+              color: 'var(--eb-text-secondary)',
+              cursor: 'pointer',
+              fontSize: 'var(--eb-text-sm)',
+              fontFamily: 'inherit',
+            }}
+          >
+            <Plus size={13} /> Add MCP server
+          </button>
+        )}
+
+        {/* AC3. Unlike the toolchain and token changes below/above, saving here
+            recreates nothing: the pair is substituted into the agent's own
+            settings at seed time and no respawn path re-seeds it. Say that
+            before the click rather than let it be discovered. */}
+        {mcpNotice && (
+          <div role="alert" style={{
+            display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+            fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
+            padding: 'var(--eb-space-2)',
+            background: 'var(--eb-status-warning-bg)',
+            borderRadius: 'var(--eb-radius-md)',
+          }}>
+            <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-status-warning)' }} />
+            <span>{mcpNotice}</span>
+          </div>
+        )}
       </div>
 
       <div style={{

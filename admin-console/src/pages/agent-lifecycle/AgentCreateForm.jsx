@@ -29,7 +29,7 @@ import { describeAgentSubmitState } from '../agent-create-submit-state.js';
 import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
 } from './form-kit.jsx';
-import { ROLE_INFO, RoleDetailBanner } from './agent-form-fields.jsx';
+import { ROLE_INFO, RoleHelpTip } from './agent-form-fields.jsx';
 
 const hasRepos = (env) =>
   (Array.isArray(env?.repositories) && env.repositories.length > 0) ||
@@ -195,12 +195,17 @@ export default function AgentCreateForm({ onSave, onCancel, saving, error }) {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-        <div style={labelStyle}>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+        {/* The role explanation is a "?" on the label rather than a box below
+            the cards (#2026): it follows the selection and costs no height in a
+            form whose subject is the prompt. */}
+        <div style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+          <span>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></span>
+          <RoleHelpTip role={form.role} />
+        </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
           <RoleCard value="agent" current={form.role} onSelect={v => update('role', v)} />
           <RoleCard value="team"  current={form.role} onSelect={v => update('role', v)} />
         </div>
-        <RoleDetailBanner role={form.role} />
         {(form.role === 'team' || form.role === 'team-member') && (
           <div style={{
             display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',

@@ -894,6 +894,26 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
 
 function ActionRow({ action, onChange, onRemove }) {
   const type = ACTION_TYPES.includes(action.type) ? action.type : 'setLabel';
+  // Direct hand-off (#2030): P1 makes a `wakeAgent` action authorable on the
+  // bundle / `triggers.json` and carried losslessly through save; the Flow
+  // Editor's edge + Edit-hand-off dialog — and this select's own option — are
+  // P2. So the row is READ-ONLY here rather than absent: an editable select
+  // with no `wakeAgent` option would silently rewrite a hand-authored hand-off
+  // into a different action type the first time anyone touched it.
+  if (type === 'wakeAgent') {
+    return (
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 'var(--eb-text-xs)' }}>
+        <span style={{ width: 130, flexShrink: 0, color: 'var(--eb-text-secondary)' }}>hand off directly</span>
+        <code style={{ fontFamily: 'var(--eb-font-mono)' }}>{action.to || '(no target)'}</code>
+        {action.note && (
+          <span style={{ color: 'var(--eb-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            — {action.note}
+          </span>
+        )}
+        {onRemove && <button onClick={onRemove} title="Remove action" style={iconBtn}><X size={12} /></button>}
+      </div>
+    );
+  }
   return (
     <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
       <select value={type} onChange={e => onChange(e.target.value === 'setLabel' ? { type: 'setLabel', label: action.label || '' } : { type: e.target.value })}
@@ -922,7 +942,22 @@ function ModeToggle({ value, onChange }) {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
-const ACTION_TYPES = ['setLabel', 'openPr', 'openIssue', 'none'];
+const ACTION_TYPES = ['setLabel', 'openPr', 'openIssue', 'wakeAgent', 'none'];
+// #2030: a direct hand-off's note is capped server-side (outcomes.js
+// WAKE_NOTE_MAX); the same cap is applied here so the field cannot submit a
+// value the server would truncate behind the author's back. The marker matches
+// the server's too — a bare slice would drop the tail of a hand-authored note
+// on the next Save with nothing to show it happened.
+const WAKE_NOTE_MAX = 1024;
+const WAKE_NOTE_TRUNCATION_MARK = ' […truncated]';
+function clampWakeNote(s) {
+  // Code points, not UTF-16 units: a cut inside a surrogate pair yields a lone
+  // surrogate that is not encodable as UTF-8 downstream.
+  const chars = Array.from(s);
+  if (chars.length <= WAKE_NOTE_MAX) return s;
+  const mark = Array.from(WAKE_NOTE_TRUNCATION_MARK).length;
+  return chars.slice(0, WAKE_NOTE_MAX - mark).join('') + WAKE_NOTE_TRUNCATION_MARK;
+}
 
 function emptyPort() { return { mode: 'anyOf', options: [] }; }
 function normalize(oc) {
@@ -957,8 +992,21 @@ function finalize(oc) {
     while (seen.has(id)) id = `${id}-${i + 1}`;
     seen.add(id);
     const actions = (Array.isArray(o.actions) ? o.actions : [])
-      .map(a => a.type === 'setLabel' ? { type: 'setLabel', label: String(a.label || '').trim() } : { type: a.type })
-      .filter(a => a.type !== 'setLabel' || a.label);
+      .map(a => {
+        if (a.type === 'setLabel') return { type: 'setLabel', label: String(a.label || '').trim() };
+        // #2030: `to` + `note` must survive the Routing tab's save, or the
+        // direct hand-off is dropped here with no error anywhere.
+        if (a.type === 'wakeAgent') {
+          const note = clampWakeNote(String(a.note || '').trim());
+          return { type: 'wakeAgent', to: String(a.to || '').trim(), ...(note ? { note } : {}) };
+        }
+        return { type: a.type };
+      })
+      .filter(a => a.type !== 'setLabel' || a.label)
+      // A `to`-less wakeAgent is an incomplete row, not an outcome: dropping it
+      // mirrors the empty-setLabel rule above, so Save never sends a shape the
+      // server would reject as "wakeAgent action needs a to".
+      .filter(a => a.type !== 'wakeAgent' || a.to);
     return {
       id,
       ...(o.title && o.title.trim() ? { title: o.title.trim() } : {}),

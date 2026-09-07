@@ -169,7 +169,8 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
 ```
 
 - **Action types.** `setLabel` (apply a GitHub label — `label` required),
-  `openPr`, `openIssue` (absorb `github.producesPr/producesIssue`), `none`
+  `openPr`, `openIssue` (absorb `github.producesPr/producesIssue`),
+  `wakeAgent` (hand off directly to another role — see below), `none`
   (terminal, no outbound signal). An option may carry several actions.
 - **Validation.** `mode` must be `exactlyOne` | `anyOf`; option `id`s are unique;
   action types must be known; a `setLabel` label may **not** be a label the
@@ -177,8 +178,9 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
   `gate: 'human'`) — same rule as `gate-violation`. A `brake` label *is* allowed:
   a brake pauses the loop and is agent-applied (#928).
   `exactlyOne` with fewer than two options is valid (a phase-5 lint, not an error).
-- **`{{var}}` substitution** applies to `label` and `when` at materialise time,
-  exactly like trigger fields.
+- **`{{var}}` substitution** applies to `label`, `when` and a `wakeAgent`'s
+  `note` at materialise time, exactly like trigger fields. A `wakeAgent`'s `to`
+  is **not** substituted — it is a role reference, remapped instead (below).
 - **Supersedes `emits` (#831).** The flat `emits` field is retired. All shipped
   templates carry `outcomes`; no `emits` field appears in newly exported bundles.
   Old bundles that carry `emits` still import correctly: `buildProcessTemplate`
@@ -192,6 +194,64 @@ vs *revisions required*, a dispatcher's *route to Developer 1 / 2 / hold*.
 - **Declarative only** (concept decision 4) — outcomes have no runtime effect in
   this phase; the agent still sets its own signals. Prompt synchronisation is a
   later phase.
+
+### `wakeAgent` — direct agent-to-agent hand-off (#2030)
+
+A `wakeAgent` action wakes a wired **same-team** role *inside the platform*: no
+label to invent, no issue or PR to hang it on, no GitHub trace. Use it for pure
+coordination that has no natural home on a work item; keep `setLabel` when a
+human tracks the state on the issue/PR (concept
+`docs/direct-agent-handoff-concept.md` §11). The two compose — they may sit in
+the same option.
+
+```jsonc
+{
+  "id": "hand-to-reviewer",
+  "title": "Hand off to Code Reviewer",
+  "when": "Implementation is complete and the tests are green",
+  "actions": [
+    { "type": "openPr" },
+    { "type": "wakeAgent", "to": "code-reviewer",
+      "note": "Look closely at the migration in step 3." }
+  ]
+}
+```
+
+- **`to`** (required, non-empty string) — a **role id in this bundle**. Remapped
+  to a member id at materialise (`<teamId>-<roleId>`) and back to the role key on
+  export, exactly like a channel's `from`, so a bundle stays portable. *Known
+  limitation, shared with `parent` / `dependsOn` / `channels[].from`:* a role
+  materialised with `count > 1` becomes `<teamId>-<roleId>-<i>`, so a `wakeAgent`
+  naming it resolves to nothing and the hand-off answers `404 unknown-target` —
+  do not target a multi-instance role until routing for it is defined.
+- **`note`** (optional string) — one sentence of context for the peer. Capped at
+  **1024 characters**; a longer note is **truncated with a marker, not rejected**.
+  It reaches the consumer as **untrusted context** inside an
+  `<external-agent-handoff>` envelope, never as its instruction — the consumer
+  runs its own configured wake instruction.
+- **Validation** (five rules): `to` present and non-empty; `to` names a role that
+  exists in the bundle/team; `to` is not the producing role itself; `to` does not
+  resolve outside the producer's team; `note`, when present, is a string.
+- **It is not a label.** `to` is a role id, so the `labelSuffix` stamper never
+  touches it — stamping it would break every hand-off in a suffixed team.
+- **Delivery.** The producing agent runs `aee-wake --to <roleId> [--note "…"]`
+  (projected into its generated `## Outcomes` block), which POSTs
+  `/internal/wake-agent`; the orchestrator resolves + authorizes the target and
+  enqueues a `kind: "wake-agent"` entry in its `pending-triggers.json`. Latency
+  is ≤ 5 s (the target polls; there is no poke), the entry is durable while the
+  target is disabled or in maintenance mode, and one `source: "internal"`
+  event-log row is written per hand-off — that log is the audit trail, because
+  nothing appears on GitHub.
+- **Consumer side.** The target needs a listener carrying the wake instruction:
+  `{ "id": "…", "type": "wake-agent", "prompt": "…" }` in its `triggers.json`.
+  Nothing schedules a trigger of this type and the poller never subscribes to it
+  — it fires only from the queue. In this phase the listener is hand-edited on
+  `triggers.json` / the bundle; the Flow Editor authors it in P2.
+- **Same team only**, and stricter than the internal label channel (which has no
+  team gate): a cross-team `to` is refused with `403 cross-team` at delivery. The
+  check is an **integrity constraint on the flow graph, not authentication** —
+  the `:4002` internal API is unauthenticated and the producer's identity is
+  self-asserted (concept §6.1).
 
 ### Notes & invariants
 

@@ -1742,3 +1742,106 @@ test('#1174: outcomesBlock without internal labels is unchanged (no aee-emit men
   const wiring = { consumersByLabel: { ready: ['Dev'] }, reviewers: {}, gateLabels: [] };
   assert.doesNotMatch(outcomesBlock(outcomes, wiring), /aee-emit/);
 });
+
+// ── #2030: direct agent hand-off — the prompt projection (§4.3) ─────────────
+
+const HANDOFF_ROLES = [
+  { id: 'developer', displayName: 'Developer',
+    outcomes: { mode: 'anyOf', options: [{ id: 'done', actions: [
+      { type: 'openPr' },
+      { type: 'wakeAgent', to: 'code-reviewer', note: 'Look closely at the migration in step 3.' },
+    ] }] } },
+  { id: 'code-reviewer', displayName: 'Code Reviewer' },
+];
+
+test('#2030: outcomesWiringContext maps a wake target to its display name', () => {
+  const { outcomesWiringContext } = require('./process-template');
+  const ctx = outcomesWiringContext('developer', { roles: HANDOFF_ROLES });
+  assert.deepEqual(ctx.wakeTargets, { 'code-reviewer': 'Code Reviewer' });
+});
+
+test('#2030: an unresolvable wake target keeps its own id — delivery uses the id', () => {
+  const { outcomesWiringContext } = require('./process-template');
+  const ctx = outcomesWiringContext('developer', { roles: [HANDOFF_ROLES[0]] });
+  assert.deepEqual(ctx.wakeTargets, { 'code-reviewer': 'code-reviewer' });
+});
+
+test('#2030: wakeTargets is absent for a role that hands off to nobody (null-context contract)', () => {
+  const { outcomesWiringContext } = require('./process-template');
+  // A lone role with no wiring at all still returns null — the pre-#1007
+  // byte-identical output contract must not be perturbed by the new field.
+  assert.equal(outcomesWiringContext('solo', { roles: [{ id: 'solo' }] }), null);
+  // …and a role wired only by labels gets no wakeTargets key.
+  const ctx = outcomesWiringContext('a', {
+    roles: [
+      { id: 'a', displayName: 'A' },
+      { id: 'b', displayName: 'B', triggers: [{ type: 'github-event', labelFilter: 'ready' }] },
+    ],
+  });
+  assert.equal('wakeTargets' in ctx, false);
+});
+
+test('#2030: outcomeActionClause renders the aee-wake command and names the peer', () => {
+  const { outcomesWiringContext } = require('./process-template');
+  const wiring = outcomesWiringContext('developer', { roles: HANDOFF_ROLES });
+  const block = outcomesBlock(HANDOFF_ROLES[0].outcomes, wiring);
+  assert.match(block, /hand off directly to \*\*Code Reviewer\*\*/);
+  assert.match(block, /`aee-wake --to code-reviewer --note "Look closely at the migration in step 3\."`/);
+  // It composes with the PR it rides alongside.
+  assert.match(block, /open a pull request and hand off directly/);
+});
+
+test('#2030: WITHOUT the branch the option would render "set no label" — the silent-wrong-prompt guard', () => {
+  const block = outcomesBlock({ mode: 'anyOf', options: [
+    { id: 'h', title: 'Hand off', actions: [{ type: 'wakeAgent', to: 'code-reviewer' }] },
+  ] });
+  assert.ok(!block.includes('set no label'),
+    'a wakeAgent falling through the action chain renders as "set no label" — silently wrong, not an error');
+  assert.match(block, /`aee-wake --to code-reviewer`/);
+});
+
+test('#2030: the fail-closed tail paragraph is appended once, only when a hand-off exists', () => {
+  const withWake = outcomesBlock({ mode: 'anyOf', options: [
+    { id: 'h', actions: [{ type: 'wakeAgent', to: 'r1' }] },
+    { id: 'h2', actions: [{ type: 'wakeAgent', to: 'r2' }] },
+  ] });
+  const rule = /A direct hand-off is delivered inside the platform: always announce it with `aee-wake`, never by applying a label/g;
+  assert.equal((withWake.match(rule) || []).length, 1);
+  assert.match(withWake, /nothing on GitHub will show that the hand-off did or did not happen/);
+  // A flow with no direct hand-off is untouched.
+  assert.ok(!outcomesBlock(EXACTLY_ONE).match(rule));
+});
+
+test('#2030: a note is quoted safely into the generated command', () => {
+  const block = outcomesBlock({ mode: 'anyOf', options: [
+    { id: 'h', actions: [{ type: 'wakeAgent', to: 'r', note: 'mind the "edge" case' }] },
+  ] });
+  // The command is a single shell word; an embedded double quote would break it.
+  assert.match(block, /`aee-wake --to r --note "mind the 'edge' case"`/);
+});
+
+test('#2030: a to-less wakeAgent contributes no clause rather than a broken command', () => {
+  const block = outcomesBlock({ mode: 'anyOf', options: [
+    { id: 'h', title: 'Broken', actions: [{ type: 'wakeAgent' }] },
+  ] });
+  assert.ok(!block.includes('aee-wake'));
+  assert.match(block, /set no label/);
+});
+
+test('#2030: outcomesWiringContext reads the port off a LIVE member shape too', () => {
+  // reconcileTeamOutcomes (api.js) pushes `{id, cfg, displayName, triggers}` —
+  // the port is on `cfg`. Reading only `r.outcomes` yields an empty map on
+  // EVERY live team, so the generated clause echoes the raw member id instead
+  // of the display name the map exists to supply.
+  const { outcomesWiringContext } = require('./process-template');
+  const live = [
+    { id: 'acme-developer', displayName: 'Developer',
+      cfg: { outcomes: { mode: 'anyOf', options: [{ id: 'done', actions: [
+        { type: 'wakeAgent', to: 'acme-code-reviewer' }] }] } }, triggers: [] },
+    { id: 'acme-code-reviewer', displayName: 'Code Reviewer', cfg: {}, triggers: [] },
+  ];
+  const ctx = outcomesWiringContext('acme-developer', { roles: live });
+  assert.deepEqual(ctx.wakeTargets, { 'acme-code-reviewer': 'Code Reviewer' });
+  const block = outcomesBlock(live[0].cfg.outcomes, ctx);
+  assert.match(block, /hand off directly to \*\*Code Reviewer\*\*/);
+});

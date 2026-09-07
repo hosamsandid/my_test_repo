@@ -2129,7 +2129,14 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   if (isAuthoredOutcomes(outcomes)) {
     // Gate-ness is configuration (#928): validate against the owning team's
     // persisted label registry, not against the label's name.
-    const vo = validateOutcomes(outcomes, { labels: teamLabelRegistry(cfg.parentTeamId) });
+    // `agents` + `roleId` (#2030) are what let the wakeAgent rules resolve a
+    // direct hand-off's target on a LIVE team — here `to` is a member id, so
+    // the index is the install's agents and the producer is this agent itself.
+    const vo = validateOutcomes(outcomes, {
+      labels: teamLabelRegistry(cfg.parentTeamId),
+      agents: wakeTargetAgentIndex(),
+      roleId: id,
+    });
     if (!vo.ok) return res.status(400).json({ error: `Invalid outcomes: ${vo.error}` });
   }
 
@@ -5032,6 +5039,27 @@ function teamLabelRegistry(teamId) {
   return Array.isArray(cfg.labels)
     ? cfg.labels.filter(l => l && typeof l.name === 'string' && l.name.trim())
     : [];
+}
+
+// Every addressable agent, as the `{id, parentTeamId, teamId}` metadata a
+// `wakeAgent` target check needs (#2030). Deliberately install-WIDE, not
+// team-scoped: a `to` naming a real agent in another team must read as the
+// honest "outside this team" (§6) rather than "not a role in this flow", and
+// that distinction is only possible if the out-of-team agents are in the index.
+// Metadata only — no prompt, no token, nothing a validator has no business
+// reading. Unreadable config → skipped, so a residue dir never blocks a save.
+function wakeTargetAgentIndex() {
+  const out = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg) continue;
+    out.push({
+      id,
+      ...(cfg.parentTeamId ? { parentTeamId: cfg.parentTeamId } : {}),
+      ...(cfg.teamId ? { teamId: cfg.teamId } : {}),
+    });
+  }
+  return out;
 }
 
 // The named human roles of a LIVE team (#987). Persisted on the team agent like

@@ -371,3 +371,205 @@ test('#1004: substituteOutcomes carries the markers and substitutes the note', (
   assert.equal(s.options[0].terminal, true);
   assert.deepEqual(s.options[1].external, { note: 'CI on org/repo' });
 });
+
+// ─── wakeAgent: direct agent-to-agent hand-off (#2030, concept §4) ───────────
+
+const {
+  WAKE_NOTE_MAX, WAKE_NOTE_TRUNCATION_MARK, clampWakeNote, outcomeWakePairs,
+} = require('./outcomes');
+const { remapOutcomeWakeTargets, roleKeyOf } = require('./process-template');
+
+// A producer whose "done" outcome opens a PR *and* hands off directly — the
+// composition the concept was raised for (§4.1).
+const handoffPort = (extra = {}) => ({
+  mode: 'anyOf',
+  options: [{
+    id: 'hand-to-reviewer',
+    title: 'Hand off to Code Reviewer',
+    when: 'Implementation is complete and the tests are green',
+    actions: [
+      { type: 'openPr' },
+      { type: 'wakeAgent', to: 'code-reviewer', note: 'Look closely at the migration in step 3.', ...extra },
+    ],
+  }],
+});
+const FLOW = { agents: [{ id: 'developer' }, { id: 'code-reviewer' }], roleId: 'developer' };
+
+test('#2030: wakeAgent is an admitted action type', () => {
+  assert.equal(validateOutcomes(handoffPort(), FLOW).ok, true);
+});
+
+test('#2030: a wakeAgent action needs a to', () => {
+  for (const bad of [undefined, '', '   ', 42, null]) {
+    const port = { mode: 'anyOf', options: [{ id: 'x', actions: [{ type: 'wakeAgent', ...(bad === undefined ? {} : { to: bad }) }] }] };
+    const v = validateOutcomes(port, FLOW);
+    assert.equal(v.ok, false, JSON.stringify(bad));
+    assert.equal(v.error, 'option x: wakeAgent action needs a to');
+  }
+});
+
+test('#2030: a wakeAgent target must be a role in this flow', () => {
+  const port = { mode: 'anyOf', options: [{ id: 'x', actions: [{ type: 'wakeAgent', to: 'ghost' }] }] };
+  const v = validateOutcomes(port, FLOW);
+  assert.equal(v.ok, false);
+  assert.equal(v.error, 'option x: wakeAgent target `ghost` is not a role in this flow');
+});
+
+test('#2030: a wakeAgent may not target its own role', () => {
+  const port = { mode: 'anyOf', options: [{ id: 'x', actions: [{ type: 'wakeAgent', to: 'developer' }] }] };
+  const v = validateOutcomes(port, FLOW);
+  assert.equal(v.ok, false);
+  assert.equal(v.error, 'option x: wakeAgent may not target its own role');
+});
+
+test('#2030: a wakeAgent target outside the producer\'s team is refused as cross-team', () => {
+  // Reachable where the agents source spans teams (the live PUT path): an agent
+  // that really exists elsewhere must read as "outside this team", not as
+  // "not a role in this flow" — the two are different mistakes.
+  const sources = {
+    roleId: 'acme-dev',
+    agents: [
+      { id: 'acme-dev', parentTeamId: 'acme' },
+      { id: 'other-reviewer', parentTeamId: 'other' },
+    ],
+  };
+  const port = { mode: 'anyOf', options: [{ id: 'x', actions: [{ type: 'wakeAgent', to: 'other-reviewer' }] }] };
+  const v = validateOutcomes(port, sources);
+  assert.equal(v.ok, false);
+  assert.equal(v.error, 'option x: wakeAgent target `other-reviewer` is outside this team');
+});
+
+test('#2030: a wakeAgent note must be a string', () => {
+  const port = { mode: 'anyOf', options: [{ id: 'x', actions: [{ type: 'wakeAgent', to: 'code-reviewer', note: 42 }] }] };
+  const v = validateOutcomes(port, FLOW);
+  assert.equal(v.ok, false);
+  assert.equal(v.error, 'option x: note must be a string');
+});
+
+test('#2030: with no agents source the target rules stay SILENT rather than guessing', () => {
+  // Same posture as the gate rule with no label registry: an unverifiable
+  // target is not an authoring error — delivery still refuses it with a 404.
+  const port = { mode: 'anyOf', options: [{ id: 'x', actions: [{ type: 'wakeAgent', to: 'anything' }] }] };
+  assert.equal(validateOutcomes(port).ok, true);
+  assert.equal(validateOutcomes(port, { labels: [] }).ok, true);
+  // The self rule needs only roleId, so it still fires without an agents list.
+  const self = { mode: 'anyOf', options: [{ id: 'x', actions: [{ type: 'wakeAgent', to: 'me' }] }] };
+  assert.match(validateOutcomes(self, { roleId: 'me' }).error, /may not target its own role/);
+});
+
+test('#2030: the note is CAPPED and truncated with a marker, never rejected', () => {
+  const long = 'x'.repeat(WAKE_NOTE_MAX + 500);
+  assert.equal(validateOutcomes({ mode: 'anyOf', options: [{ id: 'x', actions: [{ type: 'wakeAgent', to: 'code-reviewer', note: long }] }] }, FLOW).ok, true);
+  const clamped = clampWakeNote(long);
+  assert.equal(clamped.length, WAKE_NOTE_MAX);
+  assert.ok(clamped.endsWith(WAKE_NOTE_TRUNCATION_MARK));
+  assert.equal(clampWakeNote('short'), 'short');
+});
+
+test('#2030: normalizeOutcomes carries to + note (whitelist 1 — dropped on every persist)', () => {
+  const n = normalizeOutcomes(handoffPort());
+  assert.deepEqual(n.options[0].actions, [
+    { type: 'openPr' },
+    { type: 'wakeAgent', to: 'code-reviewer', note: 'Look closely at the migration in step 3.' },
+  ]);
+  // Idempotent, and the cap is applied here too.
+  assert.deepEqual(normalizeOutcomes(n), n);
+  const capped = normalizeOutcomes({ mode: 'anyOf', options: [{ id: 'x', actions: [{ type: 'wakeAgent', to: ' r ', note: 'z'.repeat(WAKE_NOTE_MAX + 9) }] }] });
+  assert.equal(capped.options[0].actions[0].to, 'r');
+  assert.equal(capped.options[0].actions[0].note.length, WAKE_NOTE_MAX);
+});
+
+test('#2030: substituteOutcomes carries to + substitutes the note (whitelist 2 — dropped at materialise)', () => {
+  const s = substituteOutcomes({ mode: 'anyOf', options: [{ id: 'x', actions: [
+    { type: 'wakeAgent', to: 'code-reviewer', note: 'Review {{repoFullName}} closely.' },
+  ] }] }, (t) => t.replace('{{repoFullName}}', 'org/repo'));
+  assert.deepEqual(s.options[0].actions[0], {
+    type: 'wakeAgent', to: 'code-reviewer', note: 'Review org/repo closely.',
+  });
+});
+
+test('#2030: `to` is NOT {{var}}-substituted — it is a role reference, remapped instead', () => {
+  const s = substituteOutcomes({ mode: 'anyOf', options: [{ id: 'x', actions: [
+    { type: 'wakeAgent', to: '{{agentId}}' },
+  ] }] }, () => 'SUBSTITUTED');
+  assert.equal(s.options[0].actions[0].to, '{{agentId}}');
+});
+
+test('#2030: a {{var}} that expands past the cap is re-clamped after substitution', () => {
+  const s = substituteOutcomes({ mode: 'anyOf', options: [{ id: 'x', actions: [
+    { type: 'wakeAgent', to: 'r', note: '{{big}}' },
+  ] }] }, () => 'q'.repeat(WAKE_NOTE_MAX + 100));
+  assert.equal(s.options[0].actions[0].note.length, WAKE_NOTE_MAX);
+  assert.ok(s.options[0].actions[0].note.endsWith(WAKE_NOTE_TRUNCATION_MARK));
+});
+
+test('#2030: outcomeWakePairs indexes the wake edges, order-preserving and deduped', () => {
+  const port = { mode: 'anyOf', options: [
+    { id: 'a', actions: [{ type: 'wakeAgent', to: 'r1', note: 'n1' }, { type: 'wakeAgent', to: 'r1' }] },
+    { id: 'b', actions: [{ type: 'setLabel', label: 'ready' }, { type: 'wakeAgent', to: 'r2' }] },
+    { id: 'c', actions: [{ type: 'wakeAgent' }] }, // to-less: skipped defensively
+  ] };
+  assert.deepEqual(outcomeWakePairs(port), [
+    { to: 'r1', outcome: 'a', note: 'n1' },
+    { to: 'r2', outcome: 'b' },
+  ]);
+  assert.deepEqual(outcomeWakePairs(null), []);
+});
+
+test('#2030: a wakeAgent contributes no label and no github produce flag', () => {
+  // The whole point: this edge carries no label token and opens no artifact.
+  assert.deepEqual(outcomeSetLabels({ mode: 'anyOf', options: [{ id: 'x', actions: [{ type: 'wakeAgent', to: 'r' }] }] }), []);
+  assert.deepEqual(outcomesToGithub({ mode: 'anyOf', options: [{ id: 'x', actions: [{ type: 'wakeAgent', to: 'r' }] }] }), {});
+});
+
+// ─── round-trip: bundle → member → export (remaps 4 and 5) ──────────────────
+
+test('#2030: buildMemberFromTemplate remaps the role id to a member id', () => {
+  const m = buildMemberFromTemplate(
+    { id: 'developer', displayName: 'Developer', promptTemplate: 'p', outcomes: handoffPort() },
+    { teamId: 'acme', vars: {} },
+  );
+  const wake = m.outcomes.options[0].actions.find(a => a.type === 'wakeAgent');
+  assert.equal(wake.to, 'acme-code-reviewer',
+    'a bare role id in a member config would never resolve at delivery');
+  assert.equal(wake.note, 'Look closely at the migration in step 3.');
+});
+
+test('#2030: remapOutcomeWakeTargets is the exact inverse across the round trip', () => {
+  const bundlePort = normalizeOutcomes(handoffPort());
+  const live = remapOutcomeWakeTargets(bundlePort, (to) => `acme-${to}`);
+  const back = remapOutcomeWakeTargets(live, (to) => roleKeyOf(to, 'acme'));
+  assert.deepEqual(back, bundlePort);
+});
+
+test('#2030: remapOutcomeWakeTargets leaves a wake-free port byte-identical (same object)', () => {
+  const port = normalizeOutcomes(dispatcher());
+  assert.equal(remapOutcomeWakeTargets(port, (to) => `acme-${to}`), port);
+});
+
+test('#2030: an exported bundle carries a portable role key, not <teamId>-<roleId>', () => {
+  const bundle = buildProcessTemplate({
+    teamId: 'acme',
+    roles: [
+      { id: 'acme-developer', displayName: 'Developer', systemPrompt: 'p',
+        outcomes: { mode: 'anyOf', options: [{ id: 'h', actions: [{ type: 'wakeAgent', to: 'acme-code-reviewer', note: 'n' }] }] } },
+      { id: 'acme-code-reviewer', displayName: 'Code Reviewer', systemPrompt: 'p' },
+    ],
+  });
+  const dev = bundle.roles.find(r => r.id === 'developer');
+  assert.equal(dev.outcomes.options[0].actions[0].to, 'code-reviewer');
+  // …and the re-exported bundle validates, with the not-self / target-exists
+  // rules now reading the portable keys.
+  assert.equal(validateProcessTemplate(bundle).ok, true, validateProcessTemplate(bundle).error);
+});
+
+test('#2030: the bundle validator names the producer, so not-self fires on a bundle', () => {
+  const bundle = buildProcessTemplate({
+    teamId: 'acme',
+    roles: [{ id: 'acme-developer', displayName: 'Developer', systemPrompt: 'p' }],
+  });
+  bundle.roles[0].outcomes = { mode: 'anyOf', options: [{ id: 'h', actions: [{ type: 'wakeAgent', to: 'developer' }] }] };
+  const v = validateProcessTemplate(bundle);
+  assert.equal(v.ok, false);
+  assert.match(v.error, /role developer: option h: wakeAgent may not target its own role/);
+});

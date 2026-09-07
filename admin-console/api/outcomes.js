@@ -11,7 +11,8 @@
 //     mode: "exactlyOne" | "anyOf",      // switch vs. zero-or-more per run
 //     options: [
 //       { id, title?, when?, notify?,
-//         actions: [ { type: "setLabel"|"openPr"|"openIssue"|"none", label? } ] }
+//         actions: [ { type: "setLabel"|"openPr"|"openIssue"|"wakeAgent"|"none",
+//                      label?, to?, note? } ] }
 //     ]
 //   }
 //
@@ -27,7 +28,60 @@
 // back to exactly its original label set and yields byte-identical graph edges.
 
 const OUTCOME_MODES = new Set(['exactlyOne', 'anyOf']);
-const ACTION_TYPES = new Set(['setLabel', 'openPr', 'openIssue', 'none']);
+const ACTION_TYPES = new Set(['setLabel', 'openPr', 'openIssue', 'wakeAgent', 'none']);
+
+// ─── the `wakeAgent` action (#2030, direct-agent-handoff concept §4.1) ───────
+//
+// A direct, label-free hand-off: `{ type: 'wakeAgent', to: '<roleId>', note? }`
+// wakes a wired SAME-TEAM role inside the platform. `to` is a role id in this
+// flow (remapped to a member id at materialise, back on export — see
+// process-template.js), NOT a label token: label-suffix.js must never stamp it.
+//
+// `note` is a short sentence of context from the producer. It is CAPPED, not
+// rejected: the cap is half the §5.3 defence (the other half is the untrusted
+// envelope the consumer wraps it in), so a producer cannot turn the note into a
+// prompt for its peer. Truncation is explicit — a silently shortened note would
+// read as the producer's complete thought.
+const WAKE_NOTE_MAX = 1024;
+const WAKE_NOTE_TRUNCATION_MARK = ' […truncated]';
+
+// Counted and cut in CODE POINTS, not UTF-16 code units. `String#slice` can
+// land between a surrogate pair, and the resulting lone surrogate is not
+// encodable as UTF-8 — it would blow up on the consumer side when the prompt is
+// written to the Claude CLI's stdin, where the write error is swallowed and the
+// pipe is never closed, hanging the run while it holds the workspace gate.
+// `Array.from` iterates code points, so a cut can never split a character.
+function clampWakeNote(note) {
+  const s = typeof note === 'string' ? note : String(note == null ? '' : note);
+  const chars = Array.from(s);
+  if (chars.length <= WAKE_NOTE_MAX) return s;
+  const markChars = Array.from(WAKE_NOTE_TRUNCATION_MARK).length;
+  return chars.slice(0, WAKE_NOTE_MAX - markChars).join('') + WAKE_NOTE_TRUNCATION_MARK;
+}
+
+// The team an addressable entry belongs to, using the one idiom the rest of the
+// platform uses (`orchestrator.js`: `cfg.parentTeamId || cfg.teamId || null`).
+// A BUNDLE role carries neither — every role in one bundle is in one flow by
+// construction, so `null` correctly means "no cross-team claim to make".
+function wakeTargetTeam(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  return entry.parentTeamId || entry.teamId || null;
+}
+
+// Index the addressable roles/agents a `wakeAgent` may name, or null when the
+// caller threaded no `agents` source at all. Null is "unknown, so forbid
+// nothing" — the same posture the gate rule takes without a label registry:
+// a target whose existence cannot be checked is not an authoring error.
+function wakeTargetIndex(sources) {
+  const list = sources && Array.isArray(sources.agents) ? sources.agents : null;
+  if (!list) return null;
+  const idx = new Map();
+  for (const a of list) {
+    if (!a || typeof a !== 'object' || typeof a.id !== 'string' || !a.id.trim()) continue;
+    if (!idx.has(a.id.trim())) idx.set(a.id.trim(), a);
+  }
+  return idx;
+}
 
 // A human-GATE label is set by a human by definition, so an agent may not set it
 // as an outcome action (concept §3, same rule as `gate-violation`). Gate-ness is
@@ -140,9 +194,52 @@ function validateOutcomes(outcomes, sources) {
           return { ok: false, error: `option ${id}: outcome may not set human-gate label \`${a.label.trim()}\`` };
         }
       }
+      if (a.type === 'wakeAgent') {
+        const err = validateWakeAction(a, id, sources);
+        if (err) return { ok: false, error: err };
+      }
     }
   }
   return { ok: true };
+}
+
+/**
+ * The five §4.2 rules for one `wakeAgent` action. Returns an error string or
+ * null. Split out of `validateOutcomes` so the rule set reads as a unit — this
+ * is the part of P1 the concept calls the easiest to get wrong.
+ *
+ * Both target rules degrade honestly when the caller threaded no `agents`
+ * source (the live PUT path before #2030 wired one, an ad-hoc suggester check):
+ * an unverifiable target is not an authoring error, and delivery still refuses
+ * it with a `404 unknown-target` / `403 cross-team`.
+ */
+function validateWakeAction(action, optionId, sources) {
+  const to = typeof action.to === 'string' ? action.to.trim() : '';
+  if (!to) return `option ${optionId}: wakeAgent action needs a to`;
+  const index = wakeTargetIndex(sources);
+  if (index && !index.has(to)) {
+    return `option ${optionId}: wakeAgent target \`${to}\` is not a role in this flow`;
+  }
+  const fromId = sources && typeof sources.roleId === 'string' ? sources.roleId.trim() : '';
+  if (fromId && fromId === to) {
+    return `option ${optionId}: wakeAgent may not target its own role`;
+  }
+  // Same-team only (§6). This is reachable only where the `agents` source spans
+  // more than one team (the live PUT passes every agent, deliberately, so a
+  // real agent elsewhere reads as "outside this team" rather than "not a role in
+  // this flow"). Inside one bundle both sides resolve to null and the rule is
+  // silent — which is correct, not a gap.
+  if (index && fromId) {
+    const fromTeam = wakeTargetTeam(index.get(fromId));
+    const toTeam = wakeTargetTeam(index.get(to));
+    if (fromTeam && toTeam && fromTeam !== toTeam) {
+      return `option ${optionId}: wakeAgent target \`${to}\` is outside this team`;
+    }
+  }
+  if (action.note !== undefined && typeof action.note !== 'string') {
+    return `option ${optionId}: note must be a string`;
+  }
+  return null;
 }
 
 // Whether a value is an authored outcomes port (well-formed shape with at least
@@ -171,6 +268,12 @@ function normalizeOutcomes(outcomes) {
         type: a.type,
         ...(a.type === 'setLabel' && typeof a.label === 'string' && a.label.trim()
           ? { label: a.label.trim() } : {}),
+        // wakeAgent (#2030): `to` + the capped `note` must survive every
+        // persist, or the edge is lost with no error anywhere.
+        ...(a.type === 'wakeAgent' && typeof a.to === 'string' && a.to.trim()
+          ? { to: a.to.trim() } : {}),
+        ...(a.type === 'wakeAgent' && typeof a.note === 'string' && a.note.trim()
+          ? { note: clampWakeNote(a.note.trim()) } : {}),
       })),
       ...(typeof o.notify === 'string' && o.notify ? { notify: o.notify } : {}),
       // Open-end markers (#1004): terminal XOR external ({note?}).
@@ -264,6 +367,14 @@ function substituteOutcomes(outcomes, subst) {
       actions: (Array.isArray(o.actions) ? o.actions : []).map(a => ({
         type: a.type,
         ...(a.type === 'setLabel' && typeof a.label === 'string' ? { label: f(a.label) } : {}),
+        // wakeAgent (#2030): `to` is a role id — carried through UNsubstituted,
+        // because the role-id → member-id remap is buildMemberFromTemplate's
+        // job, not a `{{var}}` expansion. `note` is template-bearing free text
+        // like `when` / `external.note`, and is re-clamped after substitution
+        // (a `{{var}}` can expand past the cap).
+        ...(a.type === 'wakeAgent' && typeof a.to === 'string' ? { to: a.to } : {}),
+        ...(a.type === 'wakeAgent' && typeof a.note === 'string'
+          ? { note: clampWakeNote(f(a.note)) } : {}),
       })),
       ...(typeof o.notify === 'string' && o.notify ? { notify: o.notify } : {}),
       // Open-end markers (#1004) ride through materialise; the note is
@@ -276,9 +387,40 @@ function substituteOutcomes(outcomes, subst) {
   };
 }
 
+// The `{to, note?, outcome}` triples an outcomes port hands off directly
+// (#2030) — the wake-edge index the graph builders + the prompt projection
+// consume, mirroring `outcomeEmitPairs`. Order-preserving, de-duplicated on the
+// (to, outcomeId) pair; a `to`-less action is skipped defensively (it can never
+// be persisted, but the read path must stay safe for imported/legacy data).
+function outcomeWakePairs(outcomes) {
+  const out = [];
+  const seen = new Set();
+  for (const o of (outcomes && Array.isArray(outcomes.options) ? outcomes.options : [])) {
+    if (!o || typeof o.id !== 'string') continue;
+    for (const a of (Array.isArray(o.actions) ? o.actions : [])) {
+      if (!a || a.type !== 'wakeAgent') continue;
+      const to = typeof a.to === 'string' ? a.to.trim() : '';
+      if (!to) continue;
+      const key = `${to} ${o.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        to,
+        outcome: o.id,
+        ...(typeof a.note === 'string' && a.note.trim()
+          ? { note: clampWakeNote(a.note.trim()) } : {}),
+      });
+    }
+  }
+  return out;
+}
+
 module.exports = {
   OUTCOME_MODES, ACTION_TYPES,
   slugifyOutcome, validateOutcomes, normalizeOutcomes, isAuthoredOutcomes,
   liftOutcomes, outcomeEmitPairs, outcomeSetLabels, outcomesToGithub,
   substituteOutcomes, forbiddenOutcomeLabel,
+  // wakeAgent (#2030)
+  WAKE_NOTE_MAX, WAKE_NOTE_TRUNCATION_MARK, clampWakeNote,
+  validateWakeAction, outcomeWakePairs,
 };

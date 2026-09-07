@@ -31,6 +31,7 @@ const {
 const knowledgeSync = require("./knowledge-sync");
 const { createKeyedMutex } = require("./keyed-mutex");
 const flowEmit = require("./flow-emit");
+const wakeAgent = require("./wake-agent");
 const labelFastPath = require("./github-label-fastpath");
 const { LabelDedupMarkers } = require("./label-dedup-markers");
 const githubEventLog = require("./github-event-log");
@@ -7094,7 +7095,14 @@ function enqueuePending(agentId, entry) {
     fs.writeFileSync(p, JSON.stringify(pending, null, 2));
   } catch (err) {
     console.error(`[Orchestrator] Cannot enqueue pending for ${agentId}: ${err.message}`);
+    // Additive (#2030): report the failure so a caller that has no other trace
+    // to fall back on can refuse rather than confirm. Every pre-existing caller
+    // ignores the return value and is unaffected — a label emit still has its
+    // mirrored GitHub label as evidence, but a direct hand-off leaves nothing
+    // anywhere, so "enqueued" must not be reported for a write that failed.
+    return false;
   }
+  return true;
 }
 
 // #1173: pick the GitHub token an internal-channel emit uses to mirror its
@@ -11071,6 +11079,96 @@ async function main() {
           }));
         } catch (err) {
           console.error(`[Orchestrator] flow-emit error: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Direct agent-to-agent hand-off (#2030) ────────────────────────────
+    // A producer agent says "dear agent, take this over" (via the `aee-wake`
+    // CLI) and the wake is delivered straight into the target's durable queue
+    // as a `kind: 'wake-agent'` entry. TARGET-LESS: no label, no issue/PR, no
+    // poller subscription is involved at any step — which is the point, and
+    // also why the event-log row below is not optional.
+    // docs/direct-agent-handoff-concept.md §5/§5.2.
+    if (req.method === 'POST' && req.url === '/internal/wake-agent') {
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', () => {
+        let parsed;
+        try {
+          parsed = wakeAgent.validateWakeRequest(JSON.parse(body || '{}'));
+        } catch (err) {
+          parsed = { ok: false, error: err.message };
+        }
+        if (!parsed.ok) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: parsed.error }));
+          return;
+        }
+        try {
+          const { fromAgentId, toAgentId, note } = parsed.value;
+          const agents = listAgentIds().map((aid) => ({
+            agentId: aid,
+            config: loadAgentConfig(aid),
+          }));
+          const resolved = wakeAgent.resolveWakeTarget(
+            { fromAgentId, toRoleId: toAgentId }, agents);
+          if (!resolved.ok) {
+            const status = wakeAgent.WAKE_REFUSALS[resolved.reason] || 400;
+            console.log(
+              `[Orchestrator] wake-agent: ${fromAgentId} → ${toAgentId} refused `
+              + `(${resolved.reason})`);
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, reason: resolved.reason }));
+            return;
+          }
+          // Enqueue first, log second — the same ordering flow-emit uses: the
+          // hand-off is what must not be lost, and the log is best-effort.
+          const enqueued = enqueuePending(resolved.agentId, wakeAgent.buildWakeEntry({
+            from: fromAgentId, note, teamId: resolved.teamId,
+          }));
+          if (enqueued === false) {
+            // Unlike a label emit, nothing else records that this happened —
+            // no label, no issue/PR, no GitHub trace. Confirming a hand-off
+            // whose queue write failed would lose it silently, which is the one
+            // outcome this feature exists to prevent. 500, so `aee-wake` exits
+            // non-zero and the producer surfaces it.
+            console.error(
+              `[Orchestrator] wake-agent: ${fromAgentId} → ${resolved.agentId} `
+              + `NOT delivered (queue write failed)`);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'could not write the target\'s pending queue — the hand-off was NOT delivered' }));
+            return;
+          }
+          console.log(
+            `[Orchestrator] wake-agent: ${fromAgentId} → agent=${resolved.agentId} `
+            + `team=${resolved.teamId}${note ? ` note=${note.length}ch` : ''}`);
+          // A label-free hand-off leaves NO trace on GitHub, so the platform's
+          // own log is how #1172's workspace-transparency principle is honoured
+          // here — not optional, and one row per hand-off.
+          const eventId = `wake:${crypto.randomBytes(6).toString('hex')}`;
+          const ghEvent = wakeAgent.buildWakeLogEvent({
+            producerId: fromAgentId, targetId: resolved.agentId, note,
+            eventId, now: new Date().toISOString(),
+          });
+          githubEventLog.record({
+            ...githubEventLog.buildEventEntry({
+              ghEvent, repoFullName: null, key: wakeAgent.WAKE_EVENT_KEY,
+              outcomes: [{
+                agentId: resolved.agentId, triggerId: null,
+                status: 'delivered', reason: null, digest: false,
+              }],
+            }),
+            source: 'internal',
+            emittedBy: fromAgentId,
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, target: resolved.agentId }));
+        } catch (err) {
+          console.error(`[Orchestrator] wake-agent error: ${err.message}`);
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }

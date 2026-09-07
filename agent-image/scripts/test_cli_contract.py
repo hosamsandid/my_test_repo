@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Shared CLI-contract conformance test (#1522).
 
-Exercises the four built-in agent CLIs — `aee-artifact`, `aee-emit`,
-`knowledge`, `gh-as-agent` — against the one shared contract documented in
+Exercises the five built-in agent CLIs — `aee-artifact`, `aee-emit`,
+`aee-wake`, `knowledge`, `gh-as-agent` — against the one shared contract documented in
 `docs/cli-contract.md` (concept `docs/plugin-system-concept.md` §4.5):
 
   * Discovery: `--help` / `-h` / `help` / bare invocation → exit 0 with the
@@ -37,6 +37,7 @@ SCRIPTS = Path(__file__).resolve().parent
 CLIS = {
     "aee-artifact": [sys.executable, str(SCRIPTS / "aee-artifact")],
     "aee-emit": [sys.executable, str(SCRIPTS / "aee-emit")],
+    "aee-wake": [sys.executable, str(SCRIPTS / "aee-wake")],
     "knowledge": [sys.executable, str(SCRIPTS / "knowledge")],
     "gh-as-agent": ["bash", str(SCRIPTS / "gh-as-agent")],
 }
@@ -86,6 +87,7 @@ class UsageErrors(unittest.TestCase):
     def test_missing_required_args(self):
         cases = [
             ("aee-emit", ["ready"]),            # label but no --issue/--pr target
+            ("aee-wake", ["--to"]),             # --to with no value
             ("aee-artifact", ["add", "only-name"]),  # missing <path>
             ("knowledge", ["add"]),             # missing <kind> <text>
             ("gh-as-agent", ["pr"]),            # missing --title (before any network)
@@ -134,6 +136,33 @@ class JsonOutput(unittest.TestCase):
         self.assertFalse(obj["ok"])
         self.assertIn("error", obj)
 
+    def test_aee_wake_json_usage_error(self):
+        code, out, _ = run("aee-wake", ["--json"])
+        self.assertEqual(code, 2)
+        obj = json.loads(out.strip())
+        self.assertFalse(obj["ok"])
+        self.assertIn("error", obj)
+
+    def test_aee_wake_forgotten_value_is_a_usage_error_not_a_target(self):
+        # #2030: swallowing the next flag as --to's value would POST
+        # `toAgentId: "--json"` and report a 404 wiring problem (exit 1) for
+        # what is really a usage error.
+        for args in (["--to", "--json"], ["--to", "--note"], ["--to", "x", "--note", "--json"]):
+            with self.subTest(args=args):
+                code, _out, err = run("aee-wake", args)
+                self.assertEqual(code, 2, f"{args} should be a usage error")
+                self.assertTrue(err.strip())
+
+    def test_aee_wake_note_may_begin_with_a_dash(self):
+        # Only aee-wake's OWN flags are rejected in a value slot, so a note is
+        # not silently refused for starting with punctuation.
+        code, out, _err = run(
+            "aee-wake", ["--to", "r", "--note", "-- see the PR", "--json"],
+            env_extra={"ORCHESTRATOR_INTERNAL_URL": DEAD_ORCH},
+        )
+        self.assertEqual(code, 3, "it reached the unreachable-backend path, not a usage error")
+        self.assertFalse(json.loads(out.strip())["ok"])
+
 
 class UnreachableBackend(unittest.TestCase):
     """A dead orchestrator → exit 3 (nothing was delivered / pushed)."""
@@ -141,6 +170,16 @@ class UnreachableBackend(unittest.TestCase):
     def test_gh_as_agent_push_unreachable(self):
         code, out, _err = run(
             "gh-as-agent", ["push", "--json"],
+            env_extra={"ORCHESTRATOR_INTERNAL_URL": DEAD_ORCH},
+        )
+        self.assertEqual(code, 3, "unreachable orchestrator must be exit 3")
+        self.assertFalse(json.loads(out.strip())["ok"])
+
+    def test_aee_wake_unreachable(self):
+        # #2030: target-LESS, so unlike aee-emit this needs no git clone at all
+        # — there is no repo to resolve a hand-off against.
+        code, out, _err = run(
+            "aee-wake", ["--to", "some-reviewer", "--json"],
             env_extra={"ORCHESTRATOR_INTERNAL_URL": DEAD_ORCH},
         )
         self.assertEqual(code, 3, "unreachable orchestrator must be exit 3")

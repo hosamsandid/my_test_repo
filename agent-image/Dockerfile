@@ -99,6 +99,15 @@ RUN chmod +x /opt/ace/scripts/knowledge \
 RUN chmod +x /opt/ace/scripts/aee-emit \
     && ln -sf /opt/ace/scripts/aee-emit /usr/local/bin/aee-emit
 
+# `aee-wake` — hand off directly to a wired same-team agent (#2030). The
+# target-LESS sibling of `aee-emit`: no label, no issue/PR, no GitHub trace, so
+# the platform's own event log is the audit trail. Diverges from `aee-emit`
+# deliberately by failing LOUD (exit 1) on an unknown / self / cross-team
+# target — a `wakeAgent` target is an explicitly wired role, so reaching nobody
+# is a wiring bug rather than an ambiguous outcome.
+RUN chmod +x /opt/ace/scripts/aee-wake \
+    && ln -sf /opt/ace/scripts/aee-wake /usr/local/bin/aee-wake
+
 # `usage` — read-only view of this agent's / its team's token usage (#679). On
 # PATH so agents call it directly: `usage me` / `usage team` query the
 # orchestrator's read-only usage endpoint across the volume-isolation boundary

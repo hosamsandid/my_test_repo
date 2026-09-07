@@ -26,7 +26,7 @@
 
 const {
   validateOutcomes, normalizeOutcomes, isAuthoredOutcomes, substituteOutcomes,
-  outcomesToGithub,
+  outcomesToGithub, outcomeWakePairs,
 } = require('./outcomes');
 
 const VERSION = 1;
@@ -240,6 +240,42 @@ function channelIsInternal(ch) {
     && ch.gate !== 'human');
 }
 
+// Remap the role references a `wakeAgent` action carries (#2030). A direct
+// hand-off addresses a ROLE (`developer`) in a portable bundle and a MEMBER
+// (`acme-developer`) on a live team, exactly like a channel's `from` — so the
+// same two-way mapping applies: `${teamId}-${to}` at materialise,
+// `roleKeyOf(to, teamId)` on export. Miss either and the edge is silently
+// unresolvable rather than wrong-and-loud (concept §4.2).
+//
+// KNOWN LIMITATION, shared with `parent` / `dependsOn` / `channels[].from`: the
+// `${teamId}-${roleId}` form is only the member id when the role materialises
+// as a SINGLE member. A role requested with `count > 1` becomes
+// `${teamId}-${roleId}-<i>`, so a `wakeAgent` naming it resolves to nothing and
+// every hand-off on that edge answers `404 unknown-target`. For the other three
+// the consequence is a missing graph edge; here it is a dead delivery path, and
+// "which of N instances do you wake" is a routing question the concept does not
+// answer — so it is recorded rather than guessed at.
+//
+// Returns the port unchanged (same object) when it carries no wakeAgent action,
+// so a flow without direct hand-offs stays byte-identical through both paths.
+function remapOutcomeWakeTargets(outcomes, mapTo) {
+  if (!isAuthoredOutcomes(outcomes) || typeof mapTo !== 'function') return outcomes;
+  let anyTouched = false;
+  const options = outcomes.options.map((o) => {
+    let touched = false;
+    const actions = (Array.isArray(o.actions) ? o.actions : []).map((a) => {
+      if (!a || a.type !== 'wakeAgent' || typeof a.to !== 'string' || !a.to) return a;
+      const to = mapTo(a.to);
+      if (to === a.to) return a;
+      touched = true;
+      anyTouched = true;
+      return { ...a, to };
+    });
+    return touched ? { ...o, actions } : o;
+  });
+  return anyTouched ? { ...outcomes, options } : outcomes;
+}
+
 // Remap a channel's `from` role reference through roleKeyOf so an exported team's
 // GitHub-channel wiring uses portable role keys (#380).
 function remapChannel(ch, teamId) {
@@ -339,7 +375,14 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
       // legacy flat `emits` are lifted to a degenerate anyOf so the exported bundle
       // never carries a raw `emits` field. Import still works via liftOutcomes (#831).
       ...((() => {
-        if (isAuthoredOutcomes(r.outcomes)) return { outcomes: normalizeOutcomes(r.outcomes) };
+        if (isAuthoredOutcomes(r.outcomes)) {
+          // #2030: a direct hand-off's member id becomes a portable role key,
+          // the inverse of buildMemberFromTemplate's `${teamId}-${to}`. Without
+          // it the exported bundle carries `<teamId>-<roleId>` and is
+          // unportable — it would only ever resolve back into its own team.
+          return { outcomes: remapOutcomeWakeTargets(
+            normalizeOutcomes(r.outcomes), (to) => roleKeyOf(to, teamId)) };
+        }
         if (Array.isArray(r.emits) && r.emits.length) {
           return { outcomes: normalizeOutcomes({
             mode: 'anyOf',
@@ -413,7 +456,9 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
     if (r.outcomes !== undefined) {
       // The bundle's own label registry is the gate authority (#928) — an outcome
       // may not set a `humanGate` label, whatever it is named.
-      const vo = validateOutcomes(r.outcomes, { labels: b.labels, agents: b.roles });
+      // `roleId` (#2030) is what lets the wakeAgent rules name the PRODUCER —
+      // "may not target its own role" and the same-team check both need it.
+      const vo = validateOutcomes(r.outcomes, { labels: b.labels, agents: b.roles, roleId: r.id });
       if (!vo.ok) return { ok: false, error: `role ${r.id}: ${vo.error}` };
     }
     if (r.channels !== undefined) {
@@ -731,6 +776,7 @@ function stripOutcomesBlock(text) {
  */
 function outcomesWiringContext(roleId, { roles = [], humans = [], labels = [] } = {}) {
   const nameOf = (r) => r.displayName || r.name || r.id;
+  const producerOutcomes = (r) => (r && (r.outcomes || (r.cfg && r.cfg.outcomes))) || null;
   const consumersByLabel = {};
   // Labels with ≥1 `transport: 'internal'` listener (#1174). One internal
   // listener is enough to flip the producer instruction to `aee-emit`: the
@@ -764,7 +810,29 @@ function outcomesWiringContext(roleId, { roles = [], humans = [], labels = [] } 
     if (l && l.humanGate && typeof l.name === 'string' && l.name.trim()) gateSet.add(l.name.trim());
   }
   const gateLabels = [...gateSet].sort();
-  if (!Object.keys(consumersByLabel).length && !Object.keys(reviewers).length && !gateLabels.length) {
+  // Direct hand-off targets (#2030): `to` → display name, so the generated
+  // clause names the peer in human words instead of echoing a slug. Built ONLY
+  // for the targets THIS role names — a map over every role would be non-empty
+  // in every flow and would perturb the null-context contract below (which is
+  // what keeps pre-#1007 output byte-identical).
+  const wakeTargets = {};
+  const producer = roles.find((r) => r && r.id === roleId);
+  // `roles` arrives in two shapes: a BUNDLE role carries its port directly,
+  // while a LIVE member is `{id, cfg, displayName, triggers}` and carries it on
+  // `cfg` (reconcileTeamOutcomes in api.js). Read both, the way `nameOf` reads
+  // `displayName || name || id` — reading only `r.outcomes` silently yields an
+  // empty map on every live team, so the clause would echo the raw member id.
+  for (const w of outcomeWakePairs(producerOutcomes(producer))) {
+    if (wakeTargets[w.to]) continue;
+    const target = roles.find((r) => r && r.id === w.to);
+    // An unresolvable target still gets an entry, keyed to its own id: the
+    // clause must still say `aee-wake --to <id>`, because the id is what
+    // delivery uses. Validation (§4.2) is where an unknown target is refused.
+    wakeTargets[w.to] = target ? nameOf(target) : w.to;
+  }
+  const hasWake = Object.keys(wakeTargets).length > 0;
+  if (!Object.keys(consumersByLabel).length && !Object.keys(reviewers).length
+      && !gateLabels.length && !hasWake) {
     return null;
   }
   return {
@@ -772,6 +840,7 @@ function outcomesWiringContext(roleId, { roles = [], humans = [], labels = [] } 
     reviewers,
     gateLabels,
     ...(internalLabels.size ? { internalLabels: [...internalLabels].sort() } : {}),
+    ...(hasWake ? { wakeTargets } : {}),
   };
 }
 
@@ -787,6 +856,7 @@ function outcomeActionClause(option, wiring) {
   let opensPr = false;
   let opensIssue = false;
   let setsLabel = false;
+  let wakesAgent = false;
   for (const a of (option && Array.isArray(option.actions) ? option.actions : [])) {
     if (!a || typeof a !== 'object') continue;
     if (a.type === 'setLabel' && typeof a.label === 'string' && a.label.trim()) {
@@ -807,12 +877,25 @@ function outcomeActionClause(option, wiring) {
       parts.push('open a pull request'); opensPr = true;
     } else if (a.type === 'openIssue') {
       parts.push('open a GitHub issue'); opensIssue = true;
+    } else if (a.type === 'wakeAgent' && typeof a.to === 'string' && a.to.trim()) {
+      // Direct hand-off (#2030, §4.3). WITHOUT this branch the action falls
+      // straight through the chain and the option renders as "set no label" —
+      // a silently wrong prompt, not an error, which is why the branch is the
+      // load-bearing half of the projection.
+      const to = a.to.trim();
+      const who = (wiring && wiring.wakeTargets && wiring.wakeTargets[to]) || to;
+      const note = typeof a.note === 'string' && a.note.trim() ? a.note.trim() : '';
+      // The note is quoted into the command, so an embedded double quote would
+      // break the shell word the agent is told to run.
+      const noteArg = note ? ` --note "${note.replace(/"/g, "'")}"` : '';
+      parts.push(`hand off directly to **${who}**: run \`aee-wake --to ${to}${noteArg}\``);
+      wakesAgent = true;
     }
   }
   if (!parts.length) parts.push('set no label');
   let clause = parts.join(' and ');
   if (option && option.notify === 'dm') clause += '; report to the user in the DM';
-  return { clause, opensPr, opensIssue, setsLabel };
+  return { clause, opensPr, opensIssue, setsLabel, wakesAgent };
 }
 
 // Generate the marker-delimited `## Outcomes` block for an authored outcomes
@@ -829,12 +912,14 @@ function outcomesBlock(outcomes, wiring) {
   let anyPr = false;
   let anyIssue = false;
   let anyLabel = false;
+  let anyWake = false;
   outcomes.options.forEach((o, i) => {
     const title = (typeof o.title === 'string' && o.title.trim()) ? o.title.trim() : o.id;
-    const { clause, opensPr, opensIssue, setsLabel } = outcomeActionClause(o, wiring);
+    const { clause, opensPr, opensIssue, setsLabel, wakesAgent } = outcomeActionClause(o, wiring);
     anyPr = anyPr || opensPr;
     anyIssue = anyIssue || opensIssue;
     anyLabel = anyLabel || setsLabel;
+    anyWake = anyWake || wakesAgent;
     const when = (typeof o.when === 'string' && o.when.trim()) ? ` when: ${o.when.trim()}.` : '';
     let line = `${i + 1}. **${title}** —${when} Then: ${clause}.`;
     // Reviewer context (#1007): the person reviewing this option's artifact,
@@ -879,6 +964,13 @@ function outcomesBlock(outcomes, wiring) {
       const ints = wiring.internalLabels.map(l => `\`${l}\``).join(', ');
       body.push('', `The label${wiring.internalLabels.length > 1 ? 's' : ''} ${ints} ${wiring.internalLabels.length > 1 ? 'are' : 'is'} delivered over the **internal channel**: always announce ${wiring.internalLabels.length > 1 ? 'them' : 'it'} with \`aee-emit\`, never with \`gh issue edit --add-label\` — a manually applied label is only visible decoration and wakes no internal listener. \`aee-emit\` also mirrors the label onto GitHub for you, so it needs no separate \`gh\` step and no \`gh label create\`.`);
     }
+  }
+  // Direct hand-off (#2030, §4.3): one tail paragraph, mirroring the
+  // internal-channel hard rule above, because the failure mode is equally
+  // invisible — there is no label on this edge, so nothing on GitHub shows
+  // whether the hand-off happened.
+  if (anyWake) {
+    body.push('', 'A direct hand-off is delivered inside the platform: always announce it with `aee-wake`, never by applying a label — there is no label on this edge, and nothing on GitHub will show that the hand-off did or did not happen.');
   }
   // Flow-wide gate prohibition (#1007, §4.8 known gap): whenever the flow
   // contains human gates this agent could plausibly touch, the prohibition is
@@ -1488,8 +1580,14 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
     ...(typeof t.parent === 'string' && t.parent ? { parentMemberId: `${teamId}-${t.parent}` } : {}),
     // OUTCOMES port (#827): `{{var}}` substituted inside label/when like trigger
     // fields; supersedes `emits` when present. Only one of the two is carried.
+    // #2030: a `wakeAgent`'s `to` is a ROLE id in the bundle and must become the
+    // member id the live team addresses — the same remap this function already
+    // applies to `dependsOn`, `parent` and `channels[].from`. Missed, `to` stays
+    // a bare role id in the member config and the target never resolves.
     ...(isAuthoredOutcomes(t.outcomes)
-      ? { outcomes: normalizeOutcomes(substituteOutcomes(t.outcomes, subst)) }
+      ? { outcomes: remapOutcomeWakeTargets(
+          normalizeOutcomes(substituteOutcomes(t.outcomes, subst)),
+          (to) => `${teamId}-${to}`) }
       : (Array.isArray(t.emits) && t.emits.length ? { emits: t.emits } : {})),
     ...(typeof t.stage === 'string' && t.stage ? { stage: t.stage } : {}),
     ...(t.github && (t.github.producesPr || t.github.producesIssue) ? { github: t.github } : {}),
@@ -1507,6 +1605,8 @@ module.exports = {
   channelTriggerId, isChannelTrigger, stampDerivedActivation,
   outcomesBlock, stripOutcomesBlock, stripDerivedPromptBlocks, applyDerivedPromptBlocks,
   outcomesWiringContext,
+  // Direct agent hand-off (#2030)
+  remapOutcomeWakeTargets,
   emptyDraftBundle, roleKeyOf, VERSION, normalizeHumans, normalizeHillClimb,
   artifactKey, artifactHint, artifactIsNamed,
   slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,

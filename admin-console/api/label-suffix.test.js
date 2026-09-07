@@ -159,6 +159,53 @@ describe('applyLabelSuffix', () => {
     assert.equal(out[0].outcomes.options[0].actions[0].label, 'ready-for-review-ab12');
   });
 
+  // #2030 non-regression: a wakeAgent's `to` is a ROLE ID, not a label token.
+  // Stamping it would rewrite the target of every direct hand-off in a
+  // suffixed team into an agent id that does not exist — the hand-off would
+  // then fail with `404 unknown-target` at delivery, long after the team was
+  // created and with nothing on GitHub to point at the cause.
+  it('does NOT stamp a wakeAgent to (it is a role id, not a label)', () => {
+    const members = [{
+      outcomes: {
+        options: [{ actions: [
+          { type: 'setLabel', label: 'ready-for-review' },
+          { type: 'wakeAgent', to: 'code-reviewer', note: 'Check `ready-for-review` first.' },
+        ] }],
+      },
+    }];
+    const { members: out } = applyLabelSuffix(members, [], 'ab12');
+    const [setLabel, wake] = out[0].outcomes.options[0].actions;
+    assert.equal(setLabel.label, 'ready-for-review-ab12', 'the setLabel arm is unchanged');
+    assert.equal(wake.to, 'code-reviewer');
+    assert.equal(wake.type, 'wakeAgent');
+  });
+
+  // A role id that happens to LOOK like a label token is still not stamped —
+  // the discriminator is the action type, never the string's shape.
+  it('does NOT stamp a wakeAgent to even when it collides with a label name', () => {
+    const members = [{
+      outcomes: { options: [{ actions: [{ type: 'wakeAgent', to: 'ready-for-review' }] }] },
+    }];
+    const bundleLabels = [{ name: 'ready-for-review' }];
+    const { members: out, bundleLabels: outLabels } = applyLabelSuffix(members, bundleLabels, 'ab12');
+    assert.equal(out[0].outcomes.options[0].actions[0].to, 'ready-for-review');
+    assert.equal(outLabels[0].name, 'ready-for-review-ab12');
+  });
+
+  // collectLabelTokens feeds the stamper AND the prompt-coverage warning, so a
+  // `to` leaking into it would also make a hand-off target look like a label
+  // the prompt failed to stamp.
+  it('collectLabelTokens ignores a wakeAgent to', () => {
+    const tokens = collectLabelTokens([{
+      outcomes: { options: [{ actions: [
+        { type: 'setLabel', label: 'ready-for-review' },
+        { type: 'wakeAgent', to: 'code-reviewer' },
+      ] }] },
+    }], []);
+    assert.ok(tokens.has('ready-for-review'));
+    assert.equal(tokens.has('code-reviewer'), false);
+  });
+
   // Port surfaces: bundleLabels registry
   it('stamps bundleLabels names', () => {
     const bundleLabels = [

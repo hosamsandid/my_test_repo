@@ -506,21 +506,25 @@ export default function Briefings() {
   const [renameError, setRenameError] = useState(null);
   const renameInputRef = useRef(null);
   // Bumped when a rename must reach an already-open canvas that will NOT re-key.
-  // It rides in the graph panel's `key`, so the panel remounts and refetches —
-  // exactly what the re-keying path gets for free from `proc` changing.
+  // Passed to the graph panel as a REFETCH token, deliberately not folded into
+  // its `key`: a remount would also discard an unapplied Copilot proposal and
+  // close the Copilot rail, which is a much worse trade than the stale name.
   const [draftReload, setDraftReload] = useState(0);
 
-  // `ConfirmDialog` focuses its confirm button in a passive effect on `[open]`,
-  // and a parent's effects run AFTER its children's — so neither `autoFocus`
-  // (layout phase) nor a child effect can win. Without this the caret is not in
-  // the field and the Enter reflex activates **Rename** with the value
-  // unchanged, which closes the dialog having renamed nothing. A macrotask lands
-  // after both effect flushes; this is the first autoFocus-bearing input in a
-  // ConfirmDialog in this tree, hence no precedent to copy.
+  // `ConfirmDialog` focuses its own confirm button in a passive effect on
+  // `[open]`, which beats the input's `autoFocus` (React applies that in the
+  // layout phase, before any passive effect runs). Without this the caret is not
+  // in the field and the Enter reflex activates **Rename** with the value
+  // unchanged, which closes the dialog having renamed nothing.
+  //
+  // A plain effect here is enough — React flushes passive effects child-first
+  // and `ConfirmDialog` is our child, so this runs after its focus call. Both
+  // calls are needed: `select()` only sets the selection range and does not
+  // move focus (the same order `EditableDraftTitle` uses in ProcessCanvas).
   useEffect(() => {
-    if (!renameTarget) return undefined;
-    const t = setTimeout(() => renameInputRef.current?.select(), 0);
-    return () => clearTimeout(t);
+    if (!renameTarget) return;
+    renameInputRef.current?.focus();
+    renameInputRef.current?.select();
   }, [renameTarget]);
 
   async function confirmRenameDraft() {
@@ -542,13 +546,15 @@ export default function Briefings() {
       refetchDrafts();
       if (proc === `draft:${d.id}`) {
         if (saved?.id && saved.id !== d.id) {
-          selectProc(`draft:${saved.id}`);
+          // The re-key remounts the panel (it is keyed on `proc`), so carry the
+          // Copilot panel across the way the canvas's own rename does.
+          selectProc(`draft:${saved.id}`, { copilot: copilotParam });
         } else {
           // Same slug (a case-only or punctuation-only rename), so `proc` does
           // not change and the canvas keeps the bundle it fetched — showing the
           // OLD name in its header, and, worse, PUTting that stale bundle back
-          // on the next canvas edit, which silently undoes the rename. Force
-          // the remount the re-keying path gets for nothing.
+          // on the next canvas edit, which silently undoes the rename. Ask it
+          // to refetch; the re-keying branch above gets that for free.
           setDraftReload(n => n + 1);
         }
       }
@@ -920,7 +926,7 @@ export default function Briefings() {
               </div>
             }>
               <ProcessGraphPanel
-                key={`${proc}#${draftReload}`}
+                key={proc}
                 scope={proc}
                 onNavigate={selectProc}
                 onDraftsChanged={refetchDrafts}
@@ -932,6 +938,7 @@ export default function Briefings() {
                 autoOpenCopilot={copilotParam}
                 pendingIntent={intentParam}
                 onIntentConsumed={clearPendingIntent}
+                draftReloadToken={draftReload}
               />
             </Suspense>
           ) : (

@@ -164,13 +164,16 @@ function ModePill({ tone, icon: Icon, title, children }) {
 //                       second copy of either call. Consumed on mount, like
 //                       pendingFocus; `onIntentConsumed` strips the param so a
 //                       reload does not re-fire it.
+//   draftReloadToken  — bump to refetch the open draft's bundle when it changed
+//                       server-side without changing its id (#2053) — a rail
+//                       rename whose slug is unchanged.
 //   autoOpenCopilot   — open the Flow Copilot panel on mount (#1069) — fed by
 //                        the `?copilot=1` query param ("Describe flow…" entry,
 //                        Edit-as-draft bridge). onNavigate accepts an optional
 //                        second arg `{ copilot: true }` so scope changes that
 //                        should keep the panel open (draft re-key on rename,
 //                        team → draft bridge) can carry the flag.
-export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingImport, onImportConsumed, onImportClosed, pendingFocus = null, onFocusConsumed, autoOpenCopilot = false, pendingIntent = null, onIntentConsumed }) {
+export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingImport, onImportConsumed, onImportClosed, pendingFocus = null, onFocusConsumed, autoOpenCopilot = false, pendingIntent = null, onIntentConsumed, draftReloadToken = 0 }) {
   const navigate = useCallback((s, opts) => { if (onNavigate) onNavigate(s, opts); }, [onNavigate]);
 
   const { data: agents } = useApi('/api/agents');
@@ -209,6 +212,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // The team a successful creation produced, so the dialog can confirm it
   // instead of closing and navigating away with nothing said (#2053 D5/AC12).
   const [createdTeam, setCreatedTeam] = useState(null);
+  // A rail `Create team…` that arrived while a Copilot proposal was previewing.
+  // Only ever rendered while `proposal` is set, so it cannot go stale.
+  const [intentRefused, setIntentRefused] = useState(false);
   const [addRoleOpen, setAddRoleOpen] = useState(false);
   const [stagesOpen, setStagesOpen] = useState(false);
   const [labelsOpen, setLabelsOpen] = useState(false);
@@ -243,6 +249,12 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   const [draftGraph, setDraftGraph] = useState(null);
   const draftBundleRef = useRef(null);
 
+  // `draftReloadToken` (#2053) re-runs this when the draft changed underneath us
+  // without its id changing — a case- or punctuation-only rename from the Flows
+  // rail keeps the slug, so `draftId` alone would leave us holding a bundle with
+  // the OLD name, which the next canvas edit would PUT back and silently undo
+  // the rename. A refetch rather than a remount, deliberately: remounting would
+  // also discard an unapplied Copilot proposal and close the Copilot rail.
   useEffect(() => {
     if (!draftId) { draftBundleRef.current = null; setDraftBundle(null); setDraftGraph(null); return; }
     let alive = true;
@@ -250,7 +262,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       .then(b => { if (alive) { draftBundleRef.current = b; setDraftBundle(b); } })
       .catch(e => { if (alive) setImportError(e.message); });
     return () => { alive = false; };
-  }, [draftId]);
+  }, [draftId, draftReloadToken]);
 
   useEffect(() => {
     if (!draftBundle) return;
@@ -536,7 +548,12 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       // while a proposal is previewing would create a real team from
       // `draftBundle`, i.e. the design UNDERNEATH the one on screen. Refuse and
       // say why, rather than acting on a bundle the user is not looking at.
-      if (proposal) setImportError(PROPOSAL_PENDING_REASON);
+      //
+      // The refusal is a flag, not a message in `importError`: that channel is
+      // cleared only on a scope change, so the sentence would outlive the
+      // proposal it describes and still be on screen after a Discard. Rendered
+      // under `proposal &&`, it disappears exactly when it stops being true.
+      if (proposal) setIntentRefused(true);
       else setMaterializeOpen(true);
     }
     if (pendingIntent === FLOW_INTENTS.editAsDraft) editAsDraft(false);
@@ -814,6 +831,22 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           hover. Both read inline now. Same guard shape as the live strip: an
           imported or Copilot preview is not the draft, and carries its own
           banner. */}
+      {/* A rail `Create team…` refused because a Copilot proposal is previewing
+          (#2053). Guarded on `proposal`, so resolving the proposal removes it
+          without any clearing logic — the state it describes IS its guard. */}
+      {isDraft && proposal && intentRefused && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-3)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)', flexShrink: 0,
+          background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)',
+        }}>
+          <AlertTriangle size={16} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-warning)' }}>
+            {PROPOSAL_PENDING_REASON}
+          </span>
+        </div>
+      )}
+
       {isDraft && draftBundle && !imported && !proposal && (
         <div style={{
           display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-3)',
@@ -1131,7 +1164,19 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           // bundle straight into the collision card. Before #2053 this state
           // was unreachable — the dialog closed itself on completion — so an
           // Escape/X after success is a path only the new confirmation opens.
-          onClose={() => { setMaterializeOpen(false); if (createdTeam && imported) setImported(null); setCreatedTeam(null); }}
+          onClose={() => {
+            setMaterializeOpen(false);
+            // Dropping the preview is not enough: in `import` scope `imported`
+            // is the ONLY source of a graph, so clearing it alone leaves the
+            // pane on a permanent "Loading graph…" with no toolbar and no
+            // banner. Hand the parent back to the empty selection state, the
+            // way the banner's own X does.
+            if (createdTeam && imported) {
+              setImported(null); setSelectedId(null);
+              if (isImportPreview && onImportClosed) onImportClosed();
+            }
+            setCreatedTeam(null);
+          }}
           onDone={() => { setMaterializeOpen(false); setCreatedTeam(null); if (imported) setImported(null); }}
         />
       )}

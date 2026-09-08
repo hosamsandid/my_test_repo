@@ -243,7 +243,7 @@ test('rename is reachable from the rail and follows the id the server re-derives
   // old id would leave the page pointing at a draft that no longer exists.
   assert.match(briefings, /apiCall\('PUT', `\/api\/process\/drafts\/\$\{d\.id\}`/);
   assert.match(briefings, /saved\?\.id && saved\.id !== d\.id/);
-  assert.match(briefings, /selectProc\(`draft:\$\{saved\.id\}`\)/);
+  assert.match(briefings, /selectProc\(`draft:\$\{saved\.id\}`, \{ copilot: copilotParam \}\)/);
 });
 
 // ─── AC17: the first-time user's path, end to end ───────────────────────────
@@ -268,15 +268,24 @@ test('the rail intent honours the proposal rule the rail itself cannot see', () 
   // ALREADY open (so the scope-keyed panel does not remount and the proposal
   // survives) would otherwise create a real team from the design UNDERNEATH the
   // one on screen.
-  assert.match(canvas, /if \(proposal\) setImportError\(PROPOSAL_PENDING_REASON\)/);
+  assert.match(canvas, /if \(proposal\) setIntentRefused\(true\)/);
   assert.match(canvas, /else setMaterializeOpen\(true\)/);
+  // The refusal is guarded on `proposal`, so it cannot outlive the state it
+  // describes — `importError` is cleared only on a scope change, so the sentence
+  // would still be on screen after a Discard.
+  assert.match(canvas, /\{isDraft && proposal && intentRefused && \(/);
+  assert.doesNotMatch(canvas, /setImportError\(PROPOSAL_PENDING_REASON\)/);
 });
 
 test('a successful creation clears the import preview on every close path', () => {
   // Before the confirmation existed the dialog closed itself on completion, so
   // Escape-after-success was unreachable; the preview's own `Create team…` would
   // now re-submit the identical bundle into the collision card.
-  assert.match(canvas, /onClose=\{\(\) => \{ setMaterializeOpen\(false\); if \(createdTeam && imported\) setImported\(null\); setCreatedTeam\(null\); \}\}/);
+  assert.match(canvas, /if \(createdTeam && imported\) \{/);
+  // Clearing `imported` alone is not enough: in `import` scope it is the ONLY
+  // source of a graph, so the pane would sit on a permanent "Loading graph…"
+  // with no toolbar and no banner. Hand the parent back, like the banner's X.
+  assert.match(canvas, /if \(createdTeam && imported\) \{[\s\S]{0,200}if \(isImportPreview && onImportClosed\) onImportClosed\(\)/);
 });
 
 test('the confirmation does not promise a draft on the import path', () => {
@@ -295,7 +304,14 @@ test('a rename that does NOT re-key still reaches the open canvas', () => {
   // keeps its fetched bundle — which it PUTs back on the next edit, silently
   // undoing the rename.
   assert.match(briefings, /setDraftReload\(n => n \+ 1\)/);
-  assert.match(briefings, /key=\{`\$\{proc\}#\$\{draftReload\}`\}/);
+  // A REFETCH token, not part of the panel's `key`: a remount would also discard
+  // an unapplied Copilot proposal and close the Copilot rail.
+  assert.match(briefings, /draftReloadToken=\{draftReload\}/);
+  assert.match(briefings, /key=\{proc\}/);
+  assert.match(canvas, /\}, \[draftId, draftReloadToken\]\);/);
+  // And the re-keying branch, which DOES remount, carries the Copilot panel
+  // across the way the canvas's own rename does.
+  assert.match(briefings, /selectProc\(`draft:\$\{saved\.id\}`, \{ copilot: copilotParam \}\)/);
 });
 
 test('the rename cannot be forked by key-repeat, and the field really gets focus', () => {
@@ -304,7 +320,10 @@ test('the rename cannot be forked by key-repeat, and the field really gets focus
   // effect, so the caret would not be in the field and Enter would activate
   // the confirm button with the value unchanged.
   assert.doesNotMatch(briefings, /autoFocus/);
-  assert.match(briefings, /renameInputRef\.current\?\.select\(\)/);
+  // Both calls, in this order: `select()` only sets the selection range and does
+  // not move focus, so selecting without focusing leaves the Enter reflex on the
+  // confirm button — the very bug this is here to fix.
+  assert.match(briefings, /renameInputRef\.current\?\.focus\(\);\s*renameInputRef\.current\?\.select\(\);/);
 });
 
 test('no user-visible surface still points at the removed toolbar label', () => {

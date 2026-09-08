@@ -44,7 +44,7 @@ const endpoints = [
     authTokenId: 'ep-oauth-tok', models: [{ id: 'x' }] },
 ];
 
-const scopeFor = (subject) => computeScope({ username: subject, adminUsername: 'admin', users, memberships });
+const scopeFor = (subject) => computeScope({ username: subject, users, memberships });
 const alice = () => scopeFor('alice@corp.com');
 const nomad = () => scopeFor('nomad@corp.com');
 const sys = () => scopeFor('sys@corp.com');

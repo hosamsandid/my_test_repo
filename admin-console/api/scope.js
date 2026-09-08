@@ -5,12 +5,19 @@
 // Computes what the logged-in caller may see, then filters list endpoints by
 // resource `teamId` (and, for agents, `visibility`/`ownerId`).
 //
-// SAFETY — the operator never loses visibility:
-//   - The env single-admin (#276) and any System-Admin user see EVERYTHING
-//     (`all: true`). In the current single-operator setup the caller is always
-//     the env admin, so filtering is a no-op and nothing can disappear.
+// SAFETY — an administrator never loses visibility:
+//   - Any System-Admin user sees EVERYTHING (`all: true`). On a fresh stack the
+//     only principal is the seeded System Admin (#2059), so filtering is a
+//     no-op there and nothing can disappear.
 //   - Filtering only narrows the view for non-admin users who are members of
 //     specific teams — exactly the multi-user isolation the ticket asks for.
+//
+// #2059 removed the second `all: true` branch, the env single-admin (#276): the
+// configured credential no longer authenticates, so no session can arrive
+// without a user record behind it and `userId: null` is no longer a state an
+// authenticated caller can be in. Every consequence of that null — preferences
+// that would not persist, personal credentials that could not be owned, an
+// audit actor with no id — is closed by the same change.
 //
 // Pure (no IO) so it is unit-testable; the api wires it with the on-disk
 // users/memberships indexes.
@@ -20,15 +27,12 @@
 // validator) — the two live in separate images, so the constant is duplicated.
 const CHAT_FONT_SIZE_DEFAULT = 12;
 
-function computeScope({ username, adminUsername, users = [], memberships = [] } = {}) {
-  // No identity → see nothing (the auth gate normally guarantees a username;
-  // this is a defensive fail-closed default, never reached for the env admin).
+function computeScope({ username, users = [], memberships = [] } = {}) {
+  // No identity → see nothing. The auth gate normally guarantees a username, so
+  // this is a defensive fail-closed default. (Kept: it is NOT the env-admin
+  // branch #2059 removed — that one granted `all: true`. This one grants
+  // nothing, and neither does the unknown-subject branch below.)
   if (!username) return { all: false, teamIds: new Set(), roles: new Map(), userId: null };
-
-  // The env single-admin credential is the operator: full visibility.
-  if (adminUsername && username === adminUsername) {
-    return { all: true, teamIds: new Set(), roles: new Map(), userId: null };
-  }
 
   const user = users.find(u => (u.subject || '').toLowerCase() === String(username).toLowerCase());
   // A session subject that isn't a known user → fail closed (sees only what is
@@ -107,7 +111,7 @@ function resolveAgentTenant(cfg, loadAgentConfig) {
 // (docs/multi-user-concept.md §3), a Team Admin may manage their own team and
 // its memberships, a Team Member gets read-only visibility of their own team,
 // and creating teams / managing global user records is a System-Admin action.
-// All admins (env admin + System Admin) keep `all: true` — full access.
+// A System Admin keeps `all: true` — full access.
 
 // May the caller create/edit/delete this team and manage its memberships?
 // Admins always may; a non-admin must be the `team-admin` of that exact team.
@@ -170,17 +174,18 @@ function normalizeCredential(entry) {
 
 // A personal credential belongs to exactly one human and is strictly private to
 // them (D2): visible/manageable ONLY by its owner, with NO `scope.all` override —
-// not even a System Admin or the env single-admin may see or manage it. This
-// requires an identified owner (`c.userId`) and an identified caller
-// (`scope.userId`); a personal credential with no owner, or a caller with no user
-// identity (the env single-admin has `userId: null`), matches nobody (fail-closed).
+// not even a System Admin may see or manage it. This requires an identified
+// owner (`c.userId`) and an identified caller (`scope.userId`); a personal
+// credential with no owner matches nobody (fail-closed). Since #2059 every
+// authenticated caller HAS a `scope.userId`, so it is the owner comparison —
+// not a null caller — that decides, which is the rule D2 actually wanted.
 function ownsPersonalCredential(scope, c) {
   return !!(c && c.userId && scope && scope.userId && c.userId === scope.userId);
 }
 
 // Is this credential visible to the caller? (list-endpoint filter — AC1/AC2/AC3)
 // A personal credential is checked FIRST, before the `scope.all` admin shortcut,
-// so a System/env admin listing all credentials never sees anyone's personal
+// so a System Admin listing all credentials never sees anyone's personal
 // entries (#1567 AC5 / D2 — no `scope.all` bypass on the personal tier).
 function visibleCredential(scope, cred) {
   if (!scope) return false;
@@ -241,8 +246,7 @@ function canCreateCredential(scope, desired) {
   // Any authenticated human may create a personal credential owned by THEMSELVES
   // (Team Member, Team Admin or System Admin — #1567 AC3). The owner reference on
   // the desired shape has already been forced to the caller by
-  // resolveCredentialOwnership; here we require that identity match, which also
-  // fails closed for the env single-admin (no user record → `scope.userId` null).
+  // resolveCredentialOwnership; here we require that identity match.
   // Checked before `scope.all` so a personal create is never waved through as an
   // admin action — it is always owner-scoped.
   if (desired && desired.scope === 'personal') return ownsPersonalCredential(scope, desired);
@@ -305,7 +309,7 @@ function canManageEnvironment(scope, env) {
 // The Token Usage statistics view (token/cost figures) is, for now, a
 // System-Admin-only surface: the operator keeps consumption numbers until it is
 // decided how much of them teams should see. The boundary is simply full
-// visibility (`scope.all` — the env admin or a System-Admin user); a Team Admin
+// visibility (`scope.all` — a System-Admin user); a Team Admin
 // or Team Member gets none. This is the real security boundary enforced on every
 // usage endpoint; the SPA route/nav gate is UX only. The System Admin narrows to
 // a single team via the `?team=` query parameter (see the usage routes), which is
@@ -316,27 +320,31 @@ function canViewUsageStatistics(scope) {
 
 // A serializable authorization descriptor for the session (AC6/AC7). Carries an
 // admin/System-Admin indicator and the caller's per-team memberships+roles, so
-// the frontend can make rendering decisions without re-deriving them. The env
-// admin and System Admins are reported as `admin: true` (full visibility).
-function describeAuthz({ username, adminUsername, users = [], memberships = [] } = {}) {
-  const scope = computeScope({ username, adminUsername, users, memberships });
-  const envAdmin = !!(username && adminUsername && String(username) === String(adminUsername));
+// the frontend can make rendering decisions without re-deriving them. A
+// System-Admin user record is reported as `admin: true` (full visibility).
+//
+// #2059 removed the `envAdmin` flag. It was computed independently of
+// `computeScope`, so deleting the env-admin branch alone would have left it
+// true — and `isKnownPrincipal` admitted an IAP identity on that flag ALONE,
+// which would have handed a silent, empty-scope session to anyone whose e-mail
+// happened to equal `ADMIN_USERNAME`: precisely the #1415 failure mode. With
+// the flag gone, `admin` and `systemAdmin` state the same fact, kept as two
+// keys because the client reads both.
+function describeAuthz({ username, users = [], memberships = [] } = {}) {
+  const scope = computeScope({ username, users, memberships });
   const teams = [...scope.roles.entries()].map(([teamId, role]) => ({ teamId, role }));
   // Surface the caller's own GitHub handle (#1385) so the session knows who to
-  // assign a parent tracker ticket to. Present only for a known user record;
-  // the env single-admin credential has no user record and so carries none.
+  // assign a parent tracker ticket to. Present only for a known user record.
   const self = users.find(u => (u.subject || '').toLowerCase() === String(username).toLowerCase());
   const githubHandle = (self && typeof self.githubHandle === 'string') ? self.githubHandle : '';
   // Per-user Agent-Chat transcript font size (#1437). Read the caller's own
-  // stored preference; anyone without a set value — including the env
-  // single-admin, which has no user record — gets the 12px default.
+  // stored preference; anyone without a set value gets the 12px default.
   const chatFontSize = (self && Number.isFinite(self.chatFontSize))
     ? self.chatFontSize
     : CHAT_FONT_SIZE_DEFAULT;
   return {
-    admin: scope.all,                    // full visibility: env admin OR System Admin
-    envAdmin,                            // env single-admin credential
-    systemAdmin: scope.all && !envAdmin, // a non-env-admin with full visibility is a System-Admin user
+    admin: scope.all,       // full visibility — a System-Admin user record
+    systemAdmin: scope.all, // the same fact; both keys are read by the client
     userId: scope.userId,
     githubHandle,
     chatFontSize,
@@ -344,13 +352,16 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [] }
   };
 }
 
-// Is this authz descriptor a subject the console actually knows — the env
-// single-admin or a registered user-store record? Basis for the IAP auto-login
-// gate (#1415): only known principals get a silent session; anyone else who
-// merely passed Google IAP falls through to the login form. Fail-closed on
-// missing/partial input.
+// Is this authz descriptor a subject the console actually knows — i.e. a
+// registered user-store record? Basis for the IAP auto-login gate (#1415): only
+// known principals get a silent session; anyone else who merely passed Google
+// IAP falls through to the login form. Fail-closed on missing/partial input.
+//
+// Since #2059 a resolved `userId` is the whole test. The env-admin arm is gone
+// with the credential it described, which also closes the hole where an IAP
+// identity merely NAMED `ADMIN_USERNAME` was admitted with an empty scope.
 function isKnownPrincipal(authz) {
-  return !!(authz && (authz.envAdmin || authz.userId != null));
+  return !!(authz && authz.userId != null);
 }
 
 module.exports = {

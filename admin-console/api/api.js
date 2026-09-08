@@ -195,9 +195,6 @@ const TEAMS_INDEX = path.join(WORKSPACE, 'teams', 'index.json');
 const USERS_INDEX = path.join(WORKSPACE, 'users', 'index.json');
 const MEMBERSHIPS_INDEX = path.join(WORKSPACE, 'memberships', 'index.json');
 const DEFAULT_TEAM_ID = 'default';
-// The env single-admin login (#276); its session subject is this value and it
-// is treated as the operator (full visibility) by the scope filter (#302).
-const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 
@@ -321,15 +318,19 @@ app.use('/api', audit.auditMutations);
 // responses carry the caller's admin indicator + per-team roles for the
 // frontend, reusing the same users/memberships indexes as getScope. The same
 // resolver gates IAP auto-login (#1415): only a registered user-store subject
-// or the env admin gets a silent session; readJsonFile degrading to [] on an
-// unreadable users index means unknown → login form (fail-closed).
+// gets a silent session; readJsonFile degrading to [] on an unreadable users
+// index means unknown → login form (fail-closed).
+//
+// `usersSeeded` backs the public readiness probe (#2059 AC3): the first-boot
+// seed writes the users index before the orchestrator serves anything, so this
+// file having at least one record is what "ready to be signed in to" means.
 auth.registerAuthRoutes(app, {
   describeAuthz: (subject) => describeAuthz({
     username: subject,
-    adminUsername: ADMIN_USERNAME,
     users: readJsonFile(USERS_INDEX, []),
     memberships: readJsonFile(MEMBERSHIPS_INDEX, []),
   }),
+  usersSeeded: () => readJsonFile(USERS_INDEX, []).length > 0,
 });
 app.use('/api', auth.gate);
 
@@ -802,13 +803,12 @@ function applyCredentialPatch({ res, cred, scope, body, inUse, label }) {
 }
 
 // Resolve what the logged-in caller may see (#302). Reads the users/memberships
-// indexes fresh each call (cheap; small JSON). The env admin and System Admins
-// get `all: true` — so the single-operator setup is entirely unaffected.
+// indexes fresh each call (cheap; small JSON). A System Admin gets
+// `all: true` — so a single-administrator stack is entirely unaffected.
 function getScope(req) {
   const username = req && req.user && req.user.username;
   return computeScope({
     username,
-    adminUsername: ADMIN_USERNAME,
     users: readJsonFile(USERS_INDEX, []),
     memberships: readJsonFile(MEMBERSHIPS_INDEX, []),
   });

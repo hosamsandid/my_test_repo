@@ -1,24 +1,37 @@
 'use strict';
 
-// Unit tests for the auth module (#276). Run: node --test admin-console/api/auth.test.js
-// Credentials are read at module load, so set them before requiring auth.js.
-process.env.ADMIN_USERNAME = 'tester';
-process.env.ADMIN_PASSWORD = 's3cret-pass';
+// Unit tests for the auth module (#276, reworked by #2059).
+// Run: node --test admin-console/api/auth.test.js
+//
+// `ADMIN_USERNAME`/`ADMIN_PASSWORD` are deliberately NOT set here any more:
+// since #2059 this module must not read them at all (they are the orchestrator's
+// first-boot seed), and a test that set them would hide a regression where it
+// started reading them again. `AUTH_SESSION_SECRET` is set so the session
+// signing key is fixed and no key file is touched — session-secret.test.js
+// covers the derivation itself.
 process.env.AUTH_SESSION_SECRET = 'fixed-test-secret';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const auth = require('./auth');
 
-test('verifyCredentials accepts the configured pair', () => {
-  assert.deepEqual(auth.verifyCredentials('tester', 's3cret-pass'), { sub: 'tester' });
-});
-
-test('verifyCredentials rejects wrong password, wrong user, and bad types', () => {
-  assert.equal(auth.verifyCredentials('tester', 'nope'), null);
-  assert.equal(auth.verifyCredentials('someone', 's3cret-pass'), null);
-  assert.equal(auth.verifyCredentials('tester', undefined), null);
-  assert.equal(auth.verifyCredentials(null, null), null);
+// #2059: the env-credential check is GONE, not disabled. The two tests that
+// asserted it accepted/rejected the configured pair are inverted into this one,
+// because a dormant compare against a value that is now only a seed is exactly
+// the exception AC4 says must not exist.
+test('the env-credential check no longer exists (#2059 AC4)', () => {
+  assert.equal(auth.verifyCredentials, undefined, 'verifyCredentials is not exported');
+  const src = require('node:fs').readFileSync(require.resolve('./auth'), 'utf8');
+  // Strip comments first: they legitimately explain what was removed and why.
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n')
+    .filter(l => !l.trim().startsWith('//')).join('\n');
+  for (const gone of ['verifyCredentials', 'safeEqual', 'scryptDigest', 'ADMIN_PASSWORD', 'ADMIN_USERNAME']) {
+    assert.ok(!code.includes(gone), `auth.js must not reference ${gone} any more`);
+  }
+  // ...while the path that replaced it is still there (so the assertions above
+  // cannot pass against a hollowed-out file).
+  assert.ok(code.includes('verifyViaUserStore'), 'the user-store check is the login path');
+  assert.ok(code.includes('/internal/admin/users/verify'));
 });
 
 test('issueToken → verifyToken round-trips and carries the subject', () => {
@@ -142,7 +155,7 @@ const iapVerifierFor = (email) => async (token) => (token === 'valid-iap-jwt' ? 
 
 test('requireAuth issues a session for a registered IAP subject', async (t) => {
   auth._setIapVerifierForTests(iapVerifierFor('known@accenture.com'));
-  auth._setAuthzResolverForTests(() => ({ envAdmin: false, userId: 'u1' }));
+  auth._setAuthzResolverForTests(() => ({ userId: 'u1' }));
   t.after(() => { auth._setIapVerifierForTests(null); auth._setAuthzResolverForTests(null); });
 
   const cookies = [];
@@ -155,9 +168,35 @@ test('requireAuth issues a session for a registered IAP subject', async (t) => {
   assert.match(cookies[0], new RegExp(`^${auth.COOKIE_NAME}=`));
 });
 
-test('requireAuth issues a session for the env-admin IAP subject', async (t) => {
-  auth._setIapVerifierForTests(iapVerifierFor('tester'));
-  auth._setAuthzResolverForTests(() => ({ envAdmin: true, userId: null }));
+// Inverted by #2059. This used to assert that an `envAdmin: true, userId: null`
+// descriptor WAS admitted — i.e. that an IAP identity whose e-mail merely
+// equalled `ADMIN_USERNAME` got a silent session with an empty scope, which is
+// the #1415 failure mode wearing the break-glass's clothes. With the flag gone,
+// a resolved user id is the whole test.
+test('requireAuth refuses an IAP subject that claims env-admin but has no record', async (t) => {
+  auth._setIapVerifierForTests(iapVerifierFor('admin'));
+  auth._setAuthzResolverForTests(() => ({ envAdmin: true, admin: true, userId: null }));
+  t.after(() => { auth._setIapVerifierForTests(null); auth._setAuthzResolverForTests(null); });
+
+  const cookies = [];
+  let statusCode;
+  const res = {
+    append: (k, v) => cookies.push(v),
+    status(c) { statusCode = c; return this; },
+    json() { return this; },
+  };
+  await auth.requireAuth({ headers: { 'x-goog-iap-jwt-assertion': 'valid-iap-jwt' } }, res, () => {
+    throw new Error('must not pass');
+  });
+  assert.equal(statusCode, 401);
+  assert.equal(cookies.length, 0, 'no session is issued');
+});
+
+test('requireAuth issues a session for the SEEDED administrator behind IAP', async (t) => {
+  // The replacement for the case above: the seeded admin is a real record, so
+  // it arrives with a userId and is admitted like any other registered user.
+  auth._setIapVerifierForTests(iapVerifierFor('admin'));
+  auth._setAuthzResolverForTests(() => ({ admin: true, systemAdmin: true, userId: 'u-seed' }));
   t.after(() => { auth._setIapVerifierForTests(null); auth._setAuthzResolverForTests(null); });
 
   const res = { append() {}, status() { throw new Error('should not be called'); } };
@@ -168,7 +207,7 @@ test('requireAuth issues a session for the env-admin IAP subject', async (t) => 
 
 test('requireAuth rejects an unregistered IAP subject without issuing a cookie', async (t) => {
   auth._setIapVerifierForTests(iapVerifierFor('stranger@accenture.com'));
-  auth._setAuthzResolverForTests(() => ({ envAdmin: false, userId: null }));
+  auth._setAuthzResolverForTests(() => ({ userId: null }));
   t.after(() => { auth._setIapVerifierForTests(null); auth._setAuthzResolverForTests(null); });
 
   const cookies = [];
@@ -206,7 +245,7 @@ test('requireAuth fails closed when the registration lookup throws', async (t) =
 });
 
 test('requireAuth honors an existing session cookie regardless of registration', async (t) => {
-  auth._setAuthzResolverForTests(() => ({ envAdmin: false, userId: null })); // reject-all gate
+  auth._setAuthzResolverForTests(() => ({ userId: null })); // reject-all gate
   t.after(() => auth._setAuthzResolverForTests(null));
 
   const token = auth.issueToken('anyone');
@@ -225,7 +264,7 @@ test('session endpoint gates IAP auto-login on registration', async (t) => {
   // Production wiring path: registerAuthRoutes installs the resolver.
   let registered = false;
   auth.registerAuthRoutes(app, {
-    describeAuthz: () => (registered ? { envAdmin: false, userId: 'u1' } : { envAdmin: false, userId: null }),
+    describeAuthz: () => (registered ? { userId: 'u1' } : { userId: null }),
   });
 
   const cookies = [];
@@ -259,4 +298,162 @@ test('setSessionCookie / clearSessionCookie emit the expected Set-Cookie', () =>
   headers.length = 0;
   auth.clearSessionCookie(res);
   assert.match(headers[0][1], /Max-Age=0/);
+});
+
+// ── The login route (#2059) ─────────────────────────────────────────────────
+// Before this ticket the login handler had NO test at all: `registerAuthRoutes`
+// was only ever called with a `post: () => {}` stub, so the fallback chain it
+// used to contain was uncovered. It is now the console's single login path and
+// has to tell three outcomes apart, so it is driven directly here.
+
+// Capture the routes off a minimal app stub, with a stubbed global fetch
+// standing in for the orchestrator's user store.
+function loginHarness({ storeResponse }) {
+  const routes = { get: {}, post: {} };
+  const app = {
+    get: (path, ...rest) => { routes.get[path] = rest[rest.length - 1]; },
+    post: (path, ...rest) => { routes.post[path] = rest[rest.length - 1]; },
+  };
+  auth.registerAuthRoutes(app, {
+    describeAuthz: (subject) => ({ userId: `id-of-${subject}`, admin: true }),
+    usersSeeded: () => true,
+  });
+
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, init });
+    return storeResponse();
+  };
+  return { routes, calls, restore: () => { globalThis.fetch = original; } };
+}
+
+function fakeRes() {
+  const out = { cookies: [], status: 200, body: undefined };
+  return {
+    out,
+    append: (k, v) => out.cookies.push(v),
+    status(c) { out.status = c; return this; },
+    json(b) { out.body = b; return this; },
+  };
+}
+
+const storeOk = (subject) => () => ({
+  ok: true, status: 200, json: async () => ({ id: 'u-1', subject }),
+});
+const storeRejects = () => ({ ok: false, status: 401, json: async () => ({ error: 'invalid credentials' }) });
+
+test('login: a store-verified password issues a session for that subject', async (t) => {
+  const h = loginHarness({ storeResponse: storeOk('admin') });
+  t.after(h.restore);
+
+  const res = fakeRes();
+  await h.routes.post['/api/auth/login']({ body: { username: 'admin', password: 'seed-pass' } }, res);
+
+  assert.equal(res.out.status, 200, 'the default status is left untouched on success');
+  assert.equal(res.out.body.authenticated, true);
+  assert.equal(res.out.body.user.username, 'admin');
+  assert.equal(res.out.body.user.userId, 'id-of-admin', 'the authz descriptor is merged on');
+  assert.match(res.out.cookies[0], new RegExp(`^${auth.COOKIE_NAME}=`));
+
+  // It asked the user store, and only the user store.
+  assert.equal(h.calls.length, 1);
+  assert.match(h.calls[0].url, /\/internal\/admin\/users\/verify$/);
+  assert.deepEqual(JSON.parse(h.calls[0].init.body), { username: 'admin', password: 'seed-pass' });
+  assert.ok(h.calls[0].init.signal, 'the request is bounded by a timeout signal (AC4)');
+});
+
+test('login: the store rejecting the credentials is a 401, with no session', async (t) => {
+  const h = loginHarness({ storeResponse: storeRejects });
+  t.after(h.restore);
+
+  const res = fakeRes();
+  await h.routes.post['/api/auth/login']({ body: { username: 'admin', password: 'wrong' } }, res);
+  assert.equal(res.out.status, 401);
+  assert.equal(res.out.body.error, 'Invalid username or password');
+  assert.equal(res.out.cookies.length, 0);
+});
+
+test('login: an unreachable or broken store is a 503, NOT a rejected password', async (t) => {
+  // This distinction only exists because #2059 removed the env-credential
+  // fallback. Collapsing the two — which is what the old code did by returning
+  // null for both — would tell an operator their correct password is wrong
+  // while the orchestrator is restarting.
+  for (const [label, response] of [
+    ['network failure', () => { throw new Error('ECONNREFUSED'); }],
+    ['timeout', () => { throw Object.assign(new Error('The operation was aborted'), { name: 'TimeoutError' }); }],
+    ['500 from the store', () => ({ ok: false, status: 500, json: async () => ({}) })],
+    ['unparseable 200', () => ({ ok: true, status: 200, json: async () => { throw new Error('bad json'); } })],
+    ['200 with no subject', () => ({ ok: true, status: 200, json: async () => ({ id: 'u-1' }) })],
+  ]) {
+    const h = loginHarness({ storeResponse: response });
+    const res = fakeRes();
+    await h.routes.post['/api/auth/login']({ body: { username: 'admin', password: 'seed-pass' } }, res);
+    h.restore();
+
+    assert.equal(res.out.status, 503, `${label} → 503`);
+    assert.equal(res.out.body.code, 'user_store_unavailable', `${label} → machine-readable code`);
+    assert.equal(res.out.cookies.length, 0, `${label} → no session`);
+    assert.ok(!/password/i.test(res.out.body.error), `${label} must not blame the password`);
+  }
+});
+
+test('login: a missing body is a rejection, not a crash', async (t) => {
+  const h = loginHarness({ storeResponse: storeRejects });
+  t.after(h.restore);
+  const res = fakeRes();
+  await h.routes.post['/api/auth/login']({}, res);
+  assert.equal(res.out.status, 401);
+});
+
+// ── The readiness probe (#2059 AC3) ────────────────────────────────────────
+
+test('ready: reports whether the stack has a user to sign in as', async (t) => {
+  const routes = {};
+  const app = { get: (p, ...r) => { routes[p] = r[r.length - 1]; }, post: () => {} };
+
+  let seeded = false;
+  auth.registerAuthRoutes(app, { usersSeeded: () => seeded });
+  t.after(() => auth._setAuthzResolverForTests(null));
+
+  let res = fakeRes();
+  routes['/api/auth/ready']({}, res);
+  assert.equal(res.out.status, 503, 'not seeded yet → 503, so a poll keeps waiting');
+  assert.deepEqual(res.out.body, { ready: false });
+
+  seeded = true;
+  res = fakeRes();
+  routes['/api/auth/ready']({}, res);
+  assert.equal(res.out.status, 200);
+  assert.deepEqual(res.out.body, { ready: true }, 'one boolean — never a count or a name');
+});
+
+test('ready: fails closed when the probe throws or is absent', async () => {
+  const routes = {};
+  const app = { get: (p, ...r) => { routes[p] = r[r.length - 1]; }, post: () => {} };
+
+  auth.registerAuthRoutes(app, { usersSeeded: () => { throw new Error('users index unreadable'); } });
+  let res = fakeRes();
+  routes['/api/auth/ready']({}, res);
+  assert.equal(res.out.status, 503);
+  assert.equal(res.out.body.ready, false);
+
+  // No probe injected at all (a caller that predates #2059) → not ready.
+  auth.registerAuthRoutes(app, {});
+  res = fakeRes();
+  routes['/api/auth/ready']({}, res);
+  assert.equal(res.out.body.ready, false);
+});
+
+test('gate: the readiness probe is public, everything else still needs a session', async () => {
+  const publicPaths = ['/auth/login', '/auth/logout', '/auth/session', '/auth/ready'];
+  for (const p of publicPaths) {
+    let passed = false;
+    auth.gate({ path: p, headers: {} }, fakeRes(), () => { passed = true; });
+    assert.equal(passed, true, `${p} must be reachable without a session`);
+  }
+  // A protected path still goes through requireAuth and is refused.
+  const res = fakeRes();
+  await auth.gate({ path: '/agents', headers: {} }, res, () => { throw new Error('must not pass'); });
+  assert.equal(res.out.status, 401);
 });

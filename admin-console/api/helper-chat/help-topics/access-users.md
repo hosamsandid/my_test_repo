@@ -65,11 +65,12 @@ simply **updates their role in place**.
 Membership is fail-closed: a user with no membership anywhere and no System-Admin
 flag can log in but sees nothing until a scope is granted.
 
-There is a fourth principal that never appears in any list here: the
-environment's **built-in single admin** (the deployment's `ADMIN_USERNAME`). It
-has full visibility but no user record, so it belongs to no scope, cannot be
-given a role, and cannot be managed on the **Users** page. It exists so a fresh
-stack can be administered before the first user does.
+There is **no fourth principal**. The administrator a fresh stack starts with is
+an ordinary System-Admin *user record*, **seeded once at first boot** from the
+deployment's configured initial user and never re-read afterwards. It therefore
+appears in the list on the **Users** page and is managed there like anybody
+else — and it *can* be given a membership in a scope here, though the global
+flag already covers every scope, so a role rarely adds anything.
 
 ## What a scope actually gates
 
@@ -89,8 +90,8 @@ Scoping is enforced by the API, not just hidden in the UI:
   which is what makes the pre-scope adoption above work without a migration.
 
 Two things a scope deliberately does **not** gate. **Personal credentials** are
-outside the model entirely: they belong to one human by name, and neither a
-System Admin nor the built-in admin can see or manage them — there is no
+outside the model entirely: they belong to one human by name, and not even a
+System Admin can see or manage them — there is no
 administrative break-glass. And **choosing a Model Provider for the console's**
 **own AI helpers**
 needs only membership, not the Team-Admin role, so an ordinary Team Member can

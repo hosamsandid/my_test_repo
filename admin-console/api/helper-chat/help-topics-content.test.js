@@ -387,13 +387,19 @@ const TOPIC_CONTENT = [
       'Manage Users',
       'Resource ownership',
       'reassign',
-      // #1996 additions: the fourth principal the roles table cannot describe,
-      // the personal-credential carve-out from the scope model, and the two
-      // refusals that make Delete safe.
-      'built-in single admin',
+      // #1996 additions: the personal-credential carve-out from the scope model
+      // and the two refusals that make Delete safe.
       'administrative break-glass',
       'can never be deleted',
       'still owns',
+      // #2059: the "fourth principal" #1996 pinned here — the env single admin
+      // with no user record — no longer exists. The configured credential is a
+      // one-shot SEED for a real System-Admin record, so what has to survive a
+      // reword is the OPPOSITE claim: there is no principal outside the store,
+      // and the first administrator is manageable on the Users page like the
+      // rest. Anchoring only the removal would let the old reading creep back.
+      'no fourth principal',
+      'seeded once at first boot',
     ],
   },
   {
@@ -981,8 +987,8 @@ const TOPIC_CONTENT = [
     ],
     // #1891 (E16) — the route E7 left uncovered. The topic absorbed the Users
     // page intro box (records vs memberships, the global System-Admin flag) and
-    // adds what no surface said: the immutable subject, the user-store-then-env
-    // login order, and that Delete is an offboarding which pauses the person's
+    // adds what no surface said: the immutable subject, how a sign-in is
+    // resolved, and that Delete is an offboarding which pauses the person's
     // agents and deletes their personal credentials first.
     concepts: [
       'Subject',
@@ -999,12 +1005,26 @@ const TOPIC_CONTENT = [
       'best-effort',
       'Access',
       // #1996 additions: why the subject is immutable rather than merely locked,
-      // the records-first rule as it applies to SSO, and the guard that does NOT
-      // exist — nothing stops you deleting the last System Admin.
+      // and the records rule as it applies to SSO.
       'silently sever an existing person',
       'guest list',
       'last System Admin',
       'own account',
+      // #2059 additions. #1996 pinned "nothing stops you deleting the last
+      // System Admin" and a records-THEN-env login order; both are now false.
+      // `ADMIN_USERNAME` above survives, but its meaning inverted — it is a
+      // one-shot seed, not a credential — so the load-bearing claims are pinned
+      // individually: one path, a consumed-once seed, and the two consequences
+      // the platform accepts (no sign-in during a store outage, recovered on
+      // the HOST; the password now living in the record). Plus the refusal that
+      // replaced the missing guard, in both its forms.
+      'one login path',
+      'once, as a seed',
+      'nobody can sign in',
+      'host-level',
+      'no longer revokes anything',
+      'The last System Admin cannot be deleted',
+      'cannot be demoted',
     ],
   },
   {

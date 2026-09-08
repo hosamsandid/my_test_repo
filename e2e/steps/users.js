@@ -143,7 +143,7 @@ async function expectSystemAdminFlagLocked(ctx, { subject }) {
  *     password: e2e-admin-pass
  */
 async function expectLoginRejected(ctx, { username, password }) {
-  const res = await ctx.page.request.post('/api/auth/login', { data: { username, password } });
+  const res = await ctx.request.post('/api/auth/login', { data: { username, password } });
   expect(res.status(), `login with "${password}" must be rejected`).toBe(401);
 }
 
@@ -162,8 +162,7 @@ async function expectLoginRejected(ctx, { username, password }) {
  *     password: rotated-by-journey
  */
 async function expectLoginResolvesToRecord(ctx, { username, password }) {
-  const { page } = ctx;
-  const res = await page.request.post('/api/auth/login', { data: { username, password } });
+  const res = await ctx.request.post('/api/auth/login', { data: { username, password } });
   expect(res.status(), `login with "${password}" must succeed`).toBe(200);
 
   const body = await res.json();
@@ -174,7 +173,7 @@ async function expectLoginResolvesToRecord(ctx, { username, password }) {
   expect(body.user.admin).toBe(true);
 
   // And it is durable: the session endpoint reports the same identity.
-  const session = await page.request.get('/api/auth/session');
+  const session = await ctx.request.get('/api/auth/session');
   expect(session.status()).toBe(200);
   const sessionBody = await session.json();
   expect(sessionBody.user.userId).toBe(body.user.userId);

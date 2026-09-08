@@ -399,9 +399,12 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **289,378 — 85.1% used,
-50,622 left** (#2057 made a direct hand-off read as a consumer on the Outcomes and Routing
-surfaces, which voided `agent-chat.md`'s `## Outcomes` claim that a label is what wakes the next
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **290,877 — 85.6% used,
+49,123 left** (#2059 turned the configured initial user into a first-boot seed for a real
+System-Admin record, which voided the "it falls back to the environment's built-in single admin"
+story in `users.md` and `access-users.md` and the same claim in `docs/admin-console.md`: +1,499,
+of which the `docs/**` half lands on EVERY context. It stood at 289,378 after #2057, which made a
+direct hand-off read as a consumer on the Outcomes and Routing surfaces, which voided `agent-chat.md`'s `## Outcomes` claim that a label is what wakes the next
 agent — the same claim the panel itself was making: +895 for the two-mechanism table, landing in
 full because `create.md` names `/chats` as a neighbour. It stood at 288,483 after #2053, which
 renamed the design → live-team action from *Materialize* to **Create team…** everywhere a user

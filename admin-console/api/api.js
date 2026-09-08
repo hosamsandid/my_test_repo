@@ -11942,11 +11942,14 @@ app.delete('/api/admin/users/:id/password', apiLimiter, (req, res) => {
 // profile settings (currently just the Agent-Chat transcript font size) without
 // System-Admin rights. The write is pinned to the caller's OWN resolved userId
 // (never an id from the request), so — unlike the admin CRUD above — it can
-// touch no other user's record. The env single-admin has no user record
-// (scope.userId === null): accept the value so the client's optimistic apply +
-// per-user localStorage fallback still work, but report it as not persisted
-// server-side. teamsStore.updateUser is the authoritative validator (range /
-// integer check → 400).
+// touch no other user's record. Since #2059 every authenticated caller resolves
+// to a record, so the `scope.userId == null` arm below is a fail-closed guard
+// rather than a state a signed-in human can be in — it used to be the env
+// single-admin's permanent condition, which is why `PUT /api/me/preferences`
+// was a silent no-op for the only principal a fresh stack had. It still accepts
+// the value (so the client's optimistic apply + localStorage fallback work) and
+// still reports it as not persisted. teamsStore.updateUser is the authoritative
+// validator (range / integer check → 400).
 app.put('/api/me/preferences', apiLimiter, (req, res) => {
   const scope = getScope(req);
   const patch = {};

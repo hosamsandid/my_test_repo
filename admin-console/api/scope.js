@@ -11,6 +11,10 @@
 //     the env admin, so filtering is a no-op and nothing can disappear.
 //   - Filtering only narrows the view for non-admin users who are members of
 //     specific teams — exactly the multi-user isolation the ticket asks for.
+//   - `authEnabled: false` (#1457) makes that a named mode rather than an
+//     accident of there being one login: every principal is the operator and
+//     no filter narrows anything. See auth-mode.js for the flag and why it
+//     defaults to off in the env while defaulting to ON as a parameter here.
 //
 // Pure (no IO) so it is unit-testable; the api wires it with the on-disk
 // users/memberships indexes.
@@ -20,17 +24,39 @@
 // validator) — the two live in separate images, so the constant is duplicated.
 const CHAT_FONT_SIZE_DEFAULT = 12;
 
-function computeScope({ username, adminUsername, users = [], memberships = [] } = {}) {
+// Match a session subject against the user store, case-insensitively (a login
+// subject is an e-mail address in practice). Extracted so the three callers
+// below — `computeScope`'s two branches and `describeAuthz` — cannot drift in
+// what counts as "the caller's own record".
+function findUserBySubject(users = [], username) {
+  if (!Array.isArray(users) || !username) return undefined;
+  const wanted = String(username).toLowerCase();
+  return users.find(u => u && (u.subject || '').toLowerCase() === wanted);
+}
+
+function computeScope({ username, adminUsername, users = [], memberships = [], authEnabled = true } = {}) {
   // No identity → see nothing (the auth gate normally guarantees a username;
   // this is a defensive fail-closed default, never reached for the env admin).
+  // Checked BEFORE the single-user branch: that mode relaxes authorization, not
+  // authentication, so an unauthenticated request still sees nothing.
   if (!username) return { all: false, teamIds: new Set(), roles: new Map(), userId: null };
+
+  // Single-user compatibility mode (#1457): whoever is signed in is the
+  // operator — the implicit System Admin. `userId` still resolves when the
+  // subject matches a user record, so ownership-keyed behaviour (audit
+  // attribution, personal credentials, per-user preferences) keeps working;
+  // the env admin has no record and keeps its historical `userId: null`.
+  if (!authEnabled) {
+    const self = findUserBySubject(users, username);
+    return { all: true, teamIds: new Set(), roles: new Map(), userId: self ? self.id : null };
+  }
 
   // The env single-admin credential is the operator: full visibility.
   if (adminUsername && username === adminUsername) {
     return { all: true, teamIds: new Set(), roles: new Map(), userId: null };
   }
 
-  const user = users.find(u => (u.subject || '').toLowerCase() === String(username).toLowerCase());
+  const user = findUserBySubject(users, username);
   // A session subject that isn't a known user → fail closed (sees only what is
   // explicitly shared with no team, i.e. nothing). Per-user sessions only ever
   // issue for real users, so this is an edge case.
@@ -318,14 +344,14 @@ function canViewUsageStatistics(scope) {
 // admin/System-Admin indicator and the caller's per-team memberships+roles, so
 // the frontend can make rendering decisions without re-deriving them. The env
 // admin and System Admins are reported as `admin: true` (full visibility).
-function describeAuthz({ username, adminUsername, users = [], memberships = [] } = {}) {
-  const scope = computeScope({ username, adminUsername, users, memberships });
+function describeAuthz({ username, adminUsername, users = [], memberships = [], authEnabled = true } = {}) {
+  const scope = computeScope({ username, adminUsername, users, memberships, authEnabled });
   const envAdmin = !!(username && adminUsername && String(username) === String(adminUsername));
   const teams = [...scope.roles.entries()].map(([teamId, role]) => ({ teamId, role }));
   // Surface the caller's own GitHub handle (#1385) so the session knows who to
   // assign a parent tracker ticket to. Present only for a known user record;
   // the env single-admin credential has no user record and so carries none.
-  const self = users.find(u => (u.subject || '').toLowerCase() === String(username).toLowerCase());
+  const self = findUserBySubject(users, username);
   const githubHandle = (self && typeof self.githubHandle === 'string') ? self.githubHandle : '';
   // Per-user Agent-Chat transcript font size (#1437). Read the caller's own
   // stored preference; anyone without a set value — including the env
@@ -337,6 +363,10 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [] }
     admin: scope.all,                    // full visibility: env admin OR System Admin
     envAdmin,                            // env single-admin credential
     systemAdmin: scope.all && !envAdmin, // a non-env-admin with full visibility is a System-Admin user
+    // The mode the full visibility above was decided under (#1457), so a client
+    // can tell "this operator is a System Admin" from "this stack is not
+    // enforcing team scoping yet" instead of inferring one from the other.
+    authEnabled: !!authEnabled,
     userId: scope.userId,
     githubHandle,
     chatFontSize,

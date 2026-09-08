@@ -108,15 +108,73 @@ Agent Team on purpose — those metrics are per squad, not per tenant.
 On orchestrator startup (`main()`), after the legacy role migration:
 
 1. `bootstrapTeams()` — `ensureDefaultTeam()` (idempotent), then optionally
-   `ensureSystemAdmin()` from environment config (below).
+   `ensureSystemAdmin()` from environment config (below), and finally the
+   bootstrap admin's **`team-admin` membership of the Default Team** (#1457).
+   System Admin is a global flag rather than a membership, so without this step
+   the team that owns every adopted resource had no Team Admin at all. The
+   membership is planned, not asserted: `setMembership` is an upsert, so it is
+   created only when no membership for that (user, team) pair exists in *any*
+   role — an admin a human deliberately demoted is not re-promoted on each boot.
 2. `backfillResourceOwnership()` — stamps `teamId: "default"` onto any agent,
-   environment, or credential index entry that lacks one. Idempotent: a stamped
-   resource is skipped on subsequent boots, and the JSON is only rewritten when
-   it actually changes.
+   environment, credential index entry or **MCP server** (#1457) that lacks one.
+   Idempotent: a stamped resource is skipped on subsequent boots, and the JSON is
+   only rewritten when it actually changes.
 
 This means an operator already running a single-user stack keeps every existing
 agent, environment, and credential — they're simply adopted into the default
 team on the next restart.
+
+Two properties of the adoption pass are load-bearing:
+
+- **The predicate is `teamId === undefined`, not a falsy check.** A *personal*
+  credential (#1567) carries an explicit `teamId: null` plus a `userId` and is
+  deliberately not team-owned; adopting it would hand every System Admin a view
+  of credentials the personal tier exists to keep private.
+- **MCP servers were adopted but never stamped.** The scope filter has always
+  read `server.teamId`, while nothing ever wrote it — so every registered server
+  relied on the `|| "default"` collapse inside the predicate. They are now
+  stamped explicitly. Writing a `teamId` at *create* time is the ownership
+  phase's job (#2077/#2083); this pass only adopts what predates it, which is
+  why the team-delete guard needs no new check — no non-default team can own an
+  MCP server yet.
+
+The decisions above live in the pure `orchestrator/default-team-adoption.js`
+(`needsAdoption` / `planAdoption` / `planBootstrapMembership`), because
+`bootstrapTeams` and `backfillResourceOwnership` are not exported from
+`orchestrator.js` and cannot otherwise be reached by a test.
+
+### Single-user compatibility mode (`AUTH_ENABLED`, #1457)
+
+The model above ships live but *inert* on a single-operator stack: the only
+principal is the env admin, who gets `all: true`, so no list is ever filtered.
+`AUTH_ENABLED` makes that an explicit mode rather than an accident of there
+being one login.
+
+| Value | Mode | Behaviour |
+|---|---|---|
+| unset / `false` / `0` / `no` / `off` (**default**) | single-user compatibility | Whoever is signed in is the operator. `computeScope` short-circuits to the implicit System-Admin scope; every list filter and management gate is a no-op. An upgraded stack behaves exactly as before. |
+| `true` / `1` / `yes` / `on` | multi-user | Scope is computed from the caller's user record and memberships, as `scope.js` already does. |
+
+Four things worth knowing:
+
+- **Off is the default because this is a migration flag.** An operator who pulls
+  a new image must not find their console suddenly filtered; activation is a
+  deliberate act. Adoption (above) runs unconditionally, so flipping the flag on
+  later needs no migration step.
+- **It relaxes authorization, not authentication.** An unauthenticated request
+  still resolves to the empty scope, and the IAP auto-login gate (#1415) is
+  untouched: `isKnownPrincipal` reads `envAdmin`/`userId`, never `scope.all`, so
+  an unregistered IAP identity still falls through to the login form.
+- **The personal credential tier is not breached.** `ownsPersonalCredential` has
+  no `scope.all` bypass and keys on `userId`, which single-user mode still
+  resolves from the matching user record — so one human never sees another's
+  personal credential, in either mode.
+- **The one footgun is reported, not hidden.** Turning the flag *off* on a stack
+  that already has named users grants each of them full visibility. The console
+  logs a warning at boot naming how many non-admin records are affected.
+
+An unrecognised value is treated as off *and* logged as unrecognised — a typo
+must not silently start filtering the console.
 
 ### Seeding an initial System Admin
 

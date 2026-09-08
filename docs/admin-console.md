@@ -38,6 +38,7 @@ change without a redeploy:
 | `ADMIN_PASSWORD` | `admin` | Console login password |
 | `AUTH_SESSION_SECRET` | derived from the credentials | Signs session cookies. When unset, a stable secret is derived from the credentials, so sessions survive a server restart and are auto-invalidated when the password changes. Set an explicit value to rotate sessions independently. |
 | `AUTH_COOKIE_SECURE` | `false` | Set to `true` only when the console is served over HTTPS (adds the cookie's `Secure` attribute). |
+| `AUTH_ENABLED` | `false` | Single-user ⇄ multi-user mode (#1457). Off (the default) is **single-user compatibility**: whoever signs in is the operator, and the team scope filter is a no-op — an existing stack upgrades with no change in behaviour. `true` enforces multi-user scoping, so a caller sees only what their user record's team memberships allow. It gates *authorization* only; the login itself is unchanged in both modes. |
 
 > The defaults (`admin` / `admin`) are for first-boot local use only — change
 > them for any shared deployment. This is a placeholder until enterprise SSO
@@ -96,8 +97,12 @@ A System Admin can:
 
 The page is built on the `/api/admin/{teams,users,memberships}` endpoints
 (proxied to the orchestrator's teams store). Per-role *enforcement* of these
-actions — and per-resource visibility — arrive with later tickets (#302/#304);
-today any authenticated operator can manage teams.
+actions — and per-resource visibility — landed with #302/#304 (`scope.js`), and
+**whether it applies at all is now the `AUTH_ENABLED` mode** (#1457): with the
+flag off (the default) every authenticated principal is the implicit System
+Admin and can manage every team, which is the single-user behaviour this stack
+has always had; with it on, `canManageTeam` narrows management to the caller's
+own `team-admin` memberships.
 
 ## Agent Teams — the missing-role suggestion was removed (#1959)
 

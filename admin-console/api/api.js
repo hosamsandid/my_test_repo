@@ -66,6 +66,7 @@ const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const extractTemplate = require('./extract-template');
 const { runCopilot, isCopilotAborted, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
+const { httpPostStreamText } = require('./anthropic-transport');
 const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
@@ -1724,6 +1725,15 @@ function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000, 
     req.end();
   });
 }
+
+// Whole-turn wall-clock budget for one Flow Copilot request, kept just under the
+// GKE LB backend `timeoutSec: 300` (deploy/k8s/overlays/*/app/ingress.yaml): the
+// browser-facing NDJSON response stays open across up to 3 sequential LLM calls
+// plus validation, so this bounds that WHOLE response (not one call) — the route
+// hands each call only the budget still remaining, and the console closes its own
+// stream with a clean `{error:'deadline'}` card ~20s before the edge would return
+// a raw 504. A run that steadily streams tokens normally finishes long before it.
+const COPILOT_STREAM_DEADLINE_MS = 280000;
 
 /* ─── Health ────────────────────────────────────────────────────────── */
 
@@ -8481,24 +8491,43 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   };
   // A stopped or disconnected turn ends the SERVER-side work (#2087, D2).
   // Before this, `aborted` only suppressed delivery: `runCopilot` took no
-  // signal and `httpPostJson` accepted none, so a disconnect could leave up to
-  // MAX_REPAIR_ITERATIONS + 1 = 3 × 180 s of LLM work running, billed, and
-  // discarded. The client's Stop is an `AbortController` on its own fetch, so
-  // it arrives here as the same `res.on('close')` a tab close does — one
-  // cancellation path for both (AC9, AC14).
+  // signal and the transport accepted none, so a disconnect could leave up to
+  // MAX_REPAIR_ITERATIONS + 1 = 3 LLM calls running, billed, and discarded. The
+  // client's Stop is an `AbortController` on its own fetch, so it arrives here
+  // as the same `res.on('close')` a tab close does — one cancellation path for
+  // both (AC9, AC14); the signal is threaded into httpPostStreamText so the
+  // streamed request already in flight is destroyed, not merely ignored.
   const turnAbort = new AbortController();
 
-  // Whole-bundle generations are big (16k max_tokens) — a generous transport
-  // timeout, unlike the short one-shot suggestion calls.
+  // Whole-bundle generations are big (16k max_tokens) and can take minutes.
+  // STREAM the upstream call (httpPostStreamText forces stream:true) so bytes
+  // flow the whole time — the internal Anthropic proxy never sees one long
+  // silent non-streaming request, which is the second way a large flow used to
+  // 504 — and forward a throttled progress heartbeat carrying the running reply
+  // size so the composer shows real movement instead of a frozen "Generating…".
+  const turnStartedAt = Date.now();
   const callLlm = async (payload) => {
-    const result = await httpPostJson(url, headers, { model: target.model, ...payload }, 180000, turnAbort.signal);
+    let heartbeatAt = 0;
+    // The budget left for this call is the whole-turn ceiling minus what earlier
+    // calls (generation + any repairs) already spent — never below a small floor.
+    const deadlineMs = Math.max(5000, COPILOT_STREAM_DEADLINE_MS - (Date.now() - turnStartedAt));
+    const result = await httpPostStreamText(url, headers, { model: target.model, ...payload }, {
+      deadlineMs,
+      signal: turnAbort.signal,
+      onProgress: (chars) => {
+        const now = Date.now();
+        if (now - heartbeatAt < 750) return; // a status line needs no more than ~1/s
+        heartbeatAt = now;
+        emit({ ...lastPhaseEv, chars });
+      },
+    });
     if (result.error || result.status < 200 || result.status >= 300) {
       const detail = result.error
         || (result.body && (result.body.error?.message || result.body.error || result.body.message))
         || `HTTP ${result.status}`;
       throw new Error(`LLM request failed: ${detail}`);
     }
-    return extractMessageText(result.body);
+    return result.text;
   };
 
   // NDJSON stream plumbing — see POST /api/teams/stream for the rationale of
@@ -8525,13 +8554,22 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
     } catch { /* socket gone */ }
   }
 
+  // The last phase runCopilot announced, so the streaming heartbeat inside
+  // callLlm can re-emit it with the running reply size attached (carrying its
+  // `iteration` on a repair pass) without runCopilot needing to know it streams.
+  let lastPhaseEv = { type: 'phase', phase: 'generating' };
+  const onProgress = (ev) => {
+    if (ev && ev.type === 'phase' && ev.phase) lastPhaseEv = ev;
+    emit(ev);
+  };
+
   // Provenance first (§4.5): the NDJSON stream announces which provider + model
   // is paying for this turn before any generation begins.
   emit({ type: 'assist', ...assistMeta(target).assist });
 
   try {
     const out = await runCopilot({
-      bundle: body.bundle, messages, callLlm, onProgress: emit, signal: turnAbort.signal,
+      bundle: body.bundle, messages, callLlm, onProgress, signal: turnAbort.signal,
     });
     emit({ type: 'result', ...out, model: target.model, meta: assistMeta(target) });
   } catch (err) {

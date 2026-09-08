@@ -84,6 +84,23 @@ export function defaultOwnership({ isSysAdmin, adminTeamIds = [] }) {
   return { scope: 'team', teamId: adminTeamIds[0] || '', assignedTeamIds: [] };
 }
 
+// The initial ownership state for an EDIT form: the record's own tier, made
+// explicit. #2083 needs this because working environments and MCP servers are
+// edited in the same panel they are created in, so the control has to open
+// showing what the record already is — a create-shaped default would silently
+// re-tier a shared record on the next save. A legacy record (no `scope`) reads
+// as team-tier, exactly as the server's normalizer does.
+//
+// Falls back to `defaultOwnership` when there is no record (the create case), so
+// one call site serves both modes.
+export function ownershipFromRecord(record, { isSysAdmin, adminTeamIds = [] } = {}) {
+  if (!record || typeof record !== 'object') return defaultOwnership({ isSysAdmin, adminTeamIds });
+  const c = normalizeCredential(record);
+  if (c.scope === 'system') return { scope: 'system', teamId: '', assignedTeamIds: [...c.assignedTeamIds] };
+  if (c.scope === 'personal') return { scope: 'personal', teamId: '', assignedTeamIds: [], userId: c.userId };
+  return { scope: 'team', teamId: c.teamId || '', assignedTeamIds: [] };
+}
+
 // Reduce an ownership state to the minimal API payload for a create/patch body.
 export function ownershipPayload(own) {
   const o = own || {};

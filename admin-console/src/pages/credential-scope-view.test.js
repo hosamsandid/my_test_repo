@@ -9,6 +9,7 @@ import {
   creatableScopes,
   defaultOwnership,
   ownershipPayload,
+  ownershipFromRecord,
   canManageCredentialClient,
   canReassignCredentialClient,
   adminTeamIdsOf,
@@ -164,4 +165,53 @@ test('isAdminForTeam: sysadmin → any team; team-admin → only that team; #208
   assert.equal(isAdminForTeam({ admin: false, teams: [{ teamId: 'default', role: 'team-member' }] }, 'default'), false);
   assert.equal(isAdminForTeam(null, 'default'), false);
   assert.equal(isAdminForTeam({ admin: false, teams: [{ teamId: 'default', role: 'team-admin' }] }, ''), false);
+});
+
+// ── #2083: seeding the control from an existing record ──────────────────────
+//
+// Environments and MCP servers are edited in the panel they are created in, so
+// the ownership control must open showing what the record already IS. Getting
+// this wrong is not a cosmetic bug: a create-shaped default would post
+// `{scope:'team', teamId:'default'}` over a shared record on the next ordinary
+// save, silently un-sharing it — and the server would accept it from a System
+// Admin, because for them it is a legal re-tier.
+test('ownershipFromRecord: a shared record opens as shared, with its assignments', () => {
+  const own = ownershipFromRecord(
+    { id: 'env-shared', scope: 'system', assignedTeamIds: ['sdlc', 'billing'] },
+    { isSysAdmin: true },
+  );
+  assert.equal(own.scope, 'system');
+  assert.deepEqual(own.assignedTeamIds, ['sdlc', 'billing']);
+  // Round-trips through the payload builder without losing an assignment —
+  // which is the actual regression this guards.
+  assert.deepEqual(ownershipPayload(own), { scope: 'system', assignedTeamIds: ['sdlc', 'billing'] });
+});
+
+test('ownershipFromRecord: a team record and a LEGACY record open identically', () => {
+  const explicit = ownershipFromRecord({ scope: 'team', teamId: 'sdlc' }, { isSysAdmin: true });
+  const legacy = ownershipFromRecord({ teamId: 'sdlc' }, { isSysAdmin: true });
+  assert.deepEqual(explicit, { scope: 'team', teamId: 'sdlc', assignedTeamIds: [] });
+  assert.deepEqual(legacy, explicit, 'a pre-#2083 record must not read as anything new');
+});
+
+test('ownershipFromRecord: no record falls back to the create default, for both roles', () => {
+  assert.deepEqual(
+    ownershipFromRecord(null, { isSysAdmin: true }),
+    defaultOwnership({ isSysAdmin: true }),
+  );
+  assert.deepEqual(
+    ownershipFromRecord(undefined, { isSysAdmin: false, adminTeamIds: ['risk'] }),
+    defaultOwnership({ isSysAdmin: false, adminTeamIds: ['risk'] }),
+  );
+  // A non-object is a caller bug, not a tier — it must not crash the form.
+  assert.equal(ownershipFromRecord('env-sdlc', { isSysAdmin: true }).scope, 'team');
+});
+
+test('ownershipFromRecord: a personal record keeps its owner rather than being re-tiered', () => {
+  // Nothing creates a personal environment (the server refuses), but a personal
+  // CREDENTIAL uses this same control, and opening one as team-tier would offer
+  // the owner a save that hands their private credential to a team.
+  const own = ownershipFromRecord({ scope: 'personal', userId: 'u-ada' }, { isSysAdmin: false });
+  assert.equal(own.scope, 'personal');
+  assert.equal(own.userId, 'u-ada');
 });

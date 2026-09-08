@@ -212,9 +212,14 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // The team a successful creation produced, so the dialog can confirm it
   // instead of closing and navigating away with nothing said (#2053 D5/AC12).
   const [createdTeam, setCreatedTeam] = useState(null);
-  // A rail `Create team…` that arrived while a Copilot proposal was previewing.
-  // Only ever rendered while `proposal` is set, so it cannot go stale.
-  const [intentRefused, setIntentRefused] = useState(false);
+  // The proposal a rail `Create team…` was refused against. Scoped to that
+  // exact proposal object rather than a boolean: `proposal` CYCLES (every
+  // Copilot turn sets a new one, Apply and Discard clear it), so a write-once
+  // flag would latch and re-attach the refusal to the next proposal the user
+  // asked for — telling them to discard the very thing they are being asked to
+  // review. Comparing identity self-clears on both replacement and resolution,
+  // with no clearing effect to keep in sync.
+  const [refusedFor, setRefusedFor] = useState(null);
   const [addRoleOpen, setAddRoleOpen] = useState(false);
   const [stagesOpen, setStagesOpen] = useState(false);
   const [labelsOpen, setLabelsOpen] = useState(false);
@@ -551,9 +556,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       //
       // The refusal is a flag, not a message in `importError`: that channel is
       // cleared only on a scope change, so the sentence would outlive the
-      // proposal it describes and still be on screen after a Discard. Rendered
-      // under `proposal &&`, it disappears exactly when it stops being true.
-      if (proposal) setIntentRefused(true);
+      // proposal it describes and still be on screen after a Discard. Keyed on
+      // the proposal object, it disappears exactly when that one goes away.
+      if (proposal) setRefusedFor(proposal);
       else setMaterializeOpen(true);
     }
     if (pendingIntent === FLOW_INTENTS.editAsDraft) editAsDraft(false);
@@ -832,9 +837,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           imported or Copilot preview is not the draft, and carries its own
           banner. */}
       {/* A rail `Create team…` refused because a Copilot proposal is previewing
-          (#2053). Guarded on `proposal`, so resolving the proposal removes it
-          without any clearing logic — the state it describes IS its guard. */}
-      {isDraft && proposal && intentRefused && (
+          (#2053). Keyed on the proposal it was refused against, so resolving OR
+          replacing that proposal removes it without any clearing logic — the
+          state it describes IS its guard. */}
+      {isDraft && proposal && refusedFor === proposal && (
         <div style={{
           display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-3)',
           padding: 'var(--eb-space-2) var(--eb-space-3)', flexShrink: 0,

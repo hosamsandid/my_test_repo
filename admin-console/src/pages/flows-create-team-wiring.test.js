@@ -268,13 +268,16 @@ test('the rail intent honours the proposal rule the rail itself cannot see', () 
   // ALREADY open (so the scope-keyed panel does not remount and the proposal
   // survives) would otherwise create a real team from the design UNDERNEATH the
   // one on screen.
-  assert.match(canvas, /if \(proposal\) setIntentRefused\(true\)/);
+  assert.match(canvas, /if \(proposal\) setRefusedFor\(proposal\)/);
   assert.match(canvas, /else setMaterializeOpen\(true\)/);
-  // The refusal is guarded on `proposal`, so it cannot outlive the state it
-  // describes — `importError` is cleared only on a scope change, so the sentence
-  // would still be on screen after a Discard.
-  assert.match(canvas, /\{isDraft && proposal && intentRefused && \(/);
+  // The refusal cannot outlive the state it describes: `importError` is cleared
+  // only on a scope change, so the sentence would still be on screen after a
+  // Discard. Nor can it re-attach to a LATER proposal — `proposal` cycles, so a
+  // boolean would latch and tell the user to discard the very proposal they
+  // just asked for. Identity comparison self-clears on both paths.
+  assert.match(canvas, /\{isDraft && proposal && refusedFor === proposal && \(/);
   assert.doesNotMatch(canvas, /setImportError\(PROPOSAL_PENDING_REASON\)/);
+  assert.doesNotMatch(canvas, /useState\(false\);[^\n]*refus/i);
 });
 
 test('a successful creation clears the import preview on every close path', () => {

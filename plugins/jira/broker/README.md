@@ -33,20 +33,25 @@ poller's, in `broker-sdk/event-cursor.js` (`github-poller.js` is untouched).
 | `poller.js` | the poll loop; transport-agnostic (`deliver()` callback) |
 | `server.js` | wiring: `/healthz`, `/internal/teardown-scope`, `/cli/*`, the Phase-0 `/internal/spike-config` seam |
 
-## Phase 0 — the spike
+## Credentials (Phase 1 — the per-scope store)
 
-Proves the JQL/changelog/dedup core against a **real Jira Cloud sandbox** with
-zero platform change, via Option A (the content-free doorbell):
+Each granted team's Jira credential (`site-url` / `email` / `api-token`) is set
+by a **Team Admin** in the console — the **Credentials** section on the Jira card
+on the **Plugins** page. Values are written `0600` server-side
+(`/workspace/plugins/_credentials/jira/<teamId>.json`), never read back (preview
++ set-by/-at only), and the orchestrator pushes the per-scope map to this broker
+(`PUT /internal/scope-credentials`) on boot, on grant change and on save — no
+restart, no secret in code or env. `resolveCredential(scopeId)` reads only that
+pushed map; a granted-but-unconfigured team simply isn't polled.
 
-- **Credential**: one install-wide credential from the sidecar env —
-  `JIRA_SITE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`. The spike delivers them via a
-  gitignored `broker/.env.local` (`KEY=VALUE` lines): `server.js` loads it at
-  startup, and because the image's build context is the repo root the file is
-  baked into `aee-plugin-jira:latest` when you `make plugin-images`. That is the
-  **spike credential path** and it is fine for a sandbox — the file is gitignored
-  and the image is `localhost/` only. Phase 1 replaces it with the generic
-  per-scope credential store (no secret in the image, set per team in the
-  console). Delete `.env.local` and rebuild when you are done spiking.
+`broker/.env.local` (`KEY=VALUE`, gitignored) is now **spike diagnostics only** —
+`spike.js probe` / `raw` / `whoami-jira` load it so you can hit Jira by hand.
+`server.js` no longer reads it.
+
+## Phase 0 — the spike (superseded by the store above)
+
+Proved the JQL/changelog/dedup core against a real Jira Cloud sandbox with zero
+platform change, via Option A (the content-free doorbell).
 - **Watch + doorbell**: hand-wired. Create an `http` trigger on the target agent
   (any prompt that says "run `aee-jira inbox --consume` and act on the events"),
   then register the watch. Easiest is `spike.js`, which runs INSIDE the sidecar

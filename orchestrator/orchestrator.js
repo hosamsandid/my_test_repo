@@ -116,6 +116,11 @@ const { resolveScopeId } = require("./plugin-scope");
 const pluginRegistry = require("./plugin-registry");
 const pluginRuntime = require("./plugin-runtime");
 const { resolveScopeGithubCredentials, buildTeamFlowLabels } = require("./plugin-github-creds");
+// Generic per-scope plugin credential store + wiring (Jira plan §5). Makes the
+// manifest's `credentials[]` real: a Team Admin sets values in the console,
+// stored 0600, pushed to the broker server-side — no secret in code or env.
+const { PluginCredentialStore } = require("./plugin-credential-store");
+const { createPluginCredentialWiring } = require("./plugin-credential-routes");
 const { assertGranularityGrantable, defaultGranularity } = require("./plugin-manifest");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
@@ -2163,6 +2168,24 @@ function agentPluginDisplays(cfg) {
     .filter(Boolean);
 }
 
+// Generic per-scope plugin credential wiring (Jira plan §5). `listAgentIds` /
+// `loadAgentConfig` are hoisted function declarations, so this is safe at module
+// scope. `pushDeclaredScopeCredentials` / `handleCredentialRoute` are the only
+// things orchestrator.js calls.
+const pluginCredentialStore = new PluginCredentialStore();
+const pluginCredentialWiring = createPluginCredentialWiring({
+  listAgentIds: () => listAgentIds(),
+  loadAgentConfig: (id) => loadAgentConfig(id),
+  pluginRegistry,
+  pluginRuntime,
+  effectivePlugins,
+  pluginGrantFor,
+  resolveScopeId,
+  credentialStore: pluginCredentialStore,
+  log: (m) => console.warn(m),
+});
+const { pushDeclaredScopeCredentials } = pluginCredentialWiring;
+
 // Full plugin reconcile (#1547): sidecars first (so a newly-installed plugin
 // has something to attach), then grant-driven network attachment for every
 // installed plugin. Used at boot and after an install/uninstall — idempotent,
@@ -2184,6 +2207,11 @@ async function reconcilePluginsAndAttachments() {
   // to its broker (best-effort — the token never reaches a browser or an agent).
   try { await pushGithubIssueScopeCredentials(); } catch (err) {
     console.warn(`[Orchestrator] github-issues credential push failed: ${err.message}`);
+  }
+  // Generic per-scope plugin credentials (Jira plan §5): every OTHER installed
+  // plugin that declares `credentials[]` (jira today).
+  try { await pushDeclaredScopeCredentials(); } catch (err) {
+    console.warn(`[Orchestrator] declared plugin credential push failed: ${err.message}`);
   }
   return { sidecars, networks };
 }
@@ -8299,11 +8327,18 @@ class Orchestrator {
         .map((c) => c.id);
       results.push({ pluginId, ...(await pluginRuntime.reconcilePluginAttachments(pluginId, granted)) });
     }
-    // A github-issues grant/revoke changes which teams the broker must hold a
-    // token for — re-push its per-scope credential map (best-effort, #1633).
-    if (new Set(pluginIds).has("github-issues")) {
+    // A grant/revoke changes which teams a broker must hold a credential for —
+    // re-push the affected plugin's per-scope map (best-effort).
+    const changedPlugins = new Set(pluginIds);
+    if (changedPlugins.has("github-issues")) {
       try { await pushGithubIssueScopeCredentials(); } catch (err) {
         console.warn(`[Orchestrator] github-issues credential push failed: ${err.message}`);
+      }
+    }
+    for (const pid of changedPlugins) {
+      if (pid === "github-issues") continue;
+      try { await pushDeclaredScopeCredentials(pid); } catch (err) {
+        console.warn(`[Orchestrator] ${pid} credential push failed: ${err.message}`);
       }
     }
     return results;
@@ -13644,6 +13679,17 @@ async function main() {
           return sendJson(res, 500, { error: err.message });
         }
       })();
+      return;
+    }
+
+    // GET/PUT/DELETE /internal/plugins/:id/credentials[/:scopeId] — the generic
+    // per-scope plugin credential store (Jira plan §5). The console proxy applies
+    // the Team-Admin-of-that-scope gate (§D2); this layer enforces only that the
+    // scope is one the plugin is actually granted to. All logic in the module.
+    if (/^\/internal\/plugins\/[^/]+\/credentials(?:\/[^/]+)?$/.test((req.url || '').split('?')[0])) {
+      pluginCredentialWiring
+        .handleCredentialRoute(req, res, { sendJson, readBody })
+        .catch((err) => { if (!res.headersSent) sendJson(res, 500, { error: err.message }); });
       return;
     }
 

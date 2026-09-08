@@ -406,11 +406,21 @@ Each phase is independently mergeable and leaves `main` shippable.
   `plugin-images` Makefile line and the `jira-broker` CI job. `computeQueryWindow
   Minutes` (24h-capped catch-up widening) is the one design improvement over
   #1539's fixed poll window.
-- **Phase 1 — per-scope plugin credentials (§5, D1+D2).** The generic store +
-  push, Team-Admin-writable per scope, with set-by/set-at recorded. Retrofits
-  `github-issues` onto it and unblocks `test-mgmt`'s declared credential.
-  Independently valuable; nothing about it is Jira-specific, so it can land and
-  be reviewed on its own merits before any Jira code depends on it.
+- **Phase 1 — per-scope plugin credentials (§5, D1+D2). ✅ landed (Jira-wired).**
+  The generic store (`orchestrator/plugin-credential-store.js`, 0600 at
+  `/workspace/plugins/_credentials/<pluginId>/<scopeId>.json`, metadata-only
+  readback) + a generic push (`pushDeclaredScopeCredentials()` — walks every
+  installed plugin declaring `credentials[]`, resolves each granted team scope,
+  pushes via the existing `pushScopeCredentials` wire) + `GET/PUT/DELETE
+  /api/plugins/:id/credentials[/:scopeId]` (PUT/DELETE gated to Team Admin of
+  that scope, `setBy` forced to the caller) + a **Credentials** section on the
+  Plugins-page card. The jira broker's `resolveCredential` now reads the pushed
+  per-scope map (`PUT /internal/scope-credentials`) instead of env. **The
+  `github-issues` retrofit + `test-mgmt` unblock are deferred to a follow-up**
+  (they touch two working plugins for no Jira benefit — requester decision);
+  `github-issues` keeps its bespoke `pushGithubIssueScopeCredentials` and a
+  plugin is in exactly one path (it declares `credentials: []`, so the generic
+  walker skips it).
 - **Phase 2 — the `plugin-event` trigger (§4B).** Endpoint, trigger type, queue
   kind, prompt envelope, `TriggerForm` branch, event-log row. Repoint the Phase-0
   poller at it and drop the doorbell.

@@ -38,14 +38,8 @@ const {
 const { WatchStore } = require('./watch-store');
 const { InboxStore } = require('./inbox-store');
 const { JiraPoller } = require('./poller');
-const { parseEnvLocal, loadEnvLocal } = require('./env-local');
 
 const PLUGIN_ID = 'jira';
-
-// A gitignored broker/.env.local for local spike runs (KEY=VALUE lines). Never
-// present in a real deployment — creds arrive via env or, in Phase 1, the
-// per-scope store. spike.js loads the same file.
-loadEnvLocal(__dirname);
 
 const cfg = brokerConfig({
   fallbacks: {
@@ -64,17 +58,29 @@ const watchStore = new WatchStore({ stateDir: STATE_DIR });
 const inboxStore = new InboxStore({ stateDir: STATE_DIR, ttlSeconds: cfg.quota.ttlSeconds, maxObjects: cfg.quota.maxObjects });
 const audit = auditWriter(AUDIT_DIR, { retentionMs: 30 * 24 * 3600 * 1000 });
 
+// Per-scope Jira credential, pushed by the orchestrator (Phase 1, Jira plan §5):
+// `PUT /internal/scope-credentials` with `{ scopes: { <scopeId>: { "site-url",
+// "email", "api-token" } } }`. In-memory only (the pattern github-issues uses);
+// the orchestrator re-pushes on boot / grant change / credential save. The token
+// never touches disk here and never reaches an agent.
+const scopeCredentials = new Map(); // scopeId -> { site-url, email, api-token }
+
 function writeAudit(scopeId, actor, subcommand, outcome, detail) {
   try {
     audit.write({ ts: new Date().toISOString(), pluginId: PLUGIN_ID, scopeId, agentId: actor || scopeId, subcommand, outcome, detail });
   } catch { /* best-effort */ }
 }
 
-// ── Phase-0 credential resolution: one install-wide credential from env ──────
-function resolveCredential(/* scopeId */) {
-  const siteUrl = process.env.JIRA_SITE_URL || process.env.JIRA_SITE || '';
-  const email = process.env.JIRA_EMAIL || '';
-  const apiToken = process.env.JIRA_API_TOKEN || '';
+// Resolve a scope's Jira credential from the orchestrator-pushed per-scope map.
+// Returns null when the scope has no entry or an incomplete one (the poller
+// then logs "no usable credential" and skips it — a granted-but-unconfigured
+// team is a normal transient state, not an error).
+function resolveCredential(scopeId) {
+  const v = scopeCredentials.get(String(scopeId));
+  if (!v) return null;
+  const siteUrl = (v['site-url'] || '').trim();
+  const email = (v.email || '').trim();
+  const apiToken = (v['api-token'] || '').trim();
   if (!siteUrl || !email || !apiToken) return null;
   return { siteUrl, email, apiToken };
 }
@@ -175,17 +181,38 @@ async function handleSpikeConfig(req, res) {
 
 const handleHealth = healthEndpoint(async () => ({
   scopes: watchStore.listScopes().length,
-  credentialConfigured: !!resolveCredential(),
+  scopesWithCredential: [...scopeCredentials.keys()].filter((sid) => !!resolveCredential(sid)).length,
 }));
-const handleTeardown = teardownScopeEndpoint((scopeId) => ({
-  reaped: watchStore.teardown(scopeId) + inboxStore.teardown(scopeId),
-}), { secret: SIGNING_SECRET });
+const handleTeardown = teardownScopeEndpoint((scopeId) => {
+  scopeCredentials.delete(String(scopeId));
+  return { reaped: watchStore.teardown(scopeId) + inboxStore.teardown(scopeId) };
+}, { secret: SIGNING_SECRET });
+
+// PUT /internal/scope-credentials — the orchestrator's per-scope credential push
+// (Jira plan §5). Bearer-authed with any valid jira scope token, like every
+// other internal push. Replaces the whole map so a revoked team disappears.
+async function handleScopeCredentials(req, res) {
+  const v = verifyScopeToken(req, SIGNING_SECRET);
+  if (!v || v.pluginId !== PLUGIN_ID) return sendJson(res, 401, { error: 'unauthorized' });
+  const body = parseJson(await readBody(req));
+  const scopes = body && body.scopes && typeof body.scopes === 'object' ? body.scopes : {};
+  scopeCredentials.clear();
+  for (const [scopeId, values] of Object.entries(scopes)) {
+    if (values && typeof values === 'object') scopeCredentials.set(String(scopeId), values);
+  }
+  return sendJson(res, 200, {
+    ok: true,
+    scopes: scopeCredentials.size,
+    usable: [...scopeCredentials.keys()].filter((sid) => !!resolveCredential(sid)).length,
+  });
+}
 
 async function handleRequest(req, res) {
   const urlPath = (req.url || '').split('?')[0];
 
   if (req.method === 'GET' && urlPath === '/healthz') return void (await handleHealth(req, res));
   if (req.method === 'POST' && urlPath === '/internal/teardown-scope') return void (await handleTeardown(req, res));
+  if (req.method === 'PUT' && urlPath === '/internal/scope-credentials') return void (await handleScopeCredentials(req, res));
   if (req.method === 'PUT' && urlPath === '/internal/spike-config') return void (await handleSpikeConfig(req, res));
 
   // A read-only status endpoint for the spike operator: what the poller sees.
@@ -201,6 +228,9 @@ async function handleRequest(req, res) {
       inbox: inboxStore.count(v.scopeId),
       setBy: conf.setBy,
       setAt: conf.setAt,
+      credential: resolveCredential(v.scopeId)
+        ? { configured: true, site: resolveCredential(v.scopeId).siteUrl }
+        : { configured: false },
     });
   }
 
@@ -224,4 +254,4 @@ if (require.main === module) {
   poller.start();
 }
 
-module.exports = { handleRequest, httpServer, watchStore, inboxStore, poller, resolveCredential, deliver, parseEnvLocal, PLUGIN_ID, SIGNING_SECRET };
+module.exports = { handleRequest, httpServer, watchStore, inboxStore, poller, resolveCredential, deliver, scopeCredentials, PLUGIN_ID, SIGNING_SECRET };

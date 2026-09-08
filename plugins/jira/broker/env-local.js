@@ -1,14 +1,15 @@
 'use strict';
 
-// ─── jira broker: gitignored broker/.env.local loader (Phase-0 spike) ────────
+// ─── jira broker: gitignored broker/.env.local loader (spike diagnostics) ────
 //
-// server.js and spike.js are separate processes; both need the sandbox Jira
-// credential, so the loader lives here rather than inline in one of them.
-// Delete this when Phase 1's per-scope credential store lands.
+// Since Phase 1 the real credential is the orchestrator-pushed per-scope map
+// (server.js), NOT env. This loader is now only for `spike.js` — its `probe` /
+// `raw` / `whoami-jira` commands hit Jira by hand and read the credential from
+// `broker/.env.local` (`KEY=VALUE`, gitignored).
 //
-// `parseEnvLocal` is pure (unit-tested in server.test.js): it skips blank lines
-// and `#` comments, strips an inline `# comment` after an UNQUOTED value (the
-// thing that bit the first smoke test), honours single/double quotes and an
+// `parseEnvLocal` is pure (unit-tested in env-local.test.js): it skips blank
+// lines and `#` comments, strips an inline `# comment` after an UNQUOTED value
+// (the thing that bit the first smoke test), honours single/double quotes and an
 // optional `export ` prefix.
 
 const fs = require('fs');

@@ -90,9 +90,34 @@ test('inbox: peek then consume, scoped to the token', async () => {
   } finally { srv.close(); }
 });
 
-test('teardown-scope reaps one scope\'s watch + inbox, bearer-authed', async () => {
+test('scope-credentials: the orchestrator push populates the per-scope map; resolveCredential reads it', async () => {
+  const srv = await listen();
+  try {
+    assert.equal((await call(srv, 'PUT', '/internal/scope-credentials')).status, 401); // bearer required
+    const r = await call(srv, 'PUT', '/internal/scope-credentials', {
+      token: TOKEN,
+      body: { scopes: {
+        'team-1': { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' },
+        'team-2': { 'site-url': 'acme' }, // incomplete
+      } },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.scopes, 2);
+    assert.equal(r.body.usable, 1); // only team-1 is complete
+    assert.deepEqual(broker.resolveCredential('team-1'), { siteUrl: 'acme', email: 'a@b.c', apiToken: 'tok' });
+    assert.equal(broker.resolveCredential('team-2'), null); // incomplete → not usable
+    assert.equal(broker.resolveCredential('team-9'), null); // unknown scope
+
+    // a re-push replaces the whole map (a revoked team disappears)
+    await call(srv, 'PUT', '/internal/scope-credentials', { token: OTHER, body: { scopes: {} } });
+    assert.equal(broker.resolveCredential('team-1'), null);
+  } finally { srv.close(); }
+});
+
+test('teardown-scope reaps one scope\'s watch + inbox + credential, bearer-authed', async () => {
   broker.watchStore.setConfig('team-2', { watches: [{ projectKey: 'X' }] });
   broker.inboxStore.append('team-2', { id: 'X-1:1', issueKey: 'X-1' });
+  broker.scopeCredentials.set('team-2', { 'site-url': 'a', email: 'b', 'api-token': 'c' });
   const srv = await listen();
   try {
     assert.equal((await call(srv, 'POST', '/internal/teardown-scope')).status, 401);
@@ -101,5 +126,6 @@ test('teardown-scope reaps one scope\'s watch + inbox, bearer-authed', async () 
     assert.equal(r.body.ok, true);
     assert.deepEqual(broker.watchStore.loadConfig('team-2').watches, []);
     assert.equal(broker.inboxStore.count('team-2'), 0);
+    assert.equal(broker.scopeCredentials.has('team-2'), false);
   } finally { srv.close(); }
 });

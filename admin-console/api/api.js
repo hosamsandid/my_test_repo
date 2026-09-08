@@ -102,6 +102,7 @@ const {
 const { resolveSpecKitCommand, hasUnresolvedPlaceholders } = require('./speckit-content');
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
 const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole } = require('./plugin-ui-viewer');
+const pluginCredView = require('./plugin-credential-view');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -8261,6 +8262,12 @@ app.delete('/api/plugins/:id', heavyLimiter, async (req, res) => {
   } catch (err) {
     return res.status(500).json({ error: `uninstall failed: ${err.message}` });
   }
+  // Per-scope plugin credentials (Jira plan §5) are platform state beside the
+  // registry, not inside the plugin dir — reap them here too, best-effort, so a
+  // reinstall does not silently resurrect a team's old vendor token.
+  try {
+    fs.rmSync(path.join(REGISTRY_PLUGINS_DIR, '_credentials', id), { recursive: true, force: true });
+  } catch { /* best effort */ }
   // Existing grants are deliberately LEFT ALONE: uninstalling is an operator
   // action on the registry, not a mass revoke. The orchestrator's reconcile
   // stops the orphaned sidecar, and a grant with no installed manifest seeds
@@ -8334,6 +8341,66 @@ app.get('/api/plugins/:id/scopes', apiLimiter, async (req, res) => {
   const all = deriveScopeList(granted.body.grantedAgents, granted.body.directory);
   res.json({ pluginId: id, scopes: visibleScopes(getScope(req), all) });
 });
+
+// ─── per-scope plugin credentials (Jira plan §5, D1/D2) ─────────────────────
+// GET  /api/plugins/:id/credentials              — metadata (never raw values) for
+//       every granted team the CALLER can see. Any authenticated user.
+// PUT  /api/plugins/:id/credentials/:scopeId      — { values } → set. Team Admin of
+//       that team (scopeId IS the team id for a `scopes:["team"]` plugin).
+// DELETE /api/plugins/:id/credentials/:scopeId    — clear. Same gate.
+// `setBy` is forced to the caller server-side (a vendor token carries that human's
+// permissions, so the record must name them — never trust a client value).
+app.get('/api/plugins/:id/credentials', apiLimiter, async (req, res) => {
+  const id = req.params.id;
+  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+  let r;
+  try {
+    r = await orchestratorGetJson(`/internal/plugins/${encodeURIComponent(id)}/credentials`);
+  } catch (err) {
+    return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+  if (r.status === 404) return res.status(404).json({ error: `plugin '${id}' is not installed` });
+  if (r.status === 400) return res.status(400).json(r.body || { error: 'bad request' });
+  if (!r.ok || !r.body) return res.status(502).json({ error: 'could not resolve plugin credentials' });
+  const scope = getScope(req);
+  const scopes = pluginCredView.visibleScopes(r.body.scopes, (t) => visibleTeam(scope, t))
+    .map((s) => ({ ...s, canManage: canManageTeam(scope, s.scopeId) }));
+  res.json({ pluginId: id, credentials: r.body.credentials || [], scopes });
+});
+
+async function proxyPluginCredentialWrite(req, res, method) {
+  const id = req.params.id;
+  const scopeId = req.params.scopeId;
+  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+  const gate = pluginCredView.assertCanWriteScope(scopeId, (t) => canManageTeam(getScope(req), t));
+  if (!gate.ok) return res.status(gate.status).json({ error: gate.error });
+
+  // Only declared keys reach the orchestrator; it re-validates and re-enforces
+  // the grant. `setBy` is the caller's subject, always.
+  let declaredKeys = [];
+  try {
+    const meta = await orchestratorGetJson(`/internal/plugins/${encodeURIComponent(id)}/credentials`);
+    if (meta.ok && meta.body && Array.isArray(meta.body.credentials)) declaredKeys = meta.body.credentials.map((c) => c.key);
+  } catch { /* fall through — orchestrator re-validates anyway */ }
+  const outBody = method === 'PUT'
+    ? { ...pluginCredView.shapePutBody(req.body, declaredKeys), setBy: (req.user && req.user.sub) || 'unknown' }
+    : {};
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  let resp;
+  try {
+    resp = await fetch(
+      `${orchestratorUrl}/internal/plugins/${encodeURIComponent(id)}/credentials/${encodeURIComponent(scopeId)}`,
+      { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(outBody) },
+    );
+  } catch (err) {
+    return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+  const body = await resp.json().catch(() => ({}));
+  return res.status(resp.status).json(body);
+}
+app.put('/api/plugins/:id/credentials/:scopeId', apiLimiter, (req, res) => proxyPluginCredentialWrite(req, res, 'PUT'));
+app.delete('/api/plugins/:id/credentials/:scopeId', apiLimiter, (req, res) => proxyPluginCredentialWrite(req, res, 'DELETE'));
 
 // ALL /plugins/:id/ui and /plugins/:id/ui/* — the UI proxy. NOT under /api, so
 // the session gate is applied explicitly (a session-less request is refused

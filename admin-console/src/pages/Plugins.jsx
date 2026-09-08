@@ -5,6 +5,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
 import PluginTeamAssign from '../components/PluginTeamAssign';
+import PluginCredentials from '../components/PluginCredentials';
 import { useHelpSubject } from '../context/HelperChatContext';
 import { OVERLAY_PLUGIN_INSTALL, OVERLAY_PLUGIN_UNINSTALL } from '../context/page-help-view.js';
 import { pluginRegistryRow } from './plugin-registry-view.js';
@@ -236,6 +237,13 @@ function PluginCard({ row, onInstall, onUninstall, busy, teams, stackRuntime, on
           stackRuntime={stackRuntime}
           onChanged={onAssignChanged}
         />
+      )}
+
+      {/* Per-team credentials (Jira plan §5) — installed cards that declare
+          `credentials[]`. A Team Admin of a granted team fills the fields; the
+          value is stored 0600 server-side and pushed to the broker on save. */}
+      {row.installed && row.credentialKeys.length > 0 && (
+        <PluginCredentials row={row} />
       )}
     </div>
   );

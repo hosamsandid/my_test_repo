@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 288 483 of 340 000 — 84.8% used, 51 517 left — against
+// neighbours) at 289 378 of 340 000 — 85.1% used, 50 622 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
@@ -167,7 +167,11 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // + `glossary.md`; re-measured on the merge with #2052's #2060 walkthrough fix
 // already in, that took the crown from 286 374 to **288 483** (84.8%, +2 109 —
 // stated as one total measured together rather than a per-file sum, since all four
-// grow the same crown). Re-measure rather than trust this comment —
+// grow the same crown). #2057 then made a direct hand-off read as
+// a consumer on the two read-only wiring surfaces, which voided `agent-chat.md`'s
+// `## Outcomes` claim that "the label is what wakes the next agent" (the same
+// claim the panel was making): +895 for the two-mechanism table, and it lands in
+// full because `create.md` names `/chats` as a `seeAlso` neighbour — **289 378** (85.1%). Re-measure rather than trust this comment —
 // measureWorstCaseSystemPrompt() sweeps every context and returns which one
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.

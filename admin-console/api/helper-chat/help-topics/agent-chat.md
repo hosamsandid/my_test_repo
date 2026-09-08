@@ -400,10 +400,21 @@ A loop holds the workspace for its whole duration, not between iterations:
 ## Outcomes — what the agent signals when a run ends
 
 An **outcome** is the signal a run ends with: a *condition* in plain language
-("the review found blocking problems") plus the *label* it emits. The label is
-what wakes the next agent, so outcomes are one half of the
-**Outcome → Label → Consumer** hand-off; the other half is which teammate
-subscribes to that label.
+("the review found blocking problems") plus what the agent does about it.
+
+There are **two ways** an outcome reaches a teammate:
+
+| | How the next agent learns about the work |
+|---|---|
+| **Label** | The outcome sets a label, and whichever teammate subscribes to that label wakes up — the **Outcome → Label → Consumer** hand-off. The outcome is one half of it; the other half is who subscribes. |
+| **Direct hand-off** | The outcome names the teammate itself, and the platform wakes them — no label, no issue, no pull request, nothing on GitHub. The row reads *wakes &lt;agent&gt; (direct hand-off)*, and its action reads *hand off directly to &lt;agent&gt;*. |
+
+So a label is **not** the only thing that wakes the next agent, and an outcome
+carrying only a direct hand-off is fully wired — the [Flows](/flows) topic
+describes both arrows on the canvas. An outcome may also carry both at once, and
+then both consumers are listed. A hand-off whose target is not an agent of this
+flow, or whose target has its hand-off input switched off, is called out as such
+instead: nothing is woken, and the Flow Editor's lint list explains why.
 
 Two modes:
 

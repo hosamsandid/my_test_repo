@@ -188,3 +188,29 @@ test('#2031: consumerCandidates excludes the actor pseudo-nodes, not just humans
   // A draft's roles carry no `kind` at all — they must still be candidates.
   assert.deepEqual(consumerCandidates({ id: 'ba' }, [{ id: 'dev', displayName: 'D' }]).map(c => c.id), ['dev']);
 });
+
+/* ── the direct hand-off carries no unwire affordance (#2057 D2) ───────── */
+
+// A hand-off is NOT one of the row's `wired` chips, and this is a decision, not
+// an omission: each of those chips carries a `✕` that unwires a listener and
+// applies immediately, while a direct hand-off has no listener to unwire (its
+// consumer's listener is derived and disappears once the last hand-off is gone)
+// — it is removed by editing the action, which is save-gated content. Two
+// adjacent `✕` with different commit semantics is what this keeps out.
+const wakeOpt = { id: 'ship', actions: [{ type: 'wakeAgent', to: 'dev', note: 'ready' }] };
+
+test('#2057 D2: a hand-off yields no unwire spec and no wired chip', () => {
+  assert.equal(unwireConsumerSpec(wakeOpt, node, peers[1]), null);
+  assert.deepEqual(currentConsumers(wakeOpt, node, peers), []);
+});
+
+test('#2057 D2: a hand-off row is not offered the label/channel consumer picker', () => {
+  // `wireConsumerSpec` drives the "— pick an agent —" select, which wires a
+  // LISTENER; the hand-off's own target picker lives on the action row.
+  assert.equal(wireConsumerSpec(wakeOpt), null);
+  // A row carrying both keeps the label picker for the label half only.
+  assert.deepEqual(
+    wireConsumerSpec({ id: 'm', actions: [{ type: 'setLabel', label: 'ready' }, { type: 'wakeAgent', to: 'dev' }] }),
+    { kind: 'label', label: 'ready' },
+  );
+});

@@ -892,6 +892,12 @@ const TOPIC_CONTENT = [
       'Stop always works',
       'Maintenance Mode',
       'Outcome → Label → Consumer',
+      // #2057 — a label is NOT the only way an outcome reaches a teammate. The
+      // chapter said it was, which is exactly the claim the Outcomes tab was
+      // making in the product; both are now qualified, and a reword must not
+      // quietly restore the single-mechanism reading.
+      'two ways',
+      'direct hand-off',
       'exactly one',
       'any of',
       'read-only on purpose',

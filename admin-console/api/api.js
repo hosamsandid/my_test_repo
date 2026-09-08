@@ -30,6 +30,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
         resolveAgentTenant } = require('./scope');
+const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
 const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
 const { normalizeDiscoveredModels } = require('./model-discovery');
@@ -201,6 +202,10 @@ const DEFAULT_TEAM_ID = 'default';
 // The env single-admin login (#276); its session subject is this value and it
 // is treated as the operator (full visibility) by the scope filter (#302).
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
+// Single-user ⇄ multi-user mode (#1457). Off by default: an existing stack that
+// upgrades keeps today's behaviour (every principal is the implicit System
+// Admin) until an operator activates multi-user mode explicitly. See auth-mode.js.
+const AUTH_ENABLED = resolveAuthEnabled(process.env);
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 
@@ -332,6 +337,7 @@ auth.registerAuthRoutes(app, {
     adminUsername: ADMIN_USERNAME,
     users: readJsonFile(USERS_INDEX, []),
     memberships: readJsonFile(MEMBERSHIPS_INDEX, []),
+    authEnabled: AUTH_ENABLED,
   }),
 });
 app.use('/api', auth.gate);
@@ -814,6 +820,7 @@ function getScope(req) {
     adminUsername: ADMIN_USERNAME,
     users: readJsonFile(USERS_INDEX, []),
     memberships: readJsonFile(MEMBERSHIPS_INDEX, []),
+    authEnabled: AUTH_ENABLED,
   });
 }
 
@@ -18243,6 +18250,14 @@ function sweepExportStaging() {
 
 app.listen(4000, '0.0.0.0', () => {
   console.log('[Admin] Listening on :4000');
+  // State the authorization mode explicitly (#1457) — and, in single-user mode,
+  // warn when named user records exist, since each of them signs in with full
+  // visibility while the flag is off.
+  console.log(`[Admin] ${authModeLogLine(process.env)}`);
+  try {
+    const warning = singleUserElevationWarning(readJsonFile(USERS_INDEX, []), process.env);
+    if (warning) console.warn(`[Admin] ${warning}`);
+  } catch (err) { console.error(`[Admin] Authorization mode check failed: ${err.message}`); }
   try { backfillSkillManifests(); } catch (err) { console.error(`[Admin] Skill manifest backfill failed: ${err.message}`); }
   try { sweepExportStaging(); } catch (err) { console.error(`[Admin] Export staging sweep failed: ${err.message}`); }
   try { backfillDraftAccess(); } catch (err) { console.error(`[Admin] Draft access backfill failed: ${err.message}`); }

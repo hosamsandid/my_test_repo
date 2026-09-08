@@ -9,6 +9,7 @@ const fs = require("fs");
 const path = require("path");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
 const { resolveAgentTenant, planTenantBackfill } = require("./agent-tenant");
+const { needsAdoption, planAdoption, planBootstrapMembership } = require("./default-team-adoption");
 const { makeSkillSourceResolver, parseSkillDescription } = require("./skill-source");
 const {
   normalizeKnowledgeStore,
@@ -1026,12 +1027,26 @@ function bootstrapTeams() {
   const subject = process.env.BOOTSTRAP_SYSTEM_ADMIN_SUBJECT;
   if (subject) {
     try {
-      teamsStore.ensureSystemAdmin({
+      const admin = teamsStore.ensureSystemAdmin({
         subject,
         email: process.env.BOOTSTRAP_SYSTEM_ADMIN_EMAIL,
         displayName: process.env.BOOTSTRAP_SYSTEM_ADMIN_NAME,
       });
       console.log(`[Orchestrator] Ensured System Admin for subject '${subject}'`);
+      // #1457: System Admin is a global flag, not a membership, so the bootstrap
+      // admin was left with no *Team* role at all — and the Default Team it
+      // owns everything in therefore had no Team Admin. Give it one. The plan is
+      // empty once any membership for the pair exists, in any role, so a human
+      // who deliberately demoted this admin is not re-promoted on every boot.
+      const membership = planBootstrapMembership({
+        userId: admin && admin.id,
+        memberships: teamsStore.listMemberships({ teamId: DEFAULT_TEAM_ID }),
+        teamId: DEFAULT_TEAM_ID,
+      });
+      if (membership) {
+        teamsStore.setMembership(membership);
+        console.log(`[Orchestrator] Made System Admin '${subject}' ${membership.role} of the Default Team`);
+      }
     } catch (err) {
       console.error(`[Orchestrator] System Admin bootstrap failed: ${err.message}`);
     }
@@ -1096,18 +1111,38 @@ function backfillResourceOwnership() {
     try {
       const list = JSON.parse(fs.readFileSync(idx, "utf8"));
       if (!Array.isArray(list)) continue;
-      let changed = false;
-      for (const entry of list) {
-        if (entry && typeof entry === "object" && entry.teamId === undefined) {
-          entry.teamId = DEFAULT_TEAM_ID;
-          changed = true;
-        }
-      }
-      if (changed) {
+      // planAdoption's `teamId === undefined` predicate is what keeps the
+      // personal credential tier (#1567) out: a personal entry carries an
+      // explicit `teamId: null` and must NOT be adopted into a team.
+      const pending = planAdoption(list.map((record, key) => ({ key, record })));
+      if (pending.length > 0) {
+        for (const { record } of pending) record.teamId = DEFAULT_TEAM_ID;
         fs.writeFileSync(idx, JSON.stringify(list, null, 2));
-        stamped += list.length;
+        stamped += pending.length;
       }
     } catch { /* skip unparsable index */ }
+  }
+
+  // MCP servers (#1457). The scope filter has always read `server.teamId`
+  // (api.js `visibleTeam(scope, s.teamId)`) but nothing ever wrote it, so every
+  // registered server relied on the `|| 'default'` collapse inside the
+  // predicate. Adopt them explicitly, so the Default Team's ownership is a fact
+  // on disk rather than a fallback. Writing a `teamId` at *create* time belongs
+  // to the ownership phase (#2077/#2083) — this pass only adopts what predates it.
+  if (fs.existsSync(MCP_SERVERS_DIR)) {
+    for (const name of fs.readdirSync(MCP_SERVERS_DIR)) {
+      if (name.startsWith("_")) continue; // credential/key dirs, not servers
+      const p = path.join(MCP_SERVERS_DIR, name, "server.json");
+      if (!fs.existsSync(p)) continue;
+      try {
+        const server = JSON.parse(fs.readFileSync(p, "utf8"));
+        if (needsAdoption(server)) {
+          server.teamId = DEFAULT_TEAM_ID;
+          fs.writeFileSync(p, JSON.stringify(server, null, 2));
+          stamped++;
+        }
+      } catch { /* skip unparsable server */ }
+    }
   }
 
   if (stamped > 0) {

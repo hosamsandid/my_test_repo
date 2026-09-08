@@ -399,15 +399,21 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **294,009 — 86.5% used,
-45,991 left** (#2067 made a repository attachable to a single agent, outside its Working
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **296,581 — 87.2% used,
+43,419 left** (#2067 made a repository attachable to a single agent, outside its Working
 Environment, and documented it in the two places that own the concept: `agent-chat.md`, where the
 two surfaces live — a `create.md` neighbour, so it lands on this crown in full — and the
-every-context `docs/working-environments.md` + `admin-console.md`; +4,631 measured as one total
-rather than a per-file sum, since all three grow the same crown. Worth carrying forward: a feature
-whose surfaces sit on `/chats` pays this crown twice, once through the `seeAlso` link and once
-through whichever `CORPUS_FILES` reference doc has to agree with it. It stood at 289,378 after
-#2057, which made a direct hand-off read as a consumer on the Outcomes and Routing
+every-context `docs/working-environments.md` + `admin-console.md`. Two things worth carrying
+forward: a feature whose surfaces sit on `/chats` pays this crown twice, once through the
+`seeAlso` link and once through whichever `CORPUS_FILES` reference doc has to agree with it; and
+when two PRs append to this running figure in parallel, the auto-merge keeps both entries and
+leaves one number with two successors — re-chain them in ticket order and re-measure on the
+merge, which is why the figure above is one total rather than a per-PR sum.
+It stood at 291,950 after #2065, which gave a human chat message a named badge and a
+viewer-dependent side, needing a chapter `agent-chat.md` had no equivalent of — who wrote a
+message, why the badge and the side deliberately answer different questions, and what the neutral
+icon on un-attributable history means: +2,572, landing in full for the same `seeAlso` reason.
+It stood at 289,378 after #2057, which made a direct hand-off read as a consumer on the Outcomes and Routing
 surfaces, which voided `agent-chat.md`'s `## Outcomes` claim that a label is what wakes the next
 agent — the same claim the panel itself was making: +895 for the two-mechanism table, landing in
 full because `create.md` names `/chats` as a neighbour. It stood at 288,483 after #2053, which

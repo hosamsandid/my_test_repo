@@ -136,6 +136,13 @@ type ChatMessage = {
   sender: 'user' | 'agent';
   ts: number;                 // origin_server_ts
   body: string;               // raw markdown
+  // #2065 — WHICH human wrote it. Stamped server-side onto the Matrix content
+  // under `io.aee.author` (never from the request body), absent on every
+  // pre-#2065 message and on anything a third-party client posted. Identity
+  // only: the *name* is resolved at render from the user directory, so a
+  // rename shows on old messages. `subject` rides along because the env
+  // single-admin credential has no user record and so no `userId`.
+  'io.aee.author'?: { userId?: string; subject?: string } | null;
 };
 
 type LogEvent = {

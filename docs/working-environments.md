@@ -38,6 +38,35 @@ have no repository to act on, so they are unavailable for a repo-less team. Add 
 repository to the environment if the team needs them. The Create team dialog
 shows an inline note when the selected environment has no repository.
 
+## Agent-scoped repositories
+
+A repository on the environment reaches **every** agent in it. When only one
+agent needs one more — a reference codebase, a second service, a documentation
+repo — attach it to that agent instead of widening the environment: the
+**repositories** button in the Agent Chat **Workspace** view, or the same panel
+in the agent's **Settings** tab next to *Sync repositories*.
+
+The configuration is this page's repository card, field for field. What differs
+is the scope and what follows from it:
+
+- The environment record is **not** modified, and no sibling agent gains the
+  repository, has its prompt changed, or is restarted. A later *Sync all agents*
+  neither propagates it to siblings nor removes it from the agent that has it.
+- It is **cloned into the same `./<repo-name>/`** path an environment repository
+  would use, is listed in that agent's `CLAUDE.md` the same way (read-only
+  annotation included), and survives a container respawn and a workspace
+  re-seed — it is re-cloned like an environment repository.
+- It carries **no credential of its own**: the clone uses the existing SSH-key
+  registry or this environment's GitHub token. A repository neither can reach is
+  refused before any clone is attempted, naming which credential was tried.
+- Only a user who may **manage** the agent can attach or remove one; a chat-only
+  user sees the list but no action.
+- Removing it **deletes the working copy**, and the confirmation names the
+  uncommitted changes and unpushed commits it would take with it.
+
+Attaching is what an environment repository is not: a per-agent decision. If
+several agents need the repository, put it on the environment.
+
 ## Agent toolchain
 
 Every agent container runs one image. The default — `as-agent:latest` — carries

@@ -171,7 +171,17 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // a consumer on the two read-only wiring surfaces, which voided `agent-chat.md`'s
 // `## Outcomes` claim that "the label is what wakes the next agent" (the same
 // claim the panel was making): +895 for the two-mechanism table, and it lands in
-// full because `create.md` names `/chats` as a `seeAlso` neighbour — **289 378** (85.1%). Re-measure rather than trust this comment —
+// full because `create.md` names `/chats` as a `seeAlso` neighbour — **289 378** (85.1%).
+// #2067 then made a repository attachable to a single agent, which is documented
+// in the two places that own the concept: `agent-chat.md` (the surfaces live
+// there, +2 555 — a `create.md` `seeAlso` neighbour, so it lands on this crown in
+// full) and the every-context `docs/working-environments.md` + `admin-console.md`
+// (+2 076 together, both being in CORPUS_FILES). Measured as one total rather
+// than a per-file sum, since all three grow the same crown: **294 009** (86.5%).
+// Worth noting for the next feature ticket: a feature whose surfaces sit on
+// `/chats` pays the crown twice over, once through the `seeAlso` link and once
+// through whatever reference doc in CORPUS_FILES has to agree with it.
+// Re-measure rather than trust this comment —
 // measureWorstCaseSystemPrompt() sweeps every context and returns which one
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.

@@ -6907,7 +6907,14 @@ function performGitPanelAction(id, env, body = {}) {
     };
   }
   const remoteUrl = remoteRes.out.trim();
-  const matched = gitPanelOps.matchEnvRepoByRemote(remoteUrl, env?.repositories);
+  // #2067 AC18: the Git panel's update acts on whatever `.git` it finds in the
+  // workspace, which now includes agent-scoped repositories. Their SSH key is
+  // recorded on the AGENT, not the environment, so both lists have to be
+  // offered here or an agent-scoped SSH repo would fail to fetch with no key.
+  const matched = gitPanelOps.matchEnvRepoByRemote(remoteUrl, [
+    ...(Array.isArray(env?.repositories) ? env.repositories : []),
+    ...normalizeAgentRepositories((loadAgentConfig(id) || {}).agentRepositories),
+  ]);
   const gitEnv = agentGitOps.buildRepoGitEnv({
     env,
     repoUrl: remoteUrl,

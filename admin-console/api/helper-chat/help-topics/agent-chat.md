@@ -317,6 +317,50 @@ work. A context folder is **read-only** unless it was mounted read-write; a
 read-write one also offers upload, delete and drag-to-move, and a read-only one
 simply offers no write action at all.
 
+### Repositories: inherited, and this agent's own
+
+The Workspace toolbar's **repositories** button (and the same panel in
+**Settings**, next to *Sync repositories*) lists every repository this agent
+has, and is where you attach one more.
+
+Repositories normally come from the agent's **Working Environment**, which means
+*every* agent in that environment gets them. Those rows are marked
+**From Working Environment** and carry no remove action: change them on the
+environment, where the decision belongs. Often, though, only one agent needs one
+more repository — a reference codebase to read, a second service it has to
+touch, a documentation repo. **Add repository** attaches one to **that agent
+alone**: it is marked **This agent only**, the environment record is not
+touched, and no sibling agent gains it, has its prompt changed, or is restarted.
+
+What you fill in is the same form the environment uses — URL, branch, SSH key,
+read-only — including the live reachability check, which is **advice, not a
+gate**: an unreachable URL still submits.
+
+Four things are worth knowing before you use it:
+
+- **There is no credential of its own.** The clone uses the existing SSH-key
+  registry or the environment's GitHub token, and nothing else. A private HTTPS
+  repository in an environment with no token is refused up front, with the
+  reason, rather than failing obscurely later. Attach it by its SSH URL and pick
+  a key instead.
+- **One directory per repository.** The clone path is derived from the URL, so
+  `org-a/tools` and `org-b/tools` both want `./tools/`. If that name is already
+  taken — by an environment repository, by another attachment, or by an ordinary
+  folder the agent created — the attach is refused and nothing is cloned. There
+  is no automatic renaming.
+- **The attachment is persistent.** It survives a container respawn and a
+  workspace reset, and is re-cloned like an environment repository would be — so
+  the agent never loses a repository its prompt still names.
+- **Removing it deletes the working copy**, and the confirmation says what that
+  costs: how many uncommitted changes and unpushed commits are in it, by count,
+  or that it is clean. Removal is refused while the agent is running a session,
+  because those are files the run may be using. Attaching while it runs is fine
+  — it only adds a directory — but the agent is told about the repository from
+  its **next** run on, not mid-run.
+
+Cloned repositories show up in **Git** mode like any other, with the same
+switch / update / discard actions.
+
 ### The other tabs
 
 **Triggers**, **Outcomes**, **Knowledge** and **Settings** are the remaining

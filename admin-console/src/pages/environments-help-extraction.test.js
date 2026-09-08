@@ -47,6 +47,13 @@ function sourceOf(file) {
 }
 
 const page = sourceOf('WorkingEnvironments.jsx');
+// #2067 extracted the repository card into the console-wide shared component
+// this page renders (so the agent-scoped attach form cannot drift from it).
+// The card's own field copy is therefore no longer IN this file — but it is
+// still at the point of decision, which is what AC5 protects. Read both and
+// assert against the surface the reader actually sees.
+const card = sourceOf('../components/RepositoryCard.jsx');
+const surface = page + card;
 
 const topicBody = readFileSync(
   join(here, '../../api/helper-chat/help-topics/environments.md'), 'utf8',
@@ -60,10 +67,14 @@ test('the stripped source is still the page, not a hole', () => {
     'export default function WorkingEnvironments()',
     'function EnvironmentForm(',
     'function ToolchainRegistryPanel(',
-    'function RepositoryCard(',
     'const COLUMNS',
   ]) {
     assert.ok(page.includes(signature), `comment-stripping removed ${signature}`);
+  }
+  // The card moved out in #2067; the page's render site is what stayed.
+  assert.ok(page.includes('<RepositoryCard'), 'comment-stripping removed <RepositoryCard');
+  for (const signature of ['export default function RepositoryCard(', 'export function useRepoCheck(']) {
+    assert.ok(card.includes(signature), `comment-stripping removed ${signature}`);
   }
 });
 
@@ -292,7 +303,10 @@ test('no point-of-decision microcopy was traded for a "?"', () => {
     '{ID_FORMAT_HINT}',
   ];
   for (const phrase of kept) {
-    assert.ok(page.includes(phrase), `"${phrase}" is point-of-decision copy and must stay on the page`);
+    assert.ok(
+      surface.includes(phrase),
+      `"${phrase}" is point-of-decision copy and must stay on the page or its repository card`,
+    );
   }
 });
 

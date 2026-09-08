@@ -704,10 +704,12 @@ The writes already exist and are already gated on the right predicate:
 > it in a body would arrive at `canManageTeam(scope, undefined)` and fail closed
 > for everyone but a System Admin.
 >
-> **Still owed:** AC13's end-to-end journey (below) — the dialog it needed now
-> exists, but the e2e stack has no `AUTH_ENABLED` anywhere, so every predicate
-> in that journey is inert there (the #1459 finding). It needs that
-> infrastructure, not a YAML file.
+> **AC13's end-to-end journey: delivered by #2086 — see Amendment 8.** It was
+> recorded here as owed-and-blocked because the e2e stack had no `AUTH_ENABLED`
+> anywhere, so every predicate in that journey was inert (the #1459 finding).
+> That was correct: the missing piece was infrastructure, not a YAML file, and
+> #2086 built it — a multi-user e2e stack plus two signed-in humans in the step
+> library — before writing the journey.
 
 ### 7.2 — The open directory (D2, D11)
 
@@ -862,7 +864,7 @@ D1 is a large change to a load-bearing key, so it is sliced so **each phase ship
 | **P4** — *done, #2082 (see Amendment 6 in §7.1)* | **Share dialog** in the Agent-Chat team context menu (§7.1) + the open directory (§7.2). | P3 | The four drift guards named in §7.1; a response-key assertion on `GET /api/users/directory` (never `systemAdmin`, never `githubHandle` — D2/D11); a server-side test that a Team Member's `POST /api/admin/memberships` is refused (**not** only that the button is disabled — #2041 AC9). |
 | **P5** | Layered resource ownership (D7, §5.2) — shared tier for working environments and MCP servers; credentials and model providers re-pointed. | P2 | Tier tests mirroring the credential ones; **a create-a-team-with-no-infrastructure test** (D7's stated consequence, §5.2). |
 | **P6** — *done, #2085 (see Amendment 7)* | Access page rework + System-Admin cleanup view (D5) + docs/help/corpus (§9). | P3, P5 | `help-coverage.test.js` (a page route may not silently lose its topic), the `page-help-view.test.js` parity block, `corpus.test.js` (vendored-copy byte-identity + the worst-case grounding budget), `help-registry.test.js`, the nav-smoke e2e and the `steps-catalog.json` freshness test. |
-| **AC13** — *blocked: the e2e stack has no `AUTH_ENABLED`, so every predicate in this journey is inert there (#1459)* | The end-to-end journey, after P4 | P4 | **One e2e journey** proving the loop: user A creates a team → user B does not see it → A shares it with B as Team Member → B sees it but cannot change members → A promotes B to Team Admin → B can → A is removed as last admin only after naming a successor. This is the only test that exercises D1+D4+D9 together. |
+| **AC13** — *done, #2086 (see Amendment 8)* | The end-to-end journey, after P4 | P4 | **One e2e journey** proving the loop: user A creates a team → user B does not see it → A shares it with B as Team Member → B sees it but cannot change members → A promotes B to Team Admin → B can → A is removed as last admin only after naming a successor. This is the only test that exercises D1+D4+D9 together. Shipped as `e2e/journeys/team-sharing.yaml` over a multi-user e2e stack (`AUTH_ENABLED=true` in `docker-compose.e2e.yml`) and the two-identity step library (`e2e/steps/identity.js` + `access.js`); every "cannot" is asserted **twice**, in the UI and against the API with that human's own session. |
 
 **Two strategy notes.** (1) **Every "cannot" in the ACs must be asserted server-side.** The console's own comments say the client gating is UX, not the boundary (`App.jsx:41-45`, `credential-scope-view.js:9-11`, `Shell.jsx:209-215`); a test that only checks a disabled button proves nothing about the API. (2) **P2 is where the two `scope.all` spellings bite** (§4.2): a sweep that greps only `scope.all` misses eight `getScope(req).all` sites.
 
@@ -1685,3 +1687,57 @@ The side effect is worth knowing: `/chats` lost a whole neighbour topic, so the
 worst-case grounding context moved **back** to `/quickstart` and the figure
 *fell*, from 314 511 to **312 384** of 340 000, even though the merged
 `users.md` is ~9 000 characters larger than either half it replaced.
+
+---
+
+## Amendment 8 (#2086, AC13 as built)
+
+The journey shipped as `e2e/journeys/team-sharing.yaml`. Five things it found.
+
+**A8.1 — AC13's step order cannot fire the rule its own AC2 asks for, and the
+journey deviates.** Read literally, the seven steps are: … *(5)* A promotes B to
+Team Admin, *(6)* B can manage, *(7)* A is removed as the last admin only after
+naming a successor. But step 5 creates a **second** admin, so by step 7 A is no
+longer the last one and D4 never engages — the refusal AC2 requires at step 7 is
+unreachable in the state step 5 leaves behind. Rather than assert a weaker thing
+and call it AC13, the journey **probes D4 where it is live and exercises both of
+its halves**: the refusal at the moment A is sole admin (before the promotion),
+and the successor hand-over at the end, when B has become the sole admin and
+must name A to leave. Every behaviour AC13 lists is covered; only the order
+moves, and it moves because the literal order makes one of them untestable.
+
+**A8.2 — The blocker was real, and it was one line of stack config plus a
+missing seam.** `AUTH_ENABLED=true` now lives in `docker-compose.e2e.yml` (the
+e2e override, not the generated `.env.e2e` — it is stack policy, not a
+credential). Turning it on is **safe for the other fourteen journeys as a
+property of the code**: `computeScope` short-circuits `username === adminUsername`
+to `all: true` in *both* modes, and the storageState session `global-setup.js`
+persists is exactly that env admin. The flag changes only what a *user-store*
+identity sees.
+
+**A8.3 — Two humans, without touching the journey schema.** `journeys.spec.js`
+builds `ctx = { page, request }` once and hands that same object to every fixture
+and step, so the identities hang off `ctx` and `access.actAs` re-points
+`ctx.page`/`ctx.request` at one of them. The whole existing step library — and the
+screenshot recorder, which reads `ctx.page` fresh at each capture — follows the
+active human for free. This is journey-spec-concept.md §9's anti-DSL rule
+honoured: a new capability, entirely in the step library, and the schema learns
+nothing about identities.
+
+**A8.4 — Every "cannot" is asserted twice, and the second one is the real test.**
+The strategy note under the phasing table says a disabled button proves nothing
+about the API; the journey follows it literally. When B is a Team Member it
+checks both that the Share panel renders read-only *and* that B's own session is
+refused `POST /api/admin/memberships` with a 403 — and after the promotion it
+checks that the **same** route, body and session now succeeds. The D4 refusal is
+asserted on the stable `code: 'successor-required'` rather than on the message
+text, because `orchestrator/team-admin-succession.js` says in as many words that
+callers should key on the code.
+
+**A8.5 — A role change needs a reload before its UI effect can be asserted.**
+`ShareTeamPanel` reads `canManage` from `useAuth()`, whose `teams` roles are
+resolved by `describeAuthz` when the SPA loads — so when Ada promotes Bea in
+Ada's browser, Bea's tab keeps rendering the read-only panel until it navigates.
+That is correct product behaviour, not a bug, but it is a trap for anyone
+extending this journey: the beats that assert a *changed* role always navigate
+first, and the YAML says why at each one.

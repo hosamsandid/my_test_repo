@@ -14,9 +14,367 @@
     "flows",
     "context",
     "usage",
-    "knowledge"
+    "knowledge",
+    "access"
   ],
   "steps": [
+    {
+      "name": "access.actAs",
+      "module": "access",
+      "description": "Point the journey at one signed-in human. Every later step — and every screenshot — runs as that identity until the next call.",
+      "params": [
+        {
+          "name": "as",
+          "required": true,
+          "type": "string",
+          "description": "Identity name: `owner`, `colleague` or `admin`."
+        },
+        {
+          "name": "goto",
+          "required": false,
+          "type": "string",
+          "description": "Optional path to navigate to after switching."
+        }
+      ],
+      "example": "- action:\n    do: access.actAs\n    as: colleague\n    goto: /chats"
+    },
+    {
+      "name": "access.addColleague",
+      "module": "access",
+      "description": "Add a colleague through the Share panel's picker, at a chosen role. The candidate option's VALUE is the user id, so the selection is made by value rather than by label — a display-name match would be ambiguous the moment two people share a name.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team whose Share panel is open."
+        },
+        {
+          "name": "subject",
+          "required": true,
+          "type": "string",
+          "description": "Login subject of the person to add."
+        },
+        {
+          "name": "person",
+          "required": true,
+          "type": "string",
+          "description": "Their display name, for the row assertion."
+        },
+        {
+          "name": "role",
+          "required": false,
+          "type": "string",
+          "default": "team-member",
+          "description": "Role to grant."
+        }
+      ],
+      "example": "- action:\n    do: access.addColleague\n    teamId: share-demo\n    subject: bea@e2e.local\n    person: Bea Colleague"
+    },
+    {
+      "name": "access.cancelHandover",
+      "module": "access",
+      "description": "Dismiss the D4 hand-over prompt without acting, leaving the membership set exactly as it was — so the journey can prove the refusal without spending the sole-admin state it needs for the beats that follow.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team whose Share panel is open."
+        }
+      ],
+      "example": "- action:\n    do: access.cancelHandover\n    teamId: share-demo"
+    },
+    {
+      "name": "access.closeShare",
+      "module": "access",
+      "description": "Close the Share panel.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team whose Share panel is open."
+        }
+      ],
+      "example": "- action:\n    do: access.closeShare\n    teamId: share-demo"
+    },
+    {
+      "name": "access.completeHandover",
+      "module": "access",
+      "description": "Complete the D4 hand-over: name a successor and confirm, so the promotion and the removal land in ONE write and the team is never un-administrable.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team whose Share panel is open."
+        },
+        {
+          "name": "successorSubject",
+          "required": true,
+          "type": "string",
+          "description": "Login subject of the incoming Team Admin."
+        },
+        {
+          "name": "leaving",
+          "required": true,
+          "type": "string",
+          "description": "Display name of the row being removed."
+        }
+      ],
+      "example": "- action:\n    do: access.completeHandover\n    teamId: share-demo\n    successorSubject: bea@e2e.local\n    leaving: Ada Owner"
+    },
+    {
+      "name": "access.createTeam",
+      "module": "access",
+      "description": "Create an Agent Team as the ACTIVE identity, through the real self-service route (#2081) — which is what records the creator as its Team Admin. `materializeMembers: false` keeps this cheap: the single role lands as a stub (config + triggers.json, no Matrix user, no clone, no container). A stub is still a member, which matters — `buildGroups` derives the rail's team groups from member rows, so a memberless team would render no group header and the Share… menu would be unreachable.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Slug id for the new Agent Team."
+        },
+        {
+          "name": "teamName",
+          "required": true,
+          "type": "string",
+          "description": "Display name for the team."
+        },
+        {
+          "name": "roleTemplate",
+          "required": false,
+          "type": "string",
+          "default": "generic",
+          "description": "Role template for the one stub member."
+        }
+      ],
+      "example": "- action:\n    do: access.createTeam\n    teamId: share-demo\n    teamName: Share Demo"
+    },
+    {
+      "name": "access.expectHandoverPrompt",
+      "module": "access",
+      "description": "Assert the Share panel's D4 hand-over prompt is showing — the UI half of the same rule: the last admin is asked who takes over, in the same step.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team whose Share panel is open."
+        }
+      ],
+      "example": "- assert:\n    do: access.expectHandoverPrompt\n    teamId: share-demo"
+    },
+    {
+      "name": "access.expectLastAdminRemovalRefused",
+      "module": "access",
+      "description": "Assert D4: removing the LAST Team Admin is refused when no successor is named — at the server (409), with the refusal message naming the requirement.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team to attempt the removal against."
+        },
+        {
+          "name": "subject",
+          "required": true,
+          "type": "string",
+          "description": "Login subject of the last admin being removed."
+        }
+      ],
+      "example": "- assert:\n    do: access.expectLastAdminRemovalRefused\n    teamId: share-demo\n    subject: ada@e2e.local"
+    },
+    {
+      "name": "access.expectMemberships",
+      "module": "access",
+      "description": "Assert the team's membership set is exactly the expected (subject → role) map, read from the API as the active identity. The invariant D4 protects — that a team always has at least one admin — is checked here too.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team to read memberships for."
+        },
+        {
+          "name": "expected",
+          "required": true,
+          "type": "object",
+          "description": "Map of login subject → role."
+        }
+      ],
+      "example": "- assert:\n    do: access.expectMemberships\n    teamId: share-demo\n    expected:\n      bea@e2e.local: team-admin"
+    },
+    {
+      "name": "access.expectMembershipWriteAllowed",
+      "module": "access",
+      "description": "Assert the SERVER accepts a membership write by the active identity — the positive counterpart, so \"B can now manage\" is proven at the gate and not only by a button appearing.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team to write against."
+        },
+        {
+          "name": "subject",
+          "required": true,
+          "type": "string",
+          "description": "Login subject whose role is set."
+        },
+        {
+          "name": "role",
+          "required": true,
+          "type": "string",
+          "description": "Role to set."
+        }
+      ],
+      "example": "- assert:\n    do: access.expectMembershipWriteAllowed\n    teamId: share-demo\n    subject: bea@e2e.local\n    role: team-admin"
+    },
+    {
+      "name": "access.expectMembershipWriteRefused",
+      "module": "access",
+      "description": "Assert the SERVER refuses a membership write by the active identity (403) — the half of \"B cannot change members\" that a hidden button does not prove.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team to attempt the write against."
+        },
+        {
+          "name": "subject",
+          "required": true,
+          "type": "string",
+          "description": "Login subject of the person to grant a role to."
+        },
+        {
+          "name": "role",
+          "required": false,
+          "type": "string",
+          "default": "team-admin",
+          "description": "Role the refused write would grant."
+        }
+      ],
+      "example": "- assert:\n    do: access.expectMembershipWriteRefused\n    teamId: share-demo\n    subject: bea@e2e.local"
+    },
+    {
+      "name": "access.expectShareManageable",
+      "module": "access",
+      "description": "Assert the open Share panel is MANAGEABLE for the active identity: the add section is present and the read-only notice is not.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team whose Share panel is open."
+        }
+      ],
+      "example": "- assert:\n    do: access.expectShareManageable\n    teamId: share-demo"
+    },
+    {
+      "name": "access.expectShareReadOnly",
+      "module": "access",
+      "description": "Assert the open Share panel is READ-ONLY for the active identity (AC9): the member list is legible, but there is no role control, no remove control and no add section — and the panel says so in as many words.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team whose Share panel is open."
+        }
+      ],
+      "example": "- assert:\n    do: access.expectShareReadOnly\n    teamId: share-demo"
+    },
+    {
+      "name": "access.expectTeamHidden",
+      "module": "access",
+      "description": "Assert the active identity CANNOT reach the team — private by default (D1). Checked both server-side (the list simply does not contain it) and in the rail, so a filtered API with a leaky UI, or the reverse, both fail.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id that must NOT be reachable."
+        }
+      ],
+      "example": "- assert:\n    do: access.expectTeamHidden\n    teamId: share-demo"
+    },
+    {
+      "name": "access.expectTeamVisible",
+      "module": "access",
+      "description": "Assert the active identity CAN reach the team — in the API list and in the Agent Chat rail.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id that must be reachable."
+        }
+      ],
+      "example": "- assert:\n    do: access.expectTeamVisible\n    teamId: share-demo"
+    },
+    {
+      "name": "access.openShare",
+      "module": "access",
+      "description": "Open the team's Share… panel from the rail's group context menu. The kebab is a `<span role=\"button\">` labelled `Team actions for <label>`; the portaled menu carries the same accessible name, so both are matched by role to disambiguate. The menu closes on any scroll, so nothing scrolls in between.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team whose group header carries the menu."
+        }
+      ],
+      "example": "- action:\n    do: access.openShare\n    teamId: share-demo"
+    },
+    {
+      "name": "access.requestRemoval",
+      "module": "access",
+      "description": "Click the row's Leave/Remove control, which raises the D4 hand-over prompt when the target is the team's last admin.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team whose Share panel is open."
+        },
+        {
+          "name": "person",
+          "required": true,
+          "type": "string",
+          "description": "Display name shown on the row."
+        }
+      ],
+      "example": "- action:\n    do: access.requestRemoval\n    teamId: share-demo\n    person: Ada Owner"
+    },
+    {
+      "name": "access.setMemberRole",
+      "module": "access",
+      "description": "Change a member's role from their row's select.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team whose Share panel is open."
+        },
+        {
+          "name": "person",
+          "required": true,
+          "type": "string",
+          "description": "Display name shown on the row."
+        },
+        {
+          "name": "role",
+          "required": true,
+          "type": "string",
+          "description": "`team-admin` or `team-member`."
+        }
+      ],
+      "example": "- action:\n    do: access.setMemberRole\n    teamId: share-demo\n    person: Bea Colleague\n    role: team-admin"
+    },
     {
       "name": "agents.expectDmRooms",
       "module": "agents",
@@ -2566,6 +2924,50 @@
         }
       ],
       "example": "fixtures:\n  - fixture: triggerAgent\n    params:\n      teamId: triggers-demo\n      envId: triggers-demo-env\n      envName: Triggers Demo\n      repoUrl: \"https://github.com/aee-e2e/triggers-demo.git\""
+    },
+    {
+      "name": "twoHumanTeam",
+      "description": "twoHumanTeam: two signed-in humans and a clean slate — the precondition for the decentralised-access journey (#2086, epic #2076 AC13). This is the first fixture that establishes IDENTITIES rather than resources. It mints two real user-store records with local passwords (#374/#1844) and signs each one in through the real `/api/auth/login` into its own browser context, registered as `owner` and `colleague`. Steps then point the journey's ctx at one of them with `access.actAs` — which re-points the whole existing step library, and the screenshot recorder with it, at that human. It deliberately creates NO team: \"user A creates a team\" is the journey's own first beat, and it has to run as A for #2081 to record A as its Team Admin. Teardown ORDER is load-bearing: the team (and its auto-created environment) goes first, because #2081's D4 rule refuses to delete a human who is still the last Team Admin of any team — and deleting the team is what cascades the memberships that would otherwise pin its members in place forever. The same order runs on setup as a pre-clean, so a crashed prior run cannot wedge the next one. Browser contexts are closed last, and the primary `page`/`request` fixtures are restored before they are.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "Team slug id the journey will create (pre-cleaned). Its auto-created environment shares the id."
+        },
+        {
+          "name": "ownerSubject",
+          "required": true,
+          "type": "string",
+          "description": "Login subject for user A, who creates and owns the team."
+        },
+        {
+          "name": "ownerName",
+          "required": true,
+          "type": "string",
+          "description": "Display name for user A."
+        },
+        {
+          "name": "colleagueSubject",
+          "required": true,
+          "type": "string",
+          "description": "Login subject for user B, who is shared in."
+        },
+        {
+          "name": "colleagueName",
+          "required": true,
+          "type": "string",
+          "description": "Display name for user B."
+        },
+        {
+          "name": "password",
+          "required": false,
+          "type": "string",
+          "default": "e2e-user-pass",
+          "description": "Local password given to both records."
+        }
+      ],
+      "example": "fixtures:\n  - fixture: twoHumanTeam\n    params:\n      teamId: share-demo\n      ownerSubject: ada@e2e.local\n      ownerName: Ada Owner\n      colleagueSubject: bea@e2e.local\n      colleagueName: Bea Colleague"
     },
     {
       "name": "usageData",

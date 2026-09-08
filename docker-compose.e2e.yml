@@ -70,6 +70,22 @@ services:
       # #710: the wizard repo-probe / coordinator-workflow endpoints hit the
       # fake-github REST surface. Unset ⇒ api.github.com (production-identical).
       GITHUB_API_BASE: "${GITHUB_API_BASE:-http://fake-github}"
+      # #2086 (epic #2076 AC13): run the e2e stack in MULTI-USER mode, so team
+      # scoping is actually enforced and the access journey's predicates CAN
+      # fail. Without it `computeScope` short-circuits every caller to the
+      # implicit System Admin and every assertion in that journey is inert —
+      # the #1459 finding that blocked AC13.
+      #
+      # Safe for every other journey, and that is a property of the code rather
+      # than a hope: `computeScope` returns `all: true` for
+      # `username === adminUsername` in BOTH modes, and the storageState session
+      # global-setup.js persists IS that env admin (ADMIN_USERNAME=admin). So
+      # the flag changes nothing for the existing 14 journeys; it only changes
+      # what a *user-store* identity sees, which is exactly what #2086 drives.
+      # Set here rather than in the generated .env.e2e because it is e2e-stack
+      # policy, not a credential — docker-compose.yml already declares
+      # `AUTH_ENABLED: "${AUTH_ENABLED:-}"`, which this override supersedes.
+      AUTH_ENABLED: "true"
 
   # In-stack git remote (#667, docs/e2e-testing-concept.md §2 v1.1 — option B).
   # Serves a bare fixture repository over anonymous, read-only HTTP so the

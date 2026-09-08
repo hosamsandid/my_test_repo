@@ -365,7 +365,7 @@ function PageFace({ pageHelp, context, atOverview, section, onHome, onNavigate, 
 }
 
 export default function HelperChatPanel() {
-  const { isOpen, toggle, messages, sendMessage, isStreaming, mode, setMode, openTour, pageHelp, currentRoute, helpContext, helpSection, registerHelpPanel } = useHelperChat();
+  const { isOpen, toggle, messages, sendMessage, isStreaming, mode, setMode, openTour, pageHelp, currentRoute, helpContext, helpSection } = useHelperChat();
   const [composer, setComposer] = useState('');
   const scrollRef = useRef(null);
   const navigate = useNavigate();
@@ -379,10 +379,6 @@ export default function HelperChatPanel() {
   useEffect(() => { setAtOverview(false); }, [currentRoute]);
 
   useEffect(() => { ensureAgentChatMdCss(); }, []);
-
-  // Tell the provider a panel is on screen, so the first-run auto-open nudge is
-  // never spent on a screen that has no panel (E17 #1892 — the setup wizard).
-  useEffect(() => registerHelpPanel(), [registerHelpPanel]);
 
   // Page-scoped Ask chips: when the current route has a topic, its askPrompts
   // seed the Ask empty state instead of the generic SUGGESTED_PROMPTS (#1873).

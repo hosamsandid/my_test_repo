@@ -21,6 +21,7 @@ const sdk = require('broker-sdk');
 | `healthEndpoint(extra?)` → `(req,res)` | The registry card's health probe (no auth). |
 | `teardownScopeEndpoint(reap, {secret})` → `(req,res)` | Scope teardown on team/agent deletion, per `scopeId` (one implementation serves both). Resources are **reaped before the orchestrator invalidates the token**. |
 | `parkForApproval(op)` / `approvalHoldingPen({requiresApproval})` | The `requiresApproval` holding pen (v1: DM confirm). |
+| `selectFreshEvents` / `planBurstHandoffs` / `checkAndIncThrottle` / `computeBackoffDelayMs` / `passesHorizon` / `effectiveHorizon` (+ `loadThrottleState` / `saveThrottleState`) | Event-source polling primitives for a broker that polls an external system (`event-cursor.js`). A **copy** of `orchestrator/github-poller.js`'s seen-id cursor / burst collapse / hour-scoped throttle / exponential backoff — `github-poller.js` is untouched. First consumer: the Jira plugin broker. |
 
 ## Granularity opacity
 

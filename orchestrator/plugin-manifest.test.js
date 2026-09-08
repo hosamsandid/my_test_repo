@@ -529,3 +529,29 @@ test('the shipped github-issues manifest (plugins/github-issues) is valid', () =
   const board = manifest.ui.routes.find((r) => r.path === '/');
   assert.equal(board && board.minRole, 'team-member');
 });
+
+// ── ACCEPTANCE: the shipped jira manifest validates end to end ───────────────
+test('the shipped jira manifest (plugins/jira) is valid', () => {
+  const p = path.join(__dirname, '..', 'plugins', 'jira', 'plugin.json');
+  const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const { ok, errors, manifest } = validatePluginManifest(raw);
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  // A credential-holding, egress broker — the Jira {site-url, email, api-token}
+  // is a per-scope plugin credential (§5), so unlike github-issues the declared
+  // credentials are NOT empty:
+  assert.deepEqual(manifest.sidecar.capabilities, ['egress']);
+  assert.deepEqual(manifest.credentials.map((c) => c.key), ['site-url', 'email', 'api-token']);
+  assert.ok(manifest.credentials.every((c) => c.required === true));
+  // Team scope only — a Jira site binding is a team-level fact (§6.1). Podman
+  // only for v1 — the agent→broker network path is Podman-only, so a k8s stack
+  // would wake agents that then cannot read the ticket (§6.1 corrected):
+  assert.deepEqual(manifest.scopes, ['team']);
+  assert.equal(defaultGranularity(manifest), 'team');
+  assert.deepEqual(manifest.platforms, ['podman']);
+  assert.equal(manifest.cli.name, 'aee-jira');
+  assert.equal(manifest.quota.maxObjects, 500);
+  // Phase 0 ships no UI routes and no write policy yet (Phases 3–4):
+  assert.equal(manifest.ui, undefined);
+  assert.equal(manifest.policy, undefined);
+});

@@ -4,6 +4,7 @@
 #   orchestrator          — orchestrator/*.test.js            (node --test)
 #   broker-sdk            — broker-sdk/*.test.js              (node --test, dependency-free)
 #   netzplan-broker       — plugins/netzplan/broker/*.test.js (node --test, dependency-free)
+#   jira-broker           — plugins/jira/broker/*.test.js     (node --test, dependency-free)
 #   admin-api             — admin-console/api/*.test.js       (node --test)
 #   admin-console-src     — admin-console/src/**/*.test.js    (node --test, pure-logic modules only)
 #   admin-console-build   — admin-console Vite production build (no JSX/component test runner yet, see #651)
@@ -87,6 +88,23 @@ jobs:
       # runner). No install step — same shape as the broker-sdk job.
       - name: Run unit tests
         working-directory: plugins/netzplan/broker
+        run: node --test
+
+  jira-broker:
+    name: jira-broker (node --test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Dependency-free: the broker uses Node's built-in http + global fetch, and
+      # its pure modules (event-extract / jira-client / watch-store / inbox-store
+      # / poller) require ../../../broker-sdk, which is checked out alongside. No
+      # install step — same shape as the broker-sdk and netzplan-broker jobs.
+      - name: Run unit tests
+        working-directory: plugins/jira/broker
         run: node --test
 
   admin-api:

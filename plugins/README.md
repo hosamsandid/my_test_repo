@@ -240,3 +240,28 @@ Google OAuth credential and runs kubectl (`capabilities: ["egress"]`,
 `scopes: ["team","agent"]`, `platforms: ["podman","kubernetes"]`). The page also
 carries an always-visible **"What this plugin does"** block above the sign-in
 options so a team admin sees the capability before signing in (#1716).
+
+## `jira` (Phase 0 — spike)
+
+**Wakes an agent when a Jira Cloud issue changes status.** A poll loop inside
+the broker sidecar runs a narrow JQL search per watched project, flattens each
+issue's changelog into `<issueKey>:<historyId>` status-change events, dedups
+against a per-`<siteUrl>::<projectKey>` seen-id cursor, collapses bursts, and
+wakes the granted agents — which read what happened with the dependency-free
+`aee-jira inbox` CLI. The broker (`jira/broker/`) is built on the Broker SDK and
+holds the per-scope Jira credential (`{site-url, email, api-token}`);
+`capabilities: ["egress"]`, `scopes: ["team"]`, `platforms: ["podman"]` (the
+agent→broker network path is Podman-only, so a k8s stack would wake agents that
+cannot then read the ticket).
+
+This **replaces the reverted built-in Jira integration** (PR #1539): the design
+work — JQL/changelog polling, the composite event id, the truncated-changelog
+backfill, per-site project scoping — is reused, rehomed from ~6 000 lines across
+51 platform files into a plugin plus two generic platform additions every future
+event-source plugin reuses. Full plan + rollout phases: `docs/jira-plugin-plan.md`.
+
+**Phase 0** is a de-risking spike: broker + poller waking via the agent's
+existing `http` webhook trigger (the "content-free doorbell"), credential from
+the sidecar env, zero platform change. Later phases add the generic per-scope
+credential store, a generic `plugin-event` wake, the `aee-jira` reads + writes,
+and the `/` and `/admin` UI routes.

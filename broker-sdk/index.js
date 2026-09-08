@@ -38,6 +38,23 @@ const { healthEndpoint, teardownScopeEndpoint } = require('./endpoints');
 const { needsApproval, approvalHoldingPen, parkForApproval } = require('./approval');
 const { authorizeAction, isActionPermitted } = require('./authz');
 const { brokerConfig, quotaExceeded, positiveInt } = require('./broker-config');
+const {
+  SEEN_MAX,
+  BURST_CAP,
+  THROTTLE_WINDOW_MS,
+  THROTTLE_THRESHOLD,
+  GRACE_MS,
+  BACKOFF_BASE_MS,
+  BACKOFF_MAX_MS,
+  computeBackoffDelayMs,
+  effectiveHorizon,
+  passesHorizon,
+  selectFreshEvents,
+  planBurstHandoffs,
+  loadThrottleState,
+  saveThrottleState,
+  checkAndIncThrottle,
+} = require('./event-cursor');
 
 module.exports = {
   // token verification (§4.6)
@@ -78,4 +95,21 @@ module.exports = {
   brokerConfig,
   quotaExceeded,
   positiveInt,
+  // event-source polling primitives (§6.2 of the Jira plan — a COPY of the
+  // GitHub poller's cursor/burst/throttle/backoff, for brokers that poll)
+  SEEN_MAX,
+  BURST_CAP,
+  THROTTLE_WINDOW_MS,
+  THROTTLE_THRESHOLD,
+  GRACE_MS,
+  BACKOFF_BASE_MS,
+  BACKOFF_MAX_MS,
+  computeBackoffDelayMs,
+  effectiveHorizon,
+  passesHorizon,
+  selectFreshEvents,
+  planBurstHandoffs,
+  loadThrottleState,
+  saveThrottleState,
+  checkAndIncThrottle,
 };

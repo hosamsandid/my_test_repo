@@ -397,11 +397,15 @@ Carried forward verbatim from #1539's v1 boundary, and still right:
 
 Each phase is independently mergeable and leaves `main` shippable.
 
-- **Phase 0 — spike (1 PR, no platform change).** Broker + `jira-client.js` +
-  `event-extract.js` + poller, waking via Option A's `http` doorbell against a
-  hand-wired trigger. Proves the JQL/changelog/dedup core against a real Jira
-  Cloud sandbox before any platform surface is spent. Ships `plugins/jira/` and
-  `broker-sdk/event-cursor.js`.
+- **Phase 0 — spike (1 PR, no platform change). ✅ landed.** Broker +
+  `jira-client.js` + `event-extract.js` + poller, waking via Option A's `http`
+  doorbell against a hand-wired trigger (`PUT /internal/spike-config`). Proves
+  the JQL/changelog/dedup core against a real Jira Cloud sandbox before any
+  platform surface is spent. Ships `plugins/jira/` (manifest + minimal
+  `aee-jira whoami|inbox` CLI + broker), `broker-sdk/event-cursor.js`, the
+  `plugin-images` Makefile line and the `jira-broker` CI job. `computeQueryWindow
+  Minutes` (24h-capped catch-up widening) is the one design improvement over
+  #1539's fixed poll window.
 - **Phase 1 — per-scope plugin credentials (§5, D1+D2).** The generic store +
   push, Team-Admin-writable per scope, with set-by/set-at recorded. Retrofits
   `github-issues` onto it and unblocks `test-mgmt`'s declared credential.

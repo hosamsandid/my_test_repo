@@ -1,0 +1,10 @@
+{
+  "name": "jira-broker",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "description": "Jira plugin broker sidecar (docs/jira-plugin-plan.md): server-side JQL/changelog polling for issue status changes, on the Broker SDK. Wakes granted agents; holds the per-scope Jira credential.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

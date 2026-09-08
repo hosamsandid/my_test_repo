@@ -607,7 +607,10 @@ before it moves from catalog to roadmap.
 **Enterprise integration & ops**
 
 22. **Ticketing/ALM** (Jira/ServiceNow) — create/update work items from agent
-    findings; broker enforces project scoping.
+    findings; broker enforces project scoping. **Shipped: `plugins/jira/`** —
+    wakes agents on status changes (via the broker→orchestrator `plugin-event`
+    wake this plugin introduced), `aee-jira` read/write CLI, `/` + `/admin` UI.
+    See `docs/jira-plugin.md`.
 23. **Documentation publishing** — push generated docs to
     Confluence/SharePoint spaces per team.
 24. **Notification bridge** — outbound Teams/Slack/e-mail summaries beyond

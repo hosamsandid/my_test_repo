@@ -1,10 +1,10 @@
 # Jira as an installable plugin — implementation plan
 
-> Status: proposed. Supersedes `docs/jira-integration-concept.md` (shipped as PR
-> #1539, reverted by PR #1789). Companion reading: `docs/plugin-system-concept.md`
-> (§4 the contract, §8 item 22 "Ticketing/ALM"), `plugins/CONTRACT.md`,
-> `docs/cli-contract.md`, and `docs/confluence-plugin-plan.md` — the sibling plan
-> that reuses the same broker/credential shape.
+> Status: **implemented** (Phases 0–5, this branch). This is the design record;
+> the how-to is `docs/jira-plugin.md`. Supersedes `docs/jira-integration-concept
+> .md` (shipped as PR #1539, reverted by PR #1789). Companion reading:
+> `docs/plugin-system-concept.md` (§4 the contract, §8 item 22 "Ticketing/ALM"),
+> `plugins/CONTRACT.md`, `docs/cli-contract.md`.
 
 ## 1. What happened, and what the mistake was
 
@@ -459,10 +459,15 @@ Each phase is independently mergeable and leaves `main` shippable.
   #1539's `env.jiraProjects[]`, the `jira-event` trigger fields *and* the
   Phase-0 `spike-config` seam; which agents a change wakes stays a per-agent
   `plugin-event` trigger (Phase 2).
-- **Phase 5 — docs + help.** `plugins/jira/broker/README.md`, a
-  `docs/jira-plugin.md` operator guide replacing `docs/jira-integration-concept.md`,
-  and the context-help topic. `help-coverage.test.js` will fail on any new route
-  that ships without one.
+- **Phase 5 — docs. ✅ landed.** `docs/jira-plugin.md` (operator + agent guide,
+  replacing the reverted `docs/jira-integration-concept.md`),
+  `plugins/jira/broker/README.md`, the `plugins/README.md` entry,
+  `docs/plugin-system-concept.md` §8 item 22, and the CLAUDE.md plugin-registry
+  paragraph. **No new context-help topic** — `help-coverage.test.js` already
+  passes for `/plugins/jira/ui` via the generic `/plugins/:id/view` ALLOWLIST
+  entry, and there is no per-plugin help-topic convention (github-issues /
+  netzplan / gke shipped the same way; the plugin system's `help-topics/
+  plugins.md` covers the whole system).
 
 ## 8b. Build and CI wiring — hardcoded lists, not globs
 

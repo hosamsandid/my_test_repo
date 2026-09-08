@@ -1,0 +1,195 @@
+# Jira plugin — operator & project guide
+
+> Replaces `docs/jira-integration-concept.md` (the reverted PR #1539). The
+> design rationale and the phase history are in `docs/jira-plugin-plan.md`; this
+> is the how-to.
+
+The **Jira** plugin wakes an agent when a Jira Cloud issue changes status, and
+lets that agent read and update the issue. It is an installable, uninstallable
+platform plugin (`plugins/jira/`) — removing it leaves the platform
+byte-identical.
+
+- **Not** Jira Server / Data Center — Cloud only.
+- **Not** a two-way sync — the plugin reacts to Jira and writes to Jira on
+  request; it does not mirror state.
+- **Podman only.** On Kubernetes the agent→broker network path is not
+  established, so the `aee-jira` CLI would exit 3 even though wakes still fire —
+  `platforms: ["podman"]` gates it off there deliberately.
+
+---
+
+## How it works
+
+```
+Jira Cloud                          the broker sidecar (aee-plugin-jira)
+  │  a JQL search every ~60s:         │
+  │  project = "KAN" AND updated       │  per watched project:
+  │      >= -Nm ORDER BY updated ASC   │   • flatten each issue's changelog into
+  │  expand=changelog                  │     <issueKey>:<historyId> status events
+  │◀──────────────────────────────────│   • gate by the watch's exact statusFilter
+  │                                   │   • dedup against a per-site seen-id cursor
+  │                                   │   • collapse a burst into one digest
+  │                                   │
+  │        POST /internal/plugin-event │──▶ orchestrator
+  │        Bearer <jira scope token>   │      verifies the token → {pluginId, scopeId}
+  │                                   │      resolves scopeId → the team
+  │                                   │      enqueues into every GRANTED agent whose
+  │                                   │      `plugin-event` trigger matches
+  │                                   │              │
+  │                                   │              ▼
+  │                                   │        the agent runs its OWN wake
+  │                                   │        instruction; the Jira payload
+  │                                   │        arrives as untrusted context in
+  │                                   │        an <external-event source="plugin:jira">
+```
+
+The credential (`{site-url, email, api-token}`) lives **only** in the broker
+sidecar's memory, pushed there per-team by the orchestrator. It never reaches
+your browser or an agent container.
+
+---
+
+## Setup (operator)
+
+### 1. Build + install
+
+```bash
+make plugin-images     # builds localhost/aee-plugin-jira:latest
+make seed-plugins      # lays plugins/jira/ into the pool
+```
+
+Then **Administration → Plugins → Jira → Install** (System Admin). Install starts
+the broker sidecar and grants the plugin to nobody.
+
+### 2. Grant it to a team
+
+On the same page, the Jira card's team-assign control — or a per-agent grant on
+Agent Chat → **Settings** → plugins. The grant is what seeds `aee-jira` into the
+agent workspace and makes the broker hold that team's credential.
+
+### 3. Set the team's Jira credential (Team Admin)
+
+The **Credentials** section on the Jira card (`/plugins`): three fields per
+granted team.
+
+| Field | |
+|---|---|
+| `site-url` | a bare subdomain (`acme`) or a full origin (`https://acme.atlassian.net`) |
+| `email` | the Atlassian account e-mail — the Basic-Auth username for the token |
+| `api-token` | a Jira API token — **use a classic (unscoped) token**: id.atlassian.com/manage-profile/security/api-tokens → *Create API token*, **not** *Create API token with scopes*. A scoped token missing `read:jira-work` sees zero projects. |
+
+The account whose token this is must be able to see the projects you want to
+watch — the plugin acts with exactly that person's Jira permissions. The entry
+records who set it and when.
+
+Values are stored `0600` server-side and never read back — you see a preview and
+the set-by/-at, nothing more. Changing them takes effect on the next reconcile,
+no restart.
+
+### 4. Configure which projects to watch
+
+The Jira plugin's **Watch config** page (`/admin`, team-admin — reached from the
+"Watch config" link on the plugin's main page): a list of
+`{ projectKey, statusFilter? }` rows.
+
+- `projectKey` — e.g. `KAN`.
+- `statusFilter` — blank fires on **any** status change; set it (exact match,
+  case-sensitive — copy it from Jira) to fire only on transitions **into** that
+  status, e.g. `Ready for Dev`.
+
+### 5. Give the agents a `plugin-event` trigger
+
+A watch tells the *broker* what to poll. Which *agents* a change wakes is a
+per-agent trigger: Agent Chat → **Triggers** → add → type **Plugin event**:
+
+| Field | |
+|---|---|
+| Plugin id | `jira` |
+| Event filter | blank = any event from jira; or `status_changed` |
+| Wake instruction | what the agent should do — e.g. *"Read the Jira inbox with `aee-jira inbox --consume` and refine the ticket."* |
+
+The wake instruction is the agent's own prompt; the Jira payload rides in as
+context, never as an instruction.
+
+---
+
+## What an agent can do — the `aee-jira` CLI
+
+Seeded into a granted agent's workspace. All Jira access is server-side in the
+broker; the agent never sees the token.
+
+| Command | |
+|---|---|
+| `aee-jira inbox [--consume]` | the queued status changes that woke it. `--consume` drains the queue — use once per wake |
+| `aee-jira projects` | the Jira projects in the team's scope |
+| `aee-jira list --project KAN [--status "Ready for Dev"]` | a project's issues, most-recently-updated first |
+| `aee-jira show KAN-6` | one issue (summary, status, assignee, URL) |
+| `aee-jira comment KAN-6 --body "…"` | add a comment (attributed to *"an agent on team …"*) |
+| `aee-jira transition KAN-6 --to "In Progress"` | move the issue to that **target status** — the broker resolves the Jira transition and, if none leads there from the issue's current status, reports the available options |
+
+`--json` on every subcommand; exit codes 0 ok / 1 domain error / 2 usage / 3
+broker unreachable.
+
+**Writes are role-gated, not confirmation-gated** (D3). The broker checks the
+manifest's `policy` before touching the credential, and every write is audited —
+but moving a ticket is routine and reversible, so nothing stops for a human. A
+genuinely destructive Jira operation (bulk transition, delete) would be added
+behind the `requiresApproval` pen, which is wired but unused today.
+
+---
+
+## The console UI
+
+**Jira** in the sidebar (once installed) → the plugin's `/` route (any team
+member of a granted team):
+
+- **Issues** — pick a project, optionally filter by status.
+- **Inbox** — the status changes queued for this team's agents.
+- **Watching** — the configured projects and the poller's cursor state (how many
+  events seen, any consecutive failures).
+
+The **Watch config** link (team-admin only) opens `/admin` — the project/status
+rows from step 4.
+
+---
+
+## The event log
+
+Every wake writes one row to the platform **GitHub Event Log** page
+(`/github-events`), tagged `source: internal-plugin`, event `plugin.event`
+("plugin event"). It has no repo, label or work item — those columns show `—` —
+but the row confirms the fan-out happened and to which agents. The plugin has no
+separate event-log page of its own.
+
+---
+
+## Limits
+
+- **No claim-label analogue.** Nothing in Jira marks an issue "picked up" the way
+  a GitHub `ready` → `ready:wip` swap does.
+- **Not on the Process Canvas.** A Jira wake is not a flow edge; it does not
+  appear as a producer/consumer node, and `channels` / `dataFlow` / `humans[]`
+  are untouched.
+- **No flow-anomaly integration.** The four anomaly classes read GitHub
+  label/timeline state and have no Jira signal to read.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `aee-jira` exits 3 `not-granted` | the plugin isn't granted to this agent | grant it (Plugins page or agent Settings) |
+| `aee-jira` exits 3 `broker-unreachable` | the sidecar isn't running, or you're on Kubernetes | `podman ps \| grep aee-plugin-jira`; on k8s the CLI is expected to fail (see platforms note) |
+| a write / read returns `no-credential` | the team has no Jira credential set | Team Admin sets it on the Plugins page |
+| broker log: `Jira rejected the credential (401)` | the e-mail and token aren't the same Atlassian identity, or the token was revoked | regenerate a **classic** token while signed in as the intended account |
+| `projects` returns nothing but the account sees projects in a browser | a **scoped** API token missing `read:jira-work` | use a classic (unscoped) token |
+| a transition "no transition to X" | X isn't reachable from the issue's current status, or the name doesn't match | the error lists the available transitions; use one of those target names |
+| the poll log shows `fetch failed` once then recovers | a stale keep-alive socket in the long-running broker | expected — the client retries transport failures once |
+| a fresh transition doesn't wake the agent | the watch's `statusFilter` doesn't exactly match the Jira status name, or the agent has no `plugin-event` trigger, or the poll already baselined the change | check the Watch config page's cursor; copy the status name verbatim from Jira; add the trigger |
+
+For a hands-on debug session the broker ships `spike.js` (run inside the
+sidecar): `podman exec aee-plugin-jira node spike.js probe --project KAN
+--window 120 --status "Ready for Dev"` replays the exact search + changelog
+extraction against Jira and prints what would fire. See
+`plugins/jira/broker/README.md`.

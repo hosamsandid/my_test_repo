@@ -70,6 +70,7 @@ const agentGitOps = require("./agent-git-ops");
 const credentialResolution = require("./credential-resolution");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
+const { assessConversionEligibility, planTeamConversion } = require("./team-conversion");
 const { syncAgentRepoPlan, summarizeRepoResults } = require("./repo-sync");
 const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
 const { assembleClaudeMd, buildMemoryHint, SCOPED_KNOWLEDGE_FILENAME } = require("./prompt-assembly");
@@ -270,7 +271,7 @@ const MCP_CREDENTIALS_KEYS_DIR = "/workspace/mcp-credentials/_keys";
 // bootstrap + ownership backfill below.
 const teamsStore = createTeamsStore({ root: WORKSPACE });
 // Two-tier skill resolution (#306): owning team's pool wins over the global pool.
-const { resolveSkillSourceDir } = makeSkillSourceResolver({
+const { resolveSkillSourceDir, teamSkillsDir } = makeSkillSourceResolver({
   workspace: WORKSPACE,
   templateWorkspace: TEMPLATE_WORKSPACE,
   defaultTeamId: DEFAULT_TEAM_ID,
@@ -9182,6 +9183,173 @@ class Orchestrator {
   }
 
   // ===========================================================
+  // Convert a standalone agent into a team of one, in place (#2052)
+  // ===========================================================
+  // The product has told the user since #1667 that "a single agent is simply a
+  // team of one". This is the step that makes it true: a `role: 'team'` metadata
+  // record is created beside the agent and the agent becomes its only member —
+  // keeping its id, its Matrix user, its DM room, its chat history, its triggers
+  // and its Working Environment. Nothing is copied and nothing is re-minted.
+  //
+  // The decisions (eligibility, the derived id, what each config field becomes,
+  // which skills need copying, which plugin scopes flip) all live in the pure
+  // `team-conversion.js`; this method is the fs/broker/respawn half.
+  //
+  // opts:
+  //   - force — proceed even though the agent is mid-run. Without it a busy
+  //             agent is reported back (the `disableAgent` two-phase shape) so
+  //             the console can ask rather than cut a turn off mid-sentence.
+  async convertAgentToTeam(id, { force = false } = {}) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) throw new Error(`Agent '${id}' not found`);
+
+    // Re-checked here and not only in the console: this is the last gate before
+    // anything is written, and the API's copy of the check can be stale.
+    const verdict = assessConversionEligibility(cfg);
+    if (!verdict.eligible) {
+      const err = new Error(`Agent '${id}' cannot be converted into a team: ${verdict.reason}`);
+      err.code = verdict.code;
+      throw err;
+    }
+
+    // The prompt file is rewritten and the container is recreated, so a
+    // conversion that lands mid-turn truncates the run. Refuse and say so
+    // rather than deciding for the user.
+    if (!force) {
+      const { busy, activeTriggers } = agentBusyState(id);
+      if (busy || activeTriggers.length > 0) {
+        return { id, warning: true, busy, activeTriggers };
+      }
+    }
+
+    const skills = effectiveSkills(cfg, loadAgentConfig);
+    const plugins = effectivePlugins(cfg, loadAgentConfig);
+    const fromPoolTeamId = agentKnowledgeTeamId(cfg);
+
+    // AC5 — which granted skills are served by the TENANT pool right now. A
+    // global-pool skill resolves identically after the conversion; a tenant-tier
+    // one would not, so the plan asks for those to be copied into the squad
+    // pool. Resolved here (fs), decided in the plan (pure).
+    const tenantSkills = skills.filter((name) => {
+      const src = resolveSkillSourceDir(name, fromPoolTeamId, { agentId: id });
+      return !!src && src === path.join(teamSkillsDir(fromPoolTeamId), name);
+    });
+
+    let promptFallback = "";
+    try {
+      promptFallback = fs.readFileSync(path.join(agentDir(id), AGENT_PROMPT_FILENAME), "utf8");
+    } catch { /* no prompt file — the config's own prompt (or none) is the truth */ }
+
+    const plan = planTeamConversion(cfg, {
+      teamIdTaken: (tid) => !!loadAgentConfig(tid) || agentTeardownRegistry.has(tid) || fs.existsSync(agentDir(tid)),
+      skills,
+      plugins,
+      tenantSkills,
+      promptFallback,
+      defaultTeamId: DEFAULT_TEAM_ID,
+    });
+
+    // ── 1. Additive, pre-flip work ────────────────────────────────────────────
+    // Everything here is safe to leave behind if a later step fails: it only
+    // populates the new squad's pools, which nothing else reads yet.
+    const warnings = [];
+
+    // AC5 — copy the tenant-tier skill content into the squad pool so every
+    // grant still resolves to the same bytes.
+    for (const name of plan.skillPoolCopies) {
+      const src = path.join(teamSkillsDir(fromPoolTeamId), name);
+      const dst = path.join(teamSkillsDir(plan.teamId), name);
+      try {
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.cpSync(src, dst, { recursive: true, force: false, errorOnExist: false });
+      } catch (err) {
+        warnings.push(`skill '${name}' could not be copied into the new team's pool: ${err.message}`);
+      }
+    }
+
+    // AC6 — the agent's knowledge scope re-keys from the tenant to the squad.
+    // Carrying the tenant's per-team knowledge config (#570) across is what
+    // keeps the KB repo ref and branch identical, so the agent's existing
+    // `knowledge/` checkout stays the right one and its entries stay readable.
+    // A tenant with no overrides has nothing to carry — both sides then fall
+    // through to the environment's own `knowledgeStore`.
+    const knowledgeOverrides = loadTeamKnowledgeOverrides(fromPoolTeamId);
+    if (Object.keys(knowledgeOverrides).length > 0) {
+      try {
+        writeTeamKnowledgeOverrides(plan.teamId, knowledgeOverrides);
+      } catch (err) {
+        warnings.push(`knowledge configuration could not be carried over: ${err.message}`);
+      }
+    }
+
+    // AC7 — a `team`-granularity plugin scope id is the agent's own id while it
+    // is standalone and the team's id afterwards. Reap the old scope BEFORE the
+    // flip, while its token is still mintable: a broker asked to clean up after
+    // invalidation can no longer authenticate the request.
+    let pluginTeardown = [];
+    if (plan.pluginScopeChanges.length > 0) {
+      pluginTeardown = await this.teardownAgentPluginScopes(id, cfg).catch((err) => {
+        warnings.push(`plugin scope teardown: ${err.message}`);
+        return [];
+      });
+    }
+
+    // ── 2. The flip ───────────────────────────────────────────────────────────
+    // Two config writes that must both land. If the second fails, the first is
+    // undone and the agent is left exactly as it was (AC9).
+    const memberConfig = { ...cfg, ...plan.memberPatch };
+    for (const key of plan.memberUnset) delete memberConfig[key];
+
+    saveAgentConfig(plan.teamId, plan.teamConfig);
+    this.agentConfigs.set(plan.teamId, { config: plan.teamConfig });
+    try {
+      saveAgentConfig(id, memberConfig);
+      this.agentConfigs.set(id, { config: memberConfig });
+    } catch (err) {
+      this.agentConfigs.delete(plan.teamId);
+      try { fs.rmSync(agentDir(plan.teamId), { recursive: true, force: true }); }
+      catch { /* the team record is metadata only — a leftover dir is inert */ }
+      throw err;
+    }
+
+    // ── 3. Re-derive everything that keys on the new scope ────────────────────
+    // saveAgentPrompt re-reads the config, so it must run after the write: it
+    // rewrites AGENT-PROMPT.md from the resolved prompt and rebuilds CLAUDE.md
+    // with the member's skill descriptions and the squad's knowledge digest ref.
+    const env = loadEnvironment(cfg.environmentId) || {};
+    try {
+      saveAgentPrompt(id, plan.effectivePrompt, "team-member", env);
+    } catch (err) {
+      warnings.push(`prompt/CLAUDE.md rebuild: ${err.message}`);
+    }
+    await reseedAgent(id, [AGENT_PROMPT_FILENAME, "CLAUDE.md"]);
+
+    // The agent must come back on its own — a converted agent left stopped is a
+    // failed conversion. respawnAgent is a no-op for a disabled or never-spawned
+    // agent, which is the right answer there too.
+    let respawned = false;
+    try {
+      respawned = !!this.respawnAgent(id, { reason: "converted-to-team" }).respawned;
+    } catch (err) {
+      warnings.push(`respawn: ${err.message}`);
+    }
+
+    console.log(`[Orchestrator] Converted standalone agent ${id} into team ${plan.teamId} (team of one)`);
+    return {
+      id,
+      teamId: plan.teamId,
+      teamName: plan.teamConfig.displayName,
+      role: "team-member",
+      skillsCopied: plan.skillPoolCopies,
+      knowledgeScope: plan.knowledgeScope,
+      pluginScopeChanges: plan.pluginScopeChanges,
+      pluginTeardown,
+      respawned,
+      ...(warnings.length ? { warnings } : {}),
+    };
+  }
+
+  // ===========================================================
   // Agent cloning
   // ===========================================================
   // opts:
@@ -10210,6 +10378,32 @@ async function main() {
           console.error(`[Orchestrator] context upload error for ${id}: ${err.message}`);
           sendJson(res, 500, { error: 'context upload failed' });
         });
+      });
+      return;
+    }
+
+    // Convert one standalone agent into a team of one, in place (#2052).
+    const convertMatch = req.method === 'POST'
+      && req.url.match(/^\/internal\/agents\/([^/]+)\/convert-to-team$/);
+    if (convertMatch) {
+      const agentId = decodeURIComponent(convertMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        try {
+          const parsed = body ? JSON.parse(body) : {};
+          const result = await orchestrator.convertAgentToTeam(agentId, { force: parsed.force === true });
+          // A busy agent is a refusal the caller can retry with `force`, not an
+          // error — the same 409-with-a-warning contract disable/enable uses.
+          sendJson(res, result && result.warning ? 409 : 200, result);
+        } catch (err) {
+          console.error(`[Orchestrator] Convert-to-team error for ${agentId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404
+                       : /already taken/i.test(err.message) ? 409
+                       : /cannot be converted|Cannot derive/i.test(err.message) ? 400
+                       : 500;
+          sendJson(res, status, { error: err.message, ...(err.code ? { code: err.code } : {}) });
+        }
       });
       return;
     }

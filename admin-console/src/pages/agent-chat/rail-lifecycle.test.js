@@ -225,7 +225,9 @@ test('railMenuItems routes each target kind to its own menu', () => {
     // The chat-only view action leads (#1938 D1), then the lifecycle group,
     // then the chat-only help entry that closes the menu (#1972).
     'mark-unread',
-    'toggle-enabled', 'settings', 'clone', 'export', 'extract-template', 'reset-to-stub', 'delete',
+    'toggle-enabled', 'settings', 'clone', 'export', 'extract-template',
+    'convert-to-team', // #2052 — standalone-only, so it only appears on this row
+    'reset-to-stub', 'delete',
     'help',
   ]);
   // Both chat-only entries are fenced off from the lifecycle group between them.

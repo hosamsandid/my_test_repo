@@ -194,11 +194,18 @@ GOV-SKILLS-6 and GOV-DELIVERY-3).*
   register stdio MCP servers whose `command` executes inside agent containers, toggle
   **platform-wide maintenance mode**, edit any team's skills, and publish to the global
   skill pool (worries #1 and #4 in one sentence).
-- **Tenant isolation stops at the config plane**: the chat/session/workspace route
+- ~~**Tenant isolation stops at the config plane**: the chat/session/workspace route
   family (`api.js` ~13343–15811) has effectively one visibility check — any user can
   read/write any agent's workspace, run git commit/push in it, and post into any Matrix
   room as the admin token (worry #3: pushing work through another team's agents,
-  outside their gates).
+  outside their gates).~~ **Closed for cross-tenant access by #1459** (2026-09-08) —
+  *any user* is now *any member of the agent's own team*: GOV-ACCESS-3 below is
+  delivered at that boundary, and with it the gate half of GOV-PLATFORM-4. Still open
+  **inside** a team: #2041 D9 rules workspace writes and `git-action` Team-Admin-only,
+  which `docs/decentralised-access-concept.md` §11.2 assigns to P2. The finding is left
+  visible rather than deleted because it is what the two controls were written against;
+  the route range it cites has since moved, and the family is now addressed by parameter
+  name (`:agentId`) rather than by line number. See `admin-console/api/work-plane-access.js`.
 - **Sessions are irrevocable 7-day cookies** — deleting a user or changing a password
   leaves their sessions alive; the break-glass env admin ships as `admin`/`admin`,
   shared and unattributable. Offboarding is fictional today.
@@ -220,12 +227,29 @@ mode → System Admin**; skills CRUD → tier-appropriate admin (§5); knowledge
 Team Admin; team disable/enable + hill-climb actions → Team Admin; drafts/templates →
 Team Admin (drafts owner-editable); `/api/audit` → System Admin + team view.
 
-**GOV-ACCESS-3 — One middleware for the work plane.** `P0 · small build · reads observe 1 week, writes enforce day one`
+**GOV-ACCESS-3 — One middleware for the work plane.** `P0 · small build · reads observe 1 week, writes enforce day one` — **DELIVERED as worded (#1459, 2026-09-08); tightened further by #2041 D9 at P2**
 A single `:agentId`-keyed middleware in front of the whole chat/session/workspace
 family: reads require `visibleAgent` (404 on miss — don't leak existence), writes
 (post message, session ops, workspace write, git-action, queue cancel) require
 membership in the agent's team. Same treatment for `/api/matrix/*` (resolve room →
 agent before posting with the admin token).
+*As built* (`admin-console/api/work-plane-access.js`): one middleware over a prefix
+list mounted directly after `auth.gate`, and the room routes resolve room → agent
+through `findAgentByDmRoom`. Two deviations, both deliberate. **The read/write split
+is one predicate, not two branches** — with the two roles that exist today
+`visibleAgent` already resolves through the caller's membership set, so "writes
+require membership" is the same test; a second branch would be unreachable code, so
+the equivalence is pinned by a cross-product test instead and GOV-ACCESS-4's
+`team-viewer` tier is what will make the halves diverge. **There is no separate
+observe rung for reads** — `AUTH_ENABLED` (#1457) already is one: it ships **off**,
+which makes every caller `all: true` and the gate a no-op, so the enforcement cannot
+bite until an operator turns multi-user authorization on. Both refusals are 404.
+**Note the ceiling this control has as worded**: "membership in the agent's team" is
+the *tenant* boundary, so a Team **Member** may still delete workspace files and run
+`git-action` in their own team's agents. `docs/decentralised-access-concept.md` §6 (D9)
+rules that Team-Admin-only and §11.2 schedules it for P2 — a separate, narrower change
+that cannot be method-based (posting a message, opening a DM room, attaching a file and
+stopping your own run are writes D9 deliberately allows a member).
 
 **GOV-ACCESS-4 — Viewer role; Member as standard builder tier.** `P0 · small build · structural`
 Adds `team-viewer` (§3.1). **New joiners default to Viewer**; promotion is a Team-Admin
@@ -722,11 +746,18 @@ it is the onboarding read that makes handling rules teachable. The delivery doma
 
 **GOV-PLATFORM-2 / -3 — Internal-API auth + internal audit.** *(§3.5 — canonical.)*
 
-**GOV-PLATFORM-4 — Scope the read routes; targeted read-audit.** `P0 · small build · enforce (gate) / observe (audit)`
+**GOV-PLATFORM-4 — Scope the read routes; targeted read-audit.** `P0 · small build · enforce (gate) / observe (audit)` — **gate DELIVERED (#1459, 2026-09-08); read-audit OUTSTANDING**
 `visibleAgent` at the four workspace handlers + context proxies (404 on miss); a
 **short** sensitive-path read-audit (C2/C4 paths only: `.claude/settings.json`,
 `users.md`, `_keys/`, session-log streams) through the existing audit funnel — a
 tripwire, deliberately not a SIEM-shaped full read log.
+*As built*: the gate half is the GOV-ACCESS-3 middleware above — it covers the
+workspace handlers and the context proxies, so this control needs no second gate.
+The **read-audit tripwire is not built**: it is observability rather than
+authorization, `audit.auditMutations` records mutations only, and #1459's scope stops
+at the gate. It needs its own ticket; nothing in the delivered gate blocks it (denied
+*writes* are already audited, because `auditMutations` is mounted ahead of the auth
+gate and therefore ahead of this one).
 
 **GOV-PLATFORM-5 — C2 out of every browse surface.** *(one implementation with
 GOV-CREDENTIALS-2, §8.)*
@@ -886,7 +917,7 @@ order:
 | # | Control | Why first |
 |---|---|---|
 | 1 | §3.5 internal-API auth + internal audit (GOV-PLATFORM-2/3) | Every other server-side control is bypassable via :4002 until this lands; six domains depend on it |
-| 2 | Work-plane tenant isolation (GOV-ACCESS-3 + GOV-PLATFORM-4) | Closes cross-team read/write/git-push — the widest live hole |
+| 2 | Work-plane tenant isolation (GOV-ACCESS-3 + GOV-PLATFORM-4) | Closes cross-team read/write/git-push — the widest live hole. **Gate delivered #1459**; GOV-PLATFORM-4's read-audit tripwire still owed |
 | 3 | Workspace secret masking + gate (GOV-CREDENTIALS-2 ≡ GOV-PLATFORM-5) | Plaintext MCP secrets are three clicks from any user today |
 | 4 | Close the verified route holes (GOV-ACCESS-2, incl. the maintenance + team-disable role fixes of GOV-AUTONOMY-2) | Missing locks, enforce day one |
 | 5 | Branch-protection standard + probe (GOV-DELIVERY-4) | The only thing that stops `git push origin main` from a container |
@@ -908,7 +939,8 @@ emits-lift validation fix; maintenance role gate + reason + auto-expiry;
 `AEE_WORKSPACE_ISOLATION=0` startup warning; RW-mount audit tag; waiver register file.
 
 **Phase 1 — the first month, small builds.** Internal-API auth ladder
-(observe → enforce) + internal audit; work-plane middleware + workspace masking/gate;
+(observe → enforce) + internal audit; work-plane middleware (**delivered #1459**) +
+workspace masking/gate;
 skill caps + snapshots/rollback + autonomy-dial ack + `autoActivate` gate for new
 teams; budgets (observe/warn) + showback + envelopes + CPU/count caps; session epoch +
 24 h sliding TTL + Viewer role; credential binding checks + lifecycle metadata

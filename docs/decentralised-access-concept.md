@@ -850,10 +850,10 @@ Two things it deliberately did **not** do. The draft id namespace stays global a
 
 Decision core: `admin-console/api/draft-access.js` (pure, `draft-access.test.js` carries the two-user loop this row's P2 line named); wiring guarded by `draft-routes-access.test.js`. Client decisions in `admin-console/src/pages/process/draft-share-view.js`.
 
-### 11.2 — The work plane is ungated — **D9 write half CLOSED by #2080; tenant half open**
+### 11.2 — The work plane is ungated — **D9 write half CLOSED by #2080; tenant half CLOSED by #1459 §2 (PR #2105)**
 
-> **Status: partially closed.** This row is two rules wearing one heading, and
-> they landed apart.
+> **Status: closed.** This row is two rules wearing one heading, and they landed
+> apart.
 >
 > **Closed by #2080 (P2 / AC7b):** the D9 read/write split named in the last
 > paragraph below. The ten `manage`-class routes of the §6 matrix now require
@@ -864,16 +864,20 @@ Decision core: `admin-console/api/draft-access.js` (pure, `draft-access.test.js`
 > it against api.js in **both** directions, so a route added to these families
 > later cannot ship unclassified.
 >
-> **Still open:** the **tenant** half — reads require `visibleAgent`, and the
-> chat/session/`/api/matrix/rooms/*` family needs the room→agent resolution.
-> That is #1459 §2's ticket (PR #2105, `work-plane-access.js`), which gates the
+> **Closed by #1459 §2 (PR #2105):** the **tenant** half — reads require
+> `visibleAgent`, and the chat/session/`/api/matrix/rooms/*` family needs the
+> room→agent resolution. `admin-console/api/work-plane-access.js` gates the
 > whole family with one `app.use` mount list. The two compose deliberately
 > rather than overlap: the mount answers *"is this agent yours at all"* with a
 > 404, the per-route gate answers *"may you change it"* with a 403. `app.use`
 > cannot discriminate by method, and D9's line is not a method line either —
 > posting a chat message, opening a DM room, attaching a file and stopping your
 > own run are all writes D9 *allows* a member — which is why the split could not
-> be folded into the mount.
+> be folded into the mount. The gate consumes the `{ teamId, ownerId }` shape
+> `agentMetaForScope` produces, where `teamId` is the RESOLVED access boundary
+> (`resolveAgentTeam`): since #2078 (D8) a standalone agent resolves to a `null`
+> boundary and its privacy is decided by `ownerId` (`ownedByCaller`), not the
+> retired `visibility` field.
 >
 > The line numbers below are historical (they predate #2078 and #2101).
 
@@ -888,7 +892,7 @@ Decision core: `admin-console/api/draft-access.js` (pure, `draft-access.test.js`
 
 `docs/governance-concept.md:197-201` describes the same family (*"any user can read/write any agent's workspace, run git commit/push in it, and post into any Matrix room as the admin token"*) and owns it as **GOV-ACCESS-3** (`:223`) / **GOV-PLATFORM-4** (`:725`); #1459 §2 records the same finding. **Under private-by-default this is the widest hole**, because it is reachable with nothing but an agent id — which the chat list of any team a user *does* belong to hands out.
 
-P2 must gate the whole family, and the D9 matrix (§6) is the split: reads → `visibleAgent`, writes → `canManageAgent`/`denyUnlessCanManageAgent`.
+P2 must gate the whole family, and the D9 matrix (§6) is the split: reads → `visibleAgent`, writes → `canManageAgent`/`denyUnlessCanManageAgent`. **#1459 delivered the first half of that sentence** ("gate the whole family", at the tenant boundary); the split itself is what remains — see the status note at the top of this section for the two things that turned out to be non-obvious about it.
 
 ### 11.3 — MCP server writes are ungated — **CLOSED by #2083**
 

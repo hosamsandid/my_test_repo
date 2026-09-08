@@ -38,6 +38,8 @@ const { createAgentManageGate } = require('./team-member-boundary');
 // environments and MCP servers. Byte-mirrored in orchestrator/resource-tier.js.
 const { tierOwnershipFields, isRetier } = require('./resource-tier');
 const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
+const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
+        WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
 const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
 const { normalizeDiscoveredModels } = require('./model-discovery');
@@ -364,6 +366,43 @@ auth.registerAuthRoutes(app, {
   }),
 });
 app.use('/api', auth.gate);
+
+// Work-plane tenant isolation (#1459 §2 — GOV-ACCESS-3 / GOV-PLATFORM-4).
+//
+// One gate in front of the entire `:agentId` family (workspace browser, git
+// actions, session log, context folders, chat upload) and the Matrix chat
+// rooms, which until now authorized nothing beyond the id's shape — the widest
+// live cross-tenant hole (docs/governance-concept.md:196-201).
+//
+// Mounted HERE, immediately after the authentication gate and ~1 400 lines
+// before the first route it protects, deliberately: express walks its stack in
+// registration order, so a gate registered up front cannot be bypassed by a
+// route that is added later, in the wrong place, or by someone who does not
+// know the gate exists. The rules and the mount list live in
+// work-plane-access.js; `work-plane-access.test.js` re-derives the list from
+// this file's own route table and fails if a `:agentId` route escapes it.
+//
+// The lookups are injected rather than imported so the middleware is reachable
+// from a real-HTTP test (api.js boots two listeners on require, #651).
+const workPlaneGates = createWorkPlaneGates({
+  getScope,
+  visibleAgent,
+  isValidAgentId: (id) => AGENT_ID_RE.test(id),
+  // `safeAgentPath` returns null for a missing agent directory or config, so an
+  // unresolvable agent arrives at the predicate as `null` and is refused — the
+  // same 404 as "no such agent", never a guessed `default` tenant.
+  loadAgentMeta: (id) => {
+    const cfgPath = safeAgentPath(id, 'config.json');
+    const cfg = cfgPath ? readJsonFile(cfgPath, null) : null;
+    return cfg ? agentMetaForScope(cfg) : null;
+  },
+  loadRoomAgentMeta: (roomId) => {
+    const owner = findAgentByDmRoom(roomId);
+    return owner && owner.cfg ? agentMetaForScope(owner.cfg) : null;
+  },
+});
+for (const prefix of WORK_PLANE_AGENT_PREFIXES) app.use(prefix, workPlaneGates.agentGate);
+app.use(WORK_PLANE_ROOM_PREFIX, workPlaneGates.roomGate);
 
 // Helper Chat guided-tour manifest (#1737, Phase 2.2). Serves the pre-built
 // tour manifest (generated + vendored by #1736) behind the global /api gate
@@ -16405,6 +16444,30 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
 // Paginates backward through the full timeline, collecting every m.room.message
 // event, then issues a Matrix redaction (PUT .../redact/...) for each one.
 //
+// Already-redacted events (empty content) are skipped so the call stays
+// idempotent.
+
+// Reverse lookup: which agent owns this Matrix room? The `dm-room.json` pointer
+// is the only record of it, so this scans the agent directories.
+//
+// Split out of findAgentTokenByDmRoom below for the #1459 work-plane gate,
+// which has to answer "whose room is this?" for a room the caller may not be
+// allowed to touch — a question the token router deliberately does not answer:
+// it returns null for a tokenless agent, which a gate would read as "no agent
+// owns this room" and wave through. Returning the config lets each caller apply
+// its own rule to the same single scan.
+function findAgentByDmRoom(roomId) {
+  try {
+    for (const agentId of fs.readdirSync(AGENTS_DIR)) {
+      const dm = readJsonFile(path.join(AGENTS_DIR, agentId, 'dm-room.json'), null);
+      if (dm?.roomId !== roomId) continue;
+      const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+      return { agentId, cfg };
+    }
+  } catch { /* fall through */ }
+  return null;
+}
+
 // Token routing per sender: the DM room is CREATED BY THE AGENT (see
 // ensureAgentDmRoom), and on current homeserver room versions the creator
 // holds implicit top power while the PL content is empty — so the admin token
@@ -16413,18 +16476,10 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
 // admin token silently 403'd, and "Clear History" came back after the next
 // backfill. Events sent by the agent are therefore redacted with the agent's
 // own token (from its config.json, same source ensureAgentDmRoom uses).
-// Already-redacted events (empty content) are skipped so the call stays
-// idempotent.
 function findAgentTokenByDmRoom(roomId) {
-  try {
-    for (const agentId of fs.readdirSync(AGENTS_DIR)) {
-      const dm = readJsonFile(path.join(AGENTS_DIR, agentId, 'dm-room.json'), null);
-      if (dm?.roomId !== roomId) continue;
-      const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
-      return cfg?.token ? { token: cfg.token, userId: cfg.userId || `@${agentId}:local` } : null;
-    }
-  } catch { /* fall through */ }
-  return null;
+  const owner = findAgentByDmRoom(roomId);
+  const cfg = owner && owner.cfg;
+  return cfg?.token ? { token: cfg.token, userId: cfg.userId || `@${owner.agentId}:local` } : null;
 }
 
 app.delete('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {

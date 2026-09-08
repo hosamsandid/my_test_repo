@@ -10,8 +10,10 @@
 //
 // This module answers the two questions that offer needs, and nothing else:
 //   1. did the repositories change at all, and how? → classifyRepositoryChanges
-//   2. what do we say about it?                     → repositoryChangeNotice /
-//                                                     removedRepositoriesWarning
+//   2. what do we say about it?                     → repositoryChangeNotice
+//                                                     (the lead) and
+//                                                     repositoryChangeLines
+//                                                     (one line per class)
 //
 // Same null-when-clean shape as mcpChangeNotice (working-env-mcp-view.js) and
 // toolchainChangeWarning (toolchain-select-view.js), and for the same reason: a

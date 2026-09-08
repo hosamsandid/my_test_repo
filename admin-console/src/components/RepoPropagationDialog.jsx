@@ -8,6 +8,7 @@ import {
 } from '../pages/sync-repos-view.js';
 import {
   repositoryChangeLines,
+  repositoryChangeNotice,
   propagatableCount,
 } from '../pages/working-env-repo-diff.js';
 import PageHelpButton from './PageHelpButton';
@@ -83,6 +84,17 @@ export default function RepoPropagationDialog({
     }
     return undefined;
   }, [open]);
+
+  // Escape is the decline path, matching ConfirmDialog — and inert while a run
+  // is in flight for the same reason the backdrop is: the run has already
+  // written into other workspaces and the report of what it did is the only
+  // copy.
+  useEffect(() => {
+    if (!open || running) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, running, onClose]);
 
   useEffect(() => {
     if (!open) {
@@ -185,8 +197,7 @@ export default function RepoPropagationDialog({
                 + 'not up to date with its repository list. Bring them up to date now? '
                 + 'Missing repositories are cloned and diverging ones adjusted — but only where the '
                 + 'existing clone is clean and fully pushed. Nothing is ever deleted.'
-              : `Saved. ${agentCount} agent${agentCount === 1 ? '' : 's'} already `
-                + `${agentCount === 1 ? 'uses' : 'use'} this environment.`}
+              : repositoryChangeNotice({ diff, agentCount })}
           </div>
 
           {lines.length > 0 && (
@@ -249,7 +260,7 @@ export default function RepoPropagationDialog({
         </div>
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)' }}>
-          {!done && (
+          {!done && toDo > 0 && (
             <button
               type="button"
               onClick={() => onClose?.()}
@@ -265,26 +276,26 @@ export default function RepoPropagationDialog({
               Not now
             </button>
           )}
-          {done ? (
+          {(done || toDo === 0) ? (
+            // A removal-only diff has nothing to propagate — nothing is ever
+            // deleted from an agent — so the dialog acknowledges rather than
+            // offering a disabled primary action for a pass that would do
+            // nothing (the repo-less case of #1623 lands here too).
             <button
               type="button"
               ref={acceptRef}
               onClick={() => onClose?.()}
               style={primaryStyle(false)}
             >
-              Close
+              {done ? 'Close' : 'Got it'}
             </button>
           ) : (
             <button
               type="button"
               ref={acceptRef}
               onClick={accept}
-              disabled={running || toDo === 0}
-              style={primaryStyle(running || toDo === 0)}
-              // A removal-only diff has nothing to propagate — nothing is ever
-              // deleted from an agent — so the button says so rather than
-              // running an empty pass.
-              title={toDo === 0 ? 'Nothing to bring up to date — nothing is ever deleted from an agent' : undefined}
+              disabled={running}
+              style={primaryStyle(running)}
             >
               {running && <Loader2 size={13} style={{ animation: 'repo-prop-spin 1s linear infinite', marginRight: 6, verticalAlign: -2 }} />}
               {running ? 'Bringing up to date…' : 'Bring agents up to date'}

@@ -1252,7 +1252,10 @@ export default function WorkingEnvironments() {
     const rows = (Array.isArray(list) ? list : []).filter(
       (e) => (Array.isArray(e.agents) ? e.agents.length : (e.agentCount || 0)) > 0,
     );
-    if (rows.length === 0) return;
+    // Always write the map, even when it ends up empty: returning early here
+    // would leave a badge standing for an environment whose last agent has
+    // since been deleted.
+    if (rows.length === 0) { setDivergence({}); return; }
     const entries = await Promise.all(rows.map(async (e) => {
       try {
         return [e.id, await apiCall('GET', `/api/environments/${encodeURIComponent(e.id)}/repo-divergence`)];

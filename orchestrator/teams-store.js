@@ -443,13 +443,58 @@ function createTeamsStore({ root } = {}) {
     return createUser({ subject, email, displayName, systemAdmin: true });
   }
 
+  // Append (user → team) memberships in bulk, for the #2077 D6 migration.
+  //
+  // Deliberately NOT `setMembership` in a loop, for three reasons:
+  //
+  //  1. `setMembership` validates `teamId` against `teams/index.json` (:311),
+  //     and the whole point of the collapse is that the referent is now an
+  //     **Agent Team** id, which this module cannot see (it has no agent
+  //     access). The caller has already resolved the target ids from the agent
+  //     configs, so this method takes them as given.
+  //  2. One write instead of N. A per-entry upsert would rewrite the whole
+  //     array N times, and a crash halfway would leave a partial fan-out.
+  //  3. It must never CHANGE an existing record. The migration adds reach; a
+  //     pre-existing `(userId, teamId)` pair is skipped rather than having its
+  //     role overwritten, so a hand-made grant is never silently rewritten.
+  //
+  // Returns the records actually appended (`[]` on a second run — AC6).
+  function appendMemberships(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) return [];
+    const memberships = readArray(MEMBERSHIPS_INDEX);
+    const seen = new Set(memberships.map(m => `${m && m.userId} ${m && m.teamId}`));
+    const added = [];
+    for (const e of entries) {
+      if (!e || !isNonEmptyString(e.userId) || !isNonEmptyString(e.teamId)) continue;
+      if (!MEMBERSHIP_ROLES.includes(e.role)) continue;
+      const key = `${e.userId} ${e.teamId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const record = {
+        id: crypto.randomUUID(),
+        userId: e.userId,
+        teamId: e.teamId,
+        role: e.role,
+        createdAt: nowIso(),
+      };
+      // Provenance for the collapse (#2077, §8.2): which access scope this
+      // grant was derived from. Nothing reads it — it is what makes a migrated
+      // membership auditable and distinguishable from one a human made.
+      if (isNonEmptyString(e.fromScopeId)) record.fromScopeId = e.fromScopeId;
+      memberships.push(record);
+      added.push(record);
+    }
+    if (added.length > 0) writeArray(MEMBERSHIPS_INDEX, memberships);
+    return added;
+  }
+
   return {
     DEFAULT_TEAM_ID,
     MEMBERSHIP_ROLES,
     listTeams, getTeam, createTeam, updateTeam, deleteTeam,
     listUsers, getUser, getUserBySubject, createUser, updateUser, deleteUser,
     setUserPassword, clearUserPassword, verifyUserCredentials, sanitizeUser,
-    listMemberships, setMembership, removeMembership,
+    listMemberships, setMembership, removeMembership, appendMemberships,
     ensureDefaultTeam, ensureSystemAdmin,
   };
 }

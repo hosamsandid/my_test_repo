@@ -268,6 +268,64 @@ test('memberships: remove', () => {
   assert.throws(() => store.removeMembership({ userId: user.id, teamId: 't1' }), /No membership/);
 });
 
+// ---- appendMemberships (the #2077 D6 fan-out) -----------------------------
+
+test('appendMemberships writes memberships keyed on an Agent Team id', () => {
+  const { store } = freshStore();
+  const user = store.createUser({ subject: 'ada@corp.com' });
+  // No team record exists for 'sdlc-2-0' — that is the whole point: after the
+  // collapse the referent is an Agent Team config, which this store cannot see.
+  assert.throws(() => store.setMembership({ userId: user.id, teamId: 'sdlc-2-0', role: 'team-admin' }), /Team.*not found/);
+
+  const added = store.appendMemberships([
+    { userId: user.id, teamId: 'sdlc-2-0', role: 'team-admin', fromScopeId: 'default' },
+  ]);
+  assert.equal(added.length, 1);
+  assert.equal(added[0].teamId, 'sdlc-2-0');
+  assert.equal(added[0].role, 'team-admin');
+  assert.equal(added[0].fromScopeId, 'default');
+  assert.ok(added[0].id && added[0].createdAt);
+  assert.equal(store.listMemberships({ teamId: 'sdlc-2-0' }).length, 1);
+});
+
+test('appendMemberships is idempotent and never rewrites an existing role', () => {
+  const { store } = freshStore();
+  const user = store.createUser({ subject: 'bob@corp.com' });
+  store.appendMemberships([{ userId: user.id, teamId: 'squad', role: 'team-member' }]);
+
+  // A second run adds nothing (AC6) …
+  assert.deepEqual(store.appendMemberships([{ userId: user.id, teamId: 'squad', role: 'team-member' }]), []);
+  // … and a differing role does NOT overwrite the record that is already there.
+  assert.deepEqual(store.appendMemberships([{ userId: user.id, teamId: 'squad', role: 'team-admin' }]), []);
+  const held = store.listMemberships({ userId: user.id, teamId: 'squad' });
+  assert.equal(held.length, 1);
+  assert.equal(held[0].role, 'team-member');
+});
+
+test('appendMemberships skips malformed entries and writes nothing for an empty plan', () => {
+  const { store } = freshStore();
+  const user = store.createUser({ subject: 'cyd@corp.com' });
+  assert.deepEqual(store.appendMemberships([]), []);
+  assert.deepEqual(store.appendMemberships(null), []);
+  assert.deepEqual(store.appendMemberships([
+    { userId: user.id, teamId: 'squad', role: 'boss' },   // not a MEMBERSHIP_ROLE
+    { userId: '', teamId: 'squad', role: 'team-member' }, // no user
+    { userId: user.id, teamId: '', role: 'team-member' }, // no team
+  ]), []);
+  assert.equal(store.listMemberships().length, 0);
+});
+
+test('appendMemberships de-duplicates within one call', () => {
+  const { store } = freshStore();
+  const user = store.createUser({ subject: 'dee@corp.com' });
+  const added = store.appendMemberships([
+    { userId: user.id, teamId: 'squad', role: 'team-member' },
+    { userId: user.id, teamId: 'squad', role: 'team-admin' },
+  ]);
+  assert.equal(added.length, 1);
+  assert.equal(added[0].role, 'team-member');
+});
+
 // ---- bootstrap ------------------------------------------------------------
 
 test('ensureDefaultTeam is idempotent', () => {

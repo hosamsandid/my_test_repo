@@ -39,6 +39,7 @@ separately from that point on.
 | **Model provider** | Optional override — agents start on this provider and its default model instead of the global `ANTHROPIC_BASE_URL` from `.env`. |
 | **Agent toolchain** | Optional — which container image the agents are spawned from, picked from the operator registry. Absent means the default image. |
 | **Additional instructions** | Markdown appended to the agent's `CLAUDE.md`: project context, coding conventions, domain terminology, constraints every agent here should follow. |
+| **Ownership** | Who the environment belongs to: a single **team**, or **shared** across several teams so each one sees it in its own pickers and reuses it as if it were its own. Any Team Admin of an assigned team can edit a shared environment's content; only a System Admin decides *which* teams it reaches or moves it between team-owned and shared. Left unset an environment stays owned by its team, exactly as before. |
 
 Skills are *not* part of an environment. They are granted to a team or an agent
 (Agents page, Team-Setup wizard, Knowledge page); an environment carries only

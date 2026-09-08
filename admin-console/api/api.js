@@ -27,11 +27,15 @@ const { discoverBoundAgents, hiddenBlastRadius, projectRespawnOutcome, respawnWi
 const { githubApiBase } = require('./github-api-base');
 const { createTtlCache } = require('./ttl-cache');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
-        canManageEnvironment, visibleUser, describeAuthz,
+        visibleEnvironment, canManageEnvironment, canCreateEnvironment, canRetierEnvironment,
+        visibleUser, describeAuthz,
         normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
         resolveAgentTenant } = require('./scope');
 const { resolveAgentTeam } = require('./agent-team');
+// Layered resource ownership (#2083, P5) — the shared tier shape for
+// environments and MCP servers. Byte-mirrored in orchestrator/resource-tier.js.
+const { tierOwnershipFields, isRetier } = require('./resource-tier');
 const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
 const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
@@ -857,6 +861,42 @@ function resolveCredentialOwnership(body, actingUserId) {
   }
   const teamId = resolveOwnerTeamId(b.teamId);
   return { scope: 'team', teamId, assignedTeamIds: [] };
+}
+
+// Resolve the requested ownership of a TIERED CONFIGURATION resource — a
+// working environment or an MCP server (#2083, epic #2076 P5).
+//
+// Deliberately a thin named wrapper over `resolveCredentialOwnership` rather
+// than a second validator: the tier shape is shared (resource-tier.js), so the
+// question "does this team exist, and are these assignments real" must have one
+// answer. What the wrapper adds is the ONE difference, and it is a refusal.
+//
+// THE PERSONAL TIER IS NOT OFFERED HERE, and this is a deliberate deviation from
+// issue #2083's AC1 ("a working environment can be created as shared/system,
+// team, or personal"). The design of record's own tier table (§5.1) asks only
+// for the shared tier for environments and MCP servers, and its before/after
+// example (§5.2) shows only `team` and `system` — AC1's third value is the one
+// clause of the ticket that contradicts §5.1, and the code says why §5.1 is
+// right: the personal tier's defining property is that it has NO `scope.all`
+// bypass (#1567 D2), because a personal SECRET must be private even from the
+// operator. An environment is not a secret, it is infrastructure that agents
+// run on — a personal one would be an environment a System Admin can neither
+// read, repair nor delete, which also makes the "Used by <env>" refusal on a
+// credential delete unresolvable by anyone. The predicates in scope.js still
+// handle the personal tier (so the shape stays uniform, a hand-edited record
+// fails closed to its owner, and a later ticket that wants personal
+// environments only has to open this door), but nothing can create one.
+function resolveTieredOwnership(body) {
+  const b = body || {};
+  if (b.scope === 'personal') {
+    const err = new Error('A working environment or MCP server cannot be personal — use the team or shared tier');
+    err.status = 400;
+    throw err;
+  }
+  // No `actingUserId`: without it `resolveCredentialOwnership` refuses a
+  // personal request anyway, so the explicit 400 above is the message and this
+  // is the backstop.
+  return resolveCredentialOwnership(b);
 }
 
 // Apply a rename/reassign patch to a credential entry (#798), enforcing the
@@ -3253,7 +3293,8 @@ app.post('/api/environments/:id/sync-agents', heavyLimiter, async (req, res) => 
   const env = loadEnvironment(envId);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const scope = getScope(req);
-  if (!visibleTeam(scope, env.teamId)) return res.status(404).json({ error: 'Environment not found' });
+  // #2083: tier-aware — a shared environment carries no `teamId`.
+  if (!visibleEnvironment(scope, env)) return res.status(404).json({ error: 'Environment not found' });
   if (!canManageEnvironment(scope, env)) {
     return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
   }
@@ -3298,7 +3339,8 @@ app.get('/api/environments/:id/repo-divergence', apiLimiter, async (req, res) =>
   const env = loadEnvironment(envId);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const scope = getScope(req);
-  if (!visibleTeam(scope, env.teamId)) return res.status(404).json({ error: 'Environment not found' });
+  // #2083: tier-aware — a shared environment carries no `teamId`.
+  if (!visibleEnvironment(scope, env)) return res.status(404).json({ error: 'Environment not found' });
 
   // The agent set is resolved HERE and handed to the orchestrator, because
   // deciding which agents this caller may see is the console's scoping job.
@@ -12073,7 +12115,11 @@ app.get('/api/mcp-servers', (req, res) => {
   const out = listMcpServerIds()
     .map(id => loadMcpServer(id))
     .filter(Boolean)
-    .filter(s => visibleTeam(scope, s.teamId)) // (#302); missing teamId → default team
+    // #2083: tier-aware. The old comment ("missing teamId → default team") had
+    // been stale since #2078 removed that collapse from `visibleTeam` (§8.4);
+    // what it must do now is also reach a SHARED server, which carries no
+    // `teamId` at all.
+    .filter(s => visibleEnvironment(scope, s)) // (#302, tiered by #2083)
     .map(s => {
       const transport = s.transport || 'stdio';
       const tplKey = transport === 'stdio' ? 'env' : 'headers';
@@ -12099,6 +12145,10 @@ app.get('/api/mcp-servers/:id', (req, res) => {
   if (!MCP_SERVER_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid server id' });
   const s = loadMcpServer(id);
   if (!s) return res.status(404).json({ error: 'MCP server not found' });
+  // #2083 / concept §11.3: this read was ungated and returned the raw stanza,
+  // including any `${credential}` template keys. 404 rather than 403 so the
+  // route is not an existence oracle.
+  if (!visibleEnvironment(getScope(req), s)) return res.status(404).json({ error: 'MCP server not found' });
   res.json(s);
 });
 
@@ -12158,14 +12208,24 @@ app.post('/api/mcp-servers', apiLimiter, (req, res) => {
   const built = buildMcpServerStanza({ existing: null, body });
   if (built.error) return res.status(400).json({ error: built.error });
 
-  let ownerTeamId;
-  try { ownerTeamId = resolveOwnerTeamId(body.teamId); }
+  // #2083 — the tier, and the FIRST write authorization these routes have ever
+  // had (concept §11.3: `POST`/`PUT`/`DELETE /api/mcp-servers` carried none,
+  // unlike `/api/mcp-credentials` beside them and unlike every environment
+  // route). Adding a shared tier without it would have left the tier decorative:
+  // any authenticated caller could re-assign a shared server to their own team.
+  // It IS a behaviour change for a plain Team Member, and it is the change
+  // §11.3 asks for.
+  let ownership;
+  try { ownership = resolveTieredOwnership(body); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  if (!canCreateEnvironment(getScope(req), ownership)) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
 
   const data = {
     id,
     name,
-    teamId: ownerTeamId,
+    ...tierOwnershipFields(ownership),
     description: built.stanza.description || '',
     transport: built.stanza.transport,
     ...(built.stanza.transport === 'stdio'
@@ -12182,18 +12242,34 @@ app.put('/api/mcp-servers/:id', apiLimiter, (req, res) => {
   if (!MCP_SERVER_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid server id' });
   const existing = loadMcpServer(id);
   if (!existing) return res.status(404).json({ error: 'MCP server not found' });
+  // #2083 / §11.3 — this route had no authorization at all, and no re-parenting
+  // check either (the environment PUT has required rights over the TARGET team
+  // since #989).
+  const mcpScope = getScope(req);
+  if (!canManageEnvironment(mcpScope, existing)) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
 
   const built = buildMcpServerStanza({ existing, body: req.body || {} });
   if (built.error) return res.status(400).json({ error: built.error });
 
   const merged = { ...built.stanza, updatedAt: new Date().toISOString() };
-  // Preserve (or update) the owning team (#302) — buildMcpServerStanza only
-  // covers transport fields, so carry teamId across explicitly.
-  if (req.body && req.body.teamId !== undefined) {
-    try { merged.teamId = resolveOwnerTeamId(req.body.teamId); }
+  // Ownership (#302, tiered by #2083). `buildMcpServerStanza` spreads
+  // `existing`, so the old tier fields ride along on `built.stanza` and must be
+  // restated explicitly — writing them from the resolved ownership is what
+  // stops a stale `teamId` surviving a promotion to the shared tier. The
+  // re-tier gate is the environment PUT's, for the reasons documented there.
+  if (req.body && (req.body.teamId !== undefined || req.body.scope !== undefined
+                   || req.body.assignedTeamIds !== undefined)) {
+    let nextOwnership;
+    try { nextOwnership = resolveTieredOwnership(req.body); }
     catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
-  } else if (existing.teamId !== undefined) {
-    merged.teamId = existing.teamId;
+    if (isRetier(existing, nextOwnership) && !canRetierEnvironment(mcpScope)) {
+      return res.status(403).json({ error: 'Only a System Admin may change which teams an MCP server belongs to', code: 'forbidden' });
+    }
+    Object.assign(merged, tierOwnershipFields(nextOwnership));
+  } else {
+    Object.assign(merged, tierOwnershipFields(existing));
   }
   saveMcpServer(id, merged);
   res.json(merged);
@@ -12202,7 +12278,13 @@ app.put('/api/mcp-servers/:id', apiLimiter, (req, res) => {
 app.delete('/api/mcp-servers/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!MCP_SERVER_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid server id' });
-  if (!loadMcpServer(id)) return res.status(404).json({ error: 'MCP server not found' });
+  const existing = loadMcpServer(id);
+  if (!existing) return res.status(404).json({ error: 'MCP server not found' });
+  // #2083 / §11.3 — third of the three ungated writes. Deleting a registry
+  // entry other teams may be running against was open to any caller.
+  if (!canManageEnvironment(getScope(req), existing)) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const usedBy = mcpServerInUse(id);
   if (usedBy) return res.status(409).json({ error: `MCP server is used by environment '${usedBy}'. Detach it first.` });
   // Path-injection containment (#208): re-confine the resolved server dir under
@@ -12864,11 +12946,14 @@ function resolveToolchainSelection(toolchainId) {
 
 app.get('/api/environments', (req, res) => {
   const scope = getScope(req);
+  // #2083: tier-aware. Was `visibleTeam(scope, e.teamId)`, which reaches a
+  // team-tier record only — a shared environment carries no `teamId` at all, so
+  // the old filter hid every one of them from everybody but an admin.
   const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean)
-    .filter(e => visibleTeam(scope, e.teamId)) // (#302)
+    .filter(e => visibleEnvironment(scope, e)) // (#302, tiered by #2083)
     .map(e => {
       const agents = agentsUsingEnvironment(e.id, scope); // (#439)
-      return { ...e, agents, agentCount: agents.length };
+      return { ...e, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, e) };
     });
   res.json(envs);
 });
@@ -12877,8 +12962,14 @@ app.get('/api/environments/:id', (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const scope = getScope(req);
+  // #2083: this read was ungated (concept §11.4) — any authenticated caller
+  // could fetch any environment by id and read its repositories, its
+  // `githubTokenId` and its MCP references. A tier the read-one path ignores is
+  // decorative, so the gate lands with the tier. 404 rather than 403, matching
+  // `GET /api/llm-endpoints/:id`, so the route is not an existence oracle.
+  if (!visibleEnvironment(scope, env)) return res.status(404).json({ error: 'Environment not found' });
   const agents = agentsUsingEnvironment(env.id, scope); // (#439)
-  res.json({ ...env, agents, agentCount: agents.length });
+  res.json({ ...env, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, env) });
 });
 
 // Resolve and validate { llmEndpointId, defaultModelId } against the registry.
@@ -12914,13 +13005,20 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (loadEnvironment(id)) return res.status(409).json({ error: `Environment '${id}' already exists` });
 
-  let ownerTeamId;
-  try { ownerTeamId = resolveOwnerTeamId(teamId); }
+  // #2083: ownership is now the three-tier triple, resolved and validated by the
+  // SAME function the four credential kinds use — one validator for every
+  // tiered resource, so "which teams exist" cannot be answered two ways.
+  // `actingUserId` is deliberately NOT passed: see the note on
+  // `resolveTieredOwnership`, which is why a `personal` request is refused here.
+  let ownership;
+  try { ownership = resolveTieredOwnership(req.body); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
 
-  // Config-write authorization (#989): creating an environment requires team-admin
-  // management rights over its owning team.
-  if (!canManageEnvironment(getScope(req), { teamId: ownerTeamId })) {
+  // Config-write authorization (#989, tiered by #2083): creating a team-tier
+  // environment requires team-admin rights over its owning team; creating a
+  // SHARED one is System-Admin-only (§5.2 — declaring a resource cross-tenant
+  // is an operator act).
+  if (!canCreateEnvironment(getScope(req), ownership)) {
     return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
   }
 
@@ -12958,7 +13056,11 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
     id,
     name,
     description: description || '',
-    teamId: ownerTeamId,
+    // #2083: the tier triple, written explicitly from the resolved ownership
+    // (never spread from the request body) so a client cannot smuggle a field
+    // into the shape the predicates read. A team-tier create is byte-identical
+    // to a pre-#2083 one apart from the now-explicit `scope`/`assignedTeamIds`.
+    ...tierOwnershipFields(ownership),
     repositories: normalizedRepos,
     githubTokenId: githubTokenId || null,
     mcpServers: normalizedMcp,
@@ -13008,16 +13110,30 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
     }
   }
 
-  if (teamId !== undefined) {
-    let nextTeamId;
-    try { nextTeamId = resolveOwnerTeamId(teamId); }
+  // #2083: ownership is now a tier, so an update may re-TIER the record. The
+  // gate splits along the line §5.2 draws, and the split is the whole reason a
+  // shared environment is usable at all:
+  //
+  //   • deciding WHICH teams reach it (a tier change, a cross-team move, a
+  //     change of assignments) is System-Admin-only — `canRetierEnvironment`;
+  //   • editing its CONTENT is self-service for every team-admin the record
+  //     already reaches, which the `canManageEnvironment` gate above allows.
+  //
+  // `isRetier` is what decides which of the two a given body asks for, so a
+  // client that echoes the record's own unchanged ownership back (which the
+  // console's form does on every save) is not treated as an operator act. The
+  // last literal `|| 'default'` on the environment path goes with it (§8.4).
+  if (teamId !== undefined || req.body?.scope !== undefined || req.body?.assignedTeamIds !== undefined) {
+    let nextOwnership;
+    try { nextOwnership = resolveTieredOwnership(req.body); }
     catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
-    // Re-parenting to another team requires management rights over the target.
-    if (nextTeamId !== (env.teamId || 'default')
-        && !canManageEnvironment(envScope, { teamId: nextTeamId })) {
-      return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+    if (isRetier(env, nextOwnership) && !canRetierEnvironment(envScope)) {
+      return res.status(403).json({ error: 'Only a System Admin may change which teams an environment belongs to', code: 'forbidden' });
     }
-    env.teamId = nextTeamId;
+    // Written even when it is NOT a re-tier, so a legacy record acquires its
+    // explicit `scope` on the next ordinary save rather than staying implicit
+    // forever.
+    Object.assign(env, tierOwnershipFields(nextOwnership));
   }
 
   // Only re-validate the LLM binding if either field was explicitly sent.

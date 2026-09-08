@@ -16,6 +16,9 @@ import { useHelpSubject } from '../context/HelperChatContext';
 import { OVERLAY_MCP_SERVER, OVERLAY_MCP_CREDENTIAL } from '../context/page-help-view.js';
 import { MCP_HELP_SECTIONS } from './mcp-help-sections.js';
 import { describeServerSubmitState, describeCredentialSubmitState } from './mcp-server-submit-state.js';
+import { useAuth } from '../auth/AuthContext';
+import CredentialOwnership from '../components/CredentialOwnership';
+import { defaultOwnership, ownershipPayload, adminTeamIdsOf } from './credential-scope-view.js';
 
 const inputStyle = {
   width: '100%',
@@ -73,6 +76,16 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
   const [id, setId] = useState('');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  // #2083 — ownership. This panel is create-only (neither table offers an edit),
+  // so the create default is the only seed it needs; `ownershipFromRecord` is
+  // the environment form's case, where the same panel also edits.
+  const { data: teamsData } = useApi('/api/admin/teams');
+  const { user } = useAuth();
+  const isSysAdmin = !!user?.admin;
+  const adminTeamIds = adminTeamIdsOf(user);
+  const [ownership, setOwnership] = useState(
+    () => defaultOwnership({ isSysAdmin, adminTeamIds }),
+  );
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName,
     setId,
@@ -187,6 +200,17 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
         </div>
       </div>
 
+      {/* #2083 — the same control the credential forms render, over the same
+          tier shape. A shared server is what lets a fresh team reach an MCP
+          backend without registering its own (AC11). */}
+      <CredentialOwnership
+        value={ownership}
+        onChange={setOwnership}
+        teams={Array.isArray(teamsData) ? teamsData : []}
+        isSysAdmin={isSysAdmin}
+        adminTeamIds={adminTeamIds}
+      />
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         {!saving && <SubmitBlockers label="Save server" reasons={submitBlockers} />}
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
@@ -203,6 +227,7 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
                   args: argsText.split('\n').map(s => s.trim()).filter(Boolean),
                   env: parseKeyValue(envText, '='),
                 }),
+            ...ownershipPayload(ownership),
           })}
           disabled={saving || !canSave}
           style={{

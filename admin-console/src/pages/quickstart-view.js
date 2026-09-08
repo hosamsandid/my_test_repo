@@ -56,14 +56,81 @@ export function showRepoPrerequisites(url) {
   return hasRepoUrl(url);
 }
 
+// --- No usable model provider: lock the form, guide honestly (#2084) --------
+//
+// The page used to show ONE message to everyone when no provider was usable —
+// "No model provider configured — Add provider →" — with the link pointing at
+// /models, a route `canAccessCredentialPages` closes to a plain Team Member.
+// Following in-form guidance therefore bounced that user to /chats: a dead end
+// dressed up as a fix. Two things replace it, both keyed on whether the caller
+// may add a provider at all (the SAME predicate that gates the route, passed in
+// by the page as `canAddProvider` — kept as an argument rather than imported so
+// a later policy change to *who* may add re-points one call site, not this
+// module).
+//
+// 1. The form is LOCKED up front (`providerLockActive`) instead of letting the
+//    user name an assistant and then fail on submit.
+// 2. The guidance is role-aware (`providerGuidance`): a caller who can add one
+//    keeps a working link; a caller who cannot gets a passive, honest sentence
+//    with NO link, so there is nothing to click that could redirect them.
+export const PROVIDER_GUIDANCE_COPY = {
+  // Shown to a caller who can act on it — unchanged from before.
+  canAdd: 'An agent needs a model provider — it is the only thing it runs on.',
+  linkLabel: 'Add provider →',
+  linkTo: '/models',
+  // Shown to a caller who cannot. It says what is missing and who to ask,
+  // and deliberately offers no affordance at all.
+  cannotAdd:
+    'No model provider is set up for you yet. Please ask a Team or System '
+    + 'Administrator to add one.',
+};
+
+// Is the form locked because no model provider can be used? Deliberately keyed
+// on the loading flag as well: while the provider list is in flight we know
+// neither that one exists nor that none does, so the page shows its existing
+// loading state rather than a premature lock (or a dead link).
+export function providerLockActive({ llmEndpointsLoading, hasLlmEndpoints }) {
+  return !llmEndpointsLoading && !hasLlmEndpoints;
+}
+
+// The guidance to render in place of the old one-size-fits-all warning. Returns
+// a `link` only when the caller may actually open it — the renderer has no other
+// branch to get wrong, and a `null` link cannot be turned into a dead one.
+export function providerGuidance({ canAddProvider }) {
+  if (canAddProvider) {
+    return {
+      canAddProvider: true,
+      text: PROVIDER_GUIDANCE_COPY.canAdd,
+      link: { to: PROVIDER_GUIDANCE_COPY.linkTo, label: PROVIDER_GUIDANCE_COPY.linkLabel },
+    };
+  }
+  return {
+    canAddProvider: false,
+    text: PROVIDER_GUIDANCE_COPY.cannotAdd,
+    link: null,
+  };
+}
+
+// The submit-checklist wording for the missing provider. Role-aware for the same
+// reason the card is: "Add a model provider" is an instruction a plain Team
+// Member cannot carry out, which is guidance that misleads rather than helps.
+export function providerBlockerMessage(canAddProvider) {
+  return canAddProvider
+    ? 'Add a model provider — an agent needs one to run.'
+    : 'Ask a Team or System Administrator to add a model provider — an agent needs one to run.';
+}
+
 // Can the form be submitted?
+//   - no usable provider: never (#2084). An agent needs a provider in BOTH
+//     paths — it is the only thing it runs on — so the repo path is now gated
+//     on it too. Previously it was not: the backend auto-binds a default
+//     provider there and reports an `llmWarning` instead, which created an
+//     agent that could not answer its first message. That is the same dead end
+//     from the other side, so the lock covers both paths.
 //   - repo present: GitHub prerequisites must be met (token + SSH key) — the URL
 //     itself is non-empty by definition here.
-//   - repo absent : a model provider must exist and be selected, and a name given
-//     (AC4 / AC6). A model provider is required in both cases (AC6), but for the
-//     repo path the backend auto-binds the default provider, so — unchanged from
-//     before — the repo path is not hard-blocked on the selection here (the
-//     "no model provider" guidance still shows).
+//   - repo absent : a model provider must be selected, and a name given
+//     (AC4 / AC6).
 export function canSubmitQuickstart({
   url,
   hasTokens,
@@ -72,10 +139,11 @@ export function canSubmitQuickstart({
   displayName,
   selectedLlmId,
 }) {
+  if (!hasLlmEndpoints) return false;
   if (hasRepoUrl(url)) {
     return repoPrerequisitesMet({ hasTokens, hasSshKeys });
   }
-  return !!hasLlmEndpoints && !!(displayName || '').trim() && !!selectedLlmId;
+  return !!(displayName || '').trim() && !!selectedLlmId;
 }
 
 // Why is the "Create agent & start chatting" button disabled? This is the SAME
@@ -98,7 +166,18 @@ export function quickstartSubmitReasons({
   hasLlmEndpoints,
   displayName,
   selectedLlmId,
+  canAddProvider,
 }) {
+  // No usable provider ⇒ the form is locked, so the provider is the ONLY thing
+  // worth reporting (#2084). Listing "Enter a name for your assistant." first
+  // — as this did before — asks the user to fill a field that cannot lead
+  // anywhere, and buries the one item that actually blocks them.
+  if (!hasLlmEndpoints) {
+    return {
+      canSubmit: false,
+      reasons: [{ field: 'provider', message: providerBlockerMessage(canAddProvider) }],
+    };
+  }
   const reasons = [];
   if (hasRepoUrl(url)) {
     // Repo path: the backend auto-binds the default model provider, so the gate
@@ -117,16 +196,12 @@ export function quickstartSubmitReasons({
       });
     }
   } else {
-    // Repo-less path: a name, and a model provider for the agent to run on.
+    // Repo-less path: a name, and a provider CHOICE — that at least one exists
+    // is guaranteed by the lock above.
     if (!(displayName || '').trim()) {
       reasons.push({ field: 'name', message: 'Enter a name for your assistant.' });
     }
-    if (!hasLlmEndpoints) {
-      reasons.push({
-        field: 'provider',
-        message: 'Add a model provider — an agent needs one to run.',
-      });
-    } else if (!selectedLlmId) {
+    if (!selectedLlmId) {
       reasons.push({ field: 'provider', message: 'Choose a model provider.' });
     }
   }

@@ -1,21 +1,28 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Link } from 'react-router';
-import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2, Cpu, Users, Info, Package, Server } from 'lucide-react';
+import { Edit, Trash2, Plus, GitBranch, Key, Github, X, AlertTriangle, Cpu, Users, Info, Package, Server } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
+import RepoPropagationDialog from '../components/RepoPropagationDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
-import SyncReposPanel from '../components/SyncReposPanel';
+// One repository card for the whole console (#2067): the agent-scoped attach
+// form renders this very component, so the two cannot drift in fields or copy.
+import RepositoryCard from '../components/RepositoryCard';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import { useAuth } from '../auth/AuthContext';
+import CredentialOwnership from '../components/CredentialOwnership';
+import { ownershipFromRecord, ownershipPayload, adminTeamIdsOf, canReassignCredentialClient } from './credential-scope-view.js';
 import { describeWorkingEnvSubmitState } from './working-env-submit-state.js';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning, availableToolchains, versionSourceLine } from './toolchain-select-view.js';
 import { initialMcpRows, mcpSubmitValue, mcpRowHint, mcpChangeNotice, mcpServerLabel } from './working-env-mcp-view.js';
 import { ENVIRONMENTS_HELP_SECTIONS } from './environments-help-sections.js';
+import { classifyRepositoryChanges, hasRepositoryChanges, outOfDateIndicator } from './working-env-repo-diff.js';
 import { usePageActions } from '../context/PageActionsContext';
 import { useHelpSubject } from '../context/HelperChatContext';
 import { OVERLAY_ENVIRONMENT_FORM, OVERLAY_TOOLCHAINS } from '../context/page-help-view.js';
@@ -46,187 +53,6 @@ const inputStyle = {
   outline: 'none',
   boxSizing: 'border-box',
 };
-
-function useRepoCheck(url, sshKeyId, githubTokenId) {
-  const [state, setState] = useState({ status: 'idle', error: null });
-  const reqIdRef = useRef(0);
-  const trimmedUrl = url ? url.trim() : '';
-
-  useEffect(() => {
-    if (!trimmedUrl) {
-      setState({ status: 'idle', error: null });
-      return;
-    }
-    const myReqId = ++reqIdRef.current;
-    setState({ status: 'pending', error: null });
-    const handle = setTimeout(async () => {
-      try {
-        const result = await apiCall('POST', '/api/repositories/check', {
-          url: trimmedUrl,
-          sshKeyId: sshKeyId || null,
-          githubTokenId: githubTokenId || null,
-        });
-        if (reqIdRef.current !== myReqId) return; // a newer request is in flight
-        if (result.ok) setState({ status: 'ok', error: null, empty: !!result.empty });
-        else setState({ status: 'error', error: result.error || 'Repository unreachable' });
-      } catch (err) {
-        if (reqIdRef.current !== myReqId) return;
-        setState({ status: 'error', error: err.message || 'Check failed' });
-      }
-    }, 700);
-    return () => clearTimeout(handle);
-  }, [trimmedUrl, sshKeyId, githubTokenId]);
-
-  return state;
-}
-
-function RepoStatusIcon({ status, error, empty }) {
-  if (status === 'pending') {
-    return (
-      <span title="Checking repository…" style={{ display: 'inline-flex', color: 'var(--eb-text-muted)' }}>
-        <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
-      </span>
-    );
-  }
-  if (status === 'ok') {
-    const title = empty
-      ? 'Repository reachable — but empty (no commits yet). Add an initial commit before agents can clone it.'
-      : 'Repository reachable';
-    return (
-      <span title={title} style={{ display: 'inline-flex', color: 'var(--eb-status-success, #16a34a)' }}>
-        <Check size={14} />
-      </span>
-    );
-  }
-  if (status === 'error') {
-    return (
-      <span title={error || 'Repository unreachable'} style={{ display: 'inline-flex', color: 'var(--eb-status-error)' }}>
-        <AlertTriangle size={14} />
-      </span>
-    );
-  }
-  return null;
-}
-
-function RepositoryCard({ idx, repo, sshKeys, githubTokenId, onChange, onRemove }) {
-  const check = useRepoCheck(repo.url, repo.sshKeyId, githubTokenId);
-  const isHttpsUrl = /^https:\/\//i.test((repo.url || '').trim());
-  // A private HTTPS repo fails the reachability check when no GitHub Token is set;
-  // SSH keys don't apply to HTTPS URLs, so point the user at the token section below.
-  const showTokenHint = check.status === 'error' && isHttpsUrl && !githubTokenId;
-
-  return (
-    <div style={{
-      border: '1px solid var(--eb-border-default)',
-      borderRadius: 'var(--eb-radius-md)',
-      padding: 'var(--eb-space-3)',
-      background: 'var(--eb-bg-surface)',
-      display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
-      position: 'relative',
-    }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)' }}>
-          Repository #{idx + 1}
-        </span>
-        <IconButton icon={X} label="Remove repository" danger onClick={onRemove} size={12} />
-      </div>
-
-      <div>
-        <div style={labelStyle}>SSH key</div>
-        <select
-          value={repo.sshKeyId}
-          onChange={e => onChange('sshKeyId', e.target.value)}
-          style={inputStyle}
-        >
-          <option value="">— no key (HTTPS only) —</option>
-          {sshKeys.map(k => (
-            <option key={k.id} value={k.id}>{k.name} ({k.id})</option>
-          ))}
-        </select>
-        <div style={helpTextStyle}>
-          Required for SSH-based URLs (e.g. <code>git@github.com:…</code>). Leave empty for HTTPS URLs — private HTTPS repositories authenticate with the <em>GitHub Token</em> set below, not an SSH key. Manage SSH keys on the <em>SSH Keys</em> page.
-        </div>
-      </div>
-
-      <div>
-        <div style={labelStyle}>Repository URL <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
-        <div style={{ position: 'relative' }}>
-          <input
-            style={{
-              ...inputStyle,
-              fontFamily: 'var(--eb-font-mono)',
-              paddingRight: 'var(--eb-space-8)',
-            }}
-            value={repo.url}
-            onChange={e => onChange('url', e.target.value)}
-            placeholder="git@github.com:org/repo.git"
-          />
-          <div style={{
-            position: 'absolute',
-            right: 'var(--eb-space-2)',
-            top: '50%',
-            transform: 'translateY(-50%)',
-            display: 'flex',
-            alignItems: 'center',
-            pointerEvents: 'none',
-          }}>
-            <RepoStatusIcon status={check.status} error={check.error} empty={check.empty} />
-          </div>
-        </div>
-        {check.status === 'error' && (
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)', marginTop: 'var(--eb-space-1)' }}>
-            {check.error}
-          </div>
-        )}
-        {check.status === 'ok' && check.empty && (
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning, #b45309)', marginTop: 'var(--eb-space-1)' }}>
-            Reachable, but the repository is empty (no commits yet). Add an initial commit before agents can clone it.
-          </div>
-        )}
-        {showTokenHint && (
-          <div style={{ ...helpTextStyle, color: 'var(--eb-text-secondary)' }}>
-            If this is a private HTTPS repository, select a <em>GitHub Token</em> in the section below to authenticate — SSH keys don't apply to HTTPS URLs.
-          </div>
-        )}
-        {check.status !== 'error' && (
-          <div style={helpTextStyle}>
-            The repository is checked for reachability in real time. Use an SSH URL with an SSH key, or an HTTPS URL with the <em>GitHub Token</em> set below, for private repositories.
-          </div>
-        )}
-      </div>
-
-      <div>
-        <div style={labelStyle}>Branch (optional)</div>
-        <input
-          style={{ ...inputStyle, fontFamily: 'var(--eb-font-mono)' }}
-          value={repo.branch}
-          onChange={e => onChange('branch', e.target.value)}
-          placeholder="main"
-        />
-        <div style={helpTextStyle}>
-          Leave empty to clone the repository's default branch (usually <code>main</code> or <code>master</code>).
-        </div>
-      </div>
-
-      <div>
-        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)', cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={repo.readOnly === true}
-            onChange={e => onChange('readOnly', e.target.checked)}
-            style={{ marginTop: '2px' }}
-          />
-          <span style={{ fontSize: 'var(--eb-text-sm)' }}>
-            Read-only (clone for reference — the agent must not push to this repo)
-          </span>
-        </label>
-        <div style={helpTextStyle}>
-          The repository is still cloned into the workspace, but the agent is told it is reference-only and must not commit or push to it.
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function initialRepositories(initial) {
   if (Array.isArray(initial?.repositories) && initial.repositories.length > 0) {
@@ -267,6 +93,23 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     defaultModelId: initial?.defaultModelId || '',
     toolchainId: initial?.toolchainId || '',
   }));
+
+  // #2083: the ownership control. Fetched here rather than threaded from the
+  // page, matching every other list this form loads for itself.
+  const { data: teamsData } = useApi('/api/admin/teams');
+  const { user } = useAuth();
+  const isSysAdmin = !!user?.admin;
+  const adminTeamIds = adminTeamIdsOf(user);
+  const teams = Array.isArray(teamsData) ? teamsData : [];
+  // Seeded from the record on an edit, so a shared environment opens as shared
+  // and an ordinary save cannot silently un-share it; from the role defaults on
+  // a create. Only a System Admin may re-tier (canRetierEnvironment server-side),
+  // so for anyone else the control is read-only rather than a button that 403s —
+  // the `settingsSubject` convention (concept §6, implementation note 2).
+  const [ownership, setOwnership] = useState(
+    () => ownershipFromRecord(initial, { isSysAdmin, adminTeamIds }),
+  );
+  const ownershipLocked = isEdit && !canReassignCredentialClient({ isSysAdmin });
 
   const { data: keysData } = useApi('/api/ssh-keys');
   const { data: tokensData } = useApi('/api/github-tokens');
@@ -394,6 +237,10 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
       defaultModelId: form.defaultModelId || null,
       // An ID, never an image reference (#1940) — the server resolves it.
       toolchainId: form.toolchainId || null,
+      // #2083. Sent on an edit too: `isRetier` server-side means restating the
+      // record's own unchanged ownership is NOT an operator act, so this is
+      // also what finally stamps an explicit `scope` on a legacy record.
+      ...ownershipPayload(ownership),
     });
   };
 
@@ -495,6 +342,21 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         </div>
       </div>
 
+      {/* #2083 — ownership. The same control the SSH-key, GitHub-token and
+          Model-Provider forms render, because the tier shape is the same one
+          (resource-tier.js); a second, differently-worded picker for the same
+          three tiers is exactly the drift #1928's shared-component discipline
+          exists to prevent. `disabled` while a non-System-Admin edits, since
+          only an operator may re-tier. */}
+      <CredentialOwnership
+        value={ownership}
+        onChange={setOwnership}
+        teams={teams}
+        isSysAdmin={isSysAdmin}
+        adminTeamIds={adminTeamIds}
+        disabled={ownershipLocked}
+      />
+
       <div style={{ ...helpTextStyle, marginTop: 0 }}>
         Skills are managed on the team (or agent) itself — see the Agents page, the Team-Setup wizard, or the Knowledge page.
         Working Environments carry only infrastructure: repository, credentials, MCP servers, context.
@@ -563,29 +425,14 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           <Plus size={13} /> Add repository
         </button>
 
-        {isEdit && initial?.id && form.repositories.length > 0 && (initial.agents || []).length > 0 && (
-          <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px dashed var(--eb-border-default)' }}>
-            {/* The Sync action's own sub-section inside chapter 2 — what it
-                clones, what it deliberately leaves alone, and which agents it
-                reaches. Mounted here rather than inside SyncReposPanel: that
-                component is shared with the agent settings form, where
-                openHelpFor() would resolve against a different route. */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 'calc(-1 * var(--eb-space-1))' }}>
-              <PageHelpButton
-                label="What Sync all agents does"
-                size={14}
-                style={{ padding: 0 }}
-                section={ENVIRONMENTS_HELP_SECTIONS.sync}
-              />
-            </div>
-            <SyncReposPanel
-              endpoint={`/api/environments/${encodeURIComponent(initial.id)}/sync-agents`}
-              actionLabel="Sync all agents"
-              description={`Clone the repositories above into every agent already using this environment (${(initial.agents || []).length} agent${(initial.agents || []).length === 1 ? '' : 's'}) — repositories are otherwise only cloned when an agent is first created. Already-cloned repositories are left untouched.`}
-              showAgentHeaders
-            />
-          </div>
-        )}
+        {/* #2066: the "Sync all agents" panel that used to sit here is GONE —
+            not hidden. It required an order nothing stated (Save → re-open Edit
+            → Sync) and, pressed before the save, reported success for the
+            PREVIOUS repository list. Saving now offers the propagation itself,
+            at the one moment the persisted list is authoritative. There is
+            deliberately no manual repository-sync affordance on this form at
+            all (AC1); the per-agent panel on the agent's Settings tab stays as
+            the single-agent recovery path (D2). */}
       </div>
 
       <div style={{
@@ -1249,6 +1096,38 @@ export default function WorkingEnvironments() {
   const [actionError, setActionError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
+  // The save-time propagation offer (#2066 D3). Held as one object so the
+  // dialog's inputs cannot get out of step with each other; `null` = no offer.
+  const [offer, setOffer] = useState(null);
+  // D4: per-environment divergence, keyed by env id. Fetched after the list
+  // loads rather than folded into GET /api/environments, because it costs two
+  // git commands per repository per agent and the list must not wait on it.
+  const [divergence, setDivergence] = useState({});
+
+  // Re-read the indicator for every environment that has at least one agent.
+  // Deliberately fail-quiet per environment: a probe that could not run shows
+  // NO indicator rather than a green one, so the page never claims agents are
+  // up to date when it does not know (outOfDateIndicator returns null for a
+  // missing payload).
+  const refreshDivergence = useCallback(async (list) => {
+    const rows = (Array.isArray(list) ? list : []).filter(
+      (e) => (Array.isArray(e.agents) ? e.agents.length : (e.agentCount || 0)) > 0,
+    );
+    // Always write the map, even when it ends up empty: returning early here
+    // would leave a badge standing for an environment whose last agent has
+    // since been deleted.
+    if (rows.length === 0) { setDivergence({}); return; }
+    const entries = await Promise.all(rows.map(async (e) => {
+      try {
+        return [e.id, await apiCall('GET', `/api/environments/${encodeURIComponent(e.id)}/repo-divergence`)];
+      } catch {
+        return [e.id, null];
+      }
+    }));
+    setDivergence(Object.fromEntries(entries));
+  }, []);
+
+  useEffect(() => { refreshDivergence(envs); }, [envs, refreshDivergence]);
 
   const COLUMNS = [
     { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
@@ -1284,12 +1163,45 @@ export default function WorkingEnvironments() {
       label: 'Agents',
       render: (v, row) => {
         const count = Array.isArray(row.agents) ? row.agents.length : (v || 0);
+        // D4 (#2066): the persistent out-of-date indicator, with the catch-up
+        // behind it. It lives on the Agents cell because it is a statement
+        // about those agents, and it is derived from their workspaces — so it
+        // survives a declined offer and clears itself once nothing diverges.
+        const indicator = outOfDateIndicator(divergence[row.id]);
         return (
-          <span
-            title={count > 0 ? row.agents.map(a => a.displayName || a.id).join('\n') : 'No agents use this environment'}
-            style={{ fontSize: 'var(--eb-text-xs)', color: count > 0 ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)' }}
-          >
-            {count}
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+            <span
+              title={count > 0 ? row.agents.map(a => a.displayName || a.id).join('\n') : 'No agents use this environment'}
+              style={{ fontSize: 'var(--eb-text-xs)', color: count > 0 ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)' }}
+            >
+              {count}
+            </span>
+            {indicator && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setOffer({ env: row, diff: null, catchUp: true });
+                }}
+                disabled={!indicator.canManage}
+                title={indicator.canManage
+                  ? `${indicator.title}\n\nClick to bring them up to date.`
+                  : `${indicator.title}\n\nYou may not manage this environment.`}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  padding: '1px var(--eb-space-2)',
+                  background: 'var(--eb-status-warning-bg)',
+                  border: '1px solid var(--eb-status-warning)',
+                  borderRadius: 'var(--eb-radius-sm)',
+                  color: 'var(--eb-status-warning)',
+                  fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+                  cursor: indicator.canManage ? 'pointer' : 'not-allowed',
+                  opacity: indicator.canManage ? 1 : 0.7,
+                }}
+              >
+                <AlertTriangle size={11} /> {indicator.label}
+              </button>
+            )}
           </span>
         );
       },
@@ -1311,7 +1223,22 @@ export default function WorkingEnvironments() {
     setSaving(true); setFormError(null);
     try {
       if (panelMode === 'edit') {
-        await apiCall('PUT', `/api/environments/${selected.id}`, form);
+        const saved = await apiCall('PUT', `/api/environments/${selected.id}`, form);
+        // #2066 D3: the offer is made HERE, once the save has SUCCEEDED, and
+        // the panel still closes as it always did. The diff is computed from
+        // two server-supplied lists — the list as it was persisted a moment ago
+        // (`previousRepositories`, captured inside the PUT) and the list the
+        // server saved — so it can never be computed against a draft this
+        // browser has been holding since another admin saved the same
+        // environment, which is the exact defect this ticket removes.
+        //
+        // Scoped to an environment that already HAS agents (AC4): with none
+        // there is no workspace that could be out of date, whatever changed.
+        const agents = Array.isArray(selected.agents) ? selected.agents : [];
+        const diff = classifyRepositoryChanges(saved?.previousRepositories, saved?.repositories);
+        if (agents.length > 0 && hasRepositoryChanges(diff)) {
+          setOffer({ env: { ...selected, ...saved }, diff, catchUp: false });
+        }
       } else {
         await apiCall('POST', '/api/environments', form);
       }
@@ -1442,6 +1369,17 @@ export default function WorkingEnvironments() {
           />
         )}
       </SidePanel>
+
+      <RepoPropagationDialog
+        open={!!offer}
+        envId={offer?.env?.id}
+        envName={offer?.env?.name}
+        diff={offer?.diff || null}
+        agents={offer?.env?.agents || []}
+        catchUp={!!offer?.catchUp}
+        onClose={() => setOffer(null)}
+        onFinished={() => refreshDivergence(envs)}
+      />
 
       <ConfirmDialog
         open={!!deleteTarget}

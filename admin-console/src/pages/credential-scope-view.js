@@ -10,7 +10,7 @@
 // the security boundary (every mutating route re-checks). The point is to avoid
 // showing a Team Admin actions that would just 403.
 
-const DEFAULT_TEAM_ID = 'default';
+export const DEFAULT_TEAM_ID = 'default';
 
 // Normalize a credential entry to an explicit scope shape (backward-compatible
 // with pre-#798 entries that only carry `teamId`). Mirrors scope.js.
@@ -84,6 +84,23 @@ export function defaultOwnership({ isSysAdmin, adminTeamIds = [] }) {
   return { scope: 'team', teamId: adminTeamIds[0] || '', assignedTeamIds: [] };
 }
 
+// The initial ownership state for an EDIT form: the record's own tier, made
+// explicit. #2083 needs this because working environments and MCP servers are
+// edited in the same panel they are created in, so the control has to open
+// showing what the record already is — a create-shaped default would silently
+// re-tier a shared record on the next save. A legacy record (no `scope`) reads
+// as team-tier, exactly as the server's normalizer does.
+//
+// Falls back to `defaultOwnership` when there is no record (the create case), so
+// one call site serves both modes.
+export function ownershipFromRecord(record, { isSysAdmin, adminTeamIds = [] } = {}) {
+  if (!record || typeof record !== 'object') return defaultOwnership({ isSysAdmin, adminTeamIds });
+  const c = normalizeCredential(record);
+  if (c.scope === 'system') return { scope: 'system', teamId: '', assignedTeamIds: [...c.assignedTeamIds] };
+  if (c.scope === 'personal') return { scope: 'personal', teamId: '', assignedTeamIds: [], userId: c.userId };
+  return { scope: 'team', teamId: c.teamId || '', assignedTeamIds: [] };
+}
+
 // Reduce an ownership state to the minimal API payload for a create/patch body.
 export function ownershipPayload(own) {
   const o = own || {};
@@ -126,4 +143,18 @@ export function canAccessCredentialPages(user) {
   if (!user) return false;
   if (user.admin) return true;
   return adminTeamIdsOf(user).length > 0;
+}
+
+// Can this user add a provider (or manage credentials) FOR A SPECIFIC team?
+// System Admins can (they add system-scoped providers that cover any team);
+// otherwise the user must be a Team Admin of *that* team. This is stricter than
+// `canAccessCredentialPages` (admin of ≥1 team) and closes the #2084 edge case:
+// a Team Admin of team A must NOT be offered a working /models link when the
+// agent will belong to team B, where they can navigate but cannot actually add a
+// provider. Note it subsumes `canAccessCredentialPages` — anyone who administers
+// a given team necessarily passes the credential-pages route guard too.
+export function isAdminForTeam(user, teamId) {
+  if (!user) return false;
+  if (user.admin) return true;
+  return !!teamId && adminTeamIdsOf(user).includes(teamId);
 }

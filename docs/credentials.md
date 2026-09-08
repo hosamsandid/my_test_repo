@@ -37,13 +37,22 @@ The credential an agent uses is resolved **per operation class**, because attrib
 | Read-only clones, the repo-check probe, SSH-only transport push | a shared `team`/`system` credential is fine | No attribution — a shared read credential misattributes no one. |
 | Event polling of a repo | a shared `team`/`system` token **only** | The poller is per-repo infrastructure, not per-human (#1569 AC6 — the personal tier never gates or replaces the poller's token). |
 
-The order is a **preference among tiers, not a fallback for a missing personal credential.** When an attributed write prefers the personal tier and the owner has **no usable personal credential** (absent, or a PAT missing the `repo`/`workflow` scope), the run is **refused** with a clear, actionable message — it does **not** silently drop to a `team`/`system` credential and act under a shared identity (**refuse-on-missing**, D5). The fallback chain applies only where a shared credential is legitimately acceptable (reads, polling).
+The order is a **preference among tiers, not a fallback for an unusable personal credential.** When an attributed write prefers the personal tier and the owner **has** a personal credential that cannot be used (a PAT missing the `repo`/`workflow` scope), the run is **refused** with a clear, actionable message — it does **not** silently drop to a `team`/`system` credential and act under a shared identity (**refuse-on-missing**, D5). The fallback chain applies only where a shared credential is legitimately acceptable (reads, polling) — and, since #2077, where the owner has no personal credential of that kind at all (see the switch below).
 
 **"The agent's owner"** is `config.ownerId` — for a `team-member` this is its parent Agent Team's owner (one hop, mirroring `resolveAgentTenant`), so a team operated by several humans still writes under exactly one deterministic identity regardless of which event woke the run (AC3/AC4). A **cron / GitHub-event** run resolves the owner from persisted config, never from whoever initiated the trigger.
 
-**`ownerId`-presence is the switch (reconciling AC5 with AC8).** An agent with **no `ownerId`** — the state of every agent until owner population lands — takes the shared `team`/`system` credential exactly as today and is **never** refused (AC8). Only an agent that actually carries an `ownerId` is subject to the personal preference and refuse-on-missing (AC2/AC5). So existing single-tier environments behave identically to before this phase.
+**Participation in the personal tier is the switch (reconciling AC5 with AC8).** #1569 originally gated the personal tier on the agent carrying an `ownerId`, which was safe only because nothing populated that field. **#2077 populates it on every Agent Team and standalone agent**, including a backfill over pre-existing ones, so owner *presence* can no longer be the switch: every owner starts with no personal credential (they are self-service and opt-in), and the old rule would have refused every `commit`/`pr`/`review`/`push-https` in the installation at once. The switch is now whether the owner actually participates:
 
-The decision core is the pure, unit-tested `orchestrator/credential-resolution.js` (`resolveAgentOwnerId` / `findPersonalCredential` / `resolveCredential`); the orchestrator threads its result into the attributed-write git env (`_buildAgentGitEnv`) and surfaces the refusal as a distinct `personal-credential-required` error (HTTP 424) on the `gh-as-agent pr` path.
+| The agent's owner | An attributed write gets |
+|---|---|
+| none | the shared `team`/`system` credential, never refused (AC8) |
+| set, but the owner has **no** personal credential of that kind | the shared credential, never refused — today's behaviour for every agent |
+| set, with a **usable** personal credential | that personal credential (AC1) |
+| set, with a personal credential that is **present but unusable** | **refused** (AC2/AC5, D5) |
+
+Refuse-on-missing keeps its whole purpose: a human who *has* a personal credential never has an attributed write re-attributed to a shared identity. What it no longer does is refuse on behalf of someone who never had one, which protects nobody and only takes their agents offline. Note the honest consequence: with no scope probe wired yet (see below), the refusal branch is currently unreachable and becomes reachable again when that probe lands.
+
+The decision core is the pure, unit-tested `orchestrator/credential-resolution.js` (`resolveAgentOwnerId` / `findPersonalCredential` / `findPersonalCredentialState` — the lookup that keeps "the owner has none" apart from "the owner's is unusable" — / `resolveCredential`); the orchestrator threads its result into the attributed-write git env (`_buildAgentGitEnv`) and surfaces the refusal as a distinct `personal-credential-required` error (HTTP 424) on the `gh-as-agent pr` path.
 
 ## My Credentials (self-service)
 

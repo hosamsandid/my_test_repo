@@ -562,6 +562,56 @@ test('envHasRepository / hasSkillGrant', () => {
   assert.equal(hasSkillGrant(null), false);
 });
 
+// ---- agent-scoped repositories (#2067) ------------------------------------
+
+test('AC6: an agent-scoped repository is listed in the same shape as an inherited one', () => {
+  const s = workingEnvironmentSection(
+    { name: 'E', repositories: [{ url: 'git@github.com:a/app.git' }] },
+    [],
+    [{ url: 'git@github.com:a/docs.git', readOnly: true }],
+  );
+  assert.match(s, /- `git@github\.com:a\/app\.git` — cloned to `\.\/app\/`\n/);
+  assert.match(s, /- `git@github\.com:a\/docs\.git` — cloned to `\.\/docs\/` \(READ-ONLY/);
+});
+
+test('a lone agent-scoped repository renders the singular Repository line', () => {
+  const s = workingEnvironmentSection({ name: 'E', repositories: [] }, [], [{ url: 'git@github.com:a/docs.git' }]);
+  assert.match(s, /\*\*Repository:\*\* `git@github\.com:a\/docs\.git` — cloned to `\.\/docs\/`/);
+});
+
+test('an agent-scoped repository alone is enough to emit the section', () => {
+  const s = workingEnvironmentSection(null, [], [{ url: 'git@github.com:a/docs.git' }]);
+  assert.match(s, /## Working Environment/);
+  // …and a junk entry is ignored rather than rendered as an empty bullet.
+  assert.equal(workingEnvironmentSection(null, [], [{ url: '  ' }, null]), '');
+});
+
+test('AC14: an agent-scoped repository un-gates the Git section on a repo-less environment', () => {
+  const repoLess = { name: 'E', repositories: [] };
+  assert.equal(envHasRepository(repoLess), false);
+  assert.equal(envHasRepository(repoLess, [{ url: 'git@github.com:a/docs.git' }]), true);
+  assert.equal(envHasRepository(repoLess, [{ url: ' ' }]), false);
+
+  const without = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: repoLess });
+  assert.ok(!headings(without).includes('GitHub Actions — Identity Tagging'));
+
+  const withRepo = assembleClaudeMd({
+    base: BASE, agentPrompt: 'x', role: 'agent', env: repoLess,
+    agentRepositories: [{ url: 'git@github.com:a/docs.git' }],
+  });
+  assert.ok(headings(withRepo).includes('GitHub Actions — Identity Tagging'));
+  assert.match(withRepo, /cloned to `\.\/docs\/`/);
+});
+
+test('an agent with no attachments is byte-identical to pre-#2067', () => {
+  const env = { name: 'E', repositories: [{ url: 'git@github.com:a/app.git' }] };
+  const args = { base: BASE, agentPrompt: 'x', role: 'agent', env, skills: ['s'] };
+  assert.equal(
+    assembleClaudeMd({ ...args, agentRepositories: [] }),
+    assembleClaudeMd(args),
+  );
+});
+
 // ---- cross-language drift guard --------------------------------------------
 //
 // buildMemoryHint() (JS) MUST stay byte-identical to _build_memory_hint() in

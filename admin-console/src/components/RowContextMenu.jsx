@@ -5,14 +5,20 @@ import {
   firstEnabledIndex,
   lastEnabledIndex,
   nextEnabledIndex,
-} from './header-overflow-menu.js';
-import { clampMenuPosition } from './rail-lifecycle.js';
+  clampMenuPosition,
+} from './row-context-menu-view.js';
 
 /**
- * RowContextMenu — the chat left rail's lifecycle context menu (#1928).
+ * RowContextMenu — a left rail's row context menu (#1928, shared since #2053).
+ *
+ * Built for the Agent-Chat rail's lifecycle menu; the Flows left list renders
+ * the same component over its own item descriptors, which is why this lives in
+ * `components/` rather than in either page's folder. Nothing here is specific to
+ * either rail: it takes `{items, anchor, label, onChoose, onClose}` and knows
+ * only how to place, draw and drive a `role="menu"`.
  *
  * A sibling of `HeaderOverflowMenu` (whose pure keyboard helpers it reuses) with
- * two differences the rail forces:
+ * two differences a rail forces:
  *
  *  - It is **portaled** and positioned in viewport coordinates. The rail is a
  *    scrolling container with `overflow: hidden` ancestors, so an absolutely
@@ -21,10 +27,11 @@ import { clampMenuPosition } from './rail-lifecycle.js';
  *    serves the hover-revealed kebab and the row's right-click (open question 1:
  *    both — the kebab for discoverability, right-click for speed).
  *
- * Keyboard-accessible (AC9): opening focuses the first enabled item, ↑/↓ traverse
+ * Keyboard-accessible (#1928 AC9, #2053 AC8): opening focuses the first enabled item, ↑/↓ traverse
  * enabled items (wrapping, skipping disabled), Home/End jump to the ends, Escape
  * closes and hands focus back, and an outside click or a scroll closes it. Items
- * are the descriptors `buildAgentMenu`/`buildTeamMenu` return, so what a caller
+ * are the descriptors a pure builder returns (`buildAgentMenu`/`buildTeamMenu`
+ * for the chat rail, `buildFlowsRailMenu` for the Flows rail), so what a caller
  * may do is decided in one pure place, not here.
  */
 export default function RowContextMenu({ items = [], anchor, label, onChoose, onClose }) {

@@ -56,6 +56,11 @@ export const FLOWS_HELP_SECTIONS = {
   improvements: 'improvements',
   // 10 — plain language in, a reviewable proposal out.
   copilot: 'describe-the-flow-the-copilot',
+  // 11 — who can see a draft, and what sharing one actually hands over (#2068).
+  //      Its one surface is the Share side panel itself, so unlike the chapters
+  //      above there is no page-level route into it — which is exactly why it
+  //      needs a slug: the panel is where the irreversibility has to be read.
+  sharingDrafts: 'sharing-a-draft',
 };
 
 export default FLOWS_HELP_SECTIONS;

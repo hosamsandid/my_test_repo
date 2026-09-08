@@ -12,6 +12,7 @@ A **Working Environment** is a reusable workspace recipe applied when an agent i
 | **Model Provider** | Optional override — the agent inherits `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` from this provider rather than the global default, but only for the values the provider carries: an `api-key` provider saved without a token repoints the Base URL and leaves the global `ANTHROPIC_AUTH_TOKEN` in place, while an `oauth-token` provider clears both (see [Model Providers](model-providers.md)) |
 | **Agent Toolchain** | Optional — which container image the environment's agents are spawned from, chosen from the operator toolchain registry; absent means the default image (see [Agent toolchain](#agent-toolchain)) |
 | **Additional Context** | Markdown appended to the agent's `CLAUDE.md` after the environment section |
+| **Ownership** | Who the environment belongs to: a single **team**, or **shared** across several teams so each one sees it in its pickers and reuses it as its own. Any Team Admin of an assigned team may edit a shared environment's content; deciding *which* teams it reaches, or moving it between team-owned and shared, is System-Admin-only. Left unset it stays owned by its team |
 
 ## What happens at agent creation
 
@@ -35,8 +36,37 @@ codebase (research, drafting, analysis).
 
 The one trade-off: GitHub hand-off channels (PR / issue triggers and outcomes)
 have no repository to act on, so they are unavailable for a repo-less team. Add a
-repository to the environment if the team needs them. The Materialize dialog
+repository to the environment if the team needs them. The Create team dialog
 shows an inline note when the selected environment has no repository.
+
+## Agent-scoped repositories
+
+A repository on the environment reaches **every** agent in it. When only one
+agent needs one more — a reference codebase, a second service, a documentation
+repo — attach it to that agent instead of widening the environment: the
+**repositories** button in the Agent Chat **Workspace** view, or the same panel
+in the agent's **Settings** tab next to *Sync repositories*.
+
+The configuration is this page's repository card, field for field. What differs
+is the scope and what follows from it:
+
+- The environment record is **not** modified, and no sibling agent gains the
+  repository, has its prompt changed, or is restarted. A later *Sync all agents*
+  neither propagates it to siblings nor removes it from the agent that has it.
+- It is **cloned into the same `./<repo-name>/`** path an environment repository
+  would use, is listed in that agent's `CLAUDE.md` the same way (read-only
+  annotation included), and survives a container respawn and a workspace
+  re-seed — it is re-cloned like an environment repository.
+- It carries **no credential of its own**: the clone uses the existing SSH-key
+  registry or this environment's GitHub token. A repository neither can reach is
+  refused before any clone is attempted, naming which credential was tried.
+- Only a user who may **manage** the agent can attach or remove one; a chat-only
+  user sees the list but no action.
+- Removing it **deletes the working copy**, and the confirmation names the
+  uncommitted changes and unpushed commits it would take with it.
+
+Attaching is what an environment repository is not: a per-agent decision. If
+several agents need the repository, put it on the environment.
 
 ## Agent toolchain
 
@@ -96,4 +126,24 @@ toolchains](agent-toolchains-concept.md).
 
 ## Editing a Working Environment
 
-Changes to a Working Environment affect newly created agents only. Existing agents retain the workspace state from when they were created. To update an existing agent's skills or repositories, use the Workspace Browser in the Agent Chat right rail.
+Most changes to a Working Environment affect newly created agents only — an
+existing agent keeps the workspace state it was created with.
+
+**Repositories are the exception (#2066).** Saving an environment that already
+has agents notices what changed about its repository list and *offers* to bring
+those agents up to date: an added repository is cloned in, and one whose branch,
+address or SSH key changed is adjusted in place — but only where that agent's
+existing clone is clean and fully pushed. Anywhere it is not, the clone is left
+completely untouched and reported with the reason, because a checkout may hold
+the only copy of someone's work. Nothing is ever stashed, reset or
+force-checked-out.
+
+A **removed** repository is never deleted from any agent, under any
+circumstance: the agents keep their copies and you are told so. Removing one
+from a workspace is a manual step.
+
+Accepting is your choice, and declining is not a dead end — the environment list
+carries a persistent *"N agents not up to date"* badge derived from the agents'
+actual workspaces, and clicking it runs the same propagation. For one agent the
+same job is **Sync repositories** on its Settings tab; both surfaces drive the
+same propagation, so they cannot disagree about what a change would do.

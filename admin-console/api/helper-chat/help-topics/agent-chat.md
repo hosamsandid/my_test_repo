@@ -48,6 +48,53 @@ Everything on this page is scoped to the agent you have selected. Switching
 agents switches the room, the workspace, the triggers, the outcomes — the page
 keeps its shape, the contents all change.
 
+## Who wrote a message — the badge and the sides
+
+An agent's room is shared: several people can talk to the same agent, and the
+transcript names each of them. The small round badge in front of a human message
+shows the **author's initials** — the first letters of the first two words of
+their name, or a single letter for a one-word name — and hovering it (or tabbing
+to it) reveals the full name. The agent keeps its bot icon and no name badge; the
+icon already says *machine, not human*, which is the load-bearing distinction.
+
+The **badge and the side answer two different questions**, and they are
+deliberately not the same answer:
+
+| | Question | Depends on |
+|---|---|---|
+| The **badge** | Who wrote this? | the author — never on who is reading |
+| The **side** | Is this mine? | you, the viewer |
+
+So **your own messages are on the right and every other person's on the left**,
+next to the agent — and the same message shows the *same* initials to everybody
+while sitting on opposite sides for its author and for a colleague. A human
+message on the left keeps the human bubble colour, so it is still distinct from
+an agent's bubble.
+
+The name shown is the person's **display name** from their user record, falling
+back to their login subject when that is empty. It is resolved when the
+transcript is read, not frozen when the message was sent, so renaming somebody on
+the Users page updates their initials on messages they sent months ago. There is
+deliberately **no per-person colour** — the side and the initials carry it, and a
+second weaker channel for the same information would only add noise. Two people
+whose initials collide (*Anna Schmidt* and *Andreas Schulz* both give `AS`) are
+told apart by the hover name.
+
+### Messages with a neutral person icon
+
+A message showing a plain **person icon** instead of letters has **no recorded
+author**. That is not an error — it is every message sent before this feature
+existed. The platform did not record which console user sent a chat message, and
+that cannot be reconstructed afterwards, so those messages keep the right-hand
+side they have always had rather than being relocated on a guess. For that older
+content the right-hand side is therefore *not* a guarantee that you wrote it.
+The same icon appears for a message posted into the room by some other Matrix
+client, and for an author whose user record has since been deleted and whose
+login name is no longer recoverable.
+
+Trigger notices, finished-loop cards and any other automated entry are unchanged:
+they carry no human badge and are not realigned.
+
 ## The agent roles
 
 An **Agent** is a **long-running Claude Code instance** with its own workspace
@@ -68,7 +115,7 @@ where its prompt and skills come from:
 *Paused* — the workspace is kept, the process is stopped (this is what **Disable**
 produces). *Not initialised* — a **stub**: it has its configuration and triggers,
 but no workspace, no cloned repository and no running process. You get a stub
-from a team materialized with **Materialize agents now** left off, or from a
+from a team created with **Provision agents now** left off, or from a
 member added later with **Materialize now** unticked. **Materialize** in the
 team's *Not materialized yet* section brings it to life.
 
@@ -111,6 +158,17 @@ on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:
   (knowledge shared through its repository is untouched).
 - **Clone**, **Export (ZIP)** and **Save as template** — copy this agent, take a
   copy away, or turn it into a reusable template.
+- **Convert into a team…** — offered on a **single agent** only, because a team
+  already is one and a team member already belongs to one. It lifts this
+  assistant into a team of one *in place*: a team named after it is created and
+  this agent becomes its only member, keeping its id, its chat room and history,
+  its system prompt, its skills, its triggers and its Working Environment. The
+  row then moves out of *Single agents* into its own team group, the team shows
+  up in **Flows** as a one-node flow, and **Add member…** on that group is how it
+  grows. It is a **one-way door** — there is no convert-back, and deleting the
+  team afterwards deletes the agent with it — so it confirms first, and it
+  refuses while the agent is mid-run unless you choose *Convert anyway*. The
+  agent restarts once and comes back on its own.
 - A group header carries the team-wide equivalents: **Enable/Disable** for the
   whole team, **Add member…**, **Team settings…** (which opens the team's own
   Settings tab here rather than jumping to another page), **Export team
@@ -306,6 +364,50 @@ work. A context folder is **read-only** unless it was mounted read-write; a
 read-write one also offers upload, delete and drag-to-move, and a read-only one
 simply offers no write action at all.
 
+### Repositories: inherited, and this agent's own
+
+The Workspace toolbar's **repositories** button (and the same panel in
+**Settings**, next to *Sync repositories*) lists every repository this agent
+has, and is where you attach one more.
+
+Repositories normally come from the agent's **Working Environment**, which means
+*every* agent in that environment gets them. Those rows are marked
+**From Working Environment** and carry no remove action: change them on the
+environment, where the decision belongs. Often, though, only one agent needs one
+more repository — a reference codebase to read, a second service it has to
+touch, a documentation repo. **Add repository** attaches one to **that agent
+alone**: it is marked **This agent only**, the environment record is not
+touched, and no sibling agent gains it, has its prompt changed, or is restarted.
+
+What you fill in is the same form the environment uses — URL, branch, SSH key,
+read-only — including the live reachability check, which is **advice, not a
+gate**: an unreachable URL still submits.
+
+Four things are worth knowing before you use it:
+
+- **There is no credential of its own.** The clone uses the existing SSH-key
+  registry or the environment's GitHub token, and nothing else. A private HTTPS
+  repository in an environment with no token is refused up front, with the
+  reason, rather than failing obscurely later. Attach it by its SSH URL and pick
+  a key instead.
+- **One directory per repository.** The clone path is derived from the URL, so
+  `org-a/tools` and `org-b/tools` both want `./tools/`. If that name is already
+  taken — by an environment repository, by another attachment, or by an ordinary
+  folder the agent created — the attach is refused and nothing is cloned. There
+  is no automatic renaming.
+- **The attachment is persistent.** It survives a container respawn and a
+  workspace reset, and is re-cloned like an environment repository would be — so
+  the agent never loses a repository its prompt still names.
+- **Removing it deletes the working copy**, and the confirmation says what that
+  costs: how many uncommitted changes and unpushed commits are in it, by count,
+  or that it is clean. Removal is refused while the agent is running a session,
+  because those are files the run may be using. Attaching while it runs is fine
+  — it only adds a directory — but the agent is told about the repository from
+  its **next** run on, not mid-run.
+
+Cloned repositories show up in **Git** mode like any other, with the same
+switch / update / discard actions.
+
 ### The other tabs
 
 **Triggers**, **Outcomes**, **Knowledge** and **Settings** are the remaining
@@ -389,10 +491,21 @@ A loop holds the workspace for its whole duration, not between iterations:
 ## Outcomes — what the agent signals when a run ends
 
 An **outcome** is the signal a run ends with: a *condition* in plain language
-("the review found blocking problems") plus the *label* it emits. The label is
-what wakes the next agent, so outcomes are one half of the
-**Outcome → Label → Consumer** hand-off; the other half is which teammate
-subscribes to that label.
+("the review found blocking problems") plus what the agent does about it.
+
+There are **two ways** an outcome reaches a teammate:
+
+| | How the next agent learns about the work |
+|---|---|
+| **Label** | The outcome sets a label, and whichever teammate subscribes to that label wakes up — the **Outcome → Label → Consumer** hand-off. The outcome is one half of it; the other half is who subscribes. |
+| **Direct hand-off** | The outcome names the teammate itself, and the platform wakes them — no label, no issue, no pull request, nothing on GitHub. The row reads *wakes &lt;agent&gt; (direct hand-off)*, and its action reads *hand off directly to &lt;agent&gt;*. |
+
+So a label is **not** the only thing that wakes the next agent, and an outcome
+carrying only a direct hand-off is fully wired — the [Flows](/flows) topic
+describes both arrows on the canvas. An outcome may also carry both at once, and
+then both consumers are listed. A hand-off whose target is not an agent of this
+flow, or whose target has its hand-off input switched off, is called out as such
+instead: nothing is woken, and the Flow Editor's lint list explains why.
 
 Two modes:
 

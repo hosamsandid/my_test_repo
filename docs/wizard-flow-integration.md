@@ -123,14 +123,14 @@ blank-canvas exit threw away the configuration entered in steps 1–3):
 - The wizard is **create-only**: it builds teams exclusively through the Process
   step, and the flat role-checkbox list is retired.
 - The **Extend Team UI has been removed** (#588) — growing an existing team now
-  happens in the Flow Editor (Edit-as-draft → Materialize). Old
+  happens in the Flow Editor (Edit-as-draft → Create team…). Old
   `/team-setup?team=<id>&mode=extend` deep links redirect to
   `/flows?proc=<team>`.
 - The backend `mode: "extend"` path is **retained**. The wizard still uses it in
   one place: an id collision hit while submitting a bundle stays on the bundle
   path, and the collision card re-submits the *same* bundle with
   `mode: "extend"`, adding only the missing members. The Flow Editor's
-  Materialize round-trip drives the same path.
+  Create-team round-trip drives the same path.
 - `POST /api/teams` (and `/stream`) continue to accept plain `roles` +
   `customRoles` for API compatibility — the retirement is UI-only.
 

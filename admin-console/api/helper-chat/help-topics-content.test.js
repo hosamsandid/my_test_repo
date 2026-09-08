@@ -45,6 +45,9 @@ const TOPIC_CONTENT = [
     chapters: [
       'What Flows is',
       'The flows left list',
+      // #2068 — the surface for this one is the Share side panel itself, which
+      // is where the irreversibility of sharing has to be readable.
+      'Sharing a draft',
       'The canvas',
       'Wiring hand-offs: the edge chooser',
       'Human gates, brakes and named human roles',
@@ -60,7 +63,14 @@ const TOPIC_CONTENT = [
       'Outcome',
       'Label',
       'Consumer',
-      'Materialize',
+      // #2053 renamed the design → team action from *Materialize* to
+      // **Create team…** everywhere a user reads it. The word survives in this
+      // topic as exactly two things, both deliberate: the one bridge sentence
+      // for readers who learned it, and the *Not materialized yet* / *Materialize*
+      // names of the MEMBER-level act in Agent Chat, which #2053's Non-goals
+      // leave alone. So the concept the guard pins is the new verb.
+      'Create team',
+      'previously called Materialize',
       'Flow Copilot',
       // #1876 wrote these as one "Import / Export" phrase. They are separate
       // affordances in separate places — Import is a header create action,
@@ -68,6 +78,11 @@ const TOPIC_CONTENT = [
       // the guard follows the prose rather than the other way round.
       'Import',
       'Export',
+      // #2068 — the two claims a reword must not soften: a draft is private
+      // until shared, and sharing hands over the right to delete it and to
+      // remove the sharer. Both are the product's own words in the panel.
+      'one-way act of trust',
+      'can never be emptied',
       'Label hand-off',
       'Issue channel',
       'Pull-request channel',
@@ -299,6 +314,10 @@ const TOPIC_CONTENT = [
     // areas below are each a chapter, and four of them are the landing target of
     // a "?" on the matching surface, so the headings are load-bearing rather
     // than decorative.
+    //
+    // #2066 replaced the manual **Sync all agents** action with an offer made at
+    // SAVE time plus a persistent out-of-date badge, so the chapter-2 material
+    // is rewritten around those two surfaces and gains a second `###`.
     chapters: [
       'What a Working Environment is',
       'Repositories',
@@ -320,8 +339,24 @@ const TOPIC_CONTENT = [
       'SSH key',
       'HTTPS',
       'Read-only',
-      'newly created agents',
-      'Sync all agents',
+      // #2066: `Sync all agents` and `never re-clones` are retired rather than
+      // reworded — the action is gone and the propagation now DOES fetch,
+      // switch a branch and repoint a remote. What replaces them are the
+      // claims a reader would be harmed by getting wrong: that the save is
+      // committed regardless of the answer, that an unsafe clone is left
+      // untouched rather than fixed, that a removal never deletes anything,
+      // and that the badge is derived from the workspaces rather than
+      // remembered from the last save.
+      'Saving asks',
+      'clean and fully pushed',
+      'left completely alone',
+      'Nothing is stashed, reset or force-checked-out',
+      'Removal never deletes anything',
+      'no pruning',
+      'manual step',
+      'actual workspaces',
+      'never counted',
+      'kept** and reported as retained',
       // #1987 additions. The first is a CORRECTION of the page, guarded here
       // because the form's own hint said the opposite: prompt-assembly.js writes
       // the environment name AND description into the agent's CLAUDE.md, so the
@@ -337,7 +372,6 @@ const TOPIC_CONTENT = [
       // surprising behaviour, and the reason the Sync action exists.
       'What an edit reaches',
       'recreates its running agents',
-      'never re-clones',
       // Two honest limits of surfaces that look stricter than they are.
       'advice, not a gate',
       'an instruction, not a file permission',
@@ -634,6 +668,16 @@ const TOPIC_CONTENT = [
       'never renders it',
       'When a repository is polled',
       'no expiry',
+      // #2101 additions. The Pending queue's rows now name the work item, so
+      // the chapter documents its columns the way the Processed chapter always
+      // has — and it is the ONLY place that says what the GitHub event id is,
+      // because #2101 took it off the row precisely for looking like a ticket
+      // number. A reword that loses that sentence leaves an operator who reads
+      // the hover with no way to find out what the number means.
+      'internal id',
+      'Events API gave the event',
+      'label chip',
+      'in progress',
     ],
   },
   {
@@ -712,6 +756,12 @@ const TOPIC_CONTENT = [
       'team of one',
       'Grow into a full team',
       'creates a new team',
+      // #2052 made "a single agent is a team of one" an operation rather than
+      // only a framing: chapter 2 used to document the dead end (growing could
+      // not convert this assistant) and now has to document the action that
+      // replaced it, plus the one-way-door warning the dialog gives.
+      'Convert into a team',
+      'one-way door',
       'default branch',
       'reuses',
       'Agent reused',
@@ -879,6 +929,12 @@ const TOPIC_CONTENT = [
       'Stop always works',
       'Maintenance Mode',
       'Outcome → Label → Consumer',
+      // #2057 — a label is NOT the only way an outcome reaches a teammate. The
+      // chapter said it was, which is exactly the claim the Outcomes tab was
+      // making in the product; both are now qualified, and a reword must not
+      // quietly restore the single-mechanism reading.
+      'two ways',
+      'direct hand-off',
       'exactly one',
       'any of',
       'read-only on purpose',
@@ -947,6 +1003,20 @@ const TOPIC_CONTENT = [
       '/api/agents/orphans',
       'idempotent',
       'Add `<role>` role',
+      // #2067 — repositories are no longer an environment-only concept. The
+      // load-bearing facts are the two scopes (and that the inherited one is
+      // changed elsewhere), that there is no per-repository credential, that a
+      // directory-name collision is refused rather than renamed, that the
+      // attachment survives a re-seed, and what removal costs. Each is a
+      // question a reader asks BEFORE clicking, so a reword must not lose them.
+      'From Working Environment',
+      'This agent only',
+      'no credential of its own',
+      'refused',
+      'no automatic renaming',
+      'survives a container respawn',
+      'deletes the working copy',
+      'next** run on',
     ],
   },
   {

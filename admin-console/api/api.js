@@ -13,6 +13,7 @@ const { runArchiveTool, streamArchiveTool, describeArchiveFailure } = require('.
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
+const internalAuthClient = require('./internal-auth-client');
 const githubEventLog = require('./github-event-log');
 const clientErrorLog = require('./client-error-log');
 const usageLog = require('./usage-log');
@@ -22,17 +23,24 @@ const { buildWorkItems, workItemDetail } = require('./work-items');
 const usageExport = require('./usage-export');
 const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
-const { discoverBoundAgents, respawnWithConcurrency } = require('./respawn-agents');
+const { discoverBoundAgents, hiddenBlastRadius, projectRespawnOutcome, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
 const { createTtlCache } = require('./ttl-cache');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
-        canManageEnvironment, visibleUser, describeAuthz,
+        visibleEnvironment, canManageEnvironment, canCreateEnvironment, canRetierEnvironment,
+        visibleUser, describeAuthz,
         normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
         resolveAgentTenant } = require('./scope');
+const { resolveAgentTeam } = require('./agent-team');
+// Layered resource ownership (#2083, P5) — the shared tier shape for
+// environments and MCP servers. Byte-mirrored in orchestrator/resource-tier.js.
+const { tierOwnershipFields, isRetier } = require('./resource-tier');
+const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
 const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
 const { normalizeDiscoveredModels } = require('./model-discovery');
+const { CHAT_AUTHOR_FIELD, chatAuthorStamp } = require('./chat-author');
 const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
@@ -46,8 +54,10 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
+// Process-draft access model (#2068) — one predicate for every draft route.
+const draftAccess = require('./draft-access');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
 const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require('./prompt-modes');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
@@ -55,7 +65,7 @@ const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const extractTemplate = require('./extract-template');
-const { runCopilot, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
+const { runCopilot, isCopilotAborted, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
 const { httpPostStreamText } = require('./anthropic-transport');
 const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
@@ -199,6 +209,10 @@ const DEFAULT_TEAM_ID = 'default';
 // The env single-admin login (#276); its session subject is this value and it
 // is treated as the operator (full visibility) by the scope filter (#302).
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
+// Single-user ⇄ multi-user mode (#1457). Off by default: an existing stack that
+// upgrades keeps today's behaviour (every principal is the implicit System
+// Admin) until an operator activates multi-user mode explicitly. See auth-mode.js.
+const AUTH_ENABLED = resolveAuthEnabled(process.env);
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 
@@ -209,6 +223,21 @@ fs.mkdirSync(LLM_ENDPOINTS_DIR, { recursive: true });
 fs.mkdirSync(LLM_KEYS_DIR, { recursive: true });
 fs.mkdirSync(MCP_SERVERS_DIR, { recursive: true });
 fs.mkdirSync(MCP_CREDENTIALS_KEYS_DIR, { recursive: true });
+
+// Control-plane credential for :4002 (#1456, GOV-PLATFORM-2). Installed BEFORE
+// the app is built — and therefore before any route handler, any background
+// poller and `auth.js`'s pre-session `POST /internal/admin/users/verify` — can
+// make its first orchestrator call. There are 126 raw fetch call sites reaching
+// :4002 from this process; wrapping the global is what makes "every one of them
+// carries the token" a property rather than a review claim. Scoped to the
+// orchestrator's own origin + `/internal/` (see internal-auth-client.js), so the
+// GitHub / Matrix / LLM calls this same process makes never see it. Inert with
+// no INTERNAL_API_TOKEN configured.
+{
+  const r = internalAuthClient.installInternalAuthFetch();
+  console.log(`[API] internal-auth control-plane token: ${r.installed
+    ? `installed for ${r.origin}` : `not installed (${r.reason})`}`);
+}
 
 const app = express();
 // Trust one hop (the GKE/IAP load balancer) so express-rate-limit can read
@@ -330,6 +359,7 @@ auth.registerAuthRoutes(app, {
     adminUsername: ADMIN_USERNAME,
     users: readJsonFile(USERS_INDEX, []),
     memberships: readJsonFile(MEMBERSHIPS_INDEX, []),
+    authEnabled: AUTH_ENABLED,
   }),
 });
 app.use('/api', auth.gate);
@@ -468,6 +498,101 @@ app.delete('/api/agents/:id/pending/:entryId', async (req, res) => {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/pending/${encodeURIComponent(entryId)}`, { method: 'DELETE' });
+    const body = await r.json().catch(() => ({ ok: false, error: 'invalid orchestrator response' }));
+    return res.status(r.status).json(body);
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// ── Pending-queue reassignment (#2102) ─────────────────────────────────────
+//
+// Hand a waiting entry to a different agent instead of only cancelling it.
+//
+//  - GET  /api/agents/:id/pending/:entryId/reassign-targets → eligible targets
+//  - POST /api/agents/:id/pending/:entryId/reassign          → move it
+//
+// UNLIKE the three read/cancel routes above, these are AUTHORIZED. A
+// reassignment injects work into another agent's queue — operator-initiated
+// trigger firing at a distance — and #2041 §7/D9 already decided that manually
+// firing a trigger is Team-Admin-only, on the reasoning that an autonomous run
+// is not attributable to a person the way a chat message is. So the capability
+// does not ship ungated, even though its read/cancel neighbours currently are.
+//
+// The gate runs on BOTH agents (AC5): managing the source is the right to take
+// the entry away, managing the target is the right to make it run something.
+// Holding one is not holding the other.
+//
+// The pre-existing absence of authorization on `GET /api/pending-queue` and the
+// cancel route is real and out of scope here — it belongs to the #2041 P2
+// enforcement sweep, which owns the ungated-route inventory. FLAGGED FOR THE P2
+// OWNER: any signed-in user can currently read every agent's queue and cancel
+// any entry in it.
+function resolveManageableAgentDir(req, res, id) {
+  if (!AGENT_ID_RE.test(id)) {
+    res.status(400).json({ ok: false, error: 'Invalid agent id' });
+    return null;
+  }
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    res.status(400).json({ ok: false, error: 'Invalid agent id' });
+    return null;
+  }
+  if (!fs.existsSync(agentDir)) {
+    res.status(404).json({ ok: false, error: 'Agent not found' });
+    return null;
+  }
+  if (denyUnlessCanManageAgent(req, res, agentDir)) return null;
+  return agentDir;
+}
+
+app.get('/api/agents/:id/pending/:entryId/reassign-targets', async (req, res) => {
+  const { id, entryId } = req.params;
+  if (!PENDING_ENTRY_ID_RE.test(entryId)) {
+    return res.status(400).json({ ok: false, error: 'Invalid entry id' });
+  }
+  // Listing the agents that could take this entry is already a step toward
+  // firing one, so it carries the source-side gate too.
+  if (!resolveManageableAgentDir(req, res, id)) return;
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/pending/${encodeURIComponent(entryId)}/reassign-targets`);
+    const body = await r.json().catch(() => ({ ok: false, error: 'invalid orchestrator response' }));
+    // A target the caller may not manage must not be offered, or the picker
+    // would list an option the POST below refuses (AC5).
+    if (body && Array.isArray(body.targets)) {
+      const scope = getScope(req);
+      body.targets = body.targets.filter((t) => canManageAgent(
+        scope, agentMetaForScope(readJsonFile(path.join(AGENTS_DIR, t.agentId, 'config.json'), null) || {})));
+    }
+    return res.status(r.status).json(body);
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+app.post('/api/agents/:id/pending/:entryId/reassign', async (req, res) => {
+  const { id, entryId } = req.params;
+  const targetAgentId = req.body && req.body.targetAgentId;
+  if (!PENDING_ENTRY_ID_RE.test(entryId)) {
+    return res.status(400).json({ ok: false, error: 'Invalid entry id' });
+  }
+  if (typeof targetAgentId !== 'string' || !AGENT_ID_RE.test(targetAgentId)) {
+    return res.status(400).json({ ok: false, error: 'Invalid target agent id' });
+  }
+  if (!resolveManageableAgentDir(req, res, id)) return;
+  if (!resolveManageableAgentDir(req, res, targetAgentId)) return;
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/pending/${encodeURIComponent(entryId)}/reassign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // The acting human is stamped SERVER-SIDE from the session — a body-supplied
+      // actor would be self-asserted, and this value ends up in the audit trail.
+      body: JSON.stringify({ targetAgentId, byUserId: (req.user && (req.user.sub || req.user.id)) || null }),
+    });
     const body = await r.json().catch(() => ({ ok: false, error: 'invalid orchestrator response' }));
     return res.status(r.status).json(body);
   } catch (err) {
@@ -739,6 +864,42 @@ function resolveCredentialOwnership(body, actingUserId) {
   return { scope: 'team', teamId, assignedTeamIds: [] };
 }
 
+// Resolve the requested ownership of a TIERED CONFIGURATION resource — a
+// working environment or an MCP server (#2083, epic #2076 P5).
+//
+// Deliberately a thin named wrapper over `resolveCredentialOwnership` rather
+// than a second validator: the tier shape is shared (resource-tier.js), so the
+// question "does this team exist, and are these assignments real" must have one
+// answer. What the wrapper adds is the ONE difference, and it is a refusal.
+//
+// THE PERSONAL TIER IS NOT OFFERED HERE, and this is a deliberate deviation from
+// issue #2083's AC1 ("a working environment can be created as shared/system,
+// team, or personal"). The design of record's own tier table (§5.1) asks only
+// for the shared tier for environments and MCP servers, and its before/after
+// example (§5.2) shows only `team` and `system` — AC1's third value is the one
+// clause of the ticket that contradicts §5.1, and the code says why §5.1 is
+// right: the personal tier's defining property is that it has NO `scope.all`
+// bypass (#1567 D2), because a personal SECRET must be private even from the
+// operator. An environment is not a secret, it is infrastructure that agents
+// run on — a personal one would be an environment a System Admin can neither
+// read, repair nor delete, which also makes the "Used by <env>" refusal on a
+// credential delete unresolvable by anyone. The predicates in scope.js still
+// handle the personal tier (so the shape stays uniform, a hand-edited record
+// fails closed to its owner, and a later ticket that wants personal
+// environments only has to open this door), but nothing can create one.
+function resolveTieredOwnership(body) {
+  const b = body || {};
+  if (b.scope === 'personal') {
+    const err = new Error('A working environment or MCP server cannot be personal — use the team or shared tier');
+    err.status = 400;
+    throw err;
+  }
+  // No `actingUserId`: without it `resolveCredentialOwnership` refuses a
+  // personal request anyway, so the explicit 400 above is the message and this
+  // is the backstop.
+  return resolveCredentialOwnership(b);
+}
+
 // Apply a rename/reassign patch to a credential entry (#798), enforcing the
 // role model. The caller has already been checked with `canManageCredential`.
 // Returns the updated entry, or null after sending the appropriate error
@@ -812,7 +973,35 @@ function getScope(req) {
     adminUsername: ADMIN_USERNAME,
     users: readJsonFile(USERS_INDEX, []),
     memberships: readJsonFile(MEMBERSHIPS_INDEX, []),
+    authEnabled: AUTH_ENABLED,
   });
+}
+
+// The author stamp for a chat message posted by this request (#2065). Both
+// halves come from the authenticated session — the user-store record id and the
+// login subject — never from the request body.
+function chatAuthorFor(req) {
+  return chatAuthorStamp({
+    userId: getScope(req).userId,
+    username: req && req.user && req.user.username,
+  });
+}
+
+// The `{ ownerId, ownerSource }` stamp a create request carries to the
+// orchestrator (#2077, concept D8/§3.4/§3.5). The owner is the authenticated
+// caller's user-record id, resolved HERE from the session — `POST
+// /internal/agents` is unauthenticated, so an owner accepted from a request
+// body would be self-asserted and worthless.
+//
+// Returns an EMPTY object when there is no user record to point at, which is
+// the env single-admin case (`computeScope` gives it `userId: null`). Spreading
+// `{}` leaves the key absent rather than writing `ownerId: null`, so an agent
+// created by the operator is indistinguishable from a pre-#2077 one and takes
+// the same shared-credential path — an explicit null would be a third state
+// nothing reads.
+function ownerFor(req) {
+  const userId = getScope(req).userId;
+  return userId ? { ownerId: String(userId), ownerSource: 'creator' } : {};
 }
 
 function listAgentDirs() {
@@ -1478,8 +1667,17 @@ function buildMessagesUrl(baseUrl) {
 
 // Plain HTTP/HTTPS POST of a JSON body. Mirrors httpGetJson: returns
 // { status, body, error } and never throws. Used for one-shot LLM calls.
-function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000) {
+//
+// `signal` (#2087, optional) aborts an in-flight call: a Flow Copilot turn is
+// up to 3 × 180 s of LLM work, and before this a disconnect only suppressed the
+// DELIVERY of the result — the work ran on, billed, and was discarded. Every
+// existing caller passes four arguments and is byte-identical: with no signal
+// no listener is attached and nothing about the request changes.
+function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000, signal = null) {
   return new Promise((resolve) => {
+    if (signal && signal.aborted) {
+      return resolve({ status: 0, body: null, error: 'aborted' });
+    }
     let parsed;
     try {
       parsed = new URL(targetUrl);
@@ -1506,11 +1704,23 @@ function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000) 
       res.on('end', () => {
         let body = data;
         try { body = data ? JSON.parse(data) : null; } catch { /* keep as string */ }
-        resolve({ status: res.statusCode, body, error: null });
+        settle({ status: res.statusCode, body, error: null });
       });
     });
-    req.on('error', (err) => resolve({ status: 0, body: null, error: err.message }));
-    req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: null, error: 'timeout' }); });
+    // One settle path so the abort listener is always detached — a long-lived
+    // signal (one per Copilot turn, up to three calls) must not accumulate
+    // listeners from the calls that already finished.
+    let done = false;
+    const onAbort = () => { req.destroy(); settle({ status: 0, body: null, error: 'aborted' }); };
+    function settle(result) {
+      if (done) return;
+      done = true;
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve(result);
+    }
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    req.on('error', (err) => settle({ status: 0, body: null, error: err.message }));
+    req.on('timeout', () => { req.destroy(); settle({ status: 0, body: null, error: 'timeout' }); });
     req.write(payload);
     req.end();
   });
@@ -2133,7 +2343,12 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     }
     const vh = validateProcessTemplate({ processTemplateVersion: 1, roles: [], humans: humans || [] }, { allowEmptyRoles: true });
     if (!vh.ok) return res.status(400).json({ error: `Invalid humans: ${vh.error}` });
-    normHumans = normalizeHumans(humans || []);
+    // Drop dead producer refs (#2063): a pr/issue consume whose `from` names no
+    // existing agent is unremovable via the UI (its remove control lived on the
+    // now-deleted producer). Prune against the on-disk roster so it clears on
+    // the next humans save — the safety net behind the node-inspector's per-chip
+    // remove button. Roster-based, so it stays out of the pure normalizeHumans.
+    normHumans = pruneOrphanHumanConsumes(normalizeHumans(humans || []), new Set(listAgentDirs()));
   }
 
   // ── Assist synthesis provider, team-agent only (#1213) ────────────────────
@@ -2662,6 +2877,54 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   res.json({ id, ...fresh });
 });
 
+/* ─── Convert a standalone agent into a team of one (#2052) ─────────── */
+
+// The launcher has promised since #1667 that "a single agent is simply a team of
+// one"; this is the action that makes it true, in place, for one agent the user
+// already has. Thin proxy on purpose: eligibility, the derived team id and every
+// re-keying decision live in the orchestrator (`team-conversion.js`), which is
+// the only process that can rewrite the prompt file, re-mint plugin scopes and
+// respawn the container. Duplicating the rule here would only let the two drift.
+app.post('/api/agents/:id/convert-to-team', heavyLimiter, async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  // Two gates, because the conversion does two things: it edits this agent AND
+  // it creates a team in its tenant. A caller who may do the first but not the
+  // second (the ticket's own edge case) must be refused, so the tenant check is
+  // made without the ownership escape hatch `agentMetaForScope` grants.
+  //
+  // #2078: this second gate deliberately stays on the legacy access scope. It
+  // asks "may you mint a team here", and team creation is System-Admin-only
+  // until P3 makes it self-service — so it is the one place the collapsed
+  // boundary must NOT be used, or a standalone agent's owner (who now passes the
+  // first gate under D8) could convert their way into owning a team.
+  if (denyUnlessCanManageAgent(req, res, { ...cfg, id })) return;
+  if (!canManageAgent(getScope(req), { teamId: agentTeamId({ ...cfg, id }) })) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/convert-to-team`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: req.body?.force === true }),
+      },
+    );
+    const data = await resp.json();
+    // A 409 carrying `warning` is the busy-agent refusal, not a failure —
+    // forward it verbatim so the UI can offer to convert anyway.
+    if (!resp.ok) return res.status(resp.status).json(data);
+    res.json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 /* ─── Reset agent to stub state ─────────────────────────────────────── */
 
 app.post('/api/agents/:id/deactivate', apiLimiter, async (req, res) => {
@@ -2890,7 +3153,7 @@ function openNdjsonStream(res) {
   };
 }
 
-const EMPTY_SYNC_SUMMARY = { total: 0, cloned: 0, skipped: 0, failed: 0 };
+const EMPTY_SYNC_SUMMARY = { total: 0, cloned: 0, adjusted: 0, skipped: 0, blocked: 0, failed: 0, retained: 0 };
 
 // Sync one agent by calling the orchestrator's per-agent endpoint and emitting
 // agent-scoped progress lines. Never throws — an orchestrator/transport error
@@ -2908,48 +3171,115 @@ async function syncOneAgentToStream(agentId, displayName, emit) {
     if (!resp.ok) {
       const error = (data && data.error) || `HTTP ${resp.status}`;
       emit({ type: 'agent-error', agentId, error });
-      return { summary: { ...EMPTY_SYNC_SUMMARY } };
+      return { summary: { ...EMPTY_SYNC_SUMMARY }, repos: [], error };
     }
   } catch (err) {
-    emit({ type: 'agent-error', agentId, error: `Orchestrator unreachable: ${err.message}` });
-    return { summary: { ...EMPTY_SYNC_SUMMARY } };
+    const error = `Orchestrator unreachable: ${err.message}`;
+    emit({ type: 'agent-error', agentId, error });
+    return { summary: { ...EMPTY_SYNC_SUMMARY }, repos: [], error };
   }
   if (data.noWorkspace) {
+    // AC24: an un-materialized member has no workspace to clone into. Reported
+    // as a skip with the existing reason, and it never fails the run.
     emit({ type: 'agent-skip', agentId, reason: 'no-workspace' });
-    return { summary: data.summary || { ...EMPTY_SYNC_SUMMARY } };
+    return { summary: data.summary || { ...EMPTY_SYNC_SUMMARY }, repos: [], noWorkspace: true };
   }
   const repos = Array.isArray(data.repos) ? data.repos : [];
   for (const r of repos) {
     emit({
       type: 'repo', agentId, name: r.name, url: r.url, status: r.status,
-      reason: r.reason || null, error: r.error || null, fromCache: !!r.fromCache,
+      reason: r.reason || null, detail: r.detail || null, blocked: !!r.blocked,
+      applied: Array.isArray(r.applied) ? r.applied : null,
+      error: r.error || null, fromCache: !!r.fromCache,
     });
   }
   const summary = data.summary || summarizeSyncRepos(repos);
   emit({ type: 'agent-done', agentId, summary });
-  return { summary };
+  return { summary, repos };
 }
 
-// Local fold, in case the orchestrator omits `summary` (defensive).
+// The D6 durable trail (#2066): one audit entry PER AGENT per propagation run.
+//
+// `auditMutations` already records one line per HTTP request, which for an
+// environment fan-out is a single line naming neither the agents nor what
+// happened in their workspaces — and the streamed report vanishes the moment
+// the dialog closes. Since the propagation now MUTATES existing clones, an
+// after-the-fact record of what touched which workspace stops being a nicety.
+//
+// Best-effort by construction (audit.record swallows its own errors): a trail
+// that could fail a propagation would be worse than a missing line.
+function recordRepoSyncTrail(req, { agentId, envId, repos, summary, error }) {
+  const items = (Array.isArray(repos) ? repos : []).map((r) => ({
+    name: r.name,
+    outcome: r.status,
+    ...(r.reason ? { reason: r.reason } : {}),
+    ...(r.detail ? { detail: r.detail } : {}),
+    ...(Array.isArray(r.applied) && r.applied.length ? { applied: r.applied } : {}),
+    ...(r.error ? { error: r.error } : {}),
+  }));
+  audit.record({
+    ts: new Date().toISOString(),
+    actor: (req.user && req.user.username) || 'anonymous',
+    action: 'repo-propagation',
+    method: 'POST',
+    resource: envId
+      ? `/api/environments/${envId}/sync-agents`
+      : `/api/agents/${agentId}/sync-repositories`,
+    teamId: null,
+    status: error ? 500 : 200,
+    outcome: error ? 'error' : 'success',
+    ip: req.ip,
+    repoSync: {
+      agentId,
+      ...(envId ? { environmentId: envId } : {}),
+      summary: summary || null,
+      repositories: items,
+      ...(error ? { agentError: error } : {}),
+    },
+  });
+}
+
+// Local fold, in case the orchestrator omits `summary` (defensive). Mirrors
+// summarizeRepoResults in orchestrator/repo-sync.js, including `retained` being
+// excluded from `total` — a clone that is no longer declared is not a unit of
+// work, so counting it would inflate the progress line with a row nothing acts on.
 function summarizeSyncRepos(repos) {
   const list = Array.isArray(repos) ? repos : [];
   return {
-    total: list.length,
+    total: list.filter((r) => r.status !== 'retained').length,
     cloned: list.filter((r) => r.status === 'cloned').length,
+    adjusted: list.filter((r) => r.status === 'adjusted').length,
     skipped: list.filter((r) => r.status === 'skipped').length,
+    blocked: list.filter((r) => r.status === 'skipped' && r.blocked).length,
     failed: list.filter((r) => r.status === 'failed').length,
+    retained: list.filter((r) => r.status === 'retained').length,
   };
 }
 
-// Per-agent: clone the environment's missing repos into this one agent.
+// Per-agent: reconcile the environment's repositories into this one agent's
+// workspace — clone what is missing, adjust what diverges where that is safe.
+//
+// The management gate is AC23's requirement applied here too: since #2066 this
+// route no longer only ADDS clones, it can also move a branch and repoint a
+// remote in someone else's workspace, so read visibility is not enough. It
+// carried no authorisation at all before.
 app.post('/api/agents/:id/sync-repositories', heavyLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  const scope = getScope(req);
+  if (!cfg || !visibleAgent(scope, cfg)) return res.status(404).json({ error: 'Agent not found' });
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const stream = openNdjsonStream(res);
   try {
     stream.emit({ type: 'plan', agentCount: 1 });
-    const { summary } = await syncOneAgentToStream(id, id, stream.emit);
-    stream.emit({ type: 'complete', agentCount: 1, totals: summary });
+    const result = await syncOneAgentToStream(id, cfg.displayName || id, stream.emit);
+    recordRepoSyncTrail(req, {
+      agentId: id, envId: null, repos: result.repos, summary: result.summary, error: result.error,
+    });
+    stream.emit({ type: 'complete', agentCount: 1, totals: result.summary });
   } catch (err) {
     stream.emit({ type: 'error', status: 500, error: err.message });
   } finally {
@@ -2957,36 +3287,100 @@ app.post('/api/agents/:id/sync-repositories', heavyLimiter, async (req, res) => 
   }
 });
 
-// Per-environment: fan the same sync out to every agent bound to the env.
+// Per-environment: fan the propagation out to every agent bound to the env.
+//
+// This is what both the save-time offer and the out-of-date indicator's
+// catch-up call (#2066); the manual "Sync all agents" button that used to be
+// its only caller is gone.
+//
+// AC23: the gate is `canManageEnvironment`, not read visibility. It used to
+// check only `visibleTeam`, which let a plain Team Member fan a write out into
+// other people's workspaces while `PUT`/`DELETE` on the same environment
+// required team-admin — and since #2066 the fan-out can also move a branch and
+// repoint a remote, not merely add a missing clone.
 app.post('/api/environments/:id/sync-agents', heavyLimiter, async (req, res) => {
   const envId = normalizeEnvId(req.params.id);
   const env = loadEnvironment(envId);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const scope = getScope(req);
-  if (!visibleTeam(scope, env.teamId)) return res.status(404).json({ error: 'Environment not found' });
+  // #2083: tier-aware — a shared environment carries no `teamId`.
+  if (!visibleEnvironment(scope, env)) return res.status(404).json({ error: 'Environment not found' });
+  if (!canManageEnvironment(scope, env)) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const agents = agentsUsingEnvironment(envId, scope);
   const repoCount = (Array.isArray(env.repositories) ? env.repositories : []).length;
 
   const stream = openNdjsonStream(res);
-  const totals = { total: 0, cloned: 0, skipped: 0, failed: 0 };
+  const totals = { ...EMPTY_SYNC_SUMMARY };
   try {
     stream.emit({
       type: 'plan', envId, agentCount: agents.length, repoCount,
       agents: agents.map((a) => ({ id: a.id, displayName: a.displayName })),
     });
     for (const a of agents) {
+      // AC25: one bad agent aborts neither the remaining agents nor the
+      // remaining repositories — syncOneAgentToStream never throws.
       if (stream.isAborted()) break;
-      const { summary } = await syncOneAgentToStream(a.id, a.displayName, stream.emit);
-      totals.total += summary.total || 0;
-      totals.cloned += summary.cloned || 0;
-      totals.skipped += summary.skipped || 0;
-      totals.failed += summary.failed || 0;
+      const result = await syncOneAgentToStream(a.id, a.displayName, stream.emit);
+      recordRepoSyncTrail(req, {
+        agentId: a.id, envId, repos: result.repos, summary: result.summary, error: result.error,
+      });
+      for (const key of Object.keys(totals)) totals[key] += result.summary[key] || 0;
     }
     stream.emit({ type: 'complete', agentCount: agents.length, totals });
   } catch (err) {
     stream.emit({ type: 'error', status: 500, error: err.message });
   } finally {
     stream.end();
+  }
+});
+
+// D4 (#2066): which of an environment's agents are NOT up to date, derived from
+// the actual workspace state rather than from a remembered save-time diff — so
+// it stays correct after a declined offer, a partial run or a failure, and
+// clears on its own once nothing diverges.
+//
+// Read-only, so it gates on visibility rather than management: a reader who can
+// see the environment may see that its agents are behind, but the catch-up
+// button behind the indicator posts to sync-agents above and is refused there.
+app.get('/api/environments/:id/repo-divergence', apiLimiter, async (req, res) => {
+  const envId = normalizeEnvId(req.params.id);
+  const env = loadEnvironment(envId);
+  if (!env) return res.status(404).json({ error: 'Environment not found' });
+  const scope = getScope(req);
+  // #2083: tier-aware — a shared environment carries no `teamId`.
+  if (!visibleEnvironment(scope, env)) return res.status(404).json({ error: 'Environment not found' });
+
+  // The agent set is resolved HERE and handed to the orchestrator, because
+  // deciding which agents this caller may see is the console's scoping job.
+  const agents = agentsUsingEnvironment(envId, scope);
+  if (agents.length === 0) {
+    return res.json({ envId, agents: [], outOfDate: 0, canManage: canManageEnvironment(scope, env) });
+  }
+  try {
+    const resp = await fetch(
+      `${ORCH_URL()}/internal/environments/${encodeURIComponent(envId)}/repo-divergence`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentIds: agents.map((a) => a.id) }),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(502).json({ error: data.error || `HTTP ${resp.status}` });
+    const names = new Map(agents.map((a) => [a.id, a.displayName]));
+    return res.json({
+      envId,
+      agents: (Array.isArray(data.agents) ? data.agents : [])
+        .map((a) => ({ ...a, displayName: names.get(a.agentId) || a.agentId })),
+      outOfDate: data.outOfDate || 0,
+      canManage: canManageEnvironment(scope, env),
+    });
+  } catch (err) {
+    // An unreachable orchestrator must not render as "everything is fine" —
+    // the indicator would then be silently wrong rather than absent.
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
   }
 });
 
@@ -3034,10 +3428,15 @@ app.post('/api/agents/:id/handover/nudge', handoverLimiter, async (req, res) => 
   }
 
   const txnId = crypto.randomUUID();
+  // The pre-handoff check is posted on a person's behalf, so it carries the same
+  // author stamp as a typed message (#2065 AC1) and is badged with their initials.
+  const preHandoffContent = { msgtype: 'm.text', body };
+  const preHandoffAuthor = chatAuthorFor(req);
+  if (preHandoffAuthor) preHandoffContent[CHAT_AUTHOR_FIELD] = preHandoffAuthor;
   try {
     const sendResp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
       `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
-      { method: 'PUT', body: { msgtype: 'm.text', body } });
+      { method: 'PUT', body: preHandoffContent });
     if (sendResp.status >= 400) {
       return res.status(502).json({ error: sendResp.data?.error || `Chat service error ${sendResp.status}` });
     }
@@ -3383,7 +3782,14 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
     const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, teamId }),
+      body: JSON.stringify({
+        id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, teamId,
+        // Human owner (#2077, D8) — the authenticated caller, resolved here and
+        // never taken from the request body. `getScope(req).userId` is null for
+        // the env single-admin (no user record), and `ownerFor` omits the key
+        // in that case rather than writing a null owner.
+        ...ownerFor(req),
+      }),
     });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json(data);
@@ -3502,7 +3908,10 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
   }
   if (parentTeamId != null) {
     const destCfg = readJsonFile(path.join(AGENTS_DIR, parentTeamId, 'config.json'), null);
-    if (!canManageAgent(cloneScope, agentMetaForScope(destCfg || { teamId: parentTeamId }))) {
+    // The fallback names the destination Agent Team directly (#2078): with the
+    // boundary now read off the config, a bare `{ teamId: parentTeamId }` would
+    // resolve to "no team" and fail closed on a team that does exist.
+    if (!canManageAgent(cloneScope, agentMetaForScope(destCfg || { id: parentTeamId, role: 'team' }))) {
       return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
     }
   }
@@ -3919,8 +4328,14 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
     // of the default team — non-default Team Admins should graft via parentTeamId.
     {
       const importScope = getScope(req);
+      // The standalone branch still names the legacy default access scope on
+      // purpose (#2078): this is a gate on agent *creation*, and re-pointing who
+      // may create is P3's contract, not P2's. Re-keying it here would either
+      // widen it to every authenticated user (P3, early) or narrow it to System
+      // Admins (a regression AC5 forbids). The team branch IS re-keyed — see the
+      // clone route for why the fallback names the team explicitly.
       const destMeta = parentTeamId != null
-        ? agentMetaForScope(readJsonFile(path.join(AGENTS_DIR, parentTeamId, 'config.json'), null) || { teamId: parentTeamId })
+        ? agentMetaForScope(readJsonFile(path.join(AGENTS_DIR, parentTeamId, 'config.json'), null) || { id: parentTeamId, role: 'team' })
         : { teamId: 'default' };
       if (!canManageAgent(importScope, destMeta)) {
         return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
@@ -4225,19 +4640,28 @@ app.post('/api/agents/:id/prompt-history/:version/revert', apiLimiter, async (re
 
 /* ─── Agent Model Selection ─────────────────────────────────────────── */
 
-// The human Team an agent belongs to — the tenant for ownership, visibility,
-// management and credential scoping. A team-member inherits it from its parent
+// The CREDENTIAL tenant of an agent — which access scope's model providers, SSH
+// keys and GitHub tokens it may use. A team-member inherits it from its parent
 // Agent Team; `parentTeamId` is an Agent-Team id and is never itself a tenant
 // (see resolveAgentTenant in scope.js).
+//
+// NOT an authorization answer since #2078 — use `agentMetaForScope` for that.
+// Credential records are still stamped with access-scope ids until P5 re-points
+// them, which is why this hop survives the D1 collapse; it retires with them.
 function agentTeamId(cfg) {
   return resolveAgentTenant(cfg, (id) => (
     AGENT_ID_RE.test(id) ? readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null) : null
   ));
 }
 
-// The minimal agent shape visibleAgent() needs (team + private-ownership).
+// The minimal agent shape visibleAgent()/canManageAgent() need: the ACCESS
+// boundary plus the owner. Since #2078 the boundary is the Agent Team read
+// straight off the config (agent-team.js) — no parent read, no fs access — and
+// is `null` for a standalone `role: 'agent'`, which ownership then decides (D8).
+// `visibility` is gone from the shape: nothing ever wrote the field and D8
+// retires it (concept §3.5).
 function agentMetaForScope(cfg) {
-  return { teamId: agentTeamId(cfg), visibility: cfg && cfg.visibility, ownerId: cfg && cfg.ownerId };
+  return { teamId: resolveAgentTeam(cfg), ownerId: cfg && cfg.ownerId };
 }
 
 // Config-write authorization guard (#989). Derives the agent's owning team from
@@ -4687,6 +5111,102 @@ app.get('/api/agents/:agentId/context/status', apiLimiter, (req, res) => {
     mountPath: CONTEXT_MOUNT_TARGET,
     supported: isLocalContextMountEnv(),
   });
+});
+
+/* ─── Agent-scoped repositories (#2067) ──────────────────────────────────────
+ * A repository attached to ONE agent, outside its Working Environment. The
+ * orchestrator owns every rule (the pure `orchestrator/agent-repositories.js`)
+ * and every side effect (clone, delete, prompt rebuild); these three routes are
+ * the authorization boundary and nothing else — deliberately thin, so no part
+ * of the decision exists twice.
+ *
+ * AC12 / D4: attaching or removing is a MANAGEMENT act (it pulls foreign code
+ * into a container), so both mutations are gated by `canManageAgent` — the
+ * `PATCH /api/agents/:id/context-mount` precedent, and the first per-agent gate
+ * on this family of routes: the neighbouring `/api/agents/:id/workspace/*`
+ * routes carry none, which is a pre-existing gap this ticket does not widen.
+ * Reading the list is gated by `visibleAgent` instead, because the Workspace
+ * view shows the repositories to a chat-only user; what that user does not get
+ * is the action.
+ */
+
+// Resolve the agent's config and the caller's rights over it in one place, so
+// the read and the two mutations cannot drift in who they let through.
+function resolveAgentRepoAccess(req, id, { manage }) {
+  if (!AGENT_ID_RE.test(id)) return { status: 400, error: 'Invalid agent id' };
+  const cfgPath = safeAgentPath(id, 'config.json');
+  if (!cfgPath) return { status: 404, error: 'Agent not found' };
+  const cfg = readJsonFile(cfgPath, null);
+  if (!cfg) return { status: 404, error: 'Agent not found' };
+  const scope = getScope(req);
+  const meta = agentMetaForScope(cfg);
+  const manageable = canManageAgent(scope, meta);
+  if (manage) {
+    if (!manageable) return { status: 403, error: 'forbidden', code: 'forbidden' };
+  } else if (!visibleAgent(scope, cfg)) {
+    return { status: 404, error: 'Agent not found' };
+  }
+  return { cfg, canManage: manageable };
+}
+
+// Relay an orchestrator repositories response verbatim. The orchestrator maps
+// each pure-planner refusal code onto a status already, and its message is the
+// one the two surfaces render — re-wording it here would give the same refusal
+// two different texts depending on which container answered.
+async function proxyAgentRepositories(res, id, method, body, extra = {}) {
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/agents/${encodeURIComponent(id)}/repositories`, {
+      method,
+      ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+    });
+    const payload = await resp.json().catch(() => ({ error: 'Malformed orchestrator response' }));
+    // `canManage` is added HERE, not upstream: the orchestrator's :4002 API
+    // never learns which HUMAN is asking — since #1456 it authenticates the
+    // calling *service or agent*, not the console's end user. It rides on every
+    // response so the panel can disable what the server would refuse (the
+    // `GET /api/matrix/agents` precedent), while the refusal itself stays
+    // server-side on the two mutating routes.
+    return res.status(resp.status).json(resp.ok ? { ...payload, ...extra } : payload);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+}
+
+// The merged environment+agent list. Each agent-scoped entry carries the git
+// facts a removal confirmation names (AC9), so the dialog needs no second call.
+app.get('/api/agents/:id/repositories', apiLimiter, async (req, res) => {
+  const access = resolveAgentRepoAccess(req, req.params.id, { manage: false });
+  if (access.status) return res.status(access.status).json({ error: access.error, ...(access.code ? { code: access.code } : {}) });
+  return proxyAgentRepositories(res, req.params.id, 'GET', undefined, { canManage: access.canManage });
+});
+
+// Attach one repository to this agent and clone it. heavyLimiter: this runs a
+// real `git clone`, like the sync routes next door.
+app.post('/api/agents/:id/repositories', heavyLimiter, async (req, res) => {
+  const access = resolveAgentRepoAccess(req, req.params.id, { manage: true });
+  if (access.status) return res.status(access.status).json({ error: access.error, ...(access.code ? { code: access.code } : {}) });
+  const b = req.body && typeof req.body === 'object' ? req.body : {};
+  // Whitelisted, not forwarded wholesale: D5 forbids a per-repository
+  // credential, and the orchestrator's normalizer drops unknown keys anyway —
+  // dropping them here too keeps the wire contract readable.
+  return proxyAgentRepositories(res, req.params.id, 'POST', {
+    url: typeof b.url === 'string' ? b.url : '',
+    branch: typeof b.branch === 'string' ? b.branch : null,
+    sshKeyId: typeof b.sshKeyId === 'string' ? b.sshKeyId : null,
+    readOnly: b.readOnly === true,
+  }, { canManage: access.canManage });
+});
+
+// Detach one repository and delete its working copy (AC9). The URL travels in
+// the body rather than the path: a repository URL is not path-safe, and the
+// list is keyed by URL, not by an id we would otherwise have to invent.
+app.delete('/api/agents/:id/repositories', heavyLimiter, async (req, res) => {
+  const access = resolveAgentRepoAccess(req, req.params.id, { manage: true });
+  if (access.status) return res.status(access.status).json({ error: access.error, ...(access.code ? { code: access.code } : {}) });
+  const b = req.body && typeof req.body === 'object' ? req.body : {};
+  return proxyAgentRepositories(res, req.params.id, 'DELETE', {
+    url: typeof b.url === 'string' ? b.url : '',
+  }, { canManage: access.canManage });
 });
 
 // Provisioned custom slash commands for an agent (#1796, foundation for #1797).
@@ -7937,6 +8457,16 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
     'anthropic-version': '2023-06-01',
     ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
   };
+  // A stopped or disconnected turn ends the SERVER-side work (#2087, D2).
+  // Before this, `aborted` only suppressed delivery: `runCopilot` took no
+  // signal and the transport accepted none, so a disconnect could leave up to
+  // MAX_REPAIR_ITERATIONS + 1 = 3 LLM calls running, billed, and discarded. The
+  // client's Stop is an `AbortController` on its own fetch, so it arrives here
+  // as the same `res.on('close')` a tab close does — one cancellation path for
+  // both (AC9, AC14); the signal is threaded into httpPostStreamText so the
+  // streamed request already in flight is destroyed, not merely ignored.
+  const turnAbort = new AbortController();
+
   // Whole-bundle generations are big (16k max_tokens) and can take minutes.
   // STREAM the upstream call (httpPostStreamText forces stream:true) so bytes
   // flow the whole time — the internal Anthropic proxy never sees one long
@@ -7951,6 +8481,7 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
     const deadlineMs = Math.max(5000, COPILOT_STREAM_DEADLINE_MS - (Date.now() - turnStartedAt));
     const result = await httpPostStreamText(url, headers, { model: target.model, ...payload }, {
       deadlineMs,
+      signal: turnAbort.signal,
       onProgress: (chars) => {
         const now = Date.now();
         if (now - heartbeatAt < 750) return; // a status line needs no more than ~1/s
@@ -7978,7 +8509,11 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   }
   let aborted = false;
   res.on('close', () => {
-    if (!res.writableEnded) aborted = true;
+    if (!res.writableEnded) {
+      aborted = true;
+      // #2087: stop the work, not just its delivery.
+      turnAbort.abort();
+    }
   });
   function emit(ev) {
     if (aborted) return;
@@ -8001,13 +8536,22 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   emit({ type: 'assist', ...assistMeta(target).assist });
 
   try {
-    const out = await runCopilot({ bundle: body.bundle, messages, callLlm, onProgress });
+    const out = await runCopilot({
+      bundle: body.bundle, messages, callLlm, onProgress, signal: turnAbort.signal,
+    });
     emit({ type: 'result', ...out, model: target.model, meta: assistMeta(target) });
   } catch (err) {
-    // Transport failure with no bundle to fall back to, or no parseable reply
-    // at all. "Model couldn't get lint-clean" is NOT an error — runCopilot
-    // returns ok:false for that.
-    emit({ type: 'error', status: 502, error: err.message });
+    // A stopped turn is not a failure (#2087): the socket is already gone, so
+    // `emit` is a no-op anyway, but classifying it keeps a deliberate Stop out
+    // of the error path — nothing is left to report and no proposal is built.
+    if (isCopilotAborted(err)) {
+      // nothing to emit — the client asked for this and is no longer listening
+    } else {
+      // Transport failure with no bundle to fall back to, or no parseable reply
+      // at all. "Model couldn't get lint-clean" is NOT an error — runCopilot
+      // returns ok:false for that.
+      emit({ type: 'error', status: 502, error: err.message });
+    }
   }
   if (!aborted) res.end();
 });
@@ -8547,16 +9091,88 @@ function readDraft(id) {
   if (!p || !fs.existsSync(p)) return null;
   return readJsonFile(p, null);
 }
+function listDraftIds() {
+  try {
+    return fs.readdirSync(PROCESS_DRAFTS_DIR).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5));
+  } catch { return []; /* dir not created yet */ }
+}
+// User records, keyed by id — the only thing the draft surfaces need them for is
+// turning an access-set id into a display name (AC16) and projecting the Share
+// picker (D2/D11). Read fresh per request like getScope does; the file is small.
+function usersById() {
+  const map = new Map();
+  for (const u of readJsonFile(USERS_INDEX, [])) if (u && u.id) map.set(u.id, u);
+  return map;
+}
+// DD3 (#2068) — strip a deleted human from every draft's access set. Unlike the
+// unshare route this MAY empty a set (DD3a): the draft is retained and stays
+// reachable by a System Admin, because silently destroying a document during a
+// user deletion is not recoverable. `createdBy` is left as history. Returns how
+// many records changed, for the log line.
+function stripUserFromDrafts(userId) {
+  let changed = 0;
+  for (const id of listDraftIds()) {
+    const d = readDraft(id);
+    if (!d) continue;
+    const next = draftAccess.stripUserFromDraft(d, userId);
+    if (!next.changed) continue;
+    writeJsonAtomic(draftPath(id), { ...d, accessUserIds: next.accessUserIds });
+    changed++;
+  }
+  return changed;
+}
+
+// AC15 — drafts that predate #2068 carry no access set at all, and the gate
+// above is fail-closed, so without this they would become System-Admin-only on
+// upgrade day. DD4 gives each of them `createdBy` = the first System Admin and
+// an access set of ALL current users, which is the literal reading of #2041 D6:
+// today's access is preserved exactly and nobody loses anything. Re-runs are
+// no-ops (a record with an `accessUserIds` array is already stamped), so this is
+// safe in the `app.listen` callback beside the other startup backfills.
+function backfillDraftAccess() {
+  const users = readJsonFile(USERS_INDEX, []);
+  const systemAdminId = draftAccess.firstSystemAdminId(users);
+  const allUserIds = users.filter(u => u && u.id).map(u => u.id);
+  let stamped = 0;
+  for (const id of listDraftIds()) {
+    const d = readDraft(id);
+    if (!d) continue;
+    const result = draftAccess.migrateDraftAccess(d, { systemAdminId, allUserIds });
+    if (!result.changed) continue;
+    try { writeJsonAtomic(draftPath(id), result.draft); stamped++; }
+    catch { /* best effort per draft — never block startup */ }
+  }
+  if (stamped > 0) console.log(`[Admin] Draft access backfill stamped ${stamped} draft(s)`);
+}
+
+// AC3 — the by-id gate, applied identically by every route below. Answers with
+// the AC7 indistinguishable-404 so the endpoint never confirms that a draft the
+// caller may not see exists.
+function requireDraftAccess(req, res, id) {
+  if (!DRAFT_ID_RE.test(id)) { res.status(400).json({ error: 'Invalid draft id' }); return null; }
+  const verdict = draftAccess.authorizeDraft(getScope(req), readDraft(id));
+  if (!verdict.ok) { res.status(verdict.status).json({ error: verdict.error }); return null; }
+  return verdict.draft;
+}
 
 app.get('/api/process/drafts', (req, res) => {
-  let ids = [];
-  try {
-    ids = fs.readdirSync(PROCESS_DRAFTS_DIR).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5));
-  } catch { /* dir not created yet */ }
-  const drafts = ids.map(id => {
+  const scope = getScope(req);
+  const users = usersById();
+  const drafts = listDraftIds().map(id => {
     const d = readDraft(id);
     if (!d) return null;
-    return { id, name: d.name || id, roleCount: Array.isArray(d.roles) ? d.roles.length : 0, updatedAt: d.updatedAt || null };
+    // AC6 — the list filter is the same predicate as the by-id gate; a System
+    // Admin (scope.all) sees every draft (DD7).
+    if (!draftAccess.canAccessDraft(scope, d)) return null;
+    return {
+      id,
+      name: d.name || id,
+      roleCount: Array.isArray(d.roles) ? d.roles.length : 0,
+      updatedAt: d.updatedAt || null,
+      // AC16 — private vs shared, and who created one the viewer did not. Never
+      // a raw user id: the list has no way to render one.
+      ...draftAccess.draftAccessView(d, { viewerId: scope.userId, usersById: users }),
+    };
   }).filter(Boolean).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   res.json(drafts);
 });
@@ -8571,28 +9187,74 @@ app.post('/api/process/drafts', apiLimiter, (req, res) => {
   if (req.body?.processTemplate) {
     const v = validateProcessTemplate(req.body.processTemplate, { allowEmptyRoles: true });
     if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
-    bundle = { ...req.body.processTemplate, name };
+    // Strip the access fields off an imported bundle (#2068): an exported and
+    // re-imported draft belongs to the importer, and must never carry a foreign
+    // access set in.
+    bundle = { ...draftAccess.stripAccessFields(req.body.processTemplate), name };
   }
-  const draft = { ...bundle, id, createdAt: now, updatedAt: now };
+  // AC1 — `createdBy` is resolved from the authenticated caller, never from the
+  // request body (the `PUT /api/me/preferences` rule), and the access set starts
+  // as exactly the creator.
+  const draft = { ...bundle, id, createdAt: now, updatedAt: now, ...draftAccess.newDraftAccess(getScope(req)) };
   fs.mkdirSync(PROCESS_DRAFTS_DIR, { recursive: true });
   writeJsonAtomic(draftPath(id), draft);
   res.status(201).json(draft);
 });
 
 app.get('/api/process/drafts/:id', (req, res) => {
+  const d = requireDraftAccess(req, res, req.params.id);
+  if (!d) return undefined;
+  return res.json(d);
+});
+
+// The resolved access set behind the Share dialog. Same projection as the
+// picker (D2/D11 — display name and email only), so the dialog never learns
+// anything about a colleague the directory would not have told it.
+app.get('/api/process/drafts/:id/access', (req, res) => {
+  const d = requireDraftAccess(req, res, req.params.id);
+  if (!d) return undefined;
+  return res.json({ users: draftAccess.resolveAccessList(d, usersById()) });
+});
+
+// Share (DD2 — available to everyone already in the access set, with no action
+// reserved to the creator). Writes ONLY the access set: the bundle is untouched,
+// so a share can never be a way to smuggle a template edit past validation.
+app.post('/api/process/drafts/:id/access', apiLimiter, (req, res) => {
   const { id } = req.params;
-  if (!DRAFT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid draft id' });
-  const d = readDraft(id);
-  if (!d) return res.status(404).json({ error: 'Draft not found' });
-  res.json(d);
+  const d = requireDraftAccess(req, res, id);
+  if (!d) return undefined;
+  const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : '';
+  // D3 — existing accounts only; there are no invitations of people without one.
+  if (!usersById().has(userId)) return res.status(400).json({ error: 'Unknown user' });
+  const result = draftAccess.addAccess(d, userId);
+  if (!result.ok) return res.status(result.status).json({ error: result.error });
+  if (result.changed) writeJsonAtomic(draftPath(id), { ...d, accessUserIds: result.accessUserIds });
+  return res.json({ users: draftAccess.resolveAccessList({ accessUserIds: result.accessUserIds }, usersById()) });
+});
+
+// Unshare. Anyone in the set may remove anyone (DD2), including themselves —
+// that is how leaving a shared draft works — but AC9 refuses the removal that
+// would empty the set and points at Delete draft instead.
+app.delete('/api/process/drafts/:id/access/:userId', apiLimiter, (req, res) => {
+  const { id, userId } = req.params;
+  const d = requireDraftAccess(req, res, id);
+  if (!d) return undefined;
+  const result = draftAccess.removeAccess(d, userId);
+  if (!result.ok) return res.status(result.status).json({ error: result.error, code: result.code });
+  if (result.changed) writeJsonAtomic(draftPath(id), { ...d, accessUserIds: result.accessUserIds });
+  return res.json({ users: draftAccess.resolveAccessList({ accessUserIds: result.accessUserIds }, usersById()) });
 });
 
 app.put('/api/process/drafts/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
-  if (!DRAFT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid draft id' });
-  const existing = readDraft(id);
-  if (!existing) return res.status(404).json({ error: 'Draft not found' });
-  const body = req.body || {};
+  const existing = requireDraftAccess(req, res, id);
+  if (!existing) return undefined;
+  // AC4 — the access fields are server-owned. This route spreads the whole
+  // request body onto the record and `validateProcessTemplate` is not a
+  // whitelist, so the incoming copy is dropped here and the stored one carried
+  // over below, exactly the way `createdAt` is. The ordinary save route must
+  // never be a way to widen access.
+  const body = draftAccess.stripAccessFields(req.body || {});
   // Drafts are works-in-progress — empty role sets are allowed here (only
   // materialisation requires a non-empty set).
   const v = validateProcessTemplate(body, { allowEmptyRoles: true });
@@ -8612,6 +9274,11 @@ app.put('/api/process/drafts/:id', apiLimiter, (req, res) => {
     name,
     createdAt: existing.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    // AC5 — the clients read the whole bundle and write it back, so a field they
+    // do not re-emit would be silently lost on the next save. Carried from the
+    // stored record, which is also what makes sharing survive a rename (the
+    // branch below rewrites the draft under a new id).
+    ...draftAccess.carryAccessFields(existing),
   };
   // Copilot chat history (#1071) — storage metadata like id/createdAt, never
   // part of the portable bundle. Normalized on write: whitelisted fields only,
@@ -8631,11 +9298,14 @@ app.put('/api/process/drafts/:id', apiLimiter, (req, res) => {
 
 app.delete('/api/process/drafts/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
-  if (!DRAFT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid draft id' });
+  // Delete is available to every holder (DD2/AC8) — the confirmation naming the
+  // other people who lose it is the only thing between a mis-click and someone
+  // else's work, and it lives on the client.
+  if (!requireDraftAccess(req, res, id)) return undefined;
   const p = draftPath(id);
   if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'Draft not found' });
   fs.rmSync(p);
-  res.status(204).end();
+  return res.status(204).end();
 });
 
 /* Import a BriefingPack hierarchy as a process draft (#377). Walks the mission
@@ -8703,7 +9373,10 @@ app.post('/api/process/drafts/import-briefings', apiLimiter, (req, res) => {
   // Persist as a new draft (same id derivation as POST /api/process/drafts).
   const id = deriveUniqueDraftId(name, { exists: draftExists });
   const now = new Date().toISOString();
-  const draft = { ...bundle, id, sourceBriefings: where, createdAt: now, updatedAt: now };
+  // Same stamp as POST /api/process/drafts (#2068 AC1) — there are five
+  // draft-creating entry points on the client, so the stamp belongs in the
+  // route rather than in each caller.
+  const draft = { ...bundle, id, sourceBriefings: where, createdAt: now, updatedAt: now, ...draftAccess.newDraftAccess(getScope(req)) };
   fs.mkdirSync(PROCESS_DRAFTS_DIR, { recursive: true });
   writeJsonAtomic(draftPath(id), draft);
   // `skipped` names the packs that carried no resolvable id and so contribute
@@ -10985,21 +11658,40 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   res.status(204).end();
 });
 
+// The bound-agents discovery deps, shared by the two routes below so their view
+// of "which agents are bound, and which of them may this caller see" cannot
+// drift. `isVisible` is the #1501 fix: seeing the *provider* (visibleCredential)
+// says nothing about seeing an *agent*, which has its own rules (team membership
+// since #2078, plus ownership for a standalone agent), so a system-scoped
+// credential shared across teams used to disclose every consumer's id, display
+// name and role to any Team Admin who could merely view it.
+function boundAgentDeps(scope) {
+  return {
+    loadEnvironment,
+    effectiveEndpointId,
+    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
+    isVisible: cfg => visibleAgent(scope, agentMetaForScope(cfg)),
+  };
+}
+
+function loadAllAgentConfigs() {
+  return listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
+}
+
 // Returns enabled, materialized agents whose effective LLM endpoint is :id.
 // Used by the UI to prompt a respawn after credential rotation. Discovery
 // logic lives in respawn-agents.js (pure, unit-tested) — this route only
 // does I/O (loading configs) and wires the result into a JSON response.
+//
+// Agents the caller may not see are reported as a COUNT, never omitted (#1501):
+// an operator deciding whether to rotate a shared credential needs the true
+// blast radius even when the identities in it are none of their business.
 app.get('/api/llm-endpoints/:id/bound-agents', apiLimiter, (req, res) => {
   const scope = getScope(req);
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
   if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
-  const agentConfigs = listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
-  const agents = discoverBoundAgents(agentConfigs, ep.id, {
-    loadEnvironment,
-    effectiveEndpointId,
-    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
-  });
-  res.json({ agents });
+  const { visible, hidden } = discoverBoundAgents(loadAllAgentConfigs(), ep.id, boundAgentDeps(scope));
+  res.json({ agents: visible, hidden: hiddenBlastRadius(hidden) });
 });
 
 // Respawn all enabled agents bound to :id so they pick up the rotated credential
@@ -11011,12 +11703,13 @@ app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) =
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
   if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
   if (!canManageCredential(scope, ep)) return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
-  const agentConfigs = listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
-  const agents = discoverBoundAgents(agentConfigs, ep.id, {
-    loadEnvironment,
-    effectiveEndpointId,
-    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
-  });
+  const { visible, hidden } = discoverBoundAgents(loadAllAgentConfigs(), ep.id, boundAgentDeps(scope));
+  // EVERY bound agent is respawned, visible to this caller or not (#1501). The
+  // credential owner has a legitimate reason to fix every consumer, and skipping
+  // the invisible ones would leave them silently running on the rotated-away
+  // credential — defeating the point of the feature to protect a metadata leak
+  // that the response projection below closes instead.
+  const agents = [...visible, ...hidden];
   // Bounded concurrency: an unbounded Promise.all here would fan out one
   // stop+recreate container-lifecycle call per agent simultaneously, which
   // can overwhelm the orchestrator's libpod socket and the host's container
@@ -11024,12 +11717,30 @@ app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) =
   // route against 45+ agents). RESPAWN_CONCURRENCY lets an operator tune it
   // for their hardware; the default is conservative for a local Podman host.
   const requestedConcurrency = Number(process.env.RESPAWN_CONCURRENCY) || 5;
-  const { respawned, skipped } = await respawnWithConcurrency(
+  const outcome = await respawnWithConcurrency(
     agents.map(a => a.id),
     requestedConcurrency,
     id => respawnAgentBestEffort(id, 'llm-credential-rotated'),
   );
-  res.json({ respawned, skipped });
+  const visibleIds = new Set(visible.map(a => a.id));
+  const projected = projectRespawnOutcome(outcome, visibleIds);
+  const blastRadius = hiddenBlastRadius(hidden);
+  // The log line carries the hidden counts, not the hidden ids — the same rule
+  // the response follows, so reading the server log is not a way around it.
+  if (blastRadius.count > 0) {
+    console.log(`[llm-respawn] endpoint=${ep.id} respawned=${outcome.respawned.length} skipped=${outcome.skipped.length}`
+      + ` hidden=${blastRadius.count} hiddenTeams=${blastRadius.teamCount} hiddenStandalone=${blastRadius.standalone}`
+      + ` hiddenRespawned=${projected.hiddenRespawned} hiddenSkipped=${projected.hiddenSkipped}`);
+  }
+  res.json({
+    respawned: projected.respawned,
+    skipped: projected.skipped,
+    hidden: {
+      ...blastRadius,
+      respawned: projected.hiddenRespawned,
+      skipped: projected.hiddenSkipped,
+    },
+  });
 });
 
 // Pull a human-readable failure reason out of a proxy's error response body and
@@ -11442,7 +12153,11 @@ app.get('/api/mcp-servers', (req, res) => {
   const out = listMcpServerIds()
     .map(id => loadMcpServer(id))
     .filter(Boolean)
-    .filter(s => visibleTeam(scope, s.teamId)) // (#302); missing teamId → default team
+    // #2083: tier-aware. The old comment ("missing teamId → default team") had
+    // been stale since #2078 removed that collapse from `visibleTeam` (§8.4);
+    // what it must do now is also reach a SHARED server, which carries no
+    // `teamId` at all.
+    .filter(s => visibleEnvironment(scope, s)) // (#302, tiered by #2083)
     .map(s => {
       const transport = s.transport || 'stdio';
       const tplKey = transport === 'stdio' ? 'env' : 'headers';
@@ -11468,6 +12183,10 @@ app.get('/api/mcp-servers/:id', (req, res) => {
   if (!MCP_SERVER_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid server id' });
   const s = loadMcpServer(id);
   if (!s) return res.status(404).json({ error: 'MCP server not found' });
+  // #2083 / concept §11.3: this read was ungated and returned the raw stanza,
+  // including any `${credential}` template keys. 404 rather than 403 so the
+  // route is not an existence oracle.
+  if (!visibleEnvironment(getScope(req), s)) return res.status(404).json({ error: 'MCP server not found' });
   res.json(s);
 });
 
@@ -11527,14 +12246,24 @@ app.post('/api/mcp-servers', apiLimiter, (req, res) => {
   const built = buildMcpServerStanza({ existing: null, body });
   if (built.error) return res.status(400).json({ error: built.error });
 
-  let ownerTeamId;
-  try { ownerTeamId = resolveOwnerTeamId(body.teamId); }
+  // #2083 — the tier, and the FIRST write authorization these routes have ever
+  // had (concept §11.3: `POST`/`PUT`/`DELETE /api/mcp-servers` carried none,
+  // unlike `/api/mcp-credentials` beside them and unlike every environment
+  // route). Adding a shared tier without it would have left the tier decorative:
+  // any authenticated caller could re-assign a shared server to their own team.
+  // It IS a behaviour change for a plain Team Member, and it is the change
+  // §11.3 asks for.
+  let ownership;
+  try { ownership = resolveTieredOwnership(body); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  if (!canCreateEnvironment(getScope(req), ownership)) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
 
   const data = {
     id,
     name,
-    teamId: ownerTeamId,
+    ...tierOwnershipFields(ownership),
     description: built.stanza.description || '',
     transport: built.stanza.transport,
     ...(built.stanza.transport === 'stdio'
@@ -11551,18 +12280,34 @@ app.put('/api/mcp-servers/:id', apiLimiter, (req, res) => {
   if (!MCP_SERVER_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid server id' });
   const existing = loadMcpServer(id);
   if (!existing) return res.status(404).json({ error: 'MCP server not found' });
+  // #2083 / §11.3 — this route had no authorization at all, and no re-parenting
+  // check either (the environment PUT has required rights over the TARGET team
+  // since #989).
+  const mcpScope = getScope(req);
+  if (!canManageEnvironment(mcpScope, existing)) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
 
   const built = buildMcpServerStanza({ existing, body: req.body || {} });
   if (built.error) return res.status(400).json({ error: built.error });
 
   const merged = { ...built.stanza, updatedAt: new Date().toISOString() };
-  // Preserve (or update) the owning team (#302) — buildMcpServerStanza only
-  // covers transport fields, so carry teamId across explicitly.
-  if (req.body && req.body.teamId !== undefined) {
-    try { merged.teamId = resolveOwnerTeamId(req.body.teamId); }
+  // Ownership (#302, tiered by #2083). `buildMcpServerStanza` spreads
+  // `existing`, so the old tier fields ride along on `built.stanza` and must be
+  // restated explicitly — writing them from the resolved ownership is what
+  // stops a stale `teamId` surviving a promotion to the shared tier. The
+  // re-tier gate is the environment PUT's, for the reasons documented there.
+  if (req.body && (req.body.teamId !== undefined || req.body.scope !== undefined
+                   || req.body.assignedTeamIds !== undefined)) {
+    let nextOwnership;
+    try { nextOwnership = resolveTieredOwnership(req.body); }
     catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
-  } else if (existing.teamId !== undefined) {
-    merged.teamId = existing.teamId;
+    if (isRetier(existing, nextOwnership) && !canRetierEnvironment(mcpScope)) {
+      return res.status(403).json({ error: 'Only a System Admin may change which teams an MCP server belongs to', code: 'forbidden' });
+    }
+    Object.assign(merged, tierOwnershipFields(nextOwnership));
+  } else {
+    Object.assign(merged, tierOwnershipFields(existing));
   }
   saveMcpServer(id, merged);
   res.json(merged);
@@ -11571,7 +12316,13 @@ app.put('/api/mcp-servers/:id', apiLimiter, (req, res) => {
 app.delete('/api/mcp-servers/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!MCP_SERVER_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid server id' });
-  if (!loadMcpServer(id)) return res.status(404).json({ error: 'MCP server not found' });
+  const existing = loadMcpServer(id);
+  if (!existing) return res.status(404).json({ error: 'MCP server not found' });
+  // #2083 / §11.3 — third of the three ungated writes. Deleting a registry
+  // entry other teams may be running against was open to any caller.
+  if (!canManageEnvironment(getScope(req), existing)) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const usedBy = mcpServerInUse(id);
   if (usedBy) return res.status(409).json({ error: `MCP server is used by environment '${usedBy}'. Detach it first.` });
   // Path-injection containment (#208): re-confine the resolved server dir under
@@ -11886,6 +12637,20 @@ app.delete('/api/admin/teams/:id', apiLimiter, (req, res) => {
   return proxyAdmin(req, res, `teams/${encodeURIComponent(req.params.id)}`);
 });
 
+// The OPEN user directory (#2041 D2, first built for #2068's draft Share
+// picker). Deliberately NOT `/api/admin/users`: that route returns the whole
+// record — subject, `systemAdmin`, `githubHandle`, `hasPassword` — and is
+// narrowed to users who share one of the caller's teams, which would make a
+// colleague on another team unshareable. Sharing needs the opposite: every
+// account, and only what is needed to recognise a person.
+//
+// So the projection is display name and email ONLY — never the `systemAdmin`
+// flag (D2) and never the GitHub handle (D11) — and it is read straight from
+// the users index rather than proxied, because there is nothing to filter.
+app.get('/api/users/directory', (req, res) => {
+  res.json(draftAccess.userDirectory(readJsonFile(USERS_INDEX, [])));
+});
+
 // Users — list/read filtered to users who share one of the caller's teams
 // (AC2). Global user-record CRUD + role assignment is System-Admin only (§3).
 app.get('/api/admin/users', (req, res) => {
@@ -11917,7 +12682,21 @@ app.put('/api/admin/users/:id', apiLimiter, (req, res) => {
 app.delete('/api/admin/users/:id', apiLimiter, (req, res) => {
   const scope = getScope(req);
   if (!scope.all) return denyAdmin(res, 'Only a System Admin may manage user records');
-  return proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`);
+  // DD3 (#2068) — the departing human is stripped from every draft's access set.
+  // Done here rather than in `teamsStore.deleteUser` because the admin-console
+  // API is the only writer of /workspace/process-drafts; the orchestrator would
+  // be a second one racing it. Runs only after the record is really gone, and is
+  // best-effort: a failed strip must not turn a completed offboarding into an
+  // error, and the next run of the same delete would repeat it.
+  return callAdmin('DELETE', `users/${encodeURIComponent(req.params.id)}`)
+    .then(({ status, data }) => {
+      if (status < 400) {
+        try { stripUserFromDrafts(req.params.id); }
+        catch (err) { console.error(`[Admin] Draft access strip failed for user ${req.params.id}: ${err.message}`); }
+      }
+      return res.status(status).json(data);   // same response shape as proxyAdmin
+    })
+    .catch((err) => res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` }));
 });
 // Local password set/clear (#374). The verify path is NOT proxied here — it is
 // called directly by the public login route (see auth.js), pre-session.
@@ -12205,11 +12984,14 @@ function resolveToolchainSelection(toolchainId) {
 
 app.get('/api/environments', (req, res) => {
   const scope = getScope(req);
+  // #2083: tier-aware. Was `visibleTeam(scope, e.teamId)`, which reaches a
+  // team-tier record only — a shared environment carries no `teamId` at all, so
+  // the old filter hid every one of them from everybody but an admin.
   const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean)
-    .filter(e => visibleTeam(scope, e.teamId)) // (#302)
+    .filter(e => visibleEnvironment(scope, e)) // (#302, tiered by #2083)
     .map(e => {
       const agents = agentsUsingEnvironment(e.id, scope); // (#439)
-      return { ...e, agents, agentCount: agents.length };
+      return { ...e, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, e) };
     });
   res.json(envs);
 });
@@ -12218,8 +13000,14 @@ app.get('/api/environments/:id', (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const scope = getScope(req);
+  // #2083: this read was ungated (concept §11.4) — any authenticated caller
+  // could fetch any environment by id and read its repositories, its
+  // `githubTokenId` and its MCP references. A tier the read-one path ignores is
+  // decorative, so the gate lands with the tier. 404 rather than 403, matching
+  // `GET /api/llm-endpoints/:id`, so the route is not an existence oracle.
+  if (!visibleEnvironment(scope, env)) return res.status(404).json({ error: 'Environment not found' });
   const agents = agentsUsingEnvironment(env.id, scope); // (#439)
-  res.json({ ...env, agents, agentCount: agents.length });
+  res.json({ ...env, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, env) });
 });
 
 // Resolve and validate { llmEndpointId, defaultModelId } against the registry.
@@ -12255,13 +13043,20 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (loadEnvironment(id)) return res.status(409).json({ error: `Environment '${id}' already exists` });
 
-  let ownerTeamId;
-  try { ownerTeamId = resolveOwnerTeamId(teamId); }
+  // #2083: ownership is now the three-tier triple, resolved and validated by the
+  // SAME function the four credential kinds use — one validator for every
+  // tiered resource, so "which teams exist" cannot be answered two ways.
+  // `actingUserId` is deliberately NOT passed: see the note on
+  // `resolveTieredOwnership`, which is why a `personal` request is refused here.
+  let ownership;
+  try { ownership = resolveTieredOwnership(req.body); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
 
-  // Config-write authorization (#989): creating an environment requires team-admin
-  // management rights over its owning team.
-  if (!canManageEnvironment(getScope(req), { teamId: ownerTeamId })) {
+  // Config-write authorization (#989, tiered by #2083): creating a team-tier
+  // environment requires team-admin rights over its owning team; creating a
+  // SHARED one is System-Admin-only (§5.2 — declaring a resource cross-tenant
+  // is an operator act).
+  if (!canCreateEnvironment(getScope(req), ownership)) {
     return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
   }
 
@@ -12299,7 +13094,11 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
     id,
     name,
     description: description || '',
-    teamId: ownerTeamId,
+    // #2083: the tier triple, written explicitly from the resolved ownership
+    // (never spread from the request body) so a client cannot smuggle a field
+    // into the shape the predicates read. A team-tier create is byte-identical
+    // to a pre-#2083 one apart from the now-explicit `scope`/`assignedTeamIds`.
+    ...tierOwnershipFields(ownership),
     repositories: normalizedRepos,
     githubTokenId: githubTokenId || null,
     mcpServers: normalizedMcp,
@@ -12329,6 +13128,14 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   const prevLlmEndpointId = env.llmEndpointId || null;
   const prevDefaultModelId = env.defaultModelId || null;
   const prevToolchainId = env.toolchainId || null;
+  // The repository list as PERSISTED, captured before the write and echoed on
+  // the response (#2066). The save-time offer's diff is computed from this and
+  // the saved list, both server-supplied — which is what makes it impossible
+  // for the offer to act on a list the browser has been holding since before
+  // another admin saved the same environment.
+  const prevRepositories = Array.isArray(env.repositories)
+    ? env.repositories.map((r) => ({ ...r }))
+    : [];
   // `skills` from old clients is accepted-and-discarded — the grant is
   // team-owned (see POST above); a legacy env.skills field on disk is left
   // untouched (dead after the orchestrator's startup migration).
@@ -12341,16 +13148,30 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
     }
   }
 
-  if (teamId !== undefined) {
-    let nextTeamId;
-    try { nextTeamId = resolveOwnerTeamId(teamId); }
+  // #2083: ownership is now a tier, so an update may re-TIER the record. The
+  // gate splits along the line §5.2 draws, and the split is the whole reason a
+  // shared environment is usable at all:
+  //
+  //   • deciding WHICH teams reach it (a tier change, a cross-team move, a
+  //     change of assignments) is System-Admin-only — `canRetierEnvironment`;
+  //   • editing its CONTENT is self-service for every team-admin the record
+  //     already reaches, which the `canManageEnvironment` gate above allows.
+  //
+  // `isRetier` is what decides which of the two a given body asks for, so a
+  // client that echoes the record's own unchanged ownership back (which the
+  // console's form does on every save) is not treated as an operator act. The
+  // last literal `|| 'default'` on the environment path goes with it (§8.4).
+  if (teamId !== undefined || req.body?.scope !== undefined || req.body?.assignedTeamIds !== undefined) {
+    let nextOwnership;
+    try { nextOwnership = resolveTieredOwnership(req.body); }
     catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
-    // Re-parenting to another team requires management rights over the target.
-    if (nextTeamId !== (env.teamId || 'default')
-        && !canManageEnvironment(envScope, { teamId: nextTeamId })) {
-      return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+    if (isRetier(env, nextOwnership) && !canRetierEnvironment(envScope)) {
+      return res.status(403).json({ error: 'Only a System Admin may change which teams an environment belongs to', code: 'forbidden' });
     }
-    env.teamId = nextTeamId;
+    // Written even when it is NOT a re-tier, so a legacy record acquires its
+    // explicit `scope` on the next ordinary save rather than staying implicit
+    // forever.
+    Object.assign(env, tierOwnershipFields(nextOwnership));
   }
 
   // Only re-validate the LLM binding if either field was explicitly sent.
@@ -12412,7 +13233,10 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
           || (env.defaultModelId || null) !== prevDefaultModelId) {
     notifyEnvCredentialChange(env.id, 'llm-endpoint-changed');
   }
-  res.json(env);
+  // AC7: the save is already committed at this point. Whatever the caller does
+  // with `previousRepositories` — offer, decline, crash — the environment stays
+  // persisted exactly as submitted; no path here rolls it back.
+  res.json({ ...env, previousRepositories: prevRepositories });
 });
 
 app.delete('/api/environments/:id', apiLimiter, (req, res) => {
@@ -12674,6 +13498,8 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
         role: 'agent',
         systemPrompt,
         environmentId: env.id,
+        // Human owner (#2077, D8) — the authenticated creator.
+        ...ownerFor(req),
       }),
     });
     agentResp = await resp.json();
@@ -12744,6 +13570,8 @@ app.post('/api/quickstart/llm', heavyLimiter, async (req, res) => {
         role: 'agent',
         systemPrompt,
         environmentId: envId,
+        // Human owner (#2077, D8) — the authenticated creator.
+        ...ownerFor(req),
       }),
     });
     agentResp = await resp.json();
@@ -13604,6 +14432,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           // Label suffix (#902): stored so extend-mode adds roles with the same
           // suffix and Flow-Editor dialogs can pre-fill new label inputs.
           ...(labelSuffix ? { labelSuffix } : {}),
+          // Human owner (#2077, D8) — the authenticated creator of the team.
+          ...ownerFor(req),
         }),
       });
       if (!resp.ok) {
@@ -14249,6 +15079,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           ...(bundleLabels.length ? { labels: bundleLabels } : {}),
           // Label suffix (#902) — see the non-streaming handler.
           ...(labelSuffix ? { labelSuffix } : {}),
+          // Human owner (#2077, D8) — the authenticated creator of the team.
+          ...ownerFor(req),
         }),
       });
       if (!resp.ok) {
@@ -15460,9 +16292,17 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   const content = { msgtype: 'm.text', body };
   if (extraContent && typeof extraContent === 'object' && !Array.isArray(extraContent)) {
     for (const [k, v] of Object.entries(extraContent)) {
-      if (k.startsWith('io.aee.')) content[k] = v;
+      // The author stamp is established server-side below and is deliberately
+      // NOT part of the pass-through: a browser must not be able to attribute
+      // its message to a different person (#2065 AC2).
+      if (k.startsWith('io.aee.') && k !== CHAT_AUTHOR_FIELD) content[k] = v;
     }
   }
+  // Who wrote this (#2065). Every human message — typed or sent on the user's
+  // behalf by the quick-reply path — records the authenticated console user, so
+  // the transcript can name the author instead of labelling everyone "YOU".
+  const authorStamp = chatAuthorFor(req);
+  if (authorStamp) content[CHAT_AUTHOR_FIELD] = authorStamp;
 
   const txnId = crypto.randomUUID();
   try {
@@ -17771,7 +18611,16 @@ function sweepExportStaging() {
 
 app.listen(4000, '0.0.0.0', () => {
   console.log('[Admin] Listening on :4000');
+  // State the authorization mode explicitly (#1457) — and, in single-user mode,
+  // warn when named user records exist, since each of them signs in with full
+  // visibility while the flag is off.
+  console.log(`[Admin] ${authModeLogLine(process.env)}`);
+  try {
+    const warning = singleUserElevationWarning(readJsonFile(USERS_INDEX, []), process.env);
+    if (warning) console.warn(`[Admin] ${warning}`);
+  } catch (err) { console.error(`[Admin] Authorization mode check failed: ${err.message}`); }
   try { backfillSkillManifests(); } catch (err) { console.error(`[Admin] Skill manifest backfill failed: ${err.message}`); }
   try { sweepExportStaging(); } catch (err) { console.error(`[Admin] Export staging sweep failed: ${err.message}`); }
+  try { backfillDraftAccess(); } catch (err) { console.error(`[Admin] Draft access backfill failed: ${err.message}`); }
   try { startLlmHealthPoller(); } catch (err) { console.error(`[Admin] Model Provider health poller failed to start: ${err.message}`); }
 });

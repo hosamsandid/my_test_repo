@@ -129,3 +129,32 @@ test('invalid URL resolves with an error, never throws', async () => {
   assert.equal(result.status, 0);
   assert.match(result.error, /Invalid URL/);
 });
+
+test('an already-aborted signal resolves immediately with error:aborted, no connection', async () => {
+  const ac = new AbortController();
+  ac.abort();
+  // The upfront check fires before the URL is even parsed, so nothing dials out.
+  const result = await httpPostStreamText('http://127.0.0.1:9/v1/messages', {}, {}, { signal: ac.signal });
+  assert.equal(result.status, 0);
+  assert.equal(result.error, 'aborted');
+});
+
+test('aborting mid-stream (#2087) destroys the request, returns error:aborted with partial text', async () => {
+  let held = null;
+  const srv = await withServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write(textDelta('partial'));
+    held = res; // never ended — only the abort can settle the client
+  });
+  const ac = new AbortController();
+  const result = await httpPostStreamText(srv.url, {}, {}, {
+    signal: ac.signal,
+    inactivityMs: 10000,
+    deadlineMs: 10000,
+    onProgress: () => ac.abort(), // stop as soon as the first frame lands
+  });
+  assert.equal(result.error, 'aborted');
+  assert.equal(result.text, 'partial'); // whatever streamed before the stop is kept
+  if (held) held.end();
+  await srv.close();
+});

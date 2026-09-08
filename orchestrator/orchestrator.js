@@ -9,6 +9,7 @@ const fs = require("fs");
 const path = require("path");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
 const { resolveAgentTenant, planTenantBackfill } = require("./agent-tenant");
+const { needsAdoption, planAdoption, planBootstrapMembership } = require("./default-team-adoption");
 const { makeSkillSourceResolver, parseSkillDescription } = require("./skill-source");
 const {
   normalizeKnowledgeStore,
@@ -35,6 +36,15 @@ const wakeAgent = require("./wake-agent");
 const labelFastPath = require("./github-label-fastpath");
 const { LabelDedupMarkers } = require("./label-dedup-markers");
 const githubEventLog = require("./github-event-log");
+const internalAuth = require("./internal-auth");
+
+// Internal-API authentication for :4002 (#1456, GOV-PLATFORM-2). Resolved ONCE
+// at module load: the config is a deployment property, and re-reading it per
+// request would let a half-applied env change flip the gate mid-flight.
+// `configured: false` (the default for a stack that has not opted in) keeps the
+// gate inert, so this release is behaviourally identical until an operator sets
+// INTERNAL_API_TOKEN.
+const internalAuthConfig = internalAuth.resolveInternalAuthConfig(process.env);
 
 // Shared in-memory dedup markers for the internal label fast-path (#1858). The
 // POST /internal/github-label-applied handler writes a marker per woken
@@ -68,9 +78,22 @@ const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require("./prom
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const credentialResolution = require("./credential-resolution");
+const ownershipMigration = require("./ownership-migration");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
-const { syncAgentRepoPlan, summarizeRepoResults } = require("./repo-sync");
+const { assessConversionEligibility, planTeamConversion } = require("./team-conversion");
+const { syncAgentRepoPlan, summarizeRepoResults, repoDivergence } = require("./repo-sync");
+// Agent-scoped repositories (#2067): a repository attached to ONE agent,
+// outside its Working Environment. Every decision — shape, the merged
+// environment+agent view, collision/credential refusals, what a removal
+// deletes — lives in the pure module; this file is its fs/clone half.
+const {
+  normalizeAgentRepositories,
+  resolveAgentRepositories,
+  planAgentRepoAttach,
+  planAgentRepoDetach,
+  removalFacts,
+} = require("./agent-repositories");
 const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
 const { assembleClaudeMd, buildMemoryHint, SCOPED_KNOWLEDGE_FILENAME } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
@@ -122,6 +145,8 @@ const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { isSupportedAgentRole, unsupportedRoleNote } = require("./agent-role-support");
 const { buildEnsureUserCommands, buildReactivateCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
+const humanMatrixIdentity = require("./human-matrix-identity");
+const { createHumanMatrixStore } = require("./human-matrix-store");
 const skillManifest = require("./skill-manifest");
 const skillDelivery = require("./skill-delivery");
 const skillCommands = require("./skill-commands");
@@ -135,6 +160,7 @@ const prCommentConfig = require("./pr-comment-config");
 const { parseRepoFullName: ghParseRepoFullName } = require("./github-poller");
 const ticketStore = require("./ticket-store");
 const pendingQueue = require("./pending-queue");
+const pendingReassign = require("./pending-reassign");
 const { buildFlowModel, detectFlowAnomalies } = require("./flow-anomaly-detector");
 const flowAnomalySweep = require("./flow-anomaly-sweep");
 
@@ -269,8 +295,14 @@ const MCP_CREDENTIALS_KEYS_DIR = "/workspace/mcp-credentials/_keys";
 // is the single writer for tenancy/identity data and owns the startup
 // bootstrap + ownership backfill below.
 const teamsStore = createTeamsStore({ root: WORKSPACE });
+// Per-human Matrix credentials (#1458). Deliberately a SEPARATE store from the
+// user records above: `sanitizeUser()` is a convention applied at the store
+// boundary, and users/index.json is also read directly by the admin-console —
+// so a live access token does not belong on that record. See
+// human-matrix-store.js for the full reasoning.
+const humanMatrixStore = createHumanMatrixStore({ root: WORKSPACE });
 // Two-tier skill resolution (#306): owning team's pool wins over the global pool.
-const { resolveSkillSourceDir } = makeSkillSourceResolver({
+const { resolveSkillSourceDir, teamSkillsDir } = makeSkillSourceResolver({
   workspace: WORKSPACE,
   templateWorkspace: TEMPLATE_WORKSPACE,
   defaultTeamId: DEFAULT_TEAM_ID,
@@ -493,6 +525,31 @@ function startAgentProcess(config) {
   // resolve through, #1547) never takes effect. The orchestrator's PATH has no
   // business travelling; drop it and let the image's own value stand.
   delete childEnv.PATH;
+
+  // ── Internal-API credentials (#1456, GOV-PLATFORM-2) ──────────────────────
+  //
+  // THE STRIP IS THE SECURITY-CRITICAL HALF, and it is easy to miss: the spread
+  // above copies the orchestrator's WHOLE environment into every agent
+  // container, so the orchestrator's own INTERNAL_API_TOKEN — the control-plane
+  // credential that grants the full /internal/* surface — would arrive inside
+  // the very containers this ticket exists to fence out. Minting a narrow
+  // per-agent token while shipping the wide one alongside it is not a control at
+  // all, so both the token and the agent-token signing secret are removed here.
+  // Guarded by `internal-auth-wiring.test.js`.
+  delete childEnv.INTERNAL_API_TOKEN;
+  delete childEnv.INTERNAL_AGENT_TOKEN_SECRET;
+  // The mode is not a secret and is deliberately NOT stripped — an agent-side
+  // caller has no use for it, but neither does hiding it buy anything.
+  //
+  // The per-agent token is deterministic (an HMAC over the agent id), so this
+  // re-mints the identical value on every respawn — which is what makes §3.5's
+  // "rotate via the existing respawn-on-credential-change path" free: all three
+  // respawn paths (env credential change, owner credential change, single-agent
+  // respawn) go through startAgentProcess, and changing the secret invalidates
+  // every outstanding token at once.
+  const agentInternalToken = internalAuth.mintAgentToken(id, internalAuthConfig.agentTokenSecret);
+  if (agentInternalToken) childEnv.AEE_INTERNAL_TOKEN = agentInternalToken;
+  else delete childEnv.AEE_INTERNAL_TOKEN;
 
   // Bind the agent's process to the LLM endpoint configured on its working
   // environment. When an environment doesn't reference an endpoint we leave
@@ -1014,12 +1071,26 @@ function bootstrapTeams() {
   const subject = process.env.BOOTSTRAP_SYSTEM_ADMIN_SUBJECT;
   if (subject) {
     try {
-      teamsStore.ensureSystemAdmin({
+      const admin = teamsStore.ensureSystemAdmin({
         subject,
         email: process.env.BOOTSTRAP_SYSTEM_ADMIN_EMAIL,
         displayName: process.env.BOOTSTRAP_SYSTEM_ADMIN_NAME,
       });
       console.log(`[Orchestrator] Ensured System Admin for subject '${subject}'`);
+      // #1457: System Admin is a global flag, not a membership, so the bootstrap
+      // admin was left with no *Team* role at all — and the Default Team it
+      // owns everything in therefore had no Team Admin. Give it one. The plan is
+      // empty once any membership for the pair exists, in any role, so a human
+      // who deliberately demoted this admin is not re-promoted on every boot.
+      const membership = planBootstrapMembership({
+        userId: admin && admin.id,
+        memberships: teamsStore.listMemberships({ teamId: DEFAULT_TEAM_ID }),
+        teamId: DEFAULT_TEAM_ID,
+      });
+      if (membership) {
+        teamsStore.setMembership(membership);
+        console.log(`[Orchestrator] Made System Admin '${subject}' ${membership.role} of the Default Team`);
+      }
     } catch (err) {
       console.error(`[Orchestrator] System Admin bootstrap failed: ${err.message}`);
     }
@@ -1084,22 +1155,132 @@ function backfillResourceOwnership() {
     try {
       const list = JSON.parse(fs.readFileSync(idx, "utf8"));
       if (!Array.isArray(list)) continue;
-      let changed = false;
-      for (const entry of list) {
-        if (entry && typeof entry === "object" && entry.teamId === undefined) {
-          entry.teamId = DEFAULT_TEAM_ID;
-          changed = true;
-        }
-      }
-      if (changed) {
+      // planAdoption's `teamId === undefined` predicate is what keeps the
+      // personal credential tier (#1567) out: a personal entry carries an
+      // explicit `teamId: null` and must NOT be adopted into a team.
+      const pending = planAdoption(list.map((record, key) => ({ key, record })));
+      if (pending.length > 0) {
+        for (const { record } of pending) record.teamId = DEFAULT_TEAM_ID;
         fs.writeFileSync(idx, JSON.stringify(list, null, 2));
-        stamped += list.length;
+        stamped += pending.length;
       }
     } catch { /* skip unparsable index */ }
   }
 
+  // MCP servers (#1457). The scope filter has always read `server.teamId`
+  // (api.js `visibleTeam(scope, s.teamId)`) but nothing ever wrote it, so every
+  // registered server relied on the `|| 'default'` collapse inside the
+  // predicate. Adopt them explicitly, so the Default Team's ownership is a fact
+  // on disk rather than a fallback. Writing a `teamId` at *create* time belongs
+  // to the ownership phase (#2077/#2083) — this pass only adopts what predates it.
+  if (fs.existsSync(MCP_SERVERS_DIR)) {
+    for (const name of fs.readdirSync(MCP_SERVERS_DIR)) {
+      if (name.startsWith("_")) continue; // credential/key dirs, not servers
+      const p = path.join(MCP_SERVERS_DIR, name, "server.json");
+      if (!fs.existsSync(p)) continue;
+      try {
+        const server = JSON.parse(fs.readFileSync(p, "utf8"));
+        if (needsAdoption(server)) {
+          server.teamId = DEFAULT_TEAM_ID;
+          fs.writeFileSync(p, JSON.stringify(server, null, 2));
+          stamped++;
+        }
+      } catch { /* skip unparsable server */ }
+    }
+  }
+
   if (stamped > 0) {
     console.log(`[Orchestrator] Backfilled team ownership onto ${stamped} pre-existing resource(s)`);
+  }
+}
+
+// The D6 ownership migration (#2077, epic #2076; design of record
+// `docs/decentralised-access-concept.md` §8). Startup-time, idempotent,
+// in-place — the `backfillResourceOwnership` shape above, which §8.3 names as
+// the precedent to copy. Two independent passes:
+//
+//   1. `ownerId` onto every team and standalone agent that lacks one (AC1/AC5),
+//      resolved from its access scope's memberships by the D6 rule.
+//   2. Every (user ↔ access-scope) membership fanned out to one
+//      (user ↔ Agent Team) membership per Agent Team in that scope (AC2/AC3).
+//
+// Pass 2 is ADDITIVE — the scope memberships stay. P1 is specified as "no
+// behaviour change", and enforcement still gates on a resource's `teamId`
+// stamp (an access-scope id until P2 re-points it), so removing the scope
+// grants here would empty every list for every non-admin. §8.3 states the
+// no-lockout property as `⊇` precisely to allow this; the fixture test
+// `admin-console/api/ownership-no-lockout.test.js` is the proof.
+//
+// Idempotent by VALUE, never by a marker: pass 1 skips a config that already
+// carries an `ownerId`, pass 2 skips a `(userId, teamId)` pair that already
+// exists. A second boot writes nothing and logs nothing (AC6).
+//
+// Best-effort per item, like its precedent: one unreadable config or a store
+// write failure is logged and never aborts boot.
+function migrateOwnershipModel() {
+  let users = [];
+  let memberships = [];
+  try {
+    users = teamsStore.listUsers();
+    memberships = teamsStore.listMemberships();
+  } catch (err) {
+    console.warn(`[Orchestrator] Ownership migration skipped — user store unreadable: ${err.message}`);
+    return;
+  }
+
+  const configs = {};
+  if (fs.existsSync(AGENTS_DIR)) {
+    for (const id of listAgentIds()) {
+      try {
+        const cfg = loadAgentConfig(id);
+        if (cfg) configs[id] = cfg;
+      } catch (err) {
+        console.warn(`[Orchestrator] Ownership migration: skipping unreadable config ${id}: ${err.message}`);
+      }
+    }
+  }
+
+  // ── Pass 1 — ownerId (AC1/AC5) ──────────────────────────────────────────
+  const { stamp, unresolved } = ownershipMigration.planOwnerBackfill({ configs, users, memberships });
+  let owned = 0;
+  for (const { id, ownerId, ownerSource, scopeId } of stamp) {
+    try {
+      const cfg = configs[id];
+      cfg.ownerId = ownerId;
+      cfg.ownerSource = ownerSource;
+      saveAgentConfig(id, cfg);
+      owned++;
+      console.log(`[Orchestrator] Ownership: ${id} (scope ${scopeId}) → owner ${ownerId} (migration placeholder)`);
+    } catch (err) {
+      console.warn(`[Orchestrator] Ownership migration: could not stamp ${id}: ${err.message}`);
+    }
+  }
+  // D6's rule ends in "else unset", so a scope with no members at all leaves
+  // its resources unowned rather than getting a fabricated owner. Report it —
+  // an unowned team is correctable (§8.2) but only if someone knows about it.
+  for (const { id, scopeId } of unresolved) {
+    console.warn(
+      `[Orchestrator] Ownership: ${id} has no resolvable owner — access scope '${scopeId}' has no members. `
+      + 'Assign an owner from the Access page.',
+    );
+  }
+
+  // ── Pass 2 — membership fan-out (AC2/AC3) ───────────────────────────────
+  let granted = 0;
+  const repoint = ownershipMigration.planMembershipRepoint({ configs, memberships });
+  if (repoint.length > 0) {
+    try {
+      granted = teamsStore.appendMemberships(repoint).length;
+      for (const m of repoint) {
+        console.log(`[Orchestrator] Ownership: membership ${m.userId} → Agent Team ${m.teamId} as ${m.role} (from scope ${m.fromScopeId})`);
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] Ownership migration: membership fan-out failed: ${err.message}`);
+    }
+  }
+
+  if (owned > 0 || granted > 0) {
+    console.log(`[Orchestrator] Ownership migration: stamped ${owned} owner(s), added ${granted} Agent-Team membership(s)`);
   }
 }
 
@@ -1220,10 +1401,15 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   // #1547: same discipline as skills — resolve the plugin grant from the config
   // here rather than threading it through every caller.
   const plugins = agentPluginDisplays(cfg);
+  // #2067: same discipline as skills/plugins/mounts — the agent-scoped
+  // repository list is resolved from the config HERE rather than threaded
+  // through every caller, so no path can rebuild a prompt that omits (or
+  // invents) a repository the workspace actually has.
+  const agentRepositories = normalizeAgentRepositories(cfg && cfg.agentRepositories);
   // Reference mode: CLAUDE.md points at AGENT-PROMPT.md instead of inlining it.
   fs.writeFileSync(
     path.join(dir, "CLAUDE.md"),
-    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, plugins, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef, contextMounts }),
+    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, plugins, agentRepositories, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef, contextMounts }),
   );
 }
 
@@ -2322,6 +2508,10 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
     // enumerating each folder with its in-container path and access mode (#1289).
     // Empty → the section is absent (byte-identical to a no-mount agent).
     contextMounts: Array.isArray(opts.contextMounts) ? opts.contextMounts : [],
+    // #2067: repositories attached to this ONE agent, outside its Working
+    // Environment. Listed alongside the inherited ones and counted by the
+    // Git-section gate. Empty → byte-identical to a pre-#2067 agent.
+    agentRepositories: normalizeAgentRepositories(opts.agentRepositories),
   });
 }
 
@@ -2615,8 +2805,16 @@ function seedAgentWorkspace(id, env, opts = {}) {
     : ((env && Array.isArray(env.mcpServers)) ? env.mcpServers : []);
   const mcpSeeded = seedAgentMcpServers(dest, mcpRefs, warnings);
 
-  // 5. Optional git clone(s)
-  const clones = cloneEnvironmentRepositories(dest, env, warnings);
+  // 5. Optional git clone(s) — the environment's, then this agent's own
+  //    (#2067). Agent-scoped repositories are cloned by EVERY seed, which is
+  //    what makes the attachment survive a container respawn and a workspace
+  //    re-seed (AC5/D9): reset-to-stub wipes everything but config.json, and
+  //    config.json is where the attachment lives, so the next activation
+  //    re-clones it rather than leaving the prompt naming a missing directory.
+  const clones = [
+    ...cloneEnvironmentRepositories(dest, env, warnings),
+    ...cloneAgentScopedRepositories(dest, env, (loadAgentConfig(id) || {}).agentRepositories, warnings),
+  ];
 
   // 6. Shared team Knowledge Base working copy (Shared Agent Learning, Phase 1).
   //    Only when the autonomy dial is on (>= 1); best-effort, never fails the seed.
@@ -2794,6 +2992,26 @@ function cloneEnvironmentRepositories(targetDir, env, warnings) {
   return results;
 }
 
+// Clone the repositories attached to ONE agent (#2067). Same clone code and
+// same directory convention as an environment repository — what differs is the
+// cache: `envId` is passed as null on purpose, so an agent-scoped repository
+// neither reads from nor seeds the per-environment `_repo-cache`. Seeding it
+// would let a sibling agent later copy a working tree it was never granted,
+// which is precisely what "attaching changes exactly one agent" (AC10) forbids.
+function cloneAgentScopedRepositories(targetDir, env, agentRepositories, warnings) {
+  const repos = normalizeAgentRepositories(agentRepositories);
+  const results = [];
+  for (const repo of repos) {
+    try {
+      const info = cloneRepository(targetDir, repo, env?.githubTokenId || null, null);
+      if (info) results.push(info);
+    } catch (err) {
+      warnings.push(`git clone (${repo.url}): ${err.message}`);
+    }
+  }
+  return results;
+}
+
 // Per-env clone cache. The first agent in an env triggers a real `git clone`
 // into <envDir>/_repo-cache/<repoName>; subsequent agents in the same env
 // `cp -r` from that cache instead of paying the network round-trip again.
@@ -2815,10 +3033,16 @@ function isUsableRepoCache(cacheDir) {
   }
 }
 
-function cloneRepository(targetDir, repository, envGithubTokenId = null, envId = null) {
-  const { url, branch, sshKeyId } = repository;
-  if (!url) return null;
-
+// Resolve the git credentials one repository URL needs, and shape them into the
+// per-invocation environment git reads them from.
+//
+// Extracted verbatim out of cloneRepository (#2066) so the in-place ADJUST path
+// authenticates through exactly the same resolution — a second copy would be
+// the one place where "the clone worked but the fetch did not" could diverge.
+// The resolution itself is unchanged: transport is decided by the URL, never by
+// which credentials the environment happens to carry.
+function repoGitCredentials(repository, envGithubTokenId = null) {
+  const { url, sshKeyId } = repository || {};
   // The transport choice is driven by the URL, not by which credentials
   // the env carries. HTTPS URLs need PAT-based Basic auth; SSH URLs need
   // GIT_SSH_COMMAND with the deploy key. The wizard sets BOTH credentials
@@ -2841,6 +3065,50 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null, envId =
     }
     try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
   }
+
+  // For HTTPS GitHub URLs, authenticate via GIT_CONFIG_* env vars so the
+  // token never appears in process arguments (/proc/<pid>/cmdline) and never
+  // lands in `git remote -v` (no URL rewriting). Only active for this single
+  // invocation. The presence of an SSH key does NOT block this path — SSH
+  // keys are no help for HTTPS transport.
+  let authBasic = null;
+  if (isHttpsGithub && envGithubTokenId) {
+    const tokenPath = path.join(GH_TOKENS_DIR, envGithubTokenId);
+    try {
+      const ghToken = fs.readFileSync(tokenPath, "utf8").trim();
+      if (ghToken) {
+        authBasic = Buffer.from(`x-access-token:${ghToken}`).toString("base64");
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] Cannot read GitHub token ${envGithubTokenId} for clone: ${err.message}`);
+    }
+  }
+  // Refuse proactively when no auth can possibly work. Without this, git would
+  // block on a username prompt (no TTY → fatal: could not read Username) and
+  // the failure would surface as a cryptic stderr line.
+  if (isHttpsGithub && !authBasic) {
+    throw new Error(
+      `HTTPS clone of ${url} needs a GitHub PAT, but the env has no usable githubTokenId ` +
+      `(SSH keys do not authenticate HTTPS transports). Either add a PAT to the env or ` +
+      `change the repository URL to its SSH form.`
+    );
+  }
+
+  const env = { ...process.env };
+  if (keyPath) {
+    env.GIT_SSH_COMMAND = `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes`;
+  }
+  if (authBasic) {
+    env.GIT_CONFIG_COUNT = "1";
+    env.GIT_CONFIG_KEY_0 = "http.https://github.com/.extraheader";
+    env.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${authBasic}`;
+  }
+  return env;
+}
+
+function cloneRepository(targetDir, repository, envGithubTokenId = null, envId = null) {
+  const { url, branch } = repository;
+  if (!url) return null;
 
   const repoName = (url.split("/").pop() || "repo").replace(/\.git$/, "");
   const repoDir = path.join(targetDir, repoName);
@@ -2866,47 +3134,15 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null, envId =
     }
   }
 
-  // For HTTPS GitHub URLs, authenticate via GIT_CONFIG_* env vars so the
-  // token never appears in process arguments (/proc/<pid>/cmdline) and never
-  // lands in `git remote -v` (no URL rewriting). Only active for this single
-  // invocation. The presence of an SSH key does NOT block this path — SSH
-  // keys are no help for HTTPS transport.
-  let authBasic = null;
-  if (isHttpsGithub && envGithubTokenId) {
-    const tokenPath = path.join(GH_TOKENS_DIR, envGithubTokenId);
-    try {
-      const ghToken = fs.readFileSync(tokenPath, "utf8").trim();
-      if (ghToken) {
-        authBasic = Buffer.from(`x-access-token:${ghToken}`).toString("base64");
-      }
-    } catch (err) {
-      console.warn(`[Orchestrator] Cannot read GitHub token ${envGithubTokenId} for clone: ${err.message}`);
-    }
-  }
-  // Refuse the clone proactively when no auth can possibly work. Without
-  // this, git would block on a username prompt (no TTY → fatal: could not
-  // read Username) and the failure would surface as a cryptic stderr line.
-  if (isHttpsGithub && !authBasic) {
-    throw new Error(
-      `HTTPS clone of ${url} needs a GitHub PAT, but the env has no usable githubTokenId ` +
-      `(SSH keys do not authenticate HTTPS transports). Either add a PAT to the env or ` +
-      `change the repository URL to its SSH form.`
-    );
-  }
+  // Credentials are resolved HERE, after the two early returns above, so a
+  // clone that is not going to run never fails on a credential it would not
+  // have used. The HTTPS-without-a-PAT refusal keeps its original position for
+  // the same reason: it must fire for a clone that is about to happen.
+  const env = repoGitCredentials(repository, envGithubTokenId);
 
   const args = ["clone"];
   if (branch) args.push("--branch", branch);
   args.push("--", url, repoName);
-
-  const env = { ...process.env };
-  if (keyPath) {
-    env.GIT_SSH_COMMAND = `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes`;
-  }
-  if (authBasic) {
-    env.GIT_CONFIG_COUNT = "1";
-    env.GIT_CONFIG_KEY_0 = "http.https://github.com/.extraheader";
-    env.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${authBasic}`;
-  }
 
   try {
     execFileSync("git", args, {
@@ -2937,6 +3173,108 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null, envId =
   }
 
   return { repoName, skipped: false, fromCache: false };
+}
+
+// Every git checkout directly under an agent's workspace, by directory name.
+// Used to report clones that are no longer declared as RETAINED (#2066) — they
+// are never deleted, so saying so is the only thing left to do about them.
+function listWorkspaceClones(workspace) {
+  try {
+    return fs.readdirSync(workspace, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      .filter((e) => fs.existsSync(path.join(workspace, e.name, ".git")))
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+
+// The MINIMAL probe repoDivergence() needs: per declared repository, does a
+// clone exist, which branch is checked out, and where does 'origin' point.
+//
+// Deliberately not inspectAgentRepoStatuses — that runs ~7 git commands per
+// repository (log, status --porcelain, rev-list against the upstream) because
+// it answers "is this safe to hand over". The out-of-date indicator asks a much
+// smaller question and is rendered for every agent of every environment, so it
+// gets two git commands per repository and no network access at all. The shape
+// it returns is a strict subset of the full status record, so the same pure
+// repoDivergence() reads either one.
+function inspectAgentRepoDivergence(agentId, env) {
+  const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+  const workspace = agentDir(agentId);
+  const out = [];
+
+  for (const repo of repos) {
+    if (!repo?.url) continue;
+    const name = (repo.url.split("/").pop() || "repo").replace(/\.git$/, "");
+    const repoPath = path.join(workspace, name);
+    const record = { name, url: repo.url, exists: false, branchActual: null, remoteUrl: null };
+    if (!fs.existsSync(path.join(repoPath, ".git"))) {
+      out.push(record);
+      continue;
+    }
+    record.exists = true;
+    const run = (args) => execFileSync("git", args, {
+      cwd: repoPath,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 5_000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    }).toString().trim();
+    try { record.branchActual = run(["rev-parse", "--abbrev-ref", "HEAD"]) || null; } catch { /* leave null */ }
+    try { record.remoteUrl = run(["remote", "get-url", "origin"]) || null; } catch { /* no origin */ }
+    out.push(record);
+  }
+  return out;
+}
+
+// Bring ONE existing clone into line with its declared entry (#2066 D1).
+//
+// Only ever reached for a clone cloneAdjustSafety() has cleared as clean and
+// fully pushed, and every operation below is chosen so that even then it cannot
+// discard work: `remote set-url` touches no file, `fetch` only adds objects, and
+// the branch move is `checkout` + `merge --ff-only` — a local branch that has
+// diverged makes the merge REFUSE, which surfaces as a per-repository failure.
+// There is deliberately no stash, no reset, no `checkout -f` and no clean.
+function adjustRepoClone(workspace, repository, status, plan, envGithubTokenId = null) {
+  const repoDir = path.join(workspace, status.name);
+  const env = repoGitCredentials(repository, envGithubTokenId);
+  const applied = [];
+
+  const run = (args, timeout = 120_000) => {
+    try {
+      return execFileSync("git", args, {
+        cwd: repoDir,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout,
+      }).toString();
+    } catch (err) {
+      const detail = (err.stderr || err.stdout || "").toString().trim() || err.message || "";
+      throw new Error(`git ${args[0]} failed: ${detail.slice(0, 300)}`);
+    }
+  };
+
+  // Repoint 'origin' FIRST, so the fetch below already speaks to the new
+  // address and the branch step resolves against it.
+  if (plan.setUrl) {
+    run(["remote", "set-url", "origin", plan.setUrl]);
+    applied.push(`remote → ${plan.setUrl}`);
+  }
+
+  // Always fetch. This is also the point at which an edited SSH key or PAT is
+  // actually exercised, so a credential change is proven rather than assumed.
+  run(["fetch", "--prune", "origin"]);
+  applied.push("fetched");
+
+  if (plan.checkoutBranch) {
+    const branch = plan.checkoutBranch;
+    run(["checkout", branch]);
+    run(["merge", "--ff-only", `origin/${branch}`]);
+    applied.push(`branch → ${branch}`);
+  }
+
+  console.log(`[Orchestrator] Adjusted ${status.name} in ${workspace}: ${applied.join("; ")}`);
+  return { applied };
 }
 
 function patchSeededPaths(dir) {
@@ -3215,7 +3553,22 @@ const MATRIX_LOGIN_RETRY_CEILING_MS = (() => {
     : matrixLoginRetry.DEFAULT_CEILING_MS;
 })();
 
-async function ensureMatrixUser(adminClient, username, password) {
+async function ensureMatrixUser(adminClient, username, password, { allowHumanLocalpart = false } = {}) {
+  // Human-localpart reservation (#1458). This function is the ONE choke point
+  // through which every Matrix account in the stack is created — the seven
+  // agent/team/member call sites below and the human-provisioning path — so it
+  // is the only place the reservation has to be enforced to be complete.
+  //
+  // Agent ids are free-form slugs (AGENT_ID_RE allows `[A-Za-z0-9_-]`), so
+  // without this an operator could create an agent literally named
+  // `u-0123456789abcdef` and take over a human's Matrix account, and with it
+  // that human's rooms. The predicate is exactly as narrow as the minted human
+  // shape, so ordinary ids like `u-payments` remain legal.
+  if (!allowHumanLocalpart && humanMatrixIdentity.isReservedHumanLocalpart(username)) {
+    throw new Error(
+      `Matrix localpart '${username}' is reserved for per-human identities (#1458)`,
+    );
+  }
   // Ordered create → reset-password → enable-login. Plain reset-password both
   // sets the password and reactivates a previously deactivated account on the
   // Continuwuity build we run (issue #715) — see matrix-admin-commands.js.
@@ -3298,6 +3651,123 @@ async function setDisplayName(token, userId, displayName) {
       body: JSON.stringify({ displayname: displayName }),
     }
   );
+}
+
+// ============================================================
+// Per-human Matrix identity (#1458, epic #2076 P1)
+// ============================================================
+//
+// docs/multi-user-concept.md §4: every human gets their OWN Matrix account
+// instead of sharing the one admin identity whose token lives in
+// MATRIX_ACCESS_TOKEN. This is the identity half of that change — the room
+// model (one DM room per (human, agent), one shared room per team agent) is
+// the second half and lands separately; it needs these accounts to exist
+// before it can invite anyone into anything.
+//
+// ── The provisioning mechanism, and why it is this one ─────────────────────
+// Continuwuity exposes NO Synapse `/_synapse/admin/` REST API (see
+// matrix-admin-commands.js), and the stack runs with
+// CONTINUWUITY_ALLOW_REGISTRATION="false", so the client registration endpoint
+// is closed too. The only live mechanism is the admin-ROOM command sequence
+// that `ensureMatrixUser` already fires for every agent. Humans therefore
+// reuse it verbatim — including its two hard-won properties:
+//   * the ordered create → reset-password → enable-login sequence, which also
+//     recovers a previously deactivated account (issue #715), so a re-onboarded
+//     human gets their old rooms back rather than a dead account; and
+//   * `loginMatrixUser`'s bounded retry, which absorbs the cold-stack race
+//     where the admin bot has not processed the commands yet (issues #719/#1386).
+// The admin-room commands are fire-and-forget — their replies are never parsed
+// — so the LOGIN is the only real success signal, exactly as for agents.
+//
+// ── When this runs ─────────────────────────────────────────────────────────
+// At user-record creation, not at first login. There is no just-in-time user
+// provisioning today (admin-console/api/auth.js fails an unregistered identity
+// closed, #1415), so a user record is always created deliberately, and doing
+// the work there keeps the ~5s of admin-bot settle delays off the login path.
+// When SSO JIT provisioning does arrive it will create a user record and pick
+// this up for free.
+
+// Deactivate a Matrix account by its full user id. The class method
+// `deactivateMatrixUser` covers agents (which are addressed by agent id);
+// humans are addressed by their derived `@u-<hash>:local`, so the id-taking
+// form lives here. Best-effort and fire-and-forget, like every admin-room op.
+async function deactivateMatrixUserId(adminClient, matrixUserId) {
+  if (!adminClient || !matrixUserId) return;
+  try {
+    await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, {
+      msgtype: "m.text",
+      body: `!admin users deactivate ${matrixUserId}`,
+    });
+    console.log(`[Orchestrator] Matrix user ${matrixUserId} deactivated`);
+  } catch (err) {
+    console.error(`[Orchestrator] Deactivate warning for ${matrixUserId}: ${err.message}`);
+  }
+}
+
+// Idempotent: make sure `user` has a Matrix account and a stored access token.
+// Returns the credential record, or null when it could not be provisioned.
+//
+// Idempotency matters because the callers are best-effort: a create that failed
+// (admin bot down, homeserver restarting) must be repairable by simply calling
+// this again, and a call for an already-provisioned user must be a cheap no-op
+// rather than a second round of admin-room traffic.
+async function ensureHumanMatrixIdentity(adminClient, user) {
+  if (!user || !user.id || !user.subject) return null;
+
+  const existing = humanMatrixStore.readIdentity(user.id);
+  if (existing && existing.accessToken) return existing;
+
+  const localpart = humanMatrixIdentity.humanMatrixLocalpart(user.subject);
+  const matrixUserId = humanMatrixIdentity.humanMatrixUserId(user.subject);
+
+  // A human's Matrix password is never typed by anyone — the access token from
+  // the login below is what we keep — so it is a full-entropy random value
+  // rather than the derivable `agent-<id>-<ts>` pattern the agent path uses.
+  const password = randomHex(24);
+
+  if (adminClient) {
+    await ensureMatrixUser(adminClient, localpart, password, { allowHumanLocalpart: true });
+  }
+  const accessToken = await loginMatrixUser(localpart, password, adminClient);
+
+  // Display name = the corporate display name (concept §4 step 2). This is the
+  // only human-readable thing room members see, since the localpart is a hash.
+  await setDisplayName(accessToken, matrixUserId, user.displayName || user.subject);
+
+  const record = humanMatrixStore.writeIdentity(user.id, { matrixUserId, accessToken });
+  // The pointer — not the token — goes on the user record so other components
+  // can resolve "which Matrix account is this human?" without touching the
+  // credential store.
+  try {
+    teamsStore.setUserMatrixIdentity(user.id, matrixUserId);
+  } catch (err) {
+    console.warn(`[Orchestrator] could not stamp matrixUserId on user ${user.id}: ${err.message}`);
+  }
+  console.log(`[Orchestrator] Provisioned Matrix identity ${matrixUserId} for user ${user.id}`);
+  return record;
+}
+
+// Fire-and-forget wrapper for the create path: provisioning costs several
+// seconds of admin-bot settle delays, and a homeserver hiccup must not fail the
+// user creation the caller actually asked for. A user left without an identity
+// is repaired by the next `ensureHumanMatrixIdentity` call.
+function provisionHumanMatrixIdentityInBackground(adminClient, user) {
+  ensureHumanMatrixIdentity(adminClient, user).catch((err) => {
+    console.warn(
+      `[Orchestrator] Matrix identity provisioning deferred for user ${user && user.id}: ${err.message}`,
+    );
+  });
+}
+
+// Off-boarding counterpart: deactivate the account and drop the stored token so
+// the credential does not outlive the user record. Best-effort in both halves —
+// the user removal is what the caller contracted for.
+async function deprovisionHumanMatrixIdentity(adminClient, userId) {
+  const identity = humanMatrixStore.readIdentity(userId);
+  if (identity && identity.matrixUserId) {
+    await deactivateMatrixUserId(adminClient, identity.matrixUserId);
+  }
+  humanMatrixStore.deleteIdentity(userId);
 }
 
 // ============================================================
@@ -3452,17 +3922,24 @@ function loadSshKeyIndex() {
 // (#1569, concept §5/§6). Returns `{ githubTokenId }` (the id to inject; the
 // env's shared id when the personal tier does not apply) or throws a
 // `personalCredentialRequired`-tagged Error the caller surfaces as a distinct,
-// actionable failure. Gated on `config.ownerId`: an agent with no owner (every
-// agent until ownerId population lands — AC8) takes the shared id unchanged and
-// never refuses.
+// actionable failure.
+//
+// Since #2077 populates `ownerId` on every team and standalone agent, owner
+// PRESENCE is no longer the switch — participation in the personal tier is. The
+// `present` half of `findPersonalCredentialState` is what carries that
+// distinction: an owner with no personal token takes the shared id unchanged and
+// never refuses (which is every agent today), while an owner whose personal
+// token is present-but-unusable still refuses. See the header comment in
+// `credential-resolution.js` for why the switch had to move.
 function resolveAttributedGithubToken(id, env, operation) {
   const cfg = loadAgentConfig(id) || {};
   const ownerId = credentialResolution.resolveAgentOwnerId(cfg, loadAgentConfig);
-  const personal = credentialResolution.findPersonalCredential(loadGithubTokenIndex(), ownerId);
+  const personal = credentialResolution.findPersonalCredentialState(loadGithubTokenIndex(), ownerId);
   const decision = credentialResolution.resolveCredential({
     operation,
     ownerId,
-    personalCredential: personal,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
     sharedCredentialId: env?.githubTokenId || null,
     kind: "GitHub token",
   });
@@ -6858,7 +7335,14 @@ function performGitPanelAction(id, env, body = {}) {
     };
   }
   const remoteUrl = remoteRes.out.trim();
-  const matched = gitPanelOps.matchEnvRepoByRemote(remoteUrl, env?.repositories);
+  // #2067 AC18: the Git panel's update acts on whatever `.git` it finds in the
+  // workspace, which now includes agent-scoped repositories. Their SSH key is
+  // recorded on the AGENT, not the environment, so both lists have to be
+  // offered here or an agent-scoped SSH repo would fail to fetch with no key.
+  const matched = gitPanelOps.matchEnvRepoByRemote(remoteUrl, [
+    ...(Array.isArray(env?.repositories) ? env.repositories : []),
+    ...normalizeAgentRepositories((loadAgentConfig(id) || {}).agentRepositories),
+  ]);
   const gitEnv = agentGitOps.buildRepoGitEnv({
     env,
     repoUrl: remoteUrl,
@@ -6946,8 +7430,15 @@ function performGitPanelAction(id, env, body = {}) {
 //
 // Per-repo failures are caught and surfaced via the `error` field — one bad
 // repo never aborts the rest of the report.
-function inspectAgentRepoStatuses(agentId, env) {
-  const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+// `extraRepos` (#2067) lets a caller add the agent's OWN attached repositories
+// to the report. They are on disk exactly like an environment one, so the
+// hand-off readiness gate and the removal confirmation both need their real
+// dirty/unpushed state rather than a guess.
+function inspectAgentRepoStatuses(agentId, env, extraRepos = []) {
+  const repos = [
+    ...(Array.isArray(env?.repositories) ? env.repositories : []),
+    ...(Array.isArray(extraRepos) ? extraRepos : []),
+  ];
   const workspace = agentDir(agentId);
   const results = [];
 
@@ -7247,6 +7738,182 @@ function cancelPendingEntry(agentId, entryId) {
   return { removed: true, entry: pendingQueue.summarizeEntry(removed) };
 }
 
+// ── Pending-queue reassignment (#2102) ──────────────────────────────────────
+//
+// Hand a WAITING entry to a different agent. The one thing that makes this
+// work rather than merely appear to: the moved entry must carry a trigger id
+// that resolves on the TARGET. See orchestrator/pending-reassign.js.
+
+// The `triggers.json` mtime, which is the LEGACY history-horizon fallback for a
+// trigger carrying neither `activatedAt` nor `createdAt` (see effectiveHorizon).
+// The poller reads it per agent in `_buildPollPlan`; eligibility has to use the
+// same value or a legacy trigger's horizon would be computed differently here.
+function agentTriggersMtime(id) {
+  try {
+    return fs.statSync(controlOrPoolPath(id, "triggers.json")).mtime.toISOString();
+  } catch { return null; }
+}
+
+// The agents an entry may be handed to, before eligibility is considered: the
+// source's own team, minus itself, minus the runtime-less `role: 'team'` agent,
+// minus disabled agents. Same roster rule the loop-verifier picker uses
+// (TriggersPanel.jsx) and the same `enabled === false` skip `_buildPollPlan`
+// applies — enqueueing for a stopped agent only builds a backlog that fires in
+// a burst on re-enable.
+function pendingReassignCandidates(sourceAgentId) {
+  const sourceCfg = loadAgentConfig(sourceAgentId);
+  const team = sourceCfg && (sourceCfg.parentTeamId || sourceCfg.teamId);
+  if (!team) return [];
+  const out = [];
+  for (const id of listAgentIds().sort()) {
+    if (id === sourceAgentId) continue;
+    const cfg = loadAgentConfig(id);
+    if (!cfg) continue;
+    if (cfg.role === "team") continue;
+    if (cfg.enabled === false) continue;
+    if ((cfg.parentTeamId || cfg.teamId) !== team) continue;
+    out.push({
+      agentId: id,
+      agentName: cfg.name || id,
+      triggers: loadTriggers(id),
+      triggersMtime: agentTriggersMtime(id),
+    });
+  }
+  return out;
+}
+
+// "Which agents would accept this queued event?" — answered from the real
+// poller predicates over the candidates' own triggers (#2102 AC1). Read-only:
+// this never touches either queue.
+function pendingReassignTargets(sourceAgentId, entryId) {
+  const entry = readPendingEntry(sourceAgentId, entryId);
+  if (!entry) return { ok: false, code: "entry-gone" };
+  if (!pendingQueue.isReassignable(entry)) {
+    return { ok: false, code: "kind-not-reassignable", kind: pendingQueue.entryKind(entry) };
+  }
+  const { eligible, refused } = pendingReassign.eligibleTargets(
+    entry, pendingReassignCandidates(sourceAgentId));
+  return {
+    ok: true,
+    entry: pendingQueue.summarizeEntry(entry),
+    workItem: pendingReassign.describeEntryWorkItem(entry),
+    targets: eligible,
+    refused,
+  };
+}
+
+// Where a moved entry goes when the source removal succeeded but the target
+// enqueue did not (#2102 Q2/AC8). This is the residual risk of delete-first and
+// it must not be handled by silence: the full entry is parked here so a human
+// (or a later tool) can recover it, INDEPENDENTLY of the hard error the caller
+// also gets. Deliberately not written back to the source queue — the source may
+// have drained in the meantime, and re-adding it there is exactly the
+// double-run window delete-first exists to avoid (#1527).
+function parkReassignDeadLetter(record) {
+  try {
+    const dir = path.join(WORKSPACE, "pending-reassign-dead-letter");
+    fs.mkdirSync(dir, { recursive: true });
+    const day = new Date().toISOString().slice(0, 10);
+    fs.appendFileSync(path.join(dir, `reassign-lost-${day}.jsonl`),
+      JSON.stringify(record) + "\n");
+    return true;
+  } catch (err) {
+    console.error(`[Orchestrator] reassign dead-letter write failed: ${err.message}`);
+    return false;
+  }
+}
+
+// Move one entry from `sourceAgentId` to `targetAgentId`.
+//
+// The fs half only. Every decision — the refusal ladder, the delete-first
+// ordering and the re-stamping — is `pendingReassign.performReassign`, which
+// takes the two side effects as injected functions precisely so that ordering
+// is provable in a unit test instead of only readable here.
+function reassignPendingEntry(sourceAgentId, entryId, targetAgentId, { byUserId } = {}) {
+  const entry = readPendingEntry(sourceAgentId, entryId);
+  const at = new Date().toISOString();
+  const result = pendingReassign.performReassign(
+    { sourceAgentId, targetAgentId },
+    {
+      entry,
+      isReassignable: pendingQueue.isReassignable,
+      // Same-team integrity via the direct-hand-off resolver (#1528) rather
+      // than a restatement of the rule — same constraint, same refusal
+      // vocabulary, self-targeting refused there too.
+      resolveTarget: () => wakeAgent.resolveWakeTarget(
+        { fromAgentId: sourceAgentId, toRoleId: targetAgentId },
+        listAgentIds().map((aid) => ({ agentId: aid, config: loadAgentConfig(aid) })),
+      ),
+      candidate: pendingReassignCandidates(sourceAgentId)
+        .find((c) => c.agentId === targetAgentId) || null,
+      removeAtSource: () => cancelPendingEntry(sourceAgentId, entryId),
+      enqueueAtTarget: (moved) => enqueuePending(targetAgentId, moved),
+      newId: crypto.randomUUID(),
+      now: at,
+      byUserId: byUserId || null,
+    },
+  );
+
+  if (!result.ok) {
+    if (result.code === "enqueue-failed") {
+      // The event is now in no queue at all. Park the full entry for recovery
+      // and compose the sentence HERE, where the work item is in hand: the
+      // operator's single recovery step is re-applying the named label.
+      const parked = parkReassignDeadLetter({
+        ts: at, from: sourceAgentId, to: targetAgentId, by: byUserId || null,
+        reason: "enqueue-failed-after-removal",
+        workItem: result.workItem, entry: result.entry,
+      });
+      console.error(
+        `[Orchestrator] reassign: ${sourceAgentId} → ${targetAgentId} LOST after removal `
+        + `(${result.workItem.text}) — dead-letter ${parked ? "written" : "ALSO FAILED"}`);
+      return {
+        ...result,
+        error: `The entry was removed from ${sourceAgentId} but could NOT be queued for `
+          + `${targetAgentId} — it is now in no queue. Re-apply `
+          + `${result.workItem.label ? `the '${result.workItem.label}' label` : "the label"} `
+          + `on ${result.workItem.text} to run it again.`
+          + (parked ? " A copy was saved for recovery." : ""),
+        deadLettered: parked,
+      };
+    }
+    return result;
+  }
+
+  console.log(
+    `[Orchestrator] reassign: ${result.workItem.text} ${sourceAgentId} → `
+    + `agent=${targetAgentId} trigger=${result.triggerId} by=${byUserId || "?"}`);
+
+  // The audit trail (AC6). Best-effort and LAST — the move is what must not be
+  // lost, mirroring the wake-agent ordering. Sharing the queued event's own id
+  // is deliberate: the Processed-events tab then shows the original
+  // `delivered → <source>` row AND this `reassigned → <target>` row against
+  // one event, so the trail no longer stops at "the source agent was served".
+  try {
+    githubEventLog.record({
+      ...githubEventLog.buildEventEntry({
+        ghEvent: pendingReassign.buildReassignLogEvent(entry, { now: at }),
+        repoFullName: result.workItem.repo,
+        key: (entry.github && entry.github.event) || null,
+        outcomes: [{
+          agentId: targetAgentId, triggerId: result.triggerId,
+          status: "reassigned", reason: "operator-reassign", digest: false,
+          wakeLabel: result.labelFilter || null,
+        }],
+      }),
+      source: "internal",
+      emittedBy: byUserId || null,
+      ...pendingReassign.buildReassignLogFields({
+        fromAgentId: sourceAgentId, toAgentId: targetAgentId, byUserId: byUserId || null,
+      }),
+    });
+  } catch (err) {
+    console.error(`[Orchestrator] reassign log failed: ${err.message}`);
+  }
+
+  return result;
+}
+
 // Atomic read-and-clear for the agent's HTTP drain. Single-event-loop atomic.
 function drainPending(agentId) {
   const p = pendingPath(agentId);
@@ -7375,6 +8042,21 @@ class Orchestrator {
     // an existing team.
     const ownerTeamId = resolveOwnerTeamId(extra.teamId);
 
+    // Human OWNER — the creating person (#2077, concept D8/§3.4/§3.5). Written
+    // for `role: 'team'` and standalone `role: 'agent'` only; a `team-member`
+    // deliberately gets none and resolves its owner from the parent team
+    // (`resolveAgentOwnerId`). `ownerSource` records HOW the owner was decided,
+    // so a real creator stays distinguishable from a D6 migration placeholder
+    // (§8.2 — the migrated owner "may be wrong and must be correctable").
+    const ownerFields = ownershipMigration.ownableRole(role) && extra.ownerId
+      ? {
+        ownerId: String(extra.ownerId),
+        ownerSource: ownershipMigration.OWNER_SOURCES.includes(extra.ownerSource)
+          ? extra.ownerSource
+          : ownershipMigration.OWNER_SOURCE_CREATOR,
+      }
+      : {};
+
     // Skill grant is team-owned (skill-grants.js): the caller passes the
     // initial `skills` list explicitly; the environment no longer contributes.
     const grantedSkills = Array.isArray(extra.skills)
@@ -7388,6 +8070,7 @@ class Orchestrator {
         role: "team",
         environmentId: env.id,
         teamId: ownerTeamId,
+        ...ownerFields,
         systemPromptTemplate: systemPrompt || "",
         // The team's ACTIVE skill set — inherited by every member without a
         // `skillsOverride`; the lever the Knowledge activation flow writes.
@@ -7461,6 +8144,7 @@ class Orchestrator {
       role,
       environmentId: env.id,
       teamId: ownerTeamId,
+      ...ownerFields,
       // The agent's own skill grant (team-owned skills; standalone agents
       // carry their list directly).
       skills: grantedSkills,
@@ -9004,7 +9688,13 @@ class Orchestrator {
     }
     const environmentId = cfg.environmentId || null;
     const env = environmentId ? loadEnvironment(environmentId) : null;
-    const repositories = Array.isArray(env?.repositories) ? env.repositories : [];
+    const envRepos = Array.isArray(env?.repositories) ? env.repositories : [];
+    // #2067 AC11: this agent's OWN attachments are healed by the same pass, so
+    // a sync never leaves an attached repository missing — and because the list
+    // is read from THIS agent's config, the environment fan-out (Sync all
+    // agents) can neither propagate it to a sibling nor drop it here.
+    const ownRepos = normalizeAgentRepositories(cfg.agentRepositories);
+    const repositories = [...envRepos, ...ownRepos];
     const workspace = agentDir(agentId);
 
     // A stub / never-materialized agent has no workspace on disk — there is
@@ -9013,11 +9703,316 @@ class Orchestrator {
       return { agentId, environmentId, repos: [], noWorkspace: true, summary: summarizeRepoResults([]) };
     }
 
+    const ownUrls = new Set(ownRepos.map((r) => r.url));
+    // The plan is derived from the DECLARED list against the ACTUAL clones
+    // (#2066), which is why the status probe runs first: it is what lets one
+    // core serve the save-time offer, the out-of-date catch-up and this
+    // per-agent panel without them being able to disagree (AC21). The declared
+    // list here is env + this agent's own attachments (#2067 AC11), and the
+    // probe is handed those attachments too so an agent-scoped clone is
+    // reconciled rather than read as no-longer-declared.
     const repos = syncAgentRepoPlan(repositories, {
-      hasGit: (name) => fs.existsSync(path.join(workspace, name, ".git")),
-      clone: (repo) => cloneRepository(workspace, repo, env?.githubTokenId || null, env?.id || null),
+      statuses: inspectAgentRepoStatuses(agentId, env, ownRepos),
+      // An agent-scoped repo deliberately bypasses the per-env clone cache (see
+      // cloneAgentScopedRepositories) — one agent's private repository must
+      // never become a sibling's copy source.
+      clone: (repo) => cloneRepository(
+        workspace,
+        repo,
+        env?.githubTokenId || null,
+        ownUrls.has(String(repo.url || "").trim()) ? null : (env?.id || null),
+      ),
+      adjust: (repo, status, plan) => adjustRepoClone(workspace, repo, status, plan, env?.githubTokenId || null),
+      listClones: () => listWorkspaceClones(workspace),
     });
     return { agentId, environmentId, repos, summary: summarizeRepoResults(repos) };
+  }
+
+  // ── Agent-scoped repositories (#2067) ──────────────────────────────────
+  // Attach / detach a repository to ONE agent, outside its Working
+  // Environment. Every rule lives in the pure agent-repositories module; the
+  // three methods below are its fs half: read the config, plan, clone or
+  // delete, persist, rebuild the prompt.
+  //
+  // Deliberately NOT a respawn (unlike the context-mount path, whose mount
+  // only exists at container-create time): the workspace volume is shared with
+  // the running container, so a clone appears inside the agent immediately —
+  // the same additive, no-respawn mechanism as #1342's Sync repositories. The
+  // prompt is rebuilt so the NEXT run names the repository (AC6).
+
+  // The merged environment+agent view every surface reads, plus the git state
+  // of each working copy so a removal confirmation can name what would be lost
+  // (AC9) without a second round-trip.
+  agentRepositoriesView(agentId, { withStatus = true } = {}) {
+    const cfg = loadAgentConfig(agentId);
+    if (!cfg) {
+      const e = new Error(`Agent '${agentId}' not found`);
+      e.code = "not-found";
+      throw e;
+    }
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    const own = normalizeAgentRepositories(cfg.agentRepositories);
+    const resolved = resolveAgentRepositories(env, own);
+    let statuses = [];
+    if (withStatus && fs.existsSync(agentDir(agentId))) {
+      try {
+        statuses = inspectAgentRepoStatuses(agentId, env, own);
+      } catch (err) {
+        console.warn(`[Orchestrator] repo status for ${agentId}: ${err.message}`);
+      }
+    }
+    const byUrl = new Map(statuses.map((s) => [s.url, s]));
+    return {
+      agentId,
+      environmentId: cfg.environmentId || null,
+      role: cfg.role || "agent",
+      // A team record has no workspace and a stub has none yet — the surfaces
+      // disable the action with a stated reason rather than hiding it (AC16).
+      materialized: Boolean(cfg.token),
+      busy: agentBusyState(agentId).busy === true,
+      hasGithubToken: Boolean(env && env.githubTokenId),
+      repositories: resolved.map((r) => ({
+        ...r,
+        facts: r.scope === "agent" ? removalFacts(byUrl.get(r.url) || null) : null,
+      })),
+    };
+  }
+
+  attachAgentRepository(agentId, repo) {
+    const cfg = loadAgentConfig(agentId);
+    if (!cfg) {
+      const e = new Error(`Agent '${agentId}' not found`);
+      e.code = "not-found";
+      throw e;
+    }
+    if (cfg.role === "team") {
+      const e = new Error(
+        "A team record has no container and no workspace of its own — attach the repository to one of its members instead.",
+      );
+      e.code = "no-workspace";
+      throw e;
+    }
+    const workspace = agentDir(agentId);
+    if (!cfg.token || !fs.existsSync(workspace)) {
+      const e = new Error(
+        "This agent has not been materialized yet, so it has no workspace to clone into. Materialize it first.",
+      );
+      e.code = "no-workspace";
+      throw e;
+    }
+
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    // Directory names already taken in the workspace root — a sibling clone or
+    // an ordinary folder the agent created. Read here so the pure planner can
+    // refuse a collision BEFORE anything is written (AC13).
+    let occupiedNames = [];
+    try {
+      occupiedNames = fs.readdirSync(workspace, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name);
+    } catch { /* unreadable workspace → the clone itself will fail honestly */ }
+
+    const plan = planAgentRepoAttach({
+      env,
+      agentRepositories: cfg.agentRepositories,
+      repo,
+      occupiedNames,
+      credentials: {
+        // Both conditions cloneRepository will actually apply: the id is in
+        // the registry AND the key file it would read still exists.
+        sshKeyIds: loadSshKeyIndex()
+          .map((k) => k && k.id)
+          .filter((keyId) => keyId && fs.existsSync(path.join(SSH_KEYS_DIR, keyId))),
+        hasGithubToken: Boolean(env && env.githubTokenId),
+      },
+    });
+    if (!plan.ok) {
+      const e = new Error(plan.message);
+      e.code = plan.code;
+      throw e;
+    }
+
+    // Clone FIRST, persist second: a failed clone must leave neither a config
+    // entry naming a repository that is not there nor a half-cloned directory
+    // (AC13). cloneRepository throws on failure and never leaves the target
+    // dir behind on the error path, so a throw here writes nothing at all.
+    const warnings = [];
+    const clones = cloneAgentScopedRepositories(workspace, env, [plan.repo], warnings);
+    if (warnings.length) {
+      // Best-effort cleanup of anything a partial clone left behind, then
+      // surface the real git error rather than a generic failure.
+      const target = path.join(workspace, plan.dirName);
+      try {
+        if (fs.existsSync(target) && !fs.existsSync(path.join(target, ".git"))) {
+          fs.rmSync(target, { recursive: true, force: true });
+        }
+      } catch { /* best effort */ }
+      const e = new Error(warnings[0]);
+      e.code = "clone-failed";
+      throw e;
+    }
+    // cloneRepository REPORTS rather than throws when the target directory
+    // already exists — it does not overwrite. The planner refuses that case
+    // from the directory listing it read a moment earlier, so reaching here
+    // means the directory appeared in between (a concurrent attach, or the
+    // agent itself creating a folder mid-run). Persisting now would bind the
+    // entry to a directory this clone did not produce, so refuse instead and
+    // leave the newcomer's directory untouched.
+    if (clones.some((c) => c && c.skipped)) {
+      const e = new Error(
+        `\`./${plan.dirName}/\` appeared in the workspace while the clone was starting, so ` +
+        `nothing was cloned and nothing was attached. Check what is at that path and try again.`,
+      );
+      e.code = "dir-name-occupied";
+      throw e;
+    }
+
+    cfg.agentRepositories = plan.agentRepositories;
+    saveAgentConfig(agentId, cfg);
+    this.agentConfigs.set(agentId, { config: cfg });
+
+    // Rebuild + reseed CLAUDE.md so the next run names the repository (AC6),
+    // including the git / gh-as-agent block a repo-less environment used to
+    // suppress (AC14). The shared rebuild helper is best-effort by contract:
+    // the repository is already on disk, so a prompt-rebuild failure must not
+    // undo a good clone. Deliberately no respawn — the workspace volume is
+    // shared with the running container and CLAUDE.md is re-read per
+    // invocation, so this is the #1342 additive path, not the context-mount one.
+    rebuildAgentPrompt(agentId, "agent-repository-attached").catch(() => {});
+
+    return {
+      agentId,
+      repo: plan.repo,
+      dirName: plan.dirName,
+      clones,
+      ...this.agentRepositoriesView(agentId),
+    };
+  }
+
+  detachAgentRepository(agentId, url) {
+    const cfg = loadAgentConfig(agentId);
+    if (!cfg) {
+      const e = new Error(`Agent '${agentId}' not found`);
+      e.code = "not-found";
+      throw e;
+    }
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    const plan = planAgentRepoDetach({ env, agentRepositories: cfg.agentRepositories, url });
+    if (!plan.ok) {
+      const e = new Error(plan.message);
+      e.code = plan.code;
+      throw e;
+    }
+    // AC17: a removal deletes files under the agent's own working directory,
+    // so it is refused while a run is in flight rather than corrupting that
+    // run's view of the workspace. (Attaching is additive and needs no gate.)
+    const { busy, activeTriggers } = agentBusyState(agentId);
+    if (busy) {
+      const e = new Error(
+        "This agent is running a session. Removing a repository deletes files it may be using — wait until the run ends.",
+      );
+      e.code = "busy";
+      e.activeTriggers = activeTriggers;
+      throw e;
+    }
+
+    // Config first here, working copy second — the inverse of attach, for the
+    // same reason: if the delete fails the entry is already gone, so a retry
+    // sees `not-attached` rather than re-deleting; a leftover directory is
+    // visible in the tree and removable by hand, whereas an entry pointing at
+    // deleted files would keep the prompt naming a missing repository.
+    cfg.agentRepositories = plan.agentRepositories;
+    saveAgentConfig(agentId, cfg);
+    this.agentConfigs.set(agentId, { config: cfg });
+    rebuildAgentPrompt(agentId, "agent-repository-detached").catch(() => {});
+
+    let deleted = false;
+    if (plan.deleteWorkingCopy) {
+      const target = path.join(agentDir(agentId), plan.dirName);
+      try {
+        if (fs.existsSync(target)) {
+          fs.rmSync(target, { recursive: true, force: true });
+          deleted = true;
+        }
+      } catch (err) {
+        console.error(`[Orchestrator] repo detach ${agentId}/${plan.dirName}: ${err.message}`);
+        const e = new Error(`The attachment was removed, but the working copy could not be deleted: ${err.message}`);
+        e.code = "delete-failed";
+        throw e;
+      }
+    }
+
+    return {
+      agentId,
+      repo: plan.repo,
+      dirName: plan.dirName,
+      deleted,
+      keptReason: plan.keptReason,
+      ...this.agentRepositoriesView(agentId),
+    };
+  }
+
+  // Read-only sibling of syncAgentRepositories: which declared repositories
+  // are out of date in this agent's workspace, and why (#2066 D4). Drives the
+  // environment's persistent "N agents not up to date" indicator, so it must
+  // never mutate anything and must never report a clone that is merely no
+  // longer declared — nothing is ever pruned, so that can never be fixed.
+  agentRepoDivergence(agentId) {
+    const cfg = loadAgentConfig(agentId);
+    if (!cfg) {
+      const e = new Error(`Agent '${agentId}' not found`);
+      e.code = "not-found";
+      throw e;
+    }
+    const environmentId = cfg.environmentId || null;
+    const env = environmentId ? loadEnvironment(environmentId) : null;
+    const repositories = Array.isArray(env?.repositories) ? env.repositories : [];
+    const workspace = agentDir(agentId);
+
+    // A stub has no workspace, so it is not "out of date" — it has nothing to
+    // be out of date with. Reporting it would light the indicator for a state
+    // only materialization can clear.
+    if (!fs.existsSync(workspace)) {
+      return { agentId, environmentId, diverged: [], noWorkspace: true };
+    }
+    const diverged = repoDivergence(repositories, inspectAgentRepoDivergence(agentId, env));
+    return { agentId, environmentId, diverged };
+  }
+
+  // Aggregate the above across the agents of one environment, for the
+  // environment's persistent "N agents not up to date" indicator (#2066 AC19).
+  //
+  // The agent set is supplied by the caller rather than discovered here,
+  // because deciding WHICH agents a caller may see is the console's scoping
+  // job — the orchestrator has no notion of the requesting human.
+  environmentRepoDivergence(envId, agentIds) {
+    const env = loadEnvironment(envId);
+    const agents = [];
+    for (const agentId of Array.isArray(agentIds) ? agentIds : []) {
+      try {
+        const cfg = loadAgentConfig(agentId);
+        if (!cfg || cfg.environmentId !== envId) continue;
+        const workspace = agentDir(agentId);
+        if (!fs.existsSync(workspace)) {
+          agents.push({ agentId, diverged: [], noWorkspace: true });
+          continue;
+        }
+        const repositories = Array.isArray(env?.repositories) ? env.repositories : [];
+        agents.push({
+          agentId,
+          diverged: repoDivergence(repositories, inspectAgentRepoDivergence(agentId, env)),
+        });
+      } catch (err) {
+        // One unreadable agent must not blank the whole indicator — report it
+        // rather than counting it as up to date.
+        agents.push({ agentId, diverged: [], error: errorMessage(err) });
+      }
+    }
+    return {
+      envId,
+      agents,
+      outOfDate: agents.filter((a) => a.diverged.length > 0).length,
+    };
   }
 
   // Reset an agent back to its stub state: stop the process, deactivate the
@@ -9117,6 +10112,14 @@ class Orchestrator {
       environmentId: cfg.environmentId,
       ...(cfg.parentTeamId && { parentTeamId: cfg.parentTeamId }),
       ...(cfg.blueprintId && { blueprintId: cfg.blueprintId }),
+      // #2067 D9/AC5: the attachment must survive a workspace re-seed. This
+      // wipe keeps config.json alone, so config.json is the only place the
+      // list can survive — dropping it here would leave the next activation
+      // re-cloning the environment's repositories and silently losing the
+      // agent-scoped one, while the rebuilt prompt no longer names it either.
+      ...(normalizeAgentRepositories(cfg.agentRepositories).length
+        ? { agentRepositories: normalizeAgentRepositories(cfg.agentRepositories) }
+        : {}),
       enabled: false,
     };
     saveAgentConfig(id, stripped);
@@ -9178,6 +10181,173 @@ class Orchestrator {
       seeded: seedResult.seeded,
       warnings: seedResult.warnings || [],
       clones: seedResult.clones || [],
+    };
+  }
+
+  // ===========================================================
+  // Convert a standalone agent into a team of one, in place (#2052)
+  // ===========================================================
+  // The product has told the user since #1667 that "a single agent is simply a
+  // team of one". This is the step that makes it true: a `role: 'team'` metadata
+  // record is created beside the agent and the agent becomes its only member —
+  // keeping its id, its Matrix user, its DM room, its chat history, its triggers
+  // and its Working Environment. Nothing is copied and nothing is re-minted.
+  //
+  // The decisions (eligibility, the derived id, what each config field becomes,
+  // which skills need copying, which plugin scopes flip) all live in the pure
+  // `team-conversion.js`; this method is the fs/broker/respawn half.
+  //
+  // opts:
+  //   - force — proceed even though the agent is mid-run. Without it a busy
+  //             agent is reported back (the `disableAgent` two-phase shape) so
+  //             the console can ask rather than cut a turn off mid-sentence.
+  async convertAgentToTeam(id, { force = false } = {}) {
+    const cfg = loadAgentConfig(id);
+    if (!cfg) throw new Error(`Agent '${id}' not found`);
+
+    // Re-checked here and not only in the console: this is the last gate before
+    // anything is written, and the API's copy of the check can be stale.
+    const verdict = assessConversionEligibility(cfg);
+    if (!verdict.eligible) {
+      const err = new Error(`Agent '${id}' cannot be converted into a team: ${verdict.reason}`);
+      err.code = verdict.code;
+      throw err;
+    }
+
+    // The prompt file is rewritten and the container is recreated, so a
+    // conversion that lands mid-turn truncates the run. Refuse and say so
+    // rather than deciding for the user.
+    if (!force) {
+      const { busy, activeTriggers } = agentBusyState(id);
+      if (busy || activeTriggers.length > 0) {
+        return { id, warning: true, busy, activeTriggers };
+      }
+    }
+
+    const skills = effectiveSkills(cfg, loadAgentConfig);
+    const plugins = effectivePlugins(cfg, loadAgentConfig);
+    const fromPoolTeamId = agentKnowledgeTeamId(cfg);
+
+    // AC5 — which granted skills are served by the TENANT pool right now. A
+    // global-pool skill resolves identically after the conversion; a tenant-tier
+    // one would not, so the plan asks for those to be copied into the squad
+    // pool. Resolved here (fs), decided in the plan (pure).
+    const tenantSkills = skills.filter((name) => {
+      const src = resolveSkillSourceDir(name, fromPoolTeamId, { agentId: id });
+      return !!src && src === path.join(teamSkillsDir(fromPoolTeamId), name);
+    });
+
+    let promptFallback = "";
+    try {
+      promptFallback = fs.readFileSync(path.join(agentDir(id), AGENT_PROMPT_FILENAME), "utf8");
+    } catch { /* no prompt file — the config's own prompt (or none) is the truth */ }
+
+    const plan = planTeamConversion(cfg, {
+      teamIdTaken: (tid) => !!loadAgentConfig(tid) || agentTeardownRegistry.has(tid) || fs.existsSync(agentDir(tid)),
+      skills,
+      plugins,
+      tenantSkills,
+      promptFallback,
+      defaultTeamId: DEFAULT_TEAM_ID,
+    });
+
+    // ── 1. Additive, pre-flip work ────────────────────────────────────────────
+    // Everything here is safe to leave behind if a later step fails: it only
+    // populates the new squad's pools, which nothing else reads yet.
+    const warnings = [];
+
+    // AC5 — copy the tenant-tier skill content into the squad pool so every
+    // grant still resolves to the same bytes.
+    for (const name of plan.skillPoolCopies) {
+      const src = path.join(teamSkillsDir(fromPoolTeamId), name);
+      const dst = path.join(teamSkillsDir(plan.teamId), name);
+      try {
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.cpSync(src, dst, { recursive: true, force: false, errorOnExist: false });
+      } catch (err) {
+        warnings.push(`skill '${name}' could not be copied into the new team's pool: ${err.message}`);
+      }
+    }
+
+    // AC6 — the agent's knowledge scope re-keys from the tenant to the squad.
+    // Carrying the tenant's per-team knowledge config (#570) across is what
+    // keeps the KB repo ref and branch identical, so the agent's existing
+    // `knowledge/` checkout stays the right one and its entries stay readable.
+    // A tenant with no overrides has nothing to carry — both sides then fall
+    // through to the environment's own `knowledgeStore`.
+    const knowledgeOverrides = loadTeamKnowledgeOverrides(fromPoolTeamId);
+    if (Object.keys(knowledgeOverrides).length > 0) {
+      try {
+        writeTeamKnowledgeOverrides(plan.teamId, knowledgeOverrides);
+      } catch (err) {
+        warnings.push(`knowledge configuration could not be carried over: ${err.message}`);
+      }
+    }
+
+    // AC7 — a `team`-granularity plugin scope id is the agent's own id while it
+    // is standalone and the team's id afterwards. Reap the old scope BEFORE the
+    // flip, while its token is still mintable: a broker asked to clean up after
+    // invalidation can no longer authenticate the request.
+    let pluginTeardown = [];
+    if (plan.pluginScopeChanges.length > 0) {
+      pluginTeardown = await this.teardownAgentPluginScopes(id, cfg).catch((err) => {
+        warnings.push(`plugin scope teardown: ${err.message}`);
+        return [];
+      });
+    }
+
+    // ── 2. The flip ───────────────────────────────────────────────────────────
+    // Two config writes that must both land. If the second fails, the first is
+    // undone and the agent is left exactly as it was (AC9).
+    const memberConfig = { ...cfg, ...plan.memberPatch };
+    for (const key of plan.memberUnset) delete memberConfig[key];
+
+    saveAgentConfig(plan.teamId, plan.teamConfig);
+    this.agentConfigs.set(plan.teamId, { config: plan.teamConfig });
+    try {
+      saveAgentConfig(id, memberConfig);
+      this.agentConfigs.set(id, { config: memberConfig });
+    } catch (err) {
+      this.agentConfigs.delete(plan.teamId);
+      try { fs.rmSync(agentDir(plan.teamId), { recursive: true, force: true }); }
+      catch { /* the team record is metadata only — a leftover dir is inert */ }
+      throw err;
+    }
+
+    // ── 3. Re-derive everything that keys on the new scope ────────────────────
+    // saveAgentPrompt re-reads the config, so it must run after the write: it
+    // rewrites AGENT-PROMPT.md from the resolved prompt and rebuilds CLAUDE.md
+    // with the member's skill descriptions and the squad's knowledge digest ref.
+    const env = loadEnvironment(cfg.environmentId) || {};
+    try {
+      saveAgentPrompt(id, plan.effectivePrompt, "team-member", env);
+    } catch (err) {
+      warnings.push(`prompt/CLAUDE.md rebuild: ${err.message}`);
+    }
+    await reseedAgent(id, [AGENT_PROMPT_FILENAME, "CLAUDE.md"]);
+
+    // The agent must come back on its own — a converted agent left stopped is a
+    // failed conversion. respawnAgent is a no-op for a disabled or never-spawned
+    // agent, which is the right answer there too.
+    let respawned = false;
+    try {
+      respawned = !!this.respawnAgent(id, { reason: "converted-to-team" }).respawned;
+    } catch (err) {
+      warnings.push(`respawn: ${err.message}`);
+    }
+
+    console.log(`[Orchestrator] Converted standalone agent ${id} into team ${plan.teamId} (team of one)`);
+    return {
+      id,
+      teamId: plan.teamId,
+      teamName: plan.teamConfig.displayName,
+      role: "team-member",
+      skillsCopied: plan.skillPoolCopies,
+      knowledgeScope: plan.knowledgeScope,
+      pluginScopeChanges: plan.pluginScopeChanges,
+      pluginTeardown,
+      respawned,
+      ...(warnings.length ? { warnings } : {}),
     };
   }
 
@@ -9500,7 +10670,19 @@ async function handleTeamsAdminApi(req, res) {
       }
       if (req.method === 'POST' && !resourceId) {
         const body = await readBody(req);
-        return sendJson(res, 201, clean(teamsStore.createUser(body))), true;
+        const created = teamsStore.createUser(body);
+        // Give the new human their own Matrix account (#1458). Deliberately
+        // wired HERE and not inside teamsStore.createUser: the startup
+        // `ensureSystemAdmin` bootstrap also goes through createUser, and the
+        // bootstrap admin must ADOPT the existing shared-admin identity
+        // (`@admin:local`) and its rooms rather than be handed a fresh empty
+        // account — that adoption is the migration slice's job.
+        //
+        // A single-operator stack creates no user records at all (the env
+        // admin of #276 has none), so nothing here fires and its behaviour is
+        // unchanged end to end.
+        provisionHumanMatrixIdentityInBackground(orchestrator.adminClient, created);
+        return sendJson(res, 201, clean(created)), true;
       }
       if (req.method === 'GET' && resourceId) {
         const u = teamsStore.getUser(resourceId);
@@ -9522,6 +10704,15 @@ async function handleTeamsAdminApi(req, res) {
           offboarding = await orchestrator.offboardOwner(resourceId);
         } catch (err) {
           console.error(`[Orchestrator] offboarding failed for user ${resourceId}: ${err.message}`);
+        }
+        // Retire the departing human's Matrix account and delete their stored
+        // access token (#1458), for the same reason personal credentials are
+        // removed above: a live token must not outlive the user record. Runs
+        // BEFORE deleteUser so a failure here leaves the user recoverable.
+        try {
+          await deprovisionHumanMatrixIdentity(orchestrator.adminClient, resourceId);
+        } catch (err) {
+          console.error(`[Orchestrator] Matrix de-provisioning failed for user ${resourceId}: ${err.message}`);
         }
         const deleted = teamsStore.deleteUser(resourceId);
         return sendJson(res, 200, { ...deleted, offboarding }), true;
@@ -9563,11 +10754,29 @@ async function main() {
     console.error("MATRIX_HOMESERVER required");
     process.exit(1);
   }
+  // Refuse a config that would deny every caller (#1456). Fail-closed at BOOT,
+  // where the operator is looking, rather than at the first request, where the
+  // symptom is a dead platform and the cause is three env vars away.
+  {
+    const refusal = internalAuth.bootRefusal(internalAuthConfig);
+    if (refusal) {
+      console.error(`[Orchestrator] ${refusal}`);
+      process.exit(1);
+    }
+    console.log(
+      `[Orchestrator] internal-auth mode=${internalAuthConfig.mode} `
+      + `configured=${internalAuthConfig.configured}`
+      + (internalAuthConfig.configured ? '' : ' (gate inert — set INTERNAL_API_TOKEN to arm it)'),
+    );
+  }
   migrateLegacyAgentConfigs();
   migrateSkillGrantsToAgents();
   await migrateAgentClaudeMdToReference();
   bootstrapTeams();
   backfillResourceOwnership();
+  // After backfillResourceOwnership, which is what guarantees every config
+  // carries the `teamId` the D6 owner resolution keys on (#2077).
+  migrateOwnershipModel();
   backfillTriggerHorizonStamps();
 
   const orchestrator = new Orchestrator();
@@ -9592,6 +10801,33 @@ async function main() {
 
   // Internal API — used by admin-console to manage agents
   const internalApi = http.createServer((req, res) => {
+    // ── Internal-API auth gate (#1456, GOV-PLATFORM-2) ─────────────────────
+    // FIRST statement of the handler, deliberately: this server is a ~4 400-line
+    // if-ladder with no middleware chain, so "one auth middleware at the internal
+    // server mount" can only mean the top of the dispatcher. Every route below —
+    // including the `/internal/admin/` delegation on the very next line and the
+    // inverted-guard tail route that serves as the 404 — is behind it, and a
+    // route added later is behind it by construction rather than by review.
+    //
+    // All three ladder rungs run the SAME decision; only `denied` differs, so the
+    // observe-week census is a truthful preview of what enforce will reject.
+    const authDecision = internalAuth.decideInternalAuth({
+      method: req.method, url: req.url, headers: req.headers, config: internalAuthConfig,
+    });
+    if (!authDecision.allowed) {
+      const line = internalAuth.describeDecision(authDecision, { method: req.method });
+      if (authDecision.denied) console.warn(line);
+      else if (authDecision.mode === 'warn') console.warn(line);
+      else console.log(line);
+      if (authDecision.denied) {
+        sendJson(res, authDecision.status, {
+          error: 'internal API authentication required',
+          code: authDecision.reason,
+        });
+        return;
+      }
+    }
+
     // Teams data model (#299) — CRUD for the human Team / users / memberships.
     if (req.url.startsWith('/internal/admin/')) {
       handleTeamsAdminApi(req, res).catch(err => {
@@ -10210,6 +11446,32 @@ async function main() {
           console.error(`[Orchestrator] context upload error for ${id}: ${err.message}`);
           sendJson(res, 500, { error: 'context upload failed' });
         });
+      });
+      return;
+    }
+
+    // Convert one standalone agent into a team of one, in place (#2052).
+    const convertMatch = req.method === 'POST'
+      && req.url.match(/^\/internal\/agents\/([^/]+)\/convert-to-team$/);
+    if (convertMatch) {
+      const agentId = decodeURIComponent(convertMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        try {
+          const parsed = body ? JSON.parse(body) : {};
+          const result = await orchestrator.convertAgentToTeam(agentId, { force: parsed.force === true });
+          // A busy agent is a refusal the caller can retry with `force`, not an
+          // error — the same 409-with-a-warning contract disable/enable uses.
+          sendJson(res, result && result.warning ? 409 : 200, result);
+        } catch (err) {
+          console.error(`[Orchestrator] Convert-to-team error for ${agentId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404
+                       : /already taken/i.test(err.message) ? 409
+                       : /cannot be converted|Cannot derive/i.test(err.message) ? 400
+                       : 500;
+          sendJson(res, status, { error: err.message, ...(err.code ? { code: err.code } : {}) });
+        }
       });
       return;
     }
@@ -11372,6 +12634,71 @@ async function main() {
       return;
     }
 
+    // ── Pending-queue reassignment (#2102) ────────────────────────────────
+    // GET  …/pending/:entryId/reassign-targets → which same-team agents would
+    //      accept this queued event, derived from the poller's own predicates.
+    // POST …/pending/:entryId/reassign {targetAgentId, byUserId} → move it.
+    //
+    // Both MUST be matched before the `…/pending/:entryId` route below, whose
+    // pattern would otherwise swallow `reassign-targets` as an entry id.
+    // Authorization is the console's (`denyUnlessCanManageAgent` on BOTH source
+    // and target); what this surface owns is the same-team integrity check.
+    const reassignTargetsMatch = req.method === 'GET' && req.url.split('?')[0]
+      .match(/^\/internal\/agents\/([^/]+)\/pending\/([^/]+)\/reassign-targets$/);
+    if (reassignTargetsMatch) {
+      const id = decodeURIComponent(reassignTargetsMatch[1]);
+      const entryId = decodeURIComponent(reassignTargetsMatch[2]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      try {
+        const result = pendingReassignTargets(id, entryId);
+        // A gone entry / an unreassignable kind is a plain answer about state,
+        // not a server fault — 200 so the UI refreshes and says what it found.
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+      return;
+    }
+
+    const reassignMatch = req.method === 'POST' && req.url.split('?')[0]
+      .match(/^\/internal\/agents\/([^/]+)\/pending\/([^/]+)\/reassign$/);
+    if (reassignMatch) {
+      const id = decodeURIComponent(reassignMatch[1]);
+      const entryId = decodeURIComponent(reassignMatch[2]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 100_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const targetAgentId = parsed && parsed.targetAgentId;
+          if (!isSafePathSeg(id) || typeof targetAgentId !== 'string' || !isSafePathSeg(targetAgentId)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+            return;
+          }
+          const result = reassignPendingEntry(id, entryId, targetAgentId, {
+            byUserId: typeof parsed.byUserId === 'string' ? parsed.byUserId : null,
+          });
+          // `enqueue-failed` is the ONE refusal that is a real server fault: the
+          // entry was removed and never re-queued, so it must not read as a
+          // routine "no" the operator can shrug off (AC8).
+          res.writeHead(result.ok ? 200 : (result.code === 'enqueue-failed' ? 500 : 409),
+            { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
     // ── Pending-queue single-entry detail + cancel (#724) ─────────────────
     // GET returns the full entry (incl. the GitHub payload the list omits);
     // DELETE cancels exactly one entry by id, race-free in this event loop and
@@ -12035,6 +13362,87 @@ async function main() {
       return;
     }
 
+    // ── Agent-scoped repositories (#2067) ───────────────────────────────────
+    // GET    → the merged environment+agent list, each agent entry carrying the
+    //          git facts a removal confirmation needs (AC7/AC9).
+    // POST   → attach one repository to THIS agent and clone it (AC4/AC5).
+    // DELETE → detach it and delete the working copy (AC9).
+    //
+    // Authorization lives in the console (the only side that knows the caller):
+    // `canManageAgent`, the PATCH /api/agents/:id/context-mount precedent.
+    // Every refusal maps a code from the pure planner onto an HTTP status so
+    // the console can relay the message verbatim instead of re-wording it.
+    const agentReposMatch = req.url.match(/^\/internal\/agents\/([^/?]+)\/repositories(?:\?.*)?$/);
+    if (agentReposMatch && ['GET', 'POST', 'DELETE'].includes(req.method)) {
+      const id = decodeURIComponent(agentReposMatch[1]);
+      // Refusal code → HTTP status. A collision / credential / busy refusal is
+      // a 409 (the request is well-formed, the state says no); a malformed body
+      // is a 400; an unknown agent or url is a 404.
+      const statusFor = (code) => {
+        if (code === 'not-found' || code === 'not-attached') return 404;
+        if (code === 'url-required') return 400;
+        if (code === 'no-workspace' || code === 'environment-repository') return 409;
+        return 409;
+      };
+      const respond = (status, payload) => {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(payload));
+      };
+      const run = (fn) => {
+        try {
+          respond(200, fn());
+        } catch (err) {
+          const code = err.code || 'error';
+          if (code === 'error') console.error(`[Orchestrator] agent-repositories ${id}: ${err.message}`);
+          respond(
+            code === 'error' ? 500 : statusFor(code),
+            { error: err.message, code, ...(err.activeTriggers ? { activeTriggers: err.activeTriggers } : {}) },
+          );
+        }
+      };
+      if (req.method === 'GET') {
+        run(() => orchestrator.agentRepositoriesView(id));
+        return;
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* treated as empty → url-required */ }
+        if (req.method === 'POST') run(() => orchestrator.attachAgentRepository(id, parsed));
+        else run(() => orchestrator.detachAgentRepository(id, parsed.url));
+      });
+      return;
+    }
+
+    // Read-only divergence probe for one environment's agents (#2066 D4). POST
+    // because the caller supplies the agent set it is allowed to see — scoping
+    // is the console's job, not the orchestrator's.
+    const repoDivergenceMatch = req.method === 'POST'
+      && req.url.match(/^\/internal\/environments\/([^/]+)\/repo-divergence$/);
+    if (repoDivergenceMatch) {
+      const envId = decodeURIComponent(repoDivergenceMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        const agentIds = Array.isArray(parsed.agentIds)
+          ? parsed.agentIds.filter(s => typeof s === 'string')
+          : [];
+        try {
+          const result = orchestrator.environmentRepoDivergence(envId, agentIds);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] environmentRepoDivergence error for ${envId}: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
     const disableMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/disable$/);
     if (disableMatch) {
       const id = decodeURIComponent(disableMatch[1]);
@@ -12106,7 +13514,10 @@ async function main() {
           return;
         }
         const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-        const repos = inspectAgentRepoStatuses(id, env);
+        // #2067: an agent-scoped repository is a working copy like any other,
+        // so the hand-off pre-flight must see its uncommitted / unpushed work
+        // too — otherwise a hand-off reads "ready" over losable changes.
+        const repos = inspectAgentRepoStatuses(id, env, normalizeAgentRepositories(cfg.agentRepositories));
         const summary = {
           totalRepos: repos.length,
           missing: repos.filter((r) => !r.exists).length,
@@ -12127,7 +13538,10 @@ async function main() {
     // ── Push / open-PR on behalf of an agent (gh-as-agent push/pr) ──────────────────
     // Moves the managed-policy-gated `git push` / `gh pr create` out of the
     // agent's Claude CLI into the orchestrator (see agentGitPush / agentCreatePr
-    // above). Internal-only, unauthenticated like the rest of :4002.
+    // above). Internal-only. Since #1456 the whole of :4002 is behind the
+    // internal-auth gate at the top of this handler; these two are on the
+    // agent-facing allowlist with `own`-id scope, which is what stops one
+    // agent pushing or opening a PR as another.
     const gitPushMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/git\/push$/);
     const gitPrMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/git\/pr$/);
     if (gitPushMatch || gitPrMatch) {
@@ -13832,6 +15246,11 @@ async function main() {
           team, sessionPolicy, triggers,
           // Owning (human) Team — the tenant this construct belongs to (#299).
           teamId,
+          // Human OWNER (#2077, D8): the user-record id of the creating human,
+          // resolved by the console from the authenticated session — never
+          // self-asserted by an agent, since this API is unauthenticated.
+          // Honoured for `role: 'team'` and `role: 'agent'` only.
+          ownerId, ownerSource,
           // For role: 'team' — suppress the auto-numbered first member
           // (the wizard adds members itself with role overrides instead).
           skipFirstMember,
@@ -13889,6 +15308,8 @@ async function main() {
         if (Array.isArray(triggers)) extra.triggers = triggers;
         if (skipFirstMember) extra.skipFirstMember = true;
         if (teamId) extra.teamId = teamId;
+        if (typeof ownerId === 'string' && ownerId.trim()) extra.ownerId = ownerId.trim();
+        if (typeof ownerSource === 'string' && ownerSource.trim()) extra.ownerSource = ownerSource.trim();
         if (Array.isArray(stages)) extra.stages = stages;
         if (Array.isArray(labels)) extra.labels = labels;
         if (Array.isArray(humans)) extra.humans = humans;

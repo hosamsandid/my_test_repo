@@ -133,21 +133,40 @@ That framing is what saves you from having to classify your problem up front.
 Start with one assistant, find out what the work actually needs, and add the rest
 once you know.
 
-### Growing creates a new team, it does not convert this one
+### Two ways to grow: convert this assistant, or build a new team
 
-When you want reviewers, a developer or a whole development workflow, you grow
-into a full team through the **Agent Team Wizard** — from **+ Create**, under
-*Or build a team of agents that work together*. The one-assistant form used to
-carry a **Grow into a full team** link of its own; it was removed so the form
-keeps a single call to action, and the path itself is unchanged.
+**Convert this assistant.** Open its row menu in Agent Chat and choose
+**Convert into a team…**. The assistant you have been talking to becomes the only member
+of a new team named after it, in place: it keeps its id, its chat room, its
+chat history, its system prompt, its skills, its triggers and its Working
+Environment. It moves out of the *Single agents* section into its own team group
+and the team shows up in **Flows** as a one-node flow you can wire up, ready for
+a second member through **Add member**. The agent restarts once to pick up its
+new team scope and comes back on its own. This is a one-way door — there is no
+convert-back, and deleting the team afterwards deletes the agent with it — so it
+asks you to confirm, and it refuses while the assistant is mid-run unless you
+tell it to convert anyway.
 
-One thing worth knowing before you take it: the wizard **creates a new team** —
-it does not convert your existing assistant into one. Your single agent keeps
-running independently, with its own chat history, and you can retire it
-afterwards from its row menu in Agent Chat if the team replaces it. Nothing
-moves across on its own, so if the assistant has accumulated knowledge or skills
-you want the team to have, carry them over deliberately from the Knowledge and
-Skills pages.
+**Build a new team instead.** When what you want is a whole development workflow
+with roles you have already thought through, go through the **Agent Team
+Wizard** — from **+ Create**, under *Or build a team of agents that work
+together*. The one-assistant form used to carry a **Grow into a full team** link
+of its own; it was removed so the form keeps a single call to action, and the
+path itself is unchanged.
+
+The difference is what happens to the assistant you already have: the wizard
+**creates a new team** and leaves it running independently, so nothing moves
+across on its own — if it has accumulated knowledge or skills you want the team
+to have, carry them over deliberately from the Knowledge and Skills pages, and
+retire the assistant from its row menu if the team replaces it. Converting moves
+the assistant itself, which is why it is the shorter answer when the thing you
+want to grow *is* this assistant.
+
+One detail worth knowing after converting: the repository fast lane below only
+reuses a **standalone** assistant on a Working Environment. Submitting the same
+repository again once your assistant is a team member creates a second,
+standalone assistant on that environment rather than adding to the team — use
+**Add member** on the team for that.
 
 ## The repository fast lane
 
@@ -208,15 +227,19 @@ and **Agents** — nothing here is a one-way door.
   conversation.
 
 Nothing is hidden from you while a piece is missing. Each one shows up on the page
-as a warning card with a direct link to the page that fixes it, and the create
-button spells out what is still outstanding in a short checklist rather than
-greying out silently.
+as a warning card, and the create button spells out what is still outstanding in a
+short checklist rather than greying out silently. Most cards carry a direct link to
+the page that fixes it; the missing-provider card shows that link only to someone
+who can actually add a provider, and otherwise gives an honest note asking a Team or
+System Administrator — never a link that would only bounce them back.
 
 The card and the checklist answer slightly different questions, which is why you
 sometimes see one without the other. A **warning card** says *this platform has
 no model provider / no SSH key / no GitHub token at all*, and appears as soon as
 that is true. The **checklist** under the form says *this submission cannot go
-through yet*, and lists only what blocks the form as you have filled it in. On
-the repository path the platform binds the environment's provider for you, so a
-missing provider shows as a card but does not block the button; on the repo-less
-path an empty name blocks the button with no card at all.
+through yet*, and lists only what blocks the form as you have filled it in. When
+there is no model provider on the platform at all the form is **locked** — its
+fields are disabled on both the repository and repo-less paths, rather than letting
+you name an assistant and then fail on submit — and the card and the checklist then
+agree that the provider is the one thing missing. Otherwise the two can differ: on
+the repo-less path an empty name blocks the button with no card at all.

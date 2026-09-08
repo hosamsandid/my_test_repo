@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Plus, Trash2, User } from 'lucide-react';
+import { Plus, Trash2, User, X } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import PageHelpButton from '../../components/PageHelpButton';
 import { useHelpSubject } from '../../context/HelperChatContext';
@@ -10,11 +10,12 @@ import { slugifyHumanId } from './humans-registry-ops';
 // Human-role registry editor (#987) — named, purely-declarative human flow
 // nodes ("Issue Reviewer", type Human). Each row edits name / description /
 // stage / the labels this person applies (`emits`, implicitly gates). The
-// `consumes` list (artifacts/brakes that land with the person) is shown
-// read-only here — those entries are usually created by wiring or the node
-// inspector. Mode-agnostic: every write goes through the injected
-// `ops.upsertHuman(human)` / `ops.removeHuman(id)` — draft ops persist the
-// bundle's `humans[]`, live ops persist the team agent's registry.
+// `consumes` list (artifacts/brakes that land with the person) is usually
+// created by wiring or the node inspector, but each entry carries a per-chip
+// unwire (#2063) so a dead producer's dangling ref is removable here too.
+// Mode-agnostic: every write goes through the injected `ops.upsertHuman(human)`
+// / `ops.removeHuman(id)` / `ops.unwireHumanConsume(id, entry)` — draft ops
+// persist the bundle's `humans[]`, live ops persist the team agent's registry.
 const inputStyle = {
   background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)',
   border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
@@ -28,7 +29,7 @@ function consumeLabel(c) {
   return '';
 }
 
-function HumanRow({ human, stages, onSave, onRemove, busy }) {
+function HumanRow({ human, stages, onSave, onRemove, onUnwireConsume, busy }) {
   const [name, setName] = useState(human.name || human.id);
   const [description, setDescription] = useState(human.description || '');
   const [stage, setStage] = useState(human.stage || '');
@@ -72,7 +73,13 @@ function HumanRow({ human, stages, onSave, onRemove, busy }) {
       {(human.consumes || []).length > 0 && (
         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
           {(human.consumes || []).map((c, i) => (
-            <span key={i} style={{ fontSize: 9, color: '#6d28d9', background: 'rgba(124,58,237,0.10)', border: '1px solid rgba(124,58,237,0.35)', borderRadius: 3, padding: '0 4px' }}>{consumeLabel(c)}</span>
+            <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: '#6d28d9', background: 'rgba(124,58,237,0.10)', border: '1px solid rgba(124,58,237,0.35)', borderRadius: 3, padding: '0 2px 0 4px' }}>
+              {consumeLabel(c)}
+              <button type="button" title="Unwire this delivery" disabled={busy} onClick={() => onUnwireConsume(c)}
+                style={{ display: 'inline-flex', alignItems: 'center', background: 'none', border: 'none', padding: 0, margin: 0, lineHeight: 0, color: '#6d28d9', opacity: 0.65, cursor: busy ? 'wait' : 'pointer' }}>
+                <X size={10} />
+              </button>
+            </span>
           ))}
         </div>
       )}
@@ -156,6 +163,7 @@ export default function HumanRegistryPanel({ humans = [], stages = [], ops, onCl
             busy={busy}
             onSave={(next) => run(ops.upsertHuman(next))}
             onRemove={(id) => run(ops.removeHuman(id))}
+            onUnwireConsume={(c) => run(ops.unwireHumanConsume(h.id, c))}
           />
         ))
       )}

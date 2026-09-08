@@ -20,6 +20,7 @@ import {
   SUFFIX_MAX,
 } from './launch-team.js';
 import { describeMaterializeError } from './materialize-error.js';
+import { PROVISION_NOW_LABEL, PROVISION_NOW_HINT } from './create-team-copy.js';
 
 // LaunchStep — the ONE shared "turn a design into running agents" step (#1668,
 // epic #1661 Phase E). Both front doors render this: the Flows-canvas
@@ -46,6 +47,10 @@ export default function LaunchStep({
   onCreateEnvironment,
   summary = null,
   leftAction = null,
+  // Shown inside the success card and beside it (#2053 AC12). Optional, so the
+  // Team-Setup wizard — which navigates away on completion — is unchanged.
+  completionNotice = '',
+  completionAction = null,
   describeError = describeMaterializeError,
   onBusyChange,
 }) {
@@ -275,10 +280,15 @@ export default function LaunchStep({
           {has('materializeNow') && (
             <label style={{ ...checkboxRow, alignItems: 'flex-start' }}>
               <input type="checkbox" checked={!!values.materializeNow} onChange={e => set({ materializeNow: e.target.checked })} style={{ marginTop: 3 }} />
+              {/* #2053 AC13: this said *Materialize agents now* one step away
+                  from a button that used *Materialize* for the other act — one
+                  word, two meanings, in one dialog. Creating the TEAM is
+                  "Create team"; taking one member to a running agent with a
+                  cloned repository is "provision". The Agent-Chat section that
+                  lists un-provisioned members is quoted by name rather than
+                  renamed (#2053 Non-goals) so the pointer still lands. */}
               <span>
-                Materialize agents now — clones the repo for every member immediately.
-                Leave off to create them as stubs (shown in the team, no clone) and
-                materialize each on demand by enabling it.
+                {PROVISION_NOW_LABEL} — {PROVISION_NOW_HINT}
               </span>
             </label>
           )}
@@ -337,8 +347,19 @@ export default function LaunchStep({
               <div style={{ fontWeight: 'var(--eb-font-medium)', color: 'var(--eb-text-primary)' }}>
                 {launchResultMessage(result)}
               </div>
+              {completionNotice && (
+                <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 4 }}>
+                  {completionNotice}
+                </div>
+              )}
             </div>
           </div>
+        </div>
+      )}
+
+      {result && completionAction && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          {completionAction}
         </div>
       )}
 

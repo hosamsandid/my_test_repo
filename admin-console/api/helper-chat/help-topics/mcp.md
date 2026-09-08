@@ -50,6 +50,10 @@ is created and deleted, and a change of secret is a new credential (see below).
 **New server** opens the create form. *Name* is the label operators read; the
 *ID* is auto-derived from it and is the key the seeded config uses, so it is
 worth keeping recognisable. *Description* is free text for whoever comes next.
+*Ownership* decides who the server belongs to — a single **team**, or **shared**
+across several so each one sees it in its pickers; a System Admin decides which
+teams a shared server reaches, and any Team Admin of an owning team may edit it.
+Registering a server needs **Team Admin** rights over the team you assign it to.
 
 *Transport* is the decision the rest of the form follows, and the three options
 need different fields:
@@ -166,7 +170,10 @@ holding it. **Detach it there first**, then delete.
 
 The refusal names one environment even when several hold the same entry, so a
 second attempt can surface a different name; repeat until it succeeds. Deleting
-a credential also needs rights over the team that owns it.
+a credential also needs rights over the team that owns it — and so does deleting
+a **server**: registering, editing and deleting a server now require **Team
+Admin** rights over the server's owning team, where previously any signed-in user
+could do so.
 
 Deleting either one changes nothing in the workspaces of agents that were
 already seeded — they keep the stanza they were given, secret included, until

@@ -250,12 +250,23 @@ function interactionNote(autonomous) {
 // `skills` is the agent's RESOLVED grant (team-owned skills — see
 // skill-grants.js), not an environment field: the env is a pure infrastructure
 // template and no longer carries skills.
-function workingEnvironmentSection(env, skills = []) {
-  if (!env && !(Array.isArray(skills) && skills.length > 0)) return "";
+//
+// `agentRepositories` (#2067) are repositories attached to THIS agent alone,
+// outside the Working Environment (agent-repositories.js). They are listed in
+// the same shape as the environment's — URL, clone path, read-only annotation —
+// because they are the same thing on disk (AC6): what differs is who else has
+// them, and no other agent does. The list is threaded in as data so this module
+// stays fs-free; an empty list leaves the section byte-identical to pre-#2067.
+function workingEnvironmentSection(env, skills = [], agentRepositories = []) {
+  const ownRepos = Array.isArray(agentRepositories)
+    ? agentRepositories.filter((r) => r && typeof r.url === "string" && r.url.trim())
+    : [];
+  if (!env && !(Array.isArray(skills) && skills.length > 0) && ownRepos.length === 0) return "";
   const parts = [];
   if (env && env.name) parts.push(`**Working Environment:** ${env.name}`);
   if (env && env.description) parts.push(env.description);
-  const repos = env && Array.isArray(env.repositories) ? env.repositories : [];
+  const envRepos = env && Array.isArray(env.repositories) ? env.repositories : [];
+  const repos = [...envRepos, ...ownRepos];
   // Read-only repos are cloned for reference only (#1813): annotate them where
   // the repository is listed so the agent knows without relying on its role
   // prompt. Availability is unchanged — the repo is still cloned (AC3).
@@ -424,9 +435,18 @@ function blueprintSection(blueprintId) {
 // Assembly
 // ------------------------------------------------------------
 
-// Does this environment grant a repository? Drives the Git section gate.
-function envHasRepository(env) {
-  return !!(env && Array.isArray(env.repositories) && env.repositories.length > 0);
+// Does this agent have a repository at all? Drives the Git section gate.
+//
+// #2067 AC14: the gate used to read the ENVIRONMENT alone, so an agent-scoped
+// repository attached to an agent on a repo-less environment (#1623) would
+// arrive with the whole git / `gh-as-agent` guidance switched off — the agent
+// would have a repository it had not been told how to work in. An agent-scoped
+// repository counts exactly like an environment one; `agentRepositories`
+// defaults to empty, so an agent without any is byte-identical to pre-#2067.
+function envHasRepository(env, agentRepositories = []) {
+  if (env && Array.isArray(env.repositories) && env.repositories.length > 0) return true;
+  return Array.isArray(agentRepositories)
+    && agentRepositories.some((r) => r && typeof r.url === "string" && r.url.trim());
 }
 
 // Does this agent's resolved grant contain skills? Drives the Skills section
@@ -499,7 +519,12 @@ function skillsSection(baseSkillsText, skills, skillDescriptions = {}) {
 // + each granted plugin's manifest). Supplied as data so this module stays
 // fs-free; drives the gated Plugin Capabilities section (#1518). Empty → no
 // section, matching the Skills gate.
-function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDescriptions = {}, plugins = [], blueprintId = null, autonomous = false, promptRef = null, knowledgeDigestRef = null, contextMount = null, contextMountRw = false, contextMounts = null } = {}) {
+// `agentRepositories`: repositories attached to this ONE agent, outside its
+// Working Environment (#2067). Passed as data (the caller reads them off the
+// agent's config), they are listed in the Working Environment section next to
+// the inherited ones and count towards the Git-section gate — so an attachment
+// on a repo-less environment does not arrive with that guidance switched off.
+function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDescriptions = {}, plugins = [], agentRepositories = [], blueprintId = null, autonomous = false, promptRef = null, knowledgeDigestRef = null, contextMount = null, contextMountRw = false, contextMounts = null } = {}) {
   const { preamble, sections } = splitSections(base);
   const byHeading = new Map(sections.map((s) => [s.heading, s.text]));
   const consumed = new Set();
@@ -523,7 +548,7 @@ function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDesc
   }
 
   // 3. Working Environment
-  const envBlock = workingEnvironmentSection(env, skills);
+  const envBlock = workingEnvironmentSection(env, skills, agentRepositories);
   if (envBlock) blocks.push(envBlock);
 
   // 4. Workspace (single home for the path rule)
@@ -586,7 +611,7 @@ function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDesc
   if (pluginBlock) blocks.push(pluginBlock);
 
   // 9. Git — only when the env has a repository
-  if (envHasRepository(env)) blocks.push(GIT_SECTION);
+  if (envHasRepository(env, agentRepositories)) blocks.push(GIT_SECTION);
 
   // 10. Trigger management — only for autonomous agents
   if (autonomous) blocks.push(TRIGGER_SECTION);

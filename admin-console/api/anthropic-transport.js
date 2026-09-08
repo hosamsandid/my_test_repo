@@ -34,10 +34,18 @@ function httpPostStreamText(targetUrl, headers = {}, bodyObj = {}, opts = {}) {
     inactivityMs = DEFAULT_INACTIVITY_MS,
     deadlineMs = DEFAULT_DEADLINE_MS,
     onProgress,
+    // #2087: end the SERVER-side work when the turn is stopped or the client
+    // disconnects — the streamed request is destroyed, not merely ignored, so a
+    // Stop mid-generation doesn't leave the upstream call billing to completion.
+    // Mirrors httpPostJson's signal handling (one settle path, listener removed).
+    signal = null,
     // Injectable for tests; defaults to Node's http/https by URL scheme.
     httpLib,
   } = opts;
   return new Promise((resolve) => {
+    if (signal && signal.aborted) {
+      return resolve({ status: 0, body: null, text: '', error: 'aborted' });
+    }
     let parsed;
     try {
       parsed = new URL(targetUrl);
@@ -49,10 +57,13 @@ function httpPostStreamText(targetUrl, headers = {}, bodyObj = {}, opts = {}) {
     const parser = createAnthropicStreamParser();
     let settled = false;
     let deadlineTimer = null;
+    // Declared before finish so the abort listener can be detached in one place.
+    const onAbort = () => { req.destroy(); finish({ status: 0, body: null, text: parser.getText(), error: 'aborted' }); };
     const finish = (r) => {
       if (settled) return;
       settled = true;
       if (deadlineTimer) clearTimeout(deadlineTimer);
+      if (signal) signal.removeEventListener('abort', onAbort);
       resolve(r);
     };
     const req = lib.request({
@@ -92,6 +103,7 @@ function httpPostStreamText(targetUrl, headers = {}, bodyObj = {}, opts = {}) {
       });
     });
     deadlineTimer = setTimeout(() => { req.destroy(); finish({ status: 0, body: null, text: parser.getText(), error: 'deadline' }); }, deadlineMs);
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
     req.on('error', (err) => finish({ status: 0, body: null, text: '', error: err.message }));
     req.on('timeout', () => { req.destroy(); finish({ status: 0, body: null, text: parser.getText(), error: 'timeout' }); });
     req.write(payload);

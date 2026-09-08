@@ -19,7 +19,7 @@ that still carry `emits` are lifted transparently on read.)
 |---|---|---|
 | Export | Process Canvas → **Export** | `GET /api/process/template?team=<id>` or `?templates=1` |
 | Preview (render) | Process Canvas → **Import** | `POST /api/process/graph` `{ processTemplate }` |
-| Materialise into a team | Process Canvas → **Materialize as team…** | `POST /api/teams` `{ teamId, teamName, repository, githubTokenId, processTemplate, labelSuffix?, materializeMembers? }` |
+| Materialise into a team | Process Canvas → **Create team…** (called *Materialize* before #2053) | `POST /api/teams` `{ teamId, teamName, repository, githubTokenId, processTemplate, labelSuffix?, materializeMembers? }` |
 
 `POST /api/teams` accepts the bundle under `processTemplate` (or the equivalent
 `customRoles` pseudo-template array). Inline roles are materialised by the same
@@ -263,8 +263,9 @@ the same option.
 - **Same team only**, and stricter than the internal label channel (which has no
   team gate): a cross-team `to` is refused with `403 cross-team` at delivery. The
   check is an **integrity constraint on the flow graph, not authentication** —
-  the `:4002` internal API is unauthenticated and the producer's identity is
-  self-asserted (concept §6.1).
+  even with the #1456 gate authenticating the *caller*, the producer's identity
+  is still self-asserted in the body and not cross-checked against it (concept
+  §6.1).
 
 ### Notes & invariants
 

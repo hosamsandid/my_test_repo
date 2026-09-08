@@ -6,14 +6,14 @@
  * Two jobs, one module.
  *
  * 1. **Disabled-reasons.** The draft-editing buttons (Add agent / Add human /
- *    Stages / Labels / Materialize) and Export are disabled in situations that
+ *    Stages / Labels / Create team…) and Export are disabled in situations that
  *    used to be invisible to the user — the button just greyed out with no
  *    explanation:
  *
  *      • while a Copilot proposal is on screen, structural editing pauses
  *        because the canvas is previewing the proposal, not the draft
  *        underneath (and Export would write the wrong bundle);
- *      • Materialize additionally needs at least one agent before it can turn
+ *      • Create team… additionally needs at least one agent before it can turn
  *        the design into a real team;
  *      • Export is also unavailable while an imported blueprint is previewing.
  *
@@ -32,6 +32,13 @@
  * Pure and React-free so it unit-tests without a DOM (per the #651 convention).
  */
 
+import {
+  CREATE_TEAM_DESCRIPTION,
+  DRAFT_STATUS_LEAD,
+  DRAFT_NEXT_STEP,
+  draftStatusLine,
+} from './process/create-team-copy.js';
+
 /** Descriptive title shown when an action IS available. */
 export const TOOLBAR_TITLES = {
   // Shared by the draft and the live-team scope, hence "the flow" rather than
@@ -40,13 +47,20 @@ export const TOOLBAR_TITLES = {
   addHuman: 'Add a human role to the flow',
   stages: 'Organize the flow into stages',
   labels: 'Manage the labels agents use to hand off work',
-  materialize: 'Create a real team and its agents from this design',
+  // The action key stays `materialize` even though the button now reads
+  // *Create team…* (#2053): it is an internal action id the canvas and the
+  // #1984 drift guard both address by name, and renaming it would be churn with
+  // no user-visible effect. The COPY is single-sourced from
+  // `process/create-team-copy.js`, which is what AC13's one-vocabulary rule is
+  // actually about, and it carries the *Materialize* bridge for users who
+  // learned the old word (D2).
+  materialize: CREATE_TEAM_DESCRIPTION,
   copilot: 'Ask the AI copilot to help build or edit this flow',
   export: 'Export this flow as a JSON file',
   // Kept from the pre-#1999 native title: it names the one thing a reader
   // actually needs reassuring about — the live team is not touched yet.
   editAsDraft:
-    'Make an editable copy of this team you can revise before applying — the live team is untouched until you materialize it',
+    'Make an editable copy of this team you can revise before applying — the live team is untouched until you create a team from the copy',
   anomalies: 'Review stalled hand-offs and other flow problems detected in this live team',
   improvements: 'Deterministic run metrics for this team over the measurement window',
 };
@@ -57,7 +71,7 @@ export const TOOLBAR_TITLES = {
  */
 export const STATUS_TITLES = {
   modeLive: 'You are editing a live team — changes apply to running agents immediately.',
-  modeDraft: "You're editing a draft — nothing is applied until you materialize it",
+  modeDraft: "You're editing a draft — nothing is applied until you create a team from it",
   renameDraft: 'Rename this flow',
 };
 
@@ -82,7 +96,7 @@ export const PREVIEW_BLOCKED_ACTIONS = ['export'];
 export const PROPOSAL_PENDING_REASON =
   'Accept or discard the Copilot proposal first — the canvas is previewing it, not your draft.';
 
-/** Why Materialize is unavailable on an empty design. */
+/** Why Create team… is unavailable on an empty design. */
 export const NO_ROLES_REASON =
   'Add at least one agent before you can turn this design into a real team.';
 
@@ -117,8 +131,30 @@ export function toolbarTitle(action, state = {}) {
   // A pending proposal blocks every structural action.
   if (hasProposal) return PROPOSAL_PENDING_REASON;
 
-  // Materialize has one extra precondition: at least one agent.
+  // Create team… has one extra precondition: at least one agent.
   if (action === 'materialize' && roleCount <= 0) return NO_ROLES_REASON;
 
   return base;
 }
+
+/**
+ * The persistent draft status line (#2053 B2 / AC6).
+ *
+ * The live-team canvas has had a warning strip spelling out its consequences
+ * since #1125, while the draft — the mode that actually needs guidance — carried
+ * its one explanatory sentence only in the mode pill's tooltip, and the reason
+ * the create action is greyed out on a fresh draft was reachable ONLY on hover.
+ * Both now read inline.
+ *
+ * Thin wrapper over `draftStatusLine` so the disabled-reason stays owned by this
+ * module (it is the same string the tooltip uses) while the sentence structure
+ * stays with the rest of the create-team vocabulary.
+ *
+ * @param {number} roleCount agents in the open draft
+ * @returns {string} never empty
+ */
+export function draftStatusText(roleCount) {
+  return draftStatusLine(roleCount, NO_ROLES_REASON);
+}
+
+export { DRAFT_STATUS_LEAD, DRAFT_NEXT_STEP };

@@ -135,6 +135,8 @@ const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { isSupportedAgentRole, unsupportedRoleNote } = require("./agent-role-support");
 const { buildEnsureUserCommands, buildReactivateCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
+const humanMatrixIdentity = require("./human-matrix-identity");
+const { createHumanMatrixStore } = require("./human-matrix-store");
 const skillManifest = require("./skill-manifest");
 const skillDelivery = require("./skill-delivery");
 const skillCommands = require("./skill-commands");
@@ -282,6 +284,12 @@ const MCP_CREDENTIALS_KEYS_DIR = "/workspace/mcp-credentials/_keys";
 // is the single writer for tenancy/identity data and owns the startup
 // bootstrap + ownership backfill below.
 const teamsStore = createTeamsStore({ root: WORKSPACE });
+// Per-human Matrix credentials (#1458). Deliberately a SEPARATE store from the
+// user records above: `sanitizeUser()` is a convention applied at the store
+// boundary, and users/index.json is also read directly by the admin-console —
+// so a live access token does not belong on that record. See
+// human-matrix-store.js for the full reasoning.
+const humanMatrixStore = createHumanMatrixStore({ root: WORKSPACE });
 // Two-tier skill resolution (#306): owning team's pool wins over the global pool.
 const { resolveSkillSourceDir, teamSkillsDir } = makeSkillSourceResolver({
   workspace: WORKSPACE,
@@ -3419,7 +3427,22 @@ const MATRIX_LOGIN_RETRY_CEILING_MS = (() => {
     : matrixLoginRetry.DEFAULT_CEILING_MS;
 })();
 
-async function ensureMatrixUser(adminClient, username, password) {
+async function ensureMatrixUser(adminClient, username, password, { allowHumanLocalpart = false } = {}) {
+  // Human-localpart reservation (#1458). This function is the ONE choke point
+  // through which every Matrix account in the stack is created — the seven
+  // agent/team/member call sites below and the human-provisioning path — so it
+  // is the only place the reservation has to be enforced to be complete.
+  //
+  // Agent ids are free-form slugs (AGENT_ID_RE allows `[A-Za-z0-9_-]`), so
+  // without this an operator could create an agent literally named
+  // `u-0123456789abcdef` and take over a human's Matrix account, and with it
+  // that human's rooms. The predicate is exactly as narrow as the minted human
+  // shape, so ordinary ids like `u-payments` remain legal.
+  if (!allowHumanLocalpart && humanMatrixIdentity.isReservedHumanLocalpart(username)) {
+    throw new Error(
+      `Matrix localpart '${username}' is reserved for per-human identities (#1458)`,
+    );
+  }
   // Ordered create → reset-password → enable-login. Plain reset-password both
   // sets the password and reactivates a previously deactivated account on the
   // Continuwuity build we run (issue #715) — see matrix-admin-commands.js.
@@ -3502,6 +3525,123 @@ async function setDisplayName(token, userId, displayName) {
       body: JSON.stringify({ displayname: displayName }),
     }
   );
+}
+
+// ============================================================
+// Per-human Matrix identity (#1458, epic #2076 P1)
+// ============================================================
+//
+// docs/multi-user-concept.md §4: every human gets their OWN Matrix account
+// instead of sharing the one admin identity whose token lives in
+// MATRIX_ACCESS_TOKEN. This is the identity half of that change — the room
+// model (one DM room per (human, agent), one shared room per team agent) is
+// the second half and lands separately; it needs these accounts to exist
+// before it can invite anyone into anything.
+//
+// ── The provisioning mechanism, and why it is this one ─────────────────────
+// Continuwuity exposes NO Synapse `/_synapse/admin/` REST API (see
+// matrix-admin-commands.js), and the stack runs with
+// CONTINUWUITY_ALLOW_REGISTRATION="false", so the client registration endpoint
+// is closed too. The only live mechanism is the admin-ROOM command sequence
+// that `ensureMatrixUser` already fires for every agent. Humans therefore
+// reuse it verbatim — including its two hard-won properties:
+//   * the ordered create → reset-password → enable-login sequence, which also
+//     recovers a previously deactivated account (issue #715), so a re-onboarded
+//     human gets their old rooms back rather than a dead account; and
+//   * `loginMatrixUser`'s bounded retry, which absorbs the cold-stack race
+//     where the admin bot has not processed the commands yet (issues #719/#1386).
+// The admin-room commands are fire-and-forget — their replies are never parsed
+// — so the LOGIN is the only real success signal, exactly as for agents.
+//
+// ── When this runs ─────────────────────────────────────────────────────────
+// At user-record creation, not at first login. There is no just-in-time user
+// provisioning today (admin-console/api/auth.js fails an unregistered identity
+// closed, #1415), so a user record is always created deliberately, and doing
+// the work there keeps the ~5s of admin-bot settle delays off the login path.
+// When SSO JIT provisioning does arrive it will create a user record and pick
+// this up for free.
+
+// Deactivate a Matrix account by its full user id. The class method
+// `deactivateMatrixUser` covers agents (which are addressed by agent id);
+// humans are addressed by their derived `@u-<hash>:local`, so the id-taking
+// form lives here. Best-effort and fire-and-forget, like every admin-room op.
+async function deactivateMatrixUserId(adminClient, matrixUserId) {
+  if (!adminClient || !matrixUserId) return;
+  try {
+    await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, {
+      msgtype: "m.text",
+      body: `!admin users deactivate ${matrixUserId}`,
+    });
+    console.log(`[Orchestrator] Matrix user ${matrixUserId} deactivated`);
+  } catch (err) {
+    console.error(`[Orchestrator] Deactivate warning for ${matrixUserId}: ${err.message}`);
+  }
+}
+
+// Idempotent: make sure `user` has a Matrix account and a stored access token.
+// Returns the credential record, or null when it could not be provisioned.
+//
+// Idempotency matters because the callers are best-effort: a create that failed
+// (admin bot down, homeserver restarting) must be repairable by simply calling
+// this again, and a call for an already-provisioned user must be a cheap no-op
+// rather than a second round of admin-room traffic.
+async function ensureHumanMatrixIdentity(adminClient, user) {
+  if (!user || !user.id || !user.subject) return null;
+
+  const existing = humanMatrixStore.readIdentity(user.id);
+  if (existing && existing.accessToken) return existing;
+
+  const localpart = humanMatrixIdentity.humanMatrixLocalpart(user.subject);
+  const matrixUserId = humanMatrixIdentity.humanMatrixUserId(user.subject);
+
+  // A human's Matrix password is never typed by anyone — the access token from
+  // the login below is what we keep — so it is a full-entropy random value
+  // rather than the derivable `agent-<id>-<ts>` pattern the agent path uses.
+  const password = randomHex(24);
+
+  if (adminClient) {
+    await ensureMatrixUser(adminClient, localpart, password, { allowHumanLocalpart: true });
+  }
+  const accessToken = await loginMatrixUser(localpart, password, adminClient);
+
+  // Display name = the corporate display name (concept §4 step 2). This is the
+  // only human-readable thing room members see, since the localpart is a hash.
+  await setDisplayName(accessToken, matrixUserId, user.displayName || user.subject);
+
+  const record = humanMatrixStore.writeIdentity(user.id, { matrixUserId, accessToken });
+  // The pointer — not the token — goes on the user record so other components
+  // can resolve "which Matrix account is this human?" without touching the
+  // credential store.
+  try {
+    teamsStore.setUserMatrixIdentity(user.id, matrixUserId);
+  } catch (err) {
+    console.warn(`[Orchestrator] could not stamp matrixUserId on user ${user.id}: ${err.message}`);
+  }
+  console.log(`[Orchestrator] Provisioned Matrix identity ${matrixUserId} for user ${user.id}`);
+  return record;
+}
+
+// Fire-and-forget wrapper for the create path: provisioning costs several
+// seconds of admin-bot settle delays, and a homeserver hiccup must not fail the
+// user creation the caller actually asked for. A user left without an identity
+// is repaired by the next `ensureHumanMatrixIdentity` call.
+function provisionHumanMatrixIdentityInBackground(adminClient, user) {
+  ensureHumanMatrixIdentity(adminClient, user).catch((err) => {
+    console.warn(
+      `[Orchestrator] Matrix identity provisioning deferred for user ${user && user.id}: ${err.message}`,
+    );
+  });
+}
+
+// Off-boarding counterpart: deactivate the account and drop the stored token so
+// the credential does not outlive the user record. Best-effort in both halves —
+// the user removal is what the caller contracted for.
+async function deprovisionHumanMatrixIdentity(adminClient, userId) {
+  const identity = humanMatrixStore.readIdentity(userId);
+  if (identity && identity.matrixUserId) {
+    await deactivateMatrixUserId(adminClient, identity.matrixUserId);
+  }
+  humanMatrixStore.deleteIdentity(userId);
 }
 
 // ============================================================
@@ -10204,7 +10344,19 @@ async function handleTeamsAdminApi(req, res) {
       }
       if (req.method === 'POST' && !resourceId) {
         const body = await readBody(req);
-        return sendJson(res, 201, clean(teamsStore.createUser(body))), true;
+        const created = teamsStore.createUser(body);
+        // Give the new human their own Matrix account (#1458). Deliberately
+        // wired HERE and not inside teamsStore.createUser: the startup
+        // `ensureSystemAdmin` bootstrap also goes through createUser, and the
+        // bootstrap admin must ADOPT the existing shared-admin identity
+        // (`@admin:local`) and its rooms rather than be handed a fresh empty
+        // account — that adoption is the migration slice's job.
+        //
+        // A single-operator stack creates no user records at all (the env
+        // admin of #276 has none), so nothing here fires and its behaviour is
+        // unchanged end to end.
+        provisionHumanMatrixIdentityInBackground(orchestrator.adminClient, created);
+        return sendJson(res, 201, clean(created)), true;
       }
       if (req.method === 'GET' && resourceId) {
         const u = teamsStore.getUser(resourceId);
@@ -10226,6 +10378,15 @@ async function handleTeamsAdminApi(req, res) {
           offboarding = await orchestrator.offboardOwner(resourceId);
         } catch (err) {
           console.error(`[Orchestrator] offboarding failed for user ${resourceId}: ${err.message}`);
+        }
+        // Retire the departing human's Matrix account and delete their stored
+        // access token (#1458), for the same reason personal credentials are
+        // removed above: a live token must not outlive the user record. Runs
+        // BEFORE deleteUser so a failure here leaves the user recoverable.
+        try {
+          await deprovisionHumanMatrixIdentity(orchestrator.adminClient, resourceId);
+        } catch (err) {
+          console.error(`[Orchestrator] Matrix de-provisioning failed for user ${resourceId}: ${err.message}`);
         }
         const deleted = teamsStore.deleteUser(resourceId);
         return sendJson(res, 200, { ...deleted, offboarding }), true;

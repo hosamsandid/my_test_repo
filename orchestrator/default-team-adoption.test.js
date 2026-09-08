@@ -155,3 +155,53 @@ test('bootstrapTeams creates the Default-Team membership through the plan', () =
   // human's demotion is undone on the next boot.
   assert.match(body, /if \(membership\)\s*\{/, 'setMembership is not gated on the plan');
 });
+
+// ── #2083 (P5): the shared tier and the adoption pass must not fight ────────
+//
+// A shared environment / MCP server carries `teamId: null` DELIBERATELY — that
+// is what "owned by no single team" means. The adoption pass stamps the default
+// team onto records that predate team ownership, and if it keyed on falsiness it
+// would silently un-share every shared record on the next boot, which reads as
+// "the tier does not persist" rather than as a bug in this pass.
+//
+// It already keys on `teamId === undefined`, so the two rules agree. This turns
+// that agreement from a coincidence into a checkable claim, and it is filed here
+// rather than with the tier because THIS is the code that would break it.
+test('#2083: a shared record is never adopted — its teamId: null is deliberate', () => {
+  const { isSharedTier } = require('./resource-tier');
+
+  const shared = { id: 'env-shared', scope: 'system', teamId: null, assignedTeamIds: ['sdlc'] };
+  assert.equal(isSharedTier(shared), true, 'fixture premise');
+  assert.equal(needsAdoption(shared), false, 'adopting it would silently un-share it');
+
+  // Every falsy-but-not-undefined value a hand-edited record might carry.
+  for (const teamId of [null, '', 0, false]) {
+    assert.equal(needsAdoption({ id: 'x', scope: 'system', teamId }), false,
+      `teamId: ${JSON.stringify(teamId)} must not be adopted`);
+  }
+
+  // The pass still does its job for a genuinely pre-ownership record, so the
+  // assertion above is a narrowing and not a disabling.
+  assert.equal(needsAdoption({ id: 'env-legacy' }), true);
+  assert.equal(needsAdoption({ id: 'env-legacy', name: 'no team field' }), true);
+
+  // And a shared record is excluded from a whole plan, not just the predicate.
+  const plan = planAdoption([
+    { id: 'env-legacy', record: { id: 'env-legacy' } },
+    { id: 'env-shared', record: shared },
+  ]);
+  assert.deepEqual(plan.map(e => e.id), ['env-legacy']);
+});
+
+// The orchestrator's environment arm of the pass is written INLINE
+// (`env.teamId === undefined`) rather than through `needsAdoption`, so the
+// guarantee above has to be pinned at that site too — otherwise the two arms
+// can drift and only the MCP one is protected.
+test('#2083: the orchestrator environment arm keys on undefined, not on falsiness', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'orchestrator.js'), 'utf8');
+  const at = src.indexOf('if (fs.existsSync(ENVIRONMENTS_DIR)) {');
+  assert.ok(at > 0, 'the environment adoption arm moved — this guard needs re-pointing');
+  const arm = src.slice(at, src.indexOf('// Credentials:', at));
+  assert.match(arm, /env\.teamId === undefined/);
+  assert.doesNotMatch(arm, /if \(!env\.teamId\)/, 'a falsiness check would un-share every shared environment');
+});

@@ -231,7 +231,12 @@ test('AC7 — the label is rendered as a chip carrying the bare token and the ra
 
 test('AC11 — cancel, refresh, grouping and the two counters are untouched', () => {
   const src = PAGE();
-  assert.match(src, /onCancel\(group\.agentId, row\.id\)/);
+  // Cancel still calls the same handler with the same two arguments. #2102 moved
+  // the call site from the row button's onClick into the kebab menu's onChoose
+  // (the row gained a second action, so the house rule made it a menu), so the
+  // row identifier is now the menu's captured row — the assertion follows the
+  // call rather than pinning the surface it used to live on.
+  assert.match(src, /onCancel\(group\.agentId, (?:row|menu\.row)\.id\)/);
   assert.match(src, /\{group\.count\} pending/);
   assert.match(src, /\{total\} entr\{total === 1 \? 'y' : 'ies'\} waiting/);
   assert.match(src, /groups\.map\(g => \([\s\S]{0,200}<AgentPendingGroup/);

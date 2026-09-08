@@ -31,8 +31,22 @@
 //     no filter narrows anything. See auth-mode.js for the flag and why it
 //     defaults to off in the env while defaulting to ON as a parameter here.
 //
+// WHAT #2083 (P5) ADDED. Working environments and MCP servers gained the SHARED
+// tier they lacked (concept §5.2): both now carry the same
+// `{scope, teamId, assignedTeamIds, userId}` shape credentials have had since
+// #798, defined once in `resource-tier.js` (byte-mirrored into the orchestrator,
+// which writes it in the boot migration). Credentials and model providers keep
+// their access-scope stamps — see the DEFERRED note on `credentialVisibleToTeam`.
+//
 // Pure (no IO) so it is unit-testable; the api wires it with the on-disk
 // users/memberships indexes.
+
+const {
+  TIER_PERSONAL,
+  TIER_SYSTEM,
+  normalizeTier,
+  ownsPersonalTier,
+} = require('./resource-tier');
 
 // Default Agent-Chat transcript font size in px (#1437). Kept in sync with
 // CHAT_FONT_SIZE_DEFAULT in orchestrator/teams-store.js (the authoritative
@@ -236,25 +250,12 @@ function visibleUser(scope, userId, memberships = []) {
 // one human (`userId`) and carries neither a team nor system assignments. It
 // round-trips its owner reference without loss; every other (team/system/legacy)
 // entry normalizes exactly as before — personal is strictly additive.
-function normalizeCredential(entry) {
-  if (!entry || typeof entry !== 'object') return entry;
-  if (entry.scope === 'personal') {
-    return { ...entry, scope: 'personal', userId: entry.userId || null, teamId: null, assignedTeamIds: [] };
-  }
-  const scope = entry.scope === 'system' ? 'system' : 'team';
-  if (scope === 'system') {
-    const assignedTeamIds = Array.isArray(entry.assignedTeamIds)
-      ? [...new Set(entry.assignedTeamIds.map(String))]
-      : [];
-    return { ...entry, scope, teamId: null, assignedTeamIds };
-  }
-  // No `|| 'default'` (§8.4). Safe to drop because the boot-time adoption pass
-  // (orchestrator `backfillResourceOwnership`) stamps an explicit `teamId` on
-  // every entry of all four credential indexes, so on a booted stack nothing
-  // relies on the collapse; an entry that still lacks one is a record no team
-  // owns and must fail closed rather than land in the default team's lap.
-  return { ...entry, scope: 'team', teamId: entry.teamId || null, assignedTeamIds: [] };
-}
+// #2083: the shape is no longer credential-specific — environments and MCP
+// servers carry the identical triple — so the normalizer moved to
+// `resource-tier.js` and this is a named alias over it. Behaviour is unchanged
+// (the whole credential block of scope.test.js is the proof); what the move buys
+// is that a third resource kind cannot acquire a fourth reading of `scope`.
+const normalizeCredential = normalizeTier;
 
 // A personal credential belongs to exactly one human and is strictly private to
 // them (D2): visible/manageable ONLY by its owner, with NO `scope.all` override —
@@ -262,9 +263,11 @@ function normalizeCredential(entry) {
 // requires an identified owner (`c.userId`) and an identified caller
 // (`scope.userId`); a personal credential with no owner, or a caller with no user
 // identity (the env single-admin has `userId: null`), matches nobody (fail-closed).
-function ownsPersonalCredential(scope, c) {
-  return !!(c && c.userId && scope && scope.userId && c.userId === scope.userId);
-}
+// #2083: same move as normalizeCredential — the personal-tier rule is shared by
+// all three resource kinds now, so it lives in `resource-tier.js`. It still
+// deliberately carries no `scope.all` bypass, and the census guard below still
+// names it as one of the three predicates that must not gain one.
+const ownsPersonalCredential = ownsPersonalTier;
 
 // Is this credential visible to the caller? (list-endpoint filter — AC1/AC2/AC3)
 // A personal credential is checked FIRST, before the `scope.all` admin shortcut,
@@ -350,11 +353,39 @@ function canReassignCredential(scope) {
 
 // Would `teamId` still see this credential under the given (normalized) state?
 // Used to reject a reassignment that would orphan an environment still
-// referencing the credential (edge case: no silent break).
+// referencing the credential (edge case: no silent break), and by
+// `usableEndpointsForTeam` to answer which model providers an agent may bill
+// against.
+//
+// #2083 — RE-POINTING THE CREDENTIAL AXIS IS DEFERRED, and the `|| 'default'`
+// fallback therefore STAYS. AC3 asks for credentials, model providers and skills
+// to reference Agent Team ids; the skills pool is re-pointed (it is a directory
+// name, so the migration copies the pool to each Agent Team — §5.3/§8.3), but
+// the credential/provider records are not, for two reasons that only became
+// visible against the code:
+//
+//   1. There is no lossless re-point for a scope holding several Agent Teams.
+//      A2.5 already says such a record "cannot be re-pointed to one of them
+//      without a shared tier" — but `canManageCredential` returns false for the
+//      shared tier outright (#798 AC5, pinned in scope.test.js), so promoting a
+//      team credential is a manage-axis lockout for the Team Admin who owns it
+//      today. Environments and MCP servers escape this because their shared tier
+//      is being defined here and is defined self-service (see
+//      `canManageEnvironment`); a credential's is already shipped and means
+//      something stronger.
+//   2. Collapsing `resolveAgentTenant` onto `resolveAgentTeam` — which is what
+//      "reference the new Agent Team ids" requires of the read path — answers
+//      `null` for a standalone `role: 'agent'` (A2.2, by design). Such an agent
+//      would be left with no usable provider at all, and D8 does not say which
+//      providers an owner-scoped agent may bill against. That is a new decision,
+//      not an implementation detail.
+//
+// So this predicate, `resolveAgentTenant` and the scope memberships all survive
+// this phase together, exactly as they survived P2. See concept Amendment 3.
 function credentialVisibleToTeam(cred, teamId) {
   const c = normalizeCredential(cred);
   const t = teamId || 'default';
-  if (c.scope === 'system') return c.assignedTeamIds.includes(t);
+  if (c.scope === TIER_SYSTEM) return c.assignedTeamIds.includes(t);
   return c.teamId === t;
 }
 
@@ -387,13 +418,90 @@ function canManageAgent(scope, agent) {
   return ownedByCaller(scope, agent);
 }
 
+// ── Tiered configuration resources: environments + MCP servers (#2083, P5) ──
+//
+// Both carried a single `teamId` and no shared tier, which is what made
+// "creating a team requires wiring up a repo, a key, a token and a provider
+// first" (AC11) structural rather than incidental. They now carry the
+// `resource-tier.js` triple, and these three predicates are the whole gate set.
+// One family serves both kinds: an environment and an MCP server are the same
+// kind of thing under D12 — a stanza of configuration — and giving them two
+// predicate sets would be two places for the shared tier to drift.
+//
+// TWO DELIBERATE DIFFERENCES FROM THE CREDENTIAL PREDICATES, both stated because
+// §5.2 says "the tier model to copy is the credential one":
+//
+//  1. VISIBILITY IS MEMBERSHIP, NOT THE ADMIN ROLE. `visibleCredential` gates on
+//     `canManageTeam` because Team-Member credential access was deferred by
+//     #798. An environment list has always been membership-visible
+//     (`visibleTeam`), and D9 says a Team Member may read — so narrowing it here
+//     would be an unrelated regression smuggled in under a tiering ticket.
+//
+//  2. A SHARED RECORD IS MANAGEABLE BY EVERY ASSIGNED TEAM'S ADMIN.
+//     `canManageCredential` returns false for the system tier outright. Copying
+//     that verbatim would make the migration a LOCKOUT: an access scope holding
+//     two Agent Teams cannot re-point its environment to one of them (A2.5), so
+//     the migration must promote it to the shared tier — and under the credential
+//     rule the Team Admin who could edit it yesterday could not today. That is
+//     exactly the `canManage_after ⊇ canManage_before` half of §8.3, and
+//     `ownership-no-lockout.test.js` catches it. D12's own principle ("only
+//     configuration … becomes SELF-SERVICE and tiered") points the same way, and
+//     an environment is text a reader can inspect rather than an opaque secret.
+//     §5.2's "creating/changing a `system`-tier record is gated like
+//     canReassignCredential" is honoured on the half that carries the risk:
+//     WHICH teams share a record, and moving it between tiers, stays a System
+//     Admin act (`canRetierEnvironment`). Editing a shared record's content does
+//     not.
+//
+// The tier order is the same everywhere: personal before `scope.all` (§2.2),
+// then the admin bypass, then shared, then team.
+
+// Is this environment / MCP server visible to the caller? (list + read-one)
+function visibleEnvironment(scope, env) {
+  if (!scope) return false;
+  const r = normalizeTier(env);
+  if (r && r.scope === TIER_PERSONAL) return ownsPersonalTier(scope, r);
+  if (scope.all) return true;
+  if (!r) return false;
+  if (r.scope === TIER_SYSTEM) return r.assignedTeamIds.some(t => visibleTeam(scope, t));
+  return visibleTeam(scope, r.teamId);
+}
+
 // May the caller create / edit / delete this environment (or its MCP
-// credentials)? Team Admin of the resource's owning team, or a full-visibility
+// credentials)? Team Admin of the resource's owning team — or of ANY team a
+// shared record is assigned to (difference 2 above) — or a full-visibility
 // admin. A missing teamId fails closed (§8.4), mirroring visibleTeam.
 function canManageEnvironment(scope, env) {
   if (!scope) return false;
+  const r = normalizeTier(env);
+  if (r && r.scope === TIER_PERSONAL) return ownsPersonalTier(scope, r);
   if (scope.all) return true;
-  return canManageTeam(scope, env && env.teamId);
+  if (!r) return false;
+  if (r.scope === TIER_SYSTEM) return r.assignedTeamIds.some(t => canManageTeam(scope, t));
+  return canManageTeam(scope, r.teamId);
+}
+
+// May the caller create an environment / MCP server with the requested
+// ownership? Creating a SHARED one is System-Admin-only (§5.2) — it is the act
+// of declaring a resource cross-tenant. A personal one is owner-scoped and is
+// checked before `scope.all`, so it is never waved through as an admin action.
+function canCreateEnvironment(scope, desired) {
+  if (!scope) return false;
+  if (desired && desired.scope === TIER_PERSONAL) return ownsPersonalTier(scope, desired);
+  if (scope.all) return true;
+  if (desired && desired.scope === TIER_SYSTEM) return false;
+  // No `|| 'default'`: a create naming no team is refused rather than silently
+  // attributed to a team that no longer exists.
+  return canManageTeam(scope, desired && desired.teamId);
+}
+
+// May the caller change WHICH teams reach this record — its tier, its owning
+// team, or a shared one's assignments? System-Admin-only, mirroring
+// `canReassignCredential`. `isRetier` (resource-tier.js) is what decides whether
+// a given update even asks the question, so an ordinary content edit that
+// restates the same ownership is not gated on this.
+function canRetierEnvironment(scope) {
+  return !!(scope && scope.all);
 }
 
 // ── Token-usage statistics visibility (#801) ────────────────────────────────
@@ -460,7 +568,10 @@ module.exports = {
   resolveAgentTenant,
   canManageTeam,
   canManageAgent,
+  visibleEnvironment,
   canManageEnvironment,
+  canCreateEnvironment,
+  canRetierEnvironment,
   visibleUser,
   describeAuthz,
   isKnownPrincipal,

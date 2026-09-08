@@ -10,7 +10,7 @@ The Admin Console's **MCP Servers** page (`/mcp`) lists the registered servers. 
 
 ## Configuring an MCP server
 
-Register the server via the **MCP Servers** admin page, then bind it to a Working Environment (with an optional credential). The server template format for stdio servers follows the standard Claude Code MCP configuration:
+Register the server via the **MCP Servers** admin page, then bind it to a Working Environment (with an optional credential). Registering, editing or deleting a server requires **Team Admin** rights over the team that owns it. Each server is owned by a single **team** or can be marked **shared** across several teams — a shared server appears in every assigned team's pickers; a System Admin decides which teams it reaches. The server template format for stdio servers follows the standard Claude Code MCP configuration:
 
 ```json
 {

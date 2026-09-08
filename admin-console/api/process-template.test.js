@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt, deriveClaim, claimLabelFor, claimError, channelAutoClaim, CLAIM_SUFFIX, completedLabelFor, COMPLETED_SUFFIX, normalizeHillClimb, expandWakeHandoffs, isWakeHandoffTrigger, wakeTriggerId, POSTCONDITIONS, cleanPostcondition, strictestPostcondition, channelPostcondition } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt, deriveClaim, claimLabelFor, claimError, channelAutoClaim, CLAIM_SUFFIX, completedLabelFor, COMPLETED_SUFFIX, normalizeHillClimb, normalizeWipLimit, expandWakeHandoffs, isWakeHandoffTrigger, wakeTriggerId, POSTCONDITIONS, cleanPostcondition, strictestPostcondition, channelPostcondition } = require('./process-template');
 
 // A tiny stand-in for the on-disk draft store: an id is "taken" iff present.
 const existsIn = (set) => (id) => set.has(id);
@@ -795,6 +795,48 @@ test('validateProcessTemplate accepts a string stages array, rejects non-strings
 
 test('emptyDraftBundle seeds an empty stages array', () => {
   assert.deepEqual(emptyDraftBundle('x').stages, []);
+});
+
+// ─── wipLimit: admission control (#2114) ─────────────────────────────────────
+
+test('#2114: normalizeWipLimit accepts a positive integer and refuses everything else', () => {
+  assert.equal(normalizeWipLimit(1), 1);
+  assert.equal(normalizeWipLimit(4), 4);
+  // 0 reads like "no limit" but would mean "admit nothing" — refused, not
+  // silently tolerated, so a mistyped value cannot park a flow forever.
+  for (const bad of [0, -1, 1.5, '2', null, undefined, {}, [], NaN, Infinity]) {
+    assert.equal(normalizeWipLimit(bad), null, `wipLimit=${JSON.stringify(bad)}`);
+  }
+});
+
+test('#2114: buildProcessTemplate carries wipLimit and omits it when unset', () => {
+  const withLimit = buildProcessTemplate({ name: 'f', roles: [], wipLimit: 1 });
+  assert.equal(withLimit.wipLimit, 1);
+  // A flow that never configured it stays byte-identical to a pre-#2114 bundle.
+  const without = buildProcessTemplate({ name: 'f', roles: [] });
+  assert.equal('wipLimit' in without, false);
+  assert.equal('wipLimit' in buildProcessTemplate({ name: 'f', roles: [], wipLimit: 0 }), false);
+});
+
+test('#2114: validateProcessTemplate accepts a positive integer wipLimit or none', () => {
+  const base = { processTemplateVersion: 1, name: 'f', roles: [{ id: 'a', triggers: [] }] };
+  assert.equal(validateProcessTemplate({ ...base }).ok, true);
+  assert.equal(validateProcessTemplate({ ...base, wipLimit: 1 }).ok, true);
+  assert.equal(validateProcessTemplate({ ...base, wipLimit: 3 }).ok, true);
+  assert.equal(validateProcessTemplate({ ...base, wipLimit: null }).ok, true);
+  for (const bad of [0, -1, 1.5, '1', {}]) {
+    const r = validateProcessTemplate({ ...base, wipLimit: bad });
+    assert.equal(r.ok, false, `wipLimit=${JSON.stringify(bad)}`);
+    assert.match(r.error, /wipLimit must be a positive integer/);
+  }
+});
+
+test('#2114: wipLimit survives build → validate round-trip', () => {
+  const bundle = buildProcessTemplate({
+    name: 'f', roles: [{ id: 'dev', displayName: 'Dev', triggers: [] }], wipLimit: 1,
+  });
+  assert.equal(validateProcessTemplate(bundle).ok, true);
+  assert.equal(buildProcessTemplate({ ...bundle, roles: bundle.roles }).wipLimit, 1);
 });
 
 // ─── hillClimb collector config round-trip (#1222) ───────────────────────────

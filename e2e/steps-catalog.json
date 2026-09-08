@@ -768,6 +768,13 @@
       "example": "- assert:\n    do: flows.expectAgentTriggerApi\n    agentId: wiring-demo-developer\n    event: issues.labeled\n    labelFilter: ready"
     },
     {
+      "name": "flows.expectCreateTeamAvailable",
+      "module": "flows",
+      "description": "Assert the create-team action is available on the draft (capture point for the finished-draft screenshot). The journey deliberately does not click it — a pure draft has no team side effects. Renamed from `expectMaterializeAvailable` with the button itself (#2053): the label is the whole point of the assertion, so a step name still saying `Materialize` would be the next reader's wrong turn.",
+      "params": [],
+      "example": "- assert:\n    do: flows.expectCreateTeamAvailable"
+    },
+    {
       "name": "flows.expectDraftSourceInputs",
       "module": "flows",
       "description": "S1/S8/S13 — assert the draft persists all three source inputs on a role: a raw github-event trigger, a cron schedule, and an http webhook.",
@@ -929,13 +936,6 @@
         }
       ],
       "example": "- assert:\n    do: flows.expectLint\n    code: producer-unconsumed"
-    },
-    {
-      "name": "flows.expectMaterializeAvailable",
-      "module": "flows",
-      "description": "Assert the Materialize action is available on the draft (capture point for the finished-draft screenshot). The journey deliberately does not click it — a pure draft has no team side effects.",
-      "params": [],
-      "example": "- assert:\n    do: flows.expectMaterializeAvailable"
     },
     {
       "name": "flows.expectNoLints",

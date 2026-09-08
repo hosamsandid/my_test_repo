@@ -15,8 +15,8 @@ askPrompts:
   - "What is the difference between a human gate and a brake?"
   - "Which hand-off kind should I pick — label, PR channel, issue channel or artifact?"
   - "How do I make the flow wait for a person to approve?"
-  - "Why is the Materialize button greyed out?"
-  - "Why are my agents 'Not initialised' after I materialized the draft?"
+  - "Why is the Create team button greyed out?"
+  - "Why are my agents 'Not initialised' after I created the team?"
   - "What do the Anomalies and Improvements panels tell me?"
 ---
 
@@ -37,21 +37,32 @@ There are two kinds of thing in the left list, and the difference matters:
   **Edit as draft** exists: it copies the team into a draft you can experiment
   in safely.
 
-**Materialize** is the one-way step between them. It reads the draft and
-creates the real thing: one Working Environment, one team agent, and one member
-per role with its own prompt and triggers. The dialog's **Materialize agents
-now** checkbox is **off** by default, so members are created as **stubs** —
-they appear in the team with their prompts and triggers, but no repository is
-cloned and nothing is running until you start one. A stub is listed on the
-Agents page as *Not initialised*, and in Agent Chat under its team's collapsed
-*Not materialized yet* section; starting it from either place does the same
-thing. Tick the box and every member is provisioned right away — slower,
-because each materialisation clones the repository, and a flow can have dozens
-of members.
+**Create team…** is the one-way step between them, and it is the accent-coloured
+button set apart at the end of the draft toolbar — the design → team step, so it
+is the one thing on that row that is not an editing action. It was
+**previously called Materialize** — its tooltip says the same, so anyone who
+learned the old word can still find it. It reads the draft and creates the real
+thing: one Working
+Environment, one team agent, and one member per role with its own prompt and
+triggers. The dialog's **Provision agents now** checkbox is **off** by default,
+so members are created as **stubs** — they appear in the team with their prompts
+and triggers, but no repository is cloned and nothing is running until you start
+one. A stub is badged *Not initialised* in Agent Chat, under its team's
+collapsed *Not materialized yet* section, where **Materialize** finishes it into
+a running agent — that is the member-level act, and it keeps its own name. Tick
+the
+box and every member is provisioned right away — slower, because each
+provisioning clones the repository, and a flow can have dozens of members.
 
-Two things gate the **Materialize** button: a draft needs at least one agent,
+Two things gate the **Create team…** button: a draft needs at least one agent,
 and while a Copilot proposal is on screen the structural buttons pause, because
-the canvas is previewing the proposal rather than the draft underneath.
+the canvas is previewing the proposal rather than the draft underneath. The
+draft's own status line, under the toolbar, says which of those applies rather
+than making you hover the greyed-out button to find out.
+
+Creating a team does not consume the draft. The design stays in **Drafts** and is
+reusable; editing it afterwards does not change the team you created, which is
+what the confirmation says when the creation finishes.
 
 An environment with no repository still works — the team's agents can chat and
 use their skills — but GitHub hand-offs (pull-request and issue channels) are
@@ -84,7 +95,8 @@ not in the list, so they stay reachable while the list is collapsed:
   let it propose the whole graph (see the last chapter).
 - **Import** — read a flow back from a portable JSON bundle. An imported bundle
   opens as a **read-only preview** first; *Continue as draft* turns it into
-  something editable, *Materialize as team…* creates the team directly.
+  something editable, *Create team…* creates the team directly — the same
+  button, label and tooltip as the one on the draft toolbar.
 - **Import packs** — a migration aid, not a create action. It reads a legacy
   BriefingPack directory out of an agent's workspace and lays it out as an
   editable draft. If you have never used BriefingPacks, skip past it.
@@ -92,6 +104,13 @@ not in the list, so they stay reachable while the list is collapsed:
 **Export** (on the canvas toolbar) is the other half of Import: it writes the
 current flow to a portable bundle with no repositories and no secrets in it, so
 a design can be shared or version-controlled.
+
+**Every row in the list has a context menu** — right-click it, press the `Menu`
+key (or `Shift+F10`), or use the `⋮` that appears when you hover. A **draft**
+offers **Create team…** first and set apart, then Rename…, Export… and Delete
+draft; a **team** offers Edit as draft, Export… and Open in Agent Chat. This is
+where renaming a draft lives besides the flow header, and it is the one place
+*Create team…* is reachable without opening the draft first.
 
 Your last selection is remembered per user and restored when you come back. A
 flow that has since been deleted falls back silently to no selection rather
@@ -129,10 +148,13 @@ agent nodes, flip the flow direction between top-down and left-right, show or
 hide **archived** agents, and turn **stage** banding on or off.
 
 The rest of the toolbar is the editing surface: **Add agent**, **Add human**,
-**Stages**, **Labels**, **Copilot**, **Export**, and then either
-**Materialize…** (on a draft) or **Anomalies** / **Improvements** /
-**Edit as draft** (on a live team). Buttons that do not apply to the current
-scope are not shown at all, and a button that is disabled says why on hover.
+**Stages**, **Labels**, **Copilot**, **Export**, plus **Anomalies** /
+**Improvements** / **Edit as draft** on a live team. On a draft, one button is
+deliberately not an editing action: **Create team…** sits last in the draft
+group behind a separator and carries the accent colour, because it is the exit
+from the design rather than another way to change it. Buttons that do not apply
+to the current scope are not shown at all, and a button that is disabled says
+why on hover.
 
 ## Wiring hand-offs: the edge chooser
 
@@ -313,7 +335,7 @@ Stages are optional. With none defined, the flow is laid out automatically from
 its hand-off edges, which is fine for a small graph — they earn their keep once
 a flow is big enough that the automatic layout stops telling a story.
 
-Stages travel with the flow: they are carried through Materialize, exported in
+Stages travel with the flow: they are carried through team creation, exported in
 the bundle and restored by *Edit as draft*.
 
 ## Anomalies

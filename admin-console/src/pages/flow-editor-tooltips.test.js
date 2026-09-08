@@ -58,7 +58,9 @@ test('every ToolbarButton in the header row passes a title', () => {
 });
 
 test('the header-row copy comes from the pure hints module, not inline strings', () => {
-  assert.match(canvas, /import \{ toolbarTitle, STATUS_TITLES \} from '\.\/process-toolbar-hints'/);
+  // #2053 added `draftStatusText` to the same import — the draft status line's
+  // copy belongs with the rest of the toolbar/status copy, not in the JSX.
+  assert.match(canvas, /import \{ toolbarTitle, STATUS_TITLES, draftStatusText, PROPOSAL_PENDING_REASON \} from '\.\/process-toolbar-hints'/);
   // A literal title="…" / title={'…'} would be copy no test can reach.
   assert.doesNotMatch(canvasCode, /<ToolbarButton[\s\S]{0,200}?title="/);
 });

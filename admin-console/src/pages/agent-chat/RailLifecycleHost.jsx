@@ -17,7 +17,7 @@ import {
   ResetToStubDialog, TeamEnableDialog, TeamActionResultDialog, renderDeleteMessage,
 } from '../agent-lifecycle/AgentLifecycleDialogs.jsx';
 import { deleteDialogCopy, cascadeResidueNotice } from '../agent-lifecycle/agent-lifecycle-menu.js';
-import RowContextMenu from './RowContextMenu.jsx';
+import RowContextMenu from '../../components/RowContextMenu.jsx';
 import {
   deleteTargetFor,
   existingIds as existingIdsOf,

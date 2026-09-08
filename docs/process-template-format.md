@@ -19,7 +19,7 @@ that still carry `emits` are lifted transparently on read.)
 |---|---|---|
 | Export | Process Canvas → **Export** | `GET /api/process/template?team=<id>` or `?templates=1` |
 | Preview (render) | Process Canvas → **Import** | `POST /api/process/graph` `{ processTemplate }` |
-| Materialise into a team | Process Canvas → **Materialize as team…** | `POST /api/teams` `{ teamId, teamName, repository, githubTokenId, processTemplate, labelSuffix?, materializeMembers? }` |
+| Materialise into a team | Process Canvas → **Create team…** (called *Materialize* before #2053) | `POST /api/teams` `{ teamId, teamName, repository, githubTokenId, processTemplate, labelSuffix?, materializeMembers? }` |
 
 `POST /api/teams` accepts the bundle under `processTemplate` (or the equivalent
 `customRoles` pseudo-template array). Inline roles are materialised by the same

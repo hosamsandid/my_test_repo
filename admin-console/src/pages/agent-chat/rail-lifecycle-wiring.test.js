@@ -32,7 +32,9 @@ function code(src) {
 const agentChat = code(read('../AgentChat.jsx'));
 const agentList = code(read('./AgentList.jsx'));
 const host = code(read('./RailLifecycleHost.jsx'));
-const menu = code(read('./RowContextMenu.jsx'));
+// Promoted to `src/components/` by #2053 so the Flows rail can render the same
+// menu; the component itself is unchanged, and this guard follows it there.
+const menu = code(read('../../components/RowContextMenu.jsx'));
 
 test('the chat page derives its list URL from the opt-in, never a literal', () => {
   assert.match(agentChat, /useApi\(matrixAgentsUrl\(showDisabled\)\)/);

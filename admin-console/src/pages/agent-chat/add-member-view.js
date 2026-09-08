@@ -16,10 +16,18 @@
 export const ADD_MEMBER_TITLE = 'Add member';
 
 /**
- * The "Materialize now" checkbox copy. Deliberately parallel to the team-create
- * wizard's (`LaunchStep.jsx`), singular where that one is plural — the two
- * checkboxes mean the same thing at different granularity, and a user who has
- * met one should not have to re-learn the other.
+ * The "Materialize now" checkbox copy.
+ *
+ * It USED to be deliberately parallel to the team-create wizard's — singular
+ * where that one was plural — on the grounds that the two mean the same thing at
+ * different granularity. **#2053 broke that parallel on purpose**: the launch
+ * step's checkbox now reads *Provision agents now*, because "Materialize" there
+ * sat one step from a button that used the same word for the OTHER act (turning
+ * a design into a team, now *Create team…*). This checkbox keeps the old word
+ * because it is the member-level act, and Agent Chat's *Not materialized yet*
+ * section and its *Materialize* entry — the surfaces a reader lands on from
+ * here — were deliberately left alone (#2053 Non-goals). Do not "restore" the
+ * parallel by renaming this one.
  */
 export const MATERIALIZE_NOW_LABEL = 'Materialize now';
 export const MATERIALIZE_NOW_HINT = 'Clones the repository and starts the agent immediately. '

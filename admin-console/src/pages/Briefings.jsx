@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
-import { useSearchParams } from 'react-router';
-import { ChevronLeft, ChevronRight, Users, FileText, Plus, Trash2, Upload, Sparkles, Package } from 'lucide-react';
+import { useNavigate, useSearchParams } from 'react-router';
+import { ChevronLeft, ChevronRight, Users, FileText, Plus, Upload, Sparkles, Package, MoreVertical } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -10,6 +10,9 @@ import Tooltip from '../components/Tooltip';
 import { shouldWrapTooltip } from '../components/tooltip-wrap';
 import { PAGE_ACTION_TITLES } from './process-toolbar-hints';
 import { FLOWS_HELP_SECTIONS } from './process/flows-help-sections';
+import RowContextMenu from '../components/RowContextMenu.jsx';
+import { buildFlowsRailMenu, intentForMenuKey, parseFlowIntent } from './process/flows-rail-menu.js';
+import { downloadBundle } from './process/bundle-download.js';
 import {
   IMPORT_BRIEFINGS_COPY, importCandidates, importSubmitState, importRequestBody, importErrorText,
 } from './process/import-briefings-view';
@@ -116,13 +119,25 @@ function SectionHeader({ children, action }) {
   );
 }
 
-// Generic selectable row (teams, drafts). An optional `onDelete` renders a trash button that fades in on hover.
-// Renaming a draft lives solely in the flow header (ProcessCanvas, #581) — this
-// row has no rename affordance.
-function ListRow({ icon: Icon, label, sub, selected, onSelect, onDelete, deleteTitle }) {
+// Generic selectable row (teams, drafts).
+//
+// #2053: the row's per-row affordance is a **context menu**, not an icon row —
+// the house decision epic #1925 D3 took and #1938 applied to the Agent-Chat
+// rail's last hover icon. Before this, a draft row carried a hover-revealed
+// trash icon (its only action, and the most destructive one), a team row carried
+// nothing at all, and renaming a draft was possible only from the flow header
+// (ProcessCanvas, #581). All of that is now in the menu, which the kebab, a
+// right-click and the `Menu`/`Shift+F10` keys all open — so a beginner meets one
+// interaction model on this list and on the chat list rather than two.
+//
+// The row stays presentational: it reports *that* a menu was asked for and at
+// which point, and the page decides what it contains (the AgentList contract).
+function ListRow({ icon: Icon, label, sub, selected, onSelect, onRequestMenu }) {
   const [hover, setHover] = useState(false);
 
-  const actionCount = onDelete ? 1 : 0;
+  // The trailing gutter the kebab sits in. Reserved whether or not the kebab is
+  // currently visible, so the label never reflows on hover.
+  const actionCount = onRequestMenu ? 1 : 0;
 
   return (
     <div
@@ -132,6 +147,20 @@ function ListRow({ icon: Icon, label, sub, selected, onSelect, onDelete, deleteT
     >
       <button
         onClick={onSelect}
+        onContextMenu={onRequestMenu ? (e) => {
+          e.preventDefault();
+          onRequestMenu({ x: e.clientX, y: e.clientY });
+        } : undefined}
+        onKeyDown={onRequestMenu ? (e) => {
+          // Shift+F10 / the Menu key are the platform keyboard paths to a
+          // context menu — without them the kebab would be the only keyboard
+          // route (AC8).
+          if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+            e.preventDefault();
+            const r = e.currentTarget.getBoundingClientRect();
+            onRequestMenu({ x: r.right - 8, y: r.bottom });
+          }
+        } : undefined}
         style={{
           display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', width: '100%',
           padding: 'var(--eb-space-2) var(--eb-space-3)',
@@ -160,27 +189,52 @@ function ListRow({ icon: Icon, label, sub, selected, onSelect, onDelete, deleteT
           )}
         </div>
       </button>
-      {(hover || selected) && onDelete && (
+      {onRequestMenu && (
         <div style={{
           position: 'absolute', top: '50%', right: 'var(--eb-space-2)', transform: 'translateY(-50%)',
           display: 'flex', alignItems: 'center', gap: 2,
         }}>
-          <button
-            onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            title={deleteTitle || 'Delete'}
-            aria-label={deleteTitle || 'Delete'}
-            style={{
-              background: 'none', border: 'none', cursor: 'pointer', padding: 4,
-              color: 'var(--eb-text-muted)', display: 'flex', alignItems: 'center',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.color = 'var(--eb-status-error)'; }}
-            onMouseLeave={e => { e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
-          >
-            <Trash2 size={15} />
-          </button>
+          <KebabButton
+            label={`Actions for ${label}`}
+            active={hover || selected}
+            onOpen={onRequestMenu}
+          />
         </div>
       )}
     </div>
+  );
+}
+
+// The hover-revealed menu trigger. A `span[role="button"]` rather than a
+// `<button>` because the row itself is already a `<button>` and a button inside
+// a button is invalid HTML; rest-vs-hover is opacity only, so the trailing
+// cluster never shifts. Mirrors the Agent-Chat rail's own `KebabButton`, which
+// lives in `agent-chat/AgentList.jsx` and is coupled to that list's row layout —
+// the two are small enough that a shared component would be more indirection
+// than it saves.
+function KebabButton({ label, active, onOpen }) {
+  function open(e) {
+    e.stopPropagation();
+    e.preventDefault();
+    const r = e.currentTarget.getBoundingClientRect();
+    onOpen({ x: r.right, y: r.bottom + 2 });
+  }
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      aria-haspopup="menu"
+      aria-label={label}
+      title="Actions"
+      onClick={open}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') open(e); }}
+      style={{
+        display: 'flex', alignItems: 'center', padding: 4, cursor: 'pointer',
+        color: 'var(--eb-text-muted)', opacity: active ? 1 : 0.35,
+      }}
+    >
+      <MoreVertical size={15} />
+    </span>
   );
 }
 
@@ -271,6 +325,11 @@ export default function Briefings() {
   // the Flow Copilot open (the conversational "Describe it" entry). Consumed
   // once on mount, then replaced by the resulting `?proc=draft:<id>` selection.
   const newParam = searchParams.get('new');
+  // Rail context-menu intent (#2053 B3): the menu's `Create team…` and
+  // `Edit as draft` need the bundle the canvas already loads, so the rail hands
+  // the action over through the URL rather than growing a second copy of either
+  // call. Consumed once by the graph panel, which then asks us to strip it.
+  const intentParam = parseFlowIntent(searchParams.get('intent'));
   const pendingFocus = useMemo(
     () => (proc && focusNode ? { nodeId: focusNode, tab: focusTab || 'routing' } : null),
     [proc, focusNode, focusTab],
@@ -294,6 +353,7 @@ export default function Briefings() {
     if (staleFlowParam) setSearchParams(proc ? { proc } : {}, { replace: true });
   }, [proc, staleFlowParam, setSearchParams]);
 
+  const navigate = useNavigate();
   const { data: agents } = useApi('/api/agents');
   const { data: environments } = useApi('/api/environments');
   const { data: draftsList, refetch: refetchDrafts } = useApi('/api/process/drafts');
@@ -313,8 +373,16 @@ export default function Briefings() {
     // `opts.copilot` (#1069) keeps the Copilot panel open across a scope change
     // (draft rename re-key, team → draft bridge) — the panel is component state
     // inside the (scope-keyed) graph panel, so it only survives via the param.
-    setSearchParams(opts && opts.copilot ? { proc: scope, copilot: '1' } : { proc: scope });
+    if (opts && opts.copilot) { setSearchParams({ proc: scope, copilot: '1' }); return; }
+    // `opts.intent` (#2053) hands the canvas a one-shot rail-menu action.
+    if (opts && opts.intent) { setSearchParams({ proc: scope, intent: opts.intent }); return; }
+    setSearchParams({ proc: scope });
   }
+
+  const clearPendingIntent = useCallback(() => {
+    if (!intentParam) return;
+    setSearchParams(proc ? { proc } : {}, { replace: true });
+  }, [proc, intentParam, setSearchParams]);
 
   // Restore the last-viewed flow on mount when the URL carries no selection.
   // Mirrors the Agent Chat last-agent restore pattern. Waits for both agents
@@ -418,6 +486,112 @@ export default function Briefings() {
     } finally {
       setImportBusy(false);
     }
+  }
+
+  // ── Rail context menu (#2053 B3) ────────────────────────────────────────────
+  // The rows report *that* a menu was asked for and for which target; which
+  // entries it holds is the pure `buildFlowsRailMenu`, and everything behind
+  // them lives here — the RailLifecycleHost split, applied to this page.
+  const [menuRequest, setMenuRequest] = useState(null); // { target, anchor } | null
+  const handleRequestMenu = useCallback((target, anchor) => setMenuRequest({ target, anchor }), []);
+  const closeMenu = useCallback(() => setMenuRequest(null), []);
+  const railMenu = useMemo(() => buildFlowsRailMenu(menuRequest?.target), [menuRequest]);
+
+  // A draft's name, pending rename. Renaming used to be possible only from the
+  // flow header, which meant selecting the draft first (#581) — the menu is its
+  // natural second home, so this is the dialog behind that entry.
+  const [renameTarget, setRenameTarget] = useState(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState(null);
+  const renameInputRef = useRef(null);
+  // Bumped when a rename must reach an already-open canvas that will NOT re-key.
+  // It rides in the graph panel's `key`, so the panel remounts and refetches —
+  // exactly what the re-keying path gets for free from `proc` changing.
+  const [draftReload, setDraftReload] = useState(0);
+
+  // `ConfirmDialog` focuses its confirm button in a passive effect on `[open]`,
+  // and a parent's effects run AFTER its children's — so neither `autoFocus`
+  // (layout phase) nor a child effect can win. Without this the caret is not in
+  // the field and the Enter reflex activates **Rename** with the value
+  // unchanged, which closes the dialog having renamed nothing. A macrotask lands
+  // after both effect flushes; this is the first autoFocus-bearing input in a
+  // ConfirmDialog in this tree, hence no precedent to copy.
+  useEffect(() => {
+    if (!renameTarget) return undefined;
+    const t = setTimeout(() => renameInputRef.current?.select(), 0);
+    return () => clearTimeout(t);
+  }, [renameTarget]);
+
+  async function confirmRenameDraft() {
+    const d = renameTarget;
+    const name = renameValue.trim();
+    // The Enter handler on the input is not `disabled={busy}` the way the
+    // dialog's confirm button is, so key-repeat would otherwise fork the rename:
+    // two GET+PUT pairs interleave, the second re-derives an id that is now
+    // taken and gets bumped to `<name>-2`, leaving two drafts with one name.
+    if (!d || !name || renameBusy) return;
+    if (name === d.name) { setRenameTarget(null); return; }
+    setRenameBusy(true); setRenameError(null);
+    try {
+      // The PUT carries the whole bundle (that is the route's contract) and the
+      // server re-derives the storage id from the new name, so a rename MAY
+      // re-key the draft — follow the id it returns rather than assuming it.
+      const bundle = await apiCall('GET', `/api/process/drafts/${d.id}`);
+      const saved = await apiCall('PUT', `/api/process/drafts/${d.id}`, { ...bundle, name });
+      refetchDrafts();
+      if (proc === `draft:${d.id}`) {
+        if (saved?.id && saved.id !== d.id) {
+          selectProc(`draft:${saved.id}`);
+        } else {
+          // Same slug (a case-only or punctuation-only rename), so `proc` does
+          // not change and the canvas keeps the bundle it fetched — showing the
+          // OLD name in its header, and, worse, PUTting that stale bundle back
+          // on the next canvas edit, which silently undoes the rename. Force
+          // the remount the re-keying path gets for nothing.
+          setDraftReload(n => n + 1);
+        }
+      }
+      setRenameTarget(null);
+    } catch (e) {
+      setRenameError(e.message || 'Rename failed.');
+    } finally {
+      setRenameBusy(false);
+    }
+  }
+
+  // Export from the rail. The canvas toolbar's Export reads the bundle it
+  // already has; here we fetch it first, then hand it to the SAME download
+  // helper so the two buttons cannot disagree about the filename.
+  async function exportFromRail(target) {
+    try {
+      const bundle = target.kind === 'draft'
+        ? await apiCall('GET', `/api/process/drafts/${target.id}`)
+        : await apiCall('GET', `/api/process/template?team=${encodeURIComponent(target.id)}`);
+      downloadBundle(bundle);
+    } catch (e) {
+      setImportError(`Export failed: ${e.message}`);
+    }
+  }
+
+  function chooseMenuItem(key) {
+    const target = menuRequest?.target;
+    if (!target) return;
+    const intent = intentForMenuKey(key);
+    if (intent) {
+      // Select the row and let the canvas run the action it already owns.
+      selectProc(target.kind === 'draft' ? `draft:${target.id}` : target.id, { intent });
+      return;
+    }
+    if (key === 'rename') {
+      setRenameValue(target.name || '');
+      setRenameError(null);
+      setRenameTarget({ id: target.id, name: target.name });
+      return;
+    }
+    if (key === 'export') { exportFromRail(target); return; }
+    if (key === 'delete') { setDeleteTarget({ id: target.id, name: target.name }); return; }
+    if (key === 'open-chat') { navigate(`/chats/${encodeURIComponent(target.id)}`); }
   }
 
   // Delete confirmation goes through the shared styled ConfirmDialog (like every
@@ -700,6 +874,9 @@ export default function Briefings() {
                     sub={envNameById.get(t.environmentId) || t.environmentId || null}
                     selected={proc === t.id}
                     onSelect={() => selectProc(t.id)}
+                    onRequestMenu={(anchor) => handleRequestMenu(
+                      { kind: 'team', id: t.id, name: t.displayName || t.id }, anchor,
+                    )}
                   />
                 ))
               )}
@@ -719,8 +896,9 @@ export default function Briefings() {
                     sub={`${d.roleCount} agent${d.roleCount === 1 ? '' : 's'}`}
                     selected={proc === `draft:${d.id}`}
                     onSelect={() => selectProc(`draft:${d.id}`)}
-                    onDelete={() => setDeleteTarget(d)}
-                    deleteTitle="Delete draft"
+                    onRequestMenu={(anchor) => handleRequestMenu(
+                      { kind: 'draft', id: d.id, name: d.name, roleCount: d.roleCount }, anchor,
+                    )}
                   />
                 ))
               )}
@@ -742,7 +920,7 @@ export default function Briefings() {
               </div>
             }>
               <ProcessGraphPanel
-                key={proc}
+                key={`${proc}#${draftReload}`}
                 scope={proc}
                 onNavigate={selectProc}
                 onDraftsChanged={refetchDrafts}
@@ -752,6 +930,8 @@ export default function Briefings() {
                 pendingFocus={pendingFocus}
                 onFocusConsumed={clearPendingFocus}
                 autoOpenCopilot={copilotParam}
+                pendingIntent={intentParam}
+                onIntentConsumed={clearPendingIntent}
               />
             </Suspense>
           ) : (
@@ -764,6 +944,53 @@ export default function Briefings() {
           )}
         </div>
       </div>
+
+      {/* The rail's row context menu (#2053 B3). Portaled + point-anchored, so
+          the same component serves the kebab, the right-click and the keyboard
+          path; an empty item set renders nothing rather than an empty box. */}
+      {menuRequest && railMenu.items.length > 0 && (
+        <RowContextMenu
+          items={railMenu.items}
+          label={railMenu.label}
+          anchor={menuRequest.anchor}
+          onChoose={chooseMenuItem}
+          onClose={closeMenu}
+        />
+      )}
+
+      <ConfirmDialog
+        open={!!renameTarget}
+        title="Rename flow"
+        variant="info"
+        confirmLabel={renameBusy ? 'Renaming…' : 'Rename'}
+        busy={renameBusy}
+        onConfirm={confirmRenameDraft}
+        onCancel={() => setRenameTarget(null)}
+        message={
+          <>
+            <label style={{ display: 'block', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginBottom: 6 }}>
+              Name
+            </label>
+            <input
+              ref={renameInputRef}
+              value={renameValue}
+              onChange={e => setRenameValue(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && renameValue.trim()) confirmRenameDraft(); }}
+              style={{
+                width: '100%', boxSizing: 'border-box', padding: '6px 10px', fontFamily: 'inherit',
+                fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
+                background: 'var(--eb-bg-app)', border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)',
+              }}
+            />
+            {renameError && (
+              <p style={{ margin: 'var(--eb-space-2) 0 0', color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>
+                {renameError}
+              </p>
+            )}
+          </>
+        }
+      />
 
       <ConfirmDialog
         open={!!deleteTarget}

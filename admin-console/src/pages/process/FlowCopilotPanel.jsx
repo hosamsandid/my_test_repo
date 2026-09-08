@@ -1,26 +1,21 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { Link } from 'react-router';
-import { Sparkles, X, Send, Loader2, Check, AlertTriangle, Boxes, RefreshCw } from 'lucide-react';
-import { apiCall } from '../../hooks/useApi';
-import { UNAUTHORIZED_EVENT } from '../../auth/AuthContext';
-import { assistHeaders, notifyAssistError } from '../../context/assist-transport.js';
+import { Sparkles, X, Send, Loader2, Check, AlertTriangle, Boxes, RefreshCw, Square } from 'lucide-react';
 import PageHelpButton from '../../components/PageHelpButton';
+import { useFlowCopilot } from '../../context/FlowCopilotContext.jsx';
 import { FLOWS_HELP_SECTIONS } from './flows-help-sections';
 import {
   STARTER_PROMPTS,
   toApiMessages,
   describeChange,
   lintColor,
-  copilotErrorInfo,
-  supersedePending,
-  latestProposal,
   phaseLabel,
-  consumeCopilotStream,
   toPersistedMessages,
   hydrateMessages,
   bundleSizeCharCount,
   bundleSizeLevel,
 } from './flow-copilot-view';
+import { decideCopilotAction, applyFailureNotice } from './flow-copilot-turn';
 
 // FlowCopilotPanel (#1069, spec #1047) — the docked chat rail of the Flow
 // Editor. The user describes (or iterates on) a flow in free text; every turn
@@ -38,8 +33,19 @@ import {
 // every turn / decision. Proposal bundles are NOT persisted — a reloaded
 // proposal card shows as superseded and the user regenerates.
 //
+// The RUNNING turn does not live here any more (#2087). It is owned by the
+// app-level FlowCopilotProvider, above the router, so it survives this panel's
+// unmount — closing the panel, navigating away from /flows, and the `key={proc}`
+// remount a flow switch causes. What this component still owns is the DURABLE
+// history (hydrated from the draft, per #1071) and the composer; the live turn,
+// its phase and its finished-but-unapplied proposal come from the provider,
+// scoped to this panel's `scope`.
+//
 // Props:
 //   mode            — 'draft' (chat) | 'team' (notice + Edit-as-draft bridge only)
+//   scope           — the flow this panel is bound to (`draft:<id>` or a team id).
+//                     A turn and its proposal are bound to it, so a proposal is
+//                     never offered against another bundle (AC5).
 //   bundle          — the current draft (draft mode; resent every turn — stateless
 //                     server; also carries `copilot.messages` for hydration)
 //   autoFocus       — focus the composer on mount (the "Describe flow…" entry)
@@ -51,14 +57,19 @@ import {
 //   onClose         — close the panel (parent also clears the preview)
 //   actionsRef      — ref the parent's proposal banner uses: { apply, discard, ok } | null
 export default function FlowCopilotPanel({
-  mode, bundle, autoFocus, onPreview, onApplyBundle, onPersistHistory, onEditAsDraft, onClose, actionsRef,
+  mode, scope, bundle, autoFocus, onPreview, onApplyBundle, onPersistHistory, onEditAsDraft, onClose, actionsRef,
 }) {
+  const copilot = useFlowCopilot();
+  const view = copilot ? copilot.viewFor(scope) : null;
+  const running = !!(view && view.running);
+  const pending = view ? view.pending : null;
+  const failure = view ? view.failure : null;
+  const phase = view ? view.phase : null;
+
   const [messages, setMessages] = useState([]);
   const [composer, setComposer] = useState('');
-  const [busy, setBusy] = useState(false);
-  // Live phase of the running generation (#1070) — fed by the NDJSON stream.
-  const [phase, setPhase] = useState(null);
   const [applying, setApplying] = useState(false);
+  const [applyError, setApplyError] = useState(null);
   const [model, setModel] = useState(null);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
@@ -67,11 +78,20 @@ export default function FlowCopilotPanel({
   const textareaRef = useRef(null);
   const scrollRef = useRef(null);
 
+  // Publish which flow this panel is showing, so the global indicator can hide
+  // while the user is looking at the live phase here (AC13). Retracted on
+  // unmount — the `useHelpSubject` shape.
+  const registerPanel = copilot ? copilot.registerPanel : null;
+  useEffect(() => {
+    if (!registerPanel) return undefined;
+    return registerPanel(scope);
+  }, [registerPanel, scope]);
+
   // Keep the newest message in view.
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, busy]);
+  }, [messages, running, pending, failure]);
 
   useEffect(() => {
     if (autoFocus && textareaRef.current) textareaRef.current.focus();
@@ -91,132 +111,152 @@ export default function FlowCopilotPanel({
     }
   }, [mode, bundle]);
 
-  const setEntry = useCallback((id, patch) => {
-    setMessages(ms => ms.map(m => (m.id === id ? { ...m, ...patch } : m)));
+  // The transient rows of the CURRENT turn, rendered after the durable history.
+  // They live in the provider, so they are rebuilt identically on every remount
+  // — which is what makes AC1–AC3 hold without persisting anything extra.
+  const turnRows = useCallback((p) => {
+    const rows = [];
+    if (p.userText) rows.push({ id: 'turn-user', role: 'user', content: p.userText });
+    rows.push({
+      id: `turn-proposal-${p.id}`, role: 'assistant', status: 'proposed',
+      summary: p.summary, changes: p.changes, lints: p.lints, ok: p.ok,
+      bundle: p.bundle, hasPreview: !!p.graph,
+    });
+    return rows;
   }, []);
 
-  const send = useCallback(async (text) => {
-    const trimmed = (text || '').trim();
-    if (!trimmed || busy || mode !== 'draft' || !bundle) return;
-    const userEntry = { id: nextId(), role: 'user', content: trimmed };
-    const history = [...messagesRef.current, userEntry];
-    setMessages(history);
-    setComposer('');
-    setBusy(true);
-    setPhase(null);
-    try {
-      // The endpoint streams NDJSON progress (#1070): request-shape/provider
-      // errors come back as plain non-ok JSON before any streaming starts; an
-      // OK response is a phase stream terminated by a result or error event.
-      let res, body;
-      try {
-        res = await fetch('/api/process/copilot', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...assistHeaders() },
-          body: JSON.stringify({ messages: toApiMessages(history), bundle }),
-        });
-        if (!res.ok) {
-          if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
-          const errBody = await res.json().catch(() => null);
-          if (errBody && errBody.code) notifyAssistError(errBody.code);
-          setMessages(ms => [...ms, {
-            id: nextId(), role: 'error', retryText: trimmed,
-            ...copilotErrorInfo(res.status, errBody && errBody.error),
-          }]);
-          return;
-        }
-        body = await consumeCopilotStream(res, setPhase);
-      } catch (e) {
-        // Network failure, a terminal error event, or a dropped connection
-        // mid-stream — retryable error row, composer re-enabled.
-        setMessages(ms => [...ms, {
-          id: nextId(), role: 'error', retryText: trimmed,
-          ...copilotErrorInfo(e.status, e.message),
-        }]);
-        return;
-      }
-      // Derive the canvas preview graph exactly like the import path does. A
-      // strict-invalid best-effort bundle (ok:false, invalid-bundle) fails this
-      // build — the card still shows the findings, just without a canvas render.
-      let graph = null;
-      if (body.bundle) {
-        try { graph = await apiCall('POST', '/api/flows/graph', { processTemplate: body.bundle }); }
-        catch { /* no preview for a strict-invalid bundle */ }
-      }
-      const entry = {
-        id: nextId(), role: 'assistant', status: 'proposed',
-        summary: body.summary || '', changes: Array.isArray(body.changes) ? body.changes : [],
-        lints: Array.isArray(body.lints) ? body.lints : [], ok: !!body.ok,
-        bundle: body.bundle, hasPreview: !!graph,
-      };
-      if (body.model) setModel(body.model);
-      // A new proposal retires every older still-actionable card. Computed
-      // synchronously off the send-time history (the composer is disabled
-      // while busy, so nothing interleaves) and persisted to the draft (#1071).
-      const next = [...supersedePending(history), entry];
-      messagesRef.current = next;
-      setMessages(next);
-      if (onPersistHistory) onPersistHistory(toPersistedMessages(next));
-      if (onPreview) onPreview(graph ? { bundle: body.bundle, graph, ok: !!body.ok } : null);
-    } finally {
-      setBusy(false);
-      setPhase(null);
+  const rendered = useMemo(() => {
+    const rows = [...messages];
+    if (running) {
+      if (view.userText) rows.push({ id: 'turn-user', role: 'user', content: view.userText });
+    } else if (pending) {
+      rows.push(...turnRows(pending).map(r => (
+        r.role === 'assistant' ? { ...r, applyError } : r
+      )));
+    } else if (failure) {
+      if (failure.retryText) rows.push({ id: 'turn-user', role: 'user', content: failure.retryText });
+      rows.push({
+        id: 'turn-error', role: 'error', retryText: failure.retryText,
+        kind: failure.kind, message: failure.message,
+      });
     }
-  }, [busy, mode, bundle, onPreview, onPersistHistory]);
+    return rows;
+  }, [messages, running, pending, failure, view, turnRows, applyError]);
 
-  const apply = useCallback(async (entry) => {
-    if (!entry || !entry.ok || applying) return;
+  // Model badge in the header — carried by the finished turn (AC15).
+  useEffect(() => { if (pending && pending.model) setModel(pending.model); }, [pending]);
+
+  // Canvas preview (#1069) follows this scope's pending proposal, so reopening
+  // the panel restores the read-only preview + banner rather than showing the
+  // draft underneath (AC2/AC6). Clearing on unmount is the parent's job — it
+  // owns the preview state and drops it in onClose.
+  useEffect(() => {
+    if (!onPreview) return;
+    onPreview(pending && pending.graph ? { bundle: pending.bundle, graph: pending.graph, ok: !!pending.ok } : null);
+  }, [pending, onPreview]);
+
+  // Persist the finished turn's history exactly when it used to be persisted
+  // (AC7): once, as soon as the turn produces a proposal. `toPersistedMessages`
+  // maps a still-`proposed` card to `superseded`, which is #1071's rule for a
+  // proposal whose bundle is deliberately not stored. Keyed on the turn id so a
+  // remount does not re-write it, and the rows are NOT committed into
+  // `messages` — the provider is still the one rendering them, and committing
+  // would duplicate the card.
+  const persistedTurnRef = useRef(null);
+  useEffect(() => {
+    if (!pending || !onPersistHistory || persistedTurnRef.current === pending.id) return;
+    persistedTurnRef.current = pending.id;
+    onPersistHistory(toPersistedMessages([...messagesRef.current, ...turnRows(pending)]));
+  }, [pending, onPersistHistory, turnRows]);
+
+  const send = useCallback((text) => {
+    const trimmed = (text || '').trim();
+    if (!trimmed || mode !== 'draft' || !bundle || !copilot) return;
+    // A running turn owns the tab (AC4) — the composer's own decision already
+    // refuses this, and startTurn refuses it again server-of-last-resort.
+    const history = [...messagesRef.current, { role: 'user', content: trimmed }];
+    setComposer('');
+    setApplyError(null);
+    copilot.startTurn({
+      scope,
+      flowName: (bundle && bundle.name) || '',
+      userText: trimmed,
+      apiMessages: toApiMessages(history),
+      bundle,
+    });
+  }, [mode, bundle, copilot, scope]);
+
+  /** Stop the running turn (AC8) — inert once pressed, the `stopBusy` rule. */
+  const stop = useCallback(() => { if (copilot) copilot.stopTurn(); }, [copilot]);
+
+  const apply = useCallback(async () => {
+    if (!pending || !pending.ok || applying) return;
     setApplying(true);
+    setApplyError(null);
     try {
-      // The applied status rides along in the same draft write (#1071) — one
-      // PUT persists bundle + history atomically.
-      const next = messagesRef.current.map(m => (m.id === entry.id ? { ...m, status: 'applied', applyError: null } : m));
-      await onApplyBundle(entry.bundle, toPersistedMessages(next));
+      // Commit the turn into the durable history with `applied`, then write it
+      // with the bundle in ONE PUT (#1071) — the same path as before.
+      const committed = turnRows(pending).map(r => (
+        { ...r, id: nextId(), ...(r.role === 'assistant' ? { status: 'applied' } : {}) }
+      ));
+      const next = [...messagesRef.current, ...committed];
+      await onApplyBundle(pending.bundle, toPersistedMessages(next));
       messagesRef.current = next;
       setMessages(next);
+      copilot.resolvePending(pending.id);
       if (onPreview) onPreview(null);
     } catch (e) {
-      setEntry(entry.id, { applyError: e.message || 'Apply failed' });
+      // A draft deleted while its turn ran is named as such rather than read
+      // like a transient write failure (edge case).
+      setApplyError(applyFailureNotice(e));
     } finally {
       setApplying(false);
     }
-  }, [applying, onApplyBundle, onPreview, setEntry]);
+  }, [pending, applying, onApplyBundle, onPreview, copilot, scope, turnRows]);
 
-  const discard = useCallback((entry) => {
-    if (!entry) return;
-    const next = messagesRef.current.map(m => (m.id === entry.id ? { ...m, status: 'discarded' } : m));
+  const discard = useCallback(() => {
+    if (!pending) return;
+    const committed = turnRows(pending).map(r => (
+      { ...r, id: nextId(), ...(r.role === 'assistant' ? { status: 'discarded', bundle: null } : {}) }
+    ));
+    const next = [...messagesRef.current, ...committed];
     messagesRef.current = next;
     setMessages(next);
     if (onPersistHistory) onPersistHistory(toPersistedMessages(next));
+    copilot.resolvePending(pending.id);
+    setApplyError(null);
     if (onPreview) onPreview(null);
     if (textareaRef.current) textareaRef.current.focus();
-  }, [onPreview, onPersistHistory]);
+  }, [pending, onPreview, onPersistHistory, copilot, scope, turnRows]);
 
   const retry = useCallback((entry) => {
-    // Strip the error row AND the user turn that failed (send() re-appends it —
-    // resending on top would duplicate the turn). Computed synchronously and
-    // written through the ref so the immediate send() sees the cleaned history,
-    // not the pre-setState snapshot.
-    let base = messagesRef.current.filter(m => m.id !== entry.id);
-    const last = base[base.length - 1];
-    if (last && last.role === 'user' && last.content === entry.retryText) base = base.slice(0, -1);
-    messagesRef.current = base;
-    setMessages(base);
+    // The failed user turn was never committed to the durable history (it lives
+    // on the failure record), so retrying only clears the error and resends —
+    // no stripping needed, unlike the pre-#2087 path.
+    if (copilot) copilot.clearFailure(scope);
     send(entry.retryText);
-  }, [send]);
+  }, [copilot, scope, send]);
 
-  // Expose the latest actionable proposal to the parent's canvas banner, so
+  // Expose the pending proposal to the parent's canvas banner, so
   // "Apply / Discard" there and in the card are the same handlers.
-  const latest = latestProposal(messages);
   useEffect(() => {
-    if (!actionsRef) return;
-    actionsRef.current = latest
-      ? { apply: () => apply(latest), discard: () => discard(latest), ok: latest.ok, busy: applying }
+    if (!actionsRef) return undefined;
+    actionsRef.current = pending
+      ? { apply, discard, ok: pending.ok, busy: applying }
       : null;
     return () => { if (actionsRef) actionsRef.current = null; };
-  }, [actionsRef, latest, apply, discard, applying]);
+  }, [actionsRef, pending, apply, discard, applying]);
 
-  const sendDisabled = busy || !composer.trim() || (mode === 'draft' && !bundle);
+  // Send vs Stop, from the one pure decision (mirrors composer-action.js).
+  const action = decideCopilotAction({
+    scope,
+    turnScope: view ? view.turnScope : null,
+    flowName: view ? view.turnFlowName : '',
+    stopping: view ? view.stopping : false,
+    hasText: !!composer.trim(),
+    canSend: mode === 'draft' && !!bundle,
+  });
+  const busy = running;
 
   return (
     <div style={{
@@ -278,18 +318,21 @@ export default function FlowCopilotPanel({
         <>
           {/* Message list */}
           <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-            {messages.length === 0 && !busy && (
+            {rendered.length === 0 && !busy && (
               <EmptyState onPick={(p) => { setComposer(p); if (textareaRef.current) textareaRef.current.focus(); }} />
             )}
-            {messages.map(m => (
+            {rendered.map(m => (
               m.role === 'user' ? <UserBubble key={m.id} entry={m} />
                 : m.role === 'assistant' ? (
                   <ProposalCard
                     key={m.id} entry={m}
-                    actionable={latest ? latest.id === m.id : false}
+                    // Only the provider-held pending proposal is actionable —
+                    // every committed card is a status line (#1069's rule,
+                    // now with one obvious owner).
+                    actionable={m.status === 'proposed'}
                     applying={applying}
-                    onApply={() => apply(m)}
-                    onDiscard={() => discard(m)}
+                    onApply={apply}
+                    onDiscard={discard}
                   />
                 ) : <ErrorRow key={m.id} entry={m} busy={busy} onRetry={() => retry(m)} />
             ))}
@@ -318,7 +361,7 @@ export default function FlowCopilotPanel({
                   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(composer); }
                 }}
                 rows={2}
-                placeholder={messages.length === 0
+                placeholder={rendered.length === 0
                   ? 'Describe the flow — roles, hand-offs, human gates…'
                   : 'Refine the flow — e.g. “add a security reviewer”…'}
                 style={{
@@ -329,25 +372,37 @@ export default function FlowCopilotPanel({
                   outline: 'none', opacity: busy ? 0.6 : 1, boxSizing: 'border-box',
                 }}
               />
+              {/* One primary action, Send or Stop (#2087, D2) — the shape
+                  Agent Chat's unified Stop (#1427) established. The send button
+                  used to become a disabled spinner with no stop affordance at
+                  all, so a turn could only be abandoned, never cancelled. */}
               <button
-                onClick={() => send(composer)}
-                disabled={sendDisabled}
-                title="Send (⌘/Ctrl+Enter)"
-                aria-label="Send"
+                onClick={() => (action.mode === 'stop' ? stop() : send(composer))}
+                disabled={!action.enabled}
+                title={action.mode === 'stop'
+                  ? 'Stop this Copilot turn'
+                  : (action.refusal || 'Send (⌘/Ctrl+Enter)')}
+                aria-label={action.mode === 'stop' ? 'Stop' : 'Send'}
                 style={{
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   width: 34, height: 34, flexShrink: 0,
-                  background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+                  background: action.mode === 'stop' ? 'var(--eb-status-error)' : 'var(--eb-accent-primary)',
+                  color: 'var(--eb-text-inverted)',
                   border: 'none', borderRadius: 'var(--eb-radius-md)',
-                  cursor: sendDisabled ? 'not-allowed' : 'pointer', opacity: sendDisabled ? 0.5 : 1,
+                  cursor: action.enabled ? 'pointer' : 'not-allowed', opacity: action.enabled ? 1 : 0.5,
                 }}
               >
-                {busy ? <Loader2 size={15} style={{ animation: 'eb-copilot-spin 1s linear infinite' }} /> : <Send size={15} />}
+                {action.mode === 'stop' ? <Square size={14} /> : <Send size={15} />}
               </button>
             </div>
             <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--eb-space-2)' }}>
-              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-                Every answer is a proposal — nothing changes the draft until you apply it.
+              <span style={{
+                fontSize: 'var(--eb-text-xs)',
+                color: action.refusal ? 'var(--eb-status-warning)' : 'var(--eb-text-muted)',
+              }}>
+                {/* AC4: a refused second turn states the reason rather than
+                    silently queueing or running in parallel. */}
+                {action.refusal || 'Every answer is a proposal — nothing changes the draft until you apply it.'}
               </span>
               {bundle && <BundleSizeHint bundle={bundle} />}
             </div>

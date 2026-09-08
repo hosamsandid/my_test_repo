@@ -75,6 +75,17 @@ const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assessConversionEligibility, planTeamConversion } = require("./team-conversion");
 const { syncAgentRepoPlan, summarizeRepoResults, repoDivergence } = require("./repo-sync");
+// Agent-scoped repositories (#2067): a repository attached to ONE agent,
+// outside its Working Environment. Every decision — shape, the merged
+// environment+agent view, collision/credential refusals, what a removal
+// deletes — lives in the pure module; this file is its fs/clone half.
+const {
+  normalizeAgentRepositories,
+  resolveAgentRepositories,
+  planAgentRepoAttach,
+  planAgentRepoDetach,
+  removalFacts,
+} = require("./agent-repositories");
 const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
 const { assembleClaudeMd, buildMemoryHint, SCOPED_KNOWLEDGE_FILENAME } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
@@ -1245,10 +1256,15 @@ function saveAgentPrompt(id, prompt, role, env, blueprintId = null) {
   // #1547: same discipline as skills — resolve the plugin grant from the config
   // here rather than threading it through every caller.
   const plugins = agentPluginDisplays(cfg);
+  // #2067: same discipline as skills/plugins/mounts — the agent-scoped
+  // repository list is resolved from the config HERE rather than threaded
+  // through every caller, so no path can rebuild a prompt that omits (or
+  // invents) a repository the workspace actually has.
+  const agentRepositories = normalizeAgentRepositories(cfg && cfg.agentRepositories);
   // Reference mode: CLAUDE.md points at AGENT-PROMPT.md instead of inlining it.
   fs.writeFileSync(
     path.join(dir, "CLAUDE.md"),
-    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, plugins, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef, contextMounts }),
+    buildAgentClaudeMd(prompt, role, env, blueprintId, { autonomous, skills, skillDescriptions, plugins, agentRepositories, promptRef: AGENT_PROMPT_FILENAME, knowledgeDigestRef, contextMounts }),
   );
 }
 
@@ -2347,6 +2363,10 @@ function buildAgentClaudeMd(agentPrompt, role, env, blueprintId = null, opts = {
     // enumerating each folder with its in-container path and access mode (#1289).
     // Empty → the section is absent (byte-identical to a no-mount agent).
     contextMounts: Array.isArray(opts.contextMounts) ? opts.contextMounts : [],
+    // #2067: repositories attached to this ONE agent, outside its Working
+    // Environment. Listed alongside the inherited ones and counted by the
+    // Git-section gate. Empty → byte-identical to a pre-#2067 agent.
+    agentRepositories: normalizeAgentRepositories(opts.agentRepositories),
   });
 }
 
@@ -2640,8 +2660,16 @@ function seedAgentWorkspace(id, env, opts = {}) {
     : ((env && Array.isArray(env.mcpServers)) ? env.mcpServers : []);
   const mcpSeeded = seedAgentMcpServers(dest, mcpRefs, warnings);
 
-  // 5. Optional git clone(s)
-  const clones = cloneEnvironmentRepositories(dest, env, warnings);
+  // 5. Optional git clone(s) — the environment's, then this agent's own
+  //    (#2067). Agent-scoped repositories are cloned by EVERY seed, which is
+  //    what makes the attachment survive a container respawn and a workspace
+  //    re-seed (AC5/D9): reset-to-stub wipes everything but config.json, and
+  //    config.json is where the attachment lives, so the next activation
+  //    re-clones it rather than leaving the prompt naming a missing directory.
+  const clones = [
+    ...cloneEnvironmentRepositories(dest, env, warnings),
+    ...cloneAgentScopedRepositories(dest, env, (loadAgentConfig(id) || {}).agentRepositories, warnings),
+  ];
 
   // 6. Shared team Knowledge Base working copy (Shared Agent Learning, Phase 1).
   //    Only when the autonomy dial is on (>= 1); best-effort, never fails the seed.
@@ -2811,6 +2839,26 @@ function cloneEnvironmentRepositories(targetDir, env, warnings) {
     if (!repo?.url) continue;
     try {
       const info = cloneRepository(targetDir, repo, env?.githubTokenId || null, env?.id || null);
+      if (info) results.push(info);
+    } catch (err) {
+      warnings.push(`git clone (${repo.url}): ${err.message}`);
+    }
+  }
+  return results;
+}
+
+// Clone the repositories attached to ONE agent (#2067). Same clone code and
+// same directory convention as an environment repository — what differs is the
+// cache: `envId` is passed as null on purpose, so an agent-scoped repository
+// neither reads from nor seeds the per-environment `_repo-cache`. Seeding it
+// would let a sibling agent later copy a working tree it was never granted,
+// which is precisely what "attaching changes exactly one agent" (AC10) forbids.
+function cloneAgentScopedRepositories(targetDir, env, agentRepositories, warnings) {
+  const repos = normalizeAgentRepositories(agentRepositories);
+  const results = [];
+  for (const repo of repos) {
+    try {
+      const info = cloneRepository(targetDir, repo, env?.githubTokenId || null, null);
       if (info) results.push(info);
     } catch (err) {
       warnings.push(`git clone (${repo.url}): ${err.message}`);
@@ -7003,7 +7051,14 @@ function performGitPanelAction(id, env, body = {}) {
     };
   }
   const remoteUrl = remoteRes.out.trim();
-  const matched = gitPanelOps.matchEnvRepoByRemote(remoteUrl, env?.repositories);
+  // #2067 AC18: the Git panel's update acts on whatever `.git` it finds in the
+  // workspace, which now includes agent-scoped repositories. Their SSH key is
+  // recorded on the AGENT, not the environment, so both lists have to be
+  // offered here or an agent-scoped SSH repo would fail to fetch with no key.
+  const matched = gitPanelOps.matchEnvRepoByRemote(remoteUrl, [
+    ...(Array.isArray(env?.repositories) ? env.repositories : []),
+    ...normalizeAgentRepositories((loadAgentConfig(id) || {}).agentRepositories),
+  ]);
   const gitEnv = agentGitOps.buildRepoGitEnv({
     env,
     repoUrl: remoteUrl,
@@ -7091,8 +7146,15 @@ function performGitPanelAction(id, env, body = {}) {
 //
 // Per-repo failures are caught and surfaced via the `error` field — one bad
 // repo never aborts the rest of the report.
-function inspectAgentRepoStatuses(agentId, env) {
-  const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+// `extraRepos` (#2067) lets a caller add the agent's OWN attached repositories
+// to the report. They are on disk exactly like an environment one, so the
+// hand-off readiness gate and the removal confirmation both need their real
+// dirty/unpushed state rather than a guess.
+function inspectAgentRepoStatuses(agentId, env, extraRepos = []) {
+  const repos = [
+    ...(Array.isArray(env?.repositories) ? env.repositories : []),
+    ...(Array.isArray(extraRepos) ? extraRepos : []),
+  ];
   const workspace = agentDir(agentId);
   const results = [];
 
@@ -9149,7 +9211,13 @@ class Orchestrator {
     }
     const environmentId = cfg.environmentId || null;
     const env = environmentId ? loadEnvironment(environmentId) : null;
-    const repositories = Array.isArray(env?.repositories) ? env.repositories : [];
+    const envRepos = Array.isArray(env?.repositories) ? env.repositories : [];
+    // #2067 AC11: this agent's OWN attachments are healed by the same pass, so
+    // a sync never leaves an attached repository missing — and because the list
+    // is read from THIS agent's config, the environment fan-out (Sync all
+    // agents) can neither propagate it to a sibling nor drop it here.
+    const ownRepos = normalizeAgentRepositories(cfg.agentRepositories);
+    const repositories = [...envRepos, ...ownRepos];
     const workspace = agentDir(agentId);
 
     // A stub / never-materialized agent has no workspace on disk — there is
@@ -9158,17 +9226,253 @@ class Orchestrator {
       return { agentId, environmentId, repos: [], noWorkspace: true, summary: summarizeRepoResults([]) };
     }
 
+    const ownUrls = new Set(ownRepos.map((r) => r.url));
     // The plan is derived from the DECLARED list against the ACTUAL clones
     // (#2066), which is why the status probe runs first: it is what lets one
     // core serve the save-time offer, the out-of-date catch-up and this
-    // per-agent panel without them being able to disagree (AC21).
+    // per-agent panel without them being able to disagree (AC21). The declared
+    // list here is env + this agent's own attachments (#2067 AC11), and the
+    // probe is handed those attachments too so an agent-scoped clone is
+    // reconciled rather than read as no-longer-declared.
     const repos = syncAgentRepoPlan(repositories, {
-      statuses: inspectAgentRepoStatuses(agentId, env),
-      clone: (repo) => cloneRepository(workspace, repo, env?.githubTokenId || null, env?.id || null),
+      statuses: inspectAgentRepoStatuses(agentId, env, ownRepos),
+      // An agent-scoped repo deliberately bypasses the per-env clone cache (see
+      // cloneAgentScopedRepositories) — one agent's private repository must
+      // never become a sibling's copy source.
+      clone: (repo) => cloneRepository(
+        workspace,
+        repo,
+        env?.githubTokenId || null,
+        ownUrls.has(String(repo.url || "").trim()) ? null : (env?.id || null),
+      ),
       adjust: (repo, status, plan) => adjustRepoClone(workspace, repo, status, plan, env?.githubTokenId || null),
       listClones: () => listWorkspaceClones(workspace),
     });
     return { agentId, environmentId, repos, summary: summarizeRepoResults(repos) };
+  }
+
+  // ── Agent-scoped repositories (#2067) ──────────────────────────────────
+  // Attach / detach a repository to ONE agent, outside its Working
+  // Environment. Every rule lives in the pure agent-repositories module; the
+  // three methods below are its fs half: read the config, plan, clone or
+  // delete, persist, rebuild the prompt.
+  //
+  // Deliberately NOT a respawn (unlike the context-mount path, whose mount
+  // only exists at container-create time): the workspace volume is shared with
+  // the running container, so a clone appears inside the agent immediately —
+  // the same additive, no-respawn mechanism as #1342's Sync repositories. The
+  // prompt is rebuilt so the NEXT run names the repository (AC6).
+
+  // The merged environment+agent view every surface reads, plus the git state
+  // of each working copy so a removal confirmation can name what would be lost
+  // (AC9) without a second round-trip.
+  agentRepositoriesView(agentId, { withStatus = true } = {}) {
+    const cfg = loadAgentConfig(agentId);
+    if (!cfg) {
+      const e = new Error(`Agent '${agentId}' not found`);
+      e.code = "not-found";
+      throw e;
+    }
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    const own = normalizeAgentRepositories(cfg.agentRepositories);
+    const resolved = resolveAgentRepositories(env, own);
+    let statuses = [];
+    if (withStatus && fs.existsSync(agentDir(agentId))) {
+      try {
+        statuses = inspectAgentRepoStatuses(agentId, env, own);
+      } catch (err) {
+        console.warn(`[Orchestrator] repo status for ${agentId}: ${err.message}`);
+      }
+    }
+    const byUrl = new Map(statuses.map((s) => [s.url, s]));
+    return {
+      agentId,
+      environmentId: cfg.environmentId || null,
+      role: cfg.role || "agent",
+      // A team record has no workspace and a stub has none yet — the surfaces
+      // disable the action with a stated reason rather than hiding it (AC16).
+      materialized: Boolean(cfg.token),
+      busy: agentBusyState(agentId).busy === true,
+      hasGithubToken: Boolean(env && env.githubTokenId),
+      repositories: resolved.map((r) => ({
+        ...r,
+        facts: r.scope === "agent" ? removalFacts(byUrl.get(r.url) || null) : null,
+      })),
+    };
+  }
+
+  attachAgentRepository(agentId, repo) {
+    const cfg = loadAgentConfig(agentId);
+    if (!cfg) {
+      const e = new Error(`Agent '${agentId}' not found`);
+      e.code = "not-found";
+      throw e;
+    }
+    if (cfg.role === "team") {
+      const e = new Error(
+        "A team record has no container and no workspace of its own — attach the repository to one of its members instead.",
+      );
+      e.code = "no-workspace";
+      throw e;
+    }
+    const workspace = agentDir(agentId);
+    if (!cfg.token || !fs.existsSync(workspace)) {
+      const e = new Error(
+        "This agent has not been materialized yet, so it has no workspace to clone into. Materialize it first.",
+      );
+      e.code = "no-workspace";
+      throw e;
+    }
+
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    // Directory names already taken in the workspace root — a sibling clone or
+    // an ordinary folder the agent created. Read here so the pure planner can
+    // refuse a collision BEFORE anything is written (AC13).
+    let occupiedNames = [];
+    try {
+      occupiedNames = fs.readdirSync(workspace, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name);
+    } catch { /* unreadable workspace → the clone itself will fail honestly */ }
+
+    const plan = planAgentRepoAttach({
+      env,
+      agentRepositories: cfg.agentRepositories,
+      repo,
+      occupiedNames,
+      credentials: {
+        // Both conditions cloneRepository will actually apply: the id is in
+        // the registry AND the key file it would read still exists.
+        sshKeyIds: loadSshKeyIndex()
+          .map((k) => k && k.id)
+          .filter((keyId) => keyId && fs.existsSync(path.join(SSH_KEYS_DIR, keyId))),
+        hasGithubToken: Boolean(env && env.githubTokenId),
+      },
+    });
+    if (!plan.ok) {
+      const e = new Error(plan.message);
+      e.code = plan.code;
+      throw e;
+    }
+
+    // Clone FIRST, persist second: a failed clone must leave neither a config
+    // entry naming a repository that is not there nor a half-cloned directory
+    // (AC13). cloneRepository throws on failure and never leaves the target
+    // dir behind on the error path, so a throw here writes nothing at all.
+    const warnings = [];
+    const clones = cloneAgentScopedRepositories(workspace, env, [plan.repo], warnings);
+    if (warnings.length) {
+      // Best-effort cleanup of anything a partial clone left behind, then
+      // surface the real git error rather than a generic failure.
+      const target = path.join(workspace, plan.dirName);
+      try {
+        if (fs.existsSync(target) && !fs.existsSync(path.join(target, ".git"))) {
+          fs.rmSync(target, { recursive: true, force: true });
+        }
+      } catch { /* best effort */ }
+      const e = new Error(warnings[0]);
+      e.code = "clone-failed";
+      throw e;
+    }
+    // cloneRepository REPORTS rather than throws when the target directory
+    // already exists — it does not overwrite. The planner refuses that case
+    // from the directory listing it read a moment earlier, so reaching here
+    // means the directory appeared in between (a concurrent attach, or the
+    // agent itself creating a folder mid-run). Persisting now would bind the
+    // entry to a directory this clone did not produce, so refuse instead and
+    // leave the newcomer's directory untouched.
+    if (clones.some((c) => c && c.skipped)) {
+      const e = new Error(
+        `\`./${plan.dirName}/\` appeared in the workspace while the clone was starting, so ` +
+        `nothing was cloned and nothing was attached. Check what is at that path and try again.`,
+      );
+      e.code = "dir-name-occupied";
+      throw e;
+    }
+
+    cfg.agentRepositories = plan.agentRepositories;
+    saveAgentConfig(agentId, cfg);
+    this.agentConfigs.set(agentId, { config: cfg });
+
+    // Rebuild + reseed CLAUDE.md so the next run names the repository (AC6),
+    // including the git / gh-as-agent block a repo-less environment used to
+    // suppress (AC14). The shared rebuild helper is best-effort by contract:
+    // the repository is already on disk, so a prompt-rebuild failure must not
+    // undo a good clone. Deliberately no respawn — the workspace volume is
+    // shared with the running container and CLAUDE.md is re-read per
+    // invocation, so this is the #1342 additive path, not the context-mount one.
+    rebuildAgentPrompt(agentId, "agent-repository-attached").catch(() => {});
+
+    return {
+      agentId,
+      repo: plan.repo,
+      dirName: plan.dirName,
+      clones,
+      ...this.agentRepositoriesView(agentId),
+    };
+  }
+
+  detachAgentRepository(agentId, url) {
+    const cfg = loadAgentConfig(agentId);
+    if (!cfg) {
+      const e = new Error(`Agent '${agentId}' not found`);
+      e.code = "not-found";
+      throw e;
+    }
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    const plan = planAgentRepoDetach({ env, agentRepositories: cfg.agentRepositories, url });
+    if (!plan.ok) {
+      const e = new Error(plan.message);
+      e.code = plan.code;
+      throw e;
+    }
+    // AC17: a removal deletes files under the agent's own working directory,
+    // so it is refused while a run is in flight rather than corrupting that
+    // run's view of the workspace. (Attaching is additive and needs no gate.)
+    const { busy, activeTriggers } = agentBusyState(agentId);
+    if (busy) {
+      const e = new Error(
+        "This agent is running a session. Removing a repository deletes files it may be using — wait until the run ends.",
+      );
+      e.code = "busy";
+      e.activeTriggers = activeTriggers;
+      throw e;
+    }
+
+    // Config first here, working copy second — the inverse of attach, for the
+    // same reason: if the delete fails the entry is already gone, so a retry
+    // sees `not-attached` rather than re-deleting; a leftover directory is
+    // visible in the tree and removable by hand, whereas an entry pointing at
+    // deleted files would keep the prompt naming a missing repository.
+    cfg.agentRepositories = plan.agentRepositories;
+    saveAgentConfig(agentId, cfg);
+    this.agentConfigs.set(agentId, { config: cfg });
+    rebuildAgentPrompt(agentId, "agent-repository-detached").catch(() => {});
+
+    let deleted = false;
+    if (plan.deleteWorkingCopy) {
+      const target = path.join(agentDir(agentId), plan.dirName);
+      try {
+        if (fs.existsSync(target)) {
+          fs.rmSync(target, { recursive: true, force: true });
+          deleted = true;
+        }
+      } catch (err) {
+        console.error(`[Orchestrator] repo detach ${agentId}/${plan.dirName}: ${err.message}`);
+        const e = new Error(`The attachment was removed, but the working copy could not be deleted: ${err.message}`);
+        e.code = "delete-failed";
+        throw e;
+      }
+    }
+
+    return {
+      agentId,
+      repo: plan.repo,
+      dirName: plan.dirName,
+      deleted,
+      keptReason: plan.keptReason,
+      ...this.agentRepositoriesView(agentId),
+    };
   }
 
   // Read-only sibling of syncAgentRepositories: which declared repositories
@@ -9331,6 +9635,14 @@ class Orchestrator {
       environmentId: cfg.environmentId,
       ...(cfg.parentTeamId && { parentTeamId: cfg.parentTeamId }),
       ...(cfg.blueprintId && { blueprintId: cfg.blueprintId }),
+      // #2067 D9/AC5: the attachment must survive a workspace re-seed. This
+      // wipe keeps config.json alone, so config.json is the only place the
+      // list can survive — dropping it here would leave the next activation
+      // re-cloning the environment's repositories and silently losing the
+      // agent-scoped one, while the rebuilt prompt no longer names it either.
+      ...(normalizeAgentRepositories(cfg.agentRepositories).length
+        ? { agentRepositories: normalizeAgentRepositories(cfg.agentRepositories) }
+        : {}),
       enabled: false,
     };
     saveAgentConfig(id, stripped);
@@ -12442,6 +12754,59 @@ async function main() {
       return;
     }
 
+    // ── Agent-scoped repositories (#2067) ───────────────────────────────────
+    // GET    → the merged environment+agent list, each agent entry carrying the
+    //          git facts a removal confirmation needs (AC7/AC9).
+    // POST   → attach one repository to THIS agent and clone it (AC4/AC5).
+    // DELETE → detach it and delete the working copy (AC9).
+    //
+    // Authorization lives in the console (the only side that knows the caller):
+    // `canManageAgent`, the PATCH /api/agents/:id/context-mount precedent.
+    // Every refusal maps a code from the pure planner onto an HTTP status so
+    // the console can relay the message verbatim instead of re-wording it.
+    const agentReposMatch = req.url.match(/^\/internal\/agents\/([^/?]+)\/repositories(?:\?.*)?$/);
+    if (agentReposMatch && ['GET', 'POST', 'DELETE'].includes(req.method)) {
+      const id = decodeURIComponent(agentReposMatch[1]);
+      // Refusal code → HTTP status. A collision / credential / busy refusal is
+      // a 409 (the request is well-formed, the state says no); a malformed body
+      // is a 400; an unknown agent or url is a 404.
+      const statusFor = (code) => {
+        if (code === 'not-found' || code === 'not-attached') return 404;
+        if (code === 'url-required') return 400;
+        if (code === 'no-workspace' || code === 'environment-repository') return 409;
+        return 409;
+      };
+      const respond = (status, payload) => {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(payload));
+      };
+      const run = (fn) => {
+        try {
+          respond(200, fn());
+        } catch (err) {
+          const code = err.code || 'error';
+          if (code === 'error') console.error(`[Orchestrator] agent-repositories ${id}: ${err.message}`);
+          respond(
+            code === 'error' ? 500 : statusFor(code),
+            { error: err.message, code, ...(err.activeTriggers ? { activeTriggers: err.activeTriggers } : {}) },
+          );
+        }
+      };
+      if (req.method === 'GET') {
+        run(() => orchestrator.agentRepositoriesView(id));
+        return;
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* treated as empty → url-required */ }
+        if (req.method === 'POST') run(() => orchestrator.attachAgentRepository(id, parsed));
+        else run(() => orchestrator.detachAgentRepository(id, parsed.url));
+      });
+      return;
+    }
+
     // Read-only divergence probe for one environment's agents (#2066 D4). POST
     // because the caller supplies the agent set it is allowed to see — scoping
     // is the console's job, not the orchestrator's.
@@ -12541,7 +12906,10 @@ async function main() {
           return;
         }
         const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-        const repos = inspectAgentRepoStatuses(id, env);
+        // #2067: an agent-scoped repository is a working copy like any other,
+        // so the hand-off pre-flight must see its uncommitted / unpushed work
+        // too — otherwise a hand-off reads "ready" over losable changes.
+        const repos = inspectAgentRepoStatuses(id, env, normalizeAgentRepositories(cfg.agentRepositories));
         const summary = {
           totalRepos: repos.length,
           missing: repos.filter((r) => !r.exists).length,

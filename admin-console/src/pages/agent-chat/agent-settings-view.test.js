@@ -78,6 +78,16 @@ test('a re-provision says the run ended; a deferred one does not claim it did', 
   assert.doesNotMatch(restartNoticeText(null), /re-provisioned/);
 });
 
+test('#2067: a repository change never claims a restart the conversation did not have', () => {
+  const notice = restartNoticeText({ kind: 'agent-repositories' });
+  assert.doesNotMatch(notice, /re-provisioned|fresh session|context folder/i);
+  assert.match(notice, /immediately/);
+  assert.match(notice, /next run/);
+  assert.match(notice, /conversation above is unaffected/);
+  // `respawned` is meaningless on this path and must not flip the wording.
+  assert.equal(notice, restartNoticeText({ kind: 'agent-repositories', respawned: true }));
+});
+
 test('the unsaved banner only speaks when there is something unsaved', () => {
   assert.equal(unsavedDraftNotice(false), '');
   assert.match(unsavedDraftNotice(true), /Unsaved changes/);

@@ -20,6 +20,8 @@ const {
   buildRepairMessage,
   measureCopilotSystemPrompt,
   runCopilot,
+  COPILOT_ABORTED,
+  isCopilotAborted,
 } = require('./flow-copilot');
 const { validateProcessTemplate } = require('./process-template');
 
@@ -577,4 +579,134 @@ test('measureCopilotSystemPrompt: oversized components push size above SYSTEM_PR
     bundle: {},
   });
   assert.ok(size > SYSTEM_PROMPT_CHAR_LIMIT, 'oversized format doc alone is enough to exceed the limit');
+});
+
+// ── stopping a turn server-side (#2087, D2 / AC9 / AC11) ──────────────────────
+// Before #2087 `runCopilot` took no signal: a Stop or a disconnect suppressed
+// only the DELIVERY of the result, so up to MAX_REPAIR_ITERATIONS + 1 = 3
+// × 180 s of LLM work kept running, billed, and was discarded.
+
+test('an already-aborted signal issues no LLM request at all', async () => {
+  const ac = new AbortController();
+  ac.abort();
+  let calls = 0;
+  await assert.rejects(
+    () => runCopilot({
+      bundle: undefined,
+      messages: [{ role: 'user', content: 'build it' }],
+      callLlm: async () => { calls++; return reply(fixture()); },
+      formatDoc: 'doc', addendum: 'add',
+      signal: ac.signal,
+    }),
+    (err) => isCopilotAborted(err) && err.code === COPILOT_ABORTED,
+  );
+  assert.equal(calls, 0, 'not one request for a turn stopped before it started');
+});
+
+test('AC9: a stop during iteration 1 produces no iteration-2 request', async () => {
+  // Force a repair iteration the way the existing repair test does — an
+  // invalid claim label always yields an error-level lint — then stop while
+  // the first call is in flight.
+  const bad = fixture();
+  bad.roles[3].triggers[0].claim.add = 'wrong-claim';
+  const ac = new AbortController();
+  const requests = [];
+  await assert.rejects(
+    () => runCopilot({
+      bundle: undefined,
+      messages: [{ role: 'user', content: 'build it' }],
+      callLlm: async (req) => {
+        requests.push(req);
+        ac.abort(); // the user presses Stop while iteration 1 is running
+        return reply(bad);
+      },
+      formatDoc: 'doc', addendum: 'add',
+      signal: ac.signal,
+    }),
+    isCopilotAborted,
+  );
+  assert.equal(requests.length, 1, 'the repair call the loop would otherwise make is never issued');
+});
+
+test('AC11: a stopped turn returns no best-effort proposal even after a good reply', async () => {
+  // Two iterations: the first yields a parseable bundle (so `best` is set and
+  // the pre-#2087 code path would `break` and hand it back), the second is
+  // aborted. A stopped turn must leave nothing to apply.
+  const bad = fixture();
+  bad.roles[3].triggers[0].claim.add = 'wrong-claim';
+  const ac = new AbortController();
+  let calls = 0;
+  await assert.rejects(
+    () => runCopilot({
+      bundle: undefined,
+      messages: [{ role: 'user', content: 'build it' }],
+      callLlm: async () => {
+        calls++;
+        if (calls === 1) return reply(bad);      // parseable, but error-level lints
+        ac.abort();
+        throw new Error('socket destroyed');      // the aborted second call
+      },
+      formatDoc: 'doc', addendum: 'add',
+      signal: ac.signal,
+    }),
+    isCopilotAborted,
+  );
+  assert.equal(calls, 2);
+});
+
+test('a genuine transport failure after a parseable reply still falls back (unchanged)', async () => {
+  // The same shape as the test above but with NO abort: the best-effort break
+  // must still work, so the abort check cannot have swallowed it.
+  const bad = fixture();
+  bad.roles[3].triggers[0].claim.add = 'wrong-claim';
+  let calls = 0;
+  const out = await runCopilot({
+    bundle: undefined,
+    messages: [{ role: 'user', content: 'build it' }],
+    callLlm: async () => {
+      calls++;
+      if (calls === 1) return reply(bad);
+      throw new Error('upstream 502');
+    },
+    formatDoc: 'doc', addendum: 'add',
+    signal: new AbortController().signal, // present but never aborted
+  });
+  assert.equal(calls, 2);
+  assert.equal(out.ok, false);
+  assert.ok(out.bundle, 'best-effort bundle still returned');
+});
+
+test('a stop that lands in the same moment as the result lets exactly one outcome win', async () => {
+  // Edge case: Stop pressed as the reply arrives. The reply is clean, so
+  // without the post-await check the turn would return a proposal for a turn
+  // the user stopped.
+  const ac = new AbortController();
+  await assert.rejects(
+    () => runCopilot({
+      bundle: undefined,
+      messages: [{ role: 'user', content: 'build it' }],
+      callLlm: async () => { ac.abort(); return reply(fixture(), 'built'); },
+      formatDoc: 'doc', addendum: 'add',
+      signal: ac.signal,
+    }),
+    isCopilotAborted,
+  );
+});
+
+test('omitting the signal keeps the loop byte-identical (no signal, no abort path)', async () => {
+  const out = await runCopilot({
+    bundle: undefined,
+    messages: [{ role: 'user', content: 'build the flow' }],
+    callLlm: async () => reply(fixture(), 'built the loop'),
+    formatDoc: 'doc', addendum: 'add',
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.repairIterations, 0);
+});
+
+test('isCopilotAborted only recognises the abort error', () => {
+  assert.equal(isCopilotAborted(new Error('boom')), false);
+  assert.equal(isCopilotAborted(null), false);
+  assert.equal(isCopilotAborted(undefined), false);
+  assert.equal(isCopilotAborted({ code: COPILOT_ABORTED }), true);
 });

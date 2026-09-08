@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 286 374 of 340 000 — 84.2% used, 53 626 left — against
+// neighbours) at 288 483 of 340 000 — 84.8% used, 51 517 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
@@ -160,7 +160,14 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // lists `/flows` among its `seeAlso`, so the crown-holding neighbourhood
 // contains the Flows topic even though the crown is not on `/flows`. Its other
 // docs edit (`docs/process-template-format.md`) costs nothing here, that file
-// not being in CORPUS_FILES. Re-measure rather than trust this comment —
+// not being in CORPUS_FILES. #2053 then renamed the design → live-team action
+// from *Materialize* to **Create team…** everywhere a user reads it, rewriting
+// `create.md` (the crown context's own topic), `flows.md` (its `seeAlso`
+// neighbour, so it lands here too) and the every-context `walkthrough/04-flows.md`
+// + `glossary.md`; re-measured on the merge with #2052's #2060 walkthrough fix
+// already in, that took the crown from 286 374 to **288 483** (84.8%, +2 109 —
+// stated as one total measured together rather than a per-file sum, since all four
+// grow the same crown). Re-measure rather than trust this comment —
 // measureWorstCaseSystemPrompt() sweeps every context and returns which one
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.

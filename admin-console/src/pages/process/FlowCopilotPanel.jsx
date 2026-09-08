@@ -265,7 +265,7 @@ export default function FlowCopilotPanel({
           <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
             Copilot edits a <strong>draft copy</strong> of this team — a live team is never changed
             directly from chat. Open the draft to start; your changes flow back to the team through
-            the usual <em>Materialize… (extend)</em> step.
+            the usual <em>Create team…</em> step, which extends the team it came from.
           </p>
           <button onClick={onEditAsDraft} style={{
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,

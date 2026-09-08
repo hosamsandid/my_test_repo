@@ -114,10 +114,14 @@ test('AC4 — every visible string matches the binding copy inventory', () => {
     CREATE_COPY.flowHeading,
     'Or build a team of agents that work together (a flow)',
   );
+  // #2053 AC14 amended this sentence: see the flowIntro comment in
+  // create-launcher-view.js for why the old wording was the cause rather than a
+  // symptom. Asserted verbatim, like the rest of the inventory.
   assert.equal(
     CREATE_COPY.flowIntro,
-    'A flow is several agents that hand work off to each other. All three options '
-    + 'below end in the same flow — they differ only in how you start.',
+    'A flow is several agents that hand work off to each other. All three build the '
+    + 'same kind of flow — the first ends with a live team, the other two with a design '
+    + 'you turn into a team when it is ready.',
   );
   assert.equal(CREATE_COPY.advancedToggle, 'Advanced options');
 
@@ -301,10 +305,19 @@ test('#1667 Phase D — the hero keeps the "grow it into a team" framing (AC3)',
   }
 });
 
-test('AC3 — the flow group names the concept and says the three options converge', () => {
+test('AC3 — the flow group names the concept, without over-promising the outcome', () => {
   assert.match(CREATE_COPY.flowHeading, /\(a flow\)/);
   assert.match(CREATE_COPY.flowIntro, /A flow is several agents/);
-  assert.match(CREATE_COPY.flowIntro, /end in the same flow/);
+  // #2027 AC3 asked the intro to say the three options CONVERGE, and it did so
+  // as "all three end in the same flow". #2053 D6 amends that: they converge on
+  // the same *canvas*, not on the same outcome — two of the three end in a
+  // draft, which is a document. The convergence claim survives in a form that
+  // is true; the old phrasing must not come back, or the launcher is again
+  // promising a team the canvas does not deliver.
+  assert.doesNotMatch(CREATE_COPY.flowIntro, /end in the same flow/);
+  assert.match(CREATE_COPY.flowIntro, /same kind of flow/);
+  assert.match(CREATE_COPY.flowIntro, /live team/);
+  assert.match(CREATE_COPY.flowIntro, /design/);
 });
 
 test('#1665 AC7 (jargon-free titles) is superseded on purpose, not by accident', () => {

@@ -60,7 +60,14 @@ const TOPIC_CONTENT = [
       'Outcome',
       'Label',
       'Consumer',
-      'Materialize',
+      // #2053 renamed the design → team action from *Materialize* to
+      // **Create team…** everywhere a user reads it. The word survives in this
+      // topic as exactly two things, both deliberate: the one bridge sentence
+      // for readers who learned it, and the *Not materialized yet* / *Materialize*
+      // names of the MEMBER-level act in Agent Chat, which #2053's Non-goals
+      // leave alone. So the concept the guard pins is the new verb.
+      'Create team',
+      'previously called Materialize',
       'Flow Copilot',
       // #1876 wrote these as one "Import / Export" phrase. They are separate
       // affordances in separate places — Import is a header create action,

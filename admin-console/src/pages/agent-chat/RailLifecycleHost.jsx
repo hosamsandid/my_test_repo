@@ -21,7 +21,7 @@ import { deleteDialogCopy, cascadeResidueNotice } from '../agent-lifecycle/agent
 import {
   convertDialogCopy, convertConsequences, convertBusyNotice, convertResultNotice,
 } from '../agent-lifecycle/convert-to-team-view.js';
-import RowContextMenu from './RowContextMenu.jsx';
+import RowContextMenu from '../../components/RowContextMenu.jsx';
 import {
   deleteTargetFor,
   existingIds as existingIdsOf,

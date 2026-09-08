@@ -3,7 +3,7 @@ id: flows-draft
 title: Flows
 order: 40
 # CI lane only. This journey authors a process DRAFT and stops before
-# materialising, so it has no team/Matrix side effects — only the draft document.
+# creating the team, so it has no team/Matrix side effects — only the draft document.
 # The one canvas action is the port drag that wires the issue channel
 # (flows.wireIssueChannel); every other step is a plain button/dialog/inspector
 # interaction.
@@ -44,9 +44,9 @@ steps:
     voiceover: |
       A draft is an editable process that exists before any team is created — nothing is live, nothing spawned. Here's a fresh, empty one called Simple SDLC. Let's add our first agent.
     narrative: |
-      This is the Flows editor. On the left is the list of everything the canvas can show: your live Teams and a Drafts section. A draft is the important concept here: it's an editable process that exists before any team is created. Nothing is live yet, nothing is spawned — it's a design you can shape freely and materialise into a real team only when you're happy with it.
+      This is the Flows editor. On the left is the list of everything the canvas can show: your live Teams and a Drafts section. A draft is the important concept here: it's an editable process that exists before any team is created. Nothing is live yet, nothing is spawned — it's a design you can shape freely and turn into a real team only when you're happy with it.
 
-      I've created a fresh draft called "Simple SDLC", and right now it's completely empty — zero agents, a blank canvas. The hint at the top says it all: design from scratch — add an agent, drag a port to wire connections, click to edit; nothing is created until you materialise. Along the top are the actions I'll use: Add agent, Stages, Materialize, Export. Let's add our first agent.
+      I've created a fresh draft called "Simple SDLC", and right now it's completely empty — zero agents, a blank canvas. The hint at the top says it all: design from scratch — add an agent, drag a port to wire connections, click to edit; nothing is created until you press Create team. Along the top are the actions I'll use: Add agent, Stages, Create team…, Export. Let's add our first agent.
     assert:
       do: flows.expectEmptyDraft
     screenshot: flow-empty-draft
@@ -153,11 +153,11 @@ steps:
       stage: Build
   - id: stages
     voiceover: |
-      As a final touch I turn on Stages, and the flow organises into labelled bands — Requirements holding the BA, Build holding the Developer. From here, one click on Materialize would turn this drawing into a live, running team. That's the whole story of Flows: design it visually, and go live only when you're ready.
+      As a final touch I turn on Stages, and the flow organises into labelled bands — Requirements holding the BA, Build holding the Developer. From here, one click on Create team… would turn this drawing into a live, running team. That's the whole story of Flows: design it visually, and go live only when you're ready.
     narrative: |
       As a final touch, I turn on Stages, and the flow organises itself into labelled bands: Requirements, containing the Business Analyst, and Build, containing the Developer. Stages are purely an organising layer — they group the agents into the phases of your process and make a larger flow readable at a glance, while the hand-off between them, our human-gated ready issue, stays exactly as we drew it.
 
-      This is the finished draft. From here, one click on Materialize would turn this drawing into a live, running team — real agents, real Matrix identities, reacting to real GitHub events — or I can Export it as a portable template to share and reuse. That's the whole story of Flows: design the orchestration visually, let the platform draft the hard parts, and go live only when you're ready.
+      This is the finished draft. From here, one click on Create team… would turn this drawing into a live, running team — real agents, real Matrix identities, reacting to real GitHub events — or I can Export it as a portable template to share and reuse. That's the whole story of Flows: design the orchestration visually, let the platform draft the hard parts, and go live only when you're ready.
     # Turn the stage-band view ON so the capture actually shows the Requirements/
     # Build bands the narrative describes — without this the canvas is identical
     # to flow-issue-channel (the stages are assigned but not rendered as bands).
@@ -165,5 +165,5 @@ steps:
       do: flows.showStages
       stage: Requirements
     assert:
-      do: flows.expectMaterializeAvailable
+      do: flows.expectCreateTeamAvailable
     screenshot: flow-stages

@@ -68,7 +68,7 @@ where its prompt and skills come from:
 *Paused* — the workspace is kept, the process is stopped (this is what **Disable**
 produces). *Not initialised* — a **stub**: it has its configuration and triggers,
 but no workspace, no cloned repository and no running process. You get a stub
-from a team materialized with **Materialize agents now** left off, or from a
+from a team created with **Provision agents now** left off, or from a
 member added later with **Materialize now** unticked. **Materialize** in the
 team's *Not materialized yet* section brings it to life.
 

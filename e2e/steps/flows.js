@@ -5,8 +5,8 @@
 // ProcessGraphPanel in ProcessCanvas.jsx; renderer flow-graph-render.js). The
 // `flows-draft` journey authors a process draft from scratch: create → rename →
 // add two agents (generated prompts via the mock LLM) → wire an Issue channel
-// with a human gate → stages → assert Materialize is available. It STOPS before
-// materialising, so it has no team/Matrix side effects — a pure draft journey.
+// with a human gate → stages → assert Create team… is available. It STOPS before
+// creating the team, so it has no team/Matrix side effects — a pure draft journey.
 //
 // House style (see wizard.js): id / ARIA role / visible text; no data-testids.
 // Graph nodes are real HTML `.bp-node[data-id]` divs (not a <canvas>), so they
@@ -480,16 +480,20 @@ async function assignStage(ctx, { name, stage }) {
 }
 
 /**
- * Assert the Materialize action is available on the draft (capture point for the
+ * Assert the create-team action is available on the draft (capture point for the
  * finished-draft screenshot). The journey deliberately does not click it — a pure
  * draft has no team side effects.
  *
+ * Renamed from `expectMaterializeAvailable` with the button itself (#2053): the
+ * label is the whole point of the assertion, so a step name still saying
+ * `Materialize` would be the next reader's wrong turn.
+ *
  * @example
  * - assert:
- *     do: flows.expectMaterializeAvailable
+ *     do: flows.expectCreateTeamAvailable
  */
-async function expectMaterializeAvailable(ctx) {
-  await expect(ctx.page.getByRole('button', { name: 'Materialize…' })).toBeEnabled();
+async function expectCreateTeamAvailable(ctx) {
+  await expect(ctx.page.getByRole('button', { name: 'Create team…' })).toBeEnabled();
 }
 
 /**
@@ -1594,7 +1598,7 @@ module.exports = {
   closeStages,
   showStages,
   assignStage,
-  expectMaterializeAvailable,
+  expectCreateTeamAvailable,
   openRouting,
   setOutcomeMode,
   addOutcome,

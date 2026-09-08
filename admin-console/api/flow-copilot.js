@@ -440,6 +440,22 @@ function buildRepairMessage(findings) {
 
 // ── the generate → validate → repair loop ────────────────────────────────────
 
+// A turn the caller stopped (#2087). Distinct from every transport failure so
+// the route can end the stream silently instead of emitting an error event the
+// client would render as a failed generation — the client asked for this.
+const COPILOT_ABORTED = 'copilot-aborted';
+
+function abortedError() {
+  const err = new Error('the Copilot turn was stopped');
+  err.code = COPILOT_ABORTED;
+  return err;
+}
+
+/** True for the error `runCopilot` throws when its signal was aborted. */
+function isCopilotAborted(err) {
+  return !!err && err.code === COPILOT_ABORTED;
+}
+
 /**
  * One Copilot turn. `callLlm(payload) → Promise<string>` is the only I/O.
  *
@@ -457,6 +473,14 @@ function buildRepairMessage(findings) {
  * after each reply lands. The NDJSON route forwards them to the client;
  * omitting the hook keeps the loop's behaviour byte-identical.
  *
+ * `signal` (#2087, optional AbortSignal) ends the turn's SERVER-side work:
+ * checked at the top of every iteration, so an abort during iteration 1 issues
+ * no iteration-2 request, and threaded on into `callLlm` by the route so the
+ * call already in flight is destroyed rather than merely ignored. Aborting
+ * throws a `COPILOT_ABORTED` error even when a best-effort bundle exists — a
+ * stopped turn must leave no proposal (AC11), so returning the partial result
+ * would be exactly wrong. Omitting the signal keeps the loop byte-identical.
+ *
  * @returns {{ ok, bundle, summary, changes, lints, repairIterations }}
  */
 async function runCopilot({
@@ -467,6 +491,7 @@ async function runCopilot({
   addendum = readPromptAddendum(),
   maxRepairIterations = MAX_REPAIR_ITERATIONS,
   onProgress,
+  signal,
 }) {
   const progress = typeof onProgress === 'function' ? onProgress : () => {};
   const baseBundle = isPlainObject(bundle) ? bundle : emptyDraftBundle();
@@ -476,6 +501,10 @@ async function runCopilot({
   let repairIterations = 0;
 
   for (let attempt = 0; attempt <= maxRepairIterations; attempt++) {
+    // AC9: no further LLM request is issued for a stopped turn. The check sits
+    // BEFORE the phase event too, so a stopped turn does not announce a
+    // repair iteration it will never run.
+    if (signal && signal.aborted) throw abortedError();
     progress(attempt === 0
       ? { type: 'phase', phase: 'generating' }
       : { type: 'phase', phase: 'repairing', iteration: attempt });
@@ -483,9 +512,17 @@ async function runCopilot({
     try {
       text = await callLlm(request);
     } catch (err) {
+      // An aborted call is not a transport failure to fall back from: a
+      // stopped turn must leave no proposal (AC11), so it can never take the
+      // best-effort `break` below.
+      if (signal && signal.aborted) throw abortedError();
       if (!best) throw err; // nothing to fall back to — surface the transport error
       break;                // best-effort with the previous iteration's bundle
     }
+    // The reply landed, but a stop may have won the race (edge case: "Stop
+    // pressed in the same moment the result arrives"). Exactly one outcome
+    // wins, and a stopped turn never applies anything.
+    if (signal && signal.aborted) throw abortedError();
     progress({ type: 'phase', phase: 'validating' });
 
     const parsed = parseCopilotResponse(text);
@@ -543,6 +580,8 @@ module.exports = {
   MAX_REPAIR_ITERATIONS,
   COPILOT_HISTORY_CAP,
   SYSTEM_PROMPT_CHAR_LIMIT,
+  COPILOT_ABORTED,
+  isCopilotAborted,
   sanitizeBundle,
   parseCopilotResponse,
   applyCopilotOps,

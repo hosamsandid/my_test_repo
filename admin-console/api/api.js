@@ -2130,6 +2130,33 @@ async function reconcileTeamWakeHandoffs(teamId) {
   }
 }
 
+// After any batch of team-member creations over POST /internal/teams/:id/members
+// (team create/extend, the single-member "Add member"), re-derive the members'
+// direct-hand-off wiring against their MATERIALISED ids (#2030). The portable
+// bundle renders every derived `## Outcomes` block AND every `wake-agent`
+// listener against ROLE ids (`agent-2`), because that rendering runs on the
+// bundle in expandGithubChannels/expandWakeHandoffs. A `wakeAgent`'s `to` is
+// remapped to the member id (`<team>-agent-2`) only in the stored `outcomes`
+// PORT (buildMemberFromTemplate → remapOutcomeWakeTargets) — so the
+// `aee-wake --to <id>` command the producer actually runs from its prompt, and
+// the derived listener's `sources`, keep the bare role id and the hand-off
+// resolves to nobody (404 unknown-target). These are the very reconcilers a live
+// outcomes/port edit already runs (PUT /api/agents/:id); running them once here
+// closes the identical gap for a freshly materialised team, rewriting each
+// block/listener against the live member ids (reconcileTeamOutcomes also fixes
+// each EXCLUSIVE member's stored cfg.systemPrompt, so a stub materialised later
+// inherits the corrected prompt). Best-effort — a just-created team must never
+// fail on a prompt-block rewrite.
+async function reconcileTeamHandoffWiring(teamAgentId) {
+  if (!teamAgentId) return;
+  try {
+    await reconcileTeamOutcomes(teamAgentId);
+    await reconcileTeamWakeHandoffs(teamAgentId);
+  } catch (err) {
+    console.warn(`[API] hand-off wiring reconcile for ${teamAgentId}: ${err.message}`);
+  }
+}
+
 // Re-render the derived OUTCOMES prompt block (#829) for a whole team from its
 // members' declarative `outcomes` ports, mirroring what `expandGithubChannels`
 // (via applyDerivedPromptBlocks) does at materialise time. This is the prompt-side
@@ -3743,6 +3770,11 @@ app.post('/api/agents/:teamId/members', heavyLimiter, async (req, res) => {
     });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json(data);
+    // Adding a member can wire a direct hand-off in either direction (the new
+    // member handing off to an existing one, or an existing one to it), so
+    // re-derive the whole team's hand-off wiring against the live member ids
+    // (#2030) before reporting success — see reconcileTeamHandoffWiring.
+    await reconcileTeamHandoffWiring(teamId);
     res.status(201).json(data);
   } catch (err) {
     res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
@@ -14444,6 +14476,10 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       created.members.push(p.memberId);
     }
 
+    // Re-derive direct-hand-off wiring against the members' materialised ids
+    // (#2030) now that every member exists — see reconcileTeamHandoffWiring.
+    await reconcileTeamHandoffWiring(teamAgentId);
+
     // Phase C.5 — persist the wizard's knowledge-learning config (#567). Fatal
     // like the clone check: a team created with the operator's chosen autonomy /
     // review / gates silently falling back to defaults would violate AC-3, so a
@@ -15102,6 +15138,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       created.members.push(p.memberId);
       emit({ type: 'step', id: stepId, status: 'done' });
     }
+
+    // Re-derive direct-hand-off wiring against the members' materialised ids
+    // (#2030) now that every member exists — see reconcileTeamHandoffWiring.
+    await reconcileTeamHandoffWiring(teamAgentId);
 
     // Persist the wizard's knowledge-learning config (#567) — fatal, like the
     // clone check: falling back to defaults would violate AC-3. Only fires for a

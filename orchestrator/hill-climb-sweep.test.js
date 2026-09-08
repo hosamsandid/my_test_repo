@@ -180,3 +180,33 @@ test('wasteSignalsFromEventLog scopes to the team agents when given a set', () =
   const w = wasteSignalsFromEventLog(entries, fromMs, NOW, new Set(['mine']));
   assert.deepEqual(w, { throttleDrops: 1, digestFolds: 1 });
 });
+
+test('#2113: a blocked claim is failed, not the success its posted reply implies', () => {
+  // Verify-before-claim: the run completed and posted a reply, but its declared
+  // post-condition did not hold, so the claim stayed `<wake>:wip` and the work
+  // item was NOT delivered. Without the `trigger.claim-blocked` case this run
+  // falls through to the `result` + `message.posted` rule and is measured a
+  // SUCCESS — which would move #2113's false success from the label onto the
+  // metrics surface instead of removing it.
+  const blocked = runsFromSessionEvents([
+    { type: 'trigger.fired', correlationId: 'c', triggerId: 't', ts: '2026-08-03T10:00:00.000Z' },
+    { type: 'result', correlationId: 'c', ts: '2026-08-03T10:01:00.000Z' },
+    { type: 'message.posted', correlationId: 'c', ts: '2026-08-03T10:01:02.000Z' },
+    {
+      type: 'trigger.claim-blocked', correlationId: 'c', kept: 'ready-to-merge:wip',
+      postcondition: 'merged', reason: 'pull request #2105 is not merged',
+      ts: '2026-08-03T10:01:05.000Z',
+    },
+  ], { agentId: 'a' });
+  assert.equal(blocked[0].outcome, 'failed');
+  assert.notEqual(blocked[0].merged, true);
+
+  // A claim with no post-condition is unaffected: no blocked row is emitted, so
+  // the pre-#2113 success rule still applies.
+  const plain = runsFromSessionEvents([
+    { type: 'trigger.fired', correlationId: 'c', triggerId: 't', ts: '2026-08-03T10:00:00.000Z' },
+    { type: 'result', correlationId: 'c', ts: '2026-08-03T10:01:00.000Z' },
+    { type: 'message.posted', correlationId: 'c', ts: '2026-08-03T10:01:02.000Z' },
+  ], { agentId: 'a' });
+  assert.equal(plain[0].outcome, 'success');
+});

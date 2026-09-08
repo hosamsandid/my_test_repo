@@ -48,6 +48,53 @@ Everything on this page is scoped to the agent you have selected. Switching
 agents switches the room, the workspace, the triggers, the outcomes — the page
 keeps its shape, the contents all change.
 
+## Who wrote a message — the badge and the sides
+
+An agent's room is shared: several people can talk to the same agent, and the
+transcript names each of them. The small round badge in front of a human message
+shows the **author's initials** — the first letters of the first two words of
+their name, or a single letter for a one-word name — and hovering it (or tabbing
+to it) reveals the full name. The agent keeps its bot icon and no name badge; the
+icon already says *machine, not human*, which is the load-bearing distinction.
+
+The **badge and the side answer two different questions**, and they are
+deliberately not the same answer:
+
+| | Question | Depends on |
+|---|---|---|
+| The **badge** | Who wrote this? | the author — never on who is reading |
+| The **side** | Is this mine? | you, the viewer |
+
+So **your own messages are on the right and every other person's on the left**,
+next to the agent — and the same message shows the *same* initials to everybody
+while sitting on opposite sides for its author and for a colleague. A human
+message on the left keeps the human bubble colour, so it is still distinct from
+an agent's bubble.
+
+The name shown is the person's **display name** from their user record, falling
+back to their login subject when that is empty. It is resolved when the
+transcript is read, not frozen when the message was sent, so renaming somebody on
+the Users page updates their initials on messages they sent months ago. There is
+deliberately **no per-person colour** — the side and the initials carry it, and a
+second weaker channel for the same information would only add noise. Two people
+whose initials collide (*Anna Schmidt* and *Andreas Schulz* both give `AS`) are
+told apart by the hover name.
+
+### Messages with a neutral person icon
+
+A message showing a plain **person icon** instead of letters has **no recorded
+author**. That is not an error — it is every message sent before this feature
+existed. The platform did not record which console user sent a chat message, and
+that cannot be reconstructed afterwards, so those messages keep the right-hand
+side they have always had rather than being relocated on a guess. For that older
+content the right-hand side is therefore *not* a guarantee that you wrote it.
+The same icon appears for a message posted into the room by some other Matrix
+client, and for an author whose user record has since been deleted and whose
+login name is no longer recoverable.
+
+Trigger notices, finished-loop cards and any other automated entry are unchanged:
+they carry no human badge and are not realigned.
+
 ## The agent roles
 
 An **Agent** is a **long-running Claude Code instance** with its own workspace

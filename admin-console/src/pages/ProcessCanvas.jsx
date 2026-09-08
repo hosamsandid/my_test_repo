@@ -9,6 +9,7 @@ import HumanRegistryPanel from './process/HumanRegistryPanel';
 import FlowAnomaliesPanel from './process/FlowAnomaliesPanel';
 import ImprovementsPanel from './process/ImprovementsPanel';
 import FlowCopilotPanel from './process/FlowCopilotPanel';
+import { useFlowCopilot } from '../context/FlowCopilotContext.jsx';
 import { proposalNodeDiff } from './process/flow-copilot-view';
 import { anomalyCountByNode } from './process/flow-anomalies-view';
 import { lintView } from './process/lint-view';
@@ -248,6 +249,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // The panel registers { apply, discard, ok, busy } here so the canvas banner
   // and the chat card share the same handlers.
   const copilotActionsRef = useRef(null);
+  // The app-level turn owner (#2087). Read here only to follow a draft rename
+  // (below) — the panel is what drives it.
+  const flowCopilot = useFlowCopilot();
 
   // Draft bundle + its derived graph. The bundle is the source of truth; the
   // graph is recomputed server-side from it on every change.
@@ -302,8 +306,15 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     // the URL scope param and every subsequent save target the live id (AC6).
     // Carry the copilot flag so an apply that renames the draft (the first
     // Copilot generation proposes a name) reopens the panel after the remount.
-    if (saved.id && saved.id !== draftId) navigate(`draft:${saved.id}`, { copilot: copilotOpenRef.current });
-  }, [draftId, onDraftsChanged, navigate]);
+    if (saved.id && saved.id !== draftId) {
+      // #2087 edge case: a turn (or an unapplied proposal) is bound to the OLD
+      // scope key, which nothing can select any more. Re-key it onto the new id
+      // before navigating — the binding follows the rename rather than silently
+      // mismatching. Done first, because the navigate remounts this subtree.
+      if (flowCopilot) flowCopilot.rekeyScope(`draft:${draftId}`, `draft:${saved.id}`);
+      navigate(`draft:${saved.id}`, { copilot: copilotOpenRef.current });
+    }
+  }, [draftId, onDraftsChanged, navigate, flowCopilot]);
 
   const draftOps = useMemo(
     () => makeDraftOps(() => draftBundleRef.current, persistDraft),
@@ -1204,10 +1215,13 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
 
     {/* Flow Copilot rail (#1069). Draft scope chats against the open draft;
         team scope only offers the Edit-as-draft bridge (no direct live-team
-        mutation, by design). Closing also drops any pending proposal preview. */}
+        mutation, by design). Closing drops the canvas PREVIEW only — since
+        #2087 the turn and its unapplied proposal live in the app-level
+        FlowCopilotProvider, so reopening the panel finds them again. */}
     {copilotOpen && (isDraft || (isTeamScope && !imported)) && (
       <FlowCopilotPanel
         mode={isDraft ? 'draft' : 'team'}
+        scope={scope}
         bundle={draftBundle}
         autoFocus={autoOpenCopilot}
         onPreview={setProposal}

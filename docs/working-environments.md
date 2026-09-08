@@ -96,4 +96,24 @@ toolchains](agent-toolchains-concept.md).
 
 ## Editing a Working Environment
 
-Changes to a Working Environment affect newly created agents only. Existing agents retain the workspace state from when they were created. To update an existing agent's skills or repositories, use the Workspace Browser in the Agent Chat right rail.
+Most changes to a Working Environment affect newly created agents only — an
+existing agent keeps the workspace state it was created with.
+
+**Repositories are the exception (#2066).** Saving an environment that already
+has agents notices what changed about its repository list and *offers* to bring
+those agents up to date: an added repository is cloned in, and one whose branch,
+address or SSH key changed is adjusted in place — but only where that agent's
+existing clone is clean and fully pushed. Anywhere it is not, the clone is left
+completely untouched and reported with the reason, because a checkout may hold
+the only copy of someone's work. Nothing is ever stashed, reset or
+force-checked-out.
+
+A **removed** repository is never deleted from any agent, under any
+circumstance: the agents keep their copies and you are told so. Removing one
+from a workspace is a manual step.
+
+Accepting is your choice, and declining is not a dead end — the environment list
+carries a persistent *"N agents not up to date"* badge derived from the agents'
+actual workspaces, and clicking it runs the same propagation. For one agent the
+same job is **Sync repositories** on its Settings tab; both surfaces drive the
+same propagation, so they cannot disagree about what a change would do.

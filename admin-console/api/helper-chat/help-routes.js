@@ -18,8 +18,7 @@
 //                    help-less on purpose, with an owner named.
 //   • ALLOWLIST    — a structural route that intentionally has NO page help of
 //                    its own: redirect sources, dynamic child routes that
-//                    inherit their parent's help, and stubs. These never
-//                    auto-open the panel (concept §4, C2).
+//                    inherit their parent's help, and stubs.
 //
 // This module is pure data + three tiny resolvers (aliases / redirects / dynamic
 // collapse) shared by help-registry.js. The parallel client-side copy lives in
@@ -189,6 +188,7 @@ const OVERLAY_KEYS = {
   'modal:user-edit': 'The Edit side panel on the Users page.',
   'modal:user-delete': 'The delete/offboarding confirmation on the Users page.',
   'modal:agent-template': 'The template editor side panel on the Agent Templates page.',
+  'modal:env-propagation': 'The repositories-changed / catch-up dialog on the Working Environments page.',
 };
 
 const CONTEXT_KEYS = {
@@ -249,6 +249,12 @@ const CONTEXT_KEYS = {
   'modal:user-edit': { label: 'Users · edit user' },
   'modal:user-delete': { label: 'Users · delete user' },
   'modal:agent-template': { label: 'Agent Templates · editor' },
+  // The save-time propagation offer (#2066). No topic of its own either —
+  // resolution falls through to `/environments` — and it is the third
+  // full-screen dialog in the tree (9999), so like `modal:user-delete` it
+  // needs the lift most: the help must be readable BESIDE a decision that
+  // writes into other agents' workspaces, not behind it.
+  'modal:env-propagation': { label: 'Working Environments · bring agents up to date' },
   // The Flow editor's seven overlay surfaces (#1984). Same story once more, and
   // this is the page #1990 flagged the latent bug on: EdgeDialogs already
   // rendered a "?" inside a `SidePanel` with no subject, so pressing it opened

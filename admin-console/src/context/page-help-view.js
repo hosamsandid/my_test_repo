@@ -127,6 +127,11 @@ export const CONTEXT_KEYS = {
   'modal:user-edit': { label: 'Users · edit user' },
   'modal:user-delete': { label: 'Users · delete user' },
   'modal:agent-template': { label: 'Agent Templates · editor' },
+  // The save-time propagation offer (#2066) — no topic of its own
+  // (resolution falls through to `/environments`), and a full-screen dialog
+  // at 9999, so it needs the lift for the same reason `modal:user-delete`
+  // does: help beside the decision, never behind it.
+  'modal:env-propagation': { label: 'Working Environments · bring agents up to date' },
 };
 
 // The overlay ids the app publishes, as constants so a call site cannot typo one.
@@ -155,6 +160,7 @@ export const OVERLAY_TEAM_MANAGE = 'modal:team-manage';
 export const OVERLAY_USER_EDIT = 'modal:user-edit';
 export const OVERLAY_USER_DELETE = 'modal:user-delete';
 export const OVERLAY_AGENT_TEMPLATE = 'modal:agent-template';
+export const OVERLAY_ENV_PROPAGATION = 'modal:env-propagation';
 
 // Collapse a concrete pathname to the canonical route key used for topic lookup.
 export function canonicalRoute(pathname) {
@@ -383,12 +389,6 @@ export function findSectionIndex(headings, section) {
   return list.findIndex((h) => sectionSlug(h) === want);
 }
 
-// True when the route has its own dedicated topic (drives first-run auto-open in
-// C2 — routes with only the Overview fallback do not auto-open, concept §4).
-export function hasDedicatedTopic(payload, pathname) {
-  return resolvePageTopic(payload, pathname) !== null;
-}
-
 // Shape an askPrompt chip click into the hand-off to the Ask face: switch mode
 // and pre-seed the question. Kept as data so the JSX just applies it.
 export function askHandoff(prompt) {
@@ -437,62 +437,4 @@ export function askPromptChips(topic) {
     if (q && !seen.has(q)) { seen.add(q); out.push(q); }
   }
   return out;
-}
-
-// ─── First-run auto-open (#1873, concept §4/§9) ──────────────────────────────
-//
-// The panel auto-opens on the "This page" face the FIRST time a user lands on a
-// route that has a dedicated topic — once, dismissible, never re-fought. The
-// "seen" set is a per-user list of route keys persisted in localStorage; the
-// browser-side effect owns the read/write, these pure helpers own every
-// decision (which key, whether to open, the next seen list).
-
-// The per-user localStorage key holding the set of routes whose first-run nudge
-// has already fired. A blank/absent username collapses to a shared 'anon' key
-// (the env single-admin has no user record) so the nudge still fires once.
-export function seenRoutesKey(username) {
-  const u = (typeof username === 'string' && username.trim()) ? username.trim() : 'anon';
-  return `help.seenRoutes.${u}`;
-}
-
-// The canonical key a route's first-run nudge is recorded under — the same
-// collapse used for topic resolution, so /chats/<id> and /chats share one nudge.
-// null when the route has no dedicated topic (Overview-only routes never
-// auto-open, concept §4).
-export function autoOpenRouteKey(payload, pathname) {
-  if (!hasDedicatedTopic(payload, pathname)) return null;
-  return canonicalRoute(pathname) || pathname;
-}
-
-// The first-run auto-open decision for a route:
-//   { open, routeKey }
-// `open` is true only when the route has a dedicated topic (routeKey non-null)
-// AND that key has not been seen yet. `routeKey` is what to persist as seen when
-// the nudge fires (non-null even when open is false-because-already-seen, so a
-// caller never needs to recompute it; null only when the route has no topic).
-export function autoOpenPlan(payload, pathname, seenRoutes) {
-  const routeKey = autoOpenRouteKey(payload, pathname);
-  if (!routeKey) return { open: false, routeKey: null };
-  const seen = Array.isArray(seenRoutes) ? seenRoutes : [];
-  return { open: !seen.includes(routeKey), routeKey };
-}
-
-// Add a routeKey to the seen list, returning a NEW de-duplicated array (the
-// input is never mutated). A blank routeKey is a no-op passthrough.
-export function markSeen(seenRoutes, routeKey) {
-  const seen = Array.isArray(seenRoutes) ? seenRoutes.slice() : [];
-  if (routeKey && !seen.includes(routeKey)) seen.push(routeKey);
-  return seen;
-}
-
-// Parse the raw localStorage value for the seen-routes set into a string array,
-// fail-soft (bad JSON / non-array → []). Keeps the browser effect a one-liner.
-export function parseSeenRoutes(raw) {
-  if (typeof raw !== 'string' || !raw) return [];
-  try {
-    const v = JSON.parse(raw);
-    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
-  } catch {
-    return [];
-  }
 }

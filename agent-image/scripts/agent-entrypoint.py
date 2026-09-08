@@ -852,7 +852,7 @@ class _StatePushClient:
         url = f"{self._base}{route}"
         req = urllib.request.Request(
             url, data=body, method="POST",
-            headers={"Content-Type": "application/json"},
+            headers=_internal_headers({"Content-Type": "application/json"}),
         )
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
@@ -864,6 +864,21 @@ class _StatePushClient:
                 return exc.code, str(exc)
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             return 0, str(exc)
+
+
+# Internal-API credential (#1456, GOV-PLATFORM-2). `startAgentProcess` bakes a
+# per-agent token into this container's env, exactly like the GitHub PAT; it is
+# valid only for the agent-facing allowlist and only for this agent's own id.
+# Read per call rather than cached at import: a respawn re-mints it, and reading
+# it late is what lets an operator arm the gate without a code change here.
+# Absent — a stack that has not armed the gate — every call goes out
+# unauthenticated and the orchestrator behaves exactly as it did before.
+def _internal_headers(extra: dict | None = None) -> dict:
+    headers = dict(extra or {})
+    token = os.environ.get("AEE_INTERNAL_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    return headers
 
 
 _push_client: _StatePushClient | None = None
@@ -2206,7 +2221,7 @@ def _report_retrieval(source: str, included_ids) -> None:
                               "hitCount": len(ids), "ts": ts}).encode("utf-8")
         req = urllib.request.Request(
             url, data=payload, method="POST",
-            headers={"Content-Type": "application/json"},
+            headers=_internal_headers({"Content-Type": "application/json"}),
         )
         with urllib.request.urlopen(req, timeout=3):
             pass
@@ -4953,7 +4968,7 @@ class TriggerScheduler:
     def _orch_get(route: str) -> tuple[int, str]:
         """Blocking GET against the orchestrator; run via asyncio.to_thread."""
         url = f"{ORCHESTRATOR_INTERNAL_URL.rstrip('/')}{route}"
-        req = urllib.request.Request(url, method="GET")
+        req = urllib.request.Request(url, method="GET", headers=_internal_headers())
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return resp.status, resp.read().decode("utf-8", errors="replace")
@@ -4972,7 +4987,7 @@ class TriggerScheduler:
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             url, data=body, method="POST",
-            headers={"Content-Type": "application/json"},
+            headers=_internal_headers({"Content-Type": "application/json"}),
         )
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:

@@ -38,6 +38,7 @@ change without a redeploy:
 | `ADMIN_PASSWORD` | `admin` | Console login password |
 | `AUTH_SESSION_SECRET` | derived from the credentials | Signs session cookies. When unset, a stable secret is derived from the credentials, so sessions survive a server restart and are auto-invalidated when the password changes. Set an explicit value to rotate sessions independently. |
 | `AUTH_COOKIE_SECURE` | `false` | Set to `true` only when the console is served over HTTPS (adds the cookie's `Secure` attribute). |
+| `AUTH_ENABLED` | `false` | Single-user ⇄ multi-user mode (#1457). Off (the default) is **single-user compatibility**: whoever signs in is the operator, and the team scope filter is a no-op — an existing stack upgrades with no change in behaviour. `true` enforces multi-user scoping, so a caller sees only what their user record's team memberships allow. It gates *authorization* only; the login itself is unchanged in both modes. |
 
 > The defaults (`admin` / `admin`) are for first-boot local use only — change
 > them for any shared deployment. This is a placeholder until enterprise SSO
@@ -96,8 +97,12 @@ A System Admin can:
 
 The page is built on the `/api/admin/{teams,users,memberships}` endpoints
 (proxied to the orchestrator's teams store). Per-role *enforcement* of these
-actions — and per-resource visibility — arrive with later tickets (#302/#304);
-today any authenticated operator can manage teams.
+actions — and per-resource visibility — landed with #302/#304 (`scope.js`), and
+**whether it applies at all is now the `AUTH_ENABLED` mode** (#1457): with the
+flag off (the default) every authenticated principal is the implicit System
+Admin and can manage every team, which is the single-user behaviour this stack
+has always had; with it on, `canManageTeam` narrows management to the caller's
+own `team-admin` memberships.
 
 ## Agent Teams — the missing-role suggestion was removed (#1959)
 
@@ -210,9 +215,9 @@ Toggle with `Cmd/Ctrl+Shift+L`.
 | Tab | What it shows |
 |---|---|
 | **Session Log** | Structured timeline of internal activity: tool calls, assistant text, errors, timings. Tool-use/tool-result pairs are folded into collapsible blocks. Filter by All / Tool Calls / Errors / Posted. |
-| **Workspace Browser** | Lazy-loading file tree of the agent's workspace directory. Click any text file to view its content (up to 512 KB). Hover over any file row to reveal a per-file **Download** button (works for binary files too; no size cap) and a **Reference in chat** (@) button that splices a `@<workspace-relative-path>` token for that file into the current agent's composer draft — the same reference convention an upload produces, so the agent resolves it without re-uploading (files only, never directories or `/context` host-mount rows). Supports file upload to the workspace (up to 500 files) and one-click ZIP export of the entire workspace. Binary files are flagged rather than displayed as garbage. |
+| **Workspace Browser** | Lazy-loading file tree of the agent's workspace directory. Click any text file to view its content (up to 512 KB). Hover over any file row to reveal a per-file **Download** button (works for binary files too; no size cap) and a **Reference in chat** (@) button that splices a `@<workspace-relative-path>` token for that file into the current agent's composer draft — the same reference convention an upload produces, so the agent resolves it without re-uploading (files only, never directories or `/context` host-mount rows). Supports file upload to the workspace (up to 500 files) and one-click ZIP export of the entire workspace. Binary files are flagged rather than displayed as garbage. A **repositories** button in the same toolbar lists every repository the agent has — inherited from its Working Environment (read-only here) or attached to this agent alone — and is where an **additional repository is attached to that one agent** (#2067); the same panel is on the **Settings** tab. |
 | **Triggers** | Inline editor for the agent's trigger schedule. Add, edit, or delete any trigger type; shows next execution time, last run status, and the webhook secret for HTTP triggers. |
-| **Settings** | The agent's configuration, where you see its effect (#1929) — the *same* form the Agents page's edit panel renders (display name, system prompt including a team member's Inherit / Additional input / Exclusive override modes, skills, MCP overrides, plugin grants, host context folders, repositories with **Sync repositories**). Saving goes through the same `PUT /api/agents/:id`, so an identical edit yields an identical stored config. Plugin grants and context folders keep their immediate-apply semantics; only in the chat, a context-folder change asks for confirmation first, because the re-provision it triggers ends the run you are watching. Unsaved edits are **preserved per agent** for the rest of the session: switching agents and back finds the form as you left it, behind an "unsaved changes" banner with a **Discard changes** button. Hidden for a caller who may not manage the agent. Normally the open chat's agent — a rail menu can point it at another one: **Team settings** on a group header edits the team agent, and **Settings** on a disabled row edits an agent that has no chat to open (a **Back** control returns it to the conversation). |
+| **Settings** | The agent's configuration, where you see its effect (#1929) — the *same* form the Agents page's edit panel renders (display name, system prompt including a team member's Inherit / Additional input / Exclusive override modes, skills, MCP overrides, plugin grants, host context folders, repositories with **Sync repositories** and — since #2067 — the agent-scoped repository panel that attaches an additional repository to this one agent). Saving goes through the same `PUT /api/agents/:id`, so an identical edit yields an identical stored config. Plugin grants and context folders keep their immediate-apply semantics; only in the chat, a context-folder change asks for confirmation first, because the re-provision it triggers ends the run you are watching. Unsaved edits are **preserved per agent** for the rest of the session: switching agents and back finds the form as you left it, behind an "unsaved changes" banner with a **Discard changes** button. Hidden for a caller who may not manage the agent. Normally the open chat's agent — a rail menu can point it at another one: **Team settings** on a group header edits the team agent, and **Settings** on a disabled row edits an agent that has no chat to open (a **Back** control returns it to the conversation). |
 
 ## Session Pinning
 

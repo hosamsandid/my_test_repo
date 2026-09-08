@@ -353,13 +353,20 @@ makes the Flow Editor author it.
 
 ### 6.1 What "authorization" does and does not mean here
 
-Stated plainly, because AC-4 uses the word: the whole `:4002` internal API is
-**unauthenticated** — one `http.createServer` (`orchestrator.js:10577`) bound
-on the container network (`orchestrator.js:14766-14768`), with no token, HMAC
-or header check on `/internal/flow-emit` or any sibling. `aee-emit` sends its
-`agentId` in the body with no credential (`aee-emit:140-145`), so a producer's
-identity is **self-asserted**; the trust boundary is network position, not
-authentication.
+Stated plainly, because AC-4 uses the word: when this was written the whole
+`:4002` internal API was **unauthenticated** — one `http.createServer` bound on
+the container network, with no token, HMAC or header check on
+`/internal/flow-emit` or any sibling — so a producer's identity was
+**self-asserted** and the trust boundary was network position.
+
+**Updated by #1456 (GOV-PLATFORM-2).** `:4002` now has an auth gate, and an agent
+container carries a per-agent token scoped to the agent-facing allowlist. That
+changes the *caller* from anonymous to authenticated; it does **not** change what
+this section says about `fromAgentId`/`agentId`. Those fields are still read out
+of the request body and are still not cross-checked against the authenticated
+agent id, so the same-team rule below remains an integrity constraint on the flow
+graph rather than authentication. Binding the body field to the authenticated
+caller is a named follow-up — until it lands, read this section as written.
 
 `POST /internal/wake-agent` inherits exactly that posture, and the same-team
 check is therefore an **integrity constraint on the flow graph, not an

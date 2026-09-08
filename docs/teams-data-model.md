@@ -19,6 +19,21 @@ SSO) hangs off this entity.
 > concept and one word. This page still describes what is live on `main`; the successor
 > doc is the design of record for what replaces it (rewritten here in phase P6).
 
+> **P1 has landed (#2077) — what this page no longer tells you in full.**
+> Ownership now lives on the Agent Team: every `role: "team"` and standalone
+> `role: "agent"` config carries an `ownerId` (+ an `ownerSource` recording
+> whether that owner is a real creator or a migration placeholder), and
+> `memberships/index.json` now *also* holds one `(user → Agent Team)` record per
+> Agent Team of each access scope — added **alongside** the access-scope records
+> below, not in place of them, because the enforcement described on this page
+> still keys on each resource's access-scope `teamId` stamp. So the
+> `memberships` table below is accurate but no longer complete: a `teamId` there
+> may be an access-scope id (the records this page describes) **or** an Agent
+> Team id (the ones the D6 migration added). `teams/index.json` is still written
+> and read exactly as documented here — retiring it is P2's edit, for the reason
+> in the successor doc's Amendment 1. The migration itself is
+> `orchestrator/ownership-migration.js` + `migrateOwnershipModel()`.
+
 ## Scope of this issue
 
 In scope:
@@ -52,8 +67,8 @@ records written atomically (write-temp + rename):
 | Path | Record shape |
 |---|---|
 | `/workspace/teams/index.json` | `{ id, name, description, createdAt, updatedAt }` |
-| `/workspace/users/index.json` | `{ id, subject, email, displayName, systemAdmin, githubHandle, chatFontSize?, createdAt, updatedAt }` |
-| `/workspace/memberships/index.json` | `{ id, userId, teamId, role, createdAt }` |
+| `/workspace/users/index.json` | `{ id, subject, email, displayName, systemAdmin, githubHandle, matrixUserId?, chatFontSize?, createdAt, updatedAt }` |
+| `/workspace/memberships/index.json` | `{ id, userId, teamId, role, createdAt, fromScopeId? }` |
 
 - **Team `id`** is an operator-facing slug (`^[a-z0-9][a-z0-9-]{0,63}$`), like a
   Working Environment id. The default team's id is `default`.
@@ -61,6 +76,18 @@ records written atomically (write-temp + rename):
   OIDC subject claim or corporate email. It is unique (case-insensitive) so SSO
   login can map a corporate identity onto exactly one account. `id` is a
   generated UUID.
+- **User `matrixUserId`** *(optional, #1458)* is the human's own Matrix account
+  — `@u-<16 hex of sha256(subject)>:local` — provisioned when the record is
+  created (best-effort and backgrounded, so it may be absent briefly or on a
+  single-operator stack that has no user records). It is a non-secret pointer
+  only; the matching access token is stored server-side in a separate per-user
+  file (`users/matrix/<userId>.json`), never on this record. See
+  [`docs/multi-user-concept.md`](multi-user-concept.md) Amendment 1.
+- **Membership `fromScopeId`** is present only on records the D6 migration
+  (#2077) created when it fanned an access-scope membership out to the Agent
+  Teams in that scope — it records which access scope the grant was derived
+  from. Nothing reads it; it exists so a migrated membership is auditable and
+  distinguishable from one a human made. A hand-made membership never has it.
 
 The single source of truth for this model is
 [`orchestrator/teams-store.js`](../orchestrator/teams-store.js) — a pure factory
@@ -108,15 +135,73 @@ Agent Team on purpose — those metrics are per squad, not per tenant.
 On orchestrator startup (`main()`), after the legacy role migration:
 
 1. `bootstrapTeams()` — `ensureDefaultTeam()` (idempotent), then optionally
-   `ensureSystemAdmin()` from environment config (below).
+   `ensureSystemAdmin()` from environment config (below), and finally the
+   bootstrap admin's **`team-admin` membership of the Default Team** (#1457).
+   System Admin is a global flag rather than a membership, so without this step
+   the team that owns every adopted resource had no Team Admin at all. The
+   membership is planned, not asserted: `setMembership` is an upsert, so it is
+   created only when no membership for that (user, team) pair exists in *any*
+   role — an admin a human deliberately demoted is not re-promoted on each boot.
 2. `backfillResourceOwnership()` — stamps `teamId: "default"` onto any agent,
-   environment, or credential index entry that lacks one. Idempotent: a stamped
-   resource is skipped on subsequent boots, and the JSON is only rewritten when
-   it actually changes.
+   environment, credential index entry or **MCP server** (#1457) that lacks one.
+   Idempotent: a stamped resource is skipped on subsequent boots, and the JSON is
+   only rewritten when it actually changes.
 
 This means an operator already running a single-user stack keeps every existing
 agent, environment, and credential — they're simply adopted into the default
 team on the next restart.
+
+Two properties of the adoption pass are load-bearing:
+
+- **The predicate is `teamId === undefined`, not a falsy check.** A *personal*
+  credential (#1567) carries an explicit `teamId: null` plus a `userId` and is
+  deliberately not team-owned; adopting it would hand every System Admin a view
+  of credentials the personal tier exists to keep private.
+- **MCP servers were adopted but never stamped.** The scope filter has always
+  read `server.teamId`, while nothing ever wrote it — so every registered server
+  relied on the `|| "default"` collapse inside the predicate. They are now
+  stamped explicitly. Writing a `teamId` at *create* time is the ownership
+  phase's job (#2077/#2083); this pass only adopts what predates it, which is
+  why the team-delete guard needs no new check — no non-default team can own an
+  MCP server yet.
+
+The decisions above live in the pure `orchestrator/default-team-adoption.js`
+(`needsAdoption` / `planAdoption` / `planBootstrapMembership`), because
+`bootstrapTeams` and `backfillResourceOwnership` are not exported from
+`orchestrator.js` and cannot otherwise be reached by a test.
+
+### Single-user compatibility mode (`AUTH_ENABLED`, #1457)
+
+The model above ships live but *inert* on a single-operator stack: the only
+principal is the env admin, who gets `all: true`, so no list is ever filtered.
+`AUTH_ENABLED` makes that an explicit mode rather than an accident of there
+being one login.
+
+| Value | Mode | Behaviour |
+|---|---|---|
+| unset / `false` / `0` / `no` / `off` (**default**) | single-user compatibility | Whoever is signed in is the operator. `computeScope` short-circuits to the implicit System-Admin scope; every list filter and management gate is a no-op. An upgraded stack behaves exactly as before. |
+| `true` / `1` / `yes` / `on` | multi-user | Scope is computed from the caller's user record and memberships, as `scope.js` already does. |
+
+Four things worth knowing:
+
+- **Off is the default because this is a migration flag.** An operator who pulls
+  a new image must not find their console suddenly filtered; activation is a
+  deliberate act. Adoption (above) runs unconditionally, so flipping the flag on
+  later needs no migration step.
+- **It relaxes authorization, not authentication.** An unauthenticated request
+  still resolves to the empty scope, and the IAP auto-login gate (#1415) is
+  untouched: `isKnownPrincipal` reads `envAdmin`/`userId`, never `scope.all`, so
+  an unregistered IAP identity still falls through to the login form.
+- **The personal credential tier is not breached.** `ownsPersonalCredential` has
+  no `scope.all` bypass and keys on `userId`, which single-user mode still
+  resolves from the matching user record — so one human never sees another's
+  personal credential, in either mode.
+- **The one footgun is reported, not hidden.** Turning the flag *off* on a stack
+  that already has named users grants each of them full visibility. The console
+  logs a warning at boot naming how many non-admin records are affected.
+
+An unrecognised value is treated as off *and* logged as unrecognised — a typo
+must not silently start filtering the console.
 
 ### Seeding an initial System Admin
 

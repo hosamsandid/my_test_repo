@@ -66,14 +66,27 @@ export function savedNoticeText(agent) {
 }
 
 /**
- * What a re-provisioning change (context folders) did to the live conversation.
- * The container restarted, so the run that was in flight is gone and the next
- * message opens a fresh session — the chat must not just say "saved" (AC4).
+ * What an immediate-apply change did to the live conversation.
  *
- * @param {object} info  `{ respawned }` from the mount PATCH
+ * Context folders re-provision the container, so the run that was in flight is
+ * gone and the next message opens a fresh session — the chat must not just say
+ * "saved" (AC4).
+ *
+ * Attaching or removing an agent-scoped repository (#2067) is the OPPOSITE
+ * case, and saying otherwise would be worse than saying nothing: the workspace
+ * volume is shared with the running container, so the clone lands additively
+ * with no respawn (the #1342 Sync-repositories mechanism) and the conversation
+ * above is untouched. Only the prompt has to catch up, which it does on the
+ * agent's next run.
+ *
+ * @param {object} info  `{ kind, respawned }` from the applying control
  * @returns {string}
  */
 export function restartNoticeText(info) {
+  if (info && info.kind === 'agent-repositories') {
+    return 'Repositories updated. The workspace changed immediately; the agent is told about it '
+      + 'from its next run on. The conversation above is unaffected.';
+  }
   return info && info.respawned
     ? 'Host context folders applied — the agent\'s container was re-provisioned. Any run in progress ended; the next message starts a fresh session.'
     : 'Host context folders saved. They are attached the next time the agent starts.';

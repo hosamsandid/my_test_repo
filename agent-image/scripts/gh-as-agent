@@ -84,8 +84,16 @@ _post() {
   local route="$1" payload="$2" resp http_code body
   # A failed network step (orchestrator unreachable) is exit 3: nothing was
   # pushed/opened. This is distinct from a reachable-but-rejected HTTP error.
+  # Internal-API credential (#1456, GOV-PLATFORM-2): the per-agent token
+  # `startAgentProcess` baked into the container env, valid only for the
+  # agent-facing allowlist and only for this agent's own id. Built as an array so
+  # an unset token contributes NO argument at all — an empty `-H ''` would be a
+  # malformed header rather than an absent one, and a stack that has not armed
+  # the gate must send exactly what it sent before.
+  local auth=()
+  [[ -n "${AEE_INTERNAL_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer ${AEE_INTERNAL_TOKEN}")
   resp="$(curl -sS -w $'\n%{http_code}' \
-    -X POST -H 'Content-Type: application/json' \
+    -X POST -H 'Content-Type: application/json' "${auth[@]}" \
     --data "$payload" \
     "${ORCH%/}${route}")" || die "could not reach orchestrator at ${ORCH}" "$EXIT_UNREACHABLE"
   http_code="${resp##*$'\n'}"

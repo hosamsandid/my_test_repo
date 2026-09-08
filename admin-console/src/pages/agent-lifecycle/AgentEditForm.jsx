@@ -42,6 +42,7 @@ import FormInput from '../../components/FormInput';
 import SkillPicker from '../../components/SkillPicker';
 import PluginGrantPicker from '../../components/PluginGrantPicker';
 import SyncReposPanel from '../../components/SyncReposPanel';
+import AgentRepositoriesPanel from '../agent-chat/AgentRepositoriesPanel';
 import { effectiveGrantFor } from '../plugin-grant-view.js';
 import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
@@ -511,6 +512,11 @@ export default function AgentEditForm({
         </div>
       )}
 
+      {/* Repositories. Two controls, one topic, deliberately adjacent (#2067 D7):
+          Sync pulls in what the agent's ENVIRONMENT declares, the panel below
+          attaches one to THIS agent alone. The panel is the same component the
+          Agent Chat Workspace view renders (AC20) and applies immediately,
+          outside this form's Save — like the context-mount control above. */}
       {agent.role !== 'team' && agent.environmentId && (
         <div style={{ paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
           <div style={labelStyle}>Repositories</div>
@@ -518,6 +524,17 @@ export default function AgentEditForm({
             endpoint={`/api/agents/${encodeURIComponent(agent.id)}/sync-repositories`}
             actionLabel="Sync repositories"
             description={"Clone any repositories added to this agent's Working Environment that are missing from its workspace. Already-cloned repositories are left untouched."}
+          />
+        </div>
+      )}
+
+      {agent.role !== 'team' && (
+        <div style={{ paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+          <div style={labelStyle}>Additional repositories for this agent only</div>
+          <AgentRepositoriesPanel
+            agentId={agent.id}
+            agentName={agent.displayName || agent.id}
+            onChanged={onImmediateApply ? (info => onImmediateApply({ kind: 'agent-repositories', ...info })) : null}
           />
         </div>
       )}

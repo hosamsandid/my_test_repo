@@ -176,7 +176,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // which needed a chapter `agent-chat.md` had no equivalent of (who wrote a message,
 // why badge and side answer different questions, and what the neutral icon on
 // un-attributable history means): +2 572, landing in full for the same `seeAlso`
-// reason — **291 950** (85.9%). // #2066 then replaced the manual **Sync all agents** button with an offer the
+// reason — **291 950** (85.9%). #2066 then replaced the manual **Sync all agents** button with an offer the
 // environment save makes, which raised the crown to **296 639** (87.2%, +4 689):
 // worth noting because the ticket only *removed* a control, and yet it is the
 // biggest single move in this paragraph. Two reasons, and the second is the
@@ -186,7 +186,21 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // EVERY context, `/quickstart` included, because it is a `CORPUS_FILES` doc; on
 // top of that `/quickstart` sees the topic growth in full too, since `create.md`
 // names `/environments` as a `seeAlso` neighbour — so both halves hit the same
-// crown and the delta on `/environments` itself is identical. Re-measure rather than trust this comment —// measureWorstCaseSystemPrompt() sweeps every context and returns which one
+// crown and the delta on `/environments` itself is identical. #2067 then made a repository attachable to a single
+// agent, documented in the two places that own the concept: `agent-chat.md` (the
+// surfaces live there, so it lands on this crown in full for that same `seeAlso`
+// reason) and the every-context `docs/working-environments.md` + `admin-console.md`.
+// Measured as one total on the merge rather than a per-file or per-PR sum, since
+// #2065 and #2067 both grow the same crown: **301 270** (88.6%, 38 730 left — the three
+// individual deltas +2 572, +4 689 and +4 631 sum to the measurement exactly, which
+// is how you know every branch's own number was right and only the chain was wrong). Two things worth
+// carrying forward. A feature whose surfaces sit on `/chats` pays this crown twice
+// over — once through the `seeAlso` link and once through whichever CORPUS_FILES
+// reference doc has to agree with it. And when two PRs append to THIS paragraph in
+// parallel, the auto-merge keeps both entries and leaves one figure with two
+// successors: re-chain them in ticket order and re-measure, rather than trusting
+// either branch's number.
+// Re-measure rather than trust this comment —
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.
 //

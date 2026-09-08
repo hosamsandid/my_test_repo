@@ -29,6 +29,25 @@ export function bundleFilename(name) {
 }
 
 /**
+ * Storage metadata that must never leave in an export (#2068).
+ *
+ * A draft's `createdBy` and access set are stored beside the bundle, not part of
+ * it — the same rule the Copilot history follows. Exporting them would put a
+ * list of colleagues' user ids into a file that gets mailed around, and the
+ * import side already refuses to honour them, so carrying them out is pure leak
+ * with no matching capability. A team-template export never has them.
+ */
+const NON_PORTABLE_FIELDS = ['createdBy', 'accessUserIds'];
+
+/** The portable form of a bundle: everything except the storage metadata. */
+export function portableBundle(bundle) {
+  if (!bundle || typeof bundle !== 'object') return bundle;
+  const out = { ...bundle };
+  for (const f of NON_PORTABLE_FIELDS) delete out[f];
+  return out;
+}
+
+/**
  * Write `bundle` to the user's downloads as pretty-printed JSON.
  *
  * No-op for a falsy bundle (a draft that failed to load), so a caller can hand
@@ -36,7 +55,7 @@ export function bundleFilename(name) {
  */
 export function downloadBundle(bundle) {
   if (!bundle) return;
-  const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify(portableBundle(bundle), null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = bundleFilename(bundle.name);

@@ -18,7 +18,7 @@ const byKey = (items, key) => items.find(i => i.key === key);
 
 test('AC8 — a draft row offers create-team first, then the rest', () => {
   const { items } = buildFlowsRailMenu({ kind: 'draft', name: 'Simple SDLC', id: 'simple-sdlc', roleCount: 2 });
-  assert.deepEqual(keys(items), ['create-team', 'rename', 'export', 'delete']);
+  assert.deepEqual(keys(items), ['create-team', 'rename', 'share', 'export', 'delete']);
   assert.equal(byKey(items, 'create-team').label, CREATE_TEAM_LABEL);
   assert.ok(items.every(i => !i.disabled));
 });
@@ -51,12 +51,12 @@ test('create-team is offered-but-inert on an empty draft, with the reason on it'
   const { items } = buildFlowsRailMenu({ kind: 'draft', name: 'Empty', roleCount: 0 });
   // Same shape as a non-empty draft — one stable menu, the `gate()` doctrine of
   // buildAgentMenu — so the entry is never mysteriously absent.
-  assert.deepEqual(keys(items), ['create-team', 'rename', 'export', 'delete']);
+  assert.deepEqual(keys(items), ['create-team', 'rename', 'share', 'export', 'delete']);
   assert.equal(byKey(items, 'create-team').disabled, true);
   assert.equal(byKey(items, 'create-team').title, NO_ROLES_MENU_HINT);
   // Everything else stays usable on an empty draft — you can still rename or
   // delete a design you have not filled in yet.
-  for (const k of ['rename', 'export', 'delete']) {
+  for (const k of ['rename', 'share', 'export', 'delete']) {
     assert.equal(byKey(items, k).disabled, undefined, `${k} must stay live`);
   }
 });
@@ -90,7 +90,7 @@ test('an unrecognised target degrades to an empty menu instead of guessing', () 
 test('only the two canvas actions carry an intent; the rest the page handles itself', () => {
   assert.equal(intentForMenuKey('create-team'), FLOW_INTENTS.createTeam);
   assert.equal(intentForMenuKey('edit-as-draft'), FLOW_INTENTS.editAsDraft);
-  for (const k of ['rename', 'export', 'delete', 'open-chat', 'nope', undefined]) {
+  for (const k of ['rename', 'share', 'export', 'delete', 'open-chat', 'nope', undefined]) {
     assert.equal(intentForMenuKey(k), null, `${String(k)} must not become an intent`);
   }
 });

@@ -14,6 +14,7 @@ import {
   OVERLAY_FLOW_NODE,
   OVERLAY_FLOW_ANOMALIES,
   OVERLAY_FLOW_IMPROVEMENTS,
+  OVERLAY_DRAFT_SHARE,
 } from '../../context/page-help-view.js';
 
 // ─── #1984 (epic #1981) Flows per-surface help guard ─────────────────────────
@@ -53,9 +54,12 @@ function sourceOf(rel) {
     .replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
 }
 
-// The ten surfaces from the ticket's table, as { file, chapter key }.
+// The surfaces from the ticket's table, as { file, chapter key }. Ten from
+// #1984, plus the draft Share panel #2068 added — it lives in Briefings.jsx
+// beside the left-list header, which is why that file appears twice.
 const SURFACES = [
   ['the flows left-list header', '../Briefings.jsx', 'overview'],
+  ['the draft Share panel', '../Briefings.jsx', 'sharingDrafts'],
   ['the canvas toolbar', '../ProcessCanvas.jsx', 'canvas'],
   ['the hand-off chooser', './EdgeDialogs.jsx', 'handoffs'],
   ['the label registry', './LabelRegistryPanel.jsx', 'humans'],
@@ -72,7 +76,10 @@ const SURFACES = [
 // layout, not a SidePanel, so the help panel already opens in front of it.
 // NodeInspector publishes on RoutingSection's behalf — the "?" is in the
 // Routing tab, but the panel body is the inspector's.
+// Briefings.jsx joined the list with #2068: its Share panel is a `SidePanel`
+// too, so it needs the same lift as the seven Flow-editor ones.
 const OVERLAY_OWNERS = [
+  ['../Briefings.jsx', 'OVERLAY_DRAFT_SHARE', OVERLAY_DRAFT_SHARE],
   ['./EdgeDialogs.jsx', 'OVERLAY_FLOW_EDGE', OVERLAY_FLOW_EDGE],
   ['./LabelRegistryPanel.jsx', 'OVERLAY_FLOW_LABELS', OVERLAY_FLOW_LABELS],
   ['./HumanRegistryPanel.jsx', 'OVERLAY_FLOW_HUMANS', OVERLAY_FLOW_HUMANS],
@@ -137,13 +144,14 @@ test('the chapter slugs are derived from the headings, not hand-written', () => 
     ['Anomalies', 'anomalies'],
     ['Improvements', 'improvements'],
     ['Describe the flow: the Copilot', 'copilot'],
+    ['Sharing a draft', 'sharingDrafts'],
   ];
   for (const [heading, key] of pairs) {
     assert.equal(sectionSlug(heading), FLOWS_HELP_SECTIONS[key], `chapter "${heading}"`);
   }
 });
 
-test('all ten areas the ticket names are top-level chapters, not sub-headings', () => {
+test('all the areas the tickets name are top-level chapters, not sub-headings', () => {
   const h2 = topicSections(topicBody).filter(s => s.level === 2).map(s => s.slug);
   for (const [key, slug] of Object.entries(FLOWS_HELP_SECTIONS)) {
     assert.ok(
@@ -152,9 +160,10 @@ test('all ten areas the ticket names are top-level chapters, not sub-headings', 
       + 'but the ticket asks for one clearly-headed chapter per area',
     );
   }
+  // Ten from #1984 plus `Sharing a draft` (#2068).
   assert.equal(
-    h2.length, 10,
-    `expected exactly the ten chapters, got ${h2.length}: ${h2.join(' · ')}`,
+    h2.length, 11,
+    `expected exactly the eleven chapters, got ${h2.length}: ${h2.join(' · ')}`,
   );
 });
 
@@ -229,7 +238,9 @@ test('no chapter slug is inlined as a literal anywhere on the page', () => {
   // sub-section to scroll the inspector to, e.g. section="inputs"), and that is
   // a name collision, not a hand-written help slug.
   let checked = 0;
-  for (const [, file] of SURFACES) {
+  // Deduped: Briefings.jsx hosts two surfaces (#2068), and walking it twice
+  // would double-count its buttons and make the anti-vacuity total meaningless.
+  for (const file of [...new Set(SURFACES.map(([, f]) => f))]) {
     for (const el of sourceOf(file).match(/<PageHelpButton[\s\S]*?\/>/g) || []) {
       const m = /\bsection=(\{[^}]*\}|"[^"]*"|'[^']*')/.exec(el);
       assert.ok(m, `a PageHelpButton in ${file} names no chapter at all`);
@@ -242,9 +253,10 @@ test('no chapter slug is inlined as a literal anywhere on the page', () => {
     }
   }
   // Anti-vacuity: this loop asserts nothing if the element regex stops matching
-  // (a reformat that puts a child between the tags, say). Ten surfaces, but the
-  // two registry panels share the `humans` chapter, so ten buttons is the count.
-  assert.equal(checked, 10, `expected to check ten "?" mounts, checked ${checked}`);
+  // (a reformat that puts a child between the tags, say). Eleven surfaces, one
+  // button each — the two registry panels share the `humans` CHAPTER but still
+  // mount a button apiece, so the totals agree.
+  assert.equal(checked, 11, `expected to check eleven "?" mounts, checked ${checked}`);
 });
 
 test('every SidePanel-hosted surface publishes a help subject', () => {
@@ -254,7 +266,9 @@ test('every SidePanel-hosted surface publishes a help subject', () => {
   for (const [file, constName, value] of OVERLAY_OWNERS) {
     const src = sourceOf(file);
     assert.ok(
-      /import \{ useHelpSubject \} from '\.\.\/\.\.\/context\/HelperChatContext'/.test(src),
+      // Depth-tolerant: the seven Flow-editor panels live in `pages/process/`,
+      // Briefings.jsx one level up in `pages/`.
+      /import \{ useHelpSubject \} from '(\.\.\/)+context\/HelperChatContext'/.test(src),
       `${file} must import useHelpSubject`,
     );
     assert.ok(
@@ -308,10 +322,20 @@ test('the flows-list header keeps exactly one page-level "?"', () => {
   // A second entry point in that header would compete with the one the epic
   // standardised on; every other button on this page lives inside a panel, a
   // dialog or the canvas toolbar.
+  //
+  // Briefings.jsx carries two buttons since #2068 — the header's, and the one
+  // inside the draft Share `SidePanel` — so counting the file is no longer the
+  // same as counting the header. Assert the chapters instead: exactly one
+  // `overview` (the header) and exactly one `sharingDrafts` (the panel), and
+  // nothing else. A third button would have to name a third chapter, and a
+  // second header button would push `overview` to two.
   const src = sourceOf('../Briefings.jsx');
-  assert.equal(
-    (src.match(/<PageHelpButton/g) || []).length, 1,
-    'expected exactly one page-level "?" in the Flows left-list header',
+  const sections = (src.match(/<PageHelpButton[\s\S]*?\/>/g) || [])
+    .map(el => (/\bsection=\{FLOWS_HELP_SECTIONS\.(\w+)\}/.exec(el) || [])[1]);
+  assert.deepEqual(
+    sections.sort(), ['overview', 'sharingDrafts'],
+    'expected exactly one page-level "?" (the Flows left-list header) and one '
+    + 'inside the draft Share panel',
   );
 });
 

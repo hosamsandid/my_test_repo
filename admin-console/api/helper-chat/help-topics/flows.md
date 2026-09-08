@@ -75,8 +75,10 @@ The left list is how you choose what the canvas shows. It has two sections:
 - **Teams** — the live flow graphs, one row per Agent Team, with its Working
   Environment underneath. Selecting one opens it in live mode.
 - **Drafts** — the designs you are still working on, with the number of agents
-  in each. A draft can be deleted from its row; a team cannot (a team is
-  deleted from the Agents page, because that removes running agents).
+  in each, and whether each one is **private** or **shared** (see *Sharing a
+  draft* below). You see your own drafts and the ones colleagues have shared
+  with you — not everyone's. A draft can be deleted from its row; a team cannot
+  (a team is deleted from the Agents page, because that removes running agents).
 
 The list can be collapsed to give the canvas the full width, and the divider
 between it and the canvas can be dragged; both are remembered.
@@ -107,14 +109,66 @@ a design can be shared or version-controlled.
 
 **Every row in the list has a context menu** — right-click it, press the `Menu`
 key (or `Shift+F10`), or use the `⋮` that appears when you hover. A **draft**
-offers **Create team…** first and set apart, then Rename…, Export… and Delete
-draft; a **team** offers Edit as draft, Export… and Open in Agent Chat. This is
-where renaming a draft lives besides the flow header, and it is the one place
-*Create team…* is reachable without opening the draft first.
+offers **Create team…** first and set apart, then Rename…, **Share…**, Export…
+and Delete draft; a **team** offers Edit as draft, Export… and Open in Agent
+Chat. This is where renaming and sharing a draft live besides the flow header,
+and it is the one place *Create team…* is reachable without opening the draft
+first.
 
 Your last selection is remembered per user and restored when you come back. A
 flow that has since been deleted falls back silently to no selection rather
 than to an error.
+
+## Sharing a draft
+
+**A draft belongs to the person who created it and is visible only to them
+until they share it.** The Drafts list marks each row *private* or *shared with
+N people*, and names the creator of a draft you did not create yourself. A
+System Admin sees every draft.
+
+**Share…** in the draft's row menu opens a panel listing everyone who currently
+has access, and a picker of the colleagues you can add. It offers existing
+accounts only — there are no invitations — and shows each person by display
+name and email, nothing else.
+
+**Everyone you share with becomes a full equal.** There are no roles, no
+read-only mode and no privileges kept back for whoever created the draft.
+Anyone with access can:
+
+- open, edit, rename and export it,
+- create a team from it,
+- share it on with someone else,
+- remove anyone from the access list — **including you**,
+- and delete it outright.
+
+So **sharing a draft is a one-way act of trust, not a lend.** If that is more
+than you want to hand over, export the draft and send the file instead: an
+imported bundle is a separate draft that belongs to whoever imported it, and
+carries no access list with it.
+
+Two rules follow from the equality:
+
+- **The access list can never be emptied.** The last remaining person cannot
+  remove themselves; the panel says so and points at *Delete draft*, which is
+  what they actually mean. Anyone who is not the last **can** remove
+  themselves — that is how you leave a shared draft, and it needs no separate
+  button.
+- **Deleting a draft is confirmed, and the confirmation names the other people
+  who will lose it.** Under equal rights that dialog is the only thing between
+  a mis-click and someone else's work.
+
+Two things sharing does **not** do. It does not carry over when someone
+**creates a team** from the draft: the team belongs to whoever clicked *Create
+team…*, so if a colleague materialises a draft you shared with them, the
+resulting team is theirs and you will not see it. And it does not add any
+locking — several people editing one draft at once is now likely, and the last
+save still wins.
+
+When someone deletes a draft you have open, or removes your access to it, your
+next save says so plainly rather than failing silently. If a person's user
+record is deleted, they are dropped from every access list and the drafts stay
+where they are; one whose list would be left empty is kept and stays reachable
+by a System Admin, rather than being destroyed as a side effect.
 
 ## The canvas
 

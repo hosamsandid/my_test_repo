@@ -18,6 +18,9 @@ import {
 import ConfirmDialog from '../../components/ConfirmDialog';
 import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
+// #2067: the same panel the agent's Settings tab renders, so both surfaces
+// read and write the same data and enforce the same authorization (AC20).
+import AgentRepositoriesPanel from './AgentRepositoriesPanel';
 
 const MODE_KEY = 'agentChat.workspaceMode';
 
@@ -79,6 +82,12 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
     try { localStorage.setItem(MODE_KEY, mode); } catch { /* ignore */ }
   }, [mode]);
 
+  // Agent-scoped repositories panel (#2067). Collapsed by default and never
+  // persisted: it is a configuration surface, not a display mode, and it
+  // shares the toolbar with Upload — opening one closes the other, so the
+  // tree is never pushed off-screen by two stacked panels.
+  const [reposOpen, setReposOpen] = useState(false);
+
   // Upload panel state
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadDir, setUploadDir] = useState('');
@@ -118,6 +127,7 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
     setExpanded(new Set(['']));
     setSelectedFile(null);
     setUploadOpen(false);
+    setReposOpen(false);
     setUploadDir('');
     setUploadStatus('idle');
     setUploadMessage('');
@@ -441,7 +451,7 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
         alignItems: 'center',
         gap: 'var(--eb-space-2)',
         padding: 'var(--eb-space-2) var(--eb-space-3)',
-        borderBottom: uploadOpen ? 'none' : '1px solid var(--eb-border-default)',
+        borderBottom: (uploadOpen || reposOpen) ? 'none' : '1px solid var(--eb-border-default)',
         background: 'var(--eb-bg-surface)',
         flexShrink: 0,
       }}>
@@ -456,8 +466,22 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
         }}>
           /workspace/agents/{agentId}/
         </div>
+        {/* #2067 D1: attaching an additional repository to THIS agent, placed
+            with the existing Workspace actions because the workspace is where
+            a user notices a repository is missing. Sits first because it
+            changes what the tree contains rather than acting on what it
+            already has. */}
         <button
-          onClick={() => { setUploadOpen(o => !o); setUploadStatus('idle'); setUploadMessage(''); if (!uploadOpen) setUploadDir(''); }}
+          onClick={() => { setReposOpen(o => !o); if (!reposOpen) setUploadOpen(false); }}
+          title="Repositories in this agent's workspace"
+          style={{ ...iconBtnStyle, color: reposOpen ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }}
+          onMouseEnter={e => { if (!reposOpen) e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
+          onMouseLeave={e => { if (!reposOpen) e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+        >
+          <GitBranch size={12} />
+        </button>
+        <button
+          onClick={() => { setUploadOpen(o => !o); if (!uploadOpen) setReposOpen(false); setUploadStatus('idle'); setUploadMessage(''); if (!uploadOpen) setUploadDir(''); }}
           title="Upload files or folder to workspace"
           style={{ ...iconBtnStyle, color: uploadOpen ? 'var(--eb-accent-primary)' : 'var(--eb-text-muted)' }}
           onMouseEnter={e => { if (!uploadOpen) e.currentTarget.style.color = 'var(--eb-text-primary)'; }}
@@ -484,6 +508,27 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
           <RefreshCw size={12} />
         </button>
       </div>
+      )}
+
+      {/* Agent-scoped repositories panel (#2067). The same component the
+          Settings tab renders (AC20), so the two surfaces cannot drift; a
+          successful attach/remove refreshes the tree so the new directory
+          appears without pressing Refresh (AC4). */}
+      {mode === 'tree' && reposOpen && (
+        <div style={{
+          borderBottom: '1px solid var(--eb-border-default)',
+          background: 'var(--eb-bg-elevated)',
+          padding: 'var(--eb-space-3)',
+          flexShrink: 0,
+          maxHeight: '50%',
+          overflowY: 'auto',
+        }}>
+          <AgentRepositoriesPanel
+            agentId={agentId}
+            active={active}
+            onChanged={refreshAll}
+          />
+        </div>
       )}
 
       {/* Upload panel */}

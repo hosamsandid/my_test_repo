@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router';
-import { RefreshCw, AlertCircle, Loader2, ArrowRight, Target, GitPullRequest, CircleDot, Tag, Ban, MessageSquare } from 'lucide-react';
+import { RefreshCw, AlertCircle, Loader2, ArrowRight, Target, GitPullRequest, CircleDot, Tag, Ban, CornerDownRight, MessageSquare } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
+import { handoffStatement } from '../process/outcome-consumers.js';
 import {
   resolveOutcomeView,
   modeSummary,
@@ -254,32 +255,80 @@ function OutcomeCard({ index, row, showConsumers }) {
 
       {showConsumers && (
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
-          {row.terminal
-            ? 'Terminal outcome — no signal (dead-end by design).'
-            : row.marker === 'terminal'
-              // Declared open end (#1004): a proper endpoint, never "no consumer".
-              ? '⏹ Terminal by design — the end product.'
-              : row.marker === 'external'
-                ? <>↗ external{row.markerNote ? <>: {row.markerNote}</> : ' — consumed outside this flow'}</>
-                : row.humanHandoff
-              // Brake label (#981): the hand-off to a person IS the consumer.
-              ? <>hands off to a person 👤 — the flow pauses for a decision{row.consumers.length ? <> · also wakes {row.consumers.join(', ')}</> : null}</>
-              : (row.humanReviewers || []).length
-                // Bound human reviewer of the opened PR/issue (#1001): a
-                // consumer, not a warning — mirrors the Routing tab.
-                ? <>reviewed by 👤 {row.humanReviewers.join(', ')}{row.consumers.length ? <> · also wakes {row.consumers.join(', ')}</> : null}</>
-                : row.consumers.length
-                  ? <><span style={fieldLabel}>wakes</span> {row.consumers.join(', ')}</>
-                  : <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>
-                      no consumer — nothing reacts to this outcome&apos;s signal
-                    </span>}
+          <ConsumerSummary row={row} />
         </div>
       )}
     </div>
   );
 }
 
-const ACTION_ICONS = { setLabel: Tag, openPr: GitPullRequest, openIssue: CircleDot, none: Ban };
+/**
+ * The row's "who continues the work?" line.
+ *
+ * Two halves, because an outcome can carry both at once (#2057 AC8/D5): the
+ * label / artifact / person consumer summary this panel has always shown, and
+ * the direct hand-offs the action names itself. Neither is rendered at the
+ * expense of the other — a hand-off next to a `terminal` marker is a genuine
+ * contradiction and the operator is the one who has to see it.
+ *
+ * Only when BOTH halves are empty does the row read as unconsumed, which is the
+ * defect this ticket fixes: a hand-off-only outcome used to land in that branch.
+ */
+function ConsumerSummary({ row }) {
+  // AC11 — an outcome that signals nothing at all is a dead end by design, not
+  // a missing consumer. Unchanged, and unreachable for a hand-off row (a
+  // `wakeAgent` action is not `none`).
+  if (row.terminal) return <>Terminal outcome — no signal (dead-end by design).</>;
+
+  const signal = row.marker === 'terminal'
+    // Declared open end (#1004): a proper endpoint, never "no consumer".
+    ? <>⏹ Terminal by design — the end product.</>
+    : row.marker === 'external'
+      ? <>↗ external{row.markerNote ? <>: {row.markerNote}</> : ' — consumed outside this flow'}</>
+      : row.humanHandoff
+        // Brake label (#981): the hand-off to a person IS the consumer.
+        ? <>hands off to a person 👤 — the flow pauses for a decision{row.consumers.length ? <> · also wakes {row.consumers.join(', ')}</> : null}</>
+        : (row.humanReviewers || []).length
+          // Bound human reviewer of the opened PR/issue (#1001): a consumer,
+          // not a warning — mirrors the Routing tab.
+          ? <>reviewed by 👤 {row.humanReviewers.join(', ')}{row.consumers.length ? <> · also wakes {row.consumers.join(', ')}</> : null}</>
+          : row.consumers.length
+            ? <><span style={fieldLabel}>wakes</span> {row.consumers.join(', ')}</>
+            : null;
+
+  // Wording and severity come from the shared pure module, so this panel and
+  // the Flow Editor's Routing tab cannot disagree about one hand-off (AC13).
+  const handoffs = (row.handoffs || []).map(handoffStatement);
+
+  if (!signal && !handoffs.length) {
+    return (
+      <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>
+        no consumer — nothing reacts to this outcome&apos;s signal
+      </span>
+    );
+  }
+
+  return (
+    <>
+      {signal}
+      {handoffs.map((s, i) => (
+        <React.Fragment key={i}>
+          {(signal || i > 0) && ' · '}
+          <span style={s.tone === 'warning' ? { color: 'var(--eb-status-warning, #d97706)' } : undefined}>
+            {s.text}
+          </span>
+        </React.Fragment>
+      ))}
+    </>
+  );
+}
+
+// `wakeAgent` deliberately does NOT fall through to the default: `Ban` is what
+// this panel uses for `set no signal`, so a direct hand-off — the one action
+// that always wakes someone — was labelled with the icon for the semantic
+// opposite (#2057 D3). `CornerDownRight` is the console's turning arrow, echoing
+// the canvas edge's `↪` chip.
+const ACTION_ICONS = { setLabel: Tag, openPr: GitPullRequest, openIssue: CircleDot, wakeAgent: CornerDownRight, none: Ban };
 
 function ActionChip({ action }) {
   const Icon = ACTION_ICONS[action.type] || Ban;

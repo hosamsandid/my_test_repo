@@ -22,7 +22,13 @@
  * must keep the same lenient rule (valid mode + at least one option).
  */
 
-import { consumersFor, labelConsumers, outcomeHandsOffToHuman, outcomeHumanReviewers } from '../process/outcome-consumers.js';
+import {
+  consumersFor,
+  labelConsumers,
+  outcomeHandsOffToHuman,
+  outcomeHandoffs,
+  outcomeHumanReviewers,
+} from '../process/outcome-consumers.js';
 
 export const OUTCOME_MODES = ['exactlyOne', 'anyOf'];
 
@@ -43,7 +49,12 @@ export function authoredOutcomes(outcomes) {
 // is set only for setLabel, so the caller can render it as a code chip, and
 // `type` is carried through so the icon is picked from the action kind rather
 // than by sniffing the wording.
-export function describeAction(action) {
+//
+// `nameOf` (optional) resolves a target agent id to its display name, which a
+// direct hand-off needs: the prompt block the agent receives reads `hand off
+// directly to **<Target>**`, and the panel showed the raw type string
+// `wakeAgent` instead (#2057 AC4). Absent, the id is shown — never the type.
+export function describeAction(action, nameOf) {
   const type = action && action.type;
   if (type === 'setLabel') {
     const label = typeof action.label === 'string' ? action.label.trim() : '';
@@ -51,17 +62,26 @@ export function describeAction(action) {
   }
   if (type === 'openPr') return { type, text: 'open a pull request', label: '' };
   if (type === 'openIssue') return { type, text: 'open a GitHub issue', label: '' };
+  if (type === 'wakeAgent') {
+    const to = typeof action.to === 'string' ? action.to.trim() : '';
+    const who = (to && nameOf ? nameOf(to) : '') || to;
+    return {
+      type,
+      text: who ? `hand off directly to ${who}` : 'hand off directly (no target set)',
+      label: '',
+    };
+  }
   if (type === 'none') return { type, text: 'set no signal', label: '' };
   return { type: type || 'none', text: type ? String(type) : 'set no signal', label: '' };
 }
 
 // Every action of one option, in port order, with the empty port normalised to
 // the terminal 'none' the way the editor and the prompt renderer both do.
-export function describeActions(option) {
+export function describeActions(option, nameOf) {
   const actions = Array.isArray(option?.actions) && option.actions.length
     ? option.actions
     : [{ type: 'none' }];
-  return actions.map(describeAction);
+  return actions.map(a => describeAction(a, nameOf));
 }
 
 // A row is terminal when it signals nothing at all — a dead end by design, not
@@ -95,6 +115,13 @@ export function resolveOutcomeView(agent, peers, labels, humans) {
   const node = { id: agent?.id };
   const list = Array.isArray(peers) ? peers : [];
   const consumersResolved = list.length > 0;
+  // Display name of a peer, for the hand-off action chip. Falls back to the id
+  // inside `describeAction`, so an unresolvable target still reads as an agent
+  // rather than as the raw action type.
+  const nameOf = (id) => {
+    const p = list.find(x => x && x.id === id);
+    return p ? (p.displayName || p.id) : '';
+  };
 
   if (authoredOutcomes(agent?.outcomes)) {
     const oc = agent.outcomes;
@@ -102,10 +129,13 @@ export function resolveOutcomeView(agent, peers, labels, humans) {
       key: o.id || `outcome-${i + 1}`,
       title: (typeof o.title === 'string' && o.title.trim()) ? o.title.trim() : (o.id || `Outcome ${i + 1}`),
       when: (typeof o.when === 'string' && o.when.trim()) ? o.when.trim() : '',
-      actions: describeActions(o),
+      actions: describeActions(o, nameOf),
       notifyDm: o.notify === 'dm',
       terminal: isTerminal(o),
       consumers: consumersFor(o, node, list),
+      // Direct hand-offs (#2057): a consumer named by the action itself, so it
+      // is derived separately from the label/channel matching above.
+      handoffs: outcomeHandoffs(o, node, list),
       humanHandoff: outcomeHandsOffToHuman(o, labels),
       humanReviewers: outcomeHumanReviewers(o, node, humans),
       // Open-end marker (#1004): 'terminal' | 'external' | null (+ note).
@@ -136,6 +166,7 @@ export function resolveOutcomeView(agent, peers, labels, humans) {
         notifyDm: false,
         terminal: false,
         consumers: labelConsumers(label, node, list),
+        handoffs: [], // a flat emit sets a label — it cannot carry a hand-off action
         humanHandoff: outcomeHandsOffToHuman({ actions: [{ type: 'setLabel', label }] }, labels),
         humanReviewers: [], // a flat emit sets a label — there is no artifact to review
         marker: null, markerNote: '', // flat emits carry no open-end markers

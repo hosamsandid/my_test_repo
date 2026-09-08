@@ -87,6 +87,7 @@ test('a structured port yields one row per option with derived consumers', () =>
     notifyDm: false,
     terminal: false,
     consumers: ['Code Reviewer'],
+    handoffs: [],        // #2057 — a label outcome carries no direct hand-off
     humanHandoff: false, // #981 — no brake label set, no registry threaded in
     humanReviewers: [],  // #1001 — no humans registry threaded in
     marker: null, markerNote: '', // #1004 — no open-end marker set
@@ -276,4 +277,76 @@ test('terminal/external markers surface on structured rows; legacy rows stay unm
   assert.equal(view.rows[2].marker, null);
   const legacy = resolveOutcomeView({ id: 'dev', emits: ['x'] }, peers);
   assert.equal(legacy.rows[0].marker, null);
+});
+
+/* ── direct hand-offs (#2057) ─────────────────────────────────────────── */
+
+test('#2057 AC4: a hand-off action reads in plain language and names its target', () => {
+  const nameOf = (id) => (id === 'reviewer' ? 'Code Reviewer' : '');
+  assert.deepEqual(describeAction({ type: 'wakeAgent', to: 'reviewer' }, nameOf),
+    { type: 'wakeAgent', text: 'hand off directly to Code Reviewer', label: '' });
+  // Unresolvable target: the id, never the raw action type `wakeAgent`.
+  assert.deepEqual(describeAction({ type: 'wakeAgent', to: ' gone ' }, nameOf),
+    { type: 'wakeAgent', text: 'hand off directly to gone', label: '' });
+  assert.deepEqual(describeAction({ type: 'wakeAgent', to: 'gone' }),
+    { type: 'wakeAgent', text: 'hand off directly to gone', label: '' });
+  // A half-authored row says so rather than naming nobody.
+  assert.deepEqual(describeAction({ type: 'wakeAgent' }, nameOf),
+    { type: 'wakeAgent', text: 'hand off directly (no target set)', label: '' });
+});
+
+test('#2057 AC4: describeActions resolves hand-off names from the flow peers', () => {
+  const view = resolveOutcomeView(
+    { id: 'dev', parentTeamId: 't', outcomes: { mode: 'anyOf', options: [
+      { id: 'ship', actions: [{ type: 'wakeAgent', to: 'reviewer' }] },
+    ] } },
+    peers,
+  );
+  assert.deepEqual(view.rows[0].actions, [
+    { type: 'wakeAgent', text: 'hand off directly to Code Reviewer', label: '' }]);
+});
+
+test('#2057 AC1: a hand-off-only row carries a consumer, so it is not a dead end', () => {
+  const view = resolveOutcomeView(
+    { id: 'dev', outcomes: { mode: 'anyOf', options: [
+      { id: 'ship', actions: [{ type: 'wakeAgent', to: 'reviewer' }] },
+    ] } },
+    peers,
+  );
+  const row = view.rows[0];
+  assert.deepEqual(row.handoffs, [{ to: 'reviewer', name: 'Code Reviewer', state: 'ok' }]);
+  assert.equal(row.terminal, false);          // AC11 stays about all-`none` rows
+  assert.deepEqual(row.consumers, []);        // no label, so no label subscriber
+});
+
+test('#2057 AC8: a label + hand-off row reports both relationships', () => {
+  const view = resolveOutcomeView(
+    { id: 'dev', outcomes: { mode: 'anyOf', options: [
+      { id: 'ship', actions: [
+        { type: 'setLabel', label: 'ready-for-review' },
+        { type: 'wakeAgent', to: 'qa' },
+      ] },
+    ] } },
+    peers,
+  );
+  assert.deepEqual(view.rows[0].consumers, ['Code Reviewer']);
+  assert.deepEqual(view.rows[0].handoffs.map(h => h.to), ['qa']);
+});
+
+test('#2057 AC10/AC15: a marker keeps its hand-off, and a graph-less panel claims nothing', () => {
+  const agent = { id: 'dev', outcomes: { mode: 'anyOf', options: [
+    { id: 'ship', terminal: true, actions: [{ type: 'wakeAgent', to: 'reviewer' }] },
+  ] } };
+  const view = resolveOutcomeView(agent, peers);
+  assert.equal(view.rows[0].marker, 'terminal');
+  assert.equal(view.rows[0].handoffs.length, 1);
+  // No peers → the panel suppresses the consumer line entirely rather than
+  // claiming anything, hand-off included.
+  const blind = resolveOutcomeView(agent, null);
+  assert.equal(blind.consumersResolved, false);
+});
+
+test('#2057: a legacy flat-emits row carries an empty hand-off list', () => {
+  const legacy = resolveOutcomeView({ id: 'dev', emits: ['ready-for-review'] }, peers);
+  assert.deepEqual(legacy.rows[0].handoffs, []);
 });

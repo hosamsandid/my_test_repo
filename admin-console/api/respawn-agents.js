@@ -13,26 +13,76 @@
 // deps.loadEnvironment(environmentId): => environment object or null.
 // deps.effectiveEndpointId(cfg, env): => resolved endpoint id or null.
 // deps.loadTeamConfig(teamId): => that team agent's config.json contents or null.
-// Returns: [{ id, displayName, role, teamId, teamName }] for every enabled,
-//   materialized (has a Matrix token) agent whose effective endpoint matches.
-function discoverBoundAgents(agentConfigs, endpointId, { loadEnvironment, effectiveEndpointId, loadTeamConfig }) {
-  return agentConfigs
-    .filter(cfg => {
-      if (!cfg || cfg.enabled === false || !cfg.token) return false;
-      const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-      return effectiveEndpointId(cfg, env) === endpointId;
-    })
-    .map(cfg => {
-      const teamId = typeof cfg.parentTeamId === 'string' ? cfg.parentTeamId : null;
-      const teamCfg = teamId ? loadTeamConfig(teamId) : null;
-      return {
-        id: cfg.id,
-        displayName: cfg.displayName || cfg.id,
-        role: cfg.role || 'agent',
-        teamId,
-        teamName: teamCfg ? (teamCfg.displayName || teamId) : null,
-      };
-    });
+// deps.isVisible(cfg): => may the CALLER see this agent? (#1501)
+// Returns: { visible, hidden } — two arrays of the same projected shape
+//   `{ id, displayName, role, teamId, teamName }`, together covering every
+//   enabled, materialized (has a Matrix token) agent whose effective endpoint
+//   matches, partitioned by `isVisible`.
+//
+// The split exists because the two consumers need different sets and neither is
+// "all" (#1501): the bound-agents LIST may only disclose agents the caller could
+// already see elsewhere in the console, while the RESPAWN must reach every
+// consumer of the rotated credential — hiding an agent from the respawn would
+// leave it running on a stale credential, which is worse than the metadata leak.
+// `isVisible` is deliberately REQUIRED rather than defaulting to "everything is
+// visible": a fail-open default is exactly the shape of the bug this closes, and
+// a future third call site must state its own answer instead of inheriting one.
+function discoverBoundAgents(agentConfigs, endpointId, { loadEnvironment, effectiveEndpointId, loadTeamConfig, isVisible }) {
+  if (typeof isVisible !== 'function') {
+    throw new TypeError('discoverBoundAgents: deps.isVisible(cfg) is required');
+  }
+  const visible = [];
+  const hidden = [];
+  for (const cfg of agentConfigs) {
+    if (!cfg || cfg.enabled === false || !cfg.token) continue;
+    const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+    if (effectiveEndpointId(cfg, env) !== endpointId) continue;
+    const teamId = typeof cfg.parentTeamId === 'string' ? cfg.parentTeamId : null;
+    const teamCfg = teamId ? loadTeamConfig(teamId) : null;
+    const entry = {
+      id: cfg.id,
+      displayName: cfg.displayName || cfg.id,
+      role: cfg.role || 'agent',
+      teamId,
+      teamName: teamCfg ? (teamCfg.displayName || teamId) : null,
+    };
+    (isVisible(cfg) ? visible : hidden).push(entry);
+  }
+  return { visible, hidden };
+}
+
+// The blast-radius signal an operator needs even when they may not see who is in
+// it (#1501): how many bound agents are hidden from this caller, and across how
+// many distinct teams — never an id, a display name or a team name.
+//
+// `teamCount` counts distinct team boundaries only. A hidden agent outside every
+// team (no `parentTeamId` — someone else's standalone agent) is counted in
+// `count` and reported separately in `standalone`, because folding it into
+// `teamCount` would claim a team that does not exist.
+function hiddenBlastRadius(hidden) {
+  const teamIds = new Set();
+  let standalone = 0;
+  for (const a of hidden) {
+    if (a.teamId) teamIds.add(a.teamId);
+    else standalone++;
+  }
+  return { count: hidden.length, teamCount: teamIds.size, standalone };
+}
+
+// Project a respawn outcome onto what the caller may be told (#1501). Ids are
+// disclosed only for agents the caller can already see; everything else survives
+// as a count, so the response never becomes a way to enumerate another team's
+// agent ids while still telling the operator the rotation's true reach.
+//
+// outcome: { respawned: string[], skipped: string[] } from respawnWithConcurrency.
+// visibleIds: Set<string> of the ids the caller may see.
+function projectRespawnOutcome({ respawned, skipped }, visibleIds) {
+  return {
+    respawned: respawned.filter(id => visibleIds.has(id)),
+    skipped: skipped.filter(id => visibleIds.has(id)),
+    hiddenRespawned: respawned.filter(id => !visibleIds.has(id)).length,
+    hiddenSkipped: skipped.filter(id => !visibleIds.has(id)).length,
+  };
 }
 
 // ids: string[] of agent ids to respawn.
@@ -64,4 +114,9 @@ async function respawnWithConcurrency(ids, concurrency, respawnFn) {
   return { respawned, skipped };
 }
 
-module.exports = { discoverBoundAgents, respawnWithConcurrency };
+module.exports = {
+  discoverBoundAgents,
+  hiddenBlastRadius,
+  projectRespawnOutcome,
+  respawnWithConcurrency,
+};

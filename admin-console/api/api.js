@@ -23,7 +23,7 @@ const { buildWorkItems, workItemDetail } = require('./work-items');
 const usageExport = require('./usage-export');
 const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
-const { discoverBoundAgents, respawnWithConcurrency } = require('./respawn-agents');
+const { discoverBoundAgents, hiddenBlastRadius, projectRespawnOutcome, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
 const { createTtlCache } = require('./ttl-cache');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
@@ -11578,21 +11578,40 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   res.status(204).end();
 });
 
+// The bound-agents discovery deps, shared by the two routes below so their view
+// of "which agents are bound, and which of them may this caller see" cannot
+// drift. `isVisible` is the #1501 fix: seeing the *provider* (visibleCredential)
+// says nothing about seeing an *agent*, which has its own rules (team membership
+// since #2078, plus ownership for a standalone agent), so a system-scoped
+// credential shared across teams used to disclose every consumer's id, display
+// name and role to any Team Admin who could merely view it.
+function boundAgentDeps(scope) {
+  return {
+    loadEnvironment,
+    effectiveEndpointId,
+    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
+    isVisible: cfg => visibleAgent(scope, agentMetaForScope(cfg)),
+  };
+}
+
+function loadAllAgentConfigs() {
+  return listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
+}
+
 // Returns enabled, materialized agents whose effective LLM endpoint is :id.
 // Used by the UI to prompt a respawn after credential rotation. Discovery
 // logic lives in respawn-agents.js (pure, unit-tested) — this route only
 // does I/O (loading configs) and wires the result into a JSON response.
+//
+// Agents the caller may not see are reported as a COUNT, never omitted (#1501):
+// an operator deciding whether to rotate a shared credential needs the true
+// blast radius even when the identities in it are none of their business.
 app.get('/api/llm-endpoints/:id/bound-agents', apiLimiter, (req, res) => {
   const scope = getScope(req);
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
   if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
-  const agentConfigs = listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
-  const agents = discoverBoundAgents(agentConfigs, ep.id, {
-    loadEnvironment,
-    effectiveEndpointId,
-    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
-  });
-  res.json({ agents });
+  const { visible, hidden } = discoverBoundAgents(loadAllAgentConfigs(), ep.id, boundAgentDeps(scope));
+  res.json({ agents: visible, hidden: hiddenBlastRadius(hidden) });
 });
 
 // Respawn all enabled agents bound to :id so they pick up the rotated credential
@@ -11604,12 +11623,13 @@ app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) =
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
   if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
   if (!canManageCredential(scope, ep)) return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
-  const agentConfigs = listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
-  const agents = discoverBoundAgents(agentConfigs, ep.id, {
-    loadEnvironment,
-    effectiveEndpointId,
-    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
-  });
+  const { visible, hidden } = discoverBoundAgents(loadAllAgentConfigs(), ep.id, boundAgentDeps(scope));
+  // EVERY bound agent is respawned, visible to this caller or not (#1501). The
+  // credential owner has a legitimate reason to fix every consumer, and skipping
+  // the invisible ones would leave them silently running on the rotated-away
+  // credential — defeating the point of the feature to protect a metadata leak
+  // that the response projection below closes instead.
+  const agents = [...visible, ...hidden];
   // Bounded concurrency: an unbounded Promise.all here would fan out one
   // stop+recreate container-lifecycle call per agent simultaneously, which
   // can overwhelm the orchestrator's libpod socket and the host's container
@@ -11617,12 +11637,30 @@ app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) =
   // route against 45+ agents). RESPAWN_CONCURRENCY lets an operator tune it
   // for their hardware; the default is conservative for a local Podman host.
   const requestedConcurrency = Number(process.env.RESPAWN_CONCURRENCY) || 5;
-  const { respawned, skipped } = await respawnWithConcurrency(
+  const outcome = await respawnWithConcurrency(
     agents.map(a => a.id),
     requestedConcurrency,
     id => respawnAgentBestEffort(id, 'llm-credential-rotated'),
   );
-  res.json({ respawned, skipped });
+  const visibleIds = new Set(visible.map(a => a.id));
+  const projected = projectRespawnOutcome(outcome, visibleIds);
+  const blastRadius = hiddenBlastRadius(hidden);
+  // The log line carries the hidden counts, not the hidden ids — the same rule
+  // the response follows, so reading the server log is not a way around it.
+  if (blastRadius.count > 0) {
+    console.log(`[llm-respawn] endpoint=${ep.id} respawned=${outcome.respawned.length} skipped=${outcome.skipped.length}`
+      + ` hidden=${blastRadius.count} hiddenTeams=${blastRadius.teamCount} hiddenStandalone=${blastRadius.standalone}`
+      + ` hiddenRespawned=${projected.hiddenRespawned} hiddenSkipped=${projected.hiddenSkipped}`);
+  }
+  res.json({
+    respawned: projected.respawned,
+    skipped: projected.skipped,
+    hidden: {
+      ...blastRadius,
+      respawned: projected.hiddenRespawned,
+      skipped: projected.hiddenSkipped,
+    },
+  });
 });
 
 // Pull a human-readable failure reason out of a proxy's error response body and

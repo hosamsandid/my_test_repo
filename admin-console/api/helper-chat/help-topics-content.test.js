@@ -579,6 +579,38 @@ const TOPIC_CONTENT = [
     ],
   },
   {
+    id: 'flow-control',
+    routes: ['/flow-control'],
+    // #2116 (epic #2112 Flow Control §4.4) — a NET-NEW topic: there was no box
+    // to extract, because the page did not exist. The four chapters below are
+    // each the landing target of a "?" on the matching board surface, so the
+    // headings are load-bearing rather than decorative.
+    chapters: [
+      'What the Flow Control board shows',
+      'The lifecycle stages',
+      'Blockers and what to do about them',
+      'The epic roll-up',
+    ],
+    // The load-bearing claim of the whole subsystem is that state comes from
+    // GitHub evidence and not from labels — a reword that softens it would make
+    // the board look like every other label-driven view, which is precisely the
+    // failure §4.1 exists to prevent. The read-only property is pinned for the
+    // same reason: the ledger mutates nothing, and a topic promising a repair
+    // button would be promising a later phase's feature.
+    concepts: [
+      'the fact wins',
+      'Claimed done',
+      'read-only',
+      'Superseded',
+      'Stale base',
+      'Orphaned',
+      'time in the current stage',
+      'An empty',
+      'Maintenance mode',
+      'mutually exclusive',
+    ],
+  },
+  {
     id: 'github-events',
     routes: ['/github-events'],
     // #1886 lifted the page's multi-clause intro (observational log; Processed

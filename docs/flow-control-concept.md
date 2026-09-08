@@ -503,3 +503,75 @@ UI — §4.3/§4.4/§4.5 own those, and #2115's own Scope is the ledger endpoint
 per-sweep PR-enrichment cap (`TICKET_LEDGER_PR_LIMIT`, default 60) bounds the
 cost of a team with a runaway number of open PRs; the PRs beyond it are reported
 in `errors[]` rather than silently dropped.
+
+## Amendment 2 — what §4.4 actually shipped (#2116)
+
+The board landed as `admin-console/src/pages/process/flow-control-view.js`
+(pure, the path §4.4 names) + `admin-console/src/pages/FlowControl.jsx` (the
+page) on a new `/flow-control` route, reading the Amendment-1 ledger. Read-only,
+like the ledger behind it. Four things deviate from or sharpen §4.4.
+
+**A2.1 — the netzplan stopgap is NOT built, and the reason is structural rather
+than a matter of effort.** §4.4 words it as *"the **supervisor** mirrors the
+ledger into the existing netzplan board via `aee-plan edit`"*, and §7's open
+question 1 as *"the zero-frontend stopgap **the supervisor can write**
+immediately"*. The supervisor is §4.3, which §6 phases at **Phase 4** — one
+phase *after* this board. It does not exist: `grep -ri supervisor` over the
+repository matches this document and nothing else. So the actor the stopgap is
+specified in terms of has no code, and there is no orchestrator→netzplan write
+path to substitute for it: `aee-plan` is an *agent-workspace* CLI seeded by a
+plugin grant and authenticated with a per-scope token, while a §4.3a supervisor
+is an orchestrator timer with neither a workspace nor a CLI. Building a mirror
+now would mean inventing that writer here, in a ticket whose acceptance criteria
+are all four about the board — and the stopgap's entire purpose is to be the
+*substitute* for the board, which this ticket delivers. It is therefore left to
+Phase 4, where its writer is born.
+
+Two factual corrections to §4.4 fall out of having read the plugin while
+deciding this, and they matter for whoever does build it. (a) *"`status` and
+`ownerId` are already modelled on graph nodes / swimlane lanes"* is half right:
+a **graph node** carries both (`plan-doc.js` `ownerId`, `status`), but a
+**swimlane lane** carries `ownerId` only — its progress model is a per-milestone
+`done` boolean, with no `status` field at all. A lifecycle mirror therefore has
+to use the **graph** primitive, not the swimlane one, despite "swimlane by
+lifecycle stage" being the board's own shape. (b) `ownerId` is *referentially
+validated* against `doc.owners[]` — an unknown owner is rejected on mutate and
+nulled on normalize — so a mirror must `add-owner` for each owning agent before
+it can assign one.
+
+**A2.2 — a purpose-built page, on its own route, not a side panel.** §4.4 says
+"a purpose-built admin-console page" and #2116 says "Console page", so the
+alternative was never really open; but it is worth recording why the cheaper
+option was refused. The obvious precedent is `FlowAnomaliesPanel`, a `SidePanel`
+on the Flows canvas — 560 px wide, which cannot host nine swimlanes, and reached
+only from a live team's canvas, which is not where an operator asking "where is
+everything?" starts. The cost of a real route is the registration surface
+(`App.jsx`, the sidebar, `breadcrumbs.js`, `route-title.js`, `PAGE_ROUTES`) plus
+an authored help topic, since `help-coverage.test.js` fails CI on a page route
+with no topic and no named owner. All of it is paid here; `help-topics/`
+gains `flow-control.md`.
+
+**A2.3 — "it never derives state from raw labels" is proven behaviourally, not
+by source inspection.** The obvious guard — grep the view for label vocabulary —
+is a false-positive generator for ordinary words and, worse, proves nothing
+about a label read through a variable. The check that actually holds is that
+`ticket.labels` is **not an input**: the test deletes the array from a ledger row
+entirely and asserts the rendered card is `deepEqual` to the card built with it.
+Paired with a fixture whose labels all say `:completed` while the reconciler says
+`in-review`, that turns AC2 from a claim into a fact — and a mutation that makes
+the view read `labels` fails eight tests. The page's own JSX is guarded
+separately (no `.labels` access, no flow token, no mutating `apiCall`), since a
+pure-module test cannot see the renderer.
+
+**A2.4 — the epic roll-up's buckets are exhaustive by construction.** §4.4's
+example (`3 done / 4 blocked / 2 waiting`) leaves "in progress" implicit and does
+not say what a *blocked* ticket that is also *done* counts as. `bucketFor`
+returns exactly one of `done | blocked | inProgress | waiting`, with `done`
+outranking `blocked` — a blocker recorded against merged work is history, not a
+call to action — and the test walks the whole state × blocker cross-product
+asserting the four counts sum to the total. Empty lanes are kept on the board
+for the converse reason: where work is *not* is information, and a board that
+hides its empty columns is a filtered list.
+
+**Still not built:** §4.5's central human inbox. The board surfaces
+`needsHuman` per card, which is the input that phase consumes, and nothing more.

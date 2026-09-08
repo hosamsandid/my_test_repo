@@ -107,6 +107,7 @@ const PAGE_ROUTES = new Set([
   '/maintenance-mode',
   '/users',
   '/flows',
+  '/flow-control',
   '/knowledge',
   '/about',
 ]);

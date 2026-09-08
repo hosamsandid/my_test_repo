@@ -5,6 +5,7 @@ import {
   ChevronLeft, ChevronRight, ChevronDown,
   Boxes, Key, KeyRound, MessageCircle, Github, GitBranch,
   Rocket, Users2, Wand2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle,
+  LayoutDashboard,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
@@ -136,6 +137,9 @@ const NAV_GROUPS = [
     // "build a team, then fill it in" reading order — Flows first, then the
     // templates, skills and knowledge a team draws on.
     { path: '/flows',        label: 'Flows',               Icon: GitBranch },
+    // Flows is where a process is AUTHORED; Flow Control (#2116) is where the
+    // same flow is WATCHED running, so it reads directly after it.
+    { path: '/flow-control', label: 'Flow Control',        Icon: LayoutDashboard },
     { path: '/role-templates', label: 'Agent Templates',   Icon: UserCog, adminOnly: true },
     { path: '/skills',       label: 'Skills',              Icon: Zap },
     { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },

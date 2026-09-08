@@ -81,6 +81,7 @@ const MaintenanceMode     = lazy(() => import('./pages/MaintenanceMode'));
 const Users               = lazy(() => import('./pages/Users'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
 const KnowledgeFlow       = lazy(() => import('./pages/KnowledgeFlow'));
+const FlowControl         = lazy(() => import('./pages/FlowControl'));
 const About = lazy(() => import('./pages/About'));
 
 // Keeps the browser tab title in step with the active route so tabs, history
@@ -198,6 +199,7 @@ export default function App() {
           <Route path="/users"        element={<AdminRoute><Users /></AdminRoute>} />
           <Route path="/flows"         element={<Briefings />} />
           <Route path="/knowledge"     element={<KnowledgeFlow />} />
+          <Route path="/flow-control"  element={<FlowControl />} />
           <Route path="/briefings"    element={<Navigate to="/flows" replace />} />
           <Route path="/process"      element={<Navigate to="/flows" replace />} />
           <Route path="/process/:teamId" element={<ProcessTeamRedirect />} />

@@ -229,11 +229,19 @@ export function proposalNodeDiff(current, proposed) {
 // `{type:'error'}` (the /api/teams/stream mould). Pre-stream failures
 // (bad request, no provider) stay plain non-ok JSON and never reach here.
 
-/** The live status line for a phase event. The server's repair budget is 2. */
+/**
+ * The live status line for a phase event. The server's repair budget is 2.
+ * While the upstream LLM call streams, the server re-emits the current phase
+ * with a `chars` count (the running reply size), so a large generation shows
+ * real movement instead of a frozen "Generating…"; the suffix is dropped when
+ * no size rode along (the pre-stream phase events, or the post-reply validate).
+ */
 export function phaseLabel(ev, maxRepairs = 2) {
-  if (ev && ev.phase === 'repairing') return `Repairing (${ev.iteration}/${maxRepairs})…`;
+  const chars = ev && Number.isFinite(ev.chars) ? ev.chars : 0;
+  const size = chars > 0 ? ` · ${(chars / 1000).toFixed(1)}k chars` : '';
+  if (ev && ev.phase === 'repairing') return `Repairing (${ev.iteration}/${maxRepairs})…${size}`;
   if (ev && ev.phase === 'validating') return 'Validating…';
-  return 'Generating…';
+  return `Generating…${size}`;
 }
 
 /**

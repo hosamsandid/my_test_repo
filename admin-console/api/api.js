@@ -56,6 +56,7 @@ const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const extractTemplate = require('./extract-template');
 const { runCopilot, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
+const { httpPostStreamText } = require('./anthropic-transport');
 const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
@@ -1514,6 +1515,15 @@ function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000) 
     req.end();
   });
 }
+
+// Whole-turn wall-clock budget for one Flow Copilot request, kept just under the
+// GKE LB backend `timeoutSec: 300` (deploy/k8s/overlays/*/app/ingress.yaml): the
+// browser-facing NDJSON response stays open across up to 3 sequential LLM calls
+// plus validation, so this bounds that WHOLE response (not one call) — the route
+// hands each call only the budget still remaining, and the console closes its own
+// stream with a clean `{error:'deadline'}` card ~20s before the edge would return
+// a raw 504. A run that steadily streams tokens normally finishes long before it.
+const COPILOT_STREAM_DEADLINE_MS = 280000;
 
 /* ─── Health ────────────────────────────────────────────────────────── */
 
@@ -7927,17 +7937,34 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
     'anthropic-version': '2023-06-01',
     ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
   };
-  // Whole-bundle generations are big (16k max_tokens) — a generous transport
-  // timeout, unlike the short one-shot suggestion calls.
+  // Whole-bundle generations are big (16k max_tokens) and can take minutes.
+  // STREAM the upstream call (httpPostStreamText forces stream:true) so bytes
+  // flow the whole time — the internal Anthropic proxy never sees one long
+  // silent non-streaming request, which is the second way a large flow used to
+  // 504 — and forward a throttled progress heartbeat carrying the running reply
+  // size so the composer shows real movement instead of a frozen "Generating…".
+  const turnStartedAt = Date.now();
   const callLlm = async (payload) => {
-    const result = await httpPostJson(url, headers, { model: target.model, ...payload }, 180000);
+    let heartbeatAt = 0;
+    // The budget left for this call is the whole-turn ceiling minus what earlier
+    // calls (generation + any repairs) already spent — never below a small floor.
+    const deadlineMs = Math.max(5000, COPILOT_STREAM_DEADLINE_MS - (Date.now() - turnStartedAt));
+    const result = await httpPostStreamText(url, headers, { model: target.model, ...payload }, {
+      deadlineMs,
+      onProgress: (chars) => {
+        const now = Date.now();
+        if (now - heartbeatAt < 750) return; // a status line needs no more than ~1/s
+        heartbeatAt = now;
+        emit({ ...lastPhaseEv, chars });
+      },
+    });
     if (result.error || result.status < 200 || result.status >= 300) {
       const detail = result.error
         || (result.body && (result.body.error?.message || result.body.error || result.body.message))
         || `HTTP ${result.status}`;
       throw new Error(`LLM request failed: ${detail}`);
     }
-    return extractMessageText(result.body);
+    return result.text;
   };
 
   // NDJSON stream plumbing — see POST /api/teams/stream for the rationale of
@@ -7960,12 +7987,21 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
     } catch { /* socket gone */ }
   }
 
+  // The last phase runCopilot announced, so the streaming heartbeat inside
+  // callLlm can re-emit it with the running reply size attached (carrying its
+  // `iteration` on a repair pass) without runCopilot needing to know it streams.
+  let lastPhaseEv = { type: 'phase', phase: 'generating' };
+  const onProgress = (ev) => {
+    if (ev && ev.type === 'phase' && ev.phase) lastPhaseEv = ev;
+    emit(ev);
+  };
+
   // Provenance first (§4.5): the NDJSON stream announces which provider + model
   // is paying for this turn before any generation begins.
   emit({ type: 'assist', ...assistMeta(target).assist });
 
   try {
-    const out = await runCopilot({ bundle: body.bundle, messages, callLlm, onProgress: emit });
+    const out = await runCopilot({ bundle: body.bundle, messages, callLlm, onProgress });
     emit({ type: 'result', ...out, model: target.model, meta: assistMeta(target) });
   } catch (err) {
     // Transport failure with no bundle to fall back to, or no parseable reply

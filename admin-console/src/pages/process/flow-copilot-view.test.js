@@ -155,6 +155,16 @@ test('phaseLabel maps the server phases to live status lines', () => {
   assert.equal(phaseLabel(null), 'Generating…');
 });
 
+test('phaseLabel appends the streamed reply size when a heartbeat carries one', () => {
+  // The streaming heartbeat re-emits the current phase with a `chars` count.
+  assert.equal(phaseLabel({ type: 'phase', phase: 'generating', chars: 2100 }), 'Generating… · 2.1k chars');
+  assert.equal(phaseLabel({ type: 'phase', phase: 'repairing', iteration: 1, chars: 500 }), 'Repairing (1/2)… · 0.5k chars');
+  // No size rode along, or a zero count → the bare label (backward compatible).
+  assert.equal(phaseLabel({ type: 'phase', phase: 'generating', chars: 0 }), 'Generating…');
+  // Validating is a post-reply phase — never annotated even if a stray count appears.
+  assert.equal(phaseLabel({ type: 'phase', phase: 'validating', chars: 9000 }), 'Validating…');
+});
+
 // Synthetic OK response whose body streams the given chunks.
 function streamedRes(chunks) {
   const enc = new TextEncoder();

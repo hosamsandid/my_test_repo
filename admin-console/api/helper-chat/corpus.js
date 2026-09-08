@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 305 972 of 340 000 — 90.0% used, 34 028 left — against
+// neighbours) at 306 383 of 340 000 — 90.1% used, 33 617 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped

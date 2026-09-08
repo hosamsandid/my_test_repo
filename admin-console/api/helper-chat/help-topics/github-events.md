@@ -205,10 +205,38 @@ state, and a backlog means something is holding delivery:
   the agent comes back. (Nothing new accrues while it is disabled, because the
   poller skips disabled agents.)
 
+Each waiting row reads *what kind · which work item · its title · the details ·
+when it arrived*:
+
+| Column | What it holds |
+|---|---|
+| **Kind** | What sort of entry this is — hover it for a one-line explanation. |
+| **Work item** | Whether it is a **PR** or an **Issue** and its `#number`, linking to GitHub, plus a linked `→ closes #<issue>` when the pull request resolves one. A `—` means the entry has no work item: a `push` or a release, or any kind that is not a GitHub event at all. |
+| **Title** | The title of that PR or issue. |
+| **Details** | The event in plain language (*PR labeled*, not `pull_request.labeled`), the GitHub account that caused it, and — for a labelled event — the flow label as a chip. |
+| **Received** | When the entry was accepted, as a relative phrase; the exact local time is on hover. |
+
+The **label chip** keeps the bare token you would read on the GitHub issue and
+type into a trigger's label filter. Two suffixes are added by the platform
+rather than by a person, so the chip decodes them into a state word beside the
+token: `:wip` (*in progress*) is stamped when a run claims its wake label, and
+`:completed` (*done*) when that run finishes.
+
+**Where the GitHub event id went.** The row used to end in something like
+`#14629937419`, which looked like a ticket number and was not one — it is the
+internal id GitHub's Events API gave the event. It is now on the **Details**
+hover, together with the repository and the raw event key, so support can still
+find a delivery in the poller's log without the row implying the number means
+anything to you.
+
 The queue holds more than GitHub events: a folded **GitHub digest**, a
 **throttle warning** (the heads-up DM sent the first time a cap is hit), a
-**Briefing-pack event**, and queued session operations all appear with their own
-kind badge, explained on hover.
+**hand-over message** the console composed for an agent, a **loop
+verification** another agent is waiting on, a **direct hand-off** from a
+teammate, and queued session operations all appear with their own kind badge,
+explained on hover. None of those has a PR or an issue behind it, so they
+honestly show `—` in the two work-item columns rather than a value invented for
+the sake of a full row.
 
 Each row's **kebab menu** (⋮) holds the two things you can do to a waiting
 entry. They are the only actions on this page that change anything.

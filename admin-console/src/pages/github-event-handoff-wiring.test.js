@@ -59,16 +59,13 @@ test('the Event column stays on the shared eventLabel helper', () => {
 test('the pending-queue section renders the kind through the shared view helpers', () => {
   // The `wake-agent` kind label/tooltip/detail live in pending-queue-view.js;
   // this is what keeps the queue row from reading "An unrecognised queue entry".
-  //
-  // Asserted by NAME, not as a fixed import line: a guard pinned to the exact
-  // brace list breaks on the next ticket that imports one more helper from the
-  // same module — which is precisely what #2102 (Reassign to…) did — and that
-  // failure says nothing about hand-off rendering. Parse the brace list and
-  // check only the names this guard is actually about.
-  const m = src.match(/import\s*\{([^}]*)\}\s*from\s*'\.\/pending-queue-view'/);
-  assert.ok(m, 'the page must import its queue-row helpers from pending-queue-view');
-  const imported = new Set(m[1].split(',').map(s => s.trim()).filter(Boolean));
+  // Asserted per name rather than as one exact import line (#2101 added two
+  // more helpers from the same module): what this guard is about is that these
+  // four decisions come from the pure module, not that the list is frozen.
+  const imported = /import \{([^}]*)\} from '\.\/pending-queue-view'/.exec(src);
+  assert.ok(imported, 'the page no longer imports pending-queue-view');
+  const names = imported[1].split(',').map(s => s.trim());
   for (const name of ['kindLabel', 'kindTooltip', 'entryDetail', 'totalPending']) {
-    assert.ok(imported.has(name), `the page must import ${name} from pending-queue-view`);
+    assert.ok(names.includes(name), `${name} is no longer imported from the pure module`);
   }
 });

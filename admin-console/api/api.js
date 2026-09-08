@@ -31,6 +31,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
         resolveAgentTenant } = require('./scope');
+const { resolveAgentTeam } = require('./agent-team');
 const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
 const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
@@ -2843,6 +2844,12 @@ app.post('/api/agents/:id/convert-to-team', heavyLimiter, async (req, res) => {
   // it creates a team in its tenant. A caller who may do the first but not the
   // second (the ticket's own edge case) must be refused, so the tenant check is
   // made without the ownership escape hatch `agentMetaForScope` grants.
+  //
+  // #2078: this second gate deliberately stays on the legacy access scope. It
+  // asks "may you mint a team here", and team creation is System-Admin-only
+  // until P3 makes it self-service — so it is the one place the collapsed
+  // boundary must NOT be used, or a standalone agent's owner (who now passes the
+  // first gate under D8) could convert their way into owning a team.
   if (denyUnlessCanManageAgent(req, res, { ...cfg, id })) return;
   if (!canManageAgent(getScope(req), { teamId: agentTeamId({ ...cfg, id }) })) {
     return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
@@ -3849,7 +3856,10 @@ app.post('/api/agents/:id/clone', heavyLimiter, async (req, res) => {
   }
   if (parentTeamId != null) {
     const destCfg = readJsonFile(path.join(AGENTS_DIR, parentTeamId, 'config.json'), null);
-    if (!canManageAgent(cloneScope, agentMetaForScope(destCfg || { teamId: parentTeamId }))) {
+    // The fallback names the destination Agent Team directly (#2078): with the
+    // boundary now read off the config, a bare `{ teamId: parentTeamId }` would
+    // resolve to "no team" and fail closed on a team that does exist.
+    if (!canManageAgent(cloneScope, agentMetaForScope(destCfg || { id: parentTeamId, role: 'team' }))) {
       return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
     }
   }
@@ -4266,8 +4276,14 @@ app.post('/api/agents/import', heavyLimiter, _importUpload.single('file'), async
     // of the default team — non-default Team Admins should graft via parentTeamId.
     {
       const importScope = getScope(req);
+      // The standalone branch still names the legacy default access scope on
+      // purpose (#2078): this is a gate on agent *creation*, and re-pointing who
+      // may create is P3's contract, not P2's. Re-keying it here would either
+      // widen it to every authenticated user (P3, early) or narrow it to System
+      // Admins (a regression AC5 forbids). The team branch IS re-keyed — see the
+      // clone route for why the fallback names the team explicitly.
       const destMeta = parentTeamId != null
-        ? agentMetaForScope(readJsonFile(path.join(AGENTS_DIR, parentTeamId, 'config.json'), null) || { teamId: parentTeamId })
+        ? agentMetaForScope(readJsonFile(path.join(AGENTS_DIR, parentTeamId, 'config.json'), null) || { id: parentTeamId, role: 'team' })
         : { teamId: 'default' };
       if (!canManageAgent(importScope, destMeta)) {
         return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
@@ -4572,19 +4588,28 @@ app.post('/api/agents/:id/prompt-history/:version/revert', apiLimiter, async (re
 
 /* ─── Agent Model Selection ─────────────────────────────────────────── */
 
-// The human Team an agent belongs to — the tenant for ownership, visibility,
-// management and credential scoping. A team-member inherits it from its parent
+// The CREDENTIAL tenant of an agent — which access scope's model providers, SSH
+// keys and GitHub tokens it may use. A team-member inherits it from its parent
 // Agent Team; `parentTeamId` is an Agent-Team id and is never itself a tenant
 // (see resolveAgentTenant in scope.js).
+//
+// NOT an authorization answer since #2078 — use `agentMetaForScope` for that.
+// Credential records are still stamped with access-scope ids until P5 re-points
+// them, which is why this hop survives the D1 collapse; it retires with them.
 function agentTeamId(cfg) {
   return resolveAgentTenant(cfg, (id) => (
     AGENT_ID_RE.test(id) ? readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null) : null
   ));
 }
 
-// The minimal agent shape visibleAgent() needs (team + private-ownership).
+// The minimal agent shape visibleAgent()/canManageAgent() need: the ACCESS
+// boundary plus the owner. Since #2078 the boundary is the Agent Team read
+// straight off the config (agent-team.js) — no parent read, no fs access — and
+// is `null` for a standalone `role: 'agent'`, which ownership then decides (D8).
+// `visibility` is gone from the shape: nothing ever wrote the field and D8
+// retires it (concept §3.5).
 function agentMetaForScope(cfg) {
-  return { teamId: agentTeamId(cfg), visibility: cfg && cfg.visibility, ownerId: cfg && cfg.ownerId };
+  return { teamId: resolveAgentTeam(cfg), ownerId: cfg && cfg.ownerId };
 }
 
 // Config-write authorization guard (#989). Derives the agent's owning team from

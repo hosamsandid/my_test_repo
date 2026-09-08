@@ -143,6 +143,95 @@ test('summarizeEntry surfaces per-kind hints for non-GitHub entries', () => {
   assert.equal(summarizeEntry({ id: 'w', kind: 'throttle-warning', convKey: 'push:main' }).convKey, 'push:main');
 });
 
+// ── which PR/issue is waiting (#2101) ───────────────────────────────────────
+
+test('summarizeEntry projects the work item of a PR entry, in the Processed tab shape (AC1)', () => {
+  const s = summarizeEntry({
+    id: 'p', github: {
+      event: 'pull_request.labeled', repo: 'o/r', actor: 'alice', eventId: '14629937419',
+      payload: {
+        label: { name: 'revisions-required:completed' },
+        pull_request: {
+          number: 1907, title: 'Fix the drain',
+          html_url: 'https://github.com/o/r/pull/1907', closesIssues: [1900],
+        },
+      },
+    },
+  });
+  assert.deepEqual(s.workItem, {
+    kind: 'pr', number: 1907, title: 'Fix the drain',
+    url: 'https://github.com/o/r/pull/1907', closesIssues: [1900],
+  });
+});
+
+test('summarizeEntry projects the work item of an issue entry (AC1)', () => {
+  const s = summarizeEntry({
+    id: 'i', github: {
+      event: 'issues.labeled', repo: 'o/r', eventId: '9',
+      payload: { label: { name: 'ready-6' }, issue: { number: 2101, title: 'Pending queue', html_url: 'https://github.com/o/r/issues/2101' } },
+    },
+  });
+  assert.deepEqual(s.workItem, {
+    kind: 'issue', number: 2101, title: 'Pending queue', url: 'https://github.com/o/r/issues/2101',
+  });
+});
+
+test('summarizeEntry nulls the work item for an event that has none, rather than omitting it (AC1)', () => {
+  // `push` / `release.published` carry no PR or issue. The key is always
+  // present because "no work item" is a fact the row renders as `—`, not the
+  // absence of a field a caller has to guess about.
+  const s = summarizeEntry({ id: 'u', github: { event: 'push', repo: 'o/r', eventId: '1', payload: { ref: 'refs/heads/main' } } });
+  assert.equal('workItem' in s, true);
+  assert.equal(s.workItem, null);
+});
+
+test('summarizeEntry keeps the full github payload out of the list response (AC1)', () => {
+  const entry = {
+    id: 'p', github: {
+      event: 'pull_request.opened', repo: 'o/r', eventId: '5',
+      payload: { pull_request: { number: 7, title: 'T', body: 'x'.repeat(50000) }, huge: 'y'.repeat(50000) },
+    },
+  };
+  const s = summarizeEntry(entry);
+  assert.equal('payload' in s, false);
+  assert.equal('github' in s, false);
+  // Belt and braces: nothing large rode in on the new field either.
+  assert.ok(JSON.stringify(s).length < 500, JSON.stringify(s).slice(0, 200));
+});
+
+test('summarizeEntry never throws on a malformed or absent payload while projecting a work item', () => {
+  for (const payload of [undefined, null, {}, 'nope', { pull_request: 'not-an-object' }, { issue: {} }]) {
+    const s = summarizeEntry({ id: 'x', github: { event: 'issues.opened', payload } });
+    assert.equal(s.workItem, null, JSON.stringify(payload));
+  }
+});
+
+test('a non-github kind carries no work item at all (AC4)', () => {
+  for (const kind of ['github-digest', 'throttle-warning', 'session-reset', 'session-set', 'trigger', 'wake-agent']) {
+    const s = summarizeEntry({ id: 'k', kind });
+    assert.equal('workItem' in s, false, kind);
+  }
+});
+
+test('AC2 — the pending projection and the event log share ONE extractor', () => {
+  // Two copies of this extraction is exactly how "which PR is waiting" and
+  // "which PR did we process" would come to disagree, so assert identity of the
+  // function object rather than equality of two outputs.
+  const workItem = require('./github-work-item');
+  const eventLog = require('./github-event-log');
+  assert.equal(eventLog.extractWorkItem, workItem.extractWorkItem);
+});
+
+test('AC2 — pending-queue.js stays free of fs, and so does the extractor it now requires', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  for (const file of ['pending-queue.js', 'github-work-item.js']) {
+    const src = fs.readFileSync(path.join(__dirname, file), 'utf8');
+    assert.ok(!/require\(['"](node:)?fs['"]\)/.test(src), `${file} requires fs`);
+    assert.ok(!/\bfs\./.test(src.replace(/\/\/.*$/gm, '')), `${file} uses fs`);
+  }
+});
+
 // ── direct agent-to-agent hand-off (#2032) ──────────────────────────────────
 
 test('summarizeEntry projects a wake-agent hand-off (producer + note)', () => {

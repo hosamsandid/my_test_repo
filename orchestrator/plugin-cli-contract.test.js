@@ -547,6 +547,8 @@ test('aee-jira: no subcommand → exit 2, --help → 0 with domain verbs', () =>
   assert.match(help.stdout, /projects/);
   assert.match(help.stdout, /inbox/);
   assert.match(help.stdout, /show/);
+  assert.match(help.stdout, /comment/);
+  assert.match(help.stdout, /transition/);
 });
 
 test('aee-jira: unknown subcommand → exit 2 (usage)', () => {
@@ -570,7 +572,11 @@ test('aee-jira: ungranted → exit 3 with not-granted error', () => {
 });
 
 test('aee-jira: a granted verb against an unreachable broker → exit 3', () => {
-  for (const args of [['projects'], ['list', '--project', 'KAN'], ['show', 'KAN-1'], ['inbox']]) {
+  const verbs = [
+    ['projects'], ['list', '--project', 'KAN'], ['show', 'KAN-1'], ['inbox'],
+    ['comment', 'KAN-1', '--body', 'x'], ['transition', 'KAN-1', '--to', 'Done'],
+  ];
+  for (const args of verbs) {
     const r = runJira([...args, '--json'], grantedJiraWorkspace());
     assert.equal(r.status, 3, args.join(' '));
     const obj = JSON.parse(r.stdout.trim());
@@ -578,7 +584,8 @@ test('aee-jira: a granted verb against an unreachable broker → exit 3', () => 
   }
 });
 
-test('aee-jira: list without --project → exit 2 (usage), never a broker call', () => {
-  const r = runJira(['list', '--json'], grantedJiraWorkspace());
-  assert.equal(r.status, 2);
+test('aee-jira: list without --project / comment without --body → exit 2 (usage), never a broker call', () => {
+  assert.equal(runJira(['list', '--json'], grantedJiraWorkspace()).status, 2);
+  assert.equal(runJira(['comment', 'KAN-1', '--json'], grantedJiraWorkspace()).status, 2);
+  assert.equal(runJira(['transition', 'KAN-1', '--json'], grantedJiraWorkspace()).status, 2);
 });

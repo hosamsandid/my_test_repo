@@ -445,8 +445,20 @@ Each phase is independently mergeable and leaves `main` shippable.
   up with no console change. The plugin's own poll-event log (§6.4) is deferred
   — the platform GitHub Event Log already carries a `plugin.event` row per wake
   (Phase 2).
-- **Phase 4 — writes.** `comment` / `transition` behind `policy` (D3); the
-  `/admin` watch-config route.
+- **Phase 4 — writes. ✅ landed.** `aee-jira comment ISSUE --body …` and
+  `aee-jira transition ISSUE --to "Status"` — POST through the broker, which
+  calls `broker-policy.authorizeWrite` (→ SDK `authorizeAction` against the
+  manifest's `policy: { comment|transition: { scopes: ["team"] } }`) BEFORE
+  touching the credential, and audits every write. D3: role-gated, **no
+  confirmation pen** (moving a ticket is routine + reversible), `requiresApproval`
+  wired-but-empty for a future destructive op. `jira-client`:
+  `addComment` (ADF body, agent-attributed paragraph), `listTransitions` +
+  `transitionIssue` (resolves the transition id from the target status name,
+  409 naming the options when none leads there). The `/admin` route (team-admin)
+  edits the watch config (`{ projectKey, statusFilter? }` rows) — replacing
+  #1539's `env.jiraProjects[]`, the `jira-event` trigger fields *and* the
+  Phase-0 `spike-config` seam; which agents a change wakes stays a per-agent
+  `plugin-event` trigger (Phase 2).
 - **Phase 5 — docs + help.** `plugins/jira/broker/README.md`, a
   `docs/jira-plugin.md` operator guide replacing `docs/jira-integration-concept.md`,
   and the context-help topic. `help-coverage.test.js` will fail on any new route

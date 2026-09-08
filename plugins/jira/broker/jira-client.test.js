@@ -188,6 +188,54 @@ test('searchJql: runs an arbitrary query through /search/jql', async () => {
   });
 });
 
+test('commentAdf: wraps text as ADF paragraphs, attribution first', () => {
+  const doc = jc.commentAdf('line one\n\nline two', 'by an agent');
+  assert.equal(doc.type, 'doc');
+  assert.equal(doc.content[0].content[0].text, 'by an agent');
+  assert.equal(doc.content[0].content[0].marks[0].type, 'em');
+  assert.equal(doc.content[1].content[0].text, 'line one');
+  assert.deepEqual(doc.content[2].content, []); // blank line
+});
+
+test('addComment: POSTs an ADF body to /issue/:key/comment', async () => {
+  await withFetch((url, opts) => {
+    assert.match(url, /\/rest\/api\/3\/issue\/KAN-6\/comment$/);
+    assert.equal(opts.method, 'POST');
+    assert.equal(JSON.parse(opts.body).body.type, 'doc');
+    return { ok: true, status: 201, text: async () => JSON.stringify({ id: '10099' }) };
+  }, async () => {
+    assert.deepEqual(await jc.addComment(CRED, 'KAN-6', { body: 'hi', attribution: 'x', env: CRED.env }), { id: '10099', issueKey: 'KAN-6' });
+  });
+});
+
+test('transitionIssue: resolves the transition id by target status, then POSTs it', async () => {
+  await withFetch((url, opts, n) => {
+    if (n === 1) {
+      assert.match(url, /\/transitions$/);
+      assert.equal(opts.method, 'GET');
+      return { ok: true, status: 200, text: async () => JSON.stringify({ transitions: [
+        { id: '11', name: 'Start progress', to: { name: 'In Progress' } },
+        { id: '21', name: 'Ready', to: { name: 'Ready for Dev' } },
+      ] }) };
+    }
+    assert.equal(opts.method, 'POST');
+    assert.equal(JSON.parse(opts.body).transition.id, '21');
+    return { ok: true, status: 204, text: async () => '' };
+  }, async () => {
+    const r = await jc.transitionIssue(CRED, 'KAN-6', { toStatus: 'ready for dev', env: CRED.env });
+    assert.deepEqual(r, { issueKey: 'KAN-6', applied: 'Ready', toStatus: 'Ready for Dev' });
+  });
+});
+
+test('transitionIssue: no transition to the target → a 409 naming the options', async () => {
+  await withFetch(() => ({ ok: true, status: 200, text: async () => JSON.stringify({ transitions: [{ id: '11', name: 'Start', to: { name: 'In Progress' } }] }) }), async () => {
+    await assert.rejects(
+      () => jc.transitionIssue(CRED, 'KAN-6', { toStatus: 'Done', env: CRED.env }),
+      (e) => e.status === 409 && /Available: Start → In Progress/.test(e.message),
+    );
+  });
+});
+
 test('getIssue: reads summary/status/assignee and builds a browse URL from the real site', async () => {
   await withFetch(() => ({ ok: true, status: 200, text: async () => JSON.stringify({
     key: 'ENG-5', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' } },

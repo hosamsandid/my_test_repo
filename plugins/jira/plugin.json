@@ -24,11 +24,16 @@
   "quota": {
     "maxObjects": 500
   },
+  "policy": {
+    "comment": { "scopes": ["team"] },
+    "transition": { "scopes": ["team"] }
+  },
   "ui": {
     "title": "Jira",
     "routes": [
-      { "path": "/", "minRole": "team-member" }
+      { "path": "/", "minRole": "team-member" },
+      { "path": "/admin", "minRole": "team-admin" }
     ]
   },
-  "promptLine": "When a watched Jira issue changes status you are woken; then read it with `aee-jira`: `aee-jira inbox` (the queued status changes — `--consume` drains them, use it once per wake), `aee-jira projects`, `aee-jira list --project KAN [--status \"Ready for Dev\"]`, `aee-jira show KAN-6`. All Jira access is server-side in the broker; you never see the Jira token."
+  "promptLine": "When a watched Jira issue changes status you are woken; then work it with `aee-jira`: `aee-jira inbox` (the queued status changes — `--consume` drains them, use it once per wake), `aee-jira list --project KAN [--status \"Ready for Dev\"]`, `aee-jira show KAN-6`, `aee-jira comment KAN-6 --body \"…\"`, `aee-jira transition KAN-6 --to \"In Progress\"`. All Jira access is server-side in the broker; you never see the Jira token."
 }

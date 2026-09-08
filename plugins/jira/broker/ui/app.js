@@ -13,7 +13,11 @@
 (function () {
   'use strict';
 
-  var API = 'api';
+  // The proxied mount is /plugins/jira/ui; the routes are '' (→ index.html) and
+  // '/admin' (→ admin.html). Strip either so `api/…` never leaks a level up.
+  var base = location.pathname.replace(/\/(index\.html|admin(\.html)?)$/, '/');
+  if (base.slice(-1) !== '/') base += '/';
+  function API(p) { return base + 'api' + p; }
   var $ = function (id) { return document.getElementById(id); };
   var state = { team: null, teams: [] };
 
@@ -29,7 +33,7 @@
   }
 
   function get(path) {
-    return fetch(API + path, { headers: { Accept: 'application/json' } }).then(function (r) {
+    return fetch(API(path), { headers: { Accept: 'application/json' } }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (body) {
         if (!r.ok) throw new Error(body.error || ('HTTP ' + r.status));
         return body;
@@ -129,6 +133,7 @@
   // ── boot ──────────────────────────────────────────────────────────────────
   get('/context').then(function (ctx) {
     state.teams = ctx.teams || [];
+    if (ctx.isAdmin) { var al = $('adminLink'); al.href = base + 'admin'; al.hidden = false; }
     var teamSel = $('team');
     if (state.teams.length > 1) {
       teamSel.hidden = false;

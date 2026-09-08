@@ -158,6 +158,72 @@ test('cli reads: /projects, /list, /show need the per-scope credential and call 
   }
 });
 
+test('cli writes: comment + transition are role-gated (pass for team scope), cred-gated, audited', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    if (url.includes('/comment')) return { ok: true, status: 201, text: async () => JSON.stringify({ id: '1' }) };
+    if (url.includes('/transitions') && (!opts || opts.method === 'GET')) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ transitions: [{ id: '9', name: 'Go', to: { name: 'In Progress' } }] }) };
+    }
+    return { ok: true, status: 204, text: async () => '' };
+  };
+  const srv = await listen();
+  try {
+    const c = await call(srv, 'POST', '/cli/comment', { token: TOKEN, body: { issue: 'KAN-6', body: 'picked up' } });
+    assert.equal(c.status, 200);
+    assert.equal(c.body.issueKey, 'KAN-6');
+
+    const t = await call(srv, 'POST', '/cli/transition', { token: TOKEN, body: { issue: 'KAN-6', to: 'In Progress' } });
+    assert.equal(t.status, 200);
+    assert.equal(t.body.applied, 'Go');
+
+    // a scope with no credential → 400, not a 500
+    const nocred = await call(srv, 'POST', '/cli/comment', { token: OTHER, body: { issue: 'X-1', body: 'y' } });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-credential');
+
+    // a GET on a write path → 404 (writes are POST only)
+    assert.equal((await call(srv, 'GET', '/cli/comment', { token: TOKEN })).status, 404);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('ui /admin: team-admin only; PUT replaces the watch config', async () => {
+  const srv = await listen();
+  const { port } = srv.address();
+  async function ui(pathname, opts) {
+    const res = await fetch(`http://127.0.0.1:${port}${pathname}`, opts || {});
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  }
+  const member = signViewerHeaders({ sub: 'm', role: 'team-member', teamIds: ['team-1'] }, 'test-secret');
+  const admin = signViewerHeaders({ sub: 'a', role: 'team-admin', teamIds: ['team-1'] }, 'test-secret');
+  try {
+    // a team-member is refused /admin
+    assert.equal((await ui('/ui/api/admin/watch?team=team-1', { headers: member })).status, 403);
+
+    // a team-admin may PUT
+    const put = await ui('/ui/api/admin/watch?team=team-1', {
+      method: 'PUT',
+      headers: { ...admin, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ watches: [{ projectKey: 'KAN', statusFilter: 'Ready for Dev' }, { projectKey: '', statusFilter: 'x' }] }),
+    });
+    assert.equal(put.status, 200);
+    assert.deepEqual(put.body.watches.map((w) => w.projectKey), ['KAN']); // blank dropped by normalizeWatch
+
+    const get = await ui('/ui/api/admin/watch?team=team-1', { headers: admin });
+    assert.equal(get.body.watches[0].statusFilter, 'Ready for Dev');
+    assert.equal(get.body.setBy, 'a');
+  } finally {
+    broker.watchStore.teardown('team-1');
+    srv.close();
+  }
+});
+
 test('ui: requires signed viewer headers; /ui/api/context lists the viewer\'s teams; role gate enforced', async () => {
   broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
   broker.watchStore.setConfig('team-1', { watches: [{ projectKey: 'KAN', statusFilter: 'Ready for Dev' }] });

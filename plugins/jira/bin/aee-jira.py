@@ -10,7 +10,7 @@ All privilege lives in the broker (plugins/jira/broker/server.js), which holds
 the team's Jira credential and makes every Jira call server-side. This CLI is a
 privilege-less client that just carries the scope token.
 
-Phase 3 surface — reads:
+Reads:
 
     aee-jira whoami                              # the resolved plugin scope
     aee-jira inbox [--consume]                   # what woke me: queued status-change events
@@ -18,8 +18,16 @@ Phase 3 surface — reads:
     aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
     aee-jira show KAN-6                          # one issue (summary, status, assignee, URL)
 
+Writes (attributed, role-gated server-side, no human confirmation — moving a
+ticket is routine and reversible):
+
+    aee-jira comment KAN-6 --body "Picked this up, see PR #123"
+    aee-jira transition KAN-6 --to "In Progress"
+
 `inbox` without `--consume` peeks; with `--consume` it drains the queue (use it
-once per wake). Attributed writes (`comment`, `transition`) land in Phase 4.
+once per wake). `transition` names the TARGET status; the broker resolves the
+Jira transition from where the issue currently is and reports the available
+options if none leads there.
 
 Contract (§4.5): `--json` on every subcommand; exit 0 ok / 1 domain error /
 2 usage / 3 broker unreachable; `--help` carries the agent-readable docs.
@@ -80,7 +88,7 @@ class BrokerDomainError(Exception):
     pass
 
 
-def _get(cfg, path):
+def _call(cfg, path, method="GET", body=None):
     base = cfg.get("endpoint")
     token = cfg.get("token")
     if not base:
@@ -89,7 +97,11 @@ def _get(cfg, path):
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = "Bearer %s" % token
-    req = urllib.request.Request(url, headers=headers, method="GET")
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, headers=headers, method=method, data=data)
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             text = resp.read().decode(errors="replace")
@@ -128,6 +140,14 @@ def build_parser():
     p_show = sub.add_parser("show", parents=[common], help="read one issue")
     p_show.add_argument("issue", help="issue key, e.g. KAN-6")
 
+    p_comment = sub.add_parser("comment", parents=[common], help="add a comment to an issue")
+    p_comment.add_argument("issue", help="issue key, e.g. KAN-6")
+    p_comment.add_argument("--body", required=True, help="the comment text")
+
+    p_trans = sub.add_parser("transition", parents=[common], help="move an issue to a target status")
+    p_trans.add_argument("issue", help="issue key, e.g. KAN-6")
+    p_trans.add_argument("--to", required=True, help="the TARGET status name, e.g. \"In Progress\"")
+
     return parser
 
 
@@ -155,6 +175,7 @@ def main(argv=None):
         emit({"ok": True, "result": {"scopeId": cfg.get("scopeId"), "plugin": PLUGIN_ID}, "scopeId": cfg.get("scopeId")}, as_json)
         return EXIT_OK
 
+    method, body = "GET", None
     if args.cmd == "inbox":
         path = "/inbox?consume=1" if args.consume else "/inbox"
     elif args.cmd == "projects":
@@ -166,12 +187,16 @@ def main(argv=None):
         path = "/list?" + urllib.parse.urlencode(q)
     elif args.cmd == "show":
         path = "/show?" + urllib.parse.urlencode({"issue": args.issue})
+    elif args.cmd == "comment":
+        path, method, body = "/comment", "POST", {"issue": args.issue, "body": args.body}
+    elif args.cmd == "transition":
+        path, method, body = "/transition", "POST", {"issue": args.issue, "to": getattr(args, "to")}
     else:
         parser.print_help()
         return EXIT_USAGE
 
     try:
-        result = _get(cfg, path)
+        result = _call(cfg, path, method, body)
     except BrokerUnreachable as e:
         emit({"ok": False, "error": "broker-unreachable", "message": str(e)}, as_json)
         return EXIT_BROKER_UNREACHABLE

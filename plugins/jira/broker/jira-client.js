@@ -313,6 +313,83 @@ async function searchJql(cred, jql, { env } = {}) {
   return issues;
 }
 
+// ── attributed writes (Phase 4, D3 — role-gated, not confirmation-gated) ─────
+
+// A minimal Atlassian Document Format wrapper for a plain-text comment body.
+// `attribution` is prepended as its own paragraph so a human reading the issue
+// can see the comment came from an agent (the scope token names only the team,
+// so this is "an agent on team <x>", never a spoofable agent id).
+function commentAdf(text, attribution) {
+  const paras = [];
+  if (attribution) {
+    paras.push({ type: 'paragraph', content: [{ type: 'text', text: attribution, marks: [{ type: 'em' }] }] });
+  }
+  for (const line of String(text || '').split('\n')) {
+    paras.push({ type: 'paragraph', content: line ? [{ type: 'text', text: line }] : [] });
+  }
+  return { type: 'doc', version: 1, content: paras };
+}
+
+async function addComment(cred, issueKey, { body, attribution, env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const res = await requestJson({
+    base,
+    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`,
+    method: 'POST',
+    authHeader: auth,
+    body: { body: commentAdf(body, attribution) },
+  });
+  return { id: res.id || null, issueKey };
+}
+
+// The transitions available from the issue's CURRENT status, as
+// `[{ id, name, toStatus }]` (CLI/UI needs the names to offer a choice).
+async function listTransitions(cred, issueKey, { env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const res = await requestJson({
+    base,
+    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}/transitions`,
+    authHeader: auth,
+  });
+  return (Array.isArray(res.transitions) ? res.transitions : []).map((t) => ({
+    id: String(t.id),
+    name: String(t.name || ''),
+    toStatus: t.to && t.to.name ? String(t.to.name) : null,
+  }));
+}
+
+// Move an issue to the status named `toStatus`. Resolves the transition id from
+// the available transitions (Jira has no "set status" — you apply a transition),
+// matching case-insensitively on the transition name OR its target status name.
+// Throws a clear domain error if no transition leads there from where the issue
+// currently is.
+async function transitionIssue(cred, issueKey, { toStatus, env } = {}) {
+  const want = String(toStatus || '').trim().toLowerCase();
+  if (!want) { const e = new Error('a target status is required'); e.status = 400; throw e; }
+  const available = await listTransitions(cred, issueKey, { env });
+  const match = available.find((t) => t.name.toLowerCase() === want || (t.toStatus || '').toLowerCase() === want);
+  if (!match) {
+    const e = new Error(
+      `no transition to "${toStatus}" from the issue's current status. Available: `
+      + (available.map((t) => `${t.name}${t.toStatus ? ` → ${t.toStatus}` : ''}`).join(', ') || '(none)'),
+    );
+    e.status = 409;
+    throw e;
+  }
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  await requestJson({
+    base,
+    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}/transitions`,
+    method: 'POST',
+    authHeader: auth,
+    body: { transition: { id: match.id } },
+  });
+  return { issueKey, applied: match.name, toStatus: match.toStatus };
+}
+
 module.exports = {
   MAX_PAGES,
   PAGE_SIZE,
@@ -321,6 +398,7 @@ module.exports = {
   buildJqlSearchBody,
   changelogPath,
   shapeIssue,
+  commentAdf,
   mapJiraError,
   apiBaseFor,
   whoAmI,
@@ -330,4 +408,7 @@ module.exports = {
   fetchFullChangelog,
   getIssue,
   listProjects,
+  addComment,
+  listTransitions,
+  transitionIssue,
 };

@@ -31,9 +31,24 @@ poller's, in `broker-sdk/event-cursor.js` (`github-poller.js` is untouched).
 | `watch-store.js` | per-scope watch config + poll cursor on `AEE_PLUGIN_STATE_DIR`, atomic writes |
 | `inbox-store.js` | per-scope queue of delivered-but-unconsumed events; TTL + `quota.maxObjects` ring — **this is what the manifest quota counts** |
 | `poller.js` | the poll loop; transport-agnostic (`deliver()` callback) |
-| `viewer-headers.js` | §4.8 signed-viewer-header verify (byte-identical copy, like every UI plugin) |
-| `ui/` | the served `/` route — projects → issues, the inbox, and what the poller is watching. Dependency-free vanilla JS, `--eb-*` tokens, follows the console theme |
-| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials}`, `/cli/*` (`whoami`/`inbox`/`projects`/`list`/`show`), `/ui/*`, the Phase-0 `/internal/spike-config` seam |
+| `viewer-headers.js` | §4.8 signed-viewer verify (byte-identical copy) + the `/admin` → team-admin role gate |
+| `broker-policy.js` | write authorisation (D3): `authorizeWrite` → SDK `authorizeAction` against the manifest `policy`; `requiresApproval` wired-but-empty |
+| `ui/` | the served `/` route (issues / inbox / watch view) + `/admin` route (watch config, team-admin). Dependency-free vanilla JS, `--eb-*` tokens, follows the console theme |
+| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials}`, `/cli/*` (`whoami`/`inbox`/`projects`/`list`/`show` + `comment`/`transition` POST), `/ui/*` (incl. `/ui/api/admin/watch`), the Phase-0 `/internal/spike-config` seam |
+
+## Writes (Phase 4 — D3: role-gated, not confirmation-gated)
+
+`aee-jira comment` / `transition` POST through the broker. Before the credential
+is touched, `broker-policy.authorizeWrite` runs the manifest's `policy` rule
+through the SDK's `authorizeAction`. jira is `scopes: ["team"]`, so every caller
+is `kind: 'team'` and both rules pass — which is D3's intent (moving a ticket is
+routine and reversible; an approval pen would stall unattended flows at the
+first transition). The value of the gate: the enforcement path exists, so a
+future tightening (or a `requiresApproval` entry for a destructive op) is a
+manifest edit. `transition` names the TARGET status; the broker resolves the
+Jira transition id from the issue's current status and 409s with the available
+options if none leads there. Every write is audited with the calling scope, and
+each comment carries an *"Posted by an agent on team …"* attribution paragraph.
 
 ## Credentials (Phase 1 — the per-scope store)
 

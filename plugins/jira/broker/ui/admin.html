@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jira — watch config</title>
+  <script>
+    (function () {
+      try {
+        var valid = ['admin-dark', 'admin-light', 'high-contrast'];
+        var stored = localStorage.getItem('eb-theme');
+        if (stored && valid.indexOf(stored) >= 0) document.documentElement.dataset.theme = stored;
+        else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) document.documentElement.dataset.theme = 'admin-light';
+        else document.documentElement.dataset.theme = 'admin-dark';
+      } catch (e) { document.documentElement.dataset.theme = 'admin-dark'; }
+    })();
+  </script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="toolbar">
+    <div class="section-title" style="margin:0;">Jira — watch config</div>
+    <select id="team" class="field" style="max-width:220px;" hidden></select>
+    <span class="spacer"></span>
+    <a id="backLink" class="btn" href="./">← Issues</a>
+  </div>
+
+  <div id="err" class="err" hidden></div>
+
+  <div style="padding:1rem; max-width:640px;">
+    <p class="hint">
+      Which Jira projects (and optionally which target status) the broker polls for
+      status changes. A change wakes only the agents that carry a
+      <code>plugin-event</code> trigger for <code>jira</code> — configured per agent in
+      Agent&nbsp;Chat&nbsp;→&nbsp;Triggers.
+    </p>
+
+    <div id="rows"></div>
+    <button id="add" class="btn" style="margin-top:.5rem;">+ Add project</button>
+
+    <div style="margin-top:1rem; display:flex; gap:.5rem; align-items:center;">
+      <button id="save" class="btn">Save</button>
+      <span id="msg" class="hint"></span>
+    </div>
+    <p id="meta" class="hint" style="margin-top:1rem;"></p>
+  </div>
+
+  <script src="admin.js"></script>
+</body>
+</html>

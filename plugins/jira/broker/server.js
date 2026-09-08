@@ -41,6 +41,7 @@ const { WatchStore } = require('./watch-store');
 const { InboxStore } = require('./inbox-store');
 const { JiraPoller } = require('./poller');
 const jira = require('./jira-client');
+const brokerPolicy = require('./broker-policy');
 const { verifyViewerHeaders, requiredRoleForPath, roleAllows } = require('./viewer-headers');
 
 const PLUGIN_ID = 'jira';
@@ -221,6 +222,41 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── attributed writes (Phase 4, D3 — role-gated server-side, no confirm) ──
+  const writeOps = { '/comment': 'comment', '/transition': 'transition' };
+  if (writeOps[cliPath] && req.method === 'POST') {
+    const op = writeOps[cliPath];
+    const authz = brokerPolicy.authorizeWrite(op);
+    if (!authz.allow) {
+      writeAudit(scopeId, scopeId, op, 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, op, 'no-credential');
+      return sendJson(res, 400, { error: 'This team has no Jira credential configured.', code: 'no-credential' });
+    }
+    const body = parseJson(await readBody(req));
+    const issue = String(body.issue || '').trim();
+    if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
+    const attribution = `Posted by an agent on team "${scopeId}" via Agent Studio.`;
+    try {
+      let result;
+      if (op === 'comment') {
+        const text = String(body.body || '').trim();
+        if (!text) return sendJson(res, 400, { error: 'a comment body is required' });
+        result = await jira.addComment(cred, issue, { body: text, attribution });
+      } else {
+        result = await jira.transitionIssue(cred, issue, { toStatus: body.to });
+      }
+      writeAudit(scopeId, scopeId, op, 'ok', `${issue}${op === 'transition' ? `→${body.to || ''}` : ''}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, op, 'error', `${issue}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
   return sendJson(res, 404, { error: 'not found' });
 }
 
@@ -251,7 +287,7 @@ async function handleUiApi(req, res, apiPath, viewer) {
       watches: (watchStore.loadConfig(id).watches || []).map((w) => w.projectKey),
       inbox: inboxStore.count(id),
     }));
-    return sendJson(res, 200, { user: viewer.sub, teams });
+    return sendJson(res, 200, { user: viewer.sub, role: viewer.role, isAdmin: roleAllows(viewer.role, 'team-admin'), teams });
   }
 
   const team = pickTeam(viewer, params.get('team'));
@@ -263,6 +299,24 @@ async function handleUiApi(req, res, apiPath, viewer) {
   if (apiPath === '/watches' && req.method === 'GET') {
     const conf = watchStore.loadConfig(team);
     return sendJson(res, 200, { watches: conf.watches, cursors: conf.cursors, setBy: conf.setBy, setAt: conf.setAt });
+  }
+
+  // ── /admin — the watch config (team-admin; role checked in handleUi) ─────
+  // Replaces #1539's `env.jiraProjects[]` + the `jira-event` trigger fields.
+  // Which AGENTS a transition wakes is now decided per-agent by a `plugin-event`
+  // trigger (Phase 2) — this route configures only which projects/statuses the
+  // broker watches.
+  if (apiPath === '/admin/watch' && req.method === 'GET') {
+    const conf = watchStore.loadConfig(team);
+    return sendJson(res, 200, { watches: conf.watches, setBy: conf.setBy, setAt: conf.setAt });
+  }
+  if (apiPath === '/admin/watch' && req.method === 'PUT') {
+    const body = parseJson(await readBody(req));
+    const conf = watchStore.setConfig(team, {
+      watches: Array.isArray(body.watches) ? body.watches : [],
+      setBy: viewer.sub || 'admin',
+    });
+    return sendJson(res, 200, { ok: true, watches: conf.watches });
   }
 
   const cred = resolveCredential(team);
@@ -292,7 +346,11 @@ async function handleUi(req, res, uiPath) {
   if (uiPath === '/api' || uiPath.startsWith('/api/')) {
     return handleUiApi(req, res, uiPath.slice('/api'.length) || '/', viewer);
   }
-  const file = uiPath === '/' || uiPath === '' ? 'index.html' : uiPath.replace(/^\/+/, '');
+  // Route paths (no file extension) map to their page; assets keep their name.
+  const ROUTE_PAGE = { '/': 'index.html', '': 'index.html', '/admin': 'admin.html' };
+  const file = Object.prototype.hasOwnProperty.call(ROUTE_PAGE, uiPath)
+    ? ROUTE_PAGE[uiPath]
+    : uiPath.replace(/^\/+/, '');
   const abs = path.join(__dirname, 'ui', file);
   if (!abs.startsWith(path.join(__dirname, 'ui') + path.sep)) return sendJson(res, 404, { error: 'not found' });
   fs.readFile(abs, (err, data) => {

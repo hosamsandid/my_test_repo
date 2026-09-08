@@ -68,7 +68,14 @@ function verifyViewerHeaders(headersOrReq, secret) {
 // team-admin `/admin` watch-config route — a one-line change here then.
 const ROLE_RANK = Object.freeze({ 'team-member': 1, 'team-admin': 2, 'system-admin': 3 });
 
-function requiredRoleForPath(_uiPath) {
+function requiredRoleForPath(uiPath) {
+  // Phase 4: the `/admin` route (watch config) is team-admin; everything else
+  // (issues, inbox, watch view) is team-member. The UI proxy re-enforces the
+  // manifest's `ui.routes[].minRole`; this is the second defence line.
+  const p = String(uiPath || '');
+  if (p === '/admin' || p.startsWith('/admin/') || p === '/api/admin' || p.startsWith('/api/admin/')) {
+    return 'team-admin';
+  }
   return 'team-member';
 }
 

@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 289 378 of 340 000 — 85.1% used, 50 622 left — against
+// neighbours) at 294 067 of 340 000 — 86.5% used, 45 933 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
@@ -171,7 +171,18 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // a consumer on the two read-only wiring surfaces, which voided `agent-chat.md`'s
 // `## Outcomes` claim that "the label is what wakes the next agent" (the same
 // claim the panel was making): +895 for the two-mechanism table, and it lands in
-// full because `create.md` names `/chats` as a `seeAlso` neighbour — **289 378** (85.1%). Re-measure rather than trust this comment —
+// full because `create.md` names `/chats` as a `seeAlso` neighbour — **289 378** (85.1%).
+// #2066 then replaced the manual **Sync all agents** button with an offer the
+// environment save makes, which raised the crown to **294 067** (86.5%, +4 689):
+// worth noting because the ticket only *removed* a control, and yet it is the
+// biggest single move in this paragraph. Two reasons, and the second is the
+// durable one. The topic had to grow (+3 848) to carry the three change classes,
+// the D1 safety rule and the removal warning — copy nothing on the form states
+// any more. And `docs/working-environments.md` grew (+1 033) which lands on
+// EVERY context, `/quickstart` included, because it is a `CORPUS_FILES` doc; on
+// top of that `/quickstart` sees the topic growth in full too, since `create.md`
+// names `/environments` as a `seeAlso` neighbour — so both halves hit the same
+// crown and the delta on `/environments` itself is identical. Re-measure rather than trust this comment —
 // measureWorstCaseSystemPrompt() sweeps every context and returns which one
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.

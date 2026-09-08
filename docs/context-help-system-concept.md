@@ -399,8 +399,17 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **289,378 — 85.1% used,
-50,622 left** (#2057 made a direct hand-off read as a consumer on the Outcomes and Routing
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **294,067 — 86.5% used,
+45,933 left** (#2066 replaced the manual **Sync all agents** button on the Working Environments
+form with an offer the save itself makes, and the figure went UP by 4,689 — the biggest single
+move in this chain, from a ticket whose user-visible change was *removing* a control. The topic
+had to grow +3,848 to carry the three change classes, the clean-and-pushed safety rule and the
+removal warning, because nothing on the form states any of it any more; and
+`docs/working-environments.md` grew +1,033, which being in `CORPUS_FILES` lands on EVERY context.
+`/quickstart` sees both halves in full, since `create.md` names `/environments` as a neighbour —
+so the delta here and on `/environments` itself (257,549 → 262,238) is identical, which is the
+signature of a change that is partly in the always-counted docs half. It stood at 289,378
+after #2057, which made a direct hand-off read as a consumer on the Outcomes and Routing
 surfaces, which voided `agent-chat.md`'s `## Outcomes` claim that a label is what wakes the next
 agent — the same claim the panel itself was making: +895 for the two-mechanism table, landing in
 full because `create.md` names `/chats` as a neighbour. It stood at 288,483 after #2053, which

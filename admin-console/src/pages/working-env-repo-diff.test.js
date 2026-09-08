@@ -19,6 +19,7 @@ import {
   propagatableCount,
   repositoryChangeLines,
   repositoryChangeNotice,
+  outOfDateIndicator,
 } from './working-env-repo-diff.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -234,4 +235,49 @@ test("the per-class lines name the repositories and mark the removal as a warnin
 test("no lines are produced for a clean diff", () => {
   const list = [repo("git@github.com:acme/widgets.git")];
   assert.deepEqual(repositoryChangeLines(classifyRepositoryChanges(list, list), 3), []);
+});
+
+// ── D4: outOfDateIndicator (#2066 AC19) ────────────────────────────────────
+
+test("no indicator when nothing diverges, when the probe failed, or with no agents", () => {
+  assert.equal(outOfDateIndicator(null), null);
+  assert.equal(outOfDateIndicator({ agents: [] }), null);
+  assert.equal(outOfDateIndicator({ agents: [{ agentId: "a1", diverged: [] }] }), null);
+});
+
+test("the indicator counts AGENTS, not repositories, and names each in its title", () => {
+  const ind = outOfDateIndicator({
+    canManage: true,
+    agents: [
+      { agentId: "a1", displayName: "Dev", diverged: [
+        { name: "widgets", kind: "missing" },
+        { name: "docs", kind: "branch" },
+      ] },
+      { agentId: "a2", displayName: "Reviewer", diverged: [] },
+      { agentId: "a3", displayName: "QA", diverged: [{ name: "widgets", kind: "url-and-branch" }] },
+    ],
+  });
+  assert.equal(ind.count, 2, "two agents are behind, across three divergences");
+  assert.equal(ind.label, "2 agents not up to date");
+  assert.match(ind.title, /Dev: widgets \(not cloned\), docs \(on a different branch\)/);
+  assert.match(ind.title, /QA: widgets \(on a different branch and address\)/);
+  assert.doesNotMatch(ind.title, /Reviewer/, "an up-to-date agent is not listed");
+  assert.equal(ind.canManage, true);
+});
+
+test("the indicator is singular for one agent and reports a read-only caller", () => {
+  const ind = outOfDateIndicator({
+    canManage: false,
+    agents: [{ agentId: "a1", diverged: [{ name: "widgets", kind: "url" }] }],
+  });
+  assert.equal(ind.label, "1 agent not up to date");
+  assert.equal(ind.canManage, false, "the catch-up would be refused server-side");
+  assert.match(ind.title, /a1: widgets \(pointing at a different address\)/);
+});
+
+test("a stub agent is not counted — it has nothing to be out of date with", () => {
+  assert.equal(
+    outOfDateIndicator({ agents: [{ agentId: "stub", diverged: [], noWorkspace: true }] }),
+    null,
+  );
 });

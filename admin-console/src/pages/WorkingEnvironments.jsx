@@ -1,21 +1,22 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Link } from 'react-router';
 import { Edit, Trash2, Plus, GitBranch, Key, Github, X, Check, AlertTriangle, Loader2, Cpu, Users, Info, Package, Server } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
+import RepoPropagationDialog from '../components/RepoPropagationDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
-import SyncReposPanel from '../components/SyncReposPanel';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { describeWorkingEnvSubmitState } from './working-env-submit-state.js';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning, availableToolchains, versionSourceLine } from './toolchain-select-view.js';
 import { initialMcpRows, mcpSubmitValue, mcpRowHint, mcpChangeNotice, mcpServerLabel } from './working-env-mcp-view.js';
 import { ENVIRONMENTS_HELP_SECTIONS } from './environments-help-sections.js';
+import { classifyRepositoryChanges, hasRepositoryChanges, outOfDateIndicator } from './working-env-repo-diff.js';
 import { usePageActions } from '../context/PageActionsContext';
 import { useHelpSubject } from '../context/HelperChatContext';
 import { OVERLAY_ENVIRONMENT_FORM, OVERLAY_TOOLCHAINS } from '../context/page-help-view.js';
@@ -563,29 +564,14 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           <Plus size={13} /> Add repository
         </button>
 
-        {isEdit && initial?.id && form.repositories.length > 0 && (initial.agents || []).length > 0 && (
-          <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px dashed var(--eb-border-default)' }}>
-            {/* The Sync action's own sub-section inside chapter 2 — what it
-                clones, what it deliberately leaves alone, and which agents it
-                reaches. Mounted here rather than inside SyncReposPanel: that
-                component is shared with the agent settings form, where
-                openHelpFor() would resolve against a different route. */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 'calc(-1 * var(--eb-space-1))' }}>
-              <PageHelpButton
-                label="What Sync all agents does"
-                size={14}
-                style={{ padding: 0 }}
-                section={ENVIRONMENTS_HELP_SECTIONS.sync}
-              />
-            </div>
-            <SyncReposPanel
-              endpoint={`/api/environments/${encodeURIComponent(initial.id)}/sync-agents`}
-              actionLabel="Sync all agents"
-              description={`Clone the repositories above into every agent already using this environment (${(initial.agents || []).length} agent${(initial.agents || []).length === 1 ? '' : 's'}) — repositories are otherwise only cloned when an agent is first created. Already-cloned repositories are left untouched.`}
-              showAgentHeaders
-            />
-          </div>
-        )}
+        {/* #2066: the "Sync all agents" panel that used to sit here is GONE —
+            not hidden. It required an order nothing stated (Save → re-open Edit
+            → Sync) and, pressed before the save, reported success for the
+            PREVIOUS repository list. Saving now offers the propagation itself,
+            at the one moment the persisted list is authoritative. There is
+            deliberately no manual repository-sync affordance on this form at
+            all (AC1); the per-agent panel on the agent's Settings tab stays as
+            the single-agent recovery path (D2). */}
       </div>
 
       <div style={{
@@ -1249,6 +1235,35 @@ export default function WorkingEnvironments() {
   const [actionError, setActionError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
+  // The save-time propagation offer (#2066 D3). Held as one object so the
+  // dialog's inputs cannot get out of step with each other; `null` = no offer.
+  const [offer, setOffer] = useState(null);
+  // D4: per-environment divergence, keyed by env id. Fetched after the list
+  // loads rather than folded into GET /api/environments, because it costs two
+  // git commands per repository per agent and the list must not wait on it.
+  const [divergence, setDivergence] = useState({});
+
+  // Re-read the indicator for every environment that has at least one agent.
+  // Deliberately fail-quiet per environment: a probe that could not run shows
+  // NO indicator rather than a green one, so the page never claims agents are
+  // up to date when it does not know (outOfDateIndicator returns null for a
+  // missing payload).
+  const refreshDivergence = useCallback(async (list) => {
+    const rows = (Array.isArray(list) ? list : []).filter(
+      (e) => (Array.isArray(e.agents) ? e.agents.length : (e.agentCount || 0)) > 0,
+    );
+    if (rows.length === 0) return;
+    const entries = await Promise.all(rows.map(async (e) => {
+      try {
+        return [e.id, await apiCall('GET', `/api/environments/${encodeURIComponent(e.id)}/repo-divergence`)];
+      } catch {
+        return [e.id, null];
+      }
+    }));
+    setDivergence(Object.fromEntries(entries));
+  }, []);
+
+  useEffect(() => { refreshDivergence(envs); }, [envs, refreshDivergence]);
 
   const COLUMNS = [
     { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
@@ -1284,12 +1299,45 @@ export default function WorkingEnvironments() {
       label: 'Agents',
       render: (v, row) => {
         const count = Array.isArray(row.agents) ? row.agents.length : (v || 0);
+        // D4 (#2066): the persistent out-of-date indicator, with the catch-up
+        // behind it. It lives on the Agents cell because it is a statement
+        // about those agents, and it is derived from their workspaces — so it
+        // survives a declined offer and clears itself once nothing diverges.
+        const indicator = outOfDateIndicator(divergence[row.id]);
         return (
-          <span
-            title={count > 0 ? row.agents.map(a => a.displayName || a.id).join('\n') : 'No agents use this environment'}
-            style={{ fontSize: 'var(--eb-text-xs)', color: count > 0 ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)' }}
-          >
-            {count}
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+            <span
+              title={count > 0 ? row.agents.map(a => a.displayName || a.id).join('\n') : 'No agents use this environment'}
+              style={{ fontSize: 'var(--eb-text-xs)', color: count > 0 ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)' }}
+            >
+              {count}
+            </span>
+            {indicator && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setOffer({ env: row, diff: null, catchUp: true });
+                }}
+                disabled={!indicator.canManage}
+                title={indicator.canManage
+                  ? `${indicator.title}\n\nClick to bring them up to date.`
+                  : `${indicator.title}\n\nYou may not manage this environment.`}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  padding: '1px var(--eb-space-2)',
+                  background: 'var(--eb-status-warning-bg)',
+                  border: '1px solid var(--eb-status-warning)',
+                  borderRadius: 'var(--eb-radius-sm)',
+                  color: 'var(--eb-status-warning)',
+                  fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+                  cursor: indicator.canManage ? 'pointer' : 'not-allowed',
+                  opacity: indicator.canManage ? 1 : 0.7,
+                }}
+              >
+                <AlertTriangle size={11} /> {indicator.label}
+              </button>
+            )}
           </span>
         );
       },
@@ -1311,7 +1359,22 @@ export default function WorkingEnvironments() {
     setSaving(true); setFormError(null);
     try {
       if (panelMode === 'edit') {
-        await apiCall('PUT', `/api/environments/${selected.id}`, form);
+        const saved = await apiCall('PUT', `/api/environments/${selected.id}`, form);
+        // #2066 D3: the offer is made HERE, once the save has SUCCEEDED, and
+        // the panel still closes as it always did. The diff is computed from
+        // two server-supplied lists — the list as it was persisted a moment ago
+        // (`previousRepositories`, captured inside the PUT) and the list the
+        // server saved — so it can never be computed against a draft this
+        // browser has been holding since another admin saved the same
+        // environment, which is the exact defect this ticket removes.
+        //
+        // Scoped to an environment that already HAS agents (AC4): with none
+        // there is no workspace that could be out of date, whatever changed.
+        const agents = Array.isArray(selected.agents) ? selected.agents : [];
+        const diff = classifyRepositoryChanges(saved?.previousRepositories, saved?.repositories);
+        if (agents.length > 0 && hasRepositoryChanges(diff)) {
+          setOffer({ env: { ...selected, ...saved }, diff, catchUp: false });
+        }
       } else {
         await apiCall('POST', '/api/environments', form);
       }
@@ -1442,6 +1505,17 @@ export default function WorkingEnvironments() {
           />
         )}
       </SidePanel>
+
+      <RepoPropagationDialog
+        open={!!offer}
+        envId={offer?.env?.id}
+        envName={offer?.env?.name}
+        diff={offer?.diff || null}
+        agents={offer?.env?.agents || []}
+        catchUp={!!offer?.catchUp}
+        onClose={() => setOffer(null)}
+        onFinished={() => refreshDivergence(envs)}
+      />
 
       <ConfirmDialog
         open={!!deleteTarget}

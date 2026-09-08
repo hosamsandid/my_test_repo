@@ -248,3 +248,50 @@ export function repositoryChangeNotice({ diff = null, agentCount = 0 } = {}) {
   return `The repository list changed. Bring the ${n} existing ${plural(n, 'agent', 'agents')} `
     + `using this environment up to date?`;
 }
+
+// ── D4: the persistent "N agents not up to date" indicator ─────────────────
+//
+// Derived from the ACTUAL workspace state (GET /api/environments/:id/repo-
+// divergence), never from a remembered save-time diff — which is what makes it
+// self-healing after a decline, a partial run or a failure, and what makes it
+// clear on its own once nothing diverges.
+
+const DIVERGENCE_WORDING = {
+  missing: 'not cloned',
+  branch: 'on a different branch',
+  url: 'pointing at a different address',
+  'url-and-branch': 'on a different branch and address',
+};
+
+/**
+ * The indicator for one environment, or null when there is nothing to show —
+ * which is every case the reader should not be nagged about: nothing diverges,
+ * the probe failed, or the environment has no agents at all (AC4).
+ *
+ * A clone that is merely no longer declared never reaches here: the server
+ * excludes it, because nothing is ever pruned and it could therefore never be
+ * brought up to date (AC20).
+ *
+ * @param payload GET /api/environments/:id/repo-divergence response
+ * @returns {{count: number, label: string, title: string, canManage: boolean}|null}
+ */
+export function outOfDateIndicator(payload) {
+  if (!payload) return null;
+  const agents = Array.isArray(payload.agents) ? payload.agents : [];
+  const behind = agents.filter((a) => (a.diverged || []).length > 0);
+  if (behind.length === 0) return null;
+
+  const detail = behind.map((agent) => {
+    const items = (agent.diverged || [])
+      .map((d) => `${d.name} (${DIVERGENCE_WORDING[d.kind] || d.kind})`)
+      .join(', ');
+    return `${agent.displayName || agent.agentId}: ${items}`;
+  });
+
+  return {
+    count: behind.length,
+    label: `${behind.length} ${behind.length === 1 ? 'agent' : 'agents'} not up to date`,
+    title: detail.join('\n'),
+    canManage: payload.canManage !== false,
+  };
+}

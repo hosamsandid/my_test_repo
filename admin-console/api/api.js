@@ -46,7 +46,7 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
 const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require('./prompt-modes');
@@ -2123,7 +2123,12 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     }
     const vh = validateProcessTemplate({ processTemplateVersion: 1, roles: [], humans: humans || [] }, { allowEmptyRoles: true });
     if (!vh.ok) return res.status(400).json({ error: `Invalid humans: ${vh.error}` });
-    normHumans = normalizeHumans(humans || []);
+    // Drop dead producer refs (#2063): a pr/issue consume whose `from` names no
+    // existing agent is unremovable via the UI (its remove control lived on the
+    // now-deleted producer). Prune against the on-disk roster so it clears on
+    // the next humans save — the safety net behind the node-inspector's per-chip
+    // remove button. Roster-based, so it stays out of the pure normalizeHumans.
+    normHumans = pruneOrphanHumanConsumes(normalizeHumans(humans || []), new Set(listAgentDirs()));
   }
 
   // ── Assist synthesis provider, team-agent only (#1213) ────────────────────

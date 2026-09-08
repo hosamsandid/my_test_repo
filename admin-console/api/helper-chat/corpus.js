@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/chats`** (the Agent Chat topic plus its `seeAlso` neighbours) at
-// 310 815 of 340 000 — 91.4% used, 29 185 left — against
+// 312 234 of 340 000 — 91.8% used, 27 766 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. (#1459's
 // work-plane bullet in `access-users.md` — the `/teams` topic, which `/chats`
 // names among its `seeAlso` — added the last +319 to this crown.) #1930 moved
@@ -210,6 +210,15 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // **301 270** → **303 943** (89.4%).
 // The whole #2068 delta is topic-side; nothing in `CORPUS_FILES` changed here, so
 // #2068 itself moved no OTHER context.
+// #2081 (self-service team creation) then corrected `access-users.md` — creating
+// a scope is retired, and a team can never be left without an admin — plus one
+// paragraph in `users.md`: +1 082 on main's post-#2102/#1459 crown of 309 444 →
+// **310 526** (91.3%). Worth knowing WHY an Access-page edit lands on the
+// `/chats` crown at all: `agent-chat.md` names `/teams` among its `seeAlso`, so
+// the crown-holding neighbourhood contains the Access topic even though the
+// crown is not on `/teams` (whose own context is 270 418). The `users.md` half
+// costs this crown nothing — `/users` is not in that neighbourhood — and nothing
+// in `CORPUS_FILES` changed, so no other context moved either.
 // Re-measure rather than trust this comment —
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.

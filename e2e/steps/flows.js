@@ -77,7 +77,13 @@ async function renameDraft(ctx, { name }) {
       && r.request().method() === 'PUT'
       && r.ok(),
   );
-  await page.locator('[title="Rename draft"]').click();
+  // #1999 dropped the native `title="Rename draft"` on this control — it is now a
+  // button whose accessible name is `aria-label="Rename flow: <name>"` (verified
+  // in ProcessCanvas.jsx + flow-editor-tooltips.test.js), so the old
+  // `[title="Rename draft"]` locator matched nothing and hard-timed-out every
+  // journey that renames. Target the button by its role + aria-label instead.
+  const renameControl = page.getByRole('button', { name: /^Rename flow:/ }).first();
+  await renameControl.click();
   // The inline title editor autofocuses + selects its input (EditableDraftTitle),
   // so target the focused field rather than guessing among page textboxes.
   const input = page.locator('input:focus');
@@ -85,7 +91,9 @@ async function renameDraft(ctx, { name }) {
   await input.fill(name);
   await input.press('Enter'); // commits (Enter or blur → onRename → PUT)
   await saved;
-  await expect(page.locator('[title="Rename draft"]')).toContainText(name);
+  // After committing, the inline editor reverts to the button, now carrying the
+  // new name as its visible text (and in its `Rename flow: <name>` aria-label).
+  await expect(page.getByRole('button', { name: /^Rename flow:/ }).first()).toContainText(name);
 }
 
 /**

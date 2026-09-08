@@ -304,13 +304,18 @@ These are mounted separately from `/internal/teams/*`, which operate on the
 
 **Admin console (`:4000`)** proxies them verbatim under `/api/admin/teams`,
 `/api/admin/users`, `/api/admin/memberships` — deliberately distinct from
-`POST /api/teams`, the Agent-Team setup wizard.
+`POST /api/teams`, the Agent-Team setup wizard. **Exception (#2081):** the
+`POST /api/admin/teams` create verb is retired and answers *410 Gone* — a new
+access scope can no longer be minted, because creating a team is now self-service
+and mints an Agent Team via `POST /api/teams`. The other scope verbs (`GET` /
+`PUT` / `DELETE`) still proxy verbatim.
 
 ## Referential integrity
 
 - A membership requires both its user and team to exist; `role` must be
   `team-admin` or `team-member`.
-- Deleting a **user** runs offboarding first (#1571, Phase 5): pauses the person's agents (drain — not wiped) and auto-deletes their **personal** SSH keys + GitHub tokens (index entries + 0600 files; team/system credentials are never touched); then cascades memberships. Offboarding runs before the user record is removed so a partial failure leaves the user recoverable.
+- **A team can never be left without an admin (#2081, D4).** Removing or demoting the *last* `team-admin` of a team is refused (409) unless a `successorUserId` — already a member of that team — is named, and the promotion and the removal/demotion land in a single write. Deleting a **user** is likewise refused while they are the last `team-admin` of any team, naming every one that blocks it. The rule is enforced in the store, so the orchestrator's own `/internal/admin/*` writers are covered too — not only the console routes.
+- Deleting a **user** runs offboarding first (#1571, Phase 5): pauses the person's agents (drain — not wiped) and auto-deletes their **personal** SSH keys + GitHub tokens (index entries + 0600 files; team/system credentials are never touched); then cascades memberships. Offboarding runs before the user record is removed so a partial failure leaves the user recoverable — and the last-admin refusal above is checked *ahead* of offboarding, so a refused delete pauses no agents and revokes no credentials.
 - Deleting a **team** cascades its memberships, refuses the default team, and is
   refused (409) while any agent, environment, or credential still names it as
   owner — reassign those first so nothing is orphaned.

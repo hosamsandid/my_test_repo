@@ -42,7 +42,7 @@ The two constructs share a word and nothing else:
 |---|---|---|
 | What it is | A tenant for *humans* — an access and visibility boundary | A squad of *agents* working a repository, created by the **Agent Team Wizard** |
 | Members | Human users, with a role each | Agent processes, sharing a system-prompt template and a Working Environment |
-| Created on | This page (**New Team**) | The **Create** launcher / Agent Team Wizard, listed on **Agents** |
+| Created on | Nowhere any more — the scopes that exist are the ones that exist | The **Create** launcher / Agent Team Wizard — self-service, by anyone |
 | Relationship | Owns Agent Teams, among everything else | Is owned by exactly one Team |
 
 So an Agent Team always sits *inside* a Team. When you reassign an Agent Team to
@@ -53,7 +53,7 @@ rather than carrying an assignment of their own.
 
 | Role | Where it lives | What it may do |
 |---|---|---|
-| **System Admin** | A global flag on the user record, not a team membership | Everything, in every scope — including creating scopes and reassigning resources between them |
+| **System Admin** | A global flag on the user record, not a team membership | Everything, in every scope — including reassigning resources between them |
 | **Team Admin** | A membership in one scope | Manage that scope's details and its members; see and work with the resources it owns |
 | **Team Member** | A membership in one scope | See the scope's resources and chat with its agents; no management |
 
@@ -62,8 +62,17 @@ the same time; **System Admin** is global and supersedes both. Membership is a
 single record per user and scope, so adding a user who is already a member
 simply **updates their role in place**.
 
-Membership is fail-closed: a user with no membership anywhere and no System-Admin
-flag can log in but sees nothing until a scope is granted.
+Membership is fail-closed with one deliberate exception: a user with no
+membership anywhere and no System-Admin flag can log in and sees nothing — but
+they can still **create their own Agent Team**, and they become its Team Admin
+in the same operation. That is the one thing that does not need to be granted to
+you first.
+
+**A team can never be left without an admin.** Removing or demoting the *last*
+Team Admin of a team is refused unless you name a successor who is already a
+member of it, and the refusal says so. Deleting a *user* is refused for the same
+reason while they are the last Team Admin of anything — promote somebody else
+first, or delete the team.
 
 There is **no fourth principal**. The administrator a fresh stack starts with is
 an ordinary System-Admin *user record*, **seeded once at first boot** from the
@@ -125,6 +134,10 @@ here removes only their **membership**: the person, their password and their own
 credentials are untouched, and they keep any other scope they belong to. Removing
 a user entirely is an offboarding, and it happens on the **Users** page.
 
+Removing the **last** admin of the scope is the one member action that can be
+refused outright: add the successor as a member, then remove yourself naming
+them.
+
 ## Resource ownership
 
 The section at the bottom of the page reassigns an individual agent or Working
@@ -147,8 +160,13 @@ an agent, move a repository, or alter what the resource does.
 
 ## Creating and deleting a scope
 
-**New Team** creates a scope. Its id is a lowercase slug you cannot change
-later, so pick it the way you would pick a Working Environment id.
+**Scopes are no longer created here.** Creating a team is self-service and it
+creates an **Agent Team** — use **+ Create**, or the Agent Team Wizard. The
+creator becomes its Team Admin, and the team is **private**: nobody else sees it
+until it is shared. The old **New Team** button on this page is gone, and the
+API behind it answers *410 Gone* naming its successor. The scopes listed here
+still exist and stay fully manageable; there is simply no way to mint a new one,
+because the Agent Team *is* the team now.
 
 **Delete** removes a scope, and it is refused in two cases rather than
 cascading:

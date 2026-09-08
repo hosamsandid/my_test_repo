@@ -409,8 +409,8 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **305,972 — 90.0% used,
-34,028 left** (#2068 made flow drafts private-by-default and shareable, adding an eleventh
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **306,383 — 90.1% used,
+33,617 left** (#2068 made flow drafts private-by-default and shareable, adding an eleventh
 `flows.md` chapter *Sharing a draft*; `create.md` names `/flows` among its `seeAlso`, so it
 lands on this crown in full: +2,673, re-measured on the merge and not summed on a stale base.
 #2067 (per-agent scoped repositories) landed on main while this branch was open and grew the

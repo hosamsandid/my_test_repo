@@ -33,6 +33,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const succession = require('./team-admin-succession');
 
 const DEFAULT_TEAM_ID = 'default';
 const DEFAULT_TEAM_NAME = 'Default Team';
@@ -99,9 +100,25 @@ function coerceChatFontSize(raw) {
   return n;
 }
 
-function createTeamsStore({ root } = {}) {
+// A membership's `teamId` may name an **Agent Team** as well as a legacy access
+// scope (#2077 D1; self-service creation, #2081). This module owns
+// teams/users/memberships and has no agent access, so the second half of that
+// question is injected: `agentTeamExists(id)` answers "is there a `role: 'team'`
+// agent with this id". Defaults to a closed `() => false`, so a caller that
+// wires nothing keeps exactly the pre-#2081 behaviour (`teams/index.json` only)
+// rather than silently accepting any string.
+function createTeamsStore({ root, agentTeamExists } = {}) {
   if (!isNonEmptyString(root)) {
     throw new Error('createTeamsStore: { root } is required');
+  }
+  const knownAgentTeam = typeof agentTeamExists === 'function' ? agentTeamExists : () => false;
+  function teamExists(id) {
+    if (getTeam(id)) return true;
+    try {
+      return knownAgentTeam(id) === true;
+    } catch {
+      return false; // an unreadable agent config is "no team", never "any team"
+    }
   }
 
   const TEAMS_INDEX = path.join(root, 'teams', 'index.json');
@@ -276,10 +293,25 @@ function createTeamsStore({ root } = {}) {
   }
 
   // Deletes a user and cascades their memberships.
+  //
+  // Refused while the user is the last team-admin of any team (#2081 AC5,
+  // D4): the cascade below would otherwise silently leave those teams
+  // un-administrable, and unlike a removal there is no successor to name —
+  // offboarding deletes a person, and guessing who inherits their teams is
+  // exactly what D4 forbids. The check runs FIRST so a refusal costs nothing;
+  // the caller's own pre-delete steps (agent pausing, personal-credential and
+  // Matrix teardown) are destructive and must not run for a delete that cannot
+  // proceed.
   function deleteUser(id) {
     const users = listUsers();
     const idx = users.findIndex(u => u.id === id);
     if (idx === -1) throw notFound(`User '${id}' not found`);
+    {
+      const plan = succession.planUserDeletion({
+        memberships: readArray(MEMBERSHIPS_INDEX), userId: id,
+      });
+      if (!plan.ok) throw conflict(plan.message, plan.code);
+    }
     users.splice(idx, 1);
     writeArray(USERS_INDEX, users);
     const memberships = readArray(MEMBERSHIPS_INDEX);
@@ -299,21 +331,50 @@ function createTeamsStore({ root } = {}) {
     return list;
   }
 
+  // Raise `promote.userId` to team-admin in `list`, in place. The successor's
+  // membership is guaranteed to exist — `planAdminHandover` refused otherwise —
+  // so this only ever flips a role, never creates a grant.
+  function applyPromotion(list, promote) {
+    if (!promote) return;
+    const target = list.find(m => m.userId === promote.userId && m.teamId === promote.teamId);
+    if (target) target.role = succession.ROLE_ADMIN;
+  }
+
   // Upsert: at most one membership per (userId, teamId). Re-asserting updates
   // the role in place rather than creating a duplicate.
-  function setMembership({ userId, teamId, role } = {}) {
+  //
+  // `successorUserId` is the D4 hand-over (#2081): demoting the LAST team-admin
+  // of a team is refused unless a successor already in the team is named, and
+  // when one is, the promotion and the demotion land in a SINGLE `writeArray` —
+  // a promote-then-demote pair could leave the team with two admins, or none, if
+  // the process died between the two writes.
+  function setMembership({ userId, teamId, role, successorUserId } = {}) {
     if (!isNonEmptyString(userId)) throw badRequest('userId is required');
     if (!isNonEmptyString(teamId)) throw badRequest('teamId is required');
     if (!MEMBERSHIP_ROLES.includes(role)) {
       throw badRequest(`role must be one of: ${MEMBERSHIP_ROLES.join(', ')}`);
     }
     if (!getUser(userId)) throw notFound(`User '${userId}' not found`);
-    if (!getTeam(teamId)) throw notFound(`Team '${teamId}' not found`);
+    if (!teamExists(teamId)) throw notFound(`Team '${teamId}' not found`);
 
     const memberships = readArray(MEMBERSHIPS_INDEX);
     const existing = memberships.find(m => m.userId === userId && m.teamId === teamId);
+
+    // Only a DEMOTION can strip a team of its last admin. Promoting somebody,
+    // or re-asserting the role they already hold, never can — so the rule is
+    // not consulted there and a plain "add a member" call is unaffected.
+    let promote = null;
+    if (existing && role !== succession.ROLE_ADMIN) {
+      const plan = succession.planAdminHandover({
+        memberships, userId, teamId, successorUserId,
+      });
+      if (!plan.ok) throw conflict(plan.message, plan.code);
+      promote = plan.promote;
+    }
+
     if (existing) {
       existing.role = role;
+      applyPromotion(memberships, promote);
       writeArray(MEMBERSHIPS_INDEX, memberships);
       return existing;
     }
@@ -421,14 +482,39 @@ function createTeamsStore({ root } = {}) {
     return sanitizeUser(user);
   }
 
-  function removeMembership({ userId, teamId } = {}) {
+  // Remove one membership. Subject to the same D4 hand-over as a demotion
+  // (#2081): removing the LAST team-admin of a team is refused unless a
+  // successor already in the team is named, and the promotion rides the same
+  // single write as the removal.
+  function removeMembership({ userId, teamId, successorUserId } = {}) {
     const memberships = readArray(MEMBERSHIPS_INDEX);
     const remaining = memberships.filter(m => !(m.userId === userId && m.teamId === teamId));
     if (remaining.length === memberships.length) {
       throw notFound(`No membership for user '${userId}' in team '${teamId}'`);
     }
+    const plan = succession.planAdminHandover({ memberships, userId, teamId, successorUserId });
+    if (!plan.ok) throw conflict(plan.message, plan.code);
+    applyPromotion(remaining, plan.promote);
     writeArray(MEMBERSHIPS_INDEX, remaining);
     return { userId, teamId, deleted: true };
+  }
+
+  // Drop every membership naming `teamId`, unconditionally. This is the cascade
+  // `deleteTeam` performs inline, exposed for the caller that deletes the OTHER
+  // kind of team: an **Agent Team** lives as an agent config, so the orchestrator
+  // deletes it and this module never hears about it (#2081).
+  //
+  // Deliberately NOT `removeMembership` in a loop: that path enforces the D4
+  // last-admin rule, which exists to stop a team becoming un-administrable — a
+  // team that no longer exists cannot be, and the rule would refuse the very
+  // clean-up that keeps the index consistent. Returns how many were removed.
+  function removeTeamMemberships(teamId) {
+    if (!isNonEmptyString(teamId)) return 0;
+    const memberships = readArray(MEMBERSHIPS_INDEX);
+    const remaining = memberships.filter(m => m.teamId !== teamId);
+    const removed = memberships.length - remaining.length;
+    if (removed > 0) writeArray(MEMBERSHIPS_INDEX, remaining);
+    return removed;
   }
 
   // ---- bootstrap ----------------------------------------------------------
@@ -517,7 +603,7 @@ function createTeamsStore({ root } = {}) {
     listUsers, getUser, getUserBySubject, createUser, updateUser, deleteUser,
     setUserPassword, clearUserPassword, verifyUserCredentials, sanitizeUser,
     setUserMatrixIdentity,
-    listMemberships, setMembership, removeMembership, appendMemberships,
+    listMemberships, setMembership, removeMembership, removeTeamMemberships, appendMemberships,
     ensureDefaultTeam, ensureSystemAdmin,
   };
 }
@@ -526,14 +612,18 @@ function createTeamsStore({ root } = {}) {
 // `statusHint` lets the HTTP layer map store errors to status codes without
 // string-matching messages.
 
-function tagged(message, statusHint) {
+// `code` is optional and carries a stable machine-readable reason next to the
+// human message — the D4 refusals need one so a client can tell "name a
+// successor" apart from "that successor is not a member" without matching text.
+function tagged(message, statusHint, code) {
   const err = new Error(message);
   err.statusHint = statusHint;
+  if (code) err.code = code;
   return err;
 }
-function badRequest(m) { return tagged(m, 400); }
-function notFound(m) { return tagged(m, 404); }
-function conflict(m) { return tagged(m, 409); }
+function badRequest(m, code) { return tagged(m, 400, code); }
+function notFound(m, code) { return tagged(m, 404, code); }
+function conflict(m, code) { return tagged(m, 409, code); }
 
 module.exports = {
   createTeamsStore,

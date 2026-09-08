@@ -129,6 +129,10 @@ test("AC13: attach clones before it persists; detach persists before it deletes"
   // the real git error, so no half-cloned directory is orphaned.
   assert.match(attach, /fs\.rmSync\(target, \{ recursive: true, force: true \}\)/);
   assert.match(attach, /code = "clone-failed"|e\.code = "clone-failed"/);
+  // cloneRepository REPORTS a pre-existing directory rather than throwing, so
+  // the "clone did not fail but also did not happen" case has to be refused
+  // explicitly — otherwise the entry binds to a directory it did not produce.
+  assert.match(attach, /clones\.some\(\(c\) => c && c\.skipped\)/);
 
   const detach = block("detachAgentRepository(agentId, url) {", "\n  }\n\n");
   const dSaveAt = at(detach, "saveAgentConfig(agentId, cfg)", "the config write");

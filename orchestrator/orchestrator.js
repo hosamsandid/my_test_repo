@@ -9221,6 +9221,21 @@ class Orchestrator {
       e.code = "clone-failed";
       throw e;
     }
+    // cloneRepository REPORTS rather than throws when the target directory
+    // already exists — it does not overwrite. The planner refuses that case
+    // from the directory listing it read a moment earlier, so reaching here
+    // means the directory appeared in between (a concurrent attach, or the
+    // agent itself creating a folder mid-run). Persisting now would bind the
+    // entry to a directory this clone did not produce, so refuse instead and
+    // leave the newcomer's directory untouched.
+    if (clones.some((c) => c && c.skipped)) {
+      const e = new Error(
+        `\`./${plan.dirName}/\` appeared in the workspace while the clone was starting, so ` +
+        `nothing was cloned and nothing was attached. Check what is at that path and try again.`,
+      );
+      e.code = "dir-name-occupied";
+      throw e;
+    }
 
     cfg.agentRepositories = plan.agentRepositories;
     saveAgentConfig(agentId, cfg);

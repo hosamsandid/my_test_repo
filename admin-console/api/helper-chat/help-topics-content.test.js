@@ -45,6 +45,9 @@ const TOPIC_CONTENT = [
     chapters: [
       'What Flows is',
       'The flows left list',
+      // #2068 — the surface for this one is the Share side panel itself, which
+      // is where the irreversibility of sharing has to be readable.
+      'Sharing a draft',
       'The canvas',
       'Wiring hand-offs: the edge chooser',
       'Human gates, brakes and named human roles',
@@ -75,6 +78,11 @@ const TOPIC_CONTENT = [
       // the guard follows the prose rather than the other way round.
       'Import',
       'Export',
+      // #2068 — the two claims a reword must not soften: a draft is private
+      // until shared, and sharing hands over the right to delete it and to
+      // remove the sharer. Both are the product's own words in the panel.
+      'one-way act of trust',
+      'can never be emptied',
       'Label hand-off',
       'Issue channel',
       'Pull-request channel',
@@ -985,6 +993,20 @@ const TOPIC_CONTENT = [
       '/api/agents/orphans',
       'idempotent',
       'Add `<role>` role',
+      // #2067 — repositories are no longer an environment-only concept. The
+      // load-bearing facts are the two scopes (and that the inherited one is
+      // changed elsewhere), that there is no per-repository credential, that a
+      // directory-name collision is refused rather than renamed, that the
+      // attachment survives a re-seed, and what removal costs. Each is a
+      // question a reader asks BEFORE clicking, so a reword must not lose them.
+      'From Working Environment',
+      'This agent only',
+      'no credential of its own',
+      'refused',
+      'no automatic renaming',
+      'survives a container respawn',
+      'deletes the working copy',
+      'next** run on',
     ],
   },
   {

@@ -13,6 +13,13 @@ import { FLOWS_HELP_SECTIONS } from './process/flows-help-sections';
 import RowContextMenu from '../components/RowContextMenu.jsx';
 import { buildFlowsRailMenu, intentForMenuKey, parseFlowIntent } from './process/flows-rail-menu.js';
 import { downloadBundle } from './process/bundle-download.js';
+import SidePanel from '../components/SidePanel';
+import { useHelpSubject } from '../context/HelperChatContext';
+import { OVERLAY_DRAFT_SHARE } from '../context/page-help-view.js';
+import {
+  draftSubtitle, draftAccessTitle, accessRows, shareCandidates, addControlState,
+  removeState, deleteImpactNotice, draftWriteError,
+} from './process/draft-share-view.js';
 import {
   IMPORT_BRIEFINGS_COPY, importCandidates, importSubmitState, importRequestBody, importErrorText,
 } from './process/import-briefings-view';
@@ -132,7 +139,7 @@ function SectionHeader({ children, action }) {
 //
 // The row stays presentational: it reports *that* a menu was asked for and at
 // which point, and the page decides what it contains (the AgentList contract).
-function ListRow({ icon: Icon, label, sub, selected, onSelect, onRequestMenu }) {
+function ListRow({ icon: Icon, label, sub, subTitle, selected, onSelect, onRequestMenu }) {
   const [hover, setHover] = useState(false);
 
   // The trailing gutter the kebab sits in. Reserved whether or not the kebab is
@@ -182,7 +189,7 @@ function ListRow({ icon: Icon, label, sub, selected, onSelect, onRequestMenu }) 
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
           }}>{label}</div>
           {sub && (
-            <div style={{
+            <div title={subTitle || undefined} style={{
               marginTop: 2, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}>{sub}</div>
@@ -235,6 +242,161 @@ function KebabButton({ label, active, onOpen }) {
     >
       <MoreVertical size={15} />
     </span>
+  );
+}
+
+// The Share panel (#2068). Everyone in the access set sees exactly this panel:
+// there is no owner column, no role column and no action reserved to the
+// creator (DD2). The one thing it will not let you do is empty the set (AC9) —
+// stated as a hint on the disabled button rather than discovered as a rejected
+// request, though the server refuses it either way.
+//
+// Mounted only while the panel is open (SidePanel returns null when closed), so
+// the help subject comes and goes with it and needs no `active:` flag.
+function ShareDraftPanel({ draft, viewerId, onChanged, onGone }) {
+  useHelpSubject({ overlay: OVERLAY_DRAFT_SHARE });
+  const [access, setAccess] = useState([]);
+  const [directory, setDirectory] = useState([]);
+  const [addUserId, setAddUserId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [loaded, setLoaded] = useState(false);
+
+  const base = `/api/process/drafts/${encodeURIComponent(draft.id)}/access`;
+
+  const load = useCallback(async () => {
+    try {
+      const [a, dir] = await Promise.all([
+        apiCall('GET', base),
+        apiCall('GET', '/api/users/directory'),
+      ]);
+      setAccess(Array.isArray(a?.users) ? a.users : []);
+      setDirectory(Array.isArray(dir) ? dir : []);
+      setLoaded(true);
+    } catch (e) {
+      // AC17 — the draft may have gone while the menu was open.
+      if (e && e.status === 404) { onGone(); return; }
+      setError(draftWriteError(e, 'Could not read who has access.'));
+      setLoaded(true);
+    }
+  }, [base, onGone]);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function mutate(fn) {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fn();
+      setAccess(Array.isArray(res?.users) ? res.users : []);
+      onChanged();
+    } catch (e) {
+      if (e && e.status === 404) { onGone(); return; }
+      setError(draftWriteError(e, 'Could not change who has access.'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const rows = accessRows(access, viewerId);
+  const candidates = shareCandidates(directory, access);
+  const addState = addControlState({ candidates, selectedId: addUserId, busy });
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)' }}>
+        <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          Everyone listed here can open, edit, rename, export, create a team from
+          this draft — and can share it on, remove anyone, and delete it. Sharing
+          a draft is a one-way act of trust, not a lend.
+        </p>
+        <PageHelpButton section={FLOWS_HELP_SECTIONS.sharingDrafts} label="How sharing a draft works" />
+      </div>
+
+      <div>
+        <h3 style={{ margin: '0 0 var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
+          Has access
+        </h3>
+        {!loaded ? (
+          <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>Loading…</p>
+        ) : rows.map(r => {
+          const rm = removeState(access, r.id);
+          return (
+            <div key={r.id} style={{
+              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+              padding: 'var(--eb-space-2) 0', borderBottom: '1px solid var(--eb-border-subtle)',
+            }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+                  {r.label}{r.you ? ' (you)' : ''}
+                </div>
+                {r.email && (
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{r.email}</div>
+                )}
+              </div>
+              <button
+                type="button"
+                disabled={busy || rm.disabled}
+                title={rm.hint || (r.you ? 'Leave this draft' : `Remove ${r.label}`)}
+                onClick={() => mutate(() => apiCall('DELETE', `${base}/${encodeURIComponent(r.id)}`))}
+                style={{
+                  padding: '4px 10px', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+                  background: 'transparent', border: '1px solid var(--eb-border-default)',
+                  borderRadius: 'var(--eb-radius-sm)',
+                  color: rm.disabled ? 'var(--eb-text-muted)' : 'var(--eb-status-error)',
+                  cursor: (busy || rm.disabled) ? 'not-allowed' : 'pointer',
+                  opacity: rm.disabled ? 0.6 : 1,
+                }}
+              >{r.you ? 'Leave' : 'Remove'}</button>
+            </div>
+          );
+        })}
+      </div>
+
+      <div>
+        <h3 style={{ margin: '0 0 var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
+          Share with
+        </h3>
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+          <select
+            value={addUserId}
+            onChange={e => setAddUserId(e.target.value)}
+            disabled={busy || candidates.length === 0}
+            style={{
+              flex: 1, minWidth: 0, padding: '6px 8px', fontFamily: 'inherit',
+              fontSize: 'var(--eb-text-sm)', background: 'var(--eb-bg-input)',
+              color: 'var(--eb-text-primary)', border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-sm)',
+            }}
+          >
+            <option value="">{addState.placeholder}</option>
+            {candidates.map(u => (
+              <option key={u.id} value={u.id}>{u.email ? `${u.displayName} — ${u.email}` : u.displayName}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            disabled={addState.disabled}
+            onClick={() => mutate(async () => {
+              const res = await apiCall('POST', base, { userId: addUserId });
+              setAddUserId('');
+              return res;
+            })}
+            style={{
+              padding: '6px 12px', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+              background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+              border: 'none', borderRadius: 'var(--eb-radius-sm)',
+              cursor: addState.disabled ? 'not-allowed' : 'pointer',
+              opacity: addState.disabled ? 0.5 : 1,
+            }}
+          >Share</button>
+        </div>
+      </div>
+
+      {error && (
+        <p style={{ margin: 0, color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{error}</p>
+      )}
+    </div>
   );
 }
 
@@ -596,15 +758,38 @@ export default function Briefings() {
       return;
     }
     if (key === 'export') { exportFromRail(target); return; }
-    if (key === 'delete') { setDeleteTarget({ id: target.id, name: target.name }); return; }
+    if (key === 'share') { setShareTarget({ id: target.id, name: target.name }); return; }
+    if (key === 'delete') { openDeleteDraft(target); return; }
     if (key === 'open-chat') { navigate(`/chats/${encodeURIComponent(target.id)}`); }
   }
+
+  // Share a draft with named colleagues (#2068). Under DD2 everyone in the
+  // access set is fully equal, so the entry is offered to every viewer and the
+  // panel has no owner-only affordance.
+  const [shareTarget, setShareTarget] = useState(null); // { id, name } | null
 
   // Delete confirmation goes through the shared styled ConfirmDialog (like every
   // other delete action in the console) rather than a native browser prompt,
   // so the flow looks and behaves consistently across pages.
   const [deleteTarget, setDeleteTarget] = useState(null); // the draft pending deletion
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteAccess, setDeleteAccess] = useState([]); // who else loses it (AC13)
+  const [deleteError, setDeleteError] = useState(null);
+
+  // AC13 — under DD2 any holder may delete, so the confirmation is the only
+  // thing between a mis-click and someone else's work: fetch the access set
+  // before it opens so it can name the people who will lose the draft. A failed
+  // read leaves the list empty rather than blocking the delete — the generic
+  // "cannot be undone" warning still stands.
+  async function openDeleteDraft(target) {
+    setDeleteError(null);
+    setDeleteAccess([]);
+    setDeleteTarget({ id: target.id, name: target.name });
+    try {
+      const res = await apiCall('GET', `/api/process/drafts/${encodeURIComponent(target.id)}/access`);
+      setDeleteAccess(Array.isArray(res?.users) ? res.users : []);
+    } catch { /* best effort — the confirmation is still correct without names */ }
+  }
 
   async function confirmDeleteDraft() {
     const d = deleteTarget;
@@ -615,10 +800,15 @@ export default function Briefings() {
       // If the deleted draft was open, drop the selection.
       if (proc === `draft:${d.id}`) setSearchParams({});
       refetchDrafts();
-    } catch { /* leave the list as-is; the draft may already be gone */ }
-    finally {
-      setDeleteBusy(false);
       setDeleteTarget(null);
+    } catch (e) {
+      // AC17 — a draft already gone (deleted, or access removed) must read as a
+      // sentence rather than as silence. The list is refetched either way, so
+      // the row disappears on its own.
+      setDeleteError(draftWriteError(e, 'Delete failed.'));
+      refetchDrafts();
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -899,7 +1089,11 @@ export default function Briefings() {
                     key={d.id}
                     icon={FileText}
                     label={d.name}
-                    sub={`${d.roleCount} agent${d.roleCount === 1 ? '' : 's'}`}
+                    // AC16 — private vs shared, and the creator of a draft the
+                    // viewer did not create. The server resolves the display
+                    // name, so no user id can reach the row.
+                    sub={draftSubtitle(d)}
+                    subTitle={draftAccessTitle(d)}
                     selected={proc === `draft:${d.id}`}
                     onSelect={() => selectProc(`draft:${d.id}`)}
                     onRequestMenu={(anchor) => handleRequestMenu(
@@ -1007,9 +1201,22 @@ export default function Briefings() {
             <p style={{ margin: 0 }}>
               Really delete "<strong>{deleteTarget?.name || deleteTarget?.id}</strong>"?
             </p>
+            {/* AC13 — name the other people who lose it. Under DD2 they are
+                equals, not guests, so this is a consequence to state rather
+                than a permission to check. */}
+            {deleteImpactNotice(deleteAccess, user?.userId) && (
+              <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-status-warning)', fontSize: 'var(--eb-text-sm)' }}>
+                {deleteImpactNotice(deleteAccess, user?.userId)}
+              </p>
+            )}
             <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
               This cannot be undone.
             </p>
+            {deleteError && (
+              <p style={{ margin: 'var(--eb-space-2) 0 0', color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>
+                {deleteError}
+              </p>
+            )}
           </>
         }
         variant="danger"
@@ -1018,6 +1225,30 @@ export default function Briefings() {
         onConfirm={confirmDeleteDraft}
         onCancel={() => setDeleteTarget(null)}
       />
+
+      {/* Share a draft (#2068). A `SidePanel` rather than a `ConfirmDialog`:
+          this is a list you manage, not a decision you confirm — the
+          `ManageTeamPanel` precedent, minus its role column, which DD2
+          removes. */}
+      <SidePanel
+        open={!!shareTarget}
+        onClose={() => setShareTarget(null)}
+        title={shareTarget ? `Share: ${shareTarget.name || shareTarget.id}` : ''}
+        width="480px"
+      >
+        {shareTarget && (
+          <ShareDraftPanel
+            draft={shareTarget}
+            viewerId={user?.userId || null}
+            onChanged={refetchDrafts}
+            onGone={() => {
+              setShareTarget(null);
+              if (proc === `draft:${shareTarget.id}`) setSearchParams({});
+              refetchDrafts();
+            }}
+          />
+        )}
+      </SidePanel>
 
       {/* #1965 (AC4) — the BriefingPack import, as an explicit action. Two
           fields fit the shared ConfirmDialog's ReactNode `message`, so this

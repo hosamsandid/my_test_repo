@@ -71,7 +71,7 @@ const credentialResolution = require("./credential-resolution");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assessConversionEligibility, planTeamConversion } = require("./team-conversion");
-const { syncAgentRepoPlan, summarizeRepoResults } = require("./repo-sync");
+const { syncAgentRepoPlan, summarizeRepoResults, repoDivergence } = require("./repo-sync");
 const { computeTeamRoster, createVerdictStore } = require("./loop-verify");
 const { assembleClaudeMd, buildMemoryHint, SCOPED_KNOWLEDGE_FILENAME } = require("./prompt-assembly");
 const { readMaintenanceState } = require("./maintenance-state-reader");
@@ -2816,10 +2816,16 @@ function isUsableRepoCache(cacheDir) {
   }
 }
 
-function cloneRepository(targetDir, repository, envGithubTokenId = null, envId = null) {
-  const { url, branch, sshKeyId } = repository;
-  if (!url) return null;
-
+// Resolve the git credentials one repository URL needs, and shape them into the
+// per-invocation environment git reads them from.
+//
+// Extracted verbatim out of cloneRepository (#2066) so the in-place ADJUST path
+// authenticates through exactly the same resolution — a second copy would be
+// the one place where "the clone worked but the fetch did not" could diverge.
+// The resolution itself is unchanged: transport is decided by the URL, never by
+// which credentials the environment happens to carry.
+function repoGitCredentials(repository, envGithubTokenId = null) {
+  const { url, sshKeyId } = repository || {};
   // The transport choice is driven by the URL, not by which credentials
   // the env carries. HTTPS URLs need PAT-based Basic auth; SSH URLs need
   // GIT_SSH_COMMAND with the deploy key. The wizard sets BOTH credentials
@@ -2842,6 +2848,50 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null, envId =
     }
     try { fs.chmodSync(keyPath, 0o600); } catch { /* best effort */ }
   }
+
+  // For HTTPS GitHub URLs, authenticate via GIT_CONFIG_* env vars so the
+  // token never appears in process arguments (/proc/<pid>/cmdline) and never
+  // lands in `git remote -v` (no URL rewriting). Only active for this single
+  // invocation. The presence of an SSH key does NOT block this path — SSH
+  // keys are no help for HTTPS transport.
+  let authBasic = null;
+  if (isHttpsGithub && envGithubTokenId) {
+    const tokenPath = path.join(GH_TOKENS_DIR, envGithubTokenId);
+    try {
+      const ghToken = fs.readFileSync(tokenPath, "utf8").trim();
+      if (ghToken) {
+        authBasic = Buffer.from(`x-access-token:${ghToken}`).toString("base64");
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] Cannot read GitHub token ${envGithubTokenId} for clone: ${err.message}`);
+    }
+  }
+  // Refuse proactively when no auth can possibly work. Without this, git would
+  // block on a username prompt (no TTY → fatal: could not read Username) and
+  // the failure would surface as a cryptic stderr line.
+  if (isHttpsGithub && !authBasic) {
+    throw new Error(
+      `HTTPS clone of ${url} needs a GitHub PAT, but the env has no usable githubTokenId ` +
+      `(SSH keys do not authenticate HTTPS transports). Either add a PAT to the env or ` +
+      `change the repository URL to its SSH form.`
+    );
+  }
+
+  const env = { ...process.env };
+  if (keyPath) {
+    env.GIT_SSH_COMMAND = `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes`;
+  }
+  if (authBasic) {
+    env.GIT_CONFIG_COUNT = "1";
+    env.GIT_CONFIG_KEY_0 = "http.https://github.com/.extraheader";
+    env.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${authBasic}`;
+  }
+  return env;
+}
+
+function cloneRepository(targetDir, repository, envGithubTokenId = null, envId = null) {
+  const { url, branch } = repository;
+  if (!url) return null;
 
   const repoName = (url.split("/").pop() || "repo").replace(/\.git$/, "");
   const repoDir = path.join(targetDir, repoName);
@@ -2867,47 +2917,15 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null, envId =
     }
   }
 
-  // For HTTPS GitHub URLs, authenticate via GIT_CONFIG_* env vars so the
-  // token never appears in process arguments (/proc/<pid>/cmdline) and never
-  // lands in `git remote -v` (no URL rewriting). Only active for this single
-  // invocation. The presence of an SSH key does NOT block this path — SSH
-  // keys are no help for HTTPS transport.
-  let authBasic = null;
-  if (isHttpsGithub && envGithubTokenId) {
-    const tokenPath = path.join(GH_TOKENS_DIR, envGithubTokenId);
-    try {
-      const ghToken = fs.readFileSync(tokenPath, "utf8").trim();
-      if (ghToken) {
-        authBasic = Buffer.from(`x-access-token:${ghToken}`).toString("base64");
-      }
-    } catch (err) {
-      console.warn(`[Orchestrator] Cannot read GitHub token ${envGithubTokenId} for clone: ${err.message}`);
-    }
-  }
-  // Refuse the clone proactively when no auth can possibly work. Without
-  // this, git would block on a username prompt (no TTY → fatal: could not
-  // read Username) and the failure would surface as a cryptic stderr line.
-  if (isHttpsGithub && !authBasic) {
-    throw new Error(
-      `HTTPS clone of ${url} needs a GitHub PAT, but the env has no usable githubTokenId ` +
-      `(SSH keys do not authenticate HTTPS transports). Either add a PAT to the env or ` +
-      `change the repository URL to its SSH form.`
-    );
-  }
+  // Credentials are resolved HERE, after the two early returns above, so a
+  // clone that is not going to run never fails on a credential it would not
+  // have used. The HTTPS-without-a-PAT refusal keeps its original position for
+  // the same reason: it must fire for a clone that is about to happen.
+  const env = repoGitCredentials(repository, envGithubTokenId);
 
   const args = ["clone"];
   if (branch) args.push("--branch", branch);
   args.push("--", url, repoName);
-
-  const env = { ...process.env };
-  if (keyPath) {
-    env.GIT_SSH_COMMAND = `ssh -i ${keyPath} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes`;
-  }
-  if (authBasic) {
-    env.GIT_CONFIG_COUNT = "1";
-    env.GIT_CONFIG_KEY_0 = "http.https://github.com/.extraheader";
-    env.GIT_CONFIG_VALUE_0 = `Authorization: Basic ${authBasic}`;
-  }
 
   try {
     execFileSync("git", args, {
@@ -2938,6 +2956,108 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null, envId =
   }
 
   return { repoName, skipped: false, fromCache: false };
+}
+
+// Every git checkout directly under an agent's workspace, by directory name.
+// Used to report clones that are no longer declared as RETAINED (#2066) — they
+// are never deleted, so saying so is the only thing left to do about them.
+function listWorkspaceClones(workspace) {
+  try {
+    return fs.readdirSync(workspace, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      .filter((e) => fs.existsSync(path.join(workspace, e.name, ".git")))
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+
+// The MINIMAL probe repoDivergence() needs: per declared repository, does a
+// clone exist, which branch is checked out, and where does 'origin' point.
+//
+// Deliberately not inspectAgentRepoStatuses — that runs ~7 git commands per
+// repository (log, status --porcelain, rev-list against the upstream) because
+// it answers "is this safe to hand over". The out-of-date indicator asks a much
+// smaller question and is rendered for every agent of every environment, so it
+// gets two git commands per repository and no network access at all. The shape
+// it returns is a strict subset of the full status record, so the same pure
+// repoDivergence() reads either one.
+function inspectAgentRepoDivergence(agentId, env) {
+  const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+  const workspace = agentDir(agentId);
+  const out = [];
+
+  for (const repo of repos) {
+    if (!repo?.url) continue;
+    const name = (repo.url.split("/").pop() || "repo").replace(/\.git$/, "");
+    const repoPath = path.join(workspace, name);
+    const record = { name, url: repo.url, exists: false, branchActual: null, remoteUrl: null };
+    if (!fs.existsSync(path.join(repoPath, ".git"))) {
+      out.push(record);
+      continue;
+    }
+    record.exists = true;
+    const run = (args) => execFileSync("git", args, {
+      cwd: repoPath,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 5_000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    }).toString().trim();
+    try { record.branchActual = run(["rev-parse", "--abbrev-ref", "HEAD"]) || null; } catch { /* leave null */ }
+    try { record.remoteUrl = run(["remote", "get-url", "origin"]) || null; } catch { /* no origin */ }
+    out.push(record);
+  }
+  return out;
+}
+
+// Bring ONE existing clone into line with its declared entry (#2066 D1).
+//
+// Only ever reached for a clone cloneAdjustSafety() has cleared as clean and
+// fully pushed, and every operation below is chosen so that even then it cannot
+// discard work: `remote set-url` touches no file, `fetch` only adds objects, and
+// the branch move is `checkout` + `merge --ff-only` — a local branch that has
+// diverged makes the merge REFUSE, which surfaces as a per-repository failure.
+// There is deliberately no stash, no reset, no `checkout -f` and no clean.
+function adjustRepoClone(workspace, repository, status, plan, envGithubTokenId = null) {
+  const repoDir = path.join(workspace, status.name);
+  const env = repoGitCredentials(repository, envGithubTokenId);
+  const applied = [];
+
+  const run = (args, timeout = 120_000) => {
+    try {
+      return execFileSync("git", args, {
+        cwd: repoDir,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout,
+      }).toString();
+    } catch (err) {
+      const detail = (err.stderr || err.stdout || "").toString().trim() || err.message || "";
+      throw new Error(`git ${args[0]} failed: ${detail.slice(0, 300)}`);
+    }
+  };
+
+  // Repoint 'origin' FIRST, so the fetch below already speaks to the new
+  // address and the branch step resolves against it.
+  if (plan.setUrl) {
+    run(["remote", "set-url", "origin", plan.setUrl]);
+    applied.push(`remote → ${plan.setUrl}`);
+  }
+
+  // Always fetch. This is also the point at which an edited SSH key or PAT is
+  // actually exercised, so a credential change is proven rather than assumed.
+  run(["fetch", "--prune", "origin"]);
+  applied.push("fetched");
+
+  if (plan.checkoutBranch) {
+    const branch = plan.checkoutBranch;
+    run(["checkout", branch]);
+    run(["merge", "--ff-only", `origin/${branch}`]);
+    applied.push(`branch → ${branch}`);
+  }
+
+  console.log(`[Orchestrator] Adjusted ${status.name} in ${workspace}: ${applied.join("; ")}`);
+  return { applied };
 }
 
 function patchSeededPaths(dir) {
@@ -9014,11 +9134,80 @@ class Orchestrator {
       return { agentId, environmentId, repos: [], noWorkspace: true, summary: summarizeRepoResults([]) };
     }
 
+    // The plan is derived from the DECLARED list against the ACTUAL clones
+    // (#2066), which is why the status probe runs first: it is what lets one
+    // core serve the save-time offer, the out-of-date catch-up and this
+    // per-agent panel without them being able to disagree (AC21).
     const repos = syncAgentRepoPlan(repositories, {
-      hasGit: (name) => fs.existsSync(path.join(workspace, name, ".git")),
+      statuses: inspectAgentRepoStatuses(agentId, env),
       clone: (repo) => cloneRepository(workspace, repo, env?.githubTokenId || null, env?.id || null),
+      adjust: (repo, status, plan) => adjustRepoClone(workspace, repo, status, plan, env?.githubTokenId || null),
+      listClones: () => listWorkspaceClones(workspace),
     });
     return { agentId, environmentId, repos, summary: summarizeRepoResults(repos) };
+  }
+
+  // Read-only sibling of syncAgentRepositories: which declared repositories
+  // are out of date in this agent's workspace, and why (#2066 D4). Drives the
+  // environment's persistent "N agents not up to date" indicator, so it must
+  // never mutate anything and must never report a clone that is merely no
+  // longer declared — nothing is ever pruned, so that can never be fixed.
+  agentRepoDivergence(agentId) {
+    const cfg = loadAgentConfig(agentId);
+    if (!cfg) {
+      const e = new Error(`Agent '${agentId}' not found`);
+      e.code = "not-found";
+      throw e;
+    }
+    const environmentId = cfg.environmentId || null;
+    const env = environmentId ? loadEnvironment(environmentId) : null;
+    const repositories = Array.isArray(env?.repositories) ? env.repositories : [];
+    const workspace = agentDir(agentId);
+
+    // A stub has no workspace, so it is not "out of date" — it has nothing to
+    // be out of date with. Reporting it would light the indicator for a state
+    // only materialization can clear.
+    if (!fs.existsSync(workspace)) {
+      return { agentId, environmentId, diverged: [], noWorkspace: true };
+    }
+    const diverged = repoDivergence(repositories, inspectAgentRepoDivergence(agentId, env));
+    return { agentId, environmentId, diverged };
+  }
+
+  // Aggregate the above across the agents of one environment, for the
+  // environment's persistent "N agents not up to date" indicator (#2066 AC19).
+  //
+  // The agent set is supplied by the caller rather than discovered here,
+  // because deciding WHICH agents a caller may see is the console's scoping
+  // job — the orchestrator has no notion of the requesting human.
+  environmentRepoDivergence(envId, agentIds) {
+    const env = loadEnvironment(envId);
+    const agents = [];
+    for (const agentId of Array.isArray(agentIds) ? agentIds : []) {
+      try {
+        const cfg = loadAgentConfig(agentId);
+        if (!cfg || cfg.environmentId !== envId) continue;
+        const workspace = agentDir(agentId);
+        if (!fs.existsSync(workspace)) {
+          agents.push({ agentId, diverged: [], noWorkspace: true });
+          continue;
+        }
+        const repositories = Array.isArray(env?.repositories) ? env.repositories : [];
+        agents.push({
+          agentId,
+          diverged: repoDivergence(repositories, inspectAgentRepoDivergence(agentId, env)),
+        });
+      } catch (err) {
+        // One unreadable agent must not blank the whole indicator — report it
+        // rather than counting it as up to date.
+        agents.push({ agentId, diverged: [], error: errorMessage(err) });
+      }
+    }
+    return {
+      envId,
+      agents,
+      outOfDate: agents.filter((a) => a.diverged.length > 0).length,
+    };
   }
 
   // Reset an agent back to its stub state: stop the process, deactivate the
@@ -12226,6 +12415,34 @@ async function main() {
         res.writeHead(status, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
       }
+      return;
+    }
+
+    // Read-only divergence probe for one environment's agents (#2066 D4). POST
+    // because the caller supplies the agent set it is allowed to see — scoping
+    // is the console's job, not the orchestrator's.
+    const repoDivergenceMatch = req.method === 'POST'
+      && req.url.match(/^\/internal\/environments\/([^/]+)\/repo-divergence$/);
+    if (repoDivergenceMatch) {
+      const envId = decodeURIComponent(repoDivergenceMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* ignore */ }
+        const agentIds = Array.isArray(parsed.agentIds)
+          ? parsed.agentIds.filter(s => typeof s === 'string')
+          : [];
+        try {
+          const result = orchestrator.environmentRepoDivergence(envId, agentIds);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] environmentRepoDivergence error for ${envId}: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
       return;
     }
 

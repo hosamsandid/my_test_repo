@@ -33,6 +33,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
 const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
 const { normalizeDiscoveredModels } = require('./model-discovery');
+const { CHAT_AUTHOR_FIELD, chatAuthorStamp } = require('./chat-author');
 const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
@@ -46,7 +47,7 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
 const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require('./prompt-modes');
@@ -811,6 +812,16 @@ function getScope(req) {
     adminUsername: ADMIN_USERNAME,
     users: readJsonFile(USERS_INDEX, []),
     memberships: readJsonFile(MEMBERSHIPS_INDEX, []),
+  });
+}
+
+// The author stamp for a chat message posted by this request (#2065). Both
+// halves come from the authenticated session — the user-store record id and the
+// login subject — never from the request body.
+function chatAuthorFor(req) {
+  return chatAuthorStamp({
+    userId: getScope(req).userId,
+    username: req && req.user && req.user.username,
   });
 }
 
@@ -2144,7 +2155,12 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     }
     const vh = validateProcessTemplate({ processTemplateVersion: 1, roles: [], humans: humans || [] }, { allowEmptyRoles: true });
     if (!vh.ok) return res.status(400).json({ error: `Invalid humans: ${vh.error}` });
-    normHumans = normalizeHumans(humans || []);
+    // Drop dead producer refs (#2063): a pr/issue consume whose `from` names no
+    // existing agent is unremovable via the UI (its remove control lived on the
+    // now-deleted producer). Prune against the on-disk roster so it clears on
+    // the next humans save — the safety net behind the node-inspector's per-chip
+    // remove button. Roster-based, so it stays out of the pure normalizeHumans.
+    normHumans = pruneOrphanHumanConsumes(normalizeHumans(humans || []), new Set(listAgentDirs()));
   }
 
   // ── Assist synthesis provider, team-agent only (#1213) ────────────────────
@@ -2943,7 +2959,7 @@ function openNdjsonStream(res) {
   };
 }
 
-const EMPTY_SYNC_SUMMARY = { total: 0, cloned: 0, skipped: 0, failed: 0 };
+const EMPTY_SYNC_SUMMARY = { total: 0, cloned: 0, adjusted: 0, skipped: 0, blocked: 0, failed: 0, retained: 0 };
 
 // Sync one agent by calling the orchestrator's per-agent endpoint and emitting
 // agent-scoped progress lines. Never throws — an orchestrator/transport error
@@ -2961,48 +2977,115 @@ async function syncOneAgentToStream(agentId, displayName, emit) {
     if (!resp.ok) {
       const error = (data && data.error) || `HTTP ${resp.status}`;
       emit({ type: 'agent-error', agentId, error });
-      return { summary: { ...EMPTY_SYNC_SUMMARY } };
+      return { summary: { ...EMPTY_SYNC_SUMMARY }, repos: [], error };
     }
   } catch (err) {
-    emit({ type: 'agent-error', agentId, error: `Orchestrator unreachable: ${err.message}` });
-    return { summary: { ...EMPTY_SYNC_SUMMARY } };
+    const error = `Orchestrator unreachable: ${err.message}`;
+    emit({ type: 'agent-error', agentId, error });
+    return { summary: { ...EMPTY_SYNC_SUMMARY }, repos: [], error };
   }
   if (data.noWorkspace) {
+    // AC24: an un-materialized member has no workspace to clone into. Reported
+    // as a skip with the existing reason, and it never fails the run.
     emit({ type: 'agent-skip', agentId, reason: 'no-workspace' });
-    return { summary: data.summary || { ...EMPTY_SYNC_SUMMARY } };
+    return { summary: data.summary || { ...EMPTY_SYNC_SUMMARY }, repos: [], noWorkspace: true };
   }
   const repos = Array.isArray(data.repos) ? data.repos : [];
   for (const r of repos) {
     emit({
       type: 'repo', agentId, name: r.name, url: r.url, status: r.status,
-      reason: r.reason || null, error: r.error || null, fromCache: !!r.fromCache,
+      reason: r.reason || null, detail: r.detail || null, blocked: !!r.blocked,
+      applied: Array.isArray(r.applied) ? r.applied : null,
+      error: r.error || null, fromCache: !!r.fromCache,
     });
   }
   const summary = data.summary || summarizeSyncRepos(repos);
   emit({ type: 'agent-done', agentId, summary });
-  return { summary };
+  return { summary, repos };
 }
 
-// Local fold, in case the orchestrator omits `summary` (defensive).
+// The D6 durable trail (#2066): one audit entry PER AGENT per propagation run.
+//
+// `auditMutations` already records one line per HTTP request, which for an
+// environment fan-out is a single line naming neither the agents nor what
+// happened in their workspaces — and the streamed report vanishes the moment
+// the dialog closes. Since the propagation now MUTATES existing clones, an
+// after-the-fact record of what touched which workspace stops being a nicety.
+//
+// Best-effort by construction (audit.record swallows its own errors): a trail
+// that could fail a propagation would be worse than a missing line.
+function recordRepoSyncTrail(req, { agentId, envId, repos, summary, error }) {
+  const items = (Array.isArray(repos) ? repos : []).map((r) => ({
+    name: r.name,
+    outcome: r.status,
+    ...(r.reason ? { reason: r.reason } : {}),
+    ...(r.detail ? { detail: r.detail } : {}),
+    ...(Array.isArray(r.applied) && r.applied.length ? { applied: r.applied } : {}),
+    ...(r.error ? { error: r.error } : {}),
+  }));
+  audit.record({
+    ts: new Date().toISOString(),
+    actor: (req.user && req.user.username) || 'anonymous',
+    action: 'repo-propagation',
+    method: 'POST',
+    resource: envId
+      ? `/api/environments/${envId}/sync-agents`
+      : `/api/agents/${agentId}/sync-repositories`,
+    teamId: null,
+    status: error ? 500 : 200,
+    outcome: error ? 'error' : 'success',
+    ip: req.ip,
+    repoSync: {
+      agentId,
+      ...(envId ? { environmentId: envId } : {}),
+      summary: summary || null,
+      repositories: items,
+      ...(error ? { agentError: error } : {}),
+    },
+  });
+}
+
+// Local fold, in case the orchestrator omits `summary` (defensive). Mirrors
+// summarizeRepoResults in orchestrator/repo-sync.js, including `retained` being
+// excluded from `total` — a clone that is no longer declared is not a unit of
+// work, so counting it would inflate the progress line with a row nothing acts on.
 function summarizeSyncRepos(repos) {
   const list = Array.isArray(repos) ? repos : [];
   return {
-    total: list.length,
+    total: list.filter((r) => r.status !== 'retained').length,
     cloned: list.filter((r) => r.status === 'cloned').length,
+    adjusted: list.filter((r) => r.status === 'adjusted').length,
     skipped: list.filter((r) => r.status === 'skipped').length,
+    blocked: list.filter((r) => r.status === 'skipped' && r.blocked).length,
     failed: list.filter((r) => r.status === 'failed').length,
+    retained: list.filter((r) => r.status === 'retained').length,
   };
 }
 
-// Per-agent: clone the environment's missing repos into this one agent.
+// Per-agent: reconcile the environment's repositories into this one agent's
+// workspace — clone what is missing, adjust what diverges where that is safe.
+//
+// The management gate is AC23's requirement applied here too: since #2066 this
+// route no longer only ADDS clones, it can also move a branch and repoint a
+// remote in someone else's workspace, so read visibility is not enough. It
+// carried no authorisation at all before.
 app.post('/api/agents/:id/sync-repositories', heavyLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  const scope = getScope(req);
+  if (!cfg || !visibleAgent(scope, cfg)) return res.status(404).json({ error: 'Agent not found' });
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const stream = openNdjsonStream(res);
   try {
     stream.emit({ type: 'plan', agentCount: 1 });
-    const { summary } = await syncOneAgentToStream(id, id, stream.emit);
-    stream.emit({ type: 'complete', agentCount: 1, totals: summary });
+    const result = await syncOneAgentToStream(id, cfg.displayName || id, stream.emit);
+    recordRepoSyncTrail(req, {
+      agentId: id, envId: null, repos: result.repos, summary: result.summary, error: result.error,
+    });
+    stream.emit({ type: 'complete', agentCount: 1, totals: result.summary });
   } catch (err) {
     stream.emit({ type: 'error', status: 500, error: err.message });
   } finally {
@@ -3010,36 +3093,98 @@ app.post('/api/agents/:id/sync-repositories', heavyLimiter, async (req, res) => 
   }
 });
 
-// Per-environment: fan the same sync out to every agent bound to the env.
+// Per-environment: fan the propagation out to every agent bound to the env.
+//
+// This is what both the save-time offer and the out-of-date indicator's
+// catch-up call (#2066); the manual "Sync all agents" button that used to be
+// its only caller is gone.
+//
+// AC23: the gate is `canManageEnvironment`, not read visibility. It used to
+// check only `visibleTeam`, which let a plain Team Member fan a write out into
+// other people's workspaces while `PUT`/`DELETE` on the same environment
+// required team-admin — and since #2066 the fan-out can also move a branch and
+// repoint a remote, not merely add a missing clone.
 app.post('/api/environments/:id/sync-agents', heavyLimiter, async (req, res) => {
   const envId = normalizeEnvId(req.params.id);
   const env = loadEnvironment(envId);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const scope = getScope(req);
   if (!visibleTeam(scope, env.teamId)) return res.status(404).json({ error: 'Environment not found' });
+  if (!canManageEnvironment(scope, env)) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const agents = agentsUsingEnvironment(envId, scope);
   const repoCount = (Array.isArray(env.repositories) ? env.repositories : []).length;
 
   const stream = openNdjsonStream(res);
-  const totals = { total: 0, cloned: 0, skipped: 0, failed: 0 };
+  const totals = { ...EMPTY_SYNC_SUMMARY };
   try {
     stream.emit({
       type: 'plan', envId, agentCount: agents.length, repoCount,
       agents: agents.map((a) => ({ id: a.id, displayName: a.displayName })),
     });
     for (const a of agents) {
+      // AC25: one bad agent aborts neither the remaining agents nor the
+      // remaining repositories — syncOneAgentToStream never throws.
       if (stream.isAborted()) break;
-      const { summary } = await syncOneAgentToStream(a.id, a.displayName, stream.emit);
-      totals.total += summary.total || 0;
-      totals.cloned += summary.cloned || 0;
-      totals.skipped += summary.skipped || 0;
-      totals.failed += summary.failed || 0;
+      const result = await syncOneAgentToStream(a.id, a.displayName, stream.emit);
+      recordRepoSyncTrail(req, {
+        agentId: a.id, envId, repos: result.repos, summary: result.summary, error: result.error,
+      });
+      for (const key of Object.keys(totals)) totals[key] += result.summary[key] || 0;
     }
     stream.emit({ type: 'complete', agentCount: agents.length, totals });
   } catch (err) {
     stream.emit({ type: 'error', status: 500, error: err.message });
   } finally {
     stream.end();
+  }
+});
+
+// D4 (#2066): which of an environment's agents are NOT up to date, derived from
+// the actual workspace state rather than from a remembered save-time diff — so
+// it stays correct after a declined offer, a partial run or a failure, and
+// clears on its own once nothing diverges.
+//
+// Read-only, so it gates on visibility rather than management: a reader who can
+// see the environment may see that its agents are behind, but the catch-up
+// button behind the indicator posts to sync-agents above and is refused there.
+app.get('/api/environments/:id/repo-divergence', apiLimiter, async (req, res) => {
+  const envId = normalizeEnvId(req.params.id);
+  const env = loadEnvironment(envId);
+  if (!env) return res.status(404).json({ error: 'Environment not found' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, env.teamId)) return res.status(404).json({ error: 'Environment not found' });
+
+  // The agent set is resolved HERE and handed to the orchestrator, because
+  // deciding which agents this caller may see is the console's scoping job.
+  const agents = agentsUsingEnvironment(envId, scope);
+  if (agents.length === 0) {
+    return res.json({ envId, agents: [], outOfDate: 0, canManage: canManageEnvironment(scope, env) });
+  }
+  try {
+    const resp = await fetch(
+      `${ORCH_URL()}/internal/environments/${encodeURIComponent(envId)}/repo-divergence`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentIds: agents.map((a) => a.id) }),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(502).json({ error: data.error || `HTTP ${resp.status}` });
+    const names = new Map(agents.map((a) => [a.id, a.displayName]));
+    return res.json({
+      envId,
+      agents: (Array.isArray(data.agents) ? data.agents : [])
+        .map((a) => ({ ...a, displayName: names.get(a.agentId) || a.agentId })),
+      outOfDate: data.outOfDate || 0,
+      canManage: canManageEnvironment(scope, env),
+    });
+  } catch (err) {
+    // An unreachable orchestrator must not render as "everything is fine" —
+    // the indicator would then be silently wrong rather than absent.
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
   }
 });
 
@@ -3087,10 +3232,15 @@ app.post('/api/agents/:id/handover/nudge', handoverLimiter, async (req, res) => 
   }
 
   const txnId = crypto.randomUUID();
+  // The pre-handoff check is posted on a person's behalf, so it carries the same
+  // author stamp as a typed message (#2065 AC1) and is badged with their initials.
+  const preHandoffContent = { msgtype: 'm.text', body };
+  const preHandoffAuthor = chatAuthorFor(req);
+  if (preHandoffAuthor) preHandoffContent[CHAT_AUTHOR_FIELD] = preHandoffAuthor;
   try {
     const sendResp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
       `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
-      { method: 'PUT', body: { msgtype: 'm.text', body } });
+      { method: 'PUT', body: preHandoffContent });
     if (sendResp.status >= 400) {
       return res.status(502).json({ error: sendResp.data?.error || `Chat service error ${sendResp.status}` });
     }
@@ -12378,6 +12528,14 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   const prevLlmEndpointId = env.llmEndpointId || null;
   const prevDefaultModelId = env.defaultModelId || null;
   const prevToolchainId = env.toolchainId || null;
+  // The repository list as PERSISTED, captured before the write and echoed on
+  // the response (#2066). The save-time offer's diff is computed from this and
+  // the saved list, both server-supplied — which is what makes it impossible
+  // for the offer to act on a list the browser has been holding since before
+  // another admin saved the same environment.
+  const prevRepositories = Array.isArray(env.repositories)
+    ? env.repositories.map((r) => ({ ...r }))
+    : [];
   // `skills` from old clients is accepted-and-discarded — the grant is
   // team-owned (see POST above); a legacy env.skills field on disk is left
   // untouched (dead after the orchestrator's startup migration).
@@ -12461,7 +12619,10 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
           || (env.defaultModelId || null) !== prevDefaultModelId) {
     notifyEnvCredentialChange(env.id, 'llm-endpoint-changed');
   }
-  res.json(env);
+  // AC7: the save is already committed at this point. Whatever the caller does
+  // with `previousRepositories` — offer, decline, crash — the environment stays
+  // persisted exactly as submitted; no path here rolls it back.
+  res.json({ ...env, previousRepositories: prevRepositories });
 });
 
 app.delete('/api/environments/:id', apiLimiter, (req, res) => {
@@ -15509,9 +15670,17 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   const content = { msgtype: 'm.text', body };
   if (extraContent && typeof extraContent === 'object' && !Array.isArray(extraContent)) {
     for (const [k, v] of Object.entries(extraContent)) {
-      if (k.startsWith('io.aee.')) content[k] = v;
+      // The author stamp is established server-side below and is deliberately
+      // NOT part of the pass-through: a browser must not be able to attribute
+      // its message to a different person (#2065 AC2).
+      if (k.startsWith('io.aee.') && k !== CHAT_AUTHOR_FIELD) content[k] = v;
     }
   }
+  // Who wrote this (#2065). Every human message — typed or sent on the user's
+  // behalf by the quick-reply path — records the authenticated console user, so
+  // the transcript can name the author instead of labelling everyone "YOU".
+  const authorStamp = chatAuthorFor(req);
+  if (authorStamp) content[CHAT_AUTHOR_FIELD] = authorStamp;
 
   const txnId = crypto.randomUUID();
   try {

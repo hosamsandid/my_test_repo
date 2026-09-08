@@ -135,13 +135,100 @@ test('every first-run step has a context key, and it aliases an existing page to
   }
 });
 
-test('the first-run auto-open nudge is not spent on a screen with no panel', () => {
-  // The setup wizard replaces the Shell, so no panel is mounted there; the nudge
-  // would otherwise open + persist "seen" for a route the user never saw it on.
+// ── the help panel never opens on its own (#2069) ────────────────────────────
+//
+// #1873 shipped a first-run auto-open nudge here: a route-keyed effect that
+// opened the panel once per topic-bearing route, remembering which routes it had
+// already nudged in `localStorage help.seenRoutes.<username>`. Once Phase 3/4
+// gave nearly every route its own topic (#1875–#1892, #1981, #1996) that fired
+// on almost every page a user opened, so it was removed. This guard is what
+// keeps it from coming back: the panel may open only on an explicit user action.
+
+// The opener calls the provider makes. `setIsOpen(true)` is the state write that
+// opens the panel; a route-keyed effect is what would make it automatic.
+function openCalls(src) {
+  return (src.match(/setIsOpen\(true\)/g) || []).length;
+}
+
+// The bodies of every `useEffect(…)` in a source, so an assertion can ask what
+// an effect does rather than what the whole file contains. Brace-matched from
+// each `useEffect(` so a nested block does not truncate the body.
+function effectBodies(src) {
+  const out = [];
+  const re = /useEffect\(/g;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    let depth = 0;
+    let i = m.index + m[0].length - 1; // at the '('
+    for (; i < src.length; i++) {
+      const c = src[i];
+      if (c === '(') depth += 1;
+      else if (c === ')') {
+        depth -= 1;
+        if (depth === 0) { i += 1; break; }
+      }
+    }
+    out.push(src.slice(m.index, i));
+  }
+  return out;
+}
+
+test('the help panel opens only from an explicit user action', () => {
   const ctx = stripComments(fs.readFileSync(path.join(HERE, '../context/HelperChatContext.jsx'), 'utf8'));
-  assert.match(ctx, /panelCountRef\.current === 0\) return/);
+
+  // AC5: nothing reads or writes the seen-routes key any more.
+  assert.doesNotMatch(ctx, /seenRoutes/, 'the seen-routes storage key must be gone');
+
+  // AC1–AC4: no effect may open the panel. The two legitimate openers —
+  // openTour() and openHelpFor() — are useCallbacks invoked by a click.
+  for (const body of effectBodies(ctx)) {
+    assert.doesNotMatch(
+      body,
+      /setIsOpen\(true\)/,
+      'an effect that opens the panel is an auto-open — the panel may only open from a user action',
+    );
+  }
+
+  // And the openers themselves are still there, so "no auto-open" was not
+  // achieved by breaking the Help button.
+  assert.equal(openCalls(ctx), 2, 'exactly two openers: openTour() and openHelpFor()');
+  assert.match(ctx, /const openTour = useCallback\(/);
+  assert.match(ctx, /const openHelpFor = useCallback\(/);
+});
+
+test('the auto-open decision helpers are gone from the pure core', () => {
+  // Scope 2: leaving them exported with no caller is what makes a removal
+  // reversible by accident.
+  const view = stripComments(fs.readFileSync(path.join(HERE, '../context/page-help-view.js'), 'utf8'));
+  for (const gone of ['autoOpenPlan', 'autoOpenRouteKey', 'seenRoutesKey', 'markSeen', 'parseSeenRoutes', 'hasDedicatedTopic']) {
+    assert.doesNotMatch(view, new RegExp(`\\b${gone}\\b`), `${gone} has no caller and must not be exported`);
+  }
+});
+
+test('the panel-registration counter is gone with the nudge that needed it', () => {
+  // Scope 3: `panelCountRef`/`registerHelpPanel` existed solely to keep the
+  // nudge from being spent on the first-run SetupWizard, which mounts no panel.
+  const ctx = stripComments(fs.readFileSync(path.join(HERE, '../context/HelperChatContext.jsx'), 'utf8'));
   const panel = stripComments(fs.readFileSync(path.join(HERE, '../components/HelperChatPanel.jsx'), 'utf8'));
-  assert.match(panel, /registerHelpPanel\(\)/, 'the panel must register itself, or the nudge never fires');
+  assert.doesNotMatch(ctx, /panelCountRef|registerHelpPanel/);
+  assert.doesNotMatch(panel, /registerHelpPanel/);
+});
+
+test('the auto-open guards are not vacuous', () => {
+  // The #1891 lesson: an assertion that has only ever run against a correct
+  // source proves nothing. Run each matcher over the shape it must reject.
+  const reintroduced = `
+    useEffect(() => {
+      if (!authenticated) return;
+      const seen = parseSeenRoutes(window.localStorage.getItem(seenRoutesKey(user.username)));
+      setMode('page');
+      setIsOpen(true);
+    }, [authenticated, currentRoute]);
+  `;
+  const bodies = effectBodies(reintroduced);
+  assert.equal(bodies.length, 1, 'the effect matcher must find a reintroduced effect');
+  assert.match(bodies[0], /setIsOpen\(true\)/, 'the effect body must carry the open call');
+  assert.match(reintroduced, /seenRoutes/, 'the storage-key matcher must see the key');
 });
 
 // ── the Settings dialog ─────────────────────────────────────────────────────

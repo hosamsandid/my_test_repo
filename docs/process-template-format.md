@@ -263,8 +263,9 @@ the same option.
 - **Same team only**, and stricter than the internal label channel (which has no
   team gate): a cross-team `to` is refused with `403 cross-team` at delivery. The
   check is an **integrity constraint on the flow graph, not authentication** —
-  the `:4002` internal API is unauthenticated and the producer's identity is
-  self-asserted (concept §6.1).
+  even with the #1456 gate authenticating the *caller*, the producer's identity
+  is still self-asserted in the body and not cross-checked against it (concept
+  §6.1).
 
 ### Notes & invariants
 

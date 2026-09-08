@@ -93,7 +93,59 @@ Two rough edges to know about behind a proxy:
 | `4000` | Admin Console | **yes** — behind TLS + your identity provider's proxy if you have one |
 | `4003` | Orchestrator webhook (`http` triggers) | only if external systems must fire triggers; it authenticates per-trigger via `X-Hook-Secret` |
 | `8448` | Matrix homeserver | **no** — keep internal; nothing outside needs it |
-| `4002` | Orchestrator internal API | already unpublished; leave it that way |
+| `4002` | Orchestrator internal API | already unpublished; **leave it that way** — and arm the internal-auth gate below, because unpublished is not the same as unreachable |
+
+##### 2a. Arm the internal-API gate (`:4002`)
+
+Not publishing `4002` keeps it off the host. It does **not** keep it off the
+container network — every agent container can reach `http://orchestrator:4002`,
+and until the gate is armed that surface is unauthenticated, so an agent can
+call any control-plane route directly and every authorization check the admin
+console performs is bypassable. This is GOV-PLATFORM-2 in
+`docs/governance-concept.md` §3.5.
+
+Arming it is one shared secret in `.env`:
+
+```bash
+INTERNAL_API_TOKEN=$(openssl rand -hex 32)
+```
+
+Both containers read it from the same `.env` (compose) or the same
+`agent-studio-env` Secret (k8s — `--from-env-file` picks the new keys up with no
+manifest change), and from there:
+
+- the **admin console** sends it as a bearer header on every `/internal/*` call
+  and gets the full surface;
+- each **agent container** is given a *derived* per-agent token
+  (`AEE_INTERNAL_TOKEN`) instead, valid only for the agent-facing routes and only
+  for that agent's own id. The control-plane token itself is stripped from the
+  agent environment, on both the podman and the kubernetes spawn path;
+- nothing else can present a token at all.
+
+**Roll it out in stages** (`INTERNAL_AUTH_MODE`, the §3.2 ladder):
+
+| Mode | Behaviour | When |
+|---|---|---|
+| `observe` (default) | allow everything, log every call that *would* be rejected | first — for at least a week |
+| `warn` | same, logged louder | optional middle rung |
+| `enforce` | reject with 401/403 | once the observe log is quiet |
+
+During the observe week, inventory the real callers:
+
+```bash
+podman logs orchestrator 2>&1 | grep '\[internal-auth\]' | grep would-deny
+```
+
+An empty result means nothing outside the console and the agents is talking to
+`:4002`, and `enforce` is safe. A non-empty one names the caller and the route
+before it breaks, which is the entire point of the rung. Setting `enforce`
+without a token is refused at boot rather than silently locking everyone out.
+
+Rotation is a value change plus a respawn: agent tokens are derived, so changing
+`INTERNAL_API_TOKEN` (or `INTERNAL_AGENT_TOKEN_SECRET`) invalidates every
+outstanding one, and each agent is re-minted the next time it spawns. Change the
+value in both containers together — a console holding the old token is refused
+exactly like an outsider.
 
 #### 3. Replace the developer bind-mounts
 

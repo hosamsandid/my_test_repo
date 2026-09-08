@@ -19,6 +19,21 @@ SSO) hangs off this entity.
 > concept and one word. This page still describes what is live on `main`; the successor
 > doc is the design of record for what replaces it (rewritten here in phase P6).
 
+> **P1 has landed (#2077) — what this page no longer tells you in full.**
+> Ownership now lives on the Agent Team: every `role: "team"` and standalone
+> `role: "agent"` config carries an `ownerId` (+ an `ownerSource` recording
+> whether that owner is a real creator or a migration placeholder), and
+> `memberships/index.json` now *also* holds one `(user → Agent Team)` record per
+> Agent Team of each access scope — added **alongside** the access-scope records
+> below, not in place of them, because the enforcement described on this page
+> still keys on each resource's access-scope `teamId` stamp. So the
+> `memberships` table below is accurate but no longer complete: a `teamId` there
+> may be an access-scope id (the records this page describes) **or** an Agent
+> Team id (the ones the D6 migration added). `teams/index.json` is still written
+> and read exactly as documented here — retiring it is P2's edit, for the reason
+> in the successor doc's Amendment 1. The migration itself is
+> `orchestrator/ownership-migration.js` + `migrateOwnershipModel()`.
+
 ## Scope of this issue
 
 In scope:
@@ -53,7 +68,7 @@ records written atomically (write-temp + rename):
 |---|---|
 | `/workspace/teams/index.json` | `{ id, name, description, createdAt, updatedAt }` |
 | `/workspace/users/index.json` | `{ id, subject, email, displayName, systemAdmin, githubHandle, matrixUserId?, chatFontSize?, createdAt, updatedAt }` |
-| `/workspace/memberships/index.json` | `{ id, userId, teamId, role, createdAt }` |
+| `/workspace/memberships/index.json` | `{ id, userId, teamId, role, createdAt, fromScopeId? }` |
 
 - **Team `id`** is an operator-facing slug (`^[a-z0-9][a-z0-9-]{0,63}$`), like a
   Working Environment id. The default team's id is `default`.
@@ -68,6 +83,11 @@ records written atomically (write-temp + rename):
   only; the matching access token is stored server-side in a separate per-user
   file (`users/matrix/<userId>.json`), never on this record. See
   [`docs/multi-user-concept.md`](multi-user-concept.md) Amendment 1.
+- **Membership `fromScopeId`** is present only on records the D6 migration
+  (#2077) created when it fanned an access-scope membership out to the Agent
+  Teams in that scope — it records which access scope the grant was derived
+  from. Nothing reads it; it exists so a migrated membership is auditable and
+  distinguishable from one a human made. A hand-made membership never has it.
 
 The single source of truth for this model is
 [`orchestrator/teams-store.js`](../orchestrator/teams-store.js) — a pure factory

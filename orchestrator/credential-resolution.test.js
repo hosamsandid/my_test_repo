@@ -12,6 +12,7 @@ const {
   operationPrefersPersonal,
   resolveAgentOwnerId,
   findPersonalCredential,
+  findPersonalCredentialState,
   resolveCredential,
   selectAgentIdsForOwner,
   selectPersonalCredentialIds,
@@ -120,12 +121,20 @@ test("resolveCredential: owner + usable personal → personal (AC1)", () => {
   assert.deepEqual(r, { tier: "personal", credentialId: "pers-alice" });
 });
 
-// AC2 + AC5 + D5: owner, attributed write, NO usable personal → refuse, no fallback.
-test("resolveCredential: owner + attributed write + no personal → refuse (AC2/AC5)", () => {
+// AC2 + AC5 + D5: owner, attributed write, personal credential PRESENT but
+// unusable → refuse, no fallback.
+//
+// #2077 narrowed this: presence is now what arms the refusal, not the owner. An
+// owner who has a personal credential must never have an attributed write
+// re-attributed to a shared identity — but an owner who never opted into the
+// personal tier is not protected by taking their agents offline. See the
+// sibling test below and the header comment in credential-resolution.js.
+test("resolveCredential: owner + attributed write + unusable personal → refuse (AC2/AC5)", () => {
   const r = resolveCredential({
     operation: "pr",
     ownerId: "u-alice",
     personalCredential: null,
+    personalCredentialPresent: true,
     sharedCredentialId: "team-1",
   });
   assert.ok(r.refuse, "must refuse");
@@ -134,6 +143,35 @@ test("resolveCredential: owner + attributed write + no personal → refuse (AC2/
   assert.match(r.refuse.message, /NOT fall back/i); // states no team/system fallback
   assert.equal(r.tier, undefined);
   assert.equal(r.credentialId, undefined);
+});
+
+// #2077 AC7: an owner who has NO personal credential of this kind at all takes
+// the shared credential for an attributed write, exactly as the platform does
+// today. This is the branch every existing agent lands in once the D6 backfill
+// stamps its `ownerId`; refusing here would stop every agent opening a PR.
+test("resolveCredential: owner + attributed write + owner has no personal credential → shared (#2077 AC7)", () => {
+  for (const operation of ["commit", "pr", "review", "push-https"]) {
+    assert.deepEqual(
+      resolveCredential({
+        operation,
+        ownerId: "u-alice",
+        personalCredential: null,
+        personalCredentialPresent: false,
+        sharedCredentialId: "team-1",
+      }),
+      { tier: "shared", credentialId: "team-1" },
+      operation,
+    );
+  }
+});
+
+// The refusal must not be reachable by omission — a caller that forgets to
+// report presence gets the safe branch, not an outage.
+test("resolveCredential: an omitted personalCredentialPresent never refuses (#2077)", () => {
+  assert.deepEqual(
+    resolveCredential({ operation: "pr", ownerId: "u-alice", sharedCredentialId: "team-1" }),
+    { tier: "shared", credentialId: "team-1" },
+  );
 });
 
 // AC2 second half / AC7: owner, no personal, but a SHARED-eligible op → shared, no refusal.
@@ -170,9 +208,53 @@ test("resolveCredential: refusal message names the credential kind", () => {
     operation: "push-https",
     ownerId: "u-alice",
     personalCredential: null,
+    personalCredentialPresent: true,
     kind: "SSH key",
   });
   assert.match(r.refuse.message, /personal SSH key/);
+});
+
+// ── findPersonalCredentialState (#2077) ──────────────────────────────────────
+// The lookup that keeps "the owner has none" apart from "the owner's is
+// unusable" — the distinction the refusal switch now turns on.
+
+test("findPersonalCredentialState: absent → not present, no entry", () => {
+  const index = [{ id: "team-1", scope: "team", teamId: "t" }];
+  assert.deepEqual(findPersonalCredentialState(index, "u-alice"), { entry: null, present: false });
+  // No owner and a non-array index are both "not present".
+  assert.deepEqual(findPersonalCredentialState(index, null), { entry: null, present: false });
+  assert.deepEqual(findPersonalCredentialState(null, "u-alice"), { entry: null, present: false });
+});
+
+test("findPersonalCredentialState: usable → present with the entry", () => {
+  const index = [{ id: "pers-alice", scope: "personal", userId: "u-alice" }];
+  const s = findPersonalCredentialState(index, "u-alice");
+  assert.equal(s.present, true);
+  assert.equal(s.entry.id, "pers-alice");
+});
+
+test("findPersonalCredentialState: present but rejected by isUsable → present, no entry", () => {
+  const index = [{ id: "pers-alice", scope: "personal", userId: "u-alice", underscoped: true }];
+  assert.deepEqual(
+    findPersonalCredentialState(index, "u-alice", (e) => !e.underscoped),
+    { entry: null, present: true },
+  );
+});
+
+test("findPersonalCredentialState: a usable entry later in the index still wins", () => {
+  const index = [
+    { id: "bad", scope: "personal", userId: "u-alice", underscoped: true },
+    { id: "good", scope: "personal", userId: "u-alice" },
+  ];
+  const s = findPersonalCredentialState(index, "u-alice", (e) => !e.underscoped);
+  assert.equal(s.present, true);
+  assert.equal(s.entry.id, "good");
+});
+
+test("findPersonalCredential stays the usable-entry-or-null shape it always was", () => {
+  const index = [{ id: "pers-alice", scope: "personal", userId: "u-alice", underscoped: true }];
+  assert.equal(findPersonalCredential(index, "u-alice", (e) => !e.underscoped), null);
+  assert.equal(findPersonalCredential(index, "u-alice").id, "pers-alice");
 });
 
 // ── owner-scoped respawn selection (#1570 Phase 4, AC1/AC2/AC4) ──────────────

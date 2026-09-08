@@ -13,6 +13,7 @@ import {
   canReassignCredentialClient,
   adminTeamIdsOf,
   canAccessCredentialPages,
+  isAdminForTeam,
 } from './credential-scope-view.js';
 
 const names = { default: 'Default', payments: 'Payments', risk: 'Risk' };
@@ -143,4 +144,24 @@ test('canAccessCredentialPages: admin, any team-admin → yes; plain member → 
   assert.equal(canAccessCredentialPages({ admin: false, teams: [{ teamId: 't', role: 'team-admin' }] }), true);
   assert.equal(canAccessCredentialPages({ admin: false, teams: [{ teamId: 't', role: 'team-member' }] }), false);
   assert.equal(canAccessCredentialPages(null), false);
+});
+
+test('isAdminForTeam: sysadmin → any team; team-admin → only that team; #2084 edge case', () => {
+  // System Admin can add a provider for any team (they add system-scoped ones).
+  assert.equal(isAdminForTeam({ admin: true }, 'default'), true);
+  assert.equal(isAdminForTeam({ admin: true }, 'anything'), true);
+  // Team Admin of the SAME team the agent lands in → yes.
+  assert.equal(
+    isAdminForTeam({ admin: false, teams: [{ teamId: 'default', role: 'team-admin' }] }, 'default'),
+    true,
+  );
+  // THE #2084 EDGE CASE: Team Admin of team A, agent belongs to team B (default)
+  // → no link. `canAccessCredentialPages` would have wrongly returned true here.
+  const adminOfOtherTeam = { admin: false, teams: [{ teamId: 'team-a', role: 'team-admin' }] };
+  assert.equal(isAdminForTeam(adminOfOtherTeam, 'default'), false);
+  assert.equal(canAccessCredentialPages(adminOfOtherTeam), true, 'the weaker predicate would have offered a dead link');
+  // Plain member → no; missing user / teamId → fail closed.
+  assert.equal(isAdminForTeam({ admin: false, teams: [{ teamId: 'default', role: 'team-member' }] }, 'default'), false);
+  assert.equal(isAdminForTeam(null, 'default'), false);
+  assert.equal(isAdminForTeam({ admin: false, teams: [{ teamId: 'default', role: 'team-admin' }] }, ''), false);
 });

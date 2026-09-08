@@ -279,13 +279,22 @@ DELETE /internal/admin/memberships  ?userId=&teamId=
 These are mounted separately from `/internal/teams/*`, which operate on the
 **Agent Team** construct.
 
-**Admin console (`:4000`)** proxies them verbatim under `/api/admin/teams`,
+**Admin console (`:4000`)** proxies them under `/api/admin/teams`,
 `/api/admin/users`, `/api/admin/memberships` — deliberately distinct from
-`POST /api/teams`, the Agent-Team setup wizard. **Exception (#2081):** the
-`POST /api/admin/teams` create verb is retired and answers *410 Gone* — a new
-access scope can no longer be minted, because creating a team is now self-service
-and mints an Agent Team via `POST /api/teams`. The other scope verbs (`GET` /
-`PUT` / `DELETE`) still proxy verbatim.
+`POST /api/teams`, the Agent-Team setup wizard. Two exceptions have accumulated,
+and together they mean the access-scope record is on its way out:
+
+- **#2081** retired the `POST /api/admin/teams` create verb, which answers
+  *410 Gone* — a new access scope can no longer be minted, because creating a
+  team is self-service and mints an Agent Team via `POST /api/teams`.
+- **#2085** (epic #2076 P6, D10) dissolved the **Access** page that was the UI
+  for the rest. `PUT` / `DELETE /api/admin/teams/:id` still proxy verbatim but
+  have **no console surface** any more: the scope survives only as the tier an
+  agent or environment is stamped with, re-assigned on **Administration →
+  Resources**. Membership management moved the other way, to the **Share…**
+  dialog on the Agent Team itself (#2082) — which is the referent a membership
+  has actually named since P1. `docs/decentralised-access-concept.md` A3.3 owns
+  retiring `teams/index.json` outright.
 
 ## Referential integrity
 

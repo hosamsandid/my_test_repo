@@ -31,8 +31,8 @@ export const ROUTE_TITLES = {
   '/mcp': 'MCP Servers',
   '/environments': 'Working Environments',
   '/github-events': 'GitHub Event Log',
-  '/teams': 'Access',
-  '/users': 'Users',
+  // No `/teams`: #2085 retired the Access page and made the route a redirect.
+  '/users': 'Administration',
   '/token-usage': 'Token Usage',
   '/plugins': 'Plugins',
   '/maintenance-mode': 'Maintenance Mode',

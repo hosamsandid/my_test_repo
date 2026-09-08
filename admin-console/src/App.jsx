@@ -78,7 +78,6 @@ const McpServers          = lazy(() => import('./pages/McpServers'));
 const Plugins             = lazy(() => import('./pages/Plugins'));
 const PluginUiPage        = lazy(() => import('./pages/PluginUiPage'));
 const MaintenanceMode     = lazy(() => import('./pages/MaintenanceMode'));
-const Teams               = lazy(() => import('./pages/Teams'));
 const Users               = lazy(() => import('./pages/Users'));
 const Briefings           = lazy(() => import('./pages/Briefings'));
 const KnowledgeFlow       = lazy(() => import('./pages/KnowledgeFlow'));
@@ -189,7 +188,13 @@ export default function App() {
               /plugins/:id/ui and the server both re-enforce access. */}
           <Route path="/plugins/:id/view" element={<PluginUiPage />} />
           <Route path="/maintenance-mode" element={<AdminRoute><MaintenanceMode /></AdminRoute>} />
-          <Route path="/teams"        element={<Teams />} />
+          {/* #2085 (D10): the Access page is retired, not renamed. A bookmark
+              lands on the Administration surface that absorbed its two
+              System-Admin halves — the `/agents` → `/chats` precedent (#1930),
+              so an old deep link degrades to the page holding the content
+              rather than to a blank route. `AdminRoute` on the destination is
+              what handles a non-System-Admin following one (edge case 1). */}
+          <Route path="/teams"        element={<Navigate to="/users" replace />} />
           <Route path="/users"        element={<AdminRoute><Users /></AdminRoute>} />
           <Route path="/flows"         element={<Briefings />} />
           <Route path="/knowledge"     element={<KnowledgeFlow />} />

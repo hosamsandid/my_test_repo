@@ -4,7 +4,7 @@ import {
   Users, Zap, Sparkles, Server,
   ChevronLeft, ChevronRight, ChevronDown,
   Boxes, Key, KeyRound, MessageCircle, Github, GitBranch,
-  Rocket, Users2, Wand2, Building2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle,
+  Rocket, Users2, Wand2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
@@ -156,8 +156,14 @@ const NAV_GROUPS = [
     { path: '/github-events', label: 'GitHub Event Log',     Icon: History },
   ]},
   { key: 'administration', section: 'Administration', items: [
-    { path: '/users',            label: 'Users',            Icon: UserCog,   adminOnly: true, subtitle: 'Human user accounts' },
-    { path: '/teams',            label: 'Access',           Icon: Building2, subtitle: 'Teams, roles & assignments' },
+    // #2085 (epic #2076 P6, D10): the *Access* entry is DISSOLVED, not renamed.
+    // Sharing is decentralised — the Share dialog (#2082) is where a team's
+    // members are managed now — so `/teams` and its page are gone and the two
+    // things only a System Admin still needs (the all-teams cleanup view and
+    // the tiered resource ownership) are tabs on this one entry, which becomes
+    // **Administration**. It keeps `adminOnly: true`, which is what makes the
+    // tabs System-Admin-only without a second gate.
+    { path: '/users',            label: 'Administration',   Icon: UserCog,   adminOnly: true, subtitle: 'Users, teams & resource ownership' },
     { path: '/token-usage',      label: 'Token Usage',      Icon: BarChart3, adminOnly: true },
     { path: '/plugins',          label: 'Plugins',          Icon: Puzzle,    adminOnly: true },
     { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench,    adminOnly: true },

@@ -19,8 +19,7 @@ The left sidebar is organised into task-based collapsible accordion groups (#159
 | **Model Providers** | `/models` | Register and test model providers; discover available models; set per-agent model overrides |
 | **MCP Servers** | `/mcp` | Manage the MCP server registry and credentials; the **Credential** column shows *required* for servers whose template uses `${credential}`, which the orchestrator substitutes from the Working Environment binding at seed time |
 | **Plugins** | `/plugins` | Install/uninstall governed capability plugins into the operator registry (System-Admin only; declared capabilities reviewed in plain language before the confirm). Each **installed** card also carries a team-assignment control (#1691) to grant/revoke the plugin for one or more teams directly — reuses the existing team activation path, applies immediately, and shows which teams already have it. The page's concept help (what a plugin is, install vs grant, permissions, plugins with their own UI, and a build-a-plugin deep dive) lives in the Help panel's "This page" face — the standalone `/plugin-system` page was removed in #1879 |
-| **Users** | `/users` | Dedicated full-page user management (#1844, System-Admin only): a sortable/filterable list of all human users with **Create** and **Edit** dialogs (edit display name, email and System-Admin status; the immutable `subject` is shown read-only), set/clear login password, and delete. Split out of the former slide-out on the **Access** page so users are managed end-to-end in one place |
-| **Access** | `/teams` | Manage human access scopes (**Teams**, the tenant): team edit/delete (creation is self-service since #2081, no longer done here), per-team roles, and assigning agents/environments to a team. User *records* now live on the dedicated **Users** page (#1844); this page links to it. Renamed from "Teams" to "Access & Users" (#1726) to avoid confusion with the *Agent Team* squad, then shortened to "Access" (#1910) once user records moved to the **Users** page; the route, API and internal entity stay `team` |
+| **Administration** | `/users` | The single System-Admin surface (#2085), three tabs. **Users** — human user records: a sortable/filterable list with **Create** and **Edit** dialogs (display name, email and System-Admin status; the immutable `subject` is shown read-only), set/clear login password, and delete. **All Teams** — the D5 clean-up view over every Agent Team on the platform (owner, member agents, people, Team Admins, enabled state, and a *no admin* marker), with delete; it manages no memberships, that being the **Share…** dialog's job since #2082. **Resources** — the tiered ownership of agents and Working Environments (D7/D12). The separate **Access** page (`/teams`) is **gone**, dissolved rather than renamed: `/teams` redirects here |
 | **Flows** | `/flows` | Design and run orchestration flow graphs: inspect live Teams, author Drafts, use Flow Copilot; BriefingPack flows (orchestrator-managed BP dependency graphs) are a niche secondary mode |
 
 ## Authentication (#276)
@@ -78,22 +77,31 @@ it in the login route). Swapping it for an OIDC/SAML token exchange (and adding
 the IdP callback route) requires no change to the session format, cookie
 handling, gate middleware, or the login UI/routing.
 
-## Access (#308, renamed #1726, #1910)
+## Administration (#308, renamed #1726/#1910, dissolved #2085)
 
-The **Access** page (`/teams`) is the UI for the human **Team** scope
-(the tenant) introduced by the teams data model (#299). It is distinct from the
-*Agent Team* squad created by the **Agent Team Wizard** — see
-[docs/teams-data-model.md](./teams-data-model.md). The section was renamed from
-"Teams" to "Access & Users" (#1726) because users kept confusing it with the
-*Agent Team* construct, and shortened to "Access" (#1910) once user records
-moved to their own **Users** page; both are UI-label renames only — the `/teams` route, the `/api/admin/{teams,…}`
-endpoints and the internal **Team** entity are unchanged.
+The **Administration** page (`/users`) is the one surface that exists only for a
+System Admin. It absorbed the former **Access** page (`/teams`) in #2085 (epic
+#2076 P6, D10): once sharing a team became self-service in the **Share…** dialog
+(#2082), the central Access page had nothing left that a team's own admins could
+not do, so it was **dissolved, not renamed** — `/teams` redirects to `/users`,
+which now carries three tabs (**Users / All Teams / Resources**). The route, the
+`/api/admin/{teams,…}` endpoints and the internal **Team** entity are unchanged;
+the earlier "Teams" → "Access & Users" (#1726) → "Access" (#1910) renames were
+UI-label-only and are what D10 declined to pay a third time.
+
+Note the two tenancies the tabs straddle. **All Teams** lists **Agent Teams** —
+a membership has pointed at one since epic #2076 P1, so that IS the team a
+person is given access to. **Resources** assigns the older, coarser **access
+scope** every resource is still stamped with; no new scope can be minted (#2081)
+and none can be deleted from the console any more, the two tenancies being
+collapsed into one by a later phase (`docs/decentralised-access-concept.md`
+A3.3).
 
 A System Admin can:
-- **Team edit / delete** — edit and delete teams; the `default` team cannot be deleted. Scopes are **no longer created here** (#2081): creating a team is self-service and mints an *Agent Team* (`POST /api/teams`) instead, so the **New Team** form is gone and `POST /api/admin/teams` answers *410 Gone*. The scopes that already exist stay fully manageable.
-- **Manage Users** — a **Manage Users** button links to the dedicated **Users** page (`/users`, #1844) where human user records (keyed by a stable `subject` an SSO login will later map onto) are created, edited (display name / email / System-Admin), given a login password, and deleted. The former in-page "Manage users" slide-out was removed so there is a single place to manage users.
-- **Members & roles** — per team, add/remove human members and set their per-team role (**Team Admin** / **Team Member**). Membership is an upsert: re-adding a user updates their role.
-- **Resource ownership** — reassign any agent or Working Environment to a team via a per-row team selector. Agents reassign through `PUT /api/agents/:id { teamId }`, environments through `PUT /api/environments/:id { teamId }`; both validate the target team exists.
+- **Users** — human user records (keyed by a stable `subject` an SSO login will later map onto) are created, edited (display name / email / System-Admin), given a login password, and deleted.
+- **All Teams** — every Agent Team on the platform, including ones the caller is not a member of (D5). Delete runs the two cascades that already exist: the member agents go with the parent (#1960) and the memberships with the team (#2081), so the tab needs no endpoint of its own. It deliberately manages **no** memberships — a role dropdown here would be a second, differently-warned copy of an operation that can lock a team's own admins out.
+- **Resources** — reassign an agent (an Agent Team moves as one unit, its members inheriting) and re-tier a Working Environment. Scopes are **no longer created** (#2081, `POST /api/admin/teams` answers *410 Gone*) and no longer deleted from the console.
+  An agent reassigns through `PUT /api/agents/:id { teamId }`. A Working Environment does **not**: since #2083 it carries the same `{scope, teamId, assignedTeamIds}` tier a credential does, so the row sends the full ownership payload (`PUT /api/environments/:id { scope, … }`). A bare `{ teamId }` would normalize to `scope: 'team'` server-side — i.e. the pre-#2085 one-click selector silently **un-shared** a shared environment, which is the concrete reason the section was reworked rather than carried over.
 
 The page is built on the `/api/admin/{teams,users,memberships}` endpoints
 (proxied to the orchestrator's teams store). Per-role *enforcement* of these

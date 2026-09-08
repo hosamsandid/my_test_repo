@@ -67,8 +67,16 @@ test('AC3: the Users intro box is gone, replaced by a one-liner plus the "?"', (
   assert.match(users, /import PageHelpButton from '\.\.\/components\/PageHelpButton'/);
   assert.match(users, /<PageHelpButton\b/);
   const text = assertOneLiner(users, 'Users.jsx');
-  // The one thing that must survive on the page: a record alone grants nothing.
-  assert.match(text, /Access page/);
+  // #1891 required the one-liner to point at the **Access** page, because a user
+  // record alone grants nothing and that was where access was granted. #2085
+  // dissolved that page, and its successor is not another page at all — it is
+  // the **Share…** dialog on the team itself. Pointing this line at
+  // Administration would be pointing it at the page you are already on, so the
+  // requirement becomes what the line must now say instead: which three things
+  // this one surface manages. Guarding the naming rather than the destination is
+  // what stops the one-liner drifting back into an intro box.
+  assert.match(text, /System Admin/, 'the one-liner must say whose surface this is');
+  assert.match(text, /team/, 'and that teams are one of the three things it manages');
 
   const prose = stripComments(users);
   for (const phrase of [

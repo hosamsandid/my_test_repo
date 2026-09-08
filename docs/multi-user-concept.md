@@ -91,8 +91,16 @@ See §4 for the full discussion. Summary: **each human gets their own Matrix acc
 > separate access scope. Rights administration also moves from central to decentralised — the
 > person who creates a team owns it and shares it themselves (D1–D3), while the System Admin
 > keeps full visibility (D5). The role names and semantics (**System Admin** / **Team Admin** /
-> **Team Member**) are unchanged. This section still describes what is live on `main`; the
-> successor doc is the design of record (this section is rewritten in phase P6).
+> **Team Member**) are unchanged. The successor doc is the design of record.
+>
+> **P6 has landed (#2085).** The re-pointing is complete on `main`: a membership names an
+> **Agent Team**, a team's own admins share it from **Share…** in the Agent Chat, and the
+> central *Access* page is gone — dissolved into the System-Admin-only **Administration**
+> surface (`/users`), which keeps the D5 all-teams view and the tiered resource ownership and
+> nothing else. Read the role table below as describing the roles, not the administration
+> route: "Create and manage their own team(s) and members" is now done by the Team Admin in
+> the team, not by a System Admin on a central page. The one part still pending is the access
+> scope itself, which survives as a resource stamp until A3.3 retires `teams/index.json`.
 
 ### Recommendation
 

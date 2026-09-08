@@ -26,8 +26,9 @@ export const BREADCRUMBS = {
   '/models':       'Model Providers',
   '/mcp':          'MCP Servers',
   '/plugins':      'Plugins',
-  '/teams':        'Access',
-  '/users':        'Users',
+  // `/teams` carries no entry any more: #2085 retired the page and the route is
+  // a redirect to `/users`, which is the single **Administration** surface.
+  '/users':        'Administration',
   '/maintenance-mode': 'Maintenance Mode',
   '/about':        'About',
 };

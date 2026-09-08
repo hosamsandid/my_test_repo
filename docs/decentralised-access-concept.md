@@ -861,7 +861,7 @@ D1 is a large change to a load-bearing key, so it is sliced so **each phase ship
 | **P3** | **Done, #2081 — see Amendment 5.** Self-service creation (`POST /api/teams` **api.js:13051** + stream **:13674**); creator becomes owner **and** `team-admin` in the same operation; last-admin successor rule (D4, §2.3). | P2 | A creation test from a **membership-less** user (today impossible — `api.js:11816-11817` explains why); an idempotence test that the creator's membership is written exactly once by both the streaming and non-streaming handler (they duplicate their var shape inline at `:13436` and `:14036`, so both must be asserted); D4 refusal tests on all three routes in §2.3 — **shipped one layer down**, in `teams-store.js` over the pure `orchestrator/team-admin-succession.js`, so the orchestrator's own `/internal/admin/*` writers are covered too (A5.3). |
 | **P4** — *done, #2082 (see Amendment 6 in §7.1)* | **Share dialog** in the Agent-Chat team context menu (§7.1) + the open directory (§7.2). | P3 | The four drift guards named in §7.1; a response-key assertion on `GET /api/users/directory` (never `systemAdmin`, never `githubHandle` — D2/D11); a server-side test that a Team Member's `POST /api/admin/memberships` is refused (**not** only that the button is disabled — #2041 AC9). |
 | **P5** | Layered resource ownership (D7, §5.2) — shared tier for working environments and MCP servers; credentials and model providers re-pointed. | P2 | Tier tests mirroring the credential ones; **a create-a-team-with-no-infrastructure test** (D7's stated consequence, §5.2). |
-| **P6** | Access page rework + System-Admin cleanup view (D5) + docs/help/corpus (§9). | P3, P5 | `help-coverage.test.js` (a page route may not silently lose its topic), the `page-help-view.test.js` parity block, `corpus.test.js` (vendored-copy byte-identity + the worst-case grounding budget), `help-registry.test.js`, the nav-smoke e2e and the `steps-catalog.json` freshness test. |
+| **P6** — *done, #2085 (see Amendment 7)* | Access page rework + System-Admin cleanup view (D5) + docs/help/corpus (§9). | P3, P5 | `help-coverage.test.js` (a page route may not silently lose its topic), the `page-help-view.test.js` parity block, `corpus.test.js` (vendored-copy byte-identity + the worst-case grounding budget), `help-registry.test.js`, the nav-smoke e2e and the `steps-catalog.json` freshness test. |
 | **AC13** — *blocked: the e2e stack has no `AUTH_ENABLED`, so every predicate in this journey is inert there (#1459)* | The end-to-end journey, after P4 | P4 | **One e2e journey** proving the loop: user A creates a team → user B does not see it → A shares it with B as Team Member → B sees it but cannot change members → A promotes B to Team Admin → B can → A is removed as last admin only after naming a successor. This is the only test that exercises D1+D4+D9 together. |
 
 **Two strategy notes.** (1) **Every "cannot" in the ACs must be asserted server-side.** The console's own comments say the client gating is UX, not the boundary (`App.jsx:41-45`, `credential-scope-view.js:9-11`, `Shell.jsx:209-215`); a test that only checks a disabled button proves nothing about the API. (2) **P2 is where the two `scope.all` spellings bite** (§4.2): a sweep that greps only `scope.all` misses eight `getScope(req).all` sites.
@@ -1624,3 +1624,64 @@ rather than left to be discovered.
   A successor *picker* belongs with the dialog.
 - **AC13's end-to-end journey is still P4's**, unchanged: it needs the Share
   dialog to exist.
+
+---
+
+## Amendment 7 (#2085, P6 as built)
+
+§9 shipped as written: `/teams` and `Teams.jsx` are gone, the nav entry is
+dissolved rather than renamed, and `/users` is a three-tab **Administration**
+surface (*Users / All Teams / Resources*) behind the `AdminRoute` it already had —
+which is what makes all three tabs System-Admin-only without a second gate. Five
+things are worth recording because they were decided while building, not before.
+
+**A7.1 — "All Teams" reads the Agent Team list, and manages no memberships.**
+§9.1 says the tab reads the Agent Team list, which is right for the reason §3.3
+gives: a membership has named a `role: 'team'` agent id since P1, so "every team
+on the platform" *is* that list. What §9.1 does not say is what the tab may
+therefore **not** do. It carries no role dropdown and no add-person row: that is
+the Share dialog's surface (§7.1), and a second copy here would be a
+differently-warned duplicate of an operation that can lock a team's own admins
+out — the D4 rule lives one layer down in the store, but the *warning* does not.
+The tab is a clean-up view: see every team, including ones nobody shared with
+you, and delete one. It needs **no new endpoint** — the two cascades §3.3 asks
+for already exist (member agents with the parent, #1960; memberships with the
+team, #2081).
+
+**A7.2 — The tab surfaces the state D5 says needs no machinery.** §2.3 argues no
+orphan-recovery machinery is needed *because* a System Admin can always re-admin
+an orphaned team. That argument only holds if they can **find** one, and until
+now nothing showed it. Each row therefore carries a **no admin** marker
+(`admins === 0`), which is the cheapest possible discharge of that premise.
+
+**A7.3 — The Resources tab had to be reworked, not moved, and the reason is a
+live bug.** §9.1 says "reworked for the D7/D12 tiers" without saying what breaks
+otherwise. Since #2083 a Working Environment carries the same
+`{scope, teamId, assignedTeamIds}` triple a credential does, and
+`PUT /api/environments/:id { teamId }` — exactly what the old flat team selector
+sent — normalizes to `scope: 'team'` server-side. So on a **shared** environment
+that one click silently **un-shared** it, taking it from every other team using
+it. The row now states the tier, edits it through the shared
+`CredentialOwnership` control (no second copy of the tier semantics) and shows
+the resulting tier before the save. Agents keep the plain selector: an agent has
+no tier, and an Agent Team still moves as one unit.
+
+**A7.4 — A stated capability removal: access scopes lose their console surface.**
+§9.1 retires the team table with the page and names no replacement, so `PUT` and
+`DELETE /api/admin/teams/:id` now have **no UI at all** — an access scope can be
+neither created (#2081, 410) nor renamed nor deleted from the console. That is
+deliberate rather than an oversight: A3.3 retires `teams/index.json` outright,
+and building a management surface for a record on its way out would be work
+undone by the next phase. The scope survives only as the stamp the Resources tab
+assigns. **This is the thing to reverse first if it bites** — the API verbs are
+untouched, so a surface can be restored without a server change.
+
+**A7.5 — Two `seeAlso` links were dropped rather than re-pointed.** §9.3 allows
+either. `agent-chat.md` and `team-setup.md` named *Access* because that is where
+you went to give somebody access; that is now **Share…** on the reader's own page,
+and Administration is System-Admin-only — re-pointing would have linked an
+ordinary reader at a page they cannot open. The other five links were re-pointed.
+The side effect is worth knowing: `/chats` lost a whole neighbour topic, so the
+worst-case grounding context moved **back** to `/quickstart` and the figure
+*fell*, from 314 511 to **312 384** of 340 000, even though the merged
+`users.md` is ~9 000 characters larger than either half it replaced.

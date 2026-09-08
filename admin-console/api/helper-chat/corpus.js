@@ -116,8 +116,8 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // The number therefore now means "docs corpus + the biggest single page
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
-// **`/chats`** (the Agent Chat topic plus its `seeAlso` neighbours) at
-// 314 511 of 340 000 — 92.5% used, 25 489 left — against
+// **`/quickstart`** (the `create.md` topic plus its `seeAlso` neighbours) at
+// 312 384 of 340 000 — 91.9% used, 27 616 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. (#1459's
 // work-plane bullet in `access-users.md` — the `/teams` topic, which `/chats`
 // names among its `seeAlso` — added the last +319 to this crown.) #1930 moved
@@ -219,6 +219,23 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // crown is not on `/teams` (whose own context is 270 418). The `users.md` half
 // costs this crown nothing — `/users` is not in that neighbourhood — and nothing
 // in `CORPUS_FILES` changed, so no other context moved either.
+// #2085 (epic #2076 P6, D10) then dissolved the Access page: `access-users.md` was
+// folded into `users.md`, `/teams` became a redirect, and the seven topics that
+// named *Access* in their `seeAlso` were re-pointed at `/users` — except
+// `agent-chat.md` and `team-setup.md`, where the link was DROPPED rather than
+// re-pointed, because the successor surface for what it promised (adding somebody
+// to a team) is the **Share…** dialog on the reader's own page and Administration
+// is System-Admin-only, so re-pointing would have linked an ordinary reader at a
+// page they cannot open. That is what moved the crown, and it moved it DOWN:
+// `/chats` lost its `/teams` neighbour outright and fell out of first place, so
+// the worst context is **`/quickstart`** again at **312 384** of 340 000 (91.9%,
+// 27 616 left) — down from `/chats`' 314 511, even though this ticket's own
+// `admin-console.md` + `glossary.md` rewrites (+1 038) land on EVERY context. The merged `users.md` is ~9 000
+// characters bigger than either half was, but it now lands only on contexts that
+// still name `/users`, none of which was near the crown. The durable point is the
+// same one #1996 recorded from the other direction: a `seeAlso` edit moves the
+// worst case more than the topic edit does, so read the `context` the measurement
+// hands back and never assume the crown stayed where you left it.
 // Re-measure rather than trust this comment —
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.

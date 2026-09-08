@@ -16,7 +16,7 @@ newcomer misreads at least one of them.
 
 | Word | Meaning A | Meaning B |
 |---|---|---|
-| **Team** | **Team** (human) — the tenant that owns resources and groups *people*. Managed on the **Access** page. | **Agent Team** — a squad of *agents* working one repository (agent `role: team` + its members). Created by the **Team-Setup wizard**. |
+| **Team** | **Access scope** — the older, coarser tenant every resource is *stamped* with. A System Admin re-assigns it on **Administration → Resources**; no new one can be minted. | **Agent Team** — a squad of *agents* working one repository (agent `role: team` + its members), created by the **Team-Setup wizard**. This is what a person is given access to, and what **Share…** shares. |
 | **Orchestrator** | **Orchestrator** (service) — the control-plane container that spawns and supervises every agent container. There is exactly one. | **Orchestrator** (agent role) — an agent bound to a Briefing-Pack directory that spawns one `bp-instance` per pack. |
 | **Memory** | **Memory** (per agent) — the private files an agent reads and writes about *its own* work and *its* user. Never shared. | **Knowledge** (per team) — the curated, shared, searchable knowledge base a whole team draws on. |
 | **Skill** | **Skill** (the files) — a folder of domain know-how in the skill pool. | **Skill grant** (the assignment) — which agent construct is actually allowed to use it. The grant lives on the *team agent*, never on a Working Environment. |
@@ -242,11 +242,15 @@ because one member is not dozens — so a stub can also be created long after it
 ## People, access, credentials
 
 ### Team (human)
-The tenant. Every agent, Working Environment and credential belongs to exactly one Team.
-Teams scope who can see and manage what. Roles: **System Admin** (global),
-**Team Admin**, **Team Member**.
+The tenant. Every agent, Working Environment and credential belongs to exactly one
+tenant, and it is the tenant that scopes who can see and manage what. Roles:
+**System Admin** (global), **Team Admin**, **Team Member** — the latter two being
+memberships in an **Agent Team** since epic #2076, which is what makes sharing
+self-service.
 
-*Where you meet it:* the **Access** page.
+*Where you meet it:* **Share…** on a team in the **Agent Chat** (who may see it),
+and **Administration** (`/users`) for the platform-wide view — the former
+**Access** page was dissolved into it by #2085.
 *Read more:* [teams-data-model.md](teams-data-model.md) · [multi-user-concept.md](multi-user-concept.md)
 
 ### Model Provider

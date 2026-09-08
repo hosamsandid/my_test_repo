@@ -8,7 +8,6 @@ seeAlso:
   - { label: "Knowledge", to: "/knowledge" }
   - { label: "Create something new", to: "/create" }
   - { label: "Working Environments", to: "/environments" }
-  - { label: "Access", to: "/teams" }
   - { label: "GitHub Event Log", to: "/github-events" }
 askPrompts:
   - "What is the difference between a loop trigger and a cron trigger?"
@@ -18,7 +17,7 @@ askPrompts:
   - "What exactly happens when I retire a learning?"
   - "Why does switching the model provider restart the agent?"
   - "How do I point the agent at a file in its workspace?"
-  - "What is the difference between an Agent Team and a Team on the Access page?"
+  - "What is the difference between an Agent Team and an access scope?"
   - "What is the difference between Disable, Reset to stub and Delete?"
   - "Why does one of my agents show as not initialised?"
   - "Where did the Agents page go?"
@@ -110,9 +109,11 @@ where its prompt and skills come from:
 | **Agent Team** | A squad of agents working a repository. It stores a system-prompt template and hosts no agent itself — **Add member…** on the team's group header spawns agents that share the prompt and Working Environment but each get their own workspace and their own conversation. | Several copies of the same kind of agent — e.g. three reviewer agents in parallel. Start one from the **Create** launcher rather than by hand. |
 | **Team Member** | One agent spawned from an Agent Team. Its system prompt, skills and MCP servers **inherit** from the parent team unless you flip a field from *Inherit* to *Custom*. Role, Working Environment and parent team are fixed at creation; of those, only the parent team is shown in the Settings form. | You do not pick this role — it is assigned when you add a member to a team. |
 
-> An **Agent Team** is *not* the same thing as a **Team** on the **Access**
-> page. That Team is the human tenant / **access scope** every agent,
-> environment and credential belongs to; an Agent Team is a squad of agents.
+> An **Agent Team** is *not* the same thing as an **access scope**. The scope is
+> the older, coarser tenant every agent, environment and credential is stamped
+> with, managed by a System Admin on the **Administration** page; an Agent Team
+> is a squad of agents, and it is what sharing, membership and your own rights
+> are keyed on.
 
 **The three states a row can be in.** *Active* — running and ready to chat.
 *Paused* — the workspace is kept, the process is stopped (this is what **Disable**

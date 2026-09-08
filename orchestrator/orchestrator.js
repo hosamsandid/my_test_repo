@@ -1088,19 +1088,23 @@ function bootstrapTeams() {
   // record when the stack has zero users: the identity seed.
   // `seedInitialSystemAdmin` is a no-op once any record exists, so it is consumed
   // once and never re-read.
-  const seed = resolveInitialAdminSeed(process.env);
-  if (!seed) {
-    console.log('[Orchestrator] No initial System Admin configured — skipping the seed');
-  } else {
+  // Wrapped in an IIFE so the warm-stack `if (!user) return;` returns from the
+  // seed step alone — the Default-Team backfill below must still run on a warm
+  // stack (to grant the membership to an already-seeded admin).
+  (() => {
+    const seed = resolveInitialAdminSeed(process.env);
+    if (!seed) {
+      console.log('[Orchestrator] No initial System Admin configured — skipping the seed');
+      return;
+    }
     try {
       const user = teamsStore.seedInitialSystemAdmin(seed);
-      if (user) { // null on a warm stack — already seeded
-        recordSeedAudit(AUDIT_DIR, buildSeedAuditEvent({ seed, user }));
-        console.log(
-          `[Orchestrator] Seeded initial System Admin '${user.subject}' (${seed.source}, ` +
-          `password ${user.hasPassword ? 'set' : 'not set — authenticate via SSO'})`,
-        );
-      }
+      if (!user) return; // warm stack — already seeded; audit nothing
+      recordSeedAudit(AUDIT_DIR, buildSeedAuditEvent({ seed, user }));
+      console.log(
+        `[Orchestrator] Seeded initial System Admin '${user.subject}' (${seed.source}, ` +
+        `password ${user.hasPassword ? 'set' : 'not set — authenticate via SSO'})`,
+      );
     } catch (err) {
       // A failed seed leaves the stack with zero users, which now means nobody
       // can sign in — so this is loud, and the message names the recovery path.
@@ -1109,36 +1113,32 @@ function bootstrapTeams() {
         'The console has no user to authenticate; fix the configuration and restart.',
       );
     }
-  }
+  })();
 
-  // (#1457) System Admin is a global flag, not a membership, so the seeded admin
-  // owns the Default Team but has no Team-Admin role in it — give it one. Runs
-  // every boot, idempotently (the plan is empty once any membership for the pair
-  // exists, so a deliberate demotion is never re-promoted), which both
-  // complements the one-time seed above and backfills a stack seeded before this
-  // logic existed. `resolveInitialAdminSeed` and this share the subject whenever
-  // `BOOTSTRAP_SYSTEM_ADMIN_SUBJECT` is set (it wins in both), so this can never
-  // mint a second administrator.
-  const subject = process.env.BOOTSTRAP_SYSTEM_ADMIN_SUBJECT;
-  if (subject) {
-    try {
-      const admin = teamsStore.ensureSystemAdmin({
-        subject,
-        email: process.env.BOOTSTRAP_SYSTEM_ADMIN_EMAIL,
-        displayName: process.env.BOOTSTRAP_SYSTEM_ADMIN_NAME,
-      });
+  // (#1457) System Admin is a global flag, not a membership, so a System Admin
+  // owns the Default Team but has no Team-Admin role in it — give it one. This is
+  // deliberately DECOUPLED from any deployment config (#2059 AC4/AC7): the review
+  // of the #1457 merge caught that promoting from the configured bootstrap subject
+  // on every boot would re-flip the admin flag, making that value a live admin
+  // grant through a membership side-door and silently undoing a deliberate
+  // demotion. So the backfill NEVER re-derives or re-grants admin status: it
+  // reads the CURRENT System Admins from the store and gives each the Team-Admin
+  // membership, idempotently (an empty plan once the pair exists). A user a human
+  // demoted is no longer a System Admin, so is neither found here nor re-promoted.
+  try {
+    for (const admin of teamsStore.listUsers().filter((u) => u && u.systemAdmin === true)) {
       const membership = planBootstrapMembership({
-        userId: admin && admin.id,
+        userId: admin.id,
         memberships: teamsStore.listMemberships({ teamId: DEFAULT_TEAM_ID }),
         teamId: DEFAULT_TEAM_ID,
       });
       if (membership) {
         teamsStore.setMembership(membership);
-        console.log(`[Orchestrator] Made System Admin '${subject}' ${membership.role} of the Default Team`);
+        console.log(`[Orchestrator] Made System Admin '${admin.subject}' ${membership.role} of the Default Team`);
       }
-    } catch (err) {
-      console.error(`[Orchestrator] System Admin bootstrap failed: ${err.message}`);
     }
+  } catch (err) {
+    console.error(`[Orchestrator] Default-Team Team-Admin backfill failed: ${err.message}`);
   }
 }
 

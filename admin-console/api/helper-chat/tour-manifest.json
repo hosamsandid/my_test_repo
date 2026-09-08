@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-07T13:39:24.463Z",
+  "generated": "2026-09-08T07:00:07.339Z",
   "note": "GENERATED — do not edit. Rebuild with: make tour-manifest",
   "chapters": [
     {
@@ -147,7 +147,7 @@
         },
         {
           "id": "stages",
-          "voiceover": "As a final touch I turn on Stages, and the flow organises into labelled bands — Requirements holding the BA, Build holding the Developer. From here, one click on Materialize would turn this drawing into a live, running team. That's the whole story of Flows: design it visually, and go live only when you're ready.",
+          "voiceover": "As a final touch I turn on Stages, and the flow organises into labelled bands — Requirements holding the BA, Build holding the Developer. From here, one click on Create team… would turn this drawing into a live, running team. That's the whole story of Flows: design it visually, and go live only when you're ready.",
           "screenshotPath": "flows-draft/flow-stages.png"
         }
       ]

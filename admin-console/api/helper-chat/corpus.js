@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 287 269 of 340 000 — 84.5% used, 52 731 left — against
+// neighbours) at 289 378 of 340 000 — 85.1% used, 50 622 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
@@ -154,18 +154,24 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // asserted in walkthrough/01-team-setup.md ("growing creates a *new* team rather
 // than converting this assistant"), so fixing it to name both grow paths added a
 // further +110, and — being in CORPUS_FILES — that lands on EVERY context, taking
-// the crown to 286 374 (still 84.2%). #2057 then made a direct hand-off read as
-// a consumer on the two read-only wiring surfaces, which voided `agent-chat.md`'s
-// `## Outcomes` claim that "the label is what wakes the next agent" (the same
-// claim the panel was making): +895 for the two-mechanism table, and it lands in
-// full because `create.md` names `/chats` as a `seeAlso` neighbour — 287 269
-// (84.5%). Documenting a new action in the page topic
+// the crown to 286 374 (still 84.2%). Documenting a new action in the page topic
 // that hosts it is therefore never free for this context; it is still the right home — worth
 // knowing WHY a Flows edit lands on the `/quickstart` figure at all: `create.md`
 // lists `/flows` among its `seeAlso`, so the crown-holding neighbourhood
 // contains the Flows topic even though the crown is not on `/flows`. Its other
 // docs edit (`docs/process-template-format.md`) costs nothing here, that file
-// not being in CORPUS_FILES. Re-measure rather than trust this comment —
+// not being in CORPUS_FILES. #2053 then renamed the design → live-team action
+// from *Materialize* to **Create team…** everywhere a user reads it, rewriting
+// `create.md` (the crown context's own topic), `flows.md` (its `seeAlso`
+// neighbour, so it lands here too) and the every-context `walkthrough/04-flows.md`
+// + `glossary.md`; re-measured on the merge with #2052's #2060 walkthrough fix
+// already in, that took the crown from 286 374 to **288 483** (84.8%, +2 109 —
+// stated as one total measured together rather than a per-file sum, since all four
+// grow the same crown). #2057 then made a direct hand-off read as
+// a consumer on the two read-only wiring surfaces, which voided `agent-chat.md`'s
+// `## Outcomes` claim that "the label is what wakes the next agent" (the same
+// claim the panel was making): +895 for the two-mechanism table, and it lands in
+// full because `create.md` names `/chats` as a `seeAlso` neighbour — **289 378** (85.1%). Re-measure rather than trust this comment —
 // measureWorstCaseSystemPrompt() sweeps every context and returns which one
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.

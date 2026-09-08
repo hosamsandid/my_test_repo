@@ -35,7 +35,7 @@ codebase (research, drafting, analysis).
 
 The one trade-off: GitHub hand-off channels (PR / issue triggers and outcomes)
 have no repository to act on, so they are unavailable for a repo-less team. Add a
-repository to the environment if the team needs them. The Materialize dialog
+repository to the environment if the team needs them. The Create team dialog
 shows an inline note when the selected environment has no repository.
 
 ## Agent toolchain

@@ -89,27 +89,11 @@ export function mergeAgentConfigs(chatAgents, configs) {
   return out;
 }
 
-/**
- * Place a popup menu near a click point, kept fully inside the viewport.
- *
- * The rail is a scrolling container, so the menu is portaled and positioned in
- * *viewport* coordinates. Preferred placement is below-right of the pointer; a
- * menu that would overflow flips to the other side of the point rather than
- * being merely nudged, so it never covers the row it belongs to.
- */
-export function clampMenuPosition({
-  x, y, width, height, viewportWidth, viewportHeight, margin = 8,
-}) {
-  let left = x;
-  if (left + width > viewportWidth - margin) left = x - width;          // flip left
-  if (left < margin) left = Math.max(margin, viewportWidth - width - margin);
-
-  let top = y;
-  if (top + height > viewportHeight - margin) top = y - height;         // flip up
-  if (top < margin) top = Math.max(margin, viewportHeight - height - margin);
-
-  return { left: Math.round(left), top: Math.round(top) };
-}
+// `clampMenuPosition` moved to `src/components/row-context-menu-view.js` with
+// the RowContextMenu it serves (#2053) — the menu is now shared with the Flows
+// rail. Re-exported here so this module's existing importers and
+// `rail-lifecycle.test.js` keep addressing it where it was written.
+export { clampMenuPosition } from '../../components/row-context-menu-view.js';
 
 /** `{id, displayName}` options for the clone/import parent-team pickers. */
 export function teamOptions(agents) {

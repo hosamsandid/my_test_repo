@@ -8,11 +8,11 @@ Flows is the visual design surface of the Agent Studio — a canvas where you la
 
 ## The empty draft (slide 23)
 
-Screenshot: Flows editor — left list showing Teams ("Agentic Demos") and Drafts; a fresh empty draft "Simple SDLC" on the canvas; toolbar (Add agent, Stages, Materialize, Export) and the edge-type legend at the bottom.
+Screenshot: Flows editor — left list showing Teams ("Agentic Demos") and Drafts; a fresh empty draft "Simple SDLC" on the canvas; toolbar (Add agent, Stages, Create team…, Export) and the edge-type legend at the bottom.
 
-This is the Flows editor. On the left is the list of everything the canvas can show: your live Teams — here our "Agentic Demos" team from earlier — and a Drafts section. (Older builds listed a third, BriefingPack section here; it is gone.) A draft is the important concept here: it's an editable process that exists before any team is created. Nothing is live yet, nothing is spawned — it's a design you can shape freely and materialise into a real team only when you're happy with it.
+This is the Flows editor. On the left is the list of everything the canvas can show: your live Teams — here our "Agentic Demos" team from earlier — and a Drafts section. (Older builds listed a third, BriefingPack section here; it is gone.) A draft is the important concept here: it's an editable process that exists before any team is created. Nothing is live yet, nothing is spawned — it's a design you can shape freely and turn into a real team only when you're happy with it.
 
-I've created a fresh draft called "Simple SDLC", and right now it's completely empty — zero agents, a blank canvas. The hint at the top says it all: design from scratch — add an agent, drag a port to wire connections, click to edit; nothing is created until you materialise. Along the top are the actions I'll use: Add agent, Stages, Materialize, Export. And down at the bottom is the legend — this is the vocabulary of a flow: label hand-offs, issue and pull-request channels, reviews, human approvals, GitHub events. Every connection I draw will be one of these. Let's add our first agent.
+I've created a fresh draft called "Simple SDLC", and right now it's completely empty — zero agents, a blank canvas. The hint at the top says it all: design from scratch — add an agent, drag a port to wire connections, click to edit; nothing is created until you press Create team. Along the top are the actions I'll use: Add agent, Stages, Create team…, Export. And down at the bottom is the legend — this is the vocabulary of a flow: label hand-offs, issue and pull-request channels, reviews, human approvals, GitHub events. Every connection I draw will be one of these. Let's add our first agent.
 
 ## Add agent from scratch (slide 24)
 
@@ -80,10 +80,10 @@ And there it is — a working flow. The Business Analyst now carries an Issue ou
 
 Read it top to bottom, this is a complete micro-process: the Business Analyst turns a request into a GitHub issue, a human reviews it and applies ready, and only then does the Developer wake up to implement it. Everything we walked through by hand in the earlier Core SDLC demo — but here I designed it myself, in a couple of minutes, on a blank canvas.
 
-## Stages, materialise, export (slide 32)
+## Stages, create team, export (slide 32)
 
-Screenshot: canvas with Stages enabled — bands "Requirements" (BA) and "Build" (Developer); Materialize and Export in the toolbar.
+Screenshot: canvas with Stages enabled — bands "Requirements" (BA) and "Build" (Developer); Create team… and Export in the toolbar.
 
 As a final touch, I turn on Stages, and the flow organises itself into labelled bands: Requirements, containing the Business Analyst, and Build, containing the Developer. Stages are purely an organising layer — they group the agents into the phases of your process and make a larger flow readable at a glance, while the hand-off between them, our human-gated ready issue, stays exactly as we drew it.
 
-This is the finished draft. From here, one click on Materialize would turn this drawing into a live, running team — real agents, real Matrix identities, reacting to real GitHub events — or I can Export it as a portable template to share and reuse. That's the whole story of Flows: design the orchestration visually, let the platform draft the hard parts, and go live only when you're ready.
+This is the finished draft. From here, one click on Create team… would turn this drawing into a live, running team — real agents, real Matrix identities, reacting to real GitHub events — or I can Export it as a portable template to share and reuse. That's the whole story of Flows: design the orchestration visually, let the platform draft the hard parts, and go live only when you're ready.

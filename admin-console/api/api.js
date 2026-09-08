@@ -8073,6 +8073,25 @@ app.get('/api/teams/:teamId/flow-anomalies', apiLimiter, async (req, res) => {
   }
 });
 
+// GET /api/teams/:teamId/tickets — the ticket ledger (#2115, flow-control
+// concept §4.1). Team-scoped read-only proxy to the orchestrator's reconciler,
+// which derives each work item's TRUE lifecycle state from GitHub evidence and
+// names the blocker holding it. Observe-only — no repair, no mutation — so it is
+// gated exactly like `flow-anomalies`: visibility only, no `canManageTeam`.
+app.get('/api/teams/:teamId/tickets', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/tickets`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // GET /api/teams/:teamId/hill-climb/metrics — latest persisted run-metrics
 // snapshot (hill-climbing loop Phase 1, #1222). Team-scoped read-only proxy;
 // the Improvements panel (#1223) renders the metric tiles from this.

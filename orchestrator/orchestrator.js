@@ -165,6 +165,8 @@ const pendingReassign = require("./pending-reassign");
 const { buildFlowModel, detectFlowAnomalies } = require("./flow-anomaly-detector");
 const flowAnomalySweep = require("./flow-anomaly-sweep");
 const admissionControl = require("./admission-control");
+const { buildTicketLedger } = require("./ticket-reconciler");
+const ticketReconcileSweep = require("./ticket-reconcile-sweep");
 
 // ── Read-write context mount helpers (writing into a mounted host folder) ──
 // A caller path is RELATIVE to /context. For a single legacy folder the mount
@@ -1852,6 +1854,249 @@ async function computeTeamFlowAnomalies(teamId, { now = Date.now() } = {}) {
     errors,
     model,
     anomalies,
+  };
+}
+
+// How many open PRs one sweep will enrich with the expensive per-PR detail
+// (detail + files + checks + statuses + reviews + compare = 6 requests each).
+// A team with a runaway number of open PRs is exactly the situation the ledger
+// exists to surface, so the cap must never make the endpoint fail — the PRs
+// beyond it are reported as `errors` and their tickets simply carry the cheap
+// list-level truth.
+const TICKET_PR_ENRICH_LIMIT = Math.max(
+  1,
+  Number(process.env.TICKET_LEDGER_PR_LIMIT) || 60,
+);
+
+// Ticket reconciler sweep (#2115, flow-control concept §4.1).
+//
+// Gathers the truth `computeTeamFlowAnomalies` deliberately drops — `mergeable`,
+// `mergeStateStatus`, the CI rollup, the review decision, the PR's added files
+// against the base tree, and the issue↔PR linkage in BOTH directions — then runs
+// the pure reconciler over it. Observe-only: nothing here mutates anything, on
+// GitHub or on disk.
+//
+// Every fetch is individually try/caught into `errors[]`, the same fail-soft
+// discipline as the anomaly sweep: a partial GitHub outage must degrade the
+// ledger's precision, never turn the endpoint into a 500. A PR whose enrichment
+// failed keeps `mergeable: 'UNKNOWN'`, and every rule that would need it
+// declines rather than guesses.
+async function computeTeamTicketLedger(teamId, { now = Date.now() } = {}) {
+  const teamCfg = loadAgentConfig(teamId) || {};
+  const labels = Array.isArray(teamCfg.labels) ? teamCfg.labels : [];
+  const thresholds = ticketReconcileSweep.resolveTicketThresholds(teamCfg.ticketThresholds);
+
+  const { members, envIds } = _flowTeamMembers(teamId);
+  const model = buildFlowModel(members, { labels });
+  const repoToken = _flowRepoTokens(envIds);
+
+  const interesting = new Set([
+    ...model.wakeEdges.map((w) => w.label),
+    ...model.wakeEdges.map((w) => w.claimLabel),
+    ...model.claimEdges.map((c) => c.claimLabel),
+    ...model.gateLabels,
+  ]);
+  // A `<wake>:completed` marker is never a wake (the detector drops it), but the
+  // ledger's whole `claimed-done-not-merged` class turns on WHEN it was applied
+  // — so the timeline must be fetched for objects carrying one too.
+  for (const w of model.wakeEdges) interesting.add(`${w.label}:completed`);
+
+  const issues = [];
+  const prs = [];
+  const errors = [];
+  const repos = [];
+
+  for (const [repo, token] of repoToken) {
+    const [owner, name] = repo.split("/");
+    const seg = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+    let rawIssues = [];
+    let rawPrs = [];
+    try {
+      rawIssues = await _flowGithubGetJson(`${seg}/issues?state=open&per_page=100`, token);
+    } catch (err) {
+      errors.push(`${repo}: issues: ${err.message}`);
+      continue;
+    }
+    repos.push(repo);
+    try {
+      rawPrs = await _flowGithubGetJson(`${seg}/pulls?state=open&per_page=100`, token);
+    } catch (err) {
+      errors.push(`${repo}: pulls: ${err.message}`);
+      rawPrs = [];
+    }
+
+    // The base branch's file index — ONE recursive tree request per repo, which
+    // is what makes `superseded` affordable at all (the alternative is one
+    // contents request per added file per PR). A truncated tree is reported as
+    // incomplete and the reconciler then refuses to raise `superseded`.
+    let defaultBranch = null;
+    let baseIndex = null;
+    try {
+      const repoMeta = await _flowGithubGetJson(seg, token);
+      defaultBranch = (repoMeta && repoMeta.default_branch) || null;
+      if (defaultBranch) {
+        const tree = await _flowGithubGetJson(
+          `${seg}/git/trees/${encodeURIComponent(defaultBranch)}?recursive=1`,
+          token,
+        );
+        baseIndex = ticketReconcileSweep.baseFileIndex(tree);
+      }
+    } catch (err) {
+      errors.push(`${repo}: base tree: ${err.message}`);
+      baseIndex = null;
+    }
+
+    // --- issues ------------------------------------------------------------
+    const linked = ticketReconcileSweep.linkIssuesToPrs(
+      (Array.isArray(rawIssues) ? rawIssues : []).filter((it) => it && !it.pull_request),
+      rawPrs,
+    );
+    for (const it of linked) {
+      const names = (Array.isArray(it.labels) ? it.labels : []).map((l) =>
+        typeof l === "string" ? l : l && l.name,
+      );
+      let timeline = null;
+      if (names.some((n) => interesting.has(n))) {
+        try {
+          timeline = await _flowGithubGetJson(`${seg}/issues/${it.number}/timeline`, token);
+        } catch {
+          timeline = null; // fall back to updated/created time
+        }
+      }
+      issues.push(
+        ticketReconcileSweep.issueToTicketObject(it, {
+          repo,
+          timeline,
+          linkedPrNumbers: it.linkedPrNumbers,
+        }),
+      );
+    }
+
+    // --- PRs, with the expensive enrichment --------------------------------
+    const prList = Array.isArray(rawPrs) ? rawPrs : [];
+    for (const listItem of prList.slice(0, TICKET_PR_ENRICH_LIMIT)) {
+      if (!listItem || listItem.number == null) continue;
+      const n = Number(listItem.number);
+      const prSeg = `${seg}/pulls/${n}`;
+      let detail = listItem;
+      try {
+        // Only the DETAIL form carries `mergeable`/`mergeable_state`; the list
+        // form omits both, which is why the anomaly sweep never had them.
+        detail = await _flowGithubGetJson(prSeg, token);
+      } catch (err) {
+        errors.push(`${repo}#${n}: detail: ${err.message}`);
+      }
+      const extras = { repo, baseFileIndex: baseIndex };
+      try {
+        extras.files = await _flowGithubGetJson(`${prSeg}/files?per_page=100`, token);
+      } catch {
+        extras.files = [];
+      }
+      const headSha = (detail && detail.head && detail.head.sha) || null;
+      if (headSha) {
+        let checkRuns = [];
+        let statuses = [];
+        try {
+          const res = await _flowGithubGetJson(
+            `${seg}/commits/${encodeURIComponent(headSha)}/check-runs?per_page=100`,
+            token,
+          );
+          checkRuns = (res && res.check_runs) || [];
+        } catch {
+          checkRuns = [];
+        }
+        try {
+          const res = await _flowGithubGetJson(
+            `${seg}/commits/${encodeURIComponent(headSha)}/status`,
+            token,
+          );
+          statuses = (res && res.statuses) || [];
+        } catch {
+          statuses = [];
+        }
+        extras.checkRuns = checkRuns;
+        extras.statuses = statuses;
+      }
+      try {
+        extras.reviews = await _flowGithubGetJson(`${prSeg}/reviews?per_page=100`, token);
+      } catch {
+        extras.reviews = [];
+      }
+      // How far the base has moved since this PR branched — the half of
+      // `stale-base` that separates "main moved under it" from "the author's
+      // own bug". `compare/<pr base sha>...<default branch>` answers exactly
+      // that as `ahead_by`.
+      const baseSha = (detail && detail.base && detail.base.sha) || null;
+      if (baseSha && defaultBranch) {
+        try {
+          const cmp = await _flowGithubGetJson(
+            `${seg}/compare/${encodeURIComponent(baseSha)}...${encodeURIComponent(defaultBranch)}`,
+            token,
+          );
+          if (cmp && typeof cmp.ahead_by === "number") extras.baseAheadBy = cmp.ahead_by;
+        } catch {
+          /* not measured — `stale-base` falls back to GitHub's BEHIND state */
+        }
+      }
+      let timeline = null;
+      const prLabelNames = (Array.isArray(detail.labels) ? detail.labels : []).map((l) =>
+        typeof l === "string" ? l : l && l.name,
+      );
+      if (prLabelNames.some((x) => interesting.has(x))) {
+        try {
+          timeline = await _flowGithubGetJson(`${seg}/issues/${n}/timeline`, token);
+        } catch {
+          timeline = null;
+        }
+      }
+      extras.timeline = timeline;
+      prs.push(ticketReconcileSweep.prToTicketObject(detail, extras));
+    }
+    if (prList.length > TICKET_PR_ENRICH_LIMIT) {
+      errors.push(
+        `${repo}: ${prList.length - TICKET_PR_ENRICH_LIMIT} open PR(s) beyond the enrichment limit of ${TICKET_PR_ENRICH_LIMIT} were not inspected`,
+      );
+    }
+  }
+
+  // The four shipped anomaly classes fold in as ONE input signal, and the
+  // `anomaly-history` substrate supplies recurrence — both reused rather than
+  // re-derived (§4.1). A failure in either is non-fatal: the ledger is still
+  // correct without them, only less informative.
+  let anomalies = [];
+  try {
+    const res = await computeTeamFlowAnomalies(teamId, { now });
+    anomalies = res.anomalies || [];
+  } catch (err) {
+    errors.push(`anomalies: ${err.message}`);
+  }
+  let history = [];
+  try {
+    history = require("./anomaly-history").readEntries(teamId);
+  } catch {
+    history = [];
+  }
+
+  const { tickets } = buildTicketLedger({
+    model,
+    // The raw ports too: `buildFlowModel` drops the gate→consumer edges, and the
+    // ledger's lane/owner columns are exactly those.
+    members,
+    github: { issues, prs },
+    anomalies,
+    history,
+    thresholds,
+    now,
+  });
+
+  return {
+    teamId,
+    generatedAt: new Date(now).toISOString(),
+    thresholds,
+    repos,
+    swept: issues.length + prs.length,
+    errors,
+    tickets,
   };
 }
 
@@ -14948,6 +15193,38 @@ async function main() {
           return sendJson(res, 200, { maintenance: false, ...result });
         } catch (err) {
           console.error(`[Orchestrator] flow-anomalies error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // GET /internal/teams/:teamId/tickets — the ticket ledger (#2115, concept
+    // §4.1). Derives each work item's TRUE state from GitHub evidence rather
+    // than from its labels, and names the blocker holding it. Observe-only: it
+    // computes and discards, exactly like flow-anomalies, and mutates nothing.
+    // Maintenance-gated for the same reason — the sweep is a poll, and the
+    // window must stay quiet.
+    const ticketLedgerMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/tickets(?:\?.*)?$/);
+    if (ticketLedgerMatch) {
+      const teamId = decodeURIComponent(ticketLedgerMatch[1]);
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') {
+            return sendJson(res, 404, { error: 'agent team not found' });
+          }
+          const maint = readMaintenanceState();
+          if (maint && maint.active) {
+            return sendJson(res, 200, {
+              teamId, maintenance: true, tickets: [], generatedAt: new Date().toISOString(),
+            });
+          }
+          const result = await computeTeamTicketLedger(teamId);
+          return sendJson(res, 200, { maintenance: false, ...result });
+        } catch (err) {
+          console.error(`[Orchestrator] tickets error for ${teamId}: ${err.message}`);
           return sendJson(res, 500, { error: err.message });
         }
       })();

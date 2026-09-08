@@ -189,9 +189,14 @@ const MUTATIONS = [
     'const wipLimit = (teamCfg && teamCfg.wipLimit) || null;\n  return wipLimit === null ? null :'],
   // Fail OPEN: swallow the fetch error and report the repo as swept anyway,
   // which lets a GitHub outage release every ticket and open the lane.
+  // The anchor carries the `errors.push` line above the `continue` on purpose:
+  // #2115's ticket-ledger sweep grew the same continue/}/repos.push shape a few
+  // hundred lines up, and the bare three lines stopped being unique. The check
+  // itself was already scoped to `admissionSweepTeam`'s body — it is the anchor
+  // that has to name which sweep it is sabotaging.
   ['sweep-fails-closed-on-fetch-error',
-    'continue;\n    }\n    repos.push(repo);',
-    '/* swallowed */\n    }\n    repos.push(repo);'],
+    'errors.push(`${repo}: ${err.message}`);\n      continue;\n    }\n    repos.push(repo);',
+    'errors.push(`${repo}: ${err.message}`);\n      /* swallowed */\n    }\n    repos.push(repo);'],
   ['promote-enqueues-before-saving-lane',
     '  for (const r of promoted.release) {\n    enqueuePending(r.agentId, r.entry, { admissionChecked: true });',
     '  saveAdmissionLane(teamId, promoted.lane);\n  for (const r of promoted.release) {\n    enqueuePending(r.agentId, r.entry, { admissionChecked: true });'],

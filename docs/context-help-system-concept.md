@@ -409,17 +409,18 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **301,270 — 88.6% used,
-38,730 left** (#2067 made a repository attachable to a single agent, outside its Working
-Environment, and documented it in the two places that own the concept: `agent-chat.md`, where the
-two surfaces live — a `create.md` neighbour, so it lands on this crown in full — and the
-every-context `docs/working-environments.md` + `admin-console.md`. Two things worth carrying
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **303,943 — 89.4% used,
+36,057 left** (#2068 made flow drafts private-by-default and shareable, adding an eleventh
+`flows.md` chapter *Sharing a draft*; `create.md` names `/flows` among its `seeAlso`, so it
+lands on this crown in full: +2,673, re-measured on the merge and not summed on a stale base.
+#2067 (per-agent scoped repositories) landed on main while this branch was open and grew the
+same crown by +4,631, so the baseline is not #2066's 296,639 but main's post-#2067 crown of
+301,270 → 303,943. Two things worth carrying
 forward: a feature whose surfaces sit on `/chats` pays this crown twice, once through the
 `seeAlso` link and once through whichever `CORPUS_FILES` reference doc has to agree with it; and
 when two PRs append to this running figure in parallel, the auto-merge keeps both entries and
 leaves one number with two successors — re-chain them in ticket order and re-measure on the
-merge, which is why the figure above is one total rather than a per-PR sum.
-It stood at 296,639 after #2066, which replaced the manual **Sync all agents** button on the Working Environments
+merge, which is why the figure above is one total rather than a per-PR sum. #2066 replaced the manual **Sync all agents** button on the Working Environments
 form with an offer the save itself makes, and the figure went UP by 4,689 — the biggest single
 move in this chain, from a ticket whose user-visible change was *removing* a control. The topic
 had to grow +3,848 to carry the three change classes, the clean-and-pushed safety rule and the

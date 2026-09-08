@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 296 639 of 340 000 — 87.2% used, 43 361 left — against
+// neighbours) at 303 943 of 340 000 — 89.4% used, 36 057 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
@@ -200,6 +200,14 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // parallel, the auto-merge keeps both entries and leaves one figure with two
 // successors: re-chain them in ticket order and re-measure, rather than trusting
 // either branch's number.
+// #2068 then made flow drafts private-by-default and shareable with equal rights,
+// which needed an eleventh `flows.md` chapter (*Sharing a draft*) — the panel is
+// where the irreversibility of sharing has to be readable. `create.md` names
+// `/flows` among its `seeAlso`, so that chapter lands on this crown in full: +2 673.
+// Re-measured on the merge, not summed on a stale base: main's post-#2067 crown of
+// **301 270** → **303 943** (89.4%).
+// The whole #2068 delta is topic-side; nothing in `CORPUS_FILES` changed here, so
+// #2068 itself moved no OTHER context.
 // Re-measure rather than trust this comment —
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.

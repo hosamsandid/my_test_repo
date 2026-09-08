@@ -323,6 +323,31 @@ the #2041 P2 sweep); as operator surfaces they must be gated
 action rides an already-audited hand-off route; the whole subsystem is
 maintenance-gated.
 
+### 4.7 Cross-lane merge coordination — the merge-queue (§4.0 across lanes)
+
+§4.0 bounds work-in-progress *within* a lane. Running several lanes against one
+shared `main` re-introduces the conflict at the **merge** point: N lanes each
+holding one open PR means N PRs racing one branch, and every merge re-conflicts
+the others — a reviewed, **passed** PR goes `CONFLICTING` again before it can
+merge and the reworker chases a moving base (observed live with three lanes).
+Serial-per-lane is **not** conflict-free.
+
+So the supervisor (§4.3) must own the merge point as a **merge-queue / "merge
+train"**:
+
+- **Global merge-serialisation** — at most one PR is driven to `ready-to-merge`
+  at a time across *all* lanes, so two PRs never race the same branch.
+- **Auto-rebase after each merge** — once a PR merges, every other in-flight epic
+  PR is rebased onto the new `main`, but **only** when the rebase is conflict-free
+  or mechanically resolvable (docs/changelog); a semantic conflict is routed to
+  the reworker, never force-resolved. Rides the audited reworker / `aee-wake`
+  path; never a force-push over unpushed work.
+
+This is the cross-lane analogue of admission control: §4.0 stops a lane racing
+*itself*; §4.7 stops the lanes racing *each other*. Without it, more lanes add
+conflict **thrash, not throughput** — the single shared `main` is the real
+serialisation point.
+
 ## 5. What is reused vs. what is new
 
 | Already shipped (the foundation) | New (the gap this concept fills) |

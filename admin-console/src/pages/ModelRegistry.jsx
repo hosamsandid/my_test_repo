@@ -26,7 +26,7 @@ import {
   probeTitle,
   probeRequest,
 } from './llm-probe-state';
-import { groupAgentsByTeam } from './group-agents-by-team.js';
+import { groupAgentsByTeam, hiddenAgentsNotice, boundAgentsLead, respawnFailureLead } from './group-agents-by-team.js';
 import { describeSubmitState } from './model-provider-submit-state.js';
 import { endpointAssistExclusion } from '../context/assist-selector-exclusion.js';
 import { usePageActions } from '../context/PageActionsContext';
@@ -1038,14 +1038,17 @@ export default function ModelRegistry() {
   const [actionError, setActionError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
-  const [respawnPrompt, setRespawnPrompt] = useState(null); // { endpointId, agents } | null
+  // `hidden` is the #1501 blast-radius signal: `{count, teamCount, standalone}`
+  // for the bound agents this caller may not see. Their ids never arrive — only
+  // the counts — but they are restarted all the same, so the dialog says so.
+  const [respawnPrompt, setRespawnPrompt] = useState(null); // { endpointId, agents, hidden } | null
   const [respawning, setRespawning]       = useState(false);
   const [respawnError, setRespawnError]   = useState(null);
   // Set when respawn-agents reports agents it failed to restart (still on the
   // old credentials) — surfaced as a follow-up alert so the operator can't
   // mistake "dialog closed" for "rotation fully applied" (only console.info'd
   // previously, which nobody watching the UI would ever see).
-  const [respawnFailureNotice, setRespawnFailureNotice] = useState(null); // { failedAgents: Array<{id, displayName, role, teamId, teamName}> } | null
+  const [respawnFailureNotice, setRespawnFailureNotice] = useState(null); // { failedAgents: Array<{id, displayName, role, teamId, teamName}>, hiddenSkipped: number } | null
 
   // When the endpoint list refetches after a successful edit, sync the open
   // panel with the fresh masked record (token preview/fingerprint, etc.).
@@ -1279,9 +1282,13 @@ export default function ModelRegistry() {
         || payload.baseUrl !== (editing.baseUrl ?? '');
       if (credentialChanged) {
         try {
-          const { agents } = await apiCall('GET', `/api/llm-endpoints/${editing.id}/bound-agents`);
-          if (agents && agents.length > 0) {
-            setRespawnPrompt({ endpointId: editing.id, agents });
+          const { agents, hidden } = await apiCall('GET', `/api/llm-endpoints/${editing.id}/bound-agents`);
+          // Prompt on hidden-only too: a shared, system-scoped provider whose
+          // only consumers sit in teams this caller is not in still has to be
+          // restarted, and silently skipping the prompt would leave them on the
+          // rotated-away credential (#1501).
+          if ((agents && agents.length > 0) || (hidden && hidden.count > 0)) {
+            setRespawnPrompt({ endpointId: editing.id, agents: agents || [], hidden });
             // Don't close the panel yet — dialog handles that on confirm/cancel.
             return;
           }
@@ -1315,11 +1322,14 @@ export default function ModelRegistry() {
     if (!respawnPrompt) return;
     setRespawning(true); setRespawnError(null);
     try {
-      const { respawned, skipped } = await apiCall('POST', `/api/llm-endpoints/${respawnPrompt.endpointId}/respawn-agents`);
+      const { respawned, skipped, hidden } = await apiCall('POST', `/api/llm-endpoints/${respawnPrompt.endpointId}/respawn-agents`);
       const agents = respawnPrompt.agents;
+      // Failures among the agents this caller cannot see arrive as a count only
+      // (#1501) — but they are still failures, so they must reach the alert.
+      const hiddenSkipped = (hidden && hidden.skipped) || 0;
       setRespawnPrompt(null);
       refetch();
-      if (skipped && skipped.length > 0) {
+      if ((skipped && skipped.length > 0) || hiddenSkipped > 0) {
         // `skipped` means the orchestrator's respawn call returned
         // respawned:false for that agent id. That covers two different cases
         // it can't distinguish from here: the agent wasn't actually running
@@ -1329,8 +1339,8 @@ export default function ModelRegistry() {
         // problem this feature exists to prevent). Since we can't tell which
         // occurred, don't close the panel silently; surface it as a
         // follow-up alert the operator must see and dismiss.
-        const failedAgents = skipped.map(id => agents.find(a => a.id === id) || { id, displayName: id, role: 'agent', teamId: null, teamName: null });
-        setRespawnFailureNotice({ failedAgents });
+        const failedAgents = (skipped || []).map(id => agents.find(a => a.id === id) || { id, displayName: id, role: 'agent', teamId: null, teamName: null });
+        setRespawnFailureNotice({ failedAgents, hiddenSkipped });
       } else {
         setEditing(null);
       }
@@ -1492,7 +1502,7 @@ export default function ModelRegistry() {
         message={respawnPrompt && (
           <div>
             <p style={{ marginTop: 0 }}>
-              The following {respawnPrompt.agents.length === 1 ? 'agent is' : `${respawnPrompt.agents.length} agents are`} enabled and bound to this provider, and will be restarted:
+              {boundAgentsLead(respawnPrompt.agents.length, respawnPrompt.hidden)}
             </p>
             <div style={{
               margin: '0 0 var(--eb-space-3)',
@@ -1525,6 +1535,15 @@ export default function ModelRegistry() {
                 </div>
               ))}
             </div>
+            {/* #1501: the caller may not see every consumer of a shared
+                provider, but must still be told how far the restart reaches.
+                Only shown when at least one agent IS listed — otherwise
+                boundAgentsLead has already said it, in the lead. */}
+            {respawnPrompt.agents.length > 0 && hiddenAgentsNotice(respawnPrompt.hidden) && (
+              <p style={{ margin: '0 0 var(--eb-space-3)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+                {hiddenAgentsNotice(respawnPrompt.hidden)}
+              </p>
+            )}
             {respawnError && (
               <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', marginBottom: 'var(--eb-space-2)' }}>
                 {respawnError} — you can retry or skip.
@@ -1553,7 +1572,7 @@ export default function ModelRegistry() {
         message={respawnFailureNotice && (
           <div>
             <p style={{ marginTop: 0 }}>
-              {respawnFailureNotice.failedAgents.length} agent(s) could not be restarted — if currently running, they may still be using the old credentials:
+              {respawnFailureLead(respawnFailureNotice.failedAgents.length, respawnFailureNotice.hiddenSkipped)}
             </p>
             <div style={{ maxHeight: 240, overflowY: 'auto', fontSize: 'var(--eb-text-sm)' }}>
               {groupAgentsByTeam(respawnFailureNotice.failedAgents).map(group => (

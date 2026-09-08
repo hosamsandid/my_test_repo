@@ -64,9 +64,13 @@ function clampNote(note) {
  * Shape: `{ fromAgentId, toAgentId, note? }` — target-LESS by design: there is
  * no repo, no issue/PR number and no label anywhere in it.
  *
- * `fromAgentId` is SELF-ASSERTED (§6.1): the whole `:4002` internal API is
- * unauthenticated, so this is an identity claim, not a credential. Validating
- * its shape is hygiene, not authentication — do not read it as one.
+ * `fromAgentId` is SELF-ASSERTED (§6.1): validating its shape is hygiene, not
+ * authentication — do not read it as one. Since #1456 the caller may ALSO be
+ * carrying a per-agent internal-API token, and in `enforce` mode it must be;
+ * but the gate authenticates the *caller*, not this field, and nothing here
+ * cross-checks the two. Making `fromAgentId` default to (or be verified
+ * against) the authenticated agent id is the obvious follow-up and is
+ * deliberately NOT assumed here.
  */
 function validateWakeRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {

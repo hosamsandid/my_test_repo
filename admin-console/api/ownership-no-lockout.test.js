@@ -34,7 +34,9 @@ const {
   canManageTeam,
   canManageAgent,
   canManageEnvironment,
+  visibleEnvironment,
   visibleCredential,
+  canManageCredential,
   resolveAgentTenant,
 } = require('./scope');
 
@@ -197,6 +199,107 @@ test('AC4 — the assertion is not vacuous: the estate really is reachable befor
   // pair is evaluated, so a silent fixture shrink is visible here.
   assert.equal(Object.keys(configsBefore).length, 9);
   assert.equal(principals.length, 6);
+});
+
+// ── #2083 (P5): adding the shared tier loses nobody any reach ──────────────
+//
+// P5 gives environments and MCP servers the tier they lacked. That is a change
+// to the PREDICATES, not to the records — every environment on disk keeps its
+// bare `teamId` — so the property to prove here is the mirror of the one above:
+//
+//   For every existing record R and every user U:
+//     visible_tiered(U, R)   ⊇ visible_pre2083(U, R)
+//     canManage_tiered(U, R) ⊇ canManage_pre2083(U, R)
+//
+// The "before" side has to be the LITERAL pre-#2083 predicates, reconstructed
+// here, because the real ones have been replaced — reusing the new ones on both
+// sides would compare a thing to itself and pass unconditionally.
+
+// The two environment predicates exactly as they read on main before #2083.
+const visibleEnvPre2083 = (scope, env) => visibleTeam(scope, env && env.teamId);
+const canManageEnvPre2083 = (scope, env) => {
+  if (!scope) return false;
+  if (scope.all) return true;
+  return canManageTeam(scope, env && env.teamId);
+};
+
+// Every environment/MCP-server shape that exists on disk today: a stamped one,
+// one in a scope holding two Agent Teams, and the unstamped legacy record.
+const untieredRecords = [
+  { id: 'env-sdlc', teamId: 'default' },
+  { id: 'env-risk', teamId: 'risk' },
+  { id: 'env-pay', teamId: 'payments' },
+  { id: 'env-unstamped' },
+];
+
+test('#2083 — the tier addition changes NO existing record for ANY principal', () => {
+  for (const username of principals) {
+    const scope = scopeFor(username, after.memberships);
+    for (const rec of untieredRecords) {
+      // Exact equality, not ⊇: this phase re-points nothing, so a record whose
+      // reach MOVED at all would mean the tier had leaked a new grant in.
+      assert.equal(
+        visibleEnvironment(scope, rec), visibleEnvPre2083(scope, rec),
+        `${username}: visibility of ${rec.id} moved`,
+      );
+      assert.equal(
+        canManageEnvironment(scope, rec), canManageEnvPre2083(scope, rec),
+        `${username}: manageability of ${rec.id} moved`,
+      );
+    }
+  }
+});
+
+test('#2083 — that equality is not vacuous: the pre-#2083 predicates really do grant things', () => {
+  const ada = scopeFor('ada@corp.com', after.memberships);
+  const nul = scopeFor('nul@corp.com', after.memberships);
+  const env = scopeFor(ADMIN_USERNAME, after.memberships);
+  // Ada is team-admin of the 'default' scope, so she both sees and manages it.
+  assert.equal(visibleEnvPre2083(ada, { teamId: 'default' }), true);
+  assert.equal(canManageEnvPre2083(ada, { teamId: 'default' }), true);
+  // The never-granted user reaches none of it, and the operator reaches all.
+  assert.equal(visibleEnvPre2083(nul, { teamId: 'default' }), false);
+  assert.equal(visibleEnvPre2083(env, { teamId: 'risk' }), true);
+  // And the two implementations are genuinely different code: a SHARED record
+  // is the case where they diverge, which is the whole point of the phase.
+  const shared = { id: 'env-shared', scope: 'system', assignedTeamIds: ['sdlc-2-0'] };
+  assert.equal(visibleEnvPre2083(ada, shared), false, 'the old filter could not see a shared record');
+  assert.equal(visibleEnvironment(ada, shared), true, 'the new one can');
+});
+
+test('#2083 — a shared record reaches exactly its assigned teams, measured over the real estate', () => {
+  // Ada is team-admin of scope 'default', which P1 fanned out to BOTH Agent
+  // Teams in it (sdlc-2-0 and billing). Cyd administers 'risk' only.
+  const shared = { id: 'env-shared', scope: 'system', assignedTeamIds: ['sdlc-2-0'] };
+  const reachOf = (u) => {
+    const scope = scopeFor(u, after.memberships);
+    return [visibleEnvironment(scope, shared), canManageEnvironment(scope, shared)];
+  };
+  assert.deepEqual(reachOf('ada@corp.com'), [true, true], 'fanned-out team-admin of an assigned team');
+  assert.deepEqual(reachOf('bob@corp.com'), [true, false], 'fanned-out member: reads, cannot change');
+  assert.deepEqual(reachOf('cyd@corp.com'), [false, false], 'admin of an unassigned team reaches nothing');
+  assert.deepEqual(reachOf('nul@corp.com'), [false, false]);
+  assert.deepEqual(reachOf(ADMIN_USERNAME), [true, true]);
+});
+
+test('#2083 — THE decisive case: promoting a two-team scope keeps its admin able to manage it', () => {
+  // This is why `canManageEnvironment` does NOT copy `canManageCredential`'s
+  // outright system-tier refusal. Scope 'default' holds two Agent Teams, so a
+  // future re-point of `env-sdlc` cannot name one of them (A2.5) and must
+  // promote it to the shared tier assigned to both. Under the credential rule
+  // Ada — who manages it today — could not manage it afterwards, and that is a
+  // manage-axis lockout §8.3 forbids.
+  const ada = scopeFor('ada@corp.com', after.memberships);
+  const before = { id: 'env-sdlc', teamId: 'default' };
+  const promoted = { id: 'env-sdlc', scope: 'system', assignedTeamIds: ['sdlc-2-0', 'billing'] };
+
+  assert.equal(canManageEnvPre2083(ada, before), true, 'premise: she manages it today');
+  assert.equal(canManageEnvironment(ada, promoted), true, 'and still would after a promotion');
+  assert.equal(visibleEnvironment(ada, promoted), true);
+  // The counterfactual, so the claim is measured rather than asserted: the
+  // credential rule applied to the same record DOES lose her the reach.
+  assert.equal(canManageCredential(ada, promoted), false,
+    'the credential system tier refuses outright — copying it would have been the lockout');
 });
 
 test('AC4 — a mutation that DOES lose reach is caught (the guard is real)', () => {

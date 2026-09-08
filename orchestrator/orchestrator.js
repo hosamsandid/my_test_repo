@@ -36,6 +36,15 @@ const wakeAgent = require("./wake-agent");
 const labelFastPath = require("./github-label-fastpath");
 const { LabelDedupMarkers } = require("./label-dedup-markers");
 const githubEventLog = require("./github-event-log");
+const internalAuth = require("./internal-auth");
+
+// Internal-API authentication for :4002 (#1456, GOV-PLATFORM-2). Resolved ONCE
+// at module load: the config is a deployment property, and re-reading it per
+// request would let a half-applied env change flip the gate mid-flight.
+// `configured: false` (the default for a stack that has not opted in) keeps the
+// gate inert, so this release is behaviourally identical until an operator sets
+// INTERNAL_API_TOKEN.
+const internalAuthConfig = internalAuth.resolveInternalAuthConfig(process.env);
 
 // Shared in-memory dedup markers for the internal label fast-path (#1858). The
 // POST /internal/github-label-applied handler writes a marker per woken
@@ -151,6 +160,7 @@ const prCommentConfig = require("./pr-comment-config");
 const { parseRepoFullName: ghParseRepoFullName } = require("./github-poller");
 const ticketStore = require("./ticket-store");
 const pendingQueue = require("./pending-queue");
+const pendingReassign = require("./pending-reassign");
 const { buildFlowModel, detectFlowAnomalies } = require("./flow-anomaly-detector");
 const flowAnomalySweep = require("./flow-anomaly-sweep");
 
@@ -515,6 +525,31 @@ function startAgentProcess(config) {
   // resolve through, #1547) never takes effect. The orchestrator's PATH has no
   // business travelling; drop it and let the image's own value stand.
   delete childEnv.PATH;
+
+  // ── Internal-API credentials (#1456, GOV-PLATFORM-2) ──────────────────────
+  //
+  // THE STRIP IS THE SECURITY-CRITICAL HALF, and it is easy to miss: the spread
+  // above copies the orchestrator's WHOLE environment into every agent
+  // container, so the orchestrator's own INTERNAL_API_TOKEN — the control-plane
+  // credential that grants the full /internal/* surface — would arrive inside
+  // the very containers this ticket exists to fence out. Minting a narrow
+  // per-agent token while shipping the wide one alongside it is not a control at
+  // all, so both the token and the agent-token signing secret are removed here.
+  // Guarded by `internal-auth-wiring.test.js`.
+  delete childEnv.INTERNAL_API_TOKEN;
+  delete childEnv.INTERNAL_AGENT_TOKEN_SECRET;
+  // The mode is not a secret and is deliberately NOT stripped — an agent-side
+  // caller has no use for it, but neither does hiding it buy anything.
+  //
+  // The per-agent token is deterministic (an HMAC over the agent id), so this
+  // re-mints the identical value on every respawn — which is what makes §3.5's
+  // "rotate via the existing respawn-on-credential-change path" free: all three
+  // respawn paths (env credential change, owner credential change, single-agent
+  // respawn) go through startAgentProcess, and changing the secret invalidates
+  // every outstanding token at once.
+  const agentInternalToken = internalAuth.mintAgentToken(id, internalAuthConfig.agentTokenSecret);
+  if (agentInternalToken) childEnv.AEE_INTERNAL_TOKEN = agentInternalToken;
+  else delete childEnv.AEE_INTERNAL_TOKEN;
 
   // Bind the agent's process to the LLM endpoint configured on its working
   // environment. When an environment doesn't reference an endpoint we leave
@@ -7703,6 +7738,182 @@ function cancelPendingEntry(agentId, entryId) {
   return { removed: true, entry: pendingQueue.summarizeEntry(removed) };
 }
 
+// ── Pending-queue reassignment (#2102) ──────────────────────────────────────
+//
+// Hand a WAITING entry to a different agent. The one thing that makes this
+// work rather than merely appear to: the moved entry must carry a trigger id
+// that resolves on the TARGET. See orchestrator/pending-reassign.js.
+
+// The `triggers.json` mtime, which is the LEGACY history-horizon fallback for a
+// trigger carrying neither `activatedAt` nor `createdAt` (see effectiveHorizon).
+// The poller reads it per agent in `_buildPollPlan`; eligibility has to use the
+// same value or a legacy trigger's horizon would be computed differently here.
+function agentTriggersMtime(id) {
+  try {
+    return fs.statSync(controlOrPoolPath(id, "triggers.json")).mtime.toISOString();
+  } catch { return null; }
+}
+
+// The agents an entry may be handed to, before eligibility is considered: the
+// source's own team, minus itself, minus the runtime-less `role: 'team'` agent,
+// minus disabled agents. Same roster rule the loop-verifier picker uses
+// (TriggersPanel.jsx) and the same `enabled === false` skip `_buildPollPlan`
+// applies — enqueueing for a stopped agent only builds a backlog that fires in
+// a burst on re-enable.
+function pendingReassignCandidates(sourceAgentId) {
+  const sourceCfg = loadAgentConfig(sourceAgentId);
+  const team = sourceCfg && (sourceCfg.parentTeamId || sourceCfg.teamId);
+  if (!team) return [];
+  const out = [];
+  for (const id of listAgentIds().sort()) {
+    if (id === sourceAgentId) continue;
+    const cfg = loadAgentConfig(id);
+    if (!cfg) continue;
+    if (cfg.role === "team") continue;
+    if (cfg.enabled === false) continue;
+    if ((cfg.parentTeamId || cfg.teamId) !== team) continue;
+    out.push({
+      agentId: id,
+      agentName: cfg.name || id,
+      triggers: loadTriggers(id),
+      triggersMtime: agentTriggersMtime(id),
+    });
+  }
+  return out;
+}
+
+// "Which agents would accept this queued event?" — answered from the real
+// poller predicates over the candidates' own triggers (#2102 AC1). Read-only:
+// this never touches either queue.
+function pendingReassignTargets(sourceAgentId, entryId) {
+  const entry = readPendingEntry(sourceAgentId, entryId);
+  if (!entry) return { ok: false, code: "entry-gone" };
+  if (!pendingQueue.isReassignable(entry)) {
+    return { ok: false, code: "kind-not-reassignable", kind: pendingQueue.entryKind(entry) };
+  }
+  const { eligible, refused } = pendingReassign.eligibleTargets(
+    entry, pendingReassignCandidates(sourceAgentId));
+  return {
+    ok: true,
+    entry: pendingQueue.summarizeEntry(entry),
+    workItem: pendingReassign.describeEntryWorkItem(entry),
+    targets: eligible,
+    refused,
+  };
+}
+
+// Where a moved entry goes when the source removal succeeded but the target
+// enqueue did not (#2102 Q2/AC8). This is the residual risk of delete-first and
+// it must not be handled by silence: the full entry is parked here so a human
+// (or a later tool) can recover it, INDEPENDENTLY of the hard error the caller
+// also gets. Deliberately not written back to the source queue — the source may
+// have drained in the meantime, and re-adding it there is exactly the
+// double-run window delete-first exists to avoid (#1527).
+function parkReassignDeadLetter(record) {
+  try {
+    const dir = path.join(WORKSPACE, "pending-reassign-dead-letter");
+    fs.mkdirSync(dir, { recursive: true });
+    const day = new Date().toISOString().slice(0, 10);
+    fs.appendFileSync(path.join(dir, `reassign-lost-${day}.jsonl`),
+      JSON.stringify(record) + "\n");
+    return true;
+  } catch (err) {
+    console.error(`[Orchestrator] reassign dead-letter write failed: ${err.message}`);
+    return false;
+  }
+}
+
+// Move one entry from `sourceAgentId` to `targetAgentId`.
+//
+// The fs half only. Every decision — the refusal ladder, the delete-first
+// ordering and the re-stamping — is `pendingReassign.performReassign`, which
+// takes the two side effects as injected functions precisely so that ordering
+// is provable in a unit test instead of only readable here.
+function reassignPendingEntry(sourceAgentId, entryId, targetAgentId, { byUserId } = {}) {
+  const entry = readPendingEntry(sourceAgentId, entryId);
+  const at = new Date().toISOString();
+  const result = pendingReassign.performReassign(
+    { sourceAgentId, targetAgentId },
+    {
+      entry,
+      isReassignable: pendingQueue.isReassignable,
+      // Same-team integrity via the direct-hand-off resolver (#1528) rather
+      // than a restatement of the rule — same constraint, same refusal
+      // vocabulary, self-targeting refused there too.
+      resolveTarget: () => wakeAgent.resolveWakeTarget(
+        { fromAgentId: sourceAgentId, toRoleId: targetAgentId },
+        listAgentIds().map((aid) => ({ agentId: aid, config: loadAgentConfig(aid) })),
+      ),
+      candidate: pendingReassignCandidates(sourceAgentId)
+        .find((c) => c.agentId === targetAgentId) || null,
+      removeAtSource: () => cancelPendingEntry(sourceAgentId, entryId),
+      enqueueAtTarget: (moved) => enqueuePending(targetAgentId, moved),
+      newId: crypto.randomUUID(),
+      now: at,
+      byUserId: byUserId || null,
+    },
+  );
+
+  if (!result.ok) {
+    if (result.code === "enqueue-failed") {
+      // The event is now in no queue at all. Park the full entry for recovery
+      // and compose the sentence HERE, where the work item is in hand: the
+      // operator's single recovery step is re-applying the named label.
+      const parked = parkReassignDeadLetter({
+        ts: at, from: sourceAgentId, to: targetAgentId, by: byUserId || null,
+        reason: "enqueue-failed-after-removal",
+        workItem: result.workItem, entry: result.entry,
+      });
+      console.error(
+        `[Orchestrator] reassign: ${sourceAgentId} → ${targetAgentId} LOST after removal `
+        + `(${result.workItem.text}) — dead-letter ${parked ? "written" : "ALSO FAILED"}`);
+      return {
+        ...result,
+        error: `The entry was removed from ${sourceAgentId} but could NOT be queued for `
+          + `${targetAgentId} — it is now in no queue. Re-apply `
+          + `${result.workItem.label ? `the '${result.workItem.label}' label` : "the label"} `
+          + `on ${result.workItem.text} to run it again.`
+          + (parked ? " A copy was saved for recovery." : ""),
+        deadLettered: parked,
+      };
+    }
+    return result;
+  }
+
+  console.log(
+    `[Orchestrator] reassign: ${result.workItem.text} ${sourceAgentId} → `
+    + `agent=${targetAgentId} trigger=${result.triggerId} by=${byUserId || "?"}`);
+
+  // The audit trail (AC6). Best-effort and LAST — the move is what must not be
+  // lost, mirroring the wake-agent ordering. Sharing the queued event's own id
+  // is deliberate: the Processed-events tab then shows the original
+  // `delivered → <source>` row AND this `reassigned → <target>` row against
+  // one event, so the trail no longer stops at "the source agent was served".
+  try {
+    githubEventLog.record({
+      ...githubEventLog.buildEventEntry({
+        ghEvent: pendingReassign.buildReassignLogEvent(entry, { now: at }),
+        repoFullName: result.workItem.repo,
+        key: (entry.github && entry.github.event) || null,
+        outcomes: [{
+          agentId: targetAgentId, triggerId: result.triggerId,
+          status: "reassigned", reason: "operator-reassign", digest: false,
+          wakeLabel: result.labelFilter || null,
+        }],
+      }),
+      source: "internal",
+      emittedBy: byUserId || null,
+      ...pendingReassign.buildReassignLogFields({
+        fromAgentId: sourceAgentId, toAgentId: targetAgentId, byUserId: byUserId || null,
+      }),
+    });
+  } catch (err) {
+    console.error(`[Orchestrator] reassign log failed: ${err.message}`);
+  }
+
+  return result;
+}
+
 // Atomic read-and-clear for the agent's HTTP drain. Single-event-loop atomic.
 function drainPending(agentId) {
   const p = pendingPath(agentId);
@@ -10543,6 +10754,21 @@ async function main() {
     console.error("MATRIX_HOMESERVER required");
     process.exit(1);
   }
+  // Refuse a config that would deny every caller (#1456). Fail-closed at BOOT,
+  // where the operator is looking, rather than at the first request, where the
+  // symptom is a dead platform and the cause is three env vars away.
+  {
+    const refusal = internalAuth.bootRefusal(internalAuthConfig);
+    if (refusal) {
+      console.error(`[Orchestrator] ${refusal}`);
+      process.exit(1);
+    }
+    console.log(
+      `[Orchestrator] internal-auth mode=${internalAuthConfig.mode} `
+      + `configured=${internalAuthConfig.configured}`
+      + (internalAuthConfig.configured ? '' : ' (gate inert — set INTERNAL_API_TOKEN to arm it)'),
+    );
+  }
   migrateLegacyAgentConfigs();
   migrateSkillGrantsToAgents();
   await migrateAgentClaudeMdToReference();
@@ -10575,6 +10801,33 @@ async function main() {
 
   // Internal API — used by admin-console to manage agents
   const internalApi = http.createServer((req, res) => {
+    // ── Internal-API auth gate (#1456, GOV-PLATFORM-2) ─────────────────────
+    // FIRST statement of the handler, deliberately: this server is a ~4 400-line
+    // if-ladder with no middleware chain, so "one auth middleware at the internal
+    // server mount" can only mean the top of the dispatcher. Every route below —
+    // including the `/internal/admin/` delegation on the very next line and the
+    // inverted-guard tail route that serves as the 404 — is behind it, and a
+    // route added later is behind it by construction rather than by review.
+    //
+    // All three ladder rungs run the SAME decision; only `denied` differs, so the
+    // observe-week census is a truthful preview of what enforce will reject.
+    const authDecision = internalAuth.decideInternalAuth({
+      method: req.method, url: req.url, headers: req.headers, config: internalAuthConfig,
+    });
+    if (!authDecision.allowed) {
+      const line = internalAuth.describeDecision(authDecision, { method: req.method });
+      if (authDecision.denied) console.warn(line);
+      else if (authDecision.mode === 'warn') console.warn(line);
+      else console.log(line);
+      if (authDecision.denied) {
+        sendJson(res, authDecision.status, {
+          error: 'internal API authentication required',
+          code: authDecision.reason,
+        });
+        return;
+      }
+    }
+
     // Teams data model (#299) — CRUD for the human Team / users / memberships.
     if (req.url.startsWith('/internal/admin/')) {
       handleTeamsAdminApi(req, res).catch(err => {
@@ -12381,6 +12634,71 @@ async function main() {
       return;
     }
 
+    // ── Pending-queue reassignment (#2102) ────────────────────────────────
+    // GET  …/pending/:entryId/reassign-targets → which same-team agents would
+    //      accept this queued event, derived from the poller's own predicates.
+    // POST …/pending/:entryId/reassign {targetAgentId, byUserId} → move it.
+    //
+    // Both MUST be matched before the `…/pending/:entryId` route below, whose
+    // pattern would otherwise swallow `reassign-targets` as an entry id.
+    // Authorization is the console's (`denyUnlessCanManageAgent` on BOTH source
+    // and target); what this surface owns is the same-team integrity check.
+    const reassignTargetsMatch = req.method === 'GET' && req.url.split('?')[0]
+      .match(/^\/internal\/agents\/([^/]+)\/pending\/([^/]+)\/reassign-targets$/);
+    if (reassignTargetsMatch) {
+      const id = decodeURIComponent(reassignTargetsMatch[1]);
+      const entryId = decodeURIComponent(reassignTargetsMatch[2]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      try {
+        const result = pendingReassignTargets(id, entryId);
+        // A gone entry / an unreassignable kind is a plain answer about state,
+        // not a server fault — 200 so the UI refreshes and says what it found.
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+      return;
+    }
+
+    const reassignMatch = req.method === 'POST' && req.url.split('?')[0]
+      .match(/^\/internal\/agents\/([^/]+)\/pending\/([^/]+)\/reassign$/);
+    if (reassignMatch) {
+      const id = decodeURIComponent(reassignMatch[1]);
+      const entryId = decodeURIComponent(reassignMatch[2]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 100_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const targetAgentId = parsed && parsed.targetAgentId;
+          if (!isSafePathSeg(id) || typeof targetAgentId !== 'string' || !isSafePathSeg(targetAgentId)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+            return;
+          }
+          const result = reassignPendingEntry(id, entryId, targetAgentId, {
+            byUserId: typeof parsed.byUserId === 'string' ? parsed.byUserId : null,
+          });
+          // `enqueue-failed` is the ONE refusal that is a real server fault: the
+          // entry was removed and never re-queued, so it must not read as a
+          // routine "no" the operator can shrug off (AC8).
+          res.writeHead(result.ok ? 200 : (result.code === 'enqueue-failed' ? 500 : 409),
+            { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
     // ── Pending-queue single-entry detail + cancel (#724) ─────────────────
     // GET returns the full entry (incl. the GitHub payload the list omits);
     // DELETE cancels exactly one entry by id, race-free in this event loop and
@@ -13220,7 +13538,10 @@ async function main() {
     // ── Push / open-PR on behalf of an agent (gh-as-agent push/pr) ──────────────────
     // Moves the managed-policy-gated `git push` / `gh pr create` out of the
     // agent's Claude CLI into the orchestrator (see agentGitPush / agentCreatePr
-    // above). Internal-only, unauthenticated like the rest of :4002.
+    // above). Internal-only. Since #1456 the whole of :4002 is behind the
+    // internal-auth gate at the top of this handler; these two are on the
+    // agent-facing allowlist with `own`-id scope, which is what stops one
+    // agent pushing or opening a PR as another.
     const gitPushMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/git\/push$/);
     const gitPrMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/git\/pr$/);
     if (gitPushMatch || gitPrMatch) {

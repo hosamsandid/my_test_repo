@@ -51,6 +51,22 @@ ORCH = (os.environ.get("ORCHESTRATOR_INTERNAL_URL")
         or "http://orchestrator:4002").rstrip("/")
 TIMEOUT_SEC = 20
 
+
+# Internal-API credential (#1456, GOV-PLATFORM-2). `startAgentProcess` bakes a
+# per-agent token into the container env, exactly like the GitHub PAT; it is
+# valid only for the agent-facing allowlist and only for this agent's own id.
+# Absent — a stack that has not armed the gate — the call goes out
+# unauthenticated and the orchestrator behaves exactly as it did before.
+# Duplicated across the agent-side CLIs on purpose: each is a dependency-free
+# single file by contract (docs/cli-contract.md §4.5), so there is nowhere
+# shared to put it.
+def internal_headers(extra=None):
+    headers = dict(extra or {})
+    token = os.environ.get("AEE_INTERNAL_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    return headers
+
 # Shared CLI-contract exit codes (docs/cli-contract.md).
 EXIT_OK = 0
 EXIT_DOMAIN = 1
@@ -150,7 +166,7 @@ def main(argv: list[str]):
     req = urllib.request.Request(
         f"{ORCH}/internal/wake-agent",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=internal_headers({"Content-Type": "application/json"}),
         method="POST",
     )
     try:

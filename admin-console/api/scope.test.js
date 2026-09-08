@@ -4,23 +4,31 @@
 // Run: node --test admin-console/api/scope.test.js
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
 const {
   computeScope, visibleTeam, visibleAgent,
   canManageTeam, canManageAgent, canManageEnvironment, visibleUser, describeAuthz, isKnownPrincipal,
   normalizeCredential, visibleCredential, canManageCredential,
   canCreateCredential, canReassignCredential, credentialVisibleToTeam,
   canViewUsageStatistics, assistSelectableEndpoint, resolveAgentTenant,
+  visibleEnvironment, canCreateEnvironment, canRetierEnvironment,
 } = require('./scope');
 
 const users = [
   { id: 'u-sys', subject: 'sys@corp.com', systemAdmin: true },
   { id: 'u-a', subject: 'alice@corp.com' },
   { id: 'u-b', subject: 'bob@corp.com' },
+  { id: 'u-c', subject: 'carol@corp.com' },
 ];
 const memberships = [
   { userId: 'u-a', teamId: 'payments', role: 'team-admin' },
   { userId: 'u-a', teamId: 'default', role: 'team-member' },
   { userId: 'u-b', teamId: 'risk', role: 'team-member' },
+  // #2078: a team-ADMIN of a team literally named 'default'. Without one, every
+  // "the `|| 'default'` fallback is gone" assertion passes vacuously — the old
+  // code would have denied these callers anyway for lack of the admin role.
+  { userId: 'u-c', teamId: 'default', role: 'team-admin' },
 ];
 
 test('env admin sees everything', () => {
@@ -51,11 +59,80 @@ test('cross-team isolation: bob (risk) cannot see payments', () => {
   assert.equal(visibleTeam(s, 'payments'), false);
 });
 
-test('missing teamId is treated as the default team', () => {
+// ── D5: the System-Admin bypass census (#2078 AC3) ──────────────────────────
+//
+// The re-pointing keeps every `scope.all` short-circuit (concept §4.1: ten
+// in-predicate ones plus two whole-predicate forms — twelve, none removed).
+// A behavioural test cannot notice a bypass going missing from a predicate it
+// does not exercise, and a missing bypass is a silent lock-out of the operator
+// rather than a visible failure, so the count is pinned statically. Deliberately
+// a floor, not an exact match: adding a predicate WITH a bypass is fine, losing
+// one is not. `ownsPersonalCredential` deliberately has none (§2.2) — the three
+// bypass-free predicates are named so a reader knows the omission is the design.
+test('D5: every scope.all bypass survives the re-pointing', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'scope.js'), 'utf8')
+    .split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  const shortCircuits = (src.match(/^\s*if \(scope\.all\) return true;$/gm) || []).length;
+  const wholePredicates = (src.match(/return !!\(scope && scope\.all\);/g) || []).length;
+  assert.ok(shortCircuits >= 10, `expected >=10 scope.all short-circuits, found ${shortCircuits}`);
+  assert.ok(wholePredicates >= 2, `expected >=2 whole-predicate scope.all forms, found ${wholePredicates}`);
+
+  // And the ones that must NOT gain one: a personal record is stronger than D5
+  // (§2.2), and the rest take no caller scope at all.
+  //
+  // #2083 moved the personal-tier rule and the normalizer into resource-tier.js,
+  // so the guard follows them there rather than checking the alias left behind:
+  // asserting over a one-line re-export would have been vacuous the moment the
+  // real predicate stopped living in this file. Both sources are swept.
+  const tierSrc = fs.readFileSync(path.join(__dirname, 'resource-tier.js'), 'utf8')
+    .split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  const bodyOf = (name) => {
+    for (const [where, text] of [['scope.js', src], ['resource-tier.js', tierSrc]]) {
+      const at = text.indexOf(`function ${name}(`);
+      if (at === -1) continue;
+      let depth = 0;
+      for (let i = text.indexOf('{', at); i < text.length; i++) {
+        if (text[i] === '{') depth++;
+        else if (text[i] === '}' && --depth === 0) return { where, body: text.slice(at, i + 1) };
+      }
+      throw new Error(`unbalanced braces in ${name} (${where})`);
+    }
+    throw new assert.AssertionError({ message: `${name} must still exist in scope.js or resource-tier.js` });
+  };
+  for (const name of ['ownsPersonalTier', 'credentialVisibleToTeam', 'ownedByCaller', 'tierUsableByTeam']) {
+    assert.doesNotMatch(bodyOf(name).body, /scope\.all/, `${name} must carry no admin bypass`);
+  }
+  // The two aliases really are the shared implementations, not forks of it —
+  // otherwise the sweep above would be guarding a predicate nothing calls.
+  assert.match(src, /const ownsPersonalCredential = ownsPersonalTier;/);
+  assert.match(src, /const normalizeCredential = normalizeTier;/);
+  // The personal tier is checked BEFORE the admin shortcut in every predicate
+  // that has one. A `scope.all` line ahead of the personal branch would be the
+  // silent way to lose #1567 D2, and it reads as correct code.
+  for (const name of ['visibleCredential', 'canManageCredential', 'canCreateCredential',
+                      'visibleEnvironment', 'canManageEnvironment', 'canCreateEnvironment']) {
+    const { body } = bodyOf(name);
+    const personalAt = body.search(/TIER_PERSONAL|'personal'/);
+    const adminAt = body.indexOf('if (scope.all) return true;');
+    assert.ok(personalAt !== -1, `${name} must handle the personal tier`);
+    assert.ok(adminAt !== -1, `${name} must keep its scope.all bypass`);
+    assert.ok(personalAt < adminAt, `${name}: the personal tier must be checked before scope.all`);
+  }
+});
+
+test('#2078/§8.4: a resource with no teamId is invisible, it does NOT collapse to the default team', () => {
+  // Alice IS a member of a team called 'default'. Before #2078 that made every
+  // unowned resource in the installation visible to her through the `||
+  // 'default'` fallback; with the access-scope layer collapsing, a team may be
+  // created with that slug and the fallback becomes a real leak.
   const s = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
-  assert.equal(visibleTeam(s, undefined), true);  // alice is in default
-  const sBob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
-  assert.equal(visibleTeam(sBob, undefined), false); // bob is not in default
+  assert.equal(s.teamIds.has('default'), true, 'fixture premise: the fallback had a referent for alice');
+  assert.equal(visibleTeam(s, undefined), false);
+  assert.equal(visibleTeam(s, null), false);
+  assert.equal(visibleTeam(s, ''), false);
+  // Still fully visible to an admin — the fallback removal narrows non-admins only (D5).
+  const sys = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  assert.equal(visibleTeam(sys, undefined), true);
 });
 
 test('unknown subject fails closed', () => {
@@ -69,26 +146,41 @@ test('no username fails closed', () => {
   assert.equal(s.all, false);
 });
 
-test('visibleAgent: private agent only visible to owner (non-admin)', () => {
-  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
-  const teamAgent = { teamId: 'payments', visibility: 'team' };
-  const privOwn = { teamId: 'payments', visibility: 'private', ownerId: 'u-a' };
-  const privOther = { teamId: 'payments', visibility: 'private', ownerId: 'u-b' };
-  assert.equal(visibleAgent(alice, teamAgent), true);
-  assert.equal(visibleAgent(alice, privOwn), true);
-  assert.equal(visibleAgent(alice, privOther), false); // private, not owner
-  // out-of-team agent never visible
-  assert.equal(visibleAgent(alice, { teamId: 'risk', visibility: 'team' }), false);
-});
-
-test('visibleAgent: admin sees private agents of others', () => {
-  const sys = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
-  assert.equal(visibleAgent(sys, { teamId: 'risk', visibility: 'private', ownerId: 'u-b' }), true);
-});
-
-test('visibleAgent: missing visibility defaults to team-wide', () => {
+test('visibleAgent: an agent WITH a team boundary is decided by membership alone (#2078 / D9)', () => {
   const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
   assert.equal(visibleAgent(alice, { teamId: 'payments' }), true);
+  // out-of-team agent never visible
+  assert.equal(visibleAgent(alice, { teamId: 'risk' }), false);
+  // The retired `visibility` field no longer gates anything: an in-team agent
+  // owned by someone else stays visible (D9 — a member may read and chat), and
+  // the string 'private' is inert rather than a hidden opt-in.
+  assert.equal(visibleAgent(alice, { teamId: 'payments', ownerId: 'u-b' }), true);
+  assert.equal(visibleAgent(alice, { teamId: 'payments', visibility: 'private', ownerId: 'u-b' }), true);
+  // ...and out-of-team stays invisible even when alice owns it — the boundary wins.
+  assert.equal(visibleAgent(alice, { teamId: 'risk', ownerId: 'u-a' }), false);
+});
+
+test('visibleAgent: an agent with NO team boundary is owner-only (#2078 / D8)', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(visibleAgent(alice, { teamId: null, ownerId: 'u-a' }), true);
+  assert.equal(visibleAgent(alice, { teamId: null, ownerId: 'u-b' }), false);
+  // Ownerless and teamless → nobody but an admin (§8.4 fail-closed).
+  assert.equal(visibleAgent(alice, { teamId: null }), false);
+});
+
+test('visibleAgent: a caller with no user identity never matches the owner rule', () => {
+  // The env single-admin has `userId: null`; so does an unknown subject. Neither
+  // may be allowed to match an ownerless resource by null === null.
+  const ghost = computeScope({ username: 'ghost@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(ghost.userId, null);
+  assert.equal(visibleAgent(ghost, { teamId: null, ownerId: null }), false);
+  assert.equal(visibleAgent(ghost, { teamId: null }), false);
+});
+
+test('visibleAgent: admin sees agents of every team and every owner (D5)', () => {
+  const sys = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  assert.equal(visibleAgent(sys, { teamId: 'risk', ownerId: 'u-b' }), true);
+  assert.equal(visibleAgent(sys, { teamId: null, ownerId: 'u-b' }), true);
 });
 
 // ── Admin-surface scoping & gating (#584) ──────────────────────────────────
@@ -119,9 +211,19 @@ test('canManageTeam: team-member manages nothing', () => {
   assert.equal(canManageTeam(bob, 'risk'), false);
 });
 
-test('canManageTeam: missing teamId collapses to default', () => {
+test('canManageTeam: a missing teamId fails closed, it does not collapse to default (#2078/§8.4)', () => {
+  // Sharper than the pre-#2078 version, which passed for the wrong reason:
+  // alice is only a *member* of 'default', so the old fallback denied her
+  // anyway. Carol IS team-admin of 'default' — under the fallback she would
+  // have managed every unowned resource in the installation.
   const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
-  assert.equal(canManageTeam(alice, undefined), false); // alice is only a member of default
+  assert.equal(canManageTeam(alice, undefined), false);
+  const carol = computeScope({ username: 'carol@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(carol.roles.get('default'), 'team-admin', 'fixture premise: the fallback had a referent');
+  assert.equal(canManageTeam(carol, 'default'), true);
+  assert.equal(canManageTeam(carol, undefined), false);
+  assert.equal(canManageTeam(carol, null), false);
+  assert.equal(canManageTeam(carol, ''), false);
 });
 
 test('visibleUser: non-admin sees only users sharing a team', () => {
@@ -227,7 +329,13 @@ test('describeAuthz: surfaces the caller\'s own githubHandle (#1385)', () => {
 test('normalizeCredential: legacy entry (no scope) is team-scoped by teamId', () => {
   assert.deepEqual(normalizeCredential({ id: 'k', teamId: 'payments' }),
     { id: 'k', scope: 'team', teamId: 'payments', assignedTeamIds: [] });
-  assert.equal(normalizeCredential({ id: 'k' }).teamId, 'default'); // missing → default
+  // #2078/§8.4: no `|| 'default'` collapse. Every index entry is stamped by the
+  // orchestrator's boot-time adoption pass, so an entry that still has no team
+  // is one no team owns — it must fail closed, not land in the default team's lap.
+  assert.equal(normalizeCredential({ id: 'k' }).teamId, null);
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(visibleCredential(alice, { id: 'k' }), false);
+  assert.equal(canManageCredential(alice, { id: 'k' }), false);
 });
 
 test('normalizeCredential: system entry keeps assignedTeamIds, drops teamId', () => {
@@ -295,9 +403,12 @@ test('assistSelectableEndpoint: pre-#800 legacy record (no scope) is team-scoped
   // Legacy entry carries only teamId, no scope → treated as team-scoped owned by that team.
   assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', teamId: 'risk' }), true);
   assert.equal(assistSelectableEndpoint(bob, { authType: 'api-key', teamId: 'payments' }), false);
-  // A legacy record with no teamId at all collapses to the default team.
-  const legacyDefault = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships }); // member of default
-  assert.equal(assistSelectableEndpoint(legacyDefault, { authType: 'api-key' }), true);
+  // #2078/§8.4: a record with no teamId at all no longer collapses into the
+  // default team — it is selectable by nobody but a full-visibility admin.
+  const inDefault = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships }); // member of default
+  assert.equal(assistSelectableEndpoint(inDefault, { authType: 'api-key' }), false);
+  const sys = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  assert.equal(assistSelectableEndpoint(sys, { authType: 'api-key' }), true);
 });
 
 test('assistSelectableEndpoint: fail-closed on missing scope/endpoint', () => {
@@ -446,7 +557,28 @@ test('canManageAgent: team-admin manages agents of their admin team only', () =>
   assert.equal(canManageAgent(alice, { teamId: 'payments' }), true);   // team-admin
   assert.equal(canManageAgent(alice, { teamId: 'default' }), false);   // only a member (AC1)
   assert.equal(canManageAgent(alice, { teamId: 'risk' }), false);      // not a member
-  assert.equal(canManageAgent(alice, {}), false);                      // missing → default, not admin
+  assert.equal(canManageAgent(alice, {}), false);                      // no team, no owner → closed
+});
+
+test('canManageAgent: an agent with NO team boundary is managed by its owner alone (#2078 / D8)', () => {
+  // The mirror of visibleAgent's owner branch. Without it a standalone agent
+  // would be visible to its creator and editable by nobody but a System Admin:
+  // no membership can name a standalone agent, so canManageTeam always denies.
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canManageAgent(alice, { teamId: null, ownerId: 'u-a' }), true);
+  assert.equal(canManageAgent(alice, { teamId: null, ownerId: 'u-b' }), false);
+  assert.equal(canManageAgent(alice, { teamId: null }), false);
+  // A plain team-member owns their standalone agent too — ownership is not a role.
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(bob.roles.get('risk'), 'team-member');
+  assert.equal(canManageAgent(bob, { teamId: null, ownerId: 'u-b' }), true);
+  // ...but owning an agent grants nothing over an agent that HAS a team: the
+  // boundary is checked first, so ownership never bypasses the team-admin rule.
+  assert.equal(canManageAgent(bob, { teamId: 'risk', ownerId: 'u-b' }), false);
+  // The env single-admin (userId null) must not match an ownerless agent.
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  assert.equal(env.userId, null);
+  assert.equal(canManageAgent({ ...env, all: false }, { teamId: null, ownerId: null }), false);
 });
 
 test('canManageAgent: plain team-member manages no agent (AC1)', () => {
@@ -476,6 +608,140 @@ test('canManageEnvironment: team-admin manages own team env; member/other denied
   assert.equal(canManageEnvironment(alice, { teamId: 'risk' }), false);    // other team
   assert.equal(canManageEnvironment(bob, { teamId: 'risk' }), false);      // member, not admin
   assert.equal(canManageEnvironment(alice, {}), false);                    // missing → default
+});
+
+// ── #2083 (P5): the shared tier for environments and MCP servers ────────────
+//
+// One predicate family serves both kinds, so every case below is equally a
+// statement about an MCP server record.
+
+const SHARED = (assignedTeamIds) => ({ id: 'env-shared', scope: 'system', assignedTeamIds });
+
+test('#2083: a legacy environment record behaves exactly as it did before the tier existed', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const carol = computeScope({ username: 'carol@corp.com', adminUsername: 'admin', users, memberships });
+  // No `scope` field at all — the shape every environment on disk has today.
+  const legacy = { id: 'env-pay', teamId: 'payments' };
+  assert.equal(visibleEnvironment(alice, legacy), true);
+  assert.equal(canManageEnvironment(alice, legacy), true);
+  assert.equal(visibleEnvironment(carol, legacy), false);
+  assert.equal(canManageEnvironment(carol, legacy), false);
+  // And an explicit team-tier record is indistinguishable from the legacy one.
+  const explicit = { id: 'env-pay', scope: 'team', teamId: 'payments', assignedTeamIds: [] };
+  assert.equal(visibleEnvironment(alice, explicit), visibleEnvironment(alice, legacy));
+  assert.equal(canManageEnvironment(alice, explicit), canManageEnvironment(alice, legacy));
+});
+
+test('#2083: visibility is MEMBERSHIP, not the admin role — the documented divergence from visibleCredential', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  // Alice is a plain MEMBER of 'default'. D9 says a Team Member may read.
+  const env = { id: 'env-def', teamId: 'default' };
+  assert.equal(visibleEnvironment(alice, env), true, 'a member must still see their team environment');
+  assert.equal(canManageEnvironment(alice, env), false, 'but must not manage it');
+  // The same record as a CREDENTIAL is invisible to her — that is the #798
+  // deferral this ticket deliberately does not import into the env path.
+  assert.equal(visibleCredential(alice, { scope: 'team', teamId: 'default' }), false);
+});
+
+test('#2083: a shared environment reaches every assigned team, and no other', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  const shared = SHARED(['payments', 'ops']);
+  assert.equal(visibleEnvironment(alice, shared), true);   // member of payments
+  assert.equal(visibleEnvironment(bob, shared), false);    // risk only
+  // A shared record carries no owning team, which is exactly why the old
+  // `visibleTeam(scope, env.teamId)` filter hid it from everyone.
+  assert.equal(visibleTeam(alice, shared.teamId), false);
+});
+
+test('#2083: a shared environment is MANAGEABLE by every assigned team-admin — the no-lockout rule', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const carol = computeScope({ username: 'carol@corp.com', adminUsername: 'admin', users, memberships });
+  const shared = SHARED(['payments', 'default']);
+  assert.equal(canManageEnvironment(alice, shared), true, 'team-admin of payments');
+  assert.equal(canManageEnvironment(carol, shared), true, 'team-admin of default');
+  // A plain member of an assigned team may read it but not change it.
+  const sharedDefaultOnly = SHARED(['default']);
+  assert.equal(visibleEnvironment(alice, sharedDefaultOnly), true, 'alice is a member of default');
+  assert.equal(canManageEnvironment(alice, sharedDefaultOnly), false, 'but only a member');
+  // THE DIVERGENCE, stated as a test: the credential rule refuses outright, and
+  // copying it would have made the P5 migration a manage-axis lockout.
+  assert.equal(canManageCredential(alice, { scope: 'system', assignedTeamIds: ['payments'] }), false);
+});
+
+test('#2083: a shared record assigned to zero teams is reachable by System Admins only', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const carol = computeScope({ username: 'carol@corp.com', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const orphan = SHARED([]);
+  assert.equal(visibleEnvironment(alice, orphan), false);
+  assert.equal(canManageEnvironment(alice, orphan), false);
+  // Including the team literally named 'default' — never orphaned INTO view.
+  assert.equal(visibleEnvironment(carol, orphan), false);
+  assert.equal(canManageEnvironment(carol, orphan), false);
+  assert.equal(visibleEnvironment(sys, orphan), true);
+  assert.equal(canManageEnvironment(sys, orphan), true);
+});
+
+test('#2083: creating a SHARED environment is System-Admin-only; a team one needs team-admin', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canCreateEnvironment(alice, { scope: 'team', teamId: 'payments' }), true);
+  assert.equal(canCreateEnvironment(alice, { scope: 'team', teamId: 'risk' }), false);
+  assert.equal(canCreateEnvironment(bob, { scope: 'team', teamId: 'risk' }), false, 'member, not admin');
+  // The shared tier: refused for a Team Admin even of an assigned team.
+  assert.equal(canCreateEnvironment(alice, { scope: 'system', assignedTeamIds: ['payments'] }), false);
+  assert.equal(canCreateEnvironment(sys, { scope: 'system', assignedTeamIds: ['payments'] }), true);
+  // No `|| 'default'`: a create naming no team is refused, not attributed.
+  assert.equal(canCreateEnvironment(alice, {}), false);
+  assert.equal(canCreateEnvironment(null, { scope: 'team', teamId: 'payments' }), false);
+});
+
+test('#2083: re-tiering is System-Admin-only, and is a narrower question than editing', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canRetierEnvironment(alice), false);
+  assert.equal(canRetierEnvironment(sys), true);
+  assert.equal(canRetierEnvironment(env), true);
+  assert.equal(canRetierEnvironment(null), false);
+  // Alice may still EDIT the record she administers — the two gates answer
+  // different questions and only one of them is an operator act.
+  assert.equal(canManageEnvironment(alice, { teamId: 'payments' }), true);
+});
+
+test('#2083: a hand-written personal environment fails closed to its owner, with no admin bypass', () => {
+  // Nothing can create one (resolveTieredOwnership refuses, guarded in
+  // tiered-resource-routes.test.js), but the predicates must still answer
+  // safely for a record edited onto disk rather than crash or default open.
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const mine = { id: 'env-p', scope: 'personal', userId: 'u-a' };
+  assert.equal(visibleEnvironment(alice, mine), true);
+  assert.equal(canManageEnvironment(alice, mine), true);
+  assert.equal(visibleEnvironment(sys, mine), false, 'the personal tier has no scope.all bypass');
+  assert.equal(canManageEnvironment(sys, mine), false);
+});
+
+test('#2083: a malformed record fails closed for a non-admin and stays visible to the operator', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  for (const bad of [null, undefined, {}, { scope: 'nonsense' }]) {
+    assert.equal(visibleEnvironment(alice, bad), false, 'a non-admin reaches nothing unstamped (§8.4)');
+    assert.equal(canManageEnvironment(alice, bad), false);
+    // The operator keeps `scope.all`, deliberately: this is the same answer
+    // `visibleTeam(sys, undefined)` already gives (asserted above), and it is
+    // the SAFE direction — a record too broken to name its team is exactly the
+    // one only a System Admin can repair, so hiding it would be an operator
+    // lock-out dressed as a fail-closed default.
+    assert.equal(visibleEnvironment(sys, bad), true);
+    assert.equal(canManageEnvironment(sys, bad), true);
+  }
+  // A missing caller scope still fails closed on every path.
+  assert.equal(visibleEnvironment(null, { teamId: 'payments' }), false);
+  assert.equal(canManageEnvironment(null, { teamId: 'payments' }), false);
+  assert.equal(canCreateEnvironment(null, { teamId: 'payments' }), false);
 });
 
 test('canManageEnvironment: env admin & System-Admin manage any env (no regression)', () => {
@@ -544,7 +810,15 @@ test('provider switch: even a System Admin cannot target a provider the agent te
   assert.equal(credentialVisibleToTeam(otherEp, 'risk'), false);
 });
 
-// ── Agent → human tenant resolution ─────────────────────────────────────────
+// ── Agent → CREDENTIAL tenant resolution ────────────────────────────────────
+// Since #2078 this is the credential/model-provider axis ONLY; the access
+// boundary collapsed into agent-team.js `resolveAgentTeam` (tested there and in
+// team-membership-enforcement.test.js). This block is deliberately unchanged:
+// credential records are still stamped with access-scope ids until P5 re-points
+// them, so the hop below must keep answering exactly what it answered before —
+// a regression here makes every team-scoped provider unusable, which is the bug
+// the hop was introduced to fix.
+//
 // A team-member's tenant is its parent Agent Team's `teamId`. `parentTeamId`
 // itself is an Agent-Team id in a different namespace and must never be used as
 // a tenant — doing so silently empties every team-scoped lookup whenever the

@@ -116,8 +116,8 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // The number therefore now means "docs corpus + the biggest single page
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
-// **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 305 972 of 340 000 — 90.0% used, 34 028 left — against
+// **`/chats`** (the Agent Chat topic plus its `seeAlso` neighbours) at
+// 308 886 of 340 000 — 90.8% used, 31 114 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped

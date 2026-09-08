@@ -227,15 +227,19 @@ and **Agents** — nothing here is a one-way door.
   conversation.
 
 Nothing is hidden from you while a piece is missing. Each one shows up on the page
-as a warning card with a direct link to the page that fixes it, and the create
-button spells out what is still outstanding in a short checklist rather than
-greying out silently.
+as a warning card, and the create button spells out what is still outstanding in a
+short checklist rather than greying out silently. Most cards carry a direct link to
+the page that fixes it; the missing-provider card shows that link only to someone
+who can actually add a provider, and otherwise gives an honest note asking a Team or
+System Administrator — never a link that would only bounce them back.
 
 The card and the checklist answer slightly different questions, which is why you
 sometimes see one without the other. A **warning card** says *this platform has
 no model provider / no SSH key / no GitHub token at all*, and appears as soon as
 that is true. The **checklist** under the form says *this submission cannot go
-through yet*, and lists only what blocks the form as you have filled it in. On
-the repository path the platform binds the environment's provider for you, so a
-missing provider shows as a card but does not block the button; on the repo-less
-path an empty name blocks the button with no card at all.
+through yet*, and lists only what blocks the form as you have filled it in. When
+there is no model provider on the platform at all the form is **locked** — its
+fields are disabled on both the repository and repo-less paths, rather than letting
+you name an assistant and then fail on submit — and the card and the checklist then
+agree that the provider is the one thing missing. Otherwise the two can differ: on
+the repo-less path an empty name blocks the button with no card at all.

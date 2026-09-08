@@ -551,7 +551,9 @@ test('the shipped jira manifest (plugins/jira) is valid', () => {
   assert.deepEqual(manifest.platforms, ['podman']);
   assert.equal(manifest.cli.name, 'aee-jira');
   assert.equal(manifest.quota.maxObjects, 500);
-  // Phase 0 ships no UI routes and no write policy yet (Phases 3–4):
-  assert.equal(manifest.ui, undefined);
+  // Phase 3 ships one read-only UI route (`/` @ team-member); the write
+  // `policy` lands in Phase 4.
+  assert.deepEqual(manifest.ui.routes, [{ path: '/', minRole: 'team-member' }]);
+  assert.notEqual(manifest.ui.global, true);
   assert.equal(manifest.policy, undefined);
 });

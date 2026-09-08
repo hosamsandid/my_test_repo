@@ -26,6 +26,7 @@
 // 2 replaces the doorbell with a generic `plugin-event` wake (§4B).
 
 const http = require('http');
+const fs = require('fs');
 const path = require('path');
 
 const {
@@ -39,6 +40,8 @@ const {
 const { WatchStore } = require('./watch-store');
 const { InboxStore } = require('./inbox-store');
 const { JiraPoller } = require('./poller');
+const jira = require('./jira-client');
+const { verifyViewerHeaders, requiredRoleForPath, roleAllows } = require('./viewer-headers');
 
 const PLUGIN_ID = 'jira';
 
@@ -185,7 +188,118 @@ async function handleCli(req, res, cliPath) {
     return sendJson(res, 200, { entries, consumed: consume });
   }
 
+  // ── reads that need the per-scope Jira credential (Phase 3) ───────────────
+  const readOps = { '/projects': 'projects', '/list': 'list', '/show': 'show' };
+  if (readOps[cliPath] && req.method === 'GET') {
+    const op = readOps[cliPath];
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, op, 'no-credential');
+      return sendJson(res, 400, {
+        error: 'This team has no Jira credential configured. A Team Admin sets it on the Plugins page.',
+        code: 'no-credential',
+      });
+    }
+    try {
+      let result;
+      if (op === 'projects') {
+        result = { projects: await jira.listProjects(cred) };
+      } else if (op === 'list') {
+        const project = (params.get('project') || '').trim();
+        if (!project) return sendJson(res, 400, { error: 'a --project key is required' });
+        result = { project, issues: await jira.listProjectIssues(cred, { projectKey: project, status: params.get('status') || undefined }) };
+      } else {
+        const issue = (params.get('issue') || '').trim();
+        if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
+        result = { issue: await jira.getIssue(cred, issue) };
+      }
+      writeAudit(scopeId, scopeId, op, 'ok', params.get('project') || params.get('issue') || '');
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, op, 'error', err.message);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
   return sendJson(res, 404, { error: 'not found' });
+}
+
+// ── the served UI (Jira plan §6.4) — console-proxied, viewer-header authed ───
+// The `/` route (team-member): the issues in a team's scope, the per-scope
+// event inbox, and what the poller is watching. Phase 4 adds `/admin`.
+function contentType(p) {
+  if (p.endsWith('.html')) return 'text/html; charset=utf-8';
+  if (p.endsWith('.js')) return 'text/javascript; charset=utf-8';
+  if (p.endsWith('.css')) return 'text/css; charset=utf-8';
+  return 'application/octet-stream';
+}
+
+function pickTeam(viewer, requested) {
+  const allowed = Array.isArray(viewer.teamIds) ? viewer.teamIds : [];
+  if (requested && allowed.includes(requested)) return requested;
+  if (!requested && allowed.length === 1) return allowed[0];
+  return null;
+}
+
+async function handleUiApi(req, res, apiPath, viewer) {
+  const params = query(req);
+
+  if (apiPath === '/context' && req.method === 'GET') {
+    const teams = (viewer.teamIds || []).map((id) => ({
+      teamId: id,
+      hasCredential: !!resolveCredential(id),
+      watches: (watchStore.loadConfig(id).watches || []).map((w) => w.projectKey),
+      inbox: inboxStore.count(id),
+    }));
+    return sendJson(res, 200, { user: viewer.sub, teams });
+  }
+
+  const team = pickTeam(viewer, params.get('team'));
+  if (!team) return sendJson(res, 400, { error: 'select a team you are a member of' });
+
+  if (apiPath === '/inbox' && req.method === 'GET') {
+    return sendJson(res, 200, { entries: inboxStore.list(team) });
+  }
+  if (apiPath === '/watches' && req.method === 'GET') {
+    const conf = watchStore.loadConfig(team);
+    return sendJson(res, 200, { watches: conf.watches, cursors: conf.cursors, setBy: conf.setBy, setAt: conf.setAt });
+  }
+
+  const cred = resolveCredential(team);
+  if (!cred) return sendJson(res, 400, { error: 'This team has no Jira credential configured.', code: 'no-credential' });
+  try {
+    if (apiPath === '/projects' && req.method === 'GET') {
+      return sendJson(res, 200, { projects: await jira.listProjects(cred) });
+    }
+    if (apiPath === '/issues' && req.method === 'GET') {
+      const project = (params.get('project') || '').trim();
+      if (!project) return sendJson(res, 400, { error: 'a project is required' });
+      return sendJson(res, 200, { issues: await jira.listProjectIssues(cred, { projectKey: project, status: params.get('status') || undefined }) });
+    }
+  } catch (err) {
+    return sendJson(res, err.status && err.status < 500 ? err.status : 502, { error: err.message });
+  }
+  return sendJson(res, 404, { error: 'not found' });
+}
+
+async function handleUi(req, res, uiPath) {
+  const viewer = verifyViewerHeaders(req, SIGNING_SECRET);
+  if (!viewer) return sendJson(res, 401, { error: 'unsigned viewer' });
+  const need = requiredRoleForPath(uiPath);
+  if (!roleAllows(viewer.role, need)) {
+    return sendJson(res, 403, { error: `route ${uiPath} requires ${need}; viewer is ${viewer.role}` });
+  }
+  if (uiPath === '/api' || uiPath.startsWith('/api/')) {
+    return handleUiApi(req, res, uiPath.slice('/api'.length) || '/', viewer);
+  }
+  const file = uiPath === '/' || uiPath === '' ? 'index.html' : uiPath.replace(/^\/+/, '');
+  const abs = path.join(__dirname, 'ui', file);
+  if (!abs.startsWith(path.join(__dirname, 'ui') + path.sep)) return sendJson(res, 404, { error: 'not found' });
+  fs.readFile(abs, (err, data) => {
+    if (err) return sendJson(res, 404, { error: 'not found' });
+    res.writeHead(200, { 'Content-Type': contentType(abs) });
+    res.end(data);
+  });
 }
 
 // ── Phase-0 spike seam: set a scope's watch + doorbell by hand ──────────────
@@ -262,6 +376,11 @@ async function handleRequest(req, res) {
   if (urlPath === '/cli' || urlPath.startsWith('/cli/')) {
     const cliPath = urlPath === '/cli' ? '/' : urlPath.slice('/cli'.length) || '/';
     return void (await handleCli(req, res, cliPath));
+  }
+
+  if (urlPath === '/ui' || urlPath.startsWith('/ui/')) {
+    const uiPath = urlPath === '/ui' ? '/' : urlPath.slice('/ui'.length) || '/';
+    return void (await handleUi(req, res, uiPath));
   }
 
   return void sendJson(res, 404, { error: 'not found' });

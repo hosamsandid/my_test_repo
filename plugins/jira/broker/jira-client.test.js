@@ -150,6 +150,33 @@ test('listProjects: paginates /project/search and narrows to key/name/id/type', 
   });
 });
 
+test('listProjectIssues: project-scoped JQL, optional status filter, narrow rows', async () => {
+  await withFetch((url, opts) => {
+    assert.match(url, /\/rest\/api\/3\/search\/jql/);
+    const body = JSON.parse(opts.body);
+    assert.equal(body.jql, 'project = "KAN" AND status = "Ready for Dev" ORDER BY updated DESC');
+    assert.deepEqual(body.fields, ['summary', 'status', 'assignee', 'updated']);
+    return { ok: true, status: 200, text: async () => JSON.stringify({ issues: [
+      { key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, updated: '2026-09-09T10:00:00Z' } },
+    ] }) };
+  }, async () => {
+    const rows = await jc.listProjectIssues({ siteUrl: 'acme', email: 'e', apiToken: 't' }, { projectKey: 'KAN', status: 'Ready for Dev', env: CRED.env });
+    assert.deepEqual(rows, [{
+      key: 'KAN-6', summary: 'Login', status: 'Ready for Dev', assignee: 'Jane',
+      updated: '2026-09-09T10:00:00Z', url: 'https://acme.atlassian.net/browse/KAN-6',
+    }]);
+  });
+});
+
+test('listProjectIssues: no status → JQL without the status clause', async () => {
+  await withFetch((url, opts) => {
+    assert.equal(JSON.parse(opts.body).jql, 'project = "KAN" ORDER BY updated DESC');
+    return { ok: true, status: 200, text: async () => JSON.stringify({ issues: [] }) };
+  }, async () => {
+    assert.deepEqual(await jc.listProjectIssues(CRED, { projectKey: 'KAN', env: CRED.env }), []);
+  });
+});
+
 test('searchJql: runs an arbitrary query through /search/jql', async () => {
   await withFetch((url, opts) => {
     assert.match(url, /\/rest\/api\/3\/search\/jql/);

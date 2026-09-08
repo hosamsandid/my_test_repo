@@ -503,3 +503,82 @@ test('aee-plan: edit with an op missing a type → exit 2 (usage), never a broke
   const obj = JSON.parse(r.stdout.trim());
   assert.equal(obj.error, 'usage');
 });
+
+// ─── jira: aee-jira (Jira plan §6.3, Phase 3) ────────────────────────────────
+// The same §4.5 contract against the real `aee-jira` CLI. Broker-free: `whoami`
+// reads only the seeded config; every broker-touching verb points at an
+// unroutable endpoint so a call attempt deterministically returns exit 3.
+const JIRA_CLI = path.join(__dirname, '..', 'plugins', 'jira', 'bin', 'aee-jira.py');
+
+function runJira(args, workspace) {
+  return spawnSync('python3', [JIRA_CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, AEE_WORKSPACE: workspace },
+  });
+}
+
+function grantedJiraWorkspace(endpoint) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-jira-'));
+  fs.mkdirSync(path.join(dir, '.agent-studio', 'plugins'), { recursive: true });
+  const cfg = pluginConfigFile({
+    pluginId: 'jira', scopeId: 'team-x',
+    endpoint: endpoint || 'http://127.0.0.1:59374/',   // reserved, unroutable
+    token: 'jira.team-x.SIG', cliName: 'aee-jira',
+  });
+  fs.writeFileSync(path.join(dir, '.agent-studio', 'plugins', 'jira.json'), JSON.stringify(cfg), { mode: 0o600 });
+  return dir;
+}
+
+test('aee-jira is a dependency-free single file (stdlib imports only)', () => {
+  const src = fs.readFileSync(JIRA_CLI, 'utf8');
+  const imports = src.split('\n').filter((l) => /^\s*(import|from)\s+/.test(l));
+  assert.ok(imports.length > 0);
+  const STDLIB = new Set(['argparse', 'json', 'os', 'sys', 'urllib']);
+  for (const line of imports) {
+    const m = line.match(/^\s*(?:import|from)\s+([a-zA-Z0-9_]+)/);
+    assert.ok(m && STDLIB.has(m[1]), `non-stdlib import: ${line.trim()}`);
+  }
+});
+
+test('aee-jira: no subcommand → exit 2, --help → 0 with domain verbs', () => {
+  assert.equal(runJira([], grantedJiraWorkspace()).status, 2);
+  const help = runJira(['--help'], grantedJiraWorkspace());
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /projects/);
+  assert.match(help.stdout, /inbox/);
+  assert.match(help.stdout, /show/);
+});
+
+test('aee-jira: unknown subcommand → exit 2 (usage)', () => {
+  assert.equal(runJira(['frobnicate'], grantedJiraWorkspace()).status, 2);
+});
+
+test('aee-jira: whoami --json resolves the seeded scope (no broker needed)', () => {
+  const r = runJira(['whoami', '--json'], grantedJiraWorkspace());
+  assert.equal(r.status, 0);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, true);
+  assert.equal(obj.scopeId, 'team-x');
+});
+
+test('aee-jira: ungranted → exit 3 with not-granted error', () => {
+  const r = runJira(['projects', '--json'], ungrantedWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'not-granted');
+});
+
+test('aee-jira: a granted verb against an unreachable broker → exit 3', () => {
+  for (const args of [['projects'], ['list', '--project', 'KAN'], ['show', 'KAN-1'], ['inbox']]) {
+    const r = runJira([...args, '--json'], grantedJiraWorkspace());
+    assert.equal(r.status, 3, args.join(' '));
+    const obj = JSON.parse(r.stdout.trim());
+    assert.equal(obj.error, 'broker-unreachable');
+  }
+});
+
+test('aee-jira: list without --project → exit 2 (usage), never a broker call', () => {
+  const r = runJira(['list', '--json'], grantedJiraWorkspace());
+  assert.equal(r.status, 2);
+});

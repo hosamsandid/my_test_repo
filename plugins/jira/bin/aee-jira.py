@@ -10,14 +10,16 @@ All privilege lives in the broker (plugins/jira/broker/server.js), which holds
 the team's Jira credential and makes every Jira call server-side. This CLI is a
 privilege-less client that just carries the scope token.
 
-PHASE 0 surface — the doorbell/pull model:
+Phase 3 surface — reads:
 
-    aee-jira whoami                 # the resolved scope
-    aee-jira inbox [--consume]      # what woke me: the queued status-change events
+    aee-jira whoami                              # the resolved plugin scope
+    aee-jira inbox [--consume]                   # what woke me: queued status-change events
+    aee-jira projects                            # the projects in this team's scope
+    aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
+    aee-jira show KAN-6                          # one issue (summary, status, assignee, URL)
 
 `inbox` without `--consume` peeks; with `--consume` it drains the queue (use it
-once per wake). The reads (`projects`, `list`, `show`) and the attributed writes
-(`comment`, `transition`) land in later phases.
+once per wake). Attributed writes (`comment`, `transition`) land in Phase 4.
 
 Contract (§4.5): `--json` on every subcommand; exit 0 ok / 1 domain error /
 2 usage / 3 broker unreachable; `--help` carries the agent-readable docs.
@@ -106,7 +108,7 @@ def _get(cfg, path):
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="aee-jira",
-        description="Read what a Jira status change woke you about. All Jira access is server-side in the broker.",
+        description="Read Jira issues in your team's scope. All Jira access is server-side in the broker.",
     )
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--json", action="store_true", help="machine-readable output")
@@ -116,6 +118,15 @@ def build_parser():
 
     p_inbox = sub.add_parser("inbox", parents=[common], help="the queued status-change events that woke you")
     p_inbox.add_argument("--consume", action="store_true", help="drain the queue (use once per wake) instead of peeking")
+
+    sub.add_parser("projects", parents=[common], help="list the Jira projects in this team's scope")
+
+    p_list = sub.add_parser("list", parents=[common], help="list a project's issues (most-recently-updated first)")
+    p_list.add_argument("--project", required=True, help="project key, e.g. KAN")
+    p_list.add_argument("--status", help="only issues currently in this status")
+
+    p_show = sub.add_parser("show", parents=[common], help="read one issue")
+    p_show.add_argument("issue", help="issue key, e.g. KAN-6")
 
     return parser
 
@@ -146,6 +157,15 @@ def main(argv=None):
 
     if args.cmd == "inbox":
         path = "/inbox?consume=1" if args.consume else "/inbox"
+    elif args.cmd == "projects":
+        path = "/projects"
+    elif args.cmd == "list":
+        q = {"project": args.project}
+        if args.status:
+            q["status"] = args.status
+        path = "/list?" + urllib.parse.urlencode(q)
+    elif args.cmd == "show":
+        path = "/show?" + urllib.parse.urlencode({"issue": args.issue})
     else:
         parser.print_help()
         return EXIT_USAGE

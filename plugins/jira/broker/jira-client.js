@@ -254,6 +254,40 @@ async function listProjects(cred, { env } = {}) {
   return projects;
 }
 
+// A project's issues, most-recently-updated first, optionally filtered to one
+// current status (CLI `list`). `status` is quoted + escaped so it can never
+// break out of the clause. Capped at one page (PAGE_SIZE) — an agent browsing a
+// project does not need 2000 rows.
+async function listProjectIssues(cred, { projectKey, status, env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const key = String(projectKey || '').replace(/"/g, '\\"');
+  let jql = `project = "${key}"`;
+  if (typeof status === 'string' && status.trim()) {
+    jql += ` AND status = "${status.trim().replace(/"/g, '\\"')}"`;
+  }
+  jql += ' ORDER BY updated DESC';
+  const result = await requestJson({
+    base,
+    path: '/rest/api/3/search/jql',
+    method: 'POST',
+    authHeader: auth,
+    body: { jql, fields: ['summary', 'status', 'assignee', 'updated'], maxResults: PAGE_SIZE },
+  });
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  return (Array.isArray(result.issues) ? result.issues : []).map((raw) => {
+    const f = raw.fields || {};
+    return {
+      key: String(raw.key || ''),
+      summary: f.summary == null ? '' : String(f.summary),
+      status: f.status && f.status.name ? String(f.status.name) : null,
+      assignee: f.assignee && f.assignee.displayName ? String(f.assignee.displayName) : null,
+      updated: f.updated || null,
+      url: `${siteBase}/browse/${encodeURIComponent(raw.key || '')}`,
+    };
+  });
+}
+
 // Run an arbitrary JQL (spike diagnostics only — `probe --jql`). Same shaping as
 // searchProjectIssues but the caller owns the whole query.
 async function searchJql(cred, jql, { env } = {}) {
@@ -291,6 +325,7 @@ module.exports = {
   apiBaseFor,
   whoAmI,
   searchProjectIssues,
+  listProjectIssues,
   searchJql,
   fetchFullChangelog,
   getIssue,

@@ -15,6 +15,7 @@ process.env.JIRA_AUDIT_DIR = path.join(STATE, 'audit');
 
 const { mint } = require('../../../broker-sdk');
 const broker = require('./server');
+const { signViewerHeaders } = require('./viewer-headers');
 
 const TOKEN = mint('jira', 'team-1', 'test-secret');
 const OTHER = mint('jira', 'team-2', 'test-secret');
@@ -112,6 +113,87 @@ test('scope-credentials: the orchestrator push populates the per-scope map; reso
     await call(srv, 'PUT', '/internal/scope-credentials', { token: OTHER, body: { scopes: {} } });
     assert.equal(broker.resolveCredential('team-1'), null);
   } finally { srv.close(); }
+});
+
+test('cli reads: /projects, /list, /show need the per-scope credential and call Jira server-side', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url, opts) => {
+    // Only intercept the Jira API — let the test's own requests to the broker
+    // (127.0.0.1) pass through to the real server.
+    if (String(url).includes('127.0.0.1') || String(url).includes('localhost')) return origFetch(url, opts);
+    calls.push(url);
+    if (url.includes('/project/search')) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [{ key: 'KAN', name: 'Kanban', id: '1', projectTypeKey: 'software' }] }) };
+    }
+    if (url.includes('/search/jql')) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ issues: [{ key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' } } }] }) };
+    }
+    // getIssue
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' } } }) };
+  };
+  const srv = await listen();
+  try {
+    const projects = await call(srv, 'GET', '/cli/projects', { token: TOKEN });
+    assert.equal(projects.status, 200);
+    assert.deepEqual(projects.body.projects.map((p) => p.key), ['KAN']);
+
+    const list = await call(srv, 'GET', '/cli/list?project=KAN&status=Ready+for+Dev', { token: TOKEN });
+    assert.equal(list.status, 200);
+    assert.equal(list.body.issues[0].key, 'KAN-6');
+
+    const show = await call(srv, 'GET', '/cli/show?issue=KAN-6', { token: TOKEN });
+    assert.equal(show.status, 200);
+    assert.equal(show.body.issue.key, 'KAN-6');
+
+    // a scope with no credential → 400 no-credential (not a 500)
+    const nocred = await call(srv, 'GET', '/cli/projects', { token: OTHER });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-credential');
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('ui: requires signed viewer headers; /ui/api/context lists the viewer\'s teams; role gate enforced', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  broker.watchStore.setConfig('team-1', { watches: [{ projectKey: 'KAN', statusFilter: 'Ready for Dev' }] });
+  const srv = await listen();
+  const { port } = srv.address();
+  async function ui(pathname, headers) {
+    const res = await fetch(`http://127.0.0.1:${port}${pathname}`, { headers: headers || {} });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  }
+  try {
+    // no headers → 401
+    assert.equal((await ui('/ui/api/context')).status, 401);
+    // forged → 401 (bad signature)
+    assert.equal((await ui('/ui/api/context', { 'x-aee-plugin-user': 'eve', 'x-aee-plugin-role': 'team-admin', 'x-aee-plugin-teams': 'team-1', 'x-aee-plugin-sig': 'forged' })).status, 401);
+
+    const hdrs = signViewerHeaders({ sub: 'alice', role: 'team-member', teamIds: ['team-1'] }, 'test-secret');
+    const ctx = await ui('/ui/api/context', hdrs);
+    assert.equal(ctx.status, 200);
+    assert.equal(ctx.body.teams[0].teamId, 'team-1');
+    assert.equal(ctx.body.teams[0].hasCredential, true);
+    assert.deepEqual(ctx.body.teams[0].watches, ['KAN']);
+
+    // the watch view is reachable at team-member
+    const w = await ui('/ui/api/watches?team=team-1', hdrs);
+    assert.equal(w.status, 200);
+    assert.equal(w.body.watches[0].projectKey, 'KAN');
+
+    // static asset served
+    const idx = await fetch(`http://127.0.0.1:${port}/ui/`, { headers: hdrs });
+    assert.equal(idx.status, 200);
+    assert.match(await idx.text(), /<title>Jira<\/title>/);
+  } finally {
+    broker.scopeCredentials.delete('team-1');
+    broker.watchStore.teardown('team-1');
+    srv.close();
+  }
 });
 
 test('deliver: POSTs /internal/plugin-event to the orchestrator with a minted jira scope token', async () => {

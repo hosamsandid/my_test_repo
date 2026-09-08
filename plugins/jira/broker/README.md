@@ -27,11 +27,13 @@ poller's, in `broker-sdk/event-cursor.js` (`github-poller.js` is untouched).
 | File | Role |
 |---|---|
 | `event-extract.js` | pure: `resolveJiraApiBase`, `isChangelogTruncated`, `extractStatusChangeEvents`, `matchesStatusFilter`, `computeQueryWindowMinutes` (catch-up widening, capped 24h) |
-| `jira-client.js` | Jira REST v3 surface (Basic auth); pure builders + thin `fetch` adapters; `JIRA_API_BASE` test seam |
+| `jira-client.js` | Jira REST v3 surface (Basic auth); pure builders + thin `fetch` adapters; `JIRA_API_BASE` test seam; `searchProjectIssues` (poll), `listProjectIssues` / `getIssue` / `listProjects` (CLI + UI reads) |
 | `watch-store.js` | per-scope watch config + poll cursor on `AEE_PLUGIN_STATE_DIR`, atomic writes |
 | `inbox-store.js` | per-scope queue of delivered-but-unconsumed events; TTL + `quota.maxObjects` ring — **this is what the manifest quota counts** |
 | `poller.js` | the poll loop; transport-agnostic (`deliver()` callback) |
-| `server.js` | wiring: `/healthz`, `/internal/teardown-scope`, `/cli/*`, the Phase-0 `/internal/spike-config` seam |
+| `viewer-headers.js` | §4.8 signed-viewer-header verify (byte-identical copy, like every UI plugin) |
+| `ui/` | the served `/` route — projects → issues, the inbox, and what the poller is watching. Dependency-free vanilla JS, `--eb-*` tokens, follows the console theme |
+| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials}`, `/cli/*` (`whoami`/`inbox`/`projects`/`list`/`show`), `/ui/*`, the Phase-0 `/internal/spike-config` seam |
 
 ## Credentials (Phase 1 — the per-scope store)
 

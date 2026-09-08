@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jira</title>
+  <script>
+    // Follow the console's theme before first paint (this iframe is proxied on
+    // the console's own origin, so it shares localStorage['eb-theme']).
+    (function () {
+      try {
+        var valid = ['admin-dark', 'admin-light', 'high-contrast'];
+        var stored = localStorage.getItem('eb-theme');
+        if (stored && valid.indexOf(stored) >= 0) {
+          document.documentElement.dataset.theme = stored;
+        } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+          document.documentElement.dataset.theme = 'admin-light';
+        } else {
+          document.documentElement.dataset.theme = 'admin-dark';
+        }
+      } catch (e) { document.documentElement.dataset.theme = 'admin-dark'; }
+    })();
+  </script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="toolbar">
+    <div class="section-title" style="margin:0;">Jira</div>
+    <select id="team" class="field" style="max-width:220px;" hidden></select>
+    <select id="project" class="field" style="max-width:220px;"></select>
+    <input id="status" class="field list-search" placeholder="filter by status…" style="max-width:200px;" />
+    <span class="spacer"></span>
+    <button id="refresh" class="btn">Refresh</button>
+  </div>
+
+  <div id="err" class="err" hidden></div>
+
+  <div class="layout">
+    <div class="list-pane">
+      <div class="section-title">Issues</div>
+      <div id="issues" class="issue-list"><div class="empty">Pick a project.</div></div>
+    </div>
+    <div class="detail-pane">
+      <div class="section-title">Inbox <span id="inboxCount" class="hint"></span></div>
+      <div id="inbox" class="detail"><div class="empty">Nothing queued.</div></div>
+
+      <div class="section-title" style="margin-top:1rem;">Watching</div>
+      <div id="watches" class="detail"><div class="empty">—</div></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

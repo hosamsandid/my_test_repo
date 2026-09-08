@@ -433,8 +433,18 @@ Each phase is independently mergeable and leaves `main` shippable.
   §4B touch points needed NO change after all: `pollerSubscribes` already gates
   on `type === 'github-event'`, and `isAutonomousState` already flips on
   `triggers.length > 0`.
-- **Phase 3 — CLI + read UI.** `aee-jira` against the contract test; the `/`
-  route.
+- **Phase 3 — CLI + read UI. ✅ landed.** `aee-jira projects` / `list --project
+  KEY [--status …]` / `show ISSUE` added to the Phase-0 `whoami` / `inbox`, all
+  server-side through the broker's per-scope credential; retargeted
+  `plugin-cli-contract.test.js` covers it. Broker `/cli/{projects,list,show}`
+  endpoints + `jira-client.listProjectIssues`. The `/` UI route (team-member):
+  a served page (`ui/`, dependency-free, `--eb-*` tokens, signed viewer
+  headers) showing the team's projects → issues, the per-scope inbox, and what
+  the poller is watching (project + cursor). Manifest gains `ui.routes` `[{ / ,
+  team-member }]`; the console's generic plugin-UI proxy + nav discovery pick it
+  up with no console change. The plugin's own poll-event log (§6.4) is deferred
+  — the platform GitHub Event Log already carries a `plugin.event` row per wake
+  (Phase 2).
 - **Phase 4 — writes.** `comment` / `transition` behind `policy` (D3); the
   `/admin` watch-config route.
 - **Phase 5 — docs + help.** `plugins/jira/broker/README.md`, a

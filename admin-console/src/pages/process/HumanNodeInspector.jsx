@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { User, Trash2 } from 'lucide-react';
+import { User, Trash2, X } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
 import { wireHumanGate } from './wiring-engine';
 
@@ -7,8 +7,10 @@ import { wireHumanGate } from './wiring-engine';
 // purely declarative — no prompt, no triggers, no session — so this is a focused
 // editor for name / description / stage / the labels the person applies
 // (`emits`, implicitly gates). `consumes` (artifacts and brakes wired to the
-// person) is shown read-only; those entries are created by wiring. Mode-agnostic:
-// writes go through `ops.upsertHuman(human)` / `ops.removeHuman(id)`.
+// person) is normally created by wiring, but each entry carries a per-chip
+// unwire (#2063) so a dead producer's dangling ref — whose only other remove
+// control lived on the now-deleted producer — is removable here. Mode-agnostic:
+// writes go through `ops.upsertHuman` / `ops.removeHuman` / `ops.unwireHumanConsume`.
 const inputStyle = {
   background: 'var(--eb-bg-surface)', color: 'var(--eb-text-primary)',
   border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
@@ -91,6 +93,19 @@ export default function HumanNodeInspector({ human, stages = [], ops, triggerOps
     } catch (e) { setError(e.message); setBusy(false); }
   };
 
+  // Unwire one consume entry (#2063). `unwireHumanConsume` matches by consumeKey
+  // regardless of whether the producer still exists, so a dead pr/issue ref left
+  // by a deleted producer is removable here.
+  const unwireConsume = async (c) => {
+    if (busy) return;
+    setBusy(true); setError(null);
+    try {
+      await ops.unwireHumanConsume(human.id, c);
+      onChanged?.();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
   return (
     <SidePanel open onClose={onClose} title="Human role" width="440px">
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 'var(--eb-space-3)' }}>
@@ -141,7 +156,13 @@ export default function HumanNodeInspector({ human, stages = [], ops, triggerOps
           ) : (
             <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
               {(human.consumes || []).map((c, i) => (
-                <span key={i} style={{ fontSize: 10, color: '#6d28d9', background: 'rgba(124,58,237,0.10)', border: '1px solid rgba(124,58,237,0.35)', borderRadius: 3, padding: '1px 5px' }}>{consumeLabel(c)}</span>
+                <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, color: '#6d28d9', background: 'rgba(124,58,237,0.10)', border: '1px solid rgba(124,58,237,0.35)', borderRadius: 3, padding: '1px 3px 1px 5px' }}>
+                  {consumeLabel(c)}
+                  <button type="button" title="Unwire this delivery" disabled={busy} onClick={() => unwireConsume(c)}
+                    style={{ display: 'inline-flex', alignItems: 'center', background: 'none', border: 'none', padding: 0, margin: 0, lineHeight: 0, color: '#6d28d9', opacity: 0.65, cursor: busy ? 'wait' : 'pointer' }}>
+                    <X size={11} />
+                  </button>
+                </span>
               ))}
             </div>
           )}

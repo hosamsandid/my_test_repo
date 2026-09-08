@@ -67,6 +67,34 @@ function normalizeHumans(humans) {
   return out;
 }
 
+// Prune orphaned producer references from a humans registry (#2063). A
+// `{ artifact:'pr'|'issue', from }` consume whose `from` names no existing agent
+// is a dead edge: the producer was deleted, and because the "Consumes (wired)"
+// chips are authored from the producer side, such an entry can no longer be
+// unwired through the graph/routing UI once its producer node is gone. The live
+// `PUT /api/agents/:teamId` handler runs this over the team's on-disk roster so
+// the dead ref is dropped on the next humans save. Deliberately NOT folded into
+// `normalizeHumans` (which runs at import/materialise time, before the roster
+// exists — pruning there would drop every ref). `{ label }` and
+// `{ artifact:'file', name }` consumes carry no agent ref and are never touched.
+// Pure: the caller supplies the valid-id set (a Set or any iterable).
+function pruneOrphanHumanConsumes(humans, existingAgentIds) {
+  const valid = existingAgentIds instanceof Set
+    ? existingAgentIds
+    : new Set(Array.isArray(existingAgentIds) ? existingAgentIds : []);
+  const isOrphanConsume = (c) =>
+    c && (c.artifact === 'pr' || c.artifact === 'issue')
+    && typeof c.from === 'string' && !valid.has(c.from.trim());
+  return (Array.isArray(humans) ? humans : []).map((h) => {
+    if (!h || typeof h !== 'object' || !Array.isArray(h.consumes)) return h;
+    const kept = h.consumes.filter((c) => !isOrphanConsume(c));
+    if (kept.length === h.consumes.length) return h;
+    const next = { ...h };
+    if (kept.length) next.consumes = kept; else delete next.consumes;
+    return next;
+  });
+}
+
 // Optional top-level `hillClimb` on the bundle (hill-climbing loop, #1222 +
 // #1224): the team's loop config `{ autonomy?, cron?, windowDays?,
 // minRunsPerWindow?, maxCardsPerPass?, excludeAgents? }` on the team agent.
@@ -1750,7 +1778,7 @@ module.exports = {
   outcomesWiringContext,
   // Direct agent hand-off (#2030)
   remapOutcomeWakeTargets,
-  emptyDraftBundle, roleKeyOf, VERSION, normalizeHumans, normalizeHillClimb,
+  emptyDraftBundle, roleKeyOf, VERSION, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb,
   artifactKey, artifactHint, artifactIsNamed,
   slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,
   // Claim labels (#958) + success mirror (#1163)

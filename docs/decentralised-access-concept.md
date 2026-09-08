@@ -984,3 +984,97 @@ auditing an owner, can tell a guess from a fact. **A later phase must not drop
 them when it retires the access-scope layer**: the moment the scope memberships
 are deleted, `fromScopeId` is the only remaining evidence of where a grant came
 from.
+
+---
+
+## Amendment 2 — what P2 (#2078) found, and what it changed here
+
+Appended for the same reason as Amendment 1: the design above stays readable as
+the design that was agreed, and this records where implementation contradicted
+it.
+
+### A2.1 — The collapse is on the ACCESS axis only; the tenant hop survives
+
+**§1.3 says `resolveAgentTenant` "collapses to a one-line accessor". It cannot,
+yet — and doing it in P2 would have been a hard regression.**
+
+That function has exactly two live callers, and neither of them asks an
+authorization question:
+
+| Caller | What it resolves |
+|---|---|
+| `usableEndpointsForTeam` (`api.js`) | which **model providers** an agent may bill against |
+| the assist-endpoint pick (`orchestrator.js:375`) | the same, for an autonomous synthesis run |
+
+Both compare the resolved value against a **credential record's** `teamId` /
+`assignedTeamIds`, and those records are still stamped with access-scope ids —
+§5.1 and the §10 phase table both assign "credentials and model providers
+re-pointed" to **P5**, not P2. Collapsing in place would have answered
+`agent-studio-2-0` where the credential index says `default`, making every
+team-scoped provider unusable: precisely the bug the tenant hop was introduced
+to fix, and precisely what AC5 ("no regression for the single-team/default
+installation") forbids.
+
+So P2 ships **two** functions with two clearly separated jobs:
+
+- **`resolveAgentTeam`** (new, `orchestrator/agent-team.js` ⇄ byte-identical
+  `admin-console/api/agent-team.js`) — the **access boundary**. Collapsed
+  exactly as §1.3 describes: no `loadAgentConfig` injection, no parent read.
+- **`resolveAgentTenant`** (unchanged, both copies) — the **credential tenant**,
+  with its `|| 'default'` fallback intact because the default scope it names
+  still exists. It retires with P5, and both copies now say so at the top.
+
+The §8.4 fallback removal therefore lands on the six **scope.js predicates** it
+enumerates and deliberately **not** on `resolveAgentTenant`: removing it there
+would break the very lookups the hop exists for.
+
+### A2.2 — A standalone agent resolves to `null`, not to its own id
+
+§1.3 sketches the accessor as `role === 'team' ? cfg.id : (cfg.parentTeamId ||
+cfg.id)`. For a standalone `role: 'agent'` that yields its own id — a value no
+membership can ever name, so it grants nothing and merely *looks* like a
+boundary. `resolveAgentTeam` returns `null` instead, which makes the D8
+fall-through to ownership explicit and testable at the call site. Same outcome,
+one less thing that reads like a team.
+
+### A2.3 — `canManageAgent` needed the owner branch too
+
+§4.1 row 15 records `canManageAgent` as "re-keyed" and mentions no owner rule,
+while row 3 makes ownership the primary rule for `visibleAgent`. Shipping only
+the visibility half would have left a standalone agent **visible to its creator
+and editable by nobody but a System Admin**, since no membership can name it.
+`canManageAgent` therefore mirrors `visibleAgent`: boundary present → the
+team-admin rule, boundary absent → the owner. The boundary is checked **first**,
+so owning an agent that *does* belong to a team never bypasses the role rule.
+
+### A2.4 — AC4's "existing drift guard" did not exist
+
+Issue #2078 AC4 asks that the two copies "stay byte-identical … (existing drift
+guard passes)". §1.3 already corrected this: the copies were neither
+byte-identical (quote style, `DEFAULT_TEAM_ID` vs the literal) nor guarded. P2
+delivers the guard for the module it introduces — `agent-team.js` is a whole
+shared file with a **two-sided** byte-identity guard on both sides, the
+`toolchain-registry.js` / `plugin-manifest.js` arrangement. `resolveAgentTenant`
+is left as it is rather than being reformatted for a mirror guard it loses in P5
+anyway.
+
+### A2.5 — What P2 did NOT re-point, and why
+
+- **Environment / credential / MCP-server / skill-pool stamps.** Still
+  access-scope ids (P5, §5.2 — an environment shared by two Agent Teams in one
+  scope cannot be re-pointed to one of them without a shared tier).
+- **The scope memberships.** Still present and still honoured, because the
+  stamps above are what they gate. `team-membership-enforcement.test.js` asserts
+  that dropping them changes **no** agent's visibility or manageability, which
+  is what makes P5's clean-up safe.
+- **Agent *creation* gates** (`api.js`, the standalone-import branch). Who may
+  create is P3's contract; re-keying it here would either widen it to every
+  authenticated user or narrow it to System Admins.
+- **`POST /api/agents/:id/convert-to-team`'s second gate.** It asks "may you
+  mint a team here", and team creation stays System-Admin-only until P3 — so it
+  deliberately keeps reading the legacy scope. Under D8 a standalone agent's
+  owner now passes the *first* gate, and without this the owner could convert
+  their way into owning a team.
+- **§11's leaks** (process drafts/flows, the work plane, MCP writes) and the D9
+  Team-Member mutation boundary. Cut out as separate P2 tickets by #2078's own
+  Scope-out.

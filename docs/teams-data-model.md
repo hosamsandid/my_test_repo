@@ -107,7 +107,37 @@ Every agent construct, Working Environment, and credential carries a `teamId` *(
 
 Creation paths for `team`/`system` scopes accept an optional `teamId`; when supplied it must reference an existing team, otherwise the request is rejected (400). Absent = default team. Personal credentials always carry the caller's `userId` as owner; a body naming a different owner is rejected 403.
 
-### Resolving an agent's tenant
+### Resolving an agent's access boundary (#2078)
+
+**Since #2078 an agent's access is decided by its Agent Team, not by its tenant
+stamp.** Epic #2076's D1 collapses the two namespaces for the *authorization*
+question: a `role: 'team'` agent **is** its own boundary, a `role: 'team-member'`
+is bounded by its `parentTeamId`, and a standalone `role: 'agent'` has **no**
+boundary and is decided by its `ownerId` alone (D8). The rule is the pure
+`resolveAgentTeam` in `orchestrator/agent-team.js`, duplicated byte-identically
+into `admin-console/api/agent-team.js` (the console image copies only
+`api/*.js`) and two-sided-guarded by `agent-team.test.js`. The console feeds it
+to `visibleAgent` / `canManageAgent` through `agentMetaForScope`; membership
+records (`memberships/index.json`) now reference Agent Team ids, which is what
+makes those predicates resolve.
+
+Two consequences to know. **There is no `|| 'default'` fallback left** in
+`visibleTeam`, `canManageTeam`, `canManageAgent`, `canManageEnvironment`,
+`canCreateCredential` or `normalizeCredential`: a resource with no team id is
+invisible and unmanageable to a non-admin rather than collapsing into the
+default team. And **`scope.all` is untouched** — all twelve System-Admin
+short-circuits survive (D5), pinned by a census guard in `scope.test.js`.
+
+### Resolving an agent's credential tenant
+
+This is the *other* axis, and it did **not** collapse. Credentials, model
+providers, environments and MCP servers are still stamped with access-scope ids
+until epic #2076's P5 re-points them, so resolving *which providers an agent may
+use* still needs the parent hop below. `resolveAgentTenant` and
+`orchestrator/agent-tenant.js` therefore survive #2078 unchanged, with exactly
+two live callers — `usableEndpointsForTeam` (api.js) and
+`resolveAssistBindingForTeam` (orchestrator.js), both provider lookups. **Do not
+reach for it to answer an authorization question**; it retires with P5.
 
 **`parentTeamId` is never a tenant.** It names the **Agent Team** construct — a
 different namespace from the human Team ids in `teams/index.json`. Using it as a
@@ -121,8 +151,8 @@ A team-member's tenant is therefore resolved by dereferencing its parent Agent
 Team and reading *that* agent's `teamId`, falling back to the member's own stamp
 when the parent is missing or unstamped. The rule lives in two pure, mirrored
 modules (the containers do not share code): `resolveAgentTenant` in
-`admin-console/api/scope.js` (used by `agentTeamId` → `agentMetaForScope`,
-`usableEndpointsForTeam`) and `orchestrator/agent-tenant.js` (used by
+`admin-console/api/scope.js` (used by `agentTeamId` → `usableEndpointsForTeam`)
+and `orchestrator/agent-tenant.js` (used by
 `resolveAssistBindingForTeam`). `backfillResourceOwnership()` additionally
 realigns any member whose stored `teamId` disagrees with its parent, so the
 on-disk value matches what the resolver reports.

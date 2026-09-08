@@ -19,19 +19,23 @@ SSO) hangs off this entity.
 > concept and one word. This page still describes what is live on `main`; the successor
 > doc is the design of record for what replaces it (rewritten here in phase P6).
 
-> **P1 has landed (#2077) — what this page no longer tells you in full.**
+> **P1 (#2077) and P2 (#2078) have landed — what this page no longer tells you in full.**
 > Ownership now lives on the Agent Team: every `role: "team"` and standalone
 > `role: "agent"` config carries an `ownerId` (+ an `ownerSource` recording
 > whether that owner is a real creator or a migration placeholder), and
 > `memberships/index.json` now *also* holds one `(user → Agent Team)` record per
 > Agent Team of each access scope — added **alongside** the access-scope records
-> below, not in place of them, because the enforcement described on this page
-> still keys on each resource's access-scope `teamId` stamp. So the
+> below, not in place of them. As of **P2 (#2078)** the **agent** visibility and
+> management gates key on that Agent Team membership (see *Resolving an agent's
+> access boundary* below); every **other** resource on this page — environments,
+> credentials, MCP servers — still keys on its access-scope `teamId` stamp, until
+> epic #2076's P5 re-points them. So the
 > `memberships` table below is accurate but no longer complete: a `teamId` there
 > may be an access-scope id (the records this page describes) **or** an Agent
 > Team id (the ones the D6 migration added). `teams/index.json` is still written
-> and read exactly as documented here — retiring it is P2's edit, for the reason
-> in the successor doc's Amendment 1. The migration itself is
+> and read exactly as documented here — P2 re-pointed the agent gates but left it
+> in place; its retirement is deferred past the enforcement re-point, for the
+> reason in the successor doc's Amendment 1. The migration itself is
 > `orchestrator/ownership-migration.js` + `migrateOwnershipModel()`.
 
 ## Scope of this issue

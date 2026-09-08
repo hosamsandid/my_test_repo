@@ -668,6 +668,16 @@ const TOPIC_CONTENT = [
       'never renders it',
       'When a repository is polled',
       'no expiry',
+      // #2101 additions. The Pending queue's rows now name the work item, so
+      // the chapter documents its columns the way the Processed chapter always
+      // has — and it is the ONLY place that says what the GitHub event id is,
+      // because #2101 took it off the row precisely for looking like a ticket
+      // number. A reword that loses that sentence leaves an operator who reads
+      // the hover with no way to find out what the number means.
+      'internal id',
+      'Events API gave the event',
+      'label chip',
+      'in progress',
     ],
   },
   {

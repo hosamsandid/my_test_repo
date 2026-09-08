@@ -23,7 +23,7 @@ const { buildWorkItems, workItemDetail } = require('./work-items');
 const usageExport = require('./usage-export');
 const maintenanceMode = require('./maintenance-mode');
 const { detectRasterImageType, imageContentType } = require('./image-type');
-const { discoverBoundAgents, respawnWithConcurrency } = require('./respawn-agents');
+const { discoverBoundAgents, hiddenBlastRadius, projectRespawnOutcome, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
 const { createTtlCache } = require('./ttl-cache');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
@@ -497,6 +497,101 @@ app.delete('/api/agents/:id/pending/:entryId', async (req, res) => {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/pending/${encodeURIComponent(entryId)}`, { method: 'DELETE' });
+    const body = await r.json().catch(() => ({ ok: false, error: 'invalid orchestrator response' }));
+    return res.status(r.status).json(body);
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// ── Pending-queue reassignment (#2102) ─────────────────────────────────────
+//
+// Hand a waiting entry to a different agent instead of only cancelling it.
+//
+//  - GET  /api/agents/:id/pending/:entryId/reassign-targets → eligible targets
+//  - POST /api/agents/:id/pending/:entryId/reassign          → move it
+//
+// UNLIKE the three read/cancel routes above, these are AUTHORIZED. A
+// reassignment injects work into another agent's queue — operator-initiated
+// trigger firing at a distance — and #2041 §7/D9 already decided that manually
+// firing a trigger is Team-Admin-only, on the reasoning that an autonomous run
+// is not attributable to a person the way a chat message is. So the capability
+// does not ship ungated, even though its read/cancel neighbours currently are.
+//
+// The gate runs on BOTH agents (AC5): managing the source is the right to take
+// the entry away, managing the target is the right to make it run something.
+// Holding one is not holding the other.
+//
+// The pre-existing absence of authorization on `GET /api/pending-queue` and the
+// cancel route is real and out of scope here — it belongs to the #2041 P2
+// enforcement sweep, which owns the ungated-route inventory. FLAGGED FOR THE P2
+// OWNER: any signed-in user can currently read every agent's queue and cancel
+// any entry in it.
+function resolveManageableAgentDir(req, res, id) {
+  if (!AGENT_ID_RE.test(id)) {
+    res.status(400).json({ ok: false, error: 'Invalid agent id' });
+    return null;
+  }
+  const agentsBaseDir = path.resolve(AGENTS_DIR);
+  const agentDir = path.resolve(agentsBaseDir, id);
+  const rel = path.relative(agentsBaseDir, agentDir);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    res.status(400).json({ ok: false, error: 'Invalid agent id' });
+    return null;
+  }
+  if (!fs.existsSync(agentDir)) {
+    res.status(404).json({ ok: false, error: 'Agent not found' });
+    return null;
+  }
+  if (denyUnlessCanManageAgent(req, res, agentDir)) return null;
+  return agentDir;
+}
+
+app.get('/api/agents/:id/pending/:entryId/reassign-targets', async (req, res) => {
+  const { id, entryId } = req.params;
+  if (!PENDING_ENTRY_ID_RE.test(entryId)) {
+    return res.status(400).json({ ok: false, error: 'Invalid entry id' });
+  }
+  // Listing the agents that could take this entry is already a step toward
+  // firing one, so it carries the source-side gate too.
+  if (!resolveManageableAgentDir(req, res, id)) return;
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/pending/${encodeURIComponent(entryId)}/reassign-targets`);
+    const body = await r.json().catch(() => ({ ok: false, error: 'invalid orchestrator response' }));
+    // A target the caller may not manage must not be offered, or the picker
+    // would list an option the POST below refuses (AC5).
+    if (body && Array.isArray(body.targets)) {
+      const scope = getScope(req);
+      body.targets = body.targets.filter((t) => canManageAgent(
+        scope, agentMetaForScope(readJsonFile(path.join(AGENTS_DIR, t.agentId, 'config.json'), null) || {})));
+    }
+    return res.status(r.status).json(body);
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+app.post('/api/agents/:id/pending/:entryId/reassign', async (req, res) => {
+  const { id, entryId } = req.params;
+  const targetAgentId = req.body && req.body.targetAgentId;
+  if (!PENDING_ENTRY_ID_RE.test(entryId)) {
+    return res.status(400).json({ ok: false, error: 'Invalid entry id' });
+  }
+  if (typeof targetAgentId !== 'string' || !AGENT_ID_RE.test(targetAgentId)) {
+    return res.status(400).json({ ok: false, error: 'Invalid target agent id' });
+  }
+  if (!resolveManageableAgentDir(req, res, id)) return;
+  if (!resolveManageableAgentDir(req, res, targetAgentId)) return;
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/pending/${encodeURIComponent(entryId)}/reassign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      // The acting human is stamped SERVER-SIDE from the session — a body-supplied
+      // actor would be self-asserted, and this value ends up in the audit trail.
+      body: JSON.stringify({ targetAgentId, byUserId: (req.user && (req.user.sub || req.user.id)) || null }),
+    });
     const body = await r.json().catch(() => ({ ok: false, error: 'invalid orchestrator response' }));
     return res.status(r.status).json(body);
   } catch (err) {
@@ -11525,21 +11620,40 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   res.status(204).end();
 });
 
+// The bound-agents discovery deps, shared by the two routes below so their view
+// of "which agents are bound, and which of them may this caller see" cannot
+// drift. `isVisible` is the #1501 fix: seeing the *provider* (visibleCredential)
+// says nothing about seeing an *agent*, which has its own rules (team membership
+// since #2078, plus ownership for a standalone agent), so a system-scoped
+// credential shared across teams used to disclose every consumer's id, display
+// name and role to any Team Admin who could merely view it.
+function boundAgentDeps(scope) {
+  return {
+    loadEnvironment,
+    effectiveEndpointId,
+    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
+    isVisible: cfg => visibleAgent(scope, agentMetaForScope(cfg)),
+  };
+}
+
+function loadAllAgentConfigs() {
+  return listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
+}
+
 // Returns enabled, materialized agents whose effective LLM endpoint is :id.
 // Used by the UI to prompt a respawn after credential rotation. Discovery
 // logic lives in respawn-agents.js (pure, unit-tested) — this route only
 // does I/O (loading configs) and wires the result into a JSON response.
+//
+// Agents the caller may not see are reported as a COUNT, never omitted (#1501):
+// an operator deciding whether to rotate a shared credential needs the true
+// blast radius even when the identities in it are none of their business.
 app.get('/api/llm-endpoints/:id/bound-agents', apiLimiter, (req, res) => {
   const scope = getScope(req);
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
   if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
-  const agentConfigs = listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
-  const agents = discoverBoundAgents(agentConfigs, ep.id, {
-    loadEnvironment,
-    effectiveEndpointId,
-    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
-  });
-  res.json({ agents });
+  const { visible, hidden } = discoverBoundAgents(loadAllAgentConfigs(), ep.id, boundAgentDeps(scope));
+  res.json({ agents: visible, hidden: hiddenBlastRadius(hidden) });
 });
 
 // Respawn all enabled agents bound to :id so they pick up the rotated credential
@@ -11551,12 +11665,13 @@ app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) =
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
   if (!ep || !visibleCredential(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
   if (!canManageCredential(scope, ep)) return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
-  const agentConfigs = listAgentDirs().map(id => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null));
-  const agents = discoverBoundAgents(agentConfigs, ep.id, {
-    loadEnvironment,
-    effectiveEndpointId,
-    loadTeamConfig: teamId => readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null),
-  });
+  const { visible, hidden } = discoverBoundAgents(loadAllAgentConfigs(), ep.id, boundAgentDeps(scope));
+  // EVERY bound agent is respawned, visible to this caller or not (#1501). The
+  // credential owner has a legitimate reason to fix every consumer, and skipping
+  // the invisible ones would leave them silently running on the rotated-away
+  // credential — defeating the point of the feature to protect a metadata leak
+  // that the response projection below closes instead.
+  const agents = [...visible, ...hidden];
   // Bounded concurrency: an unbounded Promise.all here would fan out one
   // stop+recreate container-lifecycle call per agent simultaneously, which
   // can overwhelm the orchestrator's libpod socket and the host's container
@@ -11564,12 +11679,30 @@ app.post('/api/llm-endpoints/:id/respawn-agents', apiLimiter, async (req, res) =
   // route against 45+ agents). RESPAWN_CONCURRENCY lets an operator tune it
   // for their hardware; the default is conservative for a local Podman host.
   const requestedConcurrency = Number(process.env.RESPAWN_CONCURRENCY) || 5;
-  const { respawned, skipped } = await respawnWithConcurrency(
+  const outcome = await respawnWithConcurrency(
     agents.map(a => a.id),
     requestedConcurrency,
     id => respawnAgentBestEffort(id, 'llm-credential-rotated'),
   );
-  res.json({ respawned, skipped });
+  const visibleIds = new Set(visible.map(a => a.id));
+  const projected = projectRespawnOutcome(outcome, visibleIds);
+  const blastRadius = hiddenBlastRadius(hidden);
+  // The log line carries the hidden counts, not the hidden ids — the same rule
+  // the response follows, so reading the server log is not a way around it.
+  if (blastRadius.count > 0) {
+    console.log(`[llm-respawn] endpoint=${ep.id} respawned=${outcome.respawned.length} skipped=${outcome.skipped.length}`
+      + ` hidden=${blastRadius.count} hiddenTeams=${blastRadius.teamCount} hiddenStandalone=${blastRadius.standalone}`
+      + ` hiddenRespawned=${projected.hiddenRespawned} hiddenSkipped=${projected.hiddenSkipped}`);
+  }
+  res.json({
+    respawned: projected.respawned,
+    skipped: projected.skipped,
+    hidden: {
+      ...blastRadius,
+      respawned: projected.hiddenRespawned,
+      skipped: projected.hiddenSkipped,
+    },
+  });
 });
 
 // Pull a human-readable failure reason out of a proxy's error response body and

@@ -147,6 +147,139 @@ export function entryDetail(entry) {
   }
 }
 
+// ── Row actions (#2102) ─────────────────────────────────────────────────────
+//
+// The row has two actions now, so per the house rule (#1925/#1938 D3, #2053 D4)
+// they live in a kebab context menu rather than a second icon button.
+
+// The row's menu, in the shared RowContextMenu descriptor shape.
+//
+// `Reassign` is offered on EVERY row but disabled with a reason where it does
+// not apply, rather than omitted: an operator who has just been told an entry
+// is stuck needs to know that handing it on is not an option here and why —
+// a missing entry answers that with silence. Whether it applies is the SERVER's
+// `reassignable` flag (stamped by `pending-queue.isReassignable`), never a
+// kind list re-derived on the client, so the two cannot drift.
+export function pendingRowMenu(row, { busy = false } = {}) {
+  const reassignable = !!(row && row.reassignable);
+  return [
+    {
+      key: 'reassign',
+      label: 'Reassign to…',
+      disabled: busy || !reassignable,
+      title: reassignable
+        ? 'Hand this entry to another agent on the same team'
+        : notReassignableReason(row),
+    },
+    {
+      key: 'cancel',
+      label: busy ? 'Cancelling…' : 'Cancel',
+      danger: true,
+      separated: true,
+      disabled: busy,
+      title: 'Remove this entry from the queue before it is delivered',
+    },
+  ];
+}
+
+// Why this row cannot be handed on. Mirrors the three conditions
+// `isReassignable` checks, in the same order, so the sentence an operator reads
+// is the actual reason the server refused to flag it.
+export function notReassignableReason(row) {
+  const kind = (row && row.kind) || 'unknown';
+  if (kind !== 'github') {
+    return `Only queued GitHub events can be reassigned — this is a ${kindLabel(kind).toLowerCase()} entry.`;
+  }
+  if (!row || !row.triggerId) {
+    return 'This entry carries no trigger, so no trigger could be re-resolved on another agent.';
+  }
+  return 'This entry carries no event details, so no target agent could be matched against it.';
+}
+
+// What the target picker shows. An empty target list is NOT an error state — it
+// is the common, informative answer ("nobody else on this team listens for
+// this"), so it gets its own sentence plus, where the server said why, the
+// per-agent refusals (#2102 AC10's "what happens when no eligible target
+// exists").
+export function reassignPickerState(data) {
+  if (!data) return { loading: true, targets: [], refused: [], notice: '' };
+  if (data.ok === false) {
+    return {
+      loading: false, targets: [], refused: [],
+      notice: pendingReassignError(data),
+    };
+  }
+  const targets = Array.isArray(data.targets) ? data.targets : [];
+  const refused = Array.isArray(data.refused) ? data.refused : [];
+  return {
+    loading: false,
+    targets,
+    refused,
+    notice: targets.length
+      ? ''
+      : 'No other agent on this team has an enabled trigger that would accept this event. '
+        + 'Reassigning it anywhere else would look successful and then do nothing, so it is not offered.',
+  };
+}
+
+// One-line label for a target in the picker: who, and which of their triggers
+// would take it — the label being the thing an operator recognises.
+export function reassignTargetLabel(target) {
+  if (!target) return '';
+  const name = target.agentName || target.agentId;
+  return target.labelFilter ? `${name} — on “${target.labelFilter}”` : `${name} — any label`;
+}
+
+// Operator-readable copy for every refusal the reassign route can return.
+// Keyed on the server's `code`, so a new refusal is a missing case here rather
+// than a silent fallthrough to a generic failure.
+const REASSIGN_ERRORS = {
+  'entry-gone': 'That entry is no longer in the queue — it was drained or cancelled. Nothing was moved.',
+  'already-fired': 'That entry fired while you were choosing a target, so it was not moved. '
+    + 'The original agent has it.',
+  'kind-not-reassignable': 'That kind of queue entry cannot be reassigned.',
+  'no-matching-trigger': 'That agent has no enabled trigger that would accept this event, '
+    + 'so the entry was left where it is.',
+  'target-not-a-candidate': 'That agent is not an eligible target — it may have been disabled '
+    + 'or moved to another team. The entry was left where it is.',
+  'cross-team': 'An entry can only be handed to an agent on the same team. Nothing was moved.',
+  'self-target': 'That entry is already queued for that agent. Nothing was moved.',
+  'unknown-target': 'That agent no longer exists. The entry was left where it is.',
+  'no-team': 'The team could not be resolved for one of the two agents, so nothing was moved.',
+  'source-write-failed': 'The queue could not be written, so nothing was moved.',
+};
+
+// Accepts either a 200 response body or the shape lifted off a thrown apiCall
+// error (`{code, error}`) — the refusals ride a 409, so most of the time this
+// sees the latter.
+export function pendingReassignError(result) {
+  const code = result && result.code;
+  // AC8: the one outcome that is NOT a routine "no". The entry was removed and
+  // never re-queued, so the event exists in no queue at all and the only
+  // recovery is a human re-applying the label on GitHub. The message therefore
+  // has to name the work item — and the server composes that sentence, because
+  // only it has the entry in hand at the moment the enqueue fails.
+  if (code === 'enqueue-failed') {
+    if (result.error) return result.error;
+    const w = result.workItem || {};
+    return 'The entry was removed from the original agent but could NOT be queued for the target — '
+      + `it is now in no queue. Re-apply ${w.label ? `the “${w.label}” label` : 'the label'} `
+      + `on ${w.text || 'the queued event'} to run it again.`;
+  }
+  if (code && REASSIGN_ERRORS[code]) return REASSIGN_ERRORS[code];
+  return (result && result.error)
+    ? `Reassign failed: ${result.error}`
+    : 'Reassign failed.';
+}
+
+// The success sentence, naming both ends so the operator can see it went where
+// they meant it to.
+export function pendingReassignSuccess(result) {
+  if (!result || !result.ok) return '';
+  const what = (result.workItem && result.workItem.text) || 'the entry';
+  return `Moved ${what} to ${result.to}.`;
+}
+
 // What the Details cell offers on hover (#2101 AC6). The repository and the
 // GitHub event id left the visible string but stay reachable here, because
 // support still needs the event id to find a delivery in the poller's log — and

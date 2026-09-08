@@ -892,6 +892,30 @@ A `stdio` MCP server's `command` **executes inside the agent containers** of any
 
 `GET /api/environments/:id` (**api.js:12167-12172**) has **no team gate on read** — only the nested agent list is scoped (`:12171`) — so an environment's full record (including its `githubTokenId` and repository URLs) is readable by any authenticated caller who knows the id. And `GET /api/agents/:id/triggers` (**:4804**) is ungated for read, which is *correct* under D9 for a member of the owning team but not for an outsider.
 
+### 11.5 — Seeing a credential was read as seeing its consumers — **CLOSED by #1501**
+
+> **Status: closed.** Recorded on issue #1501 (twice — during #1049's development
+> and by the automated PR reviewer on the same PR) rather than discovered by this
+> document, and adopted as a P2 leak ticket by epic #2076. It belongs here because
+> it is the same class as the rows above and #2078's Scope-out names it. Line
+> numbers below are historical.
+
+`GET /api/llm-endpoints/:id/bound-agents` and `POST /api/llm-endpoints/:id/respawn-agents` gated on **`visibleCredential(scope, ep)`** alone — *can this caller see the provider?* — and never asked `visibleAgent` about the agents they enumerated. Agent visibility has its own rules (team membership since #2078, plus ownership for a standalone agent under D8), so for a **`scope: 'system'` credential with `assignedTeamIds`** a Team Admin who could merely *view* the shared provider received the id, display name and role of **every** agent bound to it — other teams' members, and other humans' standalone agents.
+
+**The fix is asymmetric on purpose**, and the asymmetry is the whole design:
+
+| Surface | Rule |
+|---|---|
+| `GET bound-agents` | Responds with the **visible subset**. `visibleCredential` still gates the endpoint; `visibleAgent(scope, agentMetaForScope(cfg))` now gates each row. |
+| `POST respawn-agents` | Acts on the **union**. Hiding an agent from the *restart* would leave it silently running on the rotated-away credential — a worse outcome than the metadata leak, and the exact thing the feature exists to prevent. |
+| Its response | **Projected**: ids only for agents the caller can already see, everything else as a count — so the action's reach never becomes a way to enumerate another team's agent ids. |
+
+**The aggregate signal is never dropped.** An operator deciding whether to rotate a shared credential needs the true blast radius even when the identities in it are none of their business, so both surfaces carry `{count, teamCount, standalone}` for what is hidden, the respawn additionally reporting how many hidden agents were restarted and how many **failed** (a hidden agent left on a stale credential must still reach the operator, unnamed). The server log line follows the same rule — counts, never hidden ids — so reading the container log is not a way around the projection. `standalone` is separate from `teamCount` because a hidden agent outside every team boundary would otherwise claim a team that does not exist.
+
+**`scope.all` is untouched (D5):** a System Admin's hidden set is empty and the response is byte-identical to pre-fix, which is also the answer to the ticket's open question — where only platform admins rotate a shared credential, the caller already had blanket visibility and nothing changes for them.
+
+Decision core: `admin-console/api/respawn-agents.js` (`discoverBoundAgents` now returns `{visible, hidden}` and takes a **required** `isVisible` dep — a fail-open default is the shape of this very bug — plus `hiddenBlastRadius` and `projectRespawnOutcome`); client copy in `admin-console/src/pages/group-agents-by-team.js`; wiring guarded by `admin-console/api/bound-agents-visibility.test.js`.
+
 ---
 
 ## 12 — Non-goals, dependencies, contradictions raised

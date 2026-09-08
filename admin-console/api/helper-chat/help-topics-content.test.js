@@ -719,6 +719,12 @@ const TOPIC_CONTENT = [
       'team of one',
       'Grow into a full team',
       'creates a new team',
+      // #2052 made "a single agent is a team of one" an operation rather than
+      // only a framing: chapter 2 used to document the dead end (growing could
+      // not convert this assistant) and now has to document the action that
+      // replaced it, plus the one-way-door warning the dialog gives.
+      'Convert into a team',
+      'one-way door',
       'default branch',
       'reuses',
       'Agent reused',

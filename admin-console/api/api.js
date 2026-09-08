@@ -2652,6 +2652,48 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   res.json({ id, ...fresh });
 });
 
+/* ─── Convert a standalone agent into a team of one (#2052) ─────────── */
+
+// The launcher has promised since #1667 that "a single agent is simply a team of
+// one"; this is the action that makes it true, in place, for one agent the user
+// already has. Thin proxy on purpose: eligibility, the derived team id and every
+// re-keying decision live in the orchestrator (`team-conversion.js`), which is
+// the only process that can rewrite the prompt file, re-mint plugin scopes and
+// respawn the container. Duplicating the rule here would only let the two drift.
+app.post('/api/agents/:id/convert-to-team', heavyLimiter, async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
+  // Two gates, because the conversion does two things: it edits this agent AND
+  // it creates a team in its tenant. A caller who may do the first but not the
+  // second (the ticket's own edge case) must be refused, so the tenant check is
+  // made without the ownership escape hatch `agentMetaForScope` grants.
+  if (denyUnlessCanManageAgent(req, res, { ...cfg, id })) return;
+  if (!canManageAgent(getScope(req), { teamId: agentTeamId({ ...cfg, id }) })) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(
+      `${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/convert-to-team`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: req.body?.force === true }),
+      },
+    );
+    const data = await resp.json();
+    // A 409 carrying `warning` is the busy-agent refusal, not a failure —
+    // forward it verbatim so the UI can offer to convert anyway.
+    if (!resp.ok) return res.status(resp.status).json(data);
+    res.json(data);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 /* ─── Reset agent to stub state ─────────────────────────────────────── */
 
 app.post('/api/agents/:id/deactivate', apiLimiter, async (req, res) => {

@@ -14,9 +14,13 @@ import {
 } from '../agent-lifecycle/AgentLifecycleForms.jsx';
 import {
   DisableWarningDialog, TeamDisableDialog, DeactivateWarningDialog,
-  ResetToStubDialog, TeamEnableDialog, TeamActionResultDialog, renderDeleteMessage,
+  ResetToStubDialog, TeamEnableDialog, TeamActionResultDialog, ConvertToTeamDialog,
+  renderDeleteMessage,
 } from '../agent-lifecycle/AgentLifecycleDialogs.jsx';
 import { deleteDialogCopy, cascadeResidueNotice } from '../agent-lifecycle/agent-lifecycle-menu.js';
+import {
+  convertDialogCopy, convertConsequences, convertBusyNotice, convertResultNotice,
+} from '../agent-lifecycle/convert-to-team-view.js';
 import RowContextMenu from '../../components/RowContextMenu.jsx';
 import {
   deleteTargetFor,
@@ -127,6 +131,12 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       importInputRef.current?.click();
     },
   }), []);
+
+  // #2052 — convert into a team of one. `convertTarget.busyNotice` carries the
+  // server's own mid-run refusal, so the same dialog serves both phases: it
+  // opens empty, and re-opens with the notice when the 409 comes back.
+  const [convertTarget, setConvertTarget] = useState(null);
+  const [convertBusy, setConvertBusy] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -273,6 +283,44 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       setActionError(e.message);
     } finally {
       markBusy(agent.id, false);
+    }
+  }
+
+  // #2052 — convert this standalone agent into a team of one, in place. Raw
+  // `fetch` rather than `apiCall` for the same reason `toggleEnabled` uses one:
+  // the 409 carrying `warning` is a question for the user, not an error to
+  // throw. `force` is only sent on the second pass, after they answered it.
+  async function convertToTeam({ force = false } = {}) {
+    const agent = convertTarget?.agent;
+    if (!agent) return;
+    setConvertBusy(true);
+    markBusy(agent.id, true);
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(agent.id)}/convert-to-team`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force }),
+      });
+      const data = await res.json().catch(() => ({}));
+      const busyNotice = res.status === 409 ? convertBusyNotice(data) : null;
+      if (busyNotice) {
+        setConvertTarget({ agent, busyNotice });
+        return;
+      }
+      if (!res.ok) {
+        setConvertTarget(null);
+        setActionError(data.error || `HTTP ${res.status}`);
+        return;
+      }
+      setConvertTarget(null);
+      setNotice(convertResultNotice(data));
+      refresh();
+    } catch (e) {
+      setConvertTarget(null);
+      setActionError(e.message);
+    } finally {
+      markBusy(agent.id, false);
+      setConvertBusy(false);
     }
   }
 
@@ -469,6 +517,7 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         case 'clone':             setPanelAgent(agent); setPanelMode('clone'); break;
         case 'export':            window.open(`/api/agents/${encodeURIComponent(agent.id)}/export`, '_blank'); break;
         case 'extract-template':  openExtractPanel(agent); break;
+        case 'convert-to-team':   setConvertTarget({ agent, busyNotice: null }); break;
         case 'reset-to-stub':     setDeactivateTarget(agent); break;
         case 'delete':            setDeleteTarget(deleteTargetFor(agent, agents)); break;
         default: break;
@@ -589,6 +638,17 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         agent={deactivateTarget}
         onConfirm={deactivateConfirmed}
         onCancel={() => setDeactivateTarget(null)}
+      />
+
+      <ConvertToTeamDialog
+        open={!!convertTarget}
+        agent={convertTarget?.agent}
+        copy={convertDialogCopy(convertTarget?.agent)}
+        consequences={convertConsequences(convertTarget?.agent)}
+        busyNotice={convertTarget?.busyNotice}
+        busy={convertBusy}
+        onConfirm={() => convertToTeam({ force: !!convertTarget?.busyNotice })}
+        onCancel={() => setConvertTarget(null)}
       />
 
       <DisableWarningDialog

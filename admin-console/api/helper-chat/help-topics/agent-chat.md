@@ -111,6 +111,17 @@ on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:
   (knowledge shared through its repository is untouched).
 - **Clone**, **Export (ZIP)** and **Save as template** — copy this agent, take a
   copy away, or turn it into a reusable template.
+- **Convert into a team…** — offered on a **single agent** only, because a team
+  already is one and a team member already belongs to one. It lifts this
+  assistant into a team of one *in place*: a team named after it is created and
+  this agent becomes its only member, keeping its id, its chat room and history,
+  its system prompt, its skills, its triggers and its Working Environment. The
+  row then moves out of *Single agents* into its own team group, the team shows
+  up in **Flows** as a one-node flow, and **Add member…** on that group is how it
+  grows. It is a **one-way door** — there is no convert-back, and deleting the
+  team afterwards deletes the agent with it — so it confirms first, and it
+  refuses while the agent is mid-run unless you choose *Convert anyway*. The
+  agent restarts once and comes back on its own.
 - A group header carries the team-wide equivalents: **Enable/Disable** for the
   whole team, **Add member…**, **Team settings…** (which opens the team's own
   Settings tab here rather than jumping to another page), **Export team

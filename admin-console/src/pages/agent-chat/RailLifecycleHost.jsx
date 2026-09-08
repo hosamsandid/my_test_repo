@@ -30,6 +30,7 @@ import {
   railMenuItems,
   teamOptions,
 } from './rail-lifecycle.js';
+import ShareTeamPanel from './ShareTeamPanel.jsx';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 import {
   ADD_MEMBER_TITLE, MATERIALIZE_NOW_DEFAULT, MATERIALIZE_NOW_HINT, MATERIALIZE_NOW_LABEL,
@@ -150,6 +151,12 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   // only" cannot be inferred, and getting it wrong costs a clone either way.
   const [addMemberTeamId, setAddMemberTeamId] = useState(null);
   const [addMemberMaterialize, setAddMemberMaterialize] = useState(MATERIALIZE_NOW_DEFAULT);
+
+  // Share (#2082): which team's member list is open. A `SidePanel` rather than
+  // a `ConfirmDialog` because this is a manage-a-list surface, not a decision
+  // (the `ManageTeamPanel` precedent) — and because it stays open across
+  // several writes, each of which re-reads the list.
+  const [shareTeam, setShareTeam] = useState(null); // { id, name }
 
   const [teamActionPrompt, setTeamActionPrompt] = useState(null);
   const [teamActionBusy, setTeamActionBusy] = useState(false);
@@ -538,6 +545,11 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         // team's own edit form now renders in the rail's Settings tab, so this
         // opens it there instead of leaving the chat for the Agents page.
         case 'edit-team':        if (onOpenSettings && teamId) onOpenSettings(teamId); break;
+        case 'share':
+          // Enabled for anyone who can see the team: a Team Member gets the
+          // list read-only (#2041 AC9), the panel gates the controls.
+          if (teamId) setShareTeam({ id: teamId, name: target.group?.displayName || teamId });
+          break;
         case 'export-team':      window.open(`/api/agents/${encodeURIComponent(teamId)}/export`, '_blank'); break;
         case 'open-flow-editor': navigate(`/flows?proc=${encodeURIComponent(teamId)}`); break;
         case 'delete-team':      if (team) setDeleteTarget(deleteTargetFor(team, agents)); break;
@@ -571,6 +583,24 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         style={{ display: 'none' }}
         onChange={onImportFilePicked}
       />
+
+      {/* #2082 — the team Share panel. `onError` mirrors the message into the
+          rail toast as well, because the panel can be scrolled past its own
+          inline error while a write is being retried. */}
+      <SidePanel
+        open={!!shareTeam}
+        onClose={() => setShareTeam(null)}
+        title={shareTeam ? `Share: ${shareTeam.name}` : ''}
+        width="520px"
+      >
+        {shareTeam && (
+          <ShareTeamPanel
+            teamId={shareTeam.id}
+            teamName={shareTeam.name}
+            onError={setActionError}
+          />
+        )}
+      </SidePanel>
 
       <SidePanel
         open={panelMode === 'import'}

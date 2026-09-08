@@ -46,6 +46,7 @@ const composer = sourceOf('MessageInput.jsx');
 const settings = sourceOf('AgentSettingsPanel.jsx');
 const workspace = sourceOf('WorkspaceBrowser.jsx');
 const sessions = sourceOf('SessionsPanel.jsx');
+const share = sourceOf('ShareTeamPanel.jsx');
 const topicBody = readFileSync(
   join(here, '../../../api/helper-chat/help-topics/agent-chat.md'), 'utf8',
 );
@@ -218,6 +219,7 @@ test('the topic keeps one clearly-headed chapter per area of the page', () => {
     AGENT_CHAT_HELP_SECTIONS.outcomes,
     AGENT_CHAT_HELP_SECTIONS.knowledge,
     AGENT_CHAT_HELP_SECTIONS.settings,
+    AGENT_CHAT_HELP_SECTIONS.shareTeam,
   ]) {
     assert.ok(h2.includes(slug), `"${slug}" must stay a top-level chapter, not a sub-heading`);
   }
@@ -236,6 +238,7 @@ test('each Agent Chat surface mounts a "?" pointed at its own chapter', () => {
     ['the Workspace tab', workspace, 'workspace'],
     ['the Sessions tab', sessions, 'sessions'],
     ['the session log', sessions, 'sessionLog'],
+    ['the team Share panel', share, 'shareTeam'],
   ];
   for (const [what, source, key] of wired) {
     assert.ok(

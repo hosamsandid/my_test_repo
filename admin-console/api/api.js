@@ -16349,6 +16349,16 @@ app.get('/api/matrix/agents', (req, res) => {
       // menu can disable what the server would reject (mirrors `canSwitch` on
       // GET /api/agents/:id/model).
       canManage: canManageAgent(scope, agentMetaForScope(cfg)),
+      // Whether THIS caller may change the team's MEMBER LIST — the predicate
+      // `POST`/`DELETE /api/admin/memberships` enforce, shipped so the Share
+      // panel (#2082) can offer a read-only list instead of buttons that 403.
+      // For a `role: 'team'` row `canManage` above happens to resolve to the
+      // same thing (`agentMetaForScope().teamId === cfg.id`, so `canManageAgent`
+      // falls through to `canManageTeam`), and that coincidence is exactly why
+      // this is a separate field: a later change to the agent predicate must
+      // not silently open the member list (#2041 §7.1). Only on team rows —
+      // absent elsewhere, so a caller cannot read it as "not permitted".
+      ...(cfg.role === 'team' ? { canManageTeam: canManageTeam(scope, id) } : {}),
       dmRoomId: dm?.roomId || null,
       environmentId: cfg.environmentId || null,
       environmentName: env?.name || cfg.environmentId || null,

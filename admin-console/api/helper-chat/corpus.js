@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/chats`** (the Agent Chat topic plus its `seeAlso` neighbours) at
-// 310 863 of 340 000 — 91.4% used, 29 137 left — against
+// 314 511 of 340 000 — 92.5% used, 25 489 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. (#1459's
 // work-plane bullet in `access-users.md` — the `/teams` topic, which `/chats`
 // names among its `seeAlso` — added the last +319 to this crown.) #1930 moved

@@ -77,15 +77,7 @@ async function renameDraft(ctx, { name }) {
       && r.request().method() === 'PUT'
       && r.ok(),
   );
-  // #2114 review / AC9: this click intermittently timed out in CI (the run that
-  // never reached the seeded-admin journey). Wait for the control to be present
-  // and scroll it into view before clicking, so a not-yet-actionable affordance
-  // is a bounded wait rather than a hard `locator.click` timeout that consumes
-  // the whole suite's budget.
-  const renameControl = page.locator('[title="Rename draft"]');
-  await renameControl.waitFor({ state: 'visible' });
-  await renameControl.scrollIntoViewIfNeeded();
-  await renameControl.click();
+  await page.locator('[title="Rename draft"]').click();
   // The inline title editor autofocuses + selects its input (EditableDraftTitle),
   // so target the focused field rather than guessing among page textboxes.
   const input = page.locator('input:focus');

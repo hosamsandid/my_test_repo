@@ -95,6 +95,10 @@ export const CONTEXT_KEYS = {
   'modal:flow-node': { label: 'Flows · agent inspector' },
   'modal:flow-anomalies': { label: 'Flows · anomalies' },
   'modal:flow-improvements': { label: 'Flows · improvements' },
+  // The draft Share panel (#2068) — an eighth Flows overlay, same story: a
+  // `SidePanel` at 60/61 hosting a "?" that deep-links into the `/flows`
+  // sharing chapter, so without the lift the help would open behind it.
+  'modal:draft-share': { label: 'Flows · share a draft' },
   // The Plugins page's two confirm dialogs (#1986) — same story again, one layer
   // higher: a ConfirmDialog is the shared Modal at z-index 9999, so a "?" inside
   // one needs the lift to open beside the decision it explains rather than
@@ -141,6 +145,7 @@ export const OVERLAY_FLOW_STAGES = 'modal:flow-stages';
 export const OVERLAY_FLOW_NODE = 'modal:flow-node';
 export const OVERLAY_FLOW_ANOMALIES = 'modal:flow-anomalies';
 export const OVERLAY_FLOW_IMPROVEMENTS = 'modal:flow-improvements';
+export const OVERLAY_DRAFT_SHARE = 'modal:draft-share';
 export const OVERLAY_PLUGIN_INSTALL = 'modal:plugin-install';
 export const OVERLAY_PLUGIN_UNINSTALL = 'modal:plugin-uninstall';
 export const OVERLAY_MODEL_PROVIDER = 'modal:model-provider';

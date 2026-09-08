@@ -179,6 +179,7 @@ const OVERLAY_KEYS = {
   'modal:flow-node': 'The agent inspector side panel in the Flow editor (Details / Routing).',
   'modal:flow-anomalies': 'The Flow anomalies side panel of a live team.',
   'modal:flow-improvements': 'The Improvements side panel of a live team.',
+  'modal:draft-share': 'The Share side panel of a draft on the Flows rail.',
   'modal:plugin-install': 'The install confirmation dialog on the Plugins page.',
   'modal:plugin-uninstall': 'The uninstall confirmation dialog on the Plugins page.',
   'modal:model-provider': 'The create/edit provider side panel on the Model Providers page.',
@@ -261,6 +262,12 @@ const CONTEXT_KEYS = {
   'modal:flow-node': { label: 'Flows · agent inspector' },
   'modal:flow-anomalies': { label: 'Flows · anomalies' },
   'modal:flow-improvements': { label: 'Flows · improvements' },
+  // The draft Share panel (#2068) — an eighth Flows overlay, registered for the
+  // same reason as the seven above: it is a `SidePanel` at 60/61, so a "?"
+  // inside it must lift the help panel to be visible beside it. No topic of its
+  // own; resolution falls through to `/flows`, whose sharing chapter it
+  // deep-links into.
+  'modal:draft-share': { label: 'Flows · share a draft' },
   // The Plugins page's install and uninstall confirms (#1986). Same reason as
   // every overlay above, one layer higher: a ConfirmDialog is the shared Modal
   // at z-index 9999, so a "?" inside one has to lift the help panel to 10000 to

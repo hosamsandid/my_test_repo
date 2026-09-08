@@ -236,6 +236,14 @@ const triggerAgent = {
 // Delete every process draft carrying a given name (idempotent). Drafts get
 // server-generated ids, so the journey renames its draft to a fixed name and the
 // fixture cleans by that name — one deterministic, re-runnable surface.
+//
+// #2068 made the list per-user, which does NOT narrow this: the journey runner
+// signs in as the env single-admin, whose scope is `all`, so it still sees and
+// can delete every draft on the stack — including one a crashed prior run left
+// behind under a different identity. It also means the drafts this fixture
+// creates are stamped ownerless (the env admin has no user record) and are
+// reachable only through that same admin path, which is exactly what keeps a
+// re-run starting from a clean state.
 async function deleteDraftsNamed(ctx, name) {
   const res = await ctx.request.get('/api/process/drafts');
   if (!res.ok()) return;

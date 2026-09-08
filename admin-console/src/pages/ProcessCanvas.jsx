@@ -24,6 +24,7 @@ import { toolbarTitle, STATUS_TITLES, draftStatusText, PROPOSAL_PENDING_REASON }
 import { CREATE_TEAM_LABEL, createdTeamNotice } from './process/create-team-copy.js';
 import { FLOW_INTENTS } from './process/flows-rail-menu.js';
 import { downloadBundle } from './process/bundle-download.js';
+import { draftWriteError } from './process/draft-share-view.js';
 import PageHelpButton from '../components/PageHelpButton';
 import { FLOWS_HELP_SECTIONS } from './process/flows-help-sections';
 import Tooltip from '../components/Tooltip';
@@ -265,7 +266,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     let alive = true;
     apiCall('GET', `/api/process/drafts/${draftId}`)
       .then(b => { if (alive) { draftBundleRef.current = b; setDraftBundle(b); } })
-      .catch(e => { if (alive) setImportError(e.message); });
+      // #2068 AC17 — a draft deleted, or unshared, under an open canvas comes
+      // back as a bare 404. Say what happened instead of relaying "Draft not
+      // found", which reads like a bug in the URL.
+      .catch(e => { if (alive) setImportError(draftWriteError(e, e.message)); });
     return () => { alive = false; };
   }, [draftId, draftReloadToken]);
 
@@ -280,7 +284,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   }, [draftBundle]);
 
   const persistDraft = useCallback(async (next) => {
-    const saved = await apiCall('PUT', `/api/process/drafts/${draftId}`, next);
+    let saved;
+    try {
+      saved = await apiCall('PUT', `/api/process/drafts/${draftId}`, next);
+    } catch (e) {
+      // #2068 AC17 — the draft can disappear from under an open editor: deleted
+      // by another holder, or your access removed. Surface it as a sentence on
+      // the page's own error line and re-throw, so the dialog that triggered the
+      // save still sees the failure and does not report success.
+      setImportError(draftWriteError(e, e.message));
+      throw e;
+    }
     draftBundleRef.current = saved;
     setDraftBundle(saved);
     if (onDraftsChanged) onDraftsChanged();

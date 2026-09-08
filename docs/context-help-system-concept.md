@@ -399,8 +399,12 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **289,378 — 85.1% used,
-50,622 left** (#2057 made a direct hand-off read as a consumer on the Outcomes and Routing
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **292,051 — 85.9% used,
+47,949 left** (#2068 made flow drafts private to their creator and shareable with equal rights,
+adding a *Sharing a draft* chapter to `flows.md` — an eleventh chapter on a topic `create.md`
+names as a neighbour, so it lands in full: +2,673 on top of 289,378. Worth noting that the whole
+growth is topic-side; the ticket touches no `CORPUS_FILES` doc, so no other context moved.
+It stood at 289,378 after #2057, which made a direct hand-off read as a consumer on the Outcomes and Routing
 surfaces, which voided `agent-chat.md`'s `## Outcomes` claim that a label is what wakes the next
 agent — the same claim the panel itself was making: +895 for the two-mechanism table, landing in
 full because `create.md` names `/chats` as a neighbour. It stood at 288,483 after #2053, which

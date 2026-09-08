@@ -409,12 +409,13 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **299,312 — 88.0% used,
-40,688 left** (#2068 made flow drafts private-by-default and shareable, adding an eleventh
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **303,943 — 89.4% used,
+36,057 left** (#2068 made flow drafts private-by-default and shareable, adding an eleventh
 `flows.md` chapter *Sharing a draft*; `create.md` names `/flows` among its `seeAlso`, so it
-lands on this crown in full: +2,673 over #2066's 296,639 baseline, re-measured on the merge —
-an earlier draft of this figure wrongly measured from a pre-#2065 289,378, silently dropping the
-attribution chapter. #2066 replaced the manual **Sync all agents** button on the Working Environments
+lands on this crown in full: +2,673, re-measured on the merge and not summed on a stale base.
+#2067 (per-agent scoped repositories) landed on main while this branch was open and grew the
+same crown by +4,631, so the baseline is not #2066's 296,639 but main's post-#2067 crown of
+301,270 → 303,943. #2066 replaced the manual **Sync all agents** button on the Working Environments
 form with an offer the save itself makes, and the figure went UP by 4,689 — the biggest single
 move in this chain, from a ticket whose user-visible change was *removing* a control. The topic
 had to grow +3,848 to carry the three change classes, the clean-and-pushed safety rule and the

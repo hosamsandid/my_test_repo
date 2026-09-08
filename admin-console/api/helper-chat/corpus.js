@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 299 312 of 340 000 — 88.0% used, 40 688 left — against
+// neighbours) at 303 943 of 340 000 — 89.4% used, 36 057 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
@@ -191,11 +191,14 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // #2068 then made flow drafts private-by-default and shareable with equal rights,
 // which needed an eleventh `flows.md` chapter (*Sharing a draft*) — the panel is
 // where the irreversibility of sharing has to be readable. `create.md` names
-// `/flows` among its `seeAlso`, so that chapter lands on this crown in full: +2 673,
-// re-measured on the merge with #2066's **296 639** as the baseline (NOT the
-// pre-#2065 289 378 an earlier draft of this entry wrongly used, which had silently
-// dropped the #2065 attribution chapter) → **299 312** (88.0%). The whole delta is
-// topic-side; nothing in `CORPUS_FILES` changed, so no OTHER context moved.
+// `/flows` among its `seeAlso`, so that chapter lands on this crown in full: +2 673.
+// Re-measured on the merge, not summed on a stale base: #2067 (per-agent scoped
+// repositories) landed on main while this branch was open and grew the SAME crown
+// by +4 631 (its `agent-chat.md` chapter, which `create.md` reaches through `/chats`,
+// plus `CORPUS_FILES` edits that land on every context), so the baseline is not
+// #2066's 296 639 but main's post-#2067 crown of **301 270** → **303 943** (89.4%).
+// The whole #2068 delta is topic-side; nothing in `CORPUS_FILES` changed here, so
+// #2068 itself moved no OTHER context.
 // Re-measure rather than trust this comment — measureWorstCaseSystemPrompt() sweeps every context and returns which one
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.

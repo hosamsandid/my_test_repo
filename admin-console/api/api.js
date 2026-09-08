@@ -32,6 +32,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
         resolveAgentTenant } = require('./scope');
 const { resolveAgentTeam } = require('./agent-team');
+const { createAgentManageGate } = require('./team-member-boundary');
 const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
 const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
@@ -4533,6 +4534,34 @@ function denyUnlessCanManageAgent(req, res, agentDirOrCfg) {
   return false;
 }
 
+// The D9 Team-Member boundary on the WORK plane (#2080, epic #2076 P2 / AC7b) —
+// the express half of `team-member-boundary.js`, which carries the §6 matrix,
+// the decision and the reasoning.
+//
+// `denyUnlessCanManageAgent` above serves the config plane, where a route is
+// entirely a mutation. The work plane is different: reads and writes share a
+// route prefix (`…/workspace/`, `…/context/`), so the split cannot be a mount
+// and has to be per-route — which is why this is a middleware rather than a
+// second `app.use`. It is applied to the ten `manage`-class routes of the
+// matrix and to nothing else; `work-plane-boundary-routes.test.js` asserts
+// exactly that, in both directions.
+//
+// Refuses 404 while the agent is invisible and only then 403, so a caller who
+// cannot see an agent never learns it exists from a write attempt.
+const requireAgentManage = createAgentManageGate({
+  getScope,
+  loadAgentMeta: (id) => {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    // An unreadable or absent config means the agent's access boundary is
+    // unknown. Fail closed as absent rather than guessing a tenant — the same
+    // rule `work-plane-access.js` applies for the same reason.
+    return cfg ? agentMetaForScope(cfg) : null;
+  },
+  isValidAgentId: (id) => AGENT_ID_RE.test(id),
+  visibleAgent,
+  canManageAgent,
+});
+
 // The Model Providers a given team is entitled to use — team-owned endpoints
 // plus system-scoped endpoints assigned to that team. This is the ONLY set an
 // agent may be switched to (no cross-team leakage), and — unlike
@@ -7066,7 +7095,11 @@ async function proxySkillActivation(req, res, active) {
   const cfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
   if (!cfg) return res.status(404).json({ error: 'team not found' });
   const scope = getScope(req);
-  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+  // D9 (#2080): activating a skill edits the GRANT (`skills[]` / a member's
+  // `skillsOverride`) before it syncs any file, so this is an agent-settings
+  // change — Team Admin only, not merely visible. It was `visibleAgent`, which
+  // let any member of the owning team re-grant its skills.
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) return res.status(403).json({ error: 'forbidden' });
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   const route = cfg.role === 'team'
     ? `/internal/teams/${encodeURIComponent(teamId)}/skills/${active ? 'activate' : 'deactivate'}`
@@ -7108,7 +7141,10 @@ async function proxyPluginActivation(req, res, active) {
   const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
   if (!cfg) return res.status(404).json({ error: 'agent not found' });
   const scope = getScope(req);
-  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+  // D9 (#2080): the plugin sibling of the skill grant above, and the same
+  // reasoning — a grant decides what privilege-holding CLI the agent can reach,
+  // which is squarely "agent settings (… plugins …)" in §6's matrix.
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) return res.status(403).json({ error: 'forbidden' });
 
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   const route = cfg.role === 'team'
@@ -10174,7 +10210,10 @@ app.post('/api/skills/install', async (req, res) => {
     return res.status(409).json({ error: `Agent '${agentId}' is not active — enable it before installing skills` });
   }
   const scope = getScope(req);
-  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+  // D9 (#2080): "Install into agent" writes the grant and copies files into the
+  // workspace — an agent-settings change, so Team Admin only. Was
+  // `visibleAgent`, i.e. any member of the owning team.
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) return res.status(403).json({ error: 'forbidden' });
   // Refuse to clobber a skill the agent already carries unless overwrite:true —
   // an existing workspace dir OR a grant already listing the name both count.
   // Resolve the grant inline the same way as elsewhere (team-owned, orchestrator/
@@ -17048,7 +17087,7 @@ app.get('/api/agents/:agentId/workspace/download', apiLimiter, (req, res) => {
 // outward-symlink sanitizer), then the basename is appended. Operating on the
 // entry via its parent means a symlink is unlinked rather than followed, and a
 // final startsWith check against the realpath'd agent root rules out any escape.
-app.delete('/api/agents/:agentId/workspace/file', apiLimiter, (req, res) => {
+app.delete('/api/agents/:agentId/workspace/file', apiLimiter, requireAgentManage, (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relPath = typeof req.query.path === 'string' ? req.query.path : '';
@@ -17106,7 +17145,7 @@ app.delete('/api/agents/:agentId/workspace/file', apiLimiter, (req, res) => {
 // rejected, and both endpoints are re-checked against the realpath'd agent root.
 // Refuses to move a directory into itself or one of its own descendants, and
 // refuses to clobber an existing entry at the destination.
-app.post('/api/agents/:agentId/workspace/move', apiLimiter, (req, res) => {
+app.post('/api/agents/:agentId/workspace/move', apiLimiter, requireAgentManage, (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
 
@@ -17543,7 +17582,7 @@ app.get('/api/agents/:agentId/workspace/git-status', heavyLimiter, async (req, r
 // orchestrator with no LLM (#648 AC9). This proxy re-checks the agent's running
 // state at execution time (AC7) so a stale browser snapshot can never bypass
 // the guard, then forwards to the orchestrator, which owns the git credentials.
-app.post('/api/agents/:agentId/workspace/git-action', heavyLimiter, async (req, res) => {
+app.post('/api/agents/:agentId/workspace/git-action', heavyLimiter, requireAgentManage, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
 
@@ -17703,7 +17742,10 @@ const requireAgentIdParam = (req, res, next) => {
   next();
 };
 
-app.post('/api/agents/:agentId/workspace/upload', heavyLimiter, requireAgentIdParam, uploadFiles, (req, res) => {
+// `requireAgentManage` sits ahead of `uploadFiles` for the same reason
+// `requireAgentIdParam` does: otherwise a caller who will be refused still
+// costs us up to 500×50 MB of buffered multipart body before the 403.
+app.post('/api/agents/:agentId/workspace/upload', heavyLimiter, requireAgentIdParam, requireAgentManage, uploadFiles, (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relDir = typeof req.body.path === 'string' ? req.body.path : '';
@@ -17824,7 +17866,7 @@ app.post('/api/agents/:agentId/workspace/upload', heavyLimiter, requireAgentIdPa
 const CONTEXT_ORCH_URL = () => process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
 
 // Delete a file or directory inside a read-write context folder.
-app.delete('/api/agents/:agentId/context/file', apiLimiter, async (req, res) => {
+app.delete('/api/agents/:agentId/context/file', apiLimiter, requireAgentManage, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relPath = typeof req.query.path === 'string' ? req.query.path : '';
@@ -17842,7 +17884,7 @@ app.delete('/api/agents/:agentId/context/file', apiLimiter, async (req, res) => 
 
 // Move (rename/relocate) an entry within ONE read-write context folder. Body:
 //   { from: "<rel path>", toDir: "<rel dir path>" } — both relative to the mount.
-app.post('/api/agents/:agentId/context/move', apiLimiter, async (req, res) => {
+app.post('/api/agents/:agentId/context/move', apiLimiter, requireAgentManage, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const from = typeof req.body?.from === 'string' ? req.body.from : '';
@@ -17866,7 +17908,8 @@ app.post('/api/agents/:agentId/context/move', apiLimiter, async (req, res) => {
 // is parsed here (same multer config + 50 MB cap as the workspace upload); each
 // file is then streamed to the orchestrator as a raw octet-stream (no base64
 // inflation) which packages it into the container via the archive endpoint.
-app.post('/api/agents/:agentId/context/upload', heavyLimiter, requireAgentIdParam, uploadFiles, async (req, res) => {
+// Gate ahead of `uploadFiles`, like the workspace upload above.
+app.post('/api/agents/:agentId/context/upload', heavyLimiter, requireAgentIdParam, requireAgentManage, uploadFiles, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relDir = typeof req.body.path === 'string' ? req.body.path : '';

@@ -299,6 +299,13 @@ export function railMenuItems({
           team,
           teamId: group.id,
           canManage: team ? team.canManage !== false : true,
+          // `canManageTeam` is shipped on `role: 'team'` rows only (#2082), so
+          // a header-less group falls back to `canManage` — the same `!== false`
+          // default the rest of this call uses for a payload that predates the
+          // field, and never a hard `false` that would mislabel the entry.
+          canManageMembers: team && team.canManageTeam !== undefined
+            ? team.canManageTeam !== false
+            : (team ? team.canManage !== false : true),
           busy: busyIds.has(group.id),
         })),
         helpMenuItem(),

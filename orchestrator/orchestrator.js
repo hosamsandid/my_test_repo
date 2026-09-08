@@ -9,6 +9,7 @@ const fs = require("fs");
 const path = require("path");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
 const { resolveAgentTenant, planTenantBackfill } = require("./agent-tenant");
+const { needsAdoption, planAdoption, planBootstrapMembership } = require("./default-team-adoption");
 const { makeSkillSourceResolver, parseSkillDescription } = require("./skill-source");
 const {
   normalizeKnowledgeStore,
@@ -77,6 +78,7 @@ const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require("./prom
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const credentialResolution = require("./credential-resolution");
+const ownershipMigration = require("./ownership-migration");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assessConversionEligibility, planTeamConversion } = require("./team-conversion");
@@ -143,6 +145,8 @@ const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { isSupportedAgentRole, unsupportedRoleNote } = require("./agent-role-support");
 const { buildEnsureUserCommands, buildReactivateCommands } = require("./matrix-admin-commands");
 const matrixLoginRetry = require("./matrix-login-retry");
+const humanMatrixIdentity = require("./human-matrix-identity");
+const { createHumanMatrixStore } = require("./human-matrix-store");
 const skillManifest = require("./skill-manifest");
 const skillDelivery = require("./skill-delivery");
 const skillCommands = require("./skill-commands");
@@ -290,6 +294,12 @@ const MCP_CREDENTIALS_KEYS_DIR = "/workspace/mcp-credentials/_keys";
 // is the single writer for tenancy/identity data and owns the startup
 // bootstrap + ownership backfill below.
 const teamsStore = createTeamsStore({ root: WORKSPACE });
+// Per-human Matrix credentials (#1458). Deliberately a SEPARATE store from the
+// user records above: `sanitizeUser()` is a convention applied at the store
+// boundary, and users/index.json is also read directly by the admin-console —
+// so a live access token does not belong on that record. See
+// human-matrix-store.js for the full reasoning.
+const humanMatrixStore = createHumanMatrixStore({ root: WORKSPACE });
 // Two-tier skill resolution (#306): owning team's pool wins over the global pool.
 const { resolveSkillSourceDir, teamSkillsDir } = makeSkillSourceResolver({
   workspace: WORKSPACE,
@@ -1060,12 +1070,26 @@ function bootstrapTeams() {
   const subject = process.env.BOOTSTRAP_SYSTEM_ADMIN_SUBJECT;
   if (subject) {
     try {
-      teamsStore.ensureSystemAdmin({
+      const admin = teamsStore.ensureSystemAdmin({
         subject,
         email: process.env.BOOTSTRAP_SYSTEM_ADMIN_EMAIL,
         displayName: process.env.BOOTSTRAP_SYSTEM_ADMIN_NAME,
       });
       console.log(`[Orchestrator] Ensured System Admin for subject '${subject}'`);
+      // #1457: System Admin is a global flag, not a membership, so the bootstrap
+      // admin was left with no *Team* role at all — and the Default Team it
+      // owns everything in therefore had no Team Admin. Give it one. The plan is
+      // empty once any membership for the pair exists, in any role, so a human
+      // who deliberately demoted this admin is not re-promoted on every boot.
+      const membership = planBootstrapMembership({
+        userId: admin && admin.id,
+        memberships: teamsStore.listMemberships({ teamId: DEFAULT_TEAM_ID }),
+        teamId: DEFAULT_TEAM_ID,
+      });
+      if (membership) {
+        teamsStore.setMembership(membership);
+        console.log(`[Orchestrator] Made System Admin '${subject}' ${membership.role} of the Default Team`);
+      }
     } catch (err) {
       console.error(`[Orchestrator] System Admin bootstrap failed: ${err.message}`);
     }
@@ -1130,22 +1154,132 @@ function backfillResourceOwnership() {
     try {
       const list = JSON.parse(fs.readFileSync(idx, "utf8"));
       if (!Array.isArray(list)) continue;
-      let changed = false;
-      for (const entry of list) {
-        if (entry && typeof entry === "object" && entry.teamId === undefined) {
-          entry.teamId = DEFAULT_TEAM_ID;
-          changed = true;
-        }
-      }
-      if (changed) {
+      // planAdoption's `teamId === undefined` predicate is what keeps the
+      // personal credential tier (#1567) out: a personal entry carries an
+      // explicit `teamId: null` and must NOT be adopted into a team.
+      const pending = planAdoption(list.map((record, key) => ({ key, record })));
+      if (pending.length > 0) {
+        for (const { record } of pending) record.teamId = DEFAULT_TEAM_ID;
         fs.writeFileSync(idx, JSON.stringify(list, null, 2));
-        stamped += list.length;
+        stamped += pending.length;
       }
     } catch { /* skip unparsable index */ }
   }
 
+  // MCP servers (#1457). The scope filter has always read `server.teamId`
+  // (api.js `visibleTeam(scope, s.teamId)`) but nothing ever wrote it, so every
+  // registered server relied on the `|| 'default'` collapse inside the
+  // predicate. Adopt them explicitly, so the Default Team's ownership is a fact
+  // on disk rather than a fallback. Writing a `teamId` at *create* time belongs
+  // to the ownership phase (#2077/#2083) — this pass only adopts what predates it.
+  if (fs.existsSync(MCP_SERVERS_DIR)) {
+    for (const name of fs.readdirSync(MCP_SERVERS_DIR)) {
+      if (name.startsWith("_")) continue; // credential/key dirs, not servers
+      const p = path.join(MCP_SERVERS_DIR, name, "server.json");
+      if (!fs.existsSync(p)) continue;
+      try {
+        const server = JSON.parse(fs.readFileSync(p, "utf8"));
+        if (needsAdoption(server)) {
+          server.teamId = DEFAULT_TEAM_ID;
+          fs.writeFileSync(p, JSON.stringify(server, null, 2));
+          stamped++;
+        }
+      } catch { /* skip unparsable server */ }
+    }
+  }
+
   if (stamped > 0) {
     console.log(`[Orchestrator] Backfilled team ownership onto ${stamped} pre-existing resource(s)`);
+  }
+}
+
+// The D6 ownership migration (#2077, epic #2076; design of record
+// `docs/decentralised-access-concept.md` §8). Startup-time, idempotent,
+// in-place — the `backfillResourceOwnership` shape above, which §8.3 names as
+// the precedent to copy. Two independent passes:
+//
+//   1. `ownerId` onto every team and standalone agent that lacks one (AC1/AC5),
+//      resolved from its access scope's memberships by the D6 rule.
+//   2. Every (user ↔ access-scope) membership fanned out to one
+//      (user ↔ Agent Team) membership per Agent Team in that scope (AC2/AC3).
+//
+// Pass 2 is ADDITIVE — the scope memberships stay. P1 is specified as "no
+// behaviour change", and enforcement still gates on a resource's `teamId`
+// stamp (an access-scope id until P2 re-points it), so removing the scope
+// grants here would empty every list for every non-admin. §8.3 states the
+// no-lockout property as `⊇` precisely to allow this; the fixture test
+// `admin-console/api/ownership-no-lockout.test.js` is the proof.
+//
+// Idempotent by VALUE, never by a marker: pass 1 skips a config that already
+// carries an `ownerId`, pass 2 skips a `(userId, teamId)` pair that already
+// exists. A second boot writes nothing and logs nothing (AC6).
+//
+// Best-effort per item, like its precedent: one unreadable config or a store
+// write failure is logged and never aborts boot.
+function migrateOwnershipModel() {
+  let users = [];
+  let memberships = [];
+  try {
+    users = teamsStore.listUsers();
+    memberships = teamsStore.listMemberships();
+  } catch (err) {
+    console.warn(`[Orchestrator] Ownership migration skipped — user store unreadable: ${err.message}`);
+    return;
+  }
+
+  const configs = {};
+  if (fs.existsSync(AGENTS_DIR)) {
+    for (const id of listAgentIds()) {
+      try {
+        const cfg = loadAgentConfig(id);
+        if (cfg) configs[id] = cfg;
+      } catch (err) {
+        console.warn(`[Orchestrator] Ownership migration: skipping unreadable config ${id}: ${err.message}`);
+      }
+    }
+  }
+
+  // ── Pass 1 — ownerId (AC1/AC5) ──────────────────────────────────────────
+  const { stamp, unresolved } = ownershipMigration.planOwnerBackfill({ configs, users, memberships });
+  let owned = 0;
+  for (const { id, ownerId, ownerSource, scopeId } of stamp) {
+    try {
+      const cfg = configs[id];
+      cfg.ownerId = ownerId;
+      cfg.ownerSource = ownerSource;
+      saveAgentConfig(id, cfg);
+      owned++;
+      console.log(`[Orchestrator] Ownership: ${id} (scope ${scopeId}) → owner ${ownerId} (migration placeholder)`);
+    } catch (err) {
+      console.warn(`[Orchestrator] Ownership migration: could not stamp ${id}: ${err.message}`);
+    }
+  }
+  // D6's rule ends in "else unset", so a scope with no members at all leaves
+  // its resources unowned rather than getting a fabricated owner. Report it —
+  // an unowned team is correctable (§8.2) but only if someone knows about it.
+  for (const { id, scopeId } of unresolved) {
+    console.warn(
+      `[Orchestrator] Ownership: ${id} has no resolvable owner — access scope '${scopeId}' has no members. `
+      + 'Assign an owner from the Access page.',
+    );
+  }
+
+  // ── Pass 2 — membership fan-out (AC2/AC3) ───────────────────────────────
+  let granted = 0;
+  const repoint = ownershipMigration.planMembershipRepoint({ configs, memberships });
+  if (repoint.length > 0) {
+    try {
+      granted = teamsStore.appendMemberships(repoint).length;
+      for (const m of repoint) {
+        console.log(`[Orchestrator] Ownership: membership ${m.userId} → Agent Team ${m.teamId} as ${m.role} (from scope ${m.fromScopeId})`);
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] Ownership migration: membership fan-out failed: ${err.message}`);
+    }
+  }
+
+  if (owned > 0 || granted > 0) {
+    console.log(`[Orchestrator] Ownership migration: stamped ${owned} owner(s), added ${granted} Agent-Team membership(s)`);
   }
 }
 
@@ -3418,7 +3552,22 @@ const MATRIX_LOGIN_RETRY_CEILING_MS = (() => {
     : matrixLoginRetry.DEFAULT_CEILING_MS;
 })();
 
-async function ensureMatrixUser(adminClient, username, password) {
+async function ensureMatrixUser(adminClient, username, password, { allowHumanLocalpart = false } = {}) {
+  // Human-localpart reservation (#1458). This function is the ONE choke point
+  // through which every Matrix account in the stack is created — the seven
+  // agent/team/member call sites below and the human-provisioning path — so it
+  // is the only place the reservation has to be enforced to be complete.
+  //
+  // Agent ids are free-form slugs (AGENT_ID_RE allows `[A-Za-z0-9_-]`), so
+  // without this an operator could create an agent literally named
+  // `u-0123456789abcdef` and take over a human's Matrix account, and with it
+  // that human's rooms. The predicate is exactly as narrow as the minted human
+  // shape, so ordinary ids like `u-payments` remain legal.
+  if (!allowHumanLocalpart && humanMatrixIdentity.isReservedHumanLocalpart(username)) {
+    throw new Error(
+      `Matrix localpart '${username}' is reserved for per-human identities (#1458)`,
+    );
+  }
   // Ordered create → reset-password → enable-login. Plain reset-password both
   // sets the password and reactivates a previously deactivated account on the
   // Continuwuity build we run (issue #715) — see matrix-admin-commands.js.
@@ -3501,6 +3650,123 @@ async function setDisplayName(token, userId, displayName) {
       body: JSON.stringify({ displayname: displayName }),
     }
   );
+}
+
+// ============================================================
+// Per-human Matrix identity (#1458, epic #2076 P1)
+// ============================================================
+//
+// docs/multi-user-concept.md §4: every human gets their OWN Matrix account
+// instead of sharing the one admin identity whose token lives in
+// MATRIX_ACCESS_TOKEN. This is the identity half of that change — the room
+// model (one DM room per (human, agent), one shared room per team agent) is
+// the second half and lands separately; it needs these accounts to exist
+// before it can invite anyone into anything.
+//
+// ── The provisioning mechanism, and why it is this one ─────────────────────
+// Continuwuity exposes NO Synapse `/_synapse/admin/` REST API (see
+// matrix-admin-commands.js), and the stack runs with
+// CONTINUWUITY_ALLOW_REGISTRATION="false", so the client registration endpoint
+// is closed too. The only live mechanism is the admin-ROOM command sequence
+// that `ensureMatrixUser` already fires for every agent. Humans therefore
+// reuse it verbatim — including its two hard-won properties:
+//   * the ordered create → reset-password → enable-login sequence, which also
+//     recovers a previously deactivated account (issue #715), so a re-onboarded
+//     human gets their old rooms back rather than a dead account; and
+//   * `loginMatrixUser`'s bounded retry, which absorbs the cold-stack race
+//     where the admin bot has not processed the commands yet (issues #719/#1386).
+// The admin-room commands are fire-and-forget — their replies are never parsed
+// — so the LOGIN is the only real success signal, exactly as for agents.
+//
+// ── When this runs ─────────────────────────────────────────────────────────
+// At user-record creation, not at first login. There is no just-in-time user
+// provisioning today (admin-console/api/auth.js fails an unregistered identity
+// closed, #1415), so a user record is always created deliberately, and doing
+// the work there keeps the ~5s of admin-bot settle delays off the login path.
+// When SSO JIT provisioning does arrive it will create a user record and pick
+// this up for free.
+
+// Deactivate a Matrix account by its full user id. The class method
+// `deactivateMatrixUser` covers agents (which are addressed by agent id);
+// humans are addressed by their derived `@u-<hash>:local`, so the id-taking
+// form lives here. Best-effort and fire-and-forget, like every admin-room op.
+async function deactivateMatrixUserId(adminClient, matrixUserId) {
+  if (!adminClient || !matrixUserId) return;
+  try {
+    await adminClient.sendMessage(CONDUWUIT_ADMIN_ROOM, {
+      msgtype: "m.text",
+      body: `!admin users deactivate ${matrixUserId}`,
+    });
+    console.log(`[Orchestrator] Matrix user ${matrixUserId} deactivated`);
+  } catch (err) {
+    console.error(`[Orchestrator] Deactivate warning for ${matrixUserId}: ${err.message}`);
+  }
+}
+
+// Idempotent: make sure `user` has a Matrix account and a stored access token.
+// Returns the credential record, or null when it could not be provisioned.
+//
+// Idempotency matters because the callers are best-effort: a create that failed
+// (admin bot down, homeserver restarting) must be repairable by simply calling
+// this again, and a call for an already-provisioned user must be a cheap no-op
+// rather than a second round of admin-room traffic.
+async function ensureHumanMatrixIdentity(adminClient, user) {
+  if (!user || !user.id || !user.subject) return null;
+
+  const existing = humanMatrixStore.readIdentity(user.id);
+  if (existing && existing.accessToken) return existing;
+
+  const localpart = humanMatrixIdentity.humanMatrixLocalpart(user.subject);
+  const matrixUserId = humanMatrixIdentity.humanMatrixUserId(user.subject);
+
+  // A human's Matrix password is never typed by anyone — the access token from
+  // the login below is what we keep — so it is a full-entropy random value
+  // rather than the derivable `agent-<id>-<ts>` pattern the agent path uses.
+  const password = randomHex(24);
+
+  if (adminClient) {
+    await ensureMatrixUser(adminClient, localpart, password, { allowHumanLocalpart: true });
+  }
+  const accessToken = await loginMatrixUser(localpart, password, adminClient);
+
+  // Display name = the corporate display name (concept §4 step 2). This is the
+  // only human-readable thing room members see, since the localpart is a hash.
+  await setDisplayName(accessToken, matrixUserId, user.displayName || user.subject);
+
+  const record = humanMatrixStore.writeIdentity(user.id, { matrixUserId, accessToken });
+  // The pointer — not the token — goes on the user record so other components
+  // can resolve "which Matrix account is this human?" without touching the
+  // credential store.
+  try {
+    teamsStore.setUserMatrixIdentity(user.id, matrixUserId);
+  } catch (err) {
+    console.warn(`[Orchestrator] could not stamp matrixUserId on user ${user.id}: ${err.message}`);
+  }
+  console.log(`[Orchestrator] Provisioned Matrix identity ${matrixUserId} for user ${user.id}`);
+  return record;
+}
+
+// Fire-and-forget wrapper for the create path: provisioning costs several
+// seconds of admin-bot settle delays, and a homeserver hiccup must not fail the
+// user creation the caller actually asked for. A user left without an identity
+// is repaired by the next `ensureHumanMatrixIdentity` call.
+function provisionHumanMatrixIdentityInBackground(adminClient, user) {
+  ensureHumanMatrixIdentity(adminClient, user).catch((err) => {
+    console.warn(
+      `[Orchestrator] Matrix identity provisioning deferred for user ${user && user.id}: ${err.message}`,
+    );
+  });
+}
+
+// Off-boarding counterpart: deactivate the account and drop the stored token so
+// the credential does not outlive the user record. Best-effort in both halves —
+// the user removal is what the caller contracted for.
+async function deprovisionHumanMatrixIdentity(adminClient, userId) {
+  const identity = humanMatrixStore.readIdentity(userId);
+  if (identity && identity.matrixUserId) {
+    await deactivateMatrixUserId(adminClient, identity.matrixUserId);
+  }
+  humanMatrixStore.deleteIdentity(userId);
 }
 
 // ============================================================
@@ -3655,17 +3921,24 @@ function loadSshKeyIndex() {
 // (#1569, concept §5/§6). Returns `{ githubTokenId }` (the id to inject; the
 // env's shared id when the personal tier does not apply) or throws a
 // `personalCredentialRequired`-tagged Error the caller surfaces as a distinct,
-// actionable failure. Gated on `config.ownerId`: an agent with no owner (every
-// agent until ownerId population lands — AC8) takes the shared id unchanged and
-// never refuses.
+// actionable failure.
+//
+// Since #2077 populates `ownerId` on every team and standalone agent, owner
+// PRESENCE is no longer the switch — participation in the personal tier is. The
+// `present` half of `findPersonalCredentialState` is what carries that
+// distinction: an owner with no personal token takes the shared id unchanged and
+// never refuses (which is every agent today), while an owner whose personal
+// token is present-but-unusable still refuses. See the header comment in
+// `credential-resolution.js` for why the switch had to move.
 function resolveAttributedGithubToken(id, env, operation) {
   const cfg = loadAgentConfig(id) || {};
   const ownerId = credentialResolution.resolveAgentOwnerId(cfg, loadAgentConfig);
-  const personal = credentialResolution.findPersonalCredential(loadGithubTokenIndex(), ownerId);
+  const personal = credentialResolution.findPersonalCredentialState(loadGithubTokenIndex(), ownerId);
   const decision = credentialResolution.resolveCredential({
     operation,
     ownerId,
-    personalCredential: personal,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
     sharedCredentialId: env?.githubTokenId || null,
     kind: "GitHub token",
   });
@@ -7592,6 +7865,21 @@ class Orchestrator {
     // an existing team.
     const ownerTeamId = resolveOwnerTeamId(extra.teamId);
 
+    // Human OWNER — the creating person (#2077, concept D8/§3.4/§3.5). Written
+    // for `role: 'team'` and standalone `role: 'agent'` only; a `team-member`
+    // deliberately gets none and resolves its owner from the parent team
+    // (`resolveAgentOwnerId`). `ownerSource` records HOW the owner was decided,
+    // so a real creator stays distinguishable from a D6 migration placeholder
+    // (§8.2 — the migrated owner "may be wrong and must be correctable").
+    const ownerFields = ownershipMigration.ownableRole(role) && extra.ownerId
+      ? {
+        ownerId: String(extra.ownerId),
+        ownerSource: ownershipMigration.OWNER_SOURCES.includes(extra.ownerSource)
+          ? extra.ownerSource
+          : ownershipMigration.OWNER_SOURCE_CREATOR,
+      }
+      : {};
+
     // Skill grant is team-owned (skill-grants.js): the caller passes the
     // initial `skills` list explicitly; the environment no longer contributes.
     const grantedSkills = Array.isArray(extra.skills)
@@ -7605,6 +7893,7 @@ class Orchestrator {
         role: "team",
         environmentId: env.id,
         teamId: ownerTeamId,
+        ...ownerFields,
         systemPromptTemplate: systemPrompt || "",
         // The team's ACTIVE skill set — inherited by every member without a
         // `skillsOverride`; the lever the Knowledge activation flow writes.
@@ -7678,6 +7967,7 @@ class Orchestrator {
       role,
       environmentId: env.id,
       teamId: ownerTeamId,
+      ...ownerFields,
       // The agent's own skill grant (team-owned skills; standalone agents
       // carry their list directly).
       skills: grantedSkills,
@@ -10203,7 +10493,19 @@ async function handleTeamsAdminApi(req, res) {
       }
       if (req.method === 'POST' && !resourceId) {
         const body = await readBody(req);
-        return sendJson(res, 201, clean(teamsStore.createUser(body))), true;
+        const created = teamsStore.createUser(body);
+        // Give the new human their own Matrix account (#1458). Deliberately
+        // wired HERE and not inside teamsStore.createUser: the startup
+        // `ensureSystemAdmin` bootstrap also goes through createUser, and the
+        // bootstrap admin must ADOPT the existing shared-admin identity
+        // (`@admin:local`) and its rooms rather than be handed a fresh empty
+        // account — that adoption is the migration slice's job.
+        //
+        // A single-operator stack creates no user records at all (the env
+        // admin of #276 has none), so nothing here fires and its behaviour is
+        // unchanged end to end.
+        provisionHumanMatrixIdentityInBackground(orchestrator.adminClient, created);
+        return sendJson(res, 201, clean(created)), true;
       }
       if (req.method === 'GET' && resourceId) {
         const u = teamsStore.getUser(resourceId);
@@ -10225,6 +10527,15 @@ async function handleTeamsAdminApi(req, res) {
           offboarding = await orchestrator.offboardOwner(resourceId);
         } catch (err) {
           console.error(`[Orchestrator] offboarding failed for user ${resourceId}: ${err.message}`);
+        }
+        // Retire the departing human's Matrix account and delete their stored
+        // access token (#1458), for the same reason personal credentials are
+        // removed above: a live token must not outlive the user record. Runs
+        // BEFORE deleteUser so a failure here leaves the user recoverable.
+        try {
+          await deprovisionHumanMatrixIdentity(orchestrator.adminClient, resourceId);
+        } catch (err) {
+          console.error(`[Orchestrator] Matrix de-provisioning failed for user ${resourceId}: ${err.message}`);
         }
         const deleted = teamsStore.deleteUser(resourceId);
         return sendJson(res, 200, { ...deleted, offboarding }), true;
@@ -10286,6 +10597,9 @@ async function main() {
   await migrateAgentClaudeMdToReference();
   bootstrapTeams();
   backfillResourceOwnership();
+  // After backfillResourceOwnership, which is what guarantees every config
+  // carries the `teamId` the D6 owner resolution keys on (#2077).
+  migrateOwnershipModel();
   backfillTriggerHorizonStamps();
 
   const orchestrator = new Orchestrator();
@@ -14690,6 +15004,11 @@ async function main() {
           team, sessionPolicy, triggers,
           // Owning (human) Team — the tenant this construct belongs to (#299).
           teamId,
+          // Human OWNER (#2077, D8): the user-record id of the creating human,
+          // resolved by the console from the authenticated session — never
+          // self-asserted by an agent, since this API is unauthenticated.
+          // Honoured for `role: 'team'` and `role: 'agent'` only.
+          ownerId, ownerSource,
           // For role: 'team' — suppress the auto-numbered first member
           // (the wizard adds members itself with role overrides instead).
           skipFirstMember,
@@ -14747,6 +15066,8 @@ async function main() {
         if (Array.isArray(triggers)) extra.triggers = triggers;
         if (skipFirstMember) extra.skipFirstMember = true;
         if (teamId) extra.teamId = teamId;
+        if (typeof ownerId === 'string' && ownerId.trim()) extra.ownerId = ownerId.trim();
+        if (typeof ownerSource === 'string' && ownerSource.trim()) extra.ownerSource = ownerSource.trim();
         if (Array.isArray(stages)) extra.stages = stages;
         if (Array.isArray(labels)) extra.labels = labels;
         if (Array.isArray(humans)) extra.humans = humans;

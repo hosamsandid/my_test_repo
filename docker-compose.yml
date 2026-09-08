@@ -164,6 +164,10 @@ services:
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:-admin}"
       AUTH_SESSION_SECRET: "${AUTH_SESSION_SECRET:-}"
       AUTH_COOKIE_SECURE: "${AUTH_COOKIE_SECURE:-}"
+      # Single-user <-> multi-user mode (#1457). Default off = today's
+      # behaviour (every principal is the implicit System Admin, team scoping
+      # is a no-op); "true" enforces per-membership scoping. See .env.example.
+      AUTH_ENABLED: "${AUTH_ENABLED:-}"
       # Control-plane credential for the orchestrator's :4002 API (#1456).
       # Must match the orchestrator's value. The console never mints per-agent
       # tokens, so it deliberately does NOT get INTERNAL_AGENT_TOKEN_SECRET.

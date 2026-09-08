@@ -3,7 +3,8 @@
 // Guards the authorization boundary of the agent-scoped repository routes (#2067).
 //
 // AC12 is the whole reason these routes exist in the console at all: the
-// orchestrator's `:4002` API is unauthenticated, so `canManageAgent` here is the
+// orchestrator's `:4002` API authenticates the calling service, not the human
+// behind it (#1456), so `canManageAgent` here is the
 // ONLY thing standing between a chat-only user and cloning arbitrary code into
 // someone else's agent container. The neighbouring `/api/agents/:id/workspace/*`
 // routes carry no per-agent check (the ticket says so, and it is still true), so

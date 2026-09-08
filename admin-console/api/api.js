@@ -13,6 +13,7 @@ const { runArchiveTool, streamArchiveTool, describeArchiveFailure } = require('.
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
+const internalAuthClient = require('./internal-auth-client');
 const githubEventLog = require('./github-event-log');
 const clientErrorLog = require('./client-error-log');
 const usageLog = require('./usage-log');
@@ -209,6 +210,21 @@ fs.mkdirSync(LLM_ENDPOINTS_DIR, { recursive: true });
 fs.mkdirSync(LLM_KEYS_DIR, { recursive: true });
 fs.mkdirSync(MCP_SERVERS_DIR, { recursive: true });
 fs.mkdirSync(MCP_CREDENTIALS_KEYS_DIR, { recursive: true });
+
+// Control-plane credential for :4002 (#1456, GOV-PLATFORM-2). Installed BEFORE
+// the app is built — and therefore before any route handler, any background
+// poller and `auth.js`'s pre-session `POST /internal/admin/users/verify` — can
+// make its first orchestrator call. There are 126 raw fetch call sites reaching
+// :4002 from this process; wrapping the global is what makes "every one of them
+// carries the token" a property rather than a review claim. Scoped to the
+// orchestrator's own origin + `/internal/` (see internal-auth-client.js), so the
+// GitHub / Matrix / LLM calls this same process makes never see it. Inert with
+// no INTERNAL_API_TOKEN configured.
+{
+  const r = internalAuthClient.installInternalAuthFetch();
+  console.log(`[API] internal-auth control-plane token: ${r.installed
+    ? `installed for ${r.origin}` : `not installed (${r.reason})`}`);
+}
 
 const app = express();
 // Trust one hop (the GKE/IAP load balancer) so express-rate-limit can read
@@ -4939,8 +4955,9 @@ async function proxyAgentRepositories(res, id, method, body, extra = {}) {
       ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
     });
     const payload = await resp.json().catch(() => ({ error: 'Malformed orchestrator response' }));
-    // `canManage` is added HERE, not upstream: the orchestrator's :4002 API is
-    // unauthenticated and never learns who is asking. It rides on every
+    // `canManage` is added HERE, not upstream: the orchestrator's :4002 API
+    // never learns which HUMAN is asking — since #1456 it authenticates the
+    // calling *service or agent*, not the console's end user. It rides on every
     // response so the panel can disable what the server would refuse (the
     // `GET /api/matrix/agents` precedent), while the refusal itself stays
     // server-side on the two mutating routes.

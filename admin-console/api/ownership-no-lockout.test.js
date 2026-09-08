@@ -234,8 +234,27 @@ test('failure mode 2 — a team-member with a drifted stamp keeps its reach', ()
     assert.ok(now.has('visibleAgent:sdlc-2-0-qa'), `${username} must still see the drifted member`);
   }
   // And it gains no owner of its own — a member follows its team (D8).
-  assert.equal('ownerId' in after.configs['sdlc-2-0-qa'], false);
+  // Asserted over EVERY member, not just this one: the drifted member's scope
+  // ('stale') has no members, so it would end up ownerless even if members were
+  // wrongly made ownable — the assertion is only non-vacuous for a member whose
+  // scope does resolve ('sdlc-2-0-dev', 'billing-dev').
+  const members = Object.values(after.configs).filter(c => c.role === 'team-member');
+  assert.equal(members.length, 3);
+  assert.ok(
+    members.some(c => resolveScopeOwnerIsResolvable(c)),
+    'the fixture must contain a member whose own scope HAS an owner, or this is vacuous',
+  );
+  for (const m of members) {
+    assert.equal('ownerId' in m, false, `${m.id} must carry no ownerId of its own (D8)`);
+    assert.equal('ownerSource' in m, false, `${m.id} must carry no ownerSource of its own (D8)`);
+  }
 });
+
+// Does this config's own `teamId` scope have a member the D6 rule could pick?
+// Used only to keep the D8 assertion above honest.
+function resolveScopeOwnerIsResolvable(cfg) {
+  return membershipsBefore.some(m => m.teamId === (cfg.teamId || 'default'));
+}
 
 test('failure mode 3 — a multi-scope system credential stays reachable', () => {
   // Ada (admin of 'default') and Cyd (admin of 'risk') each reach it before and

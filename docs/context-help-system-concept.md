@@ -409,8 +409,8 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/chats`** —
-the Agent Chat topic plus its `seeAlso` neighbours — at **310,526 — 91.3% used,
-29,474 left** (the crown moved off `/quickstart`, now 307,136: `agent-chat.md` names both
+the Agent Chat topic plus its `seeAlso` neighbours — at **310,863 — 91.4% used,
+29,137 left** (the crown moved off `/quickstart`, now 307,136: `agent-chat.md` names both
 `/github-events` and `/environments` among its `seeAlso`, so #2102's and #2083's topic growth
 landed on it in full; #1459 then added +319, its `access-users.md` work-plane bullet folding
 in through `agent-chat.md`'s `/teams` `seeAlso` link) (#2068 made flow drafts private-by-default and shareable, adding an eleventh

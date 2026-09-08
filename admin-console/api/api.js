@@ -4916,6 +4916,101 @@ app.get('/api/agents/:agentId/context/status', apiLimiter, (req, res) => {
   });
 });
 
+/* ─── Agent-scoped repositories (#2067) ──────────────────────────────────────
+ * A repository attached to ONE agent, outside its Working Environment. The
+ * orchestrator owns every rule (the pure `orchestrator/agent-repositories.js`)
+ * and every side effect (clone, delete, prompt rebuild); these three routes are
+ * the authorization boundary and nothing else — deliberately thin, so no part
+ * of the decision exists twice.
+ *
+ * AC12 / D4: attaching or removing is a MANAGEMENT act (it pulls foreign code
+ * into a container), so both mutations are gated by `canManageAgent` — the
+ * `PATCH /api/agents/:id/context-mount` precedent, and the first per-agent gate
+ * on this family of routes: the neighbouring `/api/agents/:id/workspace/*`
+ * routes carry none, which is a pre-existing gap this ticket does not widen.
+ * Reading the list is gated by `visibleAgent` instead, because the Workspace
+ * view shows the repositories to a chat-only user; what that user does not get
+ * is the action.
+ */
+
+// Resolve the agent's config and the caller's rights over it in one place, so
+// the read and the two mutations cannot drift in who they let through.
+function resolveAgentRepoAccess(req, id, { manage }) {
+  if (!AGENT_ID_RE.test(id)) return { status: 400, error: 'Invalid agent id' };
+  const cfgPath = safeAgentPath(id, 'config.json');
+  if (!cfgPath) return { status: 404, error: 'Agent not found' };
+  const cfg = readJsonFile(cfgPath, null);
+  if (!cfg) return { status: 404, error: 'Agent not found' };
+  const scope = getScope(req);
+  const meta = agentMetaForScope(cfg);
+  const manageable = canManageAgent(scope, meta);
+  if (manage) {
+    if (!manageable) return { status: 403, error: 'forbidden', code: 'forbidden' };
+  } else if (!visibleAgent(scope, cfg)) {
+    return { status: 404, error: 'Agent not found' };
+  }
+  return { cfg, canManage: manageable };
+}
+
+// Relay an orchestrator repositories response verbatim. The orchestrator maps
+// each pure-planner refusal code onto a status already, and its message is the
+// one the two surfaces render — re-wording it here would give the same refusal
+// two different texts depending on which container answered.
+async function proxyAgentRepositories(res, id, method, body, extra = {}) {
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/agents/${encodeURIComponent(id)}/repositories`, {
+      method,
+      ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+    });
+    const payload = await resp.json().catch(() => ({ error: 'Malformed orchestrator response' }));
+    // `canManage` is added HERE, not upstream: the orchestrator's :4002 API is
+    // unauthenticated and never learns who is asking. It rides on every
+    // response so the panel can disable what the server would refuse (the
+    // `GET /api/matrix/agents` precedent), while the refusal itself stays
+    // server-side on the two mutating routes.
+    return res.status(resp.status).json(resp.ok ? { ...payload, ...extra } : payload);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+}
+
+// The merged environment+agent list. Each agent-scoped entry carries the git
+// facts a removal confirmation names (AC9), so the dialog needs no second call.
+app.get('/api/agents/:id/repositories', apiLimiter, async (req, res) => {
+  const access = resolveAgentRepoAccess(req, req.params.id, { manage: false });
+  if (access.status) return res.status(access.status).json({ error: access.error, ...(access.code ? { code: access.code } : {}) });
+  return proxyAgentRepositories(res, req.params.id, 'GET', undefined, { canManage: access.canManage });
+});
+
+// Attach one repository to this agent and clone it. heavyLimiter: this runs a
+// real `git clone`, like the sync routes next door.
+app.post('/api/agents/:id/repositories', heavyLimiter, async (req, res) => {
+  const access = resolveAgentRepoAccess(req, req.params.id, { manage: true });
+  if (access.status) return res.status(access.status).json({ error: access.error, ...(access.code ? { code: access.code } : {}) });
+  const b = req.body && typeof req.body === 'object' ? req.body : {};
+  // Whitelisted, not forwarded wholesale: D5 forbids a per-repository
+  // credential, and the orchestrator's normalizer drops unknown keys anyway —
+  // dropping them here too keeps the wire contract readable.
+  return proxyAgentRepositories(res, req.params.id, 'POST', {
+    url: typeof b.url === 'string' ? b.url : '',
+    branch: typeof b.branch === 'string' ? b.branch : null,
+    sshKeyId: typeof b.sshKeyId === 'string' ? b.sshKeyId : null,
+    readOnly: b.readOnly === true,
+  }, { canManage: access.canManage });
+});
+
+// Detach one repository and delete its working copy (AC9). The URL travels in
+// the body rather than the path: a repository URL is not path-safe, and the
+// list is keyed by URL, not by an id we would otherwise have to invent.
+app.delete('/api/agents/:id/repositories', heavyLimiter, async (req, res) => {
+  const access = resolveAgentRepoAccess(req, req.params.id, { manage: true });
+  if (access.status) return res.status(access.status).json({ error: access.error, ...(access.code ? { code: access.code } : {}) });
+  const b = req.body && typeof req.body === 'object' ? req.body : {};
+  return proxyAgentRepositories(res, req.params.id, 'DELETE', {
+    url: typeof b.url === 'string' ? b.url : '',
+  }, { canManage: access.canManage });
+});
+
 // Provisioned custom slash commands for an agent (#1796, foundation for #1797).
 // Returns [{ command, name, namespace, skill, invocation, description }] read
 // from the agent's seeded-commands.json — the truth the composer autocomplete

@@ -425,3 +425,81 @@ Its deeper cause, the epic running as **two parallel P-number tracks** whose
 merged half moved the model out from under the other's open PRs, is a process
 smell the reconciler surfaces (`superseded`/`stale-base`) but does not by itself
 cure; the durable cure is one epic, one track, dispatched one ticket at a time.
+
+---
+
+## Amendment 1 — what §4.1 actually shipped (#2115)
+
+The reconciler landed as `orchestrator/ticket-reconciler.js` (pure) +
+`orchestrator/ticket-reconcile-sweep.js` (shaping) + `computeTeamTicketLedger`
+in `orchestrator.js` (I/O) behind `GET /internal/teams/:id/tickets`, proxied by
+`GET /api/teams/:id/tickets`. Observe-only, as specified. Six things deviate
+from or sharpen §4.1, and each is a decision rather than an omission.
+
+**A1.1 — the lifecycle is derived from the flow graph, never from label names.**
+§4.1 writes the chain as `Backlog → Refining → Ready → In-Dev → In-Review →
+Rework → Doc → Mergeable → Merged/Done`, which reads like a fixed vocabulary.
+Hardcoding it would have made the ledger correct for exactly one team. Instead
+the positional states fall out of the declared graph: an **entry** label is a
+wake label no consumer emits (in the observed flow: `ready` / `ready-2` /
+`ready-3` — a consequence of the topology, not of their spelling), a **terminal**
+consumer is one that emits nothing and produces no PR (the Merger), `mergeable`
+is "the deepest active label reaches a terminal consumer", and `doc` is "one hop
+before that". A team whose entry label is `triage` gets `lane: 'triage'` with no
+code change; `ticket-reconciler.test.js` proves it on a flow sharing none of the
+observed vocabulary.
+
+**A1.2 — `buildFlowModel` had to be widened, from the outside.** The shipped
+model builder *drops* a human-gate label ("a human gate is not an agent wake"),
+which is right for anomaly detection and wrong here: in the observed flow the
+dispatch lanes **are** human gates that a Developer trigger listens on, so the
+ledger's `lane` and `ownerAgentId` columns are exactly the edges that builder
+discards — and any member whose only listener is a gate is absent from
+`model.consumers` entirely, taking its `emits` with it. Rather than change a
+builder three other features read, `buildTicketLedger` optionally takes the raw
+`members` and recovers the gate→consumer edges itself (`gateWakeEdges`,
+`mergedConsumers`). A caller that omits them still gets a ledger, with blank
+lanes on gate-dispatched tickets.
+
+**A1.3 — `claimed-done-not-merged` is not "a `:completed` label with an open
+PR".** Read literally, that flags every healthy ticket in a multi-stage flow: a
+Developer's `ready-2:completed` is *supposed* to coexist with an open PR the
+reviewer is working on. What makes a completion a lie is that **the flow did not
+move** — the completing stage set none of its declared outgoing labels and the
+PR is still open and unmerged past a grace window. For a terminal consumer (the
+Merger, which has no outgoing label at all) that condition is vacuously true the
+moment the PR fails to merge, which is precisely the §1.1 case that hid for
+hours. Both readings are pinned by fixtures.
+
+**A1.4 — `superseded` and `stale-base` decline rather than guess.** Only files a
+PR **adds** count toward `superseded` (a modified file trivially "already exists
+in `main`"), **all** of them must already be present, and the base file index
+must be **complete** — GitHub truncates a large recursive tree, and a truncated
+index reports "absent" for paths it merely never listed, which would accuse a
+healthy PR of being a duplicate. `stale-base` needs *both* halves — the PR
+text-merges **and** `main` has moved since it branched — because red checks on an
+unmoved base is the author's own bug (`ci-red`, a code fix) while red checks
+after `main` advanced under it is a rebase. Two different actions, hence two
+different codes. Likewise `mergeable` is three-valued: GitHub answers `null`
+while it is still computing, and mapping that either way invents or clears a
+conflict.
+
+**A1.5 — a ticket's labels live on both of its objects.** The dispatch gate sits
+on the issue; every downstream hand-off (`ready-for-review`, `ready-to-merge`
+and their `:wip`/`:completed` markers) sits on the pull request. The ledger reads
+the **union**, newest application winning a name collision. Reading either object
+alone loses the lane on half the tickets and the merge stage on the other half.
+
+**A1.6 — the ledger covers OPEN work, and `output-missing` folds into
+`stalled`.** The sweep fetches `state=open`, so `done` appears only where an
+open issue's PR merged. §4.1's table names successors for three of the four
+shipped anomaly classes; `output-missing` has none, so it folds into `stalled`
+and keeps its original class in `reasonDetail`. The GitHub-derived codes
+deliberately outrank the folded anomalies: an anomaly is a statement about the
+flow's plumbing, a conflict or a duplicate is a fact about the work.
+
+**Not built, and not owed by this ticket:** there is no board, no inbox and no
+UI — §4.3/§4.4/§4.5 own those, and #2115's own Scope is the ledger endpoint. The
+per-sweep PR-enrichment cap (`TICKET_LEDGER_PR_LIMIT`, default 60) bounds the
+cost of a team with a runaway number of open PRs; the PRs beyond it are reported
+in `errors[]` rather than silently dropped.

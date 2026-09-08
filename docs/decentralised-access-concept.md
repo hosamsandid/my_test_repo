@@ -839,7 +839,34 @@ Two things it deliberately did **not** do. The draft id namespace stays global a
 
 Decision core: `admin-console/api/draft-access.js` (pure, `draft-access.test.js` carries the two-user loop this row's P2 line named); wiring guarded by `draft-routes-access.test.js`. Client decisions in `admin-console/src/pages/process/draft-share-view.js`.
 
-### 11.2 — The work plane is ungated
+### 11.2 — The work plane is ungated — **cross-tenant half CLOSED by #1459; the D9 split still P2**
+
+> **Status: partially closed.** #1459 (P1) put one `:agentId`-keyed middleware in
+> front of the whole family — `admin-console/api/work-plane-access.js`, mounted
+> in `api.js` directly after `auth.gate` — so nothing here is reachable by a
+> caller outside the agent's tenant any more. The finding below is kept as the
+> record of what was there, and its **line numbers are now historical** (the
+> gate keys on the route family's parameter name, `:agentId`, precisely because
+> a line range goes stale).
+>
+> **What is still owed to P2 is the split this section's own closing line names**,
+> and it is the more interesting half: the delivered gate is *membership*, so a
+> Team **Member** may still delete workspace files and run `git-action` in their
+> own team's agents. Two things the implementation learned about that P2 change:
+>
+> - It **cannot be method-based.** The §6 matrix allows a member to chat, and
+>   posting a message, opening a DM room, attaching a chat file and stopping
+>   your own run are all writes on this family. So P2 needs a per-route
+>   read / chat / manage classification, not `if (isWrite)`.
+> - Several routes are **not obviously in one tier**, and the matrix does not
+>   name them: `DELETE …/session/:roomId/current` (*Reset Session* — which also
+>   kicks a git reset of every repo in the agent's environment), `PUT|DELETE
+>   …/session/:roomId/ticket` (creates a GitHub issue with the env PAT — the
+>   most outward-facing write in the family), `DELETE /api/matrix/rooms/:roomId/messages`
+>   (*Clear History*) and the `/context/*` writes into a read-write host mount.
+>   Each deserves a decision on the ticket rather than a guess in a diff.
+>
+> The delivered gate is where that change lands: one predicate, one place.
 
 **The last scope-aware line in `api.js` is 15214/15223** (`GET /api/matrix/agents`). Every route declared after it — **32 API routes** from `api.js:15344` to `:17498` — contains **no `getScope(req)` call at all** (verified: `getScope` appears 134 times in the file, none past `:15214`). That family covers:
 
@@ -851,7 +878,7 @@ Decision core: `admin-console/api/draft-access.js` (pure, `draft-access.test.js`
 
 `docs/governance-concept.md:197-201` describes the same family (*"any user can read/write any agent's workspace, run git commit/push in it, and post into any Matrix room as the admin token"*) and owns it as **GOV-ACCESS-3** (`:223`) / **GOV-PLATFORM-4** (`:725`); #1459 §2 records the same finding. **Under private-by-default this is the widest hole**, because it is reachable with nothing but an agent id — which the chat list of any team a user *does* belong to hands out.
 
-P2 must gate the whole family, and the D9 matrix (§6) is the split: reads → `visibleAgent`, writes → `canManageAgent`/`denyUnlessCanManageAgent`.
+P2 must gate the whole family, and the D9 matrix (§6) is the split: reads → `visibleAgent`, writes → `canManageAgent`/`denyUnlessCanManageAgent`. **#1459 delivered the first half of that sentence** ("gate the whole family", at the tenant boundary); the split itself is what remains — see the status note at the top of this section for the two things that turned out to be non-obvious about it.
 
 ### 11.3 — MCP server writes are ungated
 

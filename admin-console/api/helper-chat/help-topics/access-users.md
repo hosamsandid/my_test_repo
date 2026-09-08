@@ -79,6 +79,10 @@ Scoping is enforced by the API, not just hidden in the UI:
   team-scoped credentials outside your scopes are not returned at all.
 - **Private agents** are visible only to the human who owns them, even inside a
   shared scope.
+- **An agent's work plane follows its agent** — the chat transcript, the session
+  log, the workspace browser and the git actions in it. Reaching one for an agent
+  outside your scopes answers *not found*, exactly as a non-existent agent would,
+  so an agent id alone tells you nothing about whether that agent exists.
 - **Management calls are rejected** with a 403 when you are neither a System
   Admin nor the **Team Admin** of the scope in question — editing a scope's
   details or its members, for example. The console only trims the controls; the

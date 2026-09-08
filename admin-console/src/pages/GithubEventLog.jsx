@@ -6,7 +6,7 @@ import DataTable from '../components/DataTable';
 import PageHelpButton from '../components/PageHelpButton';
 import WhenCell from '../components/WhenCell';
 import { buildTriggerCorrelationId, isSessionOutcome } from './github-event-session';
-import { kindLabel, kindTooltip, entryDetail, totalPending } from './pending-queue-view';
+import { kindLabel, kindTooltip, entryDetail, entryHoverDetail, labelChip, totalPending } from './pending-queue-view';
 import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip } from './event-outcome-view';
 import { eventLabel } from './agent-chat/trigger-summary';
 import { workItemTypeLabel } from './github-event-log-type';
@@ -469,15 +469,95 @@ function KindBadge({ kind }) {
   );
 }
 
+/* ── Label chip for a pending entry (#2101 AC7) ─────────────────────────
+   The carried flow label, rendered as a label rather than folded into a
+   sentence: the bare token stays visible (it is what the operator reads on the
+   GitHub issue and types into a `labelFilter`), the mechanical `:wip` /
+   `:completed` claim suffix is decoded into a state word beside it, and the
+   exact raw token is on hover. */
+function PendingLabelChip({ label }) {
+  const chip = labelChip(label);
+  if (!chip) return null;
+  return (
+    <span
+      title={`Flow label: ${chip.raw}`}
+      style={{
+        display: 'inline-flex', alignItems: 'baseline', gap: 4,
+        padding: '1px 6px',
+        borderRadius: 'var(--eb-radius-full)',
+        fontSize: 'var(--eb-text-xs)',
+        background: 'var(--eb-bg-elevated)',
+        color: 'var(--eb-text-primary)',
+        border: '1px solid var(--eb-border-default)',
+        cursor: 'help',
+        maxWidth: '100%',
+        overflowWrap: 'anywhere',
+      }}
+    >
+      <span style={{ fontFamily: 'var(--eb-font-mono)', fontWeight: 'var(--eb-font-medium)' }}>{chip.token}</span>
+      {chip.state && <span style={{ color: 'var(--eb-text-secondary)' }}>{chip.state}</span>}
+    </span>
+  );
+}
+
+/* ── Work-item cell for a pending entry (#2101 AC3) ─────────────────────
+   Reuses the Processed tab's two cells verbatim — TypeCell for the PR/Issue
+   distinction (over github-event-log-type.js) and WorkItemCell for the linked
+   `#<number>` plus its `→ closes #<issue>` trail — so the two tabs cannot drift
+   in how a work item reads. The pair is guarded by one absence check, or a
+   work-item-less row would render two dashes instead of one (AC4). */
+function PendingWorkItemCell({ workItem, repo }) {
+  if (!workItem || workItem.number == null) {
+    return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
+  }
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 4, flexWrap: 'wrap' }}>
+      <TypeCell workItem={workItem} />
+      <WorkItemCell workItem={workItem} repo={repo} />
+    </span>
+  );
+}
+
 /* ── One agent's pending group ─────────────────────────────────────── */
 function AgentPendingGroup({ group, onCancel, busyId }) {
+  // Flatten the work-item fields onto each row, exactly as the Processed tab
+  // does (#1827): DataTable's text filter and sort are both key-based
+  // (row[col.key]), so they reach the number and the title here while the cell
+  // renderers read the whole `workItem` object. An entry with no work item — a
+  // `push`, or any non-`github` kind — simply carries nulls and shows `—`.
+  const rows = useMemo(() => (group.entries || []).map(e => ({
+    ...e,
+    workItemNumber: e.workItem && e.workItem.number != null ? e.workItem.number : null,
+    workItemTitle: e.workItem ? e.workItem.title : null,
+  })), [group.entries]);
+
   const COLS = [
     { key: 'kind', label: 'Kind', sortable: false, render: v => <KindBadge kind={v} /> },
-    { key: 'detail', label: 'Details', sortable: false, render: (_v, row) => {
+    // Work item + Title (#2101): which PR or issue is waiting, in the Processed
+    // tab's own vocabulary and its own cells, so the two tabs read alike. Both
+    // opt into per-column wrap (#1898's DataTable flag) since a PR title is the
+    // one long value in this table.
+    { key: 'workItemNumber', label: 'Work item', wrap: true, render: (_v, row) => (
+      <PendingWorkItemCell workItem={row.workItem} repo={row.repo} />
+    ) },
+    { key: 'workItemTitle', label: 'Title', wrap: true, render: v => <TitleCell title={v} /> },
+    { key: 'detail', label: 'Details', sortable: false, wrap: true, render: (_v, row) => {
       const d = entryDetail(row);
-      return d
-        ? <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{d}</span>
-        : <span style={{ color: 'var(--eb-text-secondary)' }}>—</span>;
+      const hover = entryHoverDetail(row);
+      const chip = row.label ? <PendingLabelChip label={row.label} /> : null;
+      if (!d && !chip) return <span style={{ color: 'var(--eb-text-secondary)' }}>—</span>;
+      return (
+        <span
+          title={hover || undefined}
+          style={{
+            display: 'inline-flex', alignItems: 'baseline', gap: 'var(--eb-space-2)',
+            flexWrap: 'wrap', fontSize: 'var(--eb-text-xs)',
+          }}
+        >
+          {d && <span>{d}</span>}
+          {chip}
+        </span>
+      );
     } },
     { key: 'receivedAt', label: 'Received', render: v => <WhenCell iso={v} /> },
     { key: '_cancel', label: '', sortable: false, render: (_v, row) => (
@@ -523,7 +603,7 @@ function AgentPendingGroup({ group, onCancel, busyId }) {
       </div>
       <DataTable
         columns={COLS}
-        data={group.entries || []}
+        data={rows}
         pageSize={10}
         getRowKey={(r) => r.id}
         emptyText="No entries."

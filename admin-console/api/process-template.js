@@ -158,6 +158,41 @@ function completedLabelFor(wakeLabel) {
   return `${wakeLabel}${COMPLETED_SUFFIX}`;
 }
 
+// Verify-before-claim (#2113, flow-control concept §4.2). The forward swap
+// `<wake>:wip` -> `<wake>:completed` used to fire on normal RUN completion, so
+// it tracked the run and not the outcome: a merger that hit a conflict and
+// exited cleanly still painted `ready-to-merge:completed` on an open,
+// conflicting PR (the observed #2105 shape), and every surface that trusts
+// labels was then wrong. A claim MAY therefore declare an OBSERVABLE
+// post-condition; the runtime only completes the claim when it holds against
+// GitHub truth. Ordered STRICTEST FIRST — `strictestPostcondition` uses this
+// index as the precedence when several channels consolidate onto one listener,
+// because a stricter condition can only prevent a false `:completed`, never
+// cause one. A DOCUMENTED MIRROR of `CLAIM_POSTCONDITIONS` in
+// agent-image/scripts/agent-entrypoint.py (the evaluator); keep the two in sync.
+const POSTCONDITIONS = Object.freeze(['merged', 'review-submitted', 'pr-exists']);
+
+// A declared post-condition, or '' (falsy) for absent/unknown. Absent is the
+// backwards-compatible default: a claim with no post-condition completes on run
+// completion exactly as it did before #2113.
+function cleanPostcondition(v) {
+  const k = typeof v === 'string' ? v.trim() : '';
+  return POSTCONDITIONS.includes(k) ? k : '';
+}
+
+// Which post-condition wins when several channels consolidate into ONE derived
+// listener (the group rule below). Deterministic by POSTCONDITIONS index, i.e.
+// the furthest-along lifecycle stage wins; a genuine disagreement on one label
+// is degenerate authoring (the same label means one thing to its consumer), so
+// the tie-break only has to be stable and safe, and "stricter" is the safe side.
+function strictestPostcondition(a, b) {
+  const ia = POSTCONDITIONS.indexOf(cleanPostcondition(a));
+  const ib = POSTCONDITIONS.indexOf(cleanPostcondition(b));
+  if (ia < 0) return cleanPostcondition(b);
+  if (ib < 0) return cleanPostcondition(a);
+  return POSTCONDITIONS[Math.min(ia, ib)];
+}
+
 /**
  * Derive the `claim` field for a label listener, or null when the trigger is not
  * claimable. Pure — the single source of truth for the convention, shared by the
@@ -166,12 +201,18 @@ function completedLabelFor(wakeLabel) {
  * Not claimable: a missing/blank label filter (a raw event listener has no wake
  * label to take over), or a listener that already waits on a claim label — that
  * would derive `ready:wip:wip` and claim its own claim.
+ *
+ * `postcondition` (#2113) is optional and stamped only when recognised, so a
+ * caller that passes nothing derives exactly the pre-#2113 shape.
  */
-function deriveClaim(labelFilter) {
+function deriveClaim(labelFilter, postcondition) {
   const wake = typeof labelFilter === 'string' ? labelFilter.trim() : '';
   if (!wake) return null;
   if (wake.endsWith(CLAIM_SUFFIX)) return null;
-  return { remove: wake, add: claimLabelFor(wake) };
+  const claim = { remove: wake, add: claimLabelFor(wake) };
+  const pc = cleanPostcondition(postcondition);
+  if (pc) claim.postcondition = pc;
+  return claim;
 }
 
 /**
@@ -197,6 +238,18 @@ function claimError(claim, labelFilter, type) {
   const expected = claimLabelFor(wake);
   if (claim.add.trim() !== expected) {
     return `claim.add (\`${claim.add.trim()}\`) must follow the \`<wakeLabel>:wip\` convention (\`${expected}\`)`;
+  }
+  // Optional post-condition (#2113, §4.2) — a CLOSED vocabulary, enforced here
+  // rather than tolerated, because the runtime fails CLOSED on a kind it does
+  // not recognise (an unverifiable claim never reads `:completed`). Rejecting an
+  // unknown kind at the authoring surface is what keeps that from surfacing as a
+  // mysteriously stuck `:wip`.
+  if (claim.postcondition !== undefined && claim.postcondition !== null) {
+    const raw = typeof claim.postcondition === 'string' ? claim.postcondition.trim() : '';
+    if (!cleanPostcondition(raw)) {
+      const allowed = POSTCONDITIONS.map(k => `\`${k}\``).join(', ');
+      return `claim.postcondition (\`${raw || String(claim.postcondition)}\`) must be one of ${allowed}`;
+    }
   }
   return null;
 }
@@ -254,6 +307,14 @@ function launchedLoopConflict(existing, candidate) {
 // override (#868) lives on the channel.
 function channelAutoClaim(ch) {
   return !(ch && ch.autoClaim === false);
+}
+
+// The post-condition a channel port declares for its label (#2113, §4.2), or ''
+// when it declares none. Lives on the PORT for the same reason `autoClaim` does:
+// channel triggers are stripped and regenerated on every reconcile, so a
+// trigger-level field would be wiped on the next port write.
+function channelPostcondition(ch) {
+  return cleanPostcondition(ch && ch.postcondition);
 }
 
 // A channel opts its derived listener into internal delivery (#1194) only when it
@@ -326,6 +387,10 @@ function remapChannel(ch, teamId) {
     // poller-delivered one on re-materialise (same reason as the trigger-level
     // carry in bundleTrigger).
     ...(channelIsInternal(ch) ? { transport: 'internal' } : {}),
+    // Verify-before-claim (#2113) — carried so an exported team round-trips the
+    // declaration; dropping it would silently downgrade the claim back to
+    // tracking the run instead of the outcome.
+    ...(channelPostcondition(ch) ? { postcondition: channelPostcondition(ch) } : {}),
   };
 }
 
@@ -340,7 +405,13 @@ function bundleTrigger(t) {
     // Claim (#958) — carried on the portable bundle so the claim survives
     // export → materialise → edit-as-draft. Derived listeners get it re-stamped
     // by the expanders anyway; a hand-authored claim would otherwise be lost.
-    if (isValidClaim(t.claim, t.labelFilter)) out.claim = { remove: t.claim.remove, add: t.claim.add };
+    if (isValidClaim(t.claim, t.labelFilter)) {
+      out.claim = { remove: t.claim.remove, add: t.claim.add };
+      // Post-condition (#2113) must round-trip too: dropping it on export would
+      // silently downgrade a verified claim back to the run-tracking one.
+      const pc = cleanPostcondition(t.claim.postcondition);
+      if (pc) out.claim.postcondition = pc;
+    }
     // Internal-channel transport (#1174) — part of the wiring, must round-trip:
     // dropping it would silently turn an internal listener back into a
     // poller-delivered one on re-materialise. Only the non-default is carried.
@@ -517,6 +588,26 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
         }
         if (c.transport === 'internal' && c.gate === 'human') {
           return { ok: false, error: `role ${r.id}: channel transport 'internal' is not allowed on a human-approval gate (a person applies the label on GitHub)` };
+        }
+        // Post-condition (#2113, §4.2) — checked, not tolerated, for exactly the
+        // `transport` reason above: a mistyped kind would be silently dropped by
+        // `cleanPostcondition` and the author would believe the claim is verified
+        // while it still completes on run completion. That is the very failure
+        // this ticket removes, so it must not be reachable by a typo.
+        if (c.postcondition !== undefined && c.postcondition !== null) {
+          if (!channelPostcondition(c)) {
+            const allowed = POSTCONDITIONS.map(k => `'${k}'`).join(', ');
+            return { ok: false, error: `role ${r.id}: channel postcondition must be one of ${allowed}` };
+          }
+          // A post-condition gates the CLAIM's forward swap, so it is inert
+          // without a claim to gate. Both ways of having no claim are refused
+          // rather than silently ignored.
+          if (!(typeof c.label === 'string' && c.label.trim())) {
+            return { ok: false, error: `role ${r.id}: channel postcondition requires a label (an unlabelled channel has no claim to verify)` };
+          }
+          if (!channelAutoClaim(c)) {
+            return { ok: false, error: `role ${r.id}: channel postcondition conflicts with autoClaim false (there is no claim to verify)` };
+          }
         }
       }
     }
@@ -1210,13 +1301,18 @@ function expandGithubChannels(bundle, _opts = {}) {
       const human = ch.gate === 'human';
       const key = `${artifact}::${label}`;
       let g = groups.get(key);
-      if (!g) { g = { artifact, label, human: false, wakePrompt: '', autoClaim: true, internal: true, sources: [] }; groups.set(key, g); }
+      if (!g) { g = { artifact, label, human: false, wakePrompt: '', autoClaim: true, internal: true, postcondition: '', sources: [] }; groups.set(key, g); }
       // Claim opt-out (#958): several channels consolidate into ONE derived
       // listener, and the claim is a property of that single listener — so an
       // explicit opt-out on any contributing channel wins, mirroring the
       // any-channel-gates-it rule for `human` below. Silently claiming when one
       // author asked not to would be the surprising direction.
       if (!channelAutoClaim(ch)) g.autoClaim = false;
+      // Post-condition (#2113): a declared one applies to the consolidated
+      // listener (mirroring the any-channel-gates-it rule), and the strictest
+      // wins a disagreement — verifying more can only prevent a false
+      // `:completed`, never produce one.
+      g.postcondition = strictestPostcondition(g.postcondition, channelPostcondition(ch));
       // Gated iff any contributing channel gates it (a mixed gated/ungated set on
       // the same label is degenerate — treat as gated, matching the old behaviour
       // where the labelled trigger already reacted to the label change).
@@ -1243,7 +1339,7 @@ function expandGithubChannels(bundle, _opts = {}) {
       const events = (g.label ? CHANNEL_EVENTS[g.artifact].labeled : CHANNEL_EVENTS[g.artifact].open).slice();
       const producerNames = g.sources.map(s => byId.get(s)?.displayName || s);
       const producerLabel = producerNames.join(', ') || 'an upstream';
-      const claim = g.autoClaim ? deriveClaim(g.label) : null;
+      const claim = g.autoClaim ? deriveClaim(g.label, g.postcondition) : null;
       // Internal-channel transport (#1194): only a labelled, non-human,
       // all-opted-in group delivers internally (deriveClaim/channelIsInternal
       // guarantee a label is present). The poller then excludes this listener and
@@ -1677,7 +1773,9 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
       // name the concrete runtime label the entrypoint will swap. Absence of a
       // claim on the template is preserved (an opt-out stays opted out).
       if (tr.claim && out.labelFilter) {
-        const c = deriveClaim(out.labelFilter);
+        // The post-condition is copied, not re-derived: it names a GitHub fact
+        // (#2113), never a label, so substitution cannot touch it.
+        const c = deriveClaim(out.labelFilter, tr.claim.postcondition);
         if (c) out.claim = c;
       }
       // Internal-channel transport (#1174): the runtime field the poller
@@ -1784,6 +1882,7 @@ module.exports = {
   // Claim labels (#958) + success mirror (#1163)
   deriveClaim, claimLabelFor, claimError, rawTriggerError, isValidClaim, channelAutoClaim, CLAIM_SUFFIX,
   completedLabelFor, COMPLETED_SUFFIX,
+  POSTCONDITIONS, cleanPostcondition, strictestPostcondition, channelPostcondition,
   // Chat-launched loops (#1020)
   launchedLoopConflict,
 };

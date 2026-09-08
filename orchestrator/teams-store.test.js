@@ -17,6 +17,58 @@ test('createTeamsStore requires a root', () => {
   assert.throws(() => createTeamsStore({}), /root.*required/);
 });
 
+// ---- Matrix identity pointer (#1458) --------------------------------------
+
+test('matrix identity: a new user has no pointer until one is stamped', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com', displayName: 'Jane' });
+  assert.equal(u.matrixUserId, undefined);
+  assert.equal(store.getUser(u.id).matrixUserId, undefined);
+});
+
+test('matrix identity: setUserMatrixIdentity persists the pointer and bumps updatedAt', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com', displayName: 'Jane' });
+  const stamped = store.setUserMatrixIdentity(u.id, '@u-0123456789abcdef:local');
+  assert.equal(stamped.matrixUserId, '@u-0123456789abcdef:local');
+  assert.equal(store.getUser(u.id).matrixUserId, '@u-0123456789abcdef:local');
+  assert.ok(store.getUser(u.id).updatedAt >= u.updatedAt);
+});
+
+test('matrix identity: re-stamping replaces the pointer (idempotent re-provisioning)', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com' });
+  store.setUserMatrixIdentity(u.id, '@u-1111111111111111:local');
+  store.setUserMatrixIdentity(u.id, '@u-2222222222222222:local');
+  assert.equal(store.getUser(u.id).matrixUserId, '@u-2222222222222222:local');
+});
+
+test('matrix identity: the pointer survives sanitizeUser — it is public, not a secret', () => {
+  // The localpart is visible to every member of every room the human joins, so
+  // unlike passwordHash it must NOT be stripped: consumers need it to resolve
+  // "which Matrix account is this human?".
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com' });
+  store.setUserMatrixIdentity(u.id, '@u-0123456789abcdef:local');
+  assert.equal(store.sanitizeUser(store.getUser(u.id)).matrixUserId, '@u-0123456789abcdef:local');
+});
+
+test('matrix identity: setUserMatrixIdentity validates its inputs', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com' });
+  assert.throws(() => store.setUserMatrixIdentity('nope', '@u-1:local'), /not found/);
+  assert.throws(() => store.setUserMatrixIdentity(u.id, ''), /matrixUserId is required/);
+  assert.throws(() => store.setUserMatrixIdentity(u.id, '   '), /matrixUserId is required/);
+});
+
+test('matrix identity: deleting a user drops the pointer with the record', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com' });
+  store.setUserMatrixIdentity(u.id, '@u-0123456789abcdef:local');
+  store.deleteUser(u.id);
+  assert.equal(store.getUser(u.id), null);
+});
+
 // ---- local passwords (#374) -----------------------------------------------
 
 test('passwords: set, verify, and never leak the hash', () => {
@@ -266,6 +318,64 @@ test('memberships: remove', () => {
   store.removeMembership({ userId: user.id, teamId: 't1' });
   assert.equal(store.listMemberships({ teamId: 't1' }).length, 0);
   assert.throws(() => store.removeMembership({ userId: user.id, teamId: 't1' }), /No membership/);
+});
+
+// ---- appendMemberships (the #2077 D6 fan-out) -----------------------------
+
+test('appendMemberships writes memberships keyed on an Agent Team id', () => {
+  const { store } = freshStore();
+  const user = store.createUser({ subject: 'ada@corp.com' });
+  // No team record exists for 'sdlc-2-0' — that is the whole point: after the
+  // collapse the referent is an Agent Team config, which this store cannot see.
+  assert.throws(() => store.setMembership({ userId: user.id, teamId: 'sdlc-2-0', role: 'team-admin' }), /Team.*not found/);
+
+  const added = store.appendMemberships([
+    { userId: user.id, teamId: 'sdlc-2-0', role: 'team-admin', fromScopeId: 'default' },
+  ]);
+  assert.equal(added.length, 1);
+  assert.equal(added[0].teamId, 'sdlc-2-0');
+  assert.equal(added[0].role, 'team-admin');
+  assert.equal(added[0].fromScopeId, 'default');
+  assert.ok(added[0].id && added[0].createdAt);
+  assert.equal(store.listMemberships({ teamId: 'sdlc-2-0' }).length, 1);
+});
+
+test('appendMemberships is idempotent and never rewrites an existing role', () => {
+  const { store } = freshStore();
+  const user = store.createUser({ subject: 'bob@corp.com' });
+  store.appendMemberships([{ userId: user.id, teamId: 'squad', role: 'team-member' }]);
+
+  // A second run adds nothing (AC6) …
+  assert.deepEqual(store.appendMemberships([{ userId: user.id, teamId: 'squad', role: 'team-member' }]), []);
+  // … and a differing role does NOT overwrite the record that is already there.
+  assert.deepEqual(store.appendMemberships([{ userId: user.id, teamId: 'squad', role: 'team-admin' }]), []);
+  const held = store.listMemberships({ userId: user.id, teamId: 'squad' });
+  assert.equal(held.length, 1);
+  assert.equal(held[0].role, 'team-member');
+});
+
+test('appendMemberships skips malformed entries and writes nothing for an empty plan', () => {
+  const { store } = freshStore();
+  const user = store.createUser({ subject: 'cyd@corp.com' });
+  assert.deepEqual(store.appendMemberships([]), []);
+  assert.deepEqual(store.appendMemberships(null), []);
+  assert.deepEqual(store.appendMemberships([
+    { userId: user.id, teamId: 'squad', role: 'boss' },   // not a MEMBERSHIP_ROLE
+    { userId: '', teamId: 'squad', role: 'team-member' }, // no user
+    { userId: user.id, teamId: '', role: 'team-member' }, // no team
+  ]), []);
+  assert.equal(store.listMemberships().length, 0);
+});
+
+test('appendMemberships de-duplicates within one call', () => {
+  const { store } = freshStore();
+  const user = store.createUser({ subject: 'dee@corp.com' });
+  const added = store.appendMemberships([
+    { userId: user.id, teamId: 'squad', role: 'team-member' },
+    { userId: user.id, teamId: 'squad', role: 'team-admin' },
+  ]);
+  assert.equal(added.length, 1);
+  assert.equal(added[0].role, 'team-member');
 });
 
 // ---- bootstrap ------------------------------------------------------------

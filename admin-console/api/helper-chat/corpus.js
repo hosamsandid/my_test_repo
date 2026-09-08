@@ -116,9 +116,11 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // The number therefore now means "docs corpus + the biggest single page
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
-// **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 302 769 of 340 000 — 89.0% used, 37 231 left — against
-// 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
+// **`/chats`** (the Agent Chat topic plus its `seeAlso` neighbours) at
+// 310 815 of 340 000 — 91.4% used, 29 185 left — against
+// 322 243 (94.8%) for the all-topics fold route-scoping replaced. (#1459's
+// work-plane bullet in `access-users.md` — the `/teams` topic, which `/chats`
+// names among its `seeAlso` — added the last +319 to this crown.) #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
 // too, and `create.md` (which claims `/create` and `/quickstart`) links to
@@ -200,11 +202,15 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // parallel, the auto-merge keeps both entries and leaves one figure with two
 // successors: re-chain them in ticket order and re-measure, rather than trusting
 // either branch's number.
-// #2059 then seeded the first System Admin as a real user record and authored its
-// help/docs (a `docs/admin-console.md` note — a CORPUS_FILES doc, so every context
-// — plus four help topics), re-measured on the merge with main's **301 270** as the
-// baseline → **302 769** (89.0%, +1 499).
-// Re-measure rather than trust this comment — measureWorstCaseSystemPrompt() sweeps every context and returns which one
+// #2068 then made flow drafts private-by-default and shareable with equal rights,
+// which needed an eleventh `flows.md` chapter (*Sharing a draft*) — the panel is
+// where the irreversibility of sharing has to be readable. `create.md` names
+// `/flows` among its `seeAlso`, so that chapter lands on this crown in full: +2 673.
+// Re-measured on the merge, not summed on a stale base: main's post-#2067 crown of
+// **301 270** → **303 943** (89.4%).
+// The whole #2068 delta is topic-side; nothing in `CORPUS_FILES` changed here, so
+// #2068 itself moved no OTHER context.
+// Re-measure rather than trust this comment —
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.
 //

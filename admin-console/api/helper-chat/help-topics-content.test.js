@@ -45,6 +45,9 @@ const TOPIC_CONTENT = [
     chapters: [
       'What Flows is',
       'The flows left list',
+      // #2068 — the surface for this one is the Share side panel itself, which
+      // is where the irreversibility of sharing has to be readable.
+      'Sharing a draft',
       'The canvas',
       'Wiring hand-offs: the edge chooser',
       'Human gates, brakes and named human roles',
@@ -75,6 +78,11 @@ const TOPIC_CONTENT = [
       // the guard follows the prose rather than the other way round.
       'Import',
       'Export',
+      // #2068 — the two claims a reword must not soften: a draft is private
+      // until shared, and sharing hands over the right to delete it and to
+      // remove the sharer. Both are the product's own words in the panel.
+      'one-way act of trust',
+      'can never be emptied',
       'Label hand-off',
       'Issue channel',
       'Pull-request channel',
@@ -666,6 +674,16 @@ const TOPIC_CONTENT = [
       'never renders it',
       'When a repository is polled',
       'no expiry',
+      // #2101 additions. The Pending queue's rows now name the work item, so
+      // the chapter documents its columns the way the Processed chapter always
+      // has — and it is the ONLY place that says what the GitHub event id is,
+      // because #2101 took it off the row precisely for looking like a ticket
+      // number. A reword that loses that sentence leaves an operator who reads
+      // the hover with no way to find out what the number means.
+      'internal id',
+      'Events API gave the event',
+      'label chip',
+      'in progress',
     ],
   },
   {

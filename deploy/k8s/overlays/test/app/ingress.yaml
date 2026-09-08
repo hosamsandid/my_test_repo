@@ -44,5 +44,13 @@ metadata:
   name: admin-console-backend
   namespace: agent-studio
 spec:
+  # GCP LB backend response timeout. The default is 30s and it caps the TOTAL
+  # response duration (not idle) — so a slow Flow Copilot turn (a large flow can
+  # take 20–60s+ across up to 3 sequential LLM calls) is cut off with a 504 at
+  # the edge even though the console streams NDJSON progress the whole time.
+  # 300s gives large generations ample headroom; it is a ceiling, not a fixed
+  # wait, so ordinary requests are unaffected. Kept in sync with the console's
+  # own copilot deadline (admin-console/api/api.js COPILOT_STREAM_DEADLINE_MS).
+  timeoutSec: 300
   iap:
     enabled: true

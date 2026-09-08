@@ -189,7 +189,31 @@ test('AC7 — the grant is written to the team AND as the member\'s override', (
   assert.deepEqual(plan.teamConfig.plugins, [{ id: 'github-issues', scopeGranularity: 'team' }]);
   assert.deepEqual(plan.memberPatch.pluginsOverride, [{ id: 'github-issues', scopeGranularity: 'team' }]);
   // The standalone-shaped fields must not survive next to the override.
-  assert.deepEqual(plan.memberUnset, ['skills', 'plugins', 'promptMode', 'systemPromptTemplate']);
+  // `ownerId`/`ownerSource` joined the list in #2077 for the same reason the
+  // grants are here: the owner moves onto the team (D8), and a copy left on the
+  // member would be a second source of truth.
+  assert.deepEqual(plan.memberUnset, ['skills', 'plugins', 'promptMode', 'systemPromptTemplate', 'ownerId', 'ownerSource']);
+});
+
+// ── the human owner moves onto the team (#2077, D8) ──────────────────────────
+
+test('#2077 — a converted agent\'s owner moves onto the team, not the member', () => {
+  const cfg = standalone();
+  cfg.ownerId = 'u-ada';
+  cfg.ownerSource = 'creator';
+  const plan = planTeamConversion(cfg, {});
+  assert.equal(plan.teamConfig.ownerId, 'u-ada');
+  assert.equal(plan.teamConfig.ownerSource, 'conversion');
+  // The member keeps none of its own — it resolves the owner from the parent.
+  assert.equal('ownerId' in plan.memberPatch, false);
+  assert.ok(plan.memberUnset.includes('ownerId'));
+  assert.ok(plan.memberUnset.includes('ownerSource'));
+});
+
+test('#2077 — an unowned agent converts to an unowned team, not a null owner', () => {
+  const plan = planTeamConversion(standalone(), {});
+  assert.equal('ownerId' in plan.teamConfig, false);
+  assert.equal('ownerSource' in plan.teamConfig, false);
 });
 
 test('an ungranted agent gets no empty override fields', () => {

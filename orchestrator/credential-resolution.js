@@ -25,13 +25,38 @@
 // only conflict if you let "an attributed write is happening" trigger the
 // personal requirement — every environment does attributed writes today.
 //
-// The reconciliation is forced by AC8 itself: the personal tier is gated on the
-// agent carrying an `ownerId`. An agent with NO `ownerId` (every agent today,
-// since nothing populates it yet — the blocking prerequisite named in the
-// issue) takes the shared team/system credential exactly as today and NEVER
-// refuses (AC8). Only an agent that actually carries an `ownerId` is expected to
-// act under that person and is therefore subject to refuse-on-missing (AC2/AC5).
-// So `ownerId` presence — not "is this a write" — is the switch.
+// #1569 reconciled them by gating the personal tier on the agent carrying an
+// `ownerId`, which was a safe switch **only because nothing populated it** —
+// the comment here used to say so in as many words ("every agent today, since
+// nothing populates it yet").
+//
+// ── #2077 invalidated that premise, so the switch moved ────────────────────
+// #2077 (epic #2076, D6) populates `ownerId` on every team and standalone agent,
+// including a backfill over pre-existing ones. Under the old switch that would
+// have flipped the entire installation into the owned branch at once, where
+// every owner has no personal credential (they are self-service and opt-in,
+// #1568) — so every `commit`/`pr`/`review`/`push-https` would refuse with a 424
+// and no agent could open a PR again. That is the exact regression #2077's own
+// AC7 ("no visible behaviour change") forbids.
+//
+// The switch is therefore no longer "does the agent have an owner" but "does
+// that owner actually participate in the personal tier":
+//
+//   no owner                        → shared, never refuse   (unchanged)
+//   owner, no personal credential   → shared, never refuse   (today's behaviour
+//                                     for every agent, now reachable with an
+//                                     ownerId set — this is the #2077 change)
+//   owner, usable personal cred.    → personal               (unchanged, AC1)
+//   owner, personal cred. PRESENT
+//     but rejected by `isUsable`    → REFUSE                 (unchanged, AC2/AC5)
+//
+// Refuse-on-missing keeps its whole point: a human who HAS a personal
+// credential never has an attributed write silently re-attributed to a shared
+// identity. What it stops doing is refusing on behalf of someone who never had
+// one — which is not a protection, just an outage. Note the consequence
+// honestly: with no `isUsable` probe wired yet (see `findPersonalCredential`),
+// the refusal branch is currently unreachable in this tree and becomes
+// reachable again when the concept's §5/§6 scope probe lands.
 
 const DEFAULT_TEAM_ID = "default";
 
@@ -75,20 +100,39 @@ function resolveAgentOwnerId(cfg, loadAgentConfig) {
 // caller supplies `isUsable`, an entry it rejects is treated as "no usable
 // personal credential" — i.e. it refuses on the same path as absent (D5).
 function findPersonalCredential(index, ownerId, isUsable) {
-  if (!Array.isArray(index) || !ownerId) return null;
+  return findPersonalCredentialState(index, ownerId, isUsable).entry;
+}
+
+// The same lookup, but reporting whether the owner has a personal credential of
+// this kind AT ALL — separately from whether it is usable.
+//
+// `resolveCredential` needs the two apart (see the #2077 note in the header):
+// "the owner has none" is the state every human is in until they opt into the
+// personal tier and must keep behaving exactly as today, while "the owner has
+// one but it is underscoped" is the case refuse-on-missing exists for. Folding
+// both into a bare `null` is what made the old `ownerId`-presence switch the
+// only available one.
+//
+// Returns `{ entry, present }`:
+//   entry   — the owner's usable personal credential, or null
+//   present — the owner has a personal credential of this kind, usable or not
+function findPersonalCredentialState(index, ownerId, isUsable) {
+  if (!Array.isArray(index) || !ownerId) return { entry: null, present: false };
   const check = typeof isUsable === "function" ? isUsable : () => true;
-  for (const entry of index) {
+  let present = false;
+  for (const candidate of index) {
     if (
-      entry &&
-      entry.scope === "personal" &&
-      entry.userId &&
-      String(entry.userId) === String(ownerId) &&
-      check(entry)
+      !candidate ||
+      candidate.scope !== "personal" ||
+      !candidate.userId ||
+      String(candidate.userId) !== String(ownerId)
     ) {
-      return entry;
+      continue;
     }
+    present = true;
+    if (check(candidate)) return { entry: candidate, present: true };
   }
-  return null;
+  return { entry: null, present };
 }
 
 // The core decision. Given the operation, the resolved owner, the owner's usable
@@ -96,25 +140,37 @@ function findPersonalCredential(index, ownerId, isUsable) {
 // return exactly one of:
 //
 //   { tier: 'personal', credentialId }        — AC1: owner's personal credential
-//   { tier: 'shared', credentialId | null }    — AC8 (no owner) / AC2 (read/poll)
-//   { refuse: { code, message } }              — AC2/AC5: owned attributed write,
-//                                                no usable personal credential
+//   { tier: 'shared', credentialId | null }    — AC8 (no owner, or an owner with
+//                                                no personal credential) / AC2
+//                                                (read/poll)
+//   { refuse: { code, message } }              — AC2/AC5: owned attributed write
+//                                                whose owner HAS a personal
+//                                                credential that is unusable
 //
 // `kind` labels the credential in the refusal message ("GitHub token" / "SSH
-// key"). `personalCredential` is what `findPersonalCredential` returned.
+// key"). `personalCredential` is what `findPersonalCredential` returned, and
+// `personalCredentialPresent` is the `present` half of
+// `findPersonalCredentialState` — the owner has one of this kind, usable or not.
+//
+// It defaults to `false`, i.e. "the owner does not participate in the personal
+// tier", which is the branch that behaves exactly as the platform does today.
+// A caller that wants refuse-on-missing must therefore say so by reporting a
+// credential it actually found — the refusal can no longer be reached by
+// omission, which is what made populating `ownerId` an outage before #2077.
 function resolveCredential({
   operation,
   ownerId,
   personalCredential = null,
+  personalCredentialPresent = false,
   sharedCredentialId = null,
   kind = "GitHub token",
 }) {
   const attributed = operationPrefersPersonal(operation);
 
   // No owner → the personal tier never applies. Use the shared team/system
-  // credential exactly as today, and NEVER refuse (AC8). This is the branch
-  // every agent takes until `ownerId` population lands, which is what makes the
-  // whole change a provable no-op for existing environments.
+  // credential exactly as today, and NEVER refuse (AC8). Until #2077 this was
+  // the branch every agent took; it now covers a `team-member` whose parent
+  // team is somehow unowned, and any role D8 leaves unowned.
   if (!ownerId) {
     return { tier: "shared", credentialId: sharedCredentialId || null };
   }
@@ -124,12 +180,18 @@ function resolveCredential({
     return { tier: "personal", credentialId: personalCredential.id };
   }
 
-  // Owner known but NO usable personal credential (absent or underscoped).
-  if (attributed) {
+  // Owner known, and the owner HAS a personal credential of this kind that the
+  // caller's usability check rejected (present but underscoped).
+  if (attributed && personalCredentialPresent) {
     // Refuse — an attributed write must NEVER silently drop to a shared
     // team/system credential and act under someone else's name (AC2/AC5, D5).
     return { refuse: buildRefusal(ownerId, kind) };
   }
+
+  // Owner known but the owner has NO personal credential of this kind at all —
+  // they have not opted into the personal tier. Take the shared credential
+  // exactly as the platform does today; refusing here would take a human who
+  // never asked for personal credentials offline (#2077 AC7).
 
   // A shared-eligible operation (read-only clone, the repo probe, polling) may
   // still use the shared credential — the fallback chain applies only where a
@@ -207,6 +269,7 @@ module.exports = {
   operationPrefersPersonal,
   resolveAgentOwnerId,
   findPersonalCredential,
+  findPersonalCredentialState,
   resolveCredential,
   selectAgentIdsForOwner,
   selectPersonalCredentialIds,

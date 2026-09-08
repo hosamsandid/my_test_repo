@@ -7,16 +7,19 @@
 // GET /api/auth/session, and shows a login screen until a valid session cookie
 // exists.
 //
-// ── One login path (#2059, concept #2041 D13) ───────────────────────────────
-// A password login is checked against the USER STORE and nothing else. There is
-// no env-credential fallback: `ADMIN_USERNAME`/`ADMIN_PASSWORD` are the SEED the
-// orchestrator consumes at first boot to create a real System-Admin record
-// (`orchestrator/initial-admin-seed.js`), and this module never reads them. The
-// consequences are deliberate and documented (docs/deployment.md,
-// docs/governance-concept.md GOV-ACCESS-7): every session resolves to a real
-// user id, and while the user store is unreachable nobody can sign in — so
-// recovering a lost identity is a host-level action on
-// `/workspace/users/index.json`, not a console login.
+// ── Login path (#2059 + Option C, PR #2094; concept #2041 D13) ───────────────
+// A password login is checked against the USER STORE first. `ADMIN_USERNAME`/
+// `ADMIN_PASSWORD` are primarily the SEED the orchestrator consumes at first boot
+// to create a real System-Admin record (`orchestrator/initial-admin-seed.js`),
+// but — per the human ruling on the #2059↔#1457 reconciliation — they ALSO serve
+// as a ONE-TIME PRE-SEED FALLBACK: the login route consults `verifyCredentials`
+// against them only while the store holds no user record yet (gated by
+// `preSeed()`), so an operator can sign in to a fresh install and trigger the
+// seed. The moment the seed has run that fallback is retired permanently — no
+// durable config-file login. Once seeded, every session resolves to a real user
+// id, and while the user store is unreachable nobody can sign in — so recovering
+// a lost identity is a host-level action on `/workspace/users/index.json`, not a
+// console login (docs/governance-concept.md GOV-ACCESS-7).
 //
 // ── SSO swap-point ─────────────────────────────────────────────────────────
 // An enterprise OIDC/SAML integration replaces `verifyViaUserStore()` (and adds
@@ -173,12 +176,34 @@ const loginLimiter = rateLimit({
   message: { error: 'Too many login attempts. Please wait and try again.' },
 });
 
-// NOTE (#2059): `verifyCredentials()` used to live here — a timing-safe compare
-// against `ADMIN_USERNAME`/`ADMIN_PASSWORD`, with `scryptDigest`/`safeEqual` as
-// its only callers. All four are deleted, not disabled: the configured
-// credential is a seed now, and a dormant compare against it is exactly the
-// exception AC4 says must not exist. The scrypt password check that replaced it
-// lives in the store (`orchestrator/teams-store.js` `verifyPassword`).
+// ── Env-configured admin credential — the ONE-TIME SEED WINDOW ───────────────
+// #2059 originally deleted this (its AC4: "the configured credential never
+// authenticates"). The human ruling on the #2059↔#1457 reconciliation
+// ("Option C", PR #2094) restored it under a strict gate: the env credential
+// authenticates ONLY in the pre-seed state — while no System-Admin record exists
+// yet (a fresh / not-yet-activated install). The login route's `preSeed()` gate
+// stops consulting it the moment `seedInitialSystemAdmin` has run, permanently,
+// so it is a bootstrap seed, never a durable config-file login (#2059 AC4's
+// intent preserved). The scrypt password check for real user records lives in
+// the store (`orchestrator/teams-store.js` `verifyPassword`).
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
+const COMPARE_SALT = 'aee-credential-compare-v1';
+function scryptDigest(value) {
+  return crypto.scryptSync(String(value), COMPARE_SALT, 32);
+}
+function safeEqual(a, b) {
+  return crypto.timingSafeEqual(scryptDigest(a), scryptDigest(b));
+}
+// Returns an authenticated principal `{ sub }` on success, or null on failure.
+// Callers MUST gate this behind the pre-seed check (see the login route).
+function verifyCredentials(username, password) {
+  if (typeof username !== 'string' || typeof password !== 'string') return null;
+  // Evaluate both comparisons unconditionally to avoid leaking which one failed.
+  const userOk = safeEqual(username, ADMIN_USERNAME);
+  const passOk = safeEqual(password, ADMIN_PASSWORD);
+  return userOk && passOk ? { sub: ADMIN_USERNAME } : null;
+}
 
 // ── Session token (signed, stateless) ────────────────────────────────────────
 function sign(payloadB64) {
@@ -296,24 +321,43 @@ function registerAuthRoutes(app, { describeAuthz, usersSeeded } = {}) {
     }
   };
 
+  // Option C (PR #2094): the env-configured admin credential is consultable ONLY
+  // in the pre-seed state — `usersSeeded() === true` (a user record, hence the
+  // seeded System-Admin, exists) closes it permanently. Fail closed (treat as
+  // seeded, env NOT consulted) if the check cannot answer: a fresh install
+  // answers `false` reliably because the seed writes the users index at boot, so
+  // an unanswerable check is an error state rather than a genuinely fresh one.
+  const preSeed = () => {
+    try { return typeof usersSeeded === 'function' && usersSeeded() === false; }
+    catch { return false; }
+  };
+
   app.post('/api/auth/login', loginLimiter, async (req, res) => {
     const { username, password } = req.body || {};
-    // The user store is the whole login path (#2059). The env-credential
-    // fallback that used to sit behind it is gone, so a store that cannot
+    // The user store is the primary login path (#2059). A store that cannot
     // answer is reported as such rather than as a rejected password.
     const result = await verifyViaUserStore(username, password);
-    if (!result.ok) {
-      if (result.reason === 'unavailable') {
-        return res.status(503).json({
-          error: 'The user store is unavailable, so sign-in cannot be verified right now. '
-            + 'If the stack has just started, try again in a moment.',
-          code: 'user_store_unavailable',
-        });
-      }
-      return res.status(401).json({ error: 'Invalid username or password' });
+    if (result.ok) {
+      setSessionCookie(res, issueToken(result.principal.sub));
+      return res.json({ authenticated: true, user: buildUser(result.principal.sub) });
     }
-    setSessionCookie(res, issueToken(result.principal.sub));
-    res.json({ authenticated: true, user: buildUser(result.principal.sub) });
+    if (result.reason === 'unavailable') {
+      return res.status(503).json({
+        error: 'The user store is unavailable, so sign-in cannot be verified right now. '
+          + 'If the stack has just started, try again in a moment.',
+        code: 'user_store_unavailable',
+      });
+    }
+    // Pre-seed only: the env credential lets an operator sign in to a fresh
+    // install and trigger the seed. Once seeded, this branch is dead (Option C).
+    if (preSeed()) {
+      const envPrincipal = verifyCredentials(username, password);
+      if (envPrincipal) {
+        setSessionCookie(res, issueToken(envPrincipal.sub));
+        return res.json({ authenticated: true, user: buildUser(envPrincipal.sub) });
+      }
+    }
+    return res.status(401).json({ error: 'Invalid username or password' });
   });
 
   // Readiness for the bring-up (#2059 AC3). The console starts without waiting
@@ -375,6 +419,7 @@ function gate(req, res, next) {
 
 module.exports = {
   COOKIE_NAME,
+  verifyCredentials,
   issueToken,
   verifyToken,
   getSession,

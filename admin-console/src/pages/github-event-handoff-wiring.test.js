@@ -59,8 +59,13 @@ test('the Event column stays on the shared eventLabel helper', () => {
 test('the pending-queue section renders the kind through the shared view helpers', () => {
   // The `wake-agent` kind label/tooltip/detail live in pending-queue-view.js;
   // this is what keeps the queue row from reading "An unrecognised queue entry".
-  assert.match(
-    src,
-    /import \{ kindLabel, kindTooltip, entryDetail, totalPending \} from '\.\/pending-queue-view'/,
-  );
+  // Asserted per name rather than as one exact import line (#2101 added two
+  // more helpers from the same module): what this guard is about is that these
+  // four decisions come from the pure module, not that the list is frozen.
+  const imported = /import \{([^}]*)\} from '\.\/pending-queue-view'/.exec(src);
+  assert.ok(imported, 'the page no longer imports pending-queue-view');
+  const names = imported[1].split(',').map(s => s.trim());
+  for (const name of ['kindLabel', 'kindTooltip', 'entryDetail', 'totalPending']) {
+    assert.ok(names.includes(name), `${name} is no longer imported from the pure module`);
+  }
 });

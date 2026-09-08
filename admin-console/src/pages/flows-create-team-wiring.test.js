@@ -179,8 +179,12 @@ test('AC8 — both row kinds report a menu request, with their own target shape'
 test('AC9 — the hover trash icon is gone and delete lives in the menu', () => {
   assert.doesNotMatch(briefingsRaw, /Trash2/);
   assert.doesNotMatch(briefings, /onDelete/);
-  // Still the same ConfirmDialog, reached through the menu's own key.
-  assert.match(briefings, /if \(key === 'delete'\) \{ setDeleteTarget\(/);
+  // Still the same ConfirmDialog, reached through the menu's own key. #2068 put
+  // an opener in front of `setDeleteTarget` — it pre-reads the access set so the
+  // confirmation can name the other people who lose the draft (AC13) — so the
+  // guard follows the key to that opener rather than to the setter.
+  assert.match(briefings, /if \(key === 'delete'\) \{ openDeleteDraft\(target\); return; \}/);
+  assert.match(briefings, /function openDeleteDraft\(target\) \{[\s\S]*?setDeleteTarget\(\{ id: target\.id, name: target\.name \}\)/);
   assert.match(briefings, /onConfirm=\{confirmDeleteDraft\}/);
 });
 

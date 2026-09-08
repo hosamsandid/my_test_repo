@@ -113,6 +113,12 @@ export function buildFlowsRailMenu(target) {
         title: roleCount <= 0 ? NO_ROLES_MENU_HINT : undefined,
       },
       { key: 'rename', label: 'Rename…', separated: true },
+      // Share (#2068). Under DD2 it is enabled for EVERYONE who can see the
+      // draft — there is no non-owner variant to disable or hint at, because
+      // the creator holds no lasting privilege over it. A team row's menu is
+      // unchanged: sharing an Agent Team is #2041 P4, a different surface with
+      // a two-role model.
+      { key: 'share', label: 'Share…' },
       { key: 'export', label: 'Export…' },
       { key: 'delete', label: 'Delete draft', danger: true },
     ],

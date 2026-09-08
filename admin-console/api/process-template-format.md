@@ -57,7 +57,8 @@ role's `{{vars}}` and the target repositories are applied per member.
       "channels": [                          // PR/issue channels this role consumes (#380)
         { "artifact": "pr", "from": "developer", "label": "approved", "gate": "human",
           "wakePrompt": "…",               // optional authored wake-prompt override (#868)
-          "autoClaim": false }             // opt out of auto-derived claim (#958); default ON for labelled channels
+          "autoClaim": false,              // opt out of auto-derived claim (#958); default ON for labelled channels
+          "postcondition": "merged" }      // optional (#2113): 'merged' | 'review-submitted' | 'pr-exists'
       ],
       "triggers": [
         {
@@ -66,7 +67,8 @@ role's `{{vars}}` and the target repositories are applied per member.
           "enabled": true,
           "events": ["issues.labeled"],   // github-event
           "labelFilter": "assigned:{{agentId}}",
-          "claim": { "remove": "assigned:{{agentId}}", "add": "assigned:{{agentId}}:wip" }, // optional; add MUST be <labelFilter>:wip (#958)
+          "claim": { "remove": "assigned:{{agentId}}", "add": "assigned:{{agentId}}:wip",
+                     "postcondition": "merged" }, // optional; add MUST be <labelFilter>:wip (#958); postcondition (#2113) gates the :completed swap
           "cron": "5 3 * * 1",            // cron
           "at": "2026-01-01T00:00:00Z",   // once
           "description": "…",
@@ -263,8 +265,9 @@ the same option.
 - **Same team only**, and stricter than the internal label channel (which has no
   team gate): a cross-team `to` is refused with `403 cross-team` at delivery. The
   check is an **integrity constraint on the flow graph, not authentication** —
-  the `:4002` internal API is unauthenticated and the producer's identity is
-  self-asserted (concept §6.1).
+  even with the #1456 gate authenticating the *caller*, the producer's identity
+  is still self-asserted in the body and not cross-checked against it (concept
+  §6.1).
 
 ### Notes & invariants
 
@@ -330,13 +333,38 @@ the same option.
   as an unassigned touchpoint. Persisted on the team agent like `stages`/`labels`;
   round-trips through export → materialise and Edit-as-draft. Threaded into the
   graph builders as `buildProcessGraph(agents, { labels, humans })`.
+- **Verify-before-claim (#2113, flow-control concept §4.2).** A claim MAY declare
+  an observable `postcondition`, and the runtime only swaps `<wake>:wip` ->
+  `<wake>:completed` when it actually holds on GitHub:
+
+  | `postcondition` | `:completed` requires |
+  |---|---|
+  | `merged` | a linked PR **merged** *and* the issue **closed** |
+  | `review-submitted` | at least one **submitted review** on the PR |
+  | `pr-exists` | a PR **exists** for the work item |
+
+  Without it the swap fired on normal RUN completion, so the label tracked the
+  run rather than the outcome — a merger that hit a conflict and exited cleanly
+  still painted `ready-to-merge:completed` on an open, conflicting PR. Declared
+  either on the channel port (`channels[].postcondition`, which the expander
+  stamps onto the derived claim; the strictest wins when several channels
+  consolidate onto one label) or on a hand-authored `claim`. The vocabulary is
+  closed and validated at every authoring surface, because the runtime fails
+  **closed**: a kind it cannot verify — including facts it could not read from
+  GitHub — keeps `:wip` rather than completing. Omitting the field is fully
+  backwards-compatible and costs no GitHub call. The claim stays a *mechanical*
+  runner action and is deliberately absent from the generated `## Outcomes`
+  prose (#957): an agent *asked* to verify its own outcome just moves "the agent
+  forgot" one step earlier.
+
 - **Preset conventions are enforced (#1008).** Shipped presets (the registry
   bundles here and the agent-template catalog) carry the same wiring conventions
   the engine writes: every `github-event` trigger has exactly **one** event
   (`rawTriggerError` — the strict bundle validator now rejects multi-event
   triggers at materialise; drafts stay saveable for the migration flow), every
   label listener **claims** its wake label (`{ remove: <label>, add:
-  "<label>:wip" }`), and every produced artifact either has an in-flow consumer
+  "<label>:wip" }`, optionally with a `postcondition` — see below), and every
+  produced artifact either has an in-flow consumer
   or is a **declared** open end (`terminal: true` / `external: {note}` on the
   outcome, or a human delivery via `prAudience`/`issueAudience: 'human'` +
   `humans[].consumes`). The registry CI guard

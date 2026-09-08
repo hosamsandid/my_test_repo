@@ -21,6 +21,14 @@ const src = readFileSync(
   'utf8',
 );
 
+// The pending row's action copy lives in the pure view module since #2102 gave
+// the row a kebab menu — a menu item is a descriptor, so its label and tooltip
+// are decided there rather than in the JSX.
+const pendingRowView = readFileSync(
+  fileURLToPath(new URL('./pending-queue-view.js', import.meta.url)),
+  'utf8',
+);
+
 // The "is this phrase gone?" assertions run against the source with comments
 // stripped: a code comment naming what moved to the topic (as the ones this
 // ticket added do) is documentation, not copy the user reads.
@@ -172,5 +180,17 @@ test('AC5: no point-of-decision microcopy was traded for a "?"', () => {
   // can never be the edit that removes the hint it sits beside.
   assert.match(processedView, /<OutcomeLegend\s*\/>/);
   assert.match(src, /kindTooltip\(kind\)/);
-  assert.match(src, /Remove this entry from the queue before it is delivered/);
+  // Cancel's own tooltip. It moved out of the JSX and into the row's menu
+  // descriptor when #2102 gave the row a second action (the copy travels with
+  // the control, and a menu item's copy belongs in the pure builder) — so the
+  // assertion follows it rather than being dropped. What it guards is unchanged:
+  // the hint must still exist at the point of decision, wherever that now is.
+  assert.match(pendingRowView, /Remove this entry from the queue before it is delivered/);
+});
+
+test('#2102: the row menu keeps Cancel and states why Reassign is unavailable', () => {
+  // Both halves of AC7/AC9's copy contract, next to the assertion above so a
+  // future edit that guts one is caught by the same file.
+  assert.match(pendingRowView, /Hand this entry to another agent on the same team/);
+  assert.match(pendingRowView, /Only queued GitHub events can be reassigned/);
 });

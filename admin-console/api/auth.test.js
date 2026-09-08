@@ -3,34 +3,39 @@
 // Unit tests for the auth module (#276, reworked by #2059).
 // Run: node --test admin-console/api/auth.test.js
 //
-// `ADMIN_USERNAME`/`ADMIN_PASSWORD` are deliberately NOT set here any more:
-// since #2059 this module must not read them at all (they are the orchestrator's
-// first-boot seed), and a test that set them would hide a regression where it
-// started reading them again. `AUTH_SESSION_SECRET` is set so the session
-// signing key is fixed and no key file is touched — session-secret.test.js
-// covers the derivation itself.
+// `ADMIN_USERNAME`/`ADMIN_PASSWORD` ARE set here: the #2059↔#1457 reconciliation
+// ("Option C", PR #2094) restored the env credential as a ONE-TIME SEED WINDOW —
+// it authenticates only while the store holds no user record yet, gated in the
+// login route behind `usersSeeded()`. Distinct values (not reused by the store-
+// path tests) so the pre-seed gate tests can't accidentally collide with a
+// store-credential fixture. `AUTH_SESSION_SECRET` is set so the session signing
+// key is fixed and no key file is touched — session-secret.test.js covers the
+// derivation itself.
+process.env.ADMIN_USERNAME = 'env-admin';
+process.env.ADMIN_PASSWORD = 'env-seed-pw';
 process.env.AUTH_SESSION_SECRET = 'fixed-test-secret';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const auth = require('./auth');
 
-// #2059: the env-credential check is GONE, not disabled. The two tests that
-// asserted it accepted/rejected the configured pair are inverted into this one,
-// because a dormant compare against a value that is now only a seed is exactly
-// the exception AC4 says must not exist.
-test('the env-credential check no longer exists (#2059 AC4)', () => {
-  assert.equal(auth.verifyCredentials, undefined, 'verifyCredentials is not exported');
+// Option C (PR #2094): the env-credential check EXISTS again, but only as a
+// one-time seed window — verifyCredentials is restored and exported, and the
+// login route gates it behind `usersSeeded()`. This pins the unit surface; the
+// login-route test below pins the gate itself (accepted pre-seed, rejected once
+// seeded).
+test('the env credential is restored, matching the configured pair (Option C)', () => {
+  assert.equal(typeof auth.verifyCredentials, 'function', 'verifyCredentials is exported again');
+  assert.deepEqual(auth.verifyCredentials('env-admin', 'env-seed-pw'), { sub: 'env-admin' });
+  assert.equal(auth.verifyCredentials('env-admin', 'wrong'), null, 'wrong password → null');
+  assert.equal(auth.verifyCredentials('someone-else', 'env-seed-pw'), null, 'wrong username → null');
   const src = require('node:fs').readFileSync(require.resolve('./auth'), 'utf8');
-  // Strip comments first: they legitimately explain what was removed and why.
   const code = src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n')
     .filter(l => !l.trim().startsWith('//')).join('\n');
-  for (const gone of ['verifyCredentials', 'safeEqual', 'scryptDigest', 'ADMIN_PASSWORD', 'ADMIN_USERNAME']) {
-    assert.ok(!code.includes(gone), `auth.js must not reference ${gone} any more`);
-  }
-  // ...while the path that replaced it is still there (so the assertions above
-  // cannot pass against a hollowed-out file).
-  assert.ok(code.includes('verifyViaUserStore'), 'the user-store check is the login path');
+  // The login route MUST guard the env compare behind the pre-seed gate — a
+  // refactor that dropped it would reintroduce a durable config login.
+  assert.ok(code.includes('preSeed()'), 'the login route must gate the env credential behind preSeed()');
+  assert.ok(code.includes('verifyViaUserStore'), 'the user-store check is still the primary login path');
   assert.ok(code.includes('/internal/admin/users/verify'));
 });
 
@@ -168,28 +173,39 @@ test('requireAuth issues a session for a registered IAP subject', async (t) => {
   assert.match(cookies[0], new RegExp(`^${auth.COOKIE_NAME}=`));
 });
 
-// Inverted by #2059. This used to assert that an `envAdmin: true, userId: null`
-// descriptor WAS admitted — i.e. that an IAP identity whose e-mail merely
-// equalled `ADMIN_USERNAME` got a silent session with an empty scope, which is
-// the #1415 failure mode wearing the break-glass's clothes. With the flag gone,
-// a resolved user id is the whole test.
-test('requireAuth refuses an IAP subject that claims env-admin but has no record', async (t) => {
+// Reworked for Option C (PR #2094). describeAuthz produces `envAdmin: true` ONLY
+// pre-seed (see scope.js + scope.test.js), so that descriptor represents the
+// pre-seed bootstrap identity — which requireAuth admits behind IAP. Once
+// seeded, an IAP e-mail that merely equals `ADMIN_USERNAME` gets `envAdmin:
+// false`, so with no resolved userId it is refused: the #1415 hole (a silent
+// empty-scope session for anyone named `admin`) stays closed. Both halves are
+// asserted here against `isKnownPrincipal` (main's `envAdmin || userId != null`).
+test('requireAuth: admits a PRE-SEED env-admin behind IAP, refuses a post-seed no-record claim (#1415 / Option C)', async (t) => {
   auth._setIapVerifierForTests(iapVerifierFor('admin'));
-  auth._setAuthzResolverForTests(() => ({ envAdmin: true, admin: true, userId: null }));
   t.after(() => { auth._setIapVerifierForTests(null); auth._setAuthzResolverForTests(null); });
 
+  // Pre-seed env-admin (envAdmin: true) → admitted (the bootstrap, behind IAP).
+  auth._setAuthzResolverForTests(() => ({ envAdmin: true, admin: true, userId: null }));
+  let nextCalled = false;
+  await auth.requireAuth(
+    { headers: { 'x-goog-iap-jwt-assertion': 'valid-iap-jwt' } },
+    { append() {}, status() { throw new Error('pre-seed env-admin must be admitted'); } },
+    () => { nextCalled = true; },
+  );
+  assert.equal(nextCalled, true, 'pre-seed: the env-admin bootstrap session is admitted');
+
+  // Post-seed: describeAuthz no longer flags envAdmin, so a bare no-record claim
+  // is refused — #1415 closed.
+  auth._setAuthzResolverForTests(() => ({ envAdmin: false, admin: false, userId: null }));
   const cookies = [];
   let statusCode;
-  const res = {
-    append: (k, v) => cookies.push(v),
-    status(c) { statusCode = c; return this; },
-    json() { return this; },
-  };
-  await auth.requireAuth({ headers: { 'x-goog-iap-jwt-assertion': 'valid-iap-jwt' } }, res, () => {
-    throw new Error('must not pass');
-  });
+  await auth.requireAuth(
+    { headers: { 'x-goog-iap-jwt-assertion': 'valid-iap-jwt' } },
+    { append: (k, v) => cookies.push(v), status(c) { statusCode = c; return this; }, json() { return this; } },
+    () => { throw new Error('must not pass'); },
+  );
   assert.equal(statusCode, 401);
-  assert.equal(cookies.length, 0, 'no session is issued');
+  assert.equal(cookies.length, 0, 'post-seed: no session is issued for a bare env-admin claim');
 });
 
 test('requireAuth issues a session for the SEEDED administrator behind IAP', async (t) => {
@@ -308,7 +324,7 @@ test('setSessionCookie / clearSessionCookie emit the expected Set-Cookie', () =>
 
 // Capture the routes off a minimal app stub, with a stubbed global fetch
 // standing in for the orchestrator's user store.
-function loginHarness({ storeResponse }) {
+function loginHarness({ storeResponse, usersSeeded = () => true }) {
   const routes = { get: {}, post: {} };
   const app = {
     get: (path, ...rest) => { routes.get[path] = rest[rest.length - 1]; },
@@ -316,7 +332,7 @@ function loginHarness({ storeResponse }) {
   };
   auth.registerAuthRoutes(app, {
     describeAuthz: (subject) => ({ userId: `id-of-${subject}`, admin: true }),
-    usersSeeded: () => true,
+    usersSeeded,
   });
 
   const original = globalThis.fetch;
@@ -372,6 +388,36 @@ test('login: the store rejecting the credentials is a 401, with no session', asy
   assert.equal(res.out.status, 401);
   assert.equal(res.out.body.error, 'Invalid username or password');
   assert.equal(res.out.cookies.length, 0);
+});
+
+test('login: the env credential authenticates PRE-SEED and is rejected once seeded (Option C, PR #2094)', async (t) => {
+  // Pre-seed (no user record yet): the store has nothing to match, so it
+  // rejects; the env credential is then consulted and authenticates the
+  // bootstrap admin so an operator can sign in and trigger the seed.
+  const pre = loginHarness({ storeResponse: storeRejects, usersSeeded: () => false });
+  const r1 = fakeRes();
+  await pre.routes.post['/api/auth/login']({ body: { username: 'env-admin', password: 'env-seed-pw' } }, r1);
+  pre.restore();
+  assert.equal(r1.out.status, 200, 'pre-seed: the env credential authenticates');
+  assert.equal(r1.out.body.user.username, 'env-admin');
+  assert.equal(r1.out.cookies.length, 1, 'pre-seed: a session is issued');
+
+  // Wrong env password pre-seed is still a 401 — the compare is real.
+  const preBad = loginHarness({ storeResponse: storeRejects, usersSeeded: () => false });
+  const r2 = fakeRes();
+  await preBad.routes.post['/api/auth/login']({ body: { username: 'env-admin', password: 'nope' } }, r2);
+  preBad.restore();
+  assert.equal(r2.out.status, 401, 'pre-seed: a wrong env password is rejected');
+
+  // Seeded (a System-Admin record exists): the SAME correct env pair is refused.
+  // The one-time window is closed permanently — Option C's core guarantee, and
+  // #2059 AC4's intent (no durable config-file login).
+  const post = loginHarness({ storeResponse: storeRejects, usersSeeded: () => true });
+  const r3 = fakeRes();
+  await post.routes.post['/api/auth/login']({ body: { username: 'env-admin', password: 'env-seed-pw' } }, r3);
+  post.restore();
+  assert.equal(r3.out.status, 401, 'seeded: the env credential no longer authenticates');
+  assert.equal(r3.out.cookies.length, 0, 'seeded: no session issued from the env credential');
 });
 
 test('login: an unreachable or broken store is a 503, NOT a rejected password', async (t) => {

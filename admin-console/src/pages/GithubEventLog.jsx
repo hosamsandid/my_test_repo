@@ -1,12 +1,17 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router';
-import { RefreshCw, Trash2 } from 'lucide-react';
+import { RefreshCw, MoreVertical } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import PageHelpButton from '../components/PageHelpButton';
 import WhenCell from '../components/WhenCell';
+import RowContextMenu from '../components/RowContextMenu';
+import ConfirmDialog from '../components/ConfirmDialog';
 import { buildTriggerCorrelationId, isSessionOutcome } from './github-event-session';
-import { kindLabel, kindTooltip, entryDetail, totalPending } from './pending-queue-view';
+import {
+  kindLabel, kindTooltip, entryDetail, entryHoverDetail, labelChip, totalPending,
+  pendingRowMenu, reassignPickerState, reassignTargetLabel, pendingReassignError, pendingReassignSuccess,
+} from './pending-queue-view';
 import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip } from './event-outcome-view';
 import { eventLabel } from './agent-chat/trigger-summary';
 import { workItemTypeLabel } from './github-event-log-type';
@@ -469,38 +474,215 @@ function KindBadge({ kind }) {
   );
 }
 
+/* ── Reassign target picker (#2102) ────────────────────────────────── */
+// The picker is a CORRECTNESS DEVICE, not a free dropdown: it lists only
+// agents the server confirmed have an enabled trigger that would accept this
+// exact event. Offering anything else would produce a move that reports success
+// and then evaporates on the target, which is the failure #2102 exists to stop.
+// Mounted only while a request exists (see PendingQueueView), so the fetch is
+// never fired speculatively and the dialog is always open when rendered.
+function ReassignPicker({ request, onCancel, onConfirm, busy }) {
+  const { data, loading, error } = useApi(
+    `/api/agents/${encodeURIComponent(request.agentId)}/pending/${encodeURIComponent(request.entryId)}/reassign-targets`);
+  const [target, setTarget] = useState('');
+  // A failed lookup must not read as "no eligible agents" — that would say the
+  // flow is mis-wired when in fact we simply could not ask.
+  const state = loading
+    ? { loading: true, targets: [], refused: [], notice: '' }
+    : error
+      ? { loading: false, targets: [], refused: [], notice: `Could not load eligible agents: ${error}` }
+      : reassignPickerState(data);
+
+  return (
+    <ConfirmDialog
+      open
+      title="Reassign this queued entry"
+      variant="warning"
+      confirmLabel="Reassign"
+      busy={busy}
+      // Nothing to confirm until a real target is chosen, so the primary action
+      // stays inert rather than failing server-side.
+      onConfirm={target ? () => onConfirm(target) : undefined}
+      onCancel={onCancel}
+      message={
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+          <span>
+            The entry is removed from <strong>{request.agentId}</strong> first and then queued for the
+            agent you pick, re-stamped with <em>that</em> agent&apos;s own trigger. If it has already
+            fired, nothing is moved.
+          </span>
+          {state.loading ? (
+            <span style={{ color: 'var(--eb-text-secondary)' }}>Finding eligible agents…</span>
+          ) : state.targets.length > 0 ? (
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                Agents on this team that would accept this event
+              </span>
+              <select
+                value={target}
+                onChange={e => setTarget(e.target.value)}
+                style={{ ...controlStyle, width: '100%' }}
+              >
+                <option value="">— Select an agent —</option>
+                {state.targets.map(t => (
+                  <option key={t.agentId} value={t.agentId}>{reassignTargetLabel(t)}</option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <span style={{ color: 'var(--eb-status-warning)' }}>{state.notice}</span>
+          )}
+          {/* Why each sibling was ruled out — the same vocabulary the Event
+              Log's outcome legend uses, so "label-filter" reads the same here. */}
+          {state.refused.length > 0 && (
+            <details>
+              <summary style={{ cursor: 'pointer', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                Why {state.refused.length} other agent{state.refused.length === 1 ? '' : 's'} cannot take it
+              </summary>
+              <ul style={{ margin: 'var(--eb-space-2) 0 0', paddingLeft: 'var(--eb-space-4)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                {state.refused.map(r => (
+                  <li key={r.agentId}>{r.agentName || r.agentId} — {REFUSAL_COPY[r.reason] || r.reason}</li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      }
+    />
+  );
+}
+
+// Client copy for the server's refusal reasons. Mirrors REFUSAL_REASONS in
+// orchestrator/pending-reassign.js — the console container cannot require the
+// orchestrator's modules, which is why this is a copy rather than an import.
+const REFUSAL_COPY = {
+  'not-subscribed': 'no enabled GitHub-event trigger of this shape',
+  'repo-mismatch': 'its trigger watches a different repository',
+  'event-not-subscribed': 'does not subscribe to this event type',
+  'history-horizon': "the event predates its trigger's subscription window",
+  'label-filter': 'its trigger subscribes to a different label',
+};
+
+/* ── Label chip for a pending entry (#2101 AC7) ───────────────────
+   The carried flow label, rendered as a label rather than folded into a
+   sentence: the bare token stays visible (it is what the operator reads on the
+   GitHub issue and types into a `labelFilter`), the mechanical `:wip` /
+   `:completed` claim suffix is decoded into a state word beside it, and the
+   exact raw token is on hover. */
+function PendingLabelChip({ label }) {
+  const chip = labelChip(label);
+  if (!chip) return null;
+  return (
+    <span
+      title={`Flow label: ${chip.raw}`}
+      style={{
+        display: 'inline-flex', alignItems: 'baseline', gap: 4,
+        padding: '1px 6px',
+        borderRadius: 'var(--eb-radius-full)',
+        fontSize: 'var(--eb-text-xs)',
+        background: 'var(--eb-bg-elevated)',
+        color: 'var(--eb-text-primary)',
+        border: '1px solid var(--eb-border-default)',
+        cursor: 'help',
+        maxWidth: '100%',
+        overflowWrap: 'anywhere',
+      }}
+    >
+      <span style={{ fontFamily: 'var(--eb-font-mono)', fontWeight: 'var(--eb-font-medium)' }}>{chip.token}</span>
+      {chip.state && <span style={{ color: 'var(--eb-text-secondary)' }}>{chip.state}</span>}
+    </span>
+  );
+}
+
+/* ── Work-item cell for a pending entry (#2101 AC3) ─────────────────────
+   Reuses the Processed tab's two cells verbatim — TypeCell for the PR/Issue
+   distinction (over github-event-log-type.js) and WorkItemCell for the linked
+   `#<number>` plus its `→ closes #<issue>` trail — so the two tabs cannot drift
+   in how a work item reads. The pair is guarded by one absence check, or a
+   work-item-less row would render two dashes instead of one (AC4). */
+function PendingWorkItemCell({ workItem, repo }) {
+  if (!workItem || workItem.number == null) {
+    return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
+  }
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 4, flexWrap: 'wrap' }}>
+      <TypeCell workItem={workItem} />
+      <WorkItemCell workItem={workItem} repo={repo} />
+    </span>
+  );
+}
+
 /* ── One agent's pending group ─────────────────────────────────────── */
-function AgentPendingGroup({ group, onCancel, busyId }) {
+function AgentPendingGroup({ group, onCancel, onReassign, busyId }) {
+  // Two actions now, so the house rule applies: a kebab context menu rather
+  // than a row of icon buttons (#1925/#1938 D3, #2053 D4).
+  const [menu, setMenu] = useState(null);
+  const onChoose = useCallback((key) => {
+    if (!menu) return;
+    if (key === 'cancel') onCancel(group.agentId, menu.row.id);
+    else if (key === 'reassign') onReassign(group.agentId, menu.row.id);
+  }, [menu, onCancel, onReassign, group.agentId]);
+
+  // Flatten the work-item fields onto each row, exactly as the Processed tab
+  // does (#1827): DataTable's text filter and sort are both key-based
+  // (row[col.key]), so they reach the number and the title here while the cell
+  // renderers read the whole `workItem` object. An entry with no work item — a
+  // `push`, or any non-`github` kind — simply carries nulls and shows `—`.
+  const rows = useMemo(() => (group.entries || []).map(e => ({
+    ...e,
+    workItemNumber: e.workItem && e.workItem.number != null ? e.workItem.number : null,
+    workItemTitle: e.workItem ? e.workItem.title : null,
+  })), [group.entries]);
+
   const COLS = [
     { key: 'kind', label: 'Kind', sortable: false, render: v => <KindBadge kind={v} /> },
-    { key: 'detail', label: 'Details', sortable: false, render: (_v, row) => {
+    // Work item + Title (#2101): which PR or issue is waiting, in the Processed
+    // tab's own vocabulary and its own cells, so the two tabs read alike. Both
+    // opt into per-column wrap (#1898's DataTable flag) since a PR title is the
+    // one long value in this table.
+    { key: 'workItemNumber', label: 'Work item', wrap: true, render: (_v, row) => (
+      <PendingWorkItemCell workItem={row.workItem} repo={row.repo} />
+    ) },
+    { key: 'workItemTitle', label: 'Title', wrap: true, render: v => <TitleCell title={v} /> },
+    { key: 'detail', label: 'Details', sortable: false, wrap: true, render: (_v, row) => {
       const d = entryDetail(row);
-      return d
-        ? <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{d}</span>
-        : <span style={{ color: 'var(--eb-text-secondary)' }}>—</span>;
+      const hover = entryHoverDetail(row);
+      const chip = row.label ? <PendingLabelChip label={row.label} /> : null;
+      if (!d && !chip) return <span style={{ color: 'var(--eb-text-secondary)' }}>—</span>;
+      return (
+        <span
+          title={hover || undefined}
+          style={{
+            display: 'inline-flex', alignItems: 'baseline', gap: 'var(--eb-space-2)',
+            flexWrap: 'wrap', fontSize: 'var(--eb-text-xs)',
+          }}
+        >
+          {d && <span>{d}</span>}
+          {chip}
+        </span>
+      );
     } },
     { key: 'receivedAt', label: 'Received', render: v => <WhenCell iso={v} /> },
-    { key: '_cancel', label: '', sortable: false, render: (_v, row) => (
+    { key: '_actions', label: '', sortable: false, render: (_v, row) => (
       <button
         type="button"
-        onClick={() => onCancel(group.agentId, row.id)}
+        onClick={e => setMenu({ row, anchor: { x: e.clientX, y: e.clientY } })}
         disabled={busyId === row.id}
-        aria-label="Cancel this queued entry"
-        title="Remove this entry from the queue before it is delivered"
+        aria-label="Actions for this queued entry"
+        aria-haspopup="menu"
+        title="Reassign or cancel this entry"
         style={{
-          display: 'inline-flex', alignItems: 'center', gap: 4,
-          padding: '2px 8px',
-          background: 'var(--eb-bg-elevated)',
-          border: '1px solid var(--eb-status-error)',
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          padding: '2px 4px',
+          background: 'none',
+          border: '1px solid var(--eb-border-default)',
           borderRadius: 'var(--eb-radius-md)',
-          color: 'var(--eb-status-error)',
-          fontSize: 'var(--eb-text-xs)',
-          fontFamily: 'inherit',
+          color: 'var(--eb-text-secondary)',
           cursor: busyId === row.id ? 'default' : 'pointer',
           opacity: busyId === row.id ? 0.5 : 1,
         }}
       >
-        <Trash2 size={12} /> {busyId === row.id ? 'Cancelling…' : 'Cancel'}
+        <MoreVertical size={14} />
       </button>
     ) },
   ];
@@ -523,11 +705,20 @@ function AgentPendingGroup({ group, onCancel, busyId }) {
       </div>
       <DataTable
         columns={COLS}
-        data={group.entries || []}
+        data={rows}
         pageSize={10}
         getRowKey={(r) => r.id}
         emptyText="No entries."
       />
+      {menu && (
+        <RowContextMenu
+          items={pendingRowMenu(menu.row, { busy: busyId === menu.row.id })}
+          anchor={menu.anchor}
+          label={`Actions for queued entry ${menu.row.id}`}
+          onChoose={onChoose}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }
@@ -560,6 +751,45 @@ function PendingQueueView() {
     }
   }, [refetch]);
 
+  // Reassign (#2102). Two steps by necessity, not by taste: the eligible
+  // targets can only be answered server-side (the console container cannot
+  // require the orchestrator's poller predicates), so the row action opens a
+  // picker and the picker's confirm performs the move.
+  const [reassign, setReassign] = useState(null);
+  const onReassign = useCallback((agentId, entryId) => {
+    setNotice(null);
+    setReassign({ agentId, entryId });
+  }, []);
+
+  const onReassignConfirm = useCallback(async (targetAgentId) => {
+    if (!reassign) return;
+    const { agentId, entryId } = reassign;
+    setBusyId(entryId);
+    try {
+      const res = await apiCall(
+        'POST',
+        `/api/agents/${encodeURIComponent(agentId)}/pending/${encodeURIComponent(entryId)}/reassign`,
+        { targetAgentId },
+      );
+      // Every refusal is a stated outcome, never a silent success: an entry
+      // that already fired, a target with no matching trigger, and — the one
+      // that must be loud — a removal whose enqueue then failed (AC8).
+      setNotice(res && res.ok
+        ? { kind: 'ok', text: pendingReassignSuccess(res) }
+        : { kind: 'error', text: pendingReassignError(res) });
+      if (res && res.ok) setReassign(null);
+    } catch (e) {
+      // apiCall throws on a non-2xx and lifts the body's `code` and `error`
+      // onto the Error — so a refusal is read from those, not from the status.
+      // Reporting `HTTP 409` here would turn "that entry already fired" into an
+      // unexplained failure, which is exactly the outcome AC2/AC8 forbid.
+      setNotice({ kind: 'error', text: pendingReassignError({ code: e.code, error: e.serverMessage }) });
+    } finally {
+      setBusyId(null);
+      refetch();
+    }
+  }, [reassign, refetch]);
+
   const noticeColor = notice?.kind === 'error'
     ? 'var(--eb-status-error)'
     : notice?.kind === 'ok' ? 'var(--eb-status-success)' : 'var(--eb-text-secondary)';
@@ -567,17 +797,17 @@ function PendingQueueView() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       {/* One-line tab lead (#1886): why a backlog builds up (Maintenance Mode, a
-          busy agent) is the help topic's job; the Cancel button keeps its own
+          busy agent) is the help topic's job; each row action keeps its own
           point-of-action tooltip. */}
       <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-        Events accepted but not yet delivered to their agent — cancellable until they fire.
+        Events accepted but not yet delivered to their agent — cancel or reassign them until they fire.
       </p>
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
         <button onClick={refetch} style={{ ...controlStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
         </button>
         <PageHelpButton
-          label="Why entries wait here, and what Cancel does"
+          label="Why entries wait here, and what Cancel and Reassign do"
           size={14}
           section={GITHUB_EVENTS_HELP_SECTIONS.pending}
           style={{ flexShrink: 0 }}
@@ -602,9 +832,23 @@ function PendingQueueView() {
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
           {groups.map(g => (
-            <AgentPendingGroup key={g.agentId} group={g} onCancel={onCancel} busyId={busyId} />
+            <AgentPendingGroup
+              key={g.agentId}
+              group={g}
+              onCancel={onCancel}
+              onReassign={onReassign}
+              busyId={busyId}
+            />
           ))}
         </div>
+      )}
+      {reassign && (
+        <ReassignPicker
+          request={reassign}
+          busy={busyId === reassign.entryId}
+          onCancel={() => setReassign(null)}
+          onConfirm={onReassignConfirm}
+        />
       )}
     </div>
   );

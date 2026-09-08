@@ -19,6 +19,10 @@
 
 const fs = require('fs');
 const path = require('path');
+// Single source for the PR/issue extraction (#2101 AC2): the pending-queue
+// projection needs the identical function and must stay fs-free, so it lives in
+// its own pure module rather than here, in the writer that owns the disk I/O.
+const { extractWorkItem } = require('./github-work-item');
 
 const EVENT_LOG_DIR = process.env.GITHUB_EVENT_LOG_DIR || '/workspace/github-event-log';
 const RETENTION_DAYS = 7;
@@ -58,49 +62,6 @@ function buildEventEntry({ ghEvent, repoFullName, key, outcomes }) {
     outcomes: list,
     noMatchingTrigger: list.length === 0,
   };
-}
-
-// Pull the work item (PR or issue) out of an event payload, best-effort and
-// null-safe (#1827). PR events carry `payload.pull_request` (the poller enriches
-// it with `title`/`html_url` before this runs — see
-// github-poller._enrichPullRequestPayload); issue events carry `payload.issue`
-// natively. An `issue_comment` on a PR arrives as `payload.issue` with a nested
-// `pull_request` marker and is classified `kind: 'pr'` accordingly (#1848). A
-// payload with neither (e.g. `push`), or an oddly-shaped one, yields null — this
-// must never throw, since it feeds the strictly best-effort writer.
-// `title`/`url` may individually be null when the payload is partial.
-//
-// `closesIssues` (#1833 item 3) is carried only for a PR whose enriched
-// `pull_request.closesIssues` holds the issue number(s) it resolves (parsed
-// from the PR body + head branch by the poller — see
-// github-poller._enrichPullRequestPayload). Omitted entirely when there is no
-// parseable linkage, so issue rows and un-enriched PR rows are unaffected.
-function extractWorkItem(payload) {
-  try {
-    const p = payload || {};
-    const src = (p.pull_request && typeof p.pull_request === 'object')
-      ? { kind: 'pr', item: p.pull_request }
-      : (p.issue && typeof p.issue === 'object')
-        // GitHub fires `issue_comment` for both issues and PRs; a PR's issue
-        // object carries a nested `pull_request` marker (#1848). Classify it as
-        // a PR so a comment on a pull request reads `PR`, not `Issue`.
-        ? { kind: p.issue.pull_request ? 'pr' : 'issue', item: p.issue }
-        : null;
-    if (!src || src.item.number == null) return null;
-    const workItem = {
-      kind: src.kind,
-      number: src.item.number,
-      title: typeof src.item.title === 'string' ? src.item.title : null,
-      url: typeof src.item.html_url === 'string' ? src.item.html_url : null,
-    };
-    if (src.kind === 'pr' && Array.isArray(src.item.closesIssues)) {
-      const closes = src.item.closesIssues.filter((n) => Number.isInteger(n) && n > 0);
-      if (closes.length) workItem.closesIssues = closes;
-    }
-    return workItem;
-  } catch {
-    return null;
-  }
 }
 
 // Append one entry as a JSONL line to the current day's file. Never throws.

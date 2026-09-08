@@ -80,6 +80,8 @@
 //
 // Pure: config objects in, a plan object out. No fs, no network, no clock.
 
+const { OWNER_SOURCE_CONVERSION } = require('./ownership-migration');
+
 const DEFAULT_TEAM_ID = 'default';
 
 // The derived team id is `<agent-id>-team`, not something asked for in the
@@ -202,6 +204,18 @@ function planTeamConversion(cfg, {
     enabled: true,
     convertedFromAgentId: agentId,
   };
+  // The human OWNER moves onto the team, exactly like the skill and plugin
+  // grants above (#2077, D8): a `team-member` carries no `ownerId` of its own
+  // and resolves it from its parent (`resolveAgentOwnerId`). Leaving a copy on
+  // the member would be a second source of truth that a later owner reassign
+  // on the team would silently fail to update. `ownerSource` travels with it —
+  // a converted team's owner is as authoritative as the agent's was, so it is
+  // recorded as a conversion rather than re-labelled a creator or a migration
+  // placeholder.
+  if (cfg.ownerId) {
+    teamConfig.ownerId = String(cfg.ownerId);
+    teamConfig.ownerSource = OWNER_SOURCE_CONVERSION;
+  }
   if (grantedPlugins.length > 0) teamConfig.plugins = grantedPlugins;
 
   const memberPatch = {
@@ -227,7 +241,7 @@ function planTeamConversion(cfg, {
   // template with a heading it never had. A standalone agent never has a
   // `systemPromptTemplate`, but `importAgent` deletes it defensively on its
   // standalone branch and the mirror case is worth being explicit about.
-  const memberUnset = ['skills', 'plugins', 'promptMode', 'systemPromptTemplate'];
+  const memberUnset = ['skills', 'plugins', 'promptMode', 'systemPromptTemplate', 'ownerId', 'ownerSource'];
 
   // Only tenant-pool content can go out of reach — global-pool and agent-pool
   // skills resolve identically before and after (decision 2). De-duplicated and

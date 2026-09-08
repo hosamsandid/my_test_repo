@@ -15,6 +15,9 @@ import PageHelpButton from '../components/PageHelpButton';
 // form renders this very component, so the two cannot drift in fields or copy.
 import RepositoryCard from '../components/RepositoryCard';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
+import { useAuth } from '../auth/AuthContext';
+import CredentialOwnership from '../components/CredentialOwnership';
+import { ownershipFromRecord, ownershipPayload, adminTeamIdsOf, canReassignCredentialClient } from './credential-scope-view.js';
 import { describeWorkingEnvSubmitState } from './working-env-submit-state.js';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning, availableToolchains, versionSourceLine } from './toolchain-select-view.js';
 import { initialMcpRows, mcpSubmitValue, mcpRowHint, mcpChangeNotice, mcpServerLabel } from './working-env-mcp-view.js';
@@ -90,6 +93,23 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     defaultModelId: initial?.defaultModelId || '',
     toolchainId: initial?.toolchainId || '',
   }));
+
+  // #2083: the ownership control. Fetched here rather than threaded from the
+  // page, matching every other list this form loads for itself.
+  const { data: teamsData } = useApi('/api/admin/teams');
+  const { user } = useAuth();
+  const isSysAdmin = !!user?.admin;
+  const adminTeamIds = adminTeamIdsOf(user);
+  const teams = Array.isArray(teamsData) ? teamsData : [];
+  // Seeded from the record on an edit, so a shared environment opens as shared
+  // and an ordinary save cannot silently un-share it; from the role defaults on
+  // a create. Only a System Admin may re-tier (canRetierEnvironment server-side),
+  // so for anyone else the control is read-only rather than a button that 403s —
+  // the `settingsSubject` convention (concept §6, implementation note 2).
+  const [ownership, setOwnership] = useState(
+    () => ownershipFromRecord(initial, { isSysAdmin, adminTeamIds }),
+  );
+  const ownershipLocked = isEdit && !canReassignCredentialClient({ isSysAdmin });
 
   const { data: keysData } = useApi('/api/ssh-keys');
   const { data: tokensData } = useApi('/api/github-tokens');
@@ -217,6 +237,10 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
       defaultModelId: form.defaultModelId || null,
       // An ID, never an image reference (#1940) — the server resolves it.
       toolchainId: form.toolchainId || null,
+      // #2083. Sent on an edit too: `isRetier` server-side means restating the
+      // record's own unchanged ownership is NOT an operator act, so this is
+      // also what finally stamps an explicit `scope` on a legacy record.
+      ...ownershipPayload(ownership),
     });
   };
 
@@ -317,6 +341,21 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           environment name, so keep anything private out of it.
         </div>
       </div>
+
+      {/* #2083 — ownership. The same control the SSH-key, GitHub-token and
+          Model-Provider forms render, because the tier shape is the same one
+          (resource-tier.js); a second, differently-worded picker for the same
+          three tiers is exactly the drift #1928's shared-component discipline
+          exists to prevent. `disabled` while a non-System-Admin edits, since
+          only an operator may re-tier. */}
+      <CredentialOwnership
+        value={ownership}
+        onChange={setOwnership}
+        teams={teams}
+        isSysAdmin={isSysAdmin}
+        adminTeamIds={adminTeamIds}
+        disabled={ownershipLocked}
+      />
 
       <div style={{ ...helpTextStyle, marginTop: 0 }}>
         Skills are managed on the team (or agent) itself — see the Agents page, the Team-Setup wizard, or the Knowledge page.

@@ -52,7 +52,7 @@ records written atomically (write-temp + rename):
 | Path | Record shape |
 |---|---|
 | `/workspace/teams/index.json` | `{ id, name, description, createdAt, updatedAt }` |
-| `/workspace/users/index.json` | `{ id, subject, email, displayName, systemAdmin, githubHandle, chatFontSize?, createdAt, updatedAt }` |
+| `/workspace/users/index.json` | `{ id, subject, email, displayName, systemAdmin, githubHandle, matrixUserId?, chatFontSize?, createdAt, updatedAt }` |
 | `/workspace/memberships/index.json` | `{ id, userId, teamId, role, createdAt }` |
 
 - **Team `id`** is an operator-facing slug (`^[a-z0-9][a-z0-9-]{0,63}$`), like a
@@ -61,6 +61,13 @@ records written atomically (write-temp + rename):
   OIDC subject claim or corporate email. It is unique (case-insensitive) so SSO
   login can map a corporate identity onto exactly one account. `id` is a
   generated UUID.
+- **User `matrixUserId`** *(optional, #1458)* is the human's own Matrix account
+  — `@u-<16 hex of sha256(subject)>:local` — provisioned when the record is
+  created (best-effort and backgrounded, so it may be absent briefly or on a
+  single-operator stack that has no user records). It is a non-secret pointer
+  only; the matching access token is stored server-side in a separate per-user
+  file (`users/matrix/<userId>.json`), never on this record. See
+  [`docs/multi-user-concept.md`](multi-user-concept.md) Amendment 1.
 
 The single source of truth for this model is
 [`orchestrator/teams-store.js`](../orchestrator/teams-store.js) — a pure factory

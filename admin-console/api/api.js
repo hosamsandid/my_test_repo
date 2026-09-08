@@ -47,7 +47,7 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
 const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require('./prompt-modes');
@@ -56,7 +56,7 @@ const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const extractTemplate = require('./extract-template');
-const { runCopilot, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
+const { runCopilot, isCopilotAborted, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
 const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
@@ -1488,8 +1488,17 @@ function buildMessagesUrl(baseUrl) {
 
 // Plain HTTP/HTTPS POST of a JSON body. Mirrors httpGetJson: returns
 // { status, body, error } and never throws. Used for one-shot LLM calls.
-function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000) {
+//
+// `signal` (#2087, optional) aborts an in-flight call: a Flow Copilot turn is
+// up to 3 × 180 s of LLM work, and before this a disconnect only suppressed the
+// DELIVERY of the result — the work ran on, billed, and was discarded. Every
+// existing caller passes four arguments and is byte-identical: with no signal
+// no listener is attached and nothing about the request changes.
+function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000, signal = null) {
   return new Promise((resolve) => {
+    if (signal && signal.aborted) {
+      return resolve({ status: 0, body: null, error: 'aborted' });
+    }
     let parsed;
     try {
       parsed = new URL(targetUrl);
@@ -1516,11 +1525,23 @@ function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000) 
       res.on('end', () => {
         let body = data;
         try { body = data ? JSON.parse(data) : null; } catch { /* keep as string */ }
-        resolve({ status: res.statusCode, body, error: null });
+        settle({ status: res.statusCode, body, error: null });
       });
     });
-    req.on('error', (err) => resolve({ status: 0, body: null, error: err.message }));
-    req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: null, error: 'timeout' }); });
+    // One settle path so the abort listener is always detached — a long-lived
+    // signal (one per Copilot turn, up to three calls) must not accumulate
+    // listeners from the calls that already finished.
+    let done = false;
+    const onAbort = () => { req.destroy(); settle({ status: 0, body: null, error: 'aborted' }); };
+    function settle(result) {
+      if (done) return;
+      done = true;
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve(result);
+    }
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    req.on('error', (err) => settle({ status: 0, body: null, error: err.message }));
+    req.on('timeout', () => { req.destroy(); settle({ status: 0, body: null, error: 'timeout' }); });
     req.write(payload);
     req.end();
   });
@@ -2134,7 +2155,12 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     }
     const vh = validateProcessTemplate({ processTemplateVersion: 1, roles: [], humans: humans || [] }, { allowEmptyRoles: true });
     if (!vh.ok) return res.status(400).json({ error: `Invalid humans: ${vh.error}` });
-    normHumans = normalizeHumans(humans || []);
+    // Drop dead producer refs (#2063): a pr/issue consume whose `from` names no
+    // existing agent is unremovable via the UI (its remove control lived on the
+    // now-deleted producer). Prune against the on-disk roster so it clears on
+    // the next humans save — the safety net behind the node-inspector's per-chip
+    // remove button. Roster-based, so it stays out of the pure normalizeHumans.
+    normHumans = pruneOrphanHumanConsumes(normalizeHumans(humans || []), new Set(listAgentDirs()));
   }
 
   // ── Assist synthesis provider, team-agent only (#1213) ────────────────────
@@ -2933,7 +2959,7 @@ function openNdjsonStream(res) {
   };
 }
 
-const EMPTY_SYNC_SUMMARY = { total: 0, cloned: 0, skipped: 0, failed: 0 };
+const EMPTY_SYNC_SUMMARY = { total: 0, cloned: 0, adjusted: 0, skipped: 0, blocked: 0, failed: 0, retained: 0 };
 
 // Sync one agent by calling the orchestrator's per-agent endpoint and emitting
 // agent-scoped progress lines. Never throws — an orchestrator/transport error
@@ -2951,48 +2977,115 @@ async function syncOneAgentToStream(agentId, displayName, emit) {
     if (!resp.ok) {
       const error = (data && data.error) || `HTTP ${resp.status}`;
       emit({ type: 'agent-error', agentId, error });
-      return { summary: { ...EMPTY_SYNC_SUMMARY } };
+      return { summary: { ...EMPTY_SYNC_SUMMARY }, repos: [], error };
     }
   } catch (err) {
-    emit({ type: 'agent-error', agentId, error: `Orchestrator unreachable: ${err.message}` });
-    return { summary: { ...EMPTY_SYNC_SUMMARY } };
+    const error = `Orchestrator unreachable: ${err.message}`;
+    emit({ type: 'agent-error', agentId, error });
+    return { summary: { ...EMPTY_SYNC_SUMMARY }, repos: [], error };
   }
   if (data.noWorkspace) {
+    // AC24: an un-materialized member has no workspace to clone into. Reported
+    // as a skip with the existing reason, and it never fails the run.
     emit({ type: 'agent-skip', agentId, reason: 'no-workspace' });
-    return { summary: data.summary || { ...EMPTY_SYNC_SUMMARY } };
+    return { summary: data.summary || { ...EMPTY_SYNC_SUMMARY }, repos: [], noWorkspace: true };
   }
   const repos = Array.isArray(data.repos) ? data.repos : [];
   for (const r of repos) {
     emit({
       type: 'repo', agentId, name: r.name, url: r.url, status: r.status,
-      reason: r.reason || null, error: r.error || null, fromCache: !!r.fromCache,
+      reason: r.reason || null, detail: r.detail || null, blocked: !!r.blocked,
+      applied: Array.isArray(r.applied) ? r.applied : null,
+      error: r.error || null, fromCache: !!r.fromCache,
     });
   }
   const summary = data.summary || summarizeSyncRepos(repos);
   emit({ type: 'agent-done', agentId, summary });
-  return { summary };
+  return { summary, repos };
 }
 
-// Local fold, in case the orchestrator omits `summary` (defensive).
+// The D6 durable trail (#2066): one audit entry PER AGENT per propagation run.
+//
+// `auditMutations` already records one line per HTTP request, which for an
+// environment fan-out is a single line naming neither the agents nor what
+// happened in their workspaces — and the streamed report vanishes the moment
+// the dialog closes. Since the propagation now MUTATES existing clones, an
+// after-the-fact record of what touched which workspace stops being a nicety.
+//
+// Best-effort by construction (audit.record swallows its own errors): a trail
+// that could fail a propagation would be worse than a missing line.
+function recordRepoSyncTrail(req, { agentId, envId, repos, summary, error }) {
+  const items = (Array.isArray(repos) ? repos : []).map((r) => ({
+    name: r.name,
+    outcome: r.status,
+    ...(r.reason ? { reason: r.reason } : {}),
+    ...(r.detail ? { detail: r.detail } : {}),
+    ...(Array.isArray(r.applied) && r.applied.length ? { applied: r.applied } : {}),
+    ...(r.error ? { error: r.error } : {}),
+  }));
+  audit.record({
+    ts: new Date().toISOString(),
+    actor: (req.user && req.user.username) || 'anonymous',
+    action: 'repo-propagation',
+    method: 'POST',
+    resource: envId
+      ? `/api/environments/${envId}/sync-agents`
+      : `/api/agents/${agentId}/sync-repositories`,
+    teamId: null,
+    status: error ? 500 : 200,
+    outcome: error ? 'error' : 'success',
+    ip: req.ip,
+    repoSync: {
+      agentId,
+      ...(envId ? { environmentId: envId } : {}),
+      summary: summary || null,
+      repositories: items,
+      ...(error ? { agentError: error } : {}),
+    },
+  });
+}
+
+// Local fold, in case the orchestrator omits `summary` (defensive). Mirrors
+// summarizeRepoResults in orchestrator/repo-sync.js, including `retained` being
+// excluded from `total` — a clone that is no longer declared is not a unit of
+// work, so counting it would inflate the progress line with a row nothing acts on.
 function summarizeSyncRepos(repos) {
   const list = Array.isArray(repos) ? repos : [];
   return {
-    total: list.length,
+    total: list.filter((r) => r.status !== 'retained').length,
     cloned: list.filter((r) => r.status === 'cloned').length,
+    adjusted: list.filter((r) => r.status === 'adjusted').length,
     skipped: list.filter((r) => r.status === 'skipped').length,
+    blocked: list.filter((r) => r.status === 'skipped' && r.blocked).length,
     failed: list.filter((r) => r.status === 'failed').length,
+    retained: list.filter((r) => r.status === 'retained').length,
   };
 }
 
-// Per-agent: clone the environment's missing repos into this one agent.
+// Per-agent: reconcile the environment's repositories into this one agent's
+// workspace — clone what is missing, adjust what diverges where that is safe.
+//
+// The management gate is AC23's requirement applied here too: since #2066 this
+// route no longer only ADDS clones, it can also move a branch and repoint a
+// remote in someone else's workspace, so read visibility is not enough. It
+// carried no authorisation at all before.
 app.post('/api/agents/:id/sync-repositories', heavyLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  const scope = getScope(req);
+  if (!cfg || !visibleAgent(scope, cfg)) return res.status(404).json({ error: 'Agent not found' });
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const stream = openNdjsonStream(res);
   try {
     stream.emit({ type: 'plan', agentCount: 1 });
-    const { summary } = await syncOneAgentToStream(id, id, stream.emit);
-    stream.emit({ type: 'complete', agentCount: 1, totals: summary });
+    const result = await syncOneAgentToStream(id, cfg.displayName || id, stream.emit);
+    recordRepoSyncTrail(req, {
+      agentId: id, envId: null, repos: result.repos, summary: result.summary, error: result.error,
+    });
+    stream.emit({ type: 'complete', agentCount: 1, totals: result.summary });
   } catch (err) {
     stream.emit({ type: 'error', status: 500, error: err.message });
   } finally {
@@ -3000,36 +3093,98 @@ app.post('/api/agents/:id/sync-repositories', heavyLimiter, async (req, res) => 
   }
 });
 
-// Per-environment: fan the same sync out to every agent bound to the env.
+// Per-environment: fan the propagation out to every agent bound to the env.
+//
+// This is what both the save-time offer and the out-of-date indicator's
+// catch-up call (#2066); the manual "Sync all agents" button that used to be
+// its only caller is gone.
+//
+// AC23: the gate is `canManageEnvironment`, not read visibility. It used to
+// check only `visibleTeam`, which let a plain Team Member fan a write out into
+// other people's workspaces while `PUT`/`DELETE` on the same environment
+// required team-admin — and since #2066 the fan-out can also move a branch and
+// repoint a remote, not merely add a missing clone.
 app.post('/api/environments/:id/sync-agents', heavyLimiter, async (req, res) => {
   const envId = normalizeEnvId(req.params.id);
   const env = loadEnvironment(envId);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const scope = getScope(req);
   if (!visibleTeam(scope, env.teamId)) return res.status(404).json({ error: 'Environment not found' });
+  if (!canManageEnvironment(scope, env)) {
+    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+  }
   const agents = agentsUsingEnvironment(envId, scope);
   const repoCount = (Array.isArray(env.repositories) ? env.repositories : []).length;
 
   const stream = openNdjsonStream(res);
-  const totals = { total: 0, cloned: 0, skipped: 0, failed: 0 };
+  const totals = { ...EMPTY_SYNC_SUMMARY };
   try {
     stream.emit({
       type: 'plan', envId, agentCount: agents.length, repoCount,
       agents: agents.map((a) => ({ id: a.id, displayName: a.displayName })),
     });
     for (const a of agents) {
+      // AC25: one bad agent aborts neither the remaining agents nor the
+      // remaining repositories — syncOneAgentToStream never throws.
       if (stream.isAborted()) break;
-      const { summary } = await syncOneAgentToStream(a.id, a.displayName, stream.emit);
-      totals.total += summary.total || 0;
-      totals.cloned += summary.cloned || 0;
-      totals.skipped += summary.skipped || 0;
-      totals.failed += summary.failed || 0;
+      const result = await syncOneAgentToStream(a.id, a.displayName, stream.emit);
+      recordRepoSyncTrail(req, {
+        agentId: a.id, envId, repos: result.repos, summary: result.summary, error: result.error,
+      });
+      for (const key of Object.keys(totals)) totals[key] += result.summary[key] || 0;
     }
     stream.emit({ type: 'complete', agentCount: agents.length, totals });
   } catch (err) {
     stream.emit({ type: 'error', status: 500, error: err.message });
   } finally {
     stream.end();
+  }
+});
+
+// D4 (#2066): which of an environment's agents are NOT up to date, derived from
+// the actual workspace state rather than from a remembered save-time diff — so
+// it stays correct after a declined offer, a partial run or a failure, and
+// clears on its own once nothing diverges.
+//
+// Read-only, so it gates on visibility rather than management: a reader who can
+// see the environment may see that its agents are behind, but the catch-up
+// button behind the indicator posts to sync-agents above and is refused there.
+app.get('/api/environments/:id/repo-divergence', apiLimiter, async (req, res) => {
+  const envId = normalizeEnvId(req.params.id);
+  const env = loadEnvironment(envId);
+  if (!env) return res.status(404).json({ error: 'Environment not found' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, env.teamId)) return res.status(404).json({ error: 'Environment not found' });
+
+  // The agent set is resolved HERE and handed to the orchestrator, because
+  // deciding which agents this caller may see is the console's scoping job.
+  const agents = agentsUsingEnvironment(envId, scope);
+  if (agents.length === 0) {
+    return res.json({ envId, agents: [], outOfDate: 0, canManage: canManageEnvironment(scope, env) });
+  }
+  try {
+    const resp = await fetch(
+      `${ORCH_URL()}/internal/environments/${encodeURIComponent(envId)}/repo-divergence`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentIds: agents.map((a) => a.id) }),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(502).json({ error: data.error || `HTTP ${resp.status}` });
+    const names = new Map(agents.map((a) => [a.id, a.displayName]));
+    return res.json({
+      envId,
+      agents: (Array.isArray(data.agents) ? data.agents : [])
+        .map((a) => ({ ...a, displayName: names.get(a.agentId) || a.agentId })),
+      outOfDate: data.outOfDate || 0,
+      canManage: canManageEnvironment(scope, env),
+    });
+  } catch (err) {
+    // An unreachable orchestrator must not render as "everything is fine" —
+    // the indicator would then be silently wrong rather than absent.
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
   }
 });
 
@@ -8080,10 +8235,19 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
     'anthropic-version': '2023-06-01',
     ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
   };
+  // A stopped or disconnected turn ends the SERVER-side work (#2087, D2).
+  // Before this, `aborted` only suppressed delivery: `runCopilot` took no
+  // signal and `httpPostJson` accepted none, so a disconnect could leave up to
+  // MAX_REPAIR_ITERATIONS + 1 = 3 × 180 s of LLM work running, billed, and
+  // discarded. The client's Stop is an `AbortController` on its own fetch, so
+  // it arrives here as the same `res.on('close')` a tab close does — one
+  // cancellation path for both (AC9, AC14).
+  const turnAbort = new AbortController();
+
   // Whole-bundle generations are big (16k max_tokens) — a generous transport
   // timeout, unlike the short one-shot suggestion calls.
   const callLlm = async (payload) => {
-    const result = await httpPostJson(url, headers, { model: target.model, ...payload }, 180000);
+    const result = await httpPostJson(url, headers, { model: target.model, ...payload }, 180000, turnAbort.signal);
     if (result.error || result.status < 200 || result.status >= 300) {
       const detail = result.error
         || (result.body && (result.body.error?.message || result.body.error || result.body.message))
@@ -8104,7 +8268,11 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   }
   let aborted = false;
   res.on('close', () => {
-    if (!res.writableEnded) aborted = true;
+    if (!res.writableEnded) {
+      aborted = true;
+      // #2087: stop the work, not just its delivery.
+      turnAbort.abort();
+    }
   });
   function emit(ev) {
     if (aborted) return;
@@ -8118,13 +8286,22 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   emit({ type: 'assist', ...assistMeta(target).assist });
 
   try {
-    const out = await runCopilot({ bundle: body.bundle, messages, callLlm, onProgress: emit });
+    const out = await runCopilot({
+      bundle: body.bundle, messages, callLlm, onProgress: emit, signal: turnAbort.signal,
+    });
     emit({ type: 'result', ...out, model: target.model, meta: assistMeta(target) });
   } catch (err) {
-    // Transport failure with no bundle to fall back to, or no parseable reply
-    // at all. "Model couldn't get lint-clean" is NOT an error — runCopilot
-    // returns ok:false for that.
-    emit({ type: 'error', status: 502, error: err.message });
+    // A stopped turn is not a failure (#2087): the socket is already gone, so
+    // `emit` is a no-op anyway, but classifying it keeps a deliberate Stop out
+    // of the error path — nothing is left to report and no proposal is built.
+    if (isCopilotAborted(err)) {
+      // nothing to emit — the client asked for this and is no longer listening
+    } else {
+      // Transport failure with no bundle to fall back to, or no parseable reply
+      // at all. "Model couldn't get lint-clean" is NOT an error — runCopilot
+      // returns ok:false for that.
+      emit({ type: 'error', status: 502, error: err.message });
+    }
   }
   if (!aborted) res.end();
 });
@@ -12446,6 +12623,14 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   const prevLlmEndpointId = env.llmEndpointId || null;
   const prevDefaultModelId = env.defaultModelId || null;
   const prevToolchainId = env.toolchainId || null;
+  // The repository list as PERSISTED, captured before the write and echoed on
+  // the response (#2066). The save-time offer's diff is computed from this and
+  // the saved list, both server-supplied — which is what makes it impossible
+  // for the offer to act on a list the browser has been holding since before
+  // another admin saved the same environment.
+  const prevRepositories = Array.isArray(env.repositories)
+    ? env.repositories.map((r) => ({ ...r }))
+    : [];
   // `skills` from old clients is accepted-and-discarded — the grant is
   // team-owned (see POST above); a legacy env.skills field on disk is left
   // untouched (dead after the orchestrator's startup migration).
@@ -12529,7 +12714,10 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
           || (env.defaultModelId || null) !== prevDefaultModelId) {
     notifyEnvCredentialChange(env.id, 'llm-endpoint-changed');
   }
-  res.json(env);
+  // AC7: the save is already committed at this point. Whatever the caller does
+  // with `previousRepositories` — offer, decline, crash — the environment stays
+  // persisted exactly as submitted; no path here rolls it back.
+  res.json({ ...env, previousRepositories: prevRepositories });
 });
 
 app.delete('/api/environments/:id', apiLimiter, (req, res) => {

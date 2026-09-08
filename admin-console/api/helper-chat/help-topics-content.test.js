@@ -306,6 +306,10 @@ const TOPIC_CONTENT = [
     // areas below are each a chapter, and four of them are the landing target of
     // a "?" on the matching surface, so the headings are load-bearing rather
     // than decorative.
+    //
+    // #2066 replaced the manual **Sync all agents** action with an offer made at
+    // SAVE time plus a persistent out-of-date badge, so the chapter-2 material
+    // is rewritten around those two surfaces and gains a second `###`.
     chapters: [
       'What a Working Environment is',
       'Repositories',
@@ -327,8 +331,24 @@ const TOPIC_CONTENT = [
       'SSH key',
       'HTTPS',
       'Read-only',
-      'newly created agents',
-      'Sync all agents',
+      // #2066: `Sync all agents` and `never re-clones` are retired rather than
+      // reworded — the action is gone and the propagation now DOES fetch,
+      // switch a branch and repoint a remote. What replaces them are the
+      // claims a reader would be harmed by getting wrong: that the save is
+      // committed regardless of the answer, that an unsafe clone is left
+      // untouched rather than fixed, that a removal never deletes anything,
+      // and that the badge is derived from the workspaces rather than
+      // remembered from the last save.
+      'Saving asks',
+      'clean and fully pushed',
+      'left completely alone',
+      'Nothing is stashed, reset or force-checked-out',
+      'Removal never deletes anything',
+      'no pruning',
+      'manual step',
+      'actual workspaces',
+      'never counted',
+      'kept** and reported as retained',
       // #1987 additions. The first is a CORRECTION of the page, guarded here
       // because the form's own hint said the opposite: prompt-assembly.js writes
       // the environment name AND description into the agent's CLAUDE.md, so the
@@ -344,7 +364,6 @@ const TOPIC_CONTENT = [
       // surprising behaviour, and the reason the Sync action exists.
       'What an edit reaches',
       'recreates its running agents',
-      'never re-clones',
       // Two honest limits of surfaces that look stricter than they are.
       'advice, not a gate',
       'an instruction, not a file permission',

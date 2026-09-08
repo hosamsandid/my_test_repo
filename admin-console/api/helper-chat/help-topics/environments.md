@@ -12,8 +12,10 @@ seeAlso:
 askPrompts:
   - "What does an agent inherit from its Working Environment?"
   - "When are the repositories cloned into an agent's workspace?"
-  - "I added a repository to an existing environment — why does the agent not see it?"
-  - "What exactly does Sync all agents do?"
+  - "I added a repository to an existing environment — does the agent get it?"
+  - "What happens when I remove a repository from an environment?"
+  - "Why was one of my agents left alone instead of brought up to date?"
+  - "What does the 'agents not up to date' badge on the list mean?"
   - "Do I need an SSH key or a GitHub token for a private repository?"
   - "What does the Read-only checkbox on a repository do?"
   - "Where do I set the MCP servers an environment pairs?"
@@ -60,7 +62,7 @@ agents that already exist.
 
 | You change | What happens to existing agents |
 |---|---|
-| Repositories | Nothing, until you run **Sync all agents** (below). Changes otherwise apply to **newly created agents** only. |
+| Repositories | Saving **offers** to bring the existing agents up to date, and does it when you accept (below). Decline and nothing changes — the environment is still saved, and the list shows a *not up to date* badge until you catch up. |
 | GitHub token, model provider, default model, toolchain | The environment's **running** agents are recreated so the new binding takes effect. Disabled agents pick it up when they are next enabled. |
 | An SSH key selection on a repository row | Nothing immediately — it is used at the next clone or the next respawn. |
 | Additional instructions, name, description | Only agents whose `CLAUDE.md` is written afterwards. A recreated agent keeps the file it already has. |
@@ -77,9 +79,10 @@ issue triggers and outcomes) have no repository to act on, so they are
 unavailable to a repo-less team.
 
 Per row you set the URL, optionally a **branch** and, for an SSH URL, an SSH
-key. The branch is the branch checked out **at clone time**; leave it blank to
-get the repository's own default branch. Changing it later does not switch an
-existing checkout.
+key. The branch is the branch checked out at clone time; leave it blank to get
+the repository's own default branch. Changing it later **is** offered to the
+existing agents — see below — but only where their checkout is clean and fully
+pushed, so an agent in the middle of something is never moved out from under it.
 
 Repository URLs are probed for reachability while you type, so a wrong URL or a
 missing credential shows up before you save. The probe is **advice, not a gate** —
@@ -101,25 +104,79 @@ or push to it, right where the repository is listed in its generated context. It
 is an instruction, not a file permission — use it for an upstream codebase, a
 shared library, or a docs repo the agent should only read.
 
-### Sync all agents
+### Bringing existing agents up to date
 
-Because repositories are cloned once, a repository added to an environment later
-never reaches the agents that already exist. **Sync all agents** — on the edit
-form, below the repository list — closes that gap: it clones the **missing**
-repositories into every agent already using this environment and reports one
-line per repository per agent as it goes.
+Because repositories are cloned once, a repository change made later does not
+reach the agents that already exist on its own. **Saving asks.** When you save an
+environment that has at least one agent and the repository list actually changed,
+a dialog opens listing what changed — grouped into **added**, **changed** and
+**removed** — and offers to bring those agents up to date. Accepting is the
+primary action; pressing Enter confirms it. It never runs on its own: a save
+always propagates only when you say so.
 
-What it deliberately does not do: it never re-clones, fetches, pulls or switches
-the branch of a repository that is already there (those are left untouched), and
-it does not restart anything — the files land in the workspace the running
-container already shares. A member that has not been materialized yet has no
-workspace and is reported as skipped; a **disabled** agent, on the other hand,
-is synced normally, since its workspace exists. The action appears only while
-editing an environment that has at least one repository and at least one agent.
+The save itself is already done by then. Accepting, declining, a failure, even
+closing the browser mid-run — the environment stays saved exactly as you
+submitted it. Nothing about the propagation can roll a save back.
+
+The three kinds of change are treated differently, and the difference is the
+whole point:
+
+| The change | What happens in each agent's workspace |
+|---|---|
+| A repository **added** | Cloned in, exactly as it would have been at creation time. |
+| A repository whose **branch, address or SSH key changed** | Adjusted in place — the remote is repointed, the repository fetched, the declared branch checked out and brought up to its remote — **but only if that clone is clean and fully pushed**. |
+| A repository **removed** | Nothing, ever. The agents keep their copies. |
+
+**A clone that is not clean and pushed is left completely alone**, and the report
+says what blocked it: uncommitted or untracked files, commits that were never
+pushed, a branch with no remote to compare against, a detached HEAD, or a remote
+somebody repointed by hand. Nothing is stashed, reset or force-checked-out at any
+point — a checkout may hold the only copy of someone's work, and that outranks
+the reconciliation. Push or commit, then catch up, and the same repository is
+adjusted on the next run. Such a *left alone* line is deliberately not styled
+like a failure: nothing went wrong, something is simply waiting on a person.
+
+**Removal never deletes anything.** There is no pruning, under any circumstance —
+the removed repository stays in every workspace it was ever cloned into, and the
+dialog says so. Removing it from an agent is a manual step. One consequence worth
+knowing: the agent's generated `CLAUDE.md` lists the repositories the environment
+*declares*, so a removed repository leaves the agent's instructions while its
+files stay on disk — and a newly added one enters those instructions before it is
+cloned, which is exactly why declining the offer is worth catching up on later.
+
+A changed **address** has two outcomes, decided by the folder name the URL
+derives: if the folder name is unchanged the clone's remote is simply repointed;
+if it would change, the new repository is cloned into its own folder and the old
+folder is **kept** and reported as retained. A changed address is ambiguous —
+"the same repository moved" versus "a different repository" — and the folder name
+is the only thing the platform actually keys on, so it is the honest tie-breaker.
+
+A member that has not been materialized yet has no workspace and is reported as
+skipped — start the agent, then catch up. A **disabled** agent is propagated to
+normally, since its workspace exists. Nothing is restarted either way: the files
+land in the workspace the running container already shares.
+
+### The "agents not up to date" badge
+
+Declining is not a dead end. The environment list shows a persistent badge on the
+**Agents** cell naming how many of an environment's agents are behind, and
+clicking it runs the same propagation. The badge is derived from the agents'
+**actual workspaces** — not from what the last save happened to change — so it is
+still right after a decline, a half-finished run or a failure, and it clears
+itself once nothing diverges. Hover it to see which repository is behind in which
+agent.
+
+Being behind means, per agent: a declared repository with no clone, or a clone
+whose checked-out branch or remote address differs from what the environment
+declares. A clone with **no** matching declared entry — a repository you removed —
+is never counted, because nothing is ever pruned and it could therefore never be
+brought up to date.
 
 For a single agent the same job is available on the agent itself — **Sync
-repositories** on its settings form, or the Workspace Browser in the Agent Chat
-right rail.
+repositories** on its settings form. It is the recovery path for one agent after
+a declined offer or a left-alone clone, and it drives exactly the same
+propagation, so the two surfaces cannot disagree about what a given change would
+do.
 
 ## Credentials
 

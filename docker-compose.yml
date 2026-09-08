@@ -157,6 +157,10 @@ services:
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:-admin}"
       AUTH_SESSION_SECRET: "${AUTH_SESSION_SECRET:-}"
       AUTH_COOKIE_SECURE: "${AUTH_COOKIE_SECURE:-}"
+      # Single-user <-> multi-user mode (#1457). Default off = today's
+      # behaviour (every principal is the implicit System Admin, team scoping
+      # is a no-op); "true" enforces per-membership scoping. See .env.example.
+      AUTH_ENABLED: "${AUTH_ENABLED:-}"
       STT_URL: "${STT_URL:-http://stt:9000}"
       # STT request timeout (ms). A Meeting Note-Taker segment (#1296) can be up
       # to 120 s of audio, which may take longer to transcribe on CPU than the

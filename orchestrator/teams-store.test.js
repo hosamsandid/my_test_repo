@@ -17,6 +17,58 @@ test('createTeamsStore requires a root', () => {
   assert.throws(() => createTeamsStore({}), /root.*required/);
 });
 
+// ---- Matrix identity pointer (#1458) --------------------------------------
+
+test('matrix identity: a new user has no pointer until one is stamped', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com', displayName: 'Jane' });
+  assert.equal(u.matrixUserId, undefined);
+  assert.equal(store.getUser(u.id).matrixUserId, undefined);
+});
+
+test('matrix identity: setUserMatrixIdentity persists the pointer and bumps updatedAt', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com', displayName: 'Jane' });
+  const stamped = store.setUserMatrixIdentity(u.id, '@u-0123456789abcdef:local');
+  assert.equal(stamped.matrixUserId, '@u-0123456789abcdef:local');
+  assert.equal(store.getUser(u.id).matrixUserId, '@u-0123456789abcdef:local');
+  assert.ok(store.getUser(u.id).updatedAt >= u.updatedAt);
+});
+
+test('matrix identity: re-stamping replaces the pointer (idempotent re-provisioning)', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com' });
+  store.setUserMatrixIdentity(u.id, '@u-1111111111111111:local');
+  store.setUserMatrixIdentity(u.id, '@u-2222222222222222:local');
+  assert.equal(store.getUser(u.id).matrixUserId, '@u-2222222222222222:local');
+});
+
+test('matrix identity: the pointer survives sanitizeUser — it is public, not a secret', () => {
+  // The localpart is visible to every member of every room the human joins, so
+  // unlike passwordHash it must NOT be stripped: consumers need it to resolve
+  // "which Matrix account is this human?".
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com' });
+  store.setUserMatrixIdentity(u.id, '@u-0123456789abcdef:local');
+  assert.equal(store.sanitizeUser(store.getUser(u.id)).matrixUserId, '@u-0123456789abcdef:local');
+});
+
+test('matrix identity: setUserMatrixIdentity validates its inputs', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com' });
+  assert.throws(() => store.setUserMatrixIdentity('nope', '@u-1:local'), /not found/);
+  assert.throws(() => store.setUserMatrixIdentity(u.id, ''), /matrixUserId is required/);
+  assert.throws(() => store.setUserMatrixIdentity(u.id, '   '), /matrixUserId is required/);
+});
+
+test('matrix identity: deleting a user drops the pointer with the record', () => {
+  const { store } = freshStore();
+  const u = store.createUser({ subject: 'jane@corp.com' });
+  store.setUserMatrixIdentity(u.id, '@u-0123456789abcdef:local');
+  store.deleteUser(u.id);
+  assert.equal(store.getUser(u.id), null);
+});
+
 // ---- local passwords (#374) -----------------------------------------------
 
 test('passwords: set, verify, and never leak the hash', () => {

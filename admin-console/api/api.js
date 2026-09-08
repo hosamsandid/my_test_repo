@@ -30,6 +30,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
         resolveAgentTenant } = require('./scope');
+const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
 const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
 const { normalizeDiscoveredModels } = require('./model-discovery');
@@ -49,6 +50,8 @@ const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
+// Process-draft access model (#2068) — one predicate for every draft route.
+const draftAccess = require('./draft-access');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
 const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require('./prompt-modes');
 const { listProcessTemplates, loadProcessTemplate } = require('./process-template-registry');
@@ -199,6 +202,10 @@ const DEFAULT_TEAM_ID = 'default';
 // The env single-admin login (#276); its session subject is this value and it
 // is treated as the operator (full visibility) by the scope filter (#302).
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
+// Single-user ⇄ multi-user mode (#1457). Off by default: an existing stack that
+// upgrades keeps today's behaviour (every principal is the implicit System
+// Admin) until an operator activates multi-user mode explicitly. See auth-mode.js.
+const AUTH_ENABLED = resolveAuthEnabled(process.env);
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 
@@ -330,6 +337,7 @@ auth.registerAuthRoutes(app, {
     adminUsername: ADMIN_USERNAME,
     users: readJsonFile(USERS_INDEX, []),
     memberships: readJsonFile(MEMBERSHIPS_INDEX, []),
+    authEnabled: AUTH_ENABLED,
   }),
 });
 app.use('/api', auth.gate);
@@ -812,6 +820,7 @@ function getScope(req) {
     adminUsername: ADMIN_USERNAME,
     users: readJsonFile(USERS_INDEX, []),
     memberships: readJsonFile(MEMBERSHIPS_INDEX, []),
+    authEnabled: AUTH_ENABLED,
   });
 }
 
@@ -8865,16 +8874,88 @@ function readDraft(id) {
   if (!p || !fs.existsSync(p)) return null;
   return readJsonFile(p, null);
 }
+function listDraftIds() {
+  try {
+    return fs.readdirSync(PROCESS_DRAFTS_DIR).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5));
+  } catch { return []; /* dir not created yet */ }
+}
+// User records, keyed by id — the only thing the draft surfaces need them for is
+// turning an access-set id into a display name (AC16) and projecting the Share
+// picker (D2/D11). Read fresh per request like getScope does; the file is small.
+function usersById() {
+  const map = new Map();
+  for (const u of readJsonFile(USERS_INDEX, [])) if (u && u.id) map.set(u.id, u);
+  return map;
+}
+// DD3 (#2068) — strip a deleted human from every draft's access set. Unlike the
+// unshare route this MAY empty a set (DD3a): the draft is retained and stays
+// reachable by a System Admin, because silently destroying a document during a
+// user deletion is not recoverable. `createdBy` is left as history. Returns how
+// many records changed, for the log line.
+function stripUserFromDrafts(userId) {
+  let changed = 0;
+  for (const id of listDraftIds()) {
+    const d = readDraft(id);
+    if (!d) continue;
+    const next = draftAccess.stripUserFromDraft(d, userId);
+    if (!next.changed) continue;
+    writeJsonAtomic(draftPath(id), { ...d, accessUserIds: next.accessUserIds });
+    changed++;
+  }
+  return changed;
+}
+
+// AC15 — drafts that predate #2068 carry no access set at all, and the gate
+// above is fail-closed, so without this they would become System-Admin-only on
+// upgrade day. DD4 gives each of them `createdBy` = the first System Admin and
+// an access set of ALL current users, which is the literal reading of #2041 D6:
+// today's access is preserved exactly and nobody loses anything. Re-runs are
+// no-ops (a record with an `accessUserIds` array is already stamped), so this is
+// safe in the `app.listen` callback beside the other startup backfills.
+function backfillDraftAccess() {
+  const users = readJsonFile(USERS_INDEX, []);
+  const systemAdminId = draftAccess.firstSystemAdminId(users);
+  const allUserIds = users.filter(u => u && u.id).map(u => u.id);
+  let stamped = 0;
+  for (const id of listDraftIds()) {
+    const d = readDraft(id);
+    if (!d) continue;
+    const result = draftAccess.migrateDraftAccess(d, { systemAdminId, allUserIds });
+    if (!result.changed) continue;
+    try { writeJsonAtomic(draftPath(id), result.draft); stamped++; }
+    catch { /* best effort per draft — never block startup */ }
+  }
+  if (stamped > 0) console.log(`[Admin] Draft access backfill stamped ${stamped} draft(s)`);
+}
+
+// AC3 — the by-id gate, applied identically by every route below. Answers with
+// the AC7 indistinguishable-404 so the endpoint never confirms that a draft the
+// caller may not see exists.
+function requireDraftAccess(req, res, id) {
+  if (!DRAFT_ID_RE.test(id)) { res.status(400).json({ error: 'Invalid draft id' }); return null; }
+  const verdict = draftAccess.authorizeDraft(getScope(req), readDraft(id));
+  if (!verdict.ok) { res.status(verdict.status).json({ error: verdict.error }); return null; }
+  return verdict.draft;
+}
 
 app.get('/api/process/drafts', (req, res) => {
-  let ids = [];
-  try {
-    ids = fs.readdirSync(PROCESS_DRAFTS_DIR).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5));
-  } catch { /* dir not created yet */ }
-  const drafts = ids.map(id => {
+  const scope = getScope(req);
+  const users = usersById();
+  const drafts = listDraftIds().map(id => {
     const d = readDraft(id);
     if (!d) return null;
-    return { id, name: d.name || id, roleCount: Array.isArray(d.roles) ? d.roles.length : 0, updatedAt: d.updatedAt || null };
+    // AC6 — the list filter is the same predicate as the by-id gate; a System
+    // Admin (scope.all) sees every draft (DD7).
+    if (!draftAccess.canAccessDraft(scope, d)) return null;
+    return {
+      id,
+      name: d.name || id,
+      roleCount: Array.isArray(d.roles) ? d.roles.length : 0,
+      updatedAt: d.updatedAt || null,
+      // AC16 — private vs shared, and who created one the viewer did not. Never
+      // a raw user id: the list has no way to render one.
+      ...draftAccess.draftAccessView(d, { viewerId: scope.userId, usersById: users }),
+    };
   }).filter(Boolean).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   res.json(drafts);
 });
@@ -8889,28 +8970,74 @@ app.post('/api/process/drafts', apiLimiter, (req, res) => {
   if (req.body?.processTemplate) {
     const v = validateProcessTemplate(req.body.processTemplate, { allowEmptyRoles: true });
     if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
-    bundle = { ...req.body.processTemplate, name };
+    // Strip the access fields off an imported bundle (#2068): an exported and
+    // re-imported draft belongs to the importer, and must never carry a foreign
+    // access set in.
+    bundle = { ...draftAccess.stripAccessFields(req.body.processTemplate), name };
   }
-  const draft = { ...bundle, id, createdAt: now, updatedAt: now };
+  // AC1 — `createdBy` is resolved from the authenticated caller, never from the
+  // request body (the `PUT /api/me/preferences` rule), and the access set starts
+  // as exactly the creator.
+  const draft = { ...bundle, id, createdAt: now, updatedAt: now, ...draftAccess.newDraftAccess(getScope(req)) };
   fs.mkdirSync(PROCESS_DRAFTS_DIR, { recursive: true });
   writeJsonAtomic(draftPath(id), draft);
   res.status(201).json(draft);
 });
 
 app.get('/api/process/drafts/:id', (req, res) => {
+  const d = requireDraftAccess(req, res, req.params.id);
+  if (!d) return undefined;
+  return res.json(d);
+});
+
+// The resolved access set behind the Share dialog. Same projection as the
+// picker (D2/D11 — display name and email only), so the dialog never learns
+// anything about a colleague the directory would not have told it.
+app.get('/api/process/drafts/:id/access', (req, res) => {
+  const d = requireDraftAccess(req, res, req.params.id);
+  if (!d) return undefined;
+  return res.json({ users: draftAccess.resolveAccessList(d, usersById()) });
+});
+
+// Share (DD2 — available to everyone already in the access set, with no action
+// reserved to the creator). Writes ONLY the access set: the bundle is untouched,
+// so a share can never be a way to smuggle a template edit past validation.
+app.post('/api/process/drafts/:id/access', apiLimiter, (req, res) => {
   const { id } = req.params;
-  if (!DRAFT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid draft id' });
-  const d = readDraft(id);
-  if (!d) return res.status(404).json({ error: 'Draft not found' });
-  res.json(d);
+  const d = requireDraftAccess(req, res, id);
+  if (!d) return undefined;
+  const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : '';
+  // D3 — existing accounts only; there are no invitations of people without one.
+  if (!usersById().has(userId)) return res.status(400).json({ error: 'Unknown user' });
+  const result = draftAccess.addAccess(d, userId);
+  if (!result.ok) return res.status(result.status).json({ error: result.error });
+  if (result.changed) writeJsonAtomic(draftPath(id), { ...d, accessUserIds: result.accessUserIds });
+  return res.json({ users: draftAccess.resolveAccessList({ accessUserIds: result.accessUserIds }, usersById()) });
+});
+
+// Unshare. Anyone in the set may remove anyone (DD2), including themselves —
+// that is how leaving a shared draft works — but AC9 refuses the removal that
+// would empty the set and points at Delete draft instead.
+app.delete('/api/process/drafts/:id/access/:userId', apiLimiter, (req, res) => {
+  const { id, userId } = req.params;
+  const d = requireDraftAccess(req, res, id);
+  if (!d) return undefined;
+  const result = draftAccess.removeAccess(d, userId);
+  if (!result.ok) return res.status(result.status).json({ error: result.error, code: result.code });
+  if (result.changed) writeJsonAtomic(draftPath(id), { ...d, accessUserIds: result.accessUserIds });
+  return res.json({ users: draftAccess.resolveAccessList({ accessUserIds: result.accessUserIds }, usersById()) });
 });
 
 app.put('/api/process/drafts/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
-  if (!DRAFT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid draft id' });
-  const existing = readDraft(id);
-  if (!existing) return res.status(404).json({ error: 'Draft not found' });
-  const body = req.body || {};
+  const existing = requireDraftAccess(req, res, id);
+  if (!existing) return undefined;
+  // AC4 — the access fields are server-owned. This route spreads the whole
+  // request body onto the record and `validateProcessTemplate` is not a
+  // whitelist, so the incoming copy is dropped here and the stored one carried
+  // over below, exactly the way `createdAt` is. The ordinary save route must
+  // never be a way to widen access.
+  const body = draftAccess.stripAccessFields(req.body || {});
   // Drafts are works-in-progress — empty role sets are allowed here (only
   // materialisation requires a non-empty set).
   const v = validateProcessTemplate(body, { allowEmptyRoles: true });
@@ -8930,6 +9057,11 @@ app.put('/api/process/drafts/:id', apiLimiter, (req, res) => {
     name,
     createdAt: existing.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    // AC5 — the clients read the whole bundle and write it back, so a field they
+    // do not re-emit would be silently lost on the next save. Carried from the
+    // stored record, which is also what makes sharing survive a rename (the
+    // branch below rewrites the draft under a new id).
+    ...draftAccess.carryAccessFields(existing),
   };
   // Copilot chat history (#1071) — storage metadata like id/createdAt, never
   // part of the portable bundle. Normalized on write: whitelisted fields only,
@@ -8949,11 +9081,14 @@ app.put('/api/process/drafts/:id', apiLimiter, (req, res) => {
 
 app.delete('/api/process/drafts/:id', apiLimiter, (req, res) => {
   const { id } = req.params;
-  if (!DRAFT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid draft id' });
+  // Delete is available to every holder (DD2/AC8) — the confirmation naming the
+  // other people who lose it is the only thing between a mis-click and someone
+  // else's work, and it lives on the client.
+  if (!requireDraftAccess(req, res, id)) return undefined;
   const p = draftPath(id);
   if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'Draft not found' });
   fs.rmSync(p);
-  res.status(204).end();
+  return res.status(204).end();
 });
 
 /* Import a BriefingPack hierarchy as a process draft (#377). Walks the mission
@@ -9021,7 +9156,10 @@ app.post('/api/process/drafts/import-briefings', apiLimiter, (req, res) => {
   // Persist as a new draft (same id derivation as POST /api/process/drafts).
   const id = deriveUniqueDraftId(name, { exists: draftExists });
   const now = new Date().toISOString();
-  const draft = { ...bundle, id, sourceBriefings: where, createdAt: now, updatedAt: now };
+  // Same stamp as POST /api/process/drafts (#2068 AC1) — there are five
+  // draft-creating entry points on the client, so the stamp belongs in the
+  // route rather than in each caller.
+  const draft = { ...bundle, id, sourceBriefings: where, createdAt: now, updatedAt: now, ...draftAccess.newDraftAccess(getScope(req)) };
   fs.mkdirSync(PROCESS_DRAFTS_DIR, { recursive: true });
   writeJsonAtomic(draftPath(id), draft);
   // `skipped` names the packs that carried no resolvable id and so contribute
@@ -12204,6 +12342,20 @@ app.delete('/api/admin/teams/:id', apiLimiter, (req, res) => {
   return proxyAdmin(req, res, `teams/${encodeURIComponent(req.params.id)}`);
 });
 
+// The OPEN user directory (#2041 D2, first built for #2068's draft Share
+// picker). Deliberately NOT `/api/admin/users`: that route returns the whole
+// record — subject, `systemAdmin`, `githubHandle`, `hasPassword` — and is
+// narrowed to users who share one of the caller's teams, which would make a
+// colleague on another team unshareable. Sharing needs the opposite: every
+// account, and only what is needed to recognise a person.
+//
+// So the projection is display name and email ONLY — never the `systemAdmin`
+// flag (D2) and never the GitHub handle (D11) — and it is read straight from
+// the users index rather than proxied, because there is nothing to filter.
+app.get('/api/users/directory', (req, res) => {
+  res.json(draftAccess.userDirectory(readJsonFile(USERS_INDEX, [])));
+});
+
 // Users — list/read filtered to users who share one of the caller's teams
 // (AC2). Global user-record CRUD + role assignment is System-Admin only (§3).
 app.get('/api/admin/users', (req, res) => {
@@ -12235,7 +12387,21 @@ app.put('/api/admin/users/:id', apiLimiter, (req, res) => {
 app.delete('/api/admin/users/:id', apiLimiter, (req, res) => {
   const scope = getScope(req);
   if (!scope.all) return denyAdmin(res, 'Only a System Admin may manage user records');
-  return proxyAdmin(req, res, `users/${encodeURIComponent(req.params.id)}`);
+  // DD3 (#2068) — the departing human is stripped from every draft's access set.
+  // Done here rather than in `teamsStore.deleteUser` because the admin-console
+  // API is the only writer of /workspace/process-drafts; the orchestrator would
+  // be a second one racing it. Runs only after the record is really gone, and is
+  // best-effort: a failed strip must not turn a completed offboarding into an
+  // error, and the next run of the same delete would repeat it.
+  return callAdmin('DELETE', `users/${encodeURIComponent(req.params.id)}`)
+    .then(({ status, data }) => {
+      if (status < 400) {
+        try { stripUserFromDrafts(req.params.id); }
+        catch (err) { console.error(`[Admin] Draft access strip failed for user ${req.params.id}: ${err.message}`); }
+      }
+      return res.status(status).json(data);   // same response shape as proxyAdmin
+    })
+    .catch((err) => res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` }));
 });
 // Local password set/clear (#374). The verify path is NOT proxied here — it is
 // called directly by the public login route (see auth.js), pre-session.
@@ -18116,7 +18282,16 @@ function sweepExportStaging() {
 
 app.listen(4000, '0.0.0.0', () => {
   console.log('[Admin] Listening on :4000');
+  // State the authorization mode explicitly (#1457) — and, in single-user mode,
+  // warn when named user records exist, since each of them signs in with full
+  // visibility while the flag is off.
+  console.log(`[Admin] ${authModeLogLine(process.env)}`);
+  try {
+    const warning = singleUserElevationWarning(readJsonFile(USERS_INDEX, []), process.env);
+    if (warning) console.warn(`[Admin] ${warning}`);
+  } catch (err) { console.error(`[Admin] Authorization mode check failed: ${err.message}`); }
   try { backfillSkillManifests(); } catch (err) { console.error(`[Admin] Skill manifest backfill failed: ${err.message}`); }
   try { sweepExportStaging(); } catch (err) { console.error(`[Admin] Export staging sweep failed: ${err.message}`); }
+  try { backfillDraftAccess(); } catch (err) { console.error(`[Admin] Draft access backfill failed: ${err.message}`); }
   try { startLlmHealthPoller(); } catch (err) { console.error(`[Admin] Model Provider health poller failed to start: ${err.message}`); }
 });

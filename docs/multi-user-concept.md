@@ -324,4 +324,47 @@ Prioritised. Earlier items unblock or de-risk later ones.
 
 ---
 
-*This document is a concept. It commits to a recommendation in each area and flags the cost-heavy decisions, but no auth middleware, SSO integration, or permission enforcement is implemented here — that work is captured by the issues in §10.*
+## Amendment 1 — Matrix identity provisioning as built (#1458, 2026-09-08)
+
+*§4 above stays as written: it is the design of record and the reasoning still holds. This amendment records what §10 item 3 actually delivered, and corrects one mechanism §4 got wrong. It does **not** touch §10 item 6 (the per-human-per-agent room model), which is unimplemented.*
+
+### 1.1 — What was delivered
+
+The identity half of §4, and only that half:
+
+- A human's Matrix localpart is derived deterministically from their **stable subject** — `@u-<16 hex of sha256(subject)>:local` (`orchestrator/human-matrix-identity.js`), normalised exactly the way `teams-store.js` `getUserBySubject` compares a subject, so two spellings the user store treats as one identity can never resolve to two Matrix accounts.
+- That shape is **reserved**: `ensureMatrixUser` — the single choke point every Matrix account in the stack is created through — refuses to mint it for anything but the human-provisioning path, so an agent id can never take over a human's account. The predicate is exactly as narrow as the minted shape, so an ordinary id like `u-payments` is unaffected.
+- The account is provisioned **when the user record is created**, not at first login (see 1.3), and the resulting access token is stored **server-side only**, in a per-user file separate from `users/index.json` (`orchestrator/human-matrix-store.js`, mode 0600). The user record carries only the non-secret `matrixUserId` pointer.
+- Deleting a human deactivates their Matrix account and deletes the stored token, alongside the existing personal-credential offboarding.
+
+### 1.2 — Falsified statements in §2 and §4
+
+Both sections name a provisioning mechanism that does not exist. Corrected here rather than in place, so the original reasoning stays readable:
+
+| Statement | Where | Reality on `main` |
+|---|---|---|
+| "provisioned via the **Conduwuit admin API** (the same mechanism that provisions agent users today)" | §2 *Corporate identity → Matrix user mapping*, §4 *Why a real per-human Matrix account* and *Provisioning flow* step 2 | Continuwuity exposes **no** Synapse `/_synapse/admin/` REST API (`orchestrator/matrix-admin-commands.js`). There is no admin API to call. |
+| (implied) a synchronous call with a return value | §4 *Provisioning flow* | Every lifecycle operation is a **fire-and-forget admin-room message** (`!admin users create-user …`) whose reply is never parsed. |
+| "the registration-token UIA flow is how agents are provisioned" | *not in this doc* — asserted in issue #1458's 2026-08-14 scope correction | Also wrong. `agent-image/scripts/matrix-bootstrap.py` (which carries the `register-human` subcommand) is a **standalone ACE-era script**: it is not invoked by the orchestrator, targets a different server name, and the compose stack runs with `CONTINUWUITY_ALLOW_REGISTRATION: "false"`. |
+
+**The actual mechanism, for humans and agents alike**, is the ordered admin-room sequence `create-user` → `reset-password` → `enable-login` built by `matrix-admin-commands.js`, followed by a `/login` that is retried with bounded backoff (`matrix-login-retry.js`). Humans reuse it verbatim, which is what buys them two hard-won properties for free: the plain `reset-password` reactivates a previously deactivated account (#715), so a re-onboarded human recovers their old account rather than getting a dead one; and the retry absorbs the cold-stack race where the admin bot has not processed the commands yet (#719/#1386).
+
+### 1.3 — Why provisioning hangs off record creation, not first login
+
+§4 says "provisioned automatically on first SSO login". There is no just-in-time user provisioning to hang that on: `admin-console/api/auth.js` fails an unregistered identity **closed** (#1415), so a user record is always created deliberately by an administrator. Doing the work there is strictly better than at login — it keeps several seconds of admin-bot settle delays off the login path, and it matches how an agent's Matrix account is created at agent-creation time. When JIT provisioning does arrive it will create a user record and pick this up unchanged.
+
+The consequence of the fire-and-forget mechanism (1.2) is that provisioning is **best-effort and idempotent**, not transactional: a failure leaves the user record intact without an identity, and the next `ensureHumanMatrixIdentity` call repairs it. Nothing is silently retried in a loop.
+
+### 1.4 — Explicitly NOT affected
+
+- **The room model is untouched.** There is still exactly one `dm-room.json` per agent, still holding a single `{ roomId }`, and the console still talks to Matrix as the shared `MATRIX_ACCESS_TOKEN` admin. §4's *How the DM-room model changes* remains entirely unimplemented — that is §10 item 6.
+- **`AUTH_MODE=single` is unchanged end to end**, structurally rather than by a flag: a single-operator stack creates no user records at all (the env single-admin of #276 has none), so no human account is ever provisioned there.
+- **The bootstrap admin is deliberately not auto-provisioned.** Provisioning is wired to the `POST /internal/admin/users` route rather than into `teamsStore.createUser`, so the startup `ensureSystemAdmin` bootstrap does not mint a fresh `@u-…:local`. §4 and §8 require that identity to **adopt** the existing shared-admin rooms and their `sessions/<roomId>.jsonl`; handing it an empty new account first would make that adoption harder, not easier.
+
+### 1.5 — The rule successors must carry
+
+**A human Matrix account is created only through the human-provisioning path, and its token never enters `users/index.json`.** The first half is enforced by the reservation in `ensureMatrixUser`. The second is a placement decision: `teamsStore.sanitizeUser()` is a convention applied at the store boundary (its own comment reads "strip the password hash *and any future secret*"), and the index is additionally read directly by the admin-console, so a second secret on that record would depend on every present and future path remembering to strip it — and a live access token leaking is impersonation, not a cracking problem. A later phase that needs a human's token should read it from `human-matrix-store.js`, not move it onto the record for convenience.
+
+---
+
+*This document is a concept. It commits to a recommendation in each area and flags the cost-heavy decisions, but no auth middleware, SSO integration, or permission enforcement is implemented here — that work is captured by the issues in §10 (see Amendment 1 for the one item that has since partially landed).*

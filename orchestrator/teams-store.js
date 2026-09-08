@@ -14,7 +14,7 @@
 // collections that back the model:
 //
 //   /workspace/teams/index.json        [{ id, name, description, createdAt, updatedAt }]
-//   /workspace/users/index.json        [{ id, subject, email, displayName, systemAdmin, githubHandle, createdAt, updatedAt }]
+//   /workspace/users/index.json        [{ id, subject, email, displayName, systemAdmin, githubHandle, matrixUserId, createdAt, updatedAt }]
 //   /workspace/memberships/index.json  [{ id, userId, teamId, role, createdAt }]
 //
 // Roles:
@@ -388,6 +388,28 @@ function createTeamsStore({ root } = {}) {
     return sanitizeUser(users[idx]);
   }
 
+  // ---- Matrix identity pointer (#1458) ------------------------------------
+  //
+  // Records WHICH Matrix account belongs to this human — `@u-<hash>:local`,
+  // derived from their subject by `human-matrix-identity.js`. This is a public
+  // identifier (every member of a shared room sees it), so unlike the password
+  // hash it is safe to keep on the record and to serialise.
+  //
+  // The matching **access token** deliberately does NOT live here: it is a
+  // secret, and `users/index.json` has many direct readers that bypass
+  // `sanitizeUser()`. It lives in `human-matrix-store.js` instead
+  // (`users/matrix/<userId>.json`, mode 0600).
+  function setUserMatrixIdentity(id, matrixUserId) {
+    if (!isNonEmptyString(matrixUserId)) throw badRequest('matrixUserId is required');
+    const users = listUsers();
+    const idx = users.findIndex(u => u.id === id);
+    if (idx === -1) throw notFound(`User '${id}' not found`);
+    users[idx].matrixUserId = matrixUserId.trim();
+    users[idx].updatedAt = nowIso();
+    writeArray(USERS_INDEX, users);
+    return sanitizeUser(users[idx]);
+  }
+
   // Verify a login: match by subject, then check the scrypt hash. Returns the
   // sanitized user on success, or null (unknown subject / no password / wrong
   // password are all indistinguishable to the caller).
@@ -494,6 +516,7 @@ function createTeamsStore({ root } = {}) {
     listTeams, getTeam, createTeam, updateTeam, deleteTeam,
     listUsers, getUser, getUserBySubject, createUser, updateUser, deleteUser,
     setUserPassword, clearUserPassword, verifyUserCredentials, sanitizeUser,
+    setUserMatrixIdentity,
     listMemberships, setMembership, removeMembership, appendMemberships,
     ensureDefaultTeam, ensureSystemAdmin,
   };

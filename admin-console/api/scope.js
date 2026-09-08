@@ -1,9 +1,24 @@
 'use strict';
 
-// Resource scoping by human Team (#302).
+// Resource scoping by Team (#302; re-pointed onto the Agent Team by #2078).
 //
 // Computes what the logged-in caller may see, then filters list endpoints by
-// resource `teamId` (and, for agents, `visibility`/`ownerId`).
+// resource `teamId` (and, for agents, `ownerId`).
+//
+// WHAT #2078 CHANGED, AND WHAT IT DID NOT. Not the shape of anything here: the
+// scope object, all twelve `scope.all` short-circuits (D5) and the role rule in
+// `canManageTeam` are untouched. What changed is the KEY SPACE — `teamIds` /
+// `roles` are keyed by **Agent Team** id, because `memberships.teamId` now
+// references one (P1/#2077 fanned the grants out; concept §3.3). Three
+// consequences are real code changes and are commented at their site:
+// `visibleAgent` / `canManageAgent` read the agent's own boundary instead of a
+// resolved tenant, ownership decides for an agent that has no team (D8), and the
+// `|| 'default'` fallback is gone from six predicates (§8.4).
+//
+// Credentials, environments, MCP servers and model providers are still stamped
+// with access-scope ids; P5 re-points them (concept §5.1). Their grants keep
+// resolving because P1's fan-out was additive — the legacy scope memberships are
+// retired together with the stamps they gate, not before.
 //
 // SAFETY — the operator never loses visibility:
 //   - The env single-admin (#276) and any System-Admin user see EVERYTHING
@@ -67,7 +82,9 @@ function computeScope({ username, adminUsername, users = [], memberships = [], a
 
   // Otherwise: visible teams are the caller's memberships, and `roles` records
   // the per-team role (team-admin / team-member) — the basis for the admin
-  // surface's per-team management gate (#584).
+  // surface's per-team management gate (#584). Since #2078 each `m.teamId` is an
+  // Agent Team id; the loop is unchanged because the re-keying is a property of
+  // the data, not of this code.
   const teamIds = new Set();
   const roles = new Map();
   for (const m of memberships) {
@@ -78,31 +95,65 @@ function computeScope({ username, adminUsername, users = [], memberships = [], a
   return { all: false, teamIds, roles, userId: user.id };
 }
 
-// Is a resource owned by `teamId` visible to this scope? Resources without an
-// explicit owner are treated as belonging to the default team.
+// Is a resource owned by `teamId` visible to this scope?
+//
+// #2078/§8.4: the historical `|| 'default'` fallback is GONE. It existed because
+// `teams/index.json` always held a protected `default` team; with that layer
+// collapsing there is no such referent, and `visibleTeam(scope, undefined)`
+// returning true for anyone holding a membership named `default` would be a real
+// leak (nothing stops a team being created with that slug). An unowned resource
+// is now invisible to a non-admin rather than defaulting into view.
 function visibleTeam(scope, teamId) {
   if (!scope) return false;
   if (scope.all) return true;
-  return scope.teamIds.has(teamId || 'default');
+  if (!teamId) return false;
+  return scope.teamIds.has(teamId);
 }
 
-// Agent visibility: must be in-team, and a `private` agent is visible only to
-// its owner (admins always see all). Inert until visibility/ownerId are set
-// (#304) — a missing visibility defaults to team-wide.
+// Does the caller own this resource? The rule for anything outside every team
+// boundary (D8). Requires an identified owner AND an identified caller, so an
+// ownerless resource and the env single-admin (`userId: null`) both match
+// nobody. Module-private: every caller short-circuits on `scope.all` first, so
+// this deliberately carries no admin bypass of its own.
+function ownedByCaller(scope, resource) {
+  return !!(resource && resource.ownerId && scope && scope.userId
+            && resource.ownerId === scope.userId);
+}
+
+// Agent visibility (#2078 — D1 + D8).
+//
+// Callers pass the agent's resolved ACCESS BOUNDARY on `teamId` (agent-team.js
+// `resolveAgentTeam`, single-sourced in the api layer via `agentMetaForScope`):
+// its own id for a `role: 'team'`, its `parentTeamId` for a `role: 'team-member'`,
+// and `null` for a standalone `role: 'agent'`.
+//
+//   • boundary present → plain team membership decides (any role — D9 lets a
+//     Team Member read and chat; the management gate is canManageAgent).
+//   • no boundary      → ownership decides. D8 makes owner-only the *rule* for a
+//     standalone agent, not an opt-in: the pre-#2078 `visibility === 'private'`
+//     condition is retired unread (nothing ever wrote the field, verified in
+//     concept §3.5), so a standalone agent is private to its creator full stop.
 function visibleAgent(scope, agent) {
   if (!scope) return false;
   if (scope.all) return true;
-  if (!visibleTeam(scope, agent && agent.teamId)) return false;
-  if (agent && agent.visibility === 'private' && agent.ownerId) {
-    return agent.ownerId === scope.userId;
-  }
-  return true;
+  if (agent && agent.teamId) return visibleTeam(scope, agent.teamId);
+  return ownedByCaller(scope, agent);
 }
 
-// ── Agent → human tenant resolution ─────────────────────────────────────────
+// ── Agent → credential tenant resolution ────────────────────────────────────
 //
-// An agent's `teamId` names its human **Team** — the tenant every ownership,
-// visibility and credential-scoping decision is keyed on. A `team-member` also
+// NOT the access boundary. Since #2078 that is `resolveAgentTeam`
+// (agent-team.js) — see the WHY THIS IS A SEPARATE FUNCTION note there. What
+// survives here is the CREDENTIAL axis: model providers, SSH keys and GitHub
+// tokens are still stamped with access-scope ids until P5 re-points them
+// (concept §5.1/§10), so resolving a provider for an agent still needs the hop.
+// Its two live callers are `usableEndpointsForTeam` (api.js) and the assist
+// endpoint pick (orchestrator.js), both provider lookups. **This function and
+// its `|| 'default'` fallback retire with P5** — do not reach for it to answer
+// an authorization question.
+//
+// An agent's `teamId` names its human **Team** — the tenant every credential-
+// scoping decision is keyed on. A `team-member` also
 // carries `parentTeamId`, which is the id of its **Agent Team** construct (a
 // `role: "team"` agent). Those are two different namespaces, and reading
 // `parentTeamId` as a tenant only appears to work while an Agent Team happens
@@ -137,11 +188,17 @@ function resolveAgentTenant(cfg, loadAgentConfig) {
 
 // May the caller create/edit/delete this team and manage its memberships?
 // Admins always may; a non-admin must be the `team-admin` of that exact team.
-// (A missing teamId collapses to the default team, mirroring visibleTeam.)
+// Since #2078 `teamId` is an Agent Team id and a missing one fails closed rather
+// than collapsing to the default team (§8.4, mirroring visibleTeam).
+//
+// This predicate alone carries D4 and the whole admin side of D9: it already
+// means "System Admin OR team-admin of exactly this team", so re-pointing the
+// key space re-points every gate built on it — no new predicate is needed.
 function canManageTeam(scope, teamId) {
   if (!scope) return false;
   if (scope.all) return true;
-  return scope.roles instanceof Map && scope.roles.get(teamId || 'default') === 'team-admin';
+  if (!teamId) return false;
+  return scope.roles instanceof Map && scope.roles.get(teamId) === 'team-admin';
 }
 
 // Is this user visible to the caller? A non-admin sees only users who share at
@@ -191,7 +248,12 @@ function normalizeCredential(entry) {
       : [];
     return { ...entry, scope, teamId: null, assignedTeamIds };
   }
-  return { ...entry, scope: 'team', teamId: entry.teamId || 'default', assignedTeamIds: [] };
+  // No `|| 'default'` (§8.4). Safe to drop because the boot-time adoption pass
+  // (orchestrator `backfillResourceOwnership`) stamps an explicit `teamId` on
+  // every entry of all four credential indexes, so on a booted stack nothing
+  // relies on the collapse; an entry that still lacks one is a record no team
+  // owns and must fail closed rather than land in the default team's lap.
+  return { ...entry, scope: 'team', teamId: entry.teamId || null, assignedTeamIds: [] };
 }
 
 // A personal credential belongs to exactly one human and is strictly private to
@@ -275,7 +337,9 @@ function canCreateCredential(scope, desired) {
   if (scope.all) return true;
   const reqScope = desired && desired.scope === 'system' ? 'system' : 'team';
   if (reqScope === 'system') return false;
-  return canManageTeam(scope, (desired && desired.teamId) || 'default');
+  // No `|| 'default'` (§8.4): a create request that names no team is refused
+  // rather than silently attributed to a team that no longer exists.
+  return canManageTeam(scope, desired && desired.teamId);
 }
 
 // Only a System Admin may change a credential's scope or team assignment,
@@ -308,22 +372,28 @@ function credentialVisibleToTeam(cred, teamId) {
 // regression).
 
 // May the caller create / edit / delete / re-parent this agent? Team Admin of
-// the agent's owning team, or a full-visibility admin. Callers pass the resolved
-// owning team on `agent.teamId` (agentTeamId = parentTeamId||teamId, single-
-// sourced in the api layer via agentMetaForScope), mirroring canManageCredential.
+// the agent's Agent Team, or a full-visibility admin. Callers pass the resolved
+// boundary on `agent.teamId` (agent-team.js `resolveAgentTeam`, single-sourced
+// in the api layer via agentMetaForScope), mirroring canManageCredential.
+//
+// The owner branch mirrors visibleAgent's (D8): a standalone `role: 'agent'` has
+// no team, so its creator is the only non-admin who may change it. Without this
+// the owner could see their own private agent and not edit it — and nobody but a
+// System Admin could, since no membership can name a standalone agent's id.
 function canManageAgent(scope, agent) {
   if (!scope) return false;
   if (scope.all) return true;
-  return canManageTeam(scope, (agent && agent.teamId) || 'default');
+  if (agent && agent.teamId) return canManageTeam(scope, agent.teamId);
+  return ownedByCaller(scope, agent);
 }
 
 // May the caller create / edit / delete this environment (or its MCP
 // credentials)? Team Admin of the resource's owning team, or a full-visibility
-// admin. A missing teamId collapses to the default team, mirroring visibleTeam.
+// admin. A missing teamId fails closed (§8.4), mirroring visibleTeam.
 function canManageEnvironment(scope, env) {
   if (!scope) return false;
   if (scope.all) return true;
-  return canManageTeam(scope, (env && env.teamId) || 'default');
+  return canManageTeam(scope, env && env.teamId);
 }
 
 // ── Token-usage statistics visibility (#801) ────────────────────────────────

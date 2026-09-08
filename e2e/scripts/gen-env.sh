@@ -71,7 +71,9 @@ MOCK_LLM_BASE_URL=http://fake-github
 # --- Pinned Matrix server (no :latest drift) ---
 CONDUWUIT_IMAGE=ghcr.io/continuwuity/continuwuity:v0.5.5
 
-# --- Admin (fixed creds so specs can log in deterministically) ---
+# --- Admin (fixed seed values so specs can log in deterministically) ---
+# Since #2059 these are consumed once at first boot to create a real
+# System-Admin user record; the specs then sign in against that record.
 ADMIN_USER=admin
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=e2e-admin-pass

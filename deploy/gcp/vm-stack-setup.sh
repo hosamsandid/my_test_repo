@@ -54,7 +54,10 @@ grep -q '^ORCHESTRATOR_SSH_KEY=' .env \
   && sed -i "s|^ORCHESTRATOR_SSH_KEY=.*|ORCHESTRATOR_SSH_KEY=${HOME}/.ssh/id_orchestrator|" .env \
   || echo "ORCHESTRATOR_SSH_KEY=${HOME}/.ssh/id_orchestrator" >> .env
 # Console credentials: never ship the admin/admin default on a cloud host.
-# (tr on /dev/urandom, not openssl — Fedora Cloud minimal doesn't ship openssl)
+# Since #2059 these SEED the first System-Admin user record at first boot, so
+# generating a strong one here still matters — but note it is then stored on the
+# record: changing .env afterwards no longer changes the login (the Users page
+# does). (tr on /dev/urandom, not openssl — Fedora Cloud minimal doesn't ship it)
 if ! grep -q '^ADMIN_PASSWORD=' .env; then
   echo "ADMIN_USERNAME=admin"                                          >> .env
   echo "ADMIN_PASSWORD=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)" >> .env
@@ -101,7 +104,9 @@ systemctl --user daemon-reload
 systemctl --user enable agent-studio.service
 
 echo ""
-echo "Stack is up. Console credentials are in ${STACK_DIR}/.env (ADMIN_PASSWORD)."
+echo "Stack is up. First sign-in: ADMIN_USERNAME/ADMIN_PASSWORD from ${STACK_DIR}/.env"
+echo "(that pair seeded the first System-Admin record; change the password on the"
+echo " Users page from then on — editing .env no longer affects it)."
 echo "Access from your workstation:"
 echo "  gcloud compute start-iap-tunnel agent-studio-pilot 14000 \\"
 echo "    --local-host-port=localhost:14000 --zone=europe-west3-b --project=acn-projectroots"

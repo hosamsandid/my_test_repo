@@ -37,6 +37,26 @@ wait_http() { # url desc
 # admin-console SPA served
 wait_http "${ADMIN_BASE}/" "admin-console SPA"
 
+# The first-boot System-Admin seed (#2059). The configured credential is no
+# longer a login of its own, so signing in only works once the orchestrator has
+# created the real user record from it — and the console starts without waiting
+# for the orchestrator (`depends_on` names only conduwuit). Poll the readiness
+# probe first, so a premature login attempt cannot be mistaken for bad
+# credentials. It answers 200 {"ready":true} once the users index holds a record.
+echo -n "Waiting for the System-Admin seed "
+ready_code=""
+for i in $(seq 1 60); do
+  ready_code=$(curl -s -o /dev/null -w '%{http_code}' "${ADMIN_BASE}/api/auth/ready" || true)
+  if [ "$ready_code" = "200" ]; then echo " ok"; break; fi
+  echo -n "."; sleep 2
+done
+if [ "$ready_code" != "200" ]; then
+  echo; echo "ERROR: the System-Admin seed never landed (last HTTP ${ready_code})." >&2
+  echo "       The orchestrator seeds it at boot from ADMIN_USERNAME/ADMIN_PASSWORD" >&2
+  echo "       (or BOOTSTRAP_SYSTEM_ADMIN_SUBJECT); check the orchestrator log." >&2
+  exit 1
+fi
+
 # Auth up + orchestrator reachable: login round-trip, then a proxied list call.
 COOKIE_JAR="$(mktemp)"
 trap 'rm -f "$COOKIE_JAR"' EXIT

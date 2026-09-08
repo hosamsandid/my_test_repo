@@ -409,8 +409,12 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **289,378 — 85.1% used,
-50,622 left** (#2057 made a direct hand-off read as a consumer on the Outcomes and Routing
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **291,950 — 85.9% used,
+48,050 left** (#2065 gave a human chat message a named badge and a viewer-dependent side, which
+needed a chapter `agent-chat.md` had no equivalent of — who wrote a message, why the badge and the
+side deliberately answer different questions, and what the neutral icon on un-attributable history
+means: +2,572, landing in full for the same `seeAlso` reason as below.
+It stood at 289,378 after #2057, which made a direct hand-off read as a consumer on the Outcomes and Routing
 surfaces, which voided `agent-chat.md`'s `## Outcomes` claim that a label is what wakes the next
 agent — the same claim the panel itself was making: +895 for the two-mechanism table, landing in
 full because `create.md` names `/chats` as a neighbour. It stood at 288,483 after #2053, which

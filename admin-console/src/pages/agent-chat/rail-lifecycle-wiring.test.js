@@ -307,3 +307,45 @@ test('#1958 — a failed Add member closes the dialog so its error is readable',
     /addMemberBody\([\s\S]{0,400}?catch \(e\) \{[\s\S]{0,200}?setAddMemberTeamId\(null\)/,
   );
 });
+
+/* ── #2052 convert into a team of one ───────────────────────────────── */
+
+test('#2052 AC1 — the convert entry is routed, not just described', () => {
+  // The item comes from `buildAgentMenu`; without a case in `choose()` it would
+  // render, be clickable, and do nothing at all.
+  assert.match(host, /case 'convert-to-team':\s*setConvertTarget\(/);
+  assert.match(host, /<ConvertToTeamDialog/);
+});
+
+test('#2052 AC2 — the dialog copy comes from the pure module, not inline JSX', () => {
+  assert.match(host, /copy=\{convertDialogCopy\(/);
+  assert.match(host, /consequences=\{convertConsequences\(/);
+  // A literal confirmation body here would be the copy that drifts.
+  assert.doesNotMatch(host, /cannot be undone/i);
+});
+
+test('#2052 — the request hits the convert route and only forces on the retry', () => {
+  assert.match(host, /\/convert-to-team`/);
+  // `force` is the answer to the server's mid-run question, so it may only ever
+  // be derived from the warning the server sent back.
+  assert.match(host, /force: !!convertTarget\?\.busyNotice/);
+  assert.doesNotMatch(host, /force: true/);
+});
+
+test('#2052 — the mid-run 409 re-opens the same dialog instead of throwing', () => {
+  // Raw fetch, like `toggleEnabled`: `apiCall` turns a 409 into an exception,
+  // which would surface the refusal as an error toast rather than a question.
+  assert.match(
+    host,
+    /convert-to-team`[\s\S]{0,600}?res\.status === 409[\s\S]{0,200}?convertBusyNotice\(data\)/,
+  );
+  assert.match(host, /setConvertTarget\(\{ agent, busyNotice \}\)/);
+});
+
+test('#2052 — a failed conversion closes the dialog so its error is readable', () => {
+  // Same stacking-context reason as the Add member sibling above.
+  assert.match(
+    host,
+    /convert-to-team`[\s\S]{0,1200}?catch \(e\) \{\s*setConvertTarget\(null\)/,
+  );
+});

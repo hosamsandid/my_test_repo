@@ -399,8 +399,12 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **284,200 — 83.6% used,
-55,800 left** (#2051 gave the Working Environments form an MCP server/credential picker and
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **286,264 — 84.2% used,
+53,736 left** (#2052 replaced chapter 2's documented dead end — growing could not convert an
+existing assistant — with the **Convert into a team…** action that now can, and documented it
+in the row menu's own chapter as well: +1,229 in `create.md`, which IS this context's topic,
+and +835 in `agent-chat.md`, which it names as a neighbour, so both land in full. It stood at
+284,200 after #2051, which gave the Working Environments form an MCP server/credential picker and
 rewrote the two topics that documented its absence: +916 in `environments.md`, which `create.md`
 names as a neighbour, and +147 in `mcp.md`, which it does not — so this context moved by the
 former alone while `/environments` and `/mcp`, which name each other, each moved by both, to

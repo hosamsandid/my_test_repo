@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 286 264 of 340 000 — 84.2% used, 53 736 left — against
+// neighbours) at 286 374 of 340 000 — 84.2% used, 53 626 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
@@ -150,8 +150,12 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // 284 200, and BOTH halves land in full — +1 229 in `create.md`, the
 // crown-holding context's own topic, and +835 in `agent-chat.md`, which that
 // topic names as a `seeAlso` neighbour and which is where the action actually
-// lives (the row menu). Documenting a new action in the page topic that hosts it
-// is therefore never free for this context; it is still the right home — worth
+// lives (the row menu). The review of #2052 then caught the same dead end still
+// asserted in walkthrough/01-team-setup.md ("growing creates a *new* team rather
+// than converting this assistant"), so fixing it to name both grow paths added a
+// further +110, and — being in CORPUS_FILES — that lands on EVERY context, taking
+// the crown to 286 374 (still 84.2%). Documenting a new action in the page topic
+// that hosts it is therefore never free for this context; it is still the right home — worth
 // knowing WHY a Flows edit lands on the `/quickstart` figure at all: `create.md`
 // lists `/flows` among its `seeAlso`, so the crown-holding neighbourhood
 // contains the Flows topic even though the crown is not on `/flows`. Its other

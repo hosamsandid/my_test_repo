@@ -8,6 +8,9 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
+const {
+  resolveInitialAdminSeed, buildSeedAuditEvent, recordSeedAudit,
+} = require("./initial-admin-seed");
 const { resolveAgentTenant, planTenantBackfill } = require("./agent-tenant");
 const { makeSkillSourceResolver, parseSkillDescription } = require("./skill-source");
 const {
@@ -219,6 +222,11 @@ const CONTROL_DIR = "/control/agents";
 const PER_AGENT_VOLUME = process.env.AEE_PER_AGENT_VOLUME === '1';
 const BLUEPRINTS_DIR = "/workspace/blueprints";
 const WORKSPACE = "/workspace";
+// The audit trail the admin-console writes every mutating request to (#305).
+// The orchestrator is a second writer for exactly one entry: the first-boot
+// System-Admin seeding (#2059), which is a platform action with no request
+// behind it. Same directory, same override, so `GET /api/audit` reads both.
+const AUDIT_DIR = process.env.AUDIT_DIR || "/workspace/audit";
 // Shared Agent Learning (Phase 2): the orchestrator-maintained canonical KB
 // clone per team (aggregator source of truth) + the append-only live-feed file
 // the admin-console tails. Both sit on the shared /workspace volume; neither is
@@ -1007,23 +1015,39 @@ async function migrateAgentClaudeMdToReference() {
 //
 // Every agent construct, Working Environment and credential is owned by exactly
 // one Team via a `teamId` field. On startup we guarantee the default team
-// exists, optionally seed a System Admin from environment config, and stamp any
+// exists, seed the first System Admin from environment config, and stamp any
 // pre-existing resource that predates this model with the default team. The
 // pass is idempotent — once stamped, a resource is skipped on subsequent boots.
+//
+// The seeding is where a fresh stack gets its one human identity (#2059). It
+// runs here, synchronously, and `main()` calls this BEFORE the internal API
+// starts listening on :4002 — which is what closes the start-order race from
+// the inside: no login can be verified against the user store before the seed
+// has been written (and `writeArray` renames a temp file into place, so a
+// reader never sees a half-written index). The console cannot make the same
+// guarantee about its own boot, so the bring-up polls `GET /api/auth/ready`.
 function bootstrapTeams() {
   teamsStore.ensureDefaultTeam();
-  const subject = process.env.BOOTSTRAP_SYSTEM_ADMIN_SUBJECT;
-  if (subject) {
-    try {
-      teamsStore.ensureSystemAdmin({
-        subject,
-        email: process.env.BOOTSTRAP_SYSTEM_ADMIN_EMAIL,
-        displayName: process.env.BOOTSTRAP_SYSTEM_ADMIN_NAME,
-      });
-      console.log(`[Orchestrator] Ensured System Admin for subject '${subject}'`);
-    } catch (err) {
-      console.error(`[Orchestrator] System Admin bootstrap failed: ${err.message}`);
-    }
+  const seed = resolveInitialAdminSeed(process.env);
+  if (!seed) {
+    console.log('[Orchestrator] No initial System Admin configured — skipping the seed');
+    return;
+  }
+  try {
+    const user = teamsStore.seedInitialSystemAdmin(seed);
+    if (!user) return; // warm stack: the seed is consumed once, never re-read
+    recordSeedAudit(AUDIT_DIR, buildSeedAuditEvent({ seed, user }));
+    console.log(
+      `[Orchestrator] Seeded initial System Admin '${user.subject}' (${seed.source}, ` +
+      `password ${user.hasPassword ? 'set' : 'not set — authenticate via SSO'})`,
+    );
+  } catch (err) {
+    // A failed seed leaves the stack with zero users, which now means nobody
+    // can sign in — so this is loud, and the message names the recovery path.
+    console.error(
+      `[Orchestrator] Initial System Admin seeding FAILED: ${err.message}. ` +
+      'The console has no user to authenticate; fix the configuration and restart.',
+    );
   }
 }
 
@@ -1662,7 +1686,7 @@ function _readAgentSessionEvents(id) {
 // Audit entries within the window (config-version boundary fallback when an
 // agent has no prompt-history). Newest-only read to bound the scan.
 function _readAuditEntriesSince(sinceMs) {
-  const dir = process.env.AUDIT_DIR || "/workspace/audit";
+  const dir = AUDIT_DIR;
   const out = [];
   try {
     for (const f of fs.readdirSync(dir)) {

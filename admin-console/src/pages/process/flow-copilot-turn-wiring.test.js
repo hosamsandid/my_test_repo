@@ -187,10 +187,14 @@ test('the copilot route aborts the work, not just its delivery', () => {
   assert.match(s, /const turnAbort = new AbortController\(\);/);
   assert.match(s, /turnAbort\.abort\(\);/, 'res.on(close) must abort the turn');
   assert.match(s, /signal: turnAbort\.signal/, 'runCopilot receives the signal');
+  // The upstream LLM call is streamed (httpPostStreamText, stream:true) so a
+  // large flow does not sit as one long non-streaming request; the turn signal
+  // is threaded into its opts so the in-flight streamed request is destroyed on
+  // Stop, not merely ignored.
   assert.match(
     s,
-    /httpPostJson\(url, headers, \{ model: target\.model, \.\.\.payload \}, 180000, turnAbort\.signal\)/,
-    'the LLM call in flight is destroyed, not merely ignored',
+    /httpPostStreamText\(url, headers, \{ model: target\.model, \.\.\.payload \}, \{[\s\S]*?signal: turnAbort\.signal/,
+    'the streamed LLM call in flight is destroyed, not merely ignored',
   );
   assert.match(s, /isCopilotAborted\(err\)/, 'a deliberate Stop stays out of the error path');
 });

@@ -12,6 +12,7 @@ const {
   normalizeCredential, visibleCredential, canManageCredential,
   canCreateCredential, canReassignCredential, credentialVisibleToTeam,
   canViewUsageStatistics, assistSelectableEndpoint, resolveAgentTenant,
+  visibleEnvironment, canCreateEnvironment, canRetierEnvironment,
 } = require('./scope');
 
 const users = [
@@ -607,6 +608,140 @@ test('canManageEnvironment: team-admin manages own team env; member/other denied
   assert.equal(canManageEnvironment(alice, { teamId: 'risk' }), false);    // other team
   assert.equal(canManageEnvironment(bob, { teamId: 'risk' }), false);      // member, not admin
   assert.equal(canManageEnvironment(alice, {}), false);                    // missing → default
+});
+
+// ── #2083 (P5): the shared tier for environments and MCP servers ────────────
+//
+// One predicate family serves both kinds, so every case below is equally a
+// statement about an MCP server record.
+
+const SHARED = (assignedTeamIds) => ({ id: 'env-shared', scope: 'system', assignedTeamIds });
+
+test('#2083: a legacy environment record behaves exactly as it did before the tier existed', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const carol = computeScope({ username: 'carol@corp.com', adminUsername: 'admin', users, memberships });
+  // No `scope` field at all — the shape every environment on disk has today.
+  const legacy = { id: 'env-pay', teamId: 'payments' };
+  assert.equal(visibleEnvironment(alice, legacy), true);
+  assert.equal(canManageEnvironment(alice, legacy), true);
+  assert.equal(visibleEnvironment(carol, legacy), false);
+  assert.equal(canManageEnvironment(carol, legacy), false);
+  // And an explicit team-tier record is indistinguishable from the legacy one.
+  const explicit = { id: 'env-pay', scope: 'team', teamId: 'payments', assignedTeamIds: [] };
+  assert.equal(visibleEnvironment(alice, explicit), visibleEnvironment(alice, legacy));
+  assert.equal(canManageEnvironment(alice, explicit), canManageEnvironment(alice, legacy));
+});
+
+test('#2083: visibility is MEMBERSHIP, not the admin role — the documented divergence from visibleCredential', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  // Alice is a plain MEMBER of 'default'. D9 says a Team Member may read.
+  const env = { id: 'env-def', teamId: 'default' };
+  assert.equal(visibleEnvironment(alice, env), true, 'a member must still see their team environment');
+  assert.equal(canManageEnvironment(alice, env), false, 'but must not manage it');
+  // The same record as a CREDENTIAL is invisible to her — that is the #798
+  // deferral this ticket deliberately does not import into the env path.
+  assert.equal(visibleCredential(alice, { scope: 'team', teamId: 'default' }), false);
+});
+
+test('#2083: a shared environment reaches every assigned team, and no other', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  const shared = SHARED(['payments', 'ops']);
+  assert.equal(visibleEnvironment(alice, shared), true);   // member of payments
+  assert.equal(visibleEnvironment(bob, shared), false);    // risk only
+  // A shared record carries no owning team, which is exactly why the old
+  // `visibleTeam(scope, env.teamId)` filter hid it from everyone.
+  assert.equal(visibleTeam(alice, shared.teamId), false);
+});
+
+test('#2083: a shared environment is MANAGEABLE by every assigned team-admin — the no-lockout rule', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const carol = computeScope({ username: 'carol@corp.com', adminUsername: 'admin', users, memberships });
+  const shared = SHARED(['payments', 'default']);
+  assert.equal(canManageEnvironment(alice, shared), true, 'team-admin of payments');
+  assert.equal(canManageEnvironment(carol, shared), true, 'team-admin of default');
+  // A plain member of an assigned team may read it but not change it.
+  const sharedDefaultOnly = SHARED(['default']);
+  assert.equal(visibleEnvironment(alice, sharedDefaultOnly), true, 'alice is a member of default');
+  assert.equal(canManageEnvironment(alice, sharedDefaultOnly), false, 'but only a member');
+  // THE DIVERGENCE, stated as a test: the credential rule refuses outright, and
+  // copying it would have made the P5 migration a manage-axis lockout.
+  assert.equal(canManageCredential(alice, { scope: 'system', assignedTeamIds: ['payments'] }), false);
+});
+
+test('#2083: a shared record assigned to zero teams is reachable by System Admins only', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const carol = computeScope({ username: 'carol@corp.com', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const orphan = SHARED([]);
+  assert.equal(visibleEnvironment(alice, orphan), false);
+  assert.equal(canManageEnvironment(alice, orphan), false);
+  // Including the team literally named 'default' — never orphaned INTO view.
+  assert.equal(visibleEnvironment(carol, orphan), false);
+  assert.equal(canManageEnvironment(carol, orphan), false);
+  assert.equal(visibleEnvironment(sys, orphan), true);
+  assert.equal(canManageEnvironment(sys, orphan), true);
+});
+
+test('#2083: creating a SHARED environment is System-Admin-only; a team one needs team-admin', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canCreateEnvironment(alice, { scope: 'team', teamId: 'payments' }), true);
+  assert.equal(canCreateEnvironment(alice, { scope: 'team', teamId: 'risk' }), false);
+  assert.equal(canCreateEnvironment(bob, { scope: 'team', teamId: 'risk' }), false, 'member, not admin');
+  // The shared tier: refused for a Team Admin even of an assigned team.
+  assert.equal(canCreateEnvironment(alice, { scope: 'system', assignedTeamIds: ['payments'] }), false);
+  assert.equal(canCreateEnvironment(sys, { scope: 'system', assignedTeamIds: ['payments'] }), true);
+  // No `|| 'default'`: a create naming no team is refused, not attributed.
+  assert.equal(canCreateEnvironment(alice, {}), false);
+  assert.equal(canCreateEnvironment(null, { scope: 'team', teamId: 'payments' }), false);
+});
+
+test('#2083: re-tiering is System-Admin-only, and is a narrower question than editing', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  assert.equal(canRetierEnvironment(alice), false);
+  assert.equal(canRetierEnvironment(sys), true);
+  assert.equal(canRetierEnvironment(env), true);
+  assert.equal(canRetierEnvironment(null), false);
+  // Alice may still EDIT the record she administers — the two gates answer
+  // different questions and only one of them is an operator act.
+  assert.equal(canManageEnvironment(alice, { teamId: 'payments' }), true);
+});
+
+test('#2083: a hand-written personal environment fails closed to its owner, with no admin bypass', () => {
+  // Nothing can create one (resolveTieredOwnership refuses, guarded in
+  // tiered-resource-routes.test.js), but the predicates must still answer
+  // safely for a record edited onto disk rather than crash or default open.
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const mine = { id: 'env-p', scope: 'personal', userId: 'u-a' };
+  assert.equal(visibleEnvironment(alice, mine), true);
+  assert.equal(canManageEnvironment(alice, mine), true);
+  assert.equal(visibleEnvironment(sys, mine), false, 'the personal tier has no scope.all bypass');
+  assert.equal(canManageEnvironment(sys, mine), false);
+});
+
+test('#2083: a malformed record fails closed for a non-admin and stays visible to the operator', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  for (const bad of [null, undefined, {}, { scope: 'nonsense' }]) {
+    assert.equal(visibleEnvironment(alice, bad), false, 'a non-admin reaches nothing unstamped (§8.4)');
+    assert.equal(canManageEnvironment(alice, bad), false);
+    // The operator keeps `scope.all`, deliberately: this is the same answer
+    // `visibleTeam(sys, undefined)` already gives (asserted above), and it is
+    // the SAFE direction — a record too broken to name its team is exactly the
+    // one only a System Admin can repair, so hiding it would be an operator
+    // lock-out dressed as a fail-closed default.
+    assert.equal(visibleEnvironment(sys, bad), true);
+    assert.equal(canManageEnvironment(sys, bad), true);
+  }
+  // A missing caller scope still fails closed on every path.
+  assert.equal(visibleEnvironment(null, { teamId: 'payments' }), false);
+  assert.equal(canManageEnvironment(null, { teamId: 'payments' }), false);
+  assert.equal(canCreateEnvironment(null, { teamId: 'payments' }), false);
 });
 
 test('canManageEnvironment: env admin & System-Admin manage any env (no regression)', () => {

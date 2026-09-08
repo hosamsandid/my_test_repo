@@ -89,7 +89,7 @@ function matchPollerListeners({ repo, label, kind }, agents) {
 // `payload.issue.number` / `payload.pull_request.number`) work byte-compatibly.
 // `actor` carries the human who applied the label (via the plugin) — plainly,
 // not the `agent:` prefix flow-emit uses for an agent producer.
-function buildSyntheticEvent({ repo, label, kind, number, title, actor, eventId, now }) {
+function buildSyntheticEvent({ repo, label, kind, number, title, closesIssues, actor, eventId, now }) {
   const subject = {
     number,
     html_url: `https://github.com/${repo}/${kind === 'pr' ? 'pull' : 'issues'}/${number}`,
@@ -97,6 +97,11 @@ function buildSyntheticEvent({ repo, label, kind, number, title, actor, eventId,
     // the consumer's trigger notice shows `[#N](url): <title>`, not just `#N`.
     // Absent when the fetch failed/timed out — the notice degrades to `#N`.
     ...(typeof title === 'string' && title ? { title } : {}),
+    // #2114: for a PR, carry the issue(s) it closes (strict parseCloses, from the
+    // caller's single PR-detail fetch) so admission control's `entryTicketRef`
+    // keys a human-applied wake label to the issue's ticket rather than the PR
+    // as a new one — which would otherwise deadlock a `wipLimit: 1` flow.
+    ...(kind === 'pr' && Array.isArray(closesIssues) && closesIssues.length ? { closesIssues } : {}),
   };
   return {
     id: eventId,

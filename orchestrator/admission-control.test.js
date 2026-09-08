@@ -163,6 +163,46 @@ test('a same-ticket hand-off is admitted with the lane full — the flow does no
   assert.equal(later.reason, 'same-ticket');
 });
 
+test('#2114 regression: a synthetic internal PR hand-off carries closesIssues, so it admits same-ticket rather than deadlocking', () => {
+  // The prior admission-control tests hand-craft `closesIssues` via prEntry(),
+  // so they never exercised the real synthetic-event builders. This drives the
+  // exact reviewer repro: an internal-transport reviewer-wake (developer → PR →
+  // reviewer) is the FIRST admission-gated reference to PR 77, built by
+  // flow-emit's real `buildSyntheticEvent`/`buildPendingEntry`, with issue 42
+  // already occupying the only slot.
+  const flowEmit = require('./flow-emit');
+  const key = flowEmit.eventKeyForKind('pr');
+  const iso = new Date(T0).toISOString();
+  const admitted = ac.admit({ lane: ac.emptyLane(), wipLimit: 1, agentId: 'dev', entry: issueEntry(42), now: T0 });
+
+  // The BUG shape — a synthetic PR event with NO closesIssues (what the two
+  // producers built before this fix): mis-keys as a brand-new ticket and is held
+  // forever, deadlocking the flow (the first ticket never finishes because its
+  // finisher is stuck in the hold queue).
+  const bugEvent = flowEmit.buildSyntheticEvent({
+    repo: REPO, label: 'ready-for-review', kind: 'pr', number: 77,
+    producerId: 'dev', eventId: 'int:bug', now: iso,
+  });
+  const held = ac.admit({ lane: admitted.lane, wipLimit: 1, agentId: 'reviewer',
+    entry: flowEmit.buildPendingEntry('t-bug', key, bugEvent), now: T0 + 60_000 });
+  assert.equal(held.admit, false, 'without closesIssues the hand-off is wrongly a new ticket (the bug)');
+
+  // The FIXED shape — the caller now threads the strict `closesIssues` (parsed
+  // from the PR body/branch it already fetched) into the builder, so admission
+  // keys the hand-off to issue 42's ticket and lets it through.
+  const fixedEvent = flowEmit.buildSyntheticEvent({
+    repo: REPO, label: 'ready-for-review', kind: 'pr', number: 77, closesIssues: [42],
+    producerId: 'dev', eventId: 'int:fix', now: iso,
+  });
+  assert.deepEqual(fixedEvent.payload.pull_request.closesIssues, [42],
+    'the builder propagates closesIssues onto the PR subject');
+  const handoff = ac.admit({ lane: admitted.lane, wipLimit: 1, agentId: 'reviewer',
+    entry: flowEmit.buildPendingEntry('t-fix', key, fixedEvent), now: T0 + 60_000 });
+  assert.equal(handoff.admit, true, 'with closesIssues the hand-off resolves to the issue ticket');
+  assert.equal(handoff.reason, 'same-ticket');
+  assert.equal(handoff.lane.inFlight.length, 1, 'still one ticket in flight — no deadlock');
+});
+
 test('a re-delivered event is not held twice', () => {
   const full = ac.admit({ lane: ac.emptyLane(), wipLimit: 1, agentId: 'dev', entry: issueEntry(42), now: T0 }).lane;
   const e = issueEntry(43, { eventId: 'dup' });

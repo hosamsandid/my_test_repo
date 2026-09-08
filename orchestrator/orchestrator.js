@@ -1621,20 +1621,39 @@ function _flowGithubGetJson(apiPath, token) {
 // repo's team token — exactly as the poller does for PRs. Never throws and
 // never blocks the hand-off: any missing-token/failure/timeout degrades to a
 // null title, and the notice then shows `[#N](url)` with no title (AC5).
-async function fetchWorkItemTitle(repoFullName, kind, number) {
+// Fetch a work item's title AND — for a PR — the issue(s) it closes, from ONE
+// GitHub request. The PR detail already carries `body` + `head.ref`, so the
+// strict `parseCloses` (closes/fixes/resolves #N + `issue-N` branch) costs no
+// extra call — the same "no second request" the poller's `_enrichPullRequestPayload`
+// relies on. `closesIssues` matters for #2114 admission control: `entryTicketRef`
+// keys "same-ticket" off it, so a synthetic PR event built by flow-emit.js /
+// github-label-fastpath.js MUST carry it or an internal/label-fast-path
+// reviewer-wake mis-keys as a new ticket and deadlocks at `wipLimit: 1`. Using
+// the STRICT closing-keyword parse here (not a loose issue↔PR link) is
+// deliberate: entry attribution must not merge two separate tickets.
+async function fetchWorkItemDetail(repoFullName, kind, number) {
   try {
     const tokenId = resolveRepoGithubTokenId(repoFullName);
-    if (!tokenId) return null;
+    if (!tokenId) return { title: null, closesIssues: [] };
     const token = fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim();
     const apiPath = kind === "pr"
       ? `/repos/${repoFullName}/pulls/${number}`
       : `/repos/${repoFullName}/issues/${number}`;
     const detail = await _flowGithubGetJson(apiPath, token);
-    return detail && typeof detail.title === "string" && detail.title ? detail.title : null;
+    const title = detail && typeof detail.title === "string" && detail.title ? detail.title : null;
+    const closesIssues = kind === "pr" && detail
+      ? prEventsLog.parseCloses(detail.body, detail.head && detail.head.ref)
+      : [];
+    return { title, closesIssues };
   } catch (err) {
-    console.error(`[Orchestrator] title fetch failed for ${repoFullName}#${number}: ${err.message}`);
-    return null;
+    console.error(`[Orchestrator] work-item detail fetch failed for ${repoFullName}#${number}: ${err.message}`);
+    return { title: null, closesIssues: [] };
   }
+}
+
+// Back-compat thin wrapper for the title-only callers (#1897 notices).
+async function fetchWorkItemTitle(repoFullName, kind, number) {
+  return (await fetchWorkItemDetail(repoFullName, kind, number)).title;
 }
 
 function _flowLiftEmits(cfgEmits, triggers) {
@@ -12518,9 +12537,11 @@ async function main() {
           const listeners = flowEmit.matchInternalListeners(
             { repo, label, kind: target.kind }, agents);
           // #1897 AC8: resolve the title best-effort so the notice isn't blank.
-          const title = await fetchWorkItemTitle(repo, target.kind, target.number);
+          // #2114: also carry the PR's closesIssues (from the same fetch) so the
+          // admission gate keys this hand-off to the issue's ticket, not a new one.
+          const { title, closesIssues } = await fetchWorkItemDetail(repo, target.kind, target.number);
           const ghEvent = flowEmit.buildSyntheticEvent({
-            repo, label, kind: target.kind, number: target.number, title,
+            repo, label, kind: target.kind, number: target.number, title, closesIssues,
             producerId: agentId,
             eventId: `int:${crypto.randomBytes(6).toString('hex')}`,
             now: new Date().toISOString(),
@@ -12700,9 +12721,11 @@ async function main() {
           const listeners = labelFastPath.matchPollerListeners({ repo, label, kind }, agents);
           const now = new Date().toISOString();
           // #1897 AC8: resolve the title best-effort so the notice isn't blank.
-          const title = await fetchWorkItemTitle(repo, kind, number);
+          // #2114: also carry the PR's closesIssues (from the same fetch) so the
+          // admission gate keys this hand-off to the issue's ticket, not a new one.
+          const { title, closesIssues } = await fetchWorkItemDetail(repo, kind, number);
           const ghEvent = labelFastPath.buildSyntheticEvent({
-            repo, label, kind, number, title, actor,
+            repo, label, kind, number, title, closesIssues, actor,
             eventId: `intlbl:${crypto.randomBytes(6).toString('hex')}`,
             now,
           });

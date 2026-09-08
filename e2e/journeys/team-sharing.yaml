@@ -1,0 +1,369 @@
+journeyVersion: 1
+id: team-sharing
+title: Sharing a Team
+order: 55
+# CI lane: two real user-store identities against the in-stack console. Needs no
+# GitHub, no repository and no agent container — the team's single role is a stub.
+lanes: [ci]
+
+# DELIBERATELY NOT A HELPER-CHAT TOUR CHAPTER, and therefore absent from
+# build-tour-manifest.js's ROUTE_MAP. The in-app tour narrates one operator's
+# onboarding path; this journey needs two signed-in humans and its most
+# important beats are refusals (a read-only panel, a 403, a 409), which do not
+# teach a newcomer what to do next. It keeps full `narrative` prose, so it still
+# renders into the generated user guide and the deck — the audience for "why can
+# my colleague not see this?" is a reader, not someone mid-tour.
+#
+# Mechanically that exclusion is expressed by never putting `voiceover` and
+# `screenshot` on the SAME step: the tour builder's candidate test is exactly
+# that pair, so this journey contributes zero tour steps and is dropped before
+# the ROUTE_MAP lookup — no chapter, and no "missing route mapping" warning.
+# If a later ticket does want it in the tour, move each slide's `screenshot:`
+# up onto its `voiceover:` step and add `team-sharing: '/chats'` to ROUTE_MAP.
+
+# Two humans, signed in through the real login route into their own browser
+# contexts (#2086). The fixture creates NO team: "user A creates one" is the
+# journey's first beat and has to run AS A, because that is what records A as
+# its Team Admin (#2081).
+fixtures:
+  - fixture: twoHumanTeam
+    params:
+      teamId: share-demo
+      ownerSubject: ada@e2e.local
+      ownerName: Ada Owner
+      colleagueSubject: bea@e2e.local
+      colleagueName: Bea Colleague
+
+steps:
+  # ── Slide 1: what this journey proves (narrative-only) ──────────────────────
+  - kind: narrative-only
+    id: intro
+    voiceover: |
+      Teams in the Agent Studio are private by default. Nobody sees your team until you share it, sharing happens on your own page rather than through an administrator, and a team can never be left without an admin. Let's watch two colleagues walk the whole loop.
+    narrative: |
+      Up to now every one of these journeys has run as a single operator who could see everything. This one is different: it runs as two separate people, each signed in in their own browser, and what it proves is the part of the platform you only notice when it is missing — who can see what, and who is allowed to change it.
+
+      Three rules are on trial here. The first is that a team is private by default: when Ada creates a team, Bea does not see it, and there is no step Ada has to remember to take for that to be true. The second is that sharing is decentralised: Ada does not file a ticket with an administrator, she opens the team's own Share dialog on the page she already works on, and adds Bea herself. The third is the quiet one that saves you later — a team can never be left without an admin. If Ada is the last Team Admin and tries to step down, the platform refuses and asks her, in the same step, who takes over.
+
+      Everything below is checked twice on purpose. Each time we say Bea "cannot" do something, we check both that the control is absent from her screen and that the server refuses the request when it is made directly. A hidden button is a courtesy; the refusal is the security boundary, and they are not the same claim.
+
+  # ── Slide 2: Ada creates a team ─────────────────────────────────────────────
+  - id: owner-creates-team
+    voiceover: |
+      Ada creates a team. She needs no administrator to do it, and she becomes its Team Admin in the same operation.
+    narrative: |
+      Ada starts by creating an Agent Team. The thing to notice is what she does not need: no administrator has to provision it for her, no access scope has to exist first, and — because this team is only here to be shared — it needs neither a repository nor credentials.
+
+      Creating it also makes her its Team Admin. That sounds obvious, but it is a deliberate step in the platform: an Agent Team is its own access boundary, so without a membership recorded in the same operation, Ada would have created a team she could not see. The membership is written as part of the create, and rolled back with it if anything fails.
+    action:
+      do: access.actAs
+      as: owner
+      goto: /chats
+  - action:
+      do: access.createTeam
+      teamId: share-demo
+      teamName: Share Demo
+  - assert:
+      do: access.expectTeamVisible
+      teamId: share-demo
+  - assert:
+      do: access.expectMemberships
+      teamId: share-demo
+      expected:
+        ada@e2e.local: team-admin
+    screenshot: access-owner-sees-own-team
+
+  # ── Slide 3: private by default — Bea sees nothing ──────────────────────────
+  - id: colleague-sees-nothing
+    voiceover: |
+      Bea signs in to the same console. Ada's team is simply not there — not greyed out, not locked: absent. Private by default is the platform's resting state, not something Ada had to switch on.
+    narrative: |
+      Now we switch to Bea, signed in to the same console as a different person. Ada's team is not on her screen.
+
+      It is worth being precise about what "not on her screen" means here, because it is stronger than it looks. The team is not shown in a disabled state, and there is no "request access" affordance — it is absent, and the API that backs the list does not return it either. That second half matters: if the team were filtered out only by the browser, anyone who opened the network tab would have it. The refusal is server-side, and this step checks both.
+
+      Nothing about this required Ada to make her team private. Private is what a team is until somebody shares it.
+    action:
+      do: access.actAs
+      as: colleague
+      goto: /chats
+  - assert:
+      do: access.expectTeamHidden
+      teamId: share-demo
+    screenshot: access-colleague-sees-nothing
+
+  # ── Slide 4: Ada shares the team with Bea, as a Team Member ─────────────────
+  - id: owner-shares
+    voiceover: |
+      Ada opens the team's own Share dialog — right there in the Agent Chat, no admin console — finds Bea in the directory, and adds her as a Team Member.
+    narrative: |
+      Ada shares the team. This is the decentralised half of the design: she does it from the team's own context menu in the Agent Chat, on the page she already lives on, with no visit to an administration screen and no administrator in the loop.
+
+      The picker searches the whole organisation, which is the point of the directory: people are findable, the private thing is the team. It offers only colleagues who already have an account — the platform will not invent one — and it deliberately shows nothing about them beyond a name and an email, so a System Admin appears in the results as an ordinary colleague.
+
+      Ada adds Bea as a Team Member. That is the lower of the two roles: it grants Bea the ability to open the team and chat with its agents, and to see who else has access — and nothing else.
+    action:
+      do: access.actAs
+      as: owner
+  - action:
+      do: access.openShare
+      teamId: share-demo
+  - assert:
+      do: access.expectShareManageable
+      teamId: share-demo
+    screenshot: access-share-dialog
+  - action:
+      do: access.addColleague
+      teamId: share-demo
+      subject: bea@e2e.local
+      person: Bea Colleague
+      role: team-member
+  - assert:
+      do: access.expectMemberships
+      teamId: share-demo
+      expected:
+        ada@e2e.local: team-admin
+        bea@e2e.local: team-member
+    screenshot: access-colleague-added
+
+  - action:
+      do: access.closeShare
+      teamId: share-demo
+
+  # ── Slide 5: Bea can see it, and can change nothing ─────────────────────────
+  - id: colleague-read-only
+    voiceover: |
+      Bea's screen changes immediately: the team is there, and she can open the same Share dialog — read-only. She can see who has access; she can change nothing. And when the request is made directly to the server, it is refused there too.
+    narrative: |
+      Bea reloads and the team has appeared. She can open it, chat with its agents, and open the very same Share dialog Ada used — but for her it is a read-only view. She sees exactly who has access and at what role, which is deliberate: knowing who your collaborators are is not a privilege, and a member who cannot see the list has no way to find out who to ask.
+
+      What she does not get is a single control. No role dropdown, no remove button, no way to add anybody, and the panel says so in plain language rather than leaving her to work it out from an absence.
+
+      Then we do the thing a UI test on its own would miss. We take Bea's real session and send the membership write straight to the API, skipping the interface entirely. The server refuses it. This is the assertion that actually proves the boundary — the missing buttons are a courtesy to Bea, the 403 is the rule.
+    action:
+      do: access.actAs
+      as: colleague
+  - assert:
+      do: access.expectTeamVisible
+      teamId: share-demo
+  - action:
+      do: access.openShare
+      teamId: share-demo
+  - assert:
+      do: access.expectShareReadOnly
+      teamId: share-demo
+    screenshot: access-colleague-read-only
+  - assert:
+      do: access.expectMembershipWriteRefused
+      teamId: share-demo
+      subject: bea@e2e.local
+      role: team-admin
+  - action:
+      do: access.closeShare
+      teamId: share-demo
+
+  # ── Slide 6: the last-admin rule refuses Ada's exit ─────────────────────────
+  - id: last-admin-refused
+    voiceover: |
+      Before promoting anyone, watch what happens if Ada tries to step down while she is the only Team Admin. The platform refuses, and instead of a dead end it asks the one question that resolves it: who takes over?
+    narrative: |
+      Here is the rule that only shows itself when you need it. Ada is currently the team's only Team Admin. Bea is a member, but a member cannot manage anything — so if Ada simply left, the team would still exist, still have agents, still have a member in it, and nobody at all who could change any of that. It would be quietly unadministrable, and the only way back would be a System Admin noticing.
+
+      So the platform refuses. Ada clicks to leave, and instead of the action going through she gets a prompt: she is about to remove the last Team Admin, and she must choose who takes over in the same step. The refusal is not a warning she can click past — sending the request directly to the API gets the same answer, a conflict with a machine-readable reason, because the rule lives in the store where every writer passes through it rather than in the screen.
+
+      Ada cancels for now. Nothing has changed, and the team still has its admin.
+    action:
+      do: access.actAs
+      as: owner
+  - action:
+      do: access.openShare
+      teamId: share-demo
+  - assert:
+      do: access.expectLastAdminRemovalRefused
+      teamId: share-demo
+      subject: ada@e2e.local
+  - action:
+      do: access.requestRemoval
+      teamId: share-demo
+      person: Ada Owner
+  - assert:
+      do: access.expectHandoverPrompt
+      teamId: share-demo
+    screenshot: access-last-admin-handover-prompt
+  - action:
+      do: access.cancelHandover
+      teamId: share-demo
+  - assert:
+      do: access.expectMemberships
+      teamId: share-demo
+      expected:
+        ada@e2e.local: team-admin
+        bea@e2e.local: team-member
+
+  # ── Slide 7: Ada promotes Bea to Team Admin ─────────────────────────────────
+  - id: promote-colleague
+    voiceover: |
+      Ada promotes Bea to Team Admin — one dropdown on Bea's row.
+    narrative: |
+      Ada promotes Bea from Team Member to Team Admin. It is one dropdown on Bea's row, and it takes effect immediately — there is no separate save, and no confirmation, because a promotion takes nothing away from anybody.
+
+      From this moment the team has two admins, which is what makes everything in the next two slides possible: Bea gains the ability to manage the list, and Ada's own exit stops being the dangerous act it was a moment ago.
+    action:
+      do: access.setMemberRole
+      teamId: share-demo
+      person: Bea Colleague
+      role: team-admin
+  - assert:
+      do: access.expectMemberships
+      teamId: share-demo
+      expected:
+        ada@e2e.local: team-admin
+        bea@e2e.local: team-admin
+    screenshot: access-colleague-promoted
+  - action:
+      do: access.closeShare
+      teamId: share-demo
+
+  # ── Slide 8: Bea can now manage members ─────────────────────────────────────
+  - id: colleague-can-manage
+    voiceover: |
+      Bea reopens the same dialog and it is a different screen: the controls are there, the read-only notice is gone, and the server now accepts the very request it refused two minutes ago.
+    narrative: |
+      Bea reopens the same Share dialog she saw a moment ago read-only. It is now the full surface: every member has a role dropdown, there is a remove control, and the add-a-colleague section is back. The read-only notice is gone.
+
+      And we check the other half again, in the other direction. The exact membership write the server refused from Bea earlier — the same route, the same body, the same session — now succeeds. The gate moved because her role moved, not because a button appeared.
+    # `goto` forces a full navigation, which is REQUIRED here and not tidiness:
+    # ShareTeamPanel reads `canManage` from `useAuth()`, whose `teams` roles are
+    # resolved by `describeAuthz` when the SPA loads. Ada promoted Bea in her own
+    # browser, so Bea's tab is still holding the Team Member session — without a
+    # reload the panel would correctly render read-only and this slide would fail
+    # for a reason that has nothing to do with the rule it is testing.
+    action:
+      do: access.actAs
+      as: colleague
+      goto: /chats
+  - action:
+      do: access.openShare
+      teamId: share-demo
+  - assert:
+      do: access.expectShareManageable
+      teamId: share-demo
+    screenshot: access-colleague-can-manage
+  - assert:
+      do: access.expectMembershipWriteAllowed
+      teamId: share-demo
+      subject: bea@e2e.local
+      role: team-admin
+  - action:
+      do: access.closeShare
+      teamId: share-demo
+
+  # ── Slide 9: Ada steps down — now that a successor exists ───────────────────
+  - id: owner-steps-down
+    voiceover: |
+      Now Ada steps down to an ordinary Team Member — and this time it simply works, with no prompt at all. Same control, same screen, different answer: the rule was never about Ada, it is about the team never being left without an admin.
+    narrative: |
+      Ada gives up her Team Admin role and stays on as an ordinary member. The control is the same dropdown that raised a hand-over prompt a few slides ago, on the same row of the same dialog — and this time the change just happens, with nothing to confirm and no successor to name, because Bea is already an admin.
+
+      That contrast is the whole point. The platform was never blocking Ada personally; it was protecting an invariant, and the moment the invariant was safe the block disappeared on its own.
+
+      Her own view changes with her role: on reload, the dialog she has been managing all journey is now the read-only one Bea started with. Nothing was taken away by an administrator — she handed it over herself.
+    action:
+      do: access.actAs
+      as: owner
+  - action:
+      do: access.openShare
+      teamId: share-demo
+  - action:
+      do: access.setMemberRole
+      teamId: share-demo
+      person: Ada Owner
+      role: team-member
+  - assert:
+      do: access.expectMemberships
+      teamId: share-demo
+      expected:
+        ada@e2e.local: team-member
+        bea@e2e.local: team-admin
+    screenshot: access-owner-stepped-down
+
+  # Ada's own panel follows her role — but only after a reload, since `canManage`
+  # comes from the session's resolved team roles (see slide 8's note).
+  - action:
+      do: access.closeShare
+      teamId: share-demo
+  - assert:
+      do: access.expectTeamVisible
+      teamId: share-demo
+  - action:
+      do: access.openShare
+      teamId: share-demo
+  - assert:
+      do: access.expectShareReadOnly
+      teamId: share-demo
+  - action:
+      do: access.closeShare
+      teamId: share-demo
+
+  # ── Slide 10: the hand-over that D4 asked for, actually performed ───────────
+  - id: handover-completed
+    voiceover: |
+      One beat left: the escape hatch. Bea is now the last admin, so when she tries to leave she gets the same refusal Ada got — and this time we answer its question. She names Ada as her successor, and the promotion and the departure happen as a single change, so there is never an instant where the team has no admin.
+    narrative: |
+      The last beat closes the loop that slide 6 opened. Bea is now the team's only Team Admin, so when she goes to leave she meets exactly the refusal Ada met — which is worth noticing on its own, because it confirms the rule is a property of the team rather than something that was ever special about its creator.
+
+      This time we answer the question instead of cancelling. The prompt offers the people already on the team — and only them, because inviting an outsider here would be a second, unaudited way into a private team — so Bea picks Ada and confirms.
+
+      What happens next is one request, not two. Ada's promotion to Team Admin and Bea's removal are applied in a single write, deliberately: as two steps there would be a moment, however brief, in which the team had no administrator at all, and a failure landing in that gap would strand it. Afterwards Ada is the admin again, Bea has no access, and the team has been continuously administrable from the second it was created.
+    action:
+      do: access.actAs
+      as: colleague
+  - action:
+      do: access.openShare
+      teamId: share-demo
+  - assert:
+      do: access.expectLastAdminRemovalRefused
+      teamId: share-demo
+      subject: bea@e2e.local
+  - action:
+      do: access.requestRemoval
+      teamId: share-demo
+      person: Bea Colleague
+  - assert:
+      do: access.expectHandoverPrompt
+      teamId: share-demo
+    screenshot: access-handover-prompt
+  - action:
+      do: access.completeHandover
+      teamId: share-demo
+      successorSubject: ada@e2e.local
+      leaving: Bea Colleague
+
+  # The successor really was promoted in the same write — read back as Ada, who
+  # is the only person who can still see the team at all.
+  - action:
+      do: access.actAs
+      as: owner
+      goto: /chats
+  - assert:
+      do: access.expectMemberships
+      teamId: share-demo
+      expected:
+        ada@e2e.local: team-admin
+  - action:
+      do: access.openShare
+      teamId: share-demo
+  - assert:
+      do: access.expectShareManageable
+      teamId: share-demo
+    screenshot: access-handover-complete
+
+  # And Bea, who could not see this team in slide 3, cannot see it again —
+  # private by default is symmetric, and losing access is as complete as never
+  # having had it.
+  - action:
+      do: access.actAs
+      as: colleague
+  - assert:
+      do: access.expectTeamHidden
+      teamId: share-demo

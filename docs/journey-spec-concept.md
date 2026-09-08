@@ -139,6 +139,27 @@ context, and the artifact recorder. F1–F4 are written against these modules di
 (as ordinary specs) *before* the journey runner exists — the runner is then only a thin
 loop: parse YAML → resolve functions → `test.step` each → capture screenshots.
 
+**More than one signed-in human (#2086).** Journeys ran as a single identity — the env
+admin `global-setup.js` logs in once and snapshots into `storageState` — until the
+decentralised-access journey needed two people who can see different things. The
+extension is deliberately confined to the step library, per §9's anti-DSL rule:
+
+- `steps/identity.js` is a **helper** module (absent from `STEP_MODULES`, the
+  `team.js` arrangement) that mints real user records with local passwords, signs each
+  into its **own browser context** through the same real `/api/auth/login`, and hangs
+  them off `ctx`.
+- `runner.js` builds `ctx` **once** and passes that same object to every fixture and
+  step, so `access.actAs` can re-point `ctx.page`/`ctx.request` at one identity and the
+  entire existing step library follows — including the recorder, which reads `ctx.page`
+  fresh at each capture, so a screenshot is taken in whichever human's browser is
+  active.
+- The journey **schema is untouched**: identities are named in ordinary opaque step
+  params, and a fixture owns their lifecycle (its teardown restores the primary
+  fixtures before closing the extra contexts).
+
+The rule this follows, and the one to keep: a capability that needs more than one
+browser belongs in the step library and a fixture; it is never a new YAML key.
+
 ### 2.3 Screenshot capture contract
 
 - Captured **only inside a passing run**; a failing journey publishes nothing.

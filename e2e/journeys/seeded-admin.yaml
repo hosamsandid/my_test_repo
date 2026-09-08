@@ -1,0 +1,92 @@
+journeyVersion: 1
+id: seeded-admin
+title: The first administrator is a real user record
+order: 95
+# CI lane only, and deliberately LAST (order 95): it rotates the seeded
+# administrator's login password to prove the configured credential stops
+# working, then puts it back, so the stack is left exactly as it was found.
+#
+# No fixtures. The record this drives is the one the ORCHESTRATOR seeded at
+# first boot from the stack's own ADMIN_USERNAME/ADMIN_PASSWORD (#2059) —
+# seeding it from a fixture would prove nothing about the mechanism under test.
+#
+# Rotating the password mid-suite is only safe because #2059 also stopped
+# deriving the session-cookie signing key from that password: before, this
+# journey would have invalidated every other journey's storageState cookie.
+lanes: [ci]
+
+steps:
+  # ── chapter intro (narrative-only) ─────────────────────────────────────────
+  - kind: narrative-only
+    narrative: |
+      A fresh stack has to be administered by somebody, and for a long time that somebody was not a person at all: the console accepted one credential pair straight out of the deployment's configuration, and issued a session with no user record behind it. It worked, but it had no identity — nothing to record as a team's creator, nothing to attribute an audit entry to, nothing to own a personal credential.
+
+      The configured initial user is now a seed rather than a login. At first boot, on a stack with no users at all, the orchestrator consumes it once to create a real System-Admin record — and then never reads it again. Everything that follows is what that changes.
+
+  # ── the administrator is in the list ───────────────────────────────────────
+  - id: seeded-admin-record
+    narrative: |
+      Here is the Users page on a stack nobody has touched yet — and it is not empty. The administrator you are signed in as appears in this list, because it *is* a user: a System Admin with a login password, sitting in the same table as everybody else, editable like everybody else. Its display name, e-mail, System-Admin flag and password are all managed right here.
+
+      There is one thing you cannot do to it, and the page says so before you try: it is the only System Admin on this stack, so Delete is disabled. Removing the last administrator used to be possible, and it used to be survivable because the configured credential was always there as a way back in. It is not any more, so the store refuses it.
+    action:
+      do: users.openUsersPage
+    assert:
+      do: users.expectSeededAdminRow
+      subject: admin
+    screenshot: seeded-admin-record
+
+  - id: seeded-admin-undeletable
+    narrative: |
+      The refusal is the store's, not the page's: the message on the disabled control is the same sentence the server would answer with, and the System-Admin checkbox in the edit panel is locked the same way. The rule is "promote another user first" — not "you may not", but "not while this is the only one".
+    assert:
+      do: users.expectLastAdminUndeletable
+      subject: admin
+    screenshot: seeded-admin-undeletable
+
+  - id: seeded-admin-flag-locked
+    assert:
+      do: users.expectSystemAdminFlagLocked
+      subject: admin
+
+  # ── the session has a real identity ────────────────────────────────────────
+  - id: seeded-admin-identity
+    narrative: |
+      Signing in with the seeded credentials resolves to that record — the session carries a real user id, which is the whole point of the change. That id is what lets a team record its creator, a preference persist server-side, a personal credential have an owner, and an audit entry name a person rather than a bare string.
+    assert:
+      do: users.expectLoginResolvesToRecord
+      username: admin
+      password: e2e-admin-pass
+
+  # ── the configured credential is not a standing login ──────────────────────
+  - id: seeded-admin-rotated
+    narrative: |
+      And here is the consequence worth understanding before you deploy. Change the password on this page and the value still sitting in the deployment's configuration stops working — because it was never the login, only the seed that created this record. Editing the configuration and restarting no longer revokes access; this page does.
+    action:
+      do: users.setLoginPassword
+      subject: admin
+      password: rotated-by-journey
+    assert:
+      do: users.expectLoginResolvesToRecord
+      username: admin
+      password: rotated-by-journey
+    screenshot: seeded-admin-rotated
+
+  - id: seeded-admin-config-rejected
+    narrative: |
+      The configured credential is now refused outright — not "unavailable", not "try again": rejected, like any other wrong password. That is the end of the environment credential as a way in, and it is why recovering a lost administrator is a host-level action on the user store rather than a console login.
+    assert:
+      do: users.expectLoginRejected
+      username: admin
+      password: e2e-admin-pass
+
+  # ── leave the stack as we found it ─────────────────────────────────────────
+  - id: seeded-admin-restored
+    action:
+      do: users.setLoginPassword
+      subject: admin
+      password: e2e-admin-pass
+    assert:
+      do: users.expectLoginResolvesToRecord
+      username: admin
+      password: e2e-admin-pass

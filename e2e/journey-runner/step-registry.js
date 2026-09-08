@@ -14,7 +14,7 @@ const path = require('path');
 
 // The modules that make up the step library. Explicit list (not a dir scan) so
 // adding a UI area is a deliberate one-line edit and the set is reviewable.
-const STEP_MODULES = ['env', 'create', 'wizard', 'agents', 'teardown', 'gh', 'chat', 'templates', 'shell', 'triggers', 'flows', 'context', 'usage', 'knowledge'];
+const STEP_MODULES = ['env', 'create', 'wizard', 'agents', 'teardown', 'gh', 'chat', 'templates', 'shell', 'triggers', 'flows', 'context', 'usage', 'knowledge', 'users'];
 
 const RESERVED = new Set(['volatileLocators']);
 

@@ -76,20 +76,46 @@ test('D5: every scope.all bypass survives the re-pointing', () => {
   assert.ok(shortCircuits >= 10, `expected >=10 scope.all short-circuits, found ${shortCircuits}`);
   assert.ok(wholePredicates >= 2, `expected >=2 whole-predicate scope.all forms, found ${wholePredicates}`);
 
-  // And the three that must NOT gain one: a personal credential is stronger
-  // than D5 (§2.2), and the other two take no caller scope at all.
+  // And the ones that must NOT gain one: a personal record is stronger than D5
+  // (§2.2), and the rest take no caller scope at all.
+  //
+  // #2083 moved the personal-tier rule and the normalizer into resource-tier.js,
+  // so the guard follows them there rather than checking the alias left behind:
+  // asserting over a one-line re-export would have been vacuous the moment the
+  // real predicate stopped living in this file. Both sources are swept.
+  const tierSrc = fs.readFileSync(path.join(__dirname, 'resource-tier.js'), 'utf8')
+    .split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
   const bodyOf = (name) => {
-    const at = src.indexOf(`function ${name}(`);
-    assert.notEqual(at, -1, `${name} must still exist`);
-    let depth = 0;
-    for (let i = src.indexOf('{', at); i < src.length; i++) {
-      if (src[i] === '{') depth++;
-      else if (src[i] === '}' && --depth === 0) return src.slice(at, i + 1);
+    for (const [where, text] of [['scope.js', src], ['resource-tier.js', tierSrc]]) {
+      const at = text.indexOf(`function ${name}(`);
+      if (at === -1) continue;
+      let depth = 0;
+      for (let i = text.indexOf('{', at); i < text.length; i++) {
+        if (text[i] === '{') depth++;
+        else if (text[i] === '}' && --depth === 0) return { where, body: text.slice(at, i + 1) };
+      }
+      throw new Error(`unbalanced braces in ${name} (${where})`);
     }
-    throw new Error(`unbalanced braces in ${name}`);
+    throw new assert.AssertionError({ message: `${name} must still exist in scope.js or resource-tier.js` });
   };
-  for (const name of ['ownsPersonalCredential', 'credentialVisibleToTeam', 'ownedByCaller']) {
-    assert.doesNotMatch(bodyOf(name), /scope\.all/, `${name} must carry no admin bypass`);
+  for (const name of ['ownsPersonalTier', 'credentialVisibleToTeam', 'ownedByCaller', 'tierUsableByTeam']) {
+    assert.doesNotMatch(bodyOf(name).body, /scope\.all/, `${name} must carry no admin bypass`);
+  }
+  // The two aliases really are the shared implementations, not forks of it —
+  // otherwise the sweep above would be guarding a predicate nothing calls.
+  assert.match(src, /const ownsPersonalCredential = ownsPersonalTier;/);
+  assert.match(src, /const normalizeCredential = normalizeTier;/);
+  // The personal tier is checked BEFORE the admin shortcut in every predicate
+  // that has one. A `scope.all` line ahead of the personal branch would be the
+  // silent way to lose #1567 D2, and it reads as correct code.
+  for (const name of ['visibleCredential', 'canManageCredential', 'canCreateCredential',
+                      'visibleEnvironment', 'canManageEnvironment', 'canCreateEnvironment']) {
+    const { body } = bodyOf(name);
+    const personalAt = body.search(/TIER_PERSONAL|'personal'/);
+    const adminAt = body.indexOf('if (scope.all) return true;');
+    assert.ok(personalAt !== -1, `${name} must handle the personal tier`);
+    assert.ok(adminAt !== -1, `${name} must keep its scope.all bypass`);
+    assert.ok(personalAt < adminAt, `${name}: the personal tier must be checked before scope.all`);
   }
 });
 

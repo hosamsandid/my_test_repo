@@ -21,6 +21,7 @@ import BrandMark from './BrandMark';
 import AccountMenu from './AccountMenu';
 import SettingsModal from './SettingsModal';
 import TranscriptionOverlay from './TranscriptionOverlay';
+import FlowCopilotIndicator from './FlowCopilotIndicator';
 import HelperChatPanel from './HelperChatPanel';
 import { useHelperChat } from '../context/HelperChatContext';
 import { useModelSelection } from '../context/ModelSelectionContext';
@@ -690,6 +691,11 @@ export default function Shell({ children }) {
       {/* Persistent Meeting Note-Taker overlay (#1296) — portaled to body, so
           it floats over every page while a meeting transcription runs. */}
       <TranscriptionOverlay />
+
+      {/* Running Flow Copilot turn (#2087) — same shape as the overlay above:
+          a turn now survives leaving /flows, so it needs a card that says so
+          on every route, names the flow, and offers a jump + Stop. */}
+      <FlowCopilotIndicator />
 
       {/* Helper Chat panel (#1735) — a non-blocking slide-in help assistant,
           mounted once here so it is available on every route without a backdrop. */}

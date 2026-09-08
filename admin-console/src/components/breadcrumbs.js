@@ -13,6 +13,7 @@ export const BREADCRUMBS = {
   // (#1891).
   '/wizard/team':  'Agent Team Wizard',
   '/flows':        'Flows',
+  '/flow-control': 'Flow Control',
   '/knowledge':    'Knowledge',
   '/chats':        'Agent Chat',
   '/environments': 'Working Environments',

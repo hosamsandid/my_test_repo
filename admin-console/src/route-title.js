@@ -21,6 +21,7 @@ export const APP_NAME = 'Agent Studio';
 export const ROUTE_TITLES = {
   '/chats': 'Agent Chat',
   '/flows': 'Flows',
+  '/flow-control': 'Flow Control',
   '/role-templates': 'Agent Templates',
   '/skills': 'Skills',
   '/knowledge': 'Knowledge',

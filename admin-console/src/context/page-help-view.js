@@ -123,6 +123,11 @@ export const CONTEXT_KEYS = {
   'modal:user-edit': { label: 'Users · edit user' },
   'modal:user-delete': { label: 'Users · delete user' },
   'modal:agent-template': { label: 'Agent Templates · editor' },
+  // The save-time propagation offer (#2066) — no topic of its own
+  // (resolution falls through to `/environments`), and a full-screen dialog
+  // at 9999, so it needs the lift for the same reason `modal:user-delete`
+  // does: help beside the decision, never behind it.
+  'modal:env-propagation': { label: 'Working Environments · bring agents up to date' },
 };
 
 // The overlay ids the app publishes, as constants so a call site cannot typo one.
@@ -150,6 +155,7 @@ export const OVERLAY_TEAM_MANAGE = 'modal:team-manage';
 export const OVERLAY_USER_EDIT = 'modal:user-edit';
 export const OVERLAY_USER_DELETE = 'modal:user-delete';
 export const OVERLAY_AGENT_TEMPLATE = 'modal:agent-template';
+export const OVERLAY_ENV_PROPAGATION = 'modal:env-propagation';
 
 // Collapse a concrete pathname to the canonical route key used for topic lookup.
 export function canonicalRoute(pathname) {

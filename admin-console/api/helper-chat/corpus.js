@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 293 449 of 340 000 — 86.3% used, 46 551 left — against
+// neighbours) at 298 138 of 340 000 — 87.7% used, 41 862 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
@@ -176,11 +176,22 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // which needed a chapter `agent-chat.md` had no equivalent of (who wrote a message,
 // why badge and side answer different questions, and what the neutral icon on
 // un-attributable history means): +2 572, landing in full for the same `seeAlso`
-// reason — 291 950 (85.9%). #2059 then turned the configured initial user into a
-// first-boot seed for a real System-Admin record, voiding the "login falls back to
-// the environment's built-in single admin" story in `users.md`, `access-users.md`
-// and `docs/admin-console.md` — the last of which is `CORPUS_FILES`, so its half
-// lands on EVERY context: +1 499 to **293 449** (86.3%).
+// reason — **291 950** (85.9%). // #2066 then replaced the manual **Sync all agents** button with an offer the
+// environment save makes, which raised the crown to **296 639** (87.2%, +4 689):
+// worth noting because the ticket only *removed* a control, and yet it is the
+// biggest single move in this paragraph. Two reasons, and the second is the
+// durable one. The topic had to grow (+3 848) to carry the three change classes,
+// the D1 safety rule and the removal warning — copy nothing on the form states
+// any more. And `docs/working-environments.md` grew (+1 033) which lands on
+// EVERY context, `/quickstart` included, because it is a `CORPUS_FILES` doc; on
+// top of that `/quickstart` sees the topic growth in full too, since `create.md`
+// names `/environments` as a `seeAlso` neighbour — so both halves hit the same
+// crown and the delta on `/environments` itself is identical.
+// #2059 then turned the configured initial user into a first-boot seed for a
+// real System-Admin record, voiding the "login falls back to the environment's
+// built-in single admin" story in `users.md`, `access-users.md` and
+// `docs/admin-console.md` — the last of which is `CORPUS_FILES`, so its half
+// lands on EVERY context: +1 499 to **298 138** (87.7%).
 // Re-measure rather than trust this comment —
 // measureWorstCaseSystemPrompt() sweeps every context and returns which one
 // won, so read the `context` it hands back and never assume it is still the

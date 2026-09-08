@@ -56,7 +56,7 @@ const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const extractTemplate = require('./extract-template');
-const { runCopilot, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
+const { runCopilot, isCopilotAborted, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
 const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
@@ -1488,8 +1488,17 @@ function buildMessagesUrl(baseUrl) {
 
 // Plain HTTP/HTTPS POST of a JSON body. Mirrors httpGetJson: returns
 // { status, body, error } and never throws. Used for one-shot LLM calls.
-function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000) {
+//
+// `signal` (#2087, optional) aborts an in-flight call: a Flow Copilot turn is
+// up to 3 × 180 s of LLM work, and before this a disconnect only suppressed the
+// DELIVERY of the result — the work ran on, billed, and was discarded. Every
+// existing caller passes four arguments and is byte-identical: with no signal
+// no listener is attached and nothing about the request changes.
+function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000, signal = null) {
   return new Promise((resolve) => {
+    if (signal && signal.aborted) {
+      return resolve({ status: 0, body: null, error: 'aborted' });
+    }
     let parsed;
     try {
       parsed = new URL(targetUrl);
@@ -1516,11 +1525,23 @@ function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000) 
       res.on('end', () => {
         let body = data;
         try { body = data ? JSON.parse(data) : null; } catch { /* keep as string */ }
-        resolve({ status: res.statusCode, body, error: null });
+        settle({ status: res.statusCode, body, error: null });
       });
     });
-    req.on('error', (err) => resolve({ status: 0, body: null, error: err.message }));
-    req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: null, error: 'timeout' }); });
+    // One settle path so the abort listener is always detached — a long-lived
+    // signal (one per Copilot turn, up to three calls) must not accumulate
+    // listeners from the calls that already finished.
+    let done = false;
+    const onAbort = () => { req.destroy(); settle({ status: 0, body: null, error: 'aborted' }); };
+    function settle(result) {
+      if (done) return;
+      done = true;
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve(result);
+    }
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    req.on('error', (err) => settle({ status: 0, body: null, error: err.message }));
+    req.on('timeout', () => { req.destroy(); settle({ status: 0, body: null, error: 'timeout' }); });
     req.write(payload);
     req.end();
   });
@@ -8119,10 +8140,19 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
     'anthropic-version': '2023-06-01',
     ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
   };
+  // A stopped or disconnected turn ends the SERVER-side work (#2087, D2).
+  // Before this, `aborted` only suppressed delivery: `runCopilot` took no
+  // signal and `httpPostJson` accepted none, so a disconnect could leave up to
+  // MAX_REPAIR_ITERATIONS + 1 = 3 × 180 s of LLM work running, billed, and
+  // discarded. The client's Stop is an `AbortController` on its own fetch, so
+  // it arrives here as the same `res.on('close')` a tab close does — one
+  // cancellation path for both (AC9, AC14).
+  const turnAbort = new AbortController();
+
   // Whole-bundle generations are big (16k max_tokens) — a generous transport
   // timeout, unlike the short one-shot suggestion calls.
   const callLlm = async (payload) => {
-    const result = await httpPostJson(url, headers, { model: target.model, ...payload }, 180000);
+    const result = await httpPostJson(url, headers, { model: target.model, ...payload }, 180000, turnAbort.signal);
     if (result.error || result.status < 200 || result.status >= 300) {
       const detail = result.error
         || (result.body && (result.body.error?.message || result.body.error || result.body.message))
@@ -8143,7 +8173,11 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   }
   let aborted = false;
   res.on('close', () => {
-    if (!res.writableEnded) aborted = true;
+    if (!res.writableEnded) {
+      aborted = true;
+      // #2087: stop the work, not just its delivery.
+      turnAbort.abort();
+    }
   });
   function emit(ev) {
     if (aborted) return;
@@ -8157,13 +8191,22 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   emit({ type: 'assist', ...assistMeta(target).assist });
 
   try {
-    const out = await runCopilot({ bundle: body.bundle, messages, callLlm, onProgress: emit });
+    const out = await runCopilot({
+      bundle: body.bundle, messages, callLlm, onProgress: emit, signal: turnAbort.signal,
+    });
     emit({ type: 'result', ...out, model: target.model, meta: assistMeta(target) });
   } catch (err) {
-    // Transport failure with no bundle to fall back to, or no parseable reply
-    // at all. "Model couldn't get lint-clean" is NOT an error — runCopilot
-    // returns ok:false for that.
-    emit({ type: 'error', status: 502, error: err.message });
+    // A stopped turn is not a failure (#2087): the socket is already gone, so
+    // `emit` is a no-op anyway, but classifying it keeps a deliberate Stop out
+    // of the error path — nothing is left to report and no proposal is built.
+    if (isCopilotAborted(err)) {
+      // nothing to emit — the client asked for this and is no longer listening
+    } else {
+      // Transport failure with no bundle to fall back to, or no parseable reply
+      // at all. "Model couldn't get lint-clean" is NOT an error — runCopilot
+      // returns ok:false for that.
+      emit({ type: 'error', status: 502, error: err.message });
+    }
   }
   if (!aborted) res.end();
 });

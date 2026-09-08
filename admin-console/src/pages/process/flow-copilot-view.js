@@ -111,25 +111,16 @@ export function bundleSizeLevel(charCount) {
   return 'ok';
 }
 
-/**
- * A new proposal supersedes every still-actionable one: only the latest
- * assistant card may carry live Apply/Discard buttons — an older bundle would
- * silently drop everything proposed after it.
- */
-export function supersedePending(entries) {
-  return (Array.isArray(entries) ? entries : []).map(e =>
-    (e && e.role === 'assistant' && e.status === 'proposed') ? { ...e, status: 'superseded' } : e);
-}
-
-/** The latest assistant entry still awaiting an Apply/Discard decision. */
-export function latestProposal(entries) {
-  const list = Array.isArray(entries) ? entries : [];
-  for (let i = list.length - 1; i >= 0; i--) {
-    const e = list[i];
-    if (e && e.role === 'assistant' && e.status === 'proposed') return e;
-  }
-  return null;
-}
+// `supersedePending` and `latestProposal` lived here until #2087. Both existed
+// because the panel held a LIST of cards of which at most one might still be
+// actionable, and had to find or retire it. Ownership of the actionable
+// proposal moved to the app-level FlowCopilotProvider, which holds exactly one
+// per scope and drops it on Apply / Discard / Stop / a superseding turn — so
+// "which card is live" is now structural rather than searched for, and no
+// locally-held card can carry `status: 'proposed'` at all (`hydrateMessages`
+// below forces a rehydrated proposal to `superseded`, and a committed one is
+// `applied`/`discarded`). They are deleted rather than left exported with
+// tests as their only callers.
 
 // ── chat-history persistence (#1071 item 1) ──────────────────────────────────
 // The draft file carries `copilot: { messages: [] }` — storage metadata, never

@@ -185,12 +185,20 @@ This is a migration concern (see §8). Summary: the existing single shared admin
 
 ### Protecting the internal orchestrator API (port 4002)
 
-This boundary is **critical** and must be enforced at multiple layers:
-1. **Network**: port 4002 stays bound to the internal Podman network only — never published to the host in a multi-user deployment. (Today it is already internal-only; the requirement is to *keep it that way* and document it as a hard rule.)
-2. **Shared service secret**: orchestrator ↔ admin-console calls carry a `X-Internal-Secret` header validated against a value in `.env`. Human session JWTs are **not** accepted on 4002, and the service secret is **not** accepted on the public 4000 API.
-3. **No proxying of raw 4002 routes to authenticated-but-unauthorized users**: the admin console's public API is the only gateway, and it applies §3 authorization before proxying to 4002.
+> **Superseded — see `docs/governance-concept.md` §3.5 + Amendment 1 (#1456).** The
+> single `X-Internal-Secret` header described below was the 2026-05 design. It was
+> replaced, before anything was built, by GOV-PLATFORM-2's **three token classes**,
+> which §3.5 declares canonical and which absorbs the equivalent ask from five other
+> governance domains. What shipped is a bearer header carrying either a control-plane
+> token (the console, full surface) or a **per-agent** token (the agent-facing
+> allowlist, that agent's own `:id` only), behind an `observe|warn|enforce` ladder.
+> Layers 1 and 3 below are unchanged and still hold; layer 2 is the superseded half.
+> The `bp-events` paragraph is moot — that route was deleted by #1961/#2005.
 
-The `POST /internal/bp-events` endpoint (no auth, internal-only) stays exactly as designed — internal network + best-effort posture — and must remain unpublished.
+This boundary is **critical** and must be enforced at multiple layers:
+1. **Network**: port 4002 stays bound to the internal Podman network only — never published to the host in a multi-user deployment. (Today it is already internal-only; the requirement is to *keep it that way* and document it as a hard rule.) ✅ *still current — and note it is a boundary against the **host**, not against the container network, which is what made layer 2 necessary rather than merely defensive.*
+2. ~~**Shared service secret**: orchestrator ↔ admin-console calls carry a `X-Internal-Secret` header validated against a value in `.env`.~~ **Superseded by §3.5** — one shared secret cannot express "this agent, these routes, its own id". Human session cookies are still **not** accepted on 4002, and the service token is still **not** accepted on the public 4000 API.
+3. **No proxying of raw 4002 routes to authenticated-but-unauthorized users**: the admin console's public API is the only gateway, and it applies §3 authorization before proxying to 4002. ✅ *still current — this is precisely why the control-plane token grants the full surface.*
 
 ---
 

@@ -36,6 +36,15 @@ const wakeAgent = require("./wake-agent");
 const labelFastPath = require("./github-label-fastpath");
 const { LabelDedupMarkers } = require("./label-dedup-markers");
 const githubEventLog = require("./github-event-log");
+const internalAuth = require("./internal-auth");
+
+// Internal-API authentication for :4002 (#1456, GOV-PLATFORM-2). Resolved ONCE
+// at module load: the config is a deployment property, and re-reading it per
+// request would let a half-applied env change flip the gate mid-flight.
+// `configured: false` (the default for a stack that has not opted in) keeps the
+// gate inert, so this release is behaviourally identical until an operator sets
+// INTERNAL_API_TOKEN.
+const internalAuthConfig = internalAuth.resolveInternalAuthConfig(process.env);
 
 // Shared in-memory dedup markers for the internal label fast-path (#1858). The
 // POST /internal/github-label-applied handler writes a marker per woken
@@ -515,6 +524,31 @@ function startAgentProcess(config) {
   // resolve through, #1547) never takes effect. The orchestrator's PATH has no
   // business travelling; drop it and let the image's own value stand.
   delete childEnv.PATH;
+
+  // ── Internal-API credentials (#1456, GOV-PLATFORM-2) ──────────────────────
+  //
+  // THE STRIP IS THE SECURITY-CRITICAL HALF, and it is easy to miss: the spread
+  // above copies the orchestrator's WHOLE environment into every agent
+  // container, so the orchestrator's own INTERNAL_API_TOKEN — the control-plane
+  // credential that grants the full /internal/* surface — would arrive inside
+  // the very containers this ticket exists to fence out. Minting a narrow
+  // per-agent token while shipping the wide one alongside it is not a control at
+  // all, so both the token and the agent-token signing secret are removed here.
+  // Guarded by `internal-auth-wiring.test.js`.
+  delete childEnv.INTERNAL_API_TOKEN;
+  delete childEnv.INTERNAL_AGENT_TOKEN_SECRET;
+  // The mode is not a secret and is deliberately NOT stripped — an agent-side
+  // caller has no use for it, but neither does hiding it buy anything.
+  //
+  // The per-agent token is deterministic (an HMAC over the agent id), so this
+  // re-mints the identical value on every respawn — which is what makes §3.5's
+  // "rotate via the existing respawn-on-credential-change path" free: all three
+  // respawn paths (env credential change, owner credential change, single-agent
+  // respawn) go through startAgentProcess, and changing the secret invalidates
+  // every outstanding token at once.
+  const agentInternalToken = internalAuth.mintAgentToken(id, internalAuthConfig.agentTokenSecret);
+  if (agentInternalToken) childEnv.AEE_INTERNAL_TOKEN = agentInternalToken;
+  else delete childEnv.AEE_INTERNAL_TOKEN;
 
   // Bind the agent's process to the LLM endpoint configured on its working
   // environment. When an environment doesn't reference an endpoint we leave
@@ -10543,6 +10577,21 @@ async function main() {
     console.error("MATRIX_HOMESERVER required");
     process.exit(1);
   }
+  // Refuse a config that would deny every caller (#1456). Fail-closed at BOOT,
+  // where the operator is looking, rather than at the first request, where the
+  // symptom is a dead platform and the cause is three env vars away.
+  {
+    const refusal = internalAuth.bootRefusal(internalAuthConfig);
+    if (refusal) {
+      console.error(`[Orchestrator] ${refusal}`);
+      process.exit(1);
+    }
+    console.log(
+      `[Orchestrator] internal-auth mode=${internalAuthConfig.mode} `
+      + `configured=${internalAuthConfig.configured}`
+      + (internalAuthConfig.configured ? '' : ' (gate inert — set INTERNAL_API_TOKEN to arm it)'),
+    );
+  }
   migrateLegacyAgentConfigs();
   migrateSkillGrantsToAgents();
   await migrateAgentClaudeMdToReference();
@@ -10575,6 +10624,33 @@ async function main() {
 
   // Internal API — used by admin-console to manage agents
   const internalApi = http.createServer((req, res) => {
+    // ── Internal-API auth gate (#1456, GOV-PLATFORM-2) ─────────────────────
+    // FIRST statement of the handler, deliberately: this server is a ~4 400-line
+    // if-ladder with no middleware chain, so "one auth middleware at the internal
+    // server mount" can only mean the top of the dispatcher. Every route below —
+    // including the `/internal/admin/` delegation on the very next line and the
+    // inverted-guard tail route that serves as the 404 — is behind it, and a
+    // route added later is behind it by construction rather than by review.
+    //
+    // All three ladder rungs run the SAME decision; only `denied` differs, so the
+    // observe-week census is a truthful preview of what enforce will reject.
+    const authDecision = internalAuth.decideInternalAuth({
+      method: req.method, url: req.url, headers: req.headers, config: internalAuthConfig,
+    });
+    if (!authDecision.allowed) {
+      const line = internalAuth.describeDecision(authDecision, { method: req.method });
+      if (authDecision.denied) console.warn(line);
+      else if (authDecision.mode === 'warn') console.warn(line);
+      else console.log(line);
+      if (authDecision.denied) {
+        sendJson(res, authDecision.status, {
+          error: 'internal API authentication required',
+          code: authDecision.reason,
+        });
+        return;
+      }
+    }
+
     // Teams data model (#299) — CRUD for the human Team / users / memberships.
     if (req.url.startsWith('/internal/admin/')) {
       handleTeamsAdminApi(req, res).catch(err => {
@@ -13220,7 +13296,10 @@ async function main() {
     // ── Push / open-PR on behalf of an agent (gh-as-agent push/pr) ──────────────────
     // Moves the managed-policy-gated `git push` / `gh pr create` out of the
     // agent's Claude CLI into the orchestrator (see agentGitPush / agentCreatePr
-    // above). Internal-only, unauthenticated like the rest of :4002.
+    // above). Internal-only. Since #1456 the whole of :4002 is behind the
+    // internal-auth gate at the top of this handler; these two are on the
+    // agent-facing allowlist with `own`-id scope, which is what stops one
+    // agent pushing or opening a PR as another.
     const gitPushMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/git\/push$/);
     const gitPrMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/git\/pr$/);
     if (gitPushMatch || gitPrMatch) {

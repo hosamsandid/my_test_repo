@@ -989,3 +989,60 @@ entry is binding for implementation; revisit triggers are stated where agreed.
     governance settings (lint severities, budgets, trigger policies) are not a target
     for improvement cards; governance changes remain human decisions. Revisit once
     Phase-3 verdict/rollback data proves the loop's measurement reliability.
+
+---
+
+## Amendment 1 — GOV-PLATFORM-2 as built (#1456, 2026-09-08)
+
+§3.5 is a binding decision, and this section does not rewrite it: it records where
+the implementation diverged and why, so the doc stays readable as a design and
+correct as a spec. Everything §3.5 asks for is in place except the one item whose
+subject no longer exists.
+
+### What shipped
+
+| §3.5 asks for | Built as |
+|---|---|
+| One auth middleware at the internal server mount | The first statement of the `internalApi` request handler (`orchestrator/orchestrator.js`). That server is a ~4 400-line `if`-ladder with no middleware chain, so "at the mount" can only mean the top of the dispatcher — every route, including the `/internal/admin/*` delegation and the inverted-guard tail route that serves as the 404, is behind it by construction. |
+| Control-plane token `INTERNAL_API_TOKEN`, bearer header from the proxy layer | The console has no proxy layer — it reaches `:4002` from **126 raw `fetch` call sites**. `admin-console/api/internal-auth-client.js` installs one wrapper over the global `fetch`, scoped to the orchestrator's own origin **and** the `/internal/` prefix. Editing 126 sites would have made completeness a review claim; here a call site cannot opt out and a new one is covered the day it is written. |
+| Per-agent tokens, minted at `startAgentProcess`, baked into the container env like the PAT | Exactly that, as `AEE_INTERNAL_TOKEN`. Deterministic (an HMAC over the agent id), so no state is kept and a respawn re-mints the identical value. |
+| Valid only for the agent-facing allowlist, and only for the agent's own `:id` | `AGENT_ROUTES` in `orchestrator/internal-auth.js`. Derived by reading every caller that runs inside an agent container, not from the prose list — see the two corrections below. |
+| `INTERNAL_AUTH_MODE=observe\|warn\|enforce`, one observe week | Implemented, **`observe` is the default**, and all three rungs run the same predicate — the observe-mode census is therefore a truthful preview of what `enforce` will reject rather than a second, drifting implementation. `enforce` without a token is refused at boot. |
+| Agent tokens rotate via the respawn-on-credential-change path | Free, by construction: all three respawn paths funnel through `startAgentProcess`, and changing the secret invalidates every outstanding token at once. |
+
+### Three corrections §3.5 could not have known
+
+1. **The signaler class has no subject.** §3.5 justifies it with `POST /internal/bp-events` and the ACE `bp-transition.py` caller. That route was **deleted** by the BriefingPack removal (#1961/#2005) and `orchestrator/bp-removal-guard.test.js` asserts it stays gone; nothing in the repo posts BP events, and the webhook server on `:4003` — the only remaining external entry point — has authenticated per-trigger with `X-Hook-Secret` all along. The class is therefore **not implemented**: a token class nothing can present is not a control, it is a hole with a name. Re-adding an external signaler means re-adding the class alongside it; `internal-auth.js` says so at the point where it would go.
+
+2. **`/internal/agents/:id/claim`, one of the four concrete paths in §3.5's allowlist, is also gone** — same removal. The allowlist was rebuilt from the live callers instead.
+
+3. **"Only for the agent's own `:id`" has exactly one legitimate exception.** The loop verifier (#933) posts its verify request into a **sibling's** queue via `POST /internal/agents/:id/enqueue-pending`. Narrowing that to own-id would break every loop carrying a `verify.agentId` gate. It is marked `scope: 'peer'` rather than silently widened, and a unit test pins that it is the *only* such route in both directions. Giving that route its own same-team check — the `wake-agent.js` precedent — is the named follow-up.
+
+### The failure mode this nearly shipped with
+
+`startAgentProcess` builds the agent container's environment from `...process.env`,
+so the orchestrator's **own** `INTERNAL_API_TOKEN` — the credential granting the
+full `/internal/*` surface — would have been inherited by every agent container.
+Minting a narrow per-agent token while shipping the wide one alongside it is not a
+control at all, and nothing about it looks wrong at runtime: every call simply
+succeeds. Both the token and the agent-token signing secret are explicitly deleted
+from the child environment (which covers the kubernetes spawn path too, since it
+receives the same object), and `orchestrator/internal-auth-wiring.test.js`
+mutation-proves that the deletes are present *and* ordered after the spread.
+
+The general rule for successors: when a container's environment is built by
+spreading the parent's, adding a secret to the parent is adding it to the child.
+
+### What did NOT change
+
+- `:4002` is still never published to the host, on either runtime — the gate is
+  defence in depth, not a replacement for the network boundary
+  (`docs/deployment.md` §2/§2a).
+- Console-side authorization (`admin-console/api/scope.js`) is untouched. The
+  control-plane token grants the full surface precisely *because* the console has
+  already decided who may do what before it proxies.
+- **GOV-PLATFORM-3 (internal audit) is not in this change.** §3.5 names it a
+  companion and the ticket's acceptance list does not carry it. The gate emits one
+  `[internal-auth]` log line per would-be violation, carrying the same
+  `callerKind` vocabulary GOV-PLATFORM-3 will persist — enough for the observe-week
+  census, not a substitute for the audit trail.

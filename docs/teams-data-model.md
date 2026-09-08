@@ -68,7 +68,7 @@ records written atomically (write-temp + rename):
 |---|---|
 | `/workspace/teams/index.json` | `{ id, name, description, createdAt, updatedAt }` |
 | `/workspace/users/index.json` | `{ id, subject, email, displayName, systemAdmin, githubHandle, chatFontSize?, createdAt, updatedAt }` |
-| `/workspace/memberships/index.json` | `{ id, userId, teamId, role, createdAt }` |
+| `/workspace/memberships/index.json` | `{ id, userId, teamId, role, createdAt, fromScopeId? }` |
 
 - **Team `id`** is an operator-facing slug (`^[a-z0-9][a-z0-9-]{0,63}$`), like a
   Working Environment id. The default team's id is `default`.
@@ -76,6 +76,11 @@ records written atomically (write-temp + rename):
   OIDC subject claim or corporate email. It is unique (case-insensitive) so SSO
   login can map a corporate identity onto exactly one account. `id` is a
   generated UUID.
+- **Membership `fromScopeId`** is present only on records the D6 migration
+  (#2077) created when it fanned an access-scope membership out to the Agent
+  Teams in that scope — it records which access scope the grant was derived
+  from. Nothing reads it; it exists so a migrated membership is auditable and
+  distinguishable from one a human made. A hand-made membership never has it.
 
 The single source of truth for this model is
 [`orchestrator/teams-store.js`](../orchestrator/teams-store.js) — a pure factory

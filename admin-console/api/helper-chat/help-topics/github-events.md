@@ -210,11 +210,72 @@ The queue holds more than GitHub events: a folded **GitHub digest**, a
 **Briefing-pack event**, and queued session operations all appear with their own
 kind badge, explained on hover.
 
-**Cancel** removes a single entry before it is delivered — the one action on
-this page that changes anything. Use it to stop a wake you know is wrong (a
-mis-labelled issue, a burst queued during maintenance) instead of letting the
-agent burn a session on it. An entry that drained between your reading the page
-and clicking Cancel is reported as already gone, not as an error.
+Each row's **kebab menu** (⋮) holds the two things you can do to a waiting
+entry. They are the only actions on this page that change anything.
+
+**Cancel** removes a single entry before it is delivered. Use it to stop a wake
+you know is wrong (a mis-labelled issue, a burst queued during maintenance)
+instead of letting the agent burn a session on it. An entry that drained between
+your reading the page and clicking Cancel is reported as already gone, not as an
+error.
+
+### Reassign to… — handing a waiting entry to another agent
+
+**Reassign to…** gives the entry to a *different* agent instead of throwing it
+away. The case it exists for: a team has two code reviewers, a review is queued
+for the first one, and that one is busy, wedged or simply the wrong choice. Say
+*let the other reviewer take this*, from here, without going back to GitHub.
+
+Two constraints make it work rather than merely appear to.
+
+**Same team only.** The target must be an agent on the same Agent Team as the
+current holder. The runtime-less team agent itself and disabled agents are not
+offered. This is the same integrity rule a direct agent-to-agent hand-off obeys.
+
+**Only agents that would actually accept the event.** The picker is not a free
+dropdown — it lists only agents that have an **enabled trigger which would
+accept this exact event**, judged by the same repository, event type, label
+filter and subscription-window rules the poller itself applies. This matters
+because a queued entry carries the id of a trigger on the *original* agent, and
+trigger ids never collide across agents: an entry copied to an agent that cannot
+re-resolve it would move in the UI, update the counts, and then be silently
+dropped at the far end. So the entry is re-stamped with the **target's own**
+trigger, and a target that has none is refused.
+
+**When no eligible target exists** the picker says so and offers nothing, with
+an expandable list of each sibling and why it cannot take it — the wrong label,
+a different repository, a different event type, or a subscription window that
+starts after the event. That is an answer about how the flow is wired, not an
+error: reassigning anywhere else would look successful and do nothing. Fix the
+target's trigger, or cancel the entry and re-apply the label on GitHub.
+
+**What can go wrong, and what you will be told.** The entry is removed from the
+source agent **first**, and that removal is the claim:
+
+- If the source agent fired the entry while you were choosing, nothing is moved
+  and you are told the original agent has it. This ordering is deliberate — the
+  alternative risks *both* agents running the same work item, which is worse and
+  harder to notice.
+- In the rare case where the removal succeeds but the target's queue cannot be
+  written, the event is in no queue at all. This is reported as a hard error
+  naming the repository, the issue or PR and the label, so you can re-apply that
+  label on GitHub to run it again; a copy is also saved server-side for
+  recovery. It is never reported as a success.
+
+**Which entries can be reassigned.** Queued **GitHub events** only. Every other
+kind still shows the menu entry, greyed out with the reason — a digest is a
+collapsed batch, a direct hand-off was aimed at its target deliberately, session
+operations are tied to a room, and a queued plain trigger carries no event to
+match a target's trigger against.
+
+Reassigning is recorded in **Processed events**: alongside the original
+`delivered → <first agent>` row you will see a `reassigned → <second agent>` row
+for the same event, with who moved it. So the trail never claims the first agent
+was served when another one did the work.
+
+Reassigning requires **Team Admin** rights over *both* agents — the one losing
+the entry and the one gaining it. Injecting work into an agent's queue starts an
+autonomous run, so it is held to the same bar as firing a trigger by hand.
 
 *Known gap:* the queue protects against Maintenance Mode, not against downtime.
 An event that arrives while the stack is genuinely down is not re-delivered.

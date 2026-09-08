@@ -2,8 +2,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt, deriveClaim, claimLabelFor, claimError, channelAutoClaim, CLAIM_SUFFIX, completedLabelFor, COMPLETED_SUFFIX, normalizeHillClimb, expandWakeHandoffs, isWakeHandoffTrigger, wakeTriggerId } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt, deriveClaim, claimLabelFor, claimError, channelAutoClaim, CLAIM_SUFFIX, completedLabelFor, COMPLETED_SUFFIX, normalizeHillClimb, expandWakeHandoffs, isWakeHandoffTrigger, wakeTriggerId, POSTCONDITIONS, cleanPostcondition, strictestPostcondition, channelPostcondition } = require('./process-template');
 
 // A tiny stand-in for the on-disk draft store: an id is "taken" iff present.
 const existsIn = (set) => (id) => set.has(id);
@@ -2139,4 +2141,209 @@ test('#2031: after a round-trip the listener still tracks who actually hands off
   });
   assert.deepEqual(wakeTriggersOf(repointed, 'rev'), [], 'the old target loses its listener');
   assert.equal(wakeTriggersOf(repointed, 'qa').length, 1, 'the new target gains one');
+});
+
+// --- Verify-before-claim (#2113, flow-control concept §4.2) ------------------
+// The claim schema half: the post-condition vocabulary, its validation at every
+// authoring surface, and the round-trips that must not drop it. The EVALUATION
+// of a post-condition lives in the runner (`_postcondition_verdict` in
+// agent-image/scripts/agent-entrypoint.py) and is tested there.
+
+test('#2113: the post-condition vocabulary mirrors the runner, strictest first', () => {
+  // A DOCUMENTED MIRROR of CLAIM_POSTCONDITIONS in agent-entrypoint.py. This
+  // test reads the runner source rather than restating the tuple, so the two
+  // cannot drift without a red test on this side.
+  assert.deepEqual(POSTCONDITIONS, ['merged', 'review-submitted', 'pr-exists']);
+  const py = fs.readFileSync(
+    path.join(__dirname, '../../agent-image/scripts/agent-entrypoint.py'), 'utf8');
+  const m = py.match(/^CLAIM_POSTCONDITIONS = \(([^)]*)\)/m);
+  assert.ok(m, 'CLAIM_POSTCONDITIONS not found in agent-entrypoint.py');
+  const mirrored = m[1].split(',').map(s => s.trim().replace(/^"|"$/g, '')).filter(Boolean);
+  assert.deepEqual(mirrored, POSTCONDITIONS,
+    'the runner vocabulary drifted from the schema vocabulary');
+  // Frozen: the order IS the precedence used by strictestPostcondition.
+  assert.throws(() => { POSTCONDITIONS.push('x'); });
+});
+
+test('#2113: cleanPostcondition accepts only the closed vocabulary', () => {
+  for (const k of POSTCONDITIONS) assert.equal(cleanPostcondition(k), k);
+  assert.equal(cleanPostcondition('  merged  '), 'merged', 'trimmed');
+  // Everything unrecognised is '' (falsy) — never a silently kept value.
+  for (const bad of ['', '   ', 'Merged', 'merge', 'nope', null, undefined, 7, {}, ['merged']]) {
+    assert.equal(cleanPostcondition(bad), '', `${JSON.stringify(bad)} must not be accepted`);
+  }
+});
+
+test('#2113: strictestPostcondition is deterministic and prefers the stricter side', () => {
+  assert.equal(strictestPostcondition('pr-exists', 'merged'), 'merged');
+  assert.equal(strictestPostcondition('merged', 'pr-exists'), 'merged', 'order-independent');
+  assert.equal(strictestPostcondition('review-submitted', 'pr-exists'), 'review-submitted');
+  // An absent side never weakens a declared one, and two absent sides stay absent.
+  assert.equal(strictestPostcondition('', 'pr-exists'), 'pr-exists');
+  assert.equal(strictestPostcondition('merged', ''), 'merged');
+  assert.equal(strictestPostcondition('', ''), '');
+  // An unrecognised side is treated as absent, not as a winner.
+  assert.equal(strictestPostcondition('nope', 'merged'), 'merged');
+  assert.equal(strictestPostcondition('nope', 'bogus'), '');
+});
+
+test('#2113: deriveClaim stamps a post-condition only when recognised', () => {
+  // Backwards-compatible: no post-condition asked for -> exactly the pre-#2113
+  // shape, key-for-key (a new always-present key would change every bundle).
+  assert.deepEqual(deriveClaim('ready'), { remove: 'ready', add: 'ready:wip' });
+  assert.deepEqual(Object.keys(deriveClaim('ready')), ['remove', 'add']);
+  assert.deepEqual(deriveClaim('ready-to-merge', 'merged'),
+    { remove: 'ready-to-merge', add: 'ready-to-merge:wip', postcondition: 'merged' });
+  // An unrecognised kind is dropped here (it is refused at the authoring
+  // surfaces below, so it cannot arrive silently).
+  assert.deepEqual(deriveClaim('ready', 'nope'), { remove: 'ready', add: 'ready:wip' });
+  // Non-claimable listeners stay non-claimable regardless.
+  assert.equal(deriveClaim('', 'merged'), null);
+  assert.equal(deriveClaim('ready:wip', 'merged'), null);
+});
+
+test('#2113: claimError refuses an unknown post-condition kind', () => {
+  const ok = (pc) => claimError({ remove: 'r', add: 'r:wip', postcondition: pc }, 'r', 'github-event');
+  for (const k of POSTCONDITIONS) assert.equal(ok(k), null, `${k} must validate`);
+  // Absent stays valid (the field is optional).
+  assert.equal(claimError({ remove: 'r', add: 'r:wip' }, 'r', 'github-event'), null);
+  assert.equal(ok(undefined), null);
+  assert.equal(ok(null), null);
+  // A typo is an ERROR, not a silent downgrade: the runtime fails closed on a
+  // kind it cannot verify, so an unrecognised kind would surface as a
+  // mysteriously stuck `:wip` instead of an authoring error.
+  for (const bad of ['merge', 'Merged', 'nope', 42, {}]) {
+    const err = ok(bad);
+    assert.ok(err && /postcondition/.test(err), `${JSON.stringify(bad)} must be refused`);
+    assert.ok(/`merged`/.test(err), 'the error lists the allowed kinds');
+  }
+});
+
+test('#2113: a channel port declares the post-condition and it survives export', () => {
+  assert.equal(channelPostcondition({ label: 'ready-to-merge', postcondition: 'merged' }), 'merged');
+  assert.equal(channelPostcondition({ label: 'x' }), '');
+  assert.equal(channelPostcondition(null), '');
+  // Only the non-default is carried, like autoClaim/transport — exercised
+  // through the real caller (buildProcessTemplate -> remapChannel).
+  const b = buildProcessTemplate({
+    name: 'T', level: 'live', teamId: 'acme',
+    roles: [
+      { id: 'acme-developer', displayName: 'Dev', role: 'developer', triggers: [] },
+      {
+        id: 'acme-reviewer', displayName: 'Rev', role: 'code-reviewer', triggers: [],
+        channels: [
+          { artifact: 'pr', from: 'acme-developer', label: 'ready-to-merge', postcondition: 'merged' },
+          { artifact: 'issue', from: 'acme-developer', label: 'plain' },
+        ],
+      },
+    ],
+  });
+  const chans = b.roles.find(r => r.id === roleKeyOf('acme-reviewer', 'acme')).channels;
+  const withPc = chans.find(c => c.label === 'ready-to-merge');
+  const without = chans.find(c => c.label === 'plain');
+  assert.equal(withPc.postcondition, 'merged');
+  assert.ok(!('postcondition' in without), 'a channel without one stays free of the key');
+});
+
+test('#2113: a mistyped channel post-condition is refused, not silently dropped', () => {
+  const bundle = (ch) => ({
+    id: 'b', name: 'B', processTemplateVersion: 1,
+    roles: [
+      { id: 'dev', displayName: 'Dev', role: 'developer' },
+      { id: 'rev', displayName: 'Rev', role: 'code-reviewer', channels: [ch] },
+    ],
+  });
+  const good = validateProcessTemplate(bundle(
+    { artifact: 'pr', from: 'dev', label: 'ready-to-merge', postcondition: 'merged' }));
+  assert.equal(good.ok, true, good.error);
+  // The `transport` precedent: a mistyped value would be silently dropped by
+  // cleanPostcondition and the author would believe the claim is verified.
+  const typo = validateProcessTemplate(bundle(
+    { artifact: 'pr', from: 'dev', label: 'ready-to-merge', postcondition: 'merge' }));
+  assert.equal(typo.ok, false);
+  assert.match(typo.error, /postcondition must be one of/);
+  // Inert combinations are refused too, rather than quietly doing nothing.
+  const unlabelled = validateProcessTemplate(bundle(
+    { artifact: 'pr', from: 'dev', postcondition: 'merged' }));
+  assert.equal(unlabelled.ok, false);
+  assert.match(unlabelled.error, /requires a label/);
+  const noClaim = validateProcessTemplate(bundle(
+    { artifact: 'pr', from: 'dev', label: 'x', postcondition: 'merged', autoClaim: false }));
+  assert.equal(noClaim.ok, false);
+  assert.match(noClaim.error, /autoClaim false/);
+});
+
+test('#2113: the derived channel listener carries the port post-condition', () => {
+  const wired = expandGithubChannels({
+    roles: [
+      { id: 'dev', displayName: 'Dev', triggers: [] },
+      {
+        id: 'merger', displayName: 'Merger', triggers: [],
+        channels: [{ artifact: 'pr', from: 'dev', label: 'ready-to-merge', postcondition: 'merged' }],
+      },
+    ],
+  });
+  const t = wired.roles.find(r => r.id === 'merger').triggers.find(x => x.channel);
+  assert.deepEqual(t.claim,
+    { remove: 'ready-to-merge', add: 'ready-to-merge:wip', postcondition: 'merged' });
+});
+
+test('#2113: consolidated channels take the strictest declared post-condition', () => {
+  // Several producers hand off on ONE label -> ONE derived listener, so the
+  // claim is a property of that single listener. Verifying more can only
+  // prevent a false `:completed`, so the stricter declaration wins.
+  const wired = expandGithubChannels({
+    roles: [
+      { id: 'a', displayName: 'A', triggers: [] },
+      { id: 'b', displayName: 'B', triggers: [] },
+      {
+        id: 'merger', displayName: 'Merger', triggers: [],
+        channels: [
+          { artifact: 'pr', from: 'a', label: 'ready-to-merge', postcondition: 'pr-exists' },
+          { artifact: 'pr', from: 'b', label: 'ready-to-merge', postcondition: 'merged' },
+        ],
+      },
+    ],
+  });
+  const ts = wired.roles.find(r => r.id === 'merger').triggers.filter(x => x.channel);
+  assert.equal(ts.length, 1, 'still one consolidated listener');
+  assert.equal(ts[0].claim.postcondition, 'merged');
+  // And a group where NOBODY declares one keeps the pre-#2113 claim shape.
+  const plain = expandGithubChannels({
+    roles: [
+      { id: 'a', displayName: 'A', triggers: [] },
+      {
+        id: 'm', displayName: 'M', triggers: [],
+        channels: [{ artifact: 'pr', from: 'a', label: 'ready-to-merge' }],
+      },
+    ],
+  });
+  const pt = plain.roles.find(r => r.id === 'm').triggers.find(x => x.channel);
+  assert.deepEqual(Object.keys(pt.claim), ['remove', 'add']);
+});
+
+test('#2113: the post-condition round-trips export -> materialise', () => {
+  const t = {
+    id: 'merge-listener', type: 'github-event', enabled: true,
+    events: ['pull_request.labeled'], labelFilter: 'ready-to-merge',
+    claim: { remove: 'ready-to-merge', add: 'ready-to-merge:wip', postcondition: 'merged' },
+  };
+  // Export whitelist keeps it (dropping it would silently downgrade a verified
+  // claim back to one that tracks the run).
+  const exported = JSON.parse(JSON.stringify(
+    buildProcessTemplate({
+      name: 'T', level: 'live', teamId: 'acme',
+      roles: [{ id: 'acme-merger', displayName: 'M', role: 'developer', triggers: [t] }],
+    })));
+  const et = exported.roles[0].triggers.find(x => x.id === 'merge-listener');
+  assert.equal(et.claim.postcondition, 'merged', 'lost on export');
+  // Materialise re-derives the claim from the SUBSTITUTED label, and must copy
+  // the post-condition across (it names a GitHub fact, never a label).
+  const member = buildMemberFromTemplate(exported.roles[0], {
+    teamId: 'acme', memberId: 'acme-merger', memberDisplayName: 'M',
+    vars: { repoFullName: 'acme/repo', agentId: 'acme-merger' },
+  });
+  const mt = (member.triggers || []).find(x => x.id === 'merge-listener');
+  assert.equal(mt.claim.postcondition, 'merged', 'lost on materialise');
+  assert.equal(mt.claim.add, 'ready-to-merge:wip');
 });

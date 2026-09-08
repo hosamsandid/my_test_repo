@@ -220,7 +220,10 @@ The **label chip** keeps the bare token you would read on the GitHub issue and
 type into a trigger's label filter. Two suffixes are added by the platform
 rather than by a person, so the chip decodes them into a state word beside the
 token: `:wip` (*in progress*) is stamped when a run claims its wake label, and
-`:completed` (*done*) when that run finishes.
+`:completed` (*done*) when that run finishes — unless the claim declares a
+post-condition (a merged pull request, a submitted review), in which case the
+swap to `:completed` waits until that condition actually holds on GitHub and a
+run that finishes without achieving it stays `:wip`.
 
 **Where the GitHub event id went.** The row used to end in something like
 `#14629937419`, which looked like a ticket number and was not one — it is the

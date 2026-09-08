@@ -659,6 +659,56 @@ The writes already exist and are already gated on the right predicate:
 
 **AC8's disabled-with-hint requirement** is already the house pattern: the gate closure at `agent-lifecycle-menu.js:186-189` sets `disabled: !canManage` plus `title: NO_RIGHTS_HINT`, so a Team Member sees **Share…** greyed out with the reason rather than not at all — the deliberate opposite of `Teams.jsx:472-483`, which hides its admin actions.
 
+> **Amendment 6 (#2082, P4 as built).** Everything above shipped, with **one
+> stated deviation and one addition**.
+>
+> **The deviation: AC8 and AC9 cannot both be satisfied as written, and AC9
+> wins.** AC8 asks for the **Share…** entry to be *disabled* with a hint for a
+> non-admin; AC9 asks that *"a Team Member sees the list read-only"*. A disabled
+> menu entry opens nothing, so implementing AC8 literally makes AC9's read-only
+> list unreachable — and it is not unreachable elsewhere either, because **AC12
+> (P6) retires the Access page's `ManageTeamPanel` as "superseded by the Share
+> dialog"**, which would leave a Team Member with no surface at all for seeing
+> who is on their team. D9 explicitly grants a member the *read* (§6: "reading
+> … is allowed"), so the entry ships **enabled for anyone who can see the team**
+> and the panel renders the list read-only, with no role picker, no Add row and
+> no Remove button. AC8's *hint* is still delivered, on the entry itself:
+> `MEMBERS_READ_ONLY_HINT` ("You can see who has access; only a Team Admin for
+> this team can change it") rather than `NO_RIGHTS_HINT`. It is the only entry
+> in `buildTeamMenu` that stays live without rights, and
+> `agent-lifecycle-menu.test.js` pins that as a deliberate exception to the
+> AC8 loop rather than an oversight.
+>
+> **The addition: the D4 successor picker**, which #2081's Amendment 5 owed to
+> this phase. Removing or demoting the **last** Team Admin opens an inline
+> hand-over prompt whose candidates are the team's *other* members only (the
+> store refuses an outsider, so offering one would be a button that 409s), and
+> the promotion + the removal/demotion go out as **one** request — the store
+> applies both in a single write, so the team is never momentarily
+> un-administrable. A sole admin who is also the sole member is a stated dead
+> end ("add somebody first, or delete the team") rather than an empty picker.
+>
+> **The recommendation above was taken:** `GET /api/matrix/agents` now ships an
+> explicit `canManageTeam` on `role: 'team'` rows, and `buildTeamMenu` takes it
+> as its own `canManageMembers` input (defaulting to `canManage`, so an
+> un-migrated caller is unaffected). `team-share-routes.test.js` pins the
+> present-day coincidence between the two predicates, so a successor that breaks
+> it fails there rather than silently opening the member list.
+>
+> **Client decisions** are the pure `admin-console/src/pages/agent-chat/team-share-view.js`
+> (renderer: `ShareTeamPanel.jsx`, hosted in a `SidePanel` by `RailLifecycleHost`
+> — the `ManageTeamPanel` precedent for a manage-a-list surface, deliberately not
+> a `ConfirmDialog`, which closes on confirm). The one non-obvious thing it
+> encodes: **`POST` takes `teamId` in the body and `DELETE` in the query**,
+> because that is where each route's own gate reads it from — a DELETE that sent
+> it in a body would arrive at `canManageTeam(scope, undefined)` and fail closed
+> for everyone but a System Admin.
+>
+> **Still owed:** AC13's end-to-end journey (below) — the dialog it needed now
+> exists, but the e2e stack has no `AUTH_ENABLED` anywhere, so every predicate
+> in that journey is inert there (the #1459 finding). It needs that
+> infrastructure, not a YAML file.
+
 ### 7.2 — The open directory (D2, D11)
 
 `visibleUser` (`scope.js:124-128`) shows only users who share a team. Under private-by-default that leaves a **fresh team owner unable to invite anybody** — which is why D2 reverses it.
@@ -673,6 +723,13 @@ The writes already exist and are already gated on the right predicate:
 Projecting at a **separate route** rather than conditionally inside the admin one is what makes "the flag is never exposed" checkable by a test that asserts the response keys, instead of a review of every branch. `visibleUser` itself stays as the gate on the admin surface.
 
 **Worth one data-protection sign-off** (names + corporate email become visible to every user) — recorded in #2041 D2 and inherited here.
+
+> **#2082:** the Share picker is now that route's second consumer (the first was
+> the draft Share panel it was built for). The client re-asserts the projection
+> in `team-share-view.js`'s `directoryIndex`, so a future widening of the
+> payload cannot reach the DOM by accident, and `team-share-routes.test.js`
+> asserts the response keys are exactly `{id, displayName, email}` — including
+> for a **System Admin**, who appears in the results as an ordinary colleague.
 
 ### 7.3 — Existing accounts only (D3)
 
@@ -801,11 +858,11 @@ D1 is a large change to a load-bearing key, so it is sliced so **each phase ship
 |---|---|---|---|
 | **P1** | Ownership data model: `ownerId` on Agent Teams and standalone agents (§3.4, §3.5); `memberships.teamId` re-pointed (§3.3); migration per D6. **No behaviour change.** | **#2046** (this doc) | **The before/after fixture test (#2041 AC2, §8.3)** — set-equality over the real predicates for the full user×resource cross-product, including the three failure-mode fixtures. Plus: the existing `scope.test.js` tenant block (`:555-608`) and `orchestrator/agent-tenant.test.js` (`:23-38`) must be re-pointed together, and a **new mirror guard** for the two `resolveAgentTenant` copies (§1.3 — there is none today). |
 | **P2** | Enforcement re-pointed (§4); `resolveAgentTenant` collapse; `scope.all` kept; the `'default'` fallback removed (§8.4); **process drafts/flows scoped** (§11.1 — **done, #2068**, cut out as its own ticket because it does not depend on P1's membership re-keying); the work-plane family gated (§11.2); MCP server writes gated (§11.3). | P1 | Predicate unit tests in `scope.test.js` re-keyed; **a route-coverage test** asserting every route in the §11 inventory now resolves a scope (the `orphan-routes.test.js` shape — assert on route *registration*, not behaviour); a two-user integration check that user B does not see user A's drafts (#2041 AC4). |
-| **P3** | Self-service creation (`POST /api/teams` **api.js:13051** + stream **:13674**); creator becomes owner **and** `team-admin` in the same operation; last-admin successor rule (D4, §2.3). | P2 | A creation test from a **membership-less** user (today impossible — `api.js:11816-11817` explains why); an idempotence test that the creator's membership is written exactly once by both the streaming and non-streaming handler (they duplicate their var shape inline at `:13436` and `:14036`, so both must be asserted); D4 refusal tests on all three routes in §2.3. |
-| **P4** | **Share dialog** in the Agent-Chat team context menu (§7.1) + the open directory (§7.2). | P3 | The four drift guards named in §7.1; a response-key assertion on `GET /api/users/directory` (never `systemAdmin`, never `githubHandle` — D2/D11); a server-side test that a Team Member's `POST /api/admin/memberships` is refused (**not** only that the button is disabled — #2041 AC9). |
+| **P3** | **Done, #2081 — see Amendment 5.** Self-service creation (`POST /api/teams` **api.js:13051** + stream **:13674**); creator becomes owner **and** `team-admin` in the same operation; last-admin successor rule (D4, §2.3). | P2 | A creation test from a **membership-less** user (today impossible — `api.js:11816-11817` explains why); an idempotence test that the creator's membership is written exactly once by both the streaming and non-streaming handler (they duplicate their var shape inline at `:13436` and `:14036`, so both must be asserted); D4 refusal tests on all three routes in §2.3 — **shipped one layer down**, in `teams-store.js` over the pure `orchestrator/team-admin-succession.js`, so the orchestrator's own `/internal/admin/*` writers are covered too (A5.3). |
+| **P4** — *done, #2082 (see Amendment 6 in §7.1)* | **Share dialog** in the Agent-Chat team context menu (§7.1) + the open directory (§7.2). | P3 | The four drift guards named in §7.1; a response-key assertion on `GET /api/users/directory` (never `systemAdmin`, never `githubHandle` — D2/D11); a server-side test that a Team Member's `POST /api/admin/memberships` is refused (**not** only that the button is disabled — #2041 AC9). |
 | **P5** | Layered resource ownership (D7, §5.2) — shared tier for working environments and MCP servers; credentials and model providers re-pointed. | P2 | Tier tests mirroring the credential ones; **a create-a-team-with-no-infrastructure test** (D7's stated consequence, §5.2). |
 | **P6** | Access page rework + System-Admin cleanup view (D5) + docs/help/corpus (§9). | P3, P5 | `help-coverage.test.js` (a page route may not silently lose its topic), the `page-help-view.test.js` parity block, `corpus.test.js` (vendored-copy byte-identity + the worst-case grounding budget), `help-registry.test.js`, the nav-smoke e2e and the `steps-catalog.json` freshness test. |
-| **AC13** | The end-to-end journey, after P4 | P4 | **One e2e journey** proving the loop: user A creates a team → user B does not see it → A shares it with B as Team Member → B sees it but cannot change members → A promotes B to Team Admin → B can → A is removed as last admin only after naming a successor. This is the only test that exercises D1+D4+D9 together. |
+| **AC13** — *blocked: the e2e stack has no `AUTH_ENABLED`, so every predicate in this journey is inert there (#1459)* | The end-to-end journey, after P4 | P4 | **One e2e journey** proving the loop: user A creates a team → user B does not see it → A shares it with B as Team Member → B sees it but cannot change members → A promotes B to Team Admin → B can → A is removed as last admin only after naming a successor. This is the only test that exercises D1+D4+D9 together. |
 
 **Two strategy notes.** (1) **Every "cannot" in the ACs must be asserted server-side.** The console's own comments say the client gating is UX, not the boundary (`App.jsx:41-45`, `credential-scope-view.js:9-11`, `Shell.jsx:209-215`); a test that only checks a disabled button proves nothing about the API. (2) **P2 is where the two `scope.all` spellings bite** (§4.2): a sweep that greps only `scope.all` misses eight `getScope(req).all` sites.
 
@@ -1394,3 +1451,176 @@ requested in chat stays attributable to the person who asked).
   ~10 affordances in a 1651-line JSX file is a separate slice. AC4 makes the
   server the tested guarantee and the UI an "additionally", which is why the
   boundary landed first.
+
+---
+
+## Amendment 5 — what P3 (#2081) found, and what it changed here
+
+Appended for the same reason as Amendments 1–4: the design above stays readable
+as the design that was agreed, and this records where implementation contradicted
+it.
+
+### A5.1 — The blocker was the MEMBERSHIP, not the gate
+
+§10's P3 row and #2081's Scope-in both read as "open up who may create". Read
+against the tree, **`POST /api/teams` and its stream twin were already ungated**
+(A4.5 records this) — any authenticated user could already mint an Agent Team,
+and #2077 already stamped them as its `ownerId`. What they could not do is
+**see it afterwards**.
+
+The reason is A2.2's own rule, applied to the other role. A standalone
+`role: 'agent'` resolves to `null`, so `visibleAgent` falls through to
+`ownedByCaller` and ownership is the boundary. A `role: 'team'` agent **is** its
+own boundary (`resolveAgentTeam` → `cfg.id`), so both predicates take the
+membership branch and never reach the owner. A creator with no prior membership
+therefore created a team that answered `false` to `visibleAgent`,
+`canManageAgent` and `canManageTeam` alike — measured over the real predicates in
+`admin-console/api/creator-membership.test.js`, which keeps that counterfactual
+as a test so the reason for the write cannot be forgotten.
+
+So P3's substance is one membership, written by the same operation that mints the
+team, and the interesting part is where it is *allowed* to be written at all
+(A5.2). AC1's "is recorded as its Team Admin in the same operation" is taken
+literally: the write is **fatal** and the existing rollback undoes the whole
+create, because a team its creator cannot see is worse than no team.
+
+### A5.2 — `setMembership` could not name an Agent Team, and that blocked D4 too
+
+`teams-store.js` validates a membership's `teamId` against `teams/index.json`.
+P1 worked around it with `appendMemberships`, whose own comment says why: "the
+referent is now an **Agent Team** id, which this module cannot see (it has no
+agent access)". That workaround is migration-only, and it is not enough for P3 —
+**`POST /api/admin/memberships` is the route the D4 successor is named on**, so
+on exactly the teams this phase creates, the successor could never have been
+named and AC4's third edge case ("share, hand over, leave") would have been
+unreachable.
+
+The store therefore takes an injected `agentTeamExists(id)` resolver, wired in
+`orchestrator.js` to "is there a readable `role: 'team'` config with this id".
+Three properties are deliberate: the id is shape-checked before it reaches
+`agentDir`, so a `teamId` from a request body cannot walk out of `AGENTS_DIR`; it
+defaults to a **closed** `() => false`, so a caller that wires nothing keeps the
+pre-#2081 key space rather than silently accepting any string; and a throwing or
+unparseable config answers `false`, never `true`.
+
+### A5.3 — The D4 rule belongs to the store, not to the three routes
+
+§2.3 names three `api.js` routes as the enforcement points. Enforcing there
+would have been enough for the console and wrong for the platform: the
+orchestrator's `/internal/admin/*` API writes memberships too and is reachable
+without passing through the console (it is authenticated by #1456, not
+authorized by `scope.js`). A rule whose whole purpose is *"this team can never
+become un-administrable"* has to hold for every writer, so it lives in
+`teams-store.js` over the pure `orchestrator/team-admin-succession.js`, and the
+three routes need no code at all — `adminQuery`/`proxyAdmin` already forward
+`successorUserId` and relay the store's 409 verbatim.
+
+Two consequences worth stating:
+
+- **The hand-over is one write.** The successor's promotion and the departing
+  admin's removal/demotion land in a single `writeArray`, because a
+  promote-then-demote pair can leave a team with two admins, or none, if the
+  process dies between them.
+- **A successor must already be a member.** Naming an arbitrary user would make
+  this a second, unaudited invitation path — sharing is
+  `POST /api/admin/memberships`, already gated on `canManageTeam` (§7.1). It also
+  keeps the rule answerable from the membership array alone, so nothing about it
+  can fail open on an unreadable file.
+
+`DELETE /api/admin/users/:id` needed one extra thing the store cannot supply:
+the orchestrator pauses the departing human's agents and deletes their personal
+credentials **before** calling `deleteUser` (#1571). The refusal is therefore
+re-checked at the top of that route, so a delete the store is about to refuse
+does not first strip a still-present user of their secrets. The store keeps its
+own check — it is the invariant's home; the route check only fixes the order.
+
+### A5.4 — A deleted Agent Team had to start cascading its memberships
+
+`deleteTeam` cascades memberships for an access scope. An **Agent Team** is an
+agent config, so it is deleted by the orchestrator's `DELETE /internal/agents/:id`
+and the store never hears about it. Before P3 that left a dangling grant, which
+was untidy; with D4 it is a **wedge** — the grant still counts towards the
+last-admin rule, so the holder of a deleted team could never be deleted again,
+and no successor could ever be promoted in a team that no longer exists.
+
+The cascade is `removeTeamMemberships(teamId)`, deliberately **not**
+`removeMembership` in a loop: that path enforces D4, and a team that no longer
+exists cannot become un-administrable. Deleting the team is, with promoting
+somebody, one of the two documented ways out of a D4 refusal, and both refusal
+messages say so.
+
+### A5.5 — Private by default was one record short of true
+
+§2.2's guarantee is about agents; the team the wizard creates also brings a
+**Working Environment**, and that record was written with **no tier fields at
+all**. Since #2078 removed the `|| 'default'` fallback (§8.4), `normalizeTier`
+reads that as `teamId: null` — reachable by no team — so a fresh team's own
+environment was visible to a System Admin and to nobody else, on the page where
+its repository and credentials are configured. It is now stamped with the Agent
+Team id, which is both the fix and AC2's "private by default" for the fourth
+resource kind: `visibleEnvironment` is membership-based, so the record is
+reachable by that team and by no other.
+
+Only the **auto-created** environment. A reused one keeps whatever tier it
+carries — re-stamping it would move a shared environment into the new team,
+which is a re-tier and System-Admin-only (A3.1).
+
+### A5.6 — `mode: 'extend'` was the real hole, and P3 owns it
+
+A4.5 leaves "who may create" to P3 and says nothing about extending. But
+`POST /api/teams` with `mode: 'extend'` adds members to a team that **already
+exists**, and it was ungated on both handlers — so the moment teams are private,
+any authenticated user could grow a stranger's team. The two questions have
+different answers and P3 has to give both: **create** is self-service for any
+authenticated user (D1), **extend** is a Team-Admin action by §6's own
+agent-lifecycle row. It is gated on the same
+`canManageAgent(scope, agentMetaForScope(cfg))` pair every other team-mutating
+route uses, rather than on a rule of its own.
+
+One narrow consequence to know: a team created in the window between P1's
+migration and this phase carries no membership at all, so its owner is refused
+here until a System Admin grants them one. Teams that predate P1 are unaffected —
+the D6 fan-out gave them memberships.
+
+### A5.7 — AC6 needed the *absence* of a repository to be legal, not a new path
+
+`team-needs-no-infrastructure.test.js` (A3.4) proves a fresh team can **reuse a
+shared environment**. What it does not cover is having nothing to reuse: with no
+`environmentId`, `POST /api/teams` demanded `repository.url`, an SSH key and a
+GitHub PAT. A brand-new user on an empty installation could therefore be refused
+a team outright — the pre-configuration D7 exists to remove.
+
+The fix is small because #1623 already built the repo-less path: "no
+`environmentId` **and** no repository" now sets the same `repoLess` flag the
+reused-env branch sets, and the PAT requirement follows the repository rather
+than the environment (a token exists to clone and to drive `gh`; a repo-less team
+has nothing to authenticate against). A declared repository keeps every existing
+check. This is a widening — a caller that used to get a 400 for omitting
+`repository` now gets a repo-less team — which is the AC, and it is stated here
+rather than left to be discovered.
+
+### A5.8 — What P3 did NOT do, and why
+
+- **`resolveOwnerTeamId` is untouched.** #2081's Scope-in asks for it to be
+  re-pointed; A3.3 records that as blocked on retiring `teams/index.json`, which
+  no phase owns, and P3 found no reason to disagree. Widening it to accept an
+  Agent Team id would work for environments and MCP servers (membership-keyed
+  predicates) and quietly break **credentials**, whose reach is still resolved
+  through `resolveAgentTenant` against a `'default'` stamp — it would make it
+  possible to create a credential no agent can use. The successor's order is
+  still A3.3's.
+- **`POST /api/admin/teams` is 410, and the other scope verbs stay.** AC3 offers
+  "no longer exists (or returns gone)"; `Gone` naming its successor is the
+  difference between "this API changed" and "your request was malformed". The
+  read/rename/delete verbs survive because `teams/index.json` still backs the
+  Access page and five dropdowns (A3.3). **The consequence is a real capability
+  removal and is not hidden**: no new access scope can be minted, so a new
+  team-tier *credential* must name an existing scope or be personal/system. On
+  this installation (§8.5) that is three scopes and the layer is retiring anyway,
+  but it is the one thing to reverse first if it bites.
+- **The Share dialog is still P4.** P3 delivers the server capability: a
+  successor can be named over the API, and the console's Manage panel already
+  surfaces the store's refusal message verbatim, which is the whole instruction.
+  A successor *picker* belongs with the dialog.
+- **AC13's end-to-end journey is still P4's**, unchanged: it needs the Share
+  dialog to exist.

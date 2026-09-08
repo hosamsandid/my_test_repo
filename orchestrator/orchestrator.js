@@ -8,6 +8,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
+const teamAdminSuccession = require("./team-admin-succession");
 const { resolveAgentTenant, planTenantBackfill } = require("./agent-tenant");
 const { needsAdoption, planAdoption, planBootstrapMembership } = require("./default-team-adoption");
 const { makeSkillSourceResolver, parseSkillDescription } = require("./skill-source");
@@ -295,7 +296,23 @@ const MCP_CREDENTIALS_KEYS_DIR = "/workspace/mcp-credentials/_keys";
 // under /workspace alongside the other persistent collections; the orchestrator
 // is the single writer for tenancy/identity data and owns the startup
 // bootstrap + ownership backfill below.
-const teamsStore = createTeamsStore({ root: WORKSPACE });
+// `agentTeamExists` is the injected half of "does this team id exist" (#2081):
+// since P1's fan-out a membership names an **Agent Team**, which is an agent
+// config the store cannot see. Id-shape-checked before it ever reaches
+// `agentDir`, so a `teamId` arriving from a request body cannot walk out of
+// AGENTS_DIR; a config that will not parse answers `false`, never `true`.
+const teamsStore = createTeamsStore({
+  root: WORKSPACE,
+  agentTeamExists: (id) => {
+    if (typeof id !== 'string' || !AGENT_ID_RE.test(id)) return false;
+    try {
+      const cfg = loadAgentConfig(id);
+      return !!cfg && cfg.role === 'team';
+    } catch {
+      return false;
+    }
+  },
+});
 // Per-human Matrix credentials (#1458). Deliberately a SEPARATE store from the
 // user records above: `sanitizeUser()` is a convention applied at the store
 // boundary, and users/index.json is also read directly by the admin-console —
@@ -10933,6 +10950,21 @@ async function handleTeamsAdminApi(req, res) {
         return sendJson(res, 200, clean(teamsStore.updateUser(resourceId, body))), true;
       }
       if (req.method === 'DELETE' && resourceId) {
+        // The D4 last-admin refusal (#2081 AC5) is re-checked HERE, ahead of
+        // the two best-effort teardown steps below, even though
+        // `teamsStore.deleteUser` enforces it too: those steps pause the
+        // person's agents and delete their personal credentials, and doing that
+        // for a delete the store is about to refuse would leave a still-present
+        // user stripped of their secrets. The store keeps its own check because
+        // it is the invariant's real home; this one only fixes the ORDER.
+        {
+          const plan = teamAdminSuccession.planUserDeletion({
+            memberships: teamsStore.listMemberships(), userId: resourceId,
+          });
+          if (!plan.ok) {
+            return sendJson(res, 409, { error: plan.message, code: plan.code }), true;
+          }
+        }
         // Offboarding (#1571, Phase 5): pause the departing human's agents and
         // auto-delete their personal credentials BEFORE removing the user
         // record, so a partial failure leaves the user recoverable rather than
@@ -10973,6 +11005,9 @@ async function handleTeamsAdminApi(req, res) {
         return sendJson(res, 200, teamsStore.removeMembership({
           userId: parsed.searchParams.get('userId'),
           teamId: parsed.searchParams.get('teamId'),
+          // The D4 successor (#2081) — required only when the target is the
+          // team's last admin, and validated by the store.
+          successorUserId: parsed.searchParams.get('successorUserId') || undefined,
         })), true;
       }
     }
@@ -10980,7 +11015,12 @@ async function handleTeamsAdminApi(req, res) {
     sendJson(res, 404, { error: 'unknown admin route' });
     return true;
   } catch (err) {
-    sendJson(res, err.statusHint || 500, { error: err.message });
+    // `code` rides along when the store set one (the D4 refusals, #2081) so a
+    // client can branch on the reason rather than on the message text.
+    sendJson(res, err.statusHint || 500, {
+      error: err.message,
+      ...(err.code ? { code: err.code } : {}),
+    });
     return true;
   }
 }
@@ -12022,6 +12062,24 @@ async function main() {
           // Parent last. A parent fast-phase failure IS surfaced (below) — the
           // agent the caller asked to delete could not be removed.
           await fastTeardown(id, parentCfg, true);
+
+          // Cascade the human memberships that named this Agent Team (#2081).
+          // `deleteTeam` does this for a legacy access scope, but a self-service
+          // Agent Team is deleted here, and a membership left pointing at a
+          // vanished team is not merely untidy: it counts towards the D4
+          // last-admin rule, so its holder could never be deleted again. Runs
+          // after the config is gone, and is best-effort — a delete that
+          // succeeded must not report failure over a bookkeeping write.
+          if (parentCfg && parentCfg.role === 'team') {
+            try {
+              const dropped = teamsStore.removeTeamMemberships(id);
+              if (dropped > 0) {
+                console.log(`[Orchestrator] Dropped ${dropped} membership(s) of deleted Agent Team '${id}'`);
+              }
+            } catch (err) {
+              console.error(`[Orchestrator] membership cascade for deleted team '${id}': ${err.message}`);
+            }
+          }
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({

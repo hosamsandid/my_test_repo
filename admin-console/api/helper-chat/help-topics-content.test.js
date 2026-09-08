@@ -901,11 +901,20 @@ const TOPIC_CONTENT = [
       'Outcomes — what the agent signals when a run ends',
       'Knowledge — what this agent has learned',
       'Settings — configuring the agent',
+      'Sharing a team — who can open it and who can change it',
       'Where the Agents page went',
     ],
     concepts: [
       'one long-running Claude session',
       'Reset Session',
+      // #2082 — the four sharing rules a reword must not soften. The read-only
+      // list is the AC9 half that AC8's "disabled" wording would have removed;
+      // the name+email projection is D2/D11; existing-accounts-only is D3; the
+      // hand-over is D4.
+      'A Team Member sees the list read-only',
+      'never their GitHub handle',
+      'already have an account',
+      'The last Team Admin cannot simply leave',
       'one workspace',
       'wake instruction',
       'Cron (recurring)',

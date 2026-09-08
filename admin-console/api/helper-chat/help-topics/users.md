@@ -61,8 +61,9 @@ re-granting their scopes on the **Access** page is part of the job.
 They are different mechanisms, not two levels of one setting:
 
 - **System Admin** is the flag on the record here. It is **global**: every access
-  scope, every resource, plus the operations reserved for it (creating scopes,
-  reassigning resources between them, managing users, installing plugins).
+  scope, every resource, plus the operations reserved for it (reassigning
+  resources between them, managing users, installing plugins). Note that
+  *creating a team* is **not** one of them — that is self-service for everybody.
 - **Team Admin** is a **membership** in one scope, granted on the **Access**
   page. It manages that scope and its members, and nothing outside it.
 
@@ -124,8 +125,16 @@ stepping down deliberately is a legitimate thing to do.
 
 ## Deleting a user is an offboarding
 
-**Delete** does noticeably more than remove a row, and it happens *before* the
-record disappears:
+**One thing is refused before any of it runs:** you cannot delete somebody while
+they are the **last Team Admin** of a team. The refusal names every team that
+blocks it, and there are two ways past it — promote another member of that team
+to Team Admin, or delete the team. This is checked *first*, so a refused delete
+pauses nothing and revokes nothing. Note the asymmetry with System Admin below:
+that role is global and a replacement can always be minted, whereas an
+admin-less team has nobody left who may repair it.
+
+Otherwise **Delete** does noticeably more than remove a row, and it happens
+*before* the record disappears:
 
 1. **The departing human's own agents are paused** — disabled in place, drained,
    not wiped and not deleted. Even a team-locked agent is paused, because this

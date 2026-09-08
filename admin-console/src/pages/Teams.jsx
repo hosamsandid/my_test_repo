@@ -1,17 +1,14 @@
 import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router';
-import { Plus, Trash2, Users2, UserPlus, Settings2, ShieldCheck } from 'lucide-react';
+import { Trash2, Users2, UserPlus, Settings2, ShieldCheck } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FormInput from '../components/FormInput';
-import IdField from '../components/IdField';
-import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
-import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import LearningBadge from '../components/LearningBadge';
 import { groupAgentsForOwnership } from './teams-ownership';
 import { ACCESS_HELP_SECTIONS } from './access-help-sections.js';
@@ -85,39 +82,13 @@ function ErrorBar({ error, onDismiss }) {
   );
 }
 
-/* ── Create-team form ─────────────────────────────────────────────────── */
-function CreateTeamForm({ onSave, onCancel, saving, error }) {
-  const [name, setName] = useState('');
-  const [id, setId] = useState('');
-  const [description, setDescription] = useState('');
-  const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } =
-    useAutoDerivedId({ setName, setId, getName: () => name });
-
-  const canSave = name.trim() && id.trim();
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
-      <ErrorBar error={error} />
-      <FormInput label="Name *" value={name} onChange={handleNameChange} placeholder="e.g. Payments Squad" />
-      <IdField
-        value={id} onChange={handleIdChange}
-        isAutoDerived={isAutoDerived()} onResetAuto={resetAutoDerive}
-        placeholder="e.g. payments"
-        helpText={<>Auto-derived from Name; edit to override. {ID_FORMAT_HINT}</>}
-      />
-      <FormInput label="Description" value={description} onChange={setDescription} multiline rows={3} placeholder="What this team owns" />
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <button
-          onClick={() => onSave({ id: id.trim(), name: name.trim(), description: description.trim() })}
-          disabled={saving || !canSave}
-          style={{ ...primaryBtn, opacity: (saving || !canSave) ? 0.6 : 1, cursor: saving ? 'wait' : 'pointer' }}
-        >
-          {saving ? 'Creating…' : 'Create team'}
-        </button>
-        <button onClick={onCancel} style={{ ...ghostBtn, padding: 'var(--eb-space-2) var(--eb-space-4)', fontSize: 'var(--eb-text-sm)' }}>Cancel</button>
-      </div>
-    </div>
-  );
-}
+/* ── Creating a scope is retired ──────────────────────────────────────────
+   #2081 AC3: an access scope is no longer created here. `POST /api/admin/teams`
+   answers 410 and the one creation path is `POST /api/teams` — an **Agent
+   Team**, self-service, whose creator becomes its Team Admin in the same
+   operation. The `CreateTeamForm` that used to live here is deleted rather
+   than hidden: a form posting to a retired route is a button that 410s.
+   Existing scopes stay fully manageable below (rename, membership, delete). */
 
 /* ── Manage-team panel (details + members) ────────────────────────────── */
 // `readOnly` (a Team Member viewing a team they don't administer, #584 AC9)
@@ -384,9 +355,6 @@ export default function Teams() {
   const { data: agents, refetch: refetchAgents } = useApi('/api/agents');
   const { data: environments, refetch: refetchEnvs } = useApi('/api/environments');
 
-  const [creating, setCreating] = useState(false);
-  const [savingCreate, setSavingCreate] = useState(false);
-  const [createError, setCreateError] = useState(null);
   const [manageTeam, setManageTeam] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [actionError, setActionError] = useState(null);
@@ -433,16 +401,6 @@ export default function Teams() {
     },
   ];
 
-  async function handleCreate(body) {
-    setSavingCreate(true); setCreateError(null);
-    try {
-      await apiCall('POST', '/api/admin/teams', body);
-      setCreating(false);
-      refetchTeams();
-    } catch (e) { setCreateError(e.message); }
-    finally { setSavingCreate(false); }
-  }
-
   async function handleDelete() {
     try {
       await apiCall('DELETE', `/api/admin/teams/${encodeURIComponent(deleteTarget.id)}`);
@@ -474,9 +432,6 @@ export default function Teams() {
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
         <button onClick={() => navigate('/users')} style={{ ...ghostBtn, padding: 'var(--eb-space-2) var(--eb-space-4)', fontSize: 'var(--eb-text-sm)' }}>
           <Users2 size={15} /> Manage Users
-        </button>
-        <button onClick={() => { setCreating(true); setCreateError(null); }} style={primaryBtn}>
-          <Plus size={15} /> New Team
         </button>
       </div>
     ) : null
@@ -512,7 +467,7 @@ export default function Teams() {
 
       <ErrorBar error={actionError} onDismiss={() => setActionError(null)} />
 
-      <DataTable columns={COLUMNS} data={teamList} emptyText="No teams yet. Click 'New Team' to add one." getRowKey={r => r.id} onRowClick={r => setManageTeam(r)} />
+      <DataTable columns={COLUMNS} data={teamList} emptyText="No access scopes. Creating a team is self-service — use + Create." getRowKey={r => r.id} onRowClick={r => setManageTeam(r)} />
 
       {/* Reassigning agents/environments across teams is a global operation —
           System-Admin-only (#584). Non-admins never see this section. */}
@@ -526,10 +481,6 @@ export default function Teams() {
           onRefreshEnvs={refetchEnvs}
         />
       )}
-
-      <SidePanel open={creating} onClose={() => setCreating(false)} title="New team" width="520px">
-        {creating && <CreateTeamForm onSave={handleCreate} onCancel={() => setCreating(false)} saving={savingCreate} error={createError} />}
-      </SidePanel>
 
       <SidePanel open={!!liveManageTeam} onClose={() => setManageTeam(null)} title={liveManageTeam ? `Manage: ${liveManageTeam.name}` : ''} width="560px">
         {liveManageTeam && (

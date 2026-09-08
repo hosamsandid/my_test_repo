@@ -179,6 +179,7 @@ const OVERLAY_KEYS = {
   'modal:flow-anomalies': 'The Flow anomalies side panel of a live team.',
   'modal:flow-improvements': 'The Improvements side panel of a live team.',
   'modal:draft-share': 'The Share side panel of a draft on the Flows rail.',
+  'modal:team-share': 'The Share side panel of an Agent Team in the Agent Chat rail.',
   'modal:plugin-install': 'The install confirmation dialog on the Plugins page.',
   'modal:plugin-uninstall': 'The uninstall confirmation dialog on the Plugins page.',
   'modal:model-provider': 'The create/edit provider side panel on the Model Providers page.',
@@ -274,6 +275,10 @@ const CONTEXT_KEYS = {
   // own; resolution falls through to `/flows`, whose sharing chapter it
   // deep-links into.
   'modal:draft-share': { label: 'Flows · share a draft' },
+  // The team Share panel in the Agent Chat rail (#2082) — registered for the
+  // same reason: a `SidePanel` at 60/61 hosting a "?". No topic of its own;
+  // resolution falls through to `/chats`.
+  'modal:team-share': { label: 'Agent Chat · share a team' },
   // The Plugins page's install and uninstall confirms (#1986). Same reason as
   // every overlay above, one layer higher: a ConfirmDialog is the shared Modal
   // at z-index 9999, so a "?" inside one has to lift the help panel to 10000 to

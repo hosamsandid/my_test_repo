@@ -48,7 +48,20 @@ pushed map; a granted-but-unconfigured team simply isn't polled.
 `spike.js probe` / `raw` / `whoami-jira` load it so you can hit Jira by hand.
 `server.js` no longer reads it.
 
-## Phase 0 — the spike (superseded by the store above)
+## Delivery (Phase 2 — the `plugin-event` wake)
+
+On a fresh matching transition the broker mints a `jira.<scopeId>.<sig>` scope
+token and `POST`s `AEE_ORCHESTRATOR_URL/internal/plugin-event` (default
+`http://orchestrator:4002`). The orchestrator verifies the token, resolves the
+scope to its team, and wakes every granted agent that carries a matching
+`plugin-event` trigger (`{ pluginId: "jira", eventFilter?, prompt }`). The
+agent's own `prompt` is the wake instruction; the status-change payload rides in
+as untrusted context in an `<external-event source="plugin:jira">` envelope.
+
+No doorbell, no hand-wired `http` trigger. The Phase-0 `doorbell` field +
+`spike-config` endpoint remain only so `spike.js` can still exercise things.
+
+## Phase 0 — the spike (superseded)
 
 Proved the JQL/changelog/dedup core against a real Jira Cloud sandbox with zero
 platform change, via Option A (the content-free doorbell).

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Clock, CalendarClock, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch, Repeat } from 'lucide-react';
+import { RefreshCw, Clock, CalendarClock, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch, Repeat, Puzzle } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import ScriptViewerPanel from '../../components/ScriptViewerPanel';
@@ -101,9 +101,12 @@ function TypeBadge({ type, dataFlow }) {
   const isHttp   = type === 'http';
   const isGithub = type === 'github-event';
   const isLoop   = type === 'loop';
+  const isPlugin = type === 'plugin-event';
   let bg, color, label, Icon;
   if (dataFlow) {
     bg = 'var(--eb-accent-muted)'; color = 'var(--eb-accent-primary)'; label = 'data flow'; Icon = GitBranch;
+  } else if (isPlugin) {
+    bg = 'var(--eb-status-info-bg, var(--eb-accent-muted))'; color = 'var(--eb-status-info, var(--eb-accent-primary))'; label = 'plugin'; Icon = Puzzle;
   } else if (isLoop) {
     bg = 'var(--eb-status-warning-bg)'; color = 'var(--eb-status-warning)'; label = 'loop'; Icon = Repeat;
   } else if (isCron) {
@@ -321,6 +324,8 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
     schedule = summarizeLoopTrigger(trigger);
   } else if (trigger.type === 'http') {
     schedule = `/hooks/${agentId}/${trigger.id}`;
+  } else if (trigger.type === 'plugin-event') {
+    schedule = `${trigger.pluginId || 'plugin'}${trigger.eventFilter ? ` · ${trigger.eventFilter}` : ' · any event'}`;
   } else if (ghSummary) {
     schedule = trigger.repo || 'any repo';
   } else if (trigger.cron) {
@@ -569,7 +574,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   // Draft mode (process-canvas drafts): there is no live agent/environment yet,
   // so the repo is unknown by design — it is applied at materialise time.
   const isDraftMode = ops.mode === 'draft';
-  const knownTypes = new Set(['cron', 'once', 'http', 'github-event', 'loop']);
+  const knownTypes = new Set(['cron', 'once', 'http', 'github-event', 'loop', 'plugin-event']);
   const startedAsDataFlow = isDataFlowTrigger(initialValues);
   // 'data-flow' is a UI-only type that serializes to github-event / push / from.
   const initialType = lockType
@@ -623,6 +628,12 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     // orchestrator queue (label mirrored to GitHub); 'github' is poller
     // delivery. Only meaningful for a label listener — see `showTransport`.
     transport:     initialValues?.transport === 'internal' ? 'internal' : 'github',
+    // ── plugin-event fields (Jira plan §4B) ──────────────────────────────
+    // `pluginId` names which granted plugin may fire this listener; the
+    // optional `eventFilter` is the broker's own event name (opaque to the
+    // platform) — blank = fire on any event from that plugin.
+    pluginId:    initialValues?.pluginId    ?? '',
+    eventFilter: initialValues?.eventFilter ?? '',
   }));
   const isDataFlow = form.type === 'data-flow';
   const showLabelFilter = form.type === 'github-event'
@@ -765,6 +776,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
     }
     if (form.type === 'http' && !form.secret.trim()) { setFormError('Secret is required for HTTP triggers.'); return; }
+    if (form.type === 'plugin-event' && !form.pluginId.trim()) { setFormError('Plugin id is required (the plugin that may fire this listener).'); return; }
     if (form.type === 'loop') {
       if (!isValidMaxIterations(form.maxIterations)) { setFormError('Max iterations is required and must be a positive whole number.'); return; }
       if (form.verifyMode === 'command' && !form.verifyCommand.trim()) { setFormError('Enter the verifier command, or choose a different verifier mode.'); return; }
@@ -814,6 +826,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       if (mg != null) body.minGapSeconds = mg;
     }
     else if (form.type === 'http')         body.secret = form.secret.trim();
+    else if (form.type === 'plugin-event') {
+      body.pluginId = form.pluginId.trim();
+      // `null` (not omitted) so a PUT clears an existing filter when blanked.
+      body.eventFilter = form.eventFilter.trim() || null;
+    }
     else if (form.type === 'github-event') {
       if (form.repo) body.repo = form.repo; // a draft's repo lands at materialise
       body.events = form.events.slice(0, 1); // one event per trigger
@@ -879,6 +896,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             <option value="http">HTTP webhook</option>
             <option value="github-event">GitHub event</option>
             <option value="data-flow">Data flow (agent dependency)</option>
+            <option value="plugin-event">Plugin event</option>
           </select>
         </div>
       )}
@@ -889,6 +907,28 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
       {form.type === 'once' && (
         <DateTimePicker value={form.at} onChange={v => set('at', v)} />
+      )}
+
+      {form.type === 'plugin-event' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Fires when a granted plugin&rsquo;s broker sends an event for this team.
+            The plugin is granted on the Plugins page; the event name is the broker&rsquo;s
+            own (e.g. <code style={{ fontFamily: 'var(--eb-font-mono)' }}>status_changed</code>).
+          </div>
+          <FormInput
+            label="Plugin id"
+            value={form.pluginId}
+            onChange={v => set('pluginId', v)}
+            placeholder="jira"
+          />
+          <FormInput
+            label="Event filter (optional)"
+            value={form.eventFilter}
+            onChange={v => set('eventFilter', v)}
+            placeholder="blank = any event from this plugin"
+          />
+        </div>
       )}
 
       {form.type === 'loop' && (

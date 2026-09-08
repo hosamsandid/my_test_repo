@@ -421,9 +421,18 @@ Each phase is independently mergeable and leaves `main` shippable.
   `github-issues` keeps its bespoke `pushGithubIssueScopeCredentials` and a
   plugin is in exactly one path (it declares `credentials: []`, so the generic
   walker skips it).
-- **Phase 2 — the `plugin-event` trigger (§4B).** Endpoint, trigger type, queue
-  kind, prompt envelope, `TriggerForm` branch, event-log row. Repoint the Phase-0
-  poller at it and drop the doorbell.
+- **Phase 2 — the `plugin-event` trigger (§4B). ✅ landed.** `POST
+  /internal/plugin-event` (scope-token authed — `{pluginId, scopeId}` come from
+  the token, never the body), a generic `plugin-event` trigger type
+  (`{pluginId, eventFilter?, prompt}`), the `kind: 'plugin-event'` queue entry,
+  `_execute_plugin_event` through the same `_execute` chokepoint, the
+  `<external-event source="plugin:<id>">` untrusted envelope, a `TriggersPanel`
+  authoring branch + `TypeBadge`, the `plugin.event` event-log key, and the #506
+  in-flight marker. The jira broker's `deliver()` now POSTs `/internal/
+  plugin-event` (minted scope token) instead of the doorbell. Two of the four
+  §4B touch points needed NO change after all: `pollerSubscribes` already gates
+  on `type === 'github-event'`, and `isAutonomousState` already flips on
+  `triggers.length > 0`.
 - **Phase 3 — CLI + read UI.** `aee-jira` against the contract test; the `/`
   route.
 - **Phase 4 — writes.** `comment` / `transition` behind `policy` (D3); the

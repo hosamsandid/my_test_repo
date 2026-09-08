@@ -114,6 +114,36 @@ test('scope-credentials: the orchestrator push populates the per-scope map; reso
   } finally { srv.close(); }
 });
 
+test('deliver: POSTs /internal/plugin-event to the orchestrator with a minted jira scope token', async () => {
+  const captured = [];
+  const orch = http.createServer((req, res) => {
+    let b = ''; req.on('data', (d) => { b += d; });
+    req.on('end', () => {
+      captured.push({ url: req.url, auth: req.headers.authorization, body: JSON.parse(b || '{}') });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, delivered: 1 }));
+    });
+  });
+  await new Promise((r) => orch.listen(0, '127.0.0.1', r));
+  const prev = process.env.AEE_ORCHESTRATOR_URL;
+  process.env.AEE_ORCHESTRATOR_URL = `http://127.0.0.1:${orch.address().port}`;
+  try {
+    await broker.deliver({
+      scopeId: 'team-1', kind: 'events',
+      events: [{ id: 'KAN-6:10312', event: 'status_changed', issueKey: 'KAN-6', fromStatus: 'To Do', toStatus: 'Ready for Dev' }],
+    });
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].url, '/internal/plugin-event');
+    assert.match(captured[0].auth, /^Bearer jira\.team-1\./);
+    assert.equal(captured[0].body.event, 'status_changed');
+    assert.equal(captured[0].body.eventId, 'KAN-6:10312');
+    assert.match(captured[0].body.summary, /KAN-6.*Ready for Dev/);
+  } finally {
+    if (prev === undefined) delete process.env.AEE_ORCHESTRATOR_URL; else process.env.AEE_ORCHESTRATOR_URL = prev;
+    orch.close();
+  }
+});
+
 test('teardown-scope reaps one scope\'s watch + inbox + credential, bearer-authed', async () => {
   broker.watchStore.setConfig('team-2', { watches: [{ projectKey: 'X' }] });
   broker.inboxStore.append('team-2', { id: 'X-1:1', issueKey: 'X-1' });

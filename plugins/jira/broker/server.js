@@ -30,6 +30,7 @@ const path = require('path');
 
 const {
   verifyScopeToken,
+  mint,
   auditWriter,
   healthEndpoint,
   teardownScopeEndpoint,
@@ -85,31 +86,55 @@ function resolveCredential(scopeId) {
   return { siteUrl, email, apiToken };
 }
 
-// ── Phase-0 delivery: ring the hand-wired doorbell (the inbox is filled by the
-//    poller). Phase 2 swaps this for POST /internal/plugin-event. ─────────────
+// ── delivery: POST /internal/plugin-event (Jira plan §4B) ───────────────────
+// The broker→orchestrator wake channel. A minted scope token carries
+// {pluginId: 'jira', scopeId}; the orchestrator verifies it, resolves the scope
+// to its team, and fans out to every granted agent with a matching
+// `plugin-event` trigger. No doorbell, no `http` trigger to hand-wire — the
+// Phase-0 doorbell config is left in place only for the spike (`spike-config`).
+function orchestratorUrl() {
+  return (process.env.AEE_ORCHESTRATOR_URL || 'http://orchestrator:4002').replace(/\/+$/, '');
+}
+
+function summariseEvents(kind, events) {
+  if (kind === 'digest') return `${events.length} status changes`;
+  const e = events[0] || {};
+  const issue = e.issueKey || e.projectKey || '';
+  return `${issue}${e.fromStatus && e.toStatus ? `: ${e.fromStatus} → ${e.toStatus}` : ''}`.trim() || 'status change';
+}
+
 async function deliver({ scopeId, kind, events }) {
-  const conf = watchStore.loadConfig(scopeId);
-  const doorbell = conf.doorbell;
-  if (!doorbell || !doorbell.url) {
-    writeAudit(scopeId, scopeId, 'wake', 'no-doorbell', kind);
+  if (kind === 'throttle-warning') {
+    // Nothing to wake an agent about — the throttle already suppressed the
+    // events. Record it and move on (the doorbell path posted these too).
+    writeAudit(scopeId, scopeId, 'wake', 'throttled', kind);
     return;
   }
+  const token = mint(PLUGIN_ID, scopeId, SIGNING_SECRET);
+  const first = events[0] || {};
+  const body = {
+    event: first.event || 'status_changed',
+    summary: summariseEvents(kind, events),
+    eventId: kind === 'digest' ? null : (first.id || null),
+    payload: kind === 'digest'
+      ? { kind: 'digest', count: events.length, events: events.slice(0, 20) }
+      : first,
+  };
   try {
-    const res = await fetch(doorbell.url, {
+    const res = await fetch(`${orchestratorUrl()}/internal/plugin-event`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(doorbell.secret ? { 'X-Hook-Secret': doorbell.secret } : {}),
-      },
-      // The body is ignored by the webhook server — the agent pulls the payload
-      // from the inbox — but a count is handy in the broker's own logs.
-      body: JSON.stringify({ plugin: PLUGIN_ID, kind, count: events.length }),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
     });
-    writeAudit(scopeId, scopeId, 'wake', res.ok ? 'ok' : `http-${res.status}`, kind);
-    process.stdout.write(`[jira-broker] doorbell ${res.ok ? 'ok' : `HTTP ${res.status}`} → ${scopeId} (${kind}, ${events.length} event(s))\n`);
+    const out = await res.json().catch(() => ({}));
+    writeAudit(scopeId, scopeId, 'wake', res.ok ? 'ok' : `http-${res.status}`, `${kind}:${out.delivered ?? '?'}`);
+    process.stdout.write(
+      `[jira-broker] plugin-event ${res.ok ? `ok (${out.delivered ?? '?'} agent(s))` : `HTTP ${res.status}`} `
+      + `→ ${scopeId} (${kind}, ${events.length} event(s))\n`,
+    );
   } catch (err) {
     writeAudit(scopeId, scopeId, 'wake', 'error', err.message);
-    process.stdout.write(`[jira-broker] doorbell FAILED → ${scopeId}: ${err.message}\n`);
+    process.stdout.write(`[jira-broker] plugin-event FAILED → ${scopeId}: ${err.message}\n`);
   }
 }
 

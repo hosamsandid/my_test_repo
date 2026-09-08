@@ -32,6 +32,8 @@ const knowledgeSync = require("./knowledge-sync");
 const { createKeyedMutex } = require("./keyed-mutex");
 const flowEmit = require("./flow-emit");
 const wakeAgent = require("./wake-agent");
+const pluginEvent = require("./plugin-event");
+const pluginScopeToken = require("./plugin-scope-token");
 const labelFastPath = require("./github-label-fastpath");
 const { LabelDedupMarkers } = require("./label-dedup-markers");
 const githubEventLog = require("./github-event-log");
@@ -11210,6 +11212,84 @@ async function main() {
           res.end(JSON.stringify({ ok: true, target: resolved.agentId }));
         } catch (err) {
           console.error(`[Orchestrator] wake-agent error: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── a plugin broker wakes an agent (Jira plan §4B) ───────────────────
+    // POST /internal/plugin-event, Authorization: Bearer <plugin scope token>.
+    // The token carries {pluginId, scopeId} — never the body — so a plugin can
+    // only fire events for its own id in its own scope. The grant is the second
+    // gate. GENERIC to plugins, not to Jira (§D5). Pure logic in plugin-event.js.
+    if (req.method === 'POST' && req.url === '/internal/plugin-event') {
+      const auth = req.headers['authorization'] || req.headers['Authorization'] || '';
+      const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7) : '';
+      let scope = null;
+      try { scope = pluginScopeToken.verify(token, pluginRuntime.signingSecret()); } catch { scope = null; }
+      if (!scope || !scope.pluginId || !scope.scopeId) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, reason: 'bad-token' }));
+        return;
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', () => {
+        let parsed;
+        try { parsed = pluginEvent.validatePluginEventRequest(JSON.parse(body || '{}')); }
+        catch (err) { parsed = { ok: false, error: err.message }; }
+        if (!parsed.ok) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: parsed.error }));
+          return;
+        }
+        try {
+          const { pluginId, scopeId } = scope;
+          const { event, summary, payload, eventId } = parsed.value;
+          // Per agent: is it in this scope, is the plugin granted, does it have
+          // a matching `plugin-event` trigger?
+          const agents = listAgentIds().map((aid) => {
+            const cfg = loadAgentConfig(aid);
+            let grant = null;
+            try { grant = cfg && cfg.token ? pluginGrantFor(effectivePlugins(cfg, loadAgentConfig), pluginId) : null; } catch { grant = null; }
+            const inScope = !!(grant && resolveScopeId(cfg, grant.scopeGranularity) === scopeId);
+            return { agentId: aid, inScope, granted: !!grant, triggers: loadTriggers(aid) };
+          });
+          const targets = pluginEvent.resolvePluginEventTargets({ pluginId, event }, agents);
+          const now = new Date().toISOString();
+          for (const t of targets) {
+            enqueuePending(t.agentId, pluginEvent.buildPluginEventEntry({
+              pluginId, event, summary, payload, eventId, triggerId: t.triggerId,
+            }));
+            console.log(
+              `[Orchestrator] plugin-event: ${pluginId}/${scopeId} "${event}" → agent=${t.agentId} trigger=${t.triggerId}`);
+          }
+          if (targets.length === 0) {
+            console.log(`[Orchestrator] plugin-event: ${pluginId}/${scopeId} "${event}" matched no granted agent with a plugin-event trigger`);
+          }
+          // One transparency-log row per wake — a plugin event leaves no GitHub
+          // trace, so this is the whole audit trail (like the #1858 fast-path).
+          try {
+            const ghEvent = pluginEvent.buildPluginEventLogEvent({ pluginId, event, summary, eventId, now });
+            githubEventLog.record({
+              ...githubEventLog.buildEventEntry({
+                ghEvent, repoFullName: null, key: pluginEvent.PLUGIN_EVENT_EVENT_KEY,
+                outcomes: targets.length
+                  ? targets.map((t) => ({ agentId: t.agentId, triggerId: t.triggerId, status: 'delivered', reason: null, digest: false }))
+                  : [],
+              }),
+              source: 'internal-plugin',
+              emittedBy: `plugin:${pluginId}`,
+            });
+          } catch (err) {
+            console.warn(`[Orchestrator] plugin-event log write failed: ${err.message}`);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, delivered: targets.length, targets }));
+        } catch (err) {
+          console.error(`[Orchestrator] plugin-event error: ${err.message}`);
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }

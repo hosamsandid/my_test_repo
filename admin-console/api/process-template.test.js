@@ -1846,6 +1846,43 @@ test('#2030: WITHOUT the branch the option would render "set no label" — the s
   assert.match(block, /`aee-wake --to code-reviewer`/);
 });
 
+test('#2030: buildMemberFromTemplate remaps a wakeAgent `to` role id → materialised member id', () => {
+  const m = buildMemberFromTemplate(
+    { id: 'agent-1', displayName: 'Agent 1', promptTemplate: 'Go.',
+      outcomes: { mode: 'anyOf', options: [{ id: 'h', title: 'Hand off',
+        actions: [{ type: 'wakeAgent', to: 'agent-2', note: 'Start' }] }] },
+      triggers: [] },
+    { teamId: 'test-handoff', memberId: 'test-handoff-agent-1',
+      memberDisplayName: 'Agent 1', vars: { agentId: 'test-handoff-agent-1' } });
+  // The bundle role id `agent-2` never resolves on a live team — its member is
+  // `test-handoff-agent-2`. The stored port must carry the member id (the same
+  // remap this applies to dependsOn / parent / channels[].from).
+  assert.equal(m.outcomes.options[0].actions[0].to, 'test-handoff-agent-2');
+});
+
+test('#2030: the materialised producer prompt runs `aee-wake --to <memberId>`, not the bundle role id', () => {
+  // The regression this guards (why the first hand-off test setups all failed
+  // with 404 unknown-target): the derived `## Outcomes` block is rendered on the
+  // BUNDLE (role ids), while only the stored `outcomes` PORT is remapped to the
+  // member id — so a producer's prompt kept running `aee-wake --to agent-2` even
+  // though its teammate materialised as `test-handoff-agent-2`, and the wake
+  // resolved to nobody. reconcileTeamHandoffWiring (api.js) closes it by
+  // re-rendering the block from the remapped port + live-member wiring; this is
+  // that render at the pure layer it drives.
+  const { outcomesWiringContext } = require('./process-template');
+  const members = [
+    { id: 'test-handoff-agent-1', displayName: 'Agent 1', cfg: { outcomes: {
+      mode: 'anyOf', options: [{ id: 'h', title: 'Hand off to Agent 2',
+        actions: [{ type: 'wakeAgent', to: 'test-handoff-agent-2', note: 'Start' }] }] } } },
+    { id: 'test-handoff-agent-2', displayName: 'Agent 2', cfg: {} },
+  ];
+  const wiring = outcomesWiringContext('test-handoff-agent-1', { roles: members });
+  const block = outcomesBlock(members[0].cfg.outcomes, wiring);
+  assert.match(block, /`aee-wake --to test-handoff-agent-2 --note "Start"`/);
+  assert.match(block, /hand off directly to \*\*Agent 2\*\*/); // named, not a raw slug
+  assert.doesNotMatch(block, /aee-wake --to agent-2\b/); // never the bare role id
+});
+
 test('#2030: the fail-closed tail paragraph is appended once, only when a hand-off exists', () => {
   const withWake = outcomesBlock({ mode: 'anyOf', options: [
     { id: 'h', actions: [{ type: 'wakeAgent', to: 'r1' }] },

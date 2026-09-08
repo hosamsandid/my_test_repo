@@ -33,6 +33,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
 const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
 const { normalizeDiscoveredModels } = require('./model-discovery');
+const { CHAT_AUTHOR_FIELD, chatAuthorStamp } = require('./chat-author');
 const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
@@ -46,7 +47,7 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
 const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require('./prompt-modes');
@@ -811,6 +812,16 @@ function getScope(req) {
     username,
     users: readJsonFile(USERS_INDEX, []),
     memberships: readJsonFile(MEMBERSHIPS_INDEX, []),
+  });
+}
+
+// The author stamp for a chat message posted by this request (#2065). Both
+// halves come from the authenticated session — the user-store record id and the
+// login subject — never from the request body.
+function chatAuthorFor(req) {
+  return chatAuthorStamp({
+    userId: getScope(req).userId,
+    username: req && req.user && req.user.username,
   });
 }
 
@@ -2123,7 +2134,12 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     }
     const vh = validateProcessTemplate({ processTemplateVersion: 1, roles: [], humans: humans || [] }, { allowEmptyRoles: true });
     if (!vh.ok) return res.status(400).json({ error: `Invalid humans: ${vh.error}` });
-    normHumans = normalizeHumans(humans || []);
+    // Drop dead producer refs (#2063): a pr/issue consume whose `from` names no
+    // existing agent is unremovable via the UI (its remove control lived on the
+    // now-deleted producer). Prune against the on-disk roster so it clears on
+    // the next humans save — the safety net behind the node-inspector's per-chip
+    // remove button. Roster-based, so it stays out of the pure normalizeHumans.
+    normHumans = pruneOrphanHumanConsumes(normalizeHumans(humans || []), new Set(listAgentDirs()));
   }
 
   // ── Assist synthesis provider, team-agent only (#1213) ────────────────────
@@ -3066,10 +3082,15 @@ app.post('/api/agents/:id/handover/nudge', handoverLimiter, async (req, res) => 
   }
 
   const txnId = crypto.randomUUID();
+  // The pre-handoff check is posted on a person's behalf, so it carries the same
+  // author stamp as a typed message (#2065 AC1) and is badged with their initials.
+  const preHandoffContent = { msgtype: 'm.text', body };
+  const preHandoffAuthor = chatAuthorFor(req);
+  if (preHandoffAuthor) preHandoffContent[CHAT_AUTHOR_FIELD] = preHandoffAuthor;
   try {
     const sendResp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
       `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
-      { method: 'PUT', body: { msgtype: 'm.text', body } });
+      { method: 'PUT', body: preHandoffContent });
     if (sendResp.status >= 400) {
       return res.status(502).json({ error: sendResp.data?.error || `Chat service error ${sendResp.status}` });
     }
@@ -15469,9 +15490,17 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   const content = { msgtype: 'm.text', body };
   if (extraContent && typeof extraContent === 'object' && !Array.isArray(extraContent)) {
     for (const [k, v] of Object.entries(extraContent)) {
-      if (k.startsWith('io.aee.')) content[k] = v;
+      // The author stamp is established server-side below and is deliberately
+      // NOT part of the pass-through: a browser must not be able to attribute
+      // its message to a different person (#2065 AC2).
+      if (k.startsWith('io.aee.') && k !== CHAT_AUTHOR_FIELD) content[k] = v;
     }
   }
+  // Who wrote this (#2065). Every human message — typed or sent on the user's
+  // behalf by the quick-reply path — records the authenticated console user, so
+  // the transcript can name the author instead of labelling everyone "YOU".
+  const authorStamp = chatAuthorFor(req);
+  if (authorStamp) content[CHAT_AUTHOR_FIELD] = authorStamp;
 
   const txnId = crypto.randomUUID();
   try {

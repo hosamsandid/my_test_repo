@@ -1513,6 +1513,52 @@ test('#987: emptyDraftBundle carries an empty humans[]', () => {
   assert.deepEqual(emptyDraftBundle('x').humans, []);
 });
 
+// ── #2063: prune orphaned human consumes (deleted-producer refs) ────────────
+
+test('#2063: pruneOrphanHumanConsumes drops pr/issue consumes whose producer is gone', () => {
+  const { pruneOrphanHumanConsumes } = require('./process-template');
+  const humans = [{
+    id: 'ba-human', name: 'BA Human', emits: ['ready'],
+    consumes: [
+      { artifact: 'issue', from: 'business-analyst' },            // orphan → dropped
+      { artifact: 'issue', from: 'team-x-business-analyst' },     // real → kept
+      { artifact: 'pr', from: 'ghost' },                          // orphan → dropped
+    ],
+  }];
+  const out = pruneOrphanHumanConsumes(humans, new Set(['team-x-business-analyst', 'other']));
+  assert.deepEqual(out[0].consumes, [{ artifact: 'issue', from: 'team-x-business-analyst' }]);
+});
+
+test('#2063: pruneOrphanHumanConsumes never touches label/file consumes and accepts an array id set', () => {
+  const { pruneOrphanHumanConsumes } = require('./process-template');
+  const humans = [{
+    id: 'r', name: 'R',
+    consumes: [
+      { label: 'needs-human' },                 // no agent ref → kept
+      { artifact: 'file', name: 'report' },      // no agent ref → kept
+      { artifact: 'issue', from: 'gone' },       // orphan → dropped
+    ],
+  }];
+  const out = pruneOrphanHumanConsumes(humans, ['someone']); // iterable, not a Set
+  assert.deepEqual(out[0].consumes, [{ label: 'needs-human' }, { artifact: 'file', name: 'report' }]);
+});
+
+test('#2063: pruneOrphanHumanConsumes removes an emptied consumes key and is byte-identical when nothing is stale', () => {
+  const { pruneOrphanHumanConsumes } = require('./process-template');
+  // All refs dead → consumes key deleted entirely.
+  const dead = pruneOrphanHumanConsumes(
+    [{ id: 'r', name: 'R', consumes: [{ artifact: 'issue', from: 'gone' }] }], new Set());
+  assert.ok(!('consumes' in dead[0]));
+  // Nothing stale → the same human objects are returned unchanged (identity preserved).
+  const clean = [{ id: 'r', name: 'R', consumes: [{ artifact: 'issue', from: 'ba' }] }];
+  const out = pruneOrphanHumanConsumes(clean, new Set(['ba']));
+  assert.strictEqual(out[0], clean[0]);
+  // A human with a `from` matching after trim survives (normalized input is pre-trimmed).
+  assert.deepEqual(
+    pruneOrphanHumanConsumes([{ id: 'r', name: 'R', consumes: [{ artifact: 'issue', from: 'ba' }] }], new Set(['ba'])),
+    [{ id: 'r', name: 'R', consumes: [{ artifact: 'issue', from: 'ba' }] }]);
+});
+
 // ─── #1006: the raw-layer wiring rules (one event, claim shape) ──────────────
 
 test('#1006: rawTriggerError — one event per github-event trigger, legacy passthrough on update', () => {

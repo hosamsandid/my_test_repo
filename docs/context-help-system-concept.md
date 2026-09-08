@@ -399,8 +399,13 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **286,374 — 84.2% used,
-53,626 left** (#2052 replaced chapter 2's documented dead end — growing could not convert an
+the Create & Quickstart topic plus its `seeAlso` neighbours — at **288,483 — 84.8% used,
+51,517 left** (#2053 renamed the design → live-team action from *Materialize* to **Create
+team…** everywhere a user reads it, rewriting `create.md` — this context's own topic — its
+`seeAlso` neighbour `flows.md`, and the every-context `walkthrough/04-flows.md` + `glossary.md`;
+re-measured on the merge with #2052 already in, that took the crown from 286,374 to 288,483,
++2,109 stated as one total measured together since all four grow the same crown. #2052 had
+replaced chapter 2's documented dead end — growing could not convert an
 existing assistant — with the **Convert into a team…** action that now can, and documented it
 in the row menu's own chapter as well: +1,229 in `create.md`, which IS this context's topic,
 and +835 in `agent-chat.md`, which it names as a neighbour, so both land in full; the review

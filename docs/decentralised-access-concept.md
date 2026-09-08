@@ -628,6 +628,17 @@ The matrix below is #2041 §7 carried over verbatim, with the enforcement site f
 
 **Two implementation notes.** (1) `canManageAgent` (`scope.js:288-292`) already means *team-admin of the owning team*, so every mutation route listed as Team-Admin-only in the matrix is **already gated correctly today** and mainly needs re-pointing in P2 — the exception is the work-plane family, which has no gate at all (§11.2). (2) The client already implements this split for one surface and it is the pattern to copy: `settingsSubject` (`agent-chat/agent-settings-view.js:39-47`) **hides** the Settings tab when the list payload's `canManage` is false, i.e. parity with what the server would refuse rather than a button that 403s.
 
+> **Note (1) above is wrong, and #2080 found it by reading the routes — see
+> Amendment 3.** Three Team-Admin-only surfaces this matrix names outright
+> (skill activation, plugin activation, *Install into agent*) were gated on
+> `visibleAgent`, i.e. on **mere membership**, so a Team Member could re-grant
+> their team's agents' skills and plugins. That is not a re-pointing job; it was
+> a live D9 violation on the config plane, outside the work-plane family this
+> note treats as "the exception". Note (2) is accurate, and remains the pattern
+> — but it describes the *Settings tab* only: the Workspace browser's write
+> affordances have no `canManage` awareness at all, so they are the one place
+> where a member still sees a control the server now refuses.
+
 ---
 
 ## 7 — Sharing (D2, D3, D8, D11)
@@ -839,34 +850,37 @@ Two things it deliberately did **not** do. The draft id namespace stays global a
 
 Decision core: `admin-console/api/draft-access.js` (pure, `draft-access.test.js` carries the two-user loop this row's P2 line named); wiring guarded by `draft-routes-access.test.js`. Client decisions in `admin-console/src/pages/process/draft-share-view.js`.
 
-### 11.2 — The work plane is ungated — **cross-tenant half CLOSED by #1459; the D9 split still P2**
+### 11.2 — The work plane is ungated — **D9 write half CLOSED by #2080; tenant half CLOSED by #1459 §2 (PR #2105)**
 
-> **Status: partially closed.** #1459 (P1) put one `:agentId`-keyed middleware in
-> front of the whole family — `admin-console/api/work-plane-access.js`, mounted
-> in `api.js` directly after `auth.gate` — so nothing here is reachable by a
-> caller outside the agent's tenant any more. The finding below is kept as the
-> record of what was there, and its **line numbers are now historical** (the
-> gate keys on the route family's parameter name, `:agentId`, precisely because
-> a line range goes stale).
+> **Status: closed.** This row is two rules wearing one heading, and they landed
+> apart.
 >
-> **What is still owed to P2 is the split this section's own closing line names**,
-> and it is the more interesting half: the delivered gate is *membership*, so a
-> Team **Member** may still delete workspace files and run `git-action` in their
-> own team's agents. Two things the implementation learned about that P2 change:
+> **Closed by #2080 (P2 / AC7b):** the D9 read/write split named in the last
+> paragraph below. The ten `manage`-class routes of the §6 matrix now require
+> `canManageAgent` — the seven workspace/context writes through the new
+> `requireAgentManage` middleware (`admin-console/api/team-member-boundary.js`),
+> the three trigger mutations through the `denyUnlessCanManageAgent` they
+> already carried. The matrix is data in that module and a source scan asserts
+> it against api.js in **both** directions, so a route added to these families
+> later cannot ship unclassified.
 >
-> - It **cannot be method-based.** The §6 matrix allows a member to chat, and
->   posting a message, opening a DM room, attaching a chat file and stopping
->   your own run are all writes on this family. So P2 needs a per-route
->   read / chat / manage classification, not `if (isWrite)`.
-> - Several routes are **not obviously in one tier**, and the matrix does not
->   name them: `DELETE …/session/:roomId/current` (*Reset Session* — which also
->   kicks a git reset of every repo in the agent's environment), `PUT|DELETE
->   …/session/:roomId/ticket` (creates a GitHub issue with the env PAT — the
->   most outward-facing write in the family), `DELETE /api/matrix/rooms/:roomId/messages`
->   (*Clear History*) and the `/context/*` writes into a read-write host mount.
->   Each deserves a decision on the ticket rather than a guess in a diff.
+> **Closed by #1459 §2 (PR #2105):** the **tenant** half — reads require
+> `visibleAgent`, and the chat/session/`/api/matrix/rooms/*` family needs the
+> room→agent resolution. `admin-console/api/work-plane-access.js` gates the
+> whole family with one `app.use` mount list. The two compose deliberately
+> rather than overlap: the mount answers *"is this agent yours at all"* with a
+> 404, the per-route gate answers *"may you change it"* with a 403. `app.use`
+> cannot discriminate by method, and D9's line is not a method line either —
+> posting a chat message, opening a DM room, attaching a file and stopping your
+> own run are all writes D9 *allows* a member — which is why the split could not
+> be folded into the mount. The gate consumes the `{ teamId, ownerId }` shape
+> `agentMetaForScope` produces, where `teamId` is the RESOLVED access boundary
+> (`resolveAgentTeam`): since #2078 (D8) a standalone agent resolves to a `null`
+> boundary and its privacy is decided by `ownerId` (`ownedByCaller`), not the
+> retired `visibility` field.
 >
-> The delivered gate is where that change lands: one predicate, one place.
+> The line numbers below are historical (they predate #2078 and #2101).
+
 
 **The last scope-aware line in `api.js` is 15214/15223** (`GET /api/matrix/agents`). Every route declared after it — **32 API routes** from `api.js:15344` to `:17498` — contains **no `getScope(req)` call at all** (verified: `getScope` appears 134 times in the file, none past `:15214`). That family covers:
 
@@ -1279,3 +1293,104 @@ lands as one coherent change rather than one third of one.
   That predates this ticket and tightening it would change what existing
   environments can save; recorded here as the remaining tier hole rather than
   fixed under a different heading.
+
+## Amendment 4 — what #2080 (the D9 write boundary) found, and what it changed here
+
+#2080 delivers **AC7b** — the Team Member boundary enforced server-side on
+every mutation route, i.e. the §6 matrix. Three of this document's own
+statements did not survive contact with the routes.
+
+### A4.1 — §6's note (1) is wrong: three Team-Admin-only surfaces were gated on membership
+
+The note claims every mutation route the matrix calls Team-Admin-only is
+"already gated correctly today", with the work-plane family as the sole
+exception. It is not. **Three surfaces the matrix names in its own agent-settings
+row were gated on `visibleAgent`** — mere membership in the owning team:
+
+| Surface | Route | Was | Now |
+|---|---|---|---|
+| Skill activation / deactivation | `POST /api/knowledge/{activate,deactivate}` (`proxySkillActivation`) | `visibleAgent` | `canManageAgent` |
+| Plugin grant | `POST /api/agents/:id/plugins/{activate,deactivate}` (`proxyPluginActivation`) | `visibleAgent` | `canManageAgent` |
+| *Install into agent* | `POST /api/skills/install` | `visibleAgent` | `canManageAgent` |
+
+All three edit a **grant** — `skills[]` / `skillsOverride`, `plugins[]` /
+`pluginsOverride` — before they sync a single file, so each is an agent-settings
+change by the matrix's own wording ("prompt, model, **plugins**, **skills**,
+flow, lifecycle"). A plugin grant additionally decides which privilege-holding
+broker CLI the agent can reach. The status code is unchanged (403); what changed
+is who gets it.
+
+This matters beyond the three lines because of *why* the note was wrong:
+`canManageAgent` really does mean team-admin-of-the-owning-team, so the note is
+right about the predicate and wrong about which routes call it. **A predicate
+being correct says nothing about its call sites**, and the only way to know is
+to read them — which is why #2080's completeness guard scans api.js's source
+rather than asserting over the predicate.
+
+### A4.2 — the matrix needed a fourth class, and `manage` could not be a method rule
+
+§6 sorts surfaces into allowed and Team-Admin-only. Implementing it needed the
+allowed side split in two — `read` and `chat` — because they are allowed for
+different reasons: a file read is not an act, and a chat message is an
+attributable one (the matrix's own rationale for refusing workspace writes is
+that a member "can still *ask the agent* to do it, which leaves an attributable
+trace"). Keeping them apart is what lets a later phase treat them differently
+without re-deriving the matrix.
+
+The split also **cannot be a method rule**, which is the reason #2080 is a
+per-route middleware rather than a second `app.use` mount beside #1459 §2's:
+posting a chat message, opening a DM room, attaching a file and stopping your
+own run are all `POST`s that D9 explicitly allows a member, while `GET`-shaped
+reads and destructive `DELETE`s share the `…/workspace/` prefix. Neither the
+verb nor the prefix carries the boundary; only the matrix does.
+
+### A4.3 — context-folder writes belong in the workspace-writes row
+
+§6's row names "delete/move/upload file, `git-action`" and §11.2 lists the
+`/context/*` write proxies separately. They are the same three operations on a
+read-write **host** mount, and #2080 puts them in the same row — if anything the
+stronger case, since those bytes land outside the container boundary the
+workspace routes stay inside.
+
+### A4.4 — AC3 (manual firing) is a ratchet, because the route still does not exist
+
+§6 already recorded that there is no manual trigger-firing route in `api.js` and
+stated the rule pre-emptively. #2080 confirms that is still true and makes the
+rule enforceable instead of aspirational: the matrix is data, and a source scan
+asserts it against api.js in both directions, so a new route in the
+workspace/context/triggers families **fails the build until it is classified** —
+and `MANUAL_FIRE_RULE` pre-decides the answer (`manage`, because firing produces
+an autonomous run that reads as system-initiated, whereas the same work
+requested in chat stays attributable to the person who asked).
+
+### A4.5 — what #2080 did NOT change, and why
+
+- **The tenant half of §11.2.** Reads keep no `visibleAgent` gate and the
+  chat/session/room family stays ungated here — that is #1459 §2 (PR #2105),
+  whose mount list is the right shape for it. #2080's gate composes with it
+  (404 for invisible, then 403 for unmanageable) and needs it for nothing:
+  every refusal #2080 owns is on a route it gates itself.
+- **The ZIP export.** §6 says "Unchanged (deliberately)" and calls a member
+  taking a full copy of the team definition an accepted, recorded consequence.
+  It stays open, and there is now a test asserting that decision, so gating it
+  later is a visible change rather than a drive-by. Separately worth knowing:
+  `GET /api/agents/:id/export` and `GET /api/process/template?team=` have **no
+  gate at all**, so this is currently open to any authenticated caller and not
+  only to a member — a tenant question, not a D9 one.
+- **`POST /api/teams` / `/api/teams/stream`.** Still ungated; who may create is
+  P3's contract (§10).
+- **The 14 remaining `visibleAgent(scope, cfg)` raw-config call sites.** #2080
+  fixed the three it gates and left the rest. Passing a raw `config.json` where
+  the predicate documents that it wants `agentMetaForScope(cfg)` asks about the
+  *credential tenant* stamp (`'default'`) instead of the Agent Team, and for a
+  **standalone** agent turns that truthy `'default'` into a team check —
+  bypassing D8's owner-only rule. `team-member-boundary.test.js` pins the
+  divergence in both directions. Sweeping the rest belongs with whoever owns
+  A2.5's read side, since PR #2105 is rewriting that surface concurrently.
+- **The Workspace browser's write affordances.** `WorkspaceBrowser.jsx` has no
+  `canManage` awareness, so a Team Member still sees Upload / Delete / drag-move
+  / git-action controls that the server now refuses. §6's note (2) names the
+  pattern to copy (`settingsSubject` hides the Settings tab); applying it to
+  ~10 affordances in a 1651-line JSX file is a separate slice. AC4 makes the
+  server the tested guarantee and the UI an "additionally", which is why the
+  boundary landed first.

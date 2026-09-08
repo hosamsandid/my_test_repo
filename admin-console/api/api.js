@@ -33,6 +33,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
         resolveAgentTenant } = require('./scope');
 const { resolveAgentTeam } = require('./agent-team');
+const { createAgentManageGate } = require('./team-member-boundary');
 // Layered resource ownership (#2083, P5) — the shared tier shape for
 // environments and MCP servers. Byte-mirrored in orchestrator/resource-tier.js.
 const { tierOwnershipFields, isRetier } = require('./resource-tier');
@@ -68,6 +69,7 @@ const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const extractTemplate = require('./extract-template');
 const { runCopilot, isCopilotAborted, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
+const { httpPostStreamText } = require('./anthropic-transport');
 const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
@@ -1763,6 +1765,15 @@ function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000, 
     req.end();
   });
 }
+
+// Whole-turn wall-clock budget for one Flow Copilot request, kept just under the
+// GKE LB backend `timeoutSec: 300` (deploy/k8s/overlays/*/app/ingress.yaml): the
+// browser-facing NDJSON response stays open across up to 3 sequential LLM calls
+// plus validation, so this bounds that WHOLE response (not one call) — the route
+// hands each call only the budget still remaining, and the console closes its own
+// stream with a clean `{error:'deadline'}` card ~20s before the edge would return
+// a raw 504. A run that steadily streams tokens normally finishes long before it.
+const COPILOT_STREAM_DEADLINE_MS = 280000;
 
 /* ─── Health ────────────────────────────────────────────────────────── */
 
@@ -4741,6 +4752,34 @@ function denyUnlessCanManageAgent(req, res, agentDirOrCfg) {
   return false;
 }
 
+// The D9 Team-Member boundary on the WORK plane (#2080, epic #2076 P2 / AC7b) —
+// the express half of `team-member-boundary.js`, which carries the §6 matrix,
+// the decision and the reasoning.
+//
+// `denyUnlessCanManageAgent` above serves the config plane, where a route is
+// entirely a mutation. The work plane is different: reads and writes share a
+// route prefix (`…/workspace/`, `…/context/`), so the split cannot be a mount
+// and has to be per-route — which is why this is a middleware rather than a
+// second `app.use`. It is applied to the ten `manage`-class routes of the
+// matrix and to nothing else; `work-plane-boundary-routes.test.js` asserts
+// exactly that, in both directions.
+//
+// Refuses 404 while the agent is invisible and only then 403, so a caller who
+// cannot see an agent never learns it exists from a write attempt.
+const requireAgentManage = createAgentManageGate({
+  getScope,
+  loadAgentMeta: (id) => {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    // An unreadable or absent config means the agent's access boundary is
+    // unknown. Fail closed as absent rather than guessing a tenant — the same
+    // rule `work-plane-access.js` applies for the same reason.
+    return cfg ? agentMetaForScope(cfg) : null;
+  },
+  isValidAgentId: (id) => AGENT_ID_RE.test(id),
+  visibleAgent,
+  canManageAgent,
+});
+
 // The Model Providers a given team is entitled to use — team-owned endpoints
 // plus system-scoped endpoints assigned to that team. This is the ONLY set an
 // agent may be switched to (no cross-team leakage), and — unlike
@@ -7274,7 +7313,11 @@ async function proxySkillActivation(req, res, active) {
   const cfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
   if (!cfg) return res.status(404).json({ error: 'team not found' });
   const scope = getScope(req);
-  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+  // D9 (#2080): activating a skill edits the GRANT (`skills[]` / a member's
+  // `skillsOverride`) before it syncs any file, so this is an agent-settings
+  // change — Team Admin only, not merely visible. It was `visibleAgent`, which
+  // let any member of the owning team re-grant its skills.
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) return res.status(403).json({ error: 'forbidden' });
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   const route = cfg.role === 'team'
     ? `/internal/teams/${encodeURIComponent(teamId)}/skills/${active ? 'activate' : 'deactivate'}`
@@ -7316,7 +7359,10 @@ async function proxyPluginActivation(req, res, active) {
   const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
   if (!cfg) return res.status(404).json({ error: 'agent not found' });
   const scope = getScope(req);
-  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+  // D9 (#2080): the plugin sibling of the skill grant above, and the same
+  // reasoning — a grant decides what privilege-holding CLI the agent can reach,
+  // which is squarely "agent settings (… plugins …)" in §6's matrix.
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) return res.status(403).json({ error: 'forbidden' });
 
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   const route = cfg.role === 'team'
@@ -8520,24 +8566,43 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   };
   // A stopped or disconnected turn ends the SERVER-side work (#2087, D2).
   // Before this, `aborted` only suppressed delivery: `runCopilot` took no
-  // signal and `httpPostJson` accepted none, so a disconnect could leave up to
-  // MAX_REPAIR_ITERATIONS + 1 = 3 × 180 s of LLM work running, billed, and
-  // discarded. The client's Stop is an `AbortController` on its own fetch, so
-  // it arrives here as the same `res.on('close')` a tab close does — one
-  // cancellation path for both (AC9, AC14).
+  // signal and the transport accepted none, so a disconnect could leave up to
+  // MAX_REPAIR_ITERATIONS + 1 = 3 LLM calls running, billed, and discarded. The
+  // client's Stop is an `AbortController` on its own fetch, so it arrives here
+  // as the same `res.on('close')` a tab close does — one cancellation path for
+  // both (AC9, AC14); the signal is threaded into httpPostStreamText so the
+  // streamed request already in flight is destroyed, not merely ignored.
   const turnAbort = new AbortController();
 
-  // Whole-bundle generations are big (16k max_tokens) — a generous transport
-  // timeout, unlike the short one-shot suggestion calls.
+  // Whole-bundle generations are big (16k max_tokens) and can take minutes.
+  // STREAM the upstream call (httpPostStreamText forces stream:true) so bytes
+  // flow the whole time — the internal Anthropic proxy never sees one long
+  // silent non-streaming request, which is the second way a large flow used to
+  // 504 — and forward a throttled progress heartbeat carrying the running reply
+  // size so the composer shows real movement instead of a frozen "Generating…".
+  const turnStartedAt = Date.now();
   const callLlm = async (payload) => {
-    const result = await httpPostJson(url, headers, { model: target.model, ...payload }, 180000, turnAbort.signal);
+    let heartbeatAt = 0;
+    // The budget left for this call is the whole-turn ceiling minus what earlier
+    // calls (generation + any repairs) already spent — never below a small floor.
+    const deadlineMs = Math.max(5000, COPILOT_STREAM_DEADLINE_MS - (Date.now() - turnStartedAt));
+    const result = await httpPostStreamText(url, headers, { model: target.model, ...payload }, {
+      deadlineMs,
+      signal: turnAbort.signal,
+      onProgress: (chars) => {
+        const now = Date.now();
+        if (now - heartbeatAt < 750) return; // a status line needs no more than ~1/s
+        heartbeatAt = now;
+        emit({ ...lastPhaseEv, chars });
+      },
+    });
     if (result.error || result.status < 200 || result.status >= 300) {
       const detail = result.error
         || (result.body && (result.body.error?.message || result.body.error || result.body.message))
         || `HTTP ${result.status}`;
       throw new Error(`LLM request failed: ${detail}`);
     }
-    return extractMessageText(result.body);
+    return result.text;
   };
 
   // NDJSON stream plumbing — see POST /api/teams/stream for the rationale of
@@ -8564,13 +8629,22 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
     } catch { /* socket gone */ }
   }
 
+  // The last phase runCopilot announced, so the streaming heartbeat inside
+  // callLlm can re-emit it with the running reply size attached (carrying its
+  // `iteration` on a repair pass) without runCopilot needing to know it streams.
+  let lastPhaseEv = { type: 'phase', phase: 'generating' };
+  const onProgress = (ev) => {
+    if (ev && ev.type === 'phase' && ev.phase) lastPhaseEv = ev;
+    emit(ev);
+  };
+
   // Provenance first (§4.5): the NDJSON stream announces which provider + model
   // is paying for this turn before any generation begins.
   emit({ type: 'assist', ...assistMeta(target).assist });
 
   try {
     const out = await runCopilot({
-      bundle: body.bundle, messages, callLlm, onProgress: emit, signal: turnAbort.signal,
+      bundle: body.bundle, messages, callLlm, onProgress, signal: turnAbort.signal,
     });
     emit({ type: 'result', ...out, model: target.model, meta: assistMeta(target) });
   } catch (err) {
@@ -10382,7 +10456,10 @@ app.post('/api/skills/install', async (req, res) => {
     return res.status(409).json({ error: `Agent '${agentId}' is not active — enable it before installing skills` });
   }
   const scope = getScope(req);
-  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+  // D9 (#2080): "Install into agent" writes the grant and copies files into the
+  // workspace — an agent-settings change, so Team Admin only. Was
+  // `visibleAgent`, i.e. any member of the owning team.
+  if (!canManageAgent(scope, agentMetaForScope(cfg))) return res.status(403).json({ error: 'forbidden' });
   // Refuse to clobber a skill the agent already carries unless overwrite:true —
   // an existing workspace dir OR a grant already listing the name both count.
   // Resolve the grant inline the same way as elsewhere (team-owned, orchestrator/
@@ -17392,7 +17469,7 @@ app.get('/api/agents/:agentId/workspace/download', apiLimiter, (req, res) => {
 // outward-symlink sanitizer), then the basename is appended. Operating on the
 // entry via its parent means a symlink is unlinked rather than followed, and a
 // final startsWith check against the realpath'd agent root rules out any escape.
-app.delete('/api/agents/:agentId/workspace/file', apiLimiter, (req, res) => {
+app.delete('/api/agents/:agentId/workspace/file', apiLimiter, requireAgentManage, (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relPath = typeof req.query.path === 'string' ? req.query.path : '';
@@ -17450,7 +17527,7 @@ app.delete('/api/agents/:agentId/workspace/file', apiLimiter, (req, res) => {
 // rejected, and both endpoints are re-checked against the realpath'd agent root.
 // Refuses to move a directory into itself or one of its own descendants, and
 // refuses to clobber an existing entry at the destination.
-app.post('/api/agents/:agentId/workspace/move', apiLimiter, (req, res) => {
+app.post('/api/agents/:agentId/workspace/move', apiLimiter, requireAgentManage, (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
 
@@ -17887,7 +17964,7 @@ app.get('/api/agents/:agentId/workspace/git-status', heavyLimiter, async (req, r
 // orchestrator with no LLM (#648 AC9). This proxy re-checks the agent's running
 // state at execution time (AC7) so a stale browser snapshot can never bypass
 // the guard, then forwards to the orchestrator, which owns the git credentials.
-app.post('/api/agents/:agentId/workspace/git-action', heavyLimiter, async (req, res) => {
+app.post('/api/agents/:agentId/workspace/git-action', heavyLimiter, requireAgentManage, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
 
@@ -18047,7 +18124,10 @@ const requireAgentIdParam = (req, res, next) => {
   next();
 };
 
-app.post('/api/agents/:agentId/workspace/upload', heavyLimiter, requireAgentIdParam, uploadFiles, (req, res) => {
+// `requireAgentManage` sits ahead of `uploadFiles` for the same reason
+// `requireAgentIdParam` does: otherwise a caller who will be refused still
+// costs us up to 500×50 MB of buffered multipart body before the 403.
+app.post('/api/agents/:agentId/workspace/upload', heavyLimiter, requireAgentIdParam, requireAgentManage, uploadFiles, (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relDir = typeof req.body.path === 'string' ? req.body.path : '';
@@ -18168,7 +18248,7 @@ app.post('/api/agents/:agentId/workspace/upload', heavyLimiter, requireAgentIdPa
 const CONTEXT_ORCH_URL = () => process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
 
 // Delete a file or directory inside a read-write context folder.
-app.delete('/api/agents/:agentId/context/file', apiLimiter, async (req, res) => {
+app.delete('/api/agents/:agentId/context/file', apiLimiter, requireAgentManage, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relPath = typeof req.query.path === 'string' ? req.query.path : '';
@@ -18186,7 +18266,7 @@ app.delete('/api/agents/:agentId/context/file', apiLimiter, async (req, res) => 
 
 // Move (rename/relocate) an entry within ONE read-write context folder. Body:
 //   { from: "<rel path>", toDir: "<rel dir path>" } — both relative to the mount.
-app.post('/api/agents/:agentId/context/move', apiLimiter, async (req, res) => {
+app.post('/api/agents/:agentId/context/move', apiLimiter, requireAgentManage, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const from = typeof req.body?.from === 'string' ? req.body.from : '';
@@ -18210,7 +18290,8 @@ app.post('/api/agents/:agentId/context/move', apiLimiter, async (req, res) => {
 // is parsed here (same multer config + 50 MB cap as the workspace upload); each
 // file is then streamed to the orchestrator as a raw octet-stream (no base64
 // inflation) which packages it into the container via the archive endpoint.
-app.post('/api/agents/:agentId/context/upload', heavyLimiter, requireAgentIdParam, uploadFiles, async (req, res) => {
+// Gate ahead of `uploadFiles`, like the workspace upload above.
+app.post('/api/agents/:agentId/context/upload', heavyLimiter, requireAgentIdParam, requireAgentManage, uploadFiles, async (req, res) => {
   const { agentId } = req.params;
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
   const relDir = typeof req.body.path === 'string' ? req.body.path : '';

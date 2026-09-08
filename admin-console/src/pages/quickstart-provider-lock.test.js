@@ -47,19 +47,23 @@ test('the comment-stripped page is still the page', () => {
   }
 });
 
-test('#2084: the page decides "may add a provider" with the /models route guard', () => {
-  // The SAME predicate that gates the route, not a re-derived role check — a
-  // second rule here is how the message and the route drift apart, and the
-  // ticket asks for a message that is easy to re-point when the policy moves.
+test('#2084: the page decides "may add a provider" for the AGENT\'S team, not any team', () => {
+  // The edge case (#2084): a QuickStart agent is created in the default team
+  // (the flow passes no teamId), so the guidance must gate on whether the user
+  // can add a provider for THAT team — `isAdminForTeam(user, DEFAULT_TEAM_ID)` —
+  // not on `canAccessCredentialPages` (admin of ANY team), which would offer a
+  // Team Admin of another team a link to a page where they cannot help. The
+  // predicate is single-sourced in credential-scope-view.js so the message and
+  // the route policy cannot drift apart.
   assert.match(
     page,
-    /import \{ canAccessCredentialPages \} from '\.\/credential-scope-view'/,
-    'the page must import canAccessCredentialPages, the predicate CredentialRoute uses',
+    /import \{ isAdminForTeam, DEFAULT_TEAM_ID \} from '\.\/credential-scope-view'/,
+    'the page must import isAdminForTeam + DEFAULT_TEAM_ID from the shared predicate module',
   );
   assert.match(
     page,
-    /const canAddProvider = canAccessCredentialPages\(user\)/,
-    'canAddProvider must come from that predicate applied to the session user',
+    /const canAddProvider = isAdminForTeam\(user, DEFAULT_TEAM_ID\)/,
+    'canAddProvider must gate on admin-of-the-default-team (the team the agent lands in), not admin-of-any-team',
   );
   assert.match(page, /const \{ user \} = useAuth\(\)/, 'the page needs the session user');
 });

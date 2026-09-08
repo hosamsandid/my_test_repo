@@ -10,7 +10,7 @@
 // the security boundary (every mutating route re-checks). The point is to avoid
 // showing a Team Admin actions that would just 403.
 
-const DEFAULT_TEAM_ID = 'default';
+export const DEFAULT_TEAM_ID = 'default';
 
 // Normalize a credential entry to an explicit scope shape (backward-compatible
 // with pre-#798 entries that only carry `teamId`). Mirrors scope.js.
@@ -126,4 +126,18 @@ export function canAccessCredentialPages(user) {
   if (!user) return false;
   if (user.admin) return true;
   return adminTeamIdsOf(user).length > 0;
+}
+
+// Can this user add a provider (or manage credentials) FOR A SPECIFIC team?
+// System Admins can (they add system-scoped providers that cover any team);
+// otherwise the user must be a Team Admin of *that* team. This is stricter than
+// `canAccessCredentialPages` (admin of ≥1 team) and closes the #2084 edge case:
+// a Team Admin of team A must NOT be offered a working /models link when the
+// agent will belong to team B, where they can navigate but cannot actually add a
+// provider. Note it subsumes `canAccessCredentialPages` — anyone who administers
+// a given team necessarily passes the credential-pages route guard too.
+export function isAdminForTeam(user, teamId) {
+  if (!user) return false;
+  if (user.admin) return true;
+  return !!teamId && adminTeamIdsOf(user).includes(teamId);
 }

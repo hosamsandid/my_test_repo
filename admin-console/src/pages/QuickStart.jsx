@@ -5,7 +5,7 @@ import { useApi } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import PageHelpButton from '../components/PageHelpButton';
 import { CREATE_HELP_SECTIONS } from './create-help-sections.js';
-import { canAccessCredentialPages } from './credential-scope-view';
+import { isAdminForTeam, DEFAULT_TEAM_ID } from './credential-scope-view';
 import {
   quickstartEndpoint,
   quickstartBody,
@@ -19,8 +19,12 @@ import {
 // The guidance shown wherever this page has to say "there is no model provider"
 // (#2084). One component for all three occurrences, so the role-aware
 // link/no-link decision cannot be made differently in one place than another —
-// a link to /models is a dead end for anyone `canAccessCredentialPages` turns
-// away, and following it silently redirects them to /chats.
+// a link to /models is a dead end for anyone who cannot add a provider for the
+// team this agent will live in — both a plain member (CredentialRoute silently
+// redirects them to /chats) and a Team Admin of some *other* team, who can open
+// /models but only sees their own team's settings, not the default team the
+// QuickStart agent lands in (#2084). `isAdminForTeam(user, DEFAULT_TEAM_ID)` is
+// the honest gate.
 //
 // `withText` is off where the surrounding surface already states the problem
 // (the submit error and the post-create warning both carry the server's own
@@ -108,10 +112,16 @@ export default function QuickStart() {
   // endpoint, body, and which prerequisites apply (no more mode toggle).
   const showRepoPrereqs = showRepoPrerequisites(url);
 
-  // May this user add a model provider at all? The same predicate that gates the
-  // /models route, so the guidance offers a link only where the link works
-  // (#2084). One derivation, threaded into every place that mentions providers.
-  const canAddProvider = canAccessCredentialPages(user);
+  // May this user add a model provider FOR THE TEAM THIS AGENT WILL LIVE IN?
+  // The QuickStart flow chooses no team and passes none to the server, so the
+  // agent is created in the default team (`resolveOwnerTeamId(undefined)` →
+  // DEFAULT_TEAM_ID). The guidance therefore offers a /models link only to
+  // someone who can add a provider for THAT team — a System Admin, or a Team
+  // Admin of the default team — not to a Team Admin of some *other* team, for
+  // whom the link would open a page where they cannot help (#2084 edge case).
+  // `isAdminForTeam` subsumes the credential-pages route guard, so the link never
+  // 404s. One derivation, threaded into every place that mentions providers.
+  const canAddProvider = isAdminForTeam(user, DEFAULT_TEAM_ID);
   // No usable provider (and we are past loading) ⇒ lock the form rather than let
   // the user name an assistant and fail on submit.
   const providerLock = providerLockActive({ llmEndpointsLoading, hasLlmEndpoints });

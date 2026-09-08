@@ -38,9 +38,11 @@ const AGENT_ID_RE = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
 
 // ── Fixture estate ─────────────────────────────────────────────────────────
 //
-// Two teams that share nothing, plus a private agent inside team A — the exact
-// shape the ticket's acceptance criterion names ("a second team member cannot
-// read another user's private agent's workspace tree or session log").
+// Two teams that share nothing, plus alice's standalone private agent (owner-
+// scoped since #2078 D8, not team-stamped) — the exact shape the ticket's
+// acceptance criterion names ("a second team member cannot read another user's
+// private agent's workspace tree or session log"): carol shares team A with
+// alice yet is still refused, because the agent is owner-only, not team-visible.
 
 const USERS = [
   { id: 'u-alice', subject: 'alice@example.com' },
@@ -56,9 +58,13 @@ const MEMBERSHIPS = [
 const AGENTS = {
   'agent-a': { teamId: 'team-a' },
   'agent-b': { teamId: 'team-b' },
-  // ownerId is populated by #2077's D6 backfill; `visibility` is what makes the
-  // private branch of visibleAgent live.
-  'agent-secret': { teamId: 'team-a', visibility: 'private', ownerId: 'u-alice' },
+  // A standalone (`role: 'agent'`) private agent owned by alice. #2078 (D8)
+  // retired the `visibility: 'private'` field — nothing wrote it — and re-keyed a
+  // standalone agent's privacy onto `ownerId`: its RESOLVED access boundary
+  // (`resolveAgentTeam`, surfaced by api.js `agentMetaForScope` as this exact
+  // `{ teamId, ownerId }` shape) is `null`, so `visibleAgent` falls through to
+  // `ownedByCaller` — owner-only, regardless of what team alice herself is in.
+  'agent-secret': { teamId: null, ownerId: 'u-alice' },
 };
 const ROOMS = { '!room-a:local': 'agent-a', '!room-b:local': 'agent-b', '!room-secret:local': 'agent-secret' };
 
@@ -247,7 +253,12 @@ test('reads and writes coincide today — and the write side is real membership'
     const scope = scopeFor(user);
     for (const agentId of Object.keys(AGENTS)) {
       const agent = AGENTS[agentId];
-      const member = scope.all || scope.teamIds.has(agent.teamId);
+      // Write-membership for a team-stamped agent is team membership; for a
+      // standalone owner-scoped agent (#2078 D8 — teamId null) it is ownership,
+      // the same axis reads use, so the two halves still coincide.
+      const member = scope.all || (agent.teamId
+        ? scope.teamIds.has(agent.teamId)
+        : !!(agent.ownerId && agent.ownerId === scope.userId));
       const expected = (visibleAgent(scope, agent) && member) ? 200 : 404;
       for (const [method, tpl] of [READ, WRITE]) {
         const res = await call(method, tpl.replace('%ID%', agentId), user);

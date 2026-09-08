@@ -108,9 +108,11 @@ const WORK_PLANE_AGENT_PREFIXES = Object.freeze([
 const WORK_PLANE_ROOM_PREFIX = '/api/matrix/rooms/:roomId';
 
 /**
- * THE decision. `agent` is the minimal `{ teamId, visibility, ownerId }` shape
- * `visibleAgent` consumes (api.js's `agentMetaForScope`), or `null` when no
- * agent could be resolved for the request.
+ * THE decision. `agent` is the minimal `{ teamId, ownerId }` shape `visibleAgent`
+ * consumes (api.js's `agentMetaForScope`), where `teamId` is the RESOLVED access
+ * boundary (`resolveAgentTeam`: `null` for a standalone `role: 'agent'`, whose
+ * privacy is then decided by `ownerId` — #2078 D8) rather than the raw config's
+ * tenant stamp; or `null` when no agent could be resolved for the request.
  *
  * A `null` agent is refused rather than passed through. That covers three cases
  * that must not be distinguishable from each other: the agent does not exist,
@@ -119,7 +121,7 @@ const WORK_PLANE_ROOM_PREFIX = '/api/matrix/rooms/:roomId';
  * no agent at all.
  *
  * @param {{all: boolean, teamIds: Set<string>, userId: string|null}} scope
- * @param {{teamId: string, visibility?: string, ownerId?: string}|null} agent
+ * @param {{teamId: string|null, ownerId?: string}|null} agent
  * @param {{visibleAgent: Function}} deps  scope.js's predicate, injected so this
  *   file stays free of the require graph api.js drags in.
  */

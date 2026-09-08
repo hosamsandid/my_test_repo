@@ -18,8 +18,7 @@
 //                    help-less on purpose, with an owner named.
 //   • ALLOWLIST    — a structural route that intentionally has NO page help of
 //                    its own: redirect sources, dynamic child routes that
-//                    inherit their parent's help, and stubs. These never
-//                    auto-open the panel (concept §4, C2).
+//                    inherit their parent's help, and stubs.
 //
 // This module is pure data + three tiny resolvers (aliases / redirects / dynamic
 // collapse) shared by help-registry.js. The parallel client-side copy lives in

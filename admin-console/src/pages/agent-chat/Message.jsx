@@ -3,12 +3,18 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { rehypeShikiSync } from '../../components/shiki-rehype';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
-import { Bot, Zap } from 'lucide-react';
+import { Bot, User, Zap } from 'lucide-react';
 import LoopRecordCard from './LoopRecordCard';
 import AskQuestionCard from './AskQuestionCard';
 import { normalizeAskQuestion } from './ask-question-view.js';
 import { MarkdownSafeBoundary, plainTextFallback } from '../../components/markdown-safe.js';
 import { AGENT_CHAT_MD_CSS, MD_TABLE_WRAP_CLASS } from './markdown-css.js';
+import {
+  describeMessageAuthor,
+  authorBadgeCss,
+  AUTHOR_BADGE_CLASS,
+  AUTHOR_NAME_CLASS,
+} from './message-author.js';
 
 /**
  * The actual react-markdown render. Memoized on `body` alone (#1676): the
@@ -334,6 +340,7 @@ function NoticeMessage({ message }) {
 function Message({
   message, agentUserId, thinking, onRelaunchLoop,
   onAnswerQuestion, questionAnswerable, questionAnswer,
+  viewer, authorDirectory,
 }) {
   // Quick-reply question (#1663): an agent message that paused on AskUserQuestion
   // carries a structured `io.aee.ask-question` payload — render it as clickable
@@ -375,27 +382,32 @@ function Message({
   if (message.msgtype === 'm.notice' && message['io.aee.trigger']) {
     return <NoticeMessage message={message} />;
   }
-  const isAgent = message.sender === agentUserId;
-  const align = isAgent ? 'flex-start' : 'flex-end';
+  // Who wrote this, and which side it belongs on (#2065). The two answers come
+  // from different inputs on purpose — the side depends on who is *looking*,
+  // the badge never does — and both are decided in the pure `message-author.js`
+  // so this stays a renderer (#651).
+  const { isAgent, side, badge } = describeMessageAuthor({
+    message, agentUserId, viewer, directory: authorDirectory,
+  });
+  const onRight = side === 'right';
+  const align = onRight ? 'flex-end' : 'flex-start';
+  // D9: a human message keeps the human bubble colour even when it is now on
+  // the left, so it stays distinguishable from the agent's bubble.
   const bubbleColor = isAgent
     ? { bg: 'var(--eb-bg-surface)',  fg: 'var(--eb-text-primary)' }
     : { bg: 'var(--eb-bg-selected)', fg: 'var(--eb-text-primary)' };
 
   const time = formatMessageTime(message.ts);
 
-  const initials = isAgent
-    ? null
-    : 'YOU';
-
   return (
     <div style={{
       display: 'flex',
-      flexDirection: isAgent ? 'row' : 'row-reverse',
+      flexDirection: onRight ? 'row-reverse' : 'row',
       alignItems: 'flex-end',
       gap: 'var(--eb-space-2)',
       maxWidth: '100%',
     }}>
-      <Avatar isAgent={isAgent} initials={initials} />
+      <Avatar badge={badge} />
 
       <div style={{
         display: 'flex',
@@ -451,8 +463,27 @@ function Message({
  */
 export default React.memo(Message);
 
-function Avatar({ isAgent, initials }) {
-  return (
+/**
+ * The 28 px round avatar in front of a bubble (#2065).
+ *
+ * Three kinds, decided by `describeMessageAuthor`:
+ *   - `bot`       — the agent (D4, unchanged: bot glyph, no name, no hover);
+ *   - `initials`  — a human whose author was recorded: their initials, with the
+ *                   full name revealed on hover *and* on keyboard focus (AC8);
+ *   - `anonymous` — a message with no usable author (all pre-#2065 history, a
+ *                   third-party Matrix client): a neutral person glyph. Never
+ *                   letters, never a name — and never the old `?` placeholder.
+ *
+ * The circle keeps fixed 28 × 28 px with `overflow: hidden`, so no name — an
+ * emoji, a CJK glyph, a stacked accent — can change the row's geometry (AC9),
+ * and the name reveal is positioned out of flow by `authorBadgeCss()`.
+ */
+function Avatar({ badge }) {
+  const isAgent = badge.kind === 'bot';
+  const named = badge.kind === 'initials';
+  useEffect(() => { ensureAuthorBadgeCss(); }, []);
+
+  const circle = (
     <div style={{
       width: 28, height: 28,
       borderRadius: '50%',
@@ -461,13 +492,49 @@ function Avatar({ isAgent, initials }) {
       color: isAgent ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       flexShrink: 0,
+      overflow: 'hidden',
+      lineHeight: 1,
       fontSize: 'var(--eb-text-xs)',
       fontWeight: 'var(--eb-font-semibold)',
     }}>
-      {isAgent ? <Bot size={16} /> : (initials || '?')}
+      {isAgent ? <Bot size={16} />
+        : named ? <span style={{ whiteSpace: 'nowrap', lineHeight: 1 }}>{badge.initials}</span>
+          : <User size={16} aria-label="Unknown sender" />}
+    </div>
+  );
+
+  if (!named) return <div className={AUTHOR_BADGE_CLASS}>{circle}</div>;
+
+  return (
+    <div
+      className={AUTHOR_BADGE_CLASS}
+      // Focusable so the name is reachable by keyboard, not only by pointer:
+      // no browser shows a `title` tooltip on focus, hence the real element.
+      tabIndex={0}
+      title={badge.name}
+      aria-label={`Sent by ${badge.name}`}
+    >
+      {circle}
+      <span className={AUTHOR_NAME_CLASS} aria-hidden="true">{badge.name}</span>
     </div>
   );
 }
+
+// The author-badge stylesheet is injected once at the document level (mirrors
+// ensureAgentChatMdCss / ensureThinkingDotsCss) so every transcript that mounts
+// a bubble gets the name reveal, without a <style> per message.
+let authorBadgeCssInjected = false;
+export function ensureAuthorBadgeCss() {
+  if (authorBadgeCssInjected || typeof document === 'undefined') return;
+  if (document.getElementById('agent-chat-author-badge-css')) { authorBadgeCssInjected = true; return; }
+  const el = document.createElement('style');
+  el.id = 'agent-chat-author-badge-css';
+  el.textContent = authorBadgeCss();
+  document.head.appendChild(el);
+  authorBadgeCssInjected = true;
+}
+
+ensureAuthorBadgeCss();
 
 // The `@keyframes dotPulse` used by ThinkingDots is injected once at the
 // document level (mirrors ensureAgentChatMdCss) so the shared indicator works

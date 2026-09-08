@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { useLocation } from 'react-router';
 import { assistHeaders, notifyAssistError } from './assist-transport.js';
-import { UNAUTHORIZED_EVENT, useAuth } from '../auth/AuthContext';
+import { UNAUTHORIZED_EVENT } from '../auth/AuthContext';
 import { BREADCRUMBS } from '../components/breadcrumbs';
 import {
   appendUserMessage,
@@ -13,10 +13,6 @@ import {
   splitNdjson,
 } from './helper-chat-model.js';
 import {
-  autoOpenPlan,
-  markSeen,
-  seenRoutesKey,
-  parseSeenRoutes,
   upsertSubject,
   removeSubject,
   topSubject,
@@ -48,7 +44,6 @@ export function useHelperChat() {
     helpSection: { slug: '', nonce: 0 },
     helpContext: { route: '/', overlay: '', step: '' },
     publishHelpSubject: () => {}, retractHelpSubject: () => {},
-    registerHelpPanel: () => () => {},
   };
 }
 
@@ -99,12 +94,11 @@ export function HelperChatProvider({ children }) {
   // The curated per-page help topic set, fetched once (concept §4: the client
   // resolves route→topic locally so face-switching is instant/offline). Starts
   // empty and stays empty on a fetch failure — the panel then just renders the
-  // Overview fallback. The provider sits inside BrowserRouter + AuthProvider
-  // (index.jsx), so useLocation/useAuth are safe here.
+  // Overview fallback. The provider sits inside BrowserRouter (index.jsx), so
+  // useLocation is safe here.
   const [pageHelp, setPageHelp] = useState(EMPTY_PAGE_HELP);
   const location = useLocation();
   const currentRoute = location.pathname;
-  const { authenticated, user } = useAuth();
 
   // The non-route part of the help context (E17 #1892): the stack of subjects
   // published by whatever overlay/wizard step is on screen. The topmost one wins;
@@ -123,19 +117,6 @@ export function HelperChatProvider({ children }) {
     () => ({ route: currentRoute, ...topSubject(subjects) }),
     [currentRoute, subjects],
   );
-
-  // Is a panel actually on screen? It is mounted in Shell.jsx, and the first-run
-  // setup wizard replaces the Shell entirely (App.jsx) — so during first run
-  // there is nowhere for the panel to appear. The panel registers itself here on
-  // mount; child effects run before the provider's own, so this is already set
-  // when the first-run auto-open effect below decides. Without the check that
-  // effect would open + persist "seen" for a route the user never saw the nudge
-  // on, silently burning the one nudge that route ever gets.
-  const panelCountRef = useRef(0);
-  const registerHelpPanel = useCallback(() => {
-    panelCountRef.current += 1;
-    return () => { panelCountRef.current -= 1; };
-  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -189,34 +170,11 @@ export function HelperChatProvider({ children }) {
     setIsOpen(true);
   }, []);
 
-  // First-run auto-open (#1873, concept §4/§9): the first time an authenticated
-  // user lands on a route that has a dedicated topic, nudge the panel open on
-  // the "This page" face — once. The seen key is persisted BEFORE opening, so a
-  // user who immediately closes it is never nudged for that route again. Routes
-  // with only the Overview fallback never auto-open.
-  useEffect(() => {
-    if (!authenticated) return;
-    if (panelCountRef.current === 0) return; // no panel on screen (first-run setup)
-    if (!pageHelp || !Array.isArray(pageHelp.topics) || pageHelp.topics.length === 0) return;
-    let seen = [];
-    let storageKey = null;
-    try {
-      storageKey = seenRoutesKey(user && user.username);
-      seen = parseSeenRoutes(window.localStorage.getItem(storageKey));
-    } catch {
-      return; // localStorage unavailable — skip the nudge rather than guess.
-    }
-    const plan = autoOpenPlan(pageHelp, currentRoute, seen);
-    if (!plan.open) return;
-    try {
-      window.localStorage.setItem(storageKey, JSON.stringify(markSeen(seen, plan.routeKey)));
-    } catch {
-      // Can't persist "seen" → don't auto-open, or it would re-fire every visit.
-      return;
-    }
-    setMode('page');
-    setIsOpen(true);
-  }, [authenticated, user, pageHelp, currentRoute]);
+  // There is deliberately NO route-keyed effect here. The panel opens only on an
+  // explicit user action — the header Help button, a PageHelpButton "?", the
+  // Agent Chat row menu's Help entry or openTour(). The C2 first-run auto-open
+  // nudge (#1873) was removed in #2069: once nearly every route had its own
+  // topic, "once per route" had become an unrequested panel on almost every page.
 
   const sendMessage = useCallback(async (text) => {
     const trimmed = (text || '').trim();
@@ -300,8 +258,8 @@ export function HelperChatProvider({ children }) {
   const value = useMemo(() => ({
     isOpen, toggle, messages, sendMessage, isStreaming, clearHistory,
     mode, setMode, openTour, openHelpFor, pageHelp, currentRoute, helpSection,
-    helpContext, publishHelpSubject, retractHelpSubject, registerHelpPanel,
-  }), [isOpen, toggle, messages, sendMessage, isStreaming, clearHistory, mode, openTour, openHelpFor, pageHelp, currentRoute, helpSection, helpContext, publishHelpSubject, retractHelpSubject, registerHelpPanel]);
+    helpContext, publishHelpSubject, retractHelpSubject,
+  }), [isOpen, toggle, messages, sendMessage, isStreaming, clearHistory, mode, openTour, openHelpFor, pageHelp, currentRoute, helpSection, helpContext, publishHelpSubject, retractHelpSubject]);
 
   return (
     <HelperChatContext.Provider value={value}>

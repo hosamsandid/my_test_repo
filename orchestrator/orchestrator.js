@@ -164,6 +164,7 @@ const pendingQueue = require("./pending-queue");
 const pendingReassign = require("./pending-reassign");
 const { buildFlowModel, detectFlowAnomalies } = require("./flow-anomaly-detector");
 const flowAnomalySweep = require("./flow-anomaly-sweep");
+const admissionControl = require("./admission-control");
 
 // ── Read-write context mount helpers (writing into a mounted host folder) ──
 // A caller path is RELATIVE to /context. For a single legacy folder the mount
@@ -1637,20 +1638,39 @@ function _flowGithubGetJson(apiPath, token) {
 // repo's team token — exactly as the poller does for PRs. Never throws and
 // never blocks the hand-off: any missing-token/failure/timeout degrades to a
 // null title, and the notice then shows `[#N](url)` with no title (AC5).
-async function fetchWorkItemTitle(repoFullName, kind, number) {
+// Fetch a work item's title AND — for a PR — the issue(s) it closes, from ONE
+// GitHub request. The PR detail already carries `body` + `head.ref`, so the
+// strict `parseCloses` (closes/fixes/resolves #N + `issue-N` branch) costs no
+// extra call — the same "no second request" the poller's `_enrichPullRequestPayload`
+// relies on. `closesIssues` matters for #2114 admission control: `entryTicketRef`
+// keys "same-ticket" off it, so a synthetic PR event built by flow-emit.js /
+// github-label-fastpath.js MUST carry it or an internal/label-fast-path
+// reviewer-wake mis-keys as a new ticket and deadlocks at `wipLimit: 1`. Using
+// the STRICT closing-keyword parse here (not a loose issue↔PR link) is
+// deliberate: entry attribution must not merge two separate tickets.
+async function fetchWorkItemDetail(repoFullName, kind, number) {
   try {
     const tokenId = resolveRepoGithubTokenId(repoFullName);
-    if (!tokenId) return null;
+    if (!tokenId) return { title: null, closesIssues: [] };
     const token = fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim();
     const apiPath = kind === "pr"
       ? `/repos/${repoFullName}/pulls/${number}`
       : `/repos/${repoFullName}/issues/${number}`;
     const detail = await _flowGithubGetJson(apiPath, token);
-    return detail && typeof detail.title === "string" && detail.title ? detail.title : null;
+    const title = detail && typeof detail.title === "string" && detail.title ? detail.title : null;
+    const closesIssues = kind === "pr" && detail
+      ? prEventsLog.parseCloses(detail.body, detail.head && detail.head.ref)
+      : [];
+    return { title, closesIssues };
   } catch (err) {
-    console.error(`[Orchestrator] title fetch failed for ${repoFullName}#${number}: ${err.message}`);
-    return null;
+    console.error(`[Orchestrator] work-item detail fetch failed for ${repoFullName}#${number}: ${err.message}`);
+    return { title: null, closesIssues: [] };
   }
+}
+
+// Back-compat thin wrapper for the title-only callers (#1897 notices).
+async function fetchWorkItemTitle(repoFullName, kind, number) {
+  return (await fetchWorkItemDetail(repoFullName, kind, number)).title;
 }
 
 function _flowLiftEmits(cfgEmits, triggers) {
@@ -1662,14 +1682,10 @@ function _flowLiftEmits(cfgEmits, triggers) {
   return lifted.length ? [...new Set([...base, ...lifted])] : base;
 }
 
-// Gather the team's flow model + a GitHub/run-state snapshot, then classify.
-// Returns `{ teamId, generatedAt, thresholds, repos, model, anomalies }`.
-async function computeTeamFlowAnomalies(teamId, { now = Date.now() } = {}) {
-  const teamCfg = loadAgentConfig(teamId) || {};
-  const labels = Array.isArray(teamCfg.labels) ? teamCfg.labels : [];
-  const thresholds = flowAnomalySweep.resolveThresholds(teamCfg.anomalyThresholds);
-
-  // 1) Members (+ their triggers) of this team.
+// The team's members (+ their triggers) and the environments they are bound to.
+// Extracted so the flow-anomaly sweep and admission control (#2114) derive the
+// same flow model from the same walk rather than keeping two copies of it.
+function _flowTeamMembers(teamId) {
   const members = [];
   const envIds = new Set();
   for (const id of listAgentIds()) {
@@ -1700,19 +1716,13 @@ async function computeTeamFlowAnomalies(teamId, { now = Date.now() } = {}) {
     });
     if (cfg.environmentId) envIds.add(cfg.environmentId);
   }
+  return { members, envIds };
+}
 
-  const model = buildFlowModel(members, { labels });
-
-  // Which labels the detector cares about — bound the (expensive) timeline
-  // fetches to objects that actually carry one.
-  const interesting = new Set([
-    ...model.wakeEdges.map((w) => w.label),
-    ...model.wakeEdges.map((w) => w.claimLabel),
-    ...model.claimEdges.map((c) => c.claimLabel),
-    ...model.gateLabels,
-  ]);
-
-  // 2) Resolve one token per repo across the team's environments.
+// One usable GitHub token per repo across a set of environments (first env
+// wins, mirroring the poller's plan rule). Repos with no readable token are
+// absent, which is what makes a caller able to fail closed on them.
+function _flowRepoTokens(envIds) {
   const repoToken = new Map();
   const allowNonGithubHost = String(process.env.AEE_ALLOW_NON_GITHUB_REPO_HOST || "") === "1";
   for (const envId of envIds) {
@@ -1730,6 +1740,32 @@ async function computeTeamFlowAnomalies(teamId, { now = Date.now() } = {}) {
       if (full && !repoToken.has(full)) repoToken.set(full, token);
     }
   }
+  return repoToken;
+}
+
+// Gather the team's flow model + a GitHub/run-state snapshot, then classify.
+// Returns `{ teamId, generatedAt, thresholds, repos, model, anomalies }`.
+async function computeTeamFlowAnomalies(teamId, { now = Date.now() } = {}) {
+  const teamCfg = loadAgentConfig(teamId) || {};
+  const labels = Array.isArray(teamCfg.labels) ? teamCfg.labels : [];
+  const thresholds = flowAnomalySweep.resolveThresholds(teamCfg.anomalyThresholds);
+
+  // 1) Members (+ their triggers) of this team.
+  const { members, envIds } = _flowTeamMembers(teamId);
+
+  const model = buildFlowModel(members, { labels });
+
+  // Which labels the detector cares about — bound the (expensive) timeline
+  // fetches to objects that actually carry one.
+  const interesting = new Set([
+    ...model.wakeEdges.map((w) => w.label),
+    ...model.wakeEdges.map((w) => w.claimLabel),
+    ...model.claimEdges.map((c) => c.claimLabel),
+    ...model.gateLabels,
+  ]);
+
+  // 2) Resolve one token per repo across the team's environments.
+  const repoToken = _flowRepoTokens(envIds);
 
   // 3) Sweep GitHub for open issues/PRs, enriching interesting objects.
   const objects = [];
@@ -1816,6 +1852,117 @@ async function computeTeamFlowAnomalies(teamId, { now = Date.now() } = {}) {
     errors,
     model,
     anomalies,
+  };
+}
+
+// Admission-control reconcile tick (#2114, flow-control concept §4.0).
+//
+// The half of AC2 that makes the in-flight count verifiable independently of any
+// agent prompt: it asks GitHub what is still open, releases the tickets that are
+// done, and promotes the dispatches the lane was holding. Concept §4.0 is
+// explicit that this must be a self-healing periodic tick and NOT a completion
+// event — "encoding seriality in the wake event is exactly what froze the epic",
+// because the completion event a stuck merge never emits never arrives.
+//
+// Costs nothing for a flow at rest: a team with no `wipLimit`, or one whose lane
+// holds neither an in-flight ticket nor a held dispatch, returns before the first
+// request. Returns null when it did nothing.
+async function admissionSweepTeam(teamId) {
+  let teamCfg = null;
+  try {
+    teamCfg = loadAgentConfig(teamId);
+  } catch {
+    return null;
+  }
+  const wipLimit = admissionControl.limitInForce(teamCfg && teamCfg.wipLimit);
+  if (wipLimit === null) return null;
+
+  const lane = loadAdmissionLane(teamId);
+  if (!admissionControl.laneNeedsRefresh(lane)) return null;
+
+  const { members, envIds } = _flowTeamMembers(teamId);
+  const model = buildFlowModel(members, { labels: Array.isArray(teamCfg.labels) ? teamCfg.labels : [] });
+  const activeLabels = admissionControl.activeFlowLabels(model);
+  const repoToken = _flowRepoTokens(envIds);
+
+  // Open issues AND open PRs, per repo. `repos` lists only the ones actually
+  // READ — a repo whose fetch failed stays out, and the pure core keeps every
+  // ticket in it rather than releasing the lane on an outage (fail closed).
+  const repos = [];
+  const objects = [];
+  const errors = [];
+  for (const [repo, token] of repoToken) {
+    const [owner, name] = repo.split("/");
+    const seg = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+    let issues = [];
+    let openPrs = [];
+    try {
+      issues = await _flowGithubGetJson(`${seg}/issues?state=open&per_page=100`, token);
+      openPrs = await _flowGithubGetJson(`${seg}/pulls?state=open&per_page=100`, token);
+    } catch (err) {
+      errors.push(`${repo}: ${err.message}`);
+      continue;
+    }
+    repos.push(repo);
+
+    // Which in-flight tickets an open PR references. Deliberately the LOOSE
+    // `prsForIssue` linkage (a `#n` mention or an issue number in the branch),
+    // not the strict closing-keyword parse the poller stamps onto an event
+    // payload: the two directions have opposite safe sides. On the event side a
+    // strict link decides which lane slot a dispatch takes, so a false positive
+    // would merge two genuinely separate tickets; here a false positive only
+    // keeps a ticket in flight LONGER, which is the conservative direction for a
+    // WIP limit. `prsForIssue`'s own header states the same fail-safe reasoning.
+    const ticketNumbers = lane.inFlight.filter((t) => t.repo === repo).map((t) => t.number);
+    const prByNumber = new Map();
+    for (const pr of Array.isArray(openPrs) ? openPrs : []) prByNumber.set(Number(pr.number), pr);
+    const closesFor = (pr) => ticketNumbers.filter((n) => flowAnomalySweep.prsForIssue([pr], n).length > 0);
+
+    for (const it of Array.isArray(issues) ? issues : []) {
+      const kind = flowAnomalySweep.objectKind(it);
+      // The issues list carries a PR's labels and body but never its head
+      // branch; the pulls entry has both, so prefer it when present.
+      const prItem = kind === "pr" ? (prByNumber.get(Number(it.number)) || it) : null;
+      objects.push({
+        repo,
+        number: Number(it.number),
+        kind,
+        labels: (Array.isArray(it.labels) ? it.labels : [])
+          .map((l) => (typeof l === "string" ? l : l && l.name))
+          .filter(Boolean),
+        closes: prItem ? closesFor(prItem) : [],
+      });
+    }
+  }
+
+  const reconciled = admissionControl.reconcileInFlight({
+    lane, snapshot: { repos, objects }, activeLabels,
+  });
+  const promoted = admissionControl.promoteHeld({ lane: reconciled.lane, wipLimit });
+
+  // Enqueue FIRST, persist the lane second — the same ordering the
+  // internal-channel emit uses (concept §4.2 step 3). A crash between the two
+  // re-delivers a dispatch the queue already holds, which the claim label and
+  // the poller's own re-delivery tolerate; the reverse order would drop it from
+  // the hold queue without ever putting it anywhere, and losing work is the one
+  // thing admission control must never do.
+  for (const r of promoted.release) {
+    enqueuePending(r.agentId, r.entry, { admissionChecked: true });
+    console.log(`[Admission] ${teamId}: promoted held dispatch for ${r.agentId} (${r.reason})`);
+  }
+  for (const rel of reconciled.released) {
+    console.log(`[Admission] ${teamId}: released ${rel.key} (${rel.reason})`);
+  }
+  saveAdmissionLane(teamId, promoted.lane);
+
+  return {
+    teamId,
+    repos,
+    errors,
+    released: reconciled.released,
+    promoted: promoted.release.length,
+    inFlight: promoted.lane.inFlight.length,
+    held: promoted.lane.held.length,
   };
 }
 
@@ -7587,7 +7734,91 @@ function pendingPath(id) {
   return controlOrPoolPath(id, "pending-triggers.json");
 }
 
-function enqueuePending(agentId, entry) {
+// ── Admission control (#2114, flow-control concept §4.0) ────────────────────
+//
+// A declarative per-flow `wipLimit` bounds how many TICKETS a flow works at
+// once. The stall this prevents is manufactured at dispatch: unbounded parallel
+// dispatch onto one shared `main` produces merge conflicts by construction, and
+// no downstream detector can un-make them. Every judgement lives in the pure
+// `admission-control.js`; what follows is its fs/GitHub half.
+//
+// The lane is per TEAM, beside the team agent's other control files.
+function admissionLanePath(teamId) {
+  return controlOrPoolPath(teamId, "admission-lane.json");
+}
+
+function loadAdmissionLane(teamId) {
+  try {
+    return admissionControl.normalizeLane(JSON.parse(fs.readFileSync(admissionLanePath(teamId), "utf8")));
+  } catch {
+    // Missing or corrupt: an unreadable lane degrades to "empty", never to a
+    // throw on the dispatch path.
+    return admissionControl.emptyLane();
+  }
+}
+
+function saveAdmissionLane(teamId, lane) {
+  const p = admissionLanePath(teamId);
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(lane, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`[Admission] cannot persist lane for ${teamId}: ${err.message}`);
+    return false;
+  }
+}
+
+// Which flow governs a dispatch, and with what limit. A member points at its
+// team through `parentTeamId`; a team agent hosts no run of its own but is
+// accepted for completeness. `null` means "no admission control" — the answer
+// for every standalone agent and every flow that declares no `wipLimit`, i.e.
+// for every installation until someone opts in.
+function resolveAdmissionFlow(agentId) {
+  let cfg = null;
+  try {
+    cfg = loadAgentConfig(agentId);
+  } catch {
+    return null;
+  }
+  if (!cfg) return null;
+  const teamId = cfg.role === "team" ? agentId : (cfg.parentTeamId || null);
+  if (!teamId) return null;
+  let teamCfg = null;
+  try {
+    teamCfg = loadAgentConfig(teamId);
+  } catch {
+    return null;
+  }
+  const wipLimit = admissionControl.limitInForce(teamCfg && teamCfg.wipLimit);
+  return wipLimit === null ? null : { teamId, wipLimit };
+}
+
+function enqueuePending(agentId, entry, { admissionChecked = false } = {}) {
+  // The gate sits here rather than at each of the five producers (poller
+  // fan-out, flow-emit, the label fast-path, wake-agent, the hook server)
+  // because this function is the queue's single writer: one seam cannot be
+  // bypassed by a producer added later. `admissionChecked` is the promotion
+  // path re-entering with a dispatch the lane has already admitted.
+  if (!admissionChecked) {
+    const flow = resolveAdmissionFlow(agentId);
+    if (flow) {
+      const lane = loadAdmissionLane(flow.teamId);
+      const d = admissionControl.admit({ lane, wipLimit: flow.wipLimit, agentId, entry });
+      if (d.lane !== lane) saveAdmissionLane(flow.teamId, d.lane);
+      if (!d.admit) {
+        console.log(
+          `[Admission] ${flow.teamId}: held dispatch for ${agentId} (${d.ticketKey}) — ` +
+          `wipLimit ${flow.wipLimit} reached; it fires when capacity frees`,
+        );
+        // TRUE, not false: the dispatch is durably recorded and WILL fire. A
+        // `false` here means "nothing anywhere has this event" (#2030) and would
+        // make an `aee-emit` producer report a delivery failure for work that is
+        // merely queued behind a full lane.
+        return true;
+      }
+    }
+  }
   const p = pendingPath(agentId);
   let pending = [];
   try {
@@ -8122,6 +8353,14 @@ class Orchestrator {
         // is per-instance run history and never rides the bundle.
         ...(extra.hillClimb && typeof extra.hillClimb === "object" && !Array.isArray(extra.hillClimb)
           ? { hillClimb: extra.hillClimb } : {}),
+        // Admission control (#2114, flow-control concept §4.0) — the declarative
+        // per-flow WIP limit. Held on the team agent like the registries above,
+        // but unlike them it is NOT display-only: `enqueuePending` reads it on
+        // every dispatch, so an out-of-range value must never reach disk (the
+        // admin console normalizes via normalizeWipLimit; this is the second
+        // gate, because /internal/agents is also reachable directly).
+        ...(Number.isInteger(extra.wipLimit) && extra.wipLimit >= 1
+          ? { wipLimit: extra.wipLimit } : {}),
         // Label suffix (#902): stored for extend-mode consistency checks and
         // Flow-Editor dialog pre-fill. Not used at runtime — labels are already
         // stamped in the member configs.
@@ -12356,9 +12595,11 @@ async function main() {
           const listeners = flowEmit.matchInternalListeners(
             { repo, label, kind: target.kind }, agents);
           // #1897 AC8: resolve the title best-effort so the notice isn't blank.
-          const title = await fetchWorkItemTitle(repo, target.kind, target.number);
+          // #2114: also carry the PR's closesIssues (from the same fetch) so the
+          // admission gate keys this hand-off to the issue's ticket, not a new one.
+          const { title, closesIssues } = await fetchWorkItemDetail(repo, target.kind, target.number);
           const ghEvent = flowEmit.buildSyntheticEvent({
-            repo, label, kind: target.kind, number: target.number, title,
+            repo, label, kind: target.kind, number: target.number, title, closesIssues,
             producerId: agentId,
             eventId: `int:${crypto.randomBytes(6).toString('hex')}`,
             now: new Date().toISOString(),
@@ -12538,9 +12779,11 @@ async function main() {
           const listeners = labelFastPath.matchPollerListeners({ repo, label, kind }, agents);
           const now = new Date().toISOString();
           // #1897 AC8: resolve the title best-effort so the notice isn't blank.
-          const title = await fetchWorkItemTitle(repo, kind, number);
+          // #2114: also carry the PR's closesIssues (from the same fetch) so the
+          // admission gate keys this hand-off to the issue's ticket, not a new one.
+          const { title, closesIssues } = await fetchWorkItemDetail(repo, kind, number);
           const ghEvent = labelFastPath.buildSyntheticEvent({
-            repo, label, kind, number, title, actor,
+            repo, label, kind, number, title, closesIssues, actor,
             eventId: `intlbl:${crypto.randomBytes(6).toString('hex')}`,
             now,
           });
@@ -15332,6 +15575,9 @@ async function main() {
           // For role: 'team' — hill-climb collector config (#1222): the run-metrics
           // window/floor/cron/excludeAgents, round-tripped with the bundle.
           hillClimb,
+          // For role: 'team' — admission control (#2114, flow-control concept
+          // §4.0): the declarative per-flow WIP limit the dispatch path enforces.
+          wipLimit,
         } = JSON.parse(body);
         if (!id || !displayName || !role || !environmentId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -15374,6 +15620,7 @@ async function main() {
         if (Array.isArray(skills)) extra.skills = skills;
         if (typeof labelSuffix === 'string' && labelSuffix) extra.labelSuffix = labelSuffix;
         if (hillClimb && typeof hillClimb === 'object' && !Array.isArray(hillClimb)) extra.hillClimb = hillClimb;
+        if (Number.isInteger(wipLimit) && wipLimit >= 1) extra.wipLimit = wipLimit;
         const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
@@ -15654,6 +15901,51 @@ async function main() {
   };
   const anomalyHistoryTimer = setInterval(runAnomalyHistorySweep, HILL_CLIMB_ANOMALY_INTERVAL_MS);
   if (typeof anomalyHistoryTimer.unref === "function") anomalyHistoryTimer.unref();
+
+  // ============================================================
+  // Admission control (#2114): the reconcile tick that releases finished
+  // tickets and promotes held dispatches. Frequency is a LATENCY choice — it
+  // bounds how long a queued ticket waits after the previous one finishes — so
+  // a minute is generous; and because `admissionSweepTeam` returns before its
+  // first request for a team with no `wipLimit` or an empty lane, an
+  // installation that has not opted in pays nothing for it.
+  //
+  // Deliberately NOT maintenance-gated, unlike the two sweeps above. Those
+  // *start* work; this one only reconciles a ledger and moves entries between
+  // two durable queues, and the agent-side drain is already maintenance-gated —
+  // so suppressing it would achieve nothing except stranding a flow's held
+  // dispatches for the length of the window.
+  const ADMISSION_TICK_INTERVAL_MS = Number(process.env.AEE_ADMISSION_TICK_INTERVAL_MS || 60_000);
+  let admissionBusy = false;
+  const runAdmissionTick = async () => {
+    if (admissionBusy) return; // overlap guard — a slow sweep must not stack
+    admissionBusy = true;
+    try {
+      let teamIds = [];
+      try {
+        teamIds = listAgentIds().filter((id) => {
+          try { const c = loadAgentConfig(id); return c && c.role === "team"; }
+          catch { return false; }
+        });
+      } catch (err) {
+        console.warn(`[Admission] team enumeration failed: ${err.message}`);
+        return;
+      }
+      for (const teamId of teamIds) {
+        try {
+          await admissionSweepTeam(teamId);
+        } catch (err) {
+          // Never let one team's failure stop the others, and never let it
+          // escape the timer — the lane is untouched, so the next tick retries.
+          console.warn(`[Admission] ${teamId}: sweep failed: ${err.message}`);
+        }
+      }
+    } finally {
+      admissionBusy = false;
+    }
+  };
+  const admissionTimer = setInterval(runAdmissionTick, ADMISSION_TICK_INTERVAL_MS);
+  if (typeof admissionTimer.unref === "function") admissionTimer.unref();
 
   // ============================================================
   // Hill-climbing loop Phase 1 (#1222): daily per-team metrics collector.

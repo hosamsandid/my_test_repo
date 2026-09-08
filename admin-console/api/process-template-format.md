@@ -100,7 +100,8 @@ role's `{{vars}}` and the target repositories are applied per member.
     "minRunsPerWindow": 20,               // below this, snapshot is flagged `insufficientData` (default 20)
     "maxCardsPerPass": 5,                 // max improvement cards raised per pass (default 5) (#1224)
     "excludeAgents": ["agentId"]          // agent ids excluded from the metrics pass
-  }
+  },
+  "wipLimit": 1                           // OPTIONAL — admission control: max tickets in flight (#2114)
 }
 ```
 
@@ -270,6 +271,26 @@ the same option.
   §6.1).
 
 ### Notes & invariants
+
+- **`wipLimit` (#2114) bounds how many TICKETS the flow works at once**, enforced
+  by the platform at *dispatch* rather than by a dispatcher agent's prompt. A
+  positive integer; **omit it for today's unbounded behaviour** (`0` is rejected —
+  it reads like "no limit" but would mean "admit nothing"). `wipLimit: 1` is the
+  right setting for a flow whose agents share one branch: unbounded parallel
+  dispatch onto one `main` manufactures merge conflicts by construction, which is
+  the stall `docs/flow-control-concept.md` §4.0 was written for.
+  Persisted on the team agent like `stages`/`labels`/`hillClimb`, and round-tripped
+  through export → materialise → Edit-as-draft. Three things worth knowing:
+  a **ticket**, not a run, occupies the lane — one ticket legitimately produces
+  many dispatches (the developer's PR waking the reviewer is the *same* unit of
+  work, and is admitted regardless of capacity, so `wipLimit: 1` does not deadlock
+  on its own first hand-off); a dispatch that cannot be admitted is **held, never
+  dropped**, and fires as soon as capacity frees; and a **stuck** ticket (a
+  conflicting PR, a red check, a `needs-human` gate) keeps holding the lane rather
+  than letting a second one route around it. A ticket is released when GitHub
+  shows nothing open for it — its PR merged and its issue closed, or its issue
+  left open carrying no active flow label and no PR, which is a flow that dropped
+  the ticket and would otherwise freeze the lane forever.
 
 - **Wiring is `outcomes` ↔ `labelFilter`.** An edge *A → label L → B* exists when
   a `setLabel` action in role `A`'s `outcomes` port names `L` (#831), and a

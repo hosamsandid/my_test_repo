@@ -29,6 +29,10 @@ const READ_ONLY_NOTICE =
 const SUCCESSOR_NOTICE =
   'You are about to remove the last Team Admin. Choose who takes over as Team Admin in the same step.';
 const ROLE_LABELS = { 'team-admin': 'Team Admin', 'team-member': 'Team Member' };
+// `emptyStatePointer().lead` from admin-console/src/pages/agent-chat/empty-state.js —
+// what the rail shows instead of the agent listbox when the caller can see no
+// agents at all, which is precisely this journey's "private by default" state.
+const EMPTY_RAIL_LEAD = 'No agents yet.';
 
 // ── internal helpers (NOT exported — every export becomes a journey step) ────
 
@@ -194,10 +198,20 @@ async function expectTeamHidden(ctx, { teamId }) {
     `${who} must NOT see team ${teamId}; GET /api/matrix/agents returned ${JSON.stringify(rows.map(r => r.id))}`,
   ).toBe(false);
 
+  // Wait for the rail to have actually rendered before asserting an ABSENCE,
+  // or this passes against a page that has simply not finished loading.
+  //
+  // It renders one of TWO things, which is the trap here: `AgentChat.jsx` mounts
+  // `AgentList` — and therefore `[role="listbox"]` — only when `agents.length > 0`,
+  // and hands someone with no agents at all the `emptyStatePointer()` text
+  // instead. Both of this journey's "sees nothing" beats are exactly that case,
+  // so waiting for the listbox alone would fail on the very state being proven.
   await ctx.page.reload();
   const rail = ctx.page.locator('[role="listbox"]').first();
-  await expect(rail).toBeVisible({ timeout: 30_000 });
-  await expect(rail.getByText(teamId, { exact: true })).toHaveCount(0);
+  const noAgents = ctx.page.getByText(EMPTY_RAIL_LEAD, { exact: true });
+  await expect(rail.or(noAgents).first()).toBeVisible({ timeout: 30_000 });
+  // Page-wide rather than rail-scoped, so it holds in both renderings.
+  await expect(ctx.page.getByText(teamId, { exact: true })).toHaveCount(0);
 }
 
 /**

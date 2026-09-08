@@ -95,6 +95,7 @@ const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { reposFromEnv, repoVars } = require('./team-repo-resolve');
+const { planCreatorMembership, creatorEnvironmentOwnership } = require('./creator-membership');
 const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
 const { admitsToChatList } = require('./matrix-agent-list');
 const { parseMemberMaterialize } = require('./member-materialize');
@@ -12724,12 +12725,26 @@ app.get('/api/admin/teams', (req, res) => {
     })
     .catch((err) => res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` }));
 });
-// Team creation is a System-Admin action (a fresh team has no members, so a
-// non-admin creator could not even see it afterwards).
-app.post('/api/admin/teams', apiLimiter, (req, res) => {
-  const scope = getScope(req);
-  if (!scope.all) return denyAdmin(res, 'Only a System Admin may create teams');
-  return proxyAdmin(req, res, 'teams');
+// RETIRED (#2081 AC3, epic #2076 P3). This route minted an access SCOPE, and it
+// was System-Admin-only for the reason the old comment gave: "a fresh team has
+// no members, so a non-admin creator could not even see it afterwards". P1's
+// owner model plus the creator membership `POST /api/teams` now writes remove
+// that obstacle, and D1 collapses the two layers — an **Agent Team** is the
+// team. Creating one is self-service through `POST /api/teams` and its stream
+// twin, so there is exactly one creation path and it is not admin-gated.
+//
+// 410, not 404: the resource is gone on purpose, and a `Gone` naming its
+// successor is the difference between "this API changed" and "my request was
+// malformed". The remaining `/api/admin/teams` verbs stay — `teams/index.json`
+// is still the live source for the Access page and the team dropdowns until the
+// P5 successor retires it (concept A3.3) — so existing scopes stay readable,
+// editable and deletable; only minting NEW ones is closed.
+app.post('/api/admin/teams', apiLimiter, (_req, res) => {
+  return res.status(410).json({
+    error: 'Team creation has moved: create an Agent Team with POST /api/teams. '
+      + 'Access scopes are no longer created separately.',
+    code: 'team-create-retired',
+  });
 });
 app.get('/api/admin/teams/:id', (req, res) => {
   const scope = getScope(req);
@@ -14157,6 +14172,16 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
       repository = null;
     }
     githubTokenId = reusedEnv.githubTokenId || null;
+  } else if (!repository || !repository.url) {
+    // No environment to reuse AND no repository declared: create the team with
+    // NO infrastructure at all (#2081 AC6, #2041 D7). The env auto-created below
+    // already handles a null `parsed` by writing `repositories: []`, so this is
+    // the same repo-less team #1623 shipped for the reused-env path — what
+    // changes is only that the platform stops demanding a repo, an SSH key and
+    // a PAT before a brand-new user is allowed to have a team at all. A
+    // repository that IS declared keeps every existing check.
+    repoLess = true;
+    repository = null;
   }
 
   if (!repoLess) {
@@ -14186,9 +14211,12 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   if (repository?.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
     return res.status(400).json({ error: `SSH key '${repository.sshKeyId}' not found` });
   }
-  // The auto-created env path requires a GitHub PAT. A reused env may legitimately
-  // carry none (e.g. SSH-only clone), so only validate a token when one is set.
-  if (!environmentId) {
+  // The auto-created env path requires a GitHub PAT *when it has a repository to
+  // reach*: the token exists to clone and to drive `gh`. A repo-less team has
+  // nothing to authenticate against, so demanding one there would re-impose the
+  // pre-configuration AC6 removes. A reused env may legitimately carry none
+  // (e.g. SSH-only clone), so only validate a token when one is set.
+  if (!environmentId && !repoLess) {
     if (typeof githubTokenId !== 'string' || !listGithubTokens().some(t => t.id === githubTokenId)) {
       return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
     }
@@ -14389,6 +14417,17 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   const orphansToClean = decision.orphansToClean;
   let toCreate;
   if (mode === 'extend') {
+    // Who may CREATE a team is P3's contract (#2081): creating one is
+    // self-service for any authenticated user (D1), but EXTENDING one adds
+    // members to a team that already exists and belongs to somebody, which the
+    // D9 matrix makes a Team-Admin action. Both handlers were ungated, so under
+    // private-by-default any authenticated caller could have grown a stranger's
+    // team. Gated on the same `canManageAgent`/`agentMetaForScope` pair every
+    // other team-mutating route uses, so the rule cannot drift from theirs, and
+    // placed here — after validation, before the first write.
+    if (!canManageAgent(getScope(req), agentMetaForScope(existingTeamCfg))) {
+      return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
+    }
     // Enforce suffix consistency: added roles must use the stored suffix.
     const storedSuffix = existingTeamCfg.labelSuffix || '';
     if (labelSuffix !== storedSuffix) {
@@ -14505,6 +14544,11 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         mcpServers: normalizedMcpServers,
         ...defaultLlmEndpointForTeam(),
         additionalContext: '',
+        // Owned by the team it was auto-created for (#2081). Without this the
+        // record carries no tier at all, which since #2078 dropped the
+        // `|| 'default'` fallback makes it invisible to everyone but a System
+        // Admin — including the human who just created the team.
+        ...creatorEnvironmentOwnership(teamAgentId),
         createdAt: new Date().toISOString(),
       };
       saveEnvironment(envId, env);
@@ -14551,6 +14595,28 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         throw new Error(`Team agent ${teamAgentId}: ${data.error || `HTTP ${resp.status}`}`);
       }
       created.team = teamAgentId;
+      // The creator becomes this team's Team Admin, in the same operation
+      // (#2081 AC1, #2041 D1). The `ownerId` stamped above is not enough on its
+      // own: a `role: 'team'` agent IS its own access boundary, so
+      // `visibleAgent`/`canManageAgent` take the membership branch and a
+      // creator with no prior membership could not see the team they had just
+      // made. `planCreatorMembership` is what keeps the two handlers writing it
+      // under identical conditions — exactly once, and never on an extend.
+      //
+      // Fatal, not best-effort: "in the same operation" is the acceptance
+      // criterion, and a team whose creator cannot see it is worse than no team
+      // at all — the `catch` below rolls the whole create back.
+      const creatorMembership = planCreatorMembership({
+        userId: getScope(req).userId,
+        teamAgentId,
+        teamCreated: true,
+      });
+      if (creatorMembership) {
+        const { status, data } = await callAdmin('POST', 'memberships', creatorMembership);
+        if (status >= 400) {
+          throw new Error(`Team admin membership for ${teamAgentId}: ${(data && data.error) || `HTTP ${status}`}`);
+        }
+      }
     }
 
     // Phase C — team-members, one per selected role. Each one carries a
@@ -14801,6 +14867,16 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       repository = null;
     }
     githubTokenId = reusedEnv.githubTokenId || null;
+  } else if (!repository || !repository.url) {
+    // No environment to reuse AND no repository declared: create the team with
+    // NO infrastructure at all (#2081 AC6, #2041 D7). The env auto-created below
+    // already handles a null `parsed` by writing `repositories: []`, so this is
+    // the same repo-less team #1623 shipped for the reused-env path — what
+    // changes is only that the platform stops demanding a repo, an SSH key and
+    // a PAT before a brand-new user is allowed to have a team at all. A
+    // repository that IS declared keeps every existing check.
+    repoLess = true;
+    repository = null;
   }
 
   if (!repoLess) {
@@ -14826,7 +14902,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   if (repository?.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
     return fail(400, `SSH key '${repository.sshKeyId}' not found`);
   }
-  if (!environmentId) {
+  // Repo-less needs no PAT — mirror of the non-streaming handler (#2081 AC6).
+  if (!environmentId && !repoLess) {
     if (typeof githubTokenId !== 'string' || !listGithubTokens().some(t => t.id === githubTokenId)) {
       return fail(400, `GitHub token '${githubTokenId}' not found`);
     }
@@ -14996,6 +15073,12 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   const orphansToClean = decision.orphansToClean;
   let toCreate;
   if (mode === 'extend') {
+    // Extending an existing team is Team-Admin-only (#2081) — see the twin in
+    // `POST /api/teams` for why. `fail()` rather than `res.status()`: this
+    // handler has already opened the NDJSON stream.
+    if (!canManageAgent(getScope(req), agentMetaForScope(existingTeamCfg))) {
+      return fail(403, 'You may not extend this team');
+    }
     // Enforce suffix consistency on extend — mirror the non-streaming handler.
     const storedSuffix = existingTeamCfg.labelSuffix || '';
     if (labelSuffix !== storedSuffix) {
@@ -15159,6 +15242,11 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         mcpServers: normalizedMcpServers,
         ...defaultLlmEndpointForTeam(),
         additionalContext: '',
+        // Owned by the team it was auto-created for (#2081). Without this the
+        // record carries no tier at all, which since #2078 dropped the
+        // `|| 'default'` fallback makes it invisible to everyone but a System
+        // Admin — including the human who just created the team.
+        ...creatorEnvironmentOwnership(teamAgentId),
         createdAt: new Date().toISOString(),
       };
       saveEnvironment(envId, env);
@@ -15202,6 +15290,28 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         throw new Error(`Team agent ${teamAgentId}: ${data.error || `HTTP ${resp.status}`}`);
       }
       created.team = teamAgentId;
+      // The creator becomes this team's Team Admin, in the same operation
+      // (#2081 AC1, #2041 D1). The `ownerId` stamped above is not enough on its
+      // own: a `role: 'team'` agent IS its own access boundary, so
+      // `visibleAgent`/`canManageAgent` take the membership branch and a
+      // creator with no prior membership could not see the team they had just
+      // made. `planCreatorMembership` is what keeps the two handlers writing it
+      // under identical conditions — exactly once, and never on an extend.
+      //
+      // Fatal, not best-effort: "in the same operation" is the acceptance
+      // criterion, and a team whose creator cannot see it is worse than no team
+      // at all — the `catch` below rolls the whole create back.
+      const creatorMembership = planCreatorMembership({
+        userId: getScope(req).userId,
+        teamAgentId,
+        teamCreated: true,
+      });
+      if (creatorMembership) {
+        const { status, data } = await callAdmin('POST', 'memberships', creatorMembership);
+        if (status >= 400) {
+          throw new Error(`Team admin membership for ${teamAgentId}: ${(data && data.error) || `HTTP ${status}`}`);
+        }
+      }
       emit({ type: 'step', id: 'team', status: 'done' });
     }
 

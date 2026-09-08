@@ -8,6 +8,7 @@ import LoopRecordCard from './LoopRecordCard';
 import AskQuestionCard from './AskQuestionCard';
 import { normalizeAskQuestion } from './ask-question-view.js';
 import { MarkdownSafeBoundary, plainTextFallback } from '../../components/markdown-safe.js';
+import { AGENT_CHAT_MD_CSS, MD_TABLE_WRAP_CLASS } from './markdown-css.js';
 
 /**
  * The actual react-markdown render. Memoized on `body` alone (#1676): the
@@ -134,38 +135,6 @@ const SANITIZE_SCHEMA = {
 };
 
 /**
- * Shared markdown presentation CSS for the `.agent-chat-md` wrapper.
- *
- * Single source of truth so the trigger-notice card (NoticeMessage) renders
- * markdown byte-for-byte the same as the regular chat bubble — same compact
- * paragraph/heading/blockquote spacing so block-level markdown can't blow up
- * a card. Rendered via a `<style>` tag in both surfaces.
- */
-const AGENT_CHAT_MD_CSS = `
-  .agent-chat-md { min-width: 0; max-width: 100%; }
-  /* rehype-pretty-code wraps code blocks in a <figure> — kill the UA
-     default margin (1em 40px) and cap it so the pre's own horizontal
-     scrollbar kicks in instead of widening the bubble. */
-  .agent-chat-md figure { margin: 0; max-width: 100%; min-width: 0; }
-  .agent-chat-md pre { max-width: 100%; }
-  .agent-chat-md :not(pre) > code { overflow-wrap: anywhere; }
-  .agent-chat-md p { margin: 0; }
-  .agent-chat-md p + p { margin-top: var(--eb-space-2); }
-  .agent-chat-md ul, .agent-chat-md ol { padding-left: 1.4em; margin: var(--eb-space-1) 0; }
-  .agent-chat-md li { margin: 2px 0; }
-  .agent-chat-md table { border-collapse: collapse; margin: var(--eb-space-2) 0; font-size: var(--eb-text-sm); display: block; max-width: 100%; overflow-x: auto; }
-  .agent-chat-md th, .agent-chat-md td { border: 1px solid var(--eb-border-default); padding: 4px 8px; text-align: left; }
-  .agent-chat-md th { background: var(--eb-bg-elevated); }
-  .agent-chat-md blockquote { margin: var(--eb-space-2) 0; padding-left: var(--eb-space-3); border-left: 3px solid var(--eb-border-default); color: var(--eb-text-secondary); }
-  .agent-chat-md h1, .agent-chat-md h2, .agent-chat-md h3, .agent-chat-md h4 { margin: var(--eb-space-3) 0 var(--eb-space-1); font-weight: var(--eb-font-semibold); }
-  .agent-chat-md h1 { font-size: var(--eb-text-lg); }
-  .agent-chat-md h2 { font-size: var(--eb-text-md); }
-  .agent-chat-md h3 { font-size: var(--eb-text-md); color: var(--eb-text-secondary); }
-  .agent-chat-md hr { border: none; border-top: 1px solid var(--eb-border-default); margin: var(--eb-space-3) 0; }
-  .agent-chat-md a { color: var(--eb-accent-primary); }
-`;
-
-/**
  * Inject the shared `.agent-chat-md` stylesheet exactly once (#1676).
  *
  * Previously every Message/NoticeMessage/LoopRecordCard rendered its own
@@ -216,6 +185,16 @@ function formatMessageTime(ts) {
 
 const MARKDOWN_COMPONENTS = {
   a: ({ node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+  // Tables get their own scroll wrapper (#2048) so the table itself can stay a
+  // real `display: table` box and size itself to its content. The wrapper is
+  // what would scroll in the last-resort case where even the min-content width
+  // does not fit the bubble — an ordinary wide table wraps instead. See
+  // `markdown-css.js` for the layout rules this class carries.
+  table: ({ node, ...props }) => (
+    <div className={MD_TABLE_WRAP_CLASS}>
+      <table {...props} />
+    </div>
+  ),
   // Long code blocks: wrap in <details>. We detect line count from the
   // rendered children (rehype-pretty-code outputs <code> > <span data-line>).
   pre: ({ node, ...props }) => <PreWithCollapse {...props} />,

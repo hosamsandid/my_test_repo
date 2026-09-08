@@ -919,3 +919,68 @@ This document is the successor design for:
 - `docs/multi-user-concept.md` §3 — the two-level authorization model, whose per-team tier is re-pointed.
 
 Both keep a pointer to this file; their bodies are updated in **P6**.
+
+---
+
+## Amendment 1 — what P1 (#2077) found, and what it changed here
+
+This section is appended rather than woven in: the document above is the
+design-of-record the epic is being implemented against, so it stays readable as
+the design that was agreed. This records where implementation contradicted it.
+
+### A1.1 — What changed, and why it is this phase
+
+**The credential switch had to move in P1, not P2.** §3.6 and
+`docs/credentials.md` both record that #1569 gates the personal-credential tier
+on the agent carrying an `ownerId`. That gate was safe *only* because nothing
+populated the field — the code says so itself (`credential-resolution.js`:
+"every agent today, since nothing populates it yet"). P1's whole job is to
+populate it.
+
+Under the unmodified gate, the D6 backfill would have moved every agent in the
+installation into the owned branch in one boot. Every owner starts with **no**
+personal credential (they are self-service and opt-in, #1568), so every
+`commit` / `pr` / `review` / `push-https` would have been refused with the 424
+`personal-credential-required` — i.e. no agent could open a pull request again.
+That is precisely the regression **AC7** ("no visible behaviour change")
+forbids, so it could not be deferred to P2.
+
+The switch is now *participation* rather than *presence*: an owner with no
+personal credential of a kind takes the shared credential exactly as today; an
+owner whose personal credential is present-but-unusable is still refused.
+Refuse-on-missing keeps its purpose (a human who has a personal credential is
+never silently re-attributed) and loses only the case where it protected nobody.
+`findPersonalCredentialState` is the new lookup that keeps the two apart.
+
+### A1.2 — Statements above that P1 falsified
+
+| Statement | Where | Correction |
+|---|---|---|
+| The personal tier is gated on `ownerId` presence, and that reconciles AC5 with AC8 | §3.6 (quoting `orchestrator.js`), `docs/credentials.md` | True only while nothing populates `ownerId`. P1 replaces the gate with owner *participation* — see A1.1. |
+| "P1 … `memberships.teamId` re-pointed (§3.3)" reads as a replacement | §10 phase table | It must be **additive** in P1. Enforcement still keys on each resource's `teamId` stamp (an access-scope id until P2), so dropping the scope grants in P1 empties every list for every non-admin. The scope memberships are retired by P2 *together with* the stamps they gate. §8.3's `⊇` is what makes this admissible; the proof is `admin-console/api/ownership-no-lockout.test.js`, which fails when the migration is made replacing. |
+| AC5 "no `null` owners for migrated resources" | issue #2077 | Not reachable in general: D6's own rule (§8.1) ends in "else **unset**", so an access scope with no members has no owner to inherit. Such a resource is **reported** at boot (a warning naming the agent and the scope) rather than given a fabricated owner. On this installation (§8.5) every scope has a member, so the case does not arise in practice. |
+| AC3 "`teams/index.json` is no longer written or read by any code path" | issue #2077 | Not deliverable in the same phase as AC7. Retiring the file means re-pointing `listTeams`/`getTeam` at the Agent Team config set, which changes what `GET /api/admin/teams` returns and therefore what the Access page and five team dropdowns display — a visible change. It is the same edit as the P2 enforcement re-point and belongs with it. P1 delivers the *memberships* half of AC3 (entries now reference Agent Team ids) and leaves the file read as it is. |
+
+### A1.3 — What is explicitly NOT affected
+
+- **`scope.all`** and both of its branches (§2.2) are untouched.
+- **The personal-credential privacy guarantee** (§2.2, `ownsPersonalCredential`
+  has no `scope.all` bypass) is untouched, and the no-lockout proof asserts an
+  admin still cannot see a personal credential after the migration.
+- **`resolveAgentTenant`** and its twin (§1.3) are untouched — the tenant hop
+  collapses in P2. P1 changes the owner axis only (§1.4).
+- **No resource stamp is re-pointed.** Agents, environments and credentials keep
+  their access-scope `teamId`.
+
+### A1.4 — The rule successor phases must carry
+
+**An owner records how it was decided.** §8.2 establishes that a migrated owner
+is "a defensible placeholder, not a recovered fact" and must be correctable.
+Every write therefore carries `ownerSource` — `creator` (the authenticated human
+who made the request), `migration` (the D6 placeholder) or `conversion` (carried
+from a converted agent) — and each fanned-out membership carries `fromScopeId`.
+Nothing reads either field. They exist so that P6's cleanup view, and any human
+auditing an owner, can tell a guess from a fact. **A later phase must not drop
+them when it retires the access-scope layer**: the moment the scope memberships
+are deleted, `fromScopeId` is the only remaining evidence of where a grant came
+from.

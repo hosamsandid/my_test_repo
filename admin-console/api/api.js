@@ -834,6 +834,23 @@ function chatAuthorFor(req) {
   });
 }
 
+// The `{ ownerId, ownerSource }` stamp a create request carries to the
+// orchestrator (#2077, concept D8/§3.4/§3.5). The owner is the authenticated
+// caller's user-record id, resolved HERE from the session — `POST
+// /internal/agents` is unauthenticated, so an owner accepted from a request
+// body would be self-asserted and worthless.
+//
+// Returns an EMPTY object when there is no user record to point at, which is
+// the env single-admin case (`computeScope` gives it `userId: null`). Spreading
+// `{}` leaves the key absent rather than writing `ownerId: null`, so an agent
+// created by the operator is indistinguishable from a pre-#2077 one and takes
+// the same shared-credential path — an explicit null would be a third state
+// nothing reads.
+function ownerFor(req) {
+  const userId = getScope(req).userId;
+  return userId ? { ownerId: String(userId), ownerSource: 'creator' } : {};
+}
+
 function listAgentDirs() {
   try {
     return fs.readdirSync(AGENTS_DIR).filter(name => {
@@ -3595,7 +3612,14 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
     const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, teamId }),
+      body: JSON.stringify({
+        id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, teamId,
+        // Human owner (#2077, D8) — the authenticated caller, resolved here and
+        // never taken from the request body. `getScope(req).userId` is null for
+        // the env single-admin (no user record), and `ownerFor` omits the key
+        // in that case rather than writing a null owner.
+        ...ownerFor(req),
+      }),
     });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json(data);
@@ -13145,6 +13169,8 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
         role: 'agent',
         systemPrompt,
         environmentId: env.id,
+        // Human owner (#2077, D8) — the authenticated creator.
+        ...ownerFor(req),
       }),
     });
     agentResp = await resp.json();
@@ -13215,6 +13241,8 @@ app.post('/api/quickstart/llm', heavyLimiter, async (req, res) => {
         role: 'agent',
         systemPrompt,
         environmentId: envId,
+        // Human owner (#2077, D8) — the authenticated creator.
+        ...ownerFor(req),
       }),
     });
     agentResp = await resp.json();
@@ -14075,6 +14103,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           // Label suffix (#902): stored so extend-mode adds roles with the same
           // suffix and Flow-Editor dialogs can pre-fill new label inputs.
           ...(labelSuffix ? { labelSuffix } : {}),
+          // Human owner (#2077, D8) — the authenticated creator of the team.
+          ...ownerFor(req),
         }),
       });
       if (!resp.ok) {
@@ -14720,6 +14750,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           ...(bundleLabels.length ? { labels: bundleLabels } : {}),
           // Label suffix (#902) — see the non-streaming handler.
           ...(labelSuffix ? { labelSuffix } : {}),
+          // Human owner (#2077, D8) — the authenticated creator of the team.
+          ...ownerFor(req),
         }),
       });
       if (!resp.ok) {

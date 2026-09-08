@@ -69,6 +69,7 @@ const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require("./prom
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const credentialResolution = require("./credential-resolution");
+const ownershipMigration = require("./ownership-migration");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assessConversionEligibility, planTeamConversion } = require("./team-conversion");
@@ -1155,6 +1156,96 @@ function backfillResourceOwnership() {
 
   if (stamped > 0) {
     console.log(`[Orchestrator] Backfilled team ownership onto ${stamped} pre-existing resource(s)`);
+  }
+}
+
+// The D6 ownership migration (#2077, epic #2076; design of record
+// `docs/decentralised-access-concept.md` §8). Startup-time, idempotent,
+// in-place — the `backfillResourceOwnership` shape above, which §8.3 names as
+// the precedent to copy. Two independent passes:
+//
+//   1. `ownerId` onto every team and standalone agent that lacks one (AC1/AC5),
+//      resolved from its access scope's memberships by the D6 rule.
+//   2. Every (user ↔ access-scope) membership fanned out to one
+//      (user ↔ Agent Team) membership per Agent Team in that scope (AC2/AC3).
+//
+// Pass 2 is ADDITIVE — the scope memberships stay. P1 is specified as "no
+// behaviour change", and enforcement still gates on a resource's `teamId`
+// stamp (an access-scope id until P2 re-points it), so removing the scope
+// grants here would empty every list for every non-admin. §8.3 states the
+// no-lockout property as `⊇` precisely to allow this; the fixture test
+// `admin-console/api/ownership-no-lockout.test.js` is the proof.
+//
+// Idempotent by VALUE, never by a marker: pass 1 skips a config that already
+// carries an `ownerId`, pass 2 skips a `(userId, teamId)` pair that already
+// exists. A second boot writes nothing and logs nothing (AC6).
+//
+// Best-effort per item, like its precedent: one unreadable config or a store
+// write failure is logged and never aborts boot.
+function migrateOwnershipModel() {
+  let users = [];
+  let memberships = [];
+  try {
+    users = teamsStore.listUsers();
+    memberships = teamsStore.listMemberships();
+  } catch (err) {
+    console.warn(`[Orchestrator] Ownership migration skipped — user store unreadable: ${err.message}`);
+    return;
+  }
+
+  const configs = {};
+  if (fs.existsSync(AGENTS_DIR)) {
+    for (const id of listAgentIds()) {
+      try {
+        const cfg = loadAgentConfig(id);
+        if (cfg) configs[id] = cfg;
+      } catch (err) {
+        console.warn(`[Orchestrator] Ownership migration: skipping unreadable config ${id}: ${err.message}`);
+      }
+    }
+  }
+
+  // ── Pass 1 — ownerId (AC1/AC5) ──────────────────────────────────────────
+  const { stamp, unresolved } = ownershipMigration.planOwnerBackfill({ configs, users, memberships });
+  let owned = 0;
+  for (const { id, ownerId, ownerSource, scopeId } of stamp) {
+    try {
+      const cfg = configs[id];
+      cfg.ownerId = ownerId;
+      cfg.ownerSource = ownerSource;
+      saveAgentConfig(id, cfg);
+      owned++;
+      console.log(`[Orchestrator] Ownership: ${id} (scope ${scopeId}) → owner ${ownerId} (migration placeholder)`);
+    } catch (err) {
+      console.warn(`[Orchestrator] Ownership migration: could not stamp ${id}: ${err.message}`);
+    }
+  }
+  // D6's rule ends in "else unset", so a scope with no members at all leaves
+  // its resources unowned rather than getting a fabricated owner. Report it —
+  // an unowned team is correctable (§8.2) but only if someone knows about it.
+  for (const { id, scopeId } of unresolved) {
+    console.warn(
+      `[Orchestrator] Ownership: ${id} has no resolvable owner — access scope '${scopeId}' has no members. `
+      + 'Assign an owner from the Access page.',
+    );
+  }
+
+  // ── Pass 2 — membership fan-out (AC2/AC3) ───────────────────────────────
+  let granted = 0;
+  const repoint = ownershipMigration.planMembershipRepoint({ configs, memberships });
+  if (repoint.length > 0) {
+    try {
+      granted = teamsStore.appendMemberships(repoint).length;
+      for (const m of repoint) {
+        console.log(`[Orchestrator] Ownership: membership ${m.userId} → Agent Team ${m.teamId} as ${m.role} (from scope ${m.fromScopeId})`);
+      }
+    } catch (err) {
+      console.warn(`[Orchestrator] Ownership migration: membership fan-out failed: ${err.message}`);
+    }
+  }
+
+  if (owned > 0 || granted > 0) {
+    console.log(`[Orchestrator] Ownership migration: stamped ${owned} owner(s), added ${granted} Agent-Team membership(s)`);
   }
 }
 
@@ -3796,17 +3887,24 @@ function loadSshKeyIndex() {
 // (#1569, concept §5/§6). Returns `{ githubTokenId }` (the id to inject; the
 // env's shared id when the personal tier does not apply) or throws a
 // `personalCredentialRequired`-tagged Error the caller surfaces as a distinct,
-// actionable failure. Gated on `config.ownerId`: an agent with no owner (every
-// agent until ownerId population lands — AC8) takes the shared id unchanged and
-// never refuses.
+// actionable failure.
+//
+// Since #2077 populates `ownerId` on every team and standalone agent, owner
+// PRESENCE is no longer the switch — participation in the personal tier is. The
+// `present` half of `findPersonalCredentialState` is what carries that
+// distinction: an owner with no personal token takes the shared id unchanged and
+// never refuses (which is every agent today), while an owner whose personal
+// token is present-but-unusable still refuses. See the header comment in
+// `credential-resolution.js` for why the switch had to move.
 function resolveAttributedGithubToken(id, env, operation) {
   const cfg = loadAgentConfig(id) || {};
   const ownerId = credentialResolution.resolveAgentOwnerId(cfg, loadAgentConfig);
-  const personal = credentialResolution.findPersonalCredential(loadGithubTokenIndex(), ownerId);
+  const personal = credentialResolution.findPersonalCredentialState(loadGithubTokenIndex(), ownerId);
   const decision = credentialResolution.resolveCredential({
     operation,
     ownerId,
-    personalCredential: personal,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
     sharedCredentialId: env?.githubTokenId || null,
     kind: "GitHub token",
   });
@@ -7733,6 +7831,21 @@ class Orchestrator {
     // an existing team.
     const ownerTeamId = resolveOwnerTeamId(extra.teamId);
 
+    // Human OWNER — the creating person (#2077, concept D8/§3.4/§3.5). Written
+    // for `role: 'team'` and standalone `role: 'agent'` only; a `team-member`
+    // deliberately gets none and resolves its owner from the parent team
+    // (`resolveAgentOwnerId`). `ownerSource` records HOW the owner was decided,
+    // so a real creator stays distinguishable from a D6 migration placeholder
+    // (§8.2 — the migrated owner "may be wrong and must be correctable").
+    const ownerFields = ownershipMigration.ownableRole(role) && extra.ownerId
+      ? {
+        ownerId: String(extra.ownerId),
+        ownerSource: ownershipMigration.OWNER_SOURCES.includes(extra.ownerSource)
+          ? extra.ownerSource
+          : ownershipMigration.OWNER_SOURCE_CREATOR,
+      }
+      : {};
+
     // Skill grant is team-owned (skill-grants.js): the caller passes the
     // initial `skills` list explicitly; the environment no longer contributes.
     const grantedSkills = Array.isArray(extra.skills)
@@ -7746,6 +7859,7 @@ class Orchestrator {
         role: "team",
         environmentId: env.id,
         teamId: ownerTeamId,
+        ...ownerFields,
         systemPromptTemplate: systemPrompt || "",
         // The team's ACTIVE skill set — inherited by every member without a
         // `skillsOverride`; the lever the Knowledge activation flow writes.
@@ -7819,6 +7933,7 @@ class Orchestrator {
       role,
       environmentId: env.id,
       teamId: ownerTeamId,
+      ...ownerFields,
       // The agent's own skill grant (team-owned skills; standalone agents
       // carry their list directly).
       skills: grantedSkills,
@@ -10433,6 +10548,9 @@ async function main() {
   await migrateAgentClaudeMdToReference();
   bootstrapTeams();
   backfillResourceOwnership();
+  // After backfillResourceOwnership, which is what guarantees every config
+  // carries the `teamId` the D6 owner resolution keys on (#2077).
+  migrateOwnershipModel();
   backfillTriggerHorizonStamps();
 
   const orchestrator = new Orchestrator();
@@ -14807,6 +14925,11 @@ async function main() {
           team, sessionPolicy, triggers,
           // Owning (human) Team — the tenant this construct belongs to (#299).
           teamId,
+          // Human OWNER (#2077, D8): the user-record id of the creating human,
+          // resolved by the console from the authenticated session — never
+          // self-asserted by an agent, since this API is unauthenticated.
+          // Honoured for `role: 'team'` and `role: 'agent'` only.
+          ownerId, ownerSource,
           // For role: 'team' — suppress the auto-numbered first member
           // (the wizard adds members itself with role overrides instead).
           skipFirstMember,
@@ -14864,6 +14987,8 @@ async function main() {
         if (Array.isArray(triggers)) extra.triggers = triggers;
         if (skipFirstMember) extra.skipFirstMember = true;
         if (teamId) extra.teamId = teamId;
+        if (typeof ownerId === 'string' && ownerId.trim()) extra.ownerId = ownerId.trim();
+        if (typeof ownerSource === 'string' && ownerSource.trim()) extra.ownerSource = ownerSource.trim();
         if (Array.isArray(stages)) extra.stages = stages;
         if (Array.isArray(labels)) extra.labels = labels;
         if (Array.isArray(humans)) extra.humans = humans;

@@ -69,10 +69,12 @@ test('the resolver enforces canManageAgent for manage and visibleAgent otherwise
   assert.match(src, /safeAgentPath\(id, 'config\.json'\)/, 'containment, not string concat');
   assert.match(src, /canManageAgent\(scope, meta\)/);
   assert.match(src, /status: 403/);
-  assert.match(src, /visibleAgent\(scope, cfg\)/);
+  assert.match(src, /visibleAgent\(scope, agentMetaForScope\(cfg\)\)/);
   // An invisible agent is a 404, not a 403: telling a stranger the agent exists
   // is itself a leak, and it is what every other scoped list route does.
-  assert.match(src, /visibleAgent\(scope, cfg\)\)\s*\{\s*return \{ status: 404/);
+  // Visibility keys on the resolved Agent Team (agentMetaForScope), never the
+  // raw access-scope stamp on the config.
+  assert.match(src, /visibleAgent\(scope, agentMetaForScope\(cfg\)\)\)\s*\{\s*return \{ status: 404/);
 });
 
 test('D5: the attach body is whitelisted to the four card fields, never forwarded wholesale', () => {

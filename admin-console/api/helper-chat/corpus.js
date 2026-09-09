@@ -117,11 +117,14 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the `create.md` topic plus its `seeAlso` neighbours) at
-// 315 396 of 340 000 — 92.8% used, 24 604 left — against
+// 316 575 of 340 000 — 93.1% used, 23 425 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. (#2136's
 // *Global providers* chapter in `models.md` — the `/models` topic, which
 // `create.md` names among its `seeAlso` — added the last +3 012 to this crown;
-// #1459's work-plane bullet in `access-users.md` had added +319 before it.)
+// #1459's work-plane bullet in `access-users.md` had added +319 before it.
+// #2138's orphaned-credential refusal added the last +1 179, mostly through the
+// corpus-vendored `credentials.md` — which counts on every context, this crown
+// included — plus the `/my-credentials`+`/github-tokens`+`/ssh-keys` help topic.)
 // #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped

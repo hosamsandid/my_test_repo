@@ -216,6 +216,16 @@ offboarding itself fails the deletion **still proceeds**, so on an error check t
 person's agents, personal credentials and Matrix account by hand rather than
 assuming they were cleaned up.
 
+A failed offboarding is **no longer silent**, though. A degraded run — including
+one that only *partly* succeeded, such as an agent it could not pause — is
+recorded on the **GitHub Event Log** as a `user.offboarding-degraded` entry, so a
+teardown that did not finish shows on the operator's timeline instead of only in
+a server log nobody reads. Until you have confirmed the cleanup by hand, treat
+the departed person's personal tokens as still live and revoke them at GitHub.
+(Even so, an attributed write under a deleted owner's leftover token is refused
+rather than allowed through — see *Rotation and runtime resolution* on the
+credentials pages.)
+
 Two things this does **not** do. It does not delete anything a *team* owns —
 team resources belong to the team, not to the person, and their agents are
 paused rather than removed, so someone else can take them over. And it does not

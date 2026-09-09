@@ -409,8 +409,8 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the `create.md` topic plus its `seeAlso` neighbours — at **315,396 — 92.8% used,
-24,604 left** (the crown moved BACK off `/chats`, which had held it at 314,511: #2085 dissolved
+the `create.md` topic plus its `seeAlso` neighbours — at **316,575 — 93.1% used,
+23,425 left** (the crown moved BACK off `/chats`, which had held it at 314,511: #2085 dissolved
 the Access page, folding `access-users.md` into `users.md` and DROPPING the `/teams` link
 `agent-chat.md` carried rather than re-pointing it — the successor surface for what that link
 promised is the Share dialog on `/chats` itself, and Administration is System-Admin-only — so

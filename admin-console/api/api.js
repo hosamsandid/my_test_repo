@@ -8540,11 +8540,22 @@ app.get('/api/process/template', (req, res) => {
     // `emits` (the two never both ride an exported role — buildProcessTemplate
     // enforces the same rule).
     const authoredOutcomes = isAuthoredOutcomes(cfg.outcomes);
+    // Data-flow ports (#379) + hierarchy (#377) persisted on the member config.
+    // Carried into the exported role so buildProcessTemplate can round-trip them
+    // — without these the draft graph loses the dependency/artifact edges and
+    // the human-delivery touchpoints the live team renders (the count/layout
+    // divergence between a team and an Edit-as-draft of it). buildProcessTemplate
+    // reduces the member-id `dependsOn`/`parent` to portable role keys.
+    const df = cfg.dataFlow && typeof cfg.dataFlow === 'object' ? cfg.dataFlow : {};
     roleEntries.push({
       id, displayName: cfg.displayName || id, role,
       sessionPolicy: cfg.sessionPolicy || 'persistent', systemPrompt, triggers: tlist,
       ...(authoredOutcomes ? { outcomes: cfg.outcomes } : (emits.length ? { emits } : {})),
       ...(typeof cfg.stage === 'string' && cfg.stage ? { stage: cfg.stage } : {}),
+      ...(Array.isArray(df.inputs) && df.inputs.length ? { inputs: df.inputs } : {}),
+      ...(Array.isArray(df.outputs) && df.outputs.length ? { outputs: df.outputs } : {}),
+      ...(Array.isArray(df.dependsOn) && df.dependsOn.length ? { dependsOn: df.dependsOn } : {}),
+      ...(typeof cfg.parentMemberId === 'string' && cfg.parentMemberId ? { parent: cfg.parentMemberId } : {}),
     });
     // `channels` rides along so a channel's `gate: 'human'` classifies its routing
     // label as a gate in the exported registry too (#928).

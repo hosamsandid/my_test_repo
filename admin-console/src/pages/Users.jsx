@@ -426,9 +426,17 @@ function UsersTab({ me, creating, onCreatingChange }) {
     try {
       await apiCall('POST', '/api/admin/users', body);
       closeCreate();
-      refetch();
     } catch (e) { setCreateError(e.message); }
-    finally { setSavingCreate(false); }
+    finally {
+      setSavingCreate(false);
+      // In `finally`, not after the await (#2135 AC8): the create route persists
+      // the record BEFORE its last steps, so a rejection can arrive for a user
+      // that already exists. Refetching only on success left the operator with
+      // an error banner over a stale list and no way to see the truth but a
+      // manual reload. The dialog deliberately stays open on failure — the
+      // refreshed list behind it is what shows whether the record landed.
+      refetch();
+    }
   }
 
   async function handleEditSave(patch) {

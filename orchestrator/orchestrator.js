@@ -11227,7 +11227,24 @@ async function handleTeamsAdminApi(req, res) {
         // A single-operator stack creates no user records at all (the env
         // admin of #276 has none), so nothing here fires and its behaviour is
         // unchanged end to end.
-        provisionHumanMatrixIdentityInBackground(orchestrator.adminClient, created);
+        //
+        // `orchestratorSingleton` (not `orchestrator`, #2135): this is a
+        // module-level free function, so the `const orchestrator` of main() is
+        // not in scope here — reading it threw a ReferenceError *while
+        // evaluating the argument*, i.e. before the background helper's own
+        // .catch() could ever see it. A missing singleton degrades to a null
+        // adminClient, which `ensureHumanMatrixIdentity` already tolerates.
+        //
+        // Wrapped because the record is ALREADY on disk by this line: no
+        // failure after the persisting write may turn a completed create into
+        // a 500 the operator reads as "nothing happened".
+        try {
+          provisionHumanMatrixIdentityInBackground(
+            orchestratorSingleton ? orchestratorSingleton.adminClient : null, created);
+        } catch (err) {
+          console.error(
+            `[Orchestrator] Matrix identity provisioning could not be started for user ${created && created.id}: ${err.message}`);
+        }
         return sendJson(res, 201, clean(created)), true;
       }
       if (req.method === 'GET' && resourceId) {
@@ -11262,7 +11279,14 @@ async function handleTeamsAdminApi(req, res) {
         // the user removal is what the caller contracted for and still proceeds.
         let offboarding = null;
         try {
-          offboarding = await orchestrator.offboardOwner(resourceId);
+          // `orchestratorSingleton`, guarded — see the create branch above
+          // (#2135). This read has been a ReferenceError since 2026-08-11, so
+          // offboarding never actually ran; the try/catch made it silent.
+          if (orchestratorSingleton) {
+            offboarding = await orchestratorSingleton.offboardOwner(resourceId);
+          } else {
+            console.warn(`[Orchestrator] offboarding skipped for user ${resourceId}: orchestrator not initialised`);
+          }
         } catch (err) {
           console.error(`[Orchestrator] offboarding failed for user ${resourceId}: ${err.message}`);
         }
@@ -11271,7 +11295,12 @@ async function handleTeamsAdminApi(req, res) {
         // removed above: a live token must not outlive the user record. Runs
         // BEFORE deleteUser so a failure here leaves the user recoverable.
         try {
-          await deprovisionHumanMatrixIdentity(orchestrator.adminClient, resourceId);
+          // `orchestratorSingleton` — same ReferenceError as above (#2135), so
+          // no deleted human's Matrix account was ever de-provisioned.
+          // `deactivateMatrixUserId` already no-ops on a null adminClient, and
+          // the stored token is deleted either way.
+          await deprovisionHumanMatrixIdentity(
+            orchestratorSingleton ? orchestratorSingleton.adminClient : null, resourceId);
         } catch (err) {
           console.error(`[Orchestrator] Matrix de-provisioning failed for user ${resourceId}: ${err.message}`);
         }

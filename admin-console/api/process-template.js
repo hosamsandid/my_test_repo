@@ -537,6 +537,23 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
         : {}),
       ...(Array.isArray(r.channels) && r.channels.length
         ? { channels: r.channels.map(c => remapChannel(c, teamId)) } : {}),
+      // Data-flow ports (#379) + parent-child hierarchy (#377) — the last two
+      // declarative ports the export used to drop. They MUST round-trip, or an
+      // Edit-as-draft loses exactly the dependency/artifact edges + the
+      // human-delivery touchpoints (`outputs` with audience:'human') that
+      // `unified-graph.js` derives from them, so the draft graph diverges from
+      // the live team it was made from. `inputs`/`outputs` are logical artifact
+      // descriptors carried verbatim; member-id `dependsOn`/`parent` are reduced
+      // to portable role keys (the inverse of buildMemberFromTemplate's
+      // `${teamId}-${role}`), the same remap `id`/wake-targets/`channels.from`
+      // already get. templateToCustomRoles + processTemplateToUnified already
+      // read all four back. Omitted when empty so a port-less flow stays
+      // byte-identical.
+      ...(Array.isArray(r.inputs) && r.inputs.length ? { inputs: r.inputs } : {}),
+      ...(Array.isArray(r.outputs) && r.outputs.length ? { outputs: r.outputs } : {}),
+      ...(Array.isArray(r.dependsOn) && r.dependsOn.length
+        ? { dependsOn: r.dependsOn.map(d => roleKeyOf(d, teamId)) } : {}),
+      ...(typeof r.parent === 'string' && r.parent ? { parent: roleKeyOf(r.parent, teamId) } : {}),
       // Derived listeners are NOT exported: they are regenerated from the ports
       // on the next import/materialise, and carrying one would freeze it —
       // `expandWakeHandoffs` skips a role that already has a `wake-agent`

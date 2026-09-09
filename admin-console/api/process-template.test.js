@@ -199,6 +199,51 @@ test('round-trip: build → validate → customRoles preserves wiring', () => {
   assert.ok(!('emits' in cr[0].triggers.find(t => t.id === 'dev-assigned')));
 });
 
+test('data-flow ports + hierarchy round-trip losslessly (draft-from-team parity)', () => {
+  // The bug: a live team stores member-id `dependsOn`/`parentMemberId` and
+  // `dataFlow.outputs`, but the export dropped them — so an Edit-as-draft lost
+  // the dependency/artifact edges + human-delivery touchpoints and graphed
+  // differently from the team it came from. The export must carry all four
+  // declarative ports, reducing member ids to portable role keys.
+  const b = buildProcessTemplate({
+    name: 'df', level: 'live', teamId: 'acme',
+    roles: [{
+      id: 'acme-developer', displayName: 'Developer', role: 'team-member',
+      outputs: [{ name: 'build-report', audience: 'human' }],
+      inputs: [{ name: 'spec' }],
+      dependsOn: ['acme-analyst'],       // member id → must export as 'analyst'
+      parent: 'acme-lead',               // member id → must export as 'lead'
+    }],
+  });
+  const role = b.roles[0];
+  assert.deepEqual(role.outputs, [{ name: 'build-report', audience: 'human' }]);
+  assert.deepEqual(role.inputs, [{ name: 'spec' }]);
+  assert.deepEqual(role.dependsOn, ['analyst'], 'dependsOn reduced to portable role key');
+  assert.equal(role.parent, 'lead', 'parent reduced to portable role key');
+  // And the importer re-expands the same keys back to member ids, so a team →
+  // bundle → team round-trip is a fixed point (no edge/touchpoint drift).
+  const cr = templateToCustomRoles(b);
+  assert.deepEqual(cr[0].outputs, [{ name: 'build-report', audience: 'human' }]);
+  assert.deepEqual(cr[0].dependsOn, ['analyst']);
+  assert.equal(cr[0].parent, 'lead');
+  const member = buildMemberFromTemplate({ ...cr[0], promptTemplate: '' }, {
+    teamId: 'acme', repoFullName: 'o/r', repoOwner: 'o', repoName: 'r',
+  });
+  assert.deepEqual(member.dataFlow.dependsOn, ['acme-analyst']);
+  assert.equal(member.parentMemberId, 'acme-lead');
+});
+
+test('a port-less role exports byte-identically (no empty data-flow keys)', () => {
+  const b = buildProcessTemplate({
+    name: 'plain', level: 'live', teamId: 'acme',
+    roles: [{ id: 'acme-developer', displayName: 'Developer', role: 'team-member' }],
+  });
+  const role = b.roles[0];
+  for (const k of ['inputs', 'outputs', 'dependsOn', 'parent']) {
+    assert.ok(!(k in role), `port-less role must omit ${k}`);
+  }
+});
+
 test('emptyDraftBundle is a valid draft (empty roles) but not a materialisable template', () => {
   const d = emptyDraftBundle('My Process');
   assert.equal(d.processTemplateVersion, 1);

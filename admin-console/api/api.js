@@ -9200,7 +9200,12 @@ async function proxyPluginCredentialWrite(req, res, method) {
     if (!declaredKeys) {
       return res.status(502).json({ error: 'could not resolve the plugin\'s declared credential keys — not saving' });
     }
-    outBody = { ...pluginCredView.shapePutBody(req.body, declaredKeys), setBy: (req.user && req.user.sub) || 'unknown' };
+    // `req.user` from a session/IAP login is `{ username }` (auth.js), where
+    // `username` IS the subject for a real user and ADMIN_USERNAME for the env
+    // admin — the codebase-wide actor pattern. `.sub` was never populated here,
+    // so every save recorded "unknown".
+    const setBy = (req.user && (req.user.sub || req.user.username)) || 'unknown';
+    outBody = { ...pluginCredView.shapePutBody(req.body, declaredKeys), setBy };
   }
 
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';

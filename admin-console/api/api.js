@@ -74,7 +74,7 @@ const { parseGitHubUrl, deriveRepoIdentity } = require('./repo-identity');
 const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const extractTemplate = require('./extract-template');
-const { runCopilot, isCopilotAborted, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
+const { runCopilot, isCopilotAborted, classifyTurnFailure, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
 const { httpPostStreamText } = require('./anthropic-transport');
 const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
@@ -1813,6 +1813,15 @@ const COPILOT_STREAM_DEADLINE_MS = Number(process.env.AEE_COPILOT_DEADLINE_MS) |
 // by the remaining deadline — and let an operator opt into a tighter dead-socket
 // guard via AEE_COPILOT_INACTIVITY_MS when their endpoint truly streams.
 const COPILOT_STREAM_INACTIVITY_MS = Number(process.env.AEE_COPILOT_INACTIVITY_MS) || 0;
+// Per-CALL ceiling inside that whole-turn budget (#2131). Handing one call the
+// entire remaining budget means a single slow generation can consume the turn
+// and leave nothing for the generate-in-parts fallback — so the turn still ends
+// in a failure card, just a cleaner one. Capping a call at half the turn means a
+// timed-out single generation always leaves the split retry an equal budget for
+// its two smaller calls. Derived from the turn deadline so the two stay in step
+// when an operator tunes it, and independently overridable.
+const COPILOT_CALL_DEADLINE_MS = Number(process.env.AEE_COPILOT_CALL_DEADLINE_MS)
+  || Math.round(COPILOT_STREAM_DEADLINE_MS / 2);
 
 /* ─── Health ────────────────────────────────────────────────────────── */
 
@@ -8693,8 +8702,11 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
   const callLlm = async (payload) => {
     let heartbeatAt = 0;
     // The budget left for this call is the whole-turn ceiling minus what earlier
-    // calls (generation + any repairs) already spent — never below a small floor.
-    const deadlineMs = Math.max(5000, COPILOT_STREAM_DEADLINE_MS - (Date.now() - turnStartedAt));
+    // calls (generation + any repairs) already spent — never below a small floor,
+    // and never more than one call's share of the turn (#2131), so a slow single
+    // generation fails early enough for the split retry to still fit.
+    const remainingMs = COPILOT_STREAM_DEADLINE_MS - (Date.now() - turnStartedAt);
+    const deadlineMs = Math.max(5000, Math.min(COPILOT_CALL_DEADLINE_MS, remainingMs));
     // Idle guard: default to the remaining deadline (so a buffered, byteless-but-
     // alive generation is bounded ONLY by the deadline and never prematurely
     // "timeout"s), and only tighten it when an operator sets an explicit value.
@@ -8773,8 +8785,12 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
     } else {
       // Transport failure with no bundle to fall back to, or no parseable reply
       // at all. "Model couldn't get lint-clean" is NOT an error — runCopilot
-      // returns ok:false for that.
-      emit({ type: 'error', status: 502, error: err.message });
+      // returns ok:false for that. The event carries a stable `code` (#2131) so
+      // the composer can render plain-language guidance instead of relaying the
+      // raw transport string as its headline; `error` keeps that raw detail for
+      // the card's debug expander.
+      const failure = classifyTurnFailure(err);
+      emit({ type: 'error', status: failure.status, code: failure.code, error: failure.detail });
     }
   }
   if (!aborted) res.end();

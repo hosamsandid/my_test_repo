@@ -158,3 +158,41 @@ test('aborting mid-stream (#2087) destroys the request, returns error:aborted wi
   if (held) held.end();
   await srv.close();
 });
+
+// #2131 AC2. The failure mode the ticket describes is an upstream that BUFFERS
+// the SSE and therefore delivers zero bytes for minutes before answering 504 —
+// so the heartbeat and the partial-text machinery cannot help, and the deadline
+// is the only thing that can close the turn cleanly first. The existing deadline
+// test streams one frame before stalling, which is a different socket state
+// (headers received, parser primed). This one pins the byteless case: nothing is
+// ever written, not even the response head.
+// Both cases carry an explicit test timeout: with no bytes and (below) no idle
+// guard, the deadline is the ONLY thing that can settle the promise, so a
+// regression would otherwise hang CI instead of failing it.
+test('AC2: the deadline settles a request that never receives a single byte', { timeout: 15000 }, async () => {
+  const held = [];
+  const srv = await withServer((req, res) => { held.push(res); /* no writeHead, no write, no end */ });
+  const startedAt = Date.now();
+  const result = await httpPostStreamText(srv.url, {}, {}, { deadlineMs: 200, inactivityMs: 10000 });
+  const elapsed = Date.now() - startedAt;
+  for (const r of held) { try { r.destroy(); } catch { /* already gone */ } }
+  await srv.close();
+  // A clean `deadline` — never the socket-idle `timeout`, whose message would
+  // send the user looking for a network fault, and never a hang past the bound.
+  assert.equal(result.error, 'deadline');
+  assert.equal(result.status, 0);
+  assert.equal(result.text, '');
+  assert.ok(elapsed < 2000, `settled in ${elapsed}ms, expected close to the 200ms deadline`);
+});
+
+test('AC2: the deadline wins even when the idle guard is disabled outright', { timeout: 15000 }, async () => {
+  // The copilot route sets inactivityMs to the remaining deadline (or 0 when an
+  // operator disables it), precisely because a buffered-but-alive generation
+  // looks idle. With no idle guard at all the deadline must still be a bound.
+  const held = [];
+  const srv = await withServer((req, res) => { held.push(res); });
+  const result = await httpPostStreamText(srv.url, {}, {}, { deadlineMs: 200, inactivityMs: 0 });
+  for (const r of held) { try { r.destroy(); } catch { /* already gone */ } }
+  await srv.close();
+  assert.equal(result.error, 'deadline');
+});

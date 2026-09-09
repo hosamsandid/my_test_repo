@@ -561,16 +561,32 @@ function ErrorRow({ entry, busy, onRetry }) {
       </div>
     );
   }
-  // AC3 (#1404): timeout — show specific guidance; retry is still available.
-  const messageText = entry.kind === 'timeout'
-    ? 'The LLM call timed out. If your bundle is large, try breaking your request into smaller steps.'
-    : entry.message;
+  // AC3 (#1404) / AC1 (#2131): a timeout carries a plain-language headline plus
+  // the two actionable hints, and keeps the raw transport string behind an
+  // expander — available for debugging, never the thing the user reads first.
+  const hints = Array.isArray(entry.hints) ? entry.hints : [];
   return (
     <div style={{
       border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)',
       padding: 'var(--eb-space-2) var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 6,
     }}>
-      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)', lineHeight: 1.4 }}>{messageText}</div>
+      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)', lineHeight: 1.4 }}>{entry.message}</div>
+      {hints.length > 0 && (
+        <ul style={{
+          margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4,
+          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
+        }}>
+          {hints.map((h) => <li key={h}>{h}</li>)}
+        </ul>
+      )}
+      {entry.detail && (
+        <details style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          <summary style={{ cursor: 'pointer' }}>Technical detail</summary>
+          <div style={{ paddingTop: 4, fontFamily: 'var(--eb-font-mono, monospace)', wordBreak: 'break-word' }}>
+            {entry.detail}
+          </div>
+        </details>
+      )}
       {entry.kind === 'provider' ? (
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
           The Copilot needs a configured LLM —{' '}

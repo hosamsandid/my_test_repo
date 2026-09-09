@@ -464,3 +464,13 @@ On a **live team** the Copilot still works, but it never edits the team
 directly: it opens the team as a draft and continues the conversation there.
 That is deliberate — a chat turn is not something that should reach running
 agents.
+
+A large flow can take a while, and a single generation that runs too long
+would otherwise fail outright. When that happens the Copilot generates the
+flow in two steps on its own — the roles first, then the wiring that connects
+them — and shows *Generating in parts…* while it does; you do nothing
+differently and the result is the same proposal, checked the same way. If a
+turn still cannot finish in time, the error card says so in plain language and
+suggests describing the flow in smaller parts or switching to a faster assist
+model under **Settings → Model**, with the raw technical detail tucked behind a
+*Technical detail* expander rather than shown as the headline.

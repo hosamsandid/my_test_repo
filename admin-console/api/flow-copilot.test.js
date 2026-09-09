@@ -22,6 +22,12 @@ const {
   runCopilot,
   COPILOT_ABORTED,
   isCopilotAborted,
+  MAX_TOKENS_PART,
+  GENERATION_PARTS,
+  canGenerateInParts,
+  buildPartRequest,
+  isTimeoutFailure,
+  classifyTurnFailure,
 } = require('./flow-copilot');
 const { validateProcessTemplate } = require('./process-template');
 
@@ -709,4 +715,281 @@ test('isCopilotAborted only recognises the abort error', () => {
   assert.equal(isCopilotAborted(null), false);
   assert.equal(isCopilotAborted(undefined), false);
   assert.equal(isCopilotAborted({ code: COPILOT_ABORTED }), true);
+});
+
+// ── generate in parts (#2131) ────────────────────────────────────────────────
+
+test('isTimeoutFailure recognises the whole timeout class and nothing else', () => {
+  for (const m of [
+    'LLM request failed: timeout',
+    'LLM request failed: deadline',
+    'LLM request failed: HTTP 504',
+    'LLM request failed: HTTP 502',
+    'upstream Gateway Timeout',
+    'Bad Gateway',
+    'connect ETIMEDOUT 10.0.0.1:443',
+    'socket hang up',
+    'read ECONNRESET',
+  ]) {
+    assert.equal(isTimeoutFailure(new Error(m)), true, m);
+  }
+  for (const m of [
+    'LLM returned no parseable bundle',
+    'LLM request failed: HTTP 401',
+    'LLM request failed: HTTP 500',
+    'invalid_request_error: max_tokens too large',
+  ]) {
+    assert.equal(isTimeoutFailure(new Error(m)), false, m);
+  }
+  assert.equal(isTimeoutFailure(null), false);
+});
+
+test('classifyTurnFailure: timeout is 504 + llm-timeout, junk output stays 502', () => {
+  assert.deepEqual(classifyTurnFailure(new Error('LLM request failed: HTTP 504')),
+    { status: 504, code: 'llm-timeout', detail: 'LLM request failed: HTTP 504' });
+  assert.deepEqual(classifyTurnFailure(new Error('LLM returned no parseable bundle')),
+    { status: 502, code: 'no-parseable-bundle', detail: 'LLM returned no parseable bundle' });
+  assert.deepEqual(classifyTurnFailure(new Error('boom')),
+    { status: 502, code: 'llm-failed', detail: 'boom' });
+  // Never an empty headline, whatever arrives.
+  assert.equal(classifyTurnFailure(new Error('   ')).detail, 'the Copilot turn failed');
+  assert.equal(classifyTurnFailure(null).code, 'llm-failed');
+});
+
+test('canGenerateInParts: only a fresh whole-bundle generation can be split', () => {
+  assert.equal(canGenerateInParts(undefined), true);
+  assert.equal(canGenerateInParts({}), true);
+  assert.equal(canGenerateInParts({ roles: [] }), true);
+  // A revision turn already answers with a small op list — nothing to split.
+  assert.equal(canGenerateInParts({ roles: [{ id: 'dev' }] }), false);
+});
+
+test('the two parts select the two existing contracts, at the smaller token budget', () => {
+  assert.deepEqual(GENERATION_PARTS.map(p => p.id), ['roles', 'wiring']);
+  const messages = [{ role: 'user', content: 'build an RFP process' }];
+  const rolesReq = buildPartRequest({
+    part: GENERATION_PARTS[0], bundle: { processTemplateVersion: 1, roles: [] },
+    messages, formatDoc: 'doc', addendum: 'add',
+  });
+  const wiringReq = buildPartRequest({
+    part: GENERATION_PARTS[1], bundle: { processTemplateVersion: 1, roles: [{ id: 'dev' }] },
+    messages, formatDoc: 'doc', addendum: 'add',
+  });
+  // Part 1 runs against a role-less bundle → the whole-bundle contract; part 2
+  // runs against part 1's result → the ops contract. No new prompt vocabulary.
+  assert.match(rolesReq.system, /Output contract:/);
+  assert.doesNotMatch(rolesReq.system, /"op":"addRole"/);
+  assert.match(wiringReq.system, /Output contract \(revision/);
+  assert.match(wiringReq.system, /"op":"patchRole"/);
+  // Both are capped below the single-call budget — that is the whole point.
+  assert.equal(rolesReq.max_tokens, MAX_TOKENS_PART);
+  assert.equal(wiringReq.max_tokens, MAX_TOKENS_PART);
+  assert.ok(MAX_TOKENS_PART < buildCopilotRequest({ bundle: {}, messages, formatDoc: 'd', addendum: 'a' }).max_tokens);
+  // The user's own request rides along in both parts, with the step instruction last.
+  assert.equal(rolesReq.messages[0].content, 'build an RFP process');
+  assert.match(rolesReq.messages.at(-1).content, /STEP 1 of 2/);
+  assert.match(wiringReq.messages.at(-1).content, /STEP 2 of 2/);
+});
+
+test('AC3: a timed-out single generation is recovered by a two-part generation', async () => {
+  const full = fixture();
+  // Part 1 answers roles-only; part 2 answers the wiring the roles pass left out.
+  const rolesOnly = {
+    processTemplateVersion: 1, name: full.name, stages: full.stages,
+    roles: full.roles.map(r => ({
+      id: r.id, displayName: r.displayName, role: r.role,
+      sessionPolicy: r.sessionPolicy, systemPrompt: r.systemPrompt,
+    })),
+  };
+  const wiringOps = [
+    ...full.roles.map(r => ({
+      op: 'patchRole',
+      id: r.id,
+      patch: {
+        ...(r.outcomes ? { outcomes: r.outcomes } : {}),
+        ...(r.triggers ? { triggers: r.triggers } : {}),
+        ...(r.channels ? { channels: r.channels } : {}),
+        ...(r.emits ? { emits: r.emits } : {}),
+        ...(r.github ? { github: r.github } : {}),
+      },
+    })).filter(o => Object.keys(o.patch).length > 0),
+    ...(full.labels || []).map(l => ({ op: 'upsertLabel', label: l })),
+    ...(full.humans || []).map(h => ({ op: 'upsertHuman', human: h })),
+    ...(full.gates ? [{ op: 'setGates', gates: full.gates }] : []),
+  ];
+
+  const seen = [];
+  const out = await runCopilot({
+    bundle: undefined,
+    messages: [{ role: 'user', content: 'build the whole RFP flow' }],
+    callLlm: async (payload) => {
+      seen.push(payload.max_tokens);
+      if (seen.length === 1) throw new Error('LLM request failed: HTTP 504');
+      if (seen.length === 2) return JSON.stringify({ summary: 'roles', bundle: rolesOnly });
+      return JSON.stringify({ summary: 'wired the RFP flow', ops: wiringOps });
+    },
+    formatDoc: readFormatDoc(), addendum: 'add',
+  });
+
+  assert.equal(out.ok, true, JSON.stringify(out.lints));
+  assert.equal(out.generatedInParts, true);
+  assert.equal(out.repairIterations, 0);
+  assert.equal(out.summary, 'wired the RFP flow');
+  // Three calls: the single attempt that timed out, then the two parts — and
+  // both parts asked for a smaller reply than the attempt that failed.
+  assert.equal(seen.length, 3);
+  assert.equal(seen[1], MAX_TOKENS_PART);
+  assert.equal(seen[2], MAX_TOKENS_PART);
+  // The merged bundle went through the SAME strict gate as a single-call reply.
+  assert.equal(validateProcessTemplate(out.bundle).ok, true);
+  assert.deepEqual(out.bundle.roles.map(r => r.id), full.roles.map(r => r.id));
+  assert.ok(out.changes.some(c => c.kind === 'role-added'));
+});
+
+test('AC4: a single call that succeeds never triggers the split path', async () => {
+  let calls = 0;
+  const out = await runCopilot({
+    bundle: undefined,
+    messages: [{ role: 'user', content: 'build the flow' }],
+    callLlm: async (payload) => {
+      calls++;
+      assert.equal(payload.max_tokens, 16000); // the unchanged single-call budget
+      return reply(fixture(), 'built');
+    },
+    formatDoc: 'doc', addendum: 'add',
+  });
+  assert.equal(calls, 1);
+  assert.equal(out.ok, true);
+  assert.equal(out.generatedInParts, false);
+});
+
+test('a non-timeout first failure is surfaced as-is, never split', async () => {
+  let calls = 0;
+  await assert.rejects(
+    runCopilot({
+      bundle: undefined,
+      messages: [{ role: 'user', content: 'build it' }],
+      callLlm: async () => { calls++; throw new Error('LLM request failed: HTTP 401'); },
+      formatDoc: 'doc', addendum: 'add',
+    }),
+    /HTTP 401/);
+  assert.equal(calls, 1, 'a 401 is not a size problem — no second attempt');
+});
+
+test('a revision turn that times out is NOT split (its reply is already small)', async () => {
+  let calls = 0;
+  await assert.rejects(
+    runCopilot({
+      bundle: fixture(),
+      messages: [{ role: 'user', content: 'add a security reviewer' }],
+      callLlm: async () => { calls++; throw new Error('LLM request failed: timeout'); },
+      formatDoc: 'doc', addendum: 'add',
+    }),
+    /LLM request failed: timeout/);
+  assert.equal(calls, 1);
+});
+
+test('the split runs at most once — a timeout inside a part is not re-split', async () => {
+  let calls = 0;
+  await assert.rejects(
+    runCopilot({
+      bundle: undefined,
+      messages: [{ role: 'user', content: 'build it' }],
+      callLlm: async () => { calls++; throw new Error('LLM request failed: deadline'); },
+      formatDoc: 'doc', addendum: 'add',
+    }),
+    /split generation also failed/);
+  assert.equal(calls, 2, 'the single attempt plus part 1 — and then it gives up');
+});
+
+test('a failed split re-throws the ORIGINAL timeout so the guidance stays right', async () => {
+  let calls = 0;
+  await assert.rejects(
+    runCopilot({
+      bundle: undefined,
+      messages: [{ role: 'user', content: 'build it' }],
+      callLlm: async () => {
+        if (++calls === 1) throw new Error('LLM request failed: HTTP 504');
+        return 'not json at all';
+      },
+      formatDoc: 'doc', addendum: 'add',
+    }),
+    (err) => {
+      // The turn began by timing out, so the card must still say "smaller
+      // parts / faster model" — while the detail names both reasons.
+      assert.equal(classifyTurnFailure(err).code, 'llm-timeout');
+      assert.match(err.message, /HTTP 504/);
+      assert.match(err.message, /split generation also failed.*no parseable reply/);
+      return true;
+    });
+});
+
+test('a split-generated bundle with errors still enters the repair loop, on the ops contract', async () => {
+  const bad = fixture();
+  bad.roles[3].triggers[0].claim.add = 'wrong-claim';
+  const rolesOnly = { processTemplateVersion: 1, name: bad.name, roles: bad.roles };
+  const repairRequests = [];
+  let calls = 0;
+  const out = await runCopilot({
+    bundle: undefined,
+    messages: [{ role: 'user', content: 'build it' }],
+    callLlm: async (payload) => {
+      calls++;
+      if (calls === 1) throw new Error('LLM request failed: timeout');
+      if (calls === 2) return JSON.stringify({ summary: 'roles', bundle: rolesOnly });
+      if (calls === 3) return JSON.stringify({ summary: 'wired', ops: [{ op: 'setName', name: bad.name }] });
+      repairRequests.push(payload);
+      return reply(fixture(), 'repaired');
+    },
+    formatDoc: readFormatDoc(), addendum: 'add',
+  });
+  assert.equal(out.ok, true);
+  assert.equal(out.generatedInParts, true);
+  assert.equal(out.repairIterations, 1);
+  // The repair is aimed at the MERGED bundle, so it gets the ops contract — a
+  // second full-size regeneration is the call that just timed out.
+  assert.match(repairRequests[0].system, /Output contract \(revision/);
+  assert.match(repairRequests[0].system, /wrong-claim/);
+  // ...and the merged bundle is not echoed a second time as the assistant turn.
+  const echoed = repairRequests[0].messages.find(m => m.role === 'assistant');
+  assert.match(echoed.content, /generated in two steps/);
+  assert.ok(echoed.content.length < 300);
+});
+
+test('a stop during the split issues no further part request', async () => {
+  const ac = new AbortController();
+  let calls = 0;
+  await assert.rejects(
+    runCopilot({
+      bundle: undefined,
+      messages: [{ role: 'user', content: 'build it' }],
+      callLlm: async () => {
+        if (++calls === 1) throw new Error('LLM request failed: timeout');
+        ac.abort();
+        return JSON.stringify({ summary: 'roles', bundle: { processTemplateVersion: 1, roles: [] } });
+      },
+      formatDoc: 'doc', addendum: 'add',
+      signal: ac.signal,
+    }),
+    isCopilotAborted);
+  assert.equal(calls, 2, 'part 1 ran, the stop landed, part 2 never issued');
+});
+
+test('the split announces its own progress so a long run is not a frozen label', async () => {
+  const phases = [];
+  const full = fixture();
+  let calls = 0;
+  await runCopilot({
+    bundle: undefined,
+    messages: [{ role: 'user', content: 'build it' }],
+    callLlm: async () => {
+      if (++calls === 1) throw new Error('LLM request failed: timeout');
+      if (calls === 2) return JSON.stringify({ summary: 'roles', bundle: full });
+      return JSON.stringify({ summary: 'wired', ops: [{ op: 'setName', name: full.name }] });
+    },
+    onProgress: (ev) => phases.push(ev),
+    formatDoc: readFormatDoc(), addendum: 'add',
+  });
+  const parts = phases.filter(p => Number.isFinite(p.part));
+  assert.deepEqual(parts.map(p => [p.part, p.parts, p.partId]), [[1, 2, 'roles'], [2, 2, 'wiring']]);
 });

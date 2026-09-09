@@ -70,18 +70,35 @@ function computeScope({ username, adminUsername, users = [], memberships = [], a
   // authentication, so an unauthenticated request still sees nothing.
   if (!username) return { all: false, teamIds: new Set(), roles: new Map(), userId: null };
 
+  // Option C (#2059↔#1457 human ruling, PR #2094): both env-admin power grants
+  // below are a ONE-TIME SEED WINDOW. They apply only while the store holds no
+  // System-Admin record yet (a fresh / not-yet-activated install). Once
+  // `seedInitialSystemAdmin` has created that record, the env admin is retired
+  // permanently — no durable config-file login (#2059 AC4's intent) — and both
+  // branches fall through to normal per-record resolution, so a session issued
+  // to the env admin pre-seed also loses its power the moment the stack is
+  // seeded. AC7 keeps at least one System-Admin record thereafter, so this stays
+  // closed.
+  const systemAdminSeeded = users.some(u => u && u.systemAdmin === true);
+
   // Single-user compatibility mode (#1457): whoever is signed in is the
   // operator — the implicit System Admin. `userId` still resolves when the
   // subject matches a user record, so ownership-keyed behaviour (audit
   // attribution, personal credentials, per-user preferences) keeps working;
   // the env admin has no record and keeps its historical `userId: null`.
+  // NOT pre-seed-gated (Option C): `!authEnabled` is a deployment choice — auth
+  // is disabled and everyone signed in is the operator — not the env-credential
+  // comparison the pre-seed window governs. The env credential's one-time login
+  // is gated in the login route (`auth.js` `preSeed()`) and in the env-admin
+  // branch below; this mode is orthogonal and unchanged.
   if (!authEnabled) {
     const self = findUserBySubject(users, username);
     return { all: true, teamIds: new Set(), roles: new Map(), userId: self ? self.id : null };
   }
 
-  // The env single-admin credential is the operator: full visibility.
-  if (adminUsername && username === adminUsername) {
+  // The env single-admin credential is the operator: full visibility — pre-seed
+  // only (Option C), so it cannot authenticate once a real System-Admin exists.
+  if (adminUsername && username === adminUsername && !systemAdminSeeded) {
     return { all: true, teamIds: new Set(), roles: new Map(), userId: null };
   }
 
@@ -524,7 +541,13 @@ function canViewUsageStatistics(scope) {
 // admin and System Admins are reported as `admin: true` (full visibility).
 function describeAuthz({ username, adminUsername, users = [], memberships = [], authEnabled = true } = {}) {
   const scope = computeScope({ username, adminUsername, users, memberships, authEnabled });
-  const envAdmin = !!(username && adminUsername && String(username) === String(adminUsername));
+  // Option C (PR #2094): the env admin is a pre-seed identity only. Once a
+  // System-Admin record exists, `envAdmin` is false — so `isKnownPrincipal`
+  // (which admits `envAdmin || userId != null`) stops admitting a bare env-admin
+  // session, keeping #2059's #1415 fix closed while still honouring the
+  // pre-seed bootstrap session.
+  const envAdmin = !!(username && adminUsername && String(username) === String(adminUsername))
+    && !users.some(u => u && u.systemAdmin === true);
   const teams = [...scope.roles.entries()].map(([teamId, role]) => ({ teamId, role }));
   // Surface the caller's own GitHub handle (#1385) so the session knows who to
   // assign a parent tracker ticket to. Present only for a known user record;

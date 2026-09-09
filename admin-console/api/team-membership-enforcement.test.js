@@ -40,6 +40,8 @@ const users = [
   { id: 'u-cyd', subject: 'cyd@corp.com' },   // team-admin of squad-beta
   { id: 'u-nul', subject: 'nul@corp.com' },   // no membership at all
   { id: 'u-sys', subject: 'sys@corp.com', systemAdmin: true },
+  // Option C (PR #2094): the env admin is a real seeded record once activated.
+  { id: 'u-envadmin', subject: 'admin', systemAdmin: true },
 ];
 
 const memberships = [

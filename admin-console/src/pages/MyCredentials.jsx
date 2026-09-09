@@ -599,9 +599,9 @@ export default function MyCredentials() {
           <div>
             <strong>Personal credentials need a per-user account.</strong>
             <div style={{ marginTop: 'var(--eb-space-1)', color: 'var(--eb-text-muted)' }}>
-              You're signed in as the environment administrator, which operates the platform rather than acting as a
-              person. Sign in with your own user account to store a personal SSH key and GitHub token. Shared
-              team/platform credentials are managed on the <em>SSH Keys</em> and <em>GitHub Tokens</em> pages.
+              A personal credential is owned by a user record, and this session does not resolve to one. Sign in
+              with your own user account to store a personal SSH key and GitHub token. Shared team/platform
+              credentials are managed on the <em>SSH Keys</em> and <em>GitHub Tokens</em> pages.
             </div>
           </div>
         </div>

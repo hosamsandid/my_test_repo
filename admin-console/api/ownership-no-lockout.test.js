@@ -194,7 +194,9 @@ test('AC4 — the assertion is not vacuous: the estate really is reachable befor
   // the size the fixture describes.
   assert.ok(reach('ada@corp.com', configsBefore, membershipsBefore).size > 0);
   assert.ok(reach('cyd@corp.com', configsBefore, membershipsBefore).size > 0);
-  assert.ok(reach(ADMIN_USERNAME, configsBefore, membershipsBefore).size > 0);
+  // Option C (PR #2094): the pure env admin reaches nothing once seeded, so a
+  // real System-Admin record stands in as the full-visibility principal here.
+  assert.ok(reach('sys@corp.com', configsBefore, membershipsBefore).size > 0);
   // 6 principals × (7 teams×2 + 9 agents×2 + 3 envs×2 + 6 credentials) = every
   // pair is evaluated, so a silent fixture shrink is visible here.
   assert.equal(Object.keys(configsBefore).length, 9);
@@ -253,7 +255,7 @@ test('#2083 — the tier addition changes NO existing record for ANY principal',
 test('#2083 — that equality is not vacuous: the pre-#2083 predicates really do grant things', () => {
   const ada = scopeFor('ada@corp.com', after.memberships);
   const nul = scopeFor('nul@corp.com', after.memberships);
-  const env = scopeFor(ADMIN_USERNAME, after.memberships);
+  const env = scopeFor('sys@corp.com', after.memberships); // Option C: the operator is a seeded System-Admin record, not the retired env admin
   // Ada is team-admin of the 'default' scope, so she both sees and manages it.
   assert.equal(visibleEnvPre2083(ada, { teamId: 'default' }), true);
   assert.equal(canManageEnvPre2083(ada, { teamId: 'default' }), true);
@@ -279,7 +281,7 @@ test('#2083 — a shared record reaches exactly its assigned teams, measured ove
   assert.deepEqual(reachOf('bob@corp.com'), [true, false], 'fanned-out member: reads, cannot change');
   assert.deepEqual(reachOf('cyd@corp.com'), [false, false], 'admin of an unassigned team reaches nothing');
   assert.deepEqual(reachOf('nul@corp.com'), [false, false]);
-  assert.deepEqual(reachOf(ADMIN_USERNAME), [true, true]);
+  assert.deepEqual(reachOf('sys@corp.com'), [true, true]); // Option C: full visibility is the seeded System-Admin, not the retired env admin
 });
 
 test('#2083 — THE decisive case: promoting a two-team scope keeps its admin able to manage it', () => {

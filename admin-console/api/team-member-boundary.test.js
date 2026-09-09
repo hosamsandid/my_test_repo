@@ -52,6 +52,8 @@ const ENV_ADMIN = 'envadmin';   // the #276 env single-admin credential
 
 const USERS = [
   { id: 'u-root',  subject: 'root@example.com',  systemAdmin: true },
+  // Option C (PR #2094): the env admin is a real seeded record once activated.
+  { id: 'u-envadmin', subject: ENV_ADMIN, systemAdmin: true },
   { id: 'u-alice', subject: 'alice@example.com' },
   { id: 'u-bob',   subject: 'bob@example.com' },
   { id: 'u-carol', subject: 'carol@example.com' },

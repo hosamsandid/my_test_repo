@@ -131,7 +131,9 @@ Three consequences:
   sharing a machine keep separate picks, and your own pick does not follow you to
   a different browser.
 
-The environment's built-in single admin has **no user record** at all, so even
-the font size has nowhere on the server to go — it is kept locally like the rest
-and quietly does not persist across browsers. Everyone with a real user record
-gets the server-backed behaviour.
+Everyone who can sign in has a real user record, so the font size always has
+somewhere on the server to go. That was not always true: until the first
+administrator became a real record, the platform had one principal that was
+configuration rather than a person, and its font size quietly did not persist.
+The local copy is still written as a fallback, so the size you picked survives a
+server that cannot be reached.

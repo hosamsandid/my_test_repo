@@ -42,9 +42,9 @@ membership and no System-Admin flag can sign in and will see **nothing at all**
 share a team with them is the single most common reason for "I logged in and the
 console is empty".
 
-The page is open to System Admins and the environment's built-in admin only, and
-it needs the orchestrator to be reachable — user records and teams live in the
-orchestrator's store, not in the console.
+The page is open to **System Admins** only, and it needs the orchestrator to be
+reachable — user records and teams live in the orchestrator's store, not in the
+console.
 
 > **Where the Access page went.** It is gone, and deliberately not renamed. Its
 > member management is the **Share…** dialog; its all-teams table and its
@@ -100,37 +100,60 @@ person's **personal** credentials. That tier is owned by name, with no
 administrative break-glass — which is also why deleting a user *deletes* those
 credentials rather than transferring them.
 
-There is a fourth principal that never appears in any list here: the
-environment's **built-in single admin** (the deployment's `ADMIN_USERNAME`). It
-has full visibility but no user record, so it belongs to no team, cannot be given
-a role, and cannot be managed here. It exists so a fresh stack can be
-administered before the first user does.
+There is **no fourth principal**. The administrator a fresh stack starts with is
+an ordinary System-Admin *user record*, seeded once at first boot and managed on
+this page like anybody else — no built-in login lives outside the store. See
+*How signing in actually works* below for where that first record comes from.
 
 ## How signing in actually works
 
-A sign-in tries the **user records on this page first**, matching the *Subject*
-against the password you set here. Only if that finds nothing does it fall back
-to the environment's built-in single admin (`ADMIN_USERNAME` /
-`ADMIN_PASSWORD`).
+There is exactly **one login path**: the records on this page. A sign-in matches
+the *Subject* against the password stored on that record, and nothing else is
+consulted — no deployment credential, no second identity hiding behind the
+store.
 
-Two consequences:
+**Where the first administrator came from.** A brand-new stack has no records at
+all, so the deployment's configured initial user is used **once, as a seed**: at
+first boot — and only while zero records exist — the platform creates one real
+System-Admin *user record* from it. That input is either the credential pair
+`ADMIN_USERNAME` / `ADMIN_PASSWORD` (shipped as `admin` / `admin`) or, on an SSO
+stack, `BOOTSTRAP_SYSTEM_ADMIN_SUBJECT`, which wins when set and seeds a record
+with **no** password. Once any record exists the configured value is inert and
+is never read again, so re-pointing it at a different subject can neither mint a
+second administrator nor re-grant one you deliberately demoted.
 
-- **The env single admin is not a user record.** It never appears in this list,
-  has no memberships, and cannot be edited or deleted here — it is configured in
-  the deployment. That is also why a fresh stack can be administered before any
-  user exists, and why it keeps working when the orchestrator is unreachable: it
-  is the deliberate break-glass.
-- **A record with no password cannot sign in with one.** That is the normal state
-  for an SSO-mapped identity, where the password column stays *None* on purpose.
-  If someone should log in with a password, set one for them here.
+So the first administrator **is a user record like anybody else**: it appears in
+this list, and it is managed here — display name, e-mail, the System-Admin flag
+and the login password all change on this page. It also has a real user id,
+which is why its preferences persist, it can own personal credentials, and the
+audit trail names it rather than an anonymous actor.
 
-**Records come first for SSO too.** Where single sign-on is in front of the
-console, an identity it has authenticated still only gets a session when its
-e-mail matches a **Subject on this page** (or the env admin's name). Anyone else
-is sent to the ordinary login form rather than being handed a silent,
-scope-less session — so this page is the guest list, not a formality after it.
-Repeated password attempts are rate-limited, and a signed-in session lasts about
-a week.
+**A record with no password cannot sign in with one.** That is the normal state
+for an SSO-mapped identity, where the password column stays *None* on purpose
+and the person authenticates through the identity-aware proxy — and it is
+exactly what `BOOTSTRAP_SYSTEM_ADMIN_SUBJECT` seeds. If someone should log in
+with a password, set one for them here.
+
+Two consequences the platform accepts on purpose:
+
+- **While the user store is unreachable, nobody can sign in.** Nothing sits
+  behind it as a break-glass credential any more, so an attempt during that
+  window answers *"the user store is unavailable … try again in a moment"*
+  instead of *"invalid password"* — an honest, retryable answer rather than a
+  misleading rejection. Recovering a lost identity is therefore a **host-level**
+  action on `/workspace/users/index.json`, not a console login.
+- **Editing `.env` no longer revokes anything.** The seeded password lives in
+  the record from the moment it is created, so changing the deployment's
+  variables and restarting leaves the account exactly as it was. Only this page
+  can change or clear it — and choosing a strong one is the System Admin's
+  responsibility: nothing forces a change and there is no password policy.
+
+**Records are the guest list for SSO too.** Where single sign-on is in front of
+the console, an identity it has authenticated still only gets a session when its
+e-mail matches a **Subject on this page**. Anyone else is sent to the ordinary
+login form rather than being handed a silent, scope-less session — so this page
+is the guest list, not a formality after it. Repeated password attempts are
+rate-limited, and a signed-in session lasts about a week.
 
 ## Creating and editing a user
 
@@ -148,10 +171,18 @@ halves:
   Neither waits for *Save changes*, and neither can read back what is already
   stored, so "set a new one" is the only way to change a forgotten password.
 
+**Every record is fully manageable here — the seeded first administrator
+included.** Rename it, give it an e-mail, hand the System-Admin flag to someone
+else, set it a new password: there is no privileged record this panel refuses to
+edit, because there is no longer a principal that lives outside the store.
+
 Editing your **own** account is allowed and warned about rather than blocked: if
 you remove your own System-Admin flag the panel says so before you save, because
 nothing will hand it back to you afterwards. The warning is advisory on purpose —
-stepping down deliberately is a legitimate thing to do.
+stepping down deliberately is a legitimate thing to do. The one exception is the
+estate-level rule below: if yours is the *only* System-Admin record, the
+checkbox is locked rather than merely warned about, and the reason is printed
+next to it.
 
 ## Deleting a user is an offboarding
 
@@ -181,14 +212,26 @@ offboarding itself fails the deletion **still proceeds**, so on an error check t
 person's agents and personal credentials by hand rather than assuming they were
 cleaned up.
 
-Three things this does **not** do. It does not delete anything a *team* owns —
+Two things this does **not** do. It does not delete anything a *team* owns —
 team resources belong to the team, not to the person, and their agents are
-paused rather than removed, so someone else can take them over. It does not touch
-that person's contributions or history. And it does **not check whether you are
-removing the last System Admin**: nothing stops you deleting the only account
-that can create another one, and deleting your **own** account shows a warning but
-is not blocked. Before removing an administrator, make sure another one exists —
-or that you still have the environment's built-in admin credentials.
+paused rather than removed, so someone else can take them over. And it does not
+touch that person's contributions or history.
+
+**The last System Admin cannot be deleted.** Since the console authenticates
+against user records alone, removing the only global administrator would lock
+every human out of user management with no way back in, so the store refuses it:
+*"The last System Admin cannot be deleted — promote another user to System Admin
+first"*. The row's **Delete** is disabled with that sentence as its tooltip, so
+the confirmation dialog is never even reached for such a record — and if a
+request is made anyway the server answers 409 with the same wording. The same
+rule guards the flag itself: that record **cannot be demoted** either, which is
+why its System-Admin checkbox is locked with the reason shown beside it.
+Promote a second System Admin first, and both controls unlock.
+
+Deleting your **own** account is a different case and is still only *warned*
+about, not blocked — stepping away deliberately is legitimate. If you ever do
+lose every System-Admin identity, recovery is a host-level edit of
+`/workspace/users/index.json`, not a console login.
 
 ## The All Teams tab
 

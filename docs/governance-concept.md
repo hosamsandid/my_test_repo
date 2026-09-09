@@ -207,8 +207,11 @@ GOV-SKILLS-6 and GOV-DELIVERY-3).*
   the route range it cites has since moved, and the family is now addressed by parameter
   name (`:agentId`) rather than by line number. See `admin-console/api/work-plane-access.js`.
 - **Sessions are irrevocable 7-day cookies** — deleting a user or changing a password
-  leaves their sessions alive; the break-glass env admin ships as `admin`/`admin`,
-  shared and unattributable. Offboarding is fictional today.
+  leaves their sessions alive; the initial administrator ships as `admin`/`admin`.
+  (Since #2059 that administrator is at least a real, attributable **record** rather
+  than a shared recordless credential — but the shipped default is unchanged, and a
+  password change no longer even invalidates sessions as a side effect, the cookie key
+  having been decoupled from it.) Offboarding is fictional today.
 
 ### Controls
 
@@ -274,12 +277,28 @@ see §5. (3) **Credential reassignment** — already System-Admin-only; add the 
 ack. Maintenance mode gets **no** four-eyes — an emergency brake must pull one-handed
 (typed reason + auto-expiry instead, §7). Everything else: audit is enough.
 
-**GOV-ACCESS-7 — Break-glass governance.** `P0 · config/process · enforce`
-Console refuses to serve env-admin logins when `ADMIN_PASSWORD` is the shipped default
-on a non-localhost deployment (with `GOVERNANCE_MODE=enforce`; warn otherwise — keeps
-the 5-minute local dev loop); every env-admin login is audit-marked
-`break-glass-login` and surfaced — at 50 users it should be *news*; runbook: rotate
-after use, ≥2 named System Admin records so the env admin is never routine.
+**GOV-ACCESS-7 — Break-glass governance.** `P0 · process · enforce`
+*Restated by #2059 (concept #2041 D13): there is no env-admin login left to refuse.*
+The configured initial user is consumed once at first boot to create a real
+System-Admin **record** and is never read again, so the console has exactly one login
+path and every session resolves to a named person. That removes this control's
+original subject and moves the break-glass **off the console**: recovering a lost
+administrator is a **host-level** action on the orchestrator volume
+(`/workspace/users/index.json`), which is where comparable systems put it
+(`gitlab-rails console`, `occ user:resetpassword`, `grafana-cli
+admin reset-admin-password`) — and it is deliberately not reachable through the UI,
+since an in-console way back in would be the shared recordless credential wearing a
+different name. What remains governable is therefore process, not config: **host
+access is the break-glass** and must be held by the people the runbook names; the
+shipped `admin`/`admin` seed must be replaced on the Users page (afterwards the
+password lives on the record, so rotating `.env` no longer revokes it); and **≥2
+named System Admin records** stays the rule — now partly enforced rather than merely
+advised, since the store refuses to delete or demote the last one, which means a
+single-administrator stack cannot lock itself out by accident but equally has nobody
+to recover it from inside. The `break-glass-login` audit marker retires with the
+login it marked; the seeding itself writes one audit entry (`method: BOOTSTRAP`), so
+how an instance's first administrator got there is answerable in an access review —
+which it previously was not.
 
 **GOV-ACCESS-8 — Joiner / Mover / Leaver.** `P0 · process-only (given -5) · process`
 Joiner = user record + Viewer membership; mover = membership swap within a week;
@@ -780,10 +799,17 @@ manifest over closed audit day files (`{date, file, sha256, prevManifestSha256}`
 verify command; off-box shipping is the hosted-deployment step-up.
 
 **GOV-PLATFORM-8 — Refuse unsafe defaults.** `P0 · config · warn → enforce`
-Startup checks at the `verifyCredentials` seam: shipped-default `ADMIN_PASSWORD` or
-empty `AUTH_SESSION_SECRET` → prominent warning; with `GOVERNANCE_MODE=enforce`,
-env-admin logins are refused (named users keep working — the break-glass inversion).
-Never blocks local dev.
+*Partly delivered and partly re-scoped by #2059.* The `verifyCredentials` seam this
+control was attached to no longer exists, and its second clause is moot: an empty
+`AUTH_SESSION_SECRET` no longer derives the cookie key from the admin password — it
+falls back to a random key persisted on the workspace volume, so a shipped-default
+password can no longer make session cookies forgeable. What is left is the first
+clause, re-pointed at the **record** rather than the environment: a System-Admin
+record still carrying the shipped-default password on a non-localhost deployment →
+prominent warning, and with `GOVERNANCE_MODE=enforce`, refused. Note the check must
+move with the password: it is no longer answerable from configuration at startup (the
+value in `.env` is only ever the seed), so it becomes a check against the store —
+which is also why #2059 deliberately added no password policy. Never blocks local dev.
 
 **GOV-PLATFORM-9 — Host-mount governance.** `P1 (observe slice with P0) · small build · observe → warn → enforce`
 `contextMounts` gain `dataClass` (default C1) + `approvedBy`; RW-mount changes get a
@@ -858,8 +884,9 @@ The domain cut misses real surfaces; each gets an owner and a minimum control.
   lifecycle sweep: age badge + one-click regenerate; the §10 rate-limit closes the
   brute-force window. Flows should prefer `github-event` (already documented).
 - **E2E journeys** *(owner: §10)*. Nightly runs use a dedicated test user + test team
-  (never the env admin), and journeys must not mutate non-test teams — a naming-scoped
-  guard in the journey runner plus the normal audit trail make violations visible.
+  (never the stack's seeded administrator, which they currently do use), and journeys
+  must not mutate non-test teams — a naming-scoped guard in the journey runner plus the
+  normal audit trail make violations visible.
 
 ---
 
@@ -904,7 +931,7 @@ Controls without owners decay. The organizational half, deliberately lightweight
   STT backend — each with a data-flow line (what leaves, where to) and the applicable
   terms (incl. the consumer-OAuth single-user constraint of §8).
 - **Governance reporting.** A monthly one-page digest, assembled from data the platform
-  already writes: break-glass logins, would-deny counts by route family, budget state
+  already writes: the first-boot System-Admin seeding, would-deny counts by route family, budget state
   per team, gate-removal and policy overrides (with reasons), anomaly recurrence,
   waiver expiries, backup/restore-drill status. Send to the Circle + sponsor. When the
   digest is boring, governance is working.
@@ -934,8 +961,8 @@ order:
 ## 14. Rollout roadmap
 
 **Phase 0 — days, config & process only.** Data-classification register + C4/personal
-register; JML process + quarterly access review; break-glass runbook + refuse-default
-check (warn); bp-explorer RO mount; loopback-bind checklist; branch-protection policy
+register; JML process + quarterly access review; host-level break-glass runbook
+(GOV-ACCESS-7, restated by #2059) + refuse-default check (warn); bp-explorer RO mount; loopback-bind checklist; branch-protection policy
 text; backup script + first restore drill; close the GOV-ACCESS-2 route holes;
 emits-lift validation fix; maintenance role gate + reason + auto-expiry;
 `AEE_WORKSPACE_ISOLATION=0` startup warning; RW-mount audit tag; waiver register file.

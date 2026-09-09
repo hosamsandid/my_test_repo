@@ -41,6 +41,8 @@ const ADMIN_USERNAME = 'admin';
 // nothing of its own.
 const users = [
   { id: 'u-ops', subject: 'ops@corp.com', systemAdmin: true },
+  // Option C (PR #2094): the env admin is a real seeded record once activated.
+  { id: 'u-envadmin', subject: 'admin', systemAdmin: true },
   { id: 'u-new', subject: 'newbie@corp.com' },
 ];
 

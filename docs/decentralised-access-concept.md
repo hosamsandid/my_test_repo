@@ -31,7 +31,7 @@ Tracking issue: [#2046](https://github.com/AccentureCodeFoundry/314092_agent-exe
 | **D2** | Open user directory — every user may search and browse all users (name + email only). | [§7.2](#72--the-open-directory-d2-d11), [§4.1](#41--admin-consoleapiscopejs--the-predicate-set) |
 | **D3** | No invitations of people without an account. | [§7.3](#73--existing-accounts-only-d3) |
 | **D4** | The last Team Admin cannot be removed without naming a successor. | [§2.3](#23--the-last-admin-rule-d4) |
-| **D5** | The System Admin retains full visibility (`scope.all` stays); the operator login is unchanged. | [§2.2](#22--what-full-visibility-means-d5-and-the-privacy-guarantee) |
+| **D5** | The System Admin retains full visibility (`scope.all` stays); the operator login is unchanged. *(Second clause superseded by D13 / #2059 — see [§13](#13--amendment-d13--2059--the-operator-becomes-a-record).)* | [§2.2](#22--what-full-visibility-means-d5-and-the-privacy-guarantee) |
 | **D6** | Migration preserves existing access; private-by-default applies to new teams only. | [§8](#8--migration-d6) |
 | **D7** | Layered resource ownership — personal / team-owned / system-wide shared. | [§5](#5--resource-ownership-tiers-d7-d12) |
 | **D8** | Only teams are shareable; a standalone agent stays private to its creator. | [§7.4](#74--only-teams-are-shareable-d8), [§3.5](#35--after--standalone-role-agent-config) |
@@ -111,20 +111,30 @@ Unchanged from `orchestrator/teams-store.js:20-26` and `docs/multi-user-concept.
 
 ### 2.2 — What "full visibility" means (D5), and the privacy guarantee
 
-D5 keeps `scope.all` exactly as it is. `computeScope` (`scope.js:23-53`) grants it in two branches:
+D5 keeps `scope.all` exactly as it is. `computeScope` (`scope.js:23-53`) granted it in two branches:
 
-| Branch | Lines | Returned scope |
-|---|---|---|
-| **Operator / env-admin login** (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, `auth.js:41-42`) | `scope.js:29-31` | `{ all: true, teamIds: ∅, roles: ∅, userId: null }` |
-| **System Admin user record** (`user.systemAdmin === true`) | `scope.js:40` | `{ all: true, teamIds: ∅, roles: ∅, userId: user.id }` |
+| Branch | Lines | Returned scope | Fate |
+|---|---|---|---|
+| **Operator / env-admin login** (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, `auth.js:41-42`) | `scope.js:29-31` | `{ all: true, teamIds: ∅, roles: ∅, userId: null }` | **Deleted by D13 / #2059** ([§13](#13--amendment-d13--2059--the-operator-becomes-a-record)) |
+| **System Admin user record** (`user.systemAdmin === true`) | `scope.js:40` | `{ all: true, teamIds: ∅, roles: ∅, userId: user.id }` | Unchanged |
 
-Both are **unchanged** (D4/D5). Twelve predicates consult `scope.all` as a grant (§4.1) and none of them is touched — that is the decision that keeps this redesign a re-pointing rather than a rebuild.
+> **Amended.** When this chapter was written both branches were unchanged, and the
+> first one is what §2.2's privacy guarantee and §4's *Unchanged* verdicts were
+> reasoned against. #2059 (D13) removed it: the configured credential is a first-boot
+> **seed** for a real System-Admin record, so the surviving branch is now the only
+> way to `scope.all` and **every authenticated caller has a `userId`**. Nothing about
+> the *rest* of the redesign changes — one grant branch fewer is strictly simpler —
+> but the three places this document leaned on `userId: null` are corrected in §13.
+
+The **second** branch is unchanged. Twelve predicates consult `scope.all` as a grant (§4.1) and none of them is touched — that is the decision that keeps this redesign a re-pointing rather than a rebuild.
 
 **The privacy guarantee, stated plainly:**
 
-> A team created after this redesign is **private from every other named user who is not one of its members**. Two exceptions are part of the design and are not defects: a **System Admin** retains full visibility (D5), and the **operator / env-admin login** retains full visibility (D4). Personal credentials remain outside even that — `ownsPersonalCredential` (`scope.js:177-179`) deliberately carries **no `scope.all` bypass**, and the operator's `userId` is `null`, so a personal credential is visible to its owner alone.
+> A team created after this redesign is **private from every other named user who is not one of its members**. One exception is part of the design and is not a defect: a **System Admin** retains full visibility (D5). Personal credentials remain outside even that — `ownsPersonalCredential` (`scope.js:177-179`) deliberately carries **no `scope.all` bypass**, so a personal credential is visible to its owner alone.
+>
+> *(As first written this named a second exception, the operator / env-admin login, and grounded the personal-credential carve-out in that login's `userId` being `null`. Both are superseded by D13 / #2059 — the carve-out now rests on the owner comparison alone, which is the rule D2 always meant; see §13.)*
 
-This is the honest wording, not the stronger claim. **Nothing in this document says a System Admin cannot see a team** (#2046 AC5). The stronger claim would require surgically removing the `all`-bypass from the twelve predicates in §4.1 — explicitly *not* required by D5, and it would break the governance model (`docs/governance-concept.md` GOV-ACCESS-7 break-glass, quarterly access review, GOV-ACCESS-8 JML all assume an operator who can see the estate).
+This is the honest wording, not the stronger claim. **Nothing in this document says a System Admin cannot see a team** (#2046 AC5). The stronger claim would require surgically removing the `all`-bypass from the twelve predicates in §4.1 — explicitly *not* required by D5, and it would break the governance model (`docs/governance-concept.md` quarterly access review and GOV-ACCESS-8 JML both assume an administrator who can see the estate). *(GOV-ACCESS-7 was the third item here; #2059 restated it as a host-level break-glass, since the console login it governed no longer exists — see §13.)*
 
 *A note on #2041's wording of this guarantee is raised, not resolved, in §12.2.*
 
@@ -473,7 +483,7 @@ This is the surface D1 dissolves. Plumbing: `callAdmin` `:11764-11774`, `proxyAd
 | `DELETE /api/admin/users/:id` | **11867** | `if (!scope.all)` (`:11869`) | Unchanged **+ D4 last-admin refusal** (§2.3) |
 | `POST /api/admin/users/:id/password` | **11874** | `if (!scope.all)` (`:11876`) | Unchanged |
 | `DELETE /api/admin/users/:id/password` | **11879** | `if (!scope.all)` (`:11881`) | Unchanged |
-| `PUT /api/me/preferences` | **11894** | No role gate — pinned to the caller's own id (`:11906`); env admin (`scope.userId == null`) gets `{persisted:false}` (`:11903-11905`) | Unchanged |
+| `PUT /api/me/preferences` | **11894** | No role gate — pinned to the caller's own id (`:11906`); a caller with no resolved id gets `{persisted:false}` (`:11903-11905`) | Unchanged, but **no longer a no-op for the administrator**: #2059 gives every authenticated caller a `userId`, so the `{persisted:false}` arm became a fail-closed guard rather than the operator's permanent condition (§13) |
 | `GET /api/admin/memberships` | **11916** | `scope.all ? data : data.filter(m => visibleTeam(scope, m.teamId))` (`:11921`) | **Re-keyed. Becomes the Share dialog's read** (§7.1) |
 | `POST /api/admin/memberships` | **11925** | `canManageTeam(scope, req.body.teamId)` (`:11927-11928`) | **Re-keyed. Becomes the Share dialog's write** + D4 rule. Already the right predicate — the dialog is a new *front end*, not a new authorization mechanism. |
 | `DELETE /api/admin/memberships` | **11931** | `canManageTeam(scope, req.query.teamId)` (`:11933-11934`) | Same |
@@ -502,7 +512,7 @@ Every mirror below reads **one** value: `user.teams[].teamId`/`role` and `user.a
 | `src/pages/agent-lifecycle/agent-create-access.js` | `describeAgentCreateAccess` **:31-38**; `:36` `const isTeamAdmin = (user.teams \|\| []).some(t => t && t.role === 'team-admin');` | Enables/disables New Agent + Import in the chat header, disabled-with-hint | **Relaxed** (P3): every authenticated user may create, so the refusal branch (`:38`) becomes unreachable and the helper is retired or reduced |
 | `src/pages/AgentChat.jsx` | `:189` `describeAgentCreateAccess(user)`, `:543-545` / `:551-553` disabled buttons; `:786` `agentCanManage={selectedAgent ? selectedAgent.canManage !== false : true}` | Consumes the server `canManage` per row | Re-keyed; §7.1 extends the payload |
 | `src/pages/SshKeys.jsx` / `GithubTokens.jsx` / `ModelRegistry.jsx` | `:444-446`/`:498`; `:307-309`/`:362`; `:1030-1034`/`:1242`/`:1430` | `canManageCredentialClient(row, caller)` per row | Re-keyed |
-| `src/pages/my-credentials-view.js` | `canOwnPersonalCredentials` **:19-21**, `personalOwnerId` **:24-26** | Mirrors `ownsPersonalCredential`; fail-closed for the operator login | Unchanged |
+| `src/pages/my-credentials-view.js` | `canOwnPersonalCredentials` **:19-21**, `personalOwnerId` **:24-26** | Mirrors `ownsPersonalCredential`; fail-closed on a caller with no resolved id | Unchanged as a guard; the state it guarded against is no longer reachable for a signed-in human (§13) |
 | `src/context/ModelSelectionContext.jsx` | **:93** `userTeamIds`, **:94** `isSysAdmin` → `classifyExclusions(…)` `:95` | Explains why no provider is selectable | Re-keyed |
 | `src/pages/agent-lifecycle/agent-lifecycle-menu.js` | `buildAgentMenu` **:81**, gate closure **:89-93**; `buildTeamMenu` **:184-222**, gate closure **:186-189**; `export` entry **:134-140** (`disabled: false`, rationale `:131-133`); `edit-team` **:212-216**; `export-team` **:217** | Per-entry `disabled`/`title` from the server's `canManage` | Re-keyed; **gains the `share` entry** (§7.1) |
 | `src/pages/agent-chat/rail-lifecycle.js` | `railMenuItems` **:278-326**; agent branch **:283-305** (`canManage` at `:290`); team branch **:307-323** (`canManage` at `:317`) | Threads `canManage` into both menus | Re-keyed |
@@ -1033,7 +1043,7 @@ Two points where #2041 / #2046 disagree with themselves or with the code. Both a
 
 1. **Where the member list lives.** #2041 §1 says the `role: 'team'` config gains *"its own member list with roles"*, while **D1**, §1's next bullet and §5 (the Share dialog writes `POST`/`DELETE /api/admin/memberships`) all say `memberships/index.json` survives as the member list. Two stores for the same fact would drift, and only one of them is what `canManageTeam` reads. **This document specifies `memberships/index.json` as the single member list** (§3.3, §3.4) because that is what two of the three statements require and it keeps `canManageTeam` unchanged — but the wording in #2041 §1 should be corrected rather than left ambiguous for P1. *Raised on #2041.*
 
-2. **The wording of the privacy guarantee.** #2046 chapter 2 instructs the document to state the guarantee as *"private from all named users, System Admins included, while the operator login retains full visibility"*. Read literally that **excludes System Admins**, which contradicts **D5** (*"The System Admin retains full visibility (`scope.all` stays as-is)"*) and **#2046 AC5** (*"no document text claims that System Admins cannot see teams"*). Two of the three signals agree, so **this document follows D5 and AC5** and states the guarantee as §2.2 words it. The quoted sentence looks like it was carried over from the *personal-credential* guarantee (`docs/personal-credentials-concept.md` D2), which genuinely does exclude System Admins because `ownsPersonalCredential` (`scope.js:177-179`) has no `all` bypass — and even there the operator login cannot see them either, its `userId` being `null` (`scope.js:29-31`). *Raised on #2046.*
+2. **The wording of the privacy guarantee.** #2046 chapter 2 instructs the document to state the guarantee as *"private from all named users, System Admins included, while the operator login retains full visibility"*. Read literally that **excludes System Admins**, which contradicts **D5** (*"The System Admin retains full visibility (`scope.all` stays as-is)"*) and **#2046 AC5** (*"no document text claims that System Admins cannot see teams"*). Two of the three signals agree, so **this document follows D5 and AC5** and states the guarantee as §2.2 words it. The quoted sentence looks like it was carried over from the *personal-credential* guarantee (`docs/personal-credentials-concept.md` D2), which genuinely does exclude System Admins because `ownsPersonalCredential` (`scope.js:177-179`) has no `all` bypass — and, when that was written, the operator login could not see them either, its `userId` being `null` (`scope.js:29-31`) — a second reason that has since lapsed with the branch itself (§13), leaving the owner comparison as the whole rule. *Raised on #2046.*
 
 ### 12.3 — Corrections to stated premises
 
@@ -1067,6 +1077,73 @@ Both keep a pointer to this file; their bodies are updated in **P6**.
 
 ---
 
+## 13 — Amendment: D13 / #2059 — the operator becomes a record
+
+Added after the fact. This document was written before **#2041 D13** was settled and
+before its **P0** (#2059) shipped, so several of its statements were true of the code
+it was measured against (`f324aeea0`) and are no longer true of `main`. They are
+corrected in place above; this chapter records *what* changed and *why*, so P1–P6 read
+one design of record rather than a document and a contradicting implementation.
+
+### 13.1 — What changed
+
+The configured initial user (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, or
+`BOOTSTRAP_SYSTEM_ADMIN_SUBJECT` on an SSO stack) stopped being a standing **login** and
+became a **seed**: on a stack with zero user records the orchestrator consumes it once,
+at boot, to create a real System-Admin **user record**.
+
+> **Revised by the human ruling on the #2059↔#1457 reconciliation ("Option C", PR
+> #2094).** #2059 originally *deleted* `verifyCredentials` (`auth.js`) and the env-admin
+> branch of `computeScope` outright. Because #1457 later made the `authEnabled`/env-admin
+> model central and depended-upon, the ruling instead restored them **under a strict
+> pre-seed gate**: the env credential authenticates *only* while no System-Admin record
+> exists yet (a fresh install), and both the login route (`preSeed()`) and the two
+> `computeScope` env grants + the `describeAuthz` `envAdmin` flag stop consulting it the
+> moment the seed has run — permanently. So it is a **one-time seed window**, not a
+> standing login (#2059 AC4's intent), while a genuinely fresh install still behaves as
+> #1457 describes. A password login is checked against the user store first; the env
+> credential is a pre-seed fallback only.
+
+### 13.2 — Why P0 and not a cleanup
+
+Two of this epic's own acceptance criteria key on a user id that a fresh stack did not
+have. **AC5** requires a team's creator to be recorded as its Team Admin in the same
+operation, and **AC6** that a new team be visible only to its creator — but the only
+principal on a fresh stack was the env credential, whose scope carried `userId: null`.
+§8.2 already records that the *past* has no recoverable creators; without this change
+the *future* had none either. Hence P0, and hence a hard prerequisite of **P3**
+(self-service creation).
+
+### 13.3 — The statements this document had to correct
+
+| Where | Said | Now |
+|---|---|---|
+| D5 row, §2.2 table | Both `scope.all` branches are unchanged | The env-admin branch is deleted; the System-Admin record branch is the only one |
+| §2.2 privacy guarantee | Two exceptions: System Admin **and** the operator login; the personal-credential carve-out holds partly because the operator's `userId` is `null` | One exception (System Admin); the carve-out rests on the owner comparison alone — the rule D2 always meant |
+| §2.2 closing paragraph | Removing the `all`-bypass would break GOV-ACCESS-7 break-glass | GOV-ACCESS-7 is restated as a **host-level** break-glass; the access-review and JML arguments stand |
+| §4, `PUT /api/me/preferences` | *Unchanged*; the env admin gets `{persisted:false}` | Still ungated, but no longer a silent no-op for the administrator — it has an id now |
+| §4, `my-credentials-view.js` | *Unchanged*; fail-closed for the operator login | Unchanged as a guard; the state it guarded against is unreachable for a signed-in human |
+| §12.2 item 2 | The operator login cannot see personal credentials either, its `userId` being `null` | That second reason has lapsed with the branch; the owner comparison is the whole rule |
+
+### 13.4 — What did NOT change
+
+Worth stating, because the blast radius of deleting an authorization branch reads
+larger than it is. The **twelve `scope.all` predicates of §4.1 are untouched** — one
+grant branch fewer is strictly simpler, and every one of them keeps consulting the same
+flag. `memberships/index.json` stays the member list (§3.3). D1's re-keying is
+independent of this change, which is why P0 could ship **before P1**. And the redesign's
+privacy guarantee is *strengthened*, not weakened: the recordless principal that used to
+see the whole estate without being anybody no longer exists.
+
+### 13.5 — One consequence this document should carry forward
+
+Sign-in now requires the user store, so **while the orchestrator is unreachable nobody
+can log in**. Recovering an identity is a host-level action on
+`/workspace/users/index.json`. P1–P6 must not design a console-side recovery path back
+in: it would reconstitute exactly the shared, recordless credential D13 removed. The
+store's refusal to delete or demote the **last System Admin** (#2041 AC18, delivered in
+P0) is the in-band half of that protection — it makes the lockout unreachable by
+accident rather than merely recoverable after the fact.
 ## Amendment 1 — what P1 (#2077) found, and what it changed here
 
 This section is appended rather than woven in: the document above is the

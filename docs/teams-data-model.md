@@ -168,14 +168,15 @@ Agent Team on purpose — those metrics are per squad, not per tenant.
 
 On orchestrator startup (`main()`), after the legacy role migration:
 
-1. `bootstrapTeams()` — `ensureDefaultTeam()` (idempotent), then optionally
-   `ensureSystemAdmin()` from environment config (below), and finally the
-   bootstrap admin's **`team-admin` membership of the Default Team** (#1457).
-   System Admin is a global flag rather than a membership, so without this step
-   the team that owns every adopted resource had no Team Admin at all. The
-   membership is planned, not asserted: `setMembership` is an upsert, so it is
-   created only when no membership for that (user, team) pair exists in *any*
-   role — an admin a human deliberately demoted is not re-promoted on each boot.
+1. `bootstrapTeams()` — `ensureDefaultTeam()` (idempotent), then
+   `seedInitialSystemAdmin()` from environment config (#2059, below — seeds the
+   real System-Admin *record* on a zero-user stack), and finally the bootstrap
+   admin's **`team-admin` membership of the Default Team** (#1457). System Admin
+   is a global flag rather than a membership, so without this step the team that
+   owns every adopted resource had no Team Admin at all. The membership is
+   planned, not asserted: `setMembership` is an upsert, so it is created only when
+   no membership for that (user, team) pair exists in *any* role — an admin a
+   human deliberately demoted is not re-promoted on each boot.
 2. `backfillResourceOwnership()` — stamps `teamId: "default"` onto any agent,
    environment, credential index entry or **MCP server** (#1457) that lacks one.
    Idempotent: a stamped resource is skipped on subsequent boots, and the JSON is
@@ -239,17 +240,39 @@ must not silently start filtering the console.
 
 ### Seeding an initial System Admin
 
-A fresh stack has no users. To seed one global System Admin from config, set in
-`.env`:
+A fresh stack ends its first boot with exactly **one** user: the console accepts
+no credential that is not a user record (#2059), so the platform has to create
+the first administrator itself. `seedInitialSystemAdmin()` does that, and the
+decision about *which* configured input describes them is the pure
+`orchestrator/initial-admin-seed.js`.
+
+There are two seed inputs, and `BOOTSTRAP_SYSTEM_ADMIN_SUBJECT` **wins** when set:
 
 | Variable | Purpose |
 |---|---|
-| `BOOTSTRAP_SYSTEM_ADMIN_SUBJECT` | IdP subject / email of the admin (required to seed) |
+| `BOOTSTRAP_SYSTEM_ADMIN_SUBJECT` | IdP subject / email of the admin. Seeds a record with **no password** — the person authenticates through the identity-aware proxy. Takes precedence over the pair below |
 | `BOOTSTRAP_SYSTEM_ADMIN_EMAIL` | Optional email |
 | `BOOTSTRAP_SYSTEM_ADMIN_NAME` | Optional display name |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | The fallback input, defaulting to `admin` / `admin` when unset. Seeds a record whose **password lives in the record** — so it is a real login, and rotating the variable afterwards does not change it |
 
-If a user with that subject already exists it is promoted to System Admin; the
-operation is idempotent and a no-op when the variable is unset.
+Blanking `ADMIN_PASSWORD` (or `ADMIN_USERNAME`) with no bootstrap subject named
+is a deliberate opt-out: nothing is seeded, which is what an SSO deployment that
+provisions its administrator by hand wants.
+
+The seed is gated on the stack having **zero user records** and is consumed
+exactly once — the configured value is never read again. So re-pointing either
+variable on a warm stack does nothing: it can neither mint a second
+administrator nor re-grant one that was deliberately demoted, and recovering a
+lost identity is a host-level action on `/workspace/users/index.json` rather than
+a configuration change. The seeding writes one entry to the audit trail
+(`method: 'BOOTSTRAP'`, resource `/internal/admin/users`, recording the seed
+source and whether a password was set — never the password itself), because an
+access review must be able to see that the platform, not a human, created this
+account.
+
+The console does not wait for the orchestrator at startup, so a login can arrive
+before the seed has landed. `GET /api/auth/ready` is the probe a bring-up polls
+first (`200 {"ready":true}` once the users index holds a record).
 
 ## HTTP API
 

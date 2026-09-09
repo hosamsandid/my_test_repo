@@ -7,8 +7,9 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 // login() call's transport changes — `authenticated`/`user`/`logout` stay.
 //
 // `user` carries the server's authorization descriptor (#584): besides
-// `username` it has `admin` (env admin OR System-Admin → full visibility),
-// `envAdmin`, `systemAdmin`, `userId`, and `teams: [{teamId, role}]`. The UI
+// `username` it has `admin` (a System-Admin record → full visibility),
+// `systemAdmin`, `userId`, and `teams: [{teamId, role}]`. The `envAdmin` flag
+// went with the env credential in #2059. The UI
 // reads `user.admin` to hide System-Admin-only pages and `user.teams` roles to
 // gate per-team management actions.
 

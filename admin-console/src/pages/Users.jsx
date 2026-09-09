@@ -15,7 +15,7 @@ import FormInput from '../components/FormInput';
 import PasswordField from '../components/PasswordField';
 import IconButton from '../components/IconButton';
 import {
-  usersToRows, isSelf, selfActionWarning, validateUserForm,
+  usersToRows, isSelf, selfActionWarning, validateUserForm, lastSystemAdminGuard,
 } from './users-view';
 import {
   ADMIN_TABS, resolveAdminTab,
@@ -115,12 +115,37 @@ function TabLead({ children, label, section }) {
   );
 }
 
-function SysAdminField({ checked, onChange }) {
+// `lockedReason` (#2059 AC7) is the store's own refusal sentence when this
+// record is the last System Admin: the box stays ticked and un-untickable, with
+// the reason both in the tooltip and in visible text, because a control that is
+// merely disabled leaves the reader guessing. Ticking it ON is never blocked —
+// only demotion is — so the guard is asked about 'demote' and applied to the
+// checkbox rather than to the whole field.
+function SysAdminField({ checked, onChange, lockedReason }) {
   return (
-    <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
-      <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} />
-      System Admin (global access)
-    </label>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+      <label
+        title={lockedReason || undefined}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+          fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+          cursor: lockedReason ? 'not-allowed' : 'pointer',
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={!!lockedReason}
+          onChange={e => onChange(e.target.checked)}
+        />
+        System Admin (global access)
+      </label>
+      {lockedReason && (
+        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          {lockedReason}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -162,7 +187,7 @@ function CreateUserPanel({ onSave, onCancel, saving, error }) {
 // `user` is kept live by the parent (re-found in the refetched list by id), so
 // the password section reflects the current `hasPassword` state after a set or
 // clear without this panel owning that flag.
-function EditUserPanel({ user, me, onSave, saving, error, onError, onRefresh }) {
+function EditUserPanel({ user, me, users, onSave, saving, error, onError, onRefresh }) {
   const [displayName, setDisplayName] = useState(user.displayName || '');
   const [email, setEmail] = useState(user.email || '');
   const [systemAdmin, setSystemAdmin] = useState(!!user.systemAdmin);
@@ -173,6 +198,11 @@ function EditUserPanel({ user, me, onSave, saving, error, onError, onRefresh }) 
   const validation = validateUserForm({ subject: user.subject, displayName }, 'edit');
   const canSave = !validation && !saving;
   const lockoutWarn = selfActionWarning({ me, target: user, action: 'edit', nextSystemAdmin: systemAdmin });
+  // The server refuses to demote the last System Admin (#2059 AC7); mirror it
+  // so the box cannot be unticked in the first place. This is a different
+  // concern from `lockoutWarn`, which is advisory and about *your own* account:
+  // both can be live at once, and the estate-level rule is the one that blocks.
+  const demoteGuard = lastSystemAdminGuard({ users, target: user, action: 'demote' });
 
   async function setPassword() {
     if (!pwValue) return;
@@ -224,7 +254,11 @@ function EditUserPanel({ user, me, onSave, saving, error, onError, onRefresh }) 
         </div>
         <FormInput label="Display name" required value={displayName} onChange={setDisplayName} error={validation || undefined} />
         <FormInput label="Email" type="email" value={email} onChange={setEmail} placeholder="jane.doe@corp.com" />
-        <SysAdminField checked={systemAdmin} onChange={setSystemAdmin} />
+        <SysAdminField
+          checked={systemAdmin}
+          onChange={setSystemAdmin}
+          lockedReason={demoteGuard.ok ? null : demoteGuard.reason}
+        />
         {lockoutWarn && <WarnNote>{lockoutWarn}</WarnNote>}
         <div>
           <button
@@ -291,8 +325,12 @@ function EditUserPanel({ user, me, onSave, saving, error, onError, onRefresh }) 
 // The dialog's own sentence stays verbatim: it is point-of-decision copy. The
 // "?" is an addition beside it, opening the chapter that spells out what the
 // sentence summarises — the agents that get paused (which the sentence does not
-// mention), the personal-credential deletion, and that nothing checks whether
-// this is the last System Admin.
+// mention) and the personal-credential deletion.
+//
+// #2059 removed one item from that chapter: deleting the LAST System Admin is
+// now refused by the store, so this dialog can no longer be reached for such a
+// record (the row's Delete is disabled with the reason on it). Deleting your
+// OWN account is still only warned about, not blocked — that is `warning`.
 function DeleteUserMessage({ target, warning }) {
   useHelpSubject({ overlay: OVERLAY_USER_DELETE, active: true });
   return (
@@ -340,6 +378,10 @@ function UsersTab({ me, creating, onCreatingChange }) {
   );
   const editUser = editId ? userList.find(u => u.id === editId) || null : null;
 
+  // One helper for the row action, so the column renderer and the dialog cannot
+  // disagree about whether this record may go.
+  const deleteGuardFor = (user) => lastSystemAdminGuard({ users: userList, target: user, action: 'delete' });
+
   function closeCreate() {
     onCreatingChange(false);
     setCreateError(null);
@@ -361,7 +403,19 @@ function UsersTab({ me, creating, onCreatingChange }) {
       render: (_, row) => (
         <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
           <IconButton icon={Pencil} label="Edit user" onClick={() => { setEditId(row.id); setEditError(null); }} />
-          <IconButton icon={Trash2} label="Delete user" danger onClick={() => setDeleteTarget(row._user)} />
+          {/* The store refuses to delete the last System Admin (#2059 AC7).
+              Mirrored as disabled + the store's own sentence in the tooltip, the
+              shape Teams.jsx uses for the default team; the server stays the
+              authority and its 409 message renders verbatim in `actionError`
+              if a request is made anyway. */}
+          <IconButton
+            icon={Trash2}
+            label="Delete user"
+            danger
+            onClick={() => setDeleteTarget(row._user)}
+            disabled={!deleteGuardFor(row._user).ok}
+            title={deleteGuardFor(row._user).reason || 'Delete user'}
+          />
         </div>
       ),
     },
@@ -434,6 +488,7 @@ function UsersTab({ me, creating, onCreatingChange }) {
             key={editUser.id}
             user={editUser}
             me={me}
+            users={userList}
             onSave={handleEditSave}
             saving={savingEdit}
             error={editError}

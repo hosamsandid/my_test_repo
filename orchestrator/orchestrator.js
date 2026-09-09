@@ -8,6 +8,9 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { createTeamsStore, DEFAULT_TEAM_ID } = require("./teams-store");
+const {
+  resolveInitialAdminSeed, buildSeedAuditEvent, recordSeedAudit,
+} = require("./initial-admin-seed");
 const teamAdminSuccession = require("./team-admin-succession");
 const { resolveAgentTenant, planTenantBackfill } = require("./agent-tenant");
 const { needsAdoption, planAdoption, planBootstrapMembership } = require("./default-team-adoption");
@@ -248,6 +251,11 @@ const CONTROL_DIR = "/control/agents";
 const PER_AGENT_VOLUME = process.env.AEE_PER_AGENT_VOLUME === '1';
 const BLUEPRINTS_DIR = "/workspace/blueprints";
 const WORKSPACE = "/workspace";
+// The audit trail the admin-console writes every mutating request to (#305).
+// The orchestrator is a second writer for exactly one entry: the first-boot
+// System-Admin seeding (#2059), which is a platform action with no request
+// behind it. Same directory, same override, so `GET /api/audit` reads both.
+const AUDIT_DIR = process.env.AUDIT_DIR || "/workspace/audit";
 // Shared Agent Learning (Phase 2): the orchestrator-maintained canonical KB
 // clone per team (aggregator source of truth) + the append-only live-feed file
 // the admin-console tails. Both sit on the shared /workspace volume; neither is
@@ -1083,37 +1091,74 @@ async function migrateAgentClaudeMdToReference() {
 //
 // Every agent construct, Working Environment and credential is owned by exactly
 // one Team via a `teamId` field. On startup we guarantee the default team
-// exists, optionally seed a System Admin from environment config, and stamp any
+// exists, seed the first System Admin from environment config, and stamp any
 // pre-existing resource that predates this model with the default team. The
 // pass is idempotent — once stamped, a resource is skipped on subsequent boots.
+//
+// The seeding is where a fresh stack gets its one human identity (#2059). It
+// runs here, synchronously, and `main()` calls this BEFORE the internal API
+// starts listening on :4002 — which is what closes the start-order race from
+// the inside: no login can be verified against the user store before the seed
+// has been written (and `writeArray` renames a temp file into place, so a
+// reader never sees a half-written index). The console cannot make the same
+// guarantee about its own boot, so the bring-up polls `GET /api/auth/ready`.
 function bootstrapTeams() {
   teamsStore.ensureDefaultTeam();
-  const subject = process.env.BOOTSTRAP_SYSTEM_ADMIN_SUBJECT;
-  if (subject) {
+  // (#2059, Option C — PR #2094) Seed the initial System Admin as a real user
+  // record when the stack has zero users: the identity seed.
+  // `seedInitialSystemAdmin` is a no-op once any record exists, so it is consumed
+  // once and never re-read.
+  // Wrapped in an IIFE so the warm-stack `if (!user) return;` returns from the
+  // seed step alone — the Default-Team backfill below must still run on a warm
+  // stack (to grant the membership to an already-seeded admin).
+  (() => {
+    const seed = resolveInitialAdminSeed(process.env);
+    if (!seed) {
+      console.log('[Orchestrator] No initial System Admin configured — skipping the seed');
+      return;
+    }
     try {
-      const admin = teamsStore.ensureSystemAdmin({
-        subject,
-        email: process.env.BOOTSTRAP_SYSTEM_ADMIN_EMAIL,
-        displayName: process.env.BOOTSTRAP_SYSTEM_ADMIN_NAME,
-      });
-      console.log(`[Orchestrator] Ensured System Admin for subject '${subject}'`);
-      // #1457: System Admin is a global flag, not a membership, so the bootstrap
-      // admin was left with no *Team* role at all — and the Default Team it
-      // owns everything in therefore had no Team Admin. Give it one. The plan is
-      // empty once any membership for the pair exists, in any role, so a human
-      // who deliberately demoted this admin is not re-promoted on every boot.
+      const user = teamsStore.seedInitialSystemAdmin(seed);
+      if (!user) return; // warm stack — already seeded; audit nothing
+      recordSeedAudit(AUDIT_DIR, buildSeedAuditEvent({ seed, user }));
+      console.log(
+        `[Orchestrator] Seeded initial System Admin '${user.subject}' (${seed.source}, ` +
+        `password ${user.hasPassword ? 'set' : 'not set — authenticate via SSO'})`,
+      );
+    } catch (err) {
+      // A failed seed leaves the stack with zero users, which now means nobody
+      // can sign in — so this is loud, and the message names the recovery path.
+      console.error(
+        `[Orchestrator] Initial System Admin seeding FAILED: ${err.message}. ` +
+        'The console has no user to authenticate; fix the configuration and restart.',
+      );
+    }
+  })();
+
+  // (#1457) System Admin is a global flag, not a membership, so a System Admin
+  // owns the Default Team but has no Team-Admin role in it — give it one. This is
+  // deliberately DECOUPLED from any deployment config (#2059 AC4/AC7): the review
+  // of the #1457 merge caught that promoting from the configured bootstrap subject
+  // on every boot would re-flip the admin flag, making that value a live admin
+  // grant through a membership side-door and silently undoing a deliberate
+  // demotion. So the backfill NEVER re-derives or re-grants admin status: it
+  // reads the CURRENT System Admins from the store and gives each the Team-Admin
+  // membership, idempotently (an empty plan once the pair exists). A user a human
+  // demoted is no longer a System Admin, so is neither found here nor re-promoted.
+  try {
+    for (const admin of teamsStore.listUsers().filter((u) => u && u.systemAdmin === true)) {
       const membership = planBootstrapMembership({
-        userId: admin && admin.id,
+        userId: admin.id,
         memberships: teamsStore.listMemberships({ teamId: DEFAULT_TEAM_ID }),
         teamId: DEFAULT_TEAM_ID,
       });
       if (membership) {
         teamsStore.setMembership(membership);
-        console.log(`[Orchestrator] Made System Admin '${subject}' ${membership.role} of the Default Team`);
+        console.log(`[Orchestrator] Made System Admin '${admin.subject}' ${membership.role} of the Default Team`);
       }
-    } catch (err) {
-      console.error(`[Orchestrator] System Admin bootstrap failed: ${err.message}`);
     }
+  } catch (err) {
+    console.error(`[Orchestrator] Default-Team Team-Admin backfill failed: ${err.message}`);
   }
 }
 
@@ -2256,7 +2301,7 @@ function _readAgentSessionEvents(id) {
 // Audit entries within the window (config-version boundary fallback when an
 // agent has no prompt-history). Newest-only read to bound the scan.
 function _readAuditEntriesSince(sinceMs) {
-  const dir = process.env.AUDIT_DIR || "/workspace/audit";
+  const dir = AUDIT_DIR;
   const out = [];
   try {
     for (const f of fs.readdirSync(dir)) {

@@ -1036,8 +1036,8 @@ const TOPIC_CONTENT = [
     ],
     // #1891 (E16) — the route E7 left uncovered. The topic absorbed the Users
     // page intro box (records vs memberships, the global System-Admin flag) and
-    // adds what no surface said: the immutable subject, the user-store-then-env
-    // login order, and that Delete is an offboarding which pauses the person's
+    // adds what no surface said: the immutable subject, how a sign-in is
+    // resolved, and that Delete is an offboarding which pauses the person's
     // agents and deletes their personal credentials first.
     concepts: [
       'Subject',
@@ -1054,12 +1054,31 @@ const TOPIC_CONTENT = [
       'best-effort',
       'Access',
       // #1996 additions: why the subject is immutable rather than merely locked,
-      // the records-first rule as it applies to SSO, and the guard that does NOT
-      // exist — nothing stops you deleting the last System Admin.
+      // and the records rule as it applies to SSO.
       'silently sever an existing person',
       'guest list',
       'last System Admin',
       'own account',
+      // #2059 additions. #1996 pinned "nothing stops you deleting the last
+      // System Admin" and a records-THEN-env login order; both are now false.
+      // `ADMIN_USERNAME` above survives, but its meaning inverted — it is a
+      // one-shot seed, not a credential — so the load-bearing claims are pinned
+      // individually: one path, a consumed-once seed, and the two consequences
+      // the platform accepts (no sign-in during a store outage, recovered on
+      // the HOST; the password now living in the record). Plus the refusal that
+      // replaced the missing guard, in both its forms. The "no fourth principal"
+      // reword-guard #2059 pinned on the now-retired access-users topic moves
+      // here too, since the seeded-record explanation lives in this topic after
+      // #2085 folded that page in.
+      'one login path',
+      'once, as a seed',
+      'nobody can sign in',
+      'host-level',
+      'no longer revokes anything',
+      'The last System Admin cannot be deleted',
+      'cannot be demoted',
+      'no fourth principal',
+      'seeded once at first boot',
       // #2085: everything the retired `access-users` topic was the only home
       // for. The access scope still exists as the stamp the Resources tab
       // assigns, so its concepts describe a live surface and had to be folded in

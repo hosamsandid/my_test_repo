@@ -396,10 +396,141 @@ test('ensureSystemAdmin creates then promotes idempotently', () => {
   const created = store.ensureSystemAdmin({ subject: 'admin@corp.com', displayName: 'Admin' });
   assert.equal(created.systemAdmin, true);
 
+  // A second System Admin, so the demotion below is not the #2059 AC7 case (the
+  // last System Admin may not be demoted). Without it this test would be
+  // asserting the promote path through a refusal.
+  store.createUser({ subject: 'second@corp.com', systemAdmin: true });
+
   // demote then re-run: should re-promote the same record, not duplicate
   store.updateUser(created.id, { systemAdmin: false });
   const promoted = store.ensureSystemAdmin({ subject: 'admin@corp.com' });
   assert.equal(promoted.id, created.id);
   assert.equal(promoted.systemAdmin, true);
+  assert.equal(store.listUsers().length, 2);
+});
+
+// ---- the configured initial user is a seed, not a login (#2059) -------------
+
+test('seedInitialSystemAdmin seeds one System Admin WITH its password on an empty stack', () => {
+  const { store } = freshStore();
+  const seeded = store.seedInitialSystemAdmin({
+    subject: 'admin', password: 'seed-pass', displayName: 'Administrator', email: 'ops@corp.com',
+  });
+
+  assert.equal(store.listUsers().length, 1, 'exactly one record');
+  assert.equal(seeded.subject, 'admin');
+  assert.equal(seeded.systemAdmin, true);
+  assert.equal(seeded.displayName, 'Administrator');
+  assert.equal(seeded.email, 'ops@corp.com');
+  // The return value is sanitized like every other user leaving the store.
+  assert.equal(seeded.passwordHash, undefined, 'the hash never leaves the store');
+  assert.equal(seeded.hasPassword, true);
+
+  // AC2/AC9: the seeded credential really signs in, and resolves to that record.
+  const verified = store.verifyUserCredentials('admin', 'seed-pass');
+  assert.ok(verified, 'the seeded password authenticates');
+  assert.equal(verified.id, seeded.id);
+  assert.equal(store.verifyUserCredentials('admin', 'wrong'), null);
+});
+
+test('seedInitialSystemAdmin is inert once ANY user exists, and needs a subject', () => {
+  const { store } = freshStore();
+  assert.equal(store.seedInitialSystemAdmin({}), null, 'no subject => no-op');
+  assert.equal(store.seedInitialSystemAdmin({ subject: '  ', password: 'p' }), null, 'blank subject => no-op');
+  assert.equal(store.listUsers().length, 0);
+
+  // AC1: a second pass on the same stack changes nothing (idempotent).
+  const first = store.seedInitialSystemAdmin({ subject: 'admin', password: 'seed-pass' });
+  const again = store.seedInitialSystemAdmin({ subject: 'admin', password: 'seed-pass' });
+  assert.equal(again, null, 'the pass is inert on a warm stack');
   assert.equal(store.listUsers().length, 1);
+  assert.equal(store.getUser(first.id).updatedAt, first.updatedAt, 'the record is not even touched');
+
+  // AC1: a warm stack is unaffected even when the configured subject differs —
+  // the seed cannot mint a second administrator after first boot.
+  assert.equal(store.seedInitialSystemAdmin({ subject: 'someone-else', password: 'p' }), null);
+  assert.equal(store.listUsers().length, 1);
+
+  // ...and not even when the only existing record is an ordinary member: the
+  // gate is "zero users", not "zero System Admins".
+  const { store: other } = freshStore();
+  other.createUser({ subject: 'plain@corp.com' });
+  assert.equal(other.seedInitialSystemAdmin({ subject: 'admin', password: 'p' }), null);
+  assert.equal(other.listUsers().length, 1);
+  assert.equal(other.getUserBySubject('plain@corp.com').systemAdmin, false);
+});
+
+test('seedInitialSystemAdmin without a password creates a record that cannot password-login (SSO stacks)', () => {
+  const { store } = freshStore();
+  const seeded = store.seedInitialSystemAdmin({ subject: 'ops@corp.com' });
+  assert.equal(seeded.systemAdmin, true);
+  assert.equal(seeded.hasPassword, false);
+  // `verifyUserCredentials` requires a passwordHash, so no password gets in.
+  assert.equal(store.verifyUserCredentials('ops@corp.com', ''), null);
+  assert.equal(store.verifyUserCredentials('ops@corp.com', 'anything'), null);
+});
+
+// ---- the last System Admin is protected (#2059 AC7 / #2041 AC18) -----------
+
+test('users: the last System Admin cannot be deleted or demoted', () => {
+  const { store } = freshStore();
+  const admin = store.seedInitialSystemAdmin({ subject: 'admin', password: 'pw' });
+  const member = store.createUser({ subject: 'member@corp.com' });
+
+  assert.throws(() => store.deleteUser(admin.id), /last System Admin cannot be deleted/);
+  assert.throws(() => store.updateUser(admin.id, { systemAdmin: false }), /last System Admin cannot be demoted/);
+  // Refused server-side means refused: the record is untouched, not partially
+  // edited (the systemAdmin branch runs before the write).
+  assert.equal(store.getUser(admin.id).systemAdmin, true);
+
+  // An ordinary member is unaffected in both directions.
+  store.updateUser(member.id, { systemAdmin: false });
+  store.deleteUser(member.id);
+  assert.equal(store.getUser(member.id), null);
+});
+
+test('users: a second System Admin unblocks both actions, and other edits are never blocked', () => {
+  const { store } = freshStore();
+  const first = store.seedInitialSystemAdmin({ subject: 'admin', password: 'pw' });
+
+  // Editing the last admin's other fields — including re-asserting the flag —
+  // is not a demotion and must stay allowed.
+  store.updateUser(first.id, { displayName: 'Renamed', systemAdmin: true });
+  assert.equal(store.getUser(first.id).displayName, 'Renamed');
+
+  const second = store.createUser({ subject: 'second@corp.com', systemAdmin: true });
+  store.updateUser(first.id, { systemAdmin: false });
+  assert.equal(store.getUser(first.id).systemAdmin, false);
+
+  // `second` is now the last one, so it inherits the protection.
+  assert.throws(() => store.deleteUser(second.id), /last System Admin cannot be deleted/);
+  // The demoted record is an ordinary user again and deletes cleanly.
+  store.deleteUser(first.id);
+  assert.equal(store.listUsers().length, 1);
+});
+
+test('isLastSystemAdmin: no System Admin at all means nothing to protect', () => {
+  const { isLastSystemAdmin } = require('./teams-store');
+  assert.equal(isLastSystemAdmin([{ id: 'a' }, { id: 'b' }], 'a'), false, 'zero admins');
+  assert.equal(isLastSystemAdmin([{ id: 'a', systemAdmin: true }], 'a'), true);
+  assert.equal(isLastSystemAdmin([{ id: 'a', systemAdmin: true }], 'b'), false, 'not the admin');
+  assert.equal(
+    isLastSystemAdmin([{ id: 'a', systemAdmin: true }, { id: 'b', systemAdmin: true }], 'a'),
+    false, 'two admins',
+  );
+  assert.equal(isLastSystemAdmin(null, 'a'), false, 'tolerates a missing list');
+
+  // A truthy-but-not-true flag is not a System Admin anywhere else in the
+  // store (`systemAdmin === true` on create/update), so it must not count here.
+  assert.equal(isLastSystemAdmin([{ id: 'a', systemAdmin: 'yes' }], 'a'), false);
+});
+
+// The store-side deletion guard is what the Users page mirrors; a legacy stack
+// with a single non-admin user must still be able to delete it, which is the
+// case the "zero admins" branch above protects.
+test('users: a lone ordinary user (legacy stack, no System Admin) is still deletable', () => {
+  const { store } = freshStore();
+  const only = store.createUser({ subject: 'lonely@corp.com' });
+  store.deleteUser(only.id);
+  assert.equal(store.listUsers().length, 0);
 });

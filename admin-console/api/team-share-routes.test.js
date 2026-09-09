@@ -146,7 +146,12 @@ test('AC9 — only a Team Admin of THIS team may write its member list', () => {
     bob: false, // Team Member of squad-a — D9: read and chat, nothing else
     mallory: false, // Team Admin, but of another team
     root: true, // System Admin (scope.all)
-    __env_admin__: true, // the single-operator admin
+    // #2059 (Option C): the env admin is a PRE-SEED identity only. This fixture
+    // already carries a seeded System Admin (u-root), so the env-admin power
+    // grant is retired and `__env_admin__` resolves to the empty scope — the
+    // single-operator admin is no longer a standing login once a real System
+    // Admin record exists.
+    __env_admin__: false,
   };
   for (const [subject, allowed] of Object.entries(expected)) {
     assert.equal(

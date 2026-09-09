@@ -70,12 +70,16 @@ terminator (nginx, Caddy, Traefik) in front of port `4000` and then:
 ```bash
 # in .env
 AUTH_COOKIE_SECURE=true        # session cookie gets the Secure attribute
-AUTH_SESSION_SECRET=<random>   # otherwise it is derived from the admin password
-ADMIN_PASSWORD=<something real>
+AUTH_SESSION_SECRET=<random>   # otherwise a random key is persisted on the workspace volume
+ADMIN_PASSWORD=<something real>  # seeds the first admin's password at FIRST boot only
 ```
 
 > **Do not skip `AUTH_COOKIE_SECURE`.** Without it the session cookie is sent over plain
 > HTTP too.
+
+> **Set `ADMIN_PASSWORD` before the first boot.** It seeds the first
+> System-Admin *record* and is never read again; on a stack that already has a
+> user, change the password on the Users page instead.
 
 Two rough edges to know about behind a proxy:
 
@@ -173,7 +177,8 @@ These are properties of the current implementation, not configuration mistakes.
 | Caveat | What it means in practice |
 |---|---|
 | **All console users share one chat identity** | The console authenticates to Matrix with a single access token. Every logged-in person acts as the *same* Matrix user and sees the *same* DM rooms — so **everyone can read everyone's agent conversations.** Acceptable inside one trusted team; not acceptable across teams. |
-| **The single env-admin credential always works** | Per-user passwords exist (set on the Users page), but login falls back to `ADMIN_USERNAME`/`ADMIN_PASSWORD` by design, so nobody can be locked out. That fallback also cannot be disabled. |
+| **Signing in requires the orchestrator** | A password is checked against the user store and nothing else — there is no env-credential fallback (#2059). While the orchestrator is unreachable, login answers `503` and **nobody can sign in**. Recovering a lost identity is a host-level action on `/workspace/users/index.json`, not a console login. |
+| **The seeded admin's password lives in its record** | `ADMIN_USERNAME`/`ADMIN_PASSWORD` are only the *seed* for the first System-Admin record, consumed once on a stack with no users. Changing them in `.env` and restarting does **not** revoke the account — only the Users page can change that password. |
 | **No SSO** | There is a clean, documented swap-point for OIDC/SAML, but no implementation. |
 | **Authorization is coarse** | The API gate is binary: authenticated or not. Team roles scope *lists*, not every mutation. **And they only scope anything at all once `AUTH_ENABLED=true`** — the default is single-user compatibility mode, in which every principal who can sign in is the implicit System Admin (#1457, see [teams-data-model.md](./teams-data-model.md#single-user-compatibility-mode-auth_enabled-1457)). |
 | **No backup tooling** | Five stateful volumes and no dump/restore script — see below. |

@@ -15,6 +15,7 @@
     "context",
     "usage",
     "knowledge",
+    "users",
     "access"
   ],
   "steps": [
@@ -2462,6 +2463,115 @@
         }
       ],
       "example": "- action:\n    do: usage.selectTimeRange\n    label: All time"
+    },
+    {
+      "name": "users.expectLastAdminUndeletable",
+      "module": "users",
+      "description": "Assert the row's Delete is refused because this is the last System Admin (#2059 AC7). The store owns the rule; the page mirrors it as a disabled control, so the refusal is visible before the click rather than after it.",
+      "params": [
+        {
+          "name": "subject",
+          "required": true,
+          "type": "string",
+          "description": "The subject whose row must be undeletable."
+        }
+      ],
+      "example": "- assert:\n    do: users.expectLastAdminUndeletable\n    subject: admin"
+    },
+    {
+      "name": "users.expectLoginRejected",
+      "module": "users",
+      "description": "Assert `POST /api/auth/login` REJECTS these credentials with 401 — used with the stack's configured `ADMIN_PASSWORD` after the record's password has been changed, which is the end-to-end proof that the configured credential is a one-time seed and not a standing login (#2059 AC4/AC9). A 401 is asserted specifically, not merely \"not 200\": a 503 would mean the user store did not answer, which is a different failure and must not pass for a rejection.",
+      "params": [
+        {
+          "name": "username",
+          "required": true,
+          "type": "string",
+          "description": "Subject to try."
+        },
+        {
+          "name": "password",
+          "required": true,
+          "type": "string",
+          "description": "Password to try."
+        }
+      ],
+      "example": "- assert:\n    do: users.expectLoginRejected\n    username: admin\n    password: e2e-admin-pass"
+    },
+    {
+      "name": "users.expectLoginResolvesToRecord",
+      "module": "users",
+      "description": "Assert `POST /api/auth/login` ACCEPTS these credentials and that the session resolves to a real user record — the `userId` is non-null (#2059 AC6). That id is what makes a team's creator recordable, preferences persistable and the audit actor resolvable; before #2059 this principal had none.",
+      "params": [
+        {
+          "name": "username",
+          "required": true,
+          "type": "string",
+          "description": "Subject to sign in as."
+        },
+        {
+          "name": "password",
+          "required": true,
+          "type": "string",
+          "description": "Password to sign in with."
+        }
+      ],
+      "example": "- assert:\n    do: users.expectLoginResolvesToRecord\n    username: admin\n    password: rotated-by-journey"
+    },
+    {
+      "name": "users.expectSeededAdminRow",
+      "module": "users",
+      "description": "Assert the administrator the stack was seeded with is an ORDINARY, editable user record in this list — #2059 AC5. Before #2059 the console's only principal was the env credential, which had no record and appeared nowhere.",
+      "params": [
+        {
+          "name": "subject",
+          "required": true,
+          "type": "string",
+          "description": "The seeded subject (the stack's ADMIN_USERNAME)."
+        }
+      ],
+      "example": "- assert:\n    do: users.expectSeededAdminRow\n    subject: admin"
+    },
+    {
+      "name": "users.expectSystemAdminFlagLocked",
+      "module": "users",
+      "description": "Assert the System-Admin checkbox is locked for the last System Admin, with the store's own reason shown as visible text (#2059 AC7). Requires the edit panel for that record to be open.",
+      "params": [
+        {
+          "name": "subject",
+          "required": true,
+          "type": "string",
+          "description": "The record whose panel to open."
+        }
+      ],
+      "example": "- assert:\n    do: users.expectSystemAdminFlagLocked\n    subject: admin"
+    },
+    {
+      "name": "users.openUsersPage",
+      "module": "users",
+      "description": "Open the Users page and confirm its chrome rendered: the top-bar title and the one-line description that keeps the Access hand-off.",
+      "params": [],
+      "example": "- action:\n    do: users.openUsersPage"
+    },
+    {
+      "name": "users.setLoginPassword",
+      "module": "users",
+      "description": "Open a user's edit panel and change the login password through the UI, then confirm the page reported it (#2059 AC9). This is the surface that replaces \"edit .env and restart\": after this, the value in .env no longer signs in.",
+      "params": [
+        {
+          "name": "subject",
+          "required": true,
+          "type": "string",
+          "description": "The record to edit."
+        },
+        {
+          "name": "password",
+          "required": true,
+          "type": "string",
+          "description": "The new login password."
+        }
+      ],
+      "example": "- action:\n    do: users.setLoginPassword\n    subject: admin\n    password: rotated-by-journey"
     },
     {
       "name": "wizard.createTeamAndExpectProgress",

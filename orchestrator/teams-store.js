@@ -43,6 +43,27 @@ const MEMBERSHIP_ROLES = Object.freeze(['team-admin', 'team-member']);
 // A team id is an operator-facing slug, same rules as Working Environment ids.
 const TEAM_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
+// The last System Admin may neither be deleted nor demoted (#2059 AC7, #2041
+// AC18). Before #2059 the env credential was an always-available fallback, so
+// removing the only global administrator was survivable; now that the console
+// authenticates against user records alone, it would lock every human out of
+// user management with no way back in short of editing the store on the host.
+// The store owns the rule — the Users page mirrors these exact sentences on its
+// disabled controls (`admin-console/src/pages/users-view.js`) and renders them
+// verbatim if a request is made anyway.
+const LAST_SYSTEM_ADMIN_DELETE_REASON =
+  'The last System Admin cannot be deleted — promote another user to System Admin first';
+const LAST_SYSTEM_ADMIN_DEMOTE_REASON =
+  'The last System Admin cannot be demoted — promote another user to System Admin first';
+
+// Is `id` the ONLY System Admin in `users`? A stack with zero System Admins has
+// no last one to protect, so this is false there — the guard never blocks an
+// action on a record that was not holding the estate up.
+function isLastSystemAdmin(users, id) {
+  const admins = (Array.isArray(users) ? users : []).filter(u => u && u.systemAdmin === true);
+  return admins.length === 1 && admins[0].id === id;
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -275,6 +296,9 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
       user.displayName = patch.displayName.trim();
     }
     if (patch.systemAdmin !== undefined) {
+      if (patch.systemAdmin !== true && isLastSystemAdmin(users, id)) {
+        throw conflict(LAST_SYSTEM_ADMIN_DEMOTE_REASON);
+      }
       user.systemAdmin = patch.systemAdmin === true;
     }
     if (patch.githubHandle !== undefined) {
@@ -306,6 +330,7 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
     const users = listUsers();
     const idx = users.findIndex(u => u.id === id);
     if (idx === -1) throw notFound(`User '${id}' not found`);
+    if (isLastSystemAdmin(users, id)) throw conflict(LAST_SYSTEM_ADMIN_DELETE_REASON);
     {
       const plan = succession.planUserDeletion({
         memberships: readArray(MEMBERSHIPS_INDEX), userId: id,
@@ -551,6 +576,33 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
     return createUser({ subject, email, displayName, systemAdmin: true });
   }
 
+  // Seeds the very FIRST System Admin from the deployment's configured initial
+  // user (#2059, concept #2041 D13). The configured credential is a **seed, not
+  // a login**: it is consumed once, on a stack that has zero user records, to
+  // create a real user record — and never consulted again. Hence the
+  // `listUsers().length > 0` gate rather than `ensureSystemAdmin`'s
+  // promote-on-every-boot behaviour: once any record exists, this pass is inert,
+  // so re-pointing the variable at a different subject can never mint a second
+  // administrator or re-grant one that was deliberately demoted. Recovering a
+  // lost identity is a host-level action on `/workspace/users/index.json`, which
+  // is the documented break-glass (docs/governance-concept.md GOV-ACCESS-7).
+  //
+  // A `password` is optional: an SSO stack seeds a subject with none and the
+  // person authenticates through the identity-aware proxy. Note that a record
+  // WITHOUT a password can never sign in with one (`verifyUserCredentials`
+  // requires `passwordHash`), which is exactly the intent there.
+  //
+  // Returns the sanitized seeded record, or null when nothing was seeded (no
+  // subject configured, or the stack already has users).
+  function seedInitialSystemAdmin({ subject, password, email, displayName } = {}) {
+    if (!isNonEmptyString(subject)) return null;
+    if (listUsers().length > 0) return null;
+    const user = ensureSystemAdmin({ subject, email, displayName });
+    if (!user) return null;
+    if (isNonEmptyString(password)) setUserPassword(user.id, password);
+    return sanitizeUser(getUser(user.id));
+  }
+
   // Append (user → team) memberships in bulk, for the #2077 D6 migration.
   //
   // Deliberately NOT `setMembership` in a loop, for three reasons:
@@ -604,7 +656,7 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
     setUserPassword, clearUserPassword, verifyUserCredentials, sanitizeUser,
     setUserMatrixIdentity,
     listMemberships, setMembership, removeMembership, removeTeamMemberships, appendMemberships,
-    ensureDefaultTeam, ensureSystemAdmin,
+    ensureDefaultTeam, ensureSystemAdmin, seedInitialSystemAdmin,
   };
 }
 
@@ -637,4 +689,7 @@ module.exports = {
   DEFAULT_TEAM_NAME,
   MEMBERSHIP_ROLES,
   TEAM_ID_RE,
+  isLastSystemAdmin,
+  LAST_SYSTEM_ADMIN_DELETE_REASON,
+  LAST_SYSTEM_ADMIN_DEMOTE_REASON,
 };

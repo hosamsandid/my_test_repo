@@ -28,20 +28,23 @@ The entire console is served behind a login screen — no page or `/api/*` data
 endpoint is reachable without an active session. This is the minimal,
 SSO-ready auth foundation described in [docs/multi-user-concept.md](./multi-user-concept.md).
 
-**Login.** A single credential pair, read from environment variables so it can
-change without a redeploy:
+**Login.** A password is checked against the **user store** and nothing else
+(#2059). The environment pair below is no longer a credential the console
+accepts — it is the **seed** the orchestrator consumes at first boot to create
+the first System-Admin *user record*:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ADMIN_USERNAME` | `admin` | Console login username |
-| `ADMIN_PASSWORD` | `admin` | Console login password |
-| `AUTH_SESSION_SECRET` | derived from the credentials | Signs session cookies. When unset, a stable secret is derived from the credentials, so sessions survive a server restart and are auto-invalidated when the password changes. Set an explicit value to rotate sessions independently. |
+| `ADMIN_USERNAME` | `admin` | Subject of the first System-Admin record, seeded once on a stack with no user records |
+| `ADMIN_PASSWORD` | `admin` | Password written into that record at seeding; never read again afterwards |
+| `AUTH_SESSION_SECRET` | random, persisted | Signs session cookies. When unset, a random 32-byte key is generated once and persisted at `/workspace/auth/session-secret` (`0600`), so sessions survive a restart; if that volume is unwritable the key is process-random and a restart signs everybody out (fails safe). Set an explicit value to rotate every session deliberately. |
 | `AUTH_COOKIE_SECURE` | `false` | Set to `true` only when the console is served over HTTPS (adds the cookie's `Secure` attribute). |
 | `AUTH_ENABLED` | `false` | Single-user ⇄ multi-user mode (#1457). Off (the default) is **single-user compatibility**: whoever signs in is the operator, and the team scope filter is a no-op — an existing stack upgrades with no change in behaviour. `true` enforces multi-user scoping, so a caller sees only what their user record's team memberships allow. It gates *authorization* only; the login itself is unchanged in both modes. |
 
-> The defaults (`admin` / `admin`) are for first-boot local use only — change
-> them for any shared deployment. This is a placeholder until enterprise SSO
-> replaces the credential check.
+> The defaults (`admin` / `admin`) are for first-boot local use only — but change
+> them **on the Users page**: the seeded password lives in the record, so editing
+> `.env` and restarting no longer revokes it. This is a placeholder until
+> enterprise SSO replaces the credential check.
 
 **Session.** On successful login the server issues an HMAC-signed, stateless
 session token in an **HttpOnly, SameSite=Lax cookie** (`aee_session`, 7-day
@@ -52,30 +55,38 @@ clears the cookie and returns to the login screen; an expired session (any
 `401`) does the same automatically.
 
 **API surface** (all public — everything else under `/api` requires the cookie):
-- `POST /api/auth/login` — `{ username, password }` → sets the cookie, or `401` with an inline error.
+- `POST /api/auth/login` — `{ username, password }` → sets the cookie; `401` with an inline error on bad credentials, or `503` `user_store_unavailable` when the user store did not answer (the check is bounded by a 5 s timeout).
+- `GET /api/auth/ready` — `{ ready }` (`200`/`503`): whether the stack has a user record to sign in as. A bring-up polls this before its first login attempt, so a still-seeding stack is not mistaken for a bad password.
 - `GET /api/auth/session` — `{ authenticated, user }`.
 - `POST /api/auth/logout` — clears the cookie.
 
 **Per-user local passwords (#374, interim).** Human users created on the **Users**
 page (#1844) can be given a local password (Users → Edit → Login password),
-letting more than one person log in before SSO lands. Login then
-resolves in two steps: first the **user store** (match by `subject`, verify a
-salted **scrypt** hash held in the user record and never returned by any API),
-then the **env single-admin** credential. Key properties:
+letting more than one person log in before SSO lands. Login resolves in **one**
+step: the **user store** (match by `subject`, verify a salted **scrypt** hash held
+in the user record and never returned by any API). Key properties:
 
-- A per-user session's subject is the user's `subject`, so the audit trail (#305)
-  names the real person.
-- The env `ADMIN_USERNAME`/`ADMIN_PASSWORD` **always** works — the per-user check
-  is best-effort and calls the orchestrator's internal user store; if that store
-  is unreachable, login falls through to the env admin (no operator lock-out).
+- The first administrator is no exception. On a stack with zero user records the
+  orchestrator seeds one real System-Admin record from
+  `ADMIN_USERNAME`/`ADMIN_PASSWORD` — or, when `BOOTSTRAP_SYSTEM_ADMIN_SUBJECT`
+  is set, from that instead, seeding a **password-less** record for an SSO stack.
+  See [docs/teams-data-model.md](./teams-data-model.md).
+- Every session's subject is a real user record's `subject`, so the audit trail
+  (#305) names the real person.
+- There is **no env-credential fallback** (#2059). Two consequences are
+  deliberate and accepted: while the orchestrator — and with it the user store —
+  is unreachable **nobody can sign in** (login answers `503`, not `401`), and
+  recovering a lost identity is a **host-level** action on
+  `/workspace/users/index.json`, not a console login.
+- The last System Admin cannot be deleted or demoted (`409`, refused in the store
+  and mirrored as a disabled control on the Users page).
 - This is explicitly interim and is superseded by SSO (#307); there is no
   self-service signup, reset, policy, or MFA.
 
-**SSO swap-point.** The credential check lives in a single `verifyCredentials()`
-function in `admin-console/api/auth.js` (with the per-user store check alongside
-it in the login route). Swapping it for an OIDC/SAML token exchange (and adding
-the IdP callback route) requires no change to the session format, cookie
-handling, gate middleware, or the login UI/routing.
+**SSO swap-point.** The credential check lives in a single `verifyViaUserStore()`
+function in `admin-console/api/auth.js`. Swapping it for an OIDC/SAML token
+exchange (and adding the IdP callback route) requires no change to the session
+format, cookie handling, gate middleware, or the login UI/routing.
 
 ## Administration (#308, renamed #1726/#1910, dissolved #2085)
 

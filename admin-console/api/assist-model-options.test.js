@@ -40,14 +40,14 @@ const endpoints = [
 const ids = (opts) => opts.providers.map(p => p.id).sort();
 
 test('Team Member of team A sees exactly team A\'s usable providers (no oauth, no other team)', () => {
-  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const alice = computeScope({ username: 'alice@corp.com', users, memberships });
   const opts = buildAssistModelOptions(alice, endpoints, { envBaseUrl: 'https://env' });
   assert.deepEqual(ids(opts), ['ep-a', 'ep-sys-a']); // team-a team key + system key assigned to team-a
   assert.equal(opts.envFallbackActive, false);        // providers exist → no env fallback
 });
 
 test('user with no memberships gets an empty provider list', () => {
-  const nomad = computeScope({ username: 'nomad@corp.com', adminUsername: 'admin', users, memberships });
+  const nomad = computeScope({ username: 'nomad@corp.com', users, memberships });
   const opts = buildAssistModelOptions(nomad, endpoints, { envBaseUrl: 'https://env' });
   assert.deepEqual(opts.providers, []);
   // Providers ARE registered platform-wide, the caller just can't see any — this
@@ -56,19 +56,23 @@ test('user with no memberships gets an empty provider list', () => {
 });
 
 test('System Admin (scope.all) sees all non-oauth providers, oauth excluded', () => {
-  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', users, memberships });
   const opts = buildAssistModelOptions(sys, endpoints, { envBaseUrl: '' });
   assert.deepEqual(ids(opts), ['ep-a', 'ep-b', 'ep-sys-a', 'ep-sys-none']); // every api-key provider, oauth dropped
 });
 
-test('env admin behaves like a System Admin', () => {
-  const env = computeScope({ username: 'admin', adminUsername: 'admin', users, memberships });
-  const opts = buildAssistModelOptions(env, endpoints, {});
-  assert.deepEqual(ids(opts), ['ep-a', 'ep-b', 'ep-sys-a', 'ep-sys-none']);
+test('a subject with no user record sees no provider (#2059)', () => {
+  // This used to assert that `username: 'admin'` behaved like a System Admin,
+  // via the env-admin branch of computeScope. That branch is gone: the seeded
+  // administrator is an ordinary System-Admin RECORD (covered by the test
+  // above), and a subject with no record fails closed like any other.
+  const unknown = computeScope({ username: 'admin', users, memberships });
+  assert.equal(unknown.all, false);
+  assert.deepEqual(ids(buildAssistModelOptions(unknown, endpoints, {})), []);
 });
 
 test('envFallbackActive: only when zero providers registered AND ANTHROPIC_BASE_URL set', () => {
-  const sys = computeScope({ username: 'sys@corp.com', adminUsername: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', users, memberships });
   assert.equal(buildAssistModelOptions(sys, [], { envBaseUrl: 'https://env' }).envFallbackActive, true);
   assert.equal(buildAssistModelOptions(sys, [], { envBaseUrl: '   ' }).envFallbackActive, false); // blank → false
   assert.equal(buildAssistModelOptions(sys, [], {}).envFallbackActive, false);                    // no base url
@@ -78,20 +82,20 @@ test('envFallbackActive: only when zero providers registered AND ANTHROPIC_BASE_
 // ---- exclusionHint (#1402) -------------------------------------------------
 
 test('exclusionHint: null when providers are available', () => {
-  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const alice = computeScope({ username: 'alice@corp.com', users, memberships });
   const opts = buildAssistModelOptions(alice, endpoints, {});
   assert.equal(opts.exclusionHint, null);
 });
 
 test('exclusionHint: null when envFallbackActive (zero registered providers)', () => {
-  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const alice = computeScope({ username: 'alice@corp.com', users, memberships });
   const opts = buildAssistModelOptions(alice, [], { envBaseUrl: 'https://env' });
   assert.equal(opts.envFallbackActive, true);
   assert.equal(opts.exclusionHint, null);
 });
 
 test('exclusionHint: null when no providers registered and no env fallback', () => {
-  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const alice = computeScope({ username: 'alice@corp.com', users, memberships });
   const opts = buildAssistModelOptions(alice, [], {});
   assert.equal(opts.exclusionHint, null);
 });
@@ -101,14 +105,14 @@ test('exclusionHint: all-oauth-token when every registered provider is oauth-tok
     { id: 'o1', authType: 'oauth-token', scope: 'system', assignedTeamIds: ['team-a'], models: [] },
     { id: 'o2', authType: 'oauth-token', scope: 'team', teamId: 'team-a', models: [] },
   ];
-  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const alice = computeScope({ username: 'alice@corp.com', users, memberships });
   const opts = buildAssistModelOptions(alice, oauthOnly, {});
   assert.deepEqual(opts.providers, []);
   assert.equal(opts.exclusionHint, 'all-oauth-token');
 });
 
 test('exclusionHint: no-team-overlap when non-oauth providers exist but caller has no matching team', () => {
-  const nomad = computeScope({ username: 'nomad@corp.com', adminUsername: 'admin', users, memberships });
+  const nomad = computeScope({ username: 'nomad@corp.com', users, memberships });
   const opts = buildAssistModelOptions(nomad, endpoints, {});
   assert.deepEqual(opts.providers, []);
   assert.equal(opts.exclusionHint, 'no-team-overlap');
@@ -119,7 +123,7 @@ test('exclusionHint: no-team-overlap not all-oauth when registry is mixed and ca
     { id: 'o1', authType: 'oauth-token', scope: 'system', assignedTeamIds: ['team-a'], models: [] },
     { id: 'api1', authType: 'api-key', scope: 'team', teamId: 'team-b', models: [] },
   ];
-  const nomad = computeScope({ username: 'nomad@corp.com', adminUsername: 'admin', users, memberships });
+  const nomad = computeScope({ username: 'nomad@corp.com', users, memberships });
   const opts = buildAssistModelOptions(nomad, mixed, {});
   assert.deepEqual(opts.providers, []);
   assert.equal(opts.exclusionHint, 'no-team-overlap');

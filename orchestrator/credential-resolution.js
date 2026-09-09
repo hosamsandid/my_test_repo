@@ -99,8 +99,8 @@ function resolveAgentOwnerId(cfg, loadAgentConfig) {
 // the live scope probe is the completion-step's job (concept §5/§6, D5). When a
 // caller supplies `isUsable`, an entry it rejects is treated as "no usable
 // personal credential" — i.e. it refuses on the same path as absent (D5).
-function findPersonalCredential(index, ownerId, isUsable) {
-  return findPersonalCredentialState(index, ownerId, isUsable).entry;
+function findPersonalCredential(index, ownerId, isUsable, liveUsers) {
+  return findPersonalCredentialState(index, ownerId, isUsable, liveUsers).entry;
 }
 
 // The same lookup, but reporting whether the owner has a personal credential of
@@ -113,12 +113,32 @@ function findPersonalCredential(index, ownerId, isUsable) {
 // both into a bare `null` is what made the old `ownerId`-presence switch the
 // only available one.
 //
-// Returns `{ entry, present }`:
-//   entry   — the owner's usable personal credential, or null
-//   present — the owner has a personal credential of this kind, usable or not
-function findPersonalCredentialState(index, ownerId, isUsable) {
-  if (!Array.isArray(index) || !ownerId) return { entry: null, present: false };
+// Returns `{ entry, present, orphaned }`:
+//   entry    — the owner's usable personal credential, or null
+//   present  — the owner has a personal credential of this kind, usable or not
+//   orphaned — that credential exists but its `userId` is not a live user
+//
+// ── The orphan gate (#2138 AC6) ─────────────────────────────────────────────
+// Until #2138 this lookup matched on `scope` and `userId` alone and never asked
+// whether the user still exists. Because #2135 had killed offboarding outright,
+// a deleted human's personal PAT stayed on disk, kept matching here, and their
+// agents kept pushing under it — with no refusal, because the refusal branch
+// needs a credential that is present but UNUSABLE and this one worked fine.
+//
+// `liveUsers` closes that independently of the offboarding path: an entry whose
+// owner is gone is reported present-but-not-usable, which routes an attributed
+// write into `resolveCredential`'s refusal instead of a silent success. Cleanup
+// fixes today's orphans; this makes the next one inert on the day it is created.
+//
+// `liveUsers` is a `{ known, isLive }` gate (see `buildLiveUserGate`) and is
+// OPTIONAL: when it is absent, or reports `known: false` because the caller
+// could not read the user index, the check does not run and behaviour is exactly
+// as before. That direction is deliberate — an unreadable user index must not
+// turn every personal credential on the installation into a refusal.
+function findPersonalCredentialState(index, ownerId, isUsable, liveUsers) {
+  if (!Array.isArray(index) || !ownerId) return { entry: null, present: false, orphaned: false };
   const check = typeof isUsable === "function" ? isUsable : () => true;
+  const ownerLive = isLiveUnderGate(liveUsers, ownerId);
   let present = false;
   for (const candidate of index) {
     if (
@@ -130,9 +150,44 @@ function findPersonalCredentialState(index, ownerId, isUsable) {
       continue;
     }
     present = true;
-    if (check(candidate)) return { entry: candidate, present: true };
+    // An orphan is never returned as usable, whatever `isUsable` says — the
+    // owner's absence is the disqualifier, not the credential's scopes.
+    if (ownerLive && check(candidate)) return { entry: candidate, present: true, orphaned: false };
   }
-  return { entry: null, present };
+  return { entry: null, present, orphaned: present && !ownerLive };
+}
+
+// Build the live-user gate `findPersonalCredentialState` and the offboarding
+// sweep consume, from whatever the caller managed to read of the user index.
+//
+// Returns `{ known, isLive }`. `known: false` means "we do not know who is
+// live" and every consumer of the gate must then behave as it did before the
+// gate existed — no refusal, no sweep. This is the whole fail-open story, in one
+// place, so the two consumers cannot disagree about it.
+//
+// An EMPTY array counts as unknown, not as "nobody is live". `teams-store`'s
+// `readArray` returns `[]` for an unreadable or malformed index just as it does
+// for a genuinely empty one, and a booted installation always has at least the
+// seeded System Admin (whose deletion the store refuses) — so an empty list is
+// in practice a read failure, and treating it as authoritative would refuse
+// every attributed write on the installation at once.
+function buildLiveUserGate(users) {
+  if (!Array.isArray(users) || users.length === 0) {
+    return { known: false, isLive: () => true };
+  }
+  const live = new Set();
+  for (const u of users) {
+    if (u && u.id != null && String(u.id) !== "") live.add(String(u.id));
+  }
+  if (live.size === 0) return { known: false, isLive: () => true };
+  return { known: true, isLive: (id) => live.has(String(id)) };
+}
+
+// Apply a `buildLiveUserGate` result. A missing/unknown gate answers "live" so
+// every caller degrades to pre-#2138 behaviour.
+function isLiveUnderGate(gate, userId) {
+  if (!gate || gate.known !== true || typeof gate.isLive !== "function") return true;
+  return gate.isLive(userId) === true;
 }
 
 // The core decision. Given the operation, the resolved owner, the owner's usable
@@ -162,6 +217,7 @@ function resolveCredential({
   ownerId,
   personalCredential = null,
   personalCredentialPresent = false,
+  personalCredentialOrphaned = false,
   sharedCredentialId = null,
   kind = "GitHub token",
 }) {
@@ -185,7 +241,16 @@ function resolveCredential({
   if (attributed && personalCredentialPresent) {
     // Refuse — an attributed write must NEVER silently drop to a shared
     // team/system credential and act under someone else's name (AC2/AC5, D5).
-    return { refuse: buildRefusal(ownerId, kind) };
+    //
+    // #2138 adds a second way to land here: the credential is fine, but its
+    // owner is no longer a live user. The remedy is the opposite one (an
+    // operator finishes the offboarding; nobody can "add a personal token" for
+    // a deleted person), so it gets its own message and code.
+    return {
+      refuse: personalCredentialOrphaned
+        ? buildOrphanRefusal(ownerId, kind)
+        : buildRefusal(ownerId, kind),
+    };
   }
 
   // Owner known but the owner has NO personal credential of this kind at all —
@@ -250,6 +315,46 @@ function selectPersonalCredentialIds(index, ownerId) {
   return ids;
 }
 
+// Offboarding RECONCILIATION selection (#2138 AC1/AC2). Every deletion between
+// 2026-08-11 and the #2135 fix left the person's personal credentials on disk
+// and their agents running, because the one call to `offboardOwner` threw a
+// ReferenceError into a `catch` that only logged. This selects the humans that
+// happened to — the owners whose offboarding still has to be replayed.
+//
+// An owner qualifies when it is NOT a live user and it still owns something:
+// a `personal` entry in either credential index, or an agent whose resolved
+// owner it is. Both halves matter — the credential is the security exposure,
+// the running agent is the one still using it — and `offboardOwner` handles
+// each idempotently, so replaying it over this list is safe.
+//
+// Pure — the caller supplies the two index arrays, the already-loaded agent
+// configs and the live-user gate. Returns the owner ids in first-seen order.
+// An UNKNOWN gate (`buildLiveUserGate` could not read the user index) returns
+// `[]`: with nobody known to be live, "not a live user" is true of everyone,
+// and a sweep run on that belief would drain the whole installation.
+function selectOrphanedOwnerIds({ credentialIndexes = [], agents = [], loadAgentConfig, liveUsers } = {}) {
+  if (!liveUsers || liveUsers.known !== true) return [];
+  const seen = new Set();
+  const ids = [];
+  const consider = (raw) => {
+    const id = raw != null && String(raw) !== "" ? String(raw) : null;
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    if (!isLiveUnderGate(liveUsers, id)) ids.push(id);
+  };
+  for (const index of credentialIndexes) {
+    if (!Array.isArray(index)) continue;
+    for (const entry of index) {
+      if (entry && entry.scope === "personal" && entry.userId) consider(entry.userId);
+    }
+  }
+  for (const a of Array.isArray(agents) ? agents : []) {
+    if (!a || !a.cfg) continue;
+    consider(resolveAgentOwnerId(a.cfg, loadAgentConfig));
+  }
+  return ids;
+}
+
 // The actionable refusal message (AC5): names the owner and what to do, and is
 // explicit that there is deliberately no team/system fallback.
 function buildRefusal(ownerId, kind) {
@@ -263,6 +368,21 @@ function buildRefusal(ownerId, kind) {
   };
 }
 
+// The orphan refusal (#2138 AC6). Deliberately NOT the message above: it would
+// tell the reader to add a personal credential for a user record that no longer
+// exists. What actually has to happen is an offboarding that never completed,
+// plus revoking the credential at GitHub — it was usable the whole time.
+function buildOrphanRefusal(ownerId, kind) {
+  return {
+    code: "owner-not-a-live-user",
+    message:
+      `Refusing to run an attributed GitHub write: this agent's owner (${ownerId}) is no longer ` +
+      `a user on this platform, and their personal ${kind} must not keep acting on their behalf. ` +
+      `Finish the offboarding — delete the orphaned credential and revoke it at GitHub — then ` +
+      `re-own or delete this agent. The run will NOT fall back to a team or system credential.`,
+  };
+}
+
 module.exports = {
   DEFAULT_TEAM_ID,
   ATTRIBUTED_OPERATIONS,
@@ -270,8 +390,11 @@ module.exports = {
   resolveAgentOwnerId,
   findPersonalCredential,
   findPersonalCredentialState,
+  buildLiveUserGate,
   resolveCredential,
   selectAgentIdsForOwner,
   selectPersonalCredentialIds,
+  selectOrphanedOwnerIds,
   buildRefusal,
+  buildOrphanRefusal,
 };

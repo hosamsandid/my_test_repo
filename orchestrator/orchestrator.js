@@ -4425,15 +4425,31 @@ function loadSshKeyIndex() {
 // never refuses (which is every agent today), while an owner whose personal
 // token is present-but-unusable still refuses. See the header comment in
 // `credential-resolution.js` for why the switch had to move.
+// The live-user gate for the personal tier (#2138 AC6). Built fresh per call
+// from the user index — a credential must stop resolving the moment its owner
+// is deleted, so a cached gate would just reintroduce the window this closes.
+// `buildLiveUserGate` reports `known: false` for an empty/unreadable index and
+// every consumer then behaves exactly as it did before the gate existed.
+function loadLiveUserGate() {
+  try {
+    return credentialResolution.buildLiveUserGate(teamsStore.listUsers());
+  } catch (err) {
+    console.warn(`[Orchestrator] could not read the user index for the personal-credential owner check: ${err.message}`);
+    return credentialResolution.buildLiveUserGate(null);
+  }
+}
+
 function resolveAttributedGithubToken(id, env, operation) {
   const cfg = loadAgentConfig(id) || {};
   const ownerId = credentialResolution.resolveAgentOwnerId(cfg, loadAgentConfig);
-  const personal = credentialResolution.findPersonalCredentialState(loadGithubTokenIndex(), ownerId);
+  const personal = credentialResolution.findPersonalCredentialState(
+    loadGithubTokenIndex(), ownerId, undefined, loadLiveUserGate());
   const decision = credentialResolution.resolveCredential({
     operation,
     ownerId,
     personalCredential: personal.entry,
     personalCredentialPresent: personal.present,
+    personalCredentialOrphaned: personal.orphaned,
     sharedCredentialId: env?.githubTokenId || null,
     kind: "GitHub token",
   });
@@ -10240,6 +10256,85 @@ class Orchestrator {
     return ids.map(id => ({ id, kind }));
   }
 
+  // ── Offboarding reconciliation (#2138 AC1/AC2) ────────────────────────────
+  // From 2026-08-11 (PR #1598) to the #2135 fix, `offboardOwner` was never
+  // reached: its one call site read an identifier that did not exist in scope,
+  // and the ReferenceError landed in a `catch` that only logged. Every user
+  // deleted in that window kept their agents running and their personal SSH key
+  // and GitHub PAT on disk and in active use.
+  //
+  // Fixing the call site does nothing for the deletions already done, so this
+  // replays the offboarding those users never got — at boot, on the deployed
+  // stack, which is the only place the leftovers exist. It drives
+  // `offboardOwner` itself rather than a bespoke cleanup so the remediation
+  // exercises the code path being repaired; both halves are idempotent, so a
+  // sweep that finds nothing (the steady state, and every boot after the first)
+  // costs two index reads and stops.
+  //
+  // `dryRun` returns the AC1 assessment without acting. The report names each
+  // orphaned credential's `createdAt` and `fingerprint`: the fingerprint is what
+  // an operator needs to revoke the key/token at GitHub (AC3, which no code here
+  // can do), and `createdAt` is the closest thing to an age we have — the user
+  // record is hard-deleted with no tombstone, so WHEN the owner was deleted is
+  // not recoverable from this stack at all (#2138 AC7).
+  async reconcileOrphanedOffboardings({ dryRun = false } = {}) {
+    const liveUsers = loadLiveUserGate();
+    if (!liveUsers.known) {
+      // No authoritative user list → every owner would look deleted. Refuse.
+      console.warn('[Orchestrator] offboarding reconciliation skipped: the user index could not be read');
+      return { ran: false, reason: 'live-users-unknown', owners: [], credentials: [], paused: [] };
+    }
+
+    const sshKeys = loadSshKeyIndex();
+    const ghTokens = loadGithubTokenIndex();
+    const agents = Array.from(this.agentConfigs.keys()).map(id => ({ id, cfg: loadAgentConfig(id) }));
+    const owners = credentialResolution.selectOrphanedOwnerIds({
+      credentialIndexes: [sshKeys, ghTokens],
+      agents,
+      loadAgentConfig,
+      liveUsers,
+    });
+    if (!owners.length) return { ran: true, reason: null, owners: [], credentials: [], paused: [] };
+
+    // AC1 — describe the exposure before touching it, so the log carries the
+    // assessment even when the cleanup below only partly succeeds.
+    const orphanSet = new Set(owners);
+    const credentials = [];
+    for (const [index, kind] of [[sshKeys, 'ssh-key'], [ghTokens, 'github-token']]) {
+      for (const e of Array.isArray(index) ? index : []) {
+        if (e && e.scope === 'personal' && e.userId && orphanSet.has(String(e.userId))) {
+          credentials.push({
+            id: String(e.id), kind, ownerId: String(e.userId),
+            fingerprint: e.fingerprint || null, createdAt: e.createdAt || null,
+          });
+        }
+      }
+    }
+    console.warn(
+      `[Orchestrator] offboarding reconciliation (#2138): ${owners.length} deleted owner(s) still hold `
+      + `${credentials.length} personal credential(s) or running agent(s)${dryRun ? ' [dry run]' : ''}`,
+    );
+    for (const c of credentials) {
+      console.warn(
+        `[Orchestrator]   orphaned ${c.kind} '${c.id}' of deleted user ${c.ownerId} `
+        + `(created ${c.createdAt || 'unknown'}, fingerprint ${c.fingerprint || 'unknown'}) `
+        + `— REVOKE IT AT GITHUB, deleting the local copy is not enough`,
+      );
+    }
+    if (dryRun) return { ran: true, reason: 'dry-run', owners, credentials, paused: [] };
+
+    const paused = [];
+    for (const ownerId of owners) {
+      try {
+        const result = await this.offboardOwner(ownerId);
+        paused.push(...(result.paused || []));
+      } catch (err) {
+        console.error(`[Orchestrator] offboarding reconciliation failed for ${ownerId}: ${err.message}`);
+      }
+    }
+    return { ran: true, reason: null, owners, credentials, paused };
+  }
+
   // Recreate a single running agent's container so a spawn-time change (e.g. a
   // per-agent Model-Provider override) is re-injected. A disabled/stub agent is
   // left untouched — it picks up the new binding on its next enable. Fresh-reads
@@ -11194,6 +11289,46 @@ function teamHasOwnedResources(teamId) {
   return false;
 }
 
+// Put a degraded offboarding on the operator's timeline (#2138 AC5).
+//
+// A user deletion whose teardown did not run is a security event — a departed
+// person's PAT may still be on disk and in use — and until now its only trace
+// was a server-side console line nobody reads. The GitHub Event Log is the
+// operator-facing timeline the console already renders, so the degradation goes
+// there, alongside the response field the API caller gets.
+//
+// Repo-less by construction: this event has no repository, exactly like the
+// internal wake events the same log already carries. `outcomes` stays EMPTY on
+// purpose — the console's reader resolves an agent name per outcome and would
+// throw on an outcome with no `agentId`, and we do not know which agents failed
+// to pause (that is the failure being reported).
+//
+// Never throws: `githubEventLog.record` swallows its own I/O errors, and the
+// wrapper here covers entry construction. A deletion must not fail because its
+// audit line could not be written.
+function recordOffboardingDegradation(userId, detail) {
+  try {
+    const now = new Date().toISOString();
+    githubEventLog.record({
+      ts: now,
+      eventId: `offboarding:${userId}:${Date.now()}`,
+      repo: null,
+      event: 'user.offboarding-degraded',
+      actor: null,
+      createdAt: now,
+      label: null,
+      ref: null,
+      workItem: null,
+      outcomes: [],
+      noMatchingTrigger: false,
+      source: 'internal',
+      offboarding: { userId: String(userId), ok: false, detail: String(detail || 'unknown') },
+    });
+  } catch (err) {
+    console.error(`[Orchestrator] could not log the offboarding degradation for ${userId}: ${err.message}`);
+  }
+}
+
 // Returns true if the request was a /internal/admin/* route (handled here),
 // false otherwise so the caller can fall through to other routes.
 async function handleTeamsAdminApi(req, res) {
@@ -11325,18 +11460,48 @@ async function handleTeamsAdminApi(req, res) {
         // record, so a partial failure leaves the user recoverable rather than
         // a deleted user with lingering personal secrets (AC5). Best-effort —
         // the user removal is what the caller contracted for and still proceeds.
-        let offboarding = null;
+        //
+        // #2138 AC5 — the degradation is REPORTED, not just logged. It used to
+        // be a bare `catch` + `console.error` with `offboarding` left `null`,
+        // which is what hid a total failure of offboarding for four weeks: to
+        // the console, to the API caller and to the operator, a delete whose
+        // teardown never ran was byte-identical to one that worked.
+        //
+        // The deletion still completes (#2138 Q1). Refusing it would leave a
+        // present user whose credentials are also still present and whose
+        // offboarding the operator cannot finish by any other route — strictly
+        // worse than the failure it is reporting — and the containment for a
+        // teardown that did not happen is the owner check in
+        // `findPersonalCredentialState` (AC6), which does not need this step to
+        // have succeeded. So: complete, and say plainly what did not happen.
+        let offboarding;
         try {
           // `orchestratorSingleton`, guarded — see the create branch above
-          // (#2135). This read has been a ReferenceError since 2026-08-11, so
-          // offboarding never actually ran; the try/catch made it silent.
+          // (#2135). This read was a ReferenceError from 2026-08-11 until that
+          // fix, so offboarding never actually ran; the try/catch made it silent.
           if (orchestratorSingleton) {
-            offboarding = await orchestratorSingleton.offboardOwner(resourceId);
+            offboarding = { ok: true, ...(await orchestratorSingleton.offboardOwner(resourceId)) };
           } else {
-            console.warn(`[Orchestrator] offboarding skipped for user ${resourceId}: orchestrator not initialised`);
+            offboarding = {
+              ok: false, ownerId: resourceId, paused: [], skipped: [], deletedCredentials: [],
+              error: 'the orchestrator is not initialised — offboarding did not run',
+            };
           }
         } catch (err) {
-          console.error(`[Orchestrator] offboarding failed for user ${resourceId}: ${err.message}`);
+          offboarding = {
+            ok: false, ownerId: resourceId, paused: [], skipped: [], deletedCredentials: [],
+            error: err.message,
+          };
+        }
+        if (!offboarding.ok || (offboarding.skipped || []).length) {
+          const detail = offboarding.ok
+            ? `could not pause ${offboarding.skipped.join(', ')}`
+            : offboarding.error;
+          console.error(
+            `[Orchestrator] OFFBOARDING DEGRADED for deleted user ${resourceId}: ${detail}. `
+            + `Their personal SSH key / GitHub token may still be on disk — delete it and REVOKE `
+            + `it at GitHub, and check for agents of theirs still running.`);
+          recordOffboardingDegradation(resourceId, detail);
         }
         // Retire the departing human's Matrix account and delete their stored
         // access token (#1458), for the same reason personal credentials are
@@ -11453,6 +11618,14 @@ async function main() {
   // runs after init and must never block or break the boot.
   try { migrateUnifiedAgentsMemory(); }
   catch (err) { console.warn(`[Orchestrator] legacy-memory migration pass failed: ${err.message}`); }
+
+  // Offboarding reconciliation (#2138 AC2). Replays the offboarding every user
+  // deleted between 2026-08-11 and the #2135 fix never got. Runs after init()
+  // so `agentConfigs` is populated, and is best-effort and non-blocking for the
+  // same reason as the reconcile below — a stack must still boot. Idempotent:
+  // after the first successful sweep it finds nothing and returns immediately.
+  orchestrator.reconcileOrphanedOffboardings()
+    .catch((err) => console.error(`[Orchestrator] offboarding reconciliation at boot failed: ${err.message}`));
 
   // Plugin broker sidecars (#1547): bring the live set in line with the
   // installed registry — start what is installed, stop orphans of anything

@@ -253,3 +253,118 @@ test("the sandbox really would catch a ReferenceError (anti-vacuity)", () => {
   assert.throws(() => probe(), (err) => err.name === "ReferenceError"
     && /orchestrator is not defined/.test(err.message));
 });
+
+// ---------------------------------------------------------------------------
+// AC9 (D2) — the admin catch-all genericises UNTAGGED built-in errors and logs
+// them server-side, while every statusHint-tagged domain message stays verbatim.
+//
+// These run the real catch-all (the tail of the sliced handleTeamsAdminApi), so
+// a regression in the branch order or the guard condition fails here rather than
+// leaking a raw ReferenceError to the client as #2135 did.
+//
+// Cross-realm note: the handler runs in the vm sandbox, so its `instanceof
+// ReferenceError` checks the SANDBOX's constructor. A ReferenceError minted in
+// this (Node) realm would not match — the same cross-realm fact the anti-vacuity
+// test above relies on — so the built-in-error fixtures are minted INSIDE the
+// sandbox via `vm.runInContext`.
+// ---------------------------------------------------------------------------
+
+test("AC9: an untagged built-in error is genericised and logged, never relayed", async () => {
+  const { fn, calls, sandbox } = loadHandler();
+  const makeRefError = vm.runInContext("(m) => new ReferenceError(m)", sandbox);
+  // Exactly the #2135 shape: a ReferenceError with no statusHint reaching the
+  // catch-all while handling POST /internal/admin/users.
+  sandbox.teamsStore.createUser = () => { throw makeRefError("orchestrator is not defined"); };
+
+  const { res } = await call(fn, "POST", "/internal/admin/users");
+
+  assert.equal(res.sent.status, 500);
+  assert.equal(
+    res.sent.payload.error,
+    "Internal server error",
+    "a raw engine message must never reach the client",
+  );
+  assert.doesNotMatch(
+    JSON.stringify(res.sent.payload),
+    /orchestrator is not defined/,
+    "the internal message must not leak anywhere in the response body",
+  );
+  assert.ok(
+    calls.logs.some(l => l.includes("orchestrator is not defined")),
+    "the real error must be logged server-side, not silently swallowed",
+  );
+});
+
+test("AC9: a TypeError is genericised the same way (the rule is by type, not by one message)", async () => {
+  const { fn, sandbox } = loadHandler();
+  const makeTypeError = vm.runInContext("(m) => new TypeError(m)", sandbox);
+  sandbox.teamsStore.createUser = () => { throw makeTypeError("Cannot read properties of undefined (reading 'x')"); };
+
+  const { res } = await call(fn, "POST", "/internal/admin/users");
+
+  assert.equal(res.sent.status, 500);
+  assert.equal(res.sent.payload.error, "Internal server error");
+});
+
+test("AC9: a statusHint-tagged domain error is still forwarded verbatim (byte-identity contract)", async () => {
+  const { fn, sandbox } = loadHandler();
+  // The store's `tagged()` shape: a real message + statusHint (+ code). The UI
+  // byte-identity contract (users-view.test.js / agent-repos-wiring.test.js)
+  // depends on this reaching the reader unchanged.
+  sandbox.teamsStore.createUser = () => {
+    const e = new Error("Subject 'jane@corp.com' already exists");
+    e.statusHint = 409;
+    e.code = "duplicate-subject";
+    throw e;
+  };
+
+  const { res } = await call(fn, "POST", "/internal/admin/users");
+
+  assert.equal(res.sent.status, 409, "the tagged domain status must be preserved");
+  assert.equal(
+    res.sent.payload.error,
+    "Subject 'jane@corp.com' already exists",
+    "a tagged domain message must be forwarded byte-identical",
+  );
+  assert.equal(res.sent.payload.code, "duplicate-subject", "the machine-readable code must ride along");
+});
+
+test("AC9: an untagged NON-built-in error is still forwarded verbatim (the rule stays narrow)", async () => {
+  const { fn, sandbox } = loadHandler();
+  // A plain domain Error with no statusHint is not a ReferenceError/TypeError/
+  // RangeError, so the new rule must NOT sweep it up — it keeps its pre-#2135
+  // 500-verbatim behaviour.
+  sandbox.teamsStore.createUser = () => { throw new Error("a plain domain failure"); };
+
+  const { res } = await call(fn, "POST", "/internal/admin/users");
+
+  assert.equal(res.sent.status, 500);
+  assert.equal(
+    res.sent.payload.error,
+    "a plain domain failure",
+    "a plain (non-built-in) error is not genericised",
+  );
+});
+
+test("AC9 companion: readBody tags a malformed body 400, so the catch-all answers 400 not 500", async () => {
+  const start = SRC.indexOf("function readBody(");
+  assert.notEqual(start, -1, "expected readBody in orchestrator.js");
+  const end = SRC.indexOf("\n}\n", start);
+  assert.notEqual(end, -1, "could not find the end of readBody");
+  const src = SRC.slice(start, end + 2);
+  assert.ok(src.includes("statusHint = 400"), "the readBody slice must carry the 400 tag");
+
+  const readBodyFn = vm.runInContext(`(${src})`, vm.createContext({ Promise, JSON }));
+
+  const handlers = {};
+  const req = { on: (ev, cb) => { handlers[ev] = cb; return req; } };
+  const p = readBodyFn(req);
+  handlers.data("{ not valid json");
+  handlers.end();
+
+  await assert.rejects(p, (err) => {
+    assert.equal(err.message, "invalid JSON body");
+    assert.equal(err.statusHint, 400, "a malformed body must be tagged 400, not left to answer 500");
+    return true;
+  });
+});

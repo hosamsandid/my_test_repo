@@ -49,6 +49,24 @@ test('endpointUsableByTeam — junk input is safe', () => {
   assert.equal(endpointUsableByTeam('nope', 'alpha'), false);
 });
 
+// #2136: a global provider is usable by every team, and with no team at all.
+const globalEp = { id: 'ep-global', scope: 'system', assignedTeamIds: [], authType: 'api-key', global: true };
+
+test('endpointUsableByTeam — a global provider is usable by any team and with no team (#2136)', () => {
+  assert.equal(endpointUsableByTeam(globalEp, 'alpha'), true);
+  assert.equal(endpointUsableByTeam(globalEp, 'gamma'), true);   // a team it is NOT assigned to
+  assert.equal(endpointUsableByTeam(globalEp, undefined), true);
+  assert.equal(endpointUsableByTeam(globalEp, null), true);
+  // Still never an oauth seat, even if hand-flagged global.
+  assert.equal(endpointUsableByTeam({ ...globalEp, authType: 'oauth-token' }, 'alpha'), false);
+});
+
+test('pickAssistEndpoint — a global provider resolves ok for a foreign team (#2136)', () => {
+  const r = pickAssistEndpoint([...index, globalEp], 'ep-global', 'gamma');
+  assert.equal(r.reason, 'ok');
+  assert.equal(r.ep, globalEp);
+});
+
 const index = [teamEp, systemEp, legacyEp, oauthEp];
 
 test('pickAssistEndpoint — unset id → unset (use .env)', () => {

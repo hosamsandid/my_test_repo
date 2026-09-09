@@ -31,6 +31,11 @@ function endpointScope(ep) {
 function endpointUsableByTeam(ep, teamId) {
   if (!ep || typeof ep !== 'object') return false;
   if (ep.authType === 'oauth-token') return false;
+  // A GLOBAL provider (#2136) is usable by every team with no assignment — the
+  // same additive `global: true` flag scope.js/resource-tier.js read. Inlined as
+  // a `=== true` check rather than importing resource-tier so this module stays
+  // dependency-free, matching the oauth exclusion just above (also duplicated).
+  if (ep.global === true && ep.scope !== 'personal') return true;
   const t = teamId || 'default';
   if (endpointScope(ep) === 'system') {
     const assigned = Array.isArray(ep.assignedTeamIds) ? ep.assignedTeamIds.map(String) : [];

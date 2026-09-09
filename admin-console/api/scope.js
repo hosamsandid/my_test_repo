@@ -46,6 +46,7 @@ const {
   TIER_SYSTEM,
   normalizeTier,
   ownsPersonalTier,
+  isGlobalTier,
 } = require('./resource-tier');
 
 // Default Agent-Chat transcript font size in px (#1437). Kept in sync with
@@ -294,6 +295,13 @@ function visibleCredential(scope, cred) {
   if (!scope) return false;
   const c = normalizeCredential(cred);
   if (c.scope === 'personal') return ownsPersonalCredential(scope, c);
+  // A GLOBAL provider (#2136) is reachable by everyone, so it is visible to every
+  // caller — including a user in no team. Checked after the personal tier (a
+  // personal record can never be global) and before `scope.all` so a non-admin
+  // sees it too; management stays closed (`canManageCredential` still refuses a
+  // non-System-Admin) and the token is never exposed (`maskLlmEndpoint`). This
+  // also lights it up in the agent/env provider picker, which reads this list.
+  if (isGlobalTier(c)) return true;
   if (scope.all) return true;
   if (c.scope === 'system') return c.assignedTeamIds.some(t => canManageTeam(scope, t));
   return canManageTeam(scope, c.teamId);
@@ -320,6 +328,11 @@ function visibleCredential(scope, cred) {
 function assistSelectableEndpoint(scope, ep) {
   if (!scope || !ep) return false;
   if (ep.authType === 'oauth-token') return false;
+  // A GLOBAL provider (#2136) is selectable by every user, in or out of a team —
+  // still after the oauth-token exclusion (a subscription seat is single-user and
+  // is never billable here, so it can never be global either — enforced at the
+  // route). This is what lets a plain user with no team bill AI helpers.
+  if (isGlobalTier(ep)) return true;
   if (scope.all) return true;
   const c = normalizeCredential(ep);
   if (c.scope === 'team') return scope.teamIds.has(c.teamId);
@@ -401,6 +414,13 @@ function canReassignCredential(scope) {
 // this phase together, exactly as they survived P2. See concept Amendment 3.
 function credentialVisibleToTeam(cred, teamId) {
   const c = normalizeCredential(cred);
+  // A GLOBAL provider (#2136) is usable by EVERY team with no assignment at all,
+  // and by an agent whose team is unresolved — so it must precede the tenant
+  // match. This carries no `scope.all` bypass (the census guard in scope.test.js
+  // pins that), because global reachability is a property of the record, not of
+  // the caller: it answers "may this team use it" true for everybody, which is
+  // exactly the point.
+  if (isGlobalTier(c)) return true;
   const t = teamId || 'default';
   if (c.scope === TIER_SYSTEM) return c.assignedTeamIds.includes(t);
   return c.teamId === t;

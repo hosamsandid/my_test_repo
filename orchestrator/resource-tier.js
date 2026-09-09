@@ -87,6 +87,22 @@ function isSharedTier(entry) {
   return !!(entry && entry.scope === TIER_SYSTEM);
 }
 
+// Is this record GLOBAL — reachable by every user and every agent with no team
+// assignment at all (#2136)? Represented as an additive `global: true` flag,
+// deliberately orthogonal to the three-tier `scope`: a global record is the
+// "assigned to nobody but usable by all" case the shared tier could not express
+// (a `system` record assigned to zero teams is System-Admin-only). Only model
+// providers ever carry it — the flag is inert on any record that does not — and
+// publishing one is a System-Admin act enforced at the route, not here.
+//
+// A PERSONAL record can never be global: the personal tier's whole point is that
+// it is private to one human with no `scope.all` bypass (#1567 D2), so a
+// `personal` + `global` record (only reachable by a hand edit) fails closed to
+// its owner rather than leaking to everyone.
+function isGlobalTier(entry) {
+  return !!(entry && entry.global === true && entry.scope !== TIER_PERSONAL);
+}
+
 // Which teams reach this record, as a flat list — the team tier's single owner,
 // or the shared tier's assignments, or nothing for a personal one. The one place
 // that knows a shared record's reach lives on a different field.
@@ -149,6 +165,7 @@ module.exports = {
   normalizeTier,
   ownsPersonalTier,
   isSharedTier,
+  isGlobalTier,
   tierTeamIds,
   tierUsableByTeam,
   tierOwnershipFields,

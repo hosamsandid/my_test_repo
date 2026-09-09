@@ -55,6 +55,19 @@ test('user with no memberships gets an empty provider list', () => {
   assert.equal(opts.envFallbackActive, false);
 });
 
+test('a global provider is offered to a user in no team (#2136)', () => {
+  const nomad = computeScope({ username: 'nomad@corp.com', users, memberships });
+  const withGlobal = [...endpoints,
+    { id: 'ep-global', name: 'House model', authType: 'api-key', scope: 'system',
+      assignedTeamIds: [], global: true, baseUrl: 'https://proxy/g', models: [{ id: 'g1' }] }];
+  const opts = buildAssistModelOptions(nomad, withGlobal, { envBaseUrl: 'https://env' });
+  assert.deepEqual(ids(opts), ['ep-global']);              // the teamless user reaches exactly the global one
+  assert.equal(opts.providers[0].global, true);            // and it is badged global
+  // A team member sees the global provider ALONGSIDE their own, with no duplication.
+  const alice = computeScope({ username: 'alice@corp.com', users, memberships });
+  assert.deepEqual(ids(buildAssistModelOptions(alice, withGlobal, {})), ['ep-a', 'ep-global', 'ep-sys-a']);
+});
+
 test('System Admin (scope.all) sees all non-oauth providers, oauth excluded', () => {
   const sys = computeScope({ username: 'sys@corp.com', users, memberships });
   const opts = buildAssistModelOptions(sys, endpoints, { envBaseUrl: '' });
@@ -135,6 +148,7 @@ test('masking: never leaks token material, defaults model from catalog', () => {
     id: 'ep-a',
     name: 'Team A key',
     scope: 'team',
+    global: false,
     models: [{ id: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', kind: 'sonnet' }],
     defaultModelId: 'claude-sonnet-4-6',
   });

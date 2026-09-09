@@ -19,6 +19,9 @@ function maskAssistProvider(ep) {
     id: ep.id,
     name: ep.name || ep.id,
     scope,
+    // #2136: a global provider is badged in the assist selector like the chat
+    // picker; access is what the flag opens, not any secret.
+    global: ep.global === true,
     models,
     defaultModelId: ep.defaultModelId || models[0]?.id || null,
   };

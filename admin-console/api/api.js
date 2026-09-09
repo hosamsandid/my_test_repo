@@ -37,6 +37,8 @@ const { createAgentManageGate } = require('./team-member-boundary');
 // Layered resource ownership (#2083, P5) — the shared tier shape for
 // environments and MCP servers. Byte-mirrored in orchestrator/resource-tier.js.
 const { tierOwnershipFields, isRetier } = require('./resource-tier');
+// Global model providers (#2136): the System-Admin-only publish gate.
+const { resolveGlobalFlag } = require('./llm-endpoint-global');
 const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
@@ -4831,6 +4833,8 @@ function publicEndpointView(ep) {
     // the header assist selector (#1670 AC3). Mirrors maskAssistProvider's rule:
     // legacy endpoints with no `scope` field are treated as team-owned.
     scope: ep.scope === 'system' ? 'system' : 'team',
+    // #2136: so the chat/env provider picker can badge a global provider.
+    global: ep.global === true,
     authType: ep.authType === 'oauth-token' ? 'oauth-token' : 'api-key',
     baseUrl: ep.baseUrl || '',
     defaultModelId: ep.defaultModelId || null,
@@ -11573,6 +11577,13 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
   let ownership;
   try { ownership = resolveCredentialOwnership(req.body); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  // Global provider (#2136): a System-Admin-only publish flag. A global provider
+  // carries no team assignment at all, so it is always system-scoped-with-no-
+  // teams — override the resolved ownership before the create gate so the two
+  // agree. `resolveGlobalFlag` refuses a non-admin (403) or an oauth seat (400).
+  const globalGate = resolveGlobalFlag({ wantGlobal: req.body?.global, currentGlobal: false, scopeAll: scope.all, isOauth });
+  if (globalGate.error) return res.status(globalGate.status).json({ error: globalGate.error, code: globalGate.code });
+  if (globalGate.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };
   if (!canCreateCredential(scope, ownership)) {
     return res.status(403).json({ error: 'forbidden: you may not create this provider', code: 'forbidden' });
   }
@@ -11627,6 +11638,7 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
     scope: ownership.scope,
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
+    ...(globalGate.global ? { global: true } : {}),
     baseUrl: isOauth ? '' : baseUrl,
     authType,
     ...(isOauth ? { complianceAck: buildComplianceAck(req) } : {}),
@@ -11711,11 +11723,30 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
     if (modelErr) return res.status(400).json({ error: modelErr });
   }
 
+  // Global provider toggle (#2136). Changing the flag is System-Admin-only
+  // (mirrors canReassignCredential — it changes who can reach the provider), and
+  // a subscription seat can never be global. A global provider carries no team
+  // assignment, so publishing one overrides the ownership to system-with-no-teams
+  // (idempotent: re-saving a global provider re-asserts the same shape). A no-op
+  // (flag unchanged) is not gated, so a Team Admin editing an already-global
+  // provider's models is not refused for a change they did not make.
+  const globalGate = resolveGlobalFlag({
+    wantGlobal: ('global' in b) ? b.global : undefined,
+    currentGlobal: current.global === true,
+    scopeAll: scope.all,
+    isOauth,
+  });
+  if (globalGate.error) return res.status(globalGate.status).json({ error: globalGate.error, code: globalGate.code });
+  if (globalGate.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };
+
   const next = { ...current };
   // Persist the (possibly unchanged) canonical ownership shape (#800).
   next.scope = ownership.scope;
   next.teamId = ownership.teamId;
   next.assignedTeamIds = ownership.assignedTeamIds;
+  // Global flag (#2136): stamped when set, and removed when retracted so a
+  // non-global record is byte-clean (no dangling `global: false`).
+  if (globalGate.global) next.global = true; else delete next.global;
   next.authType = nextAuthType;
   if (isOauth) {
     if (normalizeAuthType(current.authType) !== 'oauth-token' || complianceAck === true) {

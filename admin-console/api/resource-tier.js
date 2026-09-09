@@ -87,21 +87,15 @@ function isSharedTier(entry) {
   return !!(entry && entry.scope === TIER_SYSTEM);
 }
 
-// Is this record GLOBAL — reachable by every user and every agent with no team
-// assignment at all (#2136)? Represented as an additive `global: true` flag,
-// deliberately orthogonal to the three-tier `scope`: a global record is the
-// "assigned to nobody but usable by all" case the shared tier could not express
-// (a `system` record assigned to zero teams is System-Admin-only). Only model
-// providers ever carry it — the flag is inert on any record that does not — and
-// publishing one is a System-Admin act enforced at the route, not here.
-//
-// A PERSONAL record can never be global: the personal tier's whole point is that
-// it is private to one human with no `scope.all` bypass (#1567 D2), so a
-// `personal` + `global` record (only reachable by a hand edit) fails closed to
-// its owner rather than leaking to everyone.
-function isGlobalTier(entry) {
-  return !!(entry && entry.global === true && entry.scope !== TIER_PERSONAL);
-}
+// The GLOBAL model-provider rule (#2136) is DELIBERATELY NOT here. It once lived
+// in this shared module as `isGlobalTier`, but this module also shapes SSH keys
+// and GitHub tokens (via `normalizeTier` / `ownsPersonalTier` used by scope.js's
+// `visibleCredential`/`credentialVisibleToTeam`), and a `global: true` flag on
+// one of those would have widened reach to a SECRET (#2136 finding 2). The rule
+// now lives in `admin-console/api/llm-endpoint-global.js` (`isGlobalProvider`,
+// which additionally re-reads `scope === 'system'` and `authType !== 'oauth-token'`
+// on every call — finding 1) and is applied only at the model-provider call
+// sites. Do not re-introduce a global helper in this shared module.
 
 // Which teams reach this record, as a flat list — the team tier's single owner,
 // or the shared tier's assignments, or nothing for a personal one. The one place
@@ -165,7 +159,6 @@ module.exports = {
   normalizeTier,
   ownsPersonalTier,
   isSharedTier,
-  isGlobalTier,
   tierTeamIds,
   tierUsableByTeam,
   tierOwnershipFields,

@@ -59,6 +59,12 @@ test('endpointUsableByTeam — a global provider is usable by any team and with 
   assert.equal(endpointUsableByTeam(globalEp, null), true);
   // Still never an oauth seat, even if hand-flagged global.
   assert.equal(endpointUsableByTeam({ ...globalEp, authType: 'oauth-token' }, 'alpha'), false);
+  // #2136 finding 1: a { scope: 'team', global: true } record is NOT globally
+  // usable — global requires scope === 'system' (the rule reads the record, not a
+  // route invariant). Usable ONLY by its own team via the ordinary tenant match.
+  const teamFlagged = { id: 'ep-tf', scope: 'team', teamId: 'alpha', authType: 'api-key', global: true };
+  assert.equal(endpointUsableByTeam(teamFlagged, 'gamma'), false, 'a team-scoped global flag does not widen reach');
+  assert.equal(endpointUsableByTeam(teamFlagged, 'alpha'), true, 'still usable by its own team');
 });
 
 test('pickAssistEndpoint — a global provider resolves ok for a foreign team (#2136)', () => {

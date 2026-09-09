@@ -31,8 +31,19 @@
 // { error, status, code } to refuse.
 function resolveGlobalFlag({ wantGlobal, currentGlobal = false, scopeAll, isOauth } = {}) {
   const cur = currentGlobal === true;
-  // Body did not mention `global` → leave whatever the record already carries.
-  if (wantGlobal === undefined || wantGlobal === null) return { global: cur };
+  // Body did not mention `global` → leave whatever the record already carries,
+  // EXCEPT when this request makes the flag unholdable: switching a global
+  // provider to a subscription (`oauth-token`) seat must drop the flag, because a
+  // subscription seat can never be global (Consumer-Terms single-user). Without
+  // this a later `PUT { authType: 'oauth-token' }` that never mentions `global`
+  // would carry `global: true` onto a record that no longer qualifies (#2136
+  // finding 1). `isGlobalProvider` below fails closed on the same condition
+  // regardless of the stored flag, so this only keeps the stored shape honest —
+  // but keeping the two in step is what stops the flag rotting into a lie.
+  if (wantGlobal === undefined || wantGlobal === null) {
+    if (cur && isOauth) return { global: false };
+    return { global: cur };
+  }
   // Only a literal boolean `true` publishes; anything else reads as "not global"
   // so a stray value can never silently open a provider to the whole platform.
   const want = wantGlobal === true;
@@ -54,4 +65,36 @@ function resolveGlobalFlag({ wantGlobal, currentGlobal = false, scopeAll, isOaut
   return { global: want };
 }
 
-module.exports = { resolveGlobalFlag };
+// Is `ep` a GLOBAL model provider RIGHT NOW — reachable by every user and every
+// agent with no team assignment (#2136)? This is the single predicate every
+// provider-reachability call site must use; it re-reads ALL three preconditions
+// on every call rather than trusting the stored `global` flag alone:
+//
+//   • `global === true`      — the System-Admin-only publish flag (resolveGlobalFlag);
+//   • `scope === 'system'`   — a global provider carries no team assignment, so it
+//                              is always system-scoped. A `{ scope: 'team', global: true }`
+//                              record (only reachable by a hand edit / stale write)
+//                              is NOT global — the predicate answers on the record,
+//                              never on a route invariant.
+//   • `authType !== 'oauth-token'` — a subscription seat is single-user
+//                              (Consumer Terms) and can never be offered to a whole
+//                              installation. Because the auth type is MUTABLE, this
+//                              must be re-checked here and not only at the write
+//                              route: a provider published api-key-global and later
+//                              switched to oauth would otherwise stay reachable
+//                              (#2136 finding 1).
+//
+// DELIBERATELY provider-specific and OUTSIDE scope.js / resource-tier.js: those
+// generic credential predicates (`visibleCredential`, `credentialVisibleToTeam`)
+// also gate SSH keys and GitHub tokens, so a `global: true` on one of THOSE must
+// stay inert — the blast radius of a mistake there is a secret, not a model
+// endpoint (#2136 finding 2). Callers compose this with the generic predicate at
+// the provider call sites only (see api.js `providerVisible` / `providerUsableByTeam`).
+function isGlobalProvider(ep) {
+  return !!(ep
+    && ep.global === true
+    && ep.scope === 'system'
+    && ep.authType !== 'oauth-token');
+}
+
+module.exports = { resolveGlobalFlag, isGlobalProvider };

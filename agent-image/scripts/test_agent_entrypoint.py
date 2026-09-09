@@ -1130,6 +1130,68 @@ class BuildUsageRecord(unittest.TestCase):
         )
 
 
+class RequestedByBlock(unittest.TestCase):
+    """#2137: `requestedBy` is who ASKED for this run — the one thing the
+    orchestrator cannot observe, so the agent stamps it and the control plane
+    resolves it to an account at ingest.
+
+    The distinction between `None` and a present block is load-bearing: it is
+    what makes an autonomous run fall back to the agent's owner instead of
+    being attributed to whoever happened to chat last.
+    """
+
+    def test_a_chat_sender_is_carried_as_exactly_one_key(self):
+        self.assertEqual(
+            entrypoint._requested_by({"matrixUserId": "@ada:local"}),
+            {"matrixUserId": "@ada:local"},
+        )
+
+    def test_whitespace_is_trimmed(self):
+        self.assertEqual(
+            entrypoint._requested_by({"matrixUserId": "  @ada:local  "}),
+            {"matrixUserId": "@ada:local"},
+        )
+
+    def test_no_requester_is_none_never_an_empty_shaped_block(self):
+        for raw in (None, {}, {"matrixUserId": None}, {"matrixUserId": ""},
+                    {"matrixUserId": "   "}, {"matrixUserId": 42},
+                    "@ada:local", [], 7):
+            with self.subTest(raw=raw):
+                self.assertIsNone(entrypoint._requested_by(raw))
+
+    def test_no_other_chat_metadata_rides_along(self):
+        # A whitelist, not a passthrough: a usage record is billing-adjacent.
+        self.assertEqual(
+            entrypoint._requested_by({
+                "matrixUserId": "@ada:local",
+                "body": "please deploy to prod",
+                "displayName": "Ada L.",
+            }),
+            {"matrixUserId": "@ada:local"},
+        )
+
+    def test_build_usage_record_always_carries_the_key(self):
+        # Absent from the context (every trigger/loop run) still emits the key,
+        # so the orchestrator never has to distinguish "no requester" from
+        # "an older agent image".
+        rec = entrypoint.build_usage_record({"agentId": "a1"})
+        self.assertIn("requestedBy", rec)
+        self.assertIsNone(rec["requestedBy"])
+
+    def test_the_dm_path_stamps_the_sender_and_the_trigger_path_does_not(self):
+        """`on_message` is a closure inside the Matrix client wiring — it needs a
+        live homeserver to exercise — so the two halves of the rule are read off
+        the source. Both are SILENT failures: a missing stamp attributes every
+        chat turn to the agent's owner, and a stamp on the trigger path would
+        attribute a cron run to whoever chatted last."""
+        src = _MODULE_PATH.read_text(encoding="utf-8")
+        self.assertIn('dm_run_context["requestedBy"] = {"matrixUserId": sender}', src)
+        # The trigger scheduler's run context (built at `run_context = ...`,
+        # `run_context["trigger"] = ...`) must never carry it.
+        self.assertNotIn('run_context["requestedBy"]', src.replace(
+            'dm_run_context["requestedBy"]', ''))
+
+
 class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
     """#504: cron/once triggers must not fire while Maintenance Mode (#501) is
     active, http/github-event pending entries must not be drained/processed

@@ -32,7 +32,8 @@ Options:
 
     --since <ISO>     start of the half-open [since, until) window (inclusive)
     --until <ISO>     end of the window (exclusive)
-    --group-by <g>    agent | team | model | provider | day   (default: agent)
+    --group-by <g>    agent | team | model | provider | providerTier | day
+                      (default: agent)
     --json            print the raw endpoint JSON instead of the table
 
 Scope is resolved server-side from your agent identity: `me` is your own
@@ -55,7 +56,13 @@ import urllib.request
 # ===========================================================================
 
 SCOPES = ("self", "team")
-GROUP_BY = ("agent", "team", "model", "provider", "day")
+# Kept in step with AGENT_GROUP_BY in orchestrator/usage-query.js, which is
+# where the rule is ENFORCED — this tuple only shapes the error message and
+# the --help text. `providerTier` (#2137) tells a global provider's usage apart
+# from a team-scoped one. `user` is deliberately absent: the per-human
+# breakdown is System-Admin-only (#801), and a team-scoped answer would hand
+# one agent every colleague's spend. Your own runs stay fully visible either way.
+GROUP_BY = ("agent", "team", "model", "provider", "providerTier", "day")
 TOKEN_CLASSES = ("input", "output", "cacheCreationInput", "cacheReadInput")
 
 # Human labels for the four token classes (display only).

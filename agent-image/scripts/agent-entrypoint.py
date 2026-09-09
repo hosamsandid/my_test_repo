@@ -1051,6 +1051,23 @@ def _normalize_model_usage(model_usage: dict | None) -> dict:
     return out
 
 
+def _requested_by(raw) -> dict | None:
+    """Normalize the `requestedBy` provenance block of a usage record (#2137).
+
+    Returns `{"matrixUserId": "<sender>"}` for a chat turn whose sender we know,
+    else `None` — an autonomous run (cron / github-event / loop) has no requester
+    and must not be given an empty-shaped one, because the orchestrator tells the
+    two cases apart to pick the attribution kind (requesting-user vs agent-owner).
+    A whitelist of exactly one key, so no other chat metadata rides into a
+    billing-adjacent record."""
+    if not isinstance(raw, dict):
+        return None
+    mxid = raw.get("matrixUserId")
+    if not isinstance(mxid, str) or not mxid.strip():
+        return None
+    return {"matrixUserId": mxid.strip()}
+
+
 def build_usage_record(ctx: dict) -> dict:
     """Pure assembler for a §4.1 token-usage record (#654). Takes a run-context
     dict (identity + trigger/github/git provenance + the captured `resultEvent`
@@ -1061,7 +1078,14 @@ def build_usage_record(ctx: dict) -> dict:
 
     `totalCostUsd` is stored opaque for possible future use but is never
     surfaced by the aggregator/UI (tokens-only, AC4). Missing token counts
-    default to 0 so downstream summation never sees None."""
+    default to 0 so downstream summation never sees None.
+
+    `requestedBy` (#2137) is WHO asked for this run: `{"matrixUserId": …}` for a
+    chat turn, `None` for an autonomous one. It is best-effort provenance the
+    orchestrator RESOLVES at ingest (`resolveUsageAttribution`) into the record's
+    `attribution` block and then DROPS — the persisted usage record carries the
+    stable account id, never a raw Matrix id, because the usage store has no
+    retention (see orchestrator/usage-log.js)."""
     result = ctx.get("resultEvent") or {}
     tokens = result.get("tokens") or {}
     return {
@@ -1074,6 +1098,7 @@ def build_usage_record(ctx: dict) -> dict:
         "correlationId": ctx.get("correlationId"),
         "sessionId": ctx.get("sessionId"),
         "trigger": ctx.get("trigger"),
+        "requestedBy": _requested_by(ctx.get("requestedBy")),
         "github": ctx.get("github"),
         "git": ctx.get("git"),
         "tokens": {
@@ -6707,6 +6732,12 @@ async def run_dm_listener() -> None:
             # AskUserQuestion payload for the quick-reply UI (#1663) — otherwise
             # inert (it is the default usage-record context either way).
             dm_run_context = _base_run_context()
+            # Cost attribution (#2137): a chat turn HAS a requesting human, and
+            # this is the only place in the runtime that knows who — the Matrix
+            # sender of the message that started it. The orchestrator resolves it
+            # to a platform account at ingest; a trigger/loop run leaves the key
+            # absent, which is what makes it fall back to the agent's owner.
+            dm_run_context["requestedBy"] = {"matrixUserId": sender}
             try:
                 # claude invocation is blocking — run it off the event loop so
                 # matrix-nio can keep syncing (otherwise no follow-on messages

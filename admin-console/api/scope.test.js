@@ -470,6 +470,79 @@ test('assistSelectableEndpoint: fail-closed on missing scope/endpoint', () => {
   assert.equal(assistSelectableEndpoint(bob, null), false);
 });
 
+// ── Global model providers (#2136) ─────────────────────────────────────────
+// A `global` provider is reachable by EVERY user and EVERY agent with no team
+// assignment at all — the "usable by all, assigned to nobody" case the shared
+// tier could not express. Publishing one is a System-Admin act (enforced at the
+// route); access opens to everyone. It never leaks its token (maskLlmEndpoint)
+// and stays management-closed to non-admins (canManageCredential unchanged).
+
+// A user in NO team at all — the case the ticket is about (teams retired).
+const loneUsers = [...users, { id: 'u-d', subject: 'dave@corp.com' }];
+
+test('visibleCredential: the generic predicate carries NO global bypass — a `global` flag never widens reach here (#2136 finding 2)', () => {
+  // `visibleCredential` ALSO gates SSH keys and GitHub tokens (api.js GET
+  // /api/ssh-keys, GET /api/github-tokens), so a stray `global: true` on ANY
+  // credential shape must stay inert here — the blast radius of a leak is a
+  // secret. Global MODEL-PROVIDER reachability is added only at the provider call
+  // sites (api.js `providerVisible`, composing `isGlobalProvider`), never in this
+  // generic predicate. So the flag changes nothing about what this answers.
+  const bob = computeScope({ username: 'bob@corp.com', users: loneUsers, memberships }); // member of risk only
+  const dave = computeScope({ username: 'dave@corp.com', users: loneUsers, memberships }); // no team
+  assert.equal(dave.all, false);
+  assert.equal(dave.teamIds.size, 0, 'fixture premise: dave is in no team');
+  // With OR without the flag, a system-unassigned record is invisible to a
+  // non-admin — an SSH key carrying `global: true` therefore stays gated.
+  assert.equal(visibleCredential(dave, { scope: 'system', assignedTeamIds: [], global: true }), false);
+  assert.equal(visibleCredential(bob, { scope: 'system', assignedTeamIds: [], global: true }), false);
+  assert.equal(visibleCredential(dave, { scope: 'system', assignedTeamIds: [] }), false);
+  // A System Admin still sees it (via scope.all), exactly like any system record.
+  const sys = computeScope({ username: 'sys@corp.com', users, memberships });
+  assert.equal(visibleCredential(sys, { scope: 'system', assignedTeamIds: [], global: true }), true);
+});
+
+test('credentialVisibleToTeam: the generic predicate carries NO global bypass (#2136 finding 2)', () => {
+  // Same guard for the team-usability predicate usableEndpointsForTeam and the
+  // env-orphan check build on: the raw `global` flag does not make a record
+  // usable by an unassigned team HERE — the provider call site composes the
+  // provider-specific rule, and an SSH key never reaches that path.
+  assert.equal(credentialVisibleToTeam({ scope: 'system', assignedTeamIds: [], global: true }, 'payments'), false);
+  assert.equal(credentialVisibleToTeam({ scope: 'system', assignedTeamIds: [], global: true }, undefined), false);
+  // A non-global system-unassigned provider is likewise usable by no team.
+  assert.equal(credentialVisibleToTeam({ scope: 'system', assignedTeamIds: [] }, 'payments'), false);
+  // The ordinary tenant match still works for an assigned system record.
+  assert.equal(credentialVisibleToTeam({ scope: 'system', assignedTeamIds: ['payments'] }, 'payments'), true);
+});
+
+test('assistSelectableEndpoint: a global provider is selectable by a user in no team (AC2)', () => {
+  const dave = computeScope({ username: 'dave@corp.com', users: loneUsers, memberships });
+  assert.equal(assistSelectableEndpoint(dave, { authType: 'api-key', scope: 'system', assignedTeamIds: [], global: true }), true);
+  // Global never overrides the oauth-token exclusion — a subscription seat is
+  // single-user and is never billable here, so it can never be global (edge case).
+  assert.equal(assistSelectableEndpoint(dave, { authType: 'oauth-token', scope: 'system', assignedTeamIds: [], global: true }), false);
+});
+
+test('global never overrides the personal-tier privacy (fail closed)', () => {
+  // A hand-edited personal+global record must not leak to everyone: personal is
+  // stronger than global, so only its owner sees it.
+  const dave = computeScope({ username: 'dave@corp.com', users: loneUsers, memberships });
+  assert.equal(visibleCredential(dave, { scope: 'personal', userId: 'u-a', global: true }), false);
+  assert.equal(credentialVisibleToTeam({ scope: 'personal', userId: 'u-a', global: true }, 'payments'), false);
+});
+
+test('canManageCredential/canCreateCredential: a global (system) provider stays System-Admin-only (AC5)', () => {
+  const alice = computeScope({ username: 'alice@corp.com', users, memberships }); // team-admin of payments
+  const dave = computeScope({ username: 'dave@corp.com', users: loneUsers, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', users, memberships });
+  const globalEp = { scope: 'system', assignedTeamIds: [], global: true };
+  assert.equal(canManageCredential(alice, globalEp), false);
+  assert.equal(canManageCredential(dave, globalEp), false);
+  assert.equal(canManageCredential(sys, globalEp), true);
+  // Non-admins cannot create a system/global provider; a System Admin can.
+  assert.equal(canCreateCredential(alice, { scope: 'system', assignedTeamIds: [] }), false);
+  assert.equal(canCreateCredential(sys, { scope: 'system', assignedTeamIds: [] }), true);
+});
+
 test('canManageCredential: team-admin manages own team creds, never system creds', () => {
   const alice = computeScope({ username: 'alice@corp.com', users, memberships });
   assert.equal(canManageCredential(alice, { scope: 'team', teamId: 'payments' }), true);

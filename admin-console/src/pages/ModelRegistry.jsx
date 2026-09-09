@@ -262,7 +262,14 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
     return defaultOwnership({ isSysAdmin, adminTeamIds });
   });
   const sendOwnership = !isEdit || canReassign;
-  const ownershipReady = !sendOwnership || ownership.scope === 'system' || !!ownership.teamId;
+  // Global provider (#2136): a System-Admin-only flag that makes the provider
+  // usable by every user and agent with no team assignment. A global provider is
+  // system-scoped with no teams, so the team-assignment control is hidden while
+  // it is on. A subscription (oauth) seat can never be global (single-user).
+  const [isGlobal, setIsGlobal] = useState(endpoint?.global === true);
+  // A global provider has no team assignment, so it is "ready" regardless of the
+  // (hidden) ownership control; otherwise the usual team-picked rule applies.
+  const ownershipReady = isGlobal || !sendOwnership || ownership.scope === 'system' || !!ownership.teamId;
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName,
     setId,
@@ -295,6 +302,12 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
       setDefaultModelId('');
     }
   }, [models, defaultModelId]);
+
+  // A subscription (oauth) seat can never be global (#2136) — drop the flag if the
+  // user switches this provider to subscription auth so the payload stays valid.
+  useEffect(() => {
+    if (isOauth && isGlobal) setIsGlobal(false);
+  }, [isOauth, isGlobal]);
 
   // test / discover state
   const [probing, setProbing] = useState(null);            // 'test' | 'discover' | null
@@ -414,6 +427,9 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
     // (System Admin). Omitting it on a Team Admin edit leaves the scope/team
     // untouched (and the server would 403 a reassignment anyway).
     if (sendOwnership) Object.assign(payload, ownershipPayload(ownership));
+    // #2136: only a System Admin may set the global flag; the server re-enforces
+    // this (403 otherwise) and, when global, ignores the team assignment above.
+    if (isSysAdmin) payload.global = isGlobal;
     if (isOauth && complianceOk) payload.complianceAck = true;
     // Token sources, in precedence order: manual paste > completed login flow
     // (claimed server-side) > keep/clear existing.
@@ -454,8 +470,34 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
           : <>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} <strong>Cannot be changed after creation.</strong></>}
       />
 
-      {/* Ownership / team scope (#800) */}
-      {isEdit && !canReassign ? (
+      {/* Global provider (#2136) — a System-Admin-only publish flag. */}
+      {isSysAdmin && (
+        <label style={{
+          display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+          cursor: isOauth ? 'not-allowed' : 'pointer',
+          opacity: isOauth ? 0.6 : 1,
+        }}>
+          <input
+            type="checkbox"
+            checked={isGlobal}
+            disabled={isOauth}
+            onChange={e => setIsGlobal(e.target.checked)}
+            style={{ marginTop: 3, flexShrink: 0 }}
+          />
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+            <strong>Global provider</strong> — available to every user and agent, with no team required.
+            <span style={{ display: 'block', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+              {isOauth
+                ? 'A subscription (OAuth) provider is single-user and cannot be made global.'
+                : 'Anyone can select and use it; only a System Admin can manage it. The token is never exposed.'}
+            </span>
+          </span>
+        </label>
+      )}
+
+      {/* Ownership / team scope (#800). Hidden while Global is on — a global
+          provider carries no team assignment (#2136). */}
+      {isGlobal ? null : (isEdit && !canReassign ? (
         <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
           Only a System Admin can change which team owns a provider or reassign a system-scoped one.
         </div>
@@ -467,7 +509,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
           isSysAdmin={isSysAdmin}
           adminTeamIds={adminTeamIds}
         />
-      )}
+      ))}
 
       {/* Auth type — classic API key / proxy vs Claude subscription OAuth */}
       <div>
@@ -1124,6 +1166,19 @@ export default function ModelRegistry() {
       key: '_scope', label: 'Scope / Teams', sortable: false,
       render: (_, row) => {
         if (row.readOnly) return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
+        // #2136: a global provider is usable by everyone, so its team assignment
+        // is moot — show a single "Global" pill instead of the scope/teams detail.
+        if (row.global) {
+          return (
+            <span style={{ fontSize: 'var(--eb-text-xs)' }} title="Available to every user and agent — no team required">
+              <span style={{
+                display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
+                background: 'var(--eb-accent-subtle, var(--eb-bg-elevated))', color: 'var(--eb-accent, var(--eb-text-secondary))',
+                fontWeight: 'var(--eb-font-medium)',
+              }}>Global</span>
+            </span>
+          );
+        }
         const s = credentialScopeLabel(row, names);
         return (
           <span style={{ fontSize: 'var(--eb-text-xs)' }}>

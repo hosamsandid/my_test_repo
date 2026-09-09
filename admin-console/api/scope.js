@@ -47,6 +47,13 @@ const {
   normalizeTier,
   ownsPersonalTier,
 } = require('./resource-tier');
+// The GLOBAL model-provider rule (#2136) lives in its own provider-specific
+// module, NOT in the generic credential predicates below — those also gate SSH
+// keys and GitHub tokens, and a `global: true` on one of those must stay inert
+// (a secret is the blast radius, #2136 finding 2). Only the assist-selector
+// predicate (provider-only) reads it directly; the list/agent-picker call sites
+// compose it in api.js (`providerVisible` / `providerUsableByTeam`).
+const { isGlobalProvider } = require('./llm-endpoint-global');
 
 // Default Agent-Chat transcript font size in px (#1437). Kept in sync with
 // CHAT_FONT_SIZE_DEFAULT in orchestrator/teams-store.js (the authoritative
@@ -294,6 +301,11 @@ function visibleCredential(scope, cred) {
   if (!scope) return false;
   const c = normalizeCredential(cred);
   if (c.scope === 'personal') return ownsPersonalCredential(scope, c);
+  // NOTE: this generic predicate deliberately carries NO global-provider bypass —
+  // it also gates SSH keys and GitHub tokens (api.js GET /api/ssh-keys,
+  // GET /api/github-tokens), where a `global: true` must never widen reach to a
+  // secret (#2136 finding 2). Global model-provider reachability is added at the
+  // provider call sites only, via api.js `providerVisible`.
   if (scope.all) return true;
   if (c.scope === 'system') return c.assignedTeamIds.some(t => canManageTeam(scope, t));
   return canManageTeam(scope, c.teamId);
@@ -320,6 +332,13 @@ function visibleCredential(scope, cred) {
 function assistSelectableEndpoint(scope, ep) {
   if (!scope || !ep) return false;
   if (ep.authType === 'oauth-token') return false;
+  // A GLOBAL provider (#2136) is selectable by every user, in or out of a team.
+  // This predicate is provider-specific (it already excludes oauth-token just
+  // above), so it reads the provider rule directly. `isGlobalProvider` re-reads
+  // scope==='system' && authType!=='oauth-token', so a mutated record can never
+  // be selectable past what it currently qualifies for. This is what lets a
+  // plain user with no team bill AI helpers.
+  if (isGlobalProvider(ep)) return true;
   if (scope.all) return true;
   const c = normalizeCredential(ep);
   if (c.scope === 'team') return scope.teamIds.has(c.teamId);
@@ -401,6 +420,10 @@ function canReassignCredential(scope) {
 // this phase together, exactly as they survived P2. See concept Amendment 3.
 function credentialVisibleToTeam(cred, teamId) {
   const c = normalizeCredential(cred);
+  // NOTE: no global-provider bypass here — this generic predicate also gates the
+  // SSH-key and GitHub-token surfaces (api.js), so a `global: true` on one of
+  // those must stay inert (#2136 finding 2). Global model-provider reachability
+  // is added at the provider call sites only, via api.js `providerUsableByTeam`.
   const t = teamId || 'default';
   if (c.scope === TIER_SYSTEM) return c.assignedTeamIds.includes(t);
   return c.teamId === t;

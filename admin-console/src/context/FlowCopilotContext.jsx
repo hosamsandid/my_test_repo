@@ -161,7 +161,7 @@ export function FlowCopilotProvider({ children }) {
         // A stop that aborts mid-stream surfaces as a reader error; the turn is
         // already gone, so there is nothing to report.
         if (!isCurrent(id)) return;
-        failWith(copilotErrorInfo(e.status, e.message));
+        failWith(copilotErrorInfo(e.status, e.message, e.copilotCode));
         return;
       }
       // The stop may have won the race with the result (edge case): exactly one

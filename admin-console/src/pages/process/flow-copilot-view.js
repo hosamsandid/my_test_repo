@@ -72,22 +72,57 @@ export function lintColor(severity) {
   return 'var(--eb-text-muted)';
 }
 
+// Plain-language copy for a timeout-class failure (#2131 AC1). A raw
+// `LLM request failed: HTTP 504` told the user nothing they could act on, so the
+// headline states what happened and the hints state the two things that actually
+// help — both of which the product already supports. Exported so the panel and
+// its tests share one source of the wording.
+export const COPILOT_TIMEOUT_HEADLINE = 'The Copilot could not finish this request in time.';
+export const COPILOT_TIMEOUT_HINTS = [
+  'Describe the flow in smaller parts. The Copilot is built for iterative editing — ask for a few roles first, then wire them up in a follow-up message.',
+  'If a slow assist model is selected, switch to a faster one under Settings → Model.',
+];
+
+// The server's stable failure codes (#2131). Matching on these rather than on a
+// transport error string is what keeps the guidance from silently degrading to
+// the raw-detail branch when a provider rewords its timeout message.
+const TIMEOUT_CODES = new Set(['llm-timeout']);
+// Belt-and-braces for a pre-#2131 server (or a client-side transport failure,
+// which carries no code at all): the same class recognised from the message.
+const TIMEOUT_MESSAGE_RE = /timeout|timed out|deadline|HTTP 50[24]|Gateway Time-?out|Bad Gateway/i;
+
 /**
  * Classify a failed POST /api/process/copilot for the chat's error row.
  * A 400 bundle-too-large is a non-retryable bundle-size error (AC2 #1404).
  * A 400 otherwise is a request-shape/provider problem — the panel always sends
  * a valid shape, so in practice it means no Model Provider is configured;
  * retrying the identical request cannot succeed, the fix is configuration.
- * A 504 is a retryable LLM timeout (AC3 #1404).
- * Everything else (502 transport, network) is retryable as-is.
+ * A timeout / deadline / upstream 502-504 is the retryable timeout class: it
+ * carries the actionable headline above plus the raw `detail` for the card's
+ * debug expander (#2131 AC1 — both transport and gateway map here, because the
+ * remedy is the same and the distinction is meaningless to the reader).
+ * Everything else (other transport failures, network) is retryable as-is.
  */
-export function copilotErrorInfo(status, message) {
+export function copilotErrorInfo(status, message, code) {
   if (status === 400 && message === 'bundle-too-large') {
     return { kind: 'bundle-too-large', retryable: false, message: 'bundle-too-large' };
   }
   const msg = typeof message === 'string' && message.trim() ? message.trim() : `Request failed (HTTP ${status || '?'})`;
   if (status === 400) return { kind: 'provider', retryable: false, message: msg };
-  if (status === 504) return { kind: 'timeout', retryable: true, message: msg };
+  // Deliberately NOT a blanket `status === 502`: the route's own error envelope
+  // uses 502 for `no-parseable-bundle` and `llm-failed` too, and telling someone
+  // whose model produced junk JSON to "try a faster model" is a wrong answer. An
+  // UPSTREAM 502/504 arrives inside the detail (`LLM request failed: HTTP 504`)
+  // and is caught by the message test below, which is what the issue asks for.
+  if (TIMEOUT_CODES.has(code) || status === 504 || TIMEOUT_MESSAGE_RE.test(msg)) {
+    return {
+      kind: 'timeout',
+      retryable: true,
+      message: COPILOT_TIMEOUT_HEADLINE,
+      hints: COPILOT_TIMEOUT_HINTS,
+      detail: msg,
+    };
+  }
   return { kind: 'transport', retryable: true, message: msg };
 }
 
@@ -232,6 +267,12 @@ export function phaseLabel(ev, maxRepairs = 2) {
   const size = chars > 0 ? ` · ${(chars / 1000).toFixed(1)}k chars` : '';
   if (ev && ev.phase === 'repairing') return `Repairing (${ev.iteration}/${maxRepairs})…${size}`;
   if (ev && ev.phase === 'validating') return 'Validating…';
+  // A generate-in-parts run (#2131) counts its own steps, so a long split
+  // generation shows real progress rather than a second, unexplained
+  // "Generating…" after the first attempt timed out.
+  if (ev && Number.isFinite(ev.part) && Number.isFinite(ev.parts)) {
+    return `Generating in parts (${ev.part}/${ev.parts})…${size}`;
+  }
   return `Generating…${size}`;
 }
 
@@ -273,6 +314,10 @@ export async function consumeCopilotStream(res, onPhase) {
   if (errorEv) {
     const err = new Error(errorEv.error || `HTTP ${errorEv.status || 502}`);
     err.status = errorEv.status || 502;
+    // The server's stable failure class (#2131), if it sent one. Named
+    // `copilotCode` rather than `code` so it cannot be confused with the
+    // `AbortError`-style `name`/`code` the fetch layer sets on its own errors.
+    if (errorEv.code) err.copilotCode = errorEv.code;
     throw err;
   }
   if (!result) throw new Error('Connection lost during generation');

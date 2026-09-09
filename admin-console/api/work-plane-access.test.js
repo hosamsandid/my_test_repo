@@ -373,7 +373,7 @@ test('drift guard — no work-plane route escapes the mount list', () => {
   // And the one exemption really does gate itself, so the allowlist above is
   // not a hole someone can widen by adding a name to it.
   const list = API_CODE.slice(API_CODE.indexOf("app.get('/api/matrix/agents',"));
-  assert.match(list.slice(0, list.indexOf('\napp.')), /visibleAgent\(scope, cfg\)/);
+  assert.match(list.slice(0, list.indexOf('\napp.')), /visibleAgent\(scope, agentMetaForScope\(cfg\)\)/);
 });
 
 test('every mounted prefix still corresponds to real routes', () => {

@@ -111,10 +111,20 @@ test("deleting a user retires their Matrix account before the record goes away",
   // and the slice is long enough to contain what we are about to look for
   // (#2135 AC6) — the rename from `orchestrator.` to `orchestratorSingleton.`
   // is exactly the event this guard has to survive rather than sleep through.
-  const anchorAt = SRC.indexOf("offboarding = await orchestratorSingleton.offboardOwner(resourceId)");
+  //
+  // #2138 narrowed the anchor to the CALL alone: the assignment around it now
+  // wraps the summary (`{ ok: true, ...(await …) }`) so the delete route can
+  // report a degraded offboarding instead of a bare `null`. The call itself is
+  // the thing this guard is anchored on, and it is still unique in the file.
+  const anchorAt = SRC.indexOf("orchestratorSingleton.offboardOwner(resourceId)");
   assert.notEqual(anchorAt, -1, "expected the delete branch's offboarding call as the slice anchor");
 
-  const deleteBranch = SRC.slice(anchorAt).slice(0, 2000);
+  // 3000, widened from 2000 by #2138: the AC5 degradation reporting sits
+  // between the offboarding call and `deleteUser`, which pushed the latter to
+  // ~1998 chars — i.e. straddling the old window, where `indexOf` answers -1
+  // and this guard reports "the delete branch must still delete the user" for
+  // a route that plainly does. Keep it comfortably ahead of the real distance.
+  const deleteBranch = SRC.slice(anchorAt).slice(0, 3000);
   assert.ok(deleteBranch.length > 500, "the delete-branch slice must not be empty or truncated");
 
   const deprovisionAt = deleteBranch.indexOf("deprovisionHumanMatrixIdentity");

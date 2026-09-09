@@ -300,3 +300,13 @@ run is **refused** with an actionable message instead of silently acting under a
 shared identity. An agent that carries no owner at all keeps using the shared
 credential exactly as before and is never refused, so an environment that has
 never used the personal tier behaves as it always did.
+
+There is a **second** reason a personal tier refuses, and it is not about the
+credential's scopes: if the owner is **no longer a user on this platform** —
+their account was deleted — their personal token stays on disk and still works,
+but an attributed write under a departed person's name is refused rather than
+allowed to continue. That refusal carries a *different* instruction, because
+nobody can add a personal token for an account that no longer exists: finish the
+offboarding, delete the orphaned credential and **revoke it at GitHub**. Reads
+are unaffected — a clone or a poll may still use a shared credential, so one
+stale index entry never takes a whole flow offline.

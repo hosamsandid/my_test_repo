@@ -1774,7 +1774,19 @@ function httpPostJson(targetUrl, headers = {}, bodyObj = {}, timeoutMs = 30000, 
 // hands each call only the budget still remaining, and the console closes its own
 // stream with a clean `{error:'deadline'}` card ~20s before the edge would return
 // a raw 504. A run that steadily streams tokens normally finishes long before it.
-const COPILOT_STREAM_DEADLINE_MS = 280000;
+// Env-tunable so an operator can match their proxy without a redeploy.
+const COPILOT_STREAM_DEADLINE_MS = Number(process.env.AEE_COPILOT_DEADLINE_MS) || 280000;
+// Socket-idle guard for ONE streamed upstream call. httpPostStreamText defaults
+// this to 60s — fine for a snappy directly-streaming endpoint, but a large flow
+// used to fail with a bare "LLM request failed: timeout" long before the turn
+// deadline, because the internal Anthropic proxy can BUFFER the SSE (delivering
+// no incremental bytes until the whole 16k-token generation is done). During that
+// window the socket sits genuinely silent, so a 60s idle timer kills a call that
+// is alive and would have completed. For this route the whole-turn deadline is
+// the real bound, so we default the idle guard OFF (0) — the call is limited only
+// by the remaining deadline — and let an operator opt into a tighter dead-socket
+// guard via AEE_COPILOT_INACTIVITY_MS when their endpoint truly streams.
+const COPILOT_STREAM_INACTIVITY_MS = Number(process.env.AEE_COPILOT_INACTIVITY_MS) || 0;
 
 /* ─── Health ────────────────────────────────────────────────────────── */
 
@@ -8627,8 +8639,16 @@ app.post('/api/process/copilot', heavyLimiter, async (req, res) => {
     // The budget left for this call is the whole-turn ceiling minus what earlier
     // calls (generation + any repairs) already spent — never below a small floor.
     const deadlineMs = Math.max(5000, COPILOT_STREAM_DEADLINE_MS - (Date.now() - turnStartedAt));
+    // Idle guard: default to the remaining deadline (so a buffered, byteless-but-
+    // alive generation is bounded ONLY by the deadline and never prematurely
+    // "timeout"s), and only tighten it when an operator sets an explicit value.
+    // Capped at the remaining deadline so it can never outlive the turn.
+    const inactivityMs = COPILOT_STREAM_INACTIVITY_MS
+      ? Math.min(COPILOT_STREAM_INACTIVITY_MS, deadlineMs)
+      : deadlineMs;
     const result = await httpPostStreamText(url, headers, { model: target.model, ...payload }, {
       deadlineMs,
+      inactivityMs,
       signal: turnAbort.signal,
       onProgress: (chars) => {
         const now = Date.now();

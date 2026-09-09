@@ -58,34 +58,68 @@ export function rehypeShikiSync() {
   return (tree) => {
     if (!_hl) return; // not yet loaded — code blocks pass through as plain pre/code
 
-    visit(tree, 'element', (node, index, parent) => {
-      if (node.tagName !== 'pre' || !parent || index == null) return;
-      const codeEl = node.children?.[0];
-      if (!codeEl || codeEl.tagName !== 'code') return;
+    // `visit` walks the whole hast tree, and unist-util-visit throws
+    // "Cannot use 'in' operator to search for 'children' in undefined" the
+    // moment ANY children array holds an `undefined` hole — a shape the parse of
+    // certain message bodies can produce. react-markdown's own renderer tolerates
+    // such a tree (the GFM-only tier proves it), so this traversal is the ONLY
+    // thing that turns it into a throw; without this guard the whole full-pipeline
+    // render fails and, because the transcript re-renders on every SSE tick /
+    // poll / virtual-list remount, re-throws and re-logs on each pass (the
+    // "permanent" console errors). Catch it and leave code un-highlighted — the
+    // message still renders fully. See markdown-safe.js for the outer floor.
+    try {
+      visit(tree, 'element', (node, index, parent) => {
+        if (node.tagName !== 'pre' || !parent || index == null) return;
+        const codeEl = node.children?.[0];
+        if (!codeEl || codeEl.tagName !== 'code') return;
 
-      const lang = extractLang(codeEl);
-      const src = textContent(codeEl);
+        const src = textContent(codeEl);
+        const resolvedLang = resolveLang(extractLang(codeEl));
 
-      // Kick off background load for unrecognised languages; fall back to plaintext.
-      const resolvedLang =
-        !lang || !_hl.getLoadedLanguages().includes(lang)
-          ? (lang ? void _hl.loadLanguage(lang).catch(() => {}) : null, 'plaintext')
-          : lang;
-
-      try {
-        const root = _hl.codeToHast(src, {
-          lang: resolvedLang,
-          themes: THEMES,
-          defaultColor: false,
-          transformers: [DATA_THEME_TRANSFORMER],
-        });
-        const pre = root.children?.[0];
-        if (pre) parent.children[index] = pre;
-      } catch {
-        // leave original node as-is
-      }
-    });
+        try {
+          const root = _hl.codeToHast(src, {
+            lang: resolvedLang,
+            themes: THEMES,
+            defaultColor: false,
+            transformers: [DATA_THEME_TRANSFORMER],
+          });
+          const pre = root.children?.[0];
+          if (pre) parent.children[index] = pre;
+        } catch {
+          // leave original node as-is
+        }
+      });
+    } catch {
+      // Malformed tree (e.g. an undefined child) — leave code blocks
+      // un-highlighted; react-markdown still renders the message.
+    }
   };
+}
+
+/**
+ * Resolve a fenced-code language to one Shiki has loaded, else 'plaintext',
+ * kicking off a background load for an unrecognised-but-known language.
+ *
+ * `loadLanguage()` throws SYNCHRONOUSLY for a language that is not in the bundle
+ * (e.g. `jcl` on this Mainframe stack — Shiki ships `cobol` but not `jcl`), so
+ * the call must be guarded: the previous inline `void _hl.loadLanguage(lang).catch(…)`
+ * sat outside the codeToHast try/catch, so that synchronous throw escaped and
+ * took down the entire full-markdown render for any message with an unbundled
+ * code fence.
+ */
+function resolveLang(lang) {
+  if (!lang || !_hl.getLoadedLanguages().includes(lang)) {
+    if (lang) {
+      try {
+        _hl.loadLanguage(lang).catch(() => {});
+      } catch {
+        // unbundled language — stays plaintext
+      }
+    }
+    return 'plaintext';
+  }
+  return lang;
 }
 
 function extractLang(codeEl) {

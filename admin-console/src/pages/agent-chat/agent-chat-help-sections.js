@@ -32,6 +32,8 @@ export const AGENT_CHAT_HELP_SECTIONS = {
   outcomes: 'outcomes-what-the-agent-signals-when-a-run-ends',
   knowledge: 'knowledge-what-this-agent-has-learned',
   settings: 'settings-configuring-the-agent',
+  // 7 — sharing a team (#2082): who may open it, and who may change it
+  shareTeam: 'sharing-a-team-who-can-open-it-and-who-can-change-it',
 };
 
 export default AGENT_CHAT_HELP_SECTIONS;

@@ -81,6 +81,31 @@ function record(teamId, entry) {
   }
 }
 
+// Read the most recent entries back, oldest→newest. Best-effort in the same
+// sense as `record`: a missing file (nothing swept yet) or an unreadable one
+// yields `[]`, never a throw — the ticket ledger's recurrence column (#2115) is
+// an enrichment, and it must never be able to fail the sweep that carries it.
+// Malformed lines are skipped rather than aborting the read.
+function readEntries(teamId, { limit = 200 } = {}) {
+  try {
+    const p = historyPath(teamId);
+    if (!p || !fs.existsSync(p)) return [];
+    const lines = fs.readFileSync(p, 'utf8').split('\n').filter((l) => l.trim() !== '');
+    const tail = limit > 0 ? lines.slice(-limit) : lines;
+    const out = [];
+    for (const line of tail) {
+      try {
+        out.push(JSON.parse(line));
+      } catch {
+        /* skip malformed line */
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 // Prune lines older than the retention window from the team's history file.
 // Best-effort; a missing file (nothing swept yet) is not an error. Rewrites only
 // when something actually changed, to avoid needless churn.
@@ -106,5 +131,6 @@ module.exports = {
   buildHistoryEntry,
   retainRecentLines,
   record,
+  readEntries,
   pruneOldEntries,
 };

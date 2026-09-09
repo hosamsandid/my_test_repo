@@ -2,26 +2,33 @@ import { useState } from 'react';
 import { RefreshCw, Loader2 } from 'lucide-react';
 import {
   consumeSyncStream,
-  repoStatusText,
-  repoStatusSymbol,
+  syncEventRow,
+  repoRowTone,
   summaryText,
 } from '../pages/sync-repos-view.js';
 
 /**
- * "Sync repositories" control (#1342). Streams NDJSON progress from the given
- * endpoint (POST /api/agents/:id/sync-repositories for one agent, or
- * POST /api/environments/:id/sync-agents to fan out to every agent in an
- * environment) and renders one line per repo per agent.
+ * "Sync repositories" control (#1342). Streams NDJSON progress from
+ * POST /api/agents/:id/sync-repositories and renders one line per repository.
  *
- * Idempotent on the server — already-cloned repos are reported "Already
- * present" and never re-cloned. Uses a raw fetch (not the apiCall helper, which
- * doesn't stream); the session cookie rides along on the same-origin request.
+ * Since #2066 this is the PER-AGENT recovery path only — the environment-level
+ * "Sync all agents" button it used to serve is gone, replaced by the offer the
+ * environment save makes (RepoPropagationDialog). It is kept (D2) because it is
+ * how a single agent is brought up to date after a declined offer, a failed
+ * propagation or a D1 safety skip; removing both would leave states with no way
+ * out. `showAgentHeaders` is retained for a caller that fans out.
+ *
+ * The server reconciles rather than only cloning: a repository already matching
+ * its declared entry is reported "Already up to date" and left completely
+ * untouched, and one that diverges is adjusted only when its clone is clean and
+ * fully pushed. Uses a raw fetch (not the apiCall helper, which doesn't
+ * stream); the session cookie rides along on the same-origin request.
  *
  * Props:
  *   endpoint     — POST URL to stream from
- *   actionLabel  — button text (e.g. "Sync repositories" / "Sync all agents")
+ *   actionLabel  — button text (e.g. "Sync repositories")
  *   description   — one-line explanation shown above the button
- *   showAgentHeaders — group lines under a per-agent header (per-environment)
+ *   showAgentHeaders — group lines under a per-agent header
  */
 export default function SyncReposPanel({ endpoint, actionLabel, description, showAgentHeaders = false }) {
   const [running, setRunning] = useState(false);
@@ -43,22 +50,10 @@ export default function SyncReposPanel({ endpoint, actionLabel, description, sho
         throw new Error(data.error || `HTTP ${res.status}`);
       }
       const complete = await consumeSyncStream(res, (ev) => {
-        if (ev.type === 'agent') {
-          if (showAgentHeaders) push({ kind: 'agent', text: ev.displayName || ev.agentId });
-        } else if (ev.type === 'repo') {
-          push({
-            kind: 'repo',
-            symbol: repoStatusSymbol(ev.status),
-            status: ev.status,
-            text: `${ev.name} — ${repoStatusText(ev.status, ev.reason)}${ev.error ? `: ${ev.error}` : ''}`,
-          });
-        } else if (ev.type === 'agent-skip') {
-          push({ kind: 'note', text: 'Workspace not provisioned yet — start the agent, then sync.' });
-        } else if (ev.type === 'agent-error') {
-          push({ kind: 'repo', symbol: '✗', status: 'failed', text: `Could not reach this agent: ${ev.error}` });
-        }
+        const row = syncEventRow(ev, { showAgentHeaders });
+        if (row) push(row);
       });
-      setSummary((complete && complete.totals) || { total: 0, cloned: 0, skipped: 0, failed: 0 });
+      setSummary((complete && complete.totals) || {});
     } catch (e) {
       setErr((e && e.message) || 'Sync failed');
     } finally {
@@ -66,10 +61,6 @@ export default function SyncReposPanel({ endpoint, actionLabel, description, sho
     }
   }
 
-  const colorFor = (status) =>
-    status === 'failed' ? 'var(--eb-status-error)'
-      : status === 'cloned' ? 'var(--eb-status-success)'
-        : 'var(--eb-text-secondary)';
 
   return (
     <div>
@@ -119,7 +110,7 @@ export default function SyncReposPanel({ endpoint, actionLabel, description, sho
               return <div key={i} style={{ color: 'var(--eb-text-muted)', fontStyle: 'italic', paddingLeft: showAgentHeaders ? 'var(--eb-space-3)' : 0 }}>{row.text}</div>;
             }
             return (
-              <div key={i} style={{ color: colorFor(row.status), paddingLeft: showAgentHeaders ? 'var(--eb-space-3)' : 0 }}>
+              <div key={i} style={{ color: repoRowTone(row.status, row.blocked), paddingLeft: showAgentHeaders ? 'var(--eb-space-3)' : 0 }}>
                 <span style={{ display: 'inline-block', width: '1.2em' }}>{row.symbol}</span>{row.text}
               </div>
             );

@@ -16,7 +16,8 @@
 // the topic from the top, which still *looks* like the "?" worked, so the guard
 // is the only thing that notices.
 //
-// All seven chapters are exported, including the two with no "?" of their own
+// All seven chapters are exported (plus two `###` sub-sections inside chapter
+// 2), including the two with no "?" of their own
 // (`provider`, `context`) — the sibling registries (mcp 5/5, credentials 6/6)
 // do the same, it keeps every chapter addressable, and the export is what puts
 // its heading under the page-side guard. (`mcp` joined the addressed set in
@@ -32,13 +33,22 @@
 export const ENVIRONMENTS_HELP_SECTIONS = {
   // 1 — the recipe, what an agent inherits, and what an edit does NOT reach
   whatIs: 'what-a-working-environment-is',
-  // 2 — cloned at creation, branch, read-only, repo-less, and Sync all agents
+  // 2 — cloned at creation, branch, read-only, repo-less, and how a later edit
+  // reaches the agents that already exist
   repositories: 'repositories',
-  // 2b — the Sync action's own sub-section inside chapter 2. The ticket's table
-  // says "chapter 2" for this surface; landing here lands *inside* chapter 2, at
-  // the paragraph about the button that was just pressed. Point it at
-  // `repositories` instead to land at the chapter head.
-  sync: 'sync-all-agents',
+  // 2b — the propagation's own sub-section inside chapter 2, deep-linked from
+  // the save-time offer dialog. #2066 replaced the manual **Sync all agents**
+  // button with that dialog, so the slug moved with the heading: the surface
+  // did not disappear, it became a modal, and the "?" moved onto it (which is
+  // also why `modal:env-propagation` had to be registered as an overlay — a
+  // full-screen dialog at 9999 would otherwise open the help behind itself).
+  sync: 'bringing-existing-agents-up-to-date',
+  // 2c — the persistent out-of-date badge on the environment list and the
+  // catch-up behind it (#2066 D4). Its own `###` inside chapter 2 rather than a
+  // chapter, because it is the same story read from the list instead of the
+  // form; no "?" of its own — the badge IS the affordance, and it opens the
+  // dialog whose "?" lands two headings above.
+  outOfDate: 'the-agents-not-up-to-date-badge',
   // 3 — SSH-URL-needs-a-key vs HTTPS-URL-needs-the-token, and what rotation does
   credentials: 'credentials',
   // 4 — the MCP server/credential picker (#2051). Until then this form had no

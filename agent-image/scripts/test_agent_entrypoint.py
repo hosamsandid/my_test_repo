@@ -13,6 +13,8 @@ or directly:
 """
 import asyncio
 import importlib.util
+import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -1126,6 +1128,68 @@ class BuildUsageRecord(unittest.TestCase):
             {"m": {"input": 3, "output": 0,
                    "cacheCreationInput": 0, "cacheReadInput": 0}},
         )
+
+
+class RequestedByBlock(unittest.TestCase):
+    """#2137: `requestedBy` is who ASKED for this run — the one thing the
+    orchestrator cannot observe, so the agent stamps it and the control plane
+    resolves it to an account at ingest.
+
+    The distinction between `None` and a present block is load-bearing: it is
+    what makes an autonomous run fall back to the agent's owner instead of
+    being attributed to whoever happened to chat last.
+    """
+
+    def test_a_chat_sender_is_carried_as_exactly_one_key(self):
+        self.assertEqual(
+            entrypoint._requested_by({"matrixUserId": "@ada:local"}),
+            {"matrixUserId": "@ada:local"},
+        )
+
+    def test_whitespace_is_trimmed(self):
+        self.assertEqual(
+            entrypoint._requested_by({"matrixUserId": "  @ada:local  "}),
+            {"matrixUserId": "@ada:local"},
+        )
+
+    def test_no_requester_is_none_never_an_empty_shaped_block(self):
+        for raw in (None, {}, {"matrixUserId": None}, {"matrixUserId": ""},
+                    {"matrixUserId": "   "}, {"matrixUserId": 42},
+                    "@ada:local", [], 7):
+            with self.subTest(raw=raw):
+                self.assertIsNone(entrypoint._requested_by(raw))
+
+    def test_no_other_chat_metadata_rides_along(self):
+        # A whitelist, not a passthrough: a usage record is billing-adjacent.
+        self.assertEqual(
+            entrypoint._requested_by({
+                "matrixUserId": "@ada:local",
+                "body": "please deploy to prod",
+                "displayName": "Ada L.",
+            }),
+            {"matrixUserId": "@ada:local"},
+        )
+
+    def test_build_usage_record_always_carries_the_key(self):
+        # Absent from the context (every trigger/loop run) still emits the key,
+        # so the orchestrator never has to distinguish "no requester" from
+        # "an older agent image".
+        rec = entrypoint.build_usage_record({"agentId": "a1"})
+        self.assertIn("requestedBy", rec)
+        self.assertIsNone(rec["requestedBy"])
+
+    def test_the_dm_path_stamps_the_sender_and_the_trigger_path_does_not(self):
+        """`on_message` is a closure inside the Matrix client wiring — it needs a
+        live homeserver to exercise — so the two halves of the rule are read off
+        the source. Both are SILENT failures: a missing stamp attributes every
+        chat turn to the agent's owner, and a stamp on the trigger path would
+        attribute a cron run to whoever chatted last."""
+        src = _MODULE_PATH.read_text(encoding="utf-8")
+        self.assertIn('dm_run_context["requestedBy"] = {"matrixUserId": sender}', src)
+        # The trigger scheduler's run context (built at `run_context = ...`,
+        # `run_context["trigger"] = ...`) must never carry it.
+        self.assertNotIn('run_context["requestedBy"]', src.replace(
+            'dm_run_context["requestedBy"]', ''))
 
 
 class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
@@ -3419,10 +3483,13 @@ class TriggerClaimLabels(unittest.IsolatedAsyncioTestCase):
     so a run that dies leaves the wake label back on the issue and the poller
     restarts the chain event-natively. A failed swap never blocks the run."""
 
-    def _trigger(self, claim=True):
+    def _trigger(self, claim=True, postcondition=None):
         t = {"id": "t1", "type": "github-event"}
         if claim:
             t["claim"] = {"remove": "ready", "add": "ready:wip"}
+            # #2113: a claim MAY declare an observable post-condition.
+            if postcondition:
+                t["claim"]["postcondition"] = postcondition
         return t
 
     def _ctx(self):
@@ -3670,6 +3737,119 @@ class TriggerClaimLabels(unittest.IsolatedAsyncioTestCase):
         rows = self._rows(append_mock, "trigger.claim-completed")
         self.assertEqual(len(rows), 1)
         self.assertFalse(rows[0]["ok"])
+
+
+class TriggerClaimPostcondition(TriggerClaimLabels):
+    """Verify-before-claim at the swap site (#2113, §4.2). Reaching the
+    completion swap means the RUN completed; it does not mean the run achieved
+    anything. These tests drive the real `_execute_inner` and assert on the
+    labels it actually swaps.
+
+    Inherits the harness (`_run`/`_scheduler`/`_ctx`/`_rows`/`_trigger`) from
+    TriggerClaimLabels — and therefore RE-RUNS every pre-#2113 claim test in
+    this subclass too, which is the backwards-compatibility proof: a claim with
+    no declared post-condition still completes on run completion."""
+
+    def _facts(self, **facts):
+        return patch.object(entrypoint, "_gh_postcondition_facts",
+                            unittest.mock.Mock(return_value=facts))
+
+    async def test_the_2105_shape_cannot_reach_completed(self):
+        # AC-2/AC-3: the run completed, but the PR is open and unmerged. The
+        # claim MUST stay `ready:wip` — `ready:completed` on an open,
+        # conflicting PR is now structurally unreachable.
+        scheduler = self._scheduler()
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(return_value=("merged it!", None))
+        append_mock = unittest.mock.Mock()
+        with self._facts(prs=[{"number": 2105, "merged": False}],
+                         issues=[{"number": 1459, "closed": False}]):
+            await self._run(scheduler, call_mock, swap_mock, append_mock,
+                            self._trigger(postcondition="merged"), self._ctx())
+        # ONE swap only: the claim itself. No forward swap happened at all.
+        self.assertEqual(swap_mock.call_count, 1)
+        self.assertEqual(swap_mock.call_args_list[0].args[:4],
+                         ("acme/repo", 957, "ready", "ready:wip"))
+        for c in swap_mock.call_args_list:
+            self.assertNotIn("ready:completed", c.args)
+        self.assertEqual(self._rows(append_mock, "trigger.claim-completed"), [])
+        # The reason is carried, because "why is this still wip" has to be
+        # answerable without re-deriving it.
+        rows = self._rows(append_mock, "trigger.claim-blocked")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["kept"], rows[0]["postcondition"],
+                          rows[0]["repo"], rows[0]["number"], rows[0]["triggerId"]),
+                         ("ready:wip", "merged", "acme/repo", 957, "t1"))
+        self.assertIn("#2105", rows[0]["reason"])
+        self.assertIn("not merged", rows[0]["reason"])
+        # A blocked claim never gates the run's own result.
+        scheduler._send_formatted.assert_awaited_once()
+
+    async def test_a_satisfied_postcondition_still_completes(self):
+        # The other direction: the declaration is not a permanent brake.
+        scheduler = self._scheduler()
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(return_value=("done", None))
+        append_mock = unittest.mock.Mock()
+        with self._facts(prs=[{"number": 2105, "merged": True}],
+                         issues=[{"number": 1459, "closed": True}]):
+            await self._run(scheduler, call_mock, swap_mock, append_mock,
+                            self._trigger(postcondition="merged"), self._ctx())
+        self.assertEqual(swap_mock.call_count, 2)
+        self.assertEqual(swap_mock.call_args_list[1].args[:4],
+                         ("acme/repo", 957, "ready:wip", "ready:completed"))
+        self.assertEqual(len(self._rows(append_mock, "trigger.claim-completed")), 1)
+        self.assertEqual(self._rows(append_mock, "trigger.claim-blocked"), [])
+
+    async def test_unreadable_github_keeps_wip_rather_than_completing(self):
+        # Fail CLOSED: an unverifiable claim is not a completed one.
+        scheduler = self._scheduler()
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(return_value=("done", None))
+        append_mock = unittest.mock.Mock()
+        with self._facts(error="gh: 404"):
+            await self._run(scheduler, call_mock, swap_mock, append_mock,
+                            self._trigger(postcondition="merged"), self._ctx())
+        self.assertEqual(swap_mock.call_count, 1)
+        rows = self._rows(append_mock, "trigger.claim-blocked")
+        self.assertEqual(len(rows), 1)
+        self.assertIn("gh: 404", rows[0]["reason"])
+        self.assertEqual(self._rows(append_mock, "trigger.claim-completed"), [])
+
+    async def test_a_claim_without_a_postcondition_makes_no_github_read(self):
+        # AC "backwards-compatible", asserted as a fact rather than by
+        # construction: the pre-#2113 path does not even consult GitHub.
+        scheduler = self._scheduler()
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(return_value=("done", None))
+        append_mock = unittest.mock.Mock()
+        facts = unittest.mock.Mock()
+        with patch.object(entrypoint, "_gh_postcondition_facts", facts):
+            await self._run(scheduler, call_mock, swap_mock, append_mock,
+                            self._trigger(), self._ctx())
+        facts.assert_not_called()
+        self.assertEqual(swap_mock.call_args_list[1].args[:4],
+                         ("acme/repo", 957, "ready:wip", "ready:completed"))
+        self.assertEqual(self._rows(append_mock, "trigger.claim-blocked"), [])
+
+    async def test_a_failed_run_still_rolls_back_and_never_blocks(self):
+        # The verification sits on the SUCCESS path only: a double failure
+        # still restores the wake label, and emits no blocked row (there is no
+        # claim left to block).
+        scheduler = self._scheduler()
+        err = subprocess.CalledProcessError(1, "claude")
+        swap_mock = unittest.mock.Mock(return_value=True)
+        call_mock = unittest.mock.Mock(side_effect=[err, err])
+        append_mock = unittest.mock.Mock()
+        facts = unittest.mock.Mock()
+        with patch.object(entrypoint, "_gh_postcondition_facts", facts):
+            with self.assertRaises(subprocess.CalledProcessError):
+                await self._run(scheduler, call_mock, swap_mock, append_mock,
+                                self._trigger(postcondition="merged"), self._ctx())
+        facts.assert_not_called()
+        self.assertEqual(len(self._rows(append_mock, "trigger.claim-rolled-back")), 1)
+        self.assertEqual(self._rows(append_mock, "trigger.claim-blocked"), [])
+        self.assertEqual(self._rows(append_mock, "trigger.claim-completed"), [])
 
 
 class GhSwapLabels(unittest.TestCase):
@@ -4663,6 +4843,312 @@ class PluginEventMarkers(unittest.TestCase):
         desc = entrypoint.TriggerScheduler._describe_in_flight_marker(markers[0])
         self.assertIn("jira", desc)
         self.assertIn("status_changed", desc)
+# --- Verify-before-claim (#2113, flow-control concept §4.2) -----------------
+
+
+class PostconditionVerdict(unittest.TestCase):
+    """`_postcondition_verdict` is the pure core: it decides whether a claim's
+    declared post-condition holds from already-gathered facts, so every rule is
+    testable without a `gh` binary."""
+
+    def _ok(self, kind, facts):
+        holds, reason = entrypoint._postcondition_verdict(kind, facts)
+        self.assertTrue(holds, f"expected {kind} to hold, got: {reason}")
+        self.assertEqual(reason, "", "a holding post-condition carries no reason")
+
+    def _no(self, kind, facts, *needles):
+        holds, reason = entrypoint._postcondition_verdict(kind, facts)
+        self.assertFalse(holds, f"expected {kind} NOT to hold")
+        self.assertTrue(reason, "a blocked claim must carry a reason")
+        for n in needles:
+            self.assertIn(n, reason)
+
+    def test_no_declared_kind_holds_unchanged(self):
+        # Backwards-compatible: a claim with no post-condition completes on run
+        # completion exactly as it did before #2113.
+        for kind in (None, "", "   ", 0, [], {}):
+            self._ok(kind, None)
+            self._ok(kind, {"error": "boom"})  # not even consulted
+
+    def test_unknown_kind_fails_closed(self):
+        # The whole point is that `:completed` means something, so a kind this
+        # runner cannot verify keeps `:wip` rather than being waved through.
+        self._no("merge", {"prs": [{"number": 1, "merged": True}]},
+                 "not one of", "merge")
+        self._no("Merged", {}, "not one of")
+
+    def test_unreadable_github_fails_closed(self):
+        for kind in entrypoint.CLAIM_POSTCONDITIONS:
+            self._no(kind, {"error": "gh: 404"}, "could not read", kind, "gh: 404")
+
+    def test_pr_exists(self):
+        self._ok("pr-exists", {"prs": [{"number": 7, "merged": False}]})
+        self._ok("pr-exists", {"prs": [{"number": 7, "merged": True}]})
+        self._no("pr-exists", {"prs": []}, "no pull request exists")
+        self._no("pr-exists", {}, "no pull request exists")
+
+    def test_review_submitted(self):
+        self._ok("review-submitted", {"reviews": 1})
+        self._ok("review-submitted", {"reviews": 3})
+        self._no("review-submitted", {"reviews": 0}, "no review has been submitted")
+        self._no("review-submitted", {}, "no review has been submitted")
+        # `True` is not a review count (bool is an int in Python).
+        self._no("review-submitted", {"reviews": True}, "no review")
+
+    def test_merged_requires_a_merged_pr_and_a_closed_issue(self):
+        self._ok("merged", {
+            "prs": [{"number": 9, "merged": True}],
+            "issues": [{"number": 4, "closed": True}],
+        })
+        # A merged PR with no linked issue has no issue to close.
+        self._ok("merged", {"prs": [{"number": 9, "merged": True}], "issues": []})
+
+    def test_merged_refuses_the_2105_shape(self):
+        # THE regression this ticket exists for: the run completed, but the PR
+        # is open and conflicting. It must never read `:completed`.
+        self._no("merged",
+                 {"prs": [{"number": 2105, "merged": False}],
+                  "issues": [{"number": 1459, "closed": False}]},
+                 "#2105", "not merged")
+
+    def test_merged_refuses_a_merged_pr_whose_issue_is_still_open(self):
+        # The half-finished hand-off: both halves are required.
+        self._no("merged",
+                 {"prs": [{"number": 9, "merged": True}],
+                  "issues": [{"number": 4, "closed": False}]},
+                 "#9", "#4", "still open")
+
+    def test_merged_refuses_when_no_pr_exists_at_all(self):
+        self._no("merged", {"prs": [], "issues": [{"number": 4, "closed": True}]},
+                 "no pull request exists")
+
+    def test_merged_accepts_one_merged_pr_among_several(self):
+        # A work item can carry a superseded duplicate alongside the real PR.
+        self._ok("merged", {
+            "prs": [{"number": 8, "merged": False}, {"number": 9, "merged": True}],
+            "issues": [{"number": 4, "closed": True}],
+        })
+
+    def test_malformed_fact_rows_are_ignored_not_trusted(self):
+        # A non-dict row must not be read as a merged PR / closed issue.
+        self._no("merged", {"prs": ["merged!", None, 7], "issues": []},
+                 "no pull request exists")
+        self._no("merged",
+                 {"prs": [{"number": 1, "merged": "yes"}], "issues": []},
+                 "not merged")
+        self._no("merged",
+                 {"prs": [{"number": 1, "merged": True}],
+                  "issues": [{"number": 2, "closed": "yes"}]},
+                 "still open")
+
+    def test_the_vocabulary_mirrors_the_schema(self):
+        # A DOCUMENTED MIRROR of POSTCONDITIONS in
+        # admin-console/api/process-template.js — read from that source rather
+        # than restated, so the two cannot drift silently.
+        import re
+        js = (Path(__file__).resolve().parents[2]
+              / "admin-console" / "api" / "process-template.js").read_text()
+        m = re.search(r"const POSTCONDITIONS = Object\.freeze\(\[([^\]]*)\]\)", js)
+        self.assertIsNotNone(m, "POSTCONDITIONS not found in process-template.js")
+        mirrored = tuple(x.strip().strip("'\"")
+                         for x in m.group(1).split(",") if x.strip())
+        self.assertEqual(mirrored, entrypoint.CLAIM_POSTCONDITIONS)
+
+
+class ClaimPlanPostcondition(unittest.TestCase):
+    """`_claim_plan` carries a recognised post-condition onto the plan and
+    nothing else, so a pre-#2113 claim keeps its exact old shape."""
+
+    CTX = {"repo": "acme/repo", "payload": {"issue": {"number": 957}}}
+
+    def _plan(self, claim):
+        return entrypoint._claim_plan(
+            {"id": "t1", "type": "github-event", "claim": claim}, self.CTX)
+
+    def test_absent_postcondition_keeps_the_old_plan_shape(self):
+        plan = self._plan({"remove": "ready", "add": "ready:wip"})
+        self.assertEqual(set(plan), {"repo", "number", "remove", "add"})
+
+    def test_recognised_postcondition_is_carried(self):
+        plan = self._plan({"remove": "ready-to-merge",
+                           "add": "ready-to-merge:wip",
+                           "postcondition": " merged "})
+        self.assertEqual(plan["postcondition"], "merged")
+
+    def test_unrecognised_postcondition_is_not_carried(self):
+        for bad in ("merge", "", None, 7, {}):
+            plan = self._plan({"remove": "ready", "add": "ready:wip",
+                               "postcondition": bad})
+            self.assertNotIn("postcondition", plan, f"{bad!r} must not be carried")
+
+
+class VerifyClaimPostcondition(unittest.TestCase):
+    """`_verify_claim_postcondition` joins the adapter to the pure verdict, and
+    must make ZERO GitHub calls for a claim that declares nothing."""
+
+    def test_no_declaration_short_circuits_without_any_gh_call(self):
+        facts = unittest.mock.Mock()
+        with patch.object(entrypoint, "_gh_postcondition_facts", facts):
+            self.assertEqual(
+                entrypoint._verify_claim_postcondition(
+                    {"repo": "acme/repo", "number": 1,
+                     "remove": "ready", "add": "ready:wip"}),
+                (True, ""))
+        facts.assert_not_called()
+
+    def test_a_declaration_is_evaluated_against_the_gathered_facts(self):
+        facts = unittest.mock.Mock(
+            return_value={"prs": [{"number": 5, "merged": False}], "issues": []})
+        with patch.object(entrypoint, "_gh_postcondition_facts", facts):
+            holds, reason = entrypoint._verify_claim_postcondition(
+                {"repo": "acme/repo", "number": 5,
+                 "remove": "ready-to-merge", "add": "ready-to-merge:wip",
+                 "postcondition": "merged"})
+        facts.assert_called_once_with("acme/repo", 5)
+        self.assertFalse(holds)
+        self.assertIn("#5", reason)
+
+
+class GhPostconditionFacts(unittest.TestCase):
+    """The I/O adapter: it resolves the claim target's shape via `gh`, follows
+    GitHub's own link graph, and turns every failure into an `error` fact rather
+    than an exception."""
+
+    ENV = {"GH_TOKEN": "t"}
+
+    def test_no_token_is_an_error_fact_not_a_crash(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                entrypoint._gh_postcondition_facts("acme/repo", 1),
+                {"error": "no GH_TOKEN/GITHUB_TOKEN in env"})
+
+    def _run(self, side_effect):
+        with patch.dict(os.environ, self.ENV, clear=True), \
+                patch.object(entrypoint.subprocess, "run", side_effect=side_effect):
+            return entrypoint._gh_postcondition_facts("acme/repo", 42)
+
+    @staticmethod
+    def _proc(rc, out=""):
+        return subprocess.CompletedProcess([], rc, stdout=out, stderr="nope")
+
+    @staticmethod
+    def _target(argv):
+        """`(kind, number)` a `gh` argv addresses — argv is
+        ["gh", "pr"|"issue", "view", "<n>", "--repo", ...]."""
+        return argv[1], argv[3]
+
+    def test_a_pr_target_reports_merge_state_reviews_and_linked_issues(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if argv[1] == "pr":
+                return self._proc(0, json.dumps({
+                    "number": 42, "state": "MERGED",
+                    "mergedAt": "2026-09-08T16:16:03Z",
+                    "reviews": [{"id": "a"}, {"id": "b"}],
+                    "closingIssuesReferences": [{"number": 7}],
+                }))
+            return self._proc(0, json.dumps({"number": 7, "state": "CLOSED"}))
+
+        facts = self._run(run)
+        self.assertEqual(facts["target"], "pr")
+        self.assertEqual(facts["prs"], [{"number": 42, "merged": True}])
+        self.assertEqual(facts["issues"], [{"number": 7, "closed": True}])
+        self.assertEqual(facts["reviews"], 2)
+        # `gh pr view` first: it fails on a plain issue number, which is the
+        # discriminator between the two claim-target shapes.
+        self.assertEqual(calls[0][:4], ["gh", "pr", "view", "42"])
+        self.assertIn("--repo", calls[0])
+        # The linked issue is then read by number, not re-derived from body text.
+        self.assertEqual(calls[1][:4], ["gh", "issue", "view", "7"])
+        self.assertTrue(entrypoint._postcondition_verdict("merged", facts)[0])
+
+    def test_an_unmerged_pr_target_is_reported_unmerged(self):
+        def run(argv, **kw):
+            if argv[1] == "pr":
+                return self._proc(0, json.dumps({
+                    "number": 42, "state": "OPEN", "mergedAt": None,
+                    "reviews": [], "closingIssuesReferences": [],
+                }))
+            return self._proc(1)
+
+        facts = self._run(run)
+        self.assertEqual(facts["prs"], [{"number": 42, "merged": False}])
+        self.assertEqual(facts["reviews"], 0)
+        self.assertFalse(entrypoint._postcondition_verdict("merged", facts)[0])
+
+    def test_an_issue_target_follows_its_linked_pull_requests(self):
+        def run(argv, **kw):
+            if self._target(argv) == ("pr", "42"):
+                return self._proc(1)            # 42 is an issue, not a PR
+            if argv[1] == "issue":
+                return self._proc(0, json.dumps({
+                    "number": 42, "state": "CLOSED",
+                    "closedByPullRequestsReferences": [{"number": 99}],
+                }))
+            return self._proc(0, json.dumps({
+                "number": 99, "state": "MERGED",
+                "mergedAt": "2026-09-08T00:00:00Z", "reviews": [{"id": "r"}],
+            }))
+
+        facts = self._run(run)
+        self.assertEqual(facts["target"], "issue")
+        self.assertEqual(facts["prs"], [{"number": 99, "merged": True}])
+        self.assertEqual(facts["issues"], [{"number": 42, "closed": True}])
+        self.assertEqual(facts["reviews"], 1)
+        self.assertTrue(entrypoint._postcondition_verdict("merged", facts)[0])
+
+    def test_an_open_issue_with_no_linked_pr_blocks_merged(self):
+        def run(argv, **kw):
+            if argv[1] == "pr":
+                return self._proc(1)
+            return self._proc(0, json.dumps({
+                "number": 42, "state": "OPEN",
+                "closedByPullRequestsReferences": [],
+            }))
+
+        facts = self._run(run)
+        self.assertEqual(facts["prs"], [])
+        self.assertEqual(facts["issues"], [{"number": 42, "closed": False}])
+        for kind in ("merged", "pr-exists"):
+            self.assertFalse(entrypoint._postcondition_verdict(kind, facts)[0])
+
+    def test_neither_shape_readable_is_an_error_fact(self):
+        facts = self._run(lambda argv, **kw: self._proc(1))
+        self.assertIn("error", facts)
+        self.assertFalse(entrypoint._postcondition_verdict("merged", facts)[0])
+
+    def test_a_gh_exception_is_an_error_fact_not_a_raise(self):
+        def run(argv, **kw):
+            raise OSError("gh vanished")
+        facts = self._run(run)
+        self.assertIn("error", facts)
+        self.assertIn("gh vanished", facts["error"])
+
+    def test_unparseable_output_is_an_error_fact(self):
+        def run(argv, **kw):
+            if argv[1] == "pr":
+                return self._proc(0, "{not json")
+            return self._proc(1)
+        facts = self._run(run)
+        self.assertIn("error", facts)
+
+    def test_linked_object_fan_out_is_capped(self):
+        def run(argv, **kw):
+            if self._target(argv) == ("pr", "42"):
+                return self._proc(1)
+            if self._target(argv) == ("issue", "42"):
+                return self._proc(0, json.dumps({
+                    "number": 42, "state": "CLOSED",
+                    "closedByPullRequestsReferences": [
+                        {"number": n} for n in range(100, 120)],
+                }))
+            return self._proc(0, json.dumps({"number": 1, "mergedAt": None,
+                                             "reviews": []}))
+
+        facts = self._run(run)
+        self.assertEqual(len(facts["prs"]), entrypoint.CLAIM_VERIFY_MAX_LINKED)
 
 
 if __name__ == "__main__":

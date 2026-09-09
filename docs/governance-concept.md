@@ -194,14 +194,24 @@ GOV-SKILLS-6 and GOV-DELIVERY-3).*
   register stdio MCP servers whose `command` executes inside agent containers, toggle
   **platform-wide maintenance mode**, edit any team's skills, and publish to the global
   skill pool (worries #1 and #4 in one sentence).
-- **Tenant isolation stops at the config plane**: the chat/session/workspace route
+- ~~**Tenant isolation stops at the config plane**: the chat/session/workspace route
   family (`api.js` ~13343–15811) has effectively one visibility check — any user can
   read/write any agent's workspace, run git commit/push in it, and post into any Matrix
   room as the admin token (worry #3: pushing work through another team's agents,
-  outside their gates).
+  outside their gates).~~ **Closed for cross-tenant access by #1459** (2026-09-08) —
+  *any user* is now *any member of the agent's own team*: GOV-ACCESS-3 below is
+  delivered at that boundary, and with it the gate half of GOV-PLATFORM-4. Still open
+  **inside** a team: #2041 D9 rules workspace writes and `git-action` Team-Admin-only,
+  which `docs/decentralised-access-concept.md` §11.2 assigns to P2. The finding is left
+  visible rather than deleted because it is what the two controls were written against;
+  the route range it cites has since moved, and the family is now addressed by parameter
+  name (`:agentId`) rather than by line number. See `admin-console/api/work-plane-access.js`.
 - **Sessions are irrevocable 7-day cookies** — deleting a user or changing a password
-  leaves their sessions alive; the break-glass env admin ships as `admin`/`admin`,
-  shared and unattributable. Offboarding is fictional today.
+  leaves their sessions alive; the initial administrator ships as `admin`/`admin`.
+  (Since #2059 that administrator is at least a real, attributable **record** rather
+  than a shared recordless credential — but the shipped default is unchanged, and a
+  password change no longer even invalidates sessions as a side effect, the cookie key
+  having been decoupled from it.) Offboarding is fictional today.
 
 ### Controls
 
@@ -220,12 +230,29 @@ mode → System Admin**; skills CRUD → tier-appropriate admin (§5); knowledge
 Team Admin; team disable/enable + hill-climb actions → Team Admin; drafts/templates →
 Team Admin (drafts owner-editable); `/api/audit` → System Admin + team view.
 
-**GOV-ACCESS-3 — One middleware for the work plane.** `P0 · small build · reads observe 1 week, writes enforce day one`
+**GOV-ACCESS-3 — One middleware for the work plane.** `P0 · small build · reads observe 1 week, writes enforce day one` — **DELIVERED as worded (#1459, 2026-09-08); tightened further by #2041 D9 at P2**
 A single `:agentId`-keyed middleware in front of the whole chat/session/workspace
 family: reads require `visibleAgent` (404 on miss — don't leak existence), writes
 (post message, session ops, workspace write, git-action, queue cancel) require
 membership in the agent's team. Same treatment for `/api/matrix/*` (resolve room →
 agent before posting with the admin token).
+*As built* (`admin-console/api/work-plane-access.js`): one middleware over a prefix
+list mounted directly after `auth.gate`, and the room routes resolve room → agent
+through `findAgentByDmRoom`. Two deviations, both deliberate. **The read/write split
+is one predicate, not two branches** — with the two roles that exist today
+`visibleAgent` already resolves through the caller's membership set, so "writes
+require membership" is the same test; a second branch would be unreachable code, so
+the equivalence is pinned by a cross-product test instead and GOV-ACCESS-4's
+`team-viewer` tier is what will make the halves diverge. **There is no separate
+observe rung for reads** — `AUTH_ENABLED` (#1457) already is one: it ships **off**,
+which makes every caller `all: true` and the gate a no-op, so the enforcement cannot
+bite until an operator turns multi-user authorization on. Both refusals are 404.
+**Note the ceiling this control has as worded**: "membership in the agent's team" is
+the *tenant* boundary, so a Team **Member** may still delete workspace files and run
+`git-action` in their own team's agents. `docs/decentralised-access-concept.md` §6 (D9)
+rules that Team-Admin-only and §11.2 schedules it for P2 — a separate, narrower change
+that cannot be method-based (posting a message, opening a DM room, attaching a file and
+stopping your own run are writes D9 deliberately allows a member).
 
 **GOV-ACCESS-4 — Viewer role; Member as standard builder tier.** `P0 · small build · structural`
 Adds `team-viewer` (§3.1). **New joiners default to Viewer**; promotion is a Team-Admin
@@ -250,18 +277,35 @@ see §5. (3) **Credential reassignment** — already System-Admin-only; add the 
 ack. Maintenance mode gets **no** four-eyes — an emergency brake must pull one-handed
 (typed reason + auto-expiry instead, §7). Everything else: audit is enough.
 
-**GOV-ACCESS-7 — Break-glass governance.** `P0 · config/process · enforce`
-Console refuses to serve env-admin logins when `ADMIN_PASSWORD` is the shipped default
-on a non-localhost deployment (with `GOVERNANCE_MODE=enforce`; warn otherwise — keeps
-the 5-minute local dev loop); every env-admin login is audit-marked
-`break-glass-login` and surfaced — at 50 users it should be *news*; runbook: rotate
-after use, ≥2 named System Admin records so the env admin is never routine.
+**GOV-ACCESS-7 — Break-glass governance.** `P0 · process · enforce`
+*Restated by #2059 (concept #2041 D13): there is no env-admin login left to refuse.*
+The configured initial user is consumed once at first boot to create a real
+System-Admin **record** and is never read again, so the console has exactly one login
+path and every session resolves to a named person. That removes this control's
+original subject and moves the break-glass **off the console**: recovering a lost
+administrator is a **host-level** action on the orchestrator volume
+(`/workspace/users/index.json`), which is where comparable systems put it
+(`gitlab-rails console`, `occ user:resetpassword`, `grafana-cli
+admin reset-admin-password`) — and it is deliberately not reachable through the UI,
+since an in-console way back in would be the shared recordless credential wearing a
+different name. What remains governable is therefore process, not config: **host
+access is the break-glass** and must be held by the people the runbook names; the
+shipped `admin`/`admin` seed must be replaced on the Users page (afterwards the
+password lives on the record, so rotating `.env` no longer revokes it); and **≥2
+named System Admin records** stays the rule — now partly enforced rather than merely
+advised, since the store refuses to delete or demote the last one, which means a
+single-administrator stack cannot lock itself out by accident but equally has nobody
+to recover it from inside. The `break-glass-login` audit marker retires with the
+login it marked; the seeding itself writes one audit entry (`method: BOOTSTRAP`), so
+how an instance's first administrator got there is answerable in an access review —
+which it previously was not.
 
 **GOV-ACCESS-8 — Joiner / Mover / Leaver.** `P0 · process-only (given -5) · process`
 Joiner = user record + Viewer membership; mover = membership swap within a week;
 leaver = user deletion cascades memberships **and bumps sessionEpoch**, plus a
 last-30-days audit review. Quarterly: each Team Admin re-confirms their member list
-(the Access page already shows it). Includes the **agent leaver path**: deleting an
+(**Share…** on the team in the Agent Chat shows it — the central Access page was
+dissolved by #2085, and a Team Admin no longer needs a System Admin to run this). Includes the **agent leaver path**: deleting an
 agent deactivates its Matrix user and archives its DM room (today orphaned — see §11).
 
 **GOV-ACCESS-11 — Account hygiene floor.** `P1 · small build · enforce for new passwords`
@@ -722,11 +766,18 @@ it is the onboarding read that makes handling rules teachable. The delivery doma
 
 **GOV-PLATFORM-2 / -3 — Internal-API auth + internal audit.** *(§3.5 — canonical.)*
 
-**GOV-PLATFORM-4 — Scope the read routes; targeted read-audit.** `P0 · small build · enforce (gate) / observe (audit)`
+**GOV-PLATFORM-4 — Scope the read routes; targeted read-audit.** `P0 · small build · enforce (gate) / observe (audit)` — **gate DELIVERED (#1459, 2026-09-08); read-audit OUTSTANDING**
 `visibleAgent` at the four workspace handlers + context proxies (404 on miss); a
 **short** sensitive-path read-audit (C2/C4 paths only: `.claude/settings.json`,
 `users.md`, `_keys/`, session-log streams) through the existing audit funnel — a
 tripwire, deliberately not a SIEM-shaped full read log.
+*As built*: the gate half is the GOV-ACCESS-3 middleware above — it covers the
+workspace handlers and the context proxies, so this control needs no second gate.
+The **read-audit tripwire is not built**: it is observability rather than
+authorization, `audit.auditMutations` records mutations only, and #1459's scope stops
+at the gate. It needs its own ticket; nothing in the delivered gate blocks it (denied
+*writes* are already audited, because `auditMutations` is mounted ahead of the auth
+gate and therefore ahead of this one).
 
 **GOV-PLATFORM-5 — C2 out of every browse surface.** *(one implementation with
 GOV-CREDENTIALS-2, §8.)*
@@ -748,10 +799,17 @@ manifest over closed audit day files (`{date, file, sha256, prevManifestSha256}`
 verify command; off-box shipping is the hosted-deployment step-up.
 
 **GOV-PLATFORM-8 — Refuse unsafe defaults.** `P0 · config · warn → enforce`
-Startup checks at the `verifyCredentials` seam: shipped-default `ADMIN_PASSWORD` or
-empty `AUTH_SESSION_SECRET` → prominent warning; with `GOVERNANCE_MODE=enforce`,
-env-admin logins are refused (named users keep working — the break-glass inversion).
-Never blocks local dev.
+*Partly delivered and partly re-scoped by #2059.* The `verifyCredentials` seam this
+control was attached to no longer exists, and its second clause is moot: an empty
+`AUTH_SESSION_SECRET` no longer derives the cookie key from the admin password — it
+falls back to a random key persisted on the workspace volume, so a shipped-default
+password can no longer make session cookies forgeable. What is left is the first
+clause, re-pointed at the **record** rather than the environment: a System-Admin
+record still carrying the shipped-default password on a non-localhost deployment →
+prominent warning, and with `GOVERNANCE_MODE=enforce`, refused. Note the check must
+move with the password: it is no longer answerable from configuration at startup (the
+value in `.env` is only ever the seed), so it becomes a check against the store —
+which is also why #2059 deliberately added no password policy. Never blocks local dev.
 
 **GOV-PLATFORM-9 — Host-mount governance.** `P1 (observe slice with P0) · small build · observe → warn → enforce`
 `contextMounts` gain `dataClass` (default C1) + `approvedBy`; RW-mount changes get a
@@ -764,7 +822,8 @@ every RW mount (a podman/local dev feature must not centralize on platform opera
 **GOV-PLATFORM-10 — Personal data & erasure.** `P1 (register at P0) · process + small build`
 The C4 register enumerates every personal-data location with its deletion procedure
 (including the honest "Matrix history needs admin-room tooling" caveat); offboarding
-runs the checklist from the Access page trigger point. P2: an `offboard` endpoint
+runs the checklist from the **Administration → Users** trigger point (the Access
+page it used to name was dissolved into that surface by #2085). P2: an `offboard` endpoint
 automating the sweep (redact from `users.md` files, drop session pointers, prune usage
 rows, audit line). Answers GDPR-style erasure with a checklist first, a script second.
 
@@ -825,8 +884,9 @@ The domain cut misses real surfaces; each gets an owner and a minimum control.
   lifecycle sweep: age badge + one-click regenerate; the §10 rate-limit closes the
   brute-force window. Flows should prefer `github-event` (already documented).
 - **E2E journeys** *(owner: §10)*. Nightly runs use a dedicated test user + test team
-  (never the env admin), and journeys must not mutate non-test teams — a naming-scoped
-  guard in the journey runner plus the normal audit trail make violations visible.
+  (never the stack's seeded administrator, which they currently do use), and journeys
+  must not mutate non-test teams — a naming-scoped guard in the journey runner plus the
+  normal audit trail make violations visible.
 
 ---
 
@@ -871,7 +931,7 @@ Controls without owners decay. The organizational half, deliberately lightweight
   STT backend — each with a data-flow line (what leaves, where to) and the applicable
   terms (incl. the consumer-OAuth single-user constraint of §8).
 - **Governance reporting.** A monthly one-page digest, assembled from data the platform
-  already writes: break-glass logins, would-deny counts by route family, budget state
+  already writes: the first-boot System-Admin seeding, would-deny counts by route family, budget state
   per team, gate-removal and policy overrides (with reasons), anomaly recurrence,
   waiver expiries, backup/restore-drill status. Send to the Circle + sponsor. When the
   digest is boring, governance is working.
@@ -886,7 +946,7 @@ order:
 | # | Control | Why first |
 |---|---|---|
 | 1 | §3.5 internal-API auth + internal audit (GOV-PLATFORM-2/3) | Every other server-side control is bypassable via :4002 until this lands; six domains depend on it |
-| 2 | Work-plane tenant isolation (GOV-ACCESS-3 + GOV-PLATFORM-4) | Closes cross-team read/write/git-push — the widest live hole |
+| 2 | Work-plane tenant isolation (GOV-ACCESS-3 + GOV-PLATFORM-4) | Closes cross-team read/write/git-push — the widest live hole. **Gate delivered #1459**; GOV-PLATFORM-4's read-audit tripwire still owed |
 | 3 | Workspace secret masking + gate (GOV-CREDENTIALS-2 ≡ GOV-PLATFORM-5) | Plaintext MCP secrets are three clicks from any user today |
 | 4 | Close the verified route holes (GOV-ACCESS-2, incl. the maintenance + team-disable role fixes of GOV-AUTONOMY-2) | Missing locks, enforce day one |
 | 5 | Branch-protection standard + probe (GOV-DELIVERY-4) | The only thing that stops `git push origin main` from a container |
@@ -901,14 +961,15 @@ order:
 ## 14. Rollout roadmap
 
 **Phase 0 — days, config & process only.** Data-classification register + C4/personal
-register; JML process + quarterly access review; break-glass runbook + refuse-default
-check (warn); bp-explorer RO mount; loopback-bind checklist; branch-protection policy
+register; JML process + quarterly access review; host-level break-glass runbook
+(GOV-ACCESS-7, restated by #2059) + refuse-default check (warn); bp-explorer RO mount; loopback-bind checklist; branch-protection policy
 text; backup script + first restore drill; close the GOV-ACCESS-2 route holes;
 emits-lift validation fix; maintenance role gate + reason + auto-expiry;
 `AEE_WORKSPACE_ISOLATION=0` startup warning; RW-mount audit tag; waiver register file.
 
 **Phase 1 — the first month, small builds.** Internal-API auth ladder
-(observe → enforce) + internal audit; work-plane middleware + workspace masking/gate;
+(observe → enforce) + internal audit; work-plane middleware (**delivered #1459**) +
+workspace masking/gate;
 skill caps + snapshots/rollback + autonomy-dial ack + `autoActivate` gate for new
 teams; budgets (observe/warn) + showback + envelopes + CPU/count caps; session epoch +
 24 h sliding TTL + Viewer role; credential binding checks + lifecycle metadata
@@ -989,3 +1050,60 @@ entry is binding for implementation; revisit triggers are stated where agreed.
     governance settings (lint severities, budgets, trigger policies) are not a target
     for improvement cards; governance changes remain human decisions. Revisit once
     Phase-3 verdict/rollback data proves the loop's measurement reliability.
+
+---
+
+## Amendment 1 — GOV-PLATFORM-2 as built (#1456, 2026-09-08)
+
+§3.5 is a binding decision, and this section does not rewrite it: it records where
+the implementation diverged and why, so the doc stays readable as a design and
+correct as a spec. Everything §3.5 asks for is in place except the one item whose
+subject no longer exists.
+
+### What shipped
+
+| §3.5 asks for | Built as |
+|---|---|
+| One auth middleware at the internal server mount | The first statement of the `internalApi` request handler (`orchestrator/orchestrator.js`). That server is a ~4 400-line `if`-ladder with no middleware chain, so "at the mount" can only mean the top of the dispatcher — every route, including the `/internal/admin/*` delegation and the inverted-guard tail route that serves as the 404, is behind it by construction. |
+| Control-plane token `INTERNAL_API_TOKEN`, bearer header from the proxy layer | The console has no proxy layer — it reaches `:4002` from **126 raw `fetch` call sites**. `admin-console/api/internal-auth-client.js` installs one wrapper over the global `fetch`, scoped to the orchestrator's own origin **and** the `/internal/` prefix. Editing 126 sites would have made completeness a review claim; here a call site cannot opt out and a new one is covered the day it is written. |
+| Per-agent tokens, minted at `startAgentProcess`, baked into the container env like the PAT | Exactly that, as `AEE_INTERNAL_TOKEN`. Deterministic (an HMAC over the agent id), so no state is kept and a respawn re-mints the identical value. |
+| Valid only for the agent-facing allowlist, and only for the agent's own `:id` | `AGENT_ROUTES` in `orchestrator/internal-auth.js`. Derived by reading every caller that runs inside an agent container, not from the prose list — see the two corrections below. |
+| `INTERNAL_AUTH_MODE=observe\|warn\|enforce`, one observe week | Implemented, **`observe` is the default**, and all three rungs run the same predicate — the observe-mode census is therefore a truthful preview of what `enforce` will reject rather than a second, drifting implementation. `enforce` without a token is refused at boot. |
+| Agent tokens rotate via the respawn-on-credential-change path | Free, by construction: all three respawn paths funnel through `startAgentProcess`, and changing the secret invalidates every outstanding token at once. |
+
+### Three corrections §3.5 could not have known
+
+1. **The signaler class has no subject.** §3.5 justifies it with `POST /internal/bp-events` and the ACE `bp-transition.py` caller. That route was **deleted** by the BriefingPack removal (#1961/#2005) and `orchestrator/bp-removal-guard.test.js` asserts it stays gone; nothing in the repo posts BP events, and the webhook server on `:4003` — the only remaining external entry point — has authenticated per-trigger with `X-Hook-Secret` all along. The class is therefore **not implemented**: a token class nothing can present is not a control, it is a hole with a name. Re-adding an external signaler means re-adding the class alongside it; `internal-auth.js` says so at the point where it would go.
+
+2. **`/internal/agents/:id/claim`, one of the four concrete paths in §3.5's allowlist, is also gone** — same removal. The allowlist was rebuilt from the live callers instead.
+
+3. **"Only for the agent's own `:id`" has exactly one legitimate exception.** The loop verifier (#933) posts its verify request into a **sibling's** queue via `POST /internal/agents/:id/enqueue-pending`. Narrowing that to own-id would break every loop carrying a `verify.agentId` gate. It is marked `scope: 'peer'` rather than silently widened, and a unit test pins that it is the *only* such route in both directions. Giving that route its own same-team check — the `wake-agent.js` precedent — is the named follow-up.
+
+### The failure mode this nearly shipped with
+
+`startAgentProcess` builds the agent container's environment from `...process.env`,
+so the orchestrator's **own** `INTERNAL_API_TOKEN` — the credential granting the
+full `/internal/*` surface — would have been inherited by every agent container.
+Minting a narrow per-agent token while shipping the wide one alongside it is not a
+control at all, and nothing about it looks wrong at runtime: every call simply
+succeeds. Both the token and the agent-token signing secret are explicitly deleted
+from the child environment (which covers the kubernetes spawn path too, since it
+receives the same object), and `orchestrator/internal-auth-wiring.test.js`
+mutation-proves that the deletes are present *and* ordered after the spread.
+
+The general rule for successors: when a container's environment is built by
+spreading the parent's, adding a secret to the parent is adding it to the child.
+
+### What did NOT change
+
+- `:4002` is still never published to the host, on either runtime — the gate is
+  defence in depth, not a replacement for the network boundary
+  (`docs/deployment.md` §2/§2a).
+- Console-side authorization (`admin-console/api/scope.js`) is untouched. The
+  control-plane token grants the full surface precisely *because* the console has
+  already decided who may do what before it proxies.
+- **GOV-PLATFORM-3 (internal audit) is not in this change.** §3.5 names it a
+  companion and the ticket's acceptance list does not carry it. The gate emits one
+  `[internal-auth]` log line per would-be violation, carrying the same
+  `callerKind` vocabulary GOV-PLATFORM-3 will persist — enough for the observe-week
+  census, not a substitute for the audit trail.

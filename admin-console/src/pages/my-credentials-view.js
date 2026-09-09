@@ -11,16 +11,19 @@
 import { normalizeCredential } from './credential-scope-view.js';
 
 // Can this caller own personal credentials at all? A personal credential is
-// keyed on a real user id (`user.userId`). The environment single-admin
-// (`ADMIN_USERNAME`) authenticates without a user record and so carries
-// `userId: null` — it operates the platform but is not a "person", so the
-// personal tier does not apply to it (mirrors ownsPersonalCredential in
-// scope.js, which fails closed for a null userId). Fail-closed on missing input.
+// keyed on a real user id (`user.userId`), so this mirrors
+// ownsPersonalCredential in scope.js, which fails closed for a null userId.
+// Since #2059 every authenticated human HAS a user record — the recordless
+// env single-admin that used to land here with `userId: null` no longer
+// authenticates — so in practice this is now only the signed-out/partial case.
+// Kept as a guard rather than deleted: it is the client mirror of a server
+// rule, and a UI that assumes an id is present would render an owner-less
+// create form instead of an explanation. Fail-closed on missing input.
 export function canOwnPersonalCredentials(user) {
   return !!(user && user.userId);
 }
 
-// The caller's own user id, or null (env single-admin / signed-out).
+// The caller's own user id, or null (signed-out / no record).
 export function personalOwnerId(user) {
   return (user && user.userId) || null;
 }

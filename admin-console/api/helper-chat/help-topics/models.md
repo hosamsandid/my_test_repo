@@ -33,7 +33,10 @@ gateway.
 The table on this page is that list of providers, one row each: its **ID** and
 **Name**, the **Scope / Teams** that owns it (a *Team* provider belongs to one
 team; a *System* provider is assigned to the teams listed beside it, or reads
-*Unassigned*), the **Base URL** — replaced by a *Subscription (OAuth)* badge
+*Unassigned*; a **Global** provider shows a single *Global* pill because it
+belongs to no team at all and every user and agent can reach it — see *A
+provider available to everyone* below), the **Base URL** — replaced by a
+*Subscription (OAuth)* badge
 when the provider uses subscription auth, which is also why it has no URL to
 show — a short preview under **Token** (the full fingerprint is in the
 provider's own editor), how many **Models** the catalog holds and which one is
@@ -45,7 +48,27 @@ click. A **`.env` fallback** row is a synthetic record reflecting the global
 `.env` settings rather than a registered provider — change it by editing `.env`
 and restarting — and its Health reads `—` because nothing probes it. A
 **System-scoped** provider that a Team Admin can see but not manage shows the
-same padlock: you may use it, only a System Admin may change it.
+same padlock: you may use it, only a System Admin may change it — and a
+**Global** provider is that same story taken to its limit, usable by everyone
+and editable only by a System Admin.
+
+### A provider available to everyone
+
+Most providers are reachable only by the team that owns them (or the teams a
+System-scoped one is assigned to). A **Global provider** is the exception: it
+belongs to no team at all and is usable by **every** user and every agent —
+including someone who is in no team yet, which is the point, since it is what
+lets a plain user's AI helpers bill against a model without wiring up a provider
+first. Turn it on with the **Global provider** checkbox in the editor, which
+**only a System Admin sees**: publishing a provider to the whole installation is
+a System-Admin act, so a Team Admin may *use* a global provider but never create
+or retract one. A global provider carries no team assignment, so the team picker
+disappears while the box is ticked and the table shows a single **Global** pill
+in place of the usual scope/teams detail. Two limits are worth knowing: a
+**subscription (OAuth)** provider can never be global — a subscription seat is
+single-user by its terms, so the checkbox is disabled for that auth type — and
+going global changes only *who may reach* the provider, never who may manage it
+(still a System Admin only) nor whether the token is exposed (it never is).
 
 ### Which model an agent actually uses
 

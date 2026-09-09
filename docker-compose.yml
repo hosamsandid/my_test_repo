@@ -72,6 +72,18 @@ services:
       PODMAN_HOST_SOCKET: ${PODMAN_HOST_SOCKET:-/run/user/501/podman/podman.sock}
       MATRIX_HOMESERVER: http://conduwuit:6167
       ADMIN_USER_ID: "@${ADMIN_USER:-admin}:local"
+      # First-boot System-Admin seed (#2059). The orchestrator owns the user
+      # store, so it is the process that consumes these: on a stack with zero
+      # user records it creates ONE real System-Admin record from them and never
+      # reads them again. They reached only the admin-console before #2059,
+      # where they WERE the login; that credential check is gone.
+      ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-admin}"
+      # SSO alternative (wins when set): seeds a System-Admin record with NO
+      # password, for stacks where the person authenticates via an IAP.
+      BOOTSTRAP_SYSTEM_ADMIN_SUBJECT: "${BOOTSTRAP_SYSTEM_ADMIN_SUBJECT:-}"
+      BOOTSTRAP_SYSTEM_ADMIN_EMAIL: "${BOOTSTRAP_SYSTEM_ADMIN_EMAIL:-}"
+      BOOTSTRAP_SYSTEM_ADMIN_NAME: "${BOOTSTRAP_SYSTEM_ADMIN_NAME:-}"
       # Conduwuit admin (for auto-creating Matrix users).
       # CONDUWUIT_ADMIN_ROOM defaults to the historic value but is now
       # overridable via .env — Continuwuity generates a fresh deterministic
@@ -103,6 +115,13 @@ services:
       # Lets multiple stacks share one Podman store without evicting each other's
       # agent containers. Defaults to COMPOSE_PROJECT_NAME when unset.
       AEE_INSTANCE_ID: "${AEE_INSTANCE_ID:-${COMPOSE_PROJECT_NAME:-agent-studio}}"
+      # Internal-API authentication for :4002 (#1456, GOV-PLATFORM-2). Empty
+      # (the default) leaves the gate inert. See .env.example for the ladder.
+      # startAgentProcess strips both secrets from every agent container it
+      # spawns — they are inherited through the process.env spread otherwise.
+      INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:-}"
+      INTERNAL_AUTH_MODE: "${INTERNAL_AUTH_MODE:-}"
+      INTERNAL_AGENT_TOKEN_SECRET: "${INTERNAL_AGENT_TOKEN_SECRET:-}"
     depends_on:
       conduwuit:
         condition: service_started
@@ -152,11 +171,21 @@ services:
       MATRIX_ACCESS_TOKEN: "${MATRIX_ACCESS_TOKEN}"
       ADMIN_USER_ID: "@${ADMIN_USER:-admin}:local"
       ACE_REPO_PATH: "${ACE_REPO_PATH:-}"
-      # Admin Console login (#276) — single credential pair gating the console.
-      ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
-      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-admin}"
+      # NOTE (#2059): ADMIN_USERNAME/ADMIN_PASSWORD are deliberately NOT passed
+      # here any more. They were the console's login credential (#276); they are
+      # now the orchestrator's first-boot seed for a real System-Admin record,
+      # and this container must not be able to authenticate against them —
+      # auth.js no longer reads them at all.
       AUTH_SESSION_SECRET: "${AUTH_SESSION_SECRET:-}"
       AUTH_COOKIE_SECURE: "${AUTH_COOKIE_SECURE:-}"
+      # Single-user <-> multi-user mode (#1457). Default off = today's
+      # behaviour (every principal is the implicit System Admin, team scoping
+      # is a no-op); "true" enforces per-membership scoping. See .env.example.
+      AUTH_ENABLED: "${AUTH_ENABLED:-}"
+      # Control-plane credential for the orchestrator's :4002 API (#1456).
+      # Must match the orchestrator's value. The console never mints per-agent
+      # tokens, so it deliberately does NOT get INTERNAL_AGENT_TOKEN_SECRET.
+      INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:-}"
       STT_URL: "${STT_URL:-http://stt:9000}"
       # STT request timeout (ms). A Meeting Note-Taker segment (#1296) can be up
       # to 120 s of audio, which may take longer to transcribe on CPU than the

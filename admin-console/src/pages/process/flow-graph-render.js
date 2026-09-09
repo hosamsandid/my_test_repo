@@ -415,6 +415,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     // The ResizeObserver below is the authority on when it changes.
     viewportSize:       { w: 0, h: 0 },
     rafScheduled:       false,         // dedup guard: one rAF in flight at most
+    pendingCenterOnId:  null,          // node to center after an expand-children re-layout
   };
 
   function viewportSize() {
@@ -1581,6 +1582,20 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         state.pendingFit = false;
         if (!state.userTransform) fitToView();
       }
+      if (state.pendingCenterOnId) {
+        const centerId = state.pendingCenterOnId;
+        state.pendingCenterOnId = null;
+        const pos = state.positions[centerId];
+        if (pos) {
+          const nodeH = getNodeHeight(centerId);
+          const vs = viewportSize();
+          state.pan.x = vs.w / 2 - (pos.x + NODE_W / 2) * state.zoom;
+          state.pan.y = vs.h / 2 - (pos.y + nodeH / 2) * state.zoom;
+          state.userTransform = true;
+          clampStatePan();
+          applyTransform();
+        }
+      }
     });
   }
 
@@ -2511,6 +2526,7 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     } else {
       state.childrenVisible.add(id);
       state.userCollapsed.delete(id);
+      state.pendingCenterOnId = id;
     }
     render();
   }

@@ -1,0 +1,354 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { AlertTriangle, RefreshCw, ExternalLink, CheckCircle2, Info, UserRound } from 'lucide-react';
+import { useApi, apiCall } from '../hooks/useApi';
+import PageHelpButton from '../components/PageHelpButton';
+import WhenCell from '../components/WhenCell';
+import { usePageActions } from '../context/PageActionsContext';
+import {
+  groupIntoLanes, epicRollups, rollupSummary, boardSummary,
+} from './process/flow-control-view';
+import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
+
+// The Flow Control board (#2116, concept `docs/flow-control-concept.md` §4.4).
+//
+// Swimlane by lifecycle stage over the #2115 ticket ledger: which ticket is
+// where, in what state, owned by whom. Every value on a card is a field the
+// reconciler DERIVED from GitHub evidence — this page never looks at a raw
+// label, which is what makes a false `Done` impossible (AC2, proven in
+// `process/flow-control-view.test.js` rather than claimed here).
+//
+// Read-only, like the ledger behind it: there is no repair action anywhere on
+// this page. §4.3's supervisor owns that, and §4.5's inbox owns acting on the
+// `needsHuman` rows.
+
+const PAGE_DESCRIPTION = 'Which ticket is where, in what state, and who owns it — derived from GitHub, never from labels.';
+
+export default function FlowControl() {
+  const { data: agents } = useApi('/api/agents');
+  const teams = useMemo(
+    () => (Array.isArray(agents) ? agents.filter((a) => a.role === 'team') : []),
+    [agents],
+  );
+
+  const [teamId, setTeamId] = useState('');
+  const [state, setState] = useState({ loading: false, error: null, data: null });
+
+  // Default to the first team once the list arrives; never override a choice.
+  useEffect(() => {
+    if (!teamId && teams.length > 0) setTeamId(teams[0].id);
+  }, [teams, teamId]);
+
+  const load = useCallback(async () => {
+    if (!teamId) return;
+    setState((s) => ({ ...s, loading: true, error: null }));
+    try {
+      const data = await apiCall('GET', `/api/teams/${encodeURIComponent(teamId)}/tickets`);
+      setState({ loading: false, error: null, data });
+    } catch (err) {
+      setState({ loading: false, error: err.message || 'Failed to load', data: null });
+    }
+  }, [teamId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  // Hooks must run before any early return, so the portal is built here and
+  // simply not mounted while the page renders its empty state.
+  const headerAction = usePageActions(
+    <button
+      onClick={load}
+      disabled={state.loading || !teamId}
+      title="Re-run the reconciler sweep"
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 6, background: 'none',
+        border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+        padding: '4px 10px', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+        color: 'var(--eb-text-primary)', cursor: state.loading || !teamId ? 'default' : 'pointer',
+      }}
+    >
+      <RefreshCw size={13} style={state.loading ? { animation: 'spin 1s linear infinite' } : undefined} />
+      Refresh
+    </button>,
+  );
+
+  const data = state.data;
+  const summary = boardSummary(data);
+  const lanes = useMemo(() => groupIntoLanes(data && data.tickets), [data]);
+  const rollups = useMemo(() => epicRollups(data && data.tickets), [data]);
+
+  return (
+    <>
+      {headerAction}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+        {/* Title comes from the Shell header (#1847), so the page leads with the
+            one-line description plus its "?". */}
+        <p style={{
+          margin: 0, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+          fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
+        }}>
+          {PAGE_DESCRIPTION}
+          <PageHelpButton
+            label="What the board shows"
+            size={14}
+            section={FLOW_CONTROL_HELP_SECTIONS.page}
+            style={{ padding: 0, flexShrink: 0 }}
+          />
+        </p>
+
+        {teams.length === 0 ? (
+          <Banner icon={Info}>
+            No Agent Team exists yet. The board reads one team&apos;s ticket ledger, so create a team
+            first — the Flows page is where a team&apos;s process is authored.
+          </Banner>
+        ) : (
+          <>
+            <TeamPicker teams={teams} value={teamId} onChange={setTeamId} />
+
+            {data && data.maintenance && (
+              <Banner icon={Info}>Maintenance mode is active — the reconciler sweep is paused.</Banner>
+            )}
+            {summary.noRepos && (
+              <Banner icon={Info}>
+                No GitHub repository is bound to this team&apos;s environment, so there is nothing to reconcile.
+              </Banner>
+            )}
+            {summary.errors.length > 0 && (
+              <Banner icon={AlertTriangle}>
+                Partial sweep — {summary.errors.length} error(s): {summary.errors.join('; ')}
+              </Banner>
+            )}
+            {state.error && <Banner icon={AlertTriangle} tone="error">{state.error}</Banner>}
+
+            {state.loading && !data && (
+              <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Reconciling…</p>
+            )}
+
+            {data && !state.error && (
+              <>
+                <SummaryRow summary={summary} />
+                {rollups.length > 0 && <EpicRollups rollups={rollups} />}
+                {summary.total === 0 && !data.maintenance && !summary.noRepos ? (
+                  <Banner icon={CheckCircle2} tone="ok">
+                    No open work items — nothing is in flight for this team.
+                  </Banner>
+                ) : (
+                  <Board lanes={lanes} />
+                )}
+                <p style={{ margin: 0, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-tertiary, var(--eb-text-secondary))' }}>
+                  Swept {summary.swept ?? 0} open item(s) · <WhenCell iso={summary.generatedAt} />
+                </p>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+/* ── team picker ───────────────────────────────────────────────────── */
+
+function TeamPicker({ teams, value, onChange }) {
+  return (
+    <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)' }}>
+      <span style={{ color: 'var(--eb-text-secondary)' }}>Agent Team</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-bg-elevated)',
+          border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+          color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+        }}
+      >
+        {teams.map((t) => <option key={t.id} value={t.id}>{t.name || t.id}</option>)}
+      </select>
+    </label>
+  );
+}
+
+/* ── header counts ─────────────────────────────────────────────────── */
+
+function SummaryRow({ summary }) {
+  const chips = [
+    { label: 'in flight', value: summary.total },
+    { label: 'blocked', value: summary.blocked, warn: summary.blocked > 0 },
+    { label: 'need a human', value: summary.needsHuman },
+    { label: 'done', value: summary.done },
+  ];
+  return (
+    <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+      {chips.map((c) => (
+        <span
+          key={c.label}
+          style={{
+            fontSize: 'var(--eb-text-xs)', padding: '3px 8px', borderRadius: 'var(--eb-radius-sm)',
+            background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+            color: c.warn ? 'var(--eb-status-warning, #d97706)' : 'var(--eb-text-secondary)',
+          }}
+        >
+          <strong style={{ color: 'var(--eb-text-primary)' }}>{c.value}</strong> {c.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/* ── cross-lane epic roll-up ───────────────────────────────────────── */
+
+function EpicRollups({ rollups }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+        <h2 style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 600 }}>
+          Epics
+        </h2>
+        <PageHelpButton
+          label="How the roll-up counts"
+          size={13}
+          section={FLOW_CONTROL_HELP_SECTIONS.epics}
+          style={{ padding: 0, flexShrink: 0 }}
+        />
+      </div>
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+        {rollups.map((r) => (
+          <span
+            key={r.epicId}
+            style={{
+              fontSize: 'var(--eb-text-xs)', padding: '4px 10px', borderRadius: 'var(--eb-radius-md)',
+              background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+              color: 'var(--eb-text-secondary)',
+            }}
+          >
+            <strong style={{ color: 'var(--eb-text-primary)' }}>Epic #{r.epicId}</strong>: {rollupSummary(r)}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── the board ─────────────────────────────────────────────────────── */
+
+// One column per lifecycle stage, horizontally scrollable. Empty columns are
+// kept on purpose: where work is NOT is as informative as where it is, and it
+// is what makes the board a board rather than a filtered list.
+function Board({ lanes }) {
+  return (
+    <div style={{ display: 'flex', gap: 'var(--eb-space-3)', overflowX: 'auto', paddingBottom: 'var(--eb-space-2)' }}>
+      {lanes.map((lane) => (
+        <section
+          key={lane.state}
+          style={{
+            flex: '0 0 260px', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+            background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-3)',
+          }}
+        >
+          <header style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--eb-space-2)' }}>
+            <h3 style={{ margin: 0, fontSize: 'var(--eb-text-sm)', fontWeight: 600, color: 'var(--eb-text-primary)' }}>
+              {lane.label}
+            </h3>
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+              {lane.count}
+              {lane.blocked > 0 && <> · <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>{lane.blocked} blocked</span></>}
+            </span>
+            {lane.state === 'backlog' && (
+              <PageHelpButton
+                label="What the stages mean"
+                size={12}
+                section={FLOW_CONTROL_HELP_SECTIONS.states}
+                style={{ padding: 0, flexShrink: 0, marginLeft: 'auto' }}
+              />
+            )}
+          </header>
+          {lane.count === 0
+            ? <p style={{ margin: 0, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>—</p>
+            : lane.tickets.map((c) => <TicketCard key={c.ticketId} card={c} />)}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function TicketCard({ card }) {
+  return (
+    <article
+      style={{
+        background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+        borderLeft: `3px solid ${card.blocker ? card.color : 'var(--eb-border-default)'}`,
+        borderRadius: 'var(--eb-radius-sm)', padding: 'var(--eb-space-2)',
+        display: 'flex', flexDirection: 'column', gap: 4,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, fontSize: 'var(--eb-text-xs)' }}>
+        <span style={{ fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-secondary)' }}>{card.ref}</span>
+        {card.age && <span style={{ marginLeft: 'auto', color: 'var(--eb-text-secondary)' }} title="Age in this state">{card.age}</span>}
+      </div>
+
+      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', lineHeight: 1.35 }}>
+        {card.title}
+      </div>
+
+      {card.blocker && (
+        <div title={card.reasonDetail || card.blockerBlurb || ''} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{
+            fontSize: 'var(--eb-text-xs)', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
+            border: `1px solid ${card.color}`, color: card.color,
+          }}>
+            {card.blockerLabel}
+          </span>
+          {card.needsHuman && (
+            <span title="Waiting on a person" style={{ display: 'inline-flex', color: 'var(--eb-text-secondary)' }}>
+              <UserRound size={12} />
+            </span>
+          )}
+        </div>
+      )}
+
+      {card.owner && (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }} title="Owning agent">
+          <code style={{ fontFamily: 'var(--eb-font-mono)' }}>{card.owner}</code>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)' }}>
+        {card.issueUrl && <DeepLink href={card.issueUrl}>issue</DeepLink>}
+        {card.prUrl && <DeepLink href={card.prUrl}>{card.prNumber != null ? `PR #${card.prNumber}` : 'PR'}</DeepLink>}
+      </div>
+    </article>
+  );
+}
+
+function DeepLink({ href, children }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: 'var(--eb-accent-primary)', textDecoration: 'none' }}
+    >
+      {children}<ExternalLink size={10} />
+    </a>
+  );
+}
+
+/* ── banner ────────────────────────────────────────────────────────── */
+
+function Banner({ icon: Icon, tone, children }) {
+  const color = tone === 'error'
+    ? 'var(--eb-status-error, #dc2626)'
+    : tone === 'ok'
+      ? 'var(--eb-status-success, #16a34a)'
+      : 'var(--eb-text-secondary)';
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+      padding: 'var(--eb-space-3)', background: 'var(--eb-bg-surface)',
+      border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+      fontSize: 'var(--eb-text-sm)', color,
+    }}>
+      <Icon size={15} style={{ flexShrink: 0, marginTop: 2 }} />
+      <div style={{ color: 'var(--eb-text-primary)' }}>{children}</div>
+    </div>
+  );
+}

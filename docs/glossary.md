@@ -16,7 +16,7 @@ newcomer misreads at least one of them.
 
 | Word | Meaning A | Meaning B |
 |---|---|---|
-| **Team** | **Team** (human) — the tenant that owns resources and groups *people*. Managed on the **Access** page. | **Agent Team** — a squad of *agents* working one repository (agent `role: team` + its members). Created by the **Team-Setup wizard**. |
+| **Team** | **Access scope** — the older, coarser tenant every resource is *stamped* with. A System Admin re-assigns it on **Administration → Resources**; no new one can be minted. | **Agent Team** — a squad of *agents* working one repository (agent `role: team` + its members), created by the **Team-Setup wizard**. This is what a person is given access to, and what **Share…** shares. |
 | **Orchestrator** | **Orchestrator** (service) — the control-plane container that spawns and supervises every agent container. There is exactly one. | **Orchestrator** (agent role) — an agent bound to a Briefing-Pack directory that spawns one `bp-instance` per pack. |
 | **Memory** | **Memory** (per agent) — the private files an agent reads and writes about *its own* work and *its* user. Never shared. | **Knowledge** (per team) — the curated, shared, searchable knowledge base a whole team draws on. |
 | **Skill** | **Skill** (the files) — a folder of domain know-how in the skill pool. | **Skill grant** (the assignment) — which agent construct is actually allowed to use it. The grant lives on the *team agent*, never on a Working Environment. |
@@ -199,8 +199,10 @@ partition the canvas into bands and give the layout a readable left-to-right ord
 
 ### Draft
 An editable process that exists **before** any agents are created. Draw it, iterate on
-it, then *materialize* it into a live team. You can also go the other way: **Edit as
-draft** on a live team exports it back into an editable draft.
+it, then use **Create team…** to turn it into a live team. You can also go the other
+way: **Edit as draft** on a live team exports it back into an editable draft. Creating a
+team does not consume the draft — the design stays reusable, and editing it afterwards
+does not change the team it produced.
 
 ### Process template / bundle
 A portable, git-committable JSON export of a whole process — roles with their prompts,
@@ -209,18 +211,28 @@ with the product (`core-sdlc`, `extended-sdlc`); you can export your own and sha
 
 *Read more:* [process-template-format.md](process-template-format.md)
 
-### Materialize
+### Create team (formerly *Materialize*)
 Turn a draft or template into real agents: creates the team agent and one member per
-role with its prompt and triggers — in one transaction that rolls back on failure. A
-checkbox on the launch step, **Materialize agents now**, decides how far each member is
+role with its prompt and triggers — in one transaction that rolls back on failure.
+**Create team…** is the accent-coloured button set apart at the end of the draft
+toolbar, the item in the Flows rail context menu, and the title of the dialog both
+open; the launch step's own submit button has always said *Create team*. It was called
+**Materialize** until #2053, which is still the wording the tooltip carries so anyone
+who learned the old word can find it.
+
+A checkbox on the launch step, **Provision agents now**, decides how far each member is
 taken: ticked, every member is provisioned immediately (Matrix identity, repository
 clone, running container) and gets its DM room; unticked, the members are laid out as
 **stubs** — config and triggers only, nothing cloned and nothing running — and each is
 provisioned when you enable it. The Team-Setup wizard ticks it by default; the canvas'
-Materialize dialog leaves it off, because a process can have dozens of members.
-The word also names the per-member action (#1957): a stub is listed in Agent Chat under
-its team's **Not materialized yet** section, and its **Materialize** entry runs exactly
-the provisioning the removed Agents page's **Activate** used to do (#1930).
+Create-team dialog leaves it off, because a process can have dozens of members.
+
+### Materialize (a member)
+The word survives for the **per-member** act, which is a different one (#1957): a stub
+is listed in Agent Chat under its team's **Not materialized yet** section, and its
+**Materialize** entry runs exactly the provisioning the removed Agents page's
+**Activate** used to do (#1930). #2053 renamed the design → team step and deliberately
+left this one alone — different surface, different act.
 The same choice is offered for a single member added to a live team (#1958): Agent Chat's
 **Add member…** carries its own **Materialize now** checkbox — ticked by default here,
 because one member is not dozens — so a stub can also be created long after its team was.
@@ -230,11 +242,15 @@ because one member is not dozens — so a stub can also be created long after it
 ## People, access, credentials
 
 ### Team (human)
-The tenant. Every agent, Working Environment and credential belongs to exactly one Team.
-Teams scope who can see and manage what. Roles: **System Admin** (global),
-**Team Admin**, **Team Member**.
+The tenant. Every agent, Working Environment and credential belongs to exactly one
+tenant, and it is the tenant that scopes who can see and manage what. Roles:
+**System Admin** (global), **Team Admin**, **Team Member** — the latter two being
+memberships in an **Agent Team** since epic #2076, which is what makes sharing
+self-service.
 
-*Where you meet it:* the **Access** page.
+*Where you meet it:* **Share…** on a team in the **Agent Chat** (who may see it),
+and **Administration** (`/users`) for the platform-wide view — the former
+**Access** page was dissolved into it by #2085.
 *Read more:* [teams-data-model.md](teams-data-model.md) · [multi-user-concept.md](multi-user-concept.md)
 
 ### Model Provider

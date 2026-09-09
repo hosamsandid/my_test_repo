@@ -116,9 +116,13 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // The number therefore now means "docs corpus + the biggest single page
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
-// **`/quickstart`** (the Create & Quickstart topic plus its `seeAlso`
-// neighbours) at 284 200 of 340 000 — 83.6% used, 55 800 left — against
-// 322 243 (94.8%) for the all-topics fold route-scoping replaced. #1930 moved
+// **`/quickstart`** (the `create.md` topic plus its `seeAlso` neighbours) at
+// 315 396 of 340 000 — 92.8% used, 24 604 left — against
+// 322 243 (94.8%) for the all-topics fold route-scoping replaced. (#2136's
+// *Global providers* chapter in `models.md` — the `/models` topic, which
+// `create.md` names among its `seeAlso` — added the last +3 012 to this crown;
+// #1459's work-plane bullet in `access-users.md` had added +319 before it.)
+// #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
 // too, and `create.md` (which claims `/create` and `/quickstart`) links to
@@ -144,13 +148,97 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // carried have to keep being answerable: +249 in `create.md` (which IS the
 // crown-holding context's topic, so it lands in full) for the "where the Grow
 // link went" reconciliation, and +348 in walkthrough/01-team-setup.md, which
-// lands on EVERY context — worth
+// lands on EVERY context. #2052 then gave a standalone assistant a real
+// **Convert into a team…** action, which voided chapter 2's documented dead end
+// ("growing creates a new team, it does not convert this one"): +2 064 on top of
+// 284 200, and BOTH halves land in full — +1 229 in `create.md`, the
+// crown-holding context's own topic, and +835 in `agent-chat.md`, which that
+// topic names as a `seeAlso` neighbour and which is where the action actually
+// lives (the row menu). The review of #2052 then caught the same dead end still
+// asserted in walkthrough/01-team-setup.md ("growing creates a *new* team rather
+// than converting this assistant"), so fixing it to name both grow paths added a
+// further +110, and — being in CORPUS_FILES — that lands on EVERY context, taking
+// the crown to 286 374 (still 84.2%). Documenting a new action in the page topic
+// that hosts it is therefore never free for this context; it is still the right home — worth
 // knowing WHY a Flows edit lands on the `/quickstart` figure at all: `create.md`
 // lists `/flows` among its `seeAlso`, so the crown-holding neighbourhood
 // contains the Flows topic even though the crown is not on `/flows`. Its other
 // docs edit (`docs/process-template-format.md`) costs nothing here, that file
-// not being in CORPUS_FILES. Re-measure rather than trust this comment —
-// measureWorstCaseSystemPrompt() sweeps every context and returns which one
+// not being in CORPUS_FILES. #2053 then renamed the design → live-team action
+// from *Materialize* to **Create team…** everywhere a user reads it, rewriting
+// `create.md` (the crown context's own topic), `flows.md` (its `seeAlso`
+// neighbour, so it lands here too) and the every-context `walkthrough/04-flows.md`
+// + `glossary.md`; re-measured on the merge with #2052's #2060 walkthrough fix
+// already in, that took the crown from 286 374 to **288 483** (84.8%, +2 109 —
+// stated as one total measured together rather than a per-file sum, since all four
+// grow the same crown). #2057 then made a direct hand-off read as
+// a consumer on the two read-only wiring surfaces, which voided `agent-chat.md`'s
+// `## Outcomes` claim that "the label is what wakes the next agent" (the same
+// claim the panel was making): +895 for the two-mechanism table, and it lands in
+// full because `create.md` names `/chats` as a `seeAlso` neighbour — 289 378 (85.1%).
+// #2065 then gave a human chat message a named badge and a viewer-dependent side,
+// which needed a chapter `agent-chat.md` had no equivalent of (who wrote a message,
+// why badge and side answer different questions, and what the neutral icon on
+// un-attributable history means): +2 572, landing in full for the same `seeAlso`
+// reason — **291 950** (85.9%). #2066 then replaced the manual **Sync all agents** button with an offer the
+// environment save makes, which raised the crown to **296 639** (87.2%, +4 689):
+// worth noting because the ticket only *removed* a control, and yet it is the
+// biggest single move in this paragraph. Two reasons, and the second is the
+// durable one. The topic had to grow (+3 848) to carry the three change classes,
+// the D1 safety rule and the removal warning — copy nothing on the form states
+// any more. And `docs/working-environments.md` grew (+1 033) which lands on
+// EVERY context, `/quickstart` included, because it is a `CORPUS_FILES` doc; on
+// top of that `/quickstart` sees the topic growth in full too, since `create.md`
+// names `/environments` as a `seeAlso` neighbour — so both halves hit the same
+// crown and the delta on `/environments` itself is identical. #2067 then made a repository attachable to a single
+// agent, documented in the two places that own the concept: `agent-chat.md` (the
+// surfaces live there, so it lands on this crown in full for that same `seeAlso`
+// reason) and the every-context `docs/working-environments.md` + `admin-console.md`.
+// Measured as one total on the merge rather than a per-file or per-PR sum, since
+// #2065 and #2067 both grow the same crown: **301 270** (88.6%, 38 730 left — the three
+// individual deltas +2 572, +4 689 and +4 631 sum to the measurement exactly, which
+// is how you know every branch's own number was right and only the chain was wrong). Two things worth
+// carrying forward. A feature whose surfaces sit on `/chats` pays this crown twice
+// over — once through the `seeAlso` link and once through whichever CORPUS_FILES
+// reference doc has to agree with it. And when two PRs append to THIS paragraph in
+// parallel, the auto-merge keeps both entries and leaves one figure with two
+// successors: re-chain them in ticket order and re-measure, rather than trusting
+// either branch's number.
+// #2068 then made flow drafts private-by-default and shareable with equal rights,
+// which needed an eleventh `flows.md` chapter (*Sharing a draft*) — the panel is
+// where the irreversibility of sharing has to be readable. `create.md` names
+// `/flows` among its `seeAlso`, so that chapter lands on this crown in full: +2 673.
+// Re-measured on the merge, not summed on a stale base: main's post-#2067 crown of
+// **301 270** → **303 943** (89.4%).
+// The whole #2068 delta is topic-side; nothing in `CORPUS_FILES` changed here, so
+// #2068 itself moved no OTHER context.
+// #2081 (self-service team creation) then corrected `access-users.md` — creating
+// a scope is retired, and a team can never be left without an admin — plus one
+// paragraph in `users.md`: +1 082 on main's post-#2102/#1459 crown of 309 444 →
+// **310 526** (91.3%). Worth knowing WHY an Access-page edit lands on the
+// `/chats` crown at all: `agent-chat.md` names `/teams` among its `seeAlso`, so
+// the crown-holding neighbourhood contains the Access topic even though the
+// crown is not on `/teams` (whose own context is 270 418). The `users.md` half
+// costs this crown nothing — `/users` is not in that neighbourhood — and nothing
+// in `CORPUS_FILES` changed, so no other context moved either.
+// #2085 (epic #2076 P6, D10) then dissolved the Access page: `access-users.md` was
+// folded into `users.md`, `/teams` became a redirect, and the seven topics that
+// named *Access* in their `seeAlso` were re-pointed at `/users` — except
+// `agent-chat.md` and `team-setup.md`, where the link was DROPPED rather than
+// re-pointed, because the successor surface for what it promised (adding somebody
+// to a team) is the **Share…** dialog on the reader's own page and Administration
+// is System-Admin-only, so re-pointing would have linked an ordinary reader at a
+// page they cannot open. That is what moved the crown, and it moved it DOWN:
+// `/chats` lost its `/teams` neighbour outright and fell out of first place, so
+// the worst context is **`/quickstart`** again at **312 384** of 340 000 (91.9%,
+// 27 616 left) — down from `/chats`' 314 511, even though this ticket's own
+// `admin-console.md` + `glossary.md` rewrites (+1 038) land on EVERY context. The merged `users.md` is ~9 000
+// characters bigger than either half was, but it now lands only on contexts that
+// still name `/users`, none of which was near the crown. The durable point is the
+// same one #1996 recorded from the other direction: a `seeAlso` edit moves the
+// worst case more than the topic edit does, so read the `context` the measurement
+// hands back and never assume the crown stayed where you left it.
+// Re-measure rather than trust this comment —
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.
 //

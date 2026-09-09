@@ -4,7 +4,8 @@ import {
   Users, Zap, Sparkles, Server,
   ChevronLeft, ChevronRight, ChevronDown,
   Boxes, Key, KeyRound, MessageCircle, Github, GitBranch,
-  Rocket, Users2, Wand2, Building2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle,
+  Rocket, Users2, Wand2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle,
+  LayoutDashboard,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
@@ -21,6 +22,7 @@ import BrandMark from './BrandMark';
 import AccountMenu from './AccountMenu';
 import SettingsModal from './SettingsModal';
 import TranscriptionOverlay from './TranscriptionOverlay';
+import FlowCopilotIndicator from './FlowCopilotIndicator';
 import HelperChatPanel from './HelperChatPanel';
 import { useHelperChat } from '../context/HelperChatContext';
 import { useModelSelection } from '../context/ModelSelectionContext';
@@ -135,6 +137,9 @@ const NAV_GROUPS = [
     // "build a team, then fill it in" reading order — Flows first, then the
     // templates, skills and knowledge a team draws on.
     { path: '/flows',        label: 'Flows',               Icon: GitBranch },
+    // Flows is where a process is AUTHORED; Flow Control (#2116) is where the
+    // same flow is WATCHED running, so it reads directly after it.
+    { path: '/flow-control', label: 'Flow Control',        Icon: LayoutDashboard },
     { path: '/role-templates', label: 'Agent Templates',   Icon: UserCog, adminOnly: true },
     { path: '/skills',       label: 'Skills',              Icon: Zap },
     { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },
@@ -155,8 +160,14 @@ const NAV_GROUPS = [
     { path: '/github-events', label: 'GitHub Event Log',     Icon: History },
   ]},
   { key: 'administration', section: 'Administration', items: [
-    { path: '/users',            label: 'Users',            Icon: UserCog,   adminOnly: true, subtitle: 'Human user accounts' },
-    { path: '/teams',            label: 'Access',           Icon: Building2, subtitle: 'Teams, roles & assignments' },
+    // #2085 (epic #2076 P6, D10): the *Access* entry is DISSOLVED, not renamed.
+    // Sharing is decentralised — the Share dialog (#2082) is where a team's
+    // members are managed now — so `/teams` and its page are gone and the two
+    // things only a System Admin still needs (the all-teams cleanup view and
+    // the tiered resource ownership) are tabs on this one entry, which becomes
+    // **Administration**. It keeps `adminOnly: true`, which is what makes the
+    // tabs System-Admin-only without a second gate.
+    { path: '/users',            label: 'Administration',   Icon: UserCog,   adminOnly: true, subtitle: 'Users, teams & resource ownership' },
     { path: '/token-usage',      label: 'Token Usage',      Icon: BarChart3, adminOnly: true },
     { path: '/plugins',          label: 'Plugins',          Icon: Puzzle,    adminOnly: true },
     { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench,    adminOnly: true },
@@ -690,6 +701,11 @@ export default function Shell({ children }) {
       {/* Persistent Meeting Note-Taker overlay (#1296) — portaled to body, so
           it floats over every page while a meeting transcription runs. */}
       <TranscriptionOverlay />
+
+      {/* Running Flow Copilot turn (#2087) — same shape as the overlay above:
+          a turn now survives leaving /flows, so it needs a card that says so
+          on every route, names the flow, and offers a jump + Stop. */}
+      <FlowCopilotIndicator />
 
       {/* Helper Chat panel (#1735) — a non-blocking slide-in help assistant,
           mounted once here so it is available on every route without a backdrop. */}

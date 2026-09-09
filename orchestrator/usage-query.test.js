@@ -109,3 +109,62 @@ test('AC4: serialised output carries no dollar/cost figures', () => {
     }
   }
 });
+
+// ── #2137: the agent-facing grouping allowlist ──────────────────────────────
+//
+// The console's per-user breakdown is System-Admin-only (#801). The agent CLI's
+// own whitelist is an affordance, not a boundary — an agent can call the
+// internal endpoint directly — so the refusal has to live here.
+
+const { AGENT_GROUP_BY, normalizeAgentGroupBy } = require('./usage-query');
+
+test('#2137: an agent may not group its team\'s usage per human', () => {
+  const attributed = [
+    { agentId: 'dev-1', teamId: 'team-a', ts: '2026-09-01T09:00:00Z',
+      tokens: { input: 1, output: 0, cacheCreationInput: 0, cacheReadInput: 0 },
+      attribution: { userId: 'u-ada', kind: 'requesting-user' } },
+    { agentId: 'rev-1', teamId: 'team-a', ts: '2026-09-01T10:00:00Z',
+      tokens: { input: 2, output: 0, cacheCreationInput: 0, cacheReadInput: 0 },
+      attribution: { userId: 'u-bob', kind: 'agent-owner' } },
+  ];
+  for (const scope of ['self', 'team']) {
+    const q = buildUsageQuery(attributed, { scope, agentId: 'dev-1', teamId: 'team-a', groupBy: 'user' });
+    // Coerced to the default and ECHOED, so the caller sees what it got rather
+    // than reading agent keys as if they were people.
+    assert.equal(q.groupBy, 'agent', scope);
+    assert.ok(!q.groups.some((g) => g.key === 'u-ada' || g.key === 'u-bob'),
+      `a user key reached an agent under scope=${scope}`);
+    // No account id anywhere in the serialised answer.
+    assert.ok(!JSON.stringify(q).includes('u-ada'), scope);
+  }
+});
+
+test('#2137: an agent MAY group by provider tier — no personal data, and it aids budget awareness', () => {
+  const tiered = [
+    { agentId: 'dev-1', teamId: 'team-a', ts: '2026-09-01T09:00:00Z', providerTier: 'global',
+      tokens: { input: 5, output: 0, cacheCreationInput: 0, cacheReadInput: 0 } },
+    { agentId: 'dev-1', teamId: 'team-a', ts: '2026-09-01T10:00:00Z', providerTier: 'team',
+      tokens: { input: 7, output: 0, cacheCreationInput: 0, cacheReadInput: 0 } },
+  ];
+  const q = buildUsageQuery(tiered, { scope: 'self', agentId: 'dev-1', groupBy: 'providerTier' });
+  assert.equal(q.groupBy, 'providerTier');
+  assert.deepEqual(q.groups.map((g) => g.key).sort(), ['global', 'team']);
+});
+
+test('#2137: the allowlist is a strict subset of the aggregator groupings', () => {
+  const { GROUP_BY } = require('./usage-summary');
+  for (const g of AGENT_GROUP_BY) {
+    assert.ok(GROUP_BY.has(g), `${g} is offered to agents but unknown to the aggregator`);
+  }
+  assert.ok(AGENT_GROUP_BY.size < GROUP_BY.size, 'the allowlist must withhold something');
+  assert.ok(!AGENT_GROUP_BY.has('user'));
+  // Every pre-#2137 grouping is still reachable — no regression for the CLI.
+  for (const g of ['agent', 'team', 'model', 'provider', 'day']) assert.ok(AGENT_GROUP_BY.has(g), g);
+});
+
+test('#2137: normalizeAgentGroupBy returns undefined for anything withheld or unknown', () => {
+  assert.equal(normalizeAgentGroupBy('day'), 'day');
+  for (const bad of ['user', 'nonsense', '', null, undefined, 'USER']) {
+    assert.equal(normalizeAgentGroupBy(bad), undefined, String(bad));
+  }
+});

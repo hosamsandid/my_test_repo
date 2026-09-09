@@ -34,14 +34,26 @@ module.exports = async () => {
   // cookie into storageState. HttpOnly cookies are captured by the request
   // context's cookie jar, so the browser contexts inherit an authenticated
   // session with no UI login per spec.
+  //
+  // Deliberately UNCHANGED by #2059 (AC2): same endpoint, same credentials. It
+  // now resolves to a real user record — the one the orchestrator seeded from
+  // those same credentials at first boot — instead of the recordless env
+  // principal. The readiness wait that makes this safe lives in
+  // `scripts/post-up-config.sh`, which stack-up.sh runs before we get here.
   console.log('[global-setup] logging in to persist storageState …');
   const ctx = await request.newContext({ baseURL: BASE_URL });
   const res = await ctx.post('/api/auth/login', {
     data: { username: ADMIN_USERNAME, password: ADMIN_PASSWORD },
   });
   if (!res.ok()) {
+    // 503 `user_store_unavailable` is its own diagnosis since #2059: the login
+    // was not rejected, the user store did not answer — so the seed has not
+    // landed (or the orchestrator is down), and nothing here is retried.
+    const hint = res.status() === 503
+      ? ' — the user store did not answer; check GET /api/auth/ready and the orchestrator log'
+      : '';
     throw new Error(
-      `[global-setup] login failed: HTTP ${res.status()} ${await res.text()}`,
+      `[global-setup] login failed: HTTP ${res.status()} ${await res.text()}${hint}`,
     );
   }
   fs.mkdirSync(AUTH_DIR, { recursive: true });

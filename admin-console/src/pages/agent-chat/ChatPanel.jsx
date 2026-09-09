@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { Loader2, RefreshCw, RotateCcw, Gauge, Trash2 } from 'lucide-react';
-import { apiCall } from '../../hooks/useApi';
+import { apiCall, useApi } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import { useAuth } from '../../auth/AuthContext';
 import { useMaintenanceMode } from '../../context/MaintenanceModeContext';
@@ -35,6 +35,7 @@ import { maintenanceBannerText } from './maintenance-banner';
 import { providerWarningText } from '../provider-health-view.js';
 import { RESUME_MESSAGE } from './resume-session';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
+import { AUTHOR_FIELD, authorStampFor, buildAuthorDirectory } from './message-author.js';
 import {
   resolveInitialFontSize, loadStoredFontSize, FONT_SIZE_CHANGED_EVENT,
 } from './chat-font-size.js';
@@ -209,6 +210,23 @@ export default function ChatPanel({
   const { user } = useAuth();
   const username = user?.username;
   const hasServerRecord = user != null && user.userId != null;
+
+  /* ─── Human-message attribution (#2065) ──────────────────────────────
+   * `viewer` decides which side a bubble sits on ("is this mine?"), the
+   * directory resolves the author's *current* display name for the badge
+   * ("who wrote this?"). Both are memoized to stable values so a bubble's
+   * props do not change on an unrelated re-render and `React.memo` on
+   * `Message` keeps holding (AC20) — and the directory is fetched once per
+   * transcript, never per row.
+   */
+  const viewer = useMemo(
+    () => ({ userId: user?.userId ?? null, username: username ?? null }),
+    [user?.userId, username],
+  );
+  // A failed/forbidden directory read is not an error worth showing: the badge
+  // then falls back to the login subject stamped on the message itself.
+  const { data: directoryUsers } = useApi('/api/admin/users');
+  const authorDirectory = useMemo(() => buildAuthorDirectory(directoryUsers), [directoryUsers]);
   const [fontSize, setFontSize] = useState(() => resolveInitialFontSize({
     sessionValue: user?.chatFontSize,
     storedValue: loadStoredFontSize(username),
@@ -301,6 +319,7 @@ export default function ChatPanel({
             'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
             [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
             [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
+            [AUTHOR_FIELD]:        ev.content?.[AUTHOR_FIELD] || null,
           }));
         setMessages(seed);
         // `end` (in dir=b) is the older boundary — use it as `from=` for the
@@ -350,6 +369,7 @@ export default function ChatPanel({
           'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
           [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
           [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
+          [AUTHOR_FIELD]:        ev.content?.[AUTHOR_FIELD] || null,
         }));
 
       const nextFrom = typeof data?.end === 'string' ? data.end : null;
@@ -398,6 +418,7 @@ export default function ChatPanel({
       'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
       [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
       [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
+      [AUTHOR_FIELD]:        ev.content?.[AUTHOR_FIELD] || null,
     };
 
     // A trigger-started run always posts this notice before invoking Claude
@@ -513,6 +534,7 @@ export default function ChatPanel({
             'io.aee.loop-record':  ev.content?.['io.aee.loop-record'] || null,
             [ASK_QUESTION_FIELD]:  ev.content?.[ASK_QUESTION_FIELD] || null,
             [ASK_ANSWER_FIELD]:    ev.content?.[ASK_ANSWER_FIELD] || null,
+            [AUTHOR_FIELD]:        ev.content?.[AUTHOR_FIELD] || null,
           }));
         setMessages(seed);
         const nextFrom = typeof data?.end === 'string' ? data.end : null;
@@ -896,6 +918,12 @@ export default function ChatPanel({
       // #1663) onto the optimistic stub so the answered-question state reflects
       // immediately, before the canonical event round-trips.
       ...(extraContent && typeof extraContent === 'object' ? extraContent : {}),
+      // Mirror the author stamp the server will apply (#2065), so the bubble
+      // keeps the same side and the same badge across the transition from stub
+      // to confirmed event — no jump, no flicker, no label change (AC18). The
+      // authoritative stamp is always the server's; this one never leaves the
+      // browser (the send payload carries only `body`/`extraContent`).
+      [AUTHOR_FIELD]: authorStampFor(viewer),
     };
     setMessages(prev => [...prev, optimistic]);
     setSending(true);
@@ -1094,6 +1122,8 @@ export default function ChatPanel({
           onAnswerQuestion={handleAnswerQuestion}
           questionAnswerable={qState?.answerable}
           questionAnswer={qState}
+          viewer={viewer}
+          authorDirectory={authorDirectory}
         />
       </div>
     );

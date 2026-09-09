@@ -19,8 +19,7 @@ The left sidebar is organised into task-based collapsible accordion groups (#159
 | **Model Providers** | `/models` | Register and test model providers; discover available models; set per-agent model overrides |
 | **MCP Servers** | `/mcp` | Manage the MCP server registry and credentials; the **Credential** column shows *required* for servers whose template uses `${credential}`, which the orchestrator substitutes from the Working Environment binding at seed time |
 | **Plugins** | `/plugins` | Install/uninstall governed capability plugins into the operator registry (System-Admin only; declared capabilities reviewed in plain language before the confirm). Each **installed** card also carries a team-assignment control (#1691) to grant/revoke the plugin for one or more teams directly — reuses the existing team activation path, applies immediately, and shows which teams already have it. The page's concept help (what a plugin is, install vs grant, permissions, plugins with their own UI, and a build-a-plugin deep dive) lives in the Help panel's "This page" face — the standalone `/plugin-system` page was removed in #1879 |
-| **Users** | `/users` | Dedicated full-page user management (#1844, System-Admin only): a sortable/filterable list of all human users with **Create** and **Edit** dialogs (edit display name, email and System-Admin status; the immutable `subject` is shown read-only), set/clear login password, and delete. Split out of the former slide-out on the **Access** page so users are managed end-to-end in one place |
-| **Access** | `/teams` | Manage human access scopes (**Teams**, the tenant): team CRUD, per-team roles, and assigning agents/environments to a team. User *records* now live on the dedicated **Users** page (#1844); this page links to it. Renamed from "Teams" to "Access & Users" (#1726) to avoid confusion with the *Agent Team* squad, then shortened to "Access" (#1910) once user records moved to the **Users** page; the route, API and internal entity stay `team` |
+| **Administration** | `/users` | The single System-Admin surface (#2085), three tabs. **Users** — human user records: a sortable/filterable list with **Create** and **Edit** dialogs (display name, email and System-Admin status; the immutable `subject` is shown read-only), set/clear login password, and delete. **All Teams** — the D5 clean-up view over every Agent Team on the platform (owner, member agents, people, Team Admins, enabled state, and a *no admin* marker), with delete; it manages no memberships, that being the **Share…** dialog's job since #2082. **Resources** — the tiered ownership of agents and Working Environments (D7/D12). The separate **Access** page (`/teams`) is **gone**, dissolved rather than renamed: `/teams` redirects here |
 | **Flows** | `/flows` | Design and run orchestration flow graphs: inspect live Teams, author Drafts, use Flow Copilot; BriefingPack flows (orchestrator-managed BP dependency graphs) are a niche secondary mode |
 
 ## Authentication (#276)
@@ -29,19 +28,23 @@ The entire console is served behind a login screen — no page or `/api/*` data
 endpoint is reachable without an active session. This is the minimal,
 SSO-ready auth foundation described in [docs/multi-user-concept.md](./multi-user-concept.md).
 
-**Login.** A single credential pair, read from environment variables so it can
-change without a redeploy:
+**Login.** A password is checked against the **user store** and nothing else
+(#2059). The environment pair below is no longer a credential the console
+accepts — it is the **seed** the orchestrator consumes at first boot to create
+the first System-Admin *user record*:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ADMIN_USERNAME` | `admin` | Console login username |
-| `ADMIN_PASSWORD` | `admin` | Console login password |
-| `AUTH_SESSION_SECRET` | derived from the credentials | Signs session cookies. When unset, a stable secret is derived from the credentials, so sessions survive a server restart and are auto-invalidated when the password changes. Set an explicit value to rotate sessions independently. |
+| `ADMIN_USERNAME` | `admin` | Subject of the first System-Admin record, seeded once on a stack with no user records |
+| `ADMIN_PASSWORD` | `admin` | Password written into that record at seeding; never read again afterwards |
+| `AUTH_SESSION_SECRET` | random, persisted | Signs session cookies. When unset, a random 32-byte key is generated once and persisted at `/workspace/auth/session-secret` (`0600`), so sessions survive a restart; if that volume is unwritable the key is process-random and a restart signs everybody out (fails safe). Set an explicit value to rotate every session deliberately. |
 | `AUTH_COOKIE_SECURE` | `false` | Set to `true` only when the console is served over HTTPS (adds the cookie's `Secure` attribute). |
+| `AUTH_ENABLED` | `false` | Single-user ⇄ multi-user mode (#1457). Off (the default) is **single-user compatibility**: whoever signs in is the operator, and the team scope filter is a no-op — an existing stack upgrades with no change in behaviour. `true` enforces multi-user scoping, so a caller sees only what their user record's team memberships allow. It gates *authorization* only; the login itself is unchanged in both modes. |
 
-> The defaults (`admin` / `admin`) are for first-boot local use only — change
-> them for any shared deployment. This is a placeholder until enterprise SSO
-> replaces the credential check.
+> The defaults (`admin` / `admin`) are for first-boot local use only — but change
+> them **on the Users page**: the seeded password lives in the record, so editing
+> `.env` and restarting no longer revokes it. This is a placeholder until
+> enterprise SSO replaces the credential check.
 
 **Session.** On successful login the server issues an HMAC-signed, stateless
 session token in an **HttpOnly, SameSite=Lax cookie** (`aee_session`, 7-day
@@ -52,52 +55,73 @@ clears the cookie and returns to the login screen; an expired session (any
 `401`) does the same automatically.
 
 **API surface** (all public — everything else under `/api` requires the cookie):
-- `POST /api/auth/login` — `{ username, password }` → sets the cookie, or `401` with an inline error.
+- `POST /api/auth/login` — `{ username, password }` → sets the cookie; `401` with an inline error on bad credentials, or `503` `user_store_unavailable` when the user store did not answer (the check is bounded by a 5 s timeout).
+- `GET /api/auth/ready` — `{ ready }` (`200`/`503`): whether the stack has a user record to sign in as. A bring-up polls this before its first login attempt, so a still-seeding stack is not mistaken for a bad password.
 - `GET /api/auth/session` — `{ authenticated, user }`.
 - `POST /api/auth/logout` — clears the cookie.
 
 **Per-user local passwords (#374, interim).** Human users created on the **Users**
 page (#1844) can be given a local password (Users → Edit → Login password),
-letting more than one person log in before SSO lands. Login then
-resolves in two steps: first the **user store** (match by `subject`, verify a
-salted **scrypt** hash held in the user record and never returned by any API),
-then the **env single-admin** credential. Key properties:
+letting more than one person log in before SSO lands. Login resolves in **one**
+step: the **user store** (match by `subject`, verify a salted **scrypt** hash held
+in the user record and never returned by any API). Key properties:
 
-- A per-user session's subject is the user's `subject`, so the audit trail (#305)
-  names the real person.
-- The env `ADMIN_USERNAME`/`ADMIN_PASSWORD` **always** works — the per-user check
-  is best-effort and calls the orchestrator's internal user store; if that store
-  is unreachable, login falls through to the env admin (no operator lock-out).
+- The first administrator is no exception. On a stack with zero user records the
+  orchestrator seeds one real System-Admin record from
+  `ADMIN_USERNAME`/`ADMIN_PASSWORD` — or, when `BOOTSTRAP_SYSTEM_ADMIN_SUBJECT`
+  is set, from that instead, seeding a **password-less** record for an SSO stack.
+  See [docs/teams-data-model.md](./teams-data-model.md).
+- Every session's subject is a real user record's `subject`, so the audit trail
+  (#305) names the real person.
+- There is **no env-credential fallback** (#2059). Two consequences are
+  deliberate and accepted: while the orchestrator — and with it the user store —
+  is unreachable **nobody can sign in** (login answers `503`, not `401`), and
+  recovering a lost identity is a **host-level** action on
+  `/workspace/users/index.json`, not a console login.
+- The last System Admin cannot be deleted or demoted (`409`, refused in the store
+  and mirrored as a disabled control on the Users page).
 - This is explicitly interim and is superseded by SSO (#307); there is no
   self-service signup, reset, policy, or MFA.
 
-**SSO swap-point.** The credential check lives in a single `verifyCredentials()`
-function in `admin-console/api/auth.js` (with the per-user store check alongside
-it in the login route). Swapping it for an OIDC/SAML token exchange (and adding
-the IdP callback route) requires no change to the session format, cookie
-handling, gate middleware, or the login UI/routing.
+**SSO swap-point.** The credential check lives in a single `verifyViaUserStore()`
+function in `admin-console/api/auth.js`. Swapping it for an OIDC/SAML token
+exchange (and adding the IdP callback route) requires no change to the session
+format, cookie handling, gate middleware, or the login UI/routing.
 
-## Access (#308, renamed #1726, #1910)
+## Administration (#308, renamed #1726/#1910, dissolved #2085)
 
-The **Access** page (`/teams`) is the UI for the human **Team** scope
-(the tenant) introduced by the teams data model (#299). It is distinct from the
-*Agent Team* squad created by the **Agent Team Wizard** — see
-[docs/teams-data-model.md](./teams-data-model.md). The section was renamed from
-"Teams" to "Access & Users" (#1726) because users kept confusing it with the
-*Agent Team* construct, and shortened to "Access" (#1910) once user records
-moved to their own **Users** page; both are UI-label renames only — the `/teams` route, the `/api/admin/{teams,…}`
-endpoints and the internal **Team** entity are unchanged.
+The **Administration** page (`/users`) is the one surface that exists only for a
+System Admin. It absorbed the former **Access** page (`/teams`) in #2085 (epic
+#2076 P6, D10): once sharing a team became self-service in the **Share…** dialog
+(#2082), the central Access page had nothing left that a team's own admins could
+not do, so it was **dissolved, not renamed** — `/teams` redirects to `/users`,
+which now carries three tabs (**Users / All Teams / Resources**). The route, the
+`/api/admin/{teams,…}` endpoints and the internal **Team** entity are unchanged;
+the earlier "Teams" → "Access & Users" (#1726) → "Access" (#1910) renames were
+UI-label-only and are what D10 declined to pay a third time.
+
+Note the two tenancies the tabs straddle. **All Teams** lists **Agent Teams** —
+a membership has pointed at one since epic #2076 P1, so that IS the team a
+person is given access to. **Resources** assigns the older, coarser **access
+scope** every resource is still stamped with; no new scope can be minted (#2081)
+and none can be deleted from the console any more, the two tenancies being
+collapsed into one by a later phase (`docs/decentralised-access-concept.md`
+A3.3).
 
 A System Admin can:
-- **Team CRUD** — create / edit / delete teams. The `default` team cannot be deleted.
-- **Manage Users** — a **Manage Users** button links to the dedicated **Users** page (`/users`, #1844) where human user records (keyed by a stable `subject` an SSO login will later map onto) are created, edited (display name / email / System-Admin), given a login password, and deleted. The former in-page "Manage users" slide-out was removed so there is a single place to manage users.
-- **Members & roles** — per team, add/remove human members and set their per-team role (**Team Admin** / **Team Member**). Membership is an upsert: re-adding a user updates their role.
-- **Resource ownership** — reassign any agent or Working Environment to a team via a per-row team selector. Agents reassign through `PUT /api/agents/:id { teamId }`, environments through `PUT /api/environments/:id { teamId }`; both validate the target team exists.
+- **Users** — human user records (keyed by a stable `subject` an SSO login will later map onto) are created, edited (display name / email / System-Admin), given a login password, and deleted.
+- **All Teams** — every Agent Team on the platform, including ones the caller is not a member of (D5). Delete runs the two cascades that already exist: the member agents go with the parent (#1960) and the memberships with the team (#2081), so the tab needs no endpoint of its own. It deliberately manages **no** memberships — a role dropdown here would be a second, differently-warned copy of an operation that can lock a team's own admins out.
+- **Resources** — reassign an agent (an Agent Team moves as one unit, its members inheriting) and re-tier a Working Environment. Scopes are **no longer created** (#2081, `POST /api/admin/teams` answers *410 Gone*) and no longer deleted from the console.
+  An agent reassigns through `PUT /api/agents/:id { teamId }`. A Working Environment does **not**: since #2083 it carries the same `{scope, teamId, assignedTeamIds}` tier a credential does, so the row sends the full ownership payload (`PUT /api/environments/:id { scope, … }`). A bare `{ teamId }` would normalize to `scope: 'team'` server-side — i.e. the pre-#2085 one-click selector silently **un-shared** a shared environment, which is the concrete reason the section was reworked rather than carried over.
 
 The page is built on the `/api/admin/{teams,users,memberships}` endpoints
 (proxied to the orchestrator's teams store). Per-role *enforcement* of these
-actions — and per-resource visibility — arrive with later tickets (#302/#304);
-today any authenticated operator can manage teams.
+actions — and per-resource visibility — landed with #302/#304 (`scope.js`), and
+**whether it applies at all is now the `AUTH_ENABLED` mode** (#1457): with the
+flag off (the default) every authenticated principal is the implicit System
+Admin and can manage every team, which is the single-user behaviour this stack
+has always had; with it on, `canManageTeam` narrows management to the caller's
+own `team-admin` memberships.
 
 ## Agent Teams — the missing-role suggestion was removed (#1959)
 
@@ -173,7 +197,7 @@ Each row shows the agent's Working Environment name below its display name. Insi
 
 Reorder the list by dragging the grip handle (⠿, visible on hover) to relocate an item in one gesture; keyboard users can reorder the focused item with `Alt+↑`/`Alt+↓`. Groups, standalone agents, and members within a group each reorder independently; a drag cannot move an item out of its own list. Order persists in `localStorage` (`agentChat.sidebarOrder`) and survives reload. Group and standalone-agent reorder require the **All agents** filter (the other groups/singles are hidden under a filter, so a move would be ambiguous); member-within-a-group reorder is additionally available under a **single-team** filter, since that view shows the team's complete ordered member set and writes the same order it would unfiltered (#1725).
 
-Manage agents in place, without the separate Agents page that used to own this (#1928; the page itself was removed in #1930). Open a row's context menu — the kebab revealed on hover, a right-click, or `Menu`/`Shift+F10` from the keyboard — for **Enable/Disable**, **Settings**, **Clone**, **Export (ZIP)**, **Save as template** and the confirmation-guarded **Reset to stub** / **Delete**; a team group header offers the team-wide **Enable/Disable** fan-out (with a partial-failure report), **Add member…**, **Team settings**, **Export team**, **Open in Flow Editor** and **Delete team** (the **Add `<role>` role** entries are gone — see *the missing-role suggestion was removed* above). The list-level **Import Agent** / **New Agent** actions sit in the Shell's page-action header like every other page's (#1956) — the rail **+** menu they replaced is gone, so neither is reachable from two places; **New Agent** hands over to the `/create` launcher, **Import Agent** opens the ZIP picker in one click and completes through the same import dialog, and the imported agent joins the list without a page reload (if the rail filter would hide it, the confirmation says so). Both are disabled with an honest reason for a caller who may not create agents, rather than hidden. The rail header row itself stays — it carries the filter, the disabled-agents opt-in and the list's "?" — and its empty state is now a text pointer at the header button instead of a competing call to action. Every action runs the dialog, confirmation and request the Agents page used to run — they are literally the same components, extracted into `pages/agent-lifecycle/` while both surfaces existed, which is what made removing the page a deletion rather than a rewrite. **Add member…** additionally opens a dialog and sends a materialization preference (#1958, see *Adding a member without materializing it* below); that was the one place the two surfaces deliberately differed, and it is now simply how adding a member works. An action you may not perform is shown inert with a reason rather than failing at the server. A **show disabled agents** toggle (off by default, remembered per user) additionally lists paused agents so they can be re-enabled from here; a disabled agent is marked as such and cannot be opened as a chat until it is enabled — its **Settings** entry still opens its configuration in the right rail, so it can be reconfigured while paused (#1929). The same menu also leads with a chat-only **Mark as unread** entry — it flips the row back to its unread indicator and, unlike the management actions below it, never depends on your permissions; it is greyed out rather than hidden when it does not apply (the row is already unread, or is disabled/offline and has no chat to open). It replaces the mail icon that used to appear on row hover, so the drag grip no longer shifts sideways when you hover a row (#1938). The menu closes with a **What these actions do…** entry that opens the Help panel at the agent-list chapter of the Agent Chat topic — a menu cannot host the shared "?" button, so the affordance is an entry; it is always enabled, since it changes nothing (#1972). A team created with **deferred materialization** (`materializeMembers: false`, #1955) no longer reads as empty here: each team group ends with a collapsed **Not materialized yet (N)** section listing its **stub** members — configuration and triggers only, no chat account, no workspace, no clone — with the count visible without expanding, and no section at all for a team that has none (#1957). A stub row is badged *Not initialised* (the removed Agents page's own word, kept so the two never read as two different states) with its own muted status dot, so it is never mistaken for a *paused* agent, and it cannot be opened as a chat because there is no chat account to open. Its menu offers **Materialize** in place of *Enable* — the same request the Agents page's **Activate** button used to send, so the resulting agent is indistinguishable from one materialized at team-create time; the row shows it working (a role with repositories clones them now) and moves up into the active members on success, without a reload. *Stub* and *paused* are different states: the show-disabled opt-in has no effect on this section. A stub whose team is disabled gets an inert **Materialize** with *enable the team first*, as does a caller who may not manage it.
+Manage agents in place, without the separate Agents page that used to own this (#1928; the page itself was removed in #1930). Open a row's context menu — the kebab revealed on hover, a right-click, or `Menu`/`Shift+F10` from the keyboard — for **Enable/Disable**, **Settings**, **Clone**, **Export (ZIP)**, **Save as template** and the confirmation-guarded **Reset to stub** / **Delete**; a team group header offers the team-wide **Enable/Disable** fan-out (with a partial-failure report), **Add member…**, **Team settings**, **Share…**, **Export team**, **Open in Flow Editor** and **Delete team** (the **Add `<role>` role** entries are gone — see *the missing-role suggestion was removed* above). The list-level **Import Agent** / **New Agent** actions sit in the Shell's page-action header like every other page's (#1956) — the rail **+** menu they replaced is gone, so neither is reachable from two places; **New Agent** hands over to the `/create` launcher, **Import Agent** opens the ZIP picker in one click and completes through the same import dialog, and the imported agent joins the list without a page reload (if the rail filter would hide it, the confirmation says so). Both are disabled with an honest reason for a caller who may not create agents, rather than hidden. The rail header row itself stays — it carries the filter, the disabled-agents opt-in and the list's "?" — and its empty state is now a text pointer at the header button instead of a competing call to action. Every action runs the dialog, confirmation and request the Agents page used to run — they are literally the same components, extracted into `pages/agent-lifecycle/` while both surfaces existed, which is what made removing the page a deletion rather than a rewrite. **Add member…** additionally opens a dialog and sends a materialization preference (#1958, see *Adding a member without materializing it* below); that was the one place the two surfaces deliberately differed, and it is now simply how adding a member works. **Share…** (#2082) opens the team's **member list** in a side panel — who may open the team and chat with its agents, and which of them administers it. A **Team Admin** adds an existing colleague, changes a role between *Team Admin* and *Team Member*, and removes people; a **Team Member** gets the same list **read-only**, which is why this is the one entry in that menu that is not greyed out without rights — reading who is on your own team is a member's right (#2041 D9), and the panel says what it will not let them do. The picker searches the **open user directory** and shows a display name and an email address only — never whether somebody is a System Admin, never a GitHub handle — and offers only people who already have an account (creating one stays a System-Admin step on the **Users** page). Removing or demoting the **last** Team Admin asks who takes over and does both in one write, so the team is never momentarily un-administrable. Every write goes to `POST`/`DELETE /api/admin/memberships`, gated server-side on `canManageTeam` and refused with a 403 regardless of what the buttons look like. An action you may not perform is shown inert with a reason rather than failing at the server. A **show disabled agents** toggle (off by default, remembered per user) additionally lists paused agents so they can be re-enabled from here; a disabled agent is marked as such and cannot be opened as a chat until it is enabled — its **Settings** entry still opens its configuration in the right rail, so it can be reconfigured while paused (#1929). The same menu also leads with a chat-only **Mark as unread** entry — it flips the row back to its unread indicator and, unlike the management actions below it, never depends on your permissions; it is greyed out rather than hidden when it does not apply (the row is already unread, or is disabled/offline and has no chat to open). It replaces the mail icon that used to appear on row hover, so the drag grip no longer shifts sideways when you hover a row (#1938). The menu closes with a **What these actions do…** entry that opens the Help panel at the agent-list chapter of the Agent Chat topic — a menu cannot host the shared "?" button, so the affordance is an entry; it is always enabled, since it changes nothing (#1972). A team created with **deferred materialization** (`materializeMembers: false`, #1955) no longer reads as empty here: each team group ends with a collapsed **Not materialized yet (N)** section listing its **stub** members — configuration and triggers only, no chat account, no workspace, no clone — with the count visible without expanding, and no section at all for a team that has none (#1957). A stub row is badged *Not initialised* (the removed Agents page's own word, kept so the two never read as two different states) with its own muted status dot, so it is never mistaken for a *paused* agent, and it cannot be opened as a chat because there is no chat account to open. Its menu offers **Materialize** in place of *Enable* — the same request the Agents page's **Activate** button used to send, so the resulting agent is indistinguishable from one materialized at team-create time; the row shows it working (a role with repositories clones them now) and moves up into the active members on success, without a reload. *Stub* and *paused* are different states: the show-disabled opt-in has no effect on this section. A stub whose team is disabled gets an inert **Materialize** with *enable the team first*, as does a caller who may not manage it.
 
 **Adding a member without materializing it (#1958).** **Add member** on a team
 group header opens a dialog carrying a **Materialize now** checkbox — the same
@@ -210,9 +234,9 @@ Toggle with `Cmd/Ctrl+Shift+L`.
 | Tab | What it shows |
 |---|---|
 | **Session Log** | Structured timeline of internal activity: tool calls, assistant text, errors, timings. Tool-use/tool-result pairs are folded into collapsible blocks. Filter by All / Tool Calls / Errors / Posted. |
-| **Workspace Browser** | Lazy-loading file tree of the agent's workspace directory. Click any text file to view its content (up to 512 KB). Hover over any file row to reveal a per-file **Download** button (works for binary files too; no size cap) and a **Reference in chat** (@) button that splices a `@<workspace-relative-path>` token for that file into the current agent's composer draft — the same reference convention an upload produces, so the agent resolves it without re-uploading (files only, never directories or `/context` host-mount rows). Supports file upload to the workspace (up to 500 files) and one-click ZIP export of the entire workspace. Binary files are flagged rather than displayed as garbage. |
+| **Workspace Browser** | Lazy-loading file tree of the agent's workspace directory. Click any text file to view its content (up to 512 KB). Hover over any file row to reveal a per-file **Download** button (works for binary files too; no size cap) and a **Reference in chat** (@) button that splices a `@<workspace-relative-path>` token for that file into the current agent's composer draft — the same reference convention an upload produces, so the agent resolves it without re-uploading (files only, never directories or `/context` host-mount rows). Supports file upload to the workspace (up to 500 files) and one-click ZIP export of the entire workspace. Binary files are flagged rather than displayed as garbage. A **repositories** button in the same toolbar lists every repository the agent has — inherited from its Working Environment (read-only here) or attached to this agent alone — and is where an **additional repository is attached to that one agent** (#2067); the same panel is on the **Settings** tab. |
 | **Triggers** | Inline editor for the agent's trigger schedule. Add, edit, or delete any trigger type; shows next execution time, last run status, and the webhook secret for HTTP triggers. |
-| **Settings** | The agent's configuration, where you see its effect (#1929) — the *same* form the Agents page's edit panel renders (display name, system prompt including a team member's Inherit / Additional input / Exclusive override modes, skills, MCP overrides, plugin grants, host context folders, repositories with **Sync repositories**). Saving goes through the same `PUT /api/agents/:id`, so an identical edit yields an identical stored config. Plugin grants and context folders keep their immediate-apply semantics; only in the chat, a context-folder change asks for confirmation first, because the re-provision it triggers ends the run you are watching. Unsaved edits are **preserved per agent** for the rest of the session: switching agents and back finds the form as you left it, behind an "unsaved changes" banner with a **Discard changes** button. Hidden for a caller who may not manage the agent. Normally the open chat's agent — a rail menu can point it at another one: **Team settings** on a group header edits the team agent, and **Settings** on a disabled row edits an agent that has no chat to open (a **Back** control returns it to the conversation). |
+| **Settings** | The agent's configuration, where you see its effect (#1929) — the *same* form the Agents page's edit panel renders (display name, system prompt including a team member's Inherit / Additional input / Exclusive override modes, skills, MCP overrides, plugin grants, host context folders, repositories with **Sync repositories** and — since #2067 — the agent-scoped repository panel that attaches an additional repository to this one agent). Saving goes through the same `PUT /api/agents/:id`, so an identical edit yields an identical stored config. Plugin grants and context folders keep their immediate-apply semantics; only in the chat, a context-folder change asks for confirmation first, because the re-provision it triggers ends the run you are watching. Unsaved edits are **preserved per agent** for the rest of the session: switching agents and back finds the form as you left it, behind an "unsaved changes" banner with a **Discard changes** button. Hidden for a caller who may not manage the agent. Normally the open chat's agent — a rail menu can point it at another one: **Team settings** on a group header edits the team agent, and **Settings** on a disabled row edits an agent that has no chat to open (a **Back** control returns it to the conversation). |
 
 ## Session Pinning
 

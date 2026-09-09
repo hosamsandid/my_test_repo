@@ -23,6 +23,14 @@
 // claim-swap contract):
 //   - `trigger.claim-rolled-back`      → failed (github double-failure)
 //   - `trigger.claim-completed` ok     → success (github work delivered)
+//   - `trigger.claim-blocked`          → failed (#2113: the run finished but its
+//     declared post-condition did not hold, so the claim stayed `<wake>:wip` and
+//     the work item was NOT delivered). Without this case such a run falls
+//     through to the `result`+`message.posted` rule and is measured as a
+//     SUCCESS — which would just move #2113's false-success from the label onto
+//     the metrics surface. `failed` (not a fifth outcome) because OUTCOMES in
+//     hill-climb-metrics.js is a frozen four-value vocabulary, and an
+//     undelivered outcome is a failure of the flow step either way.
 //   - an `error` row (stage claude) or a `result` with `isError` → failed
 //   - a `result` with a posted reply   → success
 //   - a `result` with NO `message.posted` → pass (`[PASS]`/empty-after-harvest)
@@ -70,6 +78,9 @@ function runsFromSessionEvents(events, opts = {}) {
       case 'trigger.claim-rolled-back':
         g.rolledBack = true;
         break;
+      case 'trigger.claim-blocked':
+        g.claimBlocked = true;
+        break;
       default:
         break;
     }
@@ -81,6 +92,9 @@ function runsFromSessionEvents(events, opts = {}) {
     if (active.has(g.correlationId)) continue; // still running → don't measure yet
     let outcome;
     if (g.rolledBack) outcome = 'failed';
+    // Before the `hasResult` rules: a blocked claim (#2113) always has a
+    // `result` row (the run completed), so testing it later would never fire.
+    else if (g.claimBlocked && !g.claimCompleted) outcome = 'failed';
     else if (g.claimCompleted) outcome = 'success';
     else if (g.hasError) outcome = 'failed';
     else if (g.hasResult) outcome = g.messagePosted ? 'success' : 'pass';

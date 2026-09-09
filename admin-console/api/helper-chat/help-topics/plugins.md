@@ -5,7 +5,7 @@ title: Plugins
 summary: Governed capability extensions — how an agent reaches the outside world through a privileged broker instead of holding the credential itself.
 seeAlso:
   - { label: "Agent Chat", to: "/chats" }
-  - { label: "Access", to: "/teams" }
+  - { label: "Administration", to: "/users" }
   - { label: "MCP Servers", to: "/mcp" }
   - { label: "Skills", to: "/skills" }
 askPrompts:

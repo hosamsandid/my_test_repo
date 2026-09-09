@@ -74,7 +74,17 @@ export const CREATE_COPY = {
   // has to read as a sentence rather than as a control label.
   headerHelp: 'Not sure? Start by chatting with one assistant — you can turn it into a team anytime.',
   flowHeading: 'Or build a team of agents that work together (a flow)',
-  flowIntro: 'A flow is several agents that hand work off to each other. All three options below end in the same flow — they differ only in how you start.',
+  // **Amendment to #2027's binding copy inventory (#2053 D6/AC14).** This said
+  // "All three options below end in the same flow — they differ only in how you
+  // start", which is where the wrong expectation was born: only *Start from a
+  // ready-made team* runs a launch step and ends in a team; the other two end in
+  // a DRAFT, which is a document — no agent exists, nothing runs. A newcomer
+  // then reached a finished design on the canvas still looking for the team they
+  // had been promised. Polishing the far end of that path while leaving this
+  // sentence in place would have treated the symptom, so the sentence is
+  // corrected here and the guard below asserts the correction rather than the
+  // claim. The per-card `outcome` lines were always honest and are untouched.
+  flowIntro: 'A flow is several agents that hand work off to each other. All three build the same kind of flow — the first ends with a live team, the other two with a design you turn into a team when it is ready.',
   advancedToggle: 'Advanced options',
 };
 

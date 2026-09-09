@@ -158,12 +158,13 @@ files ship alongside the existing `helper-chat/docs/**`, `system-prompt.md` and
   (e.g. a small "← Overview" link in the face header) that returns to the Overview from any page,
   so a user who lands on a specific page can still reach the big-picture concept overview without
   hunting. (Resolved decision — see §9.)
-- **First-run auto-open.** The **first** time a user visits a given route in a session, the panel
-  auto-opens on that route's "This page" face **once** (dismissible; never re-opens for the same
-  route). "Seen" routes are tracked in `localStorage` (a per-user set, e.g.
-  `help.seenRoutes.<username>`), so the nudge fires once per page and never fights a user who has
-  closed it. Routes with no topic (Overview fallback only) do not auto-open. (Resolved decision —
-  see §9.)
+- **The panel never opens on its own.** It appears only when someone asks for it: the header
+  **Help** button, a page's or panel's "?" (`PageHelpButton`), the Help entry in the Agent Chat
+  row menu, or a "Take the tour" CTA. Not on navigation, not on a first visit, not on first
+  login. C2 originally shipped a **first-run auto-open** nudge here — once per topic-bearing
+  route per user, tracked in `localStorage help.seenRoutes.<username>` — but Phase 3/4 gave
+  nearly every route its own topic, which turned a one-off discovery nudge into an unrequested
+  panel on almost every page; it was removed in **#2069**. (Resolved decision 3 — see §9.)
 
 ---
 
@@ -247,8 +248,8 @@ Every Phase-3 ticket follows the same shape:
 - **C2 — Panel "This page" face + entry points.** `mode:'page'`; tab bar `[This page][Ask][Tour]`
   (the `Chat` tab is **renamed to `Ask`**); header Help defaults to page face; `openHelpFor(route)`;
   `PageHelpButton`; page-scoped `askPrompts` → Ask hand-off; Overview fallback rendering; the
-  **Home/Overview** affordance inside the face; **first-run auto-open** (once per route,
-  `localStorage`-tracked).
+  **Home/Overview** affordance inside the face; ~~**first-run auto-open** (once per route,
+  `localStorage`-tracked)~~ — shipped, then removed by #2069 (see §4 and resolved decision 3).
 
 ### Phase 2 — Retire Getting Started
 
@@ -286,8 +287,17 @@ Total: **2 (foundation) + 1 (Getting Started) + 15 (extraction) = 18 child ticke
 2. **`/plugin-system`** — **removed outright** (no redirect). The `PluginSystemHelp` page, its
    route, and the "Learn about plugins" link all go; its content becomes the Plugins topic
    deep-dive (E5).
-3. **First-run** — the panel **auto-opens once per route** on first visit (dismissible,
-   `localStorage`-tracked); routes with no topic do not auto-open (C2).
+3. **First-run** — ~~the panel **auto-opens once per route** on first visit (dismissible,
+   `localStorage`-tracked); routes with no topic do not auto-open (C2).~~
+   **Superseded by #2069: the panel never opens without an explicit user action.** The decision
+   was sound for the shape the system had when C2 shipped — a handful of topic-bearing routes, so
+   "once per route" was a handful of nudges in total. Phase 3/4 (#1875–#1892, #1981, #1996) then
+   gave nearly every route a topic, and the same rule became a panel on almost every page a user
+   opened. The mechanism, its `help.seenRoutes.<username>` key and the panel-registration counter
+   that kept the nudge off the first-run wizard are all removed; existing keys are left inert
+   (nothing reads or writes them). The reversal is recorded rather than erased, because *why* it
+   once auto-opened is the part worth keeping: the general lesson is that a "once per surface"
+   nudge is bounded by the eventual number of surfaces, not by the frequency per surface.
 4. **Overview reachability** — the "This page" face carries an explicit **Home/Overview**
    affordance to return to the overview from any page (C2/§4).
 5. **Chapter deep-linking** (#1972) — `openHelpFor(route, { section })` takes an optional
@@ -399,8 +409,50 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the Create & Quickstart topic plus its `seeAlso` neighbours — at **284,200 — 83.6% used,
-55,800 left** (#2051 gave the Working Environments form an MCP server/credential picker and
+the `create.md` topic plus its `seeAlso` neighbours — at **315,396 — 92.8% used,
+24,604 left** (the crown moved BACK off `/chats`, which had held it at 314,511: #2085 dissolved
+the Access page, folding `access-users.md` into `users.md` and DROPPING the `/teams` link
+`agent-chat.md` carried rather than re-pointing it — the successor surface for what that link
+promised is the Share dialog on `/chats` itself, and Administration is System-Admin-only — so
+`/chats` lost a whole neighbour topic and fell out of first place) (#2068 made flow drafts private-by-default and shareable, adding an eleventh
+`flows.md` chapter *Sharing a draft*; `create.md` names `/flows` among its `seeAlso`, so it
+lands on this crown in full: +2,673, re-measured on the merge and not summed on a stale base.
+#2067 (per-agent scoped repositories) landed on main while this branch was open and grew the
+same crown by +4,631, so the baseline is not #2066's 296,639 but main's post-#2067 crown of
+301,270 → 303,943. Two things worth carrying
+forward: a feature whose surfaces sit on `/chats` pays this crown twice, once through the
+`seeAlso` link and once through whichever `CORPUS_FILES` reference doc has to agree with it; and
+when two PRs append to this running figure in parallel, the auto-merge keeps both entries and
+leaves one number with two successors — re-chain them in ticket order and re-measure on the
+merge, which is why the figure above is one total rather than a per-PR sum. #2066 replaced the manual **Sync all agents** button on the Working Environments
+form with an offer the save itself makes, and the figure went UP by 4,689 — the biggest single
+move in this chain, from a ticket whose user-visible change was *removing* a control. The topic
+had to grow +3,848 to carry the three change classes, the clean-and-pushed safety rule and the
+removal warning, because nothing on the form states any of it any more; and
+`docs/working-environments.md` grew +1,033, which being in `CORPUS_FILES` lands on EVERY context.
+`/quickstart` sees both halves in full, since `create.md` names `/environments` as a neighbour —
+so the delta here and on `/environments` itself (257,549 → 262,238) is identical, which is the
+signature of a change that is partly in the always-counted docs half.
+It stood at 291,950 after #2065, which gave a human chat message a named badge and a
+viewer-dependent side, needing a chapter `agent-chat.md` had no equivalent of — who wrote a
+message, why the badge and the side deliberately answer different questions, and what the neutral
+icon on un-attributable history means: +2,572, landing in full for the same `seeAlso` reason.
+It stood at 289,378 after #2057, which made a direct hand-off read as a consumer on the Outcomes and Routing
+surfaces, which voided `agent-chat.md`'s `## Outcomes` claim that a label is what wakes the next
+agent — the same claim the panel itself was making: +895 for the two-mechanism table, landing in
+full because `create.md` names `/chats` as a neighbour. It stood at 288,483 after #2053, which
+renamed the design → live-team action from *Materialize* to **Create team…** everywhere a user
+reads it, rewriting `create.md` — this context's own topic — its `seeAlso` neighbour `flows.md`,
+and the every-context `walkthrough/04-flows.md` + `glossary.md`; that took the crown from
+286,374 to 288,483, +2,109 stated as one total measured together since all four grow the same
+crown. #2052 had
+replaced chapter 2's documented dead end — growing could not convert an
+existing assistant — with the **Convert into a team…** action that now can, and documented it
+in the row menu's own chapter as well: +1,229 in `create.md`, which IS this context's topic,
+and +835 in `agent-chat.md`, which it names as a neighbour, so both land in full; the review
+then caught the same dead end still asserted in `walkthrough/01-team-setup.md` and fixing it to
+name both grow paths added a further +110, which — being in `CORPUS_FILES` — lands on EVERY
+context. It stood at 284,200 after #2051, which gave the Working Environments form an MCP server/credential picker and
 rewrote the two topics that documented its absence: +916 in `environments.md`, which `create.md`
 names as a neighbour, and +147 in `mcp.md`, which it does not — so this context moved by the
 former alone while `/environments` and `/mcp`, which name each other, each moved by both, to

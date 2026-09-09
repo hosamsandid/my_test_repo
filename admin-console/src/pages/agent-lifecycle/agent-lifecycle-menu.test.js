@@ -11,6 +11,8 @@ import {
   cascadeResidueNotice,
   NO_RIGHTS_HINT,
   TEAM_LOCKED_HINT,
+  MEMBERS_MANAGE_HINT,
+  MEMBERS_READ_ONLY_HINT,
 } from './agent-lifecycle-menu.js';
 
 const keys = (items) => items.map(i => i.key);
@@ -45,7 +47,11 @@ test('agentState distinguishes stub / paused / active', () => {
 test('a standalone agent offers the full AC1 action set', () => {
   const items = buildAgentMenu({ agent: { id: 'a', role: 'agent', hasToken: true, enabled: true } });
   assert.deepEqual(keys(items), [
-    'toggle-enabled', 'settings', 'clone', 'export', 'extract-template', 'reset-to-stub', 'delete',
+    'toggle-enabled', 'settings', 'clone', 'export', 'extract-template',
+    // #2052 — growing into a team of one is a standalone-only action, and it
+    // sits before the destructive tail because nothing is lost by taking it.
+    'convert-to-team',
+    'reset-to-stub', 'delete',
   ]);
   assert.ok(items.every(i => !i.disabled));
 });
@@ -107,6 +113,52 @@ test('a stub is not exportable and its clone/template/reset entries are inert', 
   assert.equal(byKey(items, 'toggle-enabled').disabled, false);
 });
 
+/* ── #2052 convert into a team of one ───────────────────────────────── */
+
+test('#2052 AC1 — only a standalone agent is offered the conversion', () => {
+  const offered = (agent) => keys(buildAgentMenu({ agent })).includes('convert-to-team');
+
+  assert.equal(offered({ id: 'a', role: 'agent', hasToken: true, enabled: true }), true);
+  // The legacy pre-#1961 name for the same role, which an entry read before the
+  // orchestrator's startup normalization can still carry.
+  assert.equal(offered({ id: 'a', role: 'expert', hasToken: true, enabled: true }), true);
+  // A role that has nowhere to go: already a team, or already in one.
+  assert.equal(offered({ id: 't', role: 'team', hasToken: true, enabled: true }), false);
+  assert.equal(offered({ id: 'm', role: 'team-member', parentTeamId: 't', hasToken: true, enabled: true }), false);
+  // A missing role defaults to 'agent' (the module's own default), and a
+  // retired one is not converted into anything.
+  assert.equal(offered({ id: 'o', role: 'orchestrator', hasToken: true, enabled: true }), false);
+});
+
+test('#2052 AC1 — a stub is offered nothing to convert yet, and says why', () => {
+  const items = buildAgentMenu({ agent: { id: 'a', role: 'agent', token: null, enabled: false } });
+  const convert = byKey(items, 'convert-to-team');
+  assert.equal(convert.disabled, true);
+  assert.match(convert.title, /Materialize the agent before converting/);
+});
+
+test('#2052 AC2 — the entry opens a confirm and warns it is one-way', () => {
+  const convert = byKey(
+    buildAgentMenu({ agent: { id: 'a', role: 'agent', hasToken: true, enabled: true } }),
+    'convert-to-team',
+  );
+  // The trailing ellipsis is this menu's contract for "opens a dialog".
+  assert.match(convert.label, /…$/);
+  assert.equal(convert.disabled, false);
+  assert.match(convert.title, /Cannot be undone/);
+  // Nothing is lost by converting, so it must not read as destructive.
+  assert.ok(!convert.danger);
+});
+
+test('#2052 — converting is a mutation, so it is inert without rights', () => {
+  const convert = byKey(
+    buildAgentMenu({ agent: { id: 'a', role: 'agent', hasToken: true, enabled: true }, canManage: false }),
+    'convert-to-team',
+  );
+  assert.equal(convert.disabled, true);
+  assert.equal(convert.title, NO_RIGHTS_HINT);
+});
+
 test('AC5 — a member of a disabled team cannot be toggled, and says why', () => {
   const items = buildAgentMenu({
     agent: { role: 'team-member', hasToken: true, enabled: false },
@@ -154,7 +206,8 @@ test('a visible team header offers the full AC2 action set', () => {
     team: { id: 't1', role: 'team', enabled: true },
   });
   assert.deepEqual(keys(items), [
-    'toggle-team', 'add-member', 'edit-team', 'export-team', 'open-flow-editor', 'delete-team',
+    'toggle-team', 'add-member', 'edit-team', 'share', 'export-team', 'open-flow-editor',
+    'delete-team',
   ]);
 });
 
@@ -171,7 +224,7 @@ test('without a visible team row the fan-out toggle is omitted, not guessed', ()
   const items = buildTeamMenu({ teamId: 't1', team: null });
   assert.ok(!keys(items).includes('toggle-team'));
   assert.deepEqual(keys(items), [
-    'add-member', 'edit-team', 'export-team', 'open-flow-editor', 'delete-team',
+    'add-member', 'edit-team', 'share', 'export-team', 'open-flow-editor', 'delete-team',
   ]);
 });
 
@@ -210,6 +263,52 @@ test('AC8 — team mutations are inert without rights; navigation stays live', (
   for (const key of ['export-team', 'open-flow-editor']) {
     assert.equal(byKey(items, key).disabled, false, `${key} should stay live`);
   }
+});
+
+test('#2082 — Share stays live without rights, and says what it will and will not do', () => {
+  // The deliberate exception to the loop above. #2041 AC8 asks for the entry to
+  // be DISABLED with a hint for a non-admin, which cannot be reconciled with
+  // AC9 ("a Team Member sees the list read-only") — a disabled entry opens
+  // nothing — and AC12/P6 retires the Access page's Manage panel as "superseded
+  // by the Share dialog", so disabling it here would leave a member with no way
+  // at all to see who is on their team. The hint AC8 asks for is delivered on
+  // the entry; only `disabled` is not.
+  const withRights = buildTeamMenu({ teamId: 't1', team: { enabled: true } });
+  const without = buildTeamMenu({ teamId: 't1', team: { enabled: true }, canManage: false });
+
+  assert.equal(byKey(withRights, 'share').label, 'Share…');
+  assert.equal(byKey(withRights, 'share').disabled, false);
+  assert.equal(byKey(withRights, 'share').title, MEMBERS_MANAGE_HINT);
+
+  assert.equal(byKey(without, 'share').disabled, false, 'reading the list is a member right (D9)');
+  assert.equal(byKey(without, 'share').title, MEMBERS_READ_ONLY_HINT);
+  assert.notEqual(byKey(without, 'share').title, NO_RIGHTS_HINT, 'a different sentence, on purpose');
+  assert.match(MEMBERS_READ_ONLY_HINT, /see who has access/, 'the read half is stated');
+  assert.match(MEMBERS_READ_ONLY_HINT, /Team Admin/, 'and so is the missing right');
+});
+
+test('#2082 — the member list is gated on canManageTeam, not on canManageAgent', () => {
+  // For a `role: 'team'` row the two predicates resolve identically today, which
+  // is exactly why they are separate inputs: a later change to the agent
+  // predicate must not silently open the member list (#2041 §7.1).
+  const shared = { teamId: 't1', team: { enabled: true } };
+  assert.equal(
+    byKey(buildTeamMenu({ ...shared, canManage: true, canManageMembers: false }), 'share').title,
+    MEMBERS_READ_ONLY_HINT,
+    'manages the agent but not the members ⇒ read-only',
+  );
+  assert.equal(
+    byKey(buildTeamMenu({ ...shared, canManage: false, canManageMembers: true }), 'share').title,
+    MEMBERS_MANAGE_HINT,
+    'and the converse — the share entry reads its own input',
+  );
+  // Default: absent ⇒ follow canManage, so an un-migrated caller is unaffected.
+  assert.equal(byKey(buildTeamMenu({ ...shared, canManage: false }), 'share').title, MEMBERS_READ_ONLY_HINT);
+});
+
+test('#2082 — Share is inert while a team mutation is in flight', () => {
+  const items = buildTeamMenu({ teamId: 't1', team: { enabled: true }, busy: true });
+  assert.equal(byKey(items, 'share').disabled, true, 'busy is the one thing that does disable it');
 });
 
 test('delete team is the only destructive team entry', () => {

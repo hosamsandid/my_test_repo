@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { UNAUTHORIZED_EVENT } from '../auth/AuthContext';
 import { assistHeaders, notifyAssistError } from '../context/assist-transport.js';
+import { apiErrorMessage } from './api-error-message.js';
 
 // A 401 means the session expired or was cleared — notify the AuthProvider so
 // the console drops back to the login screen instead of showing broken pages.
@@ -73,9 +74,22 @@ export async function apiCall(method, url, body) {
     const serverMessage = err && typeof (err.error || err.message) === 'string'
       ? (err.error || err.message)
       : null;
-    const e = new Error(serverMessage || `HTTP ${res.status}`);
+    // A 5xx whose message is a raw JavaScript engine error ("x is not defined")
+    // is a bug report, not an explanation, and must not be rendered verbatim in
+    // a dialog (#2135 AC9). Only that narrow shape is rewritten — a 5xx with a
+    // human sentence, and every 4xx, still says exactly what the server said.
+    // `serverMessage` keeps the raw string either way, so `describeMaterializeError`
+    // (#1552) and any other consumer of it are unaffected.
+    const { message, technicalMessage } = apiErrorMessage(res.status, serverMessage);
+    const e = new Error(message);
     e.status = res.status;
     if (serverMessage) e.serverMessage = serverMessage;
+    if (technicalMessage) {
+      e.technicalMessage = technicalMessage;
+      // Keep the detail reachable: the operator no longer sees it, so it has to
+      // land somewhere a bug report can quote it from.
+      console.error(`[api] ${method} ${url} → ${res.status}: ${technicalMessage}`);
+    }
     if (err && err.code) e.code = err.code;
     throw e;
   }

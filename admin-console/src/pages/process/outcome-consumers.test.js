@@ -142,3 +142,117 @@ test('outcomeHumanReviewers falls back displayName → name → id and accepts g
     ['Reviewer'],
   );
 });
+
+/* ── direct hand-offs (#2057) ─────────────────────────────────────────── */
+
+import {
+  outcomeHandoffs, handoffStatement,
+  HANDOFF_OK, HANDOFF_UNRESOLVED, HANDOFF_DISABLED,
+} from './outcome-consumers.js';
+import { WAKE_EDGE_LEGEND } from './wake-edge-view.js';
+
+// A flow whose peers mirror what `GET /api/process/graph` returns: agents with a
+// `triggers` view (the derived `wake-agent` listener included), a human role and
+// an actor pseudo-node.
+const wakePeers = [
+  { id: 'dev', displayName: 'Developer' },
+  { id: 'reviewer', displayName: 'Code Reviewer', triggers: [{ id: 'w1', type: 'wake-agent', enabled: true }] },
+  { id: 'docs', displayName: 'Documentation Sync', triggers: [{ id: 'w2', type: 'wake-agent', enabled: false }] },
+  { id: 'qa', displayName: 'QA' },
+  { id: 'maintainer', displayName: 'Maintainer', kind: 'human' },
+  { id: '@github', displayName: 'GitHub', kind: 'actor' },
+];
+const handoffTo = (to, extra) => ({ id: 'o', actions: [{ type: 'wakeAgent', to, ...extra }] });
+
+test('#2057 AC1: a hand-off to a resolvable, enabled agent is a consumer', () => {
+  assert.deepEqual(outcomeHandoffs(handoffTo('reviewer'), node, wakePeers),
+    [{ to: 'reviewer', name: 'Code Reviewer', state: HANDOFF_OK }]);
+  // A target with no derived listener yet (a draft, or one the reconciler has
+  // not visited) is still ok — the listener is derived, never authored.
+  assert.deepEqual(outcomeHandoffs(handoffTo('qa'), node, wakePeers),
+    [{ to: 'qa', name: 'QA', state: HANDOFF_OK }]);
+});
+
+test('#2057 AC2: the healthy statement is uniform and reuses the canvas/event-log wording', () => {
+  const [h] = outcomeHandoffs(handoffTo('reviewer'), node, wakePeers);
+  assert.deepEqual(handoffStatement(h), { tone: 'neutral', text: 'wakes Code Reviewer (direct hand-off)' });
+  assert.equal(WAKE_EDGE_LEGEND, 'direct hand-off');
+  // AC3 — not warning-coloured: it describes a correctly wired hand-off.
+  assert.equal(handoffStatement(h).tone, 'neutral');
+});
+
+test('#2057 AC6: an unresolved target is reported, warning-coloured, and never a consumer', () => {
+  // A stale id from an import.
+  assert.deepEqual(outcomeHandoffs(handoffTo('gone'), node, wakePeers),
+    [{ to: 'gone', name: 'gone', state: HANDOFF_UNRESOLVED }]);
+  // A person has no queue; an actor pseudo-node is not an agent either.
+  assert.equal(outcomeHandoffs(handoffTo('maintainer'), node, wakePeers)[0].state, HANDOFF_UNRESOLVED);
+  assert.equal(outcomeHandoffs(handoffTo('@github'), node, wakePeers)[0].state, HANDOFF_UNRESOLVED);
+  // A self-hand-off is refused on delivery, so it must not read as a consumer.
+  assert.equal(outcomeHandoffs(handoffTo('dev'), node, wakePeers)[0].state, HANDOFF_UNRESOLVED);
+  const s = handoffStatement(outcomeHandoffs(handoffTo('gone'), node, wakePeers)[0]);
+  assert.deepEqual(s, { tone: 'warning', text: 'hands off directly to gone — target unresolved' });
+});
+
+test('#2057 AC7: a target whose hand-off input is switched off is warning-coloured', () => {
+  assert.deepEqual(outcomeHandoffs(handoffTo('docs'), node, wakePeers),
+    [{ to: 'docs', name: 'Documentation Sync', state: HANDOFF_DISABLED }]);
+  assert.deepEqual(handoffStatement({ to: 'docs', name: 'Documentation Sync', state: HANDOFF_DISABLED }),
+    { tone: 'warning', text: "hands off directly to Documentation Sync — target's hand-off input is disabled" });
+  // One enabled listener is enough (the runner takes the first enabled one).
+  const mixed = [{ id: 'docs', displayName: 'Docs', triggers: [
+    { type: 'wake-agent', enabled: false }, { type: 'wake-agent', enabled: true },
+  ] }];
+  assert.equal(outcomeHandoffs(handoffTo('docs'), node, mixed)[0].state, HANDOFF_OK);
+});
+
+test('#2057 AC8/AC10: a hand-off is derived independently of labels and markers', () => {
+  // Mixed actions: the label's subscribers come from consumersFor, the hand-off
+  // from here — neither at the expense of the other.
+  const mixed = { id: 'o', actions: [
+    { type: 'setLabel', label: 'ready-for-review' },
+    { type: 'wakeAgent', to: 'reviewer' },
+  ] };
+  assert.deepEqual(consumersFor(mixed, node, peers), ['Code Reviewer']);
+  assert.equal(outcomeHandoffs(mixed, node, wakePeers).length, 1);
+  // A `terminal`/`external` marker is a sibling field and changes nothing here,
+  // so the panel can render the contradiction rather than hide half of it.
+  assert.equal(outcomeHandoffs({ ...handoffTo('reviewer'), terminal: true }, node, wakePeers).length, 1);
+  assert.equal(outcomeHandoffs({ ...handoffTo('reviewer'), external: {} }, node, wakePeers).length, 1);
+});
+
+test('#2057: two hand-offs name both targets; one target is named once', () => {
+  const two = { id: 'o', actions: [
+    { type: 'wakeAgent', to: 'reviewer' }, { type: 'wakeAgent', to: 'qa' },
+  ] };
+  assert.deepEqual(outcomeHandoffs(two, node, wakePeers).map(h => h.to), ['reviewer', 'qa']);
+  const dup = { id: 'o', actions: [
+    { type: 'wakeAgent', to: 'reviewer', note: 'a' }, { type: 'wakeAgent', to: 'reviewer', note: 'b' },
+  ] };
+  assert.deepEqual(outcomeHandoffs(dup, node, wakePeers).map(h => h.to), ['reviewer']);
+});
+
+test('#2057: a `to`-less hand-off names nobody, and degenerate input stays empty', () => {
+  assert.deepEqual(outcomeHandoffs(handoffTo(''), node, wakePeers), []);
+  assert.deepEqual(outcomeHandoffs({ id: 'o', actions: [{ type: 'wakeAgent' }] }, node, wakePeers), []);
+  assert.deepEqual(outcomeHandoffs({ id: 'o', actions: [{ type: 'wakeAgent', to: '   ' }] }, node, wakePeers), []);
+  assert.deepEqual(outcomeHandoffs({ actions: [{ type: 'setLabel', label: 'x' }] }, node, wakePeers), []);
+  assert.deepEqual(outcomeHandoffs(null, node, wakePeers), []);
+  assert.deepEqual(outcomeHandoffs(handoffTo('reviewer'), node, null), [
+    { to: 'reviewer', name: 'reviewer', state: HANDOFF_UNRESOLVED }]);
+  assert.deepEqual(outcomeHandoffs(handoffTo('reviewer'), null, [{ id: 'reviewer' }]), [
+    { to: 'reviewer', name: 'reviewer', state: HANDOFF_OK }]);
+  assert.deepEqual(outcomeHandoffs({ actions: null }, node, wakePeers), []);
+});
+
+test('#2057 AC14: the pre-existing consumer cases are unaffected by the new derivation', () => {
+  // A label / artifact / none outcome yields no hand-off at all, so every
+  // existing branch of both surfaces still sees exactly what it saw before.
+  for (const o of [
+    { actions: [{ type: 'setLabel', label: 'ready-for-review' }] },
+    { actions: [{ type: 'openPr' }] },
+    { actions: [{ type: 'openIssue' }] },
+    { actions: [{ type: 'none' }] },
+    { actions: [] },
+  ]) assert.deepEqual(outcomeHandoffs(o, node, wakePeers), []);
+});

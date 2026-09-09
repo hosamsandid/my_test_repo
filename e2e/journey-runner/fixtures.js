@@ -13,6 +13,7 @@ const gh = require('../steps/gh');
 const team = require('../steps/team');
 const context = require('../steps/context');
 const knowledge = require('../steps/knowledge');
+const identity = require('../steps/identity');
 
 /**
  * teamEnv: the Team-Setup pilot's precondition. Seeds a credential-less Working
@@ -236,6 +237,14 @@ const triggerAgent = {
 // Delete every process draft carrying a given name (idempotent). Drafts get
 // server-generated ids, so the journey renames its draft to a fixed name and the
 // fixture cleans by that name — one deterministic, re-runnable surface.
+//
+// #2068 made the list per-user, which does NOT narrow this: the journey runner
+// signs in as the env single-admin, whose scope is `all`, so it still sees and
+// can delete every draft on the stack — including one a crashed prior run left
+// behind under a different identity. It also means the drafts this fixture
+// creates are stamped ownerless (the env admin has no user record) and are
+// reachable only through that same admin path, which is exactly what keeps a
+// re-run starting from a clean state.
 async function deleteDraftsNamed(ctx, name) {
   const res = await ctx.request.get('/api/process/drafts');
   if (!res.ok()) return;
@@ -548,9 +557,87 @@ const knowledgeTeam = {
   },
 };
 
+/**
+ * twoHumanTeam: two signed-in humans and a clean slate — the precondition for
+ * the decentralised-access journey (#2086, epic #2076 AC13).
+ *
+ * This is the first fixture that establishes IDENTITIES rather than resources.
+ * It mints two real user-store records with local passwords (#374/#1844) and
+ * signs each one in through the real `/api/auth/login` into its own browser
+ * context, registered as `owner` and `colleague`. Steps then point the journey's
+ * ctx at one of them with `access.actAs` — which re-points the whole existing
+ * step library, and the screenshot recorder with it, at that human.
+ *
+ * It deliberately creates NO team: "user A creates a team" is the journey's own
+ * first beat, and it has to run as A for #2081 to record A as its Team Admin.
+ *
+ * Teardown ORDER is load-bearing: the team (and its auto-created environment)
+ * goes first, because #2081's D4 rule refuses to delete a human who is still the
+ * last Team Admin of any team — and deleting the team is what cascades the
+ * memberships that would otherwise pin its members in place forever. The same
+ * order runs on setup as a pre-clean, so a crashed prior run cannot wedge the
+ * next one. Browser contexts are closed last, and the primary `page`/`request`
+ * fixtures are restored before they are.
+ *
+ * @param {string} params.teamId - Team slug id the journey will create (pre-cleaned). Its auto-created environment shares the id.
+ * @param {string} params.ownerSubject - Login subject for user A, who creates and owns the team.
+ * @param {string} params.ownerName - Display name for user A.
+ * @param {string} params.colleagueSubject - Login subject for user B, who is shared in.
+ * @param {string} params.colleagueName - Display name for user B.
+ * @param {string} [params.password=e2e-user-pass] - Local password given to both records.
+ * @example
+ * fixtures:
+ *   - fixture: twoHumanTeam
+ *     params:
+ *       teamId: share-demo
+ *       ownerSubject: ada@e2e.local
+ *       ownerName: Ada Owner
+ *       colleagueSubject: bea@e2e.local
+ *       colleagueName: Bea Colleague
+ */
+const twoHumanTeam = {
+  async setup(ctx, params = {}) {
+    const {
+      teamId, ownerSubject, ownerName, colleagueSubject, colleagueName,
+      password = 'e2e-user-pass',
+    } = params;
+    if (!teamId || !ownerSubject || !ownerName || !colleagueSubject || !colleagueName) {
+      throw new Error(
+        'twoHumanTeam fixture requires '
+        + '{ teamId, ownerSubject, ownerName, colleagueSubject, colleagueName }',
+      );
+    }
+    // Pre-clean, team before users (see the order note above). The team's
+    // environment is auto-created under the team id by the repo-less path.
+    await teardown.teardownTeam(ctx, { teamId, envId: teamId });
+    await identity.deleteUserBySubject(ctx, ownerSubject);
+    await identity.deleteUserBySubject(ctx, colleagueSubject);
+
+    await identity.ensureUser(ctx, {
+      subject: ownerSubject, displayName: ownerName, email: ownerSubject, password,
+    });
+    await identity.ensureUser(ctx, {
+      subject: colleagueSubject, displayName: colleagueName, email: colleagueSubject, password,
+    });
+    await identity.signIn(ctx, { name: 'owner', subject: ownerSubject, password });
+    await identity.signIn(ctx, { name: 'colleague', subject: colleagueSubject, password });
+    return { teamId, ownerSubject, colleagueSubject };
+  },
+  async teardown(ctx, params = {}) {
+    const { teamId, ownerSubject, colleagueSubject } = params;
+    // Restore the primary fixtures + close the extra contexts FIRST, so the
+    // clean-up requests below run as the admin rather than as a user whose
+    // record we are about to delete.
+    await identity.disposeIdentities(ctx);
+    if (teamId) await teardown.teardownTeam(ctx, { teamId, envId: teamId });
+    if (ownerSubject) await identity.deleteUserBySubject(ctx, ownerSubject);
+    if (colleagueSubject) await identity.deleteUserBySubject(ctx, colleagueSubject);
+  },
+};
+
 const FIXTURES = {
   teamEnv, ibanStoryTeam, triggerAgent, flowsDraft, liveWiringTeam, contextMountAgent, usageData,
-  knowledgeTeam,
+  knowledgeTeam, twoHumanTeam,
 };
 
 function resolveFixture(name) {

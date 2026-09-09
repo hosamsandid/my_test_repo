@@ -32,7 +32,11 @@ function code(src) {
 const agentChat = code(read('../AgentChat.jsx'));
 const agentList = code(read('./AgentList.jsx'));
 const host = code(read('./RailLifecycleHost.jsx'));
-const menu = code(read('./RowContextMenu.jsx'));
+// Promoted to `src/components/` by #2053 so the Flows rail can render the same
+// menu; the component itself is unchanged, and this guard follows it there.
+const menu = code(read('../../components/RowContextMenu.jsx'));
+// #2082 — the team Share panel, whose JSX the pure tests cannot load either.
+const sharePanel = code(read('./ShareTeamPanel.jsx'));
 
 test('the chat page derives its list URL from the opt-in, never a literal', () => {
   assert.match(agentChat, /useApi\(matrixAgentsUrl\(showDisabled\)\)/);
@@ -305,5 +309,107 @@ test('#1958 — a failed Add member closes the dialog so its error is readable',
   assert.match(
     host,
     /addMemberBody\([\s\S]{0,400}?catch \(e\) \{[\s\S]{0,200}?setAddMemberTeamId\(null\)/,
+  );
+});
+
+/* ── #2082 share an Agent Team ───────────────────────────────────────── */
+
+test('#2082 AC1 — the share entry is routed, not just described', () => {
+  // The item comes from `buildTeamMenu`; without a case in `choose()` it would
+  // render, be clickable, and do nothing at all.
+  assert.match(host, /case 'share':/);
+  assert.match(host, /setShareTeam\(\{ id: teamId/);
+  assert.match(host, /<ShareTeamPanel/);
+});
+
+test('#2082 — the member list is a SidePanel, not a ConfirmDialog', () => {
+  // A manage-a-list surface stays open across several writes (the
+  // `ManageTeamPanel` precedent); a ConfirmDialog closes on confirm, which
+  // would shut the panel on the first role change.
+  assert.match(host, /<SidePanel\s+open=\{!!shareTeam\}/);
+  assert.match(host, /onClose=\{\(\) => setShareTeam\(null\)\}/);
+});
+
+test('#2082 AC2 — the panel gates on canManageTeam, not on the fetch succeeding', () => {
+  // `GET /api/admin/memberships` is `visibleTeam`-filtered, so a plain Team
+  // Member CAN read the list (D9). Gating the controls on whether the read
+  // worked would hand them the write controls too.
+  assert.match(sharePanel, /canManageMembers\(user, teamId\)/);
+  assert.match(sharePanel, /canManage \?/, 'the controls branch on the predicate');
+});
+
+test('#2082 AC10 — the picker reads the OPEN directory, never /api/admin/users', () => {
+  // `/api/admin/users` returns the whole record including `systemAdmin` and the
+  // GitHub handle, which D2/D11 forbid showing.
+  assert.match(sharePanel, /'\/api\/users\/directory'/);
+  assert.doesNotMatch(sharePanel, /\/api\/admin\/users/);
+  // …and neither field may be referenced anywhere in the renderer.
+  assert.doesNotMatch(sharePanel, /systemAdmin/);
+  assert.doesNotMatch(sharePanel, /githubHandle/);
+});
+
+test('#2082 — every write shape comes from the pure module', () => {
+  // The body-vs-query split is the trap: `POST` reads teamId from the body and
+  // `DELETE` from the query, where its own gate looks. An inline URL here is
+  // the one place that can silently 403 everyone but a System Admin.
+  assert.match(sharePanel, /setRoleRequest\(\{ teamId/);
+  assert.match(sharePanel, /removeRequest\(\{ teamId/);
+  assert.doesNotMatch(sharePanel, /apiCall\('POST', '\/api\/admin\/memberships'/);
+  assert.doesNotMatch(sharePanel, /apiCall\('DELETE', `\/api\/admin\/memberships/);
+});
+
+test('#2082 AC4 — the D4 hand-over is one prompt and ONE request', () => {
+  // Promoting the successor in a separate call would leave the team briefly
+  // un-administrable, and a failure between the two would strand it there.
+  assert.match(sharePanel, /handoverRequirement\(\{ rows, userId, action \}\)/);
+  assert.match(sharePanel, /successorUserId: successorId/);
+  assert.match(sharePanel, /commit\(\{ \.\.\.handover, successorUserId: successorId \}\)/);
+});
+
+test('#2082 — a write re-reads the list rather than trusting its own response', () => {
+  // The store may have applied a promotion alongside the change we asked for
+  // (the hand-over lands in one write), so the response is not the whole truth.
+  assert.match(sharePanel, /await apiCall\(req\.method, req\.url[\s\S]{0,200}?await load\(\)/);
+});
+
+/* ── #2052 convert into a team of one ───────────────────────────────── */
+
+test('#2052 AC1 — the convert entry is routed, not just described', () => {
+  // The item comes from `buildAgentMenu`; without a case in `choose()` it would
+  // render, be clickable, and do nothing at all.
+  assert.match(host, /case 'convert-to-team':\s*setConvertTarget\(/);
+  assert.match(host, /<ConvertToTeamDialog/);
+});
+
+test('#2052 AC2 — the dialog copy comes from the pure module, not inline JSX', () => {
+  assert.match(host, /copy=\{convertDialogCopy\(/);
+  assert.match(host, /consequences=\{convertConsequences\(/);
+  // A literal confirmation body here would be the copy that drifts.
+  assert.doesNotMatch(host, /cannot be undone/i);
+});
+
+test('#2052 — the request hits the convert route and only forces on the retry', () => {
+  assert.match(host, /\/convert-to-team`/);
+  // `force` is the answer to the server's mid-run question, so it may only ever
+  // be derived from the warning the server sent back.
+  assert.match(host, /force: !!convertTarget\?\.busyNotice/);
+  assert.doesNotMatch(host, /force: true/);
+});
+
+test('#2052 — the mid-run 409 re-opens the same dialog instead of throwing', () => {
+  // Raw fetch, like `toggleEnabled`: `apiCall` turns a 409 into an exception,
+  // which would surface the refusal as an error toast rather than a question.
+  assert.match(
+    host,
+    /convert-to-team`[\s\S]{0,600}?res\.status === 409[\s\S]{0,200}?convertBusyNotice\(data\)/,
+  );
+  assert.match(host, /setConvertTarget\(\{ agent, busyNotice \}\)/);
+});
+
+test('#2052 — a failed conversion closes the dialog so its error is readable', () => {
+  // Same stacking-context reason as the Add member sibling above.
+  assert.match(
+    host,
+    /convert-to-team`[\s\S]{0,1200}?catch \(e\) \{\s*setConvertTarget\(null\)/,
   );
 });

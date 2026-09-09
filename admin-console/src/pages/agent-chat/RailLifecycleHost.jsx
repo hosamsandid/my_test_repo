@@ -14,10 +14,14 @@ import {
 } from '../agent-lifecycle/AgentLifecycleForms.jsx';
 import {
   DisableWarningDialog, TeamDisableDialog, DeactivateWarningDialog,
-  ResetToStubDialog, TeamEnableDialog, TeamActionResultDialog, renderDeleteMessage,
+  ResetToStubDialog, TeamEnableDialog, TeamActionResultDialog, ConvertToTeamDialog,
+  renderDeleteMessage,
 } from '../agent-lifecycle/AgentLifecycleDialogs.jsx';
 import { deleteDialogCopy, cascadeResidueNotice } from '../agent-lifecycle/agent-lifecycle-menu.js';
-import RowContextMenu from './RowContextMenu.jsx';
+import {
+  convertDialogCopy, convertConsequences, convertBusyNotice, convertResultNotice,
+} from '../agent-lifecycle/convert-to-team-view.js';
+import RowContextMenu from '../../components/RowContextMenu.jsx';
 import {
   deleteTargetFor,
   existingIds as existingIdsOf,
@@ -26,6 +30,7 @@ import {
   railMenuItems,
   teamOptions,
 } from './rail-lifecycle.js';
+import ShareTeamPanel from './ShareTeamPanel.jsx';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 import {
   ADD_MEMBER_TITLE, MATERIALIZE_NOW_DEFAULT, MATERIALIZE_NOW_HINT, MATERIALIZE_NOW_LABEL,
@@ -128,6 +133,12 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
     },
   }), []);
 
+  // #2052 — convert into a team of one. `convertTarget.busyNotice` carries the
+  // server's own mid-run refusal, so the same dialog serves both phases: it
+  // opens empty, and re-opens with the notice when the 409 comes back.
+  const [convertTarget, setConvertTarget] = useState(null);
+  const [convertBusy, setConvertBusy] = useState(false);
+
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deactivateTarget, setDeactivateTarget] = useState(null);
@@ -140,6 +151,12 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   // only" cannot be inferred, and getting it wrong costs a clone either way.
   const [addMemberTeamId, setAddMemberTeamId] = useState(null);
   const [addMemberMaterialize, setAddMemberMaterialize] = useState(MATERIALIZE_NOW_DEFAULT);
+
+  // Share (#2082): which team's member list is open. A `SidePanel` rather than
+  // a `ConfirmDialog` because this is a manage-a-list surface, not a decision
+  // (the `ManageTeamPanel` precedent) — and because it stays open across
+  // several writes, each of which re-reads the list.
+  const [shareTeam, setShareTeam] = useState(null); // { id, name }
 
   const [teamActionPrompt, setTeamActionPrompt] = useState(null);
   const [teamActionBusy, setTeamActionBusy] = useState(false);
@@ -273,6 +290,44 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       setActionError(e.message);
     } finally {
       markBusy(agent.id, false);
+    }
+  }
+
+  // #2052 — convert this standalone agent into a team of one, in place. Raw
+  // `fetch` rather than `apiCall` for the same reason `toggleEnabled` uses one:
+  // the 409 carrying `warning` is a question for the user, not an error to
+  // throw. `force` is only sent on the second pass, after they answered it.
+  async function convertToTeam({ force = false } = {}) {
+    const agent = convertTarget?.agent;
+    if (!agent) return;
+    setConvertBusy(true);
+    markBusy(agent.id, true);
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(agent.id)}/convert-to-team`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force }),
+      });
+      const data = await res.json().catch(() => ({}));
+      const busyNotice = res.status === 409 ? convertBusyNotice(data) : null;
+      if (busyNotice) {
+        setConvertTarget({ agent, busyNotice });
+        return;
+      }
+      if (!res.ok) {
+        setConvertTarget(null);
+        setActionError(data.error || `HTTP ${res.status}`);
+        return;
+      }
+      setConvertTarget(null);
+      setNotice(convertResultNotice(data));
+      refresh();
+    } catch (e) {
+      setConvertTarget(null);
+      setActionError(e.message);
+    } finally {
+      markBusy(agent.id, false);
+      setConvertBusy(false);
     }
   }
 
@@ -469,6 +524,7 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         case 'clone':             setPanelAgent(agent); setPanelMode('clone'); break;
         case 'export':            window.open(`/api/agents/${encodeURIComponent(agent.id)}/export`, '_blank'); break;
         case 'extract-template':  openExtractPanel(agent); break;
+        case 'convert-to-team':   setConvertTarget({ agent, busyNotice: null }); break;
         case 'reset-to-stub':     setDeactivateTarget(agent); break;
         case 'delete':            setDeleteTarget(deleteTargetFor(agent, agents)); break;
         default: break;
@@ -489,6 +545,11 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         // team's own edit form now renders in the rail's Settings tab, so this
         // opens it there instead of leaving the chat for the Agents page.
         case 'edit-team':        if (onOpenSettings && teamId) onOpenSettings(teamId); break;
+        case 'share':
+          // Enabled for anyone who can see the team: a Team Member gets the
+          // list read-only (#2041 AC9), the panel gates the controls.
+          if (teamId) setShareTeam({ id: teamId, name: target.group?.displayName || teamId });
+          break;
         case 'export-team':      window.open(`/api/agents/${encodeURIComponent(teamId)}/export`, '_blank'); break;
         case 'open-flow-editor': navigate(`/flows?proc=${encodeURIComponent(teamId)}`); break;
         case 'delete-team':      if (team) setDeleteTarget(deleteTargetFor(team, agents)); break;
@@ -522,6 +583,24 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         style={{ display: 'none' }}
         onChange={onImportFilePicked}
       />
+
+      {/* #2082 — the team Share panel. `onError` mirrors the message into the
+          rail toast as well, because the panel can be scrolled past its own
+          inline error while a write is being retried. */}
+      <SidePanel
+        open={!!shareTeam}
+        onClose={() => setShareTeam(null)}
+        title={shareTeam ? `Share: ${shareTeam.name}` : ''}
+        width="520px"
+      >
+        {shareTeam && (
+          <ShareTeamPanel
+            teamId={shareTeam.id}
+            teamName={shareTeam.name}
+            onError={setActionError}
+          />
+        )}
+      </SidePanel>
 
       <SidePanel
         open={panelMode === 'import'}
@@ -589,6 +668,17 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         agent={deactivateTarget}
         onConfirm={deactivateConfirmed}
         onCancel={() => setDeactivateTarget(null)}
+      />
+
+      <ConvertToTeamDialog
+        open={!!convertTarget}
+        agent={convertTarget?.agent}
+        copy={convertDialogCopy(convertTarget?.agent)}
+        consequences={convertConsequences(convertTarget?.agent)}
+        busyNotice={convertTarget?.busyNotice}
+        busy={convertBusy}
+        onConfirm={() => convertToTeam({ force: !!convertTarget?.busyNotice })}
+        onCancel={() => setConvertTarget(null)}
       />
 
       <DisableWarningDialog

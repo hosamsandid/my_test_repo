@@ -96,6 +96,57 @@ test('summary export carries the four classes as separate columns and never a co
   assert.ok(!/cost|usd|dollar|price/.test(csv), 'summary CSV must not mention money');
 });
 
+// ── #2137: attribution + provider tier columns ──────────────────────────────
+test('summary export carries the attribution and provider-tier columns', () => {
+  const keys = SUMMARY_COLUMNS.map((c) => c.key);
+  for (const k of ['attributedUserId', 'attributionKind', 'providerTier']) {
+    assert.ok(keys.includes(k), `missing column ${k}`);
+  }
+  // Every column is a distinct key, or a CSV cell would be written twice.
+  assert.equal(new Set(keys).size, keys.length);
+});
+
+test('summaryRows carries the attribution of an enriched record, blank when absent', () => {
+  const enriched = {
+    ts: '2026-09-01T10:00:00.000Z',
+    agentId: 'solo',
+    teamId: null,
+    provider: 'ep-global',
+    providerTier: 'global',
+    attribution: { userId: 'u-ada', kind: 'requesting-user' },
+    tokens: { input: 5, output: 1, cacheCreationInput: 0, cacheReadInput: 0 },
+    modelUsage: {},
+  };
+  const [row] = summaryRows([enriched]);
+  assert.equal(row.attributedUserId, 'u-ada');
+  assert.equal(row.attributionKind, 'requesting-user');
+  assert.equal(row.providerTier, 'global');
+  // A global-provider run has no team, which is exactly why these columns
+  // exist — a sheet keyed on teamId alone would drop it.
+  assert.equal(row.teamId, '');
+
+  // A pre-#2137 record (and an unattributed one) reads as blank, never as a
+  // placeholder a downstream group-by could mistake for an account.
+  const [legacy] = summaryRows([{ ...enriched, attribution: undefined, providerTier: undefined }]);
+  assert.equal(legacy.attributedUserId, '');
+  assert.equal(legacy.attributionKind, '');
+  assert.equal(legacy.providerTier, '');
+  const [unattr] = summaryRows([{ ...enriched, attribution: { userId: null, kind: 'unattributed' } }]);
+  assert.equal(unattr.attributedUserId, '');
+  assert.equal(unattr.attributionKind, 'unattributed');
+});
+
+test('a malformed attribution block cannot break the export', () => {
+  for (const attribution of [null, 'u-ada', 42, []]) {
+    const [row] = summaryRows([{
+      ts: '2026-09-01T10:00:00.000Z', attribution,
+      tokens: { input: 1, output: 0, cacheCreationInput: 0, cacheReadInput: 0 },
+    }]);
+    assert.equal(row.attributedUserId, '');
+    assert.equal(row.attributionKind, '');
+  }
+});
+
 // ── work-item export ────────────────────────────────────────────────────────
 test('workItemRows: one row per work-item × model plus an unattributed remainder', () => {
   const rows = workItemRows(canonical, []);

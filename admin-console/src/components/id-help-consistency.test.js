@@ -20,7 +20,9 @@ const pagesDir = join(here, '..', 'pages');
 // hint) must reference the shared constant rather than a hard-coded sentence.
 const ID_HINT_PAGES = [
   'Blueprints.jsx',
-  'Teams.jsx',
+  // The Access page dropped its only id field with the create-scope form in
+  // #2081: `POST /api/admin/teams` is retired and a team is created through
+  // `POST /api/teams`, whose id field lives in the Agent Team wizard.
   // The Agents page itself no longer renders an id field: its create form —
   // the only one it had — moved into the shared `agent-lifecycle/` module in
   // #1956, and the edit form has none (an id is immutable after creation).

@@ -14,7 +14,7 @@
 // collections that back the model:
 //
 //   /workspace/teams/index.json        [{ id, name, description, createdAt, updatedAt }]
-//   /workspace/users/index.json        [{ id, subject, email, displayName, systemAdmin, githubHandle, createdAt, updatedAt }]
+//   /workspace/users/index.json        [{ id, subject, email, displayName, systemAdmin, githubHandle, matrixUserId, createdAt, updatedAt }]
 //   /workspace/memberships/index.json  [{ id, userId, teamId, role, createdAt }]
 //
 // Roles:
@@ -33,6 +33,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const succession = require('./team-admin-succession');
 
 const DEFAULT_TEAM_ID = 'default';
 const DEFAULT_TEAM_NAME = 'Default Team';
@@ -41,6 +42,27 @@ const MEMBERSHIP_ROLES = Object.freeze(['team-admin', 'team-member']);
 
 // A team id is an operator-facing slug, same rules as Working Environment ids.
 const TEAM_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+// The last System Admin may neither be deleted nor demoted (#2059 AC7, #2041
+// AC18). Before #2059 the env credential was an always-available fallback, so
+// removing the only global administrator was survivable; now that the console
+// authenticates against user records alone, it would lock every human out of
+// user management with no way back in short of editing the store on the host.
+// The store owns the rule — the Users page mirrors these exact sentences on its
+// disabled controls (`admin-console/src/pages/users-view.js`) and renders them
+// verbatim if a request is made anyway.
+const LAST_SYSTEM_ADMIN_DELETE_REASON =
+  'The last System Admin cannot be deleted — promote another user to System Admin first';
+const LAST_SYSTEM_ADMIN_DEMOTE_REASON =
+  'The last System Admin cannot be demoted — promote another user to System Admin first';
+
+// Is `id` the ONLY System Admin in `users`? A stack with zero System Admins has
+// no last one to protect, so this is false there — the guard never blocks an
+// action on a record that was not holding the estate up.
+function isLastSystemAdmin(users, id) {
+  const admins = (Array.isArray(users) ? users : []).filter(u => u && u.systemAdmin === true);
+  return admins.length === 1 && admins[0].id === id;
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -99,9 +121,25 @@ function coerceChatFontSize(raw) {
   return n;
 }
 
-function createTeamsStore({ root } = {}) {
+// A membership's `teamId` may name an **Agent Team** as well as a legacy access
+// scope (#2077 D1; self-service creation, #2081). This module owns
+// teams/users/memberships and has no agent access, so the second half of that
+// question is injected: `agentTeamExists(id)` answers "is there a `role: 'team'`
+// agent with this id". Defaults to a closed `() => false`, so a caller that
+// wires nothing keeps exactly the pre-#2081 behaviour (`teams/index.json` only)
+// rather than silently accepting any string.
+function createTeamsStore({ root, agentTeamExists } = {}) {
   if (!isNonEmptyString(root)) {
     throw new Error('createTeamsStore: { root } is required');
+  }
+  const knownAgentTeam = typeof agentTeamExists === 'function' ? agentTeamExists : () => false;
+  function teamExists(id) {
+    if (getTeam(id)) return true;
+    try {
+      return knownAgentTeam(id) === true;
+    } catch {
+      return false; // an unreadable agent config is "no team", never "any team"
+    }
   }
 
   const TEAMS_INDEX = path.join(root, 'teams', 'index.json');
@@ -258,6 +296,9 @@ function createTeamsStore({ root } = {}) {
       user.displayName = patch.displayName.trim();
     }
     if (patch.systemAdmin !== undefined) {
+      if (patch.systemAdmin !== true && isLastSystemAdmin(users, id)) {
+        throw conflict(LAST_SYSTEM_ADMIN_DEMOTE_REASON);
+      }
       user.systemAdmin = patch.systemAdmin === true;
     }
     if (patch.githubHandle !== undefined) {
@@ -276,10 +317,26 @@ function createTeamsStore({ root } = {}) {
   }
 
   // Deletes a user and cascades their memberships.
+  //
+  // Refused while the user is the last team-admin of any team (#2081 AC5,
+  // D4): the cascade below would otherwise silently leave those teams
+  // un-administrable, and unlike a removal there is no successor to name —
+  // offboarding deletes a person, and guessing who inherits their teams is
+  // exactly what D4 forbids. The check runs FIRST so a refusal costs nothing;
+  // the caller's own pre-delete steps (agent pausing, personal-credential and
+  // Matrix teardown) are destructive and must not run for a delete that cannot
+  // proceed.
   function deleteUser(id) {
     const users = listUsers();
     const idx = users.findIndex(u => u.id === id);
     if (idx === -1) throw notFound(`User '${id}' not found`);
+    if (isLastSystemAdmin(users, id)) throw conflict(LAST_SYSTEM_ADMIN_DELETE_REASON);
+    {
+      const plan = succession.planUserDeletion({
+        memberships: readArray(MEMBERSHIPS_INDEX), userId: id,
+      });
+      if (!plan.ok) throw conflict(plan.message, plan.code);
+    }
     users.splice(idx, 1);
     writeArray(USERS_INDEX, users);
     const memberships = readArray(MEMBERSHIPS_INDEX);
@@ -299,21 +356,50 @@ function createTeamsStore({ root } = {}) {
     return list;
   }
 
+  // Raise `promote.userId` to team-admin in `list`, in place. The successor's
+  // membership is guaranteed to exist — `planAdminHandover` refused otherwise —
+  // so this only ever flips a role, never creates a grant.
+  function applyPromotion(list, promote) {
+    if (!promote) return;
+    const target = list.find(m => m.userId === promote.userId && m.teamId === promote.teamId);
+    if (target) target.role = succession.ROLE_ADMIN;
+  }
+
   // Upsert: at most one membership per (userId, teamId). Re-asserting updates
   // the role in place rather than creating a duplicate.
-  function setMembership({ userId, teamId, role } = {}) {
+  //
+  // `successorUserId` is the D4 hand-over (#2081): demoting the LAST team-admin
+  // of a team is refused unless a successor already in the team is named, and
+  // when one is, the promotion and the demotion land in a SINGLE `writeArray` —
+  // a promote-then-demote pair could leave the team with two admins, or none, if
+  // the process died between the two writes.
+  function setMembership({ userId, teamId, role, successorUserId } = {}) {
     if (!isNonEmptyString(userId)) throw badRequest('userId is required');
     if (!isNonEmptyString(teamId)) throw badRequest('teamId is required');
     if (!MEMBERSHIP_ROLES.includes(role)) {
       throw badRequest(`role must be one of: ${MEMBERSHIP_ROLES.join(', ')}`);
     }
     if (!getUser(userId)) throw notFound(`User '${userId}' not found`);
-    if (!getTeam(teamId)) throw notFound(`Team '${teamId}' not found`);
+    if (!teamExists(teamId)) throw notFound(`Team '${teamId}' not found`);
 
     const memberships = readArray(MEMBERSHIPS_INDEX);
     const existing = memberships.find(m => m.userId === userId && m.teamId === teamId);
+
+    // Only a DEMOTION can strip a team of its last admin. Promoting somebody,
+    // or re-asserting the role they already hold, never can — so the rule is
+    // not consulted there and a plain "add a member" call is unaffected.
+    let promote = null;
+    if (existing && role !== succession.ROLE_ADMIN) {
+      const plan = succession.planAdminHandover({
+        memberships, userId, teamId, successorUserId,
+      });
+      if (!plan.ok) throw conflict(plan.message, plan.code);
+      promote = plan.promote;
+    }
+
     if (existing) {
       existing.role = role;
+      applyPromotion(memberships, promote);
       writeArray(MEMBERSHIPS_INDEX, memberships);
       return existing;
     }
@@ -388,6 +474,28 @@ function createTeamsStore({ root } = {}) {
     return sanitizeUser(users[idx]);
   }
 
+  // ---- Matrix identity pointer (#1458) ------------------------------------
+  //
+  // Records WHICH Matrix account belongs to this human — `@u-<hash>:local`,
+  // derived from their subject by `human-matrix-identity.js`. This is a public
+  // identifier (every member of a shared room sees it), so unlike the password
+  // hash it is safe to keep on the record and to serialise.
+  //
+  // The matching **access token** deliberately does NOT live here: it is a
+  // secret, and `users/index.json` has many direct readers that bypass
+  // `sanitizeUser()`. It lives in `human-matrix-store.js` instead
+  // (`users/matrix/<userId>.json`, mode 0600).
+  function setUserMatrixIdentity(id, matrixUserId) {
+    if (!isNonEmptyString(matrixUserId)) throw badRequest('matrixUserId is required');
+    const users = listUsers();
+    const idx = users.findIndex(u => u.id === id);
+    if (idx === -1) throw notFound(`User '${id}' not found`);
+    users[idx].matrixUserId = matrixUserId.trim();
+    users[idx].updatedAt = nowIso();
+    writeArray(USERS_INDEX, users);
+    return sanitizeUser(users[idx]);
+  }
+
   // Verify a login: match by subject, then check the scrypt hash. Returns the
   // sanitized user on success, or null (unknown subject / no password / wrong
   // password are all indistinguishable to the caller).
@@ -399,14 +507,39 @@ function createTeamsStore({ root } = {}) {
     return sanitizeUser(user);
   }
 
-  function removeMembership({ userId, teamId } = {}) {
+  // Remove one membership. Subject to the same D4 hand-over as a demotion
+  // (#2081): removing the LAST team-admin of a team is refused unless a
+  // successor already in the team is named, and the promotion rides the same
+  // single write as the removal.
+  function removeMembership({ userId, teamId, successorUserId } = {}) {
     const memberships = readArray(MEMBERSHIPS_INDEX);
     const remaining = memberships.filter(m => !(m.userId === userId && m.teamId === teamId));
     if (remaining.length === memberships.length) {
       throw notFound(`No membership for user '${userId}' in team '${teamId}'`);
     }
+    const plan = succession.planAdminHandover({ memberships, userId, teamId, successorUserId });
+    if (!plan.ok) throw conflict(plan.message, plan.code);
+    applyPromotion(remaining, plan.promote);
     writeArray(MEMBERSHIPS_INDEX, remaining);
     return { userId, teamId, deleted: true };
+  }
+
+  // Drop every membership naming `teamId`, unconditionally. This is the cascade
+  // `deleteTeam` performs inline, exposed for the caller that deletes the OTHER
+  // kind of team: an **Agent Team** lives as an agent config, so the orchestrator
+  // deletes it and this module never hears about it (#2081).
+  //
+  // Deliberately NOT `removeMembership` in a loop: that path enforces the D4
+  // last-admin rule, which exists to stop a team becoming un-administrable — a
+  // team that no longer exists cannot be, and the rule would refuse the very
+  // clean-up that keeps the index consistent. Returns how many were removed.
+  function removeTeamMemberships(teamId) {
+    if (!isNonEmptyString(teamId)) return 0;
+    const memberships = readArray(MEMBERSHIPS_INDEX);
+    const remaining = memberships.filter(m => m.teamId !== teamId);
+    const removed = memberships.length - remaining.length;
+    if (removed > 0) writeArray(MEMBERSHIPS_INDEX, remaining);
+    return removed;
   }
 
   // ---- bootstrap ----------------------------------------------------------
@@ -443,14 +576,87 @@ function createTeamsStore({ root } = {}) {
     return createUser({ subject, email, displayName, systemAdmin: true });
   }
 
+  // Seeds the very FIRST System Admin from the deployment's configured initial
+  // user (#2059, concept #2041 D13). The configured credential is a **seed, not
+  // a login**: it is consumed once, on a stack that has zero user records, to
+  // create a real user record — and never consulted again. Hence the
+  // `listUsers().length > 0` gate rather than `ensureSystemAdmin`'s
+  // promote-on-every-boot behaviour: once any record exists, this pass is inert,
+  // so re-pointing the variable at a different subject can never mint a second
+  // administrator or re-grant one that was deliberately demoted. Recovering a
+  // lost identity is a host-level action on `/workspace/users/index.json`, which
+  // is the documented break-glass (docs/governance-concept.md GOV-ACCESS-7).
+  //
+  // A `password` is optional: an SSO stack seeds a subject with none and the
+  // person authenticates through the identity-aware proxy. Note that a record
+  // WITHOUT a password can never sign in with one (`verifyUserCredentials`
+  // requires `passwordHash`), which is exactly the intent there.
+  //
+  // Returns the sanitized seeded record, or null when nothing was seeded (no
+  // subject configured, or the stack already has users).
+  function seedInitialSystemAdmin({ subject, password, email, displayName } = {}) {
+    if (!isNonEmptyString(subject)) return null;
+    if (listUsers().length > 0) return null;
+    const user = ensureSystemAdmin({ subject, email, displayName });
+    if (!user) return null;
+    if (isNonEmptyString(password)) setUserPassword(user.id, password);
+    return sanitizeUser(getUser(user.id));
+  }
+
+  // Append (user → team) memberships in bulk, for the #2077 D6 migration.
+  //
+  // Deliberately NOT `setMembership` in a loop, for three reasons:
+  //
+  //  1. `setMembership` validates `teamId` against `teams/index.json` (:311),
+  //     and the whole point of the collapse is that the referent is now an
+  //     **Agent Team** id, which this module cannot see (it has no agent
+  //     access). The caller has already resolved the target ids from the agent
+  //     configs, so this method takes them as given.
+  //  2. One write instead of N. A per-entry upsert would rewrite the whole
+  //     array N times, and a crash halfway would leave a partial fan-out.
+  //  3. It must never CHANGE an existing record. The migration adds reach; a
+  //     pre-existing `(userId, teamId)` pair is skipped rather than having its
+  //     role overwritten, so a hand-made grant is never silently rewritten.
+  //
+  // Returns the records actually appended (`[]` on a second run — AC6).
+  function appendMemberships(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) return [];
+    const memberships = readArray(MEMBERSHIPS_INDEX);
+    const seen = new Set(memberships.map(m => `${m && m.userId} ${m && m.teamId}`));
+    const added = [];
+    for (const e of entries) {
+      if (!e || !isNonEmptyString(e.userId) || !isNonEmptyString(e.teamId)) continue;
+      if (!MEMBERSHIP_ROLES.includes(e.role)) continue;
+      const key = `${e.userId} ${e.teamId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const record = {
+        id: crypto.randomUUID(),
+        userId: e.userId,
+        teamId: e.teamId,
+        role: e.role,
+        createdAt: nowIso(),
+      };
+      // Provenance for the collapse (#2077, §8.2): which access scope this
+      // grant was derived from. Nothing reads it — it is what makes a migrated
+      // membership auditable and distinguishable from one a human made.
+      if (isNonEmptyString(e.fromScopeId)) record.fromScopeId = e.fromScopeId;
+      memberships.push(record);
+      added.push(record);
+    }
+    if (added.length > 0) writeArray(MEMBERSHIPS_INDEX, memberships);
+    return added;
+  }
+
   return {
     DEFAULT_TEAM_ID,
     MEMBERSHIP_ROLES,
     listTeams, getTeam, createTeam, updateTeam, deleteTeam,
     listUsers, getUser, getUserBySubject, createUser, updateUser, deleteUser,
     setUserPassword, clearUserPassword, verifyUserCredentials, sanitizeUser,
-    listMemberships, setMembership, removeMembership,
-    ensureDefaultTeam, ensureSystemAdmin,
+    setUserMatrixIdentity,
+    listMemberships, setMembership, removeMembership, removeTeamMemberships, appendMemberships,
+    ensureDefaultTeam, ensureSystemAdmin, seedInitialSystemAdmin,
   };
 }
 
@@ -458,14 +664,18 @@ function createTeamsStore({ root } = {}) {
 // `statusHint` lets the HTTP layer map store errors to status codes without
 // string-matching messages.
 
-function tagged(message, statusHint) {
+// `code` is optional and carries a stable machine-readable reason next to the
+// human message — the D4 refusals need one so a client can tell "name a
+// successor" apart from "that successor is not a member" without matching text.
+function tagged(message, statusHint, code) {
   const err = new Error(message);
   err.statusHint = statusHint;
+  if (code) err.code = code;
   return err;
 }
-function badRequest(m) { return tagged(m, 400); }
-function notFound(m) { return tagged(m, 404); }
-function conflict(m) { return tagged(m, 409); }
+function badRequest(m, code) { return tagged(m, 400, code); }
+function notFound(m, code) { return tagged(m, 404, code); }
+function conflict(m, code) { return tagged(m, 409, code); }
 
 module.exports = {
   createTeamsStore,
@@ -479,4 +689,7 @@ module.exports = {
   DEFAULT_TEAM_NAME,
   MEMBERSHIP_ROLES,
   TEAM_ID_RE,
+  isLastSystemAdmin,
+  LAST_SYSTEM_ADMIN_DELETE_REASON,
+  LAST_SYSTEM_ADMIN_DEMOTE_REASON,
 };

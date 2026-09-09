@@ -10,7 +10,6 @@ seeAlso:
   - { label: "Working Environments", to: "/environments" }
   - { label: "Agent Templates", to: "/role-templates" }
   - { label: "Skills", to: "/skills" }
-  - { label: "Access", to: "/teams" }
 askPrompts:
   - "What do the five wizard steps do?"
   - "What exactly is created when I click Create team?"
@@ -27,9 +26,10 @@ Analyst, Developer, Code Reviewer, Reworker — sharing one Working Environment 
 wired to each other, so one agent's outcome wakes the next over GitHub labels and
 events.
 
-An Agent Team is **not** the same thing as a *Team* on the Access page. That one is
-the human tenant (members and visibility scope) your agents belong to. This one is
-a group of agents that work together. They only share a word.
+An Agent Team is **not** the same thing as an *access scope*. That one is the
+older, coarser tenant your agents are stamped with, administered by a System
+Admin. This one is a group of agents that work together — and it is what people
+are actually given access to. They only share a word.
 
 ## The five steps
 

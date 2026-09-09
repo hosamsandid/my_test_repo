@@ -333,14 +333,16 @@ test('the real help-topics dir loads and includes the Overview pilot', () => {
 test('the Overview topic carries the former Getting Started concepts and CTAs', () => {
   const reg = loadRegistry(path.join(__dirname, 'help-topics'));
   const body = reg.overview.body;
-  for (const concept of ['Agents', 'Access', 'Flows', 'Working Environments', 'Knowledge', 'Model Providers']) {
+  for (const concept of ['Agents', 'Administration', 'Flows', 'Working Environments', 'Knowledge', 'Model Providers']) {
     assert.match(body, new RegExp(`\\*\\*${concept}\\*\\*`), `Overview body must explain ${concept}`);
   }
   const linked = reg.overview.seeAlso.map((s) => s.to);
   // `/agents` was in this list until #1930 removed the page; the **Agents**
   // concept above still has to be explained (it is a thing, not a page), but
   // the link now points at `/chats`, which is where you meet one.
-  for (const to of ['/chats', '/teams', '/flows', '/environments', '/knowledge', '/models']) {
+  // `/teams` was in this list until #2085 dissolved the Access page; the concept
+  // it stood for is now **Administration**, and the link points at `/users`.
+  for (const to of ['/chats', '/users', '/flows', '/environments', '/knowledge', '/models']) {
     assert.ok(linked.includes(to), `Overview must link to ${to}`);
   }
   const ctas = reg.overview.actions;

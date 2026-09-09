@@ -32,7 +32,8 @@ Options:
 
     --since <ISO>     start of the half-open [since, until) window (inclusive)
     --until <ISO>     end of the window (exclusive)
-    --group-by <g>    agent | team | model | provider | day   (default: agent)
+    --group-by <g>    agent | team | model | provider | providerTier | day
+                      (default: agent)
     --json            print the raw endpoint JSON instead of the table
 
 Scope is resolved server-side from your agent identity: `me` is your own
@@ -55,7 +56,13 @@ import urllib.request
 # ===========================================================================
 
 SCOPES = ("self", "team")
-GROUP_BY = ("agent", "team", "model", "provider", "day")
+# Kept in step with AGENT_GROUP_BY in orchestrator/usage-query.js, which is
+# where the rule is ENFORCED — this tuple only shapes the error message and
+# the --help text. `providerTier` (#2137) tells a global provider's usage apart
+# from a team-scoped one. `user` is deliberately absent: the per-human
+# breakdown is System-Admin-only (#801), and a team-scoped answer would hand
+# one agent every colleague's spend. Your own runs stay fully visible either way.
+GROUP_BY = ("agent", "team", "model", "provider", "providerTier", "day")
 TOKEN_CLASSES = ("input", "output", "cacheCreationInput", "cacheReadInput")
 
 # Human labels for the four token classes (display only).
@@ -139,6 +146,22 @@ def _agent_id():
     return os.environ.get("AGENT_ID", "unknown")
 
 
+# Internal-API credential (#1456, GOV-PLATFORM-2). `startAgentProcess` bakes a
+# per-agent token into the container env, exactly like the GitHub PAT; it is
+# valid only for the agent-facing allowlist and only for this agent's own id.
+# Absent — a stack that has not armed the gate — the call goes out
+# unauthenticated and the orchestrator behaves exactly as it did before.
+# Duplicated across the agent-side CLIs on purpose: each is a dependency-free
+# single file by contract (docs/cli-contract.md §4.5), so there is nowhere
+# shared to put it.
+def internal_headers(extra=None):
+    headers = dict(extra or {})
+    token = os.environ.get("AEE_INTERNAL_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    return headers
+
+
 def _orchestrator_base():
     return (os.environ.get("ORCHESTRATOR_INTERNAL_URL")
             or os.environ.get("AEE_ORCHESTRATOR_URL")
@@ -149,7 +172,9 @@ def _fetch_summary(url):
     """GET the summary endpoint. Returns (ok, result_or_errmsg). Read-only —
     never writes. A transport error / non-JSON body fails cleanly so a caller
     never mistakes a partial response for a real total (edge case: unreachable)."""
-    req = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
+    req = urllib.request.Request(
+        url, method="GET",
+        headers=internal_headers({"Accept": "application/json"}))
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = resp.read().decode("utf-8", "replace")

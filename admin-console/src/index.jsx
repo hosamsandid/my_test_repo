@@ -8,6 +8,7 @@ import { ModelSelectionProvider } from './context/ModelSelectionContext';
 import { AgentStatusesProvider } from './context/AgentStatusesContext.jsx';
 import { TranscriptionSessionProvider } from './context/TranscriptionSessionContext.jsx';
 import { HelperChatProvider } from './context/HelperChatContext.jsx';
+import { FlowCopilotProvider } from './context/FlowCopilotContext.jsx';
 import './theme/tokens.css';
 
 createRoot(document.getElementById('root')).render(
@@ -25,7 +26,12 @@ createRoot(document.getElementById('root')).render(
               {/* Helper Chat (#1735): app-level so the help panel + its
                   conversation survive all client-side navigation. */}
               <HelperChatProvider>
-                <App />
+                {/* Flow Copilot turn (#2087): app-level so a running turn — and
+                    the proposal it produces — survives route navigation, closing
+                    the Copilot panel and switching flow. */}
+                <FlowCopilotProvider>
+                  <App />
+                </FlowCopilotProvider>
               </HelperChatProvider>
             </TranscriptionSessionProvider>
           </AgentStatusesProvider>

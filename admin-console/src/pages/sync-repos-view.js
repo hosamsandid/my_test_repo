@@ -54,40 +54,126 @@ export async function consumeSyncStream(res, onEvent) {
   return complete;
 }
 
+// The wording for each D1 safety skip (#2066). Keyed on the stable `reason`
+// code cloneAdjustSafety() returns, with the orchestrator's own `detail` — which
+// names the specific thing blocking THIS clone — appended by repoStatusText, so
+// the reader is told what to do rather than merely that something is wrong.
+const BLOCKED_REASON_LEAD = {
+  'path-occupied': 'Left alone',
+  'uncommitted-changes': 'Left alone — uncommitted work',
+  'unpushed-commits': 'Left alone — unpushed work',
+  'no-upstream': 'Left alone — unpushed work',
+  'upstream-unknown': 'Left alone — could not verify',
+  'detached-head': 'Left alone — no branch checked out',
+  'foreign-remote': 'Left alone — remote was changed by hand',
+  'no-remote': 'Left alone — no remote to verify against',
+  'status-unreadable': 'Left alone — git state unreadable',
+};
+
 /** Human label for a single repo result line. */
-export function repoStatusText(status, reason) {
+export function repoStatusText(status, reason, detail) {
   if (status === 'cloned') return 'Cloned';
+  if (status === 'adjusted') return 'Brought up to date';
   if (status === 'failed') return 'Failed';
+  if (status === 'retained') return 'Kept — no longer declared, nothing deleted';
   if (status === 'skipped') {
-    if (reason === 'path-occupied') return 'Skipped — a non-git folder occupies that path';
-    return 'Already present';
+    const lead = BLOCKED_REASON_LEAD[reason];
+    if (lead) return detail ? `${lead}: ${detail}` : lead;
+    return 'Already up to date';
   }
   return status || 'Unknown';
 }
 
-/** Symbol prefix for a repo line, keyed on outcome. */
-export function repoStatusSymbol(status) {
-  if (status === 'cloned') return '✓';
+/**
+ * Symbol prefix for a repo line, keyed on outcome.
+ *
+ * A D1 safety skip gets its own `!` rather than sharing `✗` with a failure or
+ * `·` with an already-up-to-date repository: the three need different things
+ * from the reader — nothing, push-or-commit-then-catch-up, and fix the
+ * credentials or the URL — so they must not look alike.
+ */
+export function repoStatusSymbol(status, blocked = false) {
+  if (status === 'cloned' || status === 'adjusted') return '✓';
   if (status === 'failed') return '✗';
+  if (status === 'skipped' && blocked) return '!';
   return '·';
 }
 
 /**
  * One-line human summary of a completed run's totals.
- * e.g. "3 cloned, 2 already present, 1 failed" — omits zero buckets, and
+ * e.g. "3 cloned, 1 brought up to date, 1 left alone" — omits zero buckets, and
  * returns a friendly message when there was nothing to do.
  */
 export function summaryText(totals) {
   const t = totals || {};
   const cloned = t.cloned || 0;
+  const adjusted = t.adjusted || 0;
   const skipped = t.skipped || 0;
+  const blocked = t.blocked || 0;
   const failed = t.failed || 0;
-  if (cloned === 0 && skipped === 0 && failed === 0) {
-    return 'Nothing to sync — no repositories are declared on this environment.';
+  const retained = t.retained || 0;
+  if (cloned === 0 && adjusted === 0 && skipped === 0 && failed === 0 && retained === 0) {
+    return 'Nothing to do — no repositories are declared on this environment.';
   }
   const parts = [];
   if (cloned) parts.push(`${cloned} cloned`);
-  if (skipped) parts.push(`${skipped} already present`);
+  if (adjusted) parts.push(`${adjusted} brought up to date`);
+  // `blocked` is a subset of `skipped`, so the already-up-to-date bucket is the
+  // remainder: lumping the two together would hide the one that needs action.
+  if (skipped - blocked > 0) parts.push(`${skipped - blocked} already up to date`);
+  if (blocked) parts.push(`${blocked} left alone`);
   if (failed) parts.push(`${failed} failed`);
+  if (retained) parts.push(`${retained} kept`);
   return parts.join(', ') + '.';
+}
+
+/**
+ * Turn one stream event into a display row, or null for an event that has no
+ * row of its own (`plan`, `agent-done`, `complete`).
+ *
+ * Extracted from SyncReposPanel (#2066) so the per-agent panel and the
+ * save-time propagation dialog cannot end up describing the same outcome
+ * differently — the two surfaces render this, they do not each interpret the
+ * stream.
+ *
+ * @returns {{kind:'agent'|'repo'|'note', text: string, symbol?: string,
+ *            status?: string, blocked?: boolean}|null}
+ */
+export function syncEventRow(ev, { showAgentHeaders = false } = {}) {
+  if (!ev) return null;
+  if (ev.type === 'agent') {
+    if (!showAgentHeaders) return null;
+    return { kind: 'agent', text: ev.displayName || ev.agentId };
+  }
+  if (ev.type === 'repo') {
+    const label = repoStatusText(ev.status, ev.reason, ev.detail);
+    const applied = Array.isArray(ev.applied) && ev.applied.length ? ` (${ev.applied.join('; ')})` : '';
+    return {
+      kind: 'repo',
+      symbol: repoStatusSymbol(ev.status, ev.blocked),
+      status: ev.status,
+      blocked: !!ev.blocked,
+      text: `${ev.name} — ${label}${applied}${ev.error ? `: ${ev.error}` : ''}`,
+    };
+  }
+  if (ev.type === 'agent-skip') {
+    // AC24: an un-materialized member has no workspace, and saying so is more
+    // use than a bare "skipped" — the fix is to start the agent.
+    return { kind: 'note', text: 'Workspace not provisioned yet — start the agent, then catch up.' };
+  }
+  if (ev.type === 'agent-error') {
+    return { kind: 'repo', symbol: '✗', status: 'failed', text: `Could not reach this agent: ${ev.error}` };
+  }
+  return null;
+}
+
+/**
+ * Row colour by outcome. A D1 safety skip is warning-toned rather than red:
+ * nothing failed and nothing was lost — a person has to push or commit first.
+ */
+export function repoRowTone(status, blocked = false) {
+  if (status === 'failed') return 'var(--eb-status-error)';
+  if (status === 'skipped' && blocked) return 'var(--eb-status-warning)';
+  if (status === 'cloned' || status === 'adjusted') return 'var(--eb-status-success)';
+  return 'var(--eb-text-secondary)';
 }

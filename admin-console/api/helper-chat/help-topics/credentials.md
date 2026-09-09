@@ -8,7 +8,7 @@ seeAlso:
   - { label: "GitHub Tokens", to: "/github-tokens" }
   - { label: "My Credentials", to: "/my-credentials" }
   - { label: "Working Environments", to: "/environments" }
-  - { label: "Access", to: "/teams" }
+  - { label: "Administration", to: "/users" }
   - { label: "GitHub Event Log", to: "/github-events" }
 askPrompts:
   - "Why do I need both an SSH key and a GitHub token?"
@@ -212,12 +212,14 @@ picker: the owner is always the signed-in caller, forced server-side, and cannot
 be set to somebody else. Personal SSH keys are **account-wide** — one key covers
 all of your repositories; per-repository personal deploy keys are not offered.
 
-**If the page tells you it can't.** The environment single-admin login operates
-the platform rather than being a person: it has no user record, so it cannot own
-anything on the personal tier. The page says so plainly ("Personal credentials
-need a per-user account") and points you at the shared **SSH Keys** and **GitHub
-Tokens** pages instead. Sign in with your own account to store a personal key or
-token.
+**Everyone who can sign in can own one.** The personal tier needs a real user
+record to hang ownership on, and every principal that can sign in now has one —
+including the first administrator, which is itself an ordinary System-Admin
+record seeded at first boot. There used to be an exception: a login that came
+straight from the deployment's configuration and had no record behind it, which
+is why the page still carries a "Personal credentials need a per-user account"
+explanation pointing at the shared **SSH Keys** and **GitHub Tokens** pages. It
+is a fail-closed guard now rather than a state you can be in.
 
 ## Ownership tiers and privacy
 

@@ -111,25 +111,16 @@ export function bundleSizeLevel(charCount) {
   return 'ok';
 }
 
-/**
- * A new proposal supersedes every still-actionable one: only the latest
- * assistant card may carry live Apply/Discard buttons — an older bundle would
- * silently drop everything proposed after it.
- */
-export function supersedePending(entries) {
-  return (Array.isArray(entries) ? entries : []).map(e =>
-    (e && e.role === 'assistant' && e.status === 'proposed') ? { ...e, status: 'superseded' } : e);
-}
-
-/** The latest assistant entry still awaiting an Apply/Discard decision. */
-export function latestProposal(entries) {
-  const list = Array.isArray(entries) ? entries : [];
-  for (let i = list.length - 1; i >= 0; i--) {
-    const e = list[i];
-    if (e && e.role === 'assistant' && e.status === 'proposed') return e;
-  }
-  return null;
-}
+// `supersedePending` and `latestProposal` lived here until #2087. Both existed
+// because the panel held a LIST of cards of which at most one might still be
+// actionable, and had to find or retire it. Ownership of the actionable
+// proposal moved to the app-level FlowCopilotProvider, which holds exactly one
+// per scope and drops it on Apply / Discard / Stop / a superseding turn — so
+// "which card is live" is now structural rather than searched for, and no
+// locally-held card can carry `status: 'proposed'` at all (`hydrateMessages`
+// below forces a rehydrated proposal to `superseded`, and a committed one is
+// `applied`/`discarded`). They are deleted rather than left exported with
+// tests as their only callers.
 
 // ── chat-history persistence (#1071 item 1) ──────────────────────────────────
 // The draft file carries `copilot: { messages: [] }` — storage metadata, never
@@ -229,11 +220,19 @@ export function proposalNodeDiff(current, proposed) {
 // `{type:'error'}` (the /api/teams/stream mould). Pre-stream failures
 // (bad request, no provider) stay plain non-ok JSON and never reach here.
 
-/** The live status line for a phase event. The server's repair budget is 2. */
+/**
+ * The live status line for a phase event. The server's repair budget is 2.
+ * While the upstream LLM call streams, the server re-emits the current phase
+ * with a `chars` count (the running reply size), so a large generation shows
+ * real movement instead of a frozen "Generating…"; the suffix is dropped when
+ * no size rode along (the pre-stream phase events, or the post-reply validate).
+ */
 export function phaseLabel(ev, maxRepairs = 2) {
-  if (ev && ev.phase === 'repairing') return `Repairing (${ev.iteration}/${maxRepairs})…`;
+  const chars = ev && Number.isFinite(ev.chars) ? ev.chars : 0;
+  const size = chars > 0 ? ` · ${(chars / 1000).toFixed(1)}k chars` : '';
+  if (ev && ev.phase === 'repairing') return `Repairing (${ev.iteration}/${maxRepairs})…${size}`;
   if (ev && ev.phase === 'validating') return 'Validating…';
-  return 'Generating…';
+  return `Generating…${size}`;
 }
 
 /**

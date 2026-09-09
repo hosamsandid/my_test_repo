@@ -6,7 +6,13 @@
 // usage-record schema (build_usage_record) is the shared contract. Tokens only:
 // totalCostUsd may ride along opaque on a record but is NEVER read/surfaced here.
 
-const GROUP_BY = new Set(['agent', 'team', 'model', 'provider', 'day']);
+// `user` and `providerTier` (#2137) group on fields the ORCHESTRATOR stamps at
+// ingest (enrichUsageRecord over usage-attribution.js), not on anything the
+// agent emits — which is why they are absent from the emitter side of
+// usage-summary.fixture.json and covered by this module's own suite instead.
+// They exist because #2136's global providers broke the assumption that `team`
+// is always the accounting anchor: a global provider has no team.
+const GROUP_BY = new Set(['agent', 'team', 'user', 'model', 'provider', 'providerTier', 'day']);
 const TOKEN_CLASSES = ['input', 'output', 'cacheCreationInput', 'cacheReadInput'];
 const UNKNOWN = 'unknown';
 
@@ -46,7 +52,12 @@ function contributions(rec, groupBy) {
   }
   let key;
   if (groupBy === 'team') key = rec.teamId || UNKNOWN;
+  // A record with no resolvable charge (no requester, no agent owner) lands in
+  // `unknown` exactly like a team-less one — the gap is reported, never folded
+  // into somebody else's total. Same for a legacy pre-#2137 record.
+  else if (groupBy === 'user') key = (rec.attribution && rec.attribution.userId) || UNKNOWN;
   else if (groupBy === 'provider') key = rec.provider || UNKNOWN;
+  else if (groupBy === 'providerTier') key = rec.providerTier || UNKNOWN;
   else if (groupBy === 'day') key = typeof rec.ts === 'string' ? rec.ts.slice(0, 10) : UNKNOWN;
   else key = rec.agentId || UNKNOWN; // 'agent'
   return [{ key, tokens: rec.tokens }];

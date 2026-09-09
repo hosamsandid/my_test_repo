@@ -9,6 +9,7 @@ import HumanRegistryPanel from './process/HumanRegistryPanel';
 import FlowAnomaliesPanel from './process/FlowAnomaliesPanel';
 import ImprovementsPanel from './process/ImprovementsPanel';
 import FlowCopilotPanel from './process/FlowCopilotPanel';
+import { useFlowCopilot } from '../context/FlowCopilotContext.jsx';
 import { proposalNodeDiff } from './process/flow-copilot-view';
 import { anomalyCountByNode } from './process/flow-anomalies-view';
 import { lintView } from './process/lint-view';
@@ -20,7 +21,11 @@ import SidePanel from '../components/SidePanel';
 import { roleIcon } from '../components/role-icons';
 import { liveOps, makeDraftOps } from './process/edit-adapters';
 import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './process/connection-capabilities';
-import { toolbarTitle, STATUS_TITLES } from './process-toolbar-hints';
+import { toolbarTitle, STATUS_TITLES, draftStatusText, PROPOSAL_PENDING_REASON } from './process-toolbar-hints';
+import { CREATE_TEAM_LABEL, createdTeamNotice } from './process/create-team-copy.js';
+import { FLOW_INTENTS } from './process/flows-rail-menu.js';
+import { downloadBundle } from './process/bundle-download.js';
+import { draftWriteError } from './process/draft-share-view.js';
 import PageHelpButton from '../components/PageHelpButton';
 import { FLOWS_HELP_SECTIONS } from './process/flows-help-sections';
 import Tooltip from '../components/Tooltip';
@@ -153,13 +158,24 @@ function ModePill({ tone, icon: Icon, title, children }) {
 //                        rail's read-only Outcomes tab can hand editing over.
 //   onFocusConsumed   — tell the parent the pendingFocus was applied, so it can
 //                        strip the params and not re-apply a stale selection
+//   pendingIntent     — a one-shot action the Flows rail context menu asked for
+//                       (#2053 B3), fed by `?intent=`. The rail cannot create a
+//                       team or derive a draft from a team itself — both need
+//                       the bundle this panel already loads — so it selects the
+//                       row and hands the intent over rather than growing a
+//                       second copy of either call. Consumed on mount, like
+//                       pendingFocus; `onIntentConsumed` strips the param so a
+//                       reload does not re-fire it.
+//   draftReloadToken  — bump to refetch the open draft's bundle when it changed
+//                       server-side without changing its id (#2053) — a rail
+//                       rename whose slug is unchanged.
 //   autoOpenCopilot   — open the Flow Copilot panel on mount (#1069) — fed by
 //                        the `?copilot=1` query param ("Describe flow…" entry,
 //                        Edit-as-draft bridge). onNavigate accepts an optional
 //                        second arg `{ copilot: true }` so scope changes that
 //                        should keep the panel open (draft re-key on rename,
 //                        team → draft bridge) can carry the flag.
-export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingImport, onImportConsumed, onImportClosed, pendingFocus = null, onFocusConsumed, autoOpenCopilot = false }) {
+export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingImport, onImportConsumed, onImportClosed, pendingFocus = null, onFocusConsumed, autoOpenCopilot = false, pendingIntent = null, onIntentConsumed, draftReloadToken = 0 }) {
   const navigate = useCallback((s, opts) => { if (onNavigate) onNavigate(s, opts); }, [onNavigate]);
 
   const { data: agents } = useApi('/api/agents');
@@ -195,6 +211,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   const [imported, setImported] = useState(null); // { bundle, graph }
   const [importError, setImportError] = useState(null);
   const [materializeOpen, setMaterializeOpen] = useState(false);
+  // The team a successful creation produced, so the dialog can confirm it
+  // instead of closing and navigating away with nothing said (#2053 D5/AC12).
+  const [createdTeam, setCreatedTeam] = useState(null);
+  // The proposal a rail `Create team…` was refused against. Scoped to that
+  // exact proposal object rather than a boolean: `proposal` CYCLES (every
+  // Copilot turn sets a new one, Apply and Discard clear it), so a write-once
+  // flag would latch and re-attach the refusal to the next proposal the user
+  // asked for — telling them to discard the very thing they are being asked to
+  // review. Comparing identity self-clears on both replacement and resolution,
+  // with no clearing effect to keep in sync.
+  const [refusedFor, setRefusedFor] = useState(null);
   const [addRoleOpen, setAddRoleOpen] = useState(false);
   const [stagesOpen, setStagesOpen] = useState(false);
   const [labelsOpen, setLabelsOpen] = useState(false);
@@ -222,6 +249,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // The panel registers { apply, discard, ok, busy } here so the canvas banner
   // and the chat card share the same handlers.
   const copilotActionsRef = useRef(null);
+  // The app-level turn owner (#2087). Read here only to follow a draft rename
+  // (below) — the panel is what drives it.
+  const flowCopilot = useFlowCopilot();
 
   // Draft bundle + its derived graph. The bundle is the source of truth; the
   // graph is recomputed server-side from it on every change.
@@ -229,14 +259,23 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   const [draftGraph, setDraftGraph] = useState(null);
   const draftBundleRef = useRef(null);
 
+  // `draftReloadToken` (#2053) re-runs this when the draft changed underneath us
+  // without its id changing — a case- or punctuation-only rename from the Flows
+  // rail keeps the slug, so `draftId` alone would leave us holding a bundle with
+  // the OLD name, which the next canvas edit would PUT back and silently undo
+  // the rename. A refetch rather than a remount, deliberately: remounting would
+  // also discard an unapplied Copilot proposal and close the Copilot rail.
   useEffect(() => {
     if (!draftId) { draftBundleRef.current = null; setDraftBundle(null); setDraftGraph(null); return; }
     let alive = true;
     apiCall('GET', `/api/process/drafts/${draftId}`)
       .then(b => { if (alive) { draftBundleRef.current = b; setDraftBundle(b); } })
-      .catch(e => { if (alive) setImportError(e.message); });
+      // #2068 AC17 — a draft deleted, or unshared, under an open canvas comes
+      // back as a bare 404. Say what happened instead of relaying "Draft not
+      // found", which reads like a bug in the URL.
+      .catch(e => { if (alive) setImportError(draftWriteError(e, e.message)); });
     return () => { alive = false; };
-  }, [draftId]);
+  }, [draftId, draftReloadToken]);
 
   useEffect(() => {
     if (!draftBundle) return;
@@ -249,7 +288,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   }, [draftBundle]);
 
   const persistDraft = useCallback(async (next) => {
-    const saved = await apiCall('PUT', `/api/process/drafts/${draftId}`, next);
+    let saved;
+    try {
+      saved = await apiCall('PUT', `/api/process/drafts/${draftId}`, next);
+    } catch (e) {
+      // #2068 AC17 — the draft can disappear from under an open editor: deleted
+      // by another holder, or your access removed. Surface it as a sentence on
+      // the page's own error line and re-throw, so the dialog that triggered the
+      // save still sees the failure and does not report success.
+      setImportError(draftWriteError(e, e.message));
+      throw e;
+    }
     draftBundleRef.current = saved;
     setDraftBundle(saved);
     if (onDraftsChanged) onDraftsChanged();
@@ -257,8 +306,15 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     // the URL scope param and every subsequent save target the live id (AC6).
     // Carry the copilot flag so an apply that renames the draft (the first
     // Copilot generation proposes a name) reopens the panel after the remount.
-    if (saved.id && saved.id !== draftId) navigate(`draft:${saved.id}`, { copilot: copilotOpenRef.current });
-  }, [draftId, onDraftsChanged, navigate]);
+    if (saved.id && saved.id !== draftId) {
+      // #2087 edge case: a turn (or an unapplied proposal) is bound to the OLD
+      // scope key, which nothing can select any more. Re-key it onto the new id
+      // before navigating — the binding follows the rename rather than silently
+      // mismatching. Done first, because the navigate remounts this subtree.
+      if (flowCopilot) flowCopilot.rekeyScope(`draft:${draftId}`, `draft:${saved.id}`);
+      navigate(`draft:${saved.id}`, { copilot: copilotOpenRef.current });
+    }
+  }, [draftId, onDraftsChanged, navigate, flowCopilot]);
 
   const draftOps = useMemo(
     () => makeDraftOps(() => draftBundleRef.current, persistDraft),
@@ -498,6 +554,45 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     } catch (e) { setImportError(e.message); }
   }
 
+  // Act on a rail context-menu intent (#2053 B3), then ask the page to strip the
+  // param. `edit-draft` runs through the SAME `editAsDraft` the toolbar calls,
+  // which is the point of routing the rail through an intent instead of
+  // re-implementing the call there.
+  //
+  // Firing this from an effect rather than from `materializeOpen`'s initial
+  // state is what makes the already-selected row work: this panel is keyed on
+  // `scope`, so an intent for the row that is ALREADY open changes the prop
+  // without remounting, and a `useState` initializer would never be re-read.
+  // The single-fire guard is the param itself — `onIntentConsumed` clears it, so
+  // this re-runs once and returns early — deliberately NOT a ref, which would
+  // latch after the first use and silently ignore the same request a second
+  // time. The dialog's own render guard still waits for the bundle, so an
+  // intent that arrives before the draft has loaded opens the dialog once it
+  // has instead of flashing an empty panel.
+  useEffect(() => {
+    if (!pendingIntent) return;
+    if (pendingIntent === FLOW_INTENTS.createTeam) {
+      // The menu gates on `roleCount`, which it can see off the drafts list —
+      // but NOT on a pending Copilot proposal, which is panel state. Without
+      // this check, choosing `Create team…` for the row that is already open
+      // while a proposal is previewing would create a real team from
+      // `draftBundle`, i.e. the design UNDERNEATH the one on screen. Refuse and
+      // say why, rather than acting on a bundle the user is not looking at.
+      //
+      // The refusal is a flag, not a message in `importError`: that channel is
+      // cleared only on a scope change, so the sentence would outlive the
+      // proposal it describes and still be on screen after a Discard. Keyed on
+      // the proposal object, it disappears exactly when that one goes away.
+      if (proposal) setRefusedFor(proposal);
+      else setMaterializeOpen(true);
+    }
+    if (pendingIntent === FLOW_INTENTS.editAsDraft) editAsDraft(false);
+    if (onIntentConsumed) onIntentConsumed();
+    // `editAsDraft`/`onIntentConsumed` are stable; the deps hold only the
+    // trigger so a re-render never re-fires an action.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingIntent]);
+
   // Apply a Copilot proposal: the normal draft write — from then on it IS the
   // draft, editable with every existing dialog. The chat history (#1071) rides
   // along in the same PUT (`copilot` is storage metadata the server
@@ -612,13 +707,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       if (!res.ok) { setImportError(`Export failed: HTTP ${res.status}`); return; }
       bundle = await res.json();
     }
-    if (!bundle) return;
-    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `${(bundle.name || 'process').replace(/[^a-z0-9._-]/gi, '-')}.process.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    // Shared with the Flows rail's own Export… entry (#2053) so the two export
+    // buttons on this page cannot disagree about the filename.
+    downloadBundle(bundle);
   }
 
   return (
@@ -657,9 +748,15 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
               title={toolbarTitle('labels', { hasProposal: !!proposal })}>Labels</ToolbarButton>
             <ToolbarButton onClick={() => setCopilotOpen(o => !o)} icon={Sparkles}
               title={toolbarTitle('copilot')}>Copilot</ToolbarButton>
-            <ToolbarButton onClick={() => setMaterializeOpen(true)} icon={Boxes}
-              title={toolbarTitle('materialize', { hasProposal: !!proposal, roleCount: draftBundle?.roles?.length || 0 })}
-              disabled={!!proposal || !draftBundle?.roles?.length}>Materialize…</ToolbarButton>
+            {/* Last in the draft group, fenced off (#2053 D3): reading order
+                becomes the instruction — build first, then the set-apart exit.
+                Export follows outside this fragment, shared with live scope. */}
+            <ToolbarSeparator />
+            <CreateTeamButton
+              onClick={() => setMaterializeOpen(true)}
+              roleCount={draftBundle?.roles?.length || 0}
+              hasProposal={!!proposal}
+            />
           </>
         )}
         {isTeamScope && !imported && (
@@ -720,12 +817,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             borderRadius: 'var(--eb-radius-md)', padding: '4px 12px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
             fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
           }}>Continue as draft</button>
-          <button onClick={() => setMaterializeOpen(true)}
-            title="Create a real team and its agents from this imported design" style={{
-            background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
-            borderRadius: 'var(--eb-radius-md)', padding: '4px 12px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
-            fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
-          }}>Materialize as team…</button>
+          <CreateTeamButton
+            onClick={() => setMaterializeOpen(true)}
+            roleCount={materializeBundle?.roles?.length || 0}
+          />
           <button onClick={() => {
             setImported(null); setSelectedId(null);
             // A sidebar-triggered import (#512) has no underlying team/draft to
@@ -755,6 +850,43 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           <AlertTriangle size={16} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
           <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-warning)' }}>
             <strong>Live team.</strong> Edits apply to running agents immediately — port and structural changes re-derive triggers on save. To try changes safely, use <strong>Edit as draft</strong>.
+          </span>
+        </div>
+      )}
+
+      {/* Draft status line (#2053 B2/AC6). The live mode has had a warning strip
+          since #1125 while the draft — the mode that actually needs guidance —
+          carried its one explanatory sentence in a tooltip, and the reason the
+          create action is greyed out on a fresh draft was reachable ONLY on
+          hover. Both read inline now. Same guard shape as the live strip: an
+          imported or Copilot preview is not the draft, and carries its own
+          banner. */}
+      {/* A rail `Create team…` refused because a Copilot proposal is previewing
+          (#2053). Keyed on the proposal it was refused against, so resolving OR
+          replacing that proposal removes it without any clearing logic — the
+          state it describes IS its guard. */}
+      {isDraft && proposal && refusedFor === proposal && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-3)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)', flexShrink: 0,
+          background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)',
+        }}>
+          <AlertTriangle size={16} style={{ color: 'var(--eb-status-warning)', flexShrink: 0 }} />
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-warning)' }}>
+            {PROPOSAL_PENDING_REASON}
+          </span>
+        </div>
+      )}
+
+      {isDraft && draftBundle && !imported && !proposal && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-3)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)', flexShrink: 0,
+          background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+        }}>
+          <Pencil size={16} style={{ color: 'var(--eb-text-muted)', flexShrink: 0 }} />
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            {draftStatusText(draftBundle?.roles?.length || 0)}
           </span>
         </div>
       )}
@@ -1053,18 +1185,43 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
       {materializeOpen && materializeBundle && (
         <MaterializeDialog
           bundle={materializeBundle}
-          onClose={() => setMaterializeOpen(false)}
-          onDone={() => { setMaterializeOpen(false); if (imported) setImported(null); }}
+          // The dialog now stays open on success to confirm what happened
+          // (#2053 AC12) and calls `onDone` when the user leaves it, so the
+          // imported preview is cleared at the same moment as before.
+          createdNotice={createdTeam ? createdTeamNotice(createdTeam, { fromImport: !!imported }) : ''}
+          onCreated={(result) => setCreatedTeam(result?.teamName || null)}
+          // Both close paths behave the same ONCE a team exists: the preview is
+          // read-only and its `Create team…` would re-submit the identical
+          // bundle straight into the collision card. Before #2053 this state
+          // was unreachable — the dialog closed itself on completion — so an
+          // Escape/X after success is a path only the new confirmation opens.
+          onClose={() => {
+            setMaterializeOpen(false);
+            // Dropping the preview is not enough: in `import` scope `imported`
+            // is the ONLY source of a graph, so clearing it alone leaves the
+            // pane on a permanent "Loading graph…" with no toolbar and no
+            // banner. Hand the parent back to the empty selection state, the
+            // way the banner's own X does.
+            if (createdTeam && imported) {
+              setImported(null); setSelectedId(null);
+              if (isImportPreview && onImportClosed) onImportClosed();
+            }
+            setCreatedTeam(null);
+          }}
+          onDone={() => { setMaterializeOpen(false); setCreatedTeam(null); if (imported) setImported(null); }}
         />
       )}
     </div>
 
     {/* Flow Copilot rail (#1069). Draft scope chats against the open draft;
         team scope only offers the Edit-as-draft bridge (no direct live-team
-        mutation, by design). Closing also drops any pending proposal preview. */}
+        mutation, by design). Closing drops the canvas PREVIEW only — since
+        #2087 the turn and its unapplied proposal live in the app-level
+        FlowCopilotProvider, so reopening the panel finds them again. */}
     {copilotOpen && (isDraft || (isTeamScope && !imported)) && (
       <FlowCopilotPanel
         mode={isDraft ? 'draft' : 'team'}
+        scope={scope}
         bundle={draftBundle}
         autoFocus={autoOpenCopilot}
         onPreview={setProposal}
@@ -1342,19 +1499,61 @@ function AddRoleDialog({ onClose, onCreate }) {
   );
 }
 
+// The one action that turns a design into a live team (#2053 B1/AC4). Both entry
+// points render THIS — the draft toolbar and the import-preview banner — so the
+// label, the tooltip source and the disabled rule cannot diverge again: the
+// banner used to be a raw <button> with its own hardcoded string, a native
+// `title=` that skipped the #1999 tooltip migration, and no disabled state at
+// all, so an imported bundle with zero roles was clickable there and greyed out
+// two centimetres away.
+function CreateTeamButton({ onClick, roleCount, hasProposal }) {
+  return (
+    <ToolbarButton
+      variant="primary"
+      onClick={onClick}
+      icon={Boxes}
+      title={toolbarTitle('materialize', { hasProposal: !!hasProposal, roleCount })}
+      disabled={!!hasProposal || !roleCount}
+    >{CREATE_TEAM_LABEL}</ToolbarButton>
+  );
+}
+
+// A group boundary in the toolbar row. Position, separator and colour are three
+// INDEPENDENT signals that the create action is the set-apart exit (#2053 D3) —
+// colour alone fails for colour-blind readers and in low-contrast environments.
+function ToolbarSeparator() {
+  return (
+    <span aria-hidden="true" style={{
+      flexShrink: 0, alignSelf: 'stretch', width: 1, minHeight: 20,
+      background: 'var(--eb-border-default)', margin: '0 var(--eb-space-1)',
+    }} />
+  );
+}
+
 // Every button in the flow header row renders through here, which is why the
 // `title` → shared dark `Tooltip` migration (#1999) is a one-place change: the
 // native `title=` attribute is gone, so no header button shows the slow grey
 // browser tooltip any more. The button keeps its visible text as its accessible
 // name — the tooltip is purely presentational and never the only label.
-function ToolbarButton({ onClick, icon: Icon, disabled, children, badge, title }) {
+//
+// `variant` (#2053 AC2) is the whole reason this component grew a second style
+// block: the one irreversible, go-live action was pixel-identical to *Labels*,
+// because there was no way to say "this one is the primary". Exactly ONE button
+// per toolbar row may be `primary` — a row of accents ranks nothing — and every
+// other button renders byte-identically to before (`secondary` is the default
+// and takes the original style values verbatim).
+function ToolbarButton({ onClick, icon: Icon, disabled, children, badge, title, variant = 'secondary' }) {
+  const primary = variant === 'primary';
   return (
     <Tooltip label={title} wrap={shouldWrapTooltip(title)}>
       <button onClick={onClick} disabled={disabled} style={{
         display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0, whiteSpace: 'nowrap',
-        background: 'var(--eb-bg-surface)', color: 'var(--eb-text-secondary)',
-        border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+        background: primary ? 'var(--eb-accent-primary)' : 'var(--eb-bg-surface)',
+        color: primary ? 'var(--eb-text-inverted)' : 'var(--eb-text-secondary)',
+        border: primary ? '1px solid var(--eb-accent-primary)' : '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-md)',
         padding: 'var(--eb-space-1) var(--eb-space-3)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
+        fontWeight: primary ? 'var(--eb-font-medium)' : 'inherit',
         cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1,
       }}>
         <Icon size={14} /> {children}
@@ -1537,8 +1736,9 @@ function EmptyCanvasState({ onAddAgent }) {
         This flow is empty
       </div>
       <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', maxWidth: 340 }}>
-        Add your first agent to start wiring the flow. You can add more agents,
-        human touchpoints and stages, then materialize it into a live team.
+        Two steps: add the agents — plus any human touchpoints and stages — that
+        make up the flow, then use <strong>{CREATE_TEAM_LABEL}</strong> in the
+        toolbar to turn this design into a live team.
       </div>
       <button onClick={onAddAgent} style={{
         pointerEvents: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6,

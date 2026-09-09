@@ -111,3 +111,42 @@ class FormatSummary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GroupByAllowlist(unittest.TestCase):
+    """#2137: which groupings the CLI offers.
+
+    The tuple only shapes `--help` and the argument error — the rule is
+    ENFORCED in orchestrator/usage-query.js (`AGENT_GROUP_BY`), because an agent
+    can call the internal endpoint directly. What is asserted here is that the
+    two agree, so the CLI never advertises something the server coerces away
+    nor hides something it would happily answer."""
+
+    def test_provider_tier_is_offered_and_user_is_not(self):
+        self.assertIn("providerTier", uu.GROUP_BY)
+        # The per-human breakdown is System-Admin-only (#801); a team-scoped
+        # answer would hand one agent every colleague's spend.
+        self.assertNotIn("user", uu.GROUP_BY)
+
+    def test_every_pre_2137_grouping_still_works(self):
+        for g in ("agent", "team", "model", "provider", "day"):
+            self.assertIn(g, uu.GROUP_BY)
+
+    def test_the_help_text_lists_exactly_the_offered_groupings(self):
+        # The Options entry, not the usage examples (which also say --group-by).
+        lines = [ln for ln in uu.__doc__.splitlines() if "--group-by <g>" in ln]
+        self.assertEqual(len(lines), 1, "expected one --group-by <g> line in --help")
+        for g in uu.GROUP_BY:
+            self.assertIn(g, lines[0], f"{g} missing from --help")
+        self.assertNotIn("user", lines[0])
+
+    def test_the_cli_tuple_matches_the_servers_allowlist(self):
+        # Read the enforcement side rather than restating it: a grouping added
+        # on one side only is the drift this guards.
+        src = (Path(__file__).resolve().parents[2]
+               / "orchestrator" / "usage-query.js").read_text(encoding="utf-8")
+        m = re.search(r"const AGENT_GROUP_BY = new Set\(\[([^\]]*)\]\)", src)
+        self.assertIsNotNone(m, "could not read AGENT_GROUP_BY out of usage-query.js")
+        server = [t.strip().strip("'\"") for t in m.group(1).split(",") if t.strip()]
+        self.assertGreaterEqual(len(server), 5, "the regex has drifted")
+        self.assertEqual(sorted(server), sorted(uu.GROUP_BY))

@@ -852,7 +852,7 @@ class _StatePushClient:
         url = f"{self._base}{route}"
         req = urllib.request.Request(
             url, data=body, method="POST",
-            headers={"Content-Type": "application/json"},
+            headers=_internal_headers({"Content-Type": "application/json"}),
         )
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
@@ -864,6 +864,21 @@ class _StatePushClient:
                 return exc.code, str(exc)
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             return 0, str(exc)
+
+
+# Internal-API credential (#1456, GOV-PLATFORM-2). `startAgentProcess` bakes a
+# per-agent token into this container's env, exactly like the GitHub PAT; it is
+# valid only for the agent-facing allowlist and only for this agent's own id.
+# Read per call rather than cached at import: a respawn re-mints it, and reading
+# it late is what lets an operator arm the gate without a code change here.
+# Absent — a stack that has not armed the gate — every call goes out
+# unauthenticated and the orchestrator behaves exactly as it did before.
+def _internal_headers(extra: dict | None = None) -> dict:
+    headers = dict(extra or {})
+    token = os.environ.get("AEE_INTERNAL_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    return headers
 
 
 _push_client: _StatePushClient | None = None
@@ -1036,6 +1051,23 @@ def _normalize_model_usage(model_usage: dict | None) -> dict:
     return out
 
 
+def _requested_by(raw) -> dict | None:
+    """Normalize the `requestedBy` provenance block of a usage record (#2137).
+
+    Returns `{"matrixUserId": "<sender>"}` for a chat turn whose sender we know,
+    else `None` — an autonomous run (cron / github-event / loop) has no requester
+    and must not be given an empty-shaped one, because the orchestrator tells the
+    two cases apart to pick the attribution kind (requesting-user vs agent-owner).
+    A whitelist of exactly one key, so no other chat metadata rides into a
+    billing-adjacent record."""
+    if not isinstance(raw, dict):
+        return None
+    mxid = raw.get("matrixUserId")
+    if not isinstance(mxid, str) or not mxid.strip():
+        return None
+    return {"matrixUserId": mxid.strip()}
+
+
 def build_usage_record(ctx: dict) -> dict:
     """Pure assembler for a §4.1 token-usage record (#654). Takes a run-context
     dict (identity + trigger/github/git provenance + the captured `resultEvent`
@@ -1046,7 +1078,14 @@ def build_usage_record(ctx: dict) -> dict:
 
     `totalCostUsd` is stored opaque for possible future use but is never
     surfaced by the aggregator/UI (tokens-only, AC4). Missing token counts
-    default to 0 so downstream summation never sees None."""
+    default to 0 so downstream summation never sees None.
+
+    `requestedBy` (#2137) is WHO asked for this run: `{"matrixUserId": …}` for a
+    chat turn, `None` for an autonomous one. It is best-effort provenance the
+    orchestrator RESOLVES at ingest (`resolveUsageAttribution`) into the record's
+    `attribution` block and then DROPS — the persisted usage record carries the
+    stable account id, never a raw Matrix id, because the usage store has no
+    retention (see orchestrator/usage-log.js)."""
     result = ctx.get("resultEvent") or {}
     tokens = result.get("tokens") or {}
     return {
@@ -1059,6 +1098,7 @@ def build_usage_record(ctx: dict) -> dict:
         "correlationId": ctx.get("correlationId"),
         "sessionId": ctx.get("sessionId"),
         "trigger": ctx.get("trigger"),
+        "requestedBy": _requested_by(ctx.get("requestedBy")),
         "github": ctx.get("github"),
         "git": ctx.get("git"),
         "tokens": {
@@ -2206,7 +2246,7 @@ def _report_retrieval(source: str, included_ids) -> None:
                               "hitCount": len(ids), "ts": ts}).encode("utf-8")
         req = urllib.request.Request(
             url, data=payload, method="POST",
-            headers={"Content-Type": "application/json"},
+            headers=_internal_headers({"Content-Type": "application/json"}),
         )
         with urllib.request.urlopen(req, timeout=3):
             pass
@@ -2479,8 +2519,15 @@ def _claim_plan(trigger: dict, gh: dict | None) -> dict | None:
         number = pr.get("number")
     if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
         return None
-    return {"repo": repo, "number": number,
+    plan = {"repo": repo, "number": number,
             "remove": remove.strip(), "add": add.strip()}
+    # Optional post-condition (#2113) — stamped only when recognised, so a plan
+    # for a pre-#2113 claim keeps exactly its old shape and the completion swap
+    # makes no `gh` call to verify anything.
+    pc = claim.get("postcondition")
+    if isinstance(pc, str) and pc.strip() in CLAIM_POSTCONDITIONS:
+        plan["postcondition"] = pc.strip()
+    return plan
 
 
 def _gh_swap_labels(repo: str, number: int, remove: str, add: str,
@@ -2542,6 +2589,111 @@ def _gh_swap_labels(repo: str, number: int, remove: str, add: str,
               f"{(proc.stderr or '').strip()}", file=sys.stderr)
         return False
     return True
+
+
+def _gh_json(args: list[str]) -> tuple[dict | list | None, str]:
+    """Run a read-only `gh ... --json` command and parse its stdout.
+
+    Returns `(parsed, error)` — exactly one of the two is meaningful. Never
+    raises: the caller turns an error into a *blocked* claim (#2113), which is a
+    visible state, whereas an exception escaping `asyncio.to_thread` here would
+    abort a run that has already succeeded."""
+    try:
+        proc = subprocess.run(
+            ["gh", *args], capture_output=True, text=True,
+            env={**os.environ}, timeout=CLAIM_SWAP_TIMEOUT_SEC,
+        )
+    except Exception as exc:
+        return None, f"gh {' '.join(args[:2])}: {exc}"
+    if proc.returncode != 0:
+        return None, (proc.stderr or proc.stdout or "").strip()[:300] or \
+            f"gh exited {proc.returncode}"
+    try:
+        return json.loads(proc.stdout or "null"), ""
+    except Exception as exc:
+        return None, f"unparseable gh output: {exc}"
+
+
+def _gh_postcondition_facts(repo: str, number: int) -> dict:
+    """Gather the GitHub facts `_postcondition_verdict` decides on. The I/O half
+    of the pure/adapter split — every judgement lives in the pure function.
+
+    The claim target may be either an issue or a PR (the same wake label is used
+    both ways), so the shape is resolved by asking for the PR first: `gh pr view`
+    fails on a plain issue number, which is the cheapest reliable discriminator.
+    From there GitHub's own link graph supplies the other side —
+    `closingIssuesReferences` for a PR, `closedByPullRequestsReferences` for an
+    issue — so a work item's PR/issue pair is never inferred from body text.
+
+    Returns the facts dict, or `{"error": "..."}` when GitHub could not be read.
+    """
+    if not (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")):
+        return {"error": "no GH_TOKEN/GITHUB_TOKEN in env"}
+
+    pr, pr_err = _gh_json(["pr", "view", str(number), "--repo", repo, "--json",
+                           "number,state,mergedAt,reviews,closingIssuesReferences"])
+    if isinstance(pr, dict):
+        reviews = pr.get("reviews")
+        issues = []
+        refs = pr.get("closingIssuesReferences")
+        for ref in (refs if isinstance(refs, list) else [])[:CLAIM_VERIFY_MAX_LINKED]:
+            n = ref.get("number") if isinstance(ref, dict) else None
+            if not isinstance(n, int) or isinstance(n, bool):
+                continue
+            iss, err = _gh_json(["issue", "view", str(n), "--repo", repo,
+                                 "--json", "number,state"])
+            if err or not isinstance(iss, dict):
+                return {"error": f"issue #{n}: {err or 'unreadable'}"}
+            issues.append({"number": n,
+                           "closed": str(iss.get("state", "")).upper() == "CLOSED"})
+        return {
+            "target": "pr",
+            "prs": [{"number": number, "merged": bool(pr.get("mergedAt"))}],
+            "issues": issues,
+            "reviews": len(reviews) if isinstance(reviews, list) else 0,
+        }
+
+    issue, iss_err = _gh_json(["issue", "view", str(number), "--repo", repo,
+                               "--json", "number,state,closedByPullRequestsReferences"])
+    if not isinstance(issue, dict):
+        # Neither shape read cleanly — report the issue error, since a valid
+        # claim target that is not a PR must be an issue.
+        return {"error": iss_err or pr_err or "not readable as an issue or a PR"}
+
+    prs, reviews = [], 0
+    refs = issue.get("closedByPullRequestsReferences")
+    for ref in (refs if isinstance(refs, list) else [])[:CLAIM_VERIFY_MAX_LINKED]:
+        n = ref.get("number") if isinstance(ref, dict) else None
+        if not isinstance(n, int) or isinstance(n, bool):
+            continue
+        linked, err = _gh_json(["pr", "view", str(n), "--repo", repo, "--json",
+                                "number,state,mergedAt,reviews"])
+        if err or not isinstance(linked, dict):
+            return {"error": f"pull request #{n}: {err or 'unreadable'}"}
+        prs.append({"number": n, "merged": bool(linked.get("mergedAt"))})
+        lr = linked.get("reviews")
+        reviews += len(lr) if isinstance(lr, list) else 0
+    return {
+        "target": "issue",
+        "prs": prs,
+        "issues": [{"number": number,
+                    "closed": str(issue.get("state", "")).upper() == "CLOSED"}],
+        "reviews": reviews,
+    }
+
+
+def _verify_claim_postcondition(claim: dict) -> tuple[bool, str]:
+    """Whether `claim`'s declared post-condition holds — the adapter + the pure
+    verdict, in the one call the completion swap makes.
+
+    A claim with NO declared post-condition short-circuits to `(True, '')`
+    WITHOUT any `gh` call, which is what makes #2113 free for every claim that
+    does not opt in."""
+    kind = claim.get("postcondition") if isinstance(claim, dict) else None
+    if not (isinstance(kind, str) and kind.strip()):
+        return True, ""
+    facts = _gh_postcondition_facts(claim["repo"], claim["number"])
+    return _postcondition_verdict(kind, facts)
 
 
 def _resolve_repo_dir() -> Path | None:
@@ -3064,6 +3216,89 @@ CLAIM_SUFFIX = ":wip"
 CLAIM_COMPLETED_SUFFIX = ":completed"
 CLAIM_COMPLETED_COLOR = "0E8A16"
 CLAIM_COMPLETED_LABEL_DESC = "run completed (auto-created claim label)"
+
+# Verify-before-claim (#2113, flow-control concept §4.2). The forward swap above
+# used to fire on normal RUN completion, so it tracked the run and not the
+# outcome: a merger that hit a conflict and exited cleanly still painted
+# `ready-to-merge:completed` on an open, conflicting PR (the observed #2105
+# shape), and every surface downstream that trusts labels was then wrong. A claim
+# MAY therefore declare an observable post-condition, and the swap only happens
+# when it holds against GitHub truth.
+#
+# A DOCUMENTED MIRROR of `POSTCONDITIONS` in
+# admin-console/api/process-template.js (the authoring schema, which validates
+# the kind so a typo cannot reach here). Keep the two in sync.
+CLAIM_POSTCONDITIONS = ("merged", "review-submitted", "pr-exists")
+
+# How many linked objects (PRs of an issue / issues of a PR) the verifier will
+# resolve. A work item has one or two in practice; the cap keeps a pathological
+# cross-reference fan-out from turning a best-effort observability step into a
+# long series of `gh` calls after every run.
+CLAIM_VERIFY_MAX_LINKED = 5
+
+
+def _postcondition_verdict(kind, facts: dict | None) -> tuple[bool, str]:
+    """Decide whether a claim's declared post-condition holds. PURE — takes the
+    already-gathered GitHub facts, does no I/O, so every rule below is
+    unit-testable without a `gh` binary.
+
+    Returns `(holds, reason)`; `reason` is '' when it holds and a human-readable
+    explanation otherwise (it rides the `trigger.claim-blocked` event, which is
+    the surface that carries WHY a claim stayed `:wip`).
+
+    Two deliberate directions:
+
+    * No declared kind → holds. This is the backwards-compatible default: a
+      claim without a post-condition completes on run completion exactly as it
+      did before #2113, and no `gh` call is made for it at all.
+    * An UNKNOWN kind, or facts that could not be gathered → does NOT hold. The
+      whole point is that `:completed` means something, so anything unverifiable
+      keeps `:wip` (which the shipped `claim-stalled` detector already surfaces
+      once the agent is no longer running) rather than being waved through.
+    """
+    k = kind.strip() if isinstance(kind, str) else ""
+    if not k:
+        return True, ""
+    if k not in CLAIM_POSTCONDITIONS:
+        return False, (f"post-condition `{k}` is not one of "
+                       f"{', '.join(CLAIM_POSTCONDITIONS)} — cannot verify it")
+    facts = facts if isinstance(facts, dict) else {}
+    err = facts.get("error")
+    if err:
+        return False, f"could not read the GitHub state to verify `{k}`: {err}"
+
+    prs = [x for x in (facts.get("prs") or []) if isinstance(x, dict)]
+    issues = [x for x in (facts.get("issues") or []) if isinstance(x, dict)]
+
+    if k == "pr-exists":
+        if not prs:
+            return False, "no pull request exists for this work item"
+        return True, ""
+
+    if k == "review-submitted":
+        reviews = facts.get("reviews")
+        reviews = reviews if isinstance(reviews, int) and not isinstance(reviews, bool) else 0
+        if reviews < 1:
+            return False, "no review has been submitted on the pull request"
+        return True, ""
+
+    # k == "merged": the concept's merge-label rule — the linked PR is merged
+    # AND the issue is closed. Both halves are required, because a merged PR
+    # whose issue is still open is precisely the half-finished hand-off the
+    # merge label would otherwise claim as done.
+    merged = [x for x in prs if x.get("merged") is True]
+    if not prs:
+        return False, "no pull request exists for this work item"
+    if not merged:
+        open_prs = ", ".join(f"#{x.get('number')}" for x in prs)
+        return False, f"pull request {open_prs} is not merged"
+    still_open = [x for x in issues if x.get("closed") is not True]
+    if still_open:
+        opened = ", ".join(f"#{x.get('number')}" for x in still_open)
+        merged_at = ", ".join(f"#{x.get('number')}" for x in merged)
+        return False, (f"pull request {merged_at} is merged but issue "
+                       f"{opened} is still open")
+    return True, ""
 
 
 def _nonconformant_trigger_reason(trigger) -> str | None:
@@ -4972,7 +5207,7 @@ class TriggerScheduler:
     def _orch_get(route: str) -> tuple[int, str]:
         """Blocking GET against the orchestrator; run via asyncio.to_thread."""
         url = f"{ORCHESTRATOR_INTERNAL_URL.rstrip('/')}{route}"
-        req = urllib.request.Request(url, method="GET")
+        req = urllib.request.Request(url, method="GET", headers=_internal_headers())
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return resp.status, resp.read().decode("utf-8", errors="replace")
@@ -4991,7 +5226,7 @@ class TriggerScheduler:
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             url, data=body, method="POST",
-            headers={"Content-Type": "application/json"},
+            headers=_internal_headers({"Content-Type": "application/json"}),
         )
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -6273,25 +6508,55 @@ class TriggerScheduler:
         # `_gh_swap_labels` and never gates the result posting below (same
         # contract as claiming).
         if claim and claimed:
-            completed_label = f"{claim['remove']}{CLAIM_COMPLETED_SUFFIX}"
-            completed = await asyncio.to_thread(
-                _gh_swap_labels, claim["repo"], claim["number"],
-                claim["add"], completed_label,
-                CLAIM_COMPLETED_COLOR, CLAIM_COMPLETED_LABEL_DESC,
-            )
-            try:
-                _append_event(room_id, {
-                    "type": "trigger.claim-completed",
-                    "correlationId": correlation_id,
-                    "triggerId": tid,
-                    "repo": claim["repo"],
-                    "number": claim["number"],
-                    "removed": claim["add"],
-                    "added": completed_label,
-                    "ok": completed,
-                })
-            except Exception:
-                pass
+            # Verify before claiming (#2113, §4.2). Reaching here means the RUN
+            # completed; it does NOT mean the run achieved anything. Where the
+            # claim declares an observable post-condition, it is evaluated
+            # against GitHub truth first, and the forward swap only happens when
+            # it holds — so `<wake>:completed` is a statement about the OUTCOME.
+            # When it does not hold the claim deliberately stays `<wake>:wip`:
+            # that is the state the shipped `claim-stalled` detector already
+            # surfaces once the agent is no longer running, whereas a fourth
+            # `:blocked` suffix would be invisible to it (see the PR body). The
+            # reason rides the event below, which is where "why is this still
+            # wip" is answered.
+            verified, block_reason = await asyncio.to_thread(
+                _verify_claim_postcondition, claim)
+            if not verified:
+                print(f"[Runner:{self._agent_id}] Trigger {tid}: claim stays "
+                      f"{claim['add']} — {block_reason}", file=sys.stderr)
+                try:
+                    _append_event(room_id, {
+                        "type": "trigger.claim-blocked",
+                        "correlationId": correlation_id,
+                        "triggerId": tid,
+                        "repo": claim["repo"],
+                        "number": claim["number"],
+                        "kept": claim["add"],
+                        "postcondition": claim.get("postcondition"),
+                        "reason": block_reason,
+                    })
+                except Exception:
+                    pass
+            else:
+                completed_label = f"{claim['remove']}{CLAIM_COMPLETED_SUFFIX}"
+                completed = await asyncio.to_thread(
+                    _gh_swap_labels, claim["repo"], claim["number"],
+                    claim["add"], completed_label,
+                    CLAIM_COMPLETED_COLOR, CLAIM_COMPLETED_LABEL_DESC,
+                )
+                try:
+                    _append_event(room_id, {
+                        "type": "trigger.claim-completed",
+                        "correlationId": correlation_id,
+                        "triggerId": tid,
+                        "repo": claim["repo"],
+                        "number": claim["number"],
+                        "removed": claim["add"],
+                        "added": completed_label,
+                        "ok": completed,
+                    })
+                except Exception:
+                    pass
 
         # Loop token budget (#934): surface this iteration's output-token spend
         # (accumulated onto run_context by _call_claude_once, including any
@@ -6590,6 +6855,12 @@ async def run_dm_listener() -> None:
             # AskUserQuestion payload for the quick-reply UI (#1663) — otherwise
             # inert (it is the default usage-record context either way).
             dm_run_context = _base_run_context()
+            # Cost attribution (#2137): a chat turn HAS a requesting human, and
+            # this is the only place in the runtime that knows who — the Matrix
+            # sender of the message that started it. The orchestrator resolves it
+            # to a platform account at ingest; a trigger/loop run leaves the key
+            # absent, which is what makes it fall back to the agent's owner.
+            dm_run_context["requestedBy"] = {"matrixUserId": sender}
             try:
                 # claude invocation is blocking — run it off the event loop so
                 # matrix-nio can keep syncing (otherwise no follow-on messages

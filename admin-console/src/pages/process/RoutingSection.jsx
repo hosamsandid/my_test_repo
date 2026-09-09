@@ -10,7 +10,9 @@ import { TriggerForm } from '../agent-chat/TriggersPanel';
 import { AddInputDialog, EditHandoffDialog } from './EdgeDialogs';
 import { summarizeGithubEventTrigger, claimTooltip } from '../agent-chat/trigger-summary.js';
 import { partitionTriggers, scheduleText, derivedChannelTrigger } from './input-rows.js';
-import { consumersFor, outcomeHandsOffToHuman, outcomeHumanReviewers } from './outcome-consumers.js';
+import {
+  consumersFor, outcomeHandsOffToHuman, outcomeHandoffs, handoffStatement, outcomeHumanReviewers,
+} from './outcome-consumers.js';
 import {
   moveHumanDelivery, wireLabelHandoff, unwireLabelHandoff, wireChannel, unwireChannel,
 } from './wiring-engine.js';
@@ -770,6 +772,10 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
   const artifact = rowArtifact(option);
   const wireSpec = wireConsumerSpec(option);
   const wired = currentConsumers(option, node, peers);
+  // Direct hand-offs (#2057): a consumer the ACTION names, so it is derived
+  // beside `wired` rather than being one of it — the target is edited on the
+  // action row above, and there is no listener here to unwire (D2).
+  const handoffs = outcomeHandoffs(option, node, peers).map(h => ({ ...h, ...handoffStatement(h) }));
   const wiredIds = new Set(wired.map(w => w.id));
   const candidates = consumerCandidates(node, peers).filter(c => !wiredIds.has(c.id));
 
@@ -807,7 +813,13 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
   // Open-end markers (#1004, concept §4.7): a declared endpoint is content
   // (edited via onChange + explicit Save), not wiring.
   const marker = option.terminal === true ? 'terminal' : (option.external ? 'external' : null);
-  const noConsumerYet = !isNone && !humanHandoff && !marker && !wired.length && !humanReviewers.length;
+  // #2057 AC12: a row carrying a hand-off is never offered `mark terminal` /
+  // `mark external…` — a healthy one already has its consumer, and a broken one
+  // is a defect to fix rather than an open end to declare. Any hand-off state
+  // counts, because declaring a hand-off outcome "the end product" would be
+  // false either way.
+  const noConsumerYet = !isNone && !humanHandoff && !marker && !wired.length
+    && !humanReviewers.length && !handoffs.length;
 
   return (
     <div style={{ ...rowBox, ...(highlight ? { borderColor: 'var(--eb-accent-primary)', boxShadow: '0 0 0 1px var(--eb-accent-primary)' } : {}) }}>
@@ -890,6 +902,21 @@ function OutcomeRow({ index, option, consumers, humanHandoff, humanReviewers = [
                 )}
               </>
             )}
+        {/* #2057: the direct hand-off's consumer statement. Rendered OUTSIDE
+            the branches above, because an outcome may carry a hand-off next to
+            a label, a marker or a person hand-off, and each of those is a
+            separate consumer relationship (AC8/D5) — the previous fall-through
+            claimed "no consumer yet" for the one case where the platform itself
+            wakes the next agent. Wording and severity come from the shared pure
+            module, so this row and the Agent-Chat Outcomes tab read alike
+            (AC13). No `✕`: the neighbouring one unwires a listener and applies
+            immediately, while a hand-off is removed by editing the action —
+            save-gated content, two lines above (D2). */}
+        {!isNone && handoffs.map(h => (
+          <span key={h.to} style={h.tone === 'warning' ? { color: 'var(--eb-status-warning, #d97706)' } : undefined}>
+            {h.text}
+          </span>
+        ))}
         {dirty && !isNone && !humanHandoff && (
           <span style={{ color: 'var(--eb-text-muted)' }}>(save outcomes to route)</span>
         )}

@@ -91,8 +91,16 @@ See §4 for the full discussion. Summary: **each human gets their own Matrix acc
 > separate access scope. Rights administration also moves from central to decentralised — the
 > person who creates a team owns it and shares it themselves (D1–D3), while the System Admin
 > keeps full visibility (D5). The role names and semantics (**System Admin** / **Team Admin** /
-> **Team Member**) are unchanged. This section still describes what is live on `main`; the
-> successor doc is the design of record (this section is rewritten in phase P6).
+> **Team Member**) are unchanged. The successor doc is the design of record.
+>
+> **P6 has landed (#2085).** The re-pointing is complete on `main`: a membership names an
+> **Agent Team**, a team's own admins share it from **Share…** in the Agent Chat, and the
+> central *Access* page is gone — dissolved into the System-Admin-only **Administration**
+> surface (`/users`), which keeps the D5 all-teams view and the tiered resource ownership and
+> nothing else. Read the role table below as describing the roles, not the administration
+> route: "Create and manage their own team(s) and members" is now done by the Team Admin in
+> the team, not by a System Admin on a central page. The one part still pending is the access
+> scope itself, which survives as a resource stamp until A3.3 retires `teams/index.json`.
 
 ### Recommendation
 
@@ -185,12 +193,20 @@ This is a migration concern (see §8). Summary: the existing single shared admin
 
 ### Protecting the internal orchestrator API (port 4002)
 
-This boundary is **critical** and must be enforced at multiple layers:
-1. **Network**: port 4002 stays bound to the internal Podman network only — never published to the host in a multi-user deployment. (Today it is already internal-only; the requirement is to *keep it that way* and document it as a hard rule.)
-2. **Shared service secret**: orchestrator ↔ admin-console calls carry a `X-Internal-Secret` header validated against a value in `.env`. Human session JWTs are **not** accepted on 4002, and the service secret is **not** accepted on the public 4000 API.
-3. **No proxying of raw 4002 routes to authenticated-but-unauthorized users**: the admin console's public API is the only gateway, and it applies §3 authorization before proxying to 4002.
+> **Superseded — see `docs/governance-concept.md` §3.5 + Amendment 1 (#1456).** The
+> single `X-Internal-Secret` header described below was the 2026-05 design. It was
+> replaced, before anything was built, by GOV-PLATFORM-2's **three token classes**,
+> which §3.5 declares canonical and which absorbs the equivalent ask from five other
+> governance domains. What shipped is a bearer header carrying either a control-plane
+> token (the console, full surface) or a **per-agent** token (the agent-facing
+> allowlist, that agent's own `:id` only), behind an `observe|warn|enforce` ladder.
+> Layers 1 and 3 below are unchanged and still hold; layer 2 is the superseded half.
+> The `bp-events` paragraph is moot — that route was deleted by #1961/#2005.
 
-The `POST /internal/bp-events` endpoint (no auth, internal-only) stays exactly as designed — internal network + best-effort posture — and must remain unpublished.
+This boundary is **critical** and must be enforced at multiple layers:
+1. **Network**: port 4002 stays bound to the internal Podman network only — never published to the host in a multi-user deployment. (Today it is already internal-only; the requirement is to *keep it that way* and document it as a hard rule.) ✅ *still current — and note it is a boundary against the **host**, not against the container network, which is what made layer 2 necessary rather than merely defensive.*
+2. ~~**Shared service secret**: orchestrator ↔ admin-console calls carry a `X-Internal-Secret` header validated against a value in `.env`.~~ **Superseded by §3.5** — one shared secret cannot express "this agent, these routes, its own id". Human session cookies are still **not** accepted on 4002, and the service token is still **not** accepted on the public 4000 API.
+3. **No proxying of raw 4002 routes to authenticated-but-unauthorized users**: the admin console's public API is the only gateway, and it applies §3 authorization before proxying to 4002. ✅ *still current — this is precisely why the control-plane token grants the full surface.*
 
 ---
 
@@ -324,4 +340,47 @@ Prioritised. Earlier items unblock or de-risk later ones.
 
 ---
 
-*This document is a concept. It commits to a recommendation in each area and flags the cost-heavy decisions, but no auth middleware, SSO integration, or permission enforcement is implemented here — that work is captured by the issues in §10.*
+## Amendment 1 — Matrix identity provisioning as built (#1458, 2026-09-08)
+
+*§4 above stays as written: it is the design of record and the reasoning still holds. This amendment records what §10 item 3 actually delivered, and corrects one mechanism §4 got wrong. It does **not** touch §10 item 6 (the per-human-per-agent room model), which is unimplemented.*
+
+### 1.1 — What was delivered
+
+The identity half of §4, and only that half:
+
+- A human's Matrix localpart is derived deterministically from their **stable subject** — `@u-<16 hex of sha256(subject)>:local` (`orchestrator/human-matrix-identity.js`), normalised exactly the way `teams-store.js` `getUserBySubject` compares a subject, so two spellings the user store treats as one identity can never resolve to two Matrix accounts.
+- That shape is **reserved**: `ensureMatrixUser` — the single choke point every Matrix account in the stack is created through — refuses to mint it for anything but the human-provisioning path, so an agent id can never take over a human's account. The predicate is exactly as narrow as the minted shape, so an ordinary id like `u-payments` is unaffected.
+- The account is provisioned **when the user record is created**, not at first login (see 1.3), and the resulting access token is stored **server-side only**, in a per-user file separate from `users/index.json` (`orchestrator/human-matrix-store.js`, mode 0600). The user record carries only the non-secret `matrixUserId` pointer.
+- Deleting a human deactivates their Matrix account and deletes the stored token, alongside the existing personal-credential offboarding.
+
+### 1.2 — Falsified statements in §2 and §4
+
+Both sections name a provisioning mechanism that does not exist. Corrected here rather than in place, so the original reasoning stays readable:
+
+| Statement | Where | Reality on `main` |
+|---|---|---|
+| "provisioned via the **Conduwuit admin API** (the same mechanism that provisions agent users today)" | §2 *Corporate identity → Matrix user mapping*, §4 *Why a real per-human Matrix account* and *Provisioning flow* step 2 | Continuwuity exposes **no** Synapse `/_synapse/admin/` REST API (`orchestrator/matrix-admin-commands.js`). There is no admin API to call. |
+| (implied) a synchronous call with a return value | §4 *Provisioning flow* | Every lifecycle operation is a **fire-and-forget admin-room message** (`!admin users create-user …`) whose reply is never parsed. |
+| "the registration-token UIA flow is how agents are provisioned" | *not in this doc* — asserted in issue #1458's 2026-08-14 scope correction | Also wrong. `agent-image/scripts/matrix-bootstrap.py` (which carries the `register-human` subcommand) is a **standalone ACE-era script**: it is not invoked by the orchestrator, targets a different server name, and the compose stack runs with `CONTINUWUITY_ALLOW_REGISTRATION: "false"`. |
+
+**The actual mechanism, for humans and agents alike**, is the ordered admin-room sequence `create-user` → `reset-password` → `enable-login` built by `matrix-admin-commands.js`, followed by a `/login` that is retried with bounded backoff (`matrix-login-retry.js`). Humans reuse it verbatim, which is what buys them two hard-won properties for free: the plain `reset-password` reactivates a previously deactivated account (#715), so a re-onboarded human recovers their old account rather than getting a dead one; and the retry absorbs the cold-stack race where the admin bot has not processed the commands yet (#719/#1386).
+
+### 1.3 — Why provisioning hangs off record creation, not first login
+
+§4 says "provisioned automatically on first SSO login". There is no just-in-time user provisioning to hang that on: `admin-console/api/auth.js` fails an unregistered identity **closed** (#1415), so a user record is always created deliberately by an administrator. Doing the work there is strictly better than at login — it keeps several seconds of admin-bot settle delays off the login path, and it matches how an agent's Matrix account is created at agent-creation time. When JIT provisioning does arrive it will create a user record and pick this up unchanged.
+
+The consequence of the fire-and-forget mechanism (1.2) is that provisioning is **best-effort and idempotent**, not transactional: a failure leaves the user record intact without an identity, and the next `ensureHumanMatrixIdentity` call repairs it. Nothing is silently retried in a loop.
+
+### 1.4 — Explicitly NOT affected
+
+- **The room model is untouched.** There is still exactly one `dm-room.json` per agent, still holding a single `{ roomId }`, and the console still talks to Matrix as the shared `MATRIX_ACCESS_TOKEN` admin. §4's *How the DM-room model changes* remains entirely unimplemented — that is §10 item 6.
+- **`AUTH_MODE=single` is unchanged end to end**, structurally rather than by a flag: a single-operator stack creates no user records at all (the env single-admin of #276 has none), so no human account is ever provisioned there.
+- **The bootstrap admin is deliberately not auto-provisioned.** Provisioning is wired to the `POST /internal/admin/users` route rather than into `teamsStore.createUser`, so the startup `ensureSystemAdmin` bootstrap does not mint a fresh `@u-…:local`. §4 and §8 require that identity to **adopt** the existing shared-admin rooms and their `sessions/<roomId>.jsonl`; handing it an empty new account first would make that adoption harder, not easier.
+
+### 1.5 — The rule successors must carry
+
+**A human Matrix account is created only through the human-provisioning path, and its token never enters `users/index.json`.** The first half is enforced by the reservation in `ensureMatrixUser`. The second is a placement decision: `teamsStore.sanitizeUser()` is a convention applied at the store boundary (its own comment reads "strip the password hash *and any future secret*"), and the index is additionally read directly by the admin-console, so a second secret on that record would depend on every present and future path remembering to strip it — and a live access token leaking is impersonation, not a cracking problem. A later phase that needs a human's token should read it from `human-matrix-store.js`, not move it onto the record for convenience.
+
+---
+
+*This document is a concept. It commits to a recommendation in each area and flags the cost-heavy decisions, but no auth middleware, SSO integration, or permission enforcement is implemented here — that work is captured by the issues in §10 (see Amendment 1 for the one item that has since partially landed).*

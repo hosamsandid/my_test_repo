@@ -1,9 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   TOKEN_CLASSES,
   GROUP_OPTIONS,
+  UNKNOWN_GROUP_KEY,
+  userLabelIndex,
+  userGroupCell,
+  providerTierCell,
   formatInt,
   formatCompact,
   formatTileCount,
@@ -34,10 +41,88 @@ test('TOKEN_CLASSES matches the four-class API contract, in display order', () =
   ]);
 });
 
-test('GROUP_OPTIONS covers every groupBy the summary endpoint supports', () => {
-  assert.deepEqual(GROUP_OPTIONS.map((g) => g.key).sort(), [
-    'agent', 'day', 'model', 'provider', 'team',
+// The browser bundle cannot `require` from `api/`, so this is a two-sided drift
+// guard read out of the server module instead of a hardcoded list (the
+// `flow-control-view.js` arrangement). A grouping the server gained and the
+// selector did not is unreachable; one the selector offers and the server does
+// not silently falls back to `agent`, which reads as a broken control.
+test('GROUP_OPTIONS covers exactly the groupBy values the summary endpoint supports', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(here, '..', '..', 'api', 'usage-summary.js'), 'utf8');
+  const m = src.match(/const GROUP_BY = new Set\(\[([^\]]*)\]\)/);
+  assert.ok(m, 'could not read GROUP_BY out of api/usage-summary.js');
+  const server = m[1].split(',').map((s) => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  assert.ok(server.length >= 5, `parsed only ${server.length} server groupings — the regex has drifted`);
+  assert.deepEqual(GROUP_OPTIONS.map((g) => g.key).sort(), [...server].sort());
+});
+
+test('every GROUP_OPTIONS entry carries a human label', () => {
+  for (const g of GROUP_OPTIONS) {
+    assert.equal(typeof g.label, 'string');
+    assert.ok(g.label.trim().length > 0, `${g.key} has no label`);
+    assert.notEqual(g.label, g.key, `${g.key} must be labelled, not printed raw`);
+  }
+});
+
+// ── #2137: naming a user / provider-tier group key ──────────────────────────
+
+test('userLabelIndex maps ids to display names and ignores junk entries', () => {
+  const byId = userLabelIndex([
+    { id: 'u-ada', displayName: 'Ada Lovelace' },
+    { id: 'u-nodisplay', displayName: '' },
+    { id: '', displayName: 'nobody' },
+    null,
+    'not-a-user',
   ]);
+  assert.equal(byId.get('u-ada'), 'Ada Lovelace');
+  // A blank display name falls back to the id rather than an empty cell.
+  assert.equal(byId.get('u-nodisplay'), 'u-nodisplay');
+  assert.equal(byId.get(''), undefined);
+  assert.equal(byId.size, 2);
+  // Non-array input is a load failure, not an empty directory of one.
+  assert.equal(userLabelIndex(null).size, 0);
+  assert.equal(userLabelIndex(undefined).size, 0);
+});
+
+test('userGroupCell names the unknown bucket as a gap, never as a person', () => {
+  const byId = userLabelIndex([{ id: 'u-ada', displayName: 'Ada Lovelace' }]);
+  for (const key of [UNKNOWN_GROUP_KEY, '', null, undefined]) {
+    const cell = userGroupCell(key, byId);
+    assert.equal(cell.label, 'Unattributed');
+    assert.match(cell.hint, /no requesting user and no agent owner/i);
+  }
+});
+
+test('userGroupCell resolves a name and keeps the id as the hover', () => {
+  const byId = userLabelIndex([{ id: 'u-ada', displayName: 'Ada Lovelace' }]);
+  assert.deepEqual(userGroupCell('u-ada', byId), { label: 'Ada Lovelace', hint: 'u-ada' });
+});
+
+test('userGroupCell labels an id with no user record rather than dropping it', () => {
+  // The run happened and its tokens are real; the person is gone. Same wording
+  // the draft Share dialog uses for a departed colleague.
+  const cell = userGroupCell('u-gone', userLabelIndex([]));
+  assert.equal(cell.label, 'Deleted user');
+  assert.equal(cell.hint, 'u-gone');
+  // A directory that never loaded must not turn a real id into "Unattributed",
+  // which would claim the run could not be charged at all.
+  assert.equal(userGroupCell('u-gone', null).label, 'Deleted user');
+});
+
+test('providerTierCell names all three tiers plus the unknown bucket', () => {
+  assert.equal(providerTierCell('global').label, 'Global');
+  assert.match(providerTierCell('global').hint, /whole installation/i);
+  assert.equal(providerTierCell('system').label, 'System');
+  assert.equal(providerTierCell('team').label, 'Team');
+  assert.equal(providerTierCell(UNKNOWN_GROUP_KEY).label, 'Unknown');
+  assert.match(providerTierCell(UNKNOWN_GROUP_KEY).hint, /rather than guessed/i);
+});
+
+test('providerTierCell renders an unrecognised tier as the raw key, not as blank', () => {
+  // An unlabelled row is still a real number — dropping it would under-report.
+  assert.equal(providerTierCell('future-tier').label, 'future-tier');
+  assert.equal(providerTierCell('').label, '—');
+  assert.equal(providerTierCell(undefined).label, '—');
 });
 
 test('formatInt separates thousands and coerces junk to 0', () => {

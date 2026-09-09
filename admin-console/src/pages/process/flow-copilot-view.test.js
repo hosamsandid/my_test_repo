@@ -7,8 +7,6 @@ import {
   describeChange,
   lintColor,
   copilotErrorInfo,
-  supersedePending,
-  latestProposal,
   phaseLabel,
   consumeCopilotStream,
   PERSISTED_HISTORY_CAP,
@@ -120,30 +118,10 @@ test('bundleSizeLevel: ok below 160k, amber 160k–200k, red at/above 200k', () 
   assert.equal(bundleSizeLevel(300_000), 'red');
 });
 
-test('supersedePending retires only still-proposed assistant entries', () => {
-  const entries = [
-    { role: 'user', content: 'x' },
-    { role: 'assistant', status: 'applied', summary: 'a' },
-    { role: 'assistant', status: 'proposed', summary: 'b' },
-    { role: 'error', message: 'boom' },
-  ];
-  const next = supersedePending(entries);
-  assert.equal(next[1].status, 'applied');
-  assert.equal(next[2].status, 'superseded');
-  assert.equal(next[0], entries[0]); // untouched rows keep identity
-  assert.equal(next[3], entries[3]);
-});
-
-test('latestProposal finds the newest actionable card, else null', () => {
-  const entries = [
-    { role: 'assistant', status: 'discarded', summary: 'a' },
-    { role: 'assistant', status: 'proposed', summary: 'b' },
-    { role: 'user', content: 'y' },
-  ];
-  assert.equal(latestProposal(entries).summary, 'b');
-  assert.equal(latestProposal([{ role: 'assistant', status: 'applied' }]), null);
-  assert.equal(latestProposal(undefined), null);
-});
+// `supersedePending` / `latestProposal` were removed by #2087 — the actionable
+// proposal is now held one-per-scope by the app-level FlowCopilotProvider
+// rather than searched for in a card list. Their replacements are covered in
+// flow-copilot-turn.test.js (`putPending`/`dropPending`/`dropPendingById`).
 
 // ── NDJSON progress stream (#1070) ──────────────────────────────────────────
 
@@ -153,6 +131,16 @@ test('phaseLabel maps the server phases to live status lines', () => {
   assert.equal(phaseLabel({ type: 'phase', phase: 'repairing', iteration: 1 }), 'Repairing (1/2)…');
   assert.equal(phaseLabel({ type: 'phase', phase: 'repairing', iteration: 2 }), 'Repairing (2/2)…');
   assert.equal(phaseLabel(null), 'Generating…');
+});
+
+test('phaseLabel appends the streamed reply size when a heartbeat carries one', () => {
+  // The streaming heartbeat re-emits the current phase with a `chars` count.
+  assert.equal(phaseLabel({ type: 'phase', phase: 'generating', chars: 2100 }), 'Generating… · 2.1k chars');
+  assert.equal(phaseLabel({ type: 'phase', phase: 'repairing', iteration: 1, chars: 500 }), 'Repairing (1/2)… · 0.5k chars');
+  // No size rode along, or a zero count → the bare label (backward compatible).
+  assert.equal(phaseLabel({ type: 'phase', phase: 'generating', chars: 0 }), 'Generating…');
+  // Validating is a post-reply phase — never annotated even if a stray count appears.
+  assert.equal(phaseLabel({ type: 'phase', phase: 'validating', chars: 9000 }), 'Validating…');
 });
 
 // Synthetic OK response whose body streams the given chunks.

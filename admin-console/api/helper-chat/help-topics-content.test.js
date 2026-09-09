@@ -45,6 +45,9 @@ const TOPIC_CONTENT = [
     chapters: [
       'What Flows is',
       'The flows left list',
+      // #2068 — the surface for this one is the Share side panel itself, which
+      // is where the irreversibility of sharing has to be readable.
+      'Sharing a draft',
       'The canvas',
       'Wiring hand-offs: the edge chooser',
       'Human gates, brakes and named human roles',
@@ -60,7 +63,14 @@ const TOPIC_CONTENT = [
       'Outcome',
       'Label',
       'Consumer',
-      'Materialize',
+      // #2053 renamed the design → team action from *Materialize* to
+      // **Create team…** everywhere a user reads it. The word survives in this
+      // topic as exactly two things, both deliberate: the one bridge sentence
+      // for readers who learned it, and the *Not materialized yet* / *Materialize*
+      // names of the MEMBER-level act in Agent Chat, which #2053's Non-goals
+      // leave alone. So the concept the guard pins is the new verb.
+      'Create team',
+      'previously called Materialize',
       'Flow Copilot',
       // #1876 wrote these as one "Import / Export" phrase. They are separate
       // affordances in separate places — Import is a header create action,
@@ -68,6 +78,11 @@ const TOPIC_CONTENT = [
       // the guard follows the prose rather than the other way round.
       'Import',
       'Export',
+      // #2068 — the two claims a reword must not soften: a draft is private
+      // until shared, and sharing hands over the right to delete it and to
+      // remove the sharer. Both are the product's own words in the panel.
+      'one-way act of trust',
+      'can never be emptied',
       'Label hand-off',
       'Issue channel',
       'Pull-request channel',
@@ -299,6 +314,10 @@ const TOPIC_CONTENT = [
     // areas below are each a chapter, and four of them are the landing target of
     // a "?" on the matching surface, so the headings are load-bearing rather
     // than decorative.
+    //
+    // #2066 replaced the manual **Sync all agents** action with an offer made at
+    // SAVE time plus a persistent out-of-date badge, so the chapter-2 material
+    // is rewritten around those two surfaces and gains a second `###`.
     chapters: [
       'What a Working Environment is',
       'Repositories',
@@ -320,8 +339,24 @@ const TOPIC_CONTENT = [
       'SSH key',
       'HTTPS',
       'Read-only',
-      'newly created agents',
-      'Sync all agents',
+      // #2066: `Sync all agents` and `never re-clones` are retired rather than
+      // reworded — the action is gone and the propagation now DOES fetch,
+      // switch a branch and repoint a remote. What replaces them are the
+      // claims a reader would be harmed by getting wrong: that the save is
+      // committed regardless of the answer, that an unsafe clone is left
+      // untouched rather than fixed, that a removal never deletes anything,
+      // and that the badge is derived from the workspaces rather than
+      // remembered from the last save.
+      'Saving asks',
+      'clean and fully pushed',
+      'left completely alone',
+      'Nothing is stashed, reset or force-checked-out',
+      'Removal never deletes anything',
+      'no pruning',
+      'manual step',
+      'actual workspaces',
+      'never counted',
+      'kept** and reported as retained',
       // #1987 additions. The first is a CORRECTION of the page, guarded here
       // because the form's own hint said the opposite: prompt-assembly.js writes
       // the environment name AND description into the agent's CLAUDE.md, so the
@@ -337,7 +372,6 @@ const TOPIC_CONTENT = [
       // surprising behaviour, and the reason the Sync action exists.
       'What an edit reaches',
       'recreates its running agents',
-      'never re-clones',
       // Two honest limits of surfaces that look stricter than they are.
       'advice, not a gate',
       'an instruction, not a file permission',
@@ -345,48 +379,6 @@ const TOPIC_CONTENT = [
       // The toolchain half: the panel, and the pin-file-not-image story.
       'Toolchains panel',
       'version manager',
-    ],
-  },
-  {
-    id: 'access-users',
-    routes: ['/teams'],
-    // #1996 deepened it and added deep-links for the page header and the Manage
-    // panel. Resource ownership got its own chapter but no "?" — the section
-    // renders no header for one to sit on (see access-help-sections.js).
-    chapters: [
-      'What this page manages',
-      'Managing a scope and its members',
-    ],
-    // #1881 lifted the Access & Users intro box: the access-scope ("Team")
-    // definition, the explicit *this is not an Agent Team* distinction and the
-    // System-Admin / Team-Admin / Team-Member role list. The topic additionally
-    // records what a scope actually gates (list filtering, private agents, the
-    // 403 on management calls) and the default-team / still-owns-resources
-    // delete rules, which the page never spelled out.
-    concepts: [
-      'access scope',
-      'Agent Team',
-      'Agent Team Wizard',
-      'exactly one',
-      'System Admin',
-      'Team Admin',
-      'Team Member',
-      'default',
-      'fail-closed',
-      'updates their role in place',
-      'Lists are filtered',
-      'Private agents',
-      '403',
-      'Manage Users',
-      'Resource ownership',
-      'reassign',
-      // #1996 additions: the fourth principal the roles table cannot describe,
-      // the personal-credential carve-out from the scope model, and the two
-      // refusals that make Delete safe.
-      'built-in single admin',
-      'administrative break-glass',
-      'can never be deleted',
-      'still owns',
     ],
   },
   {
@@ -587,6 +579,38 @@ const TOPIC_CONTENT = [
     ],
   },
   {
+    id: 'flow-control',
+    routes: ['/flow-control'],
+    // #2116 (epic #2112 Flow Control §4.4) — a NET-NEW topic: there was no box
+    // to extract, because the page did not exist. The four chapters below are
+    // each the landing target of a "?" on the matching board surface, so the
+    // headings are load-bearing rather than decorative.
+    chapters: [
+      'What the Flow Control board shows',
+      'The lifecycle stages',
+      'Blockers and what to do about them',
+      'The epic roll-up',
+    ],
+    // The load-bearing claim of the whole subsystem is that state comes from
+    // GitHub evidence and not from labels — a reword that softens it would make
+    // the board look like every other label-driven view, which is precisely the
+    // failure §4.1 exists to prevent. The read-only property is pinned for the
+    // same reason: the ledger mutates nothing, and a topic promising a repair
+    // button would be promising a later phase's feature.
+    concepts: [
+      'the fact wins',
+      'Claimed done',
+      'read-only',
+      'Superseded',
+      'Stale base',
+      'Orphaned',
+      'time in the current stage',
+      'An empty',
+      'Maintenance mode',
+      'mutually exclusive',
+    ],
+  },
+  {
     id: 'github-events',
     routes: ['/github-events'],
     // #1886 lifted the page's multi-clause intro (observational log; Processed
@@ -634,6 +658,16 @@ const TOPIC_CONTENT = [
       'never renders it',
       'When a repository is polled',
       'no expiry',
+      // #2101 additions. The Pending queue's rows now name the work item, so
+      // the chapter documents its columns the way the Processed chapter always
+      // has — and it is the ONLY place that says what the GitHub event id is,
+      // because #2101 took it off the row precisely for looking like a ticket
+      // number. A reword that loses that sentence leaves an operator who reads
+      // the hover with no way to find out what the number means.
+      'internal id',
+      'Events API gave the event',
+      'label chip',
+      'in progress',
     ],
   },
   {
@@ -712,6 +746,12 @@ const TOPIC_CONTENT = [
       'team of one',
       'Grow into a full team',
       'creates a new team',
+      // #2052 made "a single agent is a team of one" an operation rather than
+      // only a framing: chapter 2 used to document the dead end (growing could
+      // not convert this assistant) and now has to document the action that
+      // replaced it, plus the one-way-door warning the dialog gives.
+      'Convert into a team',
+      'one-way door',
       'default branch',
       'reuses',
       'Agent reused',
@@ -757,7 +797,7 @@ const TOPIC_CONTENT = [
     // long prose and the go-live notice's follow-up advice.
     concepts: [
       'Agent Team',
-      'Access page',
+      'access scope',
       'Process',
       'Working Environment',
       'Team ID',
@@ -851,11 +891,20 @@ const TOPIC_CONTENT = [
       'Outcomes — what the agent signals when a run ends',
       'Knowledge — what this agent has learned',
       'Settings — configuring the agent',
+      'Sharing a team — who can open it and who can change it',
       'Where the Agents page went',
     ],
     concepts: [
       'one long-running Claude session',
       'Reset Session',
+      // #2082 — the four sharing rules a reword must not soften. The read-only
+      // list is the AC9 half that AC8's "disabled" wording would have removed;
+      // the name+email projection is D2/D11; existing-accounts-only is D3; the
+      // hand-over is D4.
+      'A Team Member sees the list read-only',
+      'never their GitHub handle',
+      'already have an account',
+      'The last Team Admin cannot simply leave',
       'one workspace',
       'wake instruction',
       'Cron (recurring)',
@@ -879,6 +928,12 @@ const TOPIC_CONTENT = [
       'Stop always works',
       'Maintenance Mode',
       'Outcome → Label → Consumer',
+      // #2057 — a label is NOT the only way an outcome reaches a teammate. The
+      // chapter said it was, which is exactly the claim the Outcomes tab was
+      // making in the product; both are now qualified, and a reword must not
+      // quietly restore the single-mechanism reading.
+      'two ways',
+      'direct hand-off',
       'exactly one',
       'any of',
       'read-only on purpose',
@@ -947,6 +1002,20 @@ const TOPIC_CONTENT = [
       '/api/agents/orphans',
       'idempotent',
       'Add `<role>` role',
+      // #2067 — repositories are no longer an environment-only concept. The
+      // load-bearing facts are the two scopes (and that the inherited one is
+      // changed elsewhere), that there is no per-repository credential, that a
+      // directory-name collision is refused rather than renamed, that the
+      // attachment survives a re-seed, and what removal costs. Each is a
+      // question a reader asks BEFORE clicking, so a reword must not lose them.
+      'From Working Environment',
+      'This agent only',
+      'no credential of its own',
+      'refused',
+      'no automatic renaming',
+      'survives a container respawn',
+      'deletes the working copy',
+      'next** run on',
     ],
   },
   {
@@ -954,16 +1023,21 @@ const TOPIC_CONTENT = [
     routes: ['/users'],
     // #1996 deepened it and split "Edit/offboarding dialog" into the two surfaces
     // it actually is — the edit panel and the delete confirmation ask different
-    // questions, and one is asked over a destructive button.
+    // questions, and one is asked over a destructive button. #2085 then folded
+    // the whole `access-users` topic in when the Access page was dissolved (D10)
+    // and added the three chapters its two new tabs deep-link into.
     chapters: [
       'What this page manages',
       'Creating and editing a user',
       'Deleting a user is an offboarding',
+      'The All Teams tab',
+      'Deleting a team',
+      'The Resources tab',
     ],
     // #1891 (E16) — the route E7 left uncovered. The topic absorbed the Users
     // page intro box (records vs memberships, the global System-Admin flag) and
-    // adds what no surface said: the immutable subject, the user-store-then-env
-    // login order, and that Delete is an offboarding which pauses the person's
+    // adds what no surface said: the immutable subject, how a sign-in is
+    // resolved, and that Delete is an offboarding which pauses the person's
     // agents and deletes their personal credentials first.
     concepts: [
       'Subject',
@@ -980,12 +1054,49 @@ const TOPIC_CONTENT = [
       'best-effort',
       'Access',
       // #1996 additions: why the subject is immutable rather than merely locked,
-      // the records-first rule as it applies to SSO, and the guard that does NOT
-      // exist — nothing stops you deleting the last System Admin.
+      // and the records rule as it applies to SSO.
       'silently sever an existing person',
       'guest list',
       'last System Admin',
       'own account',
+      // #2059 additions. #1996 pinned "nothing stops you deleting the last
+      // System Admin" and a records-THEN-env login order; both are now false.
+      // `ADMIN_USERNAME` above survives, but its meaning inverted — it is a
+      // one-shot seed, not a credential — so the load-bearing claims are pinned
+      // individually: one path, a consumed-once seed, and the two consequences
+      // the platform accepts (no sign-in during a store outage, recovered on
+      // the HOST; the password now living in the record). Plus the refusal that
+      // replaced the missing guard, in both its forms. The "no fourth principal"
+      // reword-guard #2059 pinned on the now-retired access-users topic moves
+      // here too, since the seeded-record explanation lives in this topic after
+      // #2085 folded that page in.
+      'one login path',
+      'once, as a seed',
+      'nobody can sign in',
+      'host-level',
+      'no longer revokes anything',
+      'The last System Admin cannot be deleted',
+      'cannot be demoted',
+      'no fourth principal',
+      'seeded once at first boot',
+      // #2085: everything the retired `access-users` topic was the only home
+      // for. The access scope still exists as the stamp the Resources tab
+      // assigns, so its concepts describe a live surface and had to be folded in
+      // rather than deleted with the page — plus the two things only this page
+      // can now say: where member management went, and why a shared environment
+      // is not a team dropdown.
+      'access scope',
+      'Agent Team',
+      'exactly one',
+      'Team Member',
+      'Lists are filtered',
+      '403',
+      'administrative break-glass',
+      'Share',
+      'no admin',
+      'un-shares',
+      'Shared',
+      'cascades',
     ],
   },
   {

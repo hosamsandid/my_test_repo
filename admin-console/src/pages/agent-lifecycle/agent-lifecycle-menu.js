@@ -66,6 +66,36 @@ const CLONEABLE_ROLES = new Set(['agent', 'team-member']);
 // produced a bundle whose only consumer — an import that re-creates the role —
 // the platform refuses since #1962.
 const EXPORTABLE_ROLES = new Set(['agent', 'team-member', 'team']);
+// Converting into a team of one (#2052) is offered to the standalone role
+// ALONE: a `team` already is one, a `team-member` already belongs to one, and
+// there is no reverse conversion, so a near-miss here is not a cosmetic bug.
+// `expert` is the pre-#1961 name the orchestrator normalizes to `agent` on
+// startup, listed for the same reason `findStandaloneAgentForEnv` still accepts
+// it — a list entry read before that normalization has landed.
+const CONVERTIBLE_ROLES = new Set(['agent', 'expert']);
+
+/**
+ * The hint on **Share…** for someone who may see the team but not administer it
+ * (#2082, #2041 AC9). Deliberately not `NO_RIGHTS_HINT`: the entry stays
+ * ENABLED, because the member list is something a Team Member may *read* — what
+ * they may not do is change it, and the panel says so again where the controls
+ * would be. #2041 AC8 asks for the entry to be disabled with a hint, which
+ * cannot be reconciled with AC9's read-only list (a disabled entry opens
+ * nothing) — and AC12/P6 retires the Access page's Manage panel as "superseded
+ * by the Share dialog", so disabling it here would remove a member's only way
+ * to see who else is on their team. The hint is delivered, the read is not.
+ */
+export const MEMBERS_READ_ONLY_HINT =
+  'You can see who has access; only a Team Admin for this team can change it.';
+
+/** The same entry for someone who *can* change the list — what it opens. */
+export const MEMBERS_MANAGE_HINT =
+  'Add colleagues to this team, change their role, or remove them.';
+
+/** Converting is one-way — the entry says so before it is clicked, not after. */
+export const CONVERT_TO_TEAM_HINT =
+  'Turn this assistant into a team of one, keeping its prompt, skills, '
+  + 'triggers and chat history. Cannot be undone.';
 
 /**
  * Per-agent context-menu items for one chat row / agent card.
@@ -147,6 +177,19 @@ export function buildAgentMenu({ agent, canManage = true, locked = false, busy =
     });
   }
 
+  // Grow into a team (#2052). Not in the destructive tail and not marked
+  // danger: nothing is lost, the agent keeps everything it has. But it IS
+  // one-way, so it always opens a confirm (the trailing "…") and carries the
+  // hint above rather than leaving "what happens to my assistant?" to the
+  // dialog alone.
+  if (CONVERTIBLE_ROLES.has(role)) {
+    items.push({
+      key: 'convert-to-team',
+      label: 'Convert into a team…',
+      ...gate(isStub, isStub ? 'Materialize the agent before converting it.' : CONVERT_TO_TEAM_HINT),
+    });
+  }
+
   // Destructive tail. Reset-to-stub is never a one-click action (AC4): the
   // caller opens a confirm dialog, and the entry is marked danger so it reads
   // apart from the reversible ones above.
@@ -179,9 +222,17 @@ export function buildAgentMenu({ agent, canManage = true, locked = false, busy =
  * @param {object}      o.team        the `role: 'team'` list entry, or null
  * @param {string}      o.teamId      the group's team id (always known)
  * @param {boolean}     o.canManage   server's `canManageAgent` for the team
+ * @param {boolean}     o.canManageMembers  server's `canManageTeam` — may this
+ *                      caller change the MEMBER LIST? Defaults to `canManage`
+ *                      because for a `role: 'team'` row the two predicates
+ *                      resolve identically today; it is a separate input so a
+ *                      change to the agent predicate cannot silently open the
+ *                      member list (#2041 §7.1).
  * @param {boolean}     o.busy        a team mutation is in flight
  */
-export function buildTeamMenu({ team, teamId, canManage = true, busy = false } = {}) {
+export function buildTeamMenu({
+  team, teamId, canManage = true, canManageMembers = canManage, busy = false,
+} = {}) {
   if (!teamId) return [];
   const gate = (extraDisabled, extraTitle) => ({
     disabled: !canManage || busy || !!extraDisabled,
@@ -213,6 +264,16 @@ export function buildTeamMenu({ team, teamId, canManage = true, busy = false } =
     key: 'edit-team',
     label: 'Team settings…',
     ...gate(false, 'Opens the team\'s configuration in the right rail.'),
+  });
+  // Sharing (#2082, #2041 P4): who may open, chat with and administer this
+  // team. The one entry in this menu that stays live without rights, because
+  // reading the member list is a Team-Member right (D9) — see
+  // MEMBERS_READ_ONLY_HINT for why AC8's `disabled` is deliberately not applied.
+  items.push({
+    key: 'share',
+    label: 'Share…',
+    disabled: busy,
+    title: canManageMembers ? MEMBERS_MANAGE_HINT : MEMBERS_READ_ONLY_HINT,
   });
   items.push({ key: 'export-team', label: 'Export team (ZIP)', disabled: false });
   items.push({ key: 'open-flow-editor', label: 'Open in Flow Editor', disabled: false });

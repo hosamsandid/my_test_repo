@@ -31,7 +31,7 @@ Tracking issue: [#2046](https://github.com/AccentureCodeFoundry/314092_agent-exe
 | **D2** | Open user directory — every user may search and browse all users (name + email only). | [§7.2](#72--the-open-directory-d2-d11), [§4.1](#41--admin-consoleapiscopejs--the-predicate-set) |
 | **D3** | No invitations of people without an account. | [§7.3](#73--existing-accounts-only-d3) |
 | **D4** | The last Team Admin cannot be removed without naming a successor. | [§2.3](#23--the-last-admin-rule-d4) |
-| **D5** | The System Admin retains full visibility (`scope.all` stays); the operator login is unchanged. | [§2.2](#22--what-full-visibility-means-d5-and-the-privacy-guarantee) |
+| **D5** | The System Admin retains full visibility (`scope.all` stays); the operator login is unchanged. *(Second clause superseded by D13 / #2059 — see [§13](#13--amendment-d13--2059--the-operator-becomes-a-record).)* | [§2.2](#22--what-full-visibility-means-d5-and-the-privacy-guarantee) |
 | **D6** | Migration preserves existing access; private-by-default applies to new teams only. | [§8](#8--migration-d6) |
 | **D7** | Layered resource ownership — personal / team-owned / system-wide shared. | [§5](#5--resource-ownership-tiers-d7-d12) |
 | **D8** | Only teams are shareable; a standalone agent stays private to its creator. | [§7.4](#74--only-teams-are-shareable-d8), [§3.5](#35--after--standalone-role-agent-config) |
@@ -111,20 +111,30 @@ Unchanged from `orchestrator/teams-store.js:20-26` and `docs/multi-user-concept.
 
 ### 2.2 — What "full visibility" means (D5), and the privacy guarantee
 
-D5 keeps `scope.all` exactly as it is. `computeScope` (`scope.js:23-53`) grants it in two branches:
+D5 keeps `scope.all` exactly as it is. `computeScope` (`scope.js:23-53`) granted it in two branches:
 
-| Branch | Lines | Returned scope |
-|---|---|---|
-| **Operator / env-admin login** (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, `auth.js:41-42`) | `scope.js:29-31` | `{ all: true, teamIds: ∅, roles: ∅, userId: null }` |
-| **System Admin user record** (`user.systemAdmin === true`) | `scope.js:40` | `{ all: true, teamIds: ∅, roles: ∅, userId: user.id }` |
+| Branch | Lines | Returned scope | Fate |
+|---|---|---|---|
+| **Operator / env-admin login** (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, `auth.js:41-42`) | `scope.js:29-31` | `{ all: true, teamIds: ∅, roles: ∅, userId: null }` | **Deleted by D13 / #2059** ([§13](#13--amendment-d13--2059--the-operator-becomes-a-record)) |
+| **System Admin user record** (`user.systemAdmin === true`) | `scope.js:40` | `{ all: true, teamIds: ∅, roles: ∅, userId: user.id }` | Unchanged |
 
-Both are **unchanged** (D4/D5). Twelve predicates consult `scope.all` as a grant (§4.1) and none of them is touched — that is the decision that keeps this redesign a re-pointing rather than a rebuild.
+> **Amended.** When this chapter was written both branches were unchanged, and the
+> first one is what §2.2's privacy guarantee and §4's *Unchanged* verdicts were
+> reasoned against. #2059 (D13) removed it: the configured credential is a first-boot
+> **seed** for a real System-Admin record, so the surviving branch is now the only
+> way to `scope.all` and **every authenticated caller has a `userId`**. Nothing about
+> the *rest* of the redesign changes — one grant branch fewer is strictly simpler —
+> but the three places this document leaned on `userId: null` are corrected in §13.
+
+The **second** branch is unchanged. Twelve predicates consult `scope.all` as a grant (§4.1) and none of them is touched — that is the decision that keeps this redesign a re-pointing rather than a rebuild.
 
 **The privacy guarantee, stated plainly:**
 
-> A team created after this redesign is **private from every other named user who is not one of its members**. Two exceptions are part of the design and are not defects: a **System Admin** retains full visibility (D5), and the **operator / env-admin login** retains full visibility (D4). Personal credentials remain outside even that — `ownsPersonalCredential` (`scope.js:177-179`) deliberately carries **no `scope.all` bypass**, and the operator's `userId` is `null`, so a personal credential is visible to its owner alone.
+> A team created after this redesign is **private from every other named user who is not one of its members**. One exception is part of the design and is not a defect: a **System Admin** retains full visibility (D5). Personal credentials remain outside even that — `ownsPersonalCredential` (`scope.js:177-179`) deliberately carries **no `scope.all` bypass**, so a personal credential is visible to its owner alone.
+>
+> *(As first written this named a second exception, the operator / env-admin login, and grounded the personal-credential carve-out in that login's `userId` being `null`. Both are superseded by D13 / #2059 — the carve-out now rests on the owner comparison alone, which is the rule D2 always meant; see §13.)*
 
-This is the honest wording, not the stronger claim. **Nothing in this document says a System Admin cannot see a team** (#2046 AC5). The stronger claim would require surgically removing the `all`-bypass from the twelve predicates in §4.1 — explicitly *not* required by D5, and it would break the governance model (`docs/governance-concept.md` GOV-ACCESS-7 break-glass, quarterly access review, GOV-ACCESS-8 JML all assume an operator who can see the estate).
+This is the honest wording, not the stronger claim. **Nothing in this document says a System Admin cannot see a team** (#2046 AC5). The stronger claim would require surgically removing the `all`-bypass from the twelve predicates in §4.1 — explicitly *not* required by D5, and it would break the governance model (`docs/governance-concept.md` quarterly access review and GOV-ACCESS-8 JML both assume an administrator who can see the estate). *(GOV-ACCESS-7 was the third item here; #2059 restated it as a host-level break-glass, since the console login it governed no longer exists — see §13.)*
 
 *A note on #2041's wording of this guarantee is raised, not resolved, in §12.2.*
 
@@ -473,7 +483,7 @@ This is the surface D1 dissolves. Plumbing: `callAdmin` `:11764-11774`, `proxyAd
 | `DELETE /api/admin/users/:id` | **11867** | `if (!scope.all)` (`:11869`) | Unchanged **+ D4 last-admin refusal** (§2.3) |
 | `POST /api/admin/users/:id/password` | **11874** | `if (!scope.all)` (`:11876`) | Unchanged |
 | `DELETE /api/admin/users/:id/password` | **11879** | `if (!scope.all)` (`:11881`) | Unchanged |
-| `PUT /api/me/preferences` | **11894** | No role gate — pinned to the caller's own id (`:11906`); env admin (`scope.userId == null`) gets `{persisted:false}` (`:11903-11905`) | Unchanged |
+| `PUT /api/me/preferences` | **11894** | No role gate — pinned to the caller's own id (`:11906`); a caller with no resolved id gets `{persisted:false}` (`:11903-11905`) | Unchanged, but **no longer a no-op for the administrator**: #2059 gives every authenticated caller a `userId`, so the `{persisted:false}` arm became a fail-closed guard rather than the operator's permanent condition (§13) |
 | `GET /api/admin/memberships` | **11916** | `scope.all ? data : data.filter(m => visibleTeam(scope, m.teamId))` (`:11921`) | **Re-keyed. Becomes the Share dialog's read** (§7.1) |
 | `POST /api/admin/memberships` | **11925** | `canManageTeam(scope, req.body.teamId)` (`:11927-11928`) | **Re-keyed. Becomes the Share dialog's write** + D4 rule. Already the right predicate — the dialog is a new *front end*, not a new authorization mechanism. |
 | `DELETE /api/admin/memberships` | **11931** | `canManageTeam(scope, req.query.teamId)` (`:11933-11934`) | Same |
@@ -502,7 +512,7 @@ Every mirror below reads **one** value: `user.teams[].teamId`/`role` and `user.a
 | `src/pages/agent-lifecycle/agent-create-access.js` | `describeAgentCreateAccess` **:31-38**; `:36` `const isTeamAdmin = (user.teams \|\| []).some(t => t && t.role === 'team-admin');` | Enables/disables New Agent + Import in the chat header, disabled-with-hint | **Relaxed** (P3): every authenticated user may create, so the refusal branch (`:38`) becomes unreachable and the helper is retired or reduced |
 | `src/pages/AgentChat.jsx` | `:189` `describeAgentCreateAccess(user)`, `:543-545` / `:551-553` disabled buttons; `:786` `agentCanManage={selectedAgent ? selectedAgent.canManage !== false : true}` | Consumes the server `canManage` per row | Re-keyed; §7.1 extends the payload |
 | `src/pages/SshKeys.jsx` / `GithubTokens.jsx` / `ModelRegistry.jsx` | `:444-446`/`:498`; `:307-309`/`:362`; `:1030-1034`/`:1242`/`:1430` | `canManageCredentialClient(row, caller)` per row | Re-keyed |
-| `src/pages/my-credentials-view.js` | `canOwnPersonalCredentials` **:19-21**, `personalOwnerId` **:24-26** | Mirrors `ownsPersonalCredential`; fail-closed for the operator login | Unchanged |
+| `src/pages/my-credentials-view.js` | `canOwnPersonalCredentials` **:19-21**, `personalOwnerId` **:24-26** | Mirrors `ownsPersonalCredential`; fail-closed on a caller with no resolved id | Unchanged as a guard; the state it guarded against is no longer reachable for a signed-in human (§13) |
 | `src/context/ModelSelectionContext.jsx` | **:93** `userTeamIds`, **:94** `isSysAdmin` → `classifyExclusions(…)` `:95` | Explains why no provider is selectable | Re-keyed |
 | `src/pages/agent-lifecycle/agent-lifecycle-menu.js` | `buildAgentMenu` **:81**, gate closure **:89-93**; `buildTeamMenu` **:184-222**, gate closure **:186-189**; `export` entry **:134-140** (`disabled: false`, rationale `:131-133`); `edit-team` **:212-216**; `export-team` **:217** | Per-entry `disabled`/`title` from the server's `canManage` | Re-keyed; **gains the `share` entry** (§7.1) |
 | `src/pages/agent-chat/rail-lifecycle.js` | `railMenuItems` **:278-326**; agent branch **:283-305** (`canManage` at `:290`); team branch **:307-323** (`canManage` at `:317`) | Threads `canManage` into both menus | Re-keyed |
@@ -628,6 +638,17 @@ The matrix below is #2041 §7 carried over verbatim, with the enforcement site f
 
 **Two implementation notes.** (1) `canManageAgent` (`scope.js:288-292`) already means *team-admin of the owning team*, so every mutation route listed as Team-Admin-only in the matrix is **already gated correctly today** and mainly needs re-pointing in P2 — the exception is the work-plane family, which has no gate at all (§11.2). (2) The client already implements this split for one surface and it is the pattern to copy: `settingsSubject` (`agent-chat/agent-settings-view.js:39-47`) **hides** the Settings tab when the list payload's `canManage` is false, i.e. parity with what the server would refuse rather than a button that 403s.
 
+> **Note (1) above is wrong, and #2080 found it by reading the routes — see
+> Amendment 3.** Three Team-Admin-only surfaces this matrix names outright
+> (skill activation, plugin activation, *Install into agent*) were gated on
+> `visibleAgent`, i.e. on **mere membership**, so a Team Member could re-grant
+> their team's agents' skills and plugins. That is not a re-pointing job; it was
+> a live D9 violation on the config plane, outside the work-plane family this
+> note treats as "the exception". Note (2) is accurate, and remains the pattern
+> — but it describes the *Settings tab* only: the Workspace browser's write
+> affordances have no `canManage` awareness at all, so they are the one place
+> where a member still sees a control the server now refuses.
+
 ---
 
 ## 7 — Sharing (D2, D3, D8, D11)
@@ -648,6 +669,58 @@ The writes already exist and are already gated on the right predicate:
 
 **AC8's disabled-with-hint requirement** is already the house pattern: the gate closure at `agent-lifecycle-menu.js:186-189` sets `disabled: !canManage` plus `title: NO_RIGHTS_HINT`, so a Team Member sees **Share…** greyed out with the reason rather than not at all — the deliberate opposite of `Teams.jsx:472-483`, which hides its admin actions.
 
+> **Amendment 6 (#2082, P4 as built).** Everything above shipped, with **one
+> stated deviation and one addition**.
+>
+> **The deviation: AC8 and AC9 cannot both be satisfied as written, and AC9
+> wins.** AC8 asks for the **Share…** entry to be *disabled* with a hint for a
+> non-admin; AC9 asks that *"a Team Member sees the list read-only"*. A disabled
+> menu entry opens nothing, so implementing AC8 literally makes AC9's read-only
+> list unreachable — and it is not unreachable elsewhere either, because **AC12
+> (P6) retires the Access page's `ManageTeamPanel` as "superseded by the Share
+> dialog"**, which would leave a Team Member with no surface at all for seeing
+> who is on their team. D9 explicitly grants a member the *read* (§6: "reading
+> … is allowed"), so the entry ships **enabled for anyone who can see the team**
+> and the panel renders the list read-only, with no role picker, no Add row and
+> no Remove button. AC8's *hint* is still delivered, on the entry itself:
+> `MEMBERS_READ_ONLY_HINT` ("You can see who has access; only a Team Admin for
+> this team can change it") rather than `NO_RIGHTS_HINT`. It is the only entry
+> in `buildTeamMenu` that stays live without rights, and
+> `agent-lifecycle-menu.test.js` pins that as a deliberate exception to the
+> AC8 loop rather than an oversight.
+>
+> **The addition: the D4 successor picker**, which #2081's Amendment 5 owed to
+> this phase. Removing or demoting the **last** Team Admin opens an inline
+> hand-over prompt whose candidates are the team's *other* members only (the
+> store refuses an outsider, so offering one would be a button that 409s), and
+> the promotion + the removal/demotion go out as **one** request — the store
+> applies both in a single write, so the team is never momentarily
+> un-administrable. A sole admin who is also the sole member is a stated dead
+> end ("add somebody first, or delete the team") rather than an empty picker.
+>
+> **The recommendation above was taken:** `GET /api/matrix/agents` now ships an
+> explicit `canManageTeam` on `role: 'team'` rows, and `buildTeamMenu` takes it
+> as its own `canManageMembers` input (defaulting to `canManage`, so an
+> un-migrated caller is unaffected). `team-share-routes.test.js` pins the
+> present-day coincidence between the two predicates, so a successor that breaks
+> it fails there rather than silently opening the member list.
+>
+> **Client decisions** are the pure `admin-console/src/pages/agent-chat/team-share-view.js`
+> (renderer: `ShareTeamPanel.jsx`, hosted in a `SidePanel` by `RailLifecycleHost`
+> — the `ManageTeamPanel` precedent for a manage-a-list surface, deliberately not
+> a `ConfirmDialog`, which closes on confirm). The one non-obvious thing it
+> encodes: **`POST` takes `teamId` in the body and `DELETE` in the query**,
+> because that is where each route's own gate reads it from — a DELETE that sent
+> it in a body would arrive at `canManageTeam(scope, undefined)` and fail closed
+> for everyone but a System Admin.
+>
+> **AC13's end-to-end journey: delivered by #2086 — see Amendment 8.** It was
+> recorded here as owed-and-blocked because the e2e stack had no `AUTH_ENABLED`
+> anywhere, so every predicate in that journey was inert (the #1459 finding).
+> That was correct: the missing piece was infrastructure, not a YAML file, and
+> #2086 built it — a multi-user e2e stack plus two signed-in humans in the step
+> library — before writing the journey.
+
 ### 7.2 — The open directory (D2, D11)
 
 `visibleUser` (`scope.js:124-128`) shows only users who share a team. Under private-by-default that leaves a **fresh team owner unable to invite anybody** — which is why D2 reverses it.
@@ -657,11 +730,18 @@ The writes already exist and are already gated on the right predicate:
 | Surface | Route | Visibility | Projection |
 |---|---|---|---|
 | Administration → Users (System Admin) | `GET /api/admin/users` (**api.js:11841**) | `scope.all` or `visibleUser` — **unchanged** | Full record (as today) |
-| **The open directory** (the Share picker) | **new** `GET /api/users/directory` | Any authenticated user | **`{ id, displayName, email }` only** — never `systemAdmin`, never `githubHandle`, never `hasPassword`, never `chatFontSize` |
+| **The open directory** (the Share picker) | `GET /api/users/directory` — **built by #2068** | Any authenticated user | **`{ id, displayName, email }` only** — never `systemAdmin`, never `githubHandle`, never `hasPassword`, never `chatFontSize` |
 
 Projecting at a **separate route** rather than conditionally inside the admin one is what makes "the flag is never exposed" checkable by a test that asserts the response keys, instead of a review of every branch. `visibleUser` itself stays as the gate on the admin surface.
 
 **Worth one data-protection sign-off** (names + corporate email become visible to every user) — recorded in #2041 D2 and inherited here.
+
+> **#2082:** the Share picker is now that route's second consumer (the first was
+> the draft Share panel it was built for). The client re-asserts the projection
+> in `team-share-view.js`'s `directoryIndex`, so a future widening of the
+> payload cannot reach the DOM by accident, and `team-share-routes.test.js`
+> asserts the response keys are exactly `{id, displayName, email}` — including
+> for a **System Admin**, who appears in the results as an ordinary colleague.
 
 ### 7.3 — Existing accounts only (D3)
 
@@ -669,11 +749,20 @@ Sharing offers only existing users; creating user records stays a System-Admin a
 
 **The accepted cost:** a colleague who has never logged in needs a one-time admin step — once per person, not once per team. **This is the redesign's remaining admin bottleneck** and it is a deliberate choice, not an oversight: auto-provisioning on first IAP login is the alternative and was not adopted.
 
-### 7.4 — Only teams are shareable (D8)
+### 7.4 — Only self-contained units are shareable (D8)
 
 One entry point, one rule: **sharing always applies to a self-contained unit.**
 
+> **Amended by #2068.** This section originally read *"only teams are shareable"*
+> and did not mention drafts. The rule D8 actually states is the sentence above —
+> *self-contained unit* — and a **flow draft** is one: a single bundle document
+> with no runtime, no credentials and no members. So drafts are shareable too,
+> and the heading now says what D8 means rather than what the team surface
+> happened to be at the time. The exclusion D8 exists for is unchanged: a **team
+> member** is not self-contained and is never shared on its own.
+
 - A **team** is shareable (§7.1). A **team member** always follows its team's access — after D1 that is mechanical, since its boundary *is* `parentTeamId` (§1.3).
+- A **flow draft** is shareable (**#2068**, §11.1) — with one deliberate difference from a team: it has **no roles**. Every holder is a full equal, because the read/chat-vs-configure split D9 draws needs a runtime to divide, and a draft has none. Sharing one is therefore irreversible from the sharer's side: a holder can remove you.
 - A **standalone agent** stays private to its creator (`ownerId`, §3.5). Not a dead end: it can still be handed over via the existing **Export (ZIP)** / clone path (`agent-lifecycle-menu.js:134-140`).
 - **Consequence for #1459:** its per-agent `private`|`team` visibility toggle has no role left — D8 makes owner-only the rule for standalone agents and team-following the rule for members, so a third state is unreachable. What survives and is **still needed** is #1459's `ownerId` population/backfill (§3.6) and its §2 finding about the ungated work-plane routes (§11.2).
 
@@ -780,12 +869,12 @@ D1 is a large change to a load-bearing key, so it is sliced so **each phase ship
 | Phase | Content | Depends on | What proves it green |
 |---|---|---|---|
 | **P1** | Ownership data model: `ownerId` on Agent Teams and standalone agents (§3.4, §3.5); `memberships.teamId` re-pointed (§3.3); migration per D6. **No behaviour change.** | **#2046** (this doc) | **The before/after fixture test (#2041 AC2, §8.3)** — set-equality over the real predicates for the full user×resource cross-product, including the three failure-mode fixtures. Plus: the existing `scope.test.js` tenant block (`:555-608`) and `orchestrator/agent-tenant.test.js` (`:23-38`) must be re-pointed together, and a **new mirror guard** for the two `resolveAgentTenant` copies (§1.3 — there is none today). |
-| **P2** | Enforcement re-pointed (§4); `resolveAgentTenant` collapse; `scope.all` kept; the `'default'` fallback removed (§8.4); **process drafts/flows scoped** (§11.1); the work-plane family gated (§11.2); MCP server writes gated (§11.3). | P1 | Predicate unit tests in `scope.test.js` re-keyed; **a route-coverage test** asserting every route in the §11 inventory now resolves a scope (the `orphan-routes.test.js` shape — assert on route *registration*, not behaviour); a two-user integration check that user B does not see user A's drafts (#2041 AC4). |
-| **P3** | Self-service creation (`POST /api/teams` **api.js:13051** + stream **:13674**); creator becomes owner **and** `team-admin` in the same operation; last-admin successor rule (D4, §2.3). | P2 | A creation test from a **membership-less** user (today impossible — `api.js:11816-11817` explains why); an idempotence test that the creator's membership is written exactly once by both the streaming and non-streaming handler (they duplicate their var shape inline at `:13436` and `:14036`, so both must be asserted); D4 refusal tests on all three routes in §2.3. |
-| **P4** | **Share dialog** in the Agent-Chat team context menu (§7.1) + the open directory (§7.2). | P3 | The four drift guards named in §7.1; a response-key assertion on `GET /api/users/directory` (never `systemAdmin`, never `githubHandle` — D2/D11); a server-side test that a Team Member's `POST /api/admin/memberships` is refused (**not** only that the button is disabled — #2041 AC9). |
+| **P2** | Enforcement re-pointed (§4); `resolveAgentTenant` collapse; `scope.all` kept; the `'default'` fallback removed (§8.4); **process drafts/flows scoped** (§11.1 — **done, #2068**, cut out as its own ticket because it does not depend on P1's membership re-keying); the work-plane family gated (§11.2); MCP server writes gated (§11.3). | P1 | Predicate unit tests in `scope.test.js` re-keyed; **a route-coverage test** asserting every route in the §11 inventory now resolves a scope (the `orphan-routes.test.js` shape — assert on route *registration*, not behaviour); a two-user integration check that user B does not see user A's drafts (#2041 AC4). |
+| **P3** | **Done, #2081 — see Amendment 5.** Self-service creation (`POST /api/teams` **api.js:13051** + stream **:13674**); creator becomes owner **and** `team-admin` in the same operation; last-admin successor rule (D4, §2.3). | P2 | A creation test from a **membership-less** user (today impossible — `api.js:11816-11817` explains why); an idempotence test that the creator's membership is written exactly once by both the streaming and non-streaming handler (they duplicate their var shape inline at `:13436` and `:14036`, so both must be asserted); D4 refusal tests on all three routes in §2.3 — **shipped one layer down**, in `teams-store.js` over the pure `orchestrator/team-admin-succession.js`, so the orchestrator's own `/internal/admin/*` writers are covered too (A5.3). |
+| **P4** — *done, #2082 (see Amendment 6 in §7.1)* | **Share dialog** in the Agent-Chat team context menu (§7.1) + the open directory (§7.2). | P3 | The four drift guards named in §7.1; a response-key assertion on `GET /api/users/directory` (never `systemAdmin`, never `githubHandle` — D2/D11); a server-side test that a Team Member's `POST /api/admin/memberships` is refused (**not** only that the button is disabled — #2041 AC9). |
 | **P5** | Layered resource ownership (D7, §5.2) — shared tier for working environments and MCP servers; credentials and model providers re-pointed. | P2 | Tier tests mirroring the credential ones; **a create-a-team-with-no-infrastructure test** (D7's stated consequence, §5.2). |
-| **P6** | Access page rework + System-Admin cleanup view (D5) + docs/help/corpus (§9). | P3, P5 | `help-coverage.test.js` (a page route may not silently lose its topic), the `page-help-view.test.js` parity block, `corpus.test.js` (vendored-copy byte-identity + the worst-case grounding budget), `help-registry.test.js`, the nav-smoke e2e and the `steps-catalog.json` freshness test. |
-| **AC13** | The end-to-end journey, after P4 | P4 | **One e2e journey** proving the loop: user A creates a team → user B does not see it → A shares it with B as Team Member → B sees it but cannot change members → A promotes B to Team Admin → B can → A is removed as last admin only after naming a successor. This is the only test that exercises D1+D4+D9 together. |
+| **P6** — *done, #2085 (see Amendment 7)* | Access page rework + System-Admin cleanup view (D5) + docs/help/corpus (§9). | P3, P5 | `help-coverage.test.js` (a page route may not silently lose its topic), the `page-help-view.test.js` parity block, `corpus.test.js` (vendored-copy byte-identity + the worst-case grounding budget), `help-registry.test.js`, the nav-smoke e2e and the `steps-catalog.json` freshness test. |
+| **AC13** — *done, #2086 (see Amendment 8)* | The end-to-end journey, after P4 | P4 | **One e2e journey** proving the loop: user A creates a team → user B does not see it → A shares it with B as Team Member → B sees it but cannot change members → A promotes B to Team Admin → B can → A is removed as last admin only after naming a successor. This is the only test that exercises D1+D4+D9 together. Shipped as `e2e/journeys/team-sharing.yaml` over a multi-user e2e stack (`AUTH_ENABLED=true` in `docker-compose.e2e.yml`) and the two-identity step library (`e2e/steps/identity.js` + `access.js`); every "cannot" is asserted **twice**, in the UI and against the API with that human's own session. |
 
 **Two strategy notes.** (1) **Every "cannot" in the ACs must be asserted server-side.** The console's own comments say the client gating is UX, not the boundary (`App.jsx:41-45`, `credential-scope-view.js:9-11`, `Shell.jsx:209-215`); a test that only checks a disabled button proves nothing about the API. (2) **P2 is where the two `scope.all` spellings bite** (§4.2): a sweep that greps only `scope.all` misses eight `getScope(req).all` sites.
 
@@ -795,9 +884,14 @@ D1 is a large change to a load-bearing key, so it is sliced so **each phase ship
 
 These are **verified live gaps**, harmless only while everyone shares one access scope. The moment teams are private, each becomes a cross-tenant read or write. They are recorded here because P2 must ship them, not because this document discovers them for the first time — `docs/governance-concept.md` §4 already names the class (GOV-ACCESS-3, GOV-PLATFORM-4).
 
-### 11.1 — Process drafts / flows have no gate at all
+### 11.1 — Process drafts / flows have no gate at all — **CLOSED by #2068**
 
-**Confirmed in full.** All six `/api/process/drafts*` routes are cross-tenant **readable, writable and deletable**, and the persisted record has no tenant field for a gate to key on:
+> **Status: closed.** #2068 implemented and refined this row's AC4 for drafts.
+> The finding below is kept as the record of what was there; what was built
+> differs from what this section predicted in one deliberate way, described
+> after the table.
+
+**Confirmed in full.** All six `/api/process/drafts*` routes were cross-tenant **readable, writable and deletable**, and the persisted record had no tenant field for a gate to key on:
 
 | Route | file:line | State |
 |---|---|---|
@@ -810,9 +904,52 @@ These are **verified live gaps**, harmless only while everyone shares one access
 
 The only protections present are the traversal guard (`draftPath` **:8499-8505** + `DRAFT_ID_RE` **:8495**) and `apiLimiter` on the mutating routes.
 
-**Therefore the fix is a schema change before a gate is even possible.** Add an owning team (and/or `ownerId` for a personal draft) at create, then filter on every read and gate every write. Masked today because everyone shares one scope; the moment teams are private, a user sees — and can delete — other users' private flows in the Flow editor.
+**The fix was a schema change before a gate was even possible.** This section predicted "an owning team (and/or `ownerId` for a personal draft)". **#2068 took the parenthetical, and dropped the owner as an authorization concept entirely** — for a structural reason this section did not have room for: a draft is by definition *"an editable process-template bundle that exists before any team is materialised"*, so at create time there is no Agent Team to scope it to, and the D1 boundary is not expressible on it. What shipped:
 
-### 11.2 — The work plane is ungated
+| Predicted | Built (#2068) |
+|---|---|
+| `teamId` (and/or `ownerId`) on the record | **`createdBy`** — immutable provenance, shown in the list, **never** read by a gate — plus a flat **`accessUserIds`** set |
+| Filter on every read, gate every write | One predicate, `canAccessDraft(scope, draft)` — *is the caller in the access set?* — with the `scope.all` shortcut (the `visibleAgent` pattern, **not** the personal-credential tier, which has no admin bypass). Called from all six routes plus the three new access routes; refusal is the same 404 as a non-existent draft, so the endpoint is not an existence oracle |
+| — | A **Share…** action on the draft's Flows-rail row, over the open directory §7.2 specifies (**#2068 is the ticket that built `GET /api/users/directory`**) |
+| — | Everyone in the access set is **fully equal** (DD2): edit, rename, export, create a team, share on, remove anyone — including you — and delete. There are no roles, deliberately: a draft has no runtime, no credentials and no outward effects, so the read/chat-vs-configure split D9 draws has nothing to bite on. The cost is stated in the UI: **sharing a draft is a one-way act of trust, not a lend** |
+| — | Two invariants that fall out of the equality: the access set can **never be emptied** (the last holder is refused and pointed at *Delete draft*), and a **user deletion** strips the departing human from every set without deleting anything — a set left empty keeps the draft, System-Admin-reachable |
+| D6 migration | Literal: every draft existing at upgrade time gets `createdBy` = the first System Admin and an access set of **all current users**, so nobody loses anything on upgrade day. Stamped once at startup (`backfillDraftAccess`), re-runs are no-ops |
+
+Two things it deliberately did **not** do. The draft id namespace stays global and name-derived, so naming a draft after an invisible one still yields a `-2` suffix — the *existence* of a name leaks, never any content, and decoupling the id from the name is a separate follow-up. And **creating a team does not propagate the draft's access set**: the team belongs to whoever clicked *Create team…* (P3 owns that), so a colleague who materialises a draft you shared gets a team you cannot see.
+
+Decision core: `admin-console/api/draft-access.js` (pure, `draft-access.test.js` carries the two-user loop this row's P2 line named); wiring guarded by `draft-routes-access.test.js`. Client decisions in `admin-console/src/pages/process/draft-share-view.js`.
+
+### 11.2 — The work plane is ungated — **D9 write half CLOSED by #2080; tenant half CLOSED by #1459 §2 (PR #2105)**
+
+> **Status: closed.** This row is two rules wearing one heading, and they landed
+> apart.
+>
+> **Closed by #2080 (P2 / AC7b):** the D9 read/write split named in the last
+> paragraph below. The ten `manage`-class routes of the §6 matrix now require
+> `canManageAgent` — the seven workspace/context writes through the new
+> `requireAgentManage` middleware (`admin-console/api/team-member-boundary.js`),
+> the three trigger mutations through the `denyUnlessCanManageAgent` they
+> already carried. The matrix is data in that module and a source scan asserts
+> it against api.js in **both** directions, so a route added to these families
+> later cannot ship unclassified.
+>
+> **Closed by #1459 §2 (PR #2105):** the **tenant** half — reads require
+> `visibleAgent`, and the chat/session/`/api/matrix/rooms/*` family needs the
+> room→agent resolution. `admin-console/api/work-plane-access.js` gates the
+> whole family with one `app.use` mount list. The two compose deliberately
+> rather than overlap: the mount answers *"is this agent yours at all"* with a
+> 404, the per-route gate answers *"may you change it"* with a 403. `app.use`
+> cannot discriminate by method, and D9's line is not a method line either —
+> posting a chat message, opening a DM room, attaching a file and stopping your
+> own run are all writes D9 *allows* a member — which is why the split could not
+> be folded into the mount. The gate consumes the `{ teamId, ownerId }` shape
+> `agentMetaForScope` produces, where `teamId` is the RESOLVED access boundary
+> (`resolveAgentTeam`): since #2078 (D8) a standalone agent resolves to a `null`
+> boundary and its privacy is decided by `ownerId` (`ownedByCaller`), not the
+> retired `visibility` field.
+>
+> The line numbers below are historical (they predate #2078 and #2101).
+
 
 **The last scope-aware line in `api.js` is 15214/15223** (`GET /api/matrix/agents`). Every route declared after it — **32 API routes** from `api.js:15344` to `:17498` — contains **no `getScope(req)` call at all** (verified: `getScope` appears 134 times in the file, none past `:15214`). That family covers:
 
@@ -824,11 +961,26 @@ The only protections present are the traversal guard (`draftPath` **:8499-8505**
 
 `docs/governance-concept.md:197-201` describes the same family (*"any user can read/write any agent's workspace, run git commit/push in it, and post into any Matrix room as the admin token"*) and owns it as **GOV-ACCESS-3** (`:223`) / **GOV-PLATFORM-4** (`:725`); #1459 §2 records the same finding. **Under private-by-default this is the widest hole**, because it is reachable with nothing but an agent id — which the chat list of any team a user *does* belong to hands out.
 
-P2 must gate the whole family, and the D9 matrix (§6) is the split: reads → `visibleAgent`, writes → `canManageAgent`/`denyUnlessCanManageAgent`.
+P2 must gate the whole family, and the D9 matrix (§6) is the split: reads → `visibleAgent`, writes → `canManageAgent`/`denyUnlessCanManageAgent`. **#1459 delivered the first half of that sentence** ("gate the whole family", at the tenant boundary); the split itself is what remains — see the status note at the top of this section for the two things that turned out to be non-obvious about it.
 
-### 11.3 — MCP server writes are ungated
+### 11.3 — MCP server writes are ungated — **CLOSED by #2083**
 
-Unlike the MCP **credentials** route beside them, the MCP **server** routes carry no authorization:
+> **Status: closed.** All four routes are gated as of #2083 (P5), which needed
+> them gated anyway: a shared tier whose assignment any authenticated caller can
+> rewrite is decorative. The line numbers in the table below are historical.
+> `GET /api/mcp-servers/:id` refuses with **404** rather than 403 so the route is
+> not an existence oracle, matching `GET /api/llm-endpoints/:id`; the three
+> writes take `canManageEnvironment`, which is the predicate this section
+> predicted, and `PUT` additionally gained the re-parenting gate the environment
+> `PUT` has had since #989 and this section did not notice was missing. Wiring
+> guard: `admin-console/api/tiered-resource-routes.test.js`.
+>
+> **This is a behaviour change for a plain Team Member**, who could previously
+> register, edit and delete registry entries. Recorded here rather than in a
+> release note alone, because it is the one place where closing a §11 leak
+> narrows an existing, working permission rather than an accidental one.
+
+Unlike the MCP **credentials** route beside them, the MCP **server** routes carried no authorization:
 
 | Route | file:line | Gate today |
 |---|---|---|
@@ -840,9 +992,39 @@ Unlike the MCP **credentials** route beside them, the MCP **server** routes carr
 
 A `stdio` MCP server's `command` **executes inside the agent containers** of any environment that references it — `docs/governance-concept.md:193-195` names this as a live risk. The fix is one line per route: the `canManageEnvironment` predicate its own credentials sibling already uses.
 
-### 11.4 — Two smaller ungated reads
+### 11.4 — Two smaller ungated reads — **partially closed by #2083**
+
+> **Status: half closed.** `GET /api/environments/:id` is gated as of #2083
+> (`visibleEnvironment`, 404 on refusal), for the same reason as §11.3: a tier
+> the read-one path ignores is decorative. `GET /api/agents/:id/triggers`
+> is **untouched** — it is a work-plane route and belongs with §11.2, which no
+> phase has yet claimed.
 
 `GET /api/environments/:id` (**api.js:12167-12172**) has **no team gate on read** — only the nested agent list is scoped (`:12171`) — so an environment's full record (including its `githubTokenId` and repository URLs) is readable by any authenticated caller who knows the id. And `GET /api/agents/:id/triggers` (**:4804**) is ungated for read, which is *correct* under D9 for a member of the owning team but not for an outsider.
+
+### 11.5 — Seeing a credential was read as seeing its consumers — **CLOSED by #1501**
+
+> **Status: closed.** Recorded on issue #1501 (twice — during #1049's development
+> and by the automated PR reviewer on the same PR) rather than discovered by this
+> document, and adopted as a P2 leak ticket by epic #2076. It belongs here because
+> it is the same class as the rows above and #2078's Scope-out names it. Line
+> numbers below are historical.
+
+`GET /api/llm-endpoints/:id/bound-agents` and `POST /api/llm-endpoints/:id/respawn-agents` gated on **`visibleCredential(scope, ep)`** alone — *can this caller see the provider?* — and never asked `visibleAgent` about the agents they enumerated. Agent visibility has its own rules (team membership since #2078, plus ownership for a standalone agent under D8), so for a **`scope: 'system'` credential with `assignedTeamIds`** a Team Admin who could merely *view* the shared provider received the id, display name and role of **every** agent bound to it — other teams' members, and other humans' standalone agents.
+
+**The fix is asymmetric on purpose**, and the asymmetry is the whole design:
+
+| Surface | Rule |
+|---|---|
+| `GET bound-agents` | Responds with the **visible subset**. `visibleCredential` still gates the endpoint; `visibleAgent(scope, agentMetaForScope(cfg))` now gates each row. |
+| `POST respawn-agents` | Acts on the **union**. Hiding an agent from the *restart* would leave it silently running on the rotated-away credential — a worse outcome than the metadata leak, and the exact thing the feature exists to prevent. |
+| Its response | **Projected**: ids only for agents the caller can already see, everything else as a count — so the action's reach never becomes a way to enumerate another team's agent ids. |
+
+**The aggregate signal is never dropped.** An operator deciding whether to rotate a shared credential needs the true blast radius even when the identities in it are none of their business, so both surfaces carry `{count, teamCount, standalone}` for what is hidden, the respawn additionally reporting how many hidden agents were restarted and how many **failed** (a hidden agent left on a stale credential must still reach the operator, unnamed). The server log line follows the same rule — counts, never hidden ids — so reading the container log is not a way around the projection. `standalone` is separate from `teamCount` because a hidden agent outside every team boundary would otherwise claim a team that does not exist.
+
+**`scope.all` is untouched (D5):** a System Admin's hidden set is empty and the response is byte-identical to pre-fix, which is also the answer to the ticket's open question — where only platform admins rotate a shared credential, the caller already had blanket visibility and nothing changes for them.
+
+Decision core: `admin-console/api/respawn-agents.js` (`discoverBoundAgents` now returns `{visible, hidden}` and takes a **required** `isVisible` dep — a fail-open default is the shape of this very bug — plus `hiddenBlastRadius` and `projectRespawnOutcome`); client copy in `admin-console/src/pages/group-agents-by-team.js`; wiring guarded by `admin-console/api/bound-agents-visibility.test.js`.
 
 ---
 
@@ -861,7 +1043,7 @@ Two points where #2041 / #2046 disagree with themselves or with the code. Both a
 
 1. **Where the member list lives.** #2041 §1 says the `role: 'team'` config gains *"its own member list with roles"*, while **D1**, §1's next bullet and §5 (the Share dialog writes `POST`/`DELETE /api/admin/memberships`) all say `memberships/index.json` survives as the member list. Two stores for the same fact would drift, and only one of them is what `canManageTeam` reads. **This document specifies `memberships/index.json` as the single member list** (§3.3, §3.4) because that is what two of the three statements require and it keeps `canManageTeam` unchanged — but the wording in #2041 §1 should be corrected rather than left ambiguous for P1. *Raised on #2041.*
 
-2. **The wording of the privacy guarantee.** #2046 chapter 2 instructs the document to state the guarantee as *"private from all named users, System Admins included, while the operator login retains full visibility"*. Read literally that **excludes System Admins**, which contradicts **D5** (*"The System Admin retains full visibility (`scope.all` stays as-is)"*) and **#2046 AC5** (*"no document text claims that System Admins cannot see teams"*). Two of the three signals agree, so **this document follows D5 and AC5** and states the guarantee as §2.2 words it. The quoted sentence looks like it was carried over from the *personal-credential* guarantee (`docs/personal-credentials-concept.md` D2), which genuinely does exclude System Admins because `ownsPersonalCredential` (`scope.js:177-179`) has no `all` bypass — and even there the operator login cannot see them either, its `userId` being `null` (`scope.js:29-31`). *Raised on #2046.*
+2. **The wording of the privacy guarantee.** #2046 chapter 2 instructs the document to state the guarantee as *"private from all named users, System Admins included, while the operator login retains full visibility"*. Read literally that **excludes System Admins**, which contradicts **D5** (*"The System Admin retains full visibility (`scope.all` stays as-is)"*) and **#2046 AC5** (*"no document text claims that System Admins cannot see teams"*). Two of the three signals agree, so **this document follows D5 and AC5** and states the guarantee as §2.2 words it. The quoted sentence looks like it was carried over from the *personal-credential* guarantee (`docs/personal-credentials-concept.md` D2), which genuinely does exclude System Admins because `ownsPersonalCredential` (`scope.js:177-179`) has no `all` bypass — and, when that was written, the operator login could not see them either, its `userId` being `null` (`scope.js:29-31`) — a second reason that has since lapsed with the branch itself (§13), leaving the owner comparison as the whole rule. *Raised on #2046.*
 
 ### 12.3 — Corrections to stated premises
 
@@ -892,3 +1074,747 @@ This document is the successor design for:
 - `docs/multi-user-concept.md` §3 — the two-level authorization model, whose per-team tier is re-pointed.
 
 Both keep a pointer to this file; their bodies are updated in **P6**.
+
+---
+
+## 13 — Amendment: D13 / #2059 — the operator becomes a record
+
+Added after the fact. This document was written before **#2041 D13** was settled and
+before its **P0** (#2059) shipped, so several of its statements were true of the code
+it was measured against (`f324aeea0`) and are no longer true of `main`. They are
+corrected in place above; this chapter records *what* changed and *why*, so P1–P6 read
+one design of record rather than a document and a contradicting implementation.
+
+### 13.1 — What changed
+
+The configured initial user (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, or
+`BOOTSTRAP_SYSTEM_ADMIN_SUBJECT` on an SSO stack) stopped being a standing **login** and
+became a **seed**: on a stack with zero user records the orchestrator consumes it once,
+at boot, to create a real System-Admin **user record**.
+
+> **Revised by the human ruling on the #2059↔#1457 reconciliation ("Option C", PR
+> #2094).** #2059 originally *deleted* `verifyCredentials` (`auth.js`) and the env-admin
+> branch of `computeScope` outright. Because #1457 later made the `authEnabled`/env-admin
+> model central and depended-upon, the ruling instead restored them **under a strict
+> pre-seed gate**: the env credential authenticates *only* while no System-Admin record
+> exists yet (a fresh install), and both the login route (`preSeed()`) and the two
+> `computeScope` env grants + the `describeAuthz` `envAdmin` flag stop consulting it the
+> moment the seed has run — permanently. So it is a **one-time seed window**, not a
+> standing login (#2059 AC4's intent), while a genuinely fresh install still behaves as
+> #1457 describes. A password login is checked against the user store first; the env
+> credential is a pre-seed fallback only.
+
+### 13.2 — Why P0 and not a cleanup
+
+Two of this epic's own acceptance criteria key on a user id that a fresh stack did not
+have. **AC5** requires a team's creator to be recorded as its Team Admin in the same
+operation, and **AC6** that a new team be visible only to its creator — but the only
+principal on a fresh stack was the env credential, whose scope carried `userId: null`.
+§8.2 already records that the *past* has no recoverable creators; without this change
+the *future* had none either. Hence P0, and hence a hard prerequisite of **P3**
+(self-service creation).
+
+### 13.3 — The statements this document had to correct
+
+| Where | Said | Now |
+|---|---|---|
+| D5 row, §2.2 table | Both `scope.all` branches are unchanged | The env-admin branch is deleted; the System-Admin record branch is the only one |
+| §2.2 privacy guarantee | Two exceptions: System Admin **and** the operator login; the personal-credential carve-out holds partly because the operator's `userId` is `null` | One exception (System Admin); the carve-out rests on the owner comparison alone — the rule D2 always meant |
+| §2.2 closing paragraph | Removing the `all`-bypass would break GOV-ACCESS-7 break-glass | GOV-ACCESS-7 is restated as a **host-level** break-glass; the access-review and JML arguments stand |
+| §4, `PUT /api/me/preferences` | *Unchanged*; the env admin gets `{persisted:false}` | Still ungated, but no longer a silent no-op for the administrator — it has an id now |
+| §4, `my-credentials-view.js` | *Unchanged*; fail-closed for the operator login | Unchanged as a guard; the state it guarded against is unreachable for a signed-in human |
+| §12.2 item 2 | The operator login cannot see personal credentials either, its `userId` being `null` | That second reason has lapsed with the branch; the owner comparison is the whole rule |
+
+### 13.4 — What did NOT change
+
+Worth stating, because the blast radius of deleting an authorization branch reads
+larger than it is. The **twelve `scope.all` predicates of §4.1 are untouched** — one
+grant branch fewer is strictly simpler, and every one of them keeps consulting the same
+flag. `memberships/index.json` stays the member list (§3.3). D1's re-keying is
+independent of this change, which is why P0 could ship **before P1**. And the redesign's
+privacy guarantee is *strengthened*, not weakened: the recordless principal that used to
+see the whole estate without being anybody no longer exists.
+
+### 13.5 — One consequence this document should carry forward
+
+Sign-in now requires the user store, so **while the orchestrator is unreachable nobody
+can log in**. Recovering an identity is a host-level action on
+`/workspace/users/index.json`. P1–P6 must not design a console-side recovery path back
+in: it would reconstitute exactly the shared, recordless credential D13 removed. The
+store's refusal to delete or demote the **last System Admin** (#2041 AC18, delivered in
+P0) is the in-band half of that protection — it makes the lockout unreachable by
+accident rather than merely recoverable after the fact.
+## Amendment 1 — what P1 (#2077) found, and what it changed here
+
+This section is appended rather than woven in: the document above is the
+design-of-record the epic is being implemented against, so it stays readable as
+the design that was agreed. This records where implementation contradicted it.
+
+### A1.1 — What changed, and why it is this phase
+
+**The credential switch had to move in P1, not P2.** §3.6 and
+`docs/credentials.md` both record that #1569 gates the personal-credential tier
+on the agent carrying an `ownerId`. That gate was safe *only* because nothing
+populated the field — the code says so itself (`credential-resolution.js`:
+"every agent today, since nothing populates it yet"). P1's whole job is to
+populate it.
+
+Under the unmodified gate, the D6 backfill would have moved every agent in the
+installation into the owned branch in one boot. Every owner starts with **no**
+personal credential (they are self-service and opt-in, #1568), so every
+`commit` / `pr` / `review` / `push-https` would have been refused with the 424
+`personal-credential-required` — i.e. no agent could open a pull request again.
+That is precisely the regression **AC7** ("no visible behaviour change")
+forbids, so it could not be deferred to P2.
+
+The switch is now *participation* rather than *presence*: an owner with no
+personal credential of a kind takes the shared credential exactly as today; an
+owner whose personal credential is present-but-unusable is still refused.
+Refuse-on-missing keeps its purpose (a human who has a personal credential is
+never silently re-attributed) and loses only the case where it protected nobody.
+`findPersonalCredentialState` is the new lookup that keeps the two apart.
+
+### A1.2 — Statements above that P1 falsified
+
+| Statement | Where | Correction |
+|---|---|---|
+| The personal tier is gated on `ownerId` presence, and that reconciles AC5 with AC8 | §3.6 (quoting `orchestrator.js`), `docs/credentials.md` | True only while nothing populates `ownerId`. P1 replaces the gate with owner *participation* — see A1.1. |
+| "P1 … `memberships.teamId` re-pointed (§3.3)" reads as a replacement | §10 phase table | It must be **additive** in P1. Enforcement still keys on each resource's `teamId` stamp (an access-scope id until P2), so dropping the scope grants in P1 empties every list for every non-admin. The scope memberships are retired by P2 *together with* the stamps they gate. §8.3's `⊇` is what makes this admissible; the proof is `admin-console/api/ownership-no-lockout.test.js`, which fails when the migration is made replacing. |
+| AC5 "no `null` owners for migrated resources" | issue #2077 | Not reachable in general: D6's own rule (§8.1) ends in "else **unset**", so an access scope with no members has no owner to inherit. Such a resource is **reported** at boot (a warning naming the agent and the scope) rather than given a fabricated owner. On this installation (§8.5) every scope has a member, so the case does not arise in practice. |
+| AC3 "`teams/index.json` is no longer written or read by any code path" | issue #2077 | Not deliverable in the same phase as AC7. Retiring the file means re-pointing `listTeams`/`getTeam` at the Agent Team config set, which changes what `GET /api/admin/teams` returns and therefore what the Access page and five team dropdowns display — a visible change. It is the same edit as the P2 enforcement re-point and belongs with it. P1 delivers the *memberships* half of AC3 (entries now reference Agent Team ids) and leaves the file read as it is. |
+
+### A1.3 — What is explicitly NOT affected
+
+- **`scope.all`** and both of its branches (§2.2) are untouched.
+- **The personal-credential privacy guarantee** (§2.2, `ownsPersonalCredential`
+  has no `scope.all` bypass) is untouched, and the no-lockout proof asserts an
+  admin still cannot see a personal credential after the migration.
+- **`resolveAgentTenant`** and its twin (§1.3) are untouched — the tenant hop
+  collapses in P2. P1 changes the owner axis only (§1.4).
+- **No resource stamp is re-pointed.** Agents, environments and credentials keep
+  their access-scope `teamId`.
+
+### A1.4 — The rule successor phases must carry
+
+**An owner records how it was decided.** §8.2 establishes that a migrated owner
+is "a defensible placeholder, not a recovered fact" and must be correctable.
+Every write therefore carries `ownerSource` — `creator` (the authenticated human
+who made the request), `migration` (the D6 placeholder) or `conversion` (carried
+from a converted agent) — and each fanned-out membership carries `fromScopeId`.
+Nothing reads either field. They exist so that P6's cleanup view, and any human
+auditing an owner, can tell a guess from a fact. **A later phase must not drop
+them when it retires the access-scope layer**: the moment the scope memberships
+are deleted, `fromScopeId` is the only remaining evidence of where a grant came
+from.
+
+---
+
+## Amendment 2 — what P2 (#2078) found, and what it changed here
+
+Appended for the same reason as Amendment 1: the design above stays readable as
+the design that was agreed, and this records where implementation contradicted
+it.
+
+### A2.1 — The collapse is on the ACCESS axis only; the tenant hop survives
+
+**§1.3 says `resolveAgentTenant` "collapses to a one-line accessor". It cannot,
+yet — and doing it in P2 would have been a hard regression.**
+
+That function has exactly two live callers, and neither of them asks an
+authorization question:
+
+| Caller | What it resolves |
+|---|---|
+| `usableEndpointsForTeam` (`api.js`) | which **model providers** an agent may bill against |
+| the assist-endpoint pick (`orchestrator.js:375`) | the same, for an autonomous synthesis run |
+
+Both compare the resolved value against a **credential record's** `teamId` /
+`assignedTeamIds`, and those records are still stamped with access-scope ids —
+§5.1 and the §10 phase table both assign "credentials and model providers
+re-pointed" to **P5**, not P2. Collapsing in place would have answered
+`agent-studio-2-0` where the credential index says `default`, making every
+team-scoped provider unusable: precisely the bug the tenant hop was introduced
+to fix, and precisely what AC5 ("no regression for the single-team/default
+installation") forbids.
+
+So P2 ships **two** functions with two clearly separated jobs:
+
+- **`resolveAgentTeam`** (new, `orchestrator/agent-team.js` ⇄ byte-identical
+  `admin-console/api/agent-team.js`) — the **access boundary**. Collapsed
+  exactly as §1.3 describes: no `loadAgentConfig` injection, no parent read.
+- **`resolveAgentTenant`** (unchanged, both copies) — the **credential tenant**,
+  with its `|| 'default'` fallback intact because the default scope it names
+  still exists. It retires with P5, and both copies now say so at the top.
+
+The §8.4 fallback removal therefore lands on the six **scope.js predicates** it
+enumerates and deliberately **not** on `resolveAgentTenant`: removing it there
+would break the very lookups the hop exists for.
+
+### A2.2 — A standalone agent resolves to `null`, not to its own id
+
+§1.3 sketches the accessor as `role === 'team' ? cfg.id : (cfg.parentTeamId ||
+cfg.id)`. For a standalone `role: 'agent'` that yields its own id — a value no
+membership can ever name, so it grants nothing and merely *looks* like a
+boundary. `resolveAgentTeam` returns `null` instead, which makes the D8
+fall-through to ownership explicit and testable at the call site. Same outcome,
+one less thing that reads like a team.
+
+### A2.3 — `canManageAgent` needed the owner branch too
+
+§4.1 row 15 records `canManageAgent` as "re-keyed" and mentions no owner rule,
+while row 3 makes ownership the primary rule for `visibleAgent`. Shipping only
+the visibility half would have left a standalone agent **visible to its creator
+and editable by nobody but a System Admin**, since no membership can name it.
+`canManageAgent` therefore mirrors `visibleAgent`: boundary present → the
+team-admin rule, boundary absent → the owner. The boundary is checked **first**,
+so owning an agent that *does* belong to a team never bypasses the role rule.
+
+### A2.4 — AC4's "existing drift guard" did not exist
+
+Issue #2078 AC4 asks that the two copies "stay byte-identical … (existing drift
+guard passes)". §1.3 already corrected this: the copies were neither
+byte-identical (quote style, `DEFAULT_TEAM_ID` vs the literal) nor guarded. P2
+delivers the guard for the module it introduces — `agent-team.js` is a whole
+shared file with a **two-sided** byte-identity guard on both sides, the
+`toolchain-registry.js` / `plugin-manifest.js` arrangement. `resolveAgentTenant`
+is left as it is rather than being reformatted for a mirror guard it loses in P5
+anyway.
+
+### A2.5 — What P2 did NOT re-point, and why
+
+- **Environment / credential / MCP-server / skill-pool stamps.** Still
+  access-scope ids (P5, §5.2 — an environment shared by two Agent Teams in one
+  scope cannot be re-pointed to one of them without a shared tier).
+- **The scope memberships.** Still present and still honoured, because the
+  stamps above are what they gate. `team-membership-enforcement.test.js` asserts
+  that dropping them changes **no** agent's visibility or manageability, which
+  is what makes P5's clean-up safe.
+- **Agent *creation* gates** (`api.js`, the standalone-import branch). Who may
+  create is P3's contract; re-keying it here would either widen it to every
+  authenticated user or narrow it to System Admins.
+- **`POST /api/agents/:id/convert-to-team`'s second gate.** It asks "may you
+  mint a team here", and team creation stays System-Admin-only until P3 — so it
+  deliberately keeps reading the legacy scope. Under D8 a standalone agent's
+  owner now passes the *first* gate, and without this the owner could convert
+  their way into owning a team.
+- **§11's leaks** (process drafts/flows, the work plane, MCP writes) and the D9
+  Team-Member mutation boundary. Cut out as separate P2 tickets by #2078's own
+  Scope-out.
+
+---
+
+## Amendment 3 — what P5 (#2083) found, and what it changed here
+
+Appended for the same reason as Amendments 1 and 2: the design above stays
+readable as the design that was agreed, and this records where implementation
+contradicted it.
+
+### A3.1 — The shared tier had to diverge from the credential one on the MANAGE axis
+
+**§5.2 says "the tier model to copy is the credential one" and that a
+`system`-tier record is "gated like `canReassignCredential` (System-Admin-only)".
+Copied literally, that makes the re-point a lockout.**
+
+`canManageCredential` refuses the system tier outright. A2.5 already records
+that an environment shared by two Agent Teams in one access scope "cannot be
+re-pointed to one of them without a shared tier" — so the migration's only
+lossless move for such a record is to **promote** it. Under the credential rule
+the Team Admin who can edit that environment today could not edit it afterwards,
+and `canManage_after ⊇ canManage_before` (§8.3) is exactly the half of the
+no-lockout property that forbids it.
+
+So `canManageEnvironment` grants **every assigned team's admin**, and §5.2's
+sentence is honoured on the half that carries the risk:
+
+| Question | Who |
+|---|---|
+| May I edit this shared record's content (repositories, token, MCP refs)? | any **Team Admin** of an assigned team — self-service, which is what D12 asks of configuration |
+| May I decide **which teams** reach it, or move it between tiers? | **System Admin** only (`canRetierEnvironment`, the `canReassignCredential` mirror) |
+
+`isRetier` (`resource-tier.js`) is what tells the two apart, so a client
+restating the record's own unchanged ownership — which the console's form does on
+every save — is not treated as an operator act. The counterfactual is measured
+rather than argued in `ownership-no-lockout.test.js`: the same promoted record
+under the credential rule *does* lose the admin her reach.
+
+A second, smaller divergence: **environment visibility stays membership-based**
+(`visibleTeam`), not `canManageTeam` as `visibleCredential` uses. That gate is
+#798's deferral of Team-Member credential access; D9 says a Team Member may
+read, and importing the credential rule would have smuggled an unrelated
+regression in under a tiering ticket.
+
+### A3.2 — AC1's `personal` tier for environments is refused, and §5.1 is why
+
+Issue #2083's Scope-in and AC1 ask for "shared/system + team + personal". §5.1's
+tier table asks only for the shared tier, and §5.2's before/after example shows
+only `team` and `system`. The table is right, and the reason is the tier's
+defining property: the personal tier has **no `scope.all` bypass** (§2.2),
+because a personal *secret* must be private even from the operator. An
+environment is not a secret — it is infrastructure agents run on. A personal one
+would be an environment a System Admin can neither read, repair nor delete, and
+it would make the `Used by <env>` refusal on a credential delete unresolvable by
+anybody.
+
+`resolveTieredOwnership` therefore refuses a `personal` request with a 400. The
+predicates still handle the tier, so the shape stays uniform and a hand-edited
+record fails closed to its owner rather than defaulting open — a later ticket
+that wants personal environments only has to open the route.
+
+### A3.3 — AC3 is blocked on an edit no phase owns
+
+**Re-pointing the credential / model-provider / skill team tiers at Agent Team
+ids was not deliverable, and the blocker is not in this phase's code.**
+
+Two independent reasons, both found against the tree rather than the ticket:
+
+1. **The referent itself has not moved.** `resolveOwnerTeamId` (`api.js`)
+   validates every resource's owning team against `teams/index.json` at **six**
+   call sites, and that file is still the live source for `GET
+   /api/admin/teams` — the Access page and five team dropdowns. Making a
+   resource stamp an Agent Team id means re-pointing that validation and every
+   one of those surfaces, which is the **retirement of `teams/index.json`**.
+   A1.2 found that not deliverable alongside another change and assigned it to
+   "the P2 enforcement re-point"; P2 (#2078) did not take it, and A2.5 does not
+   mention it. **It is currently unowned.** Until it lands, a re-pointed stamp
+   would name a team the create/update routes reject as non-existent.
+2. **There is no lossless promotion for a credential.** A3.1's escape hatch is
+   available only because the environment/MCP shared tier is being *defined*
+   here. The credential shared tier is already shipped and already means
+   System-Admin-managed (#798 AC5, pinned in `scope.test.js`), so promoting a
+   team credential in a multi-team scope is the manage-axis lockout A3.1
+   avoids — with no room to redefine it.
+
+   And the read path cannot collapse either: "reference the new Agent Team ids"
+   requires `usableEndpointsForTeam` to be fed `resolveAgentTeam`, which answers
+   **`null`** for a standalone `role: 'agent'` (A2.2, by design). Every
+   standalone agent would be left with no usable model provider at all, and D8
+   does not say which providers an owner-scoped agent may bill against. That is
+   a new decision, not an implementation detail.
+
+`credentialVisibleToTeam`, `resolveAgentTenant` and its `|| 'default'` fallback,
+and the access-scope memberships therefore all survive P5 together, exactly as
+they survived P2. **What the successor phase needs, in order:** retire
+`teams/index.json` (re-point `resolveOwnerTeamId` and the five dropdowns) →
+decide the provider rule for an owner-scoped agent → then re-point the
+credential/provider stamps and drop the scope memberships. The skills pool is
+the one part of AC3 with no blocker (§5.3 — it is a directory name, so §8.3's
+copy-to-each move is available), and it is left with the rest so the re-point
+lands as one coherent change rather than one third of one.
+
+### A3.4 — What P5 DID deliver
+
+- The shared tier for **working environments** and **MCP servers**, end to end:
+  the shape (`resource-tier.js`, byte-mirrored into the orchestrator and
+  two-sided-guarded), the four predicates, all eleven routes, and the first
+  ownership control either page has ever had.
+- **§11.3 closed** and **§11.4 half closed** (above) — both needed by the tier
+  rather than done alongside it.
+- The last literal `|| 'default'` on the environment path (§8.4).
+- AC4/#2041 AC11 proven: `admin-console/api/team-needs-no-infrastructure.test.js`
+  measures that a team with no credential, environment or provider of its own can
+  see and reuse a shared environment, and that it could not before.
+
+### A3.5 — Unchanged, deliberately
+
+- **`scope.all`** and all twelve bypasses (D5); the census guard now also pins
+  that every tiered predicate checks the personal tier **before** its bypass,
+  which is the silent way #1567 D2 could have been lost.
+- **The personal-credential privacy guarantee**, now shared code
+  (`ownsPersonalTier`) rather than a credential-only rule.
+- **Plugin install** stays System-Admin (D12 — a broker sidecar holds the team's
+  credentials), and per-team plugin assignment is unchanged (AC5 of #2083).
+- **Toolchains** stay System-Admin-only (§5.1).
+- **`normalizeMcpServersInput`** still resolves an environment's MCP references
+  **unscoped**, so an environment can reference a server its team cannot see.
+  That predates this ticket and tightening it would change what existing
+  environments can save; recorded here as the remaining tier hole rather than
+  fixed under a different heading.
+
+## Amendment 4 — what #2080 (the D9 write boundary) found, and what it changed here
+
+#2080 delivers **AC7b** — the Team Member boundary enforced server-side on
+every mutation route, i.e. the §6 matrix. Three of this document's own
+statements did not survive contact with the routes.
+
+### A4.1 — §6's note (1) is wrong: three Team-Admin-only surfaces were gated on membership
+
+The note claims every mutation route the matrix calls Team-Admin-only is
+"already gated correctly today", with the work-plane family as the sole
+exception. It is not. **Three surfaces the matrix names in its own agent-settings
+row were gated on `visibleAgent`** — mere membership in the owning team:
+
+| Surface | Route | Was | Now |
+|---|---|---|---|
+| Skill activation / deactivation | `POST /api/knowledge/{activate,deactivate}` (`proxySkillActivation`) | `visibleAgent` | `canManageAgent` |
+| Plugin grant | `POST /api/agents/:id/plugins/{activate,deactivate}` (`proxyPluginActivation`) | `visibleAgent` | `canManageAgent` |
+| *Install into agent* | `POST /api/skills/install` | `visibleAgent` | `canManageAgent` |
+
+All three edit a **grant** — `skills[]` / `skillsOverride`, `plugins[]` /
+`pluginsOverride` — before they sync a single file, so each is an agent-settings
+change by the matrix's own wording ("prompt, model, **plugins**, **skills**,
+flow, lifecycle"). A plugin grant additionally decides which privilege-holding
+broker CLI the agent can reach. The status code is unchanged (403); what changed
+is who gets it.
+
+This matters beyond the three lines because of *why* the note was wrong:
+`canManageAgent` really does mean team-admin-of-the-owning-team, so the note is
+right about the predicate and wrong about which routes call it. **A predicate
+being correct says nothing about its call sites**, and the only way to know is
+to read them — which is why #2080's completeness guard scans api.js's source
+rather than asserting over the predicate.
+
+### A4.2 — the matrix needed a fourth class, and `manage` could not be a method rule
+
+§6 sorts surfaces into allowed and Team-Admin-only. Implementing it needed the
+allowed side split in two — `read` and `chat` — because they are allowed for
+different reasons: a file read is not an act, and a chat message is an
+attributable one (the matrix's own rationale for refusing workspace writes is
+that a member "can still *ask the agent* to do it, which leaves an attributable
+trace"). Keeping them apart is what lets a later phase treat them differently
+without re-deriving the matrix.
+
+The split also **cannot be a method rule**, which is the reason #2080 is a
+per-route middleware rather than a second `app.use` mount beside #1459 §2's:
+posting a chat message, opening a DM room, attaching a file and stopping your
+own run are all `POST`s that D9 explicitly allows a member, while `GET`-shaped
+reads and destructive `DELETE`s share the `…/workspace/` prefix. Neither the
+verb nor the prefix carries the boundary; only the matrix does.
+
+### A4.3 — context-folder writes belong in the workspace-writes row
+
+§6's row names "delete/move/upload file, `git-action`" and §11.2 lists the
+`/context/*` write proxies separately. They are the same three operations on a
+read-write **host** mount, and #2080 puts them in the same row — if anything the
+stronger case, since those bytes land outside the container boundary the
+workspace routes stay inside.
+
+### A4.4 — AC3 (manual firing) is a ratchet, because the route still does not exist
+
+§6 already recorded that there is no manual trigger-firing route in `api.js` and
+stated the rule pre-emptively. #2080 confirms that is still true and makes the
+rule enforceable instead of aspirational: the matrix is data, and a source scan
+asserts it against api.js in both directions, so a new route in the
+workspace/context/triggers families **fails the build until it is classified** —
+and `MANUAL_FIRE_RULE` pre-decides the answer (`manage`, because firing produces
+an autonomous run that reads as system-initiated, whereas the same work
+requested in chat stays attributable to the person who asked).
+
+### A4.5 — what #2080 did NOT change, and why
+
+- **The tenant half of §11.2.** Reads keep no `visibleAgent` gate and the
+  chat/session/room family stays ungated here — that is #1459 §2 (PR #2105),
+  whose mount list is the right shape for it. #2080's gate composes with it
+  (404 for invisible, then 403 for unmanageable) and needs it for nothing:
+  every refusal #2080 owns is on a route it gates itself.
+- **The ZIP export.** §6 says "Unchanged (deliberately)" and calls a member
+  taking a full copy of the team definition an accepted, recorded consequence.
+  It stays open, and there is now a test asserting that decision, so gating it
+  later is a visible change rather than a drive-by. Separately worth knowing:
+  `GET /api/agents/:id/export` and `GET /api/process/template?team=` have **no
+  gate at all**, so this is currently open to any authenticated caller and not
+  only to a member — a tenant question, not a D9 one.
+- **`POST /api/teams` / `/api/teams/stream`.** Still ungated; who may create is
+  P3's contract (§10).
+- **The 14 remaining `visibleAgent(scope, cfg)` raw-config call sites.** #2080
+  fixed the three it gates and left the rest. Passing a raw `config.json` where
+  the predicate documents that it wants `agentMetaForScope(cfg)` asks about the
+  *credential tenant* stamp (`'default'`) instead of the Agent Team, and for a
+  **standalone** agent turns that truthy `'default'` into a team check —
+  bypassing D8's owner-only rule. `team-member-boundary.test.js` pins the
+  divergence in both directions. Sweeping the rest belongs with whoever owns
+  A2.5's read side, since PR #2105 is rewriting that surface concurrently.
+- **The Workspace browser's write affordances.** `WorkspaceBrowser.jsx` has no
+  `canManage` awareness, so a Team Member still sees Upload / Delete / drag-move
+  / git-action controls that the server now refuses. §6's note (2) names the
+  pattern to copy (`settingsSubject` hides the Settings tab); applying it to
+  ~10 affordances in a 1651-line JSX file is a separate slice. AC4 makes the
+  server the tested guarantee and the UI an "additionally", which is why the
+  boundary landed first.
+
+---
+
+## Amendment 5 — what P3 (#2081) found, and what it changed here
+
+Appended for the same reason as Amendments 1–4: the design above stays readable
+as the design that was agreed, and this records where implementation contradicted
+it.
+
+### A5.1 — The blocker was the MEMBERSHIP, not the gate
+
+§10's P3 row and #2081's Scope-in both read as "open up who may create". Read
+against the tree, **`POST /api/teams` and its stream twin were already ungated**
+(A4.5 records this) — any authenticated user could already mint an Agent Team,
+and #2077 already stamped them as its `ownerId`. What they could not do is
+**see it afterwards**.
+
+The reason is A2.2's own rule, applied to the other role. A standalone
+`role: 'agent'` resolves to `null`, so `visibleAgent` falls through to
+`ownedByCaller` and ownership is the boundary. A `role: 'team'` agent **is** its
+own boundary (`resolveAgentTeam` → `cfg.id`), so both predicates take the
+membership branch and never reach the owner. A creator with no prior membership
+therefore created a team that answered `false` to `visibleAgent`,
+`canManageAgent` and `canManageTeam` alike — measured over the real predicates in
+`admin-console/api/creator-membership.test.js`, which keeps that counterfactual
+as a test so the reason for the write cannot be forgotten.
+
+So P3's substance is one membership, written by the same operation that mints the
+team, and the interesting part is where it is *allowed* to be written at all
+(A5.2). AC1's "is recorded as its Team Admin in the same operation" is taken
+literally: the write is **fatal** and the existing rollback undoes the whole
+create, because a team its creator cannot see is worse than no team.
+
+### A5.2 — `setMembership` could not name an Agent Team, and that blocked D4 too
+
+`teams-store.js` validates a membership's `teamId` against `teams/index.json`.
+P1 worked around it with `appendMemberships`, whose own comment says why: "the
+referent is now an **Agent Team** id, which this module cannot see (it has no
+agent access)". That workaround is migration-only, and it is not enough for P3 —
+**`POST /api/admin/memberships` is the route the D4 successor is named on**, so
+on exactly the teams this phase creates, the successor could never have been
+named and AC4's third edge case ("share, hand over, leave") would have been
+unreachable.
+
+The store therefore takes an injected `agentTeamExists(id)` resolver, wired in
+`orchestrator.js` to "is there a readable `role: 'team'` config with this id".
+Three properties are deliberate: the id is shape-checked before it reaches
+`agentDir`, so a `teamId` from a request body cannot walk out of `AGENTS_DIR`; it
+defaults to a **closed** `() => false`, so a caller that wires nothing keeps the
+pre-#2081 key space rather than silently accepting any string; and a throwing or
+unparseable config answers `false`, never `true`.
+
+### A5.3 — The D4 rule belongs to the store, not to the three routes
+
+§2.3 names three `api.js` routes as the enforcement points. Enforcing there
+would have been enough for the console and wrong for the platform: the
+orchestrator's `/internal/admin/*` API writes memberships too and is reachable
+without passing through the console (it is authenticated by #1456, not
+authorized by `scope.js`). A rule whose whole purpose is *"this team can never
+become un-administrable"* has to hold for every writer, so it lives in
+`teams-store.js` over the pure `orchestrator/team-admin-succession.js`, and the
+three routes need no code at all — `adminQuery`/`proxyAdmin` already forward
+`successorUserId` and relay the store's 409 verbatim.
+
+Two consequences worth stating:
+
+- **The hand-over is one write.** The successor's promotion and the departing
+  admin's removal/demotion land in a single `writeArray`, because a
+  promote-then-demote pair can leave a team with two admins, or none, if the
+  process dies between them.
+- **A successor must already be a member.** Naming an arbitrary user would make
+  this a second, unaudited invitation path — sharing is
+  `POST /api/admin/memberships`, already gated on `canManageTeam` (§7.1). It also
+  keeps the rule answerable from the membership array alone, so nothing about it
+  can fail open on an unreadable file.
+
+`DELETE /api/admin/users/:id` needed one extra thing the store cannot supply:
+the orchestrator pauses the departing human's agents and deletes their personal
+credentials **before** calling `deleteUser` (#1571). The refusal is therefore
+re-checked at the top of that route, so a delete the store is about to refuse
+does not first strip a still-present user of their secrets. The store keeps its
+own check — it is the invariant's home; the route check only fixes the order.
+
+### A5.4 — A deleted Agent Team had to start cascading its memberships
+
+`deleteTeam` cascades memberships for an access scope. An **Agent Team** is an
+agent config, so it is deleted by the orchestrator's `DELETE /internal/agents/:id`
+and the store never hears about it. Before P3 that left a dangling grant, which
+was untidy; with D4 it is a **wedge** — the grant still counts towards the
+last-admin rule, so the holder of a deleted team could never be deleted again,
+and no successor could ever be promoted in a team that no longer exists.
+
+The cascade is `removeTeamMemberships(teamId)`, deliberately **not**
+`removeMembership` in a loop: that path enforces D4, and a team that no longer
+exists cannot become un-administrable. Deleting the team is, with promoting
+somebody, one of the two documented ways out of a D4 refusal, and both refusal
+messages say so.
+
+### A5.5 — Private by default was one record short of true
+
+§2.2's guarantee is about agents; the team the wizard creates also brings a
+**Working Environment**, and that record was written with **no tier fields at
+all**. Since #2078 removed the `|| 'default'` fallback (§8.4), `normalizeTier`
+reads that as `teamId: null` — reachable by no team — so a fresh team's own
+environment was visible to a System Admin and to nobody else, on the page where
+its repository and credentials are configured. It is now stamped with the Agent
+Team id, which is both the fix and AC2's "private by default" for the fourth
+resource kind: `visibleEnvironment` is membership-based, so the record is
+reachable by that team and by no other.
+
+Only the **auto-created** environment. A reused one keeps whatever tier it
+carries — re-stamping it would move a shared environment into the new team,
+which is a re-tier and System-Admin-only (A3.1).
+
+### A5.6 — `mode: 'extend'` was the real hole, and P3 owns it
+
+A4.5 leaves "who may create" to P3 and says nothing about extending. But
+`POST /api/teams` with `mode: 'extend'` adds members to a team that **already
+exists**, and it was ungated on both handlers — so the moment teams are private,
+any authenticated user could grow a stranger's team. The two questions have
+different answers and P3 has to give both: **create** is self-service for any
+authenticated user (D1), **extend** is a Team-Admin action by §6's own
+agent-lifecycle row. It is gated on the same
+`canManageAgent(scope, agentMetaForScope(cfg))` pair every other team-mutating
+route uses, rather than on a rule of its own.
+
+One narrow consequence to know: a team created in the window between P1's
+migration and this phase carries no membership at all, so its owner is refused
+here until a System Admin grants them one. Teams that predate P1 are unaffected —
+the D6 fan-out gave them memberships.
+
+### A5.7 — AC6 needed the *absence* of a repository to be legal, not a new path
+
+`team-needs-no-infrastructure.test.js` (A3.4) proves a fresh team can **reuse a
+shared environment**. What it does not cover is having nothing to reuse: with no
+`environmentId`, `POST /api/teams` demanded `repository.url`, an SSH key and a
+GitHub PAT. A brand-new user on an empty installation could therefore be refused
+a team outright — the pre-configuration D7 exists to remove.
+
+The fix is small because #1623 already built the repo-less path: "no
+`environmentId` **and** no repository" now sets the same `repoLess` flag the
+reused-env branch sets, and the PAT requirement follows the repository rather
+than the environment (a token exists to clone and to drive `gh`; a repo-less team
+has nothing to authenticate against). A declared repository keeps every existing
+check. This is a widening — a caller that used to get a 400 for omitting
+`repository` now gets a repo-less team — which is the AC, and it is stated here
+rather than left to be discovered.
+
+### A5.8 — What P3 did NOT do, and why
+
+- **`resolveOwnerTeamId` is untouched.** #2081's Scope-in asks for it to be
+  re-pointed; A3.3 records that as blocked on retiring `teams/index.json`, which
+  no phase owns, and P3 found no reason to disagree. Widening it to accept an
+  Agent Team id would work for environments and MCP servers (membership-keyed
+  predicates) and quietly break **credentials**, whose reach is still resolved
+  through `resolveAgentTenant` against a `'default'` stamp — it would make it
+  possible to create a credential no agent can use. The successor's order is
+  still A3.3's.
+- **`POST /api/admin/teams` is 410, and the other scope verbs stay.** AC3 offers
+  "no longer exists (or returns gone)"; `Gone` naming its successor is the
+  difference between "this API changed" and "your request was malformed". The
+  read/rename/delete verbs survive because `teams/index.json` still backs the
+  Access page and five dropdowns (A3.3). **The consequence is a real capability
+  removal and is not hidden**: no new access scope can be minted, so a new
+  team-tier *credential* must name an existing scope or be personal/system. On
+  this installation (§8.5) that is three scopes and the layer is retiring anyway,
+  but it is the one thing to reverse first if it bites.
+- **The Share dialog is still P4.** P3 delivers the server capability: a
+  successor can be named over the API, and the console's Manage panel already
+  surfaces the store's refusal message verbatim, which is the whole instruction.
+  A successor *picker* belongs with the dialog.
+- **AC13's end-to-end journey is still P4's**, unchanged: it needs the Share
+  dialog to exist.
+
+---
+
+## Amendment 7 (#2085, P6 as built)
+
+§9 shipped as written: `/teams` and `Teams.jsx` are gone, the nav entry is
+dissolved rather than renamed, and `/users` is a three-tab **Administration**
+surface (*Users / All Teams / Resources*) behind the `AdminRoute` it already had —
+which is what makes all three tabs System-Admin-only without a second gate. Five
+things are worth recording because they were decided while building, not before.
+
+**A7.1 — "All Teams" reads the Agent Team list, and manages no memberships.**
+§9.1 says the tab reads the Agent Team list, which is right for the reason §3.3
+gives: a membership has named a `role: 'team'` agent id since P1, so "every team
+on the platform" *is* that list. What §9.1 does not say is what the tab may
+therefore **not** do. It carries no role dropdown and no add-person row: that is
+the Share dialog's surface (§7.1), and a second copy here would be a
+differently-warned duplicate of an operation that can lock a team's own admins
+out — the D4 rule lives one layer down in the store, but the *warning* does not.
+The tab is a clean-up view: see every team, including ones nobody shared with
+you, and delete one. It needs **no new endpoint** — the two cascades §3.3 asks
+for already exist (member agents with the parent, #1960; memberships with the
+team, #2081).
+
+**A7.2 — The tab surfaces the state D5 says needs no machinery.** §2.3 argues no
+orphan-recovery machinery is needed *because* a System Admin can always re-admin
+an orphaned team. That argument only holds if they can **find** one, and until
+now nothing showed it. Each row therefore carries a **no admin** marker
+(`admins === 0`), which is the cheapest possible discharge of that premise.
+
+**A7.3 — The Resources tab had to be reworked, not moved, and the reason is a
+live bug.** §9.1 says "reworked for the D7/D12 tiers" without saying what breaks
+otherwise. Since #2083 a Working Environment carries the same
+`{scope, teamId, assignedTeamIds}` triple a credential does, and
+`PUT /api/environments/:id { teamId }` — exactly what the old flat team selector
+sent — normalizes to `scope: 'team'` server-side. So on a **shared** environment
+that one click silently **un-shared** it, taking it from every other team using
+it. The row now states the tier, edits it through the shared
+`CredentialOwnership` control (no second copy of the tier semantics) and shows
+the resulting tier before the save. Agents keep the plain selector: an agent has
+no tier, and an Agent Team still moves as one unit.
+
+**A7.4 — A stated capability removal: access scopes lose their console surface.**
+§9.1 retires the team table with the page and names no replacement, so `PUT` and
+`DELETE /api/admin/teams/:id` now have **no UI at all** — an access scope can be
+neither created (#2081, 410) nor renamed nor deleted from the console. That is
+deliberate rather than an oversight: A3.3 retires `teams/index.json` outright,
+and building a management surface for a record on its way out would be work
+undone by the next phase. The scope survives only as the stamp the Resources tab
+assigns. **This is the thing to reverse first if it bites** — the API verbs are
+untouched, so a surface can be restored without a server change.
+
+**A7.5 — Two `seeAlso` links were dropped rather than re-pointed.** §9.3 allows
+either. `agent-chat.md` and `team-setup.md` named *Access* because that is where
+you went to give somebody access; that is now **Share…** on the reader's own page,
+and Administration is System-Admin-only — re-pointing would have linked an
+ordinary reader at a page they cannot open. The other five links were re-pointed.
+The side effect is worth knowing: `/chats` lost a whole neighbour topic, so the
+worst-case grounding context moved **back** to `/quickstart` and the figure
+*fell*, from 314 511 to **312 384** of 340 000, even though the merged
+`users.md` is ~9 000 characters larger than either half it replaced.
+
+---
+
+## Amendment 8 (#2086, AC13 as built)
+
+The journey shipped as `e2e/journeys/team-sharing.yaml`. Five things it found.
+
+**A8.1 — AC13's step order cannot fire the rule its own AC2 asks for, and the
+journey deviates.** Read literally, the seven steps are: … *(5)* A promotes B to
+Team Admin, *(6)* B can manage, *(7)* A is removed as the last admin only after
+naming a successor. But step 5 creates a **second** admin, so by step 7 A is no
+longer the last one and D4 never engages — the refusal AC2 requires at step 7 is
+unreachable in the state step 5 leaves behind. Rather than assert a weaker thing
+and call it AC13, the journey **probes D4 where it is live and exercises both of
+its halves**: the refusal at the moment A is sole admin (before the promotion),
+and the successor hand-over at the end, when B has become the sole admin and
+must name A to leave. Every behaviour AC13 lists is covered; only the order
+moves, and it moves because the literal order makes one of them untestable.
+
+**A8.2 — The blocker was real, and it was one line of stack config plus a
+missing seam.** `AUTH_ENABLED=true` now lives in `docker-compose.e2e.yml` (the
+e2e override, not the generated `.env.e2e` — it is stack policy, not a
+credential). Turning it on is **safe for the other fourteen journeys as a
+property of the code**: `computeScope` short-circuits `username === adminUsername`
+to `all: true` in *both* modes, and the storageState session `global-setup.js`
+persists is exactly that env admin. The flag changes only what a *user-store*
+identity sees.
+
+**A8.3 — Two humans, without touching the journey schema.** `journeys.spec.js`
+builds `ctx = { page, request }` once and hands that same object to every fixture
+and step, so the identities hang off `ctx` and `access.actAs` re-points
+`ctx.page`/`ctx.request` at one of them. The whole existing step library — and the
+screenshot recorder, which reads `ctx.page` fresh at each capture — follows the
+active human for free. This is journey-spec-concept.md §9's anti-DSL rule
+honoured: a new capability, entirely in the step library, and the schema learns
+nothing about identities.
+
+**A8.4 — Every "cannot" is asserted twice, and the second one is the real test.**
+The strategy note under the phasing table says a disabled button proves nothing
+about the API; the journey follows it literally. When B is a Team Member it
+checks both that the Share panel renders read-only *and* that B's own session is
+refused `POST /api/admin/memberships` with a 403 — and after the promotion it
+checks that the **same** route, body and session now succeeds. The D4 refusal is
+asserted on the stable `code: 'successor-required'` rather than on the message
+text, because `orchestrator/team-admin-succession.js` says in as many words that
+callers should key on the code.
+
+**A8.5 — A role change needs a reload before its UI effect can be asserted.**
+`ShareTeamPanel` reads `canManage` from `useAuth()`, whose `teams` roles are
+resolved by `describeAuthz` when the SPA loads — so when Ada promotes Bea in
+Ada's browser, Bea's tab keeps rendering the read-only panel until it navigates.
+That is correct product behaviour, not a bug, but it is a trap for anyone
+extending this journey: the beats that assert a *changed* role always navigate
+first, and the YAML says why at each one.

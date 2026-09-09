@@ -63,7 +63,9 @@ const SURFACES = {
   'agent-lifecycle/agent-edit-form-model.js': strip(read('agent-lifecycle/agent-edit-form-model.js')),
   'agent-create-submit-state.js': strip(read('agent-create-submit-state.js')),
   'SkillsRegistry.jsx': strip(read('SkillsRegistry.jsx')),
-  'teams-ownership.js': strip(read('teams-ownership.js')),
+  // Was `teams-ownership.js` until #2085 dissolved the Access page and moved
+  // its grouping helper into the Administration page's own pure module.
+  'administration-view.js': strip(read('administration-view.js')),
   'pending-queue-view.js': strip(read('pending-queue-view.js')),
   '../App.jsx': strip(read('../App.jsx')),
   '../route-title.js': strip(read('../route-title.js')),
@@ -98,7 +100,7 @@ test('every swept surface still contains its own code after the strip', () => {
     'agent-lifecycle/agent-edit-form-model.js': /export function buildEditSubmit/,
     'agent-create-submit-state.js': /PROMPT_OPTIONAL_ROLES/,
     'SkillsRegistry.jsx': /installableAgents/,
-    'teams-ownership.js': /export function groupAgentsForOwnership/,
+    'administration-view.js': /export function groupAgentsForOwnership/,
     'pending-queue-view.js': /const KIND_LABELS/,
     '../App.jsx': /<Routes>/,
     '../route-title.js': /ROUTE_TITLES/,

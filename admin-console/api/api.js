@@ -1233,7 +1233,7 @@ function agentsUsingEnvironment(envId, scope) {
   const agents = [];
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
-    if (cfg.environmentId === envId && visibleAgent(scope, cfg)) {
+    if (cfg.environmentId === envId && visibleAgent(scope, agentMetaForScope(cfg))) {
       agents.push({ id, displayName: cfg.displayName || id });
     }
   }
@@ -1871,7 +1871,7 @@ app.get('/api/agents', (req, res) => {
       const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
       return { id, ...cfg };
     })
-    .filter(a => visibleAgent(scope, a)); // team + visibility scoping (#302)
+    .filter(a => visibleAgent(scope, agentMetaForScope(a))); // team + visibility scoping (#302)
   res.json(agents);
 });
 
@@ -1955,7 +1955,7 @@ app.get('/api/agents/statuses', apiLimiter, async (req, res) => {
     return res.status(500).json({ error: 'Failed to read agent statuses' });
   }
   const statuses = entries
-    .filter(e => visibleAgent(scope, e.cfg))
+    .filter(e => visibleAgent(scope, agentMetaForScope(e.cfg)))
     .map(e => e.status);
   res.json(statuses);
 });
@@ -3366,7 +3366,7 @@ app.post('/api/agents/:id/sync-repositories', heavyLimiter, async (req, res) => 
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
   const scope = getScope(req);
-  if (!cfg || !visibleAgent(scope, cfg)) return res.status(404).json({ error: 'Agent not found' });
+  if (!cfg || !visibleAgent(scope, agentMetaForScope(cfg))) return res.status(404).json({ error: 'Agent not found' });
   if (!canManageAgent(scope, agentMetaForScope(cfg))) {
     return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
   }
@@ -5274,7 +5274,7 @@ function resolveAgentRepoAccess(req, id, { manage }) {
   const manageable = canManageAgent(scope, meta);
   if (manage) {
     if (!manageable) return { status: 403, error: 'forbidden', code: 'forbidden' };
-  } else if (!visibleAgent(scope, cfg)) {
+  } else if (!visibleAgent(scope, agentMetaForScope(cfg))) {
     return { status: 404, error: 'Agent not found' };
   }
   return { cfg, canManage: manageable };
@@ -6149,7 +6149,7 @@ function gatherKnowledgeAgents(scope, teamIds) {
     if (cfg.role === 'team') continue; // template holder, not a contributor
     const teamId = agentKnowledgeTeam({ ...cfg, id: cfg.id || id });
     if (!set.has(teamId)) continue;
-    if (!visibleAgent(scope, cfg)) continue;
+    if (!visibleAgent(scope, agentMetaForScope(cfg))) continue;
     agents.push({ id, parentTeamId: teamId, environmentId: cfg.environmentId || null, displayName: cfg.displayName || id });
   }
   return agents;
@@ -6638,7 +6638,7 @@ app.post('/api/knowledge/item/:id/nominate', apiLimiter, async (req, res) => {
   if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'agentId is required' });
   const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
   if (!cfg) return res.status(404).json({ error: 'agent not found' });
-  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+  if (!visibleAgent(scope, agentMetaForScope(cfg))) return res.status(403).json({ error: 'forbidden' });
   try {
     const r = await fetch(`${ORCH_URL()}/internal/agents/${encodeURIComponent(agentId)}/knowledge/nominate`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -7288,7 +7288,7 @@ app.get('/api/agents/:id/private-skills', (req, res) => {
   if (!cfg) return res.status(404).json({ error: 'agent not found' });
   // The lift target is the agent's SQUAD pool (/workspace/teams/<squad>/skills).
   const teamId = agentKnowledgeTeam({ ...cfg, id: cfg.id || id });
-  if (!visibleAgent(scope, cfg)) return res.status(403).json({ error: 'forbidden' });
+  if (!visibleAgent(scope, agentMetaForScope(cfg))) return res.status(403).json({ error: 'forbidden' });
   // Seed-time skill grants land in the same per-agent skills dir — they are
   // copies of pool skills, not agent-authored knowledge, so they are not
   // "private" and must not surface as lift candidates. The grant is team-owned
@@ -7449,7 +7449,7 @@ app.post('/api/skills/resync', apiLimiter, async (req, res) => {
   const cfg = readJsonFile(path.join(AGENTS_DIR, anchorId, 'config.json'), null);
   if (!cfg) return res.status(404).json({ error: 'target not found' });
   const callerScope = getScope(req);
-  if (!visibleAgent(callerScope, cfg)) return res.status(403).json({ error: 'forbidden' });
+  if (!visibleAgent(callerScope, agentMetaForScope(cfg))) return res.status(403).json({ error: 'forbidden' });
 
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
@@ -9930,7 +9930,7 @@ function gatherSkillCopies(name, scope) {
 
   for (const agentId of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), {});
-    if (!visibleAgent(scope, cfg)) continue;
+    if (!visibleAgent(scope, agentMetaForScope(cfg))) continue;
     const agentSkillsBase = path.resolve(AGENTS_DIR, agentId, 'skills');
     const dir = path.resolve(agentSkillsBase, name);
     const drel = path.relative(agentSkillsBase, dir);
@@ -9982,7 +9982,7 @@ app.get('/api/skills', (req, res) => {
   // agent's skills don't leak its existence across teams.
   for (const agentId of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), {});
-    if (!visibleAgent(scope, cfg)) continue;
+    if (!visibleAgent(scope, agentMetaForScope(cfg))) continue;
     const agentSkillsDir = path.join(AGENTS_DIR, agentId, 'skills');
     // A seeded agent copy anchors its drift on the source hash recorded at seed
     // time in .agent-studio/seeded-skills.json — NOT on the copy's own skill.json origin
@@ -10058,7 +10058,7 @@ app.get('/api/skills/:name/lineage', (req, res) => {
   if (source === 'agent') {
     if (!qAgentId || !AGENT_ID_RE.test(qAgentId)) return res.status(400).json({ error: 'Invalid agent id' });
     const cfg = readJsonFile(path.join(AGENTS_DIR, qAgentId, 'config.json'), null);
-    if (!cfg || !visibleAgent(scope, cfg)) return res.status(404).json({ error: 'Skill not found' });
+    if (!cfg || !visibleAgent(scope, agentMetaForScope(cfg))) return res.status(404).json({ error: 'Skill not found' });
     viewed = { tier: 'agent', agentId: qAgentId, teamId: cfg.teamId };
     viewedDir = safeAgentSkillDir(qAgentId, name);
     if (!viewedDir) return res.status(400).json({ error: 'Invalid agent id or skill name' });
@@ -16410,7 +16410,7 @@ app.get('/api/matrix/agents', (req, res) => {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
     if (!cfg) continue;
     if (!admitsToChatList(cfg, { includeDisabled, includeStubs })) continue;
-    if (!visibleAgent(scope, cfg)) continue; // team + visibility scoping (#302)
+    if (!visibleAgent(scope, agentMetaForScope(cfg))) continue; // team + visibility scoping (#302)
     const dm = matrix.getAgentDmRoom(id);
     const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
     out.push({

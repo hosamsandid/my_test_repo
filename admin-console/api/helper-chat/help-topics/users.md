@@ -203,14 +203,18 @@ Otherwise **Delete** does noticeably more than remove a row, and it happens
 2. **Their personal SSH keys and GitHub tokens are deleted** from disk. Only
    *personal* credentials — team-scoped and system credentials are untouched, so
    other people's agents keep working.
-3. **The record and its memberships are removed** together.
+3. **Their own Matrix chat account is deactivated** and its stored access token
+   deleted, so a removed person keeps no live account and no live session on the
+   platform's chat. (A single-operator stack that never created user records has
+   no such account and nothing happens here.)
+4. **The record and its memberships are removed** together.
 
 The order is the point: pausing and revoking happen *first*, so if something goes
 wrong the person still exists and can be dealt with, rather than leaving a
-deleted user's secrets lying around. Steps 1 and 2 are best-effort — if the
+deleted user's secrets lying around. Steps 1 to 3 are best-effort — if the
 offboarding itself fails the deletion **still proceeds**, so on an error check the
-person's agents and personal credentials by hand rather than assuming they were
-cleaned up.
+person's agents, personal credentials and Matrix account by hand rather than
+assuming they were cleaned up.
 
 Two things this does **not** do. It does not delete anything a *team* owns —
 team resources belong to the team, not to the person, and their agents are

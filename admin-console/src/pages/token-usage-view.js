@@ -14,14 +14,85 @@ export const TOKEN_CLASSES = [
 ];
 
 // Groupings offered by GET /api/usage/summary. `day` is the time-series axis
-// and also a valid table grouping.
+// and also a valid table grouping. Kept in step with GROUP_BY in
+// admin-console/api/usage-summary.js — a key the server does not know silently
+// falls back to `agent`, which reads as a broken control rather than an error.
+//
+// `user` and `providerTier` (#2137) exist because a GLOBAL model provider
+// (#2136) has no team, so `team` stopped being a sufficient accounting key.
 export const GROUP_OPTIONS = [
   { key: 'agent', label: 'Agent' },
   { key: 'team', label: 'Team' },
+  { key: 'user', label: 'User' },
   { key: 'model', label: 'Model' },
   { key: 'provider', label: 'Provider' },
+  { key: 'providerTier', label: 'Provider tier' },
   { key: 'day', label: 'Day' },
 ];
+
+// The `unknown` key the aggregator uses for a record whose group value could not
+// be resolved. Written down once so the label rules below and the table cell
+// cannot disagree about which key means "no answer".
+export const UNKNOWN_GROUP_KEY = 'unknown';
+
+// How each provider tier reads in the table (#2137 AC2), and what it means.
+// A tier the server may report but this table does not know is rendered as the
+// raw key rather than dropped — an unlabelled row is still a real number.
+const PROVIDER_TIER_LABELS = {
+  global: {
+    label: 'Global',
+    hint: 'A provider published to the whole installation — reachable by every user and every agent, with no team as the accounting anchor.',
+  },
+  system: {
+    label: 'System',
+    hint: 'A system-scoped provider, reachable by the teams it is explicitly assigned to.',
+  },
+  team: {
+    label: 'Team',
+    hint: 'A provider owned by one team — usage here is already anchored on that team.',
+  },
+  [UNKNOWN_GROUP_KEY]: {
+    label: 'Unknown',
+    hint: 'The provider that paid for these runs is no longer registered, or the runs predate provider-tier recording. Reported rather than guessed.',
+  },
+};
+
+export function providerTierCell(key) {
+  const known = PROVIDER_TIER_LABELS[key];
+  if (known) return known;
+  return { label: key || '—', hint: '' };
+}
+
+// Build a `userId -> display name` lookup from GET /api/users/directory.
+// The usage store deliberately keeps only the stable account id (a display name
+// copied into a billing-adjacent record would go stale), so the name is resolved
+// at read time — and an id with no user record is labelled rather than dropped,
+// exactly as the draft Share dialog labels a departed colleague.
+export function userLabelIndex(directory) {
+  const byId = new Map();
+  for (const u of Array.isArray(directory) ? directory : []) {
+    if (u && typeof u.id === 'string' && u.id) {
+      byId.set(u.id, typeof u.displayName === 'string' && u.displayName ? u.displayName : u.id);
+    }
+  }
+  return byId;
+}
+
+// How one `groupBy=user` key reads. `unknown` is NOT a person: it is the
+// aggregator's bucket for a run with no resolvable charge (an autonomous run
+// whose agent has no owner, or a record written before attribution existed), so
+// it is named as a gap instead of being shown as an account.
+export function userGroupCell(key, byId) {
+  if (!key || key === UNKNOWN_GROUP_KEY) {
+    return {
+      label: 'Unattributed',
+      hint: 'These runs could not be charged to a person — no requesting user and no agent owner, or they predate cost attribution.',
+    };
+  }
+  const name = byId && byId.get ? byId.get(key) : null;
+  if (name) return { label: name, hint: key };
+  return { label: 'Deleted user', hint: key };
+}
 
 // Compact integer formatting with thousands separators. Non-finite → '0'.
 export function formatInt(n) {

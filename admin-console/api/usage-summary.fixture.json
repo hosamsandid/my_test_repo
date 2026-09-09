@@ -1,5 +1,5 @@
 {
-  "_comment": "Two-sided golden fixture for token telemetry (#654). The emitter (Python: build_usage_record in agent-image/scripts/agent-entrypoint.py) is asserted against records[].{input->expected}; the aggregator (JS: summarize in admin-console/api/usage-summary.js) is asserted against summaryCases (each references records[].expected by index). The canonical usage-record schema is the shared contract — change both sides in one commit.",
+  "_comment": "Two-sided golden fixture for token telemetry (#654). The emitter (Python: build_usage_record in agent-image/scripts/agent-entrypoint.py) is asserted against records[].{input->expected}; the aggregator (JS: summarize in admin-console/api/usage-summary.js) is asserted against summaryCases (each references records[].expected by index). The canonical usage-record schema is the shared contract — change both sides in one commit. NOTE (#2137): these records are what the AGENT emits. The orchestrator's ingest then enriches each one (enrichUsageRecord + orchestrator/usage-attribution.js) — it resolves `requestedBy` into an `attribution` block and drops it, and adds `providerTier` — so the `user`/`providerTier` groupings are covered by usage-summary.test.js over enriched records rather than by these emitter cases.",
   "records": [
     {
       "name": "github-triggered developer run, two models",
@@ -37,6 +37,7 @@
         "correlationId": "trigger:dev-on-issue:gh:41234567890",
         "sessionId": "sess-1",
         "trigger": { "type": "github-event", "id": "dev-on-issue", "conversationKey": "issue:654" },
+        "requestedBy": null,
         "github": { "repo": "org/repo", "prNumber": null, "issueNumber": 654 },
         "git": { "repo": "repo", "branch": "agent/x", "headBefore": "aaaa111", "headAfter": "bbbb222" },
         "tokens": { "input": 10, "output": 42, "cacheCreationInput": 8141, "cacheReadInput": 17718 },
@@ -83,6 +84,7 @@
         "correlationId": "trigger:review-on-pr:gh:99887766",
         "sessionId": "sess-2",
         "trigger": { "type": "github-event", "id": "review-on-pr", "conversationKey": "pr:42" },
+        "requestedBy": null,
         "github": { "repo": "org/repo", "prNumber": 42, "issueNumber": null },
         "git": null,
         "tokens": { "input": 5, "output": 20, "cacheCreationInput": 1000, "cacheReadInput": 2000 },
@@ -105,6 +107,7 @@
         "correlationId": "direct:$evt123",
         "sessionId": null,
         "trigger": { "type": "direct-message", "id": null, "conversationKey": "dm" },
+        "requestedBy": { "matrixUserId": "@thorsten:local" },
         "github": null,
         "git": null,
         "resultEvent": {
@@ -126,6 +129,7 @@
         "correlationId": "direct:$evt123",
         "sessionId": null,
         "trigger": { "type": "direct-message", "id": null, "conversationKey": "dm" },
+        "requestedBy": { "matrixUserId": "@thorsten:local" },
         "github": null,
         "git": null,
         "tokens": { "input": 100, "output": 200, "cacheCreationInput": 0, "cacheReadInput": 500 },

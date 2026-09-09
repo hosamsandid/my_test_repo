@@ -13,6 +13,7 @@ askPrompts:
   - "Why does this page show token counts instead of money?"
   - "What do the attribution signals flow, created, event and branch mean?"
   - "Why are some tokens unattributed?"
+  - "How can I see what a globally-shared model provider is costing, and who is using it?"
   - "What is the difference between cache write and cache read tokens?"
   - "Why does grouping by model show less than the total tile?"
   - "Which day does a run's usage land in?"
@@ -84,15 +85,28 @@ across the top carry the period totals — the four token classes plus
 turn or one trigger run is one invocation, so a single task can report many
 invocations.
 
-*Group by* re-keys the breakdown table — by agent, team, model, provider or day
-— against the same range and team filter. The summary tiles and the totals never
-change with it; only the rows underneath do. Two behaviours are worth knowing
-before you read a grouped table as a complete accounting:
+*Group by* re-keys the breakdown table — by agent, team, user, model, provider,
+provider tier or day — against the same range and team filter. The summary tiles
+and the totals never change with it; only the rows underneath do. A few
+behaviours are worth knowing before you read a grouped table as a complete
+accounting:
 
 - **Group by model fans a run out** across its per-model split, because one run
   may call more than one model. A run that recorded no per-model detail still
   counts in the totals but contributes to no model row, so the model rows can
   legitimately add up to less than the total tile.
+- **Group by user** charges each run to a person — the human who sent the chat
+  message that started it, or, for an autonomous or triggered run, the owner of
+  the agent. Runs that can be charged to neither fall under **Unattributed**, a
+  reported gap rather than a person (it also covers records written before this
+  attribution existed). This is a different question from the Work items tab's
+  coverage below, which asks which *ticket* a run went into, not which person
+  paid for it.
+- **Group by provider tier** splits the spend by how the paying provider is
+  reachable — **Global** (a provider published to the whole installation, with no
+  team as its accounting anchor), **System** or **Team** — so a globally shared
+  provider's usage is visible and told apart from team-scoped usage at a glance.
+  A run whose provider is no longer registered reads as **Unknown**.
 - **A record with no team, provider or model at all** lands in an explicit
   `unknown` bucket rather than being dropped. An `unknown` row is real
   consumption whose label is missing — never a rounding artefact.

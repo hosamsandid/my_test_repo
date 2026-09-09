@@ -27,6 +27,28 @@ function normalizeScope(scope) {
   return SCOPES.has(scope) ? scope : 'self';
 }
 
+// Which groupings an AGENT may ask for (#2137). Deliberately a SUBSET of the
+// aggregator's `GROUP_BY`, and deliberately enforced here rather than only in
+// the on-agent `usage` CLI — the CLI's own whitelist is a usability affordance,
+// not a boundary: an agent can call the internal endpoint directly.
+//
+// `providerTier` is in: which tier of provider a run spent on is a property of
+// the run, and knowing it helps an agent stay budget-aware (the whole point of
+// the CLI). `user` is OUT: the console's per-user breakdown is System-Admin-only
+// (#801), and a team-scoped answer would hand one agent the spend of every human
+// on its team — data it has no decision to make with, in a context it can quote
+// into a chat message. The agent's own runs are still fully visible to it; only
+// the per-human axis is withheld.
+//
+// An excluded grouping is COERCED to the default rather than refused, matching
+// how `summarize` already treats an unrecognised value, and the response echoes
+// the `groupBy` actually applied so a caller is never misled about what it got.
+const AGENT_GROUP_BY = new Set(['agent', 'team', 'model', 'provider', 'providerTier', 'day']);
+
+function normalizeAgentGroupBy(groupBy) {
+  return AGENT_GROUP_BY.has(groupBy) ? groupBy : undefined;
+}
+
 // Filter records to the caller's scope. Pure, fail-closed:
 //   self → only records the agent itself produced (agentId === agentId).
 //   team → only records of the agent's resolved team (teamId === teamId).
@@ -56,7 +78,7 @@ function buildUsageQuery(records, { scope, agentId, teamId, since, until, groupB
   const s = normalizeScope(scope);
   const scopedTeamId = s === 'team' ? (teamId || null) : null;
   const scoped = scopeRecords(records, { scope: s, agentId, teamId });
-  const summary = summarize(scoped, { since, until, groupBy });
+  const summary = summarize(scoped, { since, until, groupBy: normalizeAgentGroupBy(groupBy) });
   return {
     scope: s,
     agentId: agentId || null,
@@ -74,4 +96,7 @@ function buildUsageQuery(records, { scope, agentId, teamId, since, until, groupB
   };
 }
 
-module.exports = { buildUsageQuery, scopeRecords, normalizeScope, SCOPES };
+module.exports = {
+  buildUsageQuery, scopeRecords, normalizeScope, SCOPES,
+  AGENT_GROUP_BY, normalizeAgentGroupBy,
+};

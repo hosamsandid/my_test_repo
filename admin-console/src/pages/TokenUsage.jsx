@@ -7,7 +7,7 @@ import DataTable from '../components/DataTable';
 import InfoTip from '../components/InfoTip';
 import PageHelpButton from '../components/PageHelpButton';
 import { TOKEN_USAGE_HELP_SECTIONS } from './token-usage-help-sections.js';
-import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses } from './token-usage-view.js';
+import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses, userLabelIndex, userGroupCell, providerTierCell } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -308,6 +308,14 @@ function StatisticsTab({ team }) {
   const { data: summary, loading, error, refetch } = useApi(summaryUrl);
   const { data: daySummary, refetch: refetchDays } = useApi(dayUrl);
 
+  // #2137: a `groupBy=user` key is a stable account id, which is useless on
+  // screen. Names are resolved at read time from the OPEN directory (display
+  // name + email only) rather than denormalized into the usage record, because
+  // the store is billing-adjacent telemetry with no retention — a name copied
+  // in would outlive the person and go stale. Fetched only for that grouping.
+  const { data: directory } = useApi(groupBy === 'user' ? '/api/users/directory' : null);
+  const userNames = useMemo(() => userLabelIndex(directory), [directory]);
+
   const totals = summary?.totals || { input: 0, output: 0, cacheCreationInput: 0, cacheReadInput: 0, total: 0, invocations: 0 };
   const groupLabel = (GROUP_OPTIONS.find((g) => g.key === groupBy) || { label: 'Group' }).label;
 
@@ -321,8 +329,24 @@ function StatisticsTab({ team }) {
     invocations: g.invocations || 0,
   })), [summary]);
 
+  // #2137: `user` and `providerTier` keys are machine values, so they are named
+  // rather than printed raw — and the `unknown` bucket is named as a GAP
+  // ("Unattributed" / "Unknown") so it can never read as a person or a tier.
+  // Every other grouping keeps the raw key it always showed.
+  const renderGroupKey = (v) => {
+    if (groupBy === 'user') {
+      const cell = userGroupCell(v, userNames);
+      return <span title={cell.hint}>{cell.label}</span>;
+    }
+    if (groupBy === 'providerTier') {
+      const cell = providerTierCell(v);
+      return <span title={cell.hint}>{cell.label}</span>;
+    }
+    return v || '—';
+  };
+
   const COLS = [
-    { key: 'key', label: groupLabel, render: (v) => v || '—' },
+    { key: 'key', label: groupLabel, render: renderGroupKey },
     ...TOKEN_CLASSES.map((c) => ({ key: c.key, label: c.label, align: 'right', render: (v) => formatInt(v) })),
     { key: 'total', label: 'Total', align: 'right', render: (v) => formatInt(v) },
     { key: 'invocations', label: 'Invocations', align: 'right', render: (v) => formatInt(v) },

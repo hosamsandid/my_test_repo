@@ -71,7 +71,14 @@ const SUMMARY_COLUMNS = [
   { key: 'agentId', label: 'agentId' },
   { key: 'teamId', label: 'teamId' },
   { key: 'roleId', label: 'roleId' },
+  // #2137: who the spend is charged to, and which provider tier paid for it.
+  // Both are needed downstream precisely because `teamId` stops being the
+  // accounting anchor for a global provider — a FinOps sheet keyed on team
+  // alone silently drops every global-provider run into a blank bucket.
+  { key: 'attributedUserId', label: 'attributedUserId' },
+  { key: 'attributionKind', label: 'attributionKind' },
   { key: 'provider', label: 'provider' },
+  { key: 'providerTier', label: 'providerTier' },
   { key: 'correlationId', label: 'correlationId' },
   { key: 'sessionId', label: 'sessionId' },
   { key: 'repo', label: 'repo' },
@@ -93,12 +100,19 @@ function summaryRows(records, { since = null, until = null } = {}) {
     if (!rec || !inRange(rec.ts, since, until)) continue;
     const g = rec.github || {};
     const git = rec.git || {};
+    const attr = (rec.attribution && typeof rec.attribution === 'object') ? rec.attribution : {};
     const base = {
       ts: rec.ts || '',
       agentId: rec.agentId || '',
       teamId: rec.teamId || '',
       roleId: rec.roleId || '',
+      // Blank rather than a placeholder: an unattributed run and a pre-#2137
+      // record must both read as "no answer here", not as an account named
+      // `unknown` that a downstream sum would treat as a person.
+      attributedUserId: attr.userId || '',
+      attributionKind: attr.kind || '',
       provider: rec.provider || '',
+      providerTier: rec.providerTier || '',
       correlationId: rec.correlationId || '',
       sessionId: rec.sessionId || '',
       repo: g.repo || '',

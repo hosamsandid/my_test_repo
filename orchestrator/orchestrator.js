@@ -156,6 +156,7 @@ const skillDelivery = require("./skill-delivery");
 const skillCommands = require("./skill-commands");
 const usageLog = require("./usage-log");
 const usageQuery = require("./usage-query");
+const usageAttribution = require("./usage-attribution");
 const prEventsLog = require("./pr-events-log");
 const usageRecordsReader = require("./usage-records-reader");
 const { workItemDetail } = require("./work-items");
@@ -2642,6 +2643,24 @@ function _readTeamAnomalyHistory(teamId) {
 // agentId is forced to the posting agent (path param) — never trusted from
 // the body. Only null/absent fields are filled, so a value the agent already
 // resolved correctly is kept.
+//
+// #2137 adds the two fields a GLOBAL model provider makes necessary. Until
+// #2136 every provider was anchored on a team, so `teamId` was a sufficient
+// accounting key; a global provider has no team, so a per-run record needs:
+//
+//   • `attribution: { userId, kind }` — WHO the spend is charged to, resolved
+//     from the agent's own `requestedBy` (a chat turn's sender) or, for an
+//     autonomous run, the agent's human OWNER. The raw Matrix id is DROPPED
+//     after resolution: the usage store has no retention by design, so a
+//     billing-adjacent log must not accumulate raw chat identities — it keeps
+//     the stable account id instead, which also survives a Matrix rename.
+//   • `providerTier` — WHICH tier paid, so global usage is distinguishable
+//     from team-scoped usage (AC2). Honestly `null` when the provider id names
+//     no registered endpoint (a deleted provider) rather than guessed.
+//
+// Both are always written, never conditionally backfilled: unlike teamId /
+// roleId / provider the agent cannot resolve either one, so a value arriving in
+// the body is self-asserted and is overwritten.
 function enrichUsageRecord(agentId, record) {
   const out = { ...(record && typeof record === "object" ? record : {}) };
   out.agentId = agentId;
@@ -2662,6 +2681,27 @@ function enrichUsageRecord(agentId, record) {
     // A per-agent provider override wins over the environment binding.
     out.provider = cfg.llmEndpointOverride || env?.llmEndpointId || null;
   }
+
+  // Cost attribution (#2137). `resolveAgentOwnerId` is deliberately reused
+  // rather than re-derived: an autonomous run's cost and its attributed commits
+  // must point at the same person (a team-member resolves to its parent Agent
+  // Team's owner, one hop — see credential-resolution.js).
+  const requestedBy = out.requestedBy;
+  delete out.requestedBy;
+  let users = [];
+  try { users = teamsStore.listUsers(); } catch { users = []; }
+  let ownerId = null;
+  try {
+    ownerId = credentialResolution.resolveAgentOwnerId(cfg, (id) => {
+      try { return loadAgentConfig(id); } catch { return null; }
+    });
+  } catch { ownerId = null; }
+  out.attribution = usageAttribution.resolveUsageAttribution({ requestedBy, users, ownerId });
+
+  let endpointIndex = null;
+  try { endpointIndex = JSON.parse(fs.readFileSync(LLM_ENDPOINTS_INDEX, "utf8")); } catch { endpointIndex = null; }
+  out.providerTier = usageAttribution.providerTierOf(endpointIndex, out.provider);
+
   return out;
 }
 

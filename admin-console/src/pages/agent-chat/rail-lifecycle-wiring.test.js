@@ -35,6 +35,8 @@ const host = code(read('./RailLifecycleHost.jsx'));
 // Promoted to `src/components/` by #2053 so the Flows rail can render the same
 // menu; the component itself is unchanged, and this guard follows it there.
 const menu = code(read('../../components/RowContextMenu.jsx'));
+// #2082 — the team Share panel, whose JSX the pure tests cannot load either.
+const sharePanel = code(read('./ShareTeamPanel.jsx'));
 
 test('the chat page derives its list URL from the opt-in, never a literal', () => {
   assert.match(agentChat, /useApi\(matrixAgentsUrl\(showDisabled\)\)/);
@@ -308,6 +310,66 @@ test('#1958 — a failed Add member closes the dialog so its error is readable',
     host,
     /addMemberBody\([\s\S]{0,400}?catch \(e\) \{[\s\S]{0,200}?setAddMemberTeamId\(null\)/,
   );
+});
+
+/* ── #2082 share an Agent Team ───────────────────────────────────────── */
+
+test('#2082 AC1 — the share entry is routed, not just described', () => {
+  // The item comes from `buildTeamMenu`; without a case in `choose()` it would
+  // render, be clickable, and do nothing at all.
+  assert.match(host, /case 'share':/);
+  assert.match(host, /setShareTeam\(\{ id: teamId/);
+  assert.match(host, /<ShareTeamPanel/);
+});
+
+test('#2082 — the member list is a SidePanel, not a ConfirmDialog', () => {
+  // A manage-a-list surface stays open across several writes (the
+  // `ManageTeamPanel` precedent); a ConfirmDialog closes on confirm, which
+  // would shut the panel on the first role change.
+  assert.match(host, /<SidePanel\s+open=\{!!shareTeam\}/);
+  assert.match(host, /onClose=\{\(\) => setShareTeam\(null\)\}/);
+});
+
+test('#2082 AC2 — the panel gates on canManageTeam, not on the fetch succeeding', () => {
+  // `GET /api/admin/memberships` is `visibleTeam`-filtered, so a plain Team
+  // Member CAN read the list (D9). Gating the controls on whether the read
+  // worked would hand them the write controls too.
+  assert.match(sharePanel, /canManageMembers\(user, teamId\)/);
+  assert.match(sharePanel, /canManage \?/, 'the controls branch on the predicate');
+});
+
+test('#2082 AC10 — the picker reads the OPEN directory, never /api/admin/users', () => {
+  // `/api/admin/users` returns the whole record including `systemAdmin` and the
+  // GitHub handle, which D2/D11 forbid showing.
+  assert.match(sharePanel, /'\/api\/users\/directory'/);
+  assert.doesNotMatch(sharePanel, /\/api\/admin\/users/);
+  // …and neither field may be referenced anywhere in the renderer.
+  assert.doesNotMatch(sharePanel, /systemAdmin/);
+  assert.doesNotMatch(sharePanel, /githubHandle/);
+});
+
+test('#2082 — every write shape comes from the pure module', () => {
+  // The body-vs-query split is the trap: `POST` reads teamId from the body and
+  // `DELETE` from the query, where its own gate looks. An inline URL here is
+  // the one place that can silently 403 everyone but a System Admin.
+  assert.match(sharePanel, /setRoleRequest\(\{ teamId/);
+  assert.match(sharePanel, /removeRequest\(\{ teamId/);
+  assert.doesNotMatch(sharePanel, /apiCall\('POST', '\/api\/admin\/memberships'/);
+  assert.doesNotMatch(sharePanel, /apiCall\('DELETE', `\/api\/admin\/memberships/);
+});
+
+test('#2082 AC4 — the D4 hand-over is one prompt and ONE request', () => {
+  // Promoting the successor in a separate call would leave the team briefly
+  // un-administrable, and a failure between the two would strand it there.
+  assert.match(sharePanel, /handoverRequirement\(\{ rows, userId, action \}\)/);
+  assert.match(sharePanel, /successorUserId: successorId/);
+  assert.match(sharePanel, /commit\(\{ \.\.\.handover, successorUserId: successorId \}\)/);
+});
+
+test('#2082 — a write re-reads the list rather than trusting its own response', () => {
+  // The store may have applied a promotion alongside the change we asked for
+  // (the hand-over lands in one write), so the response is not the whole truth.
+  assert.match(sharePanel, /await apiCall\(req\.method, req\.url[\s\S]{0,200}?await load\(\)/);
 });
 
 /* ── #2052 convert into a team of one ───────────────────────────────── */

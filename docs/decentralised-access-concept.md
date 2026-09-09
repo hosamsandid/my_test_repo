@@ -669,6 +669,58 @@ The writes already exist and are already gated on the right predicate:
 
 **AC8's disabled-with-hint requirement** is already the house pattern: the gate closure at `agent-lifecycle-menu.js:186-189` sets `disabled: !canManage` plus `title: NO_RIGHTS_HINT`, so a Team Member sees **Share…** greyed out with the reason rather than not at all — the deliberate opposite of `Teams.jsx:472-483`, which hides its admin actions.
 
+> **Amendment 6 (#2082, P4 as built).** Everything above shipped, with **one
+> stated deviation and one addition**.
+>
+> **The deviation: AC8 and AC9 cannot both be satisfied as written, and AC9
+> wins.** AC8 asks for the **Share…** entry to be *disabled* with a hint for a
+> non-admin; AC9 asks that *"a Team Member sees the list read-only"*. A disabled
+> menu entry opens nothing, so implementing AC8 literally makes AC9's read-only
+> list unreachable — and it is not unreachable elsewhere either, because **AC12
+> (P6) retires the Access page's `ManageTeamPanel` as "superseded by the Share
+> dialog"**, which would leave a Team Member with no surface at all for seeing
+> who is on their team. D9 explicitly grants a member the *read* (§6: "reading
+> … is allowed"), so the entry ships **enabled for anyone who can see the team**
+> and the panel renders the list read-only, with no role picker, no Add row and
+> no Remove button. AC8's *hint* is still delivered, on the entry itself:
+> `MEMBERS_READ_ONLY_HINT` ("You can see who has access; only a Team Admin for
+> this team can change it") rather than `NO_RIGHTS_HINT`. It is the only entry
+> in `buildTeamMenu` that stays live without rights, and
+> `agent-lifecycle-menu.test.js` pins that as a deliberate exception to the
+> AC8 loop rather than an oversight.
+>
+> **The addition: the D4 successor picker**, which #2081's Amendment 5 owed to
+> this phase. Removing or demoting the **last** Team Admin opens an inline
+> hand-over prompt whose candidates are the team's *other* members only (the
+> store refuses an outsider, so offering one would be a button that 409s), and
+> the promotion + the removal/demotion go out as **one** request — the store
+> applies both in a single write, so the team is never momentarily
+> un-administrable. A sole admin who is also the sole member is a stated dead
+> end ("add somebody first, or delete the team") rather than an empty picker.
+>
+> **The recommendation above was taken:** `GET /api/matrix/agents` now ships an
+> explicit `canManageTeam` on `role: 'team'` rows, and `buildTeamMenu` takes it
+> as its own `canManageMembers` input (defaulting to `canManage`, so an
+> un-migrated caller is unaffected). `team-share-routes.test.js` pins the
+> present-day coincidence between the two predicates, so a successor that breaks
+> it fails there rather than silently opening the member list.
+>
+> **Client decisions** are the pure `admin-console/src/pages/agent-chat/team-share-view.js`
+> (renderer: `ShareTeamPanel.jsx`, hosted in a `SidePanel` by `RailLifecycleHost`
+> — the `ManageTeamPanel` precedent for a manage-a-list surface, deliberately not
+> a `ConfirmDialog`, which closes on confirm). The one non-obvious thing it
+> encodes: **`POST` takes `teamId` in the body and `DELETE` in the query**,
+> because that is where each route's own gate reads it from — a DELETE that sent
+> it in a body would arrive at `canManageTeam(scope, undefined)` and fail closed
+> for everyone but a System Admin.
+>
+> **AC13's end-to-end journey: delivered by #2086 — see Amendment 8.** It was
+> recorded here as owed-and-blocked because the e2e stack had no `AUTH_ENABLED`
+> anywhere, so every predicate in that journey was inert (the #1459 finding).
+> That was correct: the missing piece was infrastructure, not a YAML file, and
+> #2086 built it — a multi-user e2e stack plus two signed-in humans in the step
+> library — before writing the journey.
+
 ### 7.2 — The open directory (D2, D11)
 
 `visibleUser` (`scope.js:124-128`) shows only users who share a team. Under private-by-default that leaves a **fresh team owner unable to invite anybody** — which is why D2 reverses it.
@@ -683,6 +735,13 @@ The writes already exist and are already gated on the right predicate:
 Projecting at a **separate route** rather than conditionally inside the admin one is what makes "the flag is never exposed" checkable by a test that asserts the response keys, instead of a review of every branch. `visibleUser` itself stays as the gate on the admin surface.
 
 **Worth one data-protection sign-off** (names + corporate email become visible to every user) — recorded in #2041 D2 and inherited here.
+
+> **#2082:** the Share picker is now that route's second consumer (the first was
+> the draft Share panel it was built for). The client re-asserts the projection
+> in `team-share-view.js`'s `directoryIndex`, so a future widening of the
+> payload cannot reach the DOM by accident, and `team-share-routes.test.js`
+> asserts the response keys are exactly `{id, displayName, email}` — including
+> for a **System Admin**, who appears in the results as an ordinary colleague.
 
 ### 7.3 — Existing accounts only (D3)
 
@@ -812,10 +871,10 @@ D1 is a large change to a load-bearing key, so it is sliced so **each phase ship
 | **P1** | Ownership data model: `ownerId` on Agent Teams and standalone agents (§3.4, §3.5); `memberships.teamId` re-pointed (§3.3); migration per D6. **No behaviour change.** | **#2046** (this doc) | **The before/after fixture test (#2041 AC2, §8.3)** — set-equality over the real predicates for the full user×resource cross-product, including the three failure-mode fixtures. Plus: the existing `scope.test.js` tenant block (`:555-608`) and `orchestrator/agent-tenant.test.js` (`:23-38`) must be re-pointed together, and a **new mirror guard** for the two `resolveAgentTenant` copies (§1.3 — there is none today). |
 | **P2** | Enforcement re-pointed (§4); `resolveAgentTenant` collapse; `scope.all` kept; the `'default'` fallback removed (§8.4); **process drafts/flows scoped** (§11.1 — **done, #2068**, cut out as its own ticket because it does not depend on P1's membership re-keying); the work-plane family gated (§11.2); MCP server writes gated (§11.3). | P1 | Predicate unit tests in `scope.test.js` re-keyed; **a route-coverage test** asserting every route in the §11 inventory now resolves a scope (the `orphan-routes.test.js` shape — assert on route *registration*, not behaviour); a two-user integration check that user B does not see user A's drafts (#2041 AC4). |
 | **P3** | **Done, #2081 — see Amendment 5.** Self-service creation (`POST /api/teams` **api.js:13051** + stream **:13674**); creator becomes owner **and** `team-admin` in the same operation; last-admin successor rule (D4, §2.3). | P2 | A creation test from a **membership-less** user (today impossible — `api.js:11816-11817` explains why); an idempotence test that the creator's membership is written exactly once by both the streaming and non-streaming handler (they duplicate their var shape inline at `:13436` and `:14036`, so both must be asserted); D4 refusal tests on all three routes in §2.3 — **shipped one layer down**, in `teams-store.js` over the pure `orchestrator/team-admin-succession.js`, so the orchestrator's own `/internal/admin/*` writers are covered too (A5.3). |
-| **P4** | **Share dialog** in the Agent-Chat team context menu (§7.1) + the open directory (§7.2). | P3 | The four drift guards named in §7.1; a response-key assertion on `GET /api/users/directory` (never `systemAdmin`, never `githubHandle` — D2/D11); a server-side test that a Team Member's `POST /api/admin/memberships` is refused (**not** only that the button is disabled — #2041 AC9). |
+| **P4** — *done, #2082 (see Amendment 6 in §7.1)* | **Share dialog** in the Agent-Chat team context menu (§7.1) + the open directory (§7.2). | P3 | The four drift guards named in §7.1; a response-key assertion on `GET /api/users/directory` (never `systemAdmin`, never `githubHandle` — D2/D11); a server-side test that a Team Member's `POST /api/admin/memberships` is refused (**not** only that the button is disabled — #2041 AC9). |
 | **P5** | Layered resource ownership (D7, §5.2) — shared tier for working environments and MCP servers; credentials and model providers re-pointed. | P2 | Tier tests mirroring the credential ones; **a create-a-team-with-no-infrastructure test** (D7's stated consequence, §5.2). |
-| **P6** | Access page rework + System-Admin cleanup view (D5) + docs/help/corpus (§9). | P3, P5 | `help-coverage.test.js` (a page route may not silently lose its topic), the `page-help-view.test.js` parity block, `corpus.test.js` (vendored-copy byte-identity + the worst-case grounding budget), `help-registry.test.js`, the nav-smoke e2e and the `steps-catalog.json` freshness test. |
-| **AC13** | The end-to-end journey, after P4 | P4 | **One e2e journey** proving the loop: user A creates a team → user B does not see it → A shares it with B as Team Member → B sees it but cannot change members → A promotes B to Team Admin → B can → A is removed as last admin only after naming a successor. This is the only test that exercises D1+D4+D9 together. |
+| **P6** — *done, #2085 (see Amendment 7)* | Access page rework + System-Admin cleanup view (D5) + docs/help/corpus (§9). | P3, P5 | `help-coverage.test.js` (a page route may not silently lose its topic), the `page-help-view.test.js` parity block, `corpus.test.js` (vendored-copy byte-identity + the worst-case grounding budget), `help-registry.test.js`, the nav-smoke e2e and the `steps-catalog.json` freshness test. |
+| **AC13** — *done, #2086 (see Amendment 8)* | The end-to-end journey, after P4 | P4 | **One e2e journey** proving the loop: user A creates a team → user B does not see it → A shares it with B as Team Member → B sees it but cannot change members → A promotes B to Team Admin → B can → A is removed as last admin only after naming a successor. This is the only test that exercises D1+D4+D9 together. Shipped as `e2e/journeys/team-sharing.yaml` over a multi-user e2e stack (`AUTH_ENABLED=true` in `docker-compose.e2e.yml`) and the two-identity step library (`e2e/steps/identity.js` + `access.js`); every "cannot" is asserted **twice**, in the UI and against the API with that human's own session. |
 
 **Two strategy notes.** (1) **Every "cannot" in the ACs must be asserted server-side.** The console's own comments say the client gating is UX, not the boundary (`App.jsx:41-45`, `credential-scope-view.js:9-11`, `Shell.jsx:209-215`); a test that only checks a disabled button proves nothing about the API. (2) **P2 is where the two `scope.all` spellings bite** (§4.2): a sweep that greps only `scope.all` misses eight `getScope(req).all` sites.
 
@@ -1644,3 +1703,118 @@ rather than left to be discovered.
   A successor *picker* belongs with the dialog.
 - **AC13's end-to-end journey is still P4's**, unchanged: it needs the Share
   dialog to exist.
+
+---
+
+## Amendment 7 (#2085, P6 as built)
+
+§9 shipped as written: `/teams` and `Teams.jsx` are gone, the nav entry is
+dissolved rather than renamed, and `/users` is a three-tab **Administration**
+surface (*Users / All Teams / Resources*) behind the `AdminRoute` it already had —
+which is what makes all three tabs System-Admin-only without a second gate. Five
+things are worth recording because they were decided while building, not before.
+
+**A7.1 — "All Teams" reads the Agent Team list, and manages no memberships.**
+§9.1 says the tab reads the Agent Team list, which is right for the reason §3.3
+gives: a membership has named a `role: 'team'` agent id since P1, so "every team
+on the platform" *is* that list. What §9.1 does not say is what the tab may
+therefore **not** do. It carries no role dropdown and no add-person row: that is
+the Share dialog's surface (§7.1), and a second copy here would be a
+differently-warned duplicate of an operation that can lock a team's own admins
+out — the D4 rule lives one layer down in the store, but the *warning* does not.
+The tab is a clean-up view: see every team, including ones nobody shared with
+you, and delete one. It needs **no new endpoint** — the two cascades §3.3 asks
+for already exist (member agents with the parent, #1960; memberships with the
+team, #2081).
+
+**A7.2 — The tab surfaces the state D5 says needs no machinery.** §2.3 argues no
+orphan-recovery machinery is needed *because* a System Admin can always re-admin
+an orphaned team. That argument only holds if they can **find** one, and until
+now nothing showed it. Each row therefore carries a **no admin** marker
+(`admins === 0`), which is the cheapest possible discharge of that premise.
+
+**A7.3 — The Resources tab had to be reworked, not moved, and the reason is a
+live bug.** §9.1 says "reworked for the D7/D12 tiers" without saying what breaks
+otherwise. Since #2083 a Working Environment carries the same
+`{scope, teamId, assignedTeamIds}` triple a credential does, and
+`PUT /api/environments/:id { teamId }` — exactly what the old flat team selector
+sent — normalizes to `scope: 'team'` server-side. So on a **shared** environment
+that one click silently **un-shared** it, taking it from every other team using
+it. The row now states the tier, edits it through the shared
+`CredentialOwnership` control (no second copy of the tier semantics) and shows
+the resulting tier before the save. Agents keep the plain selector: an agent has
+no tier, and an Agent Team still moves as one unit.
+
+**A7.4 — A stated capability removal: access scopes lose their console surface.**
+§9.1 retires the team table with the page and names no replacement, so `PUT` and
+`DELETE /api/admin/teams/:id` now have **no UI at all** — an access scope can be
+neither created (#2081, 410) nor renamed nor deleted from the console. That is
+deliberate rather than an oversight: A3.3 retires `teams/index.json` outright,
+and building a management surface for a record on its way out would be work
+undone by the next phase. The scope survives only as the stamp the Resources tab
+assigns. **This is the thing to reverse first if it bites** — the API verbs are
+untouched, so a surface can be restored without a server change.
+
+**A7.5 — Two `seeAlso` links were dropped rather than re-pointed.** §9.3 allows
+either. `agent-chat.md` and `team-setup.md` named *Access* because that is where
+you went to give somebody access; that is now **Share…** on the reader's own page,
+and Administration is System-Admin-only — re-pointing would have linked an
+ordinary reader at a page they cannot open. The other five links were re-pointed.
+The side effect is worth knowing: `/chats` lost a whole neighbour topic, so the
+worst-case grounding context moved **back** to `/quickstart` and the figure
+*fell*, from 314 511 to **312 384** of 340 000, even though the merged
+`users.md` is ~9 000 characters larger than either half it replaced.
+
+---
+
+## Amendment 8 (#2086, AC13 as built)
+
+The journey shipped as `e2e/journeys/team-sharing.yaml`. Five things it found.
+
+**A8.1 — AC13's step order cannot fire the rule its own AC2 asks for, and the
+journey deviates.** Read literally, the seven steps are: … *(5)* A promotes B to
+Team Admin, *(6)* B can manage, *(7)* A is removed as the last admin only after
+naming a successor. But step 5 creates a **second** admin, so by step 7 A is no
+longer the last one and D4 never engages — the refusal AC2 requires at step 7 is
+unreachable in the state step 5 leaves behind. Rather than assert a weaker thing
+and call it AC13, the journey **probes D4 where it is live and exercises both of
+its halves**: the refusal at the moment A is sole admin (before the promotion),
+and the successor hand-over at the end, when B has become the sole admin and
+must name A to leave. Every behaviour AC13 lists is covered; only the order
+moves, and it moves because the literal order makes one of them untestable.
+
+**A8.2 — The blocker was real, and it was one line of stack config plus a
+missing seam.** `AUTH_ENABLED=true` now lives in `docker-compose.e2e.yml` (the
+e2e override, not the generated `.env.e2e` — it is stack policy, not a
+credential). Turning it on is **safe for the other fourteen journeys as a
+property of the code**: `computeScope` short-circuits `username === adminUsername`
+to `all: true` in *both* modes, and the storageState session `global-setup.js`
+persists is exactly that env admin. The flag changes only what a *user-store*
+identity sees.
+
+**A8.3 — Two humans, without touching the journey schema.** `journeys.spec.js`
+builds `ctx = { page, request }` once and hands that same object to every fixture
+and step, so the identities hang off `ctx` and `access.actAs` re-points
+`ctx.page`/`ctx.request` at one of them. The whole existing step library — and the
+screenshot recorder, which reads `ctx.page` fresh at each capture — follows the
+active human for free. This is journey-spec-concept.md §9's anti-DSL rule
+honoured: a new capability, entirely in the step library, and the schema learns
+nothing about identities.
+
+**A8.4 — Every "cannot" is asserted twice, and the second one is the real test.**
+The strategy note under the phasing table says a disabled button proves nothing
+about the API; the journey follows it literally. When B is a Team Member it
+checks both that the Share panel renders read-only *and* that B's own session is
+refused `POST /api/admin/memberships` with a 403 — and after the promotion it
+checks that the **same** route, body and session now succeeds. The D4 refusal is
+asserted on the stable `code: 'successor-required'` rather than on the message
+text, because `orchestrator/team-admin-succession.js` says in as many words that
+callers should key on the code.
+
+**A8.5 — A role change needs a reload before its UI effect can be asserted.**
+`ShareTeamPanel` reads `canManage` from `useAuth()`, whose `teams` roles are
+resolved by `describeAuthz` when the SPA loads — so when Ada promotes Bea in
+Ada's browser, Bea's tab keeps rendering the read-only panel until it navigates.
+That is correct product behaviour, not a bug, but it is a trap for anyone
+extending this journey: the beats that assert a *changed* role always navigate
+first, and the YAML says why at each one.

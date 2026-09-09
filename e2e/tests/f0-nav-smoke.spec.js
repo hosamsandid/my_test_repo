@@ -29,8 +29,10 @@ const NAV_PAGES = [
   { label: 'SSH Keys',             breadcrumb: 'SSH Keys' },
   { label: 'GitHub Tokens',        breadcrumb: 'GitHub Tokens' },
   { label: 'Working Environments', breadcrumb: 'Working Environments' },
-  { label: 'Users',                breadcrumb: 'Users' },
-  { label: 'Access',               breadcrumb: 'Access' },
+  // One Administration entry since #2085 (epic #2076 P6, D10): the separate
+  // "Access" entry is dissolved, not renamed — its System-Admin halves are the
+  // All Teams and Resources tabs of this page, and /teams now redirects here.
+  { label: 'Administration',       breadcrumb: 'Administration' },
   { label: 'Skills',               breadcrumb: 'Skills Registry' },
   { label: 'Agent Templates',      breadcrumb: 'Agent Templates' },
   { label: 'My Credentials',       breadcrumb: 'My Credentials' },

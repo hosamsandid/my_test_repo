@@ -94,7 +94,7 @@ function matchInternalListeners({ repo, label, kind }, agents) {
 // `payload.pull_request.number`) work byte-compatibly. `actor` carries the
 // producing agent, attributed — an internal emit is an explicit act, never
 // anonymous.
-function buildSyntheticEvent({ repo, label, kind, number, title, producerId, eventId, now }) {
+function buildSyntheticEvent({ repo, label, kind, number, title, closesIssues, producerId, eventId, now }) {
   const subject = {
     number,
     html_url: `https://github.com/${repo}/${kind === 'pr' ? 'pull' : 'issues'}/${number}`,
@@ -102,6 +102,12 @@ function buildSyntheticEvent({ repo, label, kind, number, title, producerId, eve
     // the consumer's trigger notice shows `[#N](url): <title>`, not just `#N`.
     // Absent when the fetch failed/timed out — the notice degrades to `#N`.
     ...(typeof title === 'string' && title ? { title } : {}),
+    // #2114: for a PR, carry the issue(s) it closes (strict parseCloses, from the
+    // caller's single PR-detail fetch) so admission control's `entryTicketRef`
+    // keys this hand-off to the issue's ticket rather than treating the PR as a
+    // brand-new one — which, over `transport: internal`, is what would otherwise
+    // deadlock a `wipLimit: 1` flow forever.
+    ...(kind === 'pr' && Array.isArray(closesIssues) && closesIssues.length ? { closesIssues } : {}),
   };
   return {
     id: eventId,

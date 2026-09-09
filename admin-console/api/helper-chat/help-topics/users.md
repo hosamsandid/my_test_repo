@@ -1,12 +1,12 @@
 ---
 id: users
 routes: ["/users"]
-title: Users
-summary: The human user *records* — who can sign in, under which name, with a login password or not, and who is a global System Admin. Which access scope they may see is set on the Access page.
+title: Administration
+summary: The one System-Admin surface — the human user records that can sign in, every team on the platform, and which team owns each agent and Working Environment.
 seeAlso:
-  - { label: "Access", to: "/teams" }
-  - { label: "My Credentials", to: "/my-credentials" }
   - { label: "Agent Chat", to: "/chats" }
+  - { label: "Working Environments", to: "/environments" }
+  - { label: "My Credentials", to: "/my-credentials" }
   - { label: "SSH Keys", to: "/ssh-keys" }
 askPrompts:
   - "What is the Subject and can I change it later?"
@@ -14,24 +14,42 @@ askPrompts:
   - "What happens to a user's agents and credentials when I delete them?"
   - "How does a person actually sign in — password or SSO?"
   - "What is the difference between System Admin and Team Admin?"
-  - "Can I delete the last System Admin by accident?"
+  - "Where did the Access page go, and how do I add someone to a team now?"
+  - "What is the difference between a team and an access scope?"
+  - "How do I share one Working Environment with several teams?"
 ---
 
 ## What this page manages
 
-This page owns the **human user record** end to end: create it, edit its
-details, set or clear a login password, mark it a **System Admin**, delete it.
+**Administration** is the one place that exists only for System Admins. It has
+three tabs:
 
-It is deliberately only half of access management. A record here says *who this
-person is*; it says nothing about **what they may see** — that is a membership in
-an access scope, granted on the **Access** page. A brand-new user with no
+| Tab | What it manages |
+|---|---|
+| **Users** | The human user **records** — who can sign in, under which name, with a login password or not, and who is a global System Admin. |
+| **All Teams** | Every team on the platform, including the ones you are not a member of. A clean-up view: see them, and delete one. |
+| **Resources** | Which tenant owns each agent and Working Environment — the ownership *tiers*. |
+
+Nothing here is where you **add somebody to a team**. That moved to the team
+itself: **Share…** in an Agent Team's context menu in the Agent Chat, where the
+team's own admins already are. This page is what is left over once sharing is
+decentralised — the platform-wide view, not the per-team one.
+
+A record on the Users tab says *who this person is*; it says nothing about **what
+they may see**. That is a membership in a team, and a brand-new user with no
 membership and no System-Admin flag can sign in and will see **nothing at all**
-(the API is fail-closed, not just the UI). Creating the record and forgetting the
-scope is the single most common reason for "I logged in and the console is
-empty".
+(the API is fail-closed, not just the UI). Creating the record and forgetting to
+share a team with them is the single most common reason for "I logged in and the
+console is empty".
 
 The page is open to **System Admins** only, and it needs the orchestrator to be
-reachable — user records live in the orchestrator's store, not in the console.
+reachable — user records and teams live in the orchestrator's store, not in the
+console.
+
+> **Where the Access page went.** It is gone, and deliberately not renamed. Its
+> member management is the **Share…** dialog; its all-teams table and its
+> resource-ownership section are the two tabs here; and `/teams` now redirects to
+> this page, so an old bookmark still lands somewhere useful.
 
 ## The record
 
@@ -53,27 +71,39 @@ system points back at a user by name. Changing it would
 silently sever an existing person from their own account, so the edit form shows it read-only and
 the API simply has no way to write it. If a person's identity really changes,
 delete and re-create — and note that this is an *offboarding* (see below), so
-re-granting their scopes on the **Access** page is part of the job.
+re-sharing their teams with the new record is part of the job.
 
 ## System Admin vs Team Admin
 
 They are different mechanisms, not two levels of one setting:
 
-- **System Admin** is the flag on the record here. It is **global**: every access
-  scope, every resource, plus the operations reserved for it (reassigning
-  resources between them, managing users, installing plugins). Note that
-  *creating a team* is **not** one of them — that is self-service for everybody.
-- **Team Admin** is a **membership** in one scope, granted on the **Access**
-  page. It manages that scope and its members, and nothing outside it.
+- **System Admin** is the flag on the record here. It is **global**: every team,
+  every resource, plus the operations reserved for it (moving resources between
+  tenants, managing users, installing plugins, deleting somebody else's team).
+  Note that *creating a team* is **not** one of them — that is self-service for
+  everybody.
+- **Team Admin** is a **membership** in one team, granted by that team's own
+  admins in the **Share…** dialog. It manages that team and its members, and
+  nothing outside it.
 
-One person can be Team Admin of one scope, Team Member of another, and System
+One person can be Team Admin of one team, Team Member of another, and System
 Admin on top of both — the flag supersedes the memberships rather than replacing
 them.
+
+**A team can never be left without an admin.** Removing or demoting the *last*
+Team Admin is refused unless a successor who is already a member is named in the
+same step. Deleting a *user* is refused for the same reason while they are the
+last Team Admin of anything.
 
 There is one thing a System Admin still cannot do: see or manage another
 person's **personal** credentials. That tier is owned by name, with no
 administrative break-glass — which is also why deleting a user *deletes* those
 credentials rather than transferring them.
+
+There is **no fourth principal**. The administrator a fresh stack starts with is
+an ordinary System-Admin *user record*, seeded once at first boot and managed on
+this page like anybody else — no built-in login lives outside the store. See
+*How signing in actually works* below for where that first record comes from.
 
 ## How signing in actually works
 
@@ -173,7 +203,7 @@ Otherwise **Delete** does noticeably more than remove a row, and it happens
 2. **Their personal SSH keys and GitHub tokens are deleted** from disk. Only
    *personal* credentials — team-scoped and system credentials are untouched, so
    other people's agents keep working.
-3. **The record and its scope memberships are removed** together.
+3. **The record and its memberships are removed** together.
 
 The order is the point: pausing and revoking happen *first*, so if something goes
 wrong the person still exists and can be dealt with, rather than leaving a
@@ -182,8 +212,8 @@ offboarding itself fails the deletion **still proceeds**, so on an error check t
 person's agents and personal credentials by hand rather than assuming they were
 cleaned up.
 
-Two things this does **not** do. It does not delete anything the *scope* owns —
-team resources belong to the scope, not to the person, and their agents are
+Two things this does **not** do. It does not delete anything a *team* owns —
+team resources belong to the team, not to the person, and their agents are
 paused rather than removed, so someone else can take them over. And it does not
 touch that person's contributions or history.
 
@@ -203,12 +233,143 @@ about, not blocked — stepping away deliberately is legitimate. If you ever do
 lose every System-Admin identity, recovery is a host-level edit of
 `/workspace/users/index.json`, not a console login.
 
+## The All Teams tab
+
+Every team is **private to its members**, so the ordinary way to find a team is
+to be in it. This tab is the exception a System Admin gets: the full list,
+including teams nobody has shared with you.
+
+The rows are **Agent Teams** — a squad of agents working a repository, created
+from **+ Create**. That is what a membership points at, so "every team on the
+platform" and "every Agent Team" are the same list.
+
+| Column | What it means |
+|---|---|
+| **ID** | The team's agent id. It is fixed at creation; there is no rename. |
+| **Team** | Its display name. |
+| **Owner** | The human who created it. `—` means the owner is unset, which is normal for a team that predates ownership being recorded. |
+| **Member agents** | How many `team-member` agents belong to it. |
+| **People** | How many humans hold a membership. A **no admin** marker appears when none of them is a Team Admin. |
+| **Team Admins** | How many of those people may change the team. |
+| **State** | Whether the team agent is enabled. |
+
+**A team with no admin is the state worth looking for.** Nobody left in it can
+change it, add anybody or delete it — only a System Admin can, which is why the
+marker is here rather than anywhere else. The fix is to share the team with
+someone as Team Admin, which you can do from the Agent Chat like anyone else.
+
+**This tab does not manage members.** There is no role dropdown and no add-person
+row, because that is the **Share…** dialog's job now and duplicating it here
+would be a second, differently-warned copy of an operation that can lock a team's
+own admins out. What is left here is the one thing only a System Admin can do.
+
+## Deleting a team
+
+Deleting a team runs **two cascades**, and the confirmation names both before you
+commit:
+
+- **Its member agents are deleted** — not paused, not orphaned. Their workspaces
+  go with them, which is the part that cannot be undone by re-creating the team.
+- **Its memberships are revoked.** The people themselves are untouched and keep
+  every other team they belong to.
+
+There is no "delete only if empty" refusal here, unlike the old access-scope
+delete: a team *is* its agents, so an empty one would be nothing to protect. If
+you only want the team out of your way, disabling it is the reversible option.
+
+Deleting a team is also the second way past a refused *user* deletion: a person
+who is the last admin of a team you no longer need stops being blocked once that
+team is gone.
+
+## The Resources tab
+
+This tab answers a different question from **All Teams**: not *which teams exist*
+but *who owns each thing*. Moving a resource between tenants is handing it to
+another group of people, so it is reserved for System Admins.
+
+### An access scope is not an Agent Team
+
+The teams in the ownership dropdowns here are **access scopes** — the older,
+coarser tenant that a resource's `teamId` still names. They share a word with
+Agent Teams and nothing else:
+
+| | **Access scope** (the dropdowns here) | **Agent Team** (the All Teams tab) |
+|---|---|---|
+| What it is | A tenant a resource is stamped with | A squad of agents working a repository |
+| Created on | Nowhere any more — the ones that exist are the ones that exist | **+ Create**, self-service, by anyone |
+| Relationship | Owns Agent Teams, among everything else | Sits inside exactly one access scope |
+
+**No new access scope can be minted**, and none can be deleted from the console:
+the surface for that retired with the Access page, and the two tenancies are
+being collapsed into one in a later step. Until then a resource is still stamped
+with a scope, and this tab is where that stamp is changed.
+
+### Agents
+
+An agent belongs to exactly **one** tenant — there is no shared tier for an
+agent — so each row carries a plain dropdown.
+
+**An Agent Team moves as one unit.** It gets a single dropdown for the whole
+squad and its members are listed beneath it read-only, because they inherit the
+tenant from their parent rather than carrying one of their own. If the parent
+moves but a member cannot, the error says so and names how many were left behind:
+the squad is briefly split across two tenants, and retrying is what resolves it.
+
+Reassigning changes **who may see and manage** the resource. It does not restart
+an agent, move a repository, or alter what the resource does.
+
+### Working Environments, and the shared tier
+
+An environment is **tiered**, not simply owned, so its row states the tier first
+and **Change ownership** edits it as one:
+
+- **Team** — owned by a single access scope, exactly like an agent.
+- **Shared** — reachable by every scope you assign it to. This is what lets one
+  repository, key and provider serve several teams instead of each team wiring up
+  its own infrastructure before it can start. A shared environment assigned to
+  **no** scope is reachable by no team at all, only by System Admins; the row
+  says so rather than looking owned.
+
+The tier is why this is not a one-click dropdown any more. Picking a team for a
+**shared** environment does not just move it — it *un-shares* it, taking it away
+from every other team that was using it. Stating the tier and showing what the
+record will be after saving is what makes that visible before you commit.
+
+A **personal** tier does not exist for environments: an operator has to be able
+to repair and delete them, and a personal record has no administrative
+break-glass by design. If a row ever reports one, that is a record in a state the
+platform does not create.
+
+### What ownership still gates
+
+Ownership is enforced by the API, not just hidden in the UI:
+
+- **Lists are filtered** by the owning tenant — agents, Working Environments and
+  team-scoped credentials outside your teams are not returned at all.
+- **An agent's work plane follows its agent** — the chat transcript, the session
+  log, the workspace browser and the git actions in it. Reaching one for an agent
+  outside your teams answers *not found*, exactly as a non-existent agent would,
+  so an agent id alone tells you nothing about whether that agent exists.
+- **Management calls are rejected** with a 403 when you are neither a System
+  Admin nor a **Team Admin** of the team in question. The console only trims the
+  controls; the refusal happens server-side.
+
+Two things ownership deliberately does **not** gate. **Personal credentials** are
+outside the model entirely: they belong to one human by name, and neither a
+System Admin nor the built-in admin can see or manage them. And **choosing a
+Model Provider for the console's own AI helpers** needs only membership, not the
+Team-Admin role, so an ordinary Team Member can run the Flow Copilot billed
+against a provider their team is entitled to.
+
 ## Working with this page
 
-- The table's **Password** column shows only *Set* or *None*, and **System
-  Admin** marks the global flag — neither says anything about which scopes the
+- The Users table's **Password** column shows only *Set* or *None*, and **System
+  Admin** marks the global flag — neither says anything about which teams the
   person can see.
-- **Manage their access** on the **Access** page: without a membership there, a
-  new non-admin user sees an empty console.
-- The row order is alphabetical by display name, so a freshly created user
-  appears in place rather than at the end.
+- **To give somebody access**, open the team in the **Agent Chat** and use
+  **Share…**. Without a membership there, a new non-admin user sees an empty
+  console.
+- The user rows are alphabetical by display name and the team rows by team name,
+  so a freshly created one appears in place rather than at the end.
+- Each tab keeps its place in the address bar (`?tab=teams`, `?tab=resources`),
+  so a link to one opens on it.

@@ -21,6 +21,7 @@ export const APP_NAME = 'Agent Studio';
 export const ROUTE_TITLES = {
   '/chats': 'Agent Chat',
   '/flows': 'Flows',
+  '/flow-control': 'Flow Control',
   '/role-templates': 'Agent Templates',
   '/skills': 'Skills',
   '/knowledge': 'Knowledge',
@@ -31,8 +32,8 @@ export const ROUTE_TITLES = {
   '/mcp': 'MCP Servers',
   '/environments': 'Working Environments',
   '/github-events': 'GitHub Event Log',
-  '/teams': 'Access',
-  '/users': 'Users',
+  // No `/teams`: #2085 retired the Access page and made the route a redirect.
+  '/users': 'Administration',
   '/token-usage': 'Token Usage',
   '/plugins': 'Plugins',
   '/maintenance-mode': 'Maintenance Mode',

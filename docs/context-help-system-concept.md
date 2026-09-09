@@ -408,12 +408,13 @@ only the **current context's** topic plus its `seeAlso` neighbours (§3.2), so t
 absorbs the growth of every page's help at once. What the number means changed with it: it is now
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
-`SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/chats`** —
-the Agent Chat topic plus its `seeAlso` neighbours — at **312,234 — 91.8% used,
-27,766 left** (the crown moved off `/quickstart`, now 307,136: `agent-chat.md` names both
-`/github-events` and `/environments` among its `seeAlso`, so #2102's and #2083's topic growth
-landed on it in full; #1459 then added +319, its `access-users.md` work-plane bullet folding
-in through `agent-chat.md`'s `/teams` `seeAlso` link) (#2068 made flow drafts private-by-default and shareable, adding an eleventh
+`SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
+the `create.md` topic plus its `seeAlso` neighbours — at **312,384 — 91.9% used,
+27,616 left** (the crown moved BACK off `/chats`, which had held it at 314,511: #2085 dissolved
+the Access page, folding `access-users.md` into `users.md` and DROPPING the `/teams` link
+`agent-chat.md` carried rather than re-pointing it — the successor surface for what that link
+promised is the Share dialog on `/chats` itself, and Administration is System-Admin-only — so
+`/chats` lost a whole neighbour topic and fell out of first place) (#2068 made flow drafts private-by-default and shareable, adding an eleventh
 `flows.md` chapter *Sharing a draft*; `create.md` names `/flows` among its `seeAlso`, so it
 lands on this crown in full: +2,673, re-measured on the merge and not summed on a stale base.
 #2067 (per-agent scoped repositories) landed on main while this branch was open and grew the

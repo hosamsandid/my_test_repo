@@ -8,7 +8,6 @@ seeAlso:
   - { label: "Knowledge", to: "/knowledge" }
   - { label: "Create something new", to: "/create" }
   - { label: "Working Environments", to: "/environments" }
-  - { label: "Access", to: "/teams" }
   - { label: "GitHub Event Log", to: "/github-events" }
 askPrompts:
   - "What is the difference between a loop trigger and a cron trigger?"
@@ -18,12 +17,15 @@ askPrompts:
   - "What exactly happens when I retire a learning?"
   - "Why does switching the model provider restart the agent?"
   - "How do I point the agent at a file in its workspace?"
-  - "What is the difference between an Agent Team and a Team on the Access page?"
+  - "What is the difference between an Agent Team and an access scope?"
   - "What is the difference between Disable, Reset to stub and Delete?"
   - "Why does one of my agents show as not initialised?"
   - "Where did the Agents page go?"
   - "Where did the orphaned-agents list go?"
   - "Where do an agent's skills, prompt and plugins come from?"
+  - "How do I give a colleague access to one of my teams?"
+  - "What is the difference between a Team Admin and a Team Member?"
+  - "Why can't I remove the last Team Admin from a team?"
 ---
 
 This page has four areas, and each of them has a **?** that opens this help at
@@ -107,9 +109,11 @@ where its prompt and skills come from:
 | **Agent Team** | A squad of agents working a repository. It stores a system-prompt template and hosts no agent itself — **Add member…** on the team's group header spawns agents that share the prompt and Working Environment but each get their own workspace and their own conversation. | Several copies of the same kind of agent — e.g. three reviewer agents in parallel. Start one from the **Create** launcher rather than by hand. |
 | **Team Member** | One agent spawned from an Agent Team. Its system prompt, skills and MCP servers **inherit** from the parent team unless you flip a field from *Inherit* to *Custom*. Role, Working Environment and parent team are fixed at creation; of those, only the parent team is shown in the Settings form. | You do not pick this role — it is assigned when you add a member to a team. |
 
-> An **Agent Team** is *not* the same thing as a **Team** on the **Access**
-> page. That Team is the human tenant / **access scope** every agent,
-> environment and credential belongs to; an Agent Team is a squad of agents.
+> An **Agent Team** is *not* the same thing as an **access scope**. The scope is
+> the older, coarser tenant every agent, environment and credential is stamped
+> with, managed by a System Admin on the **Administration** page; an Agent Team
+> is a squad of agents, and it is what sharing, membership and your own rights
+> are keyed on.
 
 **The three states a row can be in.** *Active* — running and ready to chat.
 *Paused* — the workspace is kept, the process is stopped (this is what **Disable**
@@ -171,7 +175,8 @@ on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:
   agent restarts once and comes back on its own.
 - A group header carries the team-wide equivalents: **Enable/Disable** for the
   whole team, **Add member…**, **Team settings…** (which opens the team's own
-  Settings tab here rather than jumping to another page), **Export team
+  Settings tab here rather than jumping to another page), **Share…** (who may
+  open this team — see *Sharing a team* below), **Export team
   (ZIP)**, **Open in Flow Editor** and **Delete team**.
 - **Add member…** asks one question before it acts: **Materialize now**, which is
   ticked by default. Leave it ticked and the member is created as it always was —
@@ -601,6 +606,51 @@ most consequential thing in this form, so it is not below the plugin grants.
   live context, mounted **read-only** by default; tick read-write to let the
   agent change files on the host. Saving re-provisions the agent's container.
   Offered only on the local / self-hosted stack.
+
+## Sharing a team — who can open it and who can change it
+
+A team is **private to the people it has been shared with**. **Share…** on the
+group header is where that list lives: it is the whole surface, and it needs no
+System Admin and no other page.
+
+Two roles, and the difference is not subtle:
+
+| | **Team Admin** | **Team Member** |
+|---|---|---|
+| Open the team, chat with its agents, read its session history and workspace | yes | yes |
+| See who else has access | yes | yes |
+| Change agents, prompts, triggers, plugins, team settings | yes | **no** |
+| Add, re-role or remove people | yes | **no** |
+
+**A Team Member sees the list read-only.** The entry is not greyed out for
+them — reading who is on your own team is a member's right — but the role
+picker, the Add row and the Remove buttons are not there, and the panel says
+so. This is parity with the server, not the protection itself: the write
+endpoints check the same rule independently, so a hand-made request is refused
+with a 403 whatever the buttons look like.
+
+**The picker searches everyone in the organisation.** People are findable by
+name and email; the private thing is the team, not the person. It shows a
+display name and an email address and nothing else — never whether somebody is
+a System Admin, never their GitHub handle — so a System Admin turns up in the
+results as an ordinary colleague. Only people who **already have an account**
+are offered: there is no invitation-by-email here, and a colleague who has never
+signed in has to be created on the **Users** page by a System Admin first. That
+is once per person, not once per team.
+
+**The last Team Admin cannot simply leave.** Removing them — or demoting them to
+Team Member — would leave a team nobody can administer, so the panel asks who
+takes over and does both in one step: the successor is promoted in the same
+write that removes or demotes the outgoing admin, so there is no moment in
+between. The successor has to be somebody **already on the team**, because
+naming an outsider would be a second, unaudited way in. If the last admin is
+also the team's only member there is nobody to hand over to, and the panel says
+that instead of offering an empty picker — add somebody first, or delete the
+team.
+
+**Removing somebody removes their access, not their account** and not anything
+they did: their user record, their personal credentials and the team's history
+are all untouched. They simply stop seeing the team.
 
 ## Where the Agents page went
 

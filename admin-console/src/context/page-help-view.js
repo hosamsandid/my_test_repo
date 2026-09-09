@@ -31,6 +31,9 @@ export const REDIRECTS = {
   '/briefings': '/flows',
   '/getting-started': '/chats',
   '/process': '/flows',
+  // `/teams` joined them in #2085: the Access page is dissolved (D10) and its
+  // topic content lives in the Administration topic the destination owns.
+  '/teams': '/users',
 };
 
 // Dynamic routes collapse to a canonical parent for topic resolution. A null
@@ -99,6 +102,10 @@ export const CONTEXT_KEYS = {
   // `SidePanel` at 60/61 hosting a "?" that deep-links into the `/flows`
   // sharing chapter, so without the lift the help would open behind it.
   'modal:draft-share': { label: 'Flows · share a draft' },
+  // The team Share panel in the Agent Chat rail (#2082). Same 60/61 SidePanel
+  // story; it claims no topic of its own, so resolution falls through to
+  // `/chats`, whose sharing chapter its "?" deep-links into.
+  'modal:team-share': { label: 'Agent Chat · share a team' },
   // The Plugins page's two confirm dialogs (#1986) — same story again, one layer
   // higher: a ConfirmDialog is the shared Modal at z-index 9999, so a "?" inside
   // one needs the lift to open beside the decision it explains rather than
@@ -123,9 +130,9 @@ export const CONTEXT_KEYS = {
   // `/role-templates`), registered so the panel lifts above the surface that
   // hosts the "?". Three are SidePanels (60/61); `modal:user-delete` is a
   // ConfirmDialog at 9999, so it needs the lift most.
-  'modal:team-manage': { label: 'Access · manage scope' },
-  'modal:user-edit': { label: 'Users · edit user' },
-  'modal:user-delete': { label: 'Users · delete user' },
+  'modal:team-delete': { label: 'Administration · delete team' },
+  'modal:user-edit': { label: 'Administration · edit user' },
+  'modal:user-delete': { label: 'Administration · delete user' },
   'modal:agent-template': { label: 'Agent Templates · editor' },
   // The save-time propagation offer (#2066) — no topic of its own
   // (resolution falls through to `/environments`), and a full-screen dialog
@@ -151,12 +158,13 @@ export const OVERLAY_FLOW_NODE = 'modal:flow-node';
 export const OVERLAY_FLOW_ANOMALIES = 'modal:flow-anomalies';
 export const OVERLAY_FLOW_IMPROVEMENTS = 'modal:flow-improvements';
 export const OVERLAY_DRAFT_SHARE = 'modal:draft-share';
+export const OVERLAY_TEAM_SHARE = 'modal:team-share';
 export const OVERLAY_PLUGIN_INSTALL = 'modal:plugin-install';
 export const OVERLAY_PLUGIN_UNINSTALL = 'modal:plugin-uninstall';
 export const OVERLAY_MODEL_PROVIDER = 'modal:model-provider';
 export const OVERLAY_ENVIRONMENT_FORM = 'modal:environment-form';
 export const OVERLAY_TOOLCHAINS = 'modal:toolchains';
-export const OVERLAY_TEAM_MANAGE = 'modal:team-manage';
+export const OVERLAY_TEAM_DELETE = 'modal:team-delete';
 export const OVERLAY_USER_EDIT = 'modal:user-edit';
 export const OVERLAY_USER_DELETE = 'modal:user-delete';
 export const OVERLAY_AGENT_TEMPLATE = 'modal:agent-template';

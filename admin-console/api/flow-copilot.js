@@ -53,7 +53,7 @@ const SYSTEM_PROMPT_CHAR_LIMIT = 200_000;
 // schema (docs/process-template-format.md + validateProcessTemplate);
 // `description` rides along because shipped bundles (core-sdlc) carry it.
 
-const BUNDLE_KEYS = ['processTemplateVersion', 'name', 'description', 'level', 'roles', 'gates', 'labels', 'stages', 'humans'];
+const BUNDLE_KEYS = ['processTemplateVersion', 'name', 'description', 'level', 'roles', 'gates', 'labels', 'stages', 'humans', 'wipLimit'];
 const ROLE_KEYS = ['id', 'displayName', 'role', 'sessionPolicy', 'systemPrompt', 'outcomes', 'github', 'channels', 'triggers', 'inputs', 'outputs', 'dependsOn', 'stage', 'parent', 'emits'];
 
 function isPlainObject(x) {

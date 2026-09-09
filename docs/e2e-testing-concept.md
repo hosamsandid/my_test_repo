@@ -167,12 +167,27 @@ scope rule), not a prerequisite.
 
 ## 5. Test data, auth & isolation (AC 5)
 
-- **Auth:** there is no `AUTH_ENABLED` flag today (#301 is open); the console is always
-  gated by the #276 env-credential session (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, signed
-  `aee_session` cookie). The tests **use the real gate**: global-setup logs in once via
-  `POST /api/auth/login` and persists Playwright `storageState`; one dedicated spec
-  asserts the unauthenticated redirect. No auth-disabling backdoor is added — the login
-  is part of what we're testing. If/when #301 lands, only global-setup changes.
+- **Auth:** the console is gated by the #276 env-credential session
+  (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, signed `aee_session` cookie). The tests **use the
+  real gate**: global-setup logs in once via `POST /api/auth/login` and persists
+  Playwright `storageState`; one dedicated spec asserts the unauthenticated redirect. No
+  auth-disabling backdoor is added — the login is part of what we're testing.
+- **Multi-user mode (#2086).** `AUTH_ENABLED` — the single-user ⇄ multi-user switch
+  #1457 landed, superseding this section's original "there is no such flag today (#301)"
+  note — is set to `true` for the e2e stack in `docker-compose.e2e.yml`. **This changes
+  nothing for the single-identity journeys**, and that is a property of the code rather
+  than a hope: `computeScope` returns `all: true` for `username === adminUsername` in
+  *both* modes, and the storageState session above IS that env admin. What the flag buys
+  is that a **user-store** identity is now scoped, which is what makes the
+  `team-sharing` journey's predicates able to fail at all — with the flag off, every
+  caller is the implicit System Admin and an "B cannot see A's team" assertion is inert
+  (the #1459 finding that blocked #2041 AC13).
+- **Two humans (#2086).** `e2e/steps/identity.js` mints real user records with local
+  passwords (#374/#1844), signs each into its **own browser context** through the same
+  real login route, and lets `access.actAs` re-point the journey's `ctx.page`/`ctx.request`
+  at one of them — so the whole existing step library, and the screenshot recorder,
+  follow the active human. Still no backdoor, and still no change to the journey schema
+  (journey-spec-concept.md §9): the capability lives entirely in the step library.
 - **Matrix identities:** `orchestrator/setup.sh` already bootstraps the admin user
   non-interactively when `ADMIN_PASS` is set and writes `MATRIX_ACCESS_TOKEN` +
   `CONDUWUIT_ADMIN_ROOM` back to the env file. Global-setup runs it against the e2e

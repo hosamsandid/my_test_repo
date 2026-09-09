@@ -17,6 +17,7 @@
 //                              emits, description, prompt } ] } ],
 //     gates:  [ { label } ],
 //     labels: [ { name, humanGate, brake } ],
+//     wipLimit,                          // admission control (#2114), optional
 //   }
 //
 // `labels[]` is the AUTHORITATIVE gate/brake registry (#928): `humanGate: true`
@@ -117,6 +118,27 @@ function normalizeHillClimb(hc) {
     .filter(s => typeof s === 'string' && s.trim()).map(s => s.trim());
   if (ex.length) out.excludeAgents = [...new Set(ex)];
   return Object.keys(out).length ? out : null;
+}
+
+// Admission control (#2114, flow-control concept §4.0). A declarative per-flow
+// WIP limit: at most N tickets may be in flight in this flow at once, enforced
+// by the platform at dispatch instead of by a dispatcher agent's prompt. The
+// stall this fixes began at dispatch — unbounded parallel dispatch onto one
+// shared `main` manufactures merge conflicts by construction — so `wipLimit: 1`
+// is the safe setting for a flow whose agents share a branch.
+//
+// Round-tripped through export → materialise → Edit-as-draft like
+// `stages`/`labels`/`hillClimb`, and persisted on the team agent (the
+// orchestrator reads it there; it never reads a draft).
+//
+// A positive integer or null (= unset). Unset is the backwards-compatible
+// default: no lane, no gate, today's unbounded behaviour. `0` is REFUSED rather
+// than tolerated — it reads like "no limit" but would mean "admit nothing", i.e.
+// a flow that silently never dispatches; the same reasoning the claim
+// post-condition validator uses (#2113), where silently dropping a mistyped
+// value recreates the bug being fixed.
+function normalizeWipLimit(v) {
+  return Number.isInteger(v) && v >= 1 ? v : null;
 }
 
 // Strip a leading `<teamId>-` so an exported member id becomes a reusable role
@@ -442,9 +464,10 @@ function bundleTrigger(t) {
  * @param {Array} [opts.gates]
  * @param {Array} [opts.labels]
  */
-function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stages, humans, hillClimb }) {
+function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stages, humans, hillClimb, wipLimit }) {
   const normHumans = normalizeHumans(humans);
   const normHillClimb = normalizeHillClimb(hillClimb);
+  const normWipLimit = normalizeWipLimit(wipLimit);
   return {
     processTemplateVersion: VERSION,
     name: name || 'process-template',
@@ -461,6 +484,10 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
     // Hill-climb collector config (#1222) — team-agent config, round-tripped;
     // omitted when unset so a flow that never configured it stays byte-identical.
     ...(normHillClimb ? { hillClimb: normHillClimb } : {}),
+    // Admission control (#2114) — the per-flow WIP limit the dispatch path
+    // enforces; omitted when unset so a flow that never configured it stays
+    // byte-identical.
+    ...(normWipLimit ? { wipLimit: normWipLimit } : {}),
     roles: (roles || []).map(r => ({
       id: roleKeyOf(r.id, teamId),
       displayName: r.displayName || r.id,
@@ -656,6 +683,13 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
     }
     if (hc.excludeAgents !== undefined && (!Array.isArray(hc.excludeAgents) || !hc.excludeAgents.every(s => typeof s === 'string'))) {
       return { ok: false, error: 'hillClimb.excludeAgents must be an array of strings' };
+    }
+  }
+  // Admission control (#2114): a positive integer, or absent for "no limit".
+  // Checked rather than tolerated — see normalizeWipLimit on why `0` is refused.
+  if (b.wipLimit !== undefined && b.wipLimit !== null) {
+    if (!Number.isInteger(b.wipLimit) || b.wipLimit < 1) {
+      return { ok: false, error: 'wipLimit must be a positive integer (omit it for no limit)' };
     }
   }
   // Named human roles (#987): unique slug ids, non-empty names, well-formed
@@ -1877,6 +1911,8 @@ module.exports = {
   // Direct agent hand-off (#2030)
   remapOutcomeWakeTargets,
   emptyDraftBundle, roleKeyOf, VERSION, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb,
+  // Admission control (#2114)
+  normalizeWipLimit,
   artifactKey, artifactHint, artifactIsNamed,
   slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,
   // Claim labels (#958) + success mirror (#1163)

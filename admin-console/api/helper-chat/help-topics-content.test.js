@@ -382,54 +382,6 @@ const TOPIC_CONTENT = [
     ],
   },
   {
-    id: 'access-users',
-    routes: ['/teams'],
-    // #1996 deepened it and added deep-links for the page header and the Manage
-    // panel. Resource ownership got its own chapter but no "?" — the section
-    // renders no header for one to sit on (see access-help-sections.js).
-    chapters: [
-      'What this page manages',
-      'Managing a scope and its members',
-    ],
-    // #1881 lifted the Access & Users intro box: the access-scope ("Team")
-    // definition, the explicit *this is not an Agent Team* distinction and the
-    // System-Admin / Team-Admin / Team-Member role list. The topic additionally
-    // records what a scope actually gates (list filtering, private agents, the
-    // 403 on management calls) and the default-team / still-owns-resources
-    // delete rules, which the page never spelled out.
-    concepts: [
-      'access scope',
-      'Agent Team',
-      'Agent Team Wizard',
-      'exactly one',
-      'System Admin',
-      'Team Admin',
-      'Team Member',
-      'default',
-      'fail-closed',
-      'updates their role in place',
-      'Lists are filtered',
-      'Private agents',
-      '403',
-      'Manage Users',
-      'Resource ownership',
-      'reassign',
-      // #1996 additions: the personal-credential carve-out from the scope model
-      // and the two refusals that make Delete safe.
-      'administrative break-glass',
-      'can never be deleted',
-      'still owns',
-      // #2059: the "fourth principal" #1996 pinned here — the env single admin
-      // with no user record — no longer exists. The configured credential is a
-      // one-shot SEED for a real System-Admin record, so what has to survive a
-      // reword is the OPPOSITE claim: there is no principal outside the store,
-      // and the first administrator is manageable on the Users page like the
-      // rest. Anchoring only the removal would let the old reading creep back.
-      'no fourth principal',
-      'seeded once at first boot',
-    ],
-  },
-  {
     id: 'models',
     routes: ['/models'],
     // #1882 lifted these from the Model Providers page: the intro paragraph, the
@@ -627,6 +579,38 @@ const TOPIC_CONTENT = [
     ],
   },
   {
+    id: 'flow-control',
+    routes: ['/flow-control'],
+    // #2116 (epic #2112 Flow Control §4.4) — a NET-NEW topic: there was no box
+    // to extract, because the page did not exist. The four chapters below are
+    // each the landing target of a "?" on the matching board surface, so the
+    // headings are load-bearing rather than decorative.
+    chapters: [
+      'What the Flow Control board shows',
+      'The lifecycle stages',
+      'Blockers and what to do about them',
+      'The epic roll-up',
+    ],
+    // The load-bearing claim of the whole subsystem is that state comes from
+    // GitHub evidence and not from labels — a reword that softens it would make
+    // the board look like every other label-driven view, which is precisely the
+    // failure §4.1 exists to prevent. The read-only property is pinned for the
+    // same reason: the ledger mutates nothing, and a topic promising a repair
+    // button would be promising a later phase's feature.
+    concepts: [
+      'the fact wins',
+      'Claimed done',
+      'read-only',
+      'Superseded',
+      'Stale base',
+      'Orphaned',
+      'time in the current stage',
+      'An empty',
+      'Maintenance mode',
+      'mutually exclusive',
+    ],
+  },
+  {
     id: 'github-events',
     routes: ['/github-events'],
     // #1886 lifted the page's multi-clause intro (observational log; Processed
@@ -813,7 +797,7 @@ const TOPIC_CONTENT = [
     // long prose and the go-live notice's follow-up advice.
     concepts: [
       'Agent Team',
-      'Access page',
+      'access scope',
       'Process',
       'Working Environment',
       'Team ID',
@@ -907,11 +891,20 @@ const TOPIC_CONTENT = [
       'Outcomes — what the agent signals when a run ends',
       'Knowledge — what this agent has learned',
       'Settings — configuring the agent',
+      'Sharing a team — who can open it and who can change it',
       'Where the Agents page went',
     ],
     concepts: [
       'one long-running Claude session',
       'Reset Session',
+      // #2082 — the four sharing rules a reword must not soften. The read-only
+      // list is the AC9 half that AC8's "disabled" wording would have removed;
+      // the name+email projection is D2/D11; existing-accounts-only is D3; the
+      // hand-over is D4.
+      'A Team Member sees the list read-only',
+      'never their GitHub handle',
+      'already have an account',
+      'The last Team Admin cannot simply leave',
       'one workspace',
       'wake instruction',
       'Cron (recurring)',
@@ -1030,11 +1023,16 @@ const TOPIC_CONTENT = [
     routes: ['/users'],
     // #1996 deepened it and split "Edit/offboarding dialog" into the two surfaces
     // it actually is — the edit panel and the delete confirmation ask different
-    // questions, and one is asked over a destructive button.
+    // questions, and one is asked over a destructive button. #2085 then folded
+    // the whole `access-users` topic in when the Access page was dissolved (D10)
+    // and added the three chapters its two new tabs deep-link into.
     chapters: [
       'What this page manages',
       'Creating and editing a user',
       'Deleting a user is an offboarding',
+      'The All Teams tab',
+      'Deleting a team',
+      'The Resources tab',
     ],
     // #1891 (E16) — the route E7 left uncovered. The topic absorbed the Users
     // page intro box (records vs memberships, the global System-Admin flag) and
@@ -1068,7 +1066,10 @@ const TOPIC_CONTENT = [
       // individually: one path, a consumed-once seed, and the two consequences
       // the platform accepts (no sign-in during a store outage, recovered on
       // the HOST; the password now living in the record). Plus the refusal that
-      // replaced the missing guard, in both its forms.
+      // replaced the missing guard, in both its forms. The "no fourth principal"
+      // reword-guard #2059 pinned on the now-retired access-users topic moves
+      // here too, since the seeded-record explanation lives in this topic after
+      // #2085 folded that page in.
       'one login path',
       'once, as a seed',
       'nobody can sign in',
@@ -1076,6 +1077,26 @@ const TOPIC_CONTENT = [
       'no longer revokes anything',
       'The last System Admin cannot be deleted',
       'cannot be demoted',
+      'no fourth principal',
+      'seeded once at first boot',
+      // #2085: everything the retired `access-users` topic was the only home
+      // for. The access scope still exists as the stamp the Resources tab
+      // assigns, so its concepts describe a live surface and had to be folded in
+      // rather than deleted with the page — plus the two things only this page
+      // can now say: where member management went, and why a shared environment
+      // is not a team dropdown.
+      'access scope',
+      'Agent Team',
+      'exactly one',
+      'Team Member',
+      'Lists are filtered',
+      '403',
+      'administrative break-glass',
+      'Share',
+      'no admin',
+      'un-shares',
+      'Shared',
+      'cascades',
     ],
   },
   {

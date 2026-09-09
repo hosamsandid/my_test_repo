@@ -51,6 +51,11 @@ const REDIRECTS = {
   '/briefings': '/flows',
   '/getting-started': '/chats',
   '/process': '/flows',
+  // #2085 (D10): the Access page is dissolved and `/teams` redirects to the
+  // Administration surface, whose topic absorbed `access-users.md`. Same shape
+  // as `/agents` → `/chats` in #1930 — an old link keeps its help instead of
+  // falling back to the Overview.
+  '/teams': '/users',
 };
 
 // Dynamic routes collapse to a canonical parent for topic resolution, exactly as
@@ -77,6 +82,11 @@ const DYNAMIC = [
 // `agent-chat.md` rather than retired — the concepts it carried (the roles, the
 // lifecycle states, Disable vs Reset to stub vs Delete, what the form fields
 // control) all describe surfaces that still exist, just elsewhere.
+// `/teams` left in #2085 (epic #2076 P6, D10), the fourth route to do so and the
+// second by the same mechanism: the Access page is dissolved, its two
+// System-Admin halves are tabs on `/users`, and `access-users.md` was folded
+// into that page's topic rather than retired — an access scope is still what a
+// resource's team tier names, so its concepts describe a live surface.
 const PAGE_ROUTES = new Set([
   '/chats',
   '/create',
@@ -95,9 +105,9 @@ const PAGE_ROUTES = new Set([
   '/mcp',
   '/plugins',
   '/maintenance-mode',
-  '/teams',
   '/users',
   '/flows',
+  '/flow-control',
   '/knowledge',
   '/about',
 ]);
@@ -108,6 +118,7 @@ const PAGE_ROUTES = new Set([
 const ALLOWLIST = new Set([
   '/',
   '/agents',
+  '/teams',
   '/blueprints',
   '/briefings',
   '/getting-started',
@@ -179,14 +190,15 @@ const OVERLAY_KEYS = {
   'modal:flow-anomalies': 'The Flow anomalies side panel of a live team.',
   'modal:flow-improvements': 'The Improvements side panel of a live team.',
   'modal:draft-share': 'The Share side panel of a draft on the Flows rail.',
+  'modal:team-share': 'The Share side panel of an Agent Team in the Agent Chat rail.',
   'modal:plugin-install': 'The install confirmation dialog on the Plugins page.',
   'modal:plugin-uninstall': 'The uninstall confirmation dialog on the Plugins page.',
   'modal:model-provider': 'The create/edit provider side panel on the Model Providers page.',
   'modal:environment-form': 'The create/edit side panel on the Working Environments page.',
   'modal:toolchains': 'The System-Admin Toolchains side panel on the Working Environments page.',
-  'modal:team-manage': 'The Manage/View side panel on the Access page.',
-  'modal:user-edit': 'The Edit side panel on the Users page.',
-  'modal:user-delete': 'The delete/offboarding confirmation on the Users page.',
+  'modal:team-delete': 'The delete-team confirmation on the Administration page\u2019s All Teams tab.',
+  'modal:user-edit': 'The Edit side panel on the Administration page\u2019s Users tab.',
+  'modal:user-delete': 'The delete/offboarding confirmation on the Administration page\u2019s Users tab.',
   'modal:agent-template': 'The template editor side panel on the Agent Templates page.',
   'modal:env-propagation': 'The repositories-changed / catch-up dialog on the Working Environments page.',
 };
@@ -245,9 +257,9 @@ const CONTEXT_KEYS = {
   // `modal:user-delete`, is a `ConfirmDialog` at 9999, which is exactly why it
   // needs the lift most: without it the help would open BEHIND the decision it
   // is there to inform.
-  'modal:team-manage': { label: 'Access · manage scope' },
-  'modal:user-edit': { label: 'Users · edit user' },
-  'modal:user-delete': { label: 'Users · delete user' },
+  'modal:team-delete': { label: 'Administration · delete team' },
+  'modal:user-edit': { label: 'Administration · edit user' },
+  'modal:user-delete': { label: 'Administration · delete user' },
   'modal:agent-template': { label: 'Agent Templates · editor' },
   // The save-time propagation offer (#2066). No topic of its own either —
   // resolution falls through to `/environments` — and it is the third
@@ -274,6 +286,10 @@ const CONTEXT_KEYS = {
   // own; resolution falls through to `/flows`, whose sharing chapter it
   // deep-links into.
   'modal:draft-share': { label: 'Flows · share a draft' },
+  // The team Share panel in the Agent Chat rail (#2082) — registered for the
+  // same reason: a `SidePanel` at 60/61 hosting a "?". No topic of its own;
+  // resolution falls through to `/chats`.
+  'modal:team-share': { label: 'Agent Chat · share a team' },
   // The Plugins page's install and uninstall confirms (#1986). Same reason as
   // every overlay above, one layer higher: a ConfirmDialog is the shared Modal
   // at z-index 9999, so a "?" inside one has to lift the help panel to 10000 to

@@ -7,7 +7,7 @@ seeAlso:
   - { label: "Model Providers", to: "/models" }
   - { label: "Agent Chat", to: "/chats" }
   - { label: "Token Usage", to: "/token-usage" }
-  - { label: "Access", to: "/teams" }
+  - { label: "Administration", to: "/users" }
 askPrompts:
   - "Does the Assist model change which model my agents run on?"
   - "Why is the Assist model picker highlighted?"

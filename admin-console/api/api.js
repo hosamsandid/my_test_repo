@@ -57,7 +57,7 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, normalizeWipLimit, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 // Process-draft access model (#2068) — one predicate for every draft route.
 const draftAccess = require('./draft-access');
@@ -2374,7 +2374,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(agentDir, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, github, channels, assistLlmEndpointId } = req.body;
+  const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, github, channels, assistLlmEndpointId } = req.body;
 
   // ── Label registry (#928/#981) ────────────────────────────────────────────
   // The gate/brake flags live on the TEAM agent (like `stages`) — the live
@@ -2693,6 +2693,21 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   if (labels !== undefined && fresh.role === 'team') {
     if (normLabels && normLabels.length) fresh.labels = normLabels;
     else delete fresh.labels;
+  }
+
+  // Admission control, team-agent only (#2114) — the declarative per-flow WIP
+  // limit the orchestrator's dispatch path enforces. Mirrors the bundle's
+  // `wipLimit`; unlike `stages`/`labels` this one DOES have a runtime effect, so
+  // an unusable value must not half-apply: a positive integer sets the limit,
+  // `null`/`0`/absent-from-the-body semantics are split — `null` explicitly
+  // clears it (back to unbounded dispatch), anything else invalid is refused.
+  if (wipLimit !== undefined && fresh.role === 'team') {
+    if (wipLimit === null) delete fresh.wipLimit;
+    else {
+      const norm = normalizeWipLimit(wipLimit);
+      if (!norm) return res.status(400).json({ error: 'wipLimit must be a positive integer, or null to remove the limit' });
+      fresh.wipLimit = norm;
+    }
   }
 
   // Named human roles, team-agent only (#987) — validated into normHumans above.
@@ -8061,6 +8076,25 @@ app.get('/api/teams/:teamId/flow-anomalies', apiLimiter, async (req, res) => {
   }
 });
 
+// GET /api/teams/:teamId/tickets — the ticket ledger (#2115, flow-control
+// concept §4.1). Team-scoped read-only proxy to the orchestrator's reconciler,
+// which derives each work item's TRUE lifecycle state from GitHub evidence and
+// names the blocker holding it. Observe-only — no repair, no mutation — so it is
+// gated exactly like `flow-anomalies`: visibility only, no `canManageTeam`.
+app.get('/api/teams/:teamId/tickets', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/tickets`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // GET /api/teams/:teamId/hill-climb/metrics — latest persisted run-metrics
 // snapshot (hill-climbing loop Phase 1, #1222). Team-scoped read-only proxy;
 // the Improvements panel (#1223) renders the metric tiles from this.
@@ -8465,6 +8499,7 @@ app.get('/api/process/template', (req, res) => {
   let teamName = team;
   let teamStages = [];
   let teamHillClimb = null;
+  let teamWipLimit = null;
   if (team) {
     const teamCfg = readJsonFile(path.join(AGENTS_DIR, team, 'config.json'), null);
     if (teamCfg?.displayName) teamName = teamCfg.displayName;
@@ -8472,6 +8507,9 @@ app.get('/api/process/template', (req, res) => {
     // Hill-climb collector config (#1222) round-trips like stages; normalizeHillClimb
     // (in buildProcessTemplate) drops applied-card/snapshot state so only config travels.
     teamHillClimb = teamCfg?.hillClimb || null;
+    // Admission control (#2114) — the per-flow WIP limit lives on the team agent
+    // like stages/labels, so the export carries it back into a portable bundle.
+    teamWipLimit = normalizeWipLimit(teamCfg?.wipLimit);
   }
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
@@ -8514,6 +8552,8 @@ app.get('/api/process/template', (req, res) => {
     humans: teamHumansRegistry(team),
     // Hill-climb collector config (#1222) rides along on the team agent.
     hillClimb: teamHillClimb,
+    // Admission control (#2114) rides along on the team agent, same as above.
+    wipLimit: teamWipLimit,
   }));
 });
 
@@ -14286,6 +14326,11 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // stored on the team agent (like `stages`/`labels`) so an imported bundle keeps
   // its collector config. null when the bundle never configured it.
   const bundleHillClimb = normalizeHillClimb(body.processTemplate?.hillClimb);
+  // Admission control (#2114) — the declarative per-flow WIP limit, stored on the
+  // team agent (like `stages`/`labels`) because the orchestrator's dispatch path
+  // reads the team config, never a draft. null when the bundle set no limit, in
+  // which case dispatch stays unbounded exactly as before.
+  const bundleWipLimit = normalizeWipLimit(body.processTemplate?.wipLimit);
 
   // Label-suffix stamping (#902): one-shot rename applied to the member array
   // + bundle label registry before any agent is created. No-op when labelSuffix
@@ -14585,6 +14630,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           ...(bundleHumans.length ? { humans: bundleHumans } : {}),
           // Hill-climb collector config (#1222) — held on the team agent like stages.
           ...(bundleHillClimb ? { hillClimb: bundleHillClimb } : {}),
+          // Admission control (#2114) — held on the team agent like hillClimb.
+          ...(bundleWipLimit ? { wipLimit: bundleWipLimit } : {}),
           // Authoritative gate/brake label registry (#928): the live graph has no
           // bundle to read it from and gate-ness is no longer inferable from the
           // label's name, so the team agent holds it — same pattern as `stages`.
@@ -14959,6 +15006,11 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // stored on the team agent (like `stages`/`labels`) so an imported bundle keeps
   // its collector config. null when the bundle never configured it.
   const bundleHillClimb = normalizeHillClimb(body.processTemplate?.hillClimb);
+  // Admission control (#2114) — the declarative per-flow WIP limit, stored on the
+  // team agent (like `stages`/`labels`) because the orchestrator's dispatch path
+  // reads the team config, never a draft. null when the bundle set no limit, in
+  // which case dispatch stays unbounded exactly as before.
+  const bundleWipLimit = normalizeWipLimit(body.processTemplate?.wipLimit);
 
   // Label-suffix stamping (#902) — see the non-streaming handler.
   let suffixWarnings = [];
@@ -15282,6 +15334,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           ...(bundleHumans.length ? { humans: bundleHumans } : {}),
           // Hill-climb collector config (#1222) — held on the team agent like stages.
           ...(bundleHillClimb ? { hillClimb: bundleHillClimb } : {}),
+          // Admission control (#2114) — held on the team agent like hillClimb.
+          ...(bundleWipLimit ? { wipLimit: bundleWipLimit } : {}),
           // Authoritative gate/brake label registry (#928) — see the sibling
           // materialise path; the live graph reads it back off the team agent.
           ...(bundleLabels.length ? { labels: bundleLabels } : {}),
@@ -16355,6 +16409,16 @@ app.get('/api/matrix/agents', (req, res) => {
       // menu can disable what the server would reject (mirrors `canSwitch` on
       // GET /api/agents/:id/model).
       canManage: canManageAgent(scope, agentMetaForScope(cfg)),
+      // Whether THIS caller may change the team's MEMBER LIST — the predicate
+      // `POST`/`DELETE /api/admin/memberships` enforce, shipped so the Share
+      // panel (#2082) can offer a read-only list instead of buttons that 403.
+      // For a `role: 'team'` row `canManage` above happens to resolve to the
+      // same thing (`agentMetaForScope().teamId === cfg.id`, so `canManageAgent`
+      // falls through to `canManageTeam`), and that coincidence is exactly why
+      // this is a separate field: a later change to the agent predicate must
+      // not silently open the member list (#2041 §7.1). Only on team rows —
+      // absent elsewhere, so a caller cannot read it as "not permitted".
+      ...(cfg.role === 'team' ? { canManageTeam: canManageTeam(scope, id) } : {}),
       dmRoomId: dm?.roomId || null,
       environmentId: cfg.environmentId || null,
       environmentName: env?.name || cfg.environmentId || null,

@@ -18,8 +18,12 @@ import {
   withChatDialogLabels,
 } from './rail-lifecycle.js';
 import {
-  NO_RIGHTS_HINT, TEAM_LOCKED_HINT, buildAgentMenu, buildTeamMenu,
+  NO_RIGHTS_HINT, TEAM_LOCKED_HINT, MEMBERS_MANAGE_HINT, MEMBERS_READ_ONLY_HINT,
+  buildAgentMenu, buildTeamMenu,
 } from '../agent-lifecycle/agent-lifecycle-menu.js';
+
+/** One menu entry by key — `undefined` reads as a failed assertion, not a crash. */
+const byKey = (items, key) => items.find(i => i.key === key) || {};
 
 function fakeStorage(initial = {}) {
   const map = { ...initial };
@@ -239,8 +243,8 @@ test('railMenuItems routes each target kind to its own menu', () => {
   });
   assert.equal(team.label, 'Team actions for Zeta Team');
   assert.deepEqual(team.items.map(i => i.key), [
-    'toggle-team', 'add-member', 'edit-team', 'export-team', 'open-flow-editor', 'delete-team',
-    'help',
+    'toggle-team', 'add-member', 'edit-team', 'share', 'export-team', 'open-flow-editor',
+    'delete-team', 'help',
   ]);
 });
 
@@ -377,6 +381,41 @@ test('railMenuItems omits the fan-out toggle for a header-less team group', () =
   });
   assert.equal(items.some(i => i.key === 'toggle-team'), false);
   assert.ok(items.some(i => i.key === 'delete-team'));
+  // Share needs only the team id, so it survives here — and with no header row
+  // to read a predicate off, it must read as permitted rather than as refused.
+  assert.equal(byKey(items, 'share').title, MEMBERS_MANAGE_HINT);
+});
+
+test('#2082 — the rail reads canManageTeam off the team row, not canManage', () => {
+  // The chat payload ships an explicit `canManageTeam` on `role: "team"` rows.
+  // The two coincide today, so the point of the field is that a change to
+  // `canManageAgent` cannot silently open the member list (#2041 §7.1).
+  const header = { id: 'zeta', role: 'team', enabled: true, displayName: 'Zeta Team' };
+  const readOnly = railMenuItems({
+    target: { kind: 'team', group: { id: 'zeta', header: { ...header, canManage: true, canManageTeam: false } } },
+    agents: [],
+  });
+  assert.equal(byKey(readOnly.items, 'share').title, MEMBERS_READ_ONLY_HINT);
+  assert.equal(byKey(readOnly.items, 'share').disabled, false, 'still openable — the list is readable');
+  // …while the rest of the menu keeps following `canManage`.
+  assert.equal(byKey(readOnly.items, 'delete-team').disabled, false);
+
+  const manageable = railMenuItems({
+    target: { kind: 'team', group: { id: 'zeta', header: { ...header, canManage: false, canManageTeam: true } } },
+    agents: [],
+  });
+  assert.equal(byKey(manageable.items, 'share').title, MEMBERS_MANAGE_HINT);
+  assert.equal(byKey(manageable.items, 'delete-team').disabled, true, 'the agent gate is untouched');
+});
+
+test('#2082 — a payload with no canManageTeam field falls back to canManage', () => {
+  // A response cached from before the field existed must not read as "refused".
+  const header = { id: 'zeta', role: 'team', enabled: true, canManage: true };
+  const { items } = railMenuItems({
+    target: { kind: 'team', group: { id: 'zeta', header } },
+    agents: [],
+  });
+  assert.equal(byKey(items, 'share').title, MEMBERS_MANAGE_HINT);
 });
 
 test('#1959 — the rail team menu appends no add-role entry', () => {

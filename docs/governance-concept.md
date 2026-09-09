@@ -304,7 +304,8 @@ which it previously was not.
 Joiner = user record + Viewer membership; mover = membership swap within a week;
 leaver = user deletion cascades memberships **and bumps sessionEpoch**, plus a
 last-30-days audit review. Quarterly: each Team Admin re-confirms their member list
-(the Access page already shows it). Includes the **agent leaver path**: deleting an
+(**Share…** on the team in the Agent Chat shows it — the central Access page was
+dissolved by #2085, and a Team Admin no longer needs a System Admin to run this). Includes the **agent leaver path**: deleting an
 agent deactivates its Matrix user and archives its DM room (today orphaned — see §11).
 
 **GOV-ACCESS-11 — Account hygiene floor.** `P1 · small build · enforce for new passwords`
@@ -821,7 +822,8 @@ every RW mount (a podman/local dev feature must not centralize on platform opera
 **GOV-PLATFORM-10 — Personal data & erasure.** `P1 (register at P0) · process + small build`
 The C4 register enumerates every personal-data location with its deletion procedure
 (including the honest "Matrix history needs admin-room tooling" caveat); offboarding
-runs the checklist from the Access page trigger point. P2: an `offboard` endpoint
+runs the checklist from the **Administration → Users** trigger point (the Access
+page it used to name was dissolved into that surface by #2085). P2: an `offboard` endpoint
 automating the sweep (redact from `users.md` files, drop session pointers, prune usage
 rows, audit line). Answers GDPR-style erasure with a checklist first, a script second.
 

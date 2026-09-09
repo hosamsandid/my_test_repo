@@ -323,6 +323,31 @@ the #2041 P2 sweep); as operator surfaces they must be gated
 action rides an already-audited hand-off route; the whole subsystem is
 maintenance-gated.
 
+### 4.7 Cross-lane merge coordination — the merge-queue (§4.0 across lanes)
+
+§4.0 bounds work-in-progress *within* a lane. Running several lanes against one
+shared `main` re-introduces the conflict at the **merge** point: N lanes each
+holding one open PR means N PRs racing one branch, and every merge re-conflicts
+the others — a reviewed, **passed** PR goes `CONFLICTING` again before it can
+merge and the reworker chases a moving base (observed live with three lanes).
+Serial-per-lane is **not** conflict-free.
+
+So the supervisor (§4.3) must own the merge point as a **merge-queue / "merge
+train"**:
+
+- **Global merge-serialisation** — at most one PR is driven to `ready-to-merge`
+  at a time across *all* lanes, so two PRs never race the same branch.
+- **Auto-rebase after each merge** — once a PR merges, every other in-flight epic
+  PR is rebased onto the new `main`, but **only** when the rebase is conflict-free
+  or mechanically resolvable (docs/changelog); a semantic conflict is routed to
+  the reworker, never force-resolved. Rides the audited reworker / `aee-wake`
+  path; never a force-push over unpushed work.
+
+This is the cross-lane analogue of admission control: §4.0 stops a lane racing
+*itself*; §4.7 stops the lanes racing *each other*. Without it, more lanes add
+conflict **thrash, not throughput** — the single shared `main` is the real
+serialisation point.
+
 ## 5. What is reused vs. what is new
 
 | Already shipped (the foundation) | New (the gap this concept fills) |
@@ -425,3 +450,153 @@ Its deeper cause, the epic running as **two parallel P-number tracks** whose
 merged half moved the model out from under the other's open PRs, is a process
 smell the reconciler surfaces (`superseded`/`stale-base`) but does not by itself
 cure; the durable cure is one epic, one track, dispatched one ticket at a time.
+
+---
+
+## Amendment 1 — what §4.1 actually shipped (#2115)
+
+The reconciler landed as `orchestrator/ticket-reconciler.js` (pure) +
+`orchestrator/ticket-reconcile-sweep.js` (shaping) + `computeTeamTicketLedger`
+in `orchestrator.js` (I/O) behind `GET /internal/teams/:id/tickets`, proxied by
+`GET /api/teams/:id/tickets`. Observe-only, as specified. Six things deviate
+from or sharpen §4.1, and each is a decision rather than an omission.
+
+**A1.1 — the lifecycle is derived from the flow graph, never from label names.**
+§4.1 writes the chain as `Backlog → Refining → Ready → In-Dev → In-Review →
+Rework → Doc → Mergeable → Merged/Done`, which reads like a fixed vocabulary.
+Hardcoding it would have made the ledger correct for exactly one team. Instead
+the positional states fall out of the declared graph: an **entry** label is a
+wake label no consumer emits (in the observed flow: `ready` / `ready-2` /
+`ready-3` — a consequence of the topology, not of their spelling), a **terminal**
+consumer is one that emits nothing and produces no PR (the Merger), `mergeable`
+is "the deepest active label reaches a terminal consumer", and `doc` is "one hop
+before that". A team whose entry label is `triage` gets `lane: 'triage'` with no
+code change; `ticket-reconciler.test.js` proves it on a flow sharing none of the
+observed vocabulary.
+
+**A1.2 — `buildFlowModel` had to be widened, from the outside.** The shipped
+model builder *drops* a human-gate label ("a human gate is not an agent wake"),
+which is right for anomaly detection and wrong here: in the observed flow the
+dispatch lanes **are** human gates that a Developer trigger listens on, so the
+ledger's `lane` and `ownerAgentId` columns are exactly the edges that builder
+discards — and any member whose only listener is a gate is absent from
+`model.consumers` entirely, taking its `emits` with it. Rather than change a
+builder three other features read, `buildTicketLedger` optionally takes the raw
+`members` and recovers the gate→consumer edges itself (`gateWakeEdges`,
+`mergedConsumers`). A caller that omits them still gets a ledger, with blank
+lanes on gate-dispatched tickets.
+
+**A1.3 — `claimed-done-not-merged` is not "a `:completed` label with an open
+PR".** Read literally, that flags every healthy ticket in a multi-stage flow: a
+Developer's `ready-2:completed` is *supposed* to coexist with an open PR the
+reviewer is working on. What makes a completion a lie is that **the flow did not
+move** — the completing stage set none of its declared outgoing labels and the
+PR is still open and unmerged past a grace window. For a terminal consumer (the
+Merger, which has no outgoing label at all) that condition is vacuously true the
+moment the PR fails to merge, which is precisely the §1.1 case that hid for
+hours. Both readings are pinned by fixtures.
+
+**A1.4 — `superseded` and `stale-base` decline rather than guess.** Only files a
+PR **adds** count toward `superseded` (a modified file trivially "already exists
+in `main`"), **all** of them must already be present, and the base file index
+must be **complete** — GitHub truncates a large recursive tree, and a truncated
+index reports "absent" for paths it merely never listed, which would accuse a
+healthy PR of being a duplicate. `stale-base` needs *both* halves — the PR
+text-merges **and** `main` has moved since it branched — because red checks on an
+unmoved base is the author's own bug (`ci-red`, a code fix) while red checks
+after `main` advanced under it is a rebase. Two different actions, hence two
+different codes. Likewise `mergeable` is three-valued: GitHub answers `null`
+while it is still computing, and mapping that either way invents or clears a
+conflict.
+
+**A1.5 — a ticket's labels live on both of its objects.** The dispatch gate sits
+on the issue; every downstream hand-off (`ready-for-review`, `ready-to-merge`
+and their `:wip`/`:completed` markers) sits on the pull request. The ledger reads
+the **union**, newest application winning a name collision. Reading either object
+alone loses the lane on half the tickets and the merge stage on the other half.
+
+**A1.6 — the ledger covers OPEN work, and `output-missing` folds into
+`stalled`.** The sweep fetches `state=open`, so `done` appears only where an
+open issue's PR merged. §4.1's table names successors for three of the four
+shipped anomaly classes; `output-missing` has none, so it folds into `stalled`
+and keeps its original class in `reasonDetail`. The GitHub-derived codes
+deliberately outrank the folded anomalies: an anomaly is a statement about the
+flow's plumbing, a conflict or a duplicate is a fact about the work.
+
+**Not built, and not owed by this ticket:** there is no board, no inbox and no
+UI — §4.3/§4.4/§4.5 own those, and #2115's own Scope is the ledger endpoint. The
+per-sweep PR-enrichment cap (`TICKET_LEDGER_PR_LIMIT`, default 60) bounds the
+cost of a team with a runaway number of open PRs; the PRs beyond it are reported
+in `errors[]` rather than silently dropped.
+
+## Amendment 2 — what §4.4 actually shipped (#2116)
+
+The board landed as `admin-console/src/pages/process/flow-control-view.js`
+(pure, the path §4.4 names) + `admin-console/src/pages/FlowControl.jsx` (the
+page) on a new `/flow-control` route, reading the Amendment-1 ledger. Read-only,
+like the ledger behind it. Four things deviate from or sharpen §4.4.
+
+**A2.1 — the netzplan stopgap is NOT built, and the reason is structural rather
+than a matter of effort.** §4.4 words it as *"the **supervisor** mirrors the
+ledger into the existing netzplan board via `aee-plan edit`"*, and §7's open
+question 1 as *"the zero-frontend stopgap **the supervisor can write**
+immediately"*. The supervisor is §4.3, which §6 phases at **Phase 4** — one
+phase *after* this board. It does not exist: `grep -ri supervisor` over the
+repository matches this document and nothing else. So the actor the stopgap is
+specified in terms of has no code, and there is no orchestrator→netzplan write
+path to substitute for it: `aee-plan` is an *agent-workspace* CLI seeded by a
+plugin grant and authenticated with a per-scope token, while a §4.3a supervisor
+is an orchestrator timer with neither a workspace nor a CLI. Building a mirror
+now would mean inventing that writer here, in a ticket whose acceptance criteria
+are all four about the board — and the stopgap's entire purpose is to be the
+*substitute* for the board, which this ticket delivers. It is therefore left to
+Phase 4, where its writer is born.
+
+Two factual corrections to §4.4 fall out of having read the plugin while
+deciding this, and they matter for whoever does build it. (a) *"`status` and
+`ownerId` are already modelled on graph nodes / swimlane lanes"* is half right:
+a **graph node** carries both (`plan-doc.js` `ownerId`, `status`), but a
+**swimlane lane** carries `ownerId` only — its progress model is a per-milestone
+`done` boolean, with no `status` field at all. A lifecycle mirror therefore has
+to use the **graph** primitive, not the swimlane one, despite "swimlane by
+lifecycle stage" being the board's own shape. (b) `ownerId` is *referentially
+validated* against `doc.owners[]` — an unknown owner is rejected on mutate and
+nulled on normalize — so a mirror must `add-owner` for each owning agent before
+it can assign one.
+
+**A2.2 — a purpose-built page, on its own route, not a side panel.** §4.4 says
+"a purpose-built admin-console page" and #2116 says "Console page", so the
+alternative was never really open; but it is worth recording why the cheaper
+option was refused. The obvious precedent is `FlowAnomaliesPanel`, a `SidePanel`
+on the Flows canvas — 560 px wide, which cannot host nine swimlanes, and reached
+only from a live team's canvas, which is not where an operator asking "where is
+everything?" starts. The cost of a real route is the registration surface
+(`App.jsx`, the sidebar, `breadcrumbs.js`, `route-title.js`, `PAGE_ROUTES`) plus
+an authored help topic, since `help-coverage.test.js` fails CI on a page route
+with no topic and no named owner. All of it is paid here; `help-topics/`
+gains `flow-control.md`.
+
+**A2.3 — "it never derives state from raw labels" is proven behaviourally, not
+by source inspection.** The obvious guard — grep the view for label vocabulary —
+is a false-positive generator for ordinary words and, worse, proves nothing
+about a label read through a variable. The check that actually holds is that
+`ticket.labels` is **not an input**: the test deletes the array from a ledger row
+entirely and asserts the rendered card is `deepEqual` to the card built with it.
+Paired with a fixture whose labels all say `:completed` while the reconciler says
+`in-review`, that turns AC2 from a claim into a fact — and a mutation that makes
+the view read `labels` fails eight tests. The page's own JSX is guarded
+separately (no `.labels` access, no flow token, no mutating `apiCall`), since a
+pure-module test cannot see the renderer.
+
+**A2.4 — the epic roll-up's buckets are exhaustive by construction.** §4.4's
+example (`3 done / 4 blocked / 2 waiting`) leaves "in progress" implicit and does
+not say what a *blocked* ticket that is also *done* counts as. `bucketFor`
+returns exactly one of `done | blocked | inProgress | waiting`, with `done`
+outranking `blocked` — a blocker recorded against merged work is history, not a
+call to action — and the test walks the whole state × blocker cross-product
+asserting the four counts sum to the total. Empty lanes are kept on the board
+for the converse reason: where work is *not* is information, and a board that
+hides its empty columns is a filtered list.
+
+**Still not built:** §4.5's central human inbox. The board surfaces
+`needsHuman` per card, which is the input that phase consumes, and nothing more.

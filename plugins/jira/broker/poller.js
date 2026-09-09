@@ -31,6 +31,7 @@ const {
   computeBackoffDelayMs,
   selectFreshEvents,
   planBurstHandoffs,
+  pruneThrottleState,
   loadThrottleState,
   saveThrottleState,
   checkAndIncThrottle,
@@ -231,7 +232,12 @@ class JiraPoller {
       }
     }
 
-    if (throttleDirty && this.throttleStatePath) saveThrottleState(this.throttleStatePath, this.throttleBuckets);
+    if (throttleDirty) {
+      // Evict closed-window buckets so the map does not grow one entry per
+      // issue for the life of the process (it is also pruned on persist/load).
+      this.throttleBuckets = pruneThrottleState(this.throttleBuckets);
+      if (this.throttleStatePath) saveThrottleState(this.throttleStatePath, this.throttleBuckets);
+    }
     return fired;
   }
 }

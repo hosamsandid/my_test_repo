@@ -11249,13 +11249,17 @@ async function main() {
           const { pluginId, scopeId } = scope;
           const { event, summary, payload, eventId } = parsed.value;
           // Per agent: is it in this scope, is the plugin granted, does it have
-          // a matching `plugin-event` trigger?
+          // a matching `plugin-event` trigger? Only an in-scope granted agent
+          // can be a target (`resolvePluginEventTargets` skips the rest before
+          // touching `.triggers`), so defer the `triggers.json` read — one fs
+          // hit per agent — to those, not every agent in the installation.
           const agents = listAgentIds().map((aid) => {
             const cfg = loadAgentConfig(aid);
             let grant = null;
             try { grant = cfg && cfg.token ? pluginGrantFor(effectivePlugins(cfg, loadAgentConfig), pluginId) : null; } catch { grant = null; }
             const inScope = !!(grant && resolveScopeId(cfg, grant.scopeGranularity) === scopeId);
-            return { agentId: aid, inScope, granted: !!grant, triggers: loadTriggers(aid) };
+            const granted = !!grant;
+            return { agentId: aid, inScope, granted, triggers: (inScope && granted) ? loadTriggers(aid) : [] };
           });
           const targets = pluginEvent.resolvePluginEventTargets({ pluginId, event }, agents);
           const now = new Date().toISOString();

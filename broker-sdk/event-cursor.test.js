@@ -13,6 +13,7 @@ const {
   passesHorizon,
   selectFreshEvents,
   planBurstHandoffs,
+  pruneThrottleState,
   loadThrottleState,
   saveThrottleState,
   checkAndIncThrottle,
@@ -147,4 +148,26 @@ test('throttle state round-trips through the fs helpers and prunes stale buckets
 
 test('loadThrottleState: a missing file is an empty map, never throws', () => {
   assert.deepEqual(loadThrottleState('/no/such/throttle.json', 3600_000), {});
+});
+
+test('pruneThrottleState: drops closed-window buckets, keeps live ones, tolerates junk', () => {
+  const now = Date.now();
+  const out = pruneThrottleState({
+    live: { count: 1, windowStart: new Date(now - 1000).toISOString() },
+    old: { count: 9, windowStart: new Date(now - 5 * 3600_000).toISOString() },
+    junk: null,
+    noStart: { count: 3 },
+  }, 3600_000);
+  assert.deepEqual(Object.keys(out), ['live']);
+});
+
+test('saveThrottleState prunes on write, so a long-lived in-memory map cannot bloat the file', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'evt-cursor-'));
+  const file = path.join(dir, 'throttle-state.json');
+  saveThrottleState(file, {
+    keep: { count: 1, windowStart: new Date().toISOString() },
+    drop: { count: 9, windowStart: new Date(Date.now() - 5 * 3600_000).toISOString() },
+  }, 3600_000);
+  const onDisk = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.deepEqual(Object.keys(onDisk.buckets), ['keep']);
 });

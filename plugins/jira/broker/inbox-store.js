@@ -50,11 +50,24 @@ class InboxStore {
 
   _read(scopeId) {
     assertScope(scopeId);
+    let raw;
     try {
-      const parsed = JSON.parse(fs.readFileSync(this._path(scopeId), 'utf8'));
+      raw = fs.readFileSync(this._path(scopeId), 'utf8');
+    } catch (err) {
+      if (!err || err.code !== 'ENOENT') {
+        process.stderr.write(`[jira-broker] inbox-store: read ${this._path(scopeId)} failed (${err.message})\n`);
+      }
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(raw);
       return Array.isArray(parsed) ? parsed : (Array.isArray(parsed.entries) ? parsed.entries : []);
     } catch (err) {
-      if (err && err.code === 'ENOENT') return [];
+      // Degrading to [] silently would drop every unconsumed event with no
+      // trace — say so.
+      process.stderr.write(
+        `[jira-broker] inbox-store: ${this._path(scopeId)} is not valid JSON (${err.message}) — dropping its contents\n`,
+      );
       return [];
     }
   }
@@ -65,6 +78,9 @@ class InboxStore {
     const tmp = `${file}.tmp-${process.pid}`;
     fs.writeFileSync(tmp, JSON.stringify({ entries }, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, file);
+    // `mode:` on writeFileSync is subject to umask; re-assert 0600 (the inbox
+    // holds Jira issue summaries).
+    try { fs.chmodSync(file, 0o600); } catch { /* best effort */ }
   }
 
   _fresh(entries) {

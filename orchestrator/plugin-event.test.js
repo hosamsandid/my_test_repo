@@ -28,6 +28,12 @@ test('validate: event is required; summary/eventId/payload optional and type-che
   assert.equal(validatePluginEventRequest({ event: 'x', summary: 5 }).ok, false);
   assert.equal(validatePluginEventRequest({ event: 'x', payload: [1, 2] }).ok, false);
   assert.equal(validatePluginEventRequest({ event: 'x', eventId: 7 }).ok, false);
+
+  // An explicit null for an optional key is accepted like an omitted one — the
+  // Jira broker sends `eventId: null` for a burst digest (would 400 otherwise).
+  const nulls = validatePluginEventRequest({ event: 'x', summary: null, eventId: null, payload: null });
+  assert.equal(nulls.ok, true);
+  assert.deepEqual(nulls.value, { event: 'x', summary: '', eventId: null, payload: null });
 });
 
 test('clampSummary: truncates at SUMMARY_MAX code points with an ellipsis', () => {

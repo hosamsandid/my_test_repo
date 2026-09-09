@@ -141,30 +141,34 @@ function planBurstHandoffs(deliverables, cap) {
 
 // ─── hour-scoped throttle ───────────────────────────────────────────────────
 // The state file is a flat map of `<key>` (typically `<agentId>:<convKey>`) →
-// bucket. Buckets older than 2x the window prune at load so the file does not
-// grow unbounded as old threads go quiet.
+// bucket. Buckets older than 2x the window are dead (the window has closed and
+// `checkAndIncThrottle` would start a fresh one), so they prune on both load
+// AND save — otherwise a long-running broker watching an active project
+// accumulates a bucket per issue forever, in memory and on disk.
+function pruneThrottleState(buckets, windowMs = THROTTLE_WINDOW_MS) {
+  const now = Date.now();
+  const pruned = {};
+  for (const [k, b] of Object.entries(buckets || {})) {
+    if (!b || !b.windowStart) continue;
+    if (now - new Date(b.windowStart).getTime() <= 2 * windowMs) pruned[k] = b;
+  }
+  return pruned;
+}
+
 function loadThrottleState(stateFilePath, windowMs = THROTTLE_WINDOW_MS) {
   try {
     if (!fs.existsSync(stateFilePath)) return {};
     const raw = JSON.parse(fs.readFileSync(stateFilePath, 'utf8')) || {};
-    const buckets = raw.buckets || {};
-    const now = Date.now();
-    const pruned = {};
-    for (const [k, b] of Object.entries(buckets)) {
-      if (!b || !b.windowStart) continue;
-      const age = now - new Date(b.windowStart).getTime();
-      if (age <= 2 * windowMs) pruned[k] = b;
-    }
-    return pruned;
+    return pruneThrottleState(raw.buckets || {}, windowMs);
   } catch {
     return {};
   }
 }
 
-function saveThrottleState(stateFilePath, buckets) {
+function saveThrottleState(stateFilePath, buckets, windowMs = THROTTLE_WINDOW_MS) {
   try {
     fs.mkdirSync(path.dirname(stateFilePath), { recursive: true });
-    fs.writeFileSync(stateFilePath, JSON.stringify({ buckets }, null, 2));
+    fs.writeFileSync(stateFilePath, JSON.stringify({ buckets: pruneThrottleState(buckets, windowMs) }, null, 2));
   } catch {
     /* best-effort */
   }
@@ -215,6 +219,7 @@ module.exports = {
   passesHorizon,
   selectFreshEvents,
   planBurstHandoffs,
+  pruneThrottleState,
   loadThrottleState,
   saveThrottleState,
   checkAndIncThrottle,

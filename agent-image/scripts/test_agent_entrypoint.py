@@ -4589,6 +4589,24 @@ class PluginEventDelivery(unittest.IsolatedAsyncioTestCase):
         await scheduler._process_pending()
         scheduler._execute.assert_awaited_once()
 
+    async def test_stale_trigger_id_falls_back_to_a_still_matching_trigger(self):
+        # The orchestrator stamped triggerId="old"; the consumer has since
+        # renamed it. The wake must still run, not be stranded on the dead id.
+        scheduler = self._scheduler()
+        entrypoint._save_triggers([{
+            "id": "renamed", "type": "plugin-event", "enabled": True,
+            "pluginId": "jira", "eventFilter": "status_changed", "prompt": "p",
+        }])
+        self._queue({
+            "kind": "plugin-event", "pluginId": "jira", "event": "status_changed",
+            "triggerId": "old",
+        })
+        scheduler._execute = AsyncMock()
+        await scheduler._process_pending()
+        scheduler._execute.assert_awaited_once()
+        trigger, = scheduler._execute.await_args.args
+        self.assertEqual(trigger["id"], "renamed")
+
     async def test_payload_lands_in_an_untrusted_envelope_not_the_instruction(self):
         scheduler = self._scheduler()
         entrypoint._atomic_write_json(self.workdir / "dm-room.json", {"roomId": "!room:local"})

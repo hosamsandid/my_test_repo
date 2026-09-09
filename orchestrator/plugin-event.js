@@ -70,13 +70,16 @@ function validatePluginEventRequest(body) {
   if (typeof event !== 'string' || !event.trim()) {
     return { ok: false, error: 'event must be a non-empty string' };
   }
-  if (body.summary !== undefined && typeof body.summary !== 'string') {
+  // `!= null` treats an explicit `null` like an omitted field — a broker that
+  // has no value for an optional key may send either (the Jira broker sends
+  // `eventId: null` for a burst digest). A wrong TYPE is still rejected.
+  if (body.summary != null && typeof body.summary !== 'string') {
     return { ok: false, error: 'summary must be a string when present' };
   }
-  if (body.eventId !== undefined && typeof body.eventId !== 'string') {
+  if (body.eventId != null && typeof body.eventId !== 'string') {
     return { ok: false, error: 'eventId must be a string when present' };
   }
-  if (body.payload !== undefined && (typeof body.payload !== 'object' || body.payload === null || Array.isArray(body.payload))) {
+  if (body.payload != null && (typeof body.payload !== 'object' || Array.isArray(body.payload))) {
     return { ok: false, error: 'payload must be an object when present' };
   }
   return {

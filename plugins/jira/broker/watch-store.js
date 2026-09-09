@@ -81,7 +81,18 @@ class WatchStore {
       throw err;
     }
     let parsed;
-    try { parsed = JSON.parse(raw); } catch { parsed = {}; }
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      // A corrupt file would otherwise degrade SILENTLY to an empty config —
+      // losing the watch list AND the poll cursors, so the next poll
+      // re-baselines and drops whatever changed meanwhile. Make it loud.
+      process.stderr.write(
+        `[jira-broker] watch-store: ${this._path(scopeId)} is not valid JSON (${err.message}) — `
+        + 'treating as empty; watches and cursors for this scope are lost until reconfigured\n',
+      );
+      parsed = {};
+    }
     const cfg = emptyConfig(scopeId);
     cfg.watches = Array.isArray(parsed.watches) ? parsed.watches.map(normalizeWatch).filter(Boolean) : [];
     cfg.doorbell = parsed.doorbell && parsed.doorbell.url ? { url: String(parsed.doorbell.url), secret: parsed.doorbell.secret ? String(parsed.doorbell.secret) : null } : null;
@@ -97,6 +108,9 @@ class WatchStore {
     const tmp = `${file}.tmp-${process.pid}`;
     fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, file);
+    // `mode:` on writeFileSync is subject to umask; re-assert 0600 (the file
+    // holds the poll cursor and, for a doorbell, a secret).
+    try { fs.chmodSync(file, 0o600); } catch { /* best effort */ }
   }
 
   // The full config for a scope (an empty one on first touch, never a 404).

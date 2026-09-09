@@ -35,6 +35,21 @@ function fieldType(key) {
   return SECRET_KEY_RE.test(String(key || '')) ? 'password' : 'text';
 }
 
+// A value preview (`ab…wxyz`) is enough to recognise a token, so it is not
+// "metadata" for someone who cannot manage the scope. GET is visible to any
+// team MEMBER of a granted team; only a Team Admin (canManage) sees the preview.
+// `set` / `required` / `complete` / `setBy` stay — they say whether a credential
+// exists and who configured it, not what it is.
+function redactScopeForViewer(scope, canManage) {
+  if (canManage || !scope || typeof scope !== 'object') return scope;
+  const keys = scope.keys && typeof scope.keys === 'object' ? scope.keys : {};
+  const redacted = {};
+  for (const [k, meta] of Object.entries(keys)) {
+    redacted[k] = meta && typeof meta === 'object' ? { ...meta, preview: null } : meta;
+  }
+  return { ...scope, keys: redacted };
+}
+
 // Shape the PUT body: only declared keys, string values, drop keys the caller
 // did not send (a form submit sends every field, but an API caller may PATCH).
 // The orchestrator re-validates; this keeps an obviously-malformed body from
@@ -49,4 +64,4 @@ function shapePutBody(body, declaredKeys) {
   return { values };
 }
 
-module.exports = { visibleScopes, assertCanWriteScope, fieldType, shapePutBody, SECRET_KEY_RE };
+module.exports = { visibleScopes, assertCanWriteScope, redactScopeForViewer, fieldType, shapePutBody, SECRET_KEY_RE };

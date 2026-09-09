@@ -5331,27 +5331,34 @@ class TriggerScheduler:
 
         The producer knows nothing about the consumer's trigger id; the entry
         carries the id the orchestrator resolved (``resolvePluginEventTargets``
-        picked the first matching ``plugin-event`` trigger), and the consumer
-        re-resolves defensively so a stale id does not strand the wake.
+        picked the first matching ``plugin-event`` trigger). That id is a
+        PREFERENCE, not a filter: the consumer re-resolves against its own
+        current triggers so an edit between enqueue and drain (which can change
+        the id) does not strand the wake — it falls back to the first trigger
+        that still matches this plugin + event.
         """
         plugin_id = entry.get("pluginId") if isinstance(entry.get("pluginId"), str) else ""
         event = entry.get("event") if isinstance(entry.get("event"), str) else ""
         wanted = entry.get("triggerId") if isinstance(entry.get("triggerId"), str) else ""
-        match = next(
-            (
-                t for t in triggers
-                if isinstance(t, dict)
-                and t.get("type") == _PLUGIN_EVENT_TRIGGER_TYPE
-                and t.get("enabled", True)
-                and t.get("pluginId") == plugin_id
-                and (
-                    not (isinstance(t.get("eventFilter"), str) and t.get("eventFilter").strip())
-                    or t.get("eventFilter").strip() == event
-                )
-                and (not wanted or t.get("id") == wanted)
-            ),
-            None,
-        )
+
+        def _base_match(t):
+            if not isinstance(t, dict):
+                return False
+            if t.get("type") != _PLUGIN_EVENT_TRIGGER_TYPE:
+                return False
+            if not t.get("enabled", True):
+                return False
+            if t.get("pluginId") != plugin_id:
+                return False
+            flt = t.get("eventFilter")
+            flt = flt.strip() if isinstance(flt, str) else ""
+            return not flt or flt == event
+
+        candidates = [t for t in triggers if _base_match(t)]
+        # Exact id first (the orchestrator's pick), else the first still-matching
+        # trigger — a renamed/replaced trigger must not strand the wake.
+        match = next((t for t in candidates if wanted and t.get("id") == wanted), None) \
+            or (candidates[0] if candidates else None)
         if not match:
             # No wake instruction authored here — report it rather than
             # inventing a prompt. Mirrors the wake-agent "nothing tells this

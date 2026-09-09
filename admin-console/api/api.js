@@ -8364,7 +8364,10 @@ app.get('/api/plugins/:id/credentials', apiLimiter, async (req, res) => {
   if (!r.ok || !r.body) return res.status(502).json({ error: 'could not resolve plugin credentials' });
   const scope = getScope(req);
   const scopes = pluginCredView.visibleScopes(r.body.scopes, (t) => visibleTeam(scope, t))
-    .map((s) => ({ ...s, canManage: canManageTeam(scope, s.scopeId) }));
+    .map((s) => {
+      const canManage = canManageTeam(scope, s.scopeId);
+      return { ...pluginCredView.redactScopeForViewer(s, canManage), canManage };
+    });
   res.json({ pluginId: id, credentials: r.body.credentials || [], scopes });
 });
 
@@ -8376,15 +8379,25 @@ async function proxyPluginCredentialWrite(req, res, method) {
   if (!gate.ok) return res.status(gate.status).json({ error: gate.error });
 
   // Only declared keys reach the orchestrator; it re-validates and re-enforces
-  // the grant. `setBy` is the caller's subject, always.
-  let declaredKeys = [];
-  try {
-    const meta = await orchestratorGetJson(`/internal/plugins/${encodeURIComponent(id)}/credentials`);
-    if (meta.ok && meta.body && Array.isArray(meta.body.credentials)) declaredKeys = meta.body.credentials.map((c) => c.key);
-  } catch { /* fall through — orchestrator re-validates anyway */ }
-  const outBody = method === 'PUT'
-    ? { ...pluginCredView.shapePutBody(req.body, declaredKeys), setBy: (req.user && req.user.sub) || 'unknown' }
-    : {};
+  // the grant. `setBy` is the caller's subject, always. For a PUT the
+  // declared-key list is load-bearing — `shapePutBody` drops every value not on
+  // it — so a failed pre-fetch must ABORT, not fall through to an empty list
+  // (which would silently strip the whole submission and still 200). DELETE
+  // needs no body, so it does not fetch.
+  let outBody = {};
+  if (method === 'PUT') {
+    let declaredKeys = null;
+    try {
+      const meta = await orchestratorGetJson(`/internal/plugins/${encodeURIComponent(id)}/credentials`);
+      if (meta.ok && meta.body && Array.isArray(meta.body.credentials)) {
+        declaredKeys = meta.body.credentials.map((c) => c.key);
+      }
+    } catch { /* handled below */ }
+    if (!declaredKeys) {
+      return res.status(502).json({ error: 'could not resolve the plugin\'s declared credential keys — not saving' });
+    }
+    outBody = { ...pluginCredView.shapePutBody(req.body, declaredKeys), setBy: (req.user && req.user.sub) || 'unknown' };
+  }
 
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   let resp;

@@ -107,6 +107,11 @@ function summariseEvents(kind, events) {
   return `${issue}${e.fromStatus && e.toStatus ? `: ${e.fromStatus} → ${e.toStatus}` : ''}`.trim() || 'status change';
 }
 
+// A wake POST must settle fast — the poll loop holds `running` across it (one
+// `_tick` fans out every scope sequentially), so a black-holed orchestrator
+// connection would otherwise stall polling for undici's multi-minute default.
+const DELIVER_TIMEOUT_MS = 15_000;
+
 async function deliver({ scopeId, kind, events }) {
   if (kind === 'throttle-warning') {
     // Nothing to wake an agent about — the throttle already suppressed the
@@ -116,19 +121,25 @@ async function deliver({ scopeId, kind, events }) {
   }
   const token = mint(PLUGIN_ID, scopeId, SIGNING_SECRET);
   const first = events[0] || {};
+  const eventId = kind === 'digest' ? null : (first.id || null);
   const body = {
     event: first.event || 'status_changed',
     summary: summariseEvents(kind, events),
-    eventId: kind === 'digest' ? null : (first.id || null),
+    // Omit rather than send an explicit null for a digest (the validator
+    // accepts either, but the entry shape prefers omission).
+    ...(eventId ? { eventId } : {}),
     payload: kind === 'digest'
       ? { kind: 'digest', count: events.length, events: events.slice(0, 20) }
       : first,
   };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), DELIVER_TIMEOUT_MS);
   try {
     const res = await fetch(`${orchestratorUrl()}/internal/plugin-event`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify(body),
+      signal: ctrl.signal,
     });
     const out = await res.json().catch(() => ({}));
     writeAudit(scopeId, scopeId, 'wake', res.ok ? 'ok' : `http-${res.status}`, `${kind}:${out.delivered ?? '?'}`);
@@ -137,8 +148,11 @@ async function deliver({ scopeId, kind, events }) {
       + `→ ${scopeId} (${kind}, ${events.length} event(s))\n`,
     );
   } catch (err) {
-    writeAudit(scopeId, scopeId, 'wake', 'error', err.message);
-    process.stdout.write(`[jira-broker] plugin-event FAILED → ${scopeId}: ${err.message}\n`);
+    const reason = err && err.name === 'AbortError' ? `timeout after ${DELIVER_TIMEOUT_MS}ms` : err.message;
+    writeAudit(scopeId, scopeId, 'wake', 'error', reason);
+    process.stdout.write(`[jira-broker] plugin-event FAILED → ${scopeId}: ${reason}\n`);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -154,10 +168,20 @@ const poller = new JiraPoller({
 });
 
 // ── small http helpers ─────────────────────────────────────────────────────
+// Every body this broker reads is a small JSON control message (a CLI arg set,
+// a watch-config list, the per-scope credential push). Cap it so a malformed or
+// hostile request cannot buffer unbounded memory; an over-cap body resolves
+// empty and parseJson turns it into `{}` (a 4xx from the handler).
+const MAX_BODY_BYTES = 1_000_000;
 function readBody(req) {
   return new Promise((resolve) => {
     let s = '';
-    req.on('data', (c) => { s += c; });
+    let over = false;
+    req.on('data', (c) => {
+      if (over) return;
+      s += c;
+      if (s.length > MAX_BODY_BYTES) { over = true; s = ''; req.destroy(); }
+    });
     req.on('end', () => resolve(s));
     req.on('error', () => resolve(s));
   });

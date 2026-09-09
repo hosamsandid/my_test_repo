@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { visibleScopes, assertCanWriteScope, fieldType, shapePutBody } = require('./plugin-credential-view');
+const { visibleScopes, assertCanWriteScope, redactScopeForViewer, fieldType, shapePutBody } = require('./plugin-credential-view');
 
 test('visibleScopes: keeps only scopes whose team the caller can see', () => {
   const scopes = [{ scopeId: 'team-a' }, { scopeId: 'team-b' }, { scopeId: 'team-c' }];
@@ -17,6 +17,22 @@ test('assertCanWriteScope: Team Admin of that team only', () => {
   assert.equal(denied.ok, false);
   assert.equal(denied.status, 403);
   assert.equal(assertCanWriteScope(null, () => true).status, 400);
+});
+
+test('redactScopeForViewer: strips value previews unless the caller can manage the scope', () => {
+  const scope = {
+    scopeId: 'team-a',
+    setBy: 'alice', complete: true,
+    keys: { 'api-token': { set: true, required: true, preview: 'AT…9xQ' }, 'site-url': { set: false, preview: null } },
+  };
+  // Team Admin — untouched.
+  assert.equal(redactScopeForViewer(scope, true), scope);
+  // Plain member — preview gone, everything else intact.
+  const r = redactScopeForViewer(scope, false);
+  assert.equal(r.keys['api-token'].preview, null);
+  assert.equal(r.keys['api-token'].set, true);
+  assert.equal(r.setBy, 'alice');
+  assert.equal(scope.keys['api-token'].preview, 'AT…9xQ'); // original not mutated
 });
 
 test('fieldType: secret-shaped keys → password, others → text', () => {

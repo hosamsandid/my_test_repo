@@ -11106,7 +11106,15 @@ function readBody(req) {
     req.on('end', () => {
       if (!body) return resolve({});
       try { resolve(JSON.parse(body)); }
-      catch { reject(new Error('invalid JSON body')); }
+      catch {
+        // A malformed request body is a client error, not a server fault: tag it
+        // 400 (the teams-store `tagged()` convention) so the admin catch-all
+        // forwards it as 400 rather than a bare 500, and so the #2135 AC9
+        // built-in-error rule never sweeps it up. (#2135 AC9 companion)
+        const e = new Error('invalid JSON body');
+        e.statusHint = 400;
+        reject(e);
+      }
     });
     req.on('error', reject);
   });
@@ -11227,7 +11235,24 @@ async function handleTeamsAdminApi(req, res) {
         // A single-operator stack creates no user records at all (the env
         // admin of #276 has none), so nothing here fires and its behaviour is
         // unchanged end to end.
-        provisionHumanMatrixIdentityInBackground(orchestrator.adminClient, created);
+        //
+        // `orchestratorSingleton` (not `orchestrator`, #2135): this is a
+        // module-level free function, so the `const orchestrator` of main() is
+        // not in scope here — reading it threw a ReferenceError *while
+        // evaluating the argument*, i.e. before the background helper's own
+        // .catch() could ever see it. A missing singleton degrades to a null
+        // adminClient, which `ensureHumanMatrixIdentity` already tolerates.
+        //
+        // Wrapped because the record is ALREADY on disk by this line: no
+        // failure after the persisting write may turn a completed create into
+        // a 500 the operator reads as "nothing happened".
+        try {
+          provisionHumanMatrixIdentityInBackground(
+            orchestratorSingleton ? orchestratorSingleton.adminClient : null, created);
+        } catch (err) {
+          console.error(
+            `[Orchestrator] Matrix identity provisioning could not be started for user ${created && created.id}: ${err.message}`);
+        }
         return sendJson(res, 201, clean(created)), true;
       }
       if (req.method === 'GET' && resourceId) {
@@ -11262,7 +11287,14 @@ async function handleTeamsAdminApi(req, res) {
         // the user removal is what the caller contracted for and still proceeds.
         let offboarding = null;
         try {
-          offboarding = await orchestrator.offboardOwner(resourceId);
+          // `orchestratorSingleton`, guarded — see the create branch above
+          // (#2135). This read has been a ReferenceError since 2026-08-11, so
+          // offboarding never actually ran; the try/catch made it silent.
+          if (orchestratorSingleton) {
+            offboarding = await orchestratorSingleton.offboardOwner(resourceId);
+          } else {
+            console.warn(`[Orchestrator] offboarding skipped for user ${resourceId}: orchestrator not initialised`);
+          }
         } catch (err) {
           console.error(`[Orchestrator] offboarding failed for user ${resourceId}: ${err.message}`);
         }
@@ -11271,7 +11303,12 @@ async function handleTeamsAdminApi(req, res) {
         // removed above: a live token must not outlive the user record. Runs
         // BEFORE deleteUser so a failure here leaves the user recoverable.
         try {
-          await deprovisionHumanMatrixIdentity(orchestrator.adminClient, resourceId);
+          // `orchestratorSingleton` — same ReferenceError as above (#2135), so
+          // no deleted human's Matrix account was ever de-provisioned.
+          // `deactivateMatrixUserId` already no-ops on a null adminClient, and
+          // the stored token is deleted either way.
+          await deprovisionHumanMatrixIdentity(
+            orchestratorSingleton ? orchestratorSingleton.adminClient : null, resourceId);
         } catch (err) {
           console.error(`[Orchestrator] Matrix de-provisioning failed for user ${resourceId}: ${err.message}`);
         }
@@ -11305,6 +11342,23 @@ async function handleTeamsAdminApi(req, res) {
     sendJson(res, 404, { error: 'unknown admin route' });
     return true;
   } catch (err) {
+    // An untagged JavaScript built-in error type (ReferenceError / TypeError /
+    // RangeError) is a programmer error, not a domain refusal: the store tags
+    // every domain throw with a `statusHint` (teams-store.js `tagged()`), so an
+    // untagged built-in reaching here is a bug like the #2135
+    // `orchestrator is not defined` ReferenceError. Do NOT relay its raw message
+    // to the client — that discloses internals to every caller of
+    // /internal/admin/* (a script, a curl, devtools, any future non-console
+    // client), not just the admin console. Return a generic sentence and log the
+    // real error + stack server-side, where an operator (and the Logs page) can
+    // see it. Every `statusHint`-tagged domain message is still forwarded
+    // verbatim below, so the UI byte-identity contract (users-view.test.js,
+    // agent-repos-wiring.test.js) is untouched. (#2135 AC9 / D2)
+    if (!err.statusHint && (err instanceof ReferenceError || err instanceof TypeError || err instanceof RangeError)) {
+      console.error(`[Orchestrator] admin API internal error: ${err && err.stack ? err.stack : err}`);
+      sendJson(res, 500, { error: 'Internal server error' });
+      return true;
+    }
     // `code` rides along when the store set one (the D4 refusals, #2081) so a
     // client can branch on the reason rather than on the message text.
     sendJson(res, err.statusHint || 500, {

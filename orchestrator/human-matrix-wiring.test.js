@@ -81,9 +81,12 @@ test("every agent-side ensureMatrixUser call site keeps the reservation on", () 
 // ---- provisioning is wired to user creation --------------------------------
 
 test("creating a user record provisions that human's Matrix identity", () => {
+  // `orchestratorSingleton`, not `orchestrator` — see #2135. This assertion
+  // pinned the buggy identifier, which is half of why the ReferenceError
+  // survived review: the guard read the wrong name back and agreed with itself.
   assert.match(
     SRC,
-    /const created = teamsStore\.createUser\(body\);[\s\S]{0,900}?provisionHumanMatrixIdentityInBackground\(orchestrator\.adminClient, created\)/,
+    /const created = teamsStore\.createUser\(body\);[\s\S]{0,2000}?provisionHumanMatrixIdentityInBackground\(\s*orchestratorSingleton \? orchestratorSingleton\.adminClient : null, created\)/,
     "POST /internal/admin/users must provision the new human's Matrix identity",
   );
 });
@@ -102,9 +105,17 @@ test("provisioning never blocks or fails the user creation it hangs off", () => 
 // ---- de-provisioning is wired to user deletion ------------------------------
 
 test("deleting a user retires their Matrix account before the record goes away", () => {
-  const deleteBranch = SRC.slice(
-    SRC.indexOf("offboarding = await orchestrator.offboardOwner(resourceId)"),
-  ).slice(0, 1500);
+  // The anchor is an `indexOf` LITERAL: after a rename it returns -1, `slice(-1)`
+  // yields the file's last character, and every assertion below passes
+  // vacuously against a one-character string. So assert the anchor was FOUND
+  // and the slice is long enough to contain what we are about to look for
+  // (#2135 AC6) — the rename from `orchestrator.` to `orchestratorSingleton.`
+  // is exactly the event this guard has to survive rather than sleep through.
+  const anchorAt = SRC.indexOf("offboarding = await orchestratorSingleton.offboardOwner(resourceId)");
+  assert.notEqual(anchorAt, -1, "expected the delete branch's offboarding call as the slice anchor");
+
+  const deleteBranch = SRC.slice(anchorAt).slice(0, 2000);
+  assert.ok(deleteBranch.length > 500, "the delete-branch slice must not be empty or truncated");
 
   const deprovisionAt = deleteBranch.indexOf("deprovisionHumanMatrixIdentity");
   const deleteAt = deleteBranch.indexOf("teamsStore.deleteUser(resourceId)");

@@ -110,6 +110,10 @@ const STUB_NAMES = [
   "provisionHumanMatrixIdentityInBackground",
   "deprovisionHumanMatrixIdentity",
   "orchestratorSingleton",
+  // #2138 AC5 — the degraded-offboarding event-log writer. It is a named
+  // module-level helper rather than an inline `githubEventLog.record(…)`
+  // precisely so it can be stubbed here and asserted on.
+  "recordOffboardingDegradation",
 ];
 
 function handlerSource() {
@@ -125,7 +129,7 @@ function handlerSource() {
 
 // Build a fresh sandbox per test so calls are never shared between them.
 function loadHandler(overrides = {}) {
-  const calls = { provisioned: [], deprovisioned: [], offboarded: [], logs: [] };
+  const calls = { provisioned: [], deprovisioned: [], offboarded: [], logs: [], degradations: [] };
 
   const sandbox = {
     URL,
@@ -152,7 +156,15 @@ function loadHandler(overrides = {}) {
     deprovisionHumanMatrixIdentity: async (adminClient, userId) => {
       calls.deprovisioned.push({ adminClient, userId });
     },
-    orchestratorSingleton: { adminClient: "ADMIN", offboardOwner: async (id) => { calls.offboarded.push(id); return { paused: 2 }; } },
+    orchestratorSingleton: {
+      adminClient: "ADMIN",
+      offboardOwner: async (id) => {
+        calls.offboarded.push(id);
+        // The real shape (#1571): the summary the route now reports verbatim.
+        return { ownerId: id, paused: ["a-1"], skipped: [], deletedCredentials: [{ id: "k-1", kind: "ssh-key" }] };
+      },
+    },
+    recordOffboardingDegradation: (userId, detail) => { calls.degradations.push({ userId, detail }); },
     ...overrides,
   };
 
@@ -238,7 +250,86 @@ test("DELETE /internal/admin/users/:id actually offboards and de-provisions", as
     false,
     "no step may degrade into a logged ReferenceError",
   );
-  assert.deepEqual(res.sent.payload.offboarding, { paused: 2 }, "the offboarding result must ride the response");
+  // Re-homed with a spread: since #2138 the route BUILDS this object (`{ok:true,
+  // ...summary}`) inside the vm, so it carries the sandbox realm's
+  // Object.prototype and strict deepEqual would reject it on identity alone.
+  assert.deepEqual(
+    { ...res.sent.payload.offboarding },
+    { ok: true, ownerId: "u-1", paused: ["a-1"], skipped: [], deletedCredentials: [{ id: "k-1", kind: "ssh-key" }] },
+    "the offboarding result must ride the response, tagged ok",
+  );
+  assert.deepEqual(calls.degradations, [], "a clean offboarding raises no degradation event");
+});
+
+// ---------------------------------------------------------------------------
+// #2138 AC4/AC5 — offboarding runs, and a failure of it is never silent.
+//
+// AC5's own words: "log line only" is what hid this for four weeks. Q1 is
+// answered "complete the deletion and report the degradation" — so each of
+// these asserts BOTH halves: the user is still deleted, AND the failure is
+// visible in the response and on the operator's timeline.
+// ---------------------------------------------------------------------------
+
+test("#2138 AC5: a throwing offboarding is reported in the response and the event log", async () => {
+  const { fn, calls } = loadHandler({
+    orchestratorSingleton: {
+      adminClient: "ADMIN",
+      offboardOwner: async () => { throw new Error("credential index unreadable"); },
+    },
+  });
+
+  const { res } = await call(fn, "DELETE", "/internal/admin/users/u-1");
+
+  assert.equal(res.sent.status, 200, "the deletion still completes — refusing would strand the user WITH their secrets");
+  assert.equal(res.sent.payload.deleted, true);
+  assert.equal(res.sent.payload.offboarding.ok, false, "`offboarding` must never be a bare null again");
+  assert.equal(res.sent.payload.offboarding.error, "credential index unreadable");
+  assert.equal(res.sent.payload.offboarding.ownerId, "u-1");
+  assert.deepEqual(
+    calls.degradations,
+    [{ userId: "u-1", detail: "credential index unreadable" }],
+    "the degradation must reach the operator-visible event log, not only the console",
+  );
+  assert.ok(
+    calls.logs.some(l => l.includes("REVOKE")),
+    "the log line must say what the operator has to do, not just that something failed",
+  );
+});
+
+test("#2138 AC5: an uninitialised orchestrator is a reported degradation, not a clean delete", async () => {
+  // The boot window. Before #2138 this branch logged a warning and left
+  // `offboarding: null` — indistinguishable from a delete that offboarded.
+  const { fn, calls } = loadHandler({ orchestratorSingleton: null });
+
+  const { res } = await call(fn, "DELETE", "/internal/admin/users/u-1");
+
+  assert.equal(res.sent.status, 200);
+  assert.equal(res.sent.payload.offboarding.ok, false);
+  assert.match(res.sent.payload.offboarding.error, /not initialised/);
+  assert.equal(calls.degradations.length, 1, "the skipped offboarding must be recorded");
+});
+
+test("#2138 AC5: a PARTIAL offboarding is degraded too — an unpausable agent is not a clean run", async () => {
+  // `offboardOwner` is best-effort per item and returns what it could not do.
+  // Reporting only thrown errors would call this a success while an agent of
+  // the departed human is still running under their credentials.
+  const { fn, calls } = loadHandler({
+    orchestratorSingleton: {
+      adminClient: "ADMIN",
+      offboardOwner: async (id) => ({ ownerId: id, paused: ["a-1"], skipped: ["a-2"], deletedCredentials: [] }),
+    },
+  });
+
+  const { res } = await call(fn, "DELETE", "/internal/admin/users/u-1");
+
+  assert.equal(res.sent.status, 200);
+  assert.equal(res.sent.payload.offboarding.ok, true, "nothing threw, so `ok` stays true");
+  assert.deepEqual(res.sent.payload.offboarding.skipped, ["a-2"], "what could not be paused rides the response");
+  assert.deepEqual(
+    calls.degradations,
+    [{ userId: "u-1", detail: "could not pause a-2" }],
+    "a partial run must still raise the degradation event, naming the agent",
+  );
 });
 
 test("the sandbox really would catch a ReferenceError (anti-vacuity)", () => {

@@ -220,10 +220,12 @@ test("resolveCredential: refusal message names the credential kind", () => {
 
 test("findPersonalCredentialState: absent → not present, no entry", () => {
   const index = [{ id: "team-1", scope: "team", teamId: "t" }];
-  assert.deepEqual(findPersonalCredentialState(index, "u-alice"), { entry: null, present: false });
+  // `orphaned` (#2138 AC6) is a third, independent axis: "the credential is
+  // there but its owner is not a live user". It is false in every state below.
+  assert.deepEqual(findPersonalCredentialState(index, "u-alice"), { entry: null, present: false, orphaned: false });
   // No owner and a non-array index are both "not present".
-  assert.deepEqual(findPersonalCredentialState(index, null), { entry: null, present: false });
-  assert.deepEqual(findPersonalCredentialState(null, "u-alice"), { entry: null, present: false });
+  assert.deepEqual(findPersonalCredentialState(index, null), { entry: null, present: false, orphaned: false });
+  assert.deepEqual(findPersonalCredentialState(null, "u-alice"), { entry: null, present: false, orphaned: false });
 });
 
 test("findPersonalCredentialState: usable → present with the entry", () => {
@@ -237,7 +239,8 @@ test("findPersonalCredentialState: present but rejected by isUsable → present,
   const index = [{ id: "pers-alice", scope: "personal", userId: "u-alice", underscoped: true }];
   assert.deepEqual(
     findPersonalCredentialState(index, "u-alice", (e) => !e.underscoped),
-    { entry: null, present: true },
+    // Underscoped, not orphaned — the two refusals have different remedies.
+    { entry: null, present: true, orphaned: false },
   );
 });
 
@@ -321,4 +324,157 @@ test("selectPersonalCredentialIds: null/empty owner, non-array, or entry without
   assert.deepEqual(selectPersonalCredentialIds(index, ""), []);
   assert.deepEqual(selectPersonalCredentialIds(null, "u-alice"), []);
   assert.deepEqual(selectPersonalCredentialIds([{ scope: "personal", userId: "u-alice" }], "u-alice"), []);
+});
+
+// ── #2138 AC6: a credential whose owner no longer exists must not resolve ────
+//
+// The bug this closes: from 2026-08-11 to the #2135 fix, deleting a user never
+// ran `offboardOwner`, so their personal PAT stayed on disk. `scope` + `userId`
+// still matched here, the entry was usable, and the departed person's agents
+// kept pushing under it — with NO refusal, because the refusal branch needs a
+// credential that is present but UNUSABLE and this one worked fine.
+//
+// The gate is the containment layer: it does not need the offboarding path to
+// have succeeded, which is exactly why it is worth having.
+
+const {
+  buildLiveUserGate,
+  selectOrphanedOwnerIds,
+  buildOrphanRefusal,
+} = require("./credential-resolution");
+
+const LIVE = buildLiveUserGate([{ id: "u-alice" }, { id: "u-bob" }]);
+
+test("buildLiveUserGate: an empty or unreadable user list is UNKNOWN, never 'nobody is live'", () => {
+  // teams-store's readArray answers [] for a malformed file exactly as it does
+  // for an empty one, and a booted stack always has the seeded System Admin —
+  // so treating [] as authoritative would refuse every attributed write at once.
+  for (const input of [[], null, undefined, "not-an-array", [{ id: "" }, { noId: 1 }]]) {
+    const gate = buildLiveUserGate(input);
+    assert.equal(gate.known, false, JSON.stringify(input));
+    assert.equal(gate.isLive("u-anyone"), true, "an unknown gate must answer 'live' for everyone");
+  }
+  assert.equal(LIVE.known, true);
+  assert.equal(LIVE.isLive("u-alice"), true);
+  assert.equal(LIVE.isLive("u-ghost"), false);
+});
+
+test("findPersonalCredentialState: an orphaned credential is present-but-unusable", () => {
+  const orphaned = [{ id: "pers-ghost", scope: "personal", userId: "u-ghost" }];
+
+  const state = findPersonalCredentialState(orphaned, "u-ghost", undefined, LIVE);
+  assert.equal(state.entry, null, "an orphan must never be handed back as usable");
+  assert.equal(state.present, true, "…but it IS present — that is what makes the write refuse");
+  assert.equal(state.orphaned, true);
+
+  // A live owner is untouched.
+  const alive = findPersonalCredentialState(index, "u-alice", undefined, LIVE);
+  assert.equal(alive.entry.id, "pers-alice");
+  assert.equal(alive.orphaned, false);
+});
+
+test("findPersonalCredentialState: the owner's absence outranks isUsable", () => {
+  // The disqualifier is that nobody is behind the credential, not its scopes —
+  // so an `isUsable` that says yes must not resurrect it.
+  const orphaned = [{ id: "pers-ghost", scope: "personal", userId: "u-ghost", scopes: ["repo"] }];
+  const alwaysUsable = () => true;
+  const state = findPersonalCredentialState(orphaned, "u-ghost", alwaysUsable, LIVE);
+  assert.equal(state.entry, null);
+  assert.equal(state.orphaned, true);
+});
+
+test("findPersonalCredentialState: NO gate is pre-#2138 behaviour, byte for byte", () => {
+  // The fail-open direction, stated as a test: an unreadable user index must
+  // not turn every personal credential on the installation into a refusal.
+  const orphaned = [{ id: "pers-ghost", scope: "personal", userId: "u-ghost" }];
+  for (const gate of [undefined, null, buildLiveUserGate([]), { known: false }]) {
+    const state = findPersonalCredentialState(orphaned, "u-ghost", undefined, gate);
+    assert.equal(state.entry?.id, "pers-ghost", `gate=${JSON.stringify(gate)}`);
+    assert.equal(state.present, true);
+    assert.equal(state.orphaned, false);
+  }
+});
+
+test("resolveCredential: an orphaned credential REFUSES an attributed write", () => {
+  const decision = resolveCredential({
+    operation: "pr",
+    ownerId: "u-ghost",
+    personalCredential: null,
+    personalCredentialPresent: true,
+    personalCredentialOrphaned: true,
+    sharedCredentialId: "team-1",
+  });
+  assert.ok(decision.refuse, "the departed human's PAT must not silently keep working");
+  assert.equal(decision.refuse.code, "owner-not-a-live-user");
+  assert.notEqual(decision.credentialId, "team-1");
+  // The remedy differs from the ordinary refusal, so the message must too:
+  // nobody can "add a personal token" for a user record that is gone.
+  assert.doesNotMatch(decision.refuse.message, /My Credentials page/);
+  assert.match(decision.refuse.message, /revoke it at GitHub/i);
+  assert.notEqual(buildOrphanRefusal("u-ghost", "GitHub token").code, "personal-credential-required");
+});
+
+test("resolveCredential: an orphan still lets a READ take the shared credential", () => {
+  // Refuse-on-missing is per operation class. A clone/poll is shared-eligible,
+  // and refusing it would take a whole flow offline over a stale index entry.
+  for (const op of ["clone", "poll", "probe"]) {
+    const decision = resolveCredential({
+      operation: op,
+      ownerId: "u-ghost",
+      personalCredentialPresent: true,
+      personalCredentialOrphaned: true,
+      sharedCredentialId: "team-1",
+    });
+    assert.equal(decision.refuse, undefined, op);
+    assert.equal(decision.tier, "shared", op);
+    assert.equal(decision.credentialId, "team-1", op);
+  }
+});
+
+// ── #2138 AC1/AC2: which owners still need their offboarding replayed ────────
+
+test("selectOrphanedOwnerIds: finds deleted owners holding credentials or agents", () => {
+  const keys = [
+    { id: "k-alice", scope: "personal", userId: "u-alice" },   // live → not selected
+    { id: "k-ghost", scope: "personal", userId: "u-ghost" },   // orphan
+    { id: "k-team", scope: "team", teamId: "default", userId: "u-ghost" }, // not personal
+  ];
+  const tokens = [{ id: "t-ghost2", scope: "personal", userId: "u-ghost2" }];
+  const configs = { squad: { role: "team", ownerId: "u-ghost3" } };
+  const agents = [
+    { id: "squad", cfg: configs.squad },
+    { id: "squad-dev", cfg: { role: "team-member", parentTeamId: "squad" } },
+    { id: "solo", cfg: { role: "agent", ownerId: "u-alice" } },
+  ];
+
+  const ids = selectOrphanedOwnerIds({
+    credentialIndexes: [keys, tokens],
+    agents,
+    loadAgentConfig: (id) => configs[id] || null,
+    liveUsers: LIVE,
+  });
+
+  assert.deepEqual(ids, ["u-ghost", "u-ghost2", "u-ghost3"], "credential owners first, then agent owners, deduped");
+});
+
+test("selectOrphanedOwnerIds: a team/system credential is never a reason to sweep", () => {
+  const ids = selectOrphanedOwnerIds({
+    credentialIndexes: [[{ id: "sys-1", scope: "system", userId: "u-ghost" }]],
+    liveUsers: LIVE,
+  });
+  assert.deepEqual(ids, [], "shared infrastructure is not offboarded with a person (#1571 AC3)");
+});
+
+test("selectOrphanedOwnerIds: an UNKNOWN live-user gate sweeps nothing", () => {
+  // The dangerous direction. With nobody known to be live, "not a live user" is
+  // true of everyone and a sweep on that belief drains the whole installation.
+  const keys = [{ id: "k-alice", scope: "personal", userId: "u-alice" }];
+  const agents = [{ id: "solo", cfg: { role: "agent", ownerId: "u-alice" } }];
+  for (const gate of [undefined, null, buildLiveUserGate([]), { known: false, isLive: () => false }]) {
+    assert.deepEqual(
+      selectOrphanedOwnerIds({ credentialIndexes: [keys], agents, liveUsers: gate }),
+      [],
+      `gate=${JSON.stringify(gate)}`,
+    );
+  }
 });

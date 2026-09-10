@@ -744,6 +744,145 @@ test("_fanOutBatch: the pending entry is stamped with the matched wakeLabel, not
   }
 });
 
+// ── #2152: edge-triggered wake dedup — a full-set match fires only on the
+// rising edge, so unrelated label churn and the agent's own claim swap don't
+// re-wake it while the wake label merely persists.
+
+function labeledIssueEvent(id, attributedLabel, fullSet, number = 2152) {
+  return {
+    id,
+    actor: { login: "thorsten" },
+    created_at: new Date().toISOString(),
+    type: "IssuesEvent",
+    repo: { name: "org/repo" },
+    payload: {
+      action: "labeled",
+      label: { name: attributedLabel },
+      labels: fullSet.map((name) => ({ name })),
+      issue: { number, title: "Repo attach dialog", html_url: `https://github.com/org/repo/issues/${number}` },
+    },
+  };
+}
+
+function unlabeledIssueEvent(id, removedLabel, fullSet, number = 2152) {
+  return {
+    id,
+    actor: { login: "thorsten" },
+    created_at: new Date().toISOString(),
+    type: "IssuesEvent",
+    repo: { name: "org/repo" },
+    payload: {
+      action: "unlabeled",
+      label: { name: removedLabel },
+      labels: fullSet.map((name) => ({ name })),
+      issue: { number, title: "Repo attach dialog", html_url: `https://github.com/org/repo/issues/${number}` },
+    },
+  };
+}
+
+const readyDeveloperSub = () => [{
+  agentId: "developer",
+  triggerId: "t1785499525109689",
+  events: new Set(["issues.labeled"]),
+  labelFilter: "ready",
+  horizon: null,
+}];
+
+test("_fanOutBatch (#2152): the agent's own claim swap does not re-wake it — second labeled event dropped 'wake-already-armed'", async () => {
+  const origRecord = githubEventLog.record;
+  const recorded = [];
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    // Event 1: the genuine human wake. `ready` present in the full set.
+    const ev1 = labeledIssueEvent("2152-a", "ready", ["next-wave", "ready"]);
+    // Event 2: the developer's OWN claim swap adds `ready:wip`; the event-time
+    // snapshot still carries `ready`, and the Events API mis-attributes the
+    // event's own label as `next-wave` (so the self-claim-label guard, which
+    // keys on payload.label.name, cannot catch it — the real #2152 signature).
+    const ev2 = labeledIssueEvent("2152-b", "next-wave", ["next-wave", "ready", "ready:wip"]);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2], readyDeveloperSub(), "tok");
+
+    assert.equal(enqueued.length, 1, "only the first (rising-edge) wake is delivered");
+    assert.equal(enqueued[0].entry.github.eventId, "2152-a");
+
+    const outcomes = recorded.flatMap((e) => e.outcomes || []).filter((o) => o.agentId === "developer");
+    const delivered = outcomes.filter((o) => o.status === "delivered");
+    const dropped = outcomes.filter((o) => o.status === "dropped");
+    assert.equal(delivered.length, 1);
+    assert.equal(dropped.length, 1);
+    assert.equal(dropped[0].reason, "wake-already-armed");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch (#2152): a genuine remove -> re-add re-fires (disarm reopens the edge)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ev1 = labeledIssueEvent("2152-x1", "ready", ["ready"]);          // deliver + arm
+    const ev2 = unlabeledIssueEvent("2152-x2", "ready", []);               // human removes `ready` -> disarm
+    const ev3 = labeledIssueEvent("2152-x3", "ready", ["ready"]);          // human re-adds -> fires again
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], readyDeveloperSub(), "tok");
+
+    assert.equal(enqueued.length, 2, "the re-add after a real removal must fire again");
+    assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["2152-x1", "2152-x3"]);
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch (#2152): the #1376 collapsed multi-add still fires (rising edge, not a regression)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    // One action adds `bug`+`ready`; the Events API surfaces it attributed to
+    // `bug`. The full-set recovery must still fire the `ready` listener.
+    const ev = labeledIssueEvent("2152-collapse", "bug", ["bug", "ready"], 2160);
+    await poller._fanOutBatch("org/repo", [ev], readyDeveloperSub(), "tok");
+    assert.equal(enqueued.length, 1);
+    assert.equal(enqueued[0].entry.wakeLabel, "ready");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch (#2152): kill-switch AEE_WAKE_EDGE_DEDUP=0 restores the double-fire", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  const prev = process.env.AEE_WAKE_EDGE_DEDUP;
+  process.env.AEE_WAKE_EDGE_DEDUP = "0";
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ev1 = labeledIssueEvent("2152-k1", "ready", ["next-wave", "ready"]);
+    const ev2 = labeledIssueEvent("2152-k2", "next-wave", ["next-wave", "ready", "ready:wip"]);
+    await poller._fanOutBatch("org/repo", [ev1, ev2], readyDeveloperSub(), "tok");
+
+    assert.equal(enqueued.length, 2, "with the kill-switch off, the pre-#2152 full-set match still double-fires");
+  } finally {
+    githubEventLog.record = origRecord;
+    if (prev === undefined) delete process.env.AEE_WAKE_EDGE_DEDUP;
+    else process.env.AEE_WAKE_EDGE_DEDUP = prev;
+  }
+});
+
 // ── #2151: an any-label listener's pending entry stamps wakeLabel null —
 // matching the event-log outcome convention, so the entrypoint's ladder
 // falls through to payload.label.name for exactly the case that is correct.

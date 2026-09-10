@@ -699,6 +699,89 @@ test("_fanOutBatch: wakeLabel on outcome = subscriber's labelFilter, not collaps
   }
 });
 
+// ── #2151: the pending entry itself carries the stamp, not just the event-log
+// outcome — this is what the trigger-fired notice and the Pending queue read.
+test("_fanOutBatch: the pending entry is stamped with the matched wakeLabel, not the collapsed payload.label.name (#2151)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ghEvent = {
+      id: "2151-collapsed-1",
+      actor: { login: "thorsten" },
+      created_at: new Date().toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "flow-control" },
+        labels: [{ name: "flow-control" }, { name: "ready" }],
+        issue: { number: 2151, title: "Test", html_url: "https://github.com/org/repo/issues/2151" },
+      },
+    };
+
+    const subscribers = [{
+      agentId: "developer",
+      triggerId: "trigger-ready",
+      events: new Set(["issues.labeled"]),
+      labelFilter: "ready",
+      horizon: null,
+    }];
+
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+
+    assert.equal(enqueued.length, 1);
+    assert.equal(enqueued[0].agentId, "developer");
+    assert.equal(enqueued[0].entry.wakeLabel, "ready",
+      "the queued entry's wakeLabel must be the matched labelFilter, not payload.label.name ('flow-control')");
+    assert.equal(enqueued[0].entry.github.payload.label.name, "flow-control",
+      "the raw payload is carried unchanged alongside the stamp");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+// ── #2151: an any-label listener's pending entry stamps wakeLabel null —
+// matching the event-log outcome convention, so the entrypoint's ladder
+// falls through to payload.label.name for exactly the case that is correct.
+test("_fanOutBatch: an any-label listener's pending entry stamps wakeLabel null (#2151)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ghEvent = {
+      id: "2151-any-label-1",
+      actor: { login: "user" },
+      created_at: new Date().toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "ux" },
+        labels: [{ name: "ux" }],
+        issue: { number: 5, title: "Any-label", html_url: "https://github.com/org/repo/issues/5" },
+      },
+    };
+
+    const subscribers = [
+      { agentId: "any-listener", triggerId: "t-any", events: new Set(["issues.labeled"]), labelFilter: null, horizon: null },
+    ];
+
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+
+    assert.equal(enqueued.length, 1);
+    assert.equal(enqueued[0].entry.wakeLabel, null);
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
 test("_fanOutBatch: each of two subscribers on different labelFilters gets its own wakeLabel (AC2)", async () => {
   const recorded = [];
   const origRecord = githubEventLog.record;

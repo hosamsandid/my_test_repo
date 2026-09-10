@@ -1810,7 +1810,10 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
       id: tr.id,
       type: tr.type,
       enabled: tr.enabled !== false,
-      description: tr.description || `${t.displayName} — ${tr.id}`,
+      // #2151 D1: no trigger id in the generated fallback — #1818 already
+      // removed the auto-generated id from the notice body, and appending it
+      // here just re-introduced it (the notice appends `description` verbatim).
+      description: tr.description || t.displayName,
       prompt: subst(tr.promptTemplate || ''),
     };
     if (tr.type === 'github-event') {

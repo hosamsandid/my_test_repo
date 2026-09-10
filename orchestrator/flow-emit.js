@@ -125,11 +125,18 @@ function buildSyntheticEvent({ repo, label, kind, number, title, closesIssues, p
 // The pending-queue entry for one listener — the same `{triggerId, github}`
 // shape the poller's `_enqueue` writes (the drain doesn't branch on origin),
 // plus `source: 'internal'` so log readers and operators can tell the
-// delivery path apart.
+// delivery path apart. #2151: also stamps `wakeLabel` from the synthesized
+// event's own label — an internal hand-off's matched listener filter and its
+// synthetic `payload.label.name` always agree (matchInternalListeners /
+// matchPollerListeners only forward a listener whose filter is absent or
+// equals the applied label), so reading it off the event needs no extra
+// parameter and stays byte-identical to what callers already log as
+// `wakeLabel` for the event-log outcome.
 function buildPendingEntry(triggerId, key, ghEvent) {
   return {
     triggerId,
     source: 'internal',
+    wakeLabel: ghEvent.payload?.label?.name ?? null,
     github: {
       event: key,
       eventId: ghEvent.id,

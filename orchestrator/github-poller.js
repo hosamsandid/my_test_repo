@@ -992,7 +992,7 @@ class GitHubPoller {
         const payload = enrichedPayloads.get(it.ghEvent.id);
         const ghEvent = payload === it.ghEvent.payload ? it.ghEvent : { ...it.ghEvent, payload };
 
-        this._enqueue(it.agentId, it.triggerId, it.key, ghEvent);
+        this._enqueue(it.agentId, it.triggerId, it.key, ghEvent, it.outcome.wakeLabel);
         it.outcome.status = 'delivered';
       }
     }
@@ -1091,8 +1091,14 @@ class GitHubPoller {
     }
   }
 
-  _enqueue(agentId, triggerId, key, ghEvent) {
-    this._enqueuePending(agentId, {
+  // #2151: wakeLabel is the label that actually satisfied this subscriber's
+  // labelFilter (or null for an any-label listener) — computed once in
+  // _fanOutBatch and carried through here so the entry itself, not just the
+  // event-log outcome, records what woke the agent. Stamped only when defined
+  // so an old poller (pre-fix) build's undefined argument still produces an
+  // entry with no wakeLabel key, matching AC5's in-flight-across-deploy case.
+  _enqueue(agentId, triggerId, key, ghEvent, wakeLabel) {
+    const entry = {
       triggerId,
       github: {
         event: key,
@@ -1102,7 +1108,9 @@ class GitHubPoller {
         createdAt: ghEvent.created_at,
         payload: ghEvent.payload,
       },
-    });
+    };
+    if (wakeLabel !== undefined) entry.wakeLabel = wakeLabel;
+    this._enqueuePending(agentId, entry);
     console.log(`[GH-Poller] Queued ${key} (${ghEvent.id}) → agent=${agentId} trigger=${triggerId}`);
   }
 

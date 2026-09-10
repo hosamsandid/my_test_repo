@@ -5456,7 +5456,10 @@ class TriggerScheduler:
             )
             print(f"[Runner:{self._agent_id}] {label}: {entry_tid}", file=sys.stderr)
             try:
-                await self._execute(dict(match), ctx={"github": gh} if gh else None)
+                ctx = {"github": gh} if gh else None
+                if ctx is not None and "wakeLabel" in entry:
+                    ctx["wakeLabel"] = entry.get("wakeLabel")
+                await self._execute(dict(match), ctx=ctx)
             except Exception as exc:
                 print(f"[Runner:{self._agent_id}] pending _execute({entry_tid}) error: {exc}",
                       file=sys.stderr)
@@ -5703,7 +5706,10 @@ class TriggerScheduler:
         'issues.unlabeled':                     'Issue unlabeled',
         'release.published':                    'Release published',
     }
-    # Events that carry payload.label.name — the triggering label is shown.
+    # Events for which the trigger notice shows a label chip. The label shown
+    # is the one that actually woke this subscriber (#2151) — the consumption
+    # ladder in `_post_trigger_notice` — not necessarily `payload.label.name`,
+    # which the Events API can collapse onto an arbitrary co-applied label.
     _LABEL_FILTERABLE_EVENTS: frozenset[str] = frozenset([
         'issues.labeled',
         'issues.unlabeled',
@@ -5786,13 +5792,30 @@ class TriggerScheduler:
 
             friendly = self._GITHUB_EVENT_LABELS.get(event_key) or event_key or "GitHub event"
 
-            # For label events, surface the specific label that fired.
+            # For label events, surface the label that actually woke THIS
+            # subscriber (#2151) — never necessarily `payload.label.name`,
+            # which the Events API can collapse onto an arbitrary one of
+            # several labels applied in the same action. Consumption ladder,
+            # first truthy wins: the pending entry's own stamped `wakeLabel`
+            # (set by every writer — poller, flow-emit, reassign — to the
+            # matched `labelFilter`; covers the reported bug) → the trigger's
+            # own `labelFilter` (covers an entry queued before the stamp
+            # existed, #2151 AC5) → `payload.label.name` (the only correct
+            # answer for a filter-less, any-label listener, #2151 AC2).
             label_name: str | None = None
             if event_key in self._LABEL_FILTERABLE_EVENTS:
                 try:
+                    stamped = (ctx or {}).get("wakeLabel")
+                    trigger_filter = trigger.get("labelFilter")
                     label_info = payload.get("label")
-                    if isinstance(label_info, dict):
-                        label_name = label_info.get("name") or None
+                    payload_label = (
+                        label_info.get("name") if isinstance(label_info, dict) else None
+                    )
+                    label_name = (
+                        (stamped if isinstance(stamped, str) and stamped else None)
+                        or (trigger_filter if isinstance(trigger_filter, str) and trigger_filter else None)
+                        or (payload_label or None)
+                    )
                 except Exception:
                     pass
 

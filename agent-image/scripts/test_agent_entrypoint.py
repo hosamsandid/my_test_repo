@@ -481,6 +481,80 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         body = client.room_send.call_args.kwargs["content"]["body"]
         self.assertIn("`wip`", body)
 
+    # -- #2151: the wake label — not the collapsed payload label — is shown ---
+
+    async def test_stamped_wake_label_wins_over_collapsed_payload_label(self):
+        """#2151 AC1: the reproduction case — a poller-delivered event whose
+        payload.label.name is an arbitrary co-applied label ('flow-control')
+        while the entry's stamped wakeLabel ('ready') is what actually
+        satisfied the subscriber's filter. The notice must show only 'ready'."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event", "labelFilter": "ready"}
+        ctx = {
+            "github": {
+                "event": "issues.labeled",
+                "repo": "o/r",
+                "payload": {"label": {"name": "flow-control"}, "issue": {}},
+            },
+            "wakeLabel": "ready",
+        }
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("`ready`", body)
+        self.assertNotIn("`flow-control`", body)
+
+    async def test_trigger_label_filter_used_when_no_stamp_present(self):
+        """#2151 AC5: an entry queued before the stamp existed (no `wakeLabel`
+        key in ctx at all) falls back to the trigger's own `labelFilter`,
+        which is still the correct answer for a poller-delivered entry."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event", "labelFilter": "ready-2"}
+        ctx = {"github": {
+            "event": "issues.labeled",
+            "repo": "o/r",
+            "payload": {"label": {"name": "ux"}, "issue": {}},
+        }}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("`ready-2`", body)
+        self.assertNotIn("`ux`", body)
+
+    async def test_null_stamp_falls_through_to_payload_label_for_any_label_listener(self):
+        """#2151 AC2: a filter-less (any-label) listener's stamped wakeLabel is
+        `None` (poller/flow-emit convention) — the notice must still fall
+        through to `payload.label.name`, unchanged behaviour."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event"}
+        ctx = {
+            "github": {
+                "event": "issues.labeled",
+                "repo": "o/r",
+                "payload": {"label": {"name": "ux"}, "issue": {}},
+            },
+            "wakeLabel": None,
+        }
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("`ux`", body)
+
+    async def test_internal_delivery_stays_byte_identical_when_stamp_agrees(self):
+        """#2151 AC3: flow-emit / label-fastpath synthetic events stamp
+        wakeLabel equal to their own payload.label.name — the notice must be
+        unaffected either way."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event", "labelFilter": "ready"}
+        ctx = {
+            "github": {
+                "event": "issues.labeled",
+                "repo": "o/r",
+                "payload": {"label": {"name": "ready"}, "issue": {}},
+            },
+            "wakeLabel": "ready",
+        }
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("`ready`", body)
+
     # -- AC3: graceful label fallback ------------------------------------------
 
     async def test_missing_label_name_omits_label_portion(self):
@@ -4682,6 +4756,34 @@ class WakeAgentDispatchPlacement(unittest.TestCase):
     def test_a_blank_note_adds_no_envelope(self):
         body = self.CODE[self.CODE.index("async def _execute_inner"):]
         self.assertIn("isinstance(handoff_note, str) and handoff_note.strip()", body)
+
+
+class HandlePendingEntryWakeLabelWiring(unittest.TestCase):
+    """#2151: the drained pending entry's stamped `wakeLabel` must reach the
+    trigger notice through `ctx`, the same way `_handle_pending_entry` already
+    threads `github` through. Read off the source for the same reason
+    `WakeAgentDispatchPlacement` above does — a live drain needs a scheduler,
+    a Claude run and a Matrix client, so a silent regression here would only
+    ever surface as a wrong label in a running chat."""
+
+    SRC = _MODULE_PATH.read_text(encoding="utf-8")
+
+    def _fallthrough_body(self) -> str:
+        start = self.SRC.index("async def _handle_pending_entry")
+        end = self.SRC.index("\n    async def ", start + 1)
+        return self.SRC[start:end]
+
+    def test_ctx_carries_wake_label_from_the_entry(self):
+        body = self._fallthrough_body()
+        self.assertIn('entry.get("wakeLabel")', body)
+
+    def test_wake_label_is_only_threaded_when_ctx_exists(self):
+        # A trigger with no `github` in the entry passes ctx=None straight
+        # through — wakeLabel must never be set on a None ctx (AttributeError).
+        body = self._fallthrough_body()
+        idx = body.index('entry.get("wakeLabel")')
+        preceding = body[:idx]
+        self.assertIn("ctx is not None", preceding)
 
 
 # --- Verify-before-claim (#2113, flow-control concept §4.2) -----------------

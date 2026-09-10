@@ -129,6 +129,26 @@ export function validateLaunch({ teamId, teamName, environmentId, labelSuffix } 
   return null;
 }
 
+// The SINGLE source for whether the primary Launch button is disabled and WHY
+// (#2157 AC4). Before this, `LaunchStep` computed its own `envBlocking` boolean
+// (`has('environment') && !values.environmentId`) independently of
+// `validateLaunch`'s explanation — so the disabled state and the reason a
+// caller might show could disagree, and the button gave a silent, unexplained
+// dead click on the no-environment path (#2157).
+//
+// Settles the team id FIRST (`normalizeTeamId`, the same step `submit()` takes
+// before validating) rather than calling `validateLaunch(values)` directly on
+// the raw value — the trap #2157 calls out explicitly: `TEAM_ID_RE` rejects a
+// value with a trailing dash, which is legal WHILE TYPING (the id field keeps a
+// trailing dash until blur, #1934 AC1). Without settling first, the reported
+// reason would flap between "team id" and "pick a working environment" on
+// every dash keystroke, even though the disabled boolean stayed true
+// throughout — settling removes that flicker in the SHOWN reason, not just the
+// boolean. Returns `null` when the inputs are launchable.
+export function launchBlockReason(values) {
+  return validateLaunch({ ...values, teamId: normalizeTeamId(values?.teamId) });
+}
+
 // The canonical POST body for /api/teams (and /api/teams/stream). `extra` carries
 // entry-point-specific pass-through fields (the wizard's readyLabel/dispatchLabel/
 // maxParallel/skills/knowledgeConfig or a legacy repository fallback); the shared

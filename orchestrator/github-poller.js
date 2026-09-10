@@ -29,6 +29,7 @@ const https = require('https');
 const githubEventLog = require('./github-event-log');
 const { parseCloses } = require('./pr-events-log');
 const { resolveGithubApiTarget, githubApiBase, DEFAULT_GITHUB_API_BASE } = require('./github-api-base');
+const wakeArmory = require('./wake-armory');
 
 // Poll cadence. Fixed 30s in production; overridable via
 // AEE_GITHUB_POLL_INTERVAL_MS (#711) so the E2E stack can tighten it — the
@@ -466,6 +467,15 @@ class GitHubPoller {
     // of the same label is dropped here as `internal-dedup`. Absent in unit
     // tests → no dedup (the poller behaves exactly as before).
     this.labelMarkers = labelMarkers || null;
+    // #2152: edge-triggered wake de-duplication. When on (default), a `*.labeled`
+    // event whose wake label is already ARMED for the object (delivered and still
+    // present) is dropped as `wake-already-armed` instead of re-firing — the fix
+    // for the developer being woken a second time by its own claim swap and by
+    // unrelated label churn. Kill-switch `AEE_WAKE_EDGE_DEDUP=0` restores the
+    // pre-#2152 behaviour (fire on every full-set match). See wake-armory.js.
+    this._wakeEdgeDedup = !['0', 'false', 'off'].includes(
+      String(process.env.AEE_WAKE_EDGE_DEDUP || '').toLowerCase(),
+    );
     // #678: best-effort callback fired once per merged PR seen in a poll, so the
     // orchestrator can post the work item's token summary. Independent of
     // subscriber fan-out (a merge is a human action nobody need subscribe to).
@@ -768,7 +778,7 @@ class GitHubPoller {
       // GitHub returns newest-first; process oldest-first so triggers fire
       // in causal order. Events without a timestamp sort last (stable).
       fresh.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
-      await this._fanOutBatch(repoFullName, fresh, subscribers, token);
+      await this._fanOutBatch(repoFullName, fresh, subscribers, token, repoState);
       await this._handleMergedPrs(repoFullName, fresh);
     }
 
@@ -792,7 +802,7 @@ class GitHubPoller {
     }
   }
 
-  async _fanOutBatch(repoFullName, ghEvents, subscribers, token) {
+  async _fanOutBatch(repoFullName, ghEvents, subscribers, token, repoStateArg) {
     // Phase 1 — per-event delivery gates (history horizon, label filter).
     // Everything that survives becomes a "deliverable" tagged with its
     // subscriber + conversation, to be grouped in phase 2. Events arrive
@@ -812,12 +822,40 @@ class GitHubPoller {
     // (AC #4), distinct from "someone listened but a gate dropped it" (AC #3).
     const deliverables = [];
     const eventLogEntries = new Map();
+
+    // #2152: the per-repo armed-wake set, persisted in state.json by the caller's
+    // _saveState() after this batch. GC'd once per batch (TTL + cap). Absent /
+    // malformed -> a fresh object, so an upgraded stack self-heals.
+    const repoState = repoStateArg || this.state[repoFullName] || (this.state[repoFullName] = {});
+    if (!repoState.armed || typeof repoState.armed !== 'object') repoState.armed = {};
+    const armed = repoState.armed;
+    if (this._wakeEdgeDedup) wakeArmory.gcArmed(armed);
+
     for (const ghEvent of ghEvents) {
       const key = eventKey(ghEvent);
       const logEntry = { ghEvent, key, outcomes: [] };
       eventLogEntries.set(ghEvent.id, logEntry);
       if (!key) continue;
       const convKey = conversationKey(ghEvent);
+
+      // #2152: disarm on removal/close, subscription-independent and BEFORE this
+      // event's subscriber arm-check. Events are oldest-first, so a same-batch
+      // remove -> re-add ends armed+delivered, while a batch's own labeled fires
+      // before a later unlabeled clears it. A wake label removed (its own claim
+      // swap does this too) or a closed object re-arms, so a genuine later
+      // re-label fires again.
+      if (this._wakeEdgeDedup && typeof key === 'string') {
+        const num = workItemNumber(ghEvent);
+        if (num != null) {
+          const kind = key.startsWith('pull_request') ? 'pr' : 'issue';
+          const removed = ghEvent.payload?.label?.name;
+          if (key.endsWith('.unlabeled') && removed) {
+            wakeArmory.disarmLabel(armed, { kind, number: num, label: removed });
+          } else if (key.endsWith('.closed')) {
+            wakeArmory.disarmObject(armed, { kind, number: num });
+          }
+        }
+      }
 
       for (const sub of subscribers) {
         if (!sub.events.has(key)) continue;
@@ -895,6 +933,23 @@ class GitHubPoller {
         // label-filter drops, which continue before reaching this point.
         outcome.wakeLabel = sub.labelFilter || null;
 
+        // #2152: the wake-edge armed key for this (trigger, object, wake label),
+        // computed once and shared by the internal-dedup drop path (which arms it
+        // so a later claim swap OUTSIDE the plugin window is still caught) and the
+        // rising-edge check below. Only for `*.labeled` with a real wake label;
+        // any-label listeners (null filter) have nothing to arm on.
+        let wakeArmKey = null;
+        if (this._wakeEdgeDedup && sub.labelFilter && typeof key === 'string' && key.endsWith('.labeled')) {
+          const num = workItemNumber(ghEvent);
+          if (num != null) {
+            wakeArmKey = wakeArmory.armedKey({
+              triggerId: sub.triggerId,
+              kind: key.startsWith('pull_request') ? 'pr' : 'issue',
+              number: num, label: sub.labelFilter,
+            });
+          }
+        }
+
         // Internal fast-path dedup (#1858): if this (agent, trigger, repo,
         // number, wakeLabel) wake was already delivered internally by the plugin
         // path within the match window, drop this later Events-API event. Scoped
@@ -902,7 +957,11 @@ class GitHubPoller {
         // not consume-once: a single apply churns up several matching events (the
         // real `<wake>` delivery, the claim swap's `<wake>:wip` add, a co-added
         // label) and ALL within the window are dropped; a legitimate later
-        // re-label (created_at outside the window) still fires normally.
+        // re-label (created_at outside the window) still fires normally. Runs
+        // BEFORE the wake-edge check so its more-specific reason wins for an
+        // in-window echo — but still ARMS the wake-edge key, so a claim swap that
+        // lands after the window is caught by wake-already-armed rather than
+        // re-firing.
         if (this.labelMarkers && typeof key === 'string' && key.endsWith('.labeled')) {
           const wl = sub.labelFilter || ghEvent.payload?.label?.name || null;
           const num = workItemNumber(ghEvent);
@@ -919,11 +978,33 @@ class GitHubPoller {
                 `[GH-Poller] internal-dedup: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
                 `(already delivered internally, ${repoFullName}#${num} +${wl})`,
               );
+              if (wakeArmKey) wakeArmory.arm(armed, wakeArmKey, Date.now());
               outcome.status = 'dropped';
               outcome.reason = 'internal-dedup';
               continue;
             }
           }
+        }
+
+        // Edge-triggered wake dedup (#2152): fire a full-set label match only on
+        // the RISING edge. A wake label already armed for the object — delivered
+        // on an earlier event and still present — means this is a re-fire from
+        // unrelated label churn or the agent's OWN claim swap (whose `<wake>:wip`
+        // add carries an event-time snapshot that still names `<wake>`, and whose
+        // attributed label the Events API may mis-report, defeating the
+        // self-claim-label guard). Drop it; otherwise arm the rising edge. Disarm
+        // happens in the outer loop on the label's removal or the object's close.
+        if (wakeArmKey) {
+          if (wakeArmory.isArmed(armed, wakeArmKey)) {
+            console.log(
+              `[GH-Poller] wake-already-armed: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+              `(${repoFullName} ${sub.labelFilter} still present on the object, no fresh add)`,
+            );
+            outcome.status = 'dropped';
+            outcome.reason = 'wake-already-armed';
+            continue;
+          }
+          wakeArmory.arm(armed, wakeArmKey, Date.now());
         }
 
         deliverables.push({

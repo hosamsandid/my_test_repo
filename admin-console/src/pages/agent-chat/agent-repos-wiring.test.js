@@ -100,8 +100,10 @@ test('AC3: the agent form gets the environment form probe, not a reimplementatio
   assert.match(card, /status: 'error'/);
   assert.match(card, /status: 'ok'/);
   // The panel must NOT hand the card a token id — D5 means the agent surface
-  // has no credential of its own; only the presence flag is passed.
-  assert.match(panel(), /githubTokenId=\{view && view\.hasGithubToken \? 'environment' : ''\}/);
+  // has no credential of its own, and `githubTokenId` is a real id the card
+  // sends to the live reachability probe (#2161): a placeholder there makes
+  // the probe 400 against the token registry, not just misdescribe the hint.
+  assert.match(panel(), /githubTokenId=""/);
   assert.match(panel(), /tokenTarget="environment"/);
 });
 

@@ -266,10 +266,11 @@ export default function AgentRepositoriesPanel({
             repo={draft}
             sshKeys={sshKeys}
             // D5: no credential of its own — the probe (and the clone) use the
-            // environment's GitHub token, resolved server-side. Passing the
-            // presence flag is what makes the card's HTTPS-without-token hint
-            // truthful without ever handing the client a token id it could send.
-            githubTokenId={view && view.hasGithubToken ? 'environment' : ''}
+            // environment's GitHub token, resolved server-side. `githubTokenId`
+            // is a real token id the card sends to the reachability probe, so
+            // it must never carry a client-guessed placeholder (#2161) — the
+            // HTTPS-without-token hint is driven by `tokenTarget` alone.
+            githubTokenId=""
             tokenTarget="environment"
             onChange={(field, value) => setDraft((d) => ({ ...d, [field]: value }))}
           />

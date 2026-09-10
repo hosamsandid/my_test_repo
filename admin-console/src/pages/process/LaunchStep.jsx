@@ -311,7 +311,7 @@ export default function LaunchStep({
                 issue above and try again.
               </div>
               <div style={{ marginTop: 'var(--eb-space-3)' }}>
-                <button type="button" onClick={() => submit('create')} disabled={submitting} style={primary}>
+                <button type="button" onClick={() => submit('create')} disabled={submitting} style={primaryStyle(submitting)}>
                   {submitting ? 'Retrying…' : <><RefreshCw size={14} /> Retry</>}
                 </button>
               </div>
@@ -331,7 +331,7 @@ export default function LaunchStep({
             {collisionInfo.existing?.members?.length > 0 && <>Members: {collisionInfo.existing.members.join(', ')}</>}
           </div>
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-            <button type="button" onClick={() => submit('extend')} disabled={submitting} style={primary}>
+            <button type="button" onClick={() => submit('extend')} disabled={submitting} style={primaryStyle(submitting)}>
               {submitting ? 'Adding…' : 'Add missing agents'}
             </button>
             <button type="button" onClick={() => setCollisionInfo(null)} style={ghost}>Cancel</button>
@@ -388,7 +388,7 @@ export default function LaunchStep({
             type="button"
             onClick={() => submit(values.extend ? 'extend' : 'create')}
             disabled={submitting || envBlocking}
-            style={primary}
+            style={primaryStyle(submitting || envBlocking)}
           >
             {submitting ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : null}
             {submitting ? ` ${primaryLabel}` : primaryLabel}
@@ -468,8 +468,13 @@ const ghost = {
   background: 'none', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
   borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', cursor: 'pointer',
 };
-const primary = {
+const primaryBase = {
   display: 'inline-flex', alignItems: 'center', gap: 6,
   background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
-  borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
+  borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
 };
+const primaryStyle = (disabled) => ({
+  ...primaryBase,
+  opacity: disabled ? 0.5 : 1,
+  cursor: disabled ? 'not-allowed' : 'pointer',
+});

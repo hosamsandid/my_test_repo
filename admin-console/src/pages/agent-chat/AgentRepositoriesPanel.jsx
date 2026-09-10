@@ -68,7 +68,7 @@ const badgeBase = {
 // "everyone has this" is the default a reader assumes.
 function ScopeBadge({ row }) {
   const style = row.scope === 'agent'
-    ? { ...badgeBase, background: 'var(--eb-accent-soft, rgba(99,102,241,0.15))', color: 'var(--eb-accent, #6366f1)' }
+    ? { ...badgeBase, background: 'var(--eb-accent-muted)', color: 'var(--eb-accent-primary)' }
     : { ...badgeBase, background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-muted)' };
   return <span style={style}>{row.scopeLabel}</span>;
 }
@@ -239,16 +239,17 @@ export default function AgentRepositoriesPanel({
             title={gate.canAttach ? undefined : gate.reason}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1-5)',
-              padding: 'var(--eb-space-1-5) var(--eb-space-3)',
+              padding: 'var(--eb-space-2) var(--eb-space-4)',
               background: 'var(--eb-bg-elevated)',
               border: '1px solid var(--eb-border-default)',
               borderRadius: 'var(--eb-radius-md)',
               color: gate.canAttach ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)',
-              fontSize: 'var(--eb-text-xs)',
+              fontSize: 'var(--eb-text-sm)',
+              fontFamily: 'inherit',
               cursor: gate.canAttach ? 'pointer' : 'not-allowed',
             }}
           >
-            <Plus size={12} /> Add repository
+            <Plus size={13} /> Add repository
           </button>
           {/* AC16/AC17: the action is disabled WITH the reason rather than
               silently absent — an empty toolbar answers "where is it?" with
@@ -279,17 +280,18 @@ export default function AgentRepositoriesPanel({
               disabled={!submit.enabled}
               title={submit.reason || undefined}
               style={{
-                padding: 'var(--eb-space-1-5) var(--eb-space-3)',
-                background: submit.enabled ? 'var(--eb-accent, #6366f1)' : 'var(--eb-bg-elevated)',
-                border: '1px solid var(--eb-border-default)',
+                padding: 'var(--eb-space-2) var(--eb-space-4)',
+                background: submit.enabled ? 'var(--eb-accent-primary)' : 'var(--eb-bg-elevated)',
+                border: submit.enabled ? 'none' : '1px solid var(--eb-border-default)',
                 borderRadius: 'var(--eb-radius-md)',
-                color: submit.enabled ? '#fff' : 'var(--eb-text-muted)',
-                fontSize: 'var(--eb-text-xs)',
+                color: submit.enabled ? 'var(--eb-text-inverted)' : 'var(--eb-text-muted)',
+                fontSize: 'var(--eb-text-sm)',
+                fontFamily: 'inherit',
                 cursor: submit.enabled ? 'pointer' : 'not-allowed',
                 display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1-5)',
               }}
             >
-              {saving && <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />}
+              {saving && <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />}
               {saving ? 'Cloning…' : 'Attach and clone'}
             </button>
             <button
@@ -297,12 +299,13 @@ export default function AgentRepositoriesPanel({
               onClick={() => { setAdding(false); setDraft(blankRepositoryRow()); setError(null); }}
               disabled={saving}
               style={{
-                padding: 'var(--eb-space-1-5) var(--eb-space-3)',
+                padding: 'var(--eb-space-2) var(--eb-space-4)',
                 background: 'transparent',
                 border: '1px solid var(--eb-border-default)',
                 borderRadius: 'var(--eb-radius-md)',
                 color: 'var(--eb-text-secondary)',
-                fontSize: 'var(--eb-text-xs)',
+                fontSize: 'var(--eb-text-sm)',
+                fontFamily: 'inherit',
                 cursor: saving ? 'not-allowed' : 'pointer',
               }}
             >

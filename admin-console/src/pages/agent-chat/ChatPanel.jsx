@@ -1118,6 +1118,7 @@ export default function ChatPanel({
         <Message
           message={msg}
           agentUserId={agent.userId}
+          agentId={agent.id}
           onRelaunchLoop={handleRelaunchLoop}
           onAnswerQuestion={handleAnswerQuestion}
           questionAnswerable={qState?.answerable}

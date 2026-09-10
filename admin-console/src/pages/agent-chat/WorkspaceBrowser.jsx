@@ -1460,7 +1460,44 @@ function FileViewerBody({ agentId, relPath, loading, error, data, viewMode }) {
   );
 }
 
-function FileViewerModal({ agentId, relPath, data, loading, error, viewMode, onToggleViewMode, onClose }) {
+// Fetches the `/file` metadata (size/truncated/binary/imageType/content) for
+// one workspace-relative path — the same request `FileViewer` below makes on
+// a tree click. Extracted so the Agent Chat inline-image-thumbnail fullscreen
+// preview (#2146, `chat-image-thumbnail.jsx`) can feed the exact same
+// `FileViewerModal` without a second, parallel viewer (the ticket's own
+// constraint: reuse the existing preview, not rebuild it).
+export function useWorkspaceFileData(agentId, relPath) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const reqIdRef = useRef(0);
+
+  useEffect(() => {
+    if (!agentId || !relPath) return;
+    const reqId = ++reqIdRef.current;
+    setLoading(true);
+    setError(null);
+    setData(null);
+    fetch(workspaceUrl(agentId, relPath, 'file'))
+      .then(r => r.json().then(j => ({ ok: r.ok, j })))
+      .then(({ ok, j }) => {
+        if (reqId !== reqIdRef.current) return;
+        if (!ok) throw new Error(j?.error || 'Failed');
+        setData(j);
+      })
+      .catch(e => {
+        if (reqId !== reqIdRef.current) return;
+        setError(e.message);
+      })
+      .finally(() => {
+        if (reqId === reqIdRef.current) setLoading(false);
+      });
+  }, [agentId, relPath]);
+
+  return { data, loading, error };
+}
+
+export function FileViewerModal({ agentId, relPath, data, loading, error, viewMode, onToggleViewMode, onClose }) {
   const isMarkdown = isMarkdownFile(relPath);
 
   useEffect(() => {
@@ -1514,39 +1551,14 @@ function FileViewerModal({ agentId, relPath, data, loading, error, viewMode, onT
 }
 
 function FileViewer({ agentId, path: relPath, onClose }) {
-  const [data, setData]       = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError]     = useState(null);
+  const { data, loading, error } = useWorkspaceFileData(agentId, relPath);
   const [expanded, setExpanded] = useState(false);
   const [viewMode, setViewMode] = useState(() => isMarkdownFile(relPath) ? 'rendered' : 'raw');
-  const reqIdRef = useRef(0);
 
   // Reset view mode when file changes.
   useEffect(() => {
     setViewMode(isMarkdownFile(relPath) ? 'rendered' : 'raw');
   }, [relPath]);
-
-  useEffect(() => {
-    if (!agentId || !relPath) return;
-    const reqId = ++reqIdRef.current;
-    setLoading(true);
-    setError(null);
-    setData(null);
-    fetch(workspaceUrl(agentId, relPath, 'file'))
-      .then(r => r.json().then(j => ({ ok: r.ok, j })))
-      .then(({ ok, j }) => {
-        if (reqId !== reqIdRef.current) return;
-        if (!ok) throw new Error(j?.error || 'Failed');
-        setData(j);
-      })
-      .catch(e => {
-        if (reqId !== reqIdRef.current) return;
-        setError(e.message);
-      })
-      .finally(() => {
-        if (reqId === reqIdRef.current) setLoading(false);
-      });
-  }, [agentId, relPath]);
 
   const isMarkdown = isMarkdownFile(relPath);
   const toggleViewMode = () => setViewMode(m => m === 'rendered' ? 'raw' : 'rendered');

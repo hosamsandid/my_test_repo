@@ -314,7 +314,11 @@ at; the note-taker is a meeting you did not want to retype.
 **Files.** The paperclip attaches a file — as does dragging one onto the composer
 or pasting it. To point the agent at a file it *already has*, use the **@** button
 on a row in the Workspace tab: it splices `@<path>` into the draft, and the agent
-resolves that path itself with no upload.
+resolves that path itself with no upload. When your own message references an
+image this way, it shows as a small inline thumbnail instead of the raw
+`@<path>` text — click it to open the same fullscreen preview the Workspace tab
+uses. This only happens for messages **you** send; an agent's own reply never
+gets a thumbnail.
 
 **Answering a question.** When a run pauses to ask you something, the question
 arrives as a card with the options as buttons — click one instead of typing it.

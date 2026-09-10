@@ -11,6 +11,7 @@ import {
   reposForEnv,
   isRepoLessEnv,
   validateLaunch,
+  launchBlockReason,
   buildLaunchBody,
   launchSubmitLabel,
   launchResultMessage,
@@ -191,6 +192,38 @@ test('validateLaunch: hyphenated team id accepted, misplaced dashes refused', ()
       `'${bad}' should be a rejected suffix`,
     );
   }
+});
+
+// #2157 AC4 — launchBlockReason is the SINGLE source for the LaunchStep
+// primary button's disabled state and its visible reason, replacing the old
+// `envBlocking` boolean that decided disabled-ness independently of
+// validateLaunch's message.
+test('launchBlockReason: same reason validateLaunch gives, on the settled team id', () => {
+  assert.equal(launchBlockReason({ teamId: 'team', teamName: 'Team', environmentId: 'env' }), null);
+  assert.match(launchBlockReason({ teamId: 'ok', teamName: 'x', environmentId: '' }), /working environment/i);
+  // '---' is all-dash, so even after settling (normalizeTeamId strips leading/
+  // trailing dashes) it collapses to an empty id — genuinely invalid, unlike
+  // 'Bad Id' or a trailing-dash value, both of which settle to something legal.
+  assert.match(launchBlockReason({ teamId: '---', teamName: 'x', environmentId: 'e' }), /team id/i);
+  assert.match(launchBlockReason({ teamId: 'ok', teamName: '   ', environmentId: 'e' }), /name/i);
+});
+
+test('launchBlockReason: a trailing dash mid-edit does not flicker the reason to "team id" (the #2157 trap)', () => {
+  // `acme-` fails TEAM_ID_RE raw (a trailing dash is legal only while typing,
+  // #1934 AC1) but settles to `acme`, which is a fine id. The ACTUAL blocker
+  // here is the missing environment, and that is the reason that must be
+  // reported — not a spurious "team id" message that would flap on every dash
+  // keystroke if the raw value were validated directly.
+  const reason = launchBlockReason({ teamId: 'acme-', teamName: 'Acme', environmentId: '' });
+  assert.match(reason, /working environment/i);
+  assert.doesNotMatch(reason, /team id/i);
+  // Once the environment is picked, the settled id is fine — nothing blocks.
+  assert.equal(launchBlockReason({ teamId: 'acme-', teamName: 'Acme', environmentId: 'e' }), null);
+});
+
+test('launchBlockReason: null values object does not throw', () => {
+  assert.match(launchBlockReason({}), /team id/i);
+  assert.doesNotThrow(() => launchBlockReason(undefined));
 });
 
 test('buildLaunchBody: canonical shape, explicit materializeMembers, bundle name binding', () => {

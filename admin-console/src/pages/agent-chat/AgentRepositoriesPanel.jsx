@@ -269,9 +269,15 @@ export default function AgentRepositoriesPanel({
             // environment's GitHub token, resolved server-side. `githubTokenId`
             // is a real token id the card sends to the reachability probe, so
             // it must never carry a client-guessed placeholder (#2161) — the
-            // HTTPS-without-token hint is driven by `tokenTarget` alone.
+            // HTTPS-without-token hint's COPY is driven by `tokenTarget` alone.
+            // Its VISIBILITY, separately, is suppressed when the environment
+            // already has a real token bound — `hasEnvironmentToken` carries
+            // that signal on its own channel, never touching the probe/API
+            // (#2161 follow-up), so a probe failure never tells the reader to
+            // add a token their environment already has.
             githubTokenId=""
             tokenTarget="environment"
+            hasEnvironmentToken={view && view.hasGithubToken === true}
             onChange={(field, value) => setDraft((d) => ({ ...d, [field]: value }))}
           />
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center' }}>

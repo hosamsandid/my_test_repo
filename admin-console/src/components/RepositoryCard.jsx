@@ -125,9 +125,13 @@ export default function RepositoryCard({
   onChange,
   onRemove = null,
   tokenTarget = 'form',
+  // #2161 follow-up: a real GitHub token is bound somewhere the reachability
+  // probe does not (and must not) reach — never sent to `useRepoCheck`/the API,
+  // only used to suppress the "add a GitHub Token" hint on a probe failure.
+  hasEnvironmentToken = false,
 }) {
   const check = useRepoCheck(repo.url, repo.sshKeyId, githubTokenId);
-  const showTokenHint = shouldShowTokenHint(check, repo.url, githubTokenId);
+  const showTokenHint = shouldShowTokenHint(check, repo.url, githubTokenId, hasEnvironmentToken);
   const elsewhere = tokenIsElsewhere(tokenTarget);
 
   return (

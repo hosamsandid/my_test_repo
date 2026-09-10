@@ -339,3 +339,70 @@ test('no user-visible surface still points at the removed toolbar label', () => 
   const copilot = code(read('process/FlowCopilotPanel.jsx'));
   assert.doesNotMatch(copilot, /Materialize/);
 });
+
+// ─── #2157 — disabled-button affordance, source-reading half (AC8) ──────────
+//
+// The pure decision (`launchBlockReason` in launch-team.js) is unit-tested in
+// `launch-team.test.js`; what `node --test` cannot see is whether the JSX
+// actually WIRES it to the disabled state and the visible style — the exact
+// class of regression #2157 reported (the disabled check was correct, the
+// component just never rendered it). These are source-reading assertions in
+// the same spirit as the rest of this file.
+
+test('AC1/AC2 — the shared primary style greys out when disabled, and all three buttons use it', () => {
+  // The house pattern (opacity/cursor), not a bespoke treatment, and it must
+  // live in the SHARED style object/helper — a per-call-site override would not
+  // satisfy AC2, so this greps for exactly one definition of each.
+  assert.match(launch, /opacity:\s*disabled\s*\?\s*0\.5\s*:\s*1/);
+  assert.match(launch, /cursor:\s*disabled\s*\?\s*'not-allowed'\s*:\s*'pointer'/);
+  assert.equal((launch.match(/primaryStyle\(/g) || []).length, 3, 'submit, Retry and Add missing agents must all call primaryStyle(...)');
+});
+
+test('AC4 — the disabled state and its reason come from launchBlockReason, not a separate envBlocking boolean', () => {
+  assert.match(launch, /launchBlockReason/, 'the shared decision must be imported and used');
+  assert.doesNotMatch(launch, /envBlocking/, 'the old disconnected boolean must be gone, not left beside the new one');
+  // The submit button's disabled/style pair must be driven by the SAME
+  // `launchBlocked` value the reason came from — not two separately-computed
+  // conditions that could drift apart.
+  assert.match(launch, /disabled=\{submitting \|\| launchBlocked\}/);
+  assert.match(launch, /style=\{primaryStyle\(submitting \|\| launchBlocked\)\}/);
+});
+
+test('AC3 — the reason is rendered as persistent text, not only a hover tooltip', () => {
+  // A `title` alone is a legitimate hover affordance to keep, but AC3 requires
+  // a non-hover rendering too — so there must be a plain text node keyed off
+  // the same reason, not just the `title` attribute.
+  assert.match(launch, /\{launchReason\}/, 'the reason must be rendered as visible text somewhere');
+  assert.match(launch, /title=\{launchBlocked \? launchReason : undefined\}/);
+});
+
+test('AC6 — the environments fetch is not swallowed into an empty list', () => {
+  // The exact bug: an inline `.catch(() => [])` on the fetch itself folds a
+  // 403/500/network failure into "zero environments", which the empty-state box
+  // then misreports as "no working environment exists yet". The rejection must
+  // reach the outer try/catch instead.
+  assert.doesNotMatch(dialog, /apiCall\('GET', '\/api\/environments'\)\.catch/);
+  assert.match(dialog, /await apiCall\('GET', '\/api\/environments'\);/);
+  // And the catch branch's error path must actually be reachable — asserted
+  // both ways: envError is still set, and envsLoaded is no longer forced true
+  // there (which is what made the empty-list branch fire on a failure).
+  assert.match(dialog, /catch \(e\) \{[\s\S]{0,400}setEnvError\(message\)/);
+  const catchBlock = dialog.slice(dialog.indexOf('catch (e) {'), dialog.indexOf('catch (e) {') + 400);
+  assert.doesNotMatch(catchBlock, /setEnvsLoaded\(true\)/, 'the catch branch must not resolve to "loaded" — that is what let the empty-state lie render');
+});
+
+test('AC7 — the space before {{vars}} lives inside the tag, matching the tag above it', () => {
+  assert.match(dialog, /<code> \{'\{\{vars\}\}'\}<\/code>/);
+  // The workaround this mirrors, one line above, must still be there too — if
+  // it regresses, the two would disagree about which fix pattern is correct.
+  assert.match(dialog, /<strong> \{bundle\?\.name\}<\/strong>/);
+});
+
+test('AC9 — no point-of-decision copy was traded away for the AC4/AC6 rewiring', () => {
+  // These live in LaunchStep.jsx (the empty-state box + repo-less notice +
+  // provision-now hint), not MaterializeDialog.jsx.
+  assert.match(launch, /No working environment exists yet/);
+  assert.match(launch, /Create a working environment/);
+  assert.match(launch, /This environment has no repository/);
+  assert.match(launch, /PROVISION_NOW_LABEL/);
+});

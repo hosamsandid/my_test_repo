@@ -4,6 +4,7 @@ import {
   reposForEnv,
   isRepoLessEnv,
   validateLaunch,
+  launchBlockReason,
   buildLaunchBody,
   launchSubmitLabel,
   launchResultMessage,
@@ -137,7 +138,16 @@ export default function LaunchStep({
   }
 
   const primaryLabel = launchSubmitLabel({ saving: submitting, extend: values.extend, materializeNow: values.materializeNow });
-  const envBlocking = has('environment') && !values.environmentId;
+  // Single source for the disabled state AND its reason (#2157 AC4) — replaces
+  // the old `envBlocking`, which decided disabled-ness with no connection to the
+  // message a caller might show. `launchBlockReason` settles the team id first,
+  // so a trailing dash mid-edit never flickers the reason (see its own comment).
+  const launchReason = launchBlockReason(values);
+  const launchBlocked = !!launchReason;
+  // The no-environment empty state (below) already carries this exact reason —
+  // do not repeat it a second time next to the button (#2157 AC3: the two must
+  // not contradict, not that they must both say it).
+  const showLaunchReasonHint = launchBlocked && !submitting && !(has('environment') && noEnvs);
   // Inline, immediate format feedback so a rule violation is visible while
   // typing instead of surfacing as an opaque 400 from the API (#1934).
   const idFieldError = teamIdError(values.teamId);
@@ -311,7 +321,7 @@ export default function LaunchStep({
                 issue above and try again.
               </div>
               <div style={{ marginTop: 'var(--eb-space-3)' }}>
-                <button type="button" onClick={() => submit('create')} disabled={submitting} style={primary}>
+                <button type="button" onClick={() => submit('create')} disabled={submitting} style={primaryStyle(submitting)}>
                   {submitting ? 'Retrying…' : <><RefreshCw size={14} /> Retry</>}
                 </button>
               </div>
@@ -331,7 +341,7 @@ export default function LaunchStep({
             {collisionInfo.existing?.members?.length > 0 && <>Members: {collisionInfo.existing.members.join(', ')}</>}
           </div>
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-            <button type="button" onClick={() => submit('extend')} disabled={submitting} style={primary}>
+            <button type="button" onClick={() => submit('extend')} disabled={submitting} style={primaryStyle(submitting)}>
               {submitting ? 'Adding…' : 'Add missing agents'}
             </button>
             <button type="button" onClick={() => setCollisionInfo(null)} style={ghost}>Cancel</button>
@@ -382,17 +392,27 @@ export default function LaunchStep({
       )}
 
       {!result && (
-        <div style={{ display: 'flex', justifyContent: leftAction ? 'space-between' : 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-1)' }}>
-          {leftAction}
-          <button
-            type="button"
-            onClick={() => submit(values.extend ? 'extend' : 'create')}
-            disabled={submitting || envBlocking}
-            style={primary}
-          >
-            {submitting ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : null}
-            {submitting ? ` ${primaryLabel}` : primaryLabel}
-          </button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)', marginTop: 'var(--eb-space-1)' }}>
+          {/* #2157 AC3: readable without hovering — a `title` alone would not
+              satisfy that, so this is a persistent line, not a tooltip. */}
+          {showLaunchReasonHint && (
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', textAlign: 'right' }}>
+              {launchReason}
+            </div>
+          )}
+          <div style={{ display: 'flex', justifyContent: leftAction ? 'space-between' : 'flex-end', gap: 'var(--eb-space-2)' }}>
+            {leftAction}
+            <button
+              type="button"
+              onClick={() => submit(values.extend ? 'extend' : 'create')}
+              disabled={submitting || launchBlocked}
+              style={primaryStyle(submitting || launchBlocked)}
+              title={launchBlocked ? launchReason : undefined}
+            >
+              {submitting ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : null}
+              {submitting ? ` ${primaryLabel}` : primaryLabel}
+            </button>
+          </div>
         </div>
       )}
       <style>{`@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}`}</style>
@@ -468,8 +488,13 @@ const ghost = {
   background: 'none', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
   borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', cursor: 'pointer',
 };
-const primary = {
+const primaryBase = {
   display: 'inline-flex', alignItems: 'center', gap: 6,
   background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
-  borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
+  borderRadius: 'var(--eb-radius-md)', padding: '6px 14px', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
 };
+const primaryStyle = (disabled) => ({
+  ...primaryBase,
+  opacity: disabled ? 0.5 : 1,
+  cursor: disabled ? 'not-allowed' : 'pointer',
+});

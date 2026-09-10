@@ -166,12 +166,19 @@ function eligibleTargets(entry, candidates) {
 //
 // `source: 'internal'` matches the flow-emit / wake-agent entries so log
 // readers can tell the delivery path apart (docs/direct-agent-handoff-concept.md).
-function buildReassignedEntry(entry, { triggerId, fromAgentId, byUserId, at, id }) {
+//
+// `wakeLabel` is re-stamped from the TARGET's own `labelFilter` (#2151), never
+// carried over from `...base`: the entry now sits in the target's queue under
+// the target's trigger, and the source's wakeLabel recorded what woke a
+// DIFFERENT trigger — carrying it over would misattribute the target's own
+// notice the same way this ticket fixes elsewhere.
+function buildReassignedEntry(entry, { triggerId, labelFilter, fromAgentId, byUserId, at, id }) {
   const base = (entry && typeof entry === 'object') ? entry : {};
   return {
     ...base,
     id,
     triggerId,
+    wakeLabel: labelFilter || null,
     source: 'internal',
     reassignedFrom: fromAgentId,
     reassignedFromEntryId: base.id || null,
@@ -269,6 +276,7 @@ function performReassign({ sourceAgentId, targetAgentId }, deps) {
   // ── Hand it over, re-stamped for the target.
   const moved = buildReassignedEntry(entry, {
     triggerId: target.triggerId,
+    labelFilter: target.labelFilter,
     fromAgentId: sourceAgentId,
     byUserId,
     at: now,

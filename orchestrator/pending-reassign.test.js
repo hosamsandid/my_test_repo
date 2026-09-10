@@ -367,6 +367,26 @@ test("AC3: the moved entry carries the target's trigger id and full provenance",
   assert.equal(queuedEntry().triggerId, "t-source");
 });
 
+// ── #2151: the moved entry's wakeLabel is the TARGET's, never the source's ──
+
+test("#2151: buildReassignedEntry re-stamps wakeLabel from the target's own labelFilter", () => {
+  const moved = buildReassignedEntry(queuedEntry({ wakeLabel: "ready" }), {
+    triggerId: "t-target", labelFilter: "ready-2", fromAgentId: "reviewer-a",
+    byUserId: "u-1", at: "2026-09-08T13:00:00.000Z", id: "entry-new",
+  });
+  assert.equal(moved.wakeLabel, "ready-2",
+    "the target's own labelFilter, not the source's stale wakeLabel ('ready')");
+});
+
+test("#2151: buildReassignedEntry stamps null when the target listener carries no labelFilter", () => {
+  const moved = buildReassignedEntry(queuedEntry({ wakeLabel: "ready" }), {
+    triggerId: "t-target", labelFilter: null, fromAgentId: "reviewer-a",
+    byUserId: "u-1", at: "2026-09-08T13:00:00.000Z", id: "entry-new",
+  });
+  assert.equal(moved.wakeLabel, null,
+    "an any-label target listener must not inherit the source's wakeLabel");
+});
+
 test("AC3: the target's consumer path resolves the moved entry's trigger id", () => {
   // agent-entrypoint.py `_handle_pending_entry` looks the entry's `triggerId`
   // up in the TARGET's own triggers.json and requires type http|github-event
@@ -508,6 +528,9 @@ test("AC2: the happy path removes at the source BEFORE enqueueing at the target"
   assert.equal(h.targetQueue[0].id, "entry-new");
   assert.equal(result.to, "reviewer-b");
   assert.equal(result.triggerId, "t-target");
+  // #2151: the moved entry's wakeLabel is the target trigger's own filter.
+  assert.equal(h.targetQueue[0].wakeLabel, "ready-6");
+  assert.equal(result.labelFilter, "ready-6");
 });
 
 test("AC2: an entry that already fired performs NO enqueue and reports a distinct outcome", () => {

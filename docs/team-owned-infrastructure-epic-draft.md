@@ -63,7 +63,7 @@ identity & credentials; **B1 is its root** (B2/B3 depend on it, B4 on B3, B5 las
   - [ ] B5 — Retire the shared team credential; personal is the norm
 - **C — Cross-cutting (schedule anywhere)**
   - [ ] C1 — Move skill promote-to-global and plugin-apply to Team Admin
-  - [ ] C2 — Guide provider onboarding; block team-create without a provider
+  - [x] C2 — Guide provider onboarding; block team-create without a provider (#2179)
 
 **Out of scope / kept:** the full per-(human, agent) *room* model (multi-user-concept §4 / §10
 item 6) stays deferred — B1 uses one shared room per agent, humans joining under their own

@@ -21,6 +21,7 @@ import {
   SUFFIX_RE,
   TEAM_ID_HINT,
   SUFFIX_HINT,
+  NO_PROVIDER_ERROR,
 } from './launch-team.js';
 
 test('slugify: lowercase, dash runs, trim dashes, 40-char cap', () => {
@@ -226,6 +227,28 @@ test('launchBlockReason: a trailing dash mid-edit does not flicker the reason to
 test('launchBlockReason: null values object does not throw', () => {
   assert.match(launchBlockReason({}), /team id/i);
   assert.doesNotThrow(() => launchBlockReason(undefined));
+});
+
+// #2179: a platform with no registered model provider blocks team creation —
+// mirrored client-side so the button disables before the server 400s.
+test('validateLaunch: hasProvider defaults to true (does not block) and only an explicit false blocks', () => {
+  const base = { teamId: 'team', teamName: 'Team', environmentId: 'env' };
+  assert.equal(validateLaunch(base), null);
+  assert.equal(validateLaunch({ ...base, hasProvider: true }), null);
+  assert.equal(validateLaunch({ ...base, hasProvider: undefined }), null);
+  assert.equal(validateLaunch({ ...base, hasProvider: false }), NO_PROVIDER_ERROR);
+});
+
+test('launchBlockReason: propagates hasProvider: false as the block reason', () => {
+  assert.equal(
+    launchBlockReason({ teamId: 'team', teamName: 'Team', environmentId: '', hasProvider: false }),
+    NO_PROVIDER_ERROR,
+  );
+  // A genuinely invalid team id is still reported ahead of the provider check.
+  assert.match(
+    launchBlockReason({ teamId: '---', teamName: 'x', environmentId: 'e', hasProvider: false }),
+    /team id/i,
+  );
 });
 
 test('buildLaunchBody: canonical shape, explicit materializeMembers, bundle name binding', () => {

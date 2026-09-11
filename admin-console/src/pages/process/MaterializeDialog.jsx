@@ -28,6 +28,11 @@ export default function MaterializeDialog({ bundle, onClose, onDone, onCreated, 
   const [environments, setEnvironments] = useState([]);
   const [envsLoaded, setEnvsLoaded] = useState(false);
   const [envError, setEnvError] = useState(null);
+  // #2179: block team creation on a platform with no registered model
+  // provider — mirrors the server-side check in POST /api/teams(/stream).
+  // `null` means "still loading" (undefined once resolved), so LaunchStep's
+  // `hasUsableProvider !== false` never blocks prematurely.
+  const [hasUsableProvider, setHasUsableProvider] = useState(undefined);
 
   // A draft opened from a live team (#348) remembers its origin so we can default
   // to extending it rather than creating a colliding new team.
@@ -82,6 +87,22 @@ export default function MaterializeDialog({ bundle, onClose, onDone, onCreated, 
     return () => { alive = false; };
   }, [sourceTeamId]);
 
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const endpoints = await apiCall('GET', '/api/llm-endpoints');
+        if (!alive) return;
+        setHasUsableProvider(Array.isArray(endpoints) && endpoints.length > 0);
+      } catch {
+        // A failed provider-registry fetch is not itself a reason to block
+        // the launch — the server re-checks at the boundary either way.
+        if (alive) setHasUsableProvider(true);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
   return (
     <SidePanel open onClose={onClose} title={CREATE_TEAM_DIALOG_TITLE} width="520px">
       <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 0 }}>
@@ -111,6 +132,7 @@ export default function MaterializeDialog({ bundle, onClose, onDone, onCreated, 
         // which names the team, plus the notice the parent supplies, and the
         // navigation is an explicit click.
         onComplete={(result) => onCreated?.(result)}
+        hasUsableProvider={hasUsableProvider}
         completionNotice={createdNotice}
         completionAction={(
           <button

@@ -53,6 +53,12 @@ export default function LaunchStep({
   completionAction = null,
   describeError = describeMaterializeError,
   onBusyChange,
+  // #2179: whether at least one model provider is registered on the
+  // platform. `undefined` (the caller hasn't finished loading `/api/llm-
+  // endpoints` yet) is treated as "don't block" so the button never flashes
+  // disabled during that fetch — the check re-runs on every render, so it
+  // still catches the true zero-provider case before submit.
+  hasUsableProvider,
 }) {
   const [submitting, setSubmitting] = useState(false);
   const [progressSteps, setProgressSteps] = useState(null);
@@ -66,6 +72,7 @@ export default function LaunchStep({
 
   const has = (f) => fields.includes(f);
   const set = (patch) => onChange?.(patch);
+  const hasProvider = hasUsableProvider !== false;
 
   // `environments` may be null/undefined while still loading — distinguish that
   // from a genuinely empty list so we don't flash the "no environments" box.
@@ -109,7 +116,7 @@ export default function LaunchStep({
     const settledId = normalizeTeamId(values.teamId);
     if (settledId !== values.teamId) set({ teamId: settledId });
     const settled = { ...values, teamId: settledId };
-    const err = validateLaunch(settled);
+    const err = validateLaunch({ ...settled, hasProvider });
     if (err) { setError(err); setErrorDetail(null); return; }
     setError(null); setErrorDetail(null);
     setCollisionInfo(null); setProgressError(null); setProgressSteps(null); setMatWarnings([]);
@@ -141,7 +148,7 @@ export default function LaunchStep({
   // the old `envBlocking`, which decided disabled-ness with no connection to the
   // message a caller might show. `launchBlockReason` settles the team id first,
   // so a trailing dash mid-edit never flickers the reason (see its own comment).
-  const launchReason = launchBlockReason(values);
+  const launchReason = launchBlockReason({ ...values, hasProvider });
   const launchBlocked = !!launchReason;
   // The no-environment empty state (below) already carries this exact reason —
   // do not repeat it a second time next to the button (#2157 AC3: the two must

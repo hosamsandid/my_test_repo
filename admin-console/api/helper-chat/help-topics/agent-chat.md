@@ -570,10 +570,15 @@ plugin grants, host context folders. It is the only place an existing agent is
 configured: the Agents page that used to host a second copy of this form was
 removed once the tab covered it (see *Where the Agents page went* below).
 
-Its **role** and its **Working Environment** are fixed at creation and are not
-shown here — neither could be changed in this form anyway. The agent's role is
-what its list icon shows, and the environment's name sits under the agent's name
-in the list (on a team, once per group header).
+Its **role** is fixed at creation and is not shown here — the agent's role is
+what its list icon shows. The **Working Environment** binding itself is fixed
+too, but on a **team** agent this tab also renders a **Working Environment**
+section — grouped tabs (Repositories · Model provider · Toolchain · MCP
+servers · Additional context) editing the bound environment's own content in
+place, through that record's own save rather than this form's. There is no
+ownership/team picker there — the environment already belongs to this team.
+On any other role the environment's name just sits under the agent's name in
+the list (on a team, once per group header), with no edit surface here.
 
 Three things behave differently from an ordinary form:
 

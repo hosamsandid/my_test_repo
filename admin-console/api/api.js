@@ -395,6 +395,27 @@ auth.registerAuthRoutes(app, {
 });
 app.use('/api', auth.gate);
 
+// Team-share room sync (#2174, epic #2166 B2). Mirrors the `auditMutations`
+// pattern above: mounted before the two routes it watches and listening for
+// `res.on('finish')` rather than wrapping their handlers, so it needs no
+// change to `POST`/`DELETE /api/admin/memberships` — including their own
+// `canManageTeam` gate and `proxyAdmin` plumbing — and always reads the real
+// final status. A denied (403) or failed (4xx/5xx) write is never followed by
+// a room change.
+app.use('/api/admin/memberships', (req, res, next) => {
+  res.on('finish', () => {
+    if (res.statusCode >= 400) return;
+    if (req.method === 'POST') {
+      const shared = req.body || {};
+      if (shared.teamId && shared.userId) syncSharedMemberRooms(shared.teamId, shared.userId, 'invite');
+    } else if (req.method === 'DELETE') {
+      const unshared = req.query || {};
+      if (unshared.teamId && unshared.userId) syncSharedMemberRooms(unshared.teamId, unshared.userId, 'remove');
+    }
+  });
+  next();
+});
+
 // Work-plane tenant isolation (#1459 §2 — GOV-ACCESS-3 / GOV-PLATFORM-4).
 //
 // One gate in front of the entire `:agentId` family (workspace browser, git
@@ -1096,6 +1117,46 @@ async function ensureHumanJoinedToRoom(identity, roomId) {
       `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/join`,
       { method: 'POST', body: {} });
   } catch { /* already joined */ }
+}
+
+// Sharing/unsharing an Agent Team should reach its members' rooms immediately
+// rather than waiting for a shared-in human's first message to trigger the
+// #2173 lazy invite above (#2174, epic #2166 B2). `role: 'team'` itself hosts
+// no chat and has no `dm-room.json` (docs: "hosts no agent itself"), so only
+// its materialized `team-member`s are ever in scope.
+//
+// Best-effort + idempotent (the #1458 provisioning discipline): a human with
+// no provisioned Matrix identity yet is silently skipped — the lazy path still
+// covers them once provisioning finishes — and a member with no DM room (never
+// opened, or a stub not yet materialized) has nothing to invite into or remove
+// from. Fired-and-forgotten by its caller; every failure is caught here so it
+// can never surface as (or delay) the membership write's own response.
+function syncSharedMemberRooms(teamId, userId, action) {
+  Promise.resolve().then(async () => {
+    const identity = humanMatrixStore.readIdentity(userId);
+    if (!identity || !identity.matrixUserId) return;
+    const configs = listAgentDirs().map(
+      id => ({ id, ...readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {}) }));
+    const memberIds = membersOfTeam(configs, teamId).map(m => m.id);
+    for (const memberId of memberIds) {
+      const dm = matrix.getAgentDmRoom(memberId);
+      if (!dm?.roomId) continue;
+      try {
+        if (action === 'invite') {
+          await ensureHumanJoinedToRoom(identity, dm.roomId);
+        } else {
+          await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+            `/_matrix/client/v3/rooms/${encodeURIComponent(dm.roomId)}/kick`,
+            { method: 'POST', body: { user_id: identity.matrixUserId, reason: 'Removed from team' } });
+        }
+      } catch (err) {
+        console.error(`[API] Failed to ${action} user ${userId} ${action === 'invite' ? 'into' : 'from'} `
+          + `room ${dm.roomId} (agent ${memberId}, team ${teamId}): ${err.message}`);
+      }
+    }
+  }).catch((err) => {
+    console.error(`[API] syncSharedMemberRooms(${teamId}, ${userId}, ${action}) failed: ${err.message}`);
+  });
 }
 
 // The `{ ownerId, ownerSource }` stamp a create request carries to the

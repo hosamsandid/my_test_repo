@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Trash2, Pencil, Plus, ChevronDown, ChevronRight, KeyRound, ClipboardPaste, Copy, Check, ExternalLink } from 'lucide-react';
+import { Trash2, Pencil, Plus, ChevronDown, ChevronRight, KeyRound, ClipboardPaste, Copy, Check, ExternalLink, RefreshCw } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import WhenCell from '../components/WhenCell';
@@ -428,6 +428,10 @@ export default function SshKeys() {
   const { user } = useAuth();
   const [creating, setCreating] = useState(false);
   const [editTarget, setEditTarget] = useState(null);
+  const [rotateTarget, setRotateTarget] = useState(null);
+  const [rotateMode, setRotateMode] = useState('generate');
+  const [rotatePrivateKey, setRotatePrivateKey] = useState('');
+  const [rotateGenerated, setRotateGenerated] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -499,6 +503,7 @@ export default function SshKeys() {
         return (
           <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
             {manageable && <IconButton icon={Pencil} label="Edit" onClick={() => { setEditTarget(row); setFormError(null); }} />}
+            {manageable && <IconButton icon={RefreshCw} label="Replace key" onClick={() => { setRotateTarget(row); setRotateMode('generate'); setRotatePrivateKey(''); setRotateGenerated(null); setFormError(null); }} />}
             {manageable && <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />}
           </div>
         );
@@ -559,6 +564,30 @@ export default function SshKeys() {
     } catch (e) {
       setActionError(e.message);
       setDeleteTarget(null);
+    }
+  }
+
+  function closeRotatePanel() {
+    setRotateTarget(null); setRotatePrivateKey(''); setRotateGenerated(null); setFormError(null);
+  }
+
+  async function handleRotate() {
+    setSaving(true); setFormError(null);
+    try {
+      const body = rotateMode === 'generate'
+        ? { generate: true }
+        : { privateKey: rotatePrivateKey.trim() };
+      const r = await apiCall('POST', `/api/ssh-keys/${rotateTarget.id}/rotate`, body);
+      refetch();
+      if (rotateMode === 'generate' && r?.publicKey) {
+        setRotateGenerated(r.publicKey); // reveal the new public key to copy to GitHub
+      } else {
+        closeRotatePanel();
+      }
+    } catch (e) {
+      setFormError(e.message);
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -665,6 +694,75 @@ export default function SshKeys() {
             error={formError}
           />
         )}
+      </SidePanel>
+
+      <SidePanel
+        open={!!rotateTarget}
+        onClose={closeRotatePanel}
+        title="Replace SSH key"
+        width="560px"
+      >
+        {rotateTarget && (rotateGenerated
+          ? <PublicKeyReveal publicKey={rotateGenerated} onDone={closeRotatePanel} />
+          : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+              <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+                Replacing the private key for <strong>{rotateTarget.name || rotateTarget.id}</strong>
+                <code style={{ display: 'block', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>{rotateTarget.id}</code>
+              </p>
+              <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
+                Keeps the same id, name and ownership. Every Working Environment that references this key
+                has its running agents <strong>restarted</strong> so they pick up the new key — a running
+                loop or trigger is cut off, so replace at a quiet moment. Remember to add the new public
+                key as a deploy key on GitHub.
+              </div>
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+                <button
+                  onClick={() => setRotateMode('generate')}
+                  style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2)', background: rotateMode === 'generate' ? 'var(--eb-accent-primary)' : 'transparent', color: rotateMode === 'generate' ? 'var(--eb-text-inverted)' : 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit' }}
+                >
+                  <KeyRound size={14} /> Generate new keypair
+                </button>
+                <button
+                  onClick={() => setRotateMode('paste')}
+                  style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2)', background: rotateMode === 'paste' ? 'var(--eb-accent-primary)' : 'transparent', color: rotateMode === 'paste' ? 'var(--eb-text-inverted)' : 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit' }}
+                >
+                  <ClipboardPaste size={14} /> Paste a private key
+                </button>
+              </div>
+              {rotateMode === 'paste' && (
+                <label style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+                  New private key
+                  <textarea
+                    value={rotatePrivateKey}
+                    onChange={e => setRotatePrivateKey(e.target.value)}
+                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                    rows={5}
+                    autoFocus
+                    style={{ width: '100%', marginTop: 'var(--eb-space-2)', padding: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', resize: 'vertical', boxSizing: 'border-box' }}
+                  />
+                </label>
+              )}
+              {formError && (
+                <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{formError}</div>
+              )}
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+                <button
+                  disabled={saving || (rotateMode === 'paste' && !rotatePrivateKey.trim())}
+                  onClick={handleRotate}
+                  style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: (saving || (rotateMode === 'paste' && !rotatePrivateKey.trim())) ? 'not-allowed' : 'pointer', opacity: (saving || (rotateMode === 'paste' && !rotatePrivateKey.trim())) ? 0.6 : 1, fontFamily: 'inherit' }}
+                >
+                  {saving ? 'Replacing…' : (rotateMode === 'generate' ? 'Generate & restart agents' : 'Replace & restart agents')}
+                </button>
+                <button
+                  onClick={closeRotatePanel}
+                  style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'transparent', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ))}
       </SidePanel>
 
       <ConfirmDialog

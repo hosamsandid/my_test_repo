@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router';
-import { Trash2, Pencil, Plus, ChevronDown, ChevronRight } from 'lucide-react';
+import { Trash2, Pencil, Plus, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import WhenCell from '../components/WhenCell';
@@ -294,6 +294,8 @@ export default function GithubTokens() {
   const { user } = useAuth();
   const [creating, setCreating] = useState(false);
   const [editTarget, setEditTarget] = useState(null);
+  const [rotateTarget, setRotateTarget] = useState(null);
+  const [rotateToken, setRotateToken] = useState('');
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -363,6 +365,7 @@ export default function GithubTokens() {
         return (
           <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
             {manageable && <IconButton icon={Pencil} label="Edit" onClick={() => { setEditTarget(row); setFormError(null); }} />}
+            {manageable && <IconButton icon={RefreshCw} label="Replace value" onClick={() => { setRotateTarget(row); setRotateToken(''); setFormError(null); }} />}
             {manageable && <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />}
           </div>
         );
@@ -388,6 +391,19 @@ export default function GithubTokens() {
     try {
       await apiCall('PATCH', `/api/github-tokens/${editTarget.id}`, body);
       setEditTarget(null);
+      refetch();
+    } catch (e) {
+      setFormError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleRotate() {
+    setSaving(true); setFormError(null);
+    try {
+      await apiCall('POST', `/api/github-tokens/${rotateTarget.id}/rotate`, { token: rotateToken.trim() });
+      setRotateTarget(null); setRotateToken('');
       refetch();
     } catch (e) {
       setFormError(e.message);
@@ -497,11 +513,12 @@ export default function GithubTokens() {
             cred={editTarget}
             secretHelp={(
               <>
-                The token value can't be changed here — a token secret is set once, at creation.
-                {' '}<strong>To rotate an expiring or leaked token:</strong> create a new GitHub token,
-                then repoint the <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environment</Link>{' '}
-                to it. Any running agents in that environment are restarted so they pick up the new
-                token — in-flight work is interrupted, so rotate at a quiet moment.
+                This dialog changes only the name and ownership. <strong>To replace an expiring or
+                leaked token value in place,</strong> close this and use <strong>Replace value</strong>{' '}
+                (the <RefreshCw size={12} style={{ verticalAlign: 'middle' }} /> action on the row). Any
+                running agents in a <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environment</Link>{' '}
+                that references this token are restarted so they pick up the new value — in-flight work
+                is interrupted, so replace at a quiet moment.
               </>
             )}
             teams={teams}
@@ -513,6 +530,57 @@ export default function GithubTokens() {
             saving={saving}
             error={formError}
           />
+        )}
+      </SidePanel>
+
+      <SidePanel
+        open={!!rotateTarget}
+        onClose={() => { setRotateTarget(null); setRotateToken(''); setFormError(null); }}
+        title="Replace GitHub token value"
+        width="560px"
+      >
+        {rotateTarget && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+            <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+              Replacing the value for <strong>{rotateTarget.name || rotateTarget.id}</strong>
+              <code style={{ display: 'block', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>{rotateTarget.id}</code>
+            </p>
+            <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
+              Keeps the same id, name and ownership. Every Working Environment that references this token
+              has its running agents <strong>restarted</strong> so they pick up the new value — a running
+              loop or trigger is cut off, so replace at a quiet moment.
+            </div>
+            <GithubTokenHint />
+            <label style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+              New token value
+              <textarea
+                value={rotateToken}
+                onChange={e => setRotateToken(e.target.value)}
+                placeholder="github_pat_… or ghp_…"
+                rows={3}
+                autoFocus
+                style={{ width: '100%', marginTop: 'var(--eb-space-2)', padding: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', resize: 'vertical', boxSizing: 'border-box' }}
+              />
+            </label>
+            {formError && (
+              <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{formError}</div>
+            )}
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+              <button
+                disabled={saving || !rotateToken.trim()}
+                onClick={handleRotate}
+                style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: saving || !rotateToken.trim() ? 'not-allowed' : 'pointer', opacity: saving || !rotateToken.trim() ? 0.6 : 1, fontFamily: 'inherit' }}
+              >
+                {saving ? 'Replacing…' : 'Replace & restart agents'}
+              </button>
+              <button
+                onClick={() => { setRotateTarget(null); setRotateToken(''); setFormError(null); }}
+                style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'transparent', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit' }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
         )}
       </SidePanel>
 

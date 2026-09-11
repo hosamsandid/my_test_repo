@@ -34,7 +34,13 @@ export default function PublishSkillAction({ name, agentId, teamId, onPublished 
   const [pendingStep, setPendingStep] = useState(null); // the step awaiting an overwrite confirm
   const [done, setDone] = useState(null); // 'direct' | 'staged' — the path that finished
 
-  async function runStep(step, steps, idx) {
+  // `id` — the path this call chain belongs to — is threaded through as an
+  // explicit ARGUMENT, never read back out of `pathId` state. `start()` calls
+  // this synchronously, in the same tick as `setPathId(id)`; React batches
+  // that update, so a closure reading `pathId` state here would still see the
+  // PREVIOUS render's value (`null` on the very first publish) — which is
+  // exactly why the terminal `setDone(...)` used to go silently wrong.
+  async function runStep(step, steps, idx, id) {
     setBusy(true);
     setError(null);
     try {
@@ -46,7 +52,7 @@ export default function PublishSkillAction({ name, agentId, teamId, onPublished 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         if (res.status === 409 && data.exists) {
-          setPendingStep({ step, steps, idx });
+          setPendingStep({ step, steps, idx, id });
           setBusy(false);
           return;
         }
@@ -55,10 +61,10 @@ export default function PublishSkillAction({ name, agentId, teamId, onPublished 
       const next = idx + 1;
       if (next < steps.length) {
         setStepIndex(next);
-        await runStep(steps[next], steps, next);
+        await runStep(steps[next], steps, next, id);
         return;
       }
-      setDone(pathId);
+      setDone(id);
       setBusy(false);
       onPublished?.(data);
     } catch (e) {
@@ -73,14 +79,14 @@ export default function PublishSkillAction({ name, agentId, teamId, onPublished 
     setDone(null);
     setError(null);
     const steps = publishSteps(id, { name, agentId, teamId });
-    runStep(steps[0], steps, 0);
+    runStep(steps[0], steps, 0, id);
   }
 
   function confirmOverwrite() {
     if (!pendingStep) return;
-    const { step, steps, idx } = pendingStep;
+    const { step, steps, idx, id } = pendingStep;
     setPendingStep(null);
-    runStep({ ...step, onCollision: 'overwrite' }, steps, idx);
+    runStep({ ...step, onCollision: 'overwrite' }, steps, idx, id);
   }
 
   return (

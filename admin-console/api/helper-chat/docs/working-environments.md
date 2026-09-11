@@ -160,14 +160,41 @@ same propagation, so they cannot disagree about what a change would do.
 
 ## Editing from a team's Settings tab
 
-A `role: 'team'` agent's Working Environment can also be edited without leaving
-Agent Chat: open the team's **Settings** tab and its **Working Environment**
-section renders grouped tabs — **Repositories · Model provider · Toolchain ·
-MCP servers · Additional context** — over the same environment record, saved
-through the same `PUT /api/environments/:id` this page's own form uses. A
-repository change still gets the save-time propagation offer described above;
-a provider or toolchain change still respawns the team's running agents.
+The general-purpose Working Environments page described above is **retired**
+(#2170, epic #2166 A4) — there is no longer a standalone page listing every
+environment. A `role: 'team'` agent's Working Environment is now edited
+without leaving Agent Chat: open the team's **Settings** tab and its **Working
+Environment** section renders grouped tabs — **Repositories · Model provider ·
+Toolchain · MCP servers · Additional context** — over the same environment
+record, saved through the same `PUT /api/environments/:id` the retired page's
+form used. A repository change still gets the save-time propagation offer
+described above; a provider or toolchain change still respawns the team's
+running agents. The **GitHub Token** select joined the Repositories tab in
+#2170, since that page was the only surface that could set it.
 
-Not carried onto that surface: the environment's **Name**/**ID** and its
-**GitHub Token** — those stay edited here, on the Working Environments page.
-Ownership is edited on neither surface — see above.
+Not carried onto that surface: the environment's **Name**/**ID** (fixed at
+creation, rarely revisited) and ownership/team (the environment already
+belongs to this team; editing its content is not a re-tier). A System Admin
+can still re-tier an existing environment from **Administration → Resources**.
+
+## The System-Admin Environment Templates catalog
+
+The other half of the retired page — curating a shared, reusable environment —
+is now **Environment Templates** (`/environment-templates`, System-Admin-only).
+A template carries the same infrastructure fields (repositories, MCP pairings,
+model provider, toolchain, additional context) but is never a live-shared
+binding: no agent or team can be pointed at one directly (`environmentId` on
+`POST /api/agents`, `POST /api/teams` or `POST /api/teams/stream` refuses a
+template with `template-not-bindable`). Instead, `POST /api/environments`
+accepts an optional `copyFromTemplateId` that seeds a **new**, independent
+environment's structure from the named template — repositories and MCP server
+references are copied, but every credential reference (`sshKeyId` on a
+repository, `credentialId` on an MCP pairing) is deliberately stripped, so the
+team that copies a template always supplies its own. This replaces the earlier
+**global environment** flag (`global: true` + `scope: 'system'`, #2158), which
+made a record directly usable by every team with no admin action — a live
+binding, not a copy; a pre-existing global record is read as a template on the
+Environment Templates list (`isTemplateEnvironment`'s migration rule) and
+becomes a real, on-disk `isTemplate: true` record the first time it is saved
+from that page. The `isTemplate` flag is set only by a System Admin
+(`resolveTemplateFlag`, mirroring `resolveGlobalFlag`'s publish-gate shape).

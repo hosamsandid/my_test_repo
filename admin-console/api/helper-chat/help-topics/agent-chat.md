@@ -7,9 +7,10 @@ seeAlso:
   - { label: "Flows", to: "/flows" }
   - { label: "Knowledge", to: "/knowledge" }
   - { label: "Create something new", to: "/create" }
-  - { label: "Working Environments", to: "/environments" }
+  - { label: "Environment Templates", to: "/environment-templates" }
   - { label: "GitHub Event Log", to: "/github-events" }
 askPrompts:
+  - "Where did the Working Environments page go?"
   - "What is the difference between a loop trigger and a cron trigger?"
   - "Why is my trigger not firing while a loop is running?"
   - "What is the difference between Reset Session and Clear History?"
@@ -616,6 +617,39 @@ most consequential thing in this form, so it is not below the plugin grants.
   agent change files on the host. Saving re-provisions the agent's container.
   Offered only on the local / self-hosted stack.
 
+### The team's Working Environment section, in detail
+
+On a **team** agent the **Working Environment** section edits the bound
+environment's own record in place — the same record `PUT /api/environments/:id`
+always has, just reached from here instead of a standalone page. There is no
+ownership/team picker: the environment already belongs to this team.
+
+| Tab | What it does |
+|---|---|
+| **Repositories** | Zero or more repos, cloned into a member's workspace when that member is created. Each row can bind its own SSH key for a private SSH URL; a private HTTPS URL needs the *GitHub Token* select instead. Mark a repository *Read-only* to clone it for reference only — it is still cloned, but members are told not to commit or push to it. |
+| **Model provider** | Optional override — members start on this provider and its default model instead of the global `.env` fallback. |
+| **Toolchain** | Optional — which container image members are spawned from, picked from the System-Admin-registered list. Absent means the default image. |
+| **MCP servers** | Optional server + credential pairs from the MCP registry, materialised into each member's `.claude/settings.json` at seed time. |
+| **Additional context** | Optional text appended to every member's `CLAUDE.md`. |
+
+**A repository change reaches only members created afterwards** — cloning
+happens once, at creation. To bring already-running members up to date, saving
+a repository change offers to propagate it (see the next chapter); nothing here
+re-clones or re-fetches on its own.
+
+### Bringing existing agents up to date
+
+Saving a repository change on an environment that already has agents offers to
+bring them up to date — add a new repository, drop one, or repoint an existing
+one's URL/branch, and the offer summarises exactly what changed before doing
+anything. It only **acts on a clean, fully-pushed clone**: uncommitted changes,
+unpushed commits, a detached head or an unrecognised remote are reported as a
+skip with the reason, never overwritten. **Nothing already cloned is ever
+pruned** — removing a repository from the environment leaves that member's
+existing clone alone; you can always recover it from the workspace browser.
+Declining the offer is safe — the environment save already happened, and the
+same propagation is one click away later.
+
 ## Sharing a team — who can open it and who can change it
 
 A team is **private to the people it has been shared with**. **Share…** on the
@@ -711,3 +745,28 @@ worse than none, so it is gone rather than re-homed. Grow a team with **Add
 member…** above, and read the real gaps off the **Flow editor**, where an
 unconsumed label or an idle gate is visible instead of inferred. Roles added
 through the old button are unaffected and keep working.
+
+## Where the Working Environments page went
+
+There used to be a general-purpose **Working Environments** page listing every
+environment on the platform, open to any user. It was removed (#2170) once its
+two audiences each had their own home: an ordinary team edits its own
+environment right here, in the **Settings** tab's **Working Environment**
+section above; a System Admin curates reusable **Environment Templates** — a
+catalog a new team can start from, never a live-shared binding — on its own
+System-Admin-only page. Old `/environments` links land here.
+
+| What it offered | Where it is now |
+|---|---|
+| Editing a team's own environment | this page's **Settings** tab, **Working Environment** section |
+| The **Global** checkbox (any team could select the record with no admin action) | retired — see below |
+| A System Admin's shared catalog of reusable environments | the **Environment Templates** page (System-Admin-only) |
+| The Toolchains registry panel | moved to the Environment Templates page |
+
+**The Global checkbox is gone, not merely hidden.** It made an environment
+*directly usable* by every team with no admin involvement — a live, shared
+binding. Its replacement is the opposite in kind: a **template** is a curated
+copy source. A team that starts from one gets its own, independent
+environment, seeded once from the template's repositories, MCP pairings,
+model provider, toolchain and additional context — never its credentials, and
+never a live pointer back to the template itself.

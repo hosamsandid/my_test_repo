@@ -64,7 +64,7 @@ test.describe('F3: environment + credential CRUD', () => {
     });
   });
 
-  test('Working Environment seed (API) → edit → delete through the UI', async ({ page, request }) => {
+  test('Environment Template seed (API) → edit → delete through the UI', async ({ page, request }) => {
     const ctx = { page, request };
     const runId = makeRunId();
     envId = `${runId}-env`;

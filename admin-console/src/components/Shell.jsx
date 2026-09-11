@@ -145,8 +145,10 @@ const NAV_GROUPS = [
   ]},
   // Ordered by a typical setup flow: pick a Model Provider first, then the
   // credentials (SSH keys / GitHub tokens / personal), then MCP servers (an env
-  // may reference them), then build a Working Environment — and finally the
-  // GitHub Event Log, which only makes sense once an environment exists.
+  // may reference them) — and finally the GitHub Event Log, which only makes
+  // sense once an environment exists. The general-purpose "Working
+  // Environments" entry is gone (#2170): a team edits its own environment from
+  // the Agent Chat Settings tab now, which needs no sidebar entry of its own.
   { key: 'connections', section: 'Connections', items: [
     { path: '/models',        label: 'Model Providers',      Icon: Sparkles, credAdmin: true },
     { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,      credAdmin: true },
@@ -155,7 +157,6 @@ const NAV_GROUPS = [
     // authenticated human (no credAdmin gate).
     { path: '/my-credentials', label: 'My Credentials',      Icon: KeyRound },
     { path: '/mcp',           label: 'MCP Servers',          Icon: Server,   adminOnly: true },
-    { path: '/environments',  label: 'Working Environments', Icon: Boxes },
     { path: '/github-events', label: 'GitHub Event Log',     Icon: History },
   ]},
   { key: 'administration', section: 'Administration', items: [
@@ -168,6 +169,10 @@ const NAV_GROUPS = [
     // tabs System-Admin-only without a second gate.
     { path: '/users',            label: 'Administration',   Icon: UserCog,   adminOnly: true, subtitle: 'Users, teams & resource ownership' },
     { path: '/token-usage',      label: 'Token Usage',      Icon: BarChart3, adminOnly: true },
+    // Environment Templates (#2170, epic #2166 A4) — successor to the removed
+    // Working Environments page's System-Admin half: a curated catalog of
+    // copy sources for team creation, never a live-shared binding.
+    { path: '/environment-templates', label: 'Environment Templates', Icon: Boxes, adminOnly: true },
     { path: '/plugins',          label: 'Plugins',          Icon: Puzzle,    adminOnly: true },
     { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench,    adminOnly: true },
   ]},

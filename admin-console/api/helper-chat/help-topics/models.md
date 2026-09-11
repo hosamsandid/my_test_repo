@@ -4,7 +4,7 @@ routes: ["/models"]
 title: Model Providers
 summary: The LLM endpoints Agent Studio routes model traffic to — each with a URL, a credential and a catalog of models your agents can pick from.
 seeAlso:
-  - { label: "Working Environments", to: "/environments" }
+  - { label: "Environment Templates", to: "/environment-templates" }
   - { label: "Agent Chat", to: "/chats" }
   - { label: "Token Usage", to: "/token-usage" }
 askPrompts:
@@ -21,7 +21,7 @@ askPrompts:
 A **Model Provider** is one endpoint Agent Studio sends model traffic to. It
 carries three things: a **URL**, an **auth credential**, and a **catalog of
 models** the console discovers from it. Nothing binds to a model directly: a
-[Working Environment](/environments) — or an individual agent — binds to a
+[Working Environment](/chats) — or an individual agent — binds to a
 *provider* and picks a default model out of its catalog. That indirection is the
 point: re-pointing one environment at a new provider moves every agent in it at
 once, without editing each agent.

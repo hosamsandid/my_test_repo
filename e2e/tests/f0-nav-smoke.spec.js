@@ -28,7 +28,12 @@ const NAV_PAGES = [
   { label: 'Knowledge',            breadcrumb: 'Knowledge' },
   { label: 'SSH Keys',             breadcrumb: 'SSH Keys' },
   { label: 'GitHub Tokens',        breadcrumb: 'GitHub Tokens' },
-  { label: 'Working Environments', breadcrumb: 'Working Environments' },
+  // No 'Working Environments' entry: #2170 (epic #2166 A4) removed the page
+  // and its sidebar entry entirely (/environments now redirects to /chats). A
+  // team edits its own environment from the Agent Chat Settings tab; the
+  // System-Admin catalog that replaced its other half is 'Environment
+  // Templates' below.
+  { label: 'Environment Templates', breadcrumb: 'Environment Templates' },
   // One Administration entry since #2085 (epic #2076 P6, D10): the separate
   // "Access" entry is dissolved, not renamed — its System-Admin halves are the
   // All Teams and Resources tabs of this page, and /teams now redirects here.

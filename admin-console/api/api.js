@@ -49,6 +49,13 @@ const { resolveGlobalFlag, isGlobalProvider } = require('./llm-endpoint-global')
 // sites below — never inside scope.js or resource-tier.js (AC4), for the same
 // reason `isGlobalProvider` stays out of the generic credential predicates.
 const { resolveGlobalFlag: resolveEnvGlobalFlag, isGlobalEnvironment } = require('./global-resource');
+// Environment templates (#2170, epic #2166 A4): the environment-side successor
+// to the `global` live-sharing mechanism above — a template is a curated copy
+// SOURCE for team creation, never a live-shared binding. See
+// environment-template.js for the full rationale; MCP servers keep their own
+// `global` toggle untouched, and Model Providers keep #2136's live-global
+// behaviour untouched — this only replaces the environment side of #2158.
+const { isTemplateEnvironment, resolveTemplateFlag, copyEnvironmentStructure } = require('./environment-template');
 const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
@@ -3976,8 +3983,17 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
   if (!systemPrompt && role !== 'team') {
     return res.status(400).json({ error: 'systemPrompt is required for every role except team' });
   }
-  if (!loadEnvironment(environmentId)) {
+  const boundEnv = loadEnvironment(environmentId);
+  if (!boundEnv) {
     return res.status(400).json({ error: `Working Environment '${environmentId}' not found` });
+  }
+  // #2170: a template is a copy source, never a live-shared binding — refuse
+  // direct binding, same rule as the two team-creation paths below.
+  if (isTemplateEnvironment(boundEnv)) {
+    return res.status(400).json({
+      error: `Environment '${environmentId}' is a template — copy it into a new environment instead of binding to it directly`,
+      code: 'template-not-bindable',
+    });
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
@@ -13459,14 +13475,27 @@ function resolveToolchainSelection(toolchainId) {
 
 app.get('/api/environments', (req, res) => {
   const scope = getScope(req);
-  // #2083: tier-aware. Was `visibleTeam(scope, e.teamId)`, which reaches a
-  // team-tier record only — a shared environment carries no `teamId` at all, so
-  // the old filter hid every one of them from everybody but an admin.
+  // #2170: two disjoint views over the SAME store, switched by `?isTemplate=`.
+  // The default (ordinary) list is what every team/agent picker has always
+  // read — templates are copy sources, never a live-shared binding, so they
+  // are excluded here regardless of tier so a picker can never bind one
+  // directly (defense in depth alongside the explicit refusals below).
+  // `?isTemplate=true` is the admin catalog's own read: open to any
+  // authenticated caller (so a team-creation "start from a template" picker
+  // needs no admin rights to list them), unfiltered by team tier — a template
+  // is a curated catalog entry, not a team-owned resource.
+  const wantTemplates = req.query.isTemplate === 'true';
   const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean)
-    // #2158: a GLOBAL environment is visible to everyone regardless of team
-    // assignment — `isGlobalEnvironment` re-reads its own preconditions, so
-    // this can never widen past what the record currently qualifies for.
-    .filter(e => visibleEnvironment(scope, e) || isGlobalEnvironment(e))
+    .filter(e => wantTemplates
+      ? isTemplateEnvironment(e)
+      // #2083: tier-aware. Was `visibleTeam(scope, e.teamId)`, which reaches a
+      // team-tier record only — a shared environment carries no `teamId` at
+      // all, so the old filter hid every one of them from everybody but an
+      // admin. #2158: a GLOBAL environment is visible to everyone regardless
+      // of team assignment — `isGlobalEnvironment` re-reads its own
+      // preconditions, so this can never widen past what the record currently
+      // qualifies for.
+      : !isTemplateEnvironment(e) && (visibleEnvironment(scope, e) || isGlobalEnvironment(e)))
     .map(e => {
       const agents = agentsUsingEnvironment(e.id, scope); // (#439)
       return { ...e, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, e) };
@@ -13478,13 +13507,18 @@ app.get('/api/environments/:id', (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const scope = getScope(req);
-  // #2083: this read was ungated (concept §11.4) — any authenticated caller
-  // could fetch any environment by id and read its repositories, its
-  // `githubTokenId` and its MCP references. A tier the read-one path ignores is
-  // decorative, so the gate lands with the tier. 404 rather than 403, matching
-  // `GET /api/llm-endpoints/:id`, so the route is not an existence oracle.
-  if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env)) {
-    return res.status(404).json({ error: 'Environment not found' });
+  // #2170: a template is readable by any authenticated caller (the catalog
+  // read, mirroring the list above) — checked BEFORE the tier gate below, so
+  // a template need carry no team tier at all to be readable.
+  if (!isTemplateEnvironment(env)) {
+    // #2083: this read was ungated (concept §11.4) — any authenticated caller
+    // could fetch any environment by id and read its repositories, its
+    // `githubTokenId` and its MCP references. A tier the read-one path ignores is
+    // decorative, so the gate lands with the tier. 404 rather than 403, matching
+    // `GET /api/llm-endpoints/:id`, so the route is not an existence oracle.
+    if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env)) {
+      return res.status(404).json({ error: 'Environment not found' });
+    }
   }
   const agents = agentsUsingEnvironment(env.id, scope); // (#439)
   res.json({ ...env, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, env) });
@@ -13540,6 +13574,22 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (loadEnvironment(id)) return res.status(409).json({ error: `Environment '${id}' already exists` });
 
+  // #2170: create-time template copy — "start from a template". Resolved
+  // before any of the fields below so an unset field can default to what the
+  // template carries. Structure only (credentials always stripped, see
+  // copyEnvironmentStructure) — the caller supplies their own SSH key / GitHub
+  // token / MCP credential, exactly as #2171 (A5, team clone) states for its
+  // own copy mechanism.
+  let templateSeed = null;
+  if (typeof req.body?.copyFromTemplateId === 'string' && req.body.copyFromTemplateId.trim()) {
+    const template = loadEnvironment(normalizeEnvId(req.body.copyFromTemplateId));
+    if (!template) return res.status(400).json({ error: `Template environment '${req.body.copyFromTemplateId}' not found` });
+    if (!isTemplateEnvironment(template)) {
+      return res.status(400).json({ error: `Environment '${req.body.copyFromTemplateId}' is not a template`, code: 'not-a-template' });
+    }
+    templateSeed = copyEnvironmentStructure(template);
+  }
+
   // #2083: ownership is now the three-tier triple, resolved and validated by the
   // SAME function the four credential kinds use — one validator for every
   // tiered resource, so "which teams exist" cannot be answered two ways.
@@ -13567,6 +13617,18 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   }
   if (globalFlag.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };
 
+  // #2170: the `isTemplate` flag — System-Admin-only to set, mirroring the
+  // global flag immediately above. `currentTemplate` is always `false` on
+  // create.
+  const templateFlag = resolveTemplateFlag({
+    wantTemplate: req.body?.isTemplate,
+    currentTemplate: false,
+    scopeAll: createScope.all,
+  });
+  if (templateFlag.error) {
+    return res.status(templateFlag.status).json({ error: templateFlag.error, code: templateFlag.code });
+  }
+
   // Config-write authorization (#989, tiered by #2083): creating a team-tier
   // environment requires team-admin rights over its owning team; creating a
   // SHARED one is System-Admin-only (§5.2 — declaring a resource cross-tenant
@@ -13577,7 +13639,13 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
 
   let normalizedRepos;
   try {
-    normalizedRepos = normalizeRepositoriesInput(repositories, repository);
+    // #2170: fall back to the template's structure only when the caller sent
+    // neither shape at all — an explicit (even empty) `repositories`/
+    // `repository` always wins, so a caller who deliberately started repo-less
+    // from a template is never re-populated against their will.
+    normalizedRepos = (repositories === undefined && repository === undefined && templateSeed?.repositories?.length)
+      ? templateSeed.repositories
+      : normalizeRepositoriesInput(repositories, repository);
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
@@ -13592,17 +13660,22 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
 
   let normalizedMcp;
   try {
-    normalizedMcp = normalizeMcpServersInput(mcpServers);
+    normalizedMcp = (mcpServers === undefined && templateSeed?.mcpServers?.length)
+      ? templateSeed.mcpServers
+      : normalizeMcpServersInput(mcpServers);
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
 
-  const llm = resolveLlmBinding(llmEndpointId, defaultModelId);
+  const llm = resolveLlmBinding(
+    llmEndpointId !== undefined ? llmEndpointId : templateSeed?.llmEndpointId,
+    defaultModelId !== undefined ? defaultModelId : templateSeed?.defaultModelId,
+  );
   if (llm.error) return res.status(400).json({ error: llm.error });
 
   // Agent toolchain (#1940): an ID from the operator registry, resolved to an
   // image server-side at spawn time. Never an image string from the client.
-  const toolchain = resolveToolchainSelection(toolchainId);
+  const toolchain = resolveToolchainSelection(toolchainId !== undefined ? toolchainId : templateSeed?.toolchainId);
   if (toolchain.error) return res.status(400).json({ error: toolchain.error });
 
   // #2158 AC9: publishing (this create IS the publish transition, since a
@@ -13628,13 +13701,16 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
     mcpServers: normalizedMcp,
     llmEndpointId: llm.llmEndpointId,
     defaultModelId: llm.defaultModelId,
-    additionalContext: additionalContext || '',
+    additionalContext: additionalContext !== undefined ? additionalContext : (templateSeed?.additionalContext || ''),
     createdAt: new Date().toISOString(),
   };
   // Written only when a toolchain was actually selected, so an environment
   // without one is byte-identical to a pre-#1940 environment on disk (AC1) —
   // the same discipline as contextMountRw (#1289).
   if (toolchain.toolchainId) env.toolchainId = toolchain.toolchainId;
+  // #2170: written only when true — no dangling `isTemplate: false` on disk,
+  // same discipline as `global` below.
+  if (templateFlag.isTemplate) env.isTemplate = true;
   // #2158 AC6: written only when true — no dangling `global: false` on disk.
   if (globalFlag.global) env.global = true;
   saveEnvironment(id, env);
@@ -13691,6 +13767,27 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   });
   if (globalFlag.error) {
     return res.status(globalFlag.status).json({ error: globalFlag.error, code: globalFlag.code });
+  }
+
+  // #2170: publish/retract the `isTemplate` flag — System-Admin-only, same
+  // discipline as the global flag immediately above. Independent of
+  // `canManageEnvironment`: a team admin who can edit an environment's content
+  // may not unilaterally turn it into (or out of) a curated template.
+  const templateFlag = resolveTemplateFlag({
+    wantTemplate: req.body?.isTemplate,
+    // Deliberately the EXPLICIT flag only, not `isTemplateEnvironment(env)`
+    // (which also reads a legacy `global: true` record as a template): an
+    // ordinary content edit through some other surface (e.g. Administration →
+    // Resources re-tiering) must never silently persist `isTemplate: true` as
+    // a side effect just because the record happened to qualify under the
+    // migration read. The explicit flag is what the dedicated template-catalog
+    // page sends on every save, which is what turns the migration inference
+    // into a real, on-disk flag the first time such a record is opened there.
+    currentTemplate: env.isTemplate === true,
+    scopeAll: envScope.all,
+  });
+  if (templateFlag.error) {
+    return res.status(templateFlag.status).json({ error: templateFlag.error, code: templateFlag.code });
   }
 
   // #2083: ownership is now a tier, so an update may re-TIER the record. The
@@ -13753,6 +13850,13 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   // #2158 AC6: cleared explicitly rather than left as a dangling `false`.
   if (globalFlag.global) env.global = true;
   else delete env.global;
+  // #2170: same discipline for the template flag. Explicitly persisted even
+  // when the record's "current" value was only inferred from a legacy
+  // `global: true` (the migration read in isTemplateEnvironment) — the first
+  // save through this route is what turns that inference into a real,
+  // on-disk `isTemplate: true`.
+  if (templateFlag.isTemplate) env.isTemplate = true;
+  else delete env.isTemplate;
 
   if (name !== undefined) env.name = name;
   if (description !== undefined) env.description = description;
@@ -14637,6 +14741,16 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     if (!reusedEnv) {
       return res.status(400).json({ error: `Working environment '${environmentId}' not found` });
     }
+    // #2170: a template is a copy source, never a live-shared binding —
+    // "start from a template" goes through POST /api/environments'
+    // copyFromTemplateId (which mints a real, credential-less environment the
+    // team then reuses normally), not through this reuse path directly.
+    if (isTemplateEnvironment(reusedEnv)) {
+      return res.status(400).json({
+        error: `Environment '${environmentId}' is a template — copy it into a new environment first`,
+        code: 'template-not-bindable',
+      });
+    }
     const primary = reposFromEnv(reusedEnv)[0];
     if (primary?.url) {
       repository = { url: primary.url, branch: primary.branch || 'main', sshKeyId: primary.sshKeyId || null };
@@ -15343,6 +15457,11 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     const reusedEnv = loadEnvironment(environmentId);
     if (!reusedEnv) {
       return fail(400, `Working environment '${environmentId}' not found`);
+    }
+    // #2170: same guard as the non-streaming handler above — a template is a
+    // copy source, never a live-shared binding.
+    if (isTemplateEnvironment(reusedEnv)) {
+      return fail(400, `Environment '${environmentId}' is a template — copy it into a new environment first`);
     }
     const primary = reposFromEnv(reusedEnv)[0];
     if (primary?.url) {

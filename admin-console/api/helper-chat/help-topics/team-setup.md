@@ -7,7 +7,7 @@ seeAlso:
   - { label: "Create", to: "/create" }
   - { label: "Flows", to: "/flows" }
   - { label: "Agent Chat", to: "/chats" }
-  - { label: "Working Environments", to: "/environments" }
+  - { label: "Environment Templates", to: "/environment-templates" }
   - { label: "Agent Templates", to: "/role-templates" }
   - { label: "Skills", to: "/skills" }
 askPrompts:

@@ -56,6 +56,13 @@ const REDIRECTS = {
   // as `/agents` → `/chats` in #1930 — an old link keeps its help instead of
   // falling back to the Overview.
   '/teams': '/users',
+  // #2170 (epic #2166 A4): the general-purpose Working Environments page is
+  // retired. An ordinary team now edits its own environment from the Agent
+  // Chat Settings tab, whose topic absorbed `environments.md`'s content — the
+  // same shape as `/agents` → `/chats` in #1930. The System-Admin catalog that
+  // replaced the page's other half is the NEW `/environment-templates` route
+  // (below), not a redirect target.
+  '/environments': '/chats',
 };
 
 // Dynamic routes collapse to a canonical parent for topic resolution, exactly as
@@ -93,7 +100,7 @@ const PAGE_ROUTES = new Set([
   '/quickstart',
   '/team-setup',
   '/wizard/team',
-  '/environments',
+  '/environment-templates',
   '/ssh-keys',
   '/github-tokens',
   '/my-credentials',
@@ -126,6 +133,7 @@ const ALLOWLIST = new Set([
   '/process/:teamId',
   '/chats/:agentId',
   '/plugins/:id/view',
+  '/environments',
 ]);
 
 // ── the shrinking exception list (E16 #1891, concept §3.4) ───────────────────
@@ -194,13 +202,13 @@ const OVERLAY_KEYS = {
   'modal:plugin-install': 'The install confirmation dialog on the Plugins page.',
   'modal:plugin-uninstall': 'The uninstall confirmation dialog on the Plugins page.',
   'modal:model-provider': 'The create/edit provider side panel on the Model Providers page.',
-  'modal:environment-form': 'The create/edit side panel on the Working Environments page.',
-  'modal:toolchains': 'The System-Admin Toolchains side panel on the Working Environments page.',
+  'modal:environment-template-form': 'The create/edit side panel on the Environment Templates page.',
+  'modal:toolchains': 'The System-Admin Toolchains side panel on the Environment Templates page.',
   'modal:team-delete': 'The delete-team confirmation on the Administration page\u2019s All Teams tab.',
   'modal:user-edit': 'The Edit side panel on the Administration page\u2019s Users tab.',
   'modal:user-delete': 'The delete/offboarding confirmation on the Administration page\u2019s Users tab.',
   'modal:agent-template': 'The template editor side panel on the Agent Templates page.',
-  'modal:env-propagation': 'The repositories-changed / catch-up dialog on the Working Environments page.',
+  'modal:env-propagation': 'The repositories-changed / catch-up dialog on the team\'s Working Environment section (Agent Chat Settings tab).',
 };
 
 const CONTEXT_KEYS = {
@@ -266,7 +274,7 @@ const CONTEXT_KEYS = {
   // full-screen dialog in the tree (9999), so like `modal:user-delete` it
   // needs the lift most: the help must be readable BESIDE a decision that
   // writes into other agents' workspaces, not behind it.
-  'modal:env-propagation': { label: 'Working Environments · bring agents up to date' },
+  'modal:env-propagation': { label: 'Agent Chat · bring agents up to date' },
   // The Flow editor's seven overlay surfaces (#1984). Same story once more, and
   // this is the page #1990 flagged the latent bug on: EdgeDialogs already
   // rendered a "?" inside a `SidePanel` with no subject, so pressing it opened
@@ -303,15 +311,14 @@ const CONTEXT_KEYS = {
   // so without the lift the help panel would open *behind* the form it
   // explains. No topic of its own — resolution falls through to `/models`.
   'modal:model-provider': { label: 'Model provider form' },
-  // The Working Environments page's two side panels (#1987) — the create/edit
-  // form and the System-Admin toolchain registry. Registered for the same
-  // reason as the MCP pair: both are shared `SidePanel`s (z-index 60/61) and
-  // both host a "?" that deep-links into the `/environments` chapters, so
-  // without the lift the help panel would open *behind* the surface it
-  // explains. Neither claims a topic of its own — resolution falls through to
-  // `/environments`. This page keeps THREE of its five "?" inside the form
-  // panel (repositories, Sync, token), which is why one subject covers them.
-  'modal:environment-form': { label: 'Working Environment form' },
+  // The Environment Templates page's two side panels (#1987, renamed by
+  // #2170) — the create/edit form and the System-Admin toolchain registry.
+  // Registered for the same reason as the MCP pair: both are shared
+  // `SidePanel`s (z-index 60/61) and both host a "?" that deep-links into the
+  // `/environment-templates` chapters, so without the lift the help panel
+  // would open *behind* the surface it explains. Neither claims a topic of
+  // its own — resolution falls through to `/environment-templates`.
+  'modal:environment-template-form': { label: 'Environment Template form' },
   'modal:toolchains': { label: 'Agent toolchains' },
 };
 

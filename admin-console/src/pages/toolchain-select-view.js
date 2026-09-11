@@ -1,5 +1,5 @@
 // Pure view decisions for the "Agent toolchain" field on the Working
-// Environment create/edit form (WorkingEnvironments.jsx, #1940).
+// Environment create/edit form (EnvironmentTemplates.jsx, #1940).
 //
 // The field is a SELECT over the operator registry (`GET /api/toolchains`), not
 // a text input, because an image reference is a privilege: an agent container

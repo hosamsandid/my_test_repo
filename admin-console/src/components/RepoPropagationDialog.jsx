@@ -14,7 +14,10 @@ import {
 import PageHelpButton from './PageHelpButton';
 import { useHelpSubject } from '../context/HelperChatContext';
 import { OVERLAY_ENV_PROPAGATION } from '../context/page-help-view.js';
-import { ENVIRONMENTS_HELP_SECTIONS } from '../pages/environments-help-sections.js';
+// #2170: the standalone Working Environments page (and its help topic) is
+// retired — this dialog is now reached only from the team's Settings tab, so
+// its chapter lives in the agent-chat topic alongside the rest of that tab.
+import { AGENT_CHAT_HELP_SECTIONS } from '../pages/agent-chat/agent-chat-help-sections.js';
 
 /**
  * The save-time propagation offer (#2066, D3/D5) — and the same dialog behind
@@ -186,7 +189,7 @@ export default function RepoPropagationDialog({
             label="What bringing agents up to date does"
             size={14}
             style={{ padding: 0 }}
-            section={ENVIRONMENTS_HELP_SECTIONS.sync}
+            section={AGENT_CHAT_HELP_SECTIONS.bringingAgentsUpToDate}
           />
         </div>
 

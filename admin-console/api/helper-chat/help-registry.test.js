@@ -333,7 +333,7 @@ test('the real help-topics dir loads and includes the Overview pilot', () => {
 test('the Overview topic carries the former Getting Started concepts and CTAs', () => {
   const reg = loadRegistry(path.join(__dirname, 'help-topics'));
   const body = reg.overview.body;
-  for (const concept of ['Agents', 'Administration', 'Flows', 'Working Environments', 'Knowledge', 'Model Providers']) {
+  for (const concept of ['Agents', 'Administration', 'Flows', 'Working Environment', 'Knowledge', 'Model Providers']) {
     assert.match(body, new RegExp(`\\*\\*${concept}\\*\\*`), `Overview body must explain ${concept}`);
   }
   const linked = reg.overview.seeAlso.map((s) => s.to);
@@ -342,7 +342,10 @@ test('the Overview topic carries the former Getting Started concepts and CTAs', 
   // the link now points at `/chats`, which is where you meet one.
   // `/teams` was in this list until #2085 dissolved the Access page; the concept
   // it stood for is now **Administration**, and the link points at `/users`.
-  for (const to of ['/chats', '/users', '/flows', '/environments', '/knowledge', '/models']) {
+  // `/environments` was in this list until #2170 retired the page; the concept
+  // it stood for is now **Working Environment**, and the link points at the
+  // System-Admin Environment Templates catalog that replaced it.
+  for (const to of ['/chats', '/users', '/flows', '/environment-templates', '/knowledge', '/models']) {
     assert.ok(linked.includes(to), `Overview must link to ${to}`);
   }
   const ctas = reg.overview.actions;

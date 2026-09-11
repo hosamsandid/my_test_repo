@@ -8,7 +8,7 @@
 // must never send an image reference, only an id.
 //
 // Sources are read comment-stripped, because the comments in
-// WorkingEnvironments.jsx explain the very identifiers being matched.
+// EnvironmentTemplates.jsx explain the very identifiers being matched.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,14 +25,14 @@ function stripComments(src) {
     .replace(/^[ \t]*\/\/.*$/gm, '');
 }
 
-const SRC = stripComments(fs.readFileSync(path.join(HERE, 'WorkingEnvironments.jsx'), 'utf8'));
+const SRC = stripComments(fs.readFileSync(path.join(HERE, 'EnvironmentTemplates.jsx'), 'utf8'));
 
 // Prove the matcher is not vacuous (the #1891 lesson): the same assertions must
 // FAIL against a source that lacks the wiring.
 const BARE = stripComments(`
   import React from 'react';
   function EnvironmentForm() { return null; }
-  export default function WorkingEnvironments() { return null; }
+  export default function EnvironmentTemplates() { return null; }
 `);
 
 test('the pure view helpers are imported and every one is called', () => {

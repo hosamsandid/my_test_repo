@@ -83,27 +83,21 @@ async function deleteSshKey(ctx, keyId) {
 
 // ── Working Environments ────────────────────────────────────────────────────
 
-// Create an environment through the UI with a single repository. The repo
-// reachability probe is advisory and does not gate submit (canSubmit only needs
-// id + name + non-empty repo URLs), so we don't wait on the status icon.
+// Seed a fixture environment via the API. #2168 A2 removed the standalone
+// "create environment" UI entry point (WorkingEnvironments.jsx no longer
+// offers one — team creation is the only UI path that mints one now), so a
+// fixture for the rename/delete UI coverage below has to come in the same
+// door any other pre-existing infrastructure would: the still-live
+// `POST /api/environments` route (System-Admin/Team-Admin-authorized, same as
+// before — only the UI button is gone).
 async function createEnv(ctx, { envId, name, repoUrl, branch = 'main' }) {
+  const res = await ctx.request.post('/api/environments', {
+    data: { id: envId, name, repositories: [{ url: repoUrl, branch }] },
+  });
+  expect(res.ok(), `POST /api/environments expected 2xx, got HTTP ${res.status()}`).toBeTruthy();
   const { page } = ctx;
   await page.goto('/environments');
   await expect(page.getByRole('heading', { name: 'Working Environments' })).toBeVisible();
-  await page.getByRole('button', { name: 'New Environment' }).click();
-
-  // exact — the Project-context textarea's long placeholder also contains the
-  // words "COBOL migration", and getByPlaceholder matches substrings by default.
-  await page.getByPlaceholder('COBOL Migration', { exact: true }).fill(name);
-  await page.getByPlaceholder('e.g. cobol-migration').fill(envId);
-  await expect(page.getByPlaceholder('e.g. cobol-migration')).toHaveValue(envId);
-
-  await page.getByRole('button', { name: 'Add repository' }).click();
-  await page.getByPlaceholder('git@github.com:org/repo.git').fill(repoUrl);
-  await page.getByPlaceholder('main').fill(branch);
-
-  await page.getByRole('button', { name: 'Create environment' }).click();
-  // The side panel closes on success; the new row appears in the list.
   await expect(page.getByRole('row').filter({ hasText: envId })).toBeVisible();
 }
 

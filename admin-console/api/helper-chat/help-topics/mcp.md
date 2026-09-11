@@ -50,20 +50,23 @@ is created and deleted, and a change of secret is a new credential (see below).
 **New server** opens the create form. *Name* is the label operators read; the
 *ID* is auto-derived from it and is the key the seeded config uses, so it is
 worth keeping recognisable. *Description* is free text for whoever comes next.
-*Ownership* decides who the server belongs to — a single **team**, **shared**
-across several so each one sees it in its pickers, or **global** — reachable by
-every team, including teams created later, with no admin involved. A System
-Admin decides which teams a shared server reaches, and any Team Admin of an
-owning team may edit it. Registering a server needs **Team Admin** rights over
-the team you assign it to; publishing one as global is System-Admin-only.
+
+**Ownership is not chosen on this form.** A server's visibility — team-owned,
+or reachable by every team once published **global** below — is derived from
+the owning team rather than picked at creation. Registering a server still
+needs **Team Admin** rights over the team it is created in; publishing one as
+global is System-Admin-only. Unlike Working Environments, this page has **no**
+surface at all yet for moving an existing server between teams or into a
+shared tier after creation — an ownership-less create resolves to an
+unassigned system tier (invisible until published global) rather than any
+particular team; that is a stated, tracked limitation, not an accident.
 
 **Global is set on this form at creation only.** Once a server is created
 global, retracting or re-publishing it is still possible — a System Admin does
 it through the API (`PUT /api/mcp-servers/:id`), not on this page — so an
 operator who creates one global by mistake is never stuck deleting and
 re-creating it, which would break every environment's pairing and every
-already-seeded agent's config. This page has no edit-ownership control for a
-server at all yet; that is a stated, tracked limitation, not an accident.
+already-seeded agent's config.
 
 *Transport* is the decision the rest of the form follows, and the three options
 need different fields:

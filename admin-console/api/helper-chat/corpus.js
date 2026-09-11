@@ -117,8 +117,12 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the `create.md` topic plus its `seeAlso` neighbours) at
-// 322 380 of 340 000 — 94.8% used, 17 620 left — against
-// 322 243 (94.8%) for the all-topics fold route-scoping replaced. (#2175's
+// 322 473 of 340 000 — 94.8% used, 17 527 left — against
+// 322 243 (94.8%) for the all-topics fold route-scoping replaced. (#2195's own
+// +93 — the corpus-vendored `working-environments.md` plus the `/environments`
+// and `/mcp` help topics, correcting the ownership-picker-removal description —
+// was still unmerged when main's own restamp landed at 322 380; re-measured on
+// this merge rather than trusted, per the #1996 lesson. #2175's
 // growth of the corpus-vendored `credentials.md` — the SSH-equivalent /
 // acting-sender section, counted on EVERY context, not just a seeAlso
 // neighbourhood — added the last +1 260 to this crown, cleanly attributable
@@ -139,6 +143,12 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // #2138's orphaned-credential refusal added the last +1 179, mostly through the
 // corpus-vendored `credentials.md` — which counts on every context, this crown
 // included — plus the `/my-credentials`+`/github-tokens`+`/ssh-keys` help topic.)
+// #2195 (A3 of epic #2166) removed the ownership/team picker from the
+// Working Environments and MCP Servers forms — the corpus-vendored
+// `working-environments.md` table row correcting to "derived from the team,
+// not chosen here" added +93 (every context), the `/environments` help topic's
+// matching correction landing on this crown too since `create.md` names
+// `/environments` among its `seeAlso`: 321 120 → **321 213** (94.5%, 18 787 left).
 // #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped

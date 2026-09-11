@@ -409,8 +409,11 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the `create.md` topic plus its `seeAlso` neighbours — at **322,380 — 94.8% used,
-17,620 left** (#2175/#2187 added +1,260 via `credentials.md`'s acting-sender/SSH-equivalent
+the `create.md` topic plus its `seeAlso` neighbours — at **322,473 — 94.8% used,
+17,527 left** (#2195 added +93 via `working-environments.md` and the `/environments`/`/mcp`
+help topics, correcting the ownership-picker-removal description, still unmerged when the
+figure below was stamped — re-measured on this merge rather than trusted, per the #1996 lesson.
+#2175/#2187 added +1,260 via `credentials.md`'s acting-sender/SSH-equivalent
 section, counted on every context, not just a seeAlso neighbourhood; the prior restamp (321,120)
 was verified exact against the immediate pre-#2187 main tip, so this delta is cleanly attributable
 to #2187 alone. #2168 added +265 via `team-setup.md`, stating that a Working Environment is now

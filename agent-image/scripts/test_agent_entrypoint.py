@@ -31,6 +31,42 @@ _spec.loader.exec_module(entrypoint)
 fmt = entrypoint._format_ask_user_question
 github_event_detail = entrypoint.TriggerScheduler._github_event_detail
 map_stream_json_line = entrypoint._map_stream_json_line
+is_human_sender = entrypoint._is_human_sender
+
+
+class ChatTurnGate(unittest.TestCase):
+    """#2173: humans post under their own Matrix identity into the shared
+    per-agent room, so the old "exactly two room members" DM heuristic had to
+    go — a legitimate room now holds this agent plus any number of humans.
+    """
+
+    AGENT = "@my-agent:local"
+
+    def test_agent_itself_never_counts_as_a_sender(self):
+        self.assertFalse(is_human_sender(self.AGENT, self.AGENT, [self.AGENT, "@u-alice:local"]))
+
+    def test_a_joined_member_that_is_not_the_agent_is_a_human_sender(self):
+        self.assertTrue(is_human_sender(self.AGENT, "@u-alice:local", [self.AGENT, "@u-alice:local"]))
+
+    def test_a_three_member_room_still_responds_to_either_human(self):
+        # The exact scenario the ticket's runtime AC names: two humans plus the
+        # agent in one room, both humans get replies.
+        members = [self.AGENT, "@u-alice:local", "@u-bob:local"]
+        self.assertTrue(is_human_sender(self.AGENT, "@u-alice:local", members))
+        self.assertTrue(is_human_sender(self.AGENT, "@u-bob:local", members))
+
+    def test_a_sender_not_joined_to_the_room_is_refused(self):
+        # e.g. a stale/cached member list, or a sender who has since left.
+        members = [self.AGENT, "@u-alice:local"]
+        self.assertFalse(is_human_sender(self.AGENT, "@u-someone-else:local", members))
+
+    def test_room_size_alone_no_longer_matters(self):
+        # The old heuristic refused a message the instant a third member
+        # joined; a legitimate second human in the room must not be refused.
+        two_members = [self.AGENT, "@u-alice:local"]
+        three_members = [self.AGENT, "@u-alice:local", "@u-bob:local"]
+        self.assertTrue(is_human_sender(self.AGENT, "@u-alice:local", two_members))
+        self.assertTrue(is_human_sender(self.AGENT, "@u-alice:local", three_members))
 
 
 class FormatAskUserQuestion(unittest.TestCase):

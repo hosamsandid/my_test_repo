@@ -56,6 +56,12 @@ const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
 const { normalizeDiscoveredModels } = require('./model-discovery');
 const { CHAT_AUTHOR_FIELD, chatAuthorStamp } = require('./chat-author');
+// Per-human Matrix identity (#1458, epic #2076 P1). Byte-mirrored in
+// orchestrator/human-matrix-store.js — the console reads the same
+// /workspace/users/matrix/<userId>.json store the orchestrator provisions,
+// so a human's own token can be used on the send path (#2173) without a
+// second internal-API hop.
+const { createHumanMatrixStore } = require('./human-matrix-store');
 const { parseAssistSelection, resolveAssistSelection } = require('./assist-target');
 const { buildSessionHistory, findResumableSession } = require('./session-history');
 const { buildProcessGraph } = require('./process-graph');
@@ -138,6 +144,10 @@ const AGENT_TEMPLATES_DIR = path.join(POOL_DIR, 'agent-templates');
 // edits/creates survive a re-seed. Shadows the seeded defaults: user wins.
 const USER_AGENT_TEMPLATES_DIR = path.join(WORKSPACE, 'agent-templates');
 const AGENTS_DIR = path.join(WORKSPACE, 'agents');
+// The per-human Matrix credential store (#1458), same root the orchestrator
+// provisions into — see the require above for why the console reads it
+// directly rather than proxying through :4002.
+const humanMatrixStore = createHumanMatrixStore({ root: WORKSPACE });
 // Control-plane volume (#185): agents push status + session-log to the
 // orchestrator, which persists them here. Mounted read-write by both services.
 const CONTROL_DIR = '/control/agents';
@@ -1041,6 +1051,39 @@ function chatAuthorFor(req) {
     userId: getScope(req).userId,
     username: req && req.user && req.user.username,
   });
+}
+
+// The acting human's own Matrix credential for this request (#2173), or
+// `null` when there is none to send as — no user record behind the session
+// (the env single-admin), or a record whose Matrix identity has not finished
+// provisioning yet (#1458 provisioning is best-effort/backgrounded). Either
+// way the caller falls back to the shared admin token rather than failing
+// the send.
+function humanMatrixIdentityFor(req) {
+  const userId = getScope(req).userId;
+  if (!userId) return null;
+  const identity = humanMatrixStore.readIdentity(userId);
+  return identity && identity.accessToken && identity.matrixUserId ? identity : null;
+}
+
+// Make sure the acting human is actually a member of the room before they
+// send as themselves — the DM room is created with the shared admin invited
+// (see ensureAgentDmRoom), not with any individual human's account, so a
+// human sending here for the first time has to be invited and joined. Both
+// steps are best-effort and idempotent (an already-invited/joined account
+// just gets a non-2xx we ignore); a genuine failure to join surfaces at the
+// send call itself rather than here.
+async function ensureHumanJoinedToRoom(identity, roomId) {
+  try {
+    await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+      `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`,
+      { method: 'POST', body: { user_id: identity.matrixUserId } });
+  } catch { /* already invited/joined, or admin token unavailable — join below still tries */ }
+  try {
+    await matrix.matrixFetch(identity.accessToken,
+      `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/join`,
+      { method: 'POST', body: {} });
+  } catch { /* already joined */ }
 }
 
 // The `{ ownerId, ownerSource }` stamp a create request carries to the
@@ -16880,7 +16923,9 @@ app.get('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   }
 });
 
-// 4. Send a text message to a room as the admin user
+// 4. Send a text message to a room — as the acting human's own Matrix
+// identity when one is provisioned (#2173), else the shared admin account
+// (env single-admin, or a human whose identity hasn't finished provisioning).
 app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
   if (!matrix.ADMIN_TOKEN) return res.status(500).json({ error: 'MATRIX_ACCESS_TOKEN not configured' });
   const { roomId } = req.params;
@@ -16902,15 +16947,25 @@ app.post('/api/matrix/rooms/:roomId/messages', apiLimiter, async (req, res) => {
       if (k.startsWith('io.aee.') && k !== CHAT_AUTHOR_FIELD) content[k] = v;
     }
   }
-  // Who wrote this (#2065). Every human message — typed or sent on the user's
-  // behalf by the quick-reply path — records the authenticated console user, so
-  // the transcript can name the author instead of labelling everyone "YOU".
+  // Who wrote this (#2065). Kept alongside the real Matrix sender below —
+  // it is what resolves the display name/initials in the transcript, and it
+  // still fires for the shared-admin fallback (an unprovisioned identity, or
+  // the env single-admin, has no Matrix account of its own to be "true"
+  // about).
   const authorStamp = chatAuthorFor(req);
   if (authorStamp) content[CHAT_AUTHOR_FIELD] = authorStamp;
 
+  // #2173: send as the acting human's own Matrix account when one exists, so
+  // `event.sender` in every downstream consumer (the agent runtime's DM
+  // gate included) is the real person rather than the one shared admin
+  // identity every console user used to share.
+  const humanIdentity = humanMatrixIdentityFor(req);
+  const sendToken = humanIdentity ? humanIdentity.accessToken : matrix.ADMIN_TOKEN;
+  if (humanIdentity) await ensureHumanJoinedToRoom(humanIdentity, roomId);
+
   const txnId = crypto.randomUUID();
   try {
-    const resp = await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+    const resp = await matrix.matrixFetch(sendToken,
       `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
       {
         method: 'PUT',

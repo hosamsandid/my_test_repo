@@ -383,4 +383,20 @@ The consequence of the fire-and-forget mechanism (1.2) is that provisioning is *
 
 ---
 
-*This document is a concept. It commits to a recommendation in each area and flags the cost-heavy decisions, but no auth middleware, SSO integration, or permission enforcement is implemented here — that work is captured by the issues in §10 (see Amendment 1 for the one item that has since partially landed).*
+## Amendment 2 — Identity in the shared room, not the per-human room (#2173, 2026-09-11)
+
+*§4's *How the DM-room model changes* (one room per agent **per human**) is §10 item 6 and stays entirely unimplemented — this amendment does not touch it. What landed instead is narrower: the humans who already share one room (Amendment 1's unchanged room model) now post into it under their own identity rather than the shared admin's.*
+
+### 2.1 — What was delivered
+
+- `POST /api/matrix/rooms/:roomId/messages` sends as the acting human's own Matrix account (`human-matrix-store.js`) when their identity has finished provisioning, inviting-then-joining that account into the room on first use; it falls back to the shared `MATRIX_ACCESS_TOKEN` admin only when there is no user record behind the session (the env single-admin) or the identity is not yet provisioned (Amendment 1 §1.3 — provisioning is best-effort/backgrounded).
+- The agent-runner's DM heuristic (§4's `getJoinedRoomMembers(roomId) == 2 && sender != self`, quoted in §4 and still describing `main` before this ticket) is retired: `is_human_sender` (`agent-entrypoint.py`) now acts iff the sender is a joined room member and isn't the agent itself, with no member-count check — a legitimate room now holds the agent plus any number of humans.
+- The room itself is still **created** by the shared admin (Amendment 1 §1.4 is otherwise unchanged: still one `dm-room.json` per agent, still a single `{ roomId }`); a second (or third…) human is added to that same room by the send path's invite-then-join, not by a new room.
+
+### 2.2 — Why this is not §10 item 6
+
+Item 6 replaces the model (a room per `(human, agent)` pair, so two humans chatting with one agent never see each other). This ticket keeps the model (one room per agent, shared by whoever talks to that agent) and only replaces *who the sender is*. It was chosen because the human section of the ticket asked for exactly that — one shared room where each person is distinguishable — not per-human privacy from each other. A future item-6 implementation is unaffected: it would still migrate `dm-room.json` to a per-user map, and the send path here would then pick the room for the acting human the same way it already picks their token.
+
+---
+
+*This document is a concept. It commits to a recommendation in each area and flags the cost-heavy decisions, but no auth middleware, SSO integration, or permission enforcement is implemented here — that work is captured by the issues in §10 (see Amendment 1 and Amendment 2 for the items that have since partially landed).*

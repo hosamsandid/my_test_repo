@@ -111,6 +111,22 @@ def _handle_sigterm(signum: int, frame) -> None:
 CLAUDE_TIMEOUT_SEC = 3600
 MEMBER_CACHE_TTL_SEC = 30
 
+
+def _is_human_sender(agent_user_id: str, sender: str, members: list[str]) -> bool:
+    """The chat-turn gate (#2173): act iff the sender is a joined member of
+    the room and isn't this agent itself.
+
+    Replaces the old "exactly two room members" heuristic — humans now post
+    under their own Matrix identity into the one shared per-agent room (#2173),
+    so a legitimate room can hold this agent plus any number of humans. It is
+    still one room per agent, never per-human rooms, so the only "other"
+    account a message can arrive from is a human's own — nothing here needs to
+    tell a human account apart from a service one.
+    """
+    if sender == agent_user_id:
+        return False
+    return sender in members
+
 # Agent-form loop verifier (#933): how long to wait for a delegated verifier's
 # verdict, and how often to poll for it. Overridable for tests / slow reviewers.
 VERIFY_WAIT_SEC = int(os.environ.get("LOOP_VERIFY_WAIT_SEC", "1800"))
@@ -6612,7 +6628,7 @@ async def run_dm_listener() -> None:
         member_cache[room_id] = (members, time.time() + MEMBER_CACHE_TTL_SEC)
         return members
 
-    async def is_dm_from_human(room_id: str, sender: str) -> bool:
+    async def is_human_sender(room_id: str, sender: str) -> bool:
         if sender == user_id:
             return False
         try:
@@ -6621,9 +6637,7 @@ async def run_dm_listener() -> None:
             print(f"[Runner:{agent_id}] joined_members({room_id}) failed: {exc}",
                   file=sys.stderr)
             return False
-        if len(members) != 2:
-            return False
-        return user_id in members and sender in members
+        return _is_human_sender(user_id, sender, members)
 
     async def send_formatted(room_id: str, text: str,
                              extra_content: dict | None = None) -> str:
@@ -6678,7 +6692,7 @@ async def run_dm_listener() -> None:
             return
         if ts < start_time_ms:
             return
-        if not await is_dm_from_human(room_id, sender):
+        if not await is_human_sender(room_id, sender):
             return
 
         # #1157: a chat turn is a workspace-touching run, so it serializes on

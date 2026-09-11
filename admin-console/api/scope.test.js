@@ -14,6 +14,11 @@ const {
   canViewUsageStatistics, assistSelectableEndpoint, resolveAgentTenant,
   visibleEnvironment, canCreateEnvironment, canRetierEnvironment,
 } = require('./scope');
+// #2158: the global reach for environments/MCP servers is composed at the
+// api.js call sites, never inside scope.js itself (AC4) — imported here only
+// to prove the composition against the exact shape scope.js's own predicate
+// refuses (the "shared, assigned to zero teams" record).
+const { isGlobalEnvironment } = require('./global-resource');
 
 // `u-seed` is the seeded administrator (#2059): on every stack the configured
 // initial user is a REAL record whose subject happens to be `admin`, so
@@ -814,6 +819,38 @@ test('#2083: a shared record assigned to zero teams is reachable by System Admin
   assert.equal(canManageEnvironment(carol, orphan), false);
   assert.equal(visibleEnvironment(sys, orphan), true);
   assert.equal(canManageEnvironment(sys, orphan), true);
+});
+
+// #2158: the case above is split into GLOBAL and NOT GLOBAL rather than
+// deleted (AC12) — a global record has the IDENTICAL underlying shape
+// (`scope: 'system'`, `assignedTeamIds: []`) and means the OPPOSITE thing
+// (everyone reaches it, not nobody). `scope.js`'s own `visibleEnvironment`
+// stays exactly as asserted above — the global flag is composed at the
+// api.js call sites, not here (AC4) — but the composition must still turn
+// "reachable by System Admins only" into "reachable by everyone".
+test('#2158: a global record has the IDENTICAL shape as the zero-assignment shared record, and the composed reach is the opposite', () => {
+  const alice = computeScope({ username: 'alice@corp.com', adminUsername: 'admin', users, memberships });
+  const carol = computeScope({ username: 'carol@corp.com', adminUsername: 'admin', users, memberships });
+  const orphan = SHARED([]); // scope:'system', assignedTeamIds:[] — no `global` key
+  const global = { ...orphan, global: true }; // the identical shape, plus the flag
+
+  // scope.js's own predicate is UNCHANGED by the flag — it does not know about
+  // `global` at all, which is the point of keeping the rule out of this module.
+  assert.equal(visibleEnvironment(alice, global), false);
+  assert.equal(visibleEnvironment(carol, global), false);
+
+  // But `isGlobalEnvironment` reads it as reachable — this IS the predicate
+  // api.js composes with `visibleEnvironment` at every read/list call site, so
+  // the OR-composition (not `visibleEnvironment` alone) is what a normal user
+  // actually meets.
+  assert.equal(isGlobalEnvironment(orphan), false, 'no `global` key — still just an unreachable orphan');
+  assert.equal(isGlobalEnvironment(global), true);
+  assert.equal(visibleEnvironment(alice, global) || isGlobalEnvironment(global), true);
+  assert.equal(visibleEnvironment(carol, global) || isGlobalEnvironment(global), true);
+
+  // A hand-edited/stale record — `global: true` on a TEAM-tier record — is
+  // never global (AC5): the predicate re-reads `scope === 'system'` too.
+  assert.equal(isGlobalEnvironment({ scope: 'team', teamId: 'payments', global: true }), false);
 });
 
 test('#2083: creating a SHARED environment is System-Admin-only; a team one needs team-admin', () => {

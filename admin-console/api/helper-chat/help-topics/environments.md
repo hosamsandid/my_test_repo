@@ -39,11 +39,21 @@ separately from that point on.
 | **Model provider** | Optional override — agents start on this provider and its default model instead of the global `ANTHROPIC_BASE_URL` from `.env`. |
 | **Agent toolchain** | Optional — which container image the agents are spawned from, picked from the operator registry. Absent means the default image. |
 | **Additional instructions** | Markdown appended to the agent's `CLAUDE.md`: project context, coding conventions, domain terminology, constraints every agent here should follow. |
-| **Ownership** | Who the environment belongs to: a single **team**, or **shared** across several teams so each one sees it in its own pickers and reuses it as if it were its own. Any Team Admin of an assigned team can edit a shared environment's content; only a System Admin decides *which* teams it reaches or moves it between team-owned and shared. Left unset an environment stays owned by its team, exactly as before. |
+| **Ownership** | Who the environment belongs to: a single **team**, **shared** across several teams so each one sees it in its own pickers and reuses it as if it were its own, or **global** — every team, including teams created later, can select and use it with no admin involved. Any Team Admin of an assigned team can edit a shared environment's content; only a System Admin decides *which* teams it reaches, moves it between team-owned and shared, or publishes/retracts the global flag. Left unset an environment stays owned by its team, exactly as before. |
 
 Skills are *not* part of an environment. They are granted to a team or an agent
 (Agents page, Team-Setup wizard, Knowledge page); an environment carries only
 infrastructure.
+
+**Global** widens *reach*, not *authority*: once a System Admin publishes an
+environment as global, any user — including one in a team created afterwards —
+can select and use it without asking anyone, but only a System Admin can still
+edit, re-tier, retract or delete it. A global environment carries no team
+assignment at all — that is exactly what "every team, including teams created
+later" means. The same flag exists for MCP servers (below), set only at
+creation there; publishing an environment as global refuses to save if its
+bound model provider is itself team-scoped, since a reachable environment
+whose agents cannot get a model is worse than no environment.
 
 The environment **id is fixed once it is created** — everything else can be
 edited. The **name** and the **description** are not purely cosmetic: both are

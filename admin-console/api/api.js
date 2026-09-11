@@ -43,6 +43,12 @@ const { tierOwnershipFields, isRetier } = require('./resource-tier');
 // `providerVisible` / `providerUsableByTeam` below), never inside scope.js —
 // those predicates also gate SSH keys and GitHub tokens (finding 2).
 const { resolveGlobalFlag, isGlobalProvider } = require('./llm-endpoint-global');
+// Global working environments + MCP servers (#2158): the same System-Admin-only
+// publish gate shape, applied to a second resource family. `isGlobalEnvironment`
+// is composed with `visibleEnvironment` ONLY at the environment/MCP-server call
+// sites below — never inside scope.js or resource-tier.js (AC4), for the same
+// reason `isGlobalProvider` stays out of the generic credential predicates.
+const { resolveGlobalFlag: resolveEnvGlobalFlag, isGlobalEnvironment } = require('./global-resource');
 const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
@@ -3433,8 +3439,11 @@ app.post('/api/environments/:id/sync-agents', heavyLimiter, async (req, res) => 
   const env = loadEnvironment(envId);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const scope = getScope(req);
-  // #2083: tier-aware — a shared environment carries no `teamId`.
-  if (!visibleEnvironment(scope, env)) return res.status(404).json({ error: 'Environment not found' });
+  // #2083: tier-aware — a shared environment carries no `teamId`. #2158: also
+  // reachable by a caller with no team assignment at all when the env is global.
+  if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env)) {
+    return res.status(404).json({ error: 'Environment not found' });
+  }
   if (!canManageEnvironment(scope, env)) {
     return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
   }
@@ -3479,8 +3488,11 @@ app.get('/api/environments/:id/repo-divergence', apiLimiter, async (req, res) =>
   const env = loadEnvironment(envId);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const scope = getScope(req);
-  // #2083: tier-aware — a shared environment carries no `teamId`.
-  if (!visibleEnvironment(scope, env)) return res.status(404).json({ error: 'Environment not found' });
+  // #2083: tier-aware — a shared environment carries no `teamId`. #2158: also
+  // reachable by a caller with no team assignment at all when the env is global.
+  if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env)) {
+    return res.status(404).json({ error: 'Environment not found' });
+  }
 
   // The agent set is resolved HERE and handed to the orchestrator, because
   // deciding which agents this caller may see is the console's scoping job.
@@ -12432,7 +12444,9 @@ app.get('/api/mcp-servers', (req, res) => {
     // been stale since #2078 removed that collapse from `visibleTeam` (§8.4);
     // what it must do now is also reach a SHARED server, which carries no
     // `teamId` at all.
-    .filter(s => visibleEnvironment(scope, s)) // (#302, tiered by #2083)
+    // #2158: a GLOBAL MCP server is visible to everyone regardless of team
+    // assignment, same rule as the environment list above.
+    .filter(s => visibleEnvironment(scope, s) || isGlobalEnvironment(s))
     .map(s => {
       const transport = s.transport || 'stdio';
       const tplKey = transport === 'stdio' ? 'env' : 'headers';
@@ -12448,6 +12462,10 @@ app.get('/api/mcp-servers', (req, res) => {
         templateKeys: Object.keys(template),
         templateField: tplKey,
         requiresCredential: serverNeedsCredential(s),
+        // #2158 AC8: a DERIVED reach field, like `publicEndpointView`'s
+        // `global: isGlobalProvider(ep)` — never an echoed raw flag, so the
+        // badge can never show a global record that has stopped qualifying.
+        global: isGlobalEnvironment(s),
       };
     });
   res.json(out);
@@ -12460,8 +12478,11 @@ app.get('/api/mcp-servers/:id', (req, res) => {
   if (!s) return res.status(404).json({ error: 'MCP server not found' });
   // #2083 / concept §11.3: this read was ungated and returned the raw stanza,
   // including any `${credential}` template keys. 404 rather than 403 so the
-  // route is not an existence oracle.
-  if (!visibleEnvironment(getScope(req), s)) return res.status(404).json({ error: 'MCP server not found' });
+  // route is not an existence oracle. #2158: also reachable when global —
+  // deliberately still 404, never 403, so the refusal shape is unchanged.
+  if (!visibleEnvironment(getScope(req), s) && !isGlobalEnvironment(s)) {
+    return res.status(404).json({ error: 'MCP server not found' });
+  }
   res.json(s);
 });
 
@@ -12531,7 +12552,26 @@ app.post('/api/mcp-servers', apiLimiter, (req, res) => {
   let ownership;
   try { ownership = resolveTieredOwnership(body); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
-  if (!canCreateEnvironment(getScope(req), ownership)) {
+  const mcpCreateScope = getScope(req);
+
+  // #2158 decision 6: for MCP servers `global` is SET at create time only — the
+  // console form stays create-only (`tiered-resource-form-wiring.test.js:95` is
+  // not amended), but `PUT` below still honours the flag so retraction never
+  // needs delete-and-recreate (AC3a). `currentGlobal` is always `false` here.
+  // A global server carries no team assignment at all, so publishing one
+  // overrides the resolved ownership to system-with-no-teams BEFORE the
+  // create gate — mirroring `POST /api/environments` / `POST /api/llm-endpoints`.
+  const globalFlag = resolveEnvGlobalFlag({
+    wantGlobal: body.global,
+    currentGlobal: false,
+    scopeAll: mcpCreateScope.all,
+  });
+  if (globalFlag.error) {
+    return res.status(globalFlag.status).json({ error: globalFlag.error, code: globalFlag.code });
+  }
+  if (globalFlag.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };
+
+  if (!canCreateEnvironment(mcpCreateScope, ownership)) {
     return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
   }
 
@@ -12546,6 +12586,8 @@ app.post('/api/mcp-servers', apiLimiter, (req, res) => {
       : { url: built.stanza.url, headers: built.stanza.headers || {} }),
     createdAt: new Date().toISOString(),
   };
+  // #2158 AC6: written only when true — no dangling `global: false` on disk.
+  if (globalFlag.global) data.global = true;
   saveMcpServer(id, data);
   res.status(201).json(data);
 });
@@ -12567,12 +12609,37 @@ app.put('/api/mcp-servers/:id', apiLimiter, (req, res) => {
   if (built.error) return res.status(400).json({ error: built.error });
 
   const merged = { ...built.stanza, updatedAt: new Date().toISOString() };
+
+  // #2158 AC3a: `PUT` sets AND clears `global` for a System Admin through the
+  // same `resolveEnvGlobalFlag` gate as environments — decision 6 makes the
+  // MCP *form* create-only, not the API, so retracting (or re-publishing) a
+  // global MCP server never requires delete-and-recreate, which would break
+  // every `mcpServers[].serverId` binding and every already-seeded agent
+  // settings file. Omitting `global` from the body keeps the current value.
+  // Resolved BEFORE the re-tier block below for the same reason as the
+  // environment PUT: a global record's forced system-with-no-teams shape must
+  // win over any teamId/scope/assignedTeamIds the same body also sent.
+  const mcpGlobalFlag = resolveEnvGlobalFlag({
+    wantGlobal: req.body?.global,
+    currentGlobal: existing.global === true,
+    scopeAll: mcpScope.all,
+  });
+  if (mcpGlobalFlag.error) {
+    return res.status(mcpGlobalFlag.status).json({ error: mcpGlobalFlag.error, code: mcpGlobalFlag.code });
+  }
+
   // Ownership (#302, tiered by #2083). `buildMcpServerStanza` spreads
   // `existing`, so the old tier fields ride along on `built.stanza` and must be
   // restated explicitly — writing them from the resolved ownership is what
   // stops a stale `teamId` surviving a promotion to the shared tier. The
   // re-tier gate is the environment PUT's, for the reasons documented there.
-  if (req.body && (req.body.teamId !== undefined || req.body.scope !== undefined
+  if (mcpGlobalFlag.global) {
+    const nextOwnership = { scope: 'system', teamId: null, assignedTeamIds: [] };
+    if (isRetier(existing, nextOwnership) && !canRetierEnvironment(mcpScope)) {
+      return res.status(403).json({ error: 'Only a System Admin may change which teams an MCP server belongs to', code: 'forbidden' });
+    }
+    Object.assign(merged, tierOwnershipFields(nextOwnership));
+  } else if (req.body && (req.body.teamId !== undefined || req.body.scope !== undefined
                    || req.body.assignedTeamIds !== undefined)) {
     let nextOwnership;
     try { nextOwnership = resolveTieredOwnership(req.body); }
@@ -12584,6 +12651,10 @@ app.put('/api/mcp-servers/:id', apiLimiter, (req, res) => {
   } else {
     Object.assign(merged, tierOwnershipFields(existing));
   }
+
+  if (mcpGlobalFlag.global) merged.global = true;
+  else delete merged.global;
+
   saveMcpServer(id, merged);
   res.json(merged);
 });
@@ -13280,7 +13351,10 @@ app.get('/api/environments', (req, res) => {
   // team-tier record only — a shared environment carries no `teamId` at all, so
   // the old filter hid every one of them from everybody but an admin.
   const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean)
-    .filter(e => visibleEnvironment(scope, e)) // (#302, tiered by #2083)
+    // #2158: a GLOBAL environment is visible to everyone regardless of team
+    // assignment — `isGlobalEnvironment` re-reads its own preconditions, so
+    // this can never widen past what the record currently qualifies for.
+    .filter(e => visibleEnvironment(scope, e) || isGlobalEnvironment(e))
     .map(e => {
       const agents = agentsUsingEnvironment(e.id, scope); // (#439)
       return { ...e, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, e) };
@@ -13297,7 +13371,9 @@ app.get('/api/environments/:id', (req, res) => {
   // `githubTokenId` and its MCP references. A tier the read-one path ignores is
   // decorative, so the gate lands with the tier. 404 rather than 403, matching
   // `GET /api/llm-endpoints/:id`, so the route is not an existence oracle.
-  if (!visibleEnvironment(scope, env)) return res.status(404).json({ error: 'Environment not found' });
+  if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env)) {
+    return res.status(404).json({ error: 'Environment not found' });
+  }
   const agents = agentsUsingEnvironment(env.id, scope); // (#439)
   res.json({ ...env, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, env) });
 });
@@ -13324,6 +13400,23 @@ function resolveLlmBinding(llmEndpointId, defaultModelId) {
   return { llmEndpointId: ep.id, defaultModelId: pickEndpointDefaultModel(ep) };
 }
 
+// #2158 AC9: publishing a global environment whose bound model provider is
+// NEITHER global nor system-scoped is refused — reusing `isGlobalProvider`
+// rather than a second "is this provider shareable" rule, because a reachable
+// environment whose agents cannot obtain a model is worse than no environment
+// (a global env promises "every team, including teams created later" reaches
+// it — a team-scoped provider breaks that promise on the first message). The
+// refusal names the provider. Only called on a PUBLISH TRANSITION (global
+// turning true this request), never on an ordinary save of an already-broken
+// record, so a broken one stays repairable. No provider bound at all is legal
+// (an env can be repo-less and provider-less both) and refuses nothing here.
+function refuseGlobalEnvironmentUnusableProvider(llmEndpointId) {
+  if (!llmEndpointId) return null;
+  const ep = listLlmEndpoints().find(e => e.id === llmEndpointId);
+  if (!ep || isGlobalProvider(ep)) return null;
+  return `Cannot publish this environment as global: its model provider '${ep.name || ep.id}' is not itself global or system-scoped`;
+}
+
 app.post('/api/environments', heavyLimiter, (req, res) => {
   // `skills` is accepted-and-discarded: the skill grant is team-owned
   // (orchestrator/skill-grants.js) and lives on the agent constructs — the
@@ -13344,11 +13437,29 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   try { ownership = resolveTieredOwnership(req.body); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
 
+  // #2158: the global flag (AC1/AC3/AC4) — System-Admin-only to set, exactly
+  // like the `global` model-provider flag (#2136). `currentGlobal` is always
+  // `false` on create. A global environment carries no team assignment at
+  // all, so publishing one overrides the resolved ownership to
+  // system-with-no-teams BEFORE the create gate below, mirroring
+  // `POST /api/llm-endpoints` — so the two can never disagree about whether
+  // this is a shared-tier create.
+  const createScope = getScope(req);
+  const globalFlag = resolveEnvGlobalFlag({
+    wantGlobal: req.body?.global,
+    currentGlobal: false,
+    scopeAll: createScope.all,
+  });
+  if (globalFlag.error) {
+    return res.status(globalFlag.status).json({ error: globalFlag.error, code: globalFlag.code });
+  }
+  if (globalFlag.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };
+
   // Config-write authorization (#989, tiered by #2083): creating a team-tier
   // environment requires team-admin rights over its owning team; creating a
   // SHARED one is System-Admin-only (§5.2 — declaring a resource cross-tenant
   // is an operator act).
-  if (!canCreateEnvironment(getScope(req), ownership)) {
+  if (!canCreateEnvironment(createScope, ownership)) {
     return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
   }
 
@@ -13382,6 +13493,15 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   const toolchain = resolveToolchainSelection(toolchainId);
   if (toolchain.error) return res.status(400).json({ error: toolchain.error });
 
+  // #2158 AC9: publishing (this create IS the publish transition, since a
+  // fresh record starts non-global) refuses a bound provider that is neither
+  // global nor system-scoped — a reachable environment whose agents cannot
+  // obtain a model is worse than no environment.
+  if (globalFlag.global) {
+    const providerRefusal = refuseGlobalEnvironmentUnusableProvider(llm.llmEndpointId);
+    if (providerRefusal) return res.status(400).json({ error: providerRefusal, code: 'global-provider-unusable' });
+  }
+
   const env = {
     id,
     name,
@@ -13403,6 +13523,8 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   // without one is byte-identical to a pre-#1940 environment on disk (AC1) —
   // the same discipline as contextMountRw (#1289).
   if (toolchain.toolchainId) env.toolchainId = toolchain.toolchainId;
+  // #2158 AC6: written only when true — no dangling `global: false` on disk.
+  if (globalFlag.global) env.global = true;
   saveEnvironment(id, env);
   res.status(201).json(env);
 });
@@ -13440,6 +13562,25 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
     }
   }
 
+  // #2158: publish/retract the global flag (AC1/AC3/AC6/AC9) — resolved
+  // BEFORE the re-tier block below, because a global record carries no team
+  // assignment at all, and forcing that shape has to WIN over any
+  // teamId/scope/assignedTeamIds the same body also sent (mirrors
+  // `PUT /api/llm-endpoints`, where a global toggle overrides the resolved
+  // ownership the same way). Only a System Admin may flip the flag itself
+  // (`resolveEnvGlobalFlag`'s own gate — independent of `canManageEnvironment`
+  // above, since a shared record's assigned admins may edit its content but
+  // not decide its reach). Omitting `global` from the body keeps the current
+  // value (the #2136 "an ordinary save must not drop it" rule).
+  const globalFlag = resolveEnvGlobalFlag({
+    wantGlobal: req.body?.global,
+    currentGlobal: env.global === true,
+    scopeAll: envScope.all,
+  });
+  if (globalFlag.error) {
+    return res.status(globalFlag.status).json({ error: globalFlag.error, code: globalFlag.code });
+  }
+
   // #2083: ownership is now a tier, so an update may re-TIER the record. The
   // gate splits along the line §5.2 draws, and the split is the whole reason a
   // shared environment is usable at all:
@@ -13453,7 +13594,19 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   // client that echoes the record's own unchanged ownership back (which the
   // console's form does on every save) is not treated as an operator act. The
   // last literal `|| 'default'` on the environment path goes with it (§8.4).
-  if (teamId !== undefined || req.body?.scope !== undefined || req.body?.assignedTeamIds !== undefined) {
+  //
+  // #2158: when publishing (or re-asserting) global, the tier is FORCED to
+  // system-with-no-teams regardless of what the body's own tier fields say —
+  // a global record is always system-scoped with an empty `assignedTeamIds`,
+  // and letting the two disagree is exactly the "hand-edited, stale record"
+  // shape `isGlobalEnvironment` refuses to trust.
+  if (globalFlag.global) {
+    const nextOwnership = { scope: 'system', teamId: null, assignedTeamIds: [] };
+    if (isRetier(env, nextOwnership) && !canRetierEnvironment(envScope)) {
+      return res.status(403).json({ error: 'Only a System Admin may change which teams an environment belongs to', code: 'forbidden' });
+    }
+    Object.assign(env, tierOwnershipFields(nextOwnership));
+  } else if (teamId !== undefined || req.body?.scope !== undefined || req.body?.assignedTeamIds !== undefined) {
     let nextOwnership;
     try { nextOwnership = resolveTieredOwnership(req.body); }
     catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
@@ -13475,6 +13628,19 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
     env.llmEndpointId  = llm.llmEndpointId;
     env.defaultModelId = llm.defaultModelId;
   }
+
+  if (globalFlag.global && env.global !== true) {
+    // A PUBLISH TRANSITION (was not global, now is) — refuse an unusable
+    // provider binding (AC9), reading the FINAL llmEndpointId (any change in
+    // this same request already applied above). An ordinary save of an
+    // already-global, already-broken record is not blocked here, so it stays
+    // repairable.
+    const providerRefusal = refuseGlobalEnvironmentUnusableProvider(env.llmEndpointId);
+    if (providerRefusal) return res.status(400).json({ error: providerRefusal, code: 'global-provider-unusable' });
+  }
+  // #2158 AC6: cleared explicitly rather than left as a dangling `false`.
+  if (globalFlag.global) env.global = true;
+  else delete env.global;
 
   if (name !== undefined) env.name = name;
   if (description !== undefined) env.description = description;

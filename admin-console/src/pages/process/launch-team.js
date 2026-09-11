@@ -120,11 +120,14 @@ export function isRepoLessEnv(env) {
 
 // Final, entry-point-agnostic validation of the launch inputs. Deliberately does
 // NOT require a repository — a repo-less environment is a valid launch target
-// (AC6). Returns the first error string, or null when the inputs are launchable.
-export function validateLaunch({ teamId, teamName, environmentId, labelSuffix } = {}) {
+// (AC6) — and, since #2168 A2, does NOT require an environment at all: leaving
+// `environmentId` empty falls through to `POST /api/teams`'s own repo-less
+// auto-create path (env id = team id), which is what makes "no UI path forces
+// naming or picking an environment" hold for every launch surface, not just the
+// wizard. Returns the first error string, or null when the inputs are launchable.
+export function validateLaunch({ teamId, teamName, labelSuffix } = {}) {
   if (!TEAM_ID_RE.test(String(teamId || ''))) return TEAM_ID_ERROR;
   if (!String(teamName || '').trim()) return 'Team name required.';
-  if (!environmentId) return 'Pick a working environment.';
   if (labelSuffix && !SUFFIX_RE.test(labelSuffix)) return SUFFIX_ERROR;
   return null;
 }

@@ -402,7 +402,16 @@ test('AC9 — no point-of-decision copy was traded away for the AC4/AC6 rewiring
   // These live in LaunchStep.jsx (the empty-state box + repo-less notice +
   // provision-now hint), not MaterializeDialog.jsx.
   assert.match(launch, /No working environment exists yet/);
-  assert.match(launch, /Create a working environment/);
   assert.match(launch, /This environment has no repository/);
   assert.match(launch, /PROVISION_NOW_LABEL/);
+});
+
+// #2168 A2 — no standalone "create environment" entry point survives on this
+// launch surface either: the noEnvs box no longer offers one, and picking no
+// environment at all is a launchable state, not a validation error.
+test('#2168 A2 — no dangling "create a working environment" affordance, and an unset environment is launchable', () => {
+  assert.doesNotMatch(launch, /Create a working environment/);
+  assert.doesNotMatch(launch, /onCreateEnvironment/);
+  assert.doesNotMatch(dialog, /onCreateEnvironment/);
+  assert.doesNotMatch(dialog, /navigate\('\/environments'\)/);
 });

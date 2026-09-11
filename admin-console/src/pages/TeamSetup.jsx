@@ -67,22 +67,6 @@ const hintStyle = {
   lineHeight: 1.5,
 };
 
-const diagramLinkButtonStyle = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: 6,
-  padding: 'var(--eb-space-2) var(--eb-space-3)',
-  background: 'var(--eb-bg-surface)',
-  color: 'var(--eb-accent-primary)',
-  border: '1px solid var(--eb-accent-primary)',
-  borderRadius: 'var(--eb-radius-md)',
-  fontSize: 'var(--eb-text-sm)',
-  fontWeight: 'var(--eb-font-medium)',
-  cursor: 'pointer',
-  fontFamily: 'inherit',
-  whiteSpace: 'nowrap',
-};
-
 function Card({ children, accent }) {
   return (
     <div style={{
@@ -452,8 +436,9 @@ function StepEnvironmentSelect({ form, environments, envsLoading, refetchEnvs, o
               gone — that belongs to the team-setup topic. What remains is the one
               line that names the immediate input. */}
           <p style={{ margin: 0 }}>
-            Pick the <strong style={{ color: 'var(--eb-text-primary)' }}>Working Environment</strong> the team
-            works in — it already bundles the repository, credentials and knowledge sources.
+            Optionally reuse an existing <strong style={{ color: 'var(--eb-text-primary)' }}>Working Environment</strong> —
+            it already bundles the repository, credentials and knowledge sources. Pick nothing and the team
+            gets a fresh, repo-less one of its own (#2168 A2 — no environment to name or find first).
           </p>
         </div>
 
@@ -469,17 +454,12 @@ function StepEnvironmentSelect({ form, environments, envsLoading, refetchEnvs, o
             fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6,
           }}>
             <div>
-              No working environment exists yet. Create one first — with the repository the team should work
-              on — then come back here.
+              No working environment exists yet — that&apos;s fine, click <strong>Next</strong> and one will be
+              created for this team automatically.
             </div>
-            <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'center' }}>
-              <Link to="/environments" target="_blank" style={{ ...diagramLinkButtonStyle, textDecoration: 'none' }}>
-                <Layers size={14} /> Open Working Environments
-              </Link>
-              <button type="button" onClick={refetchEnvs} style={secondaryButtonStyle()}>
-                Refresh list
-              </button>
-            </div>
+            <button type="button" onClick={refetchEnvs} style={secondaryButtonStyle()}>
+              Refresh list
+            </button>
           </div>
         ) : (
           <>
@@ -494,7 +474,8 @@ function StepEnvironmentSelect({ form, environments, envsLoading, refetchEnvs, o
               ))}
             </div>
             <div style={{ ...hintStyle, marginTop: 0 }}>
-              Missing one, or need to adjust repositories? Manage them at{' '}
+              Not picking one is fine too — click <strong>Next</strong> and the team gets its own, freshly
+              created. To manage an existing one, open{' '}
               <Link to="/environments" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments →</Link>
               {' '}<button
                 type="button"
@@ -896,9 +877,10 @@ export default function TeamSetup() {
       return null;
     }
     if (step === 1) {
-      if (!f.environmentId) return 'Pick a working environment';
-      // A repo-less environment is a valid target (#1623 / #1668 AC6) — no repo
-      // requirement here.
+      // Picking a Working Environment is optional (#2168 A2): a team can be
+      // created with none at all, exactly like the repo-less case (#1623 /
+      // #1668 AC6) — `launchExtraBody()` falls through to the auto-created,
+      // repo-less environment when none is selected here.
       return null;
     }
     if (step === 2) {

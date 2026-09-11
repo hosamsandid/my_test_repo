@@ -82,11 +82,6 @@ export default function MaterializeDialog({ bundle, onClose, onDone, onCreated, 
     return () => { alive = false; };
   }, [sourceTeamId]);
 
-  function goCreateEnv() {
-    onClose?.();
-    navigate('/environments');
-  }
-
   return (
     <SidePanel open onClose={onClose} title={CREATE_TEAM_DIALOG_TITLE} width="520px">
       <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', marginTop: 0 }}>
@@ -108,7 +103,6 @@ export default function MaterializeDialog({ bundle, onClose, onDone, onCreated, 
         environments={envsLoaded ? environments : null}
         values={values}
         onChange={patch => setValues(v => ({ ...v, ...patch }))}
-        onCreateEnvironment={goCreateEnv}
         // #2053 AC12: this used to navigate away the instant the stream
         // completed, so nothing ever said what had happened — the draft row
         // stayed in **Drafts** looking untouched next to a new **Teams** row,

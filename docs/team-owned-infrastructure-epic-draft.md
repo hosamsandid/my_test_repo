@@ -50,7 +50,7 @@ identity & credentials; **B1 is its root** (B2/B3 depend on it, B4 on B3, B5 las
 **Delivery checklist**
 - **A — Team-owned infrastructure (UI/model)**
   - [ ] A1 — Team edit form carries the environment fields (tabs)
-  - [ ] A2 — Reverse creation order: team-first, no standalone environment creation
+  - [x] A2 — Reverse creation order: team-first, no standalone environment creation (#2168)
   - [ ] A3 — Derive infrastructure visibility from the team; remove the ownership/team picker
   - [ ] A4 — Remove the Working Environments page; add a Sysadmin template catalog (redirects #2158)
   - [ ] A5 — Team clone copies structure only, prompts for credentials

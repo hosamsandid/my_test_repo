@@ -182,14 +182,14 @@ export default function AgentCreateForm({ onSave, onCancel, saving, error }) {
           }}>
             {/* #1956 edge case: on `/create` this form is reachable on a stack
                 that has no environment at all, and the picker above is already
-                disabled. Rather than a dead end, the card links to the page that
-                fixes it — the same "warning card with a direct link" the other
-                launcher paths use. */}
-            No Working Environments yet — create one on the{' '}
-            <Link to="/environments" style={{ color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-semibold)' }}>
-              Working Environments
+                disabled. #2168 A2 removed the standalone "create environment"
+                entry point, so the fix is no longer a link to that page — a
+                Working Environment now only comes from creating a team. */}
+            No Working Environments yet — creating a team provisions one automatically. Use the
+            {' '}<Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-semibold)' }}>
+              Agent Team Wizard
             </Link>{' '}
-            page first.
+            first, then come back here.
           </div>
         )}
       </div>

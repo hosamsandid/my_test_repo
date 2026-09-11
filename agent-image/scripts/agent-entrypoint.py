@@ -1322,6 +1322,19 @@ def _map_stream_json_line(line: str, correlation_id: str,
             result_ev["errors"] = parsed.get("errors")
         events.append(result_ev)
 
+    elif ptype == "rate_limit_event":
+        # #2202: previously uncaught, so it fell into the generic `unknown`
+        # branch below and rendered client-side as a raw JSON dump. Give it
+        # its own type so LogEvent.jsx can render a human-readable summary
+        # (status/overage/reset-time) instead, while still keeping the whole
+        # parsed line as `raw` for the expandable full-detail view.
+        events.append({
+            "type": "rate_limit_event",
+            "info": parsed.get("rate_limit_info"),
+            "raw": parsed,
+            "correlationId": correlation_id,
+        })
+
     else:
         events.append({"type": "unknown", "raw": parsed, "correlationId": correlation_id})
 

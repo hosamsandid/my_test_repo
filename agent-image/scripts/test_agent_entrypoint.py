@@ -1209,6 +1209,48 @@ class SystemInitProvenance(unittest.TestCase):
             self.assertNotIn("token", key.lower())
 
 
+class RateLimitEventMapping(unittest.TestCase):
+    """#2202: a `rate_limit_event` stream-json line must get its own event
+    type (rather than falling into the generic `unknown` branch) so the
+    Session Log can render a human-readable summary instead of a raw dump."""
+
+    def _map(self, rate_limit_info):
+        line = __import__("json").dumps({
+            "type": "rate_limit_event",
+            "rate_limit_info": rate_limit_info,
+            "uuid": "u-1",
+            "session_id": "sess-1",
+        })
+        return map_stream_json_line(line, "corr-1")
+
+    def test_type_is_rate_limit_event_not_unknown(self):
+        events = self._map({"status": "allowed"})
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "rate_limit_event")
+
+    def test_info_carries_the_rate_limit_info_object(self):
+        info = {
+            "status": "allowed",
+            "resetsAt": 1790812800,
+            "rateLimitType": "overage",
+            "overageStatus": "allowed",
+            "overageResetsAt": 1790812800,
+            "isUsingOverage": False,
+            "overageInUse": True,
+        }
+        ev = self._map(info)[0]
+        self.assertEqual(ev["info"], info)
+
+    def test_raw_carries_the_whole_parsed_line(self):
+        ev = self._map({"status": "allowed"})[0]
+        self.assertEqual(ev["raw"]["type"], "rate_limit_event")
+        self.assertEqual(ev["raw"]["session_id"], "sess-1")
+
+    def test_correlation_id_present(self):
+        ev = self._map({"status": "allowed"})[0]
+        self.assertEqual(ev["correlationId"], "corr-1")
+
+
 class BuildUsageRecord(unittest.TestCase):
     """Two-sided contract with admin-console/api/usage-summary.js: build_usage_record
     (emitter) is asserted against the SAME golden fixture the JS aggregator uses

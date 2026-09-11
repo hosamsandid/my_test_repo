@@ -15,6 +15,7 @@ askPrompts:
   - "What exactly is created when I click Create team?"
   - "When do the new agents start acting on their own?"
   - "When do I need a label suffix?"
+  - "What happens if I don't pick a Working Environment?"
   - "How do I add a role to a team that already exists?"
   - "What happens if creating the team fails halfway through?"
 ---
@@ -36,7 +37,7 @@ are actually given access to. They only share a word.
 | Step | What you decide |
 |---|---|
 | **Process** | The central choice: which flow the team runs. Pick a curated template or one of your saved drafts. The step shows a live preview and a wiring check — **blocking wiring errors stop you from advancing**, advisory ones do not. |
-| **Working Environment** | *Where* the team works. An environment already bundles the repository, branch, credentials and knowledge sources, so you pick one instead of re-entering them. A repo-less environment is a legitimate pick — the team then runs chat + skills only, with no GitHub hand-offs. |
+| **Working Environment** | *Where* the team works — and **optional**. An environment already bundles the repository, branch, credentials and knowledge sources, so pick one to reuse them instead of re-entering them. Leave it unset and the team gets a fresh, repo-less environment of its own — there is no environment to name or find first (#2168). Whether picked or auto-created, a repo-less environment is a legitimate outcome — the team then runs chat + skills only, with no GitHub hand-offs. |
 | **Team** | The team name and the **Team ID** slug. The slug is the naming prefix for everything created: agent ids come out as `<teamId>-<roleId>`. Names may repeat; the ID is the identifier and must be free. |
 | **Knowledge** *(optional)* | Initial skills for the whole team, and a read-only view of the MCP knowledge sources inherited from the environment. Nothing here blocks continuing. |
 | **Review** | The summary of what will be created, and the go-live warning. |
@@ -52,7 +53,7 @@ ignore a selection made here; change them by editing the environment.
 
 One transaction, in this order:
 
-- **One Working Environment** — the one you picked, reused as-is.
+- **One Working Environment** — the one you picked, reused as-is; or, if you picked none, a fresh repo-less one created for this team.
 - **One `team` agent** carrying the shared system-prompt template, the team skill
   grant and the flow's label/stage registries. It hosts no agent of its own.
 - **One `team-member` agent per role** in the template, each with its own system

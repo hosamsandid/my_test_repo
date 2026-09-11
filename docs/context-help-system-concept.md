@@ -409,11 +409,13 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the `create.md` topic plus its `seeAlso` neighbours — at **321,120 — 94.4% used,
-18,880 left** (#2168 added +265 via `team-setup.md`, stating that a Working Environment is now
-optional at team creation; several unrelated merges landed against this crown since the last
-restamp without one, accounting for the rest of the gap from the 318,602 figure this paragraph
-previously carried) (the crown moved BACK off `/chats`, which had held it at 314,511: #2085 dissolved
+the `create.md` topic plus its `seeAlso` neighbours — at **321,213 — 94.5% used,
+18,787 left** (#2195 added +93 via the corpus-vendored `working-environments.md` and the
+`/environments` help topic, correcting both to say ownership is derived from the owning team
+rather than chosen on the environment/MCP-server forms; #2168 added +265 via `team-setup.md`,
+stating that a Working Environment is now optional at team creation; several unrelated merges
+landed against this crown since the last restamp without one, accounting for the rest of the gap
+from the 318,602 figure this paragraph previously carried) (the crown moved BACK off `/chats`, which had held it at 314,511: #2085 dissolved
 the Access page, folding `access-users.md` into `users.md` and DROPPING the `/teams` link
 `agent-chat.md` carried rather than re-pointing it — the successor surface for what that link
 promised is the Share dialog on `/chats` itself, and Administration is System-Admin-only — so

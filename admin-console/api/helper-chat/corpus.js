@@ -117,7 +117,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the `create.md` topic plus its `seeAlso` neighbours) at
-// 321 120 of 340 000 — 94.4% used, 18 880 left — against
+// 321 213 of 340 000 — 94.5% used, 18 787 left — against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. (Several
 // merges landed between the last stamp here (318 602) and this one without
 // re-stamping — #2168's own `team-setup.md` update (Working Environment is now
@@ -137,6 +137,12 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // #2138's orphaned-credential refusal added the last +1 179, mostly through the
 // corpus-vendored `credentials.md` — which counts on every context, this crown
 // included — plus the `/my-credentials`+`/github-tokens`+`/ssh-keys` help topic.)
+// #2195 (A3 of epic #2166) removed the ownership/team picker from the
+// Working Environments and MCP Servers forms — the corpus-vendored
+// `working-environments.md` table row correcting to "derived from the team,
+// not chosen here" added +93 (every context), the `/environments` help topic's
+// matching correction landing on this crown too since `create.md` names
+// `/environments` among its `seeAlso`: 321 120 → **321 213** (94.5%, 18 787 left).
 // #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped

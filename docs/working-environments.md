@@ -12,7 +12,17 @@ A **Working Environment** is a reusable workspace recipe applied when an agent i
 | **Model Provider** | Optional override — the agent inherits `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` from this provider rather than the global default, but only for the values the provider carries: an `api-key` provider saved without a token repoints the Base URL and leaves the global `ANTHROPIC_AUTH_TOKEN` in place, while an `oauth-token` provider clears both (see [Model Providers](model-providers.md)) |
 | **Agent Toolchain** | Optional — which container image the environment's agents are spawned from, chosen from the operator toolchain registry; absent means the default image (see [Agent toolchain](#agent-toolchain)) |
 | **Additional Context** | Markdown appended to the agent's `CLAUDE.md` after the environment section |
-| **Ownership** | Who the environment belongs to: a single **team**, **shared** across several teams so each one sees it in its pickers and reuses it as its own, or **global** — reachable by every user and every agent with no team assignment at all, including teams created later. Any Team Admin of an assigned team may edit a shared environment's content; deciding *which* teams it reaches, moving it between team-owned and shared, and publishing or retracting the global flag are all System-Admin-only. Left unset it stays owned by its team |
+
+**Ownership is not a field on this form.** Who an environment belongs to — a
+single **team**, **shared** across several teams so each one sees it in its
+pickers and reuses it as its own, or **global** — reachable by every user and
+every agent with no team assignment at all, including teams created later —
+is derived from the owning team, not chosen when the environment is created or
+edited. Any Team Admin of an assigned team may still edit a shared
+environment's content; deciding *which* teams it reaches, moving it between
+team-owned and shared, and publishing or retracting the global flag are all
+System-Admin-only and happen on the **Administration → Resources** tab, not
+here.
 
 ## What happens at agent creation
 
@@ -158,6 +168,6 @@ through the same `PUT /api/environments/:id` this page's own form uses. A
 repository change still gets the save-time propagation offer described above;
 a provider or toolchain change still respawns the team's running agents.
 
-Not carried onto that surface: the environment's **Name**/**ID**, its **GitHub
-Token**, and its **Ownership** — those stay edited here, on the Working
-Environments page.
+Not carried onto that surface: the environment's **Name**/**ID** and its
+**GitHub Token** — those stay edited here, on the Working Environments page.
+Ownership is edited on neither surface — see above.

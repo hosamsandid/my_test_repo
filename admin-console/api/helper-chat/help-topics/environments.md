@@ -39,7 +39,14 @@ separately from that point on.
 | **Model provider** | Optional override — agents start on this provider and its default model instead of the global `ANTHROPIC_BASE_URL` from `.env`. |
 | **Agent toolchain** | Optional — which container image the agents are spawned from, picked from the operator registry. Absent means the default image. |
 | **Additional instructions** | Markdown appended to the agent's `CLAUDE.md`: project context, coding conventions, domain terminology, constraints every agent here should follow. |
-| **Ownership** | Who the environment belongs to: a single **team**, **shared** across several teams so each one sees it in its own pickers and reuses it as if it were its own, or **global** — every team, including teams created later, can select and use it with no admin involved. Any Team Admin of an assigned team can edit a shared environment's content; only a System Admin decides *which* teams it reaches, moves it between team-owned and shared, or publishes/retracts the global flag. Left unset an environment stays owned by its team, exactly as before. |
+
+**Ownership is not chosen here.** Who an environment belongs to — a single
+**team**, **shared** across several teams so each one sees it in its own
+pickers and reuses it as if it were its own, or **global** — is derived from
+the owning team, never picked on this create/edit form. A System Admin can
+still re-tier an existing environment, moving it between team-owned and
+shared or publishing/retracting the global flag, but only through
+**Administration → Resources**, not here.
 
 Skills are *not* part of an environment. They are granted to a team or an agent
 (Agents page, Team-Setup wizard, Knowledge page); an environment carries only

@@ -60,7 +60,9 @@ from the same footing.
 > environment. This moved deliberately; if you find an older doc that says otherwise, the
 > doc is stale.
 
-*Where you meet it:* the **Working Environments** page; step 2 of the Team-Setup wizard.
+*Where you meet it:* a team's own **Settings** tab in Agent Chat; the System-Admin
+**Environment Templates** catalog (`/environment-templates`, #2170); step 2 of the Team-Setup
+wizard.
 *Read more:* [working-environments.md](working-environments.md)
 
 ### Workspace

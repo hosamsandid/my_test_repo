@@ -409,8 +409,15 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the `create.md` topic plus its `seeAlso` neighbours — at **324,900 — 95.6% used,
-15,100 left** (#2179 added +408 via a new `team-setup.md` bullet — "Create team" disabled with
+the `create.md` topic plus its `seeAlso` neighbours — at **314,890 — 92.6% used,
+25,110 left** (#2170 SHRANK this crown, a rare direction for the number to move: removing the
+Working Environments page retired the `/environments` help topic outright (349 lines) rather than
+folding it whole into a survivor — the still-live half (repositories, credentials, MCP references,
+the propagation dialog) moved into the existing `agent-chat.md` (+61 net lines) and the
+System-Admin-only Toolchains half moved into a new, small `environment-templates.md` that is
+**not** on `/quickstart`'s `seeAlso` chain at all (only System Admins reach it, from
+Administration) — down from the previously-stamped 324,900, net of the usual small pre-existing
+drift from unstamped intervening merges. #2179 added +408 via a new `team-setup.md` bullet — "Create team" disabled with
 the guidance message when the platform has no registered model provider — landing on an
 already-stale 324,492 live on `main`: +2,019 over the 322,473 this paragraph previously stamped,
 from intervening merges (#2175/#2176's credential-resolution doc growth, #2193's undocumented

@@ -130,6 +130,16 @@ export function canReassignCredentialClient({ isSysAdmin }) {
   return !!isSysAdmin;
 }
 
+// Is `record` a GLOBAL Working Environment or MCP server (#2158) — reachable
+// by every user and agent with no team assignment at all? Mirrors the
+// server's `isGlobalEnvironment` (admin-console/api/global-resource.js):
+// re-reads BOTH preconditions from the record on every call rather than
+// trusting a stale flag alone, so a hand-edited `{scope:'team', global:true}`
+// record reads as not global here too. UX only — the API is the boundary.
+export function isGlobalRecord(record) {
+  return !!(record && record.global === true && record.scope === 'system');
+}
+
 // Team ids the caller administers, from the session `user.teams` descriptor.
 export function adminTeamIdsOf(user) {
   return (user && Array.isArray(user.teams) ? user.teams : [])

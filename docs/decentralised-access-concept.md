@@ -1818,3 +1818,62 @@ Ada's browser, Bea's tab keeps rendering the read-only panel until it navigates.
 That is correct product behaviour, not a bug, but it is a trap for anyone
 extending this journey: the beats that assert a *changed* role always navigate
 first, and the YAML says why at each one.
+
+---
+
+## Amendment 9 (#2158) — Global: a fourth reach, above the three tiers
+
+D7/§5.2 defines exactly three tiers a configuration resource can carry:
+**personal**, **team**, and **shared** (`system` + `assignedTeamIds`) — visible
+to zero or more *named* teams, and to `assignedTeamIds: []` reachable by System
+Admins only. #2136 (global model providers) and #2158 (global Working
+Environments + MCP servers) both needed a fourth answer this model has no room
+for: reachable by **every** team, **including teams created after the record
+was published** — which no `assignedTeamIds` list, however long, can ever
+express, since a team minted tomorrow cannot be named in a list saved today.
+
+**Global is additive, not a fourth tier.** It is a boolean flag layered on top
+of the shared tier (`global: true` requires `scope: 'system'`, re-read on every
+call — never trusted from the stored flag alone, so a hand-edited or stale
+`{scope:'team', global:true}` record is not global), not a new value the
+`scope` field can take. That is a deliberate, load-bearing distinction:
+
+- **Reach widens; authority does not.** A global record is visible to and
+  usable by everyone with no team assignment at all, but publishing, retracting,
+  editing and deleting stay exactly where D12 already put the shared tier —
+  System-Admin-only for the ownership axis, self-service for content where the
+  resource kind allows it (an environment's content; not a model provider's
+  credential, not an MCP server's registration in this ticket's decision 6).
+  Global is the one exception to "assigned teams administer a shared record":
+  it names *no* team, so there is nobody to hand that content-editing right to.
+- **It lives in its own module per resource family, never in the generic
+  tiered/credential predicates.** `admin-console/api/llm-endpoint-global.js`
+  (providers) and `admin-console/api/global-resource.js` (environments + MCP
+  servers) are composed **only** at each family's own read/visibility call
+  sites — never inside `resource-tier.js`, `resolveTieredOwnership`,
+  `resolveCredentialOwnership`, or the generic `scope.js` predicates that also
+  gate SSH keys and GitHub tokens. A `global` key on one of *those* must stay
+  inert: the blast radius of a mistake there is a secret, not a shareable
+  configuration record. One module per family rather than a shared "global"
+  helper, because a credential's `global` would open a secret to the whole
+  installation with nobody to blame it on.
+- **The wording is uniform.** Both the Model Providers page and the Working
+  Environments / MCP Servers forms call it **"Global"**, with the same detail
+  line — *"every team, including teams created later"* — because that clause
+  names the actual decision an operator is taking, and a reader should not have
+  to learn two words for the same concept.
+
+**Two instances exist today, and the pattern is meant to be reused, not
+special-cased per resource:**
+
+| Resource | Module | Extra precondition | Decided by |
+|---|---|---|---|
+| Model provider | `llm-endpoint-global.js` | `authType !== 'oauth-token'` — a subscription seat is single-user by Anthropic's Consumer Terms and can never be shared | #2136 |
+| Working Environment | `global-resource.js` | Publishing refuses a bound model provider that is not itself global/system-scoped (a reachable environment whose agents cannot get a model is worse than none) | #2158 |
+| MCP server | `global-resource.js` (same module — D12: an environment and an MCP server are the same kind of thing) | None — set at create time only in the console; `PUT` still honours retraction, so a global MCP server is never a one-way door | #2158 |
+
+A future resource that needs the same reach is a fourth row in this table, not
+a re-argument of the questions Amendment 9 already answered: whether reach and
+authority may diverge (yes), where the rule lives (its own small module,
+composed at the family's own call sites), and what it is called in the UI
+(**Global**).

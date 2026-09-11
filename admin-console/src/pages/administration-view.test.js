@@ -5,7 +5,7 @@ import {
   ADMIN_TABS, DEFAULT_ADMIN_TAB, resolveAdminTab,
   allTeamRows, isUnadministered, teamDeleteImpact,
   groupAgentsForOwnership,
-  environmentTierSummary, environmentOwnershipError, environmentOwnershipPatch,
+  environmentTierSummary, mcpTierSummary, environmentOwnershipError, environmentOwnershipPatch,
   ownershipUnchanged,
 } from './administration-view.js';
 
@@ -176,6 +176,48 @@ test('a shared environment assigned to nobody says so — it is reachable by no 
   const s = environmentTierSummary({ scope: 'system', assignedTeamIds: [] }, NAMES);
   assert.match(s.detail, /Not assigned to any team/);
   assert.match(s.detail, /System Admins only/);
+});
+
+// #2158 AC7 — a global record and a shared-with-nobody record carry the
+// IDENTICAL underlying shape (`scope: 'system'`, `assignedTeamIds: []`) and
+// mean the OPPOSITE thing (everyone vs. nobody). This is the actual logic the
+// #2158 review flagged as untested — the shape overlap is exactly what makes
+// getting the branch order wrong silently swap the two meanings.
+test('#2158: a global record reads "Global" — not the shared-with-nobody wording — despite the identical empty-assignment shape', () => {
+  const s = environmentTierSummary({ scope: 'system', assignedTeamIds: [], global: true }, NAMES);
+  assert.equal(s.scope, 'system');
+  assert.equal(s.global, true);
+  assert.equal(s.label, 'Global');
+  assert.match(s.detail, /every team/i);
+  assert.match(s.detail, /created later/i);
+  // The "System Admins only" shared-with-nobody sentence must NEVER appear on
+  // a global record — that sentence claims the opposite of what global means.
+  assert.doesNotMatch(s.detail, /Not assigned to any team/);
+  assert.doesNotMatch(s.detail, /System Admins only/);
+});
+
+test('#2158: global wins even when assignedTeamIds is non-empty (the broadest reach wins, mirrors #2136)', () => {
+  const s = environmentTierSummary({ scope: 'system', assignedTeamIds: ['alpha'], global: true }, NAMES);
+  assert.equal(s.label, 'Global');
+});
+
+test('#2158: a stale/hand-edited global flag on a non-system-scoped record is not honoured', () => {
+  // isGlobalRecord requires scope === 'system'; a team-tier record carrying a
+  // stray `global: true` must read as an ordinary team record, not Global.
+  const s = environmentTierSummary({ scope: 'team', teamId: 'alpha', global: true }, NAMES);
+  assert.equal(s.label, 'Team');
+  assert.equal(s.global, false);
+});
+
+test('#2158 AC7: mcpTierSummary is the SAME helper as environmentTierSummary, not a second copy', () => {
+  // The whole point of the alias (AC7 — "one shared tier-summary helper
+  // serving both kinds") is that a global MCP server and a global environment
+  // can never be labelled differently by drifting implementations.
+  assert.equal(mcpTierSummary, environmentTierSummary);
+  const mcpGlobal = mcpTierSummary({ scope: 'system', assignedTeamIds: [], global: true }, NAMES);
+  assert.equal(mcpGlobal.label, 'Global');
+  const mcpShared = mcpTierSummary({ scope: 'system', assignedTeamIds: [] }, NAMES);
+  assert.equal(mcpShared.label, 'Shared');
 });
 
 test('a team-tier and a LEGACY (scope-less) environment read identically', () => {

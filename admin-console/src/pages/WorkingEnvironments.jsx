@@ -17,7 +17,7 @@ import RepositoryCard from '../components/RepositoryCard';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { useAuth } from '../auth/AuthContext';
 import CredentialOwnership from '../components/CredentialOwnership';
-import { ownershipFromRecord, ownershipPayload, adminTeamIdsOf, canReassignCredentialClient } from './credential-scope-view.js';
+import { ownershipFromRecord, ownershipPayload, adminTeamIdsOf, canReassignCredentialClient, isGlobalRecord } from './credential-scope-view.js';
 import { describeWorkingEnvSubmitState } from './working-env-submit-state.js';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning, availableToolchains, versionSourceLine } from './toolchain-select-view.js';
 import { initialMcpRows, mcpSubmitValue, mcpRowHint, mcpChangeNotice, mcpServerLabel } from './working-env-mcp-view.js';
@@ -110,6 +110,13 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     () => ownershipFromRecord(initial, { isSysAdmin, adminTeamIds }),
   );
   const ownershipLocked = isEdit && !canReassignCredentialClient({ isSysAdmin });
+
+  // Global environment (#2158): a System-Admin-only flag mirroring the
+  // Model-Providers "Global provider" toggle (#2136) — reachable by every
+  // user and agent with no team assignment. A global environment is
+  // system-scoped with no teams, so the team-assignment control is hidden
+  // while it is on; the server forces that shape regardless either way.
+  const [isGlobal, setIsGlobal] = useState(isGlobalRecord(initial));
 
   const { data: keysData } = useApi('/api/ssh-keys');
   const { data: tokensData } = useApi('/api/github-tokens');
@@ -241,6 +248,11 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
       // record's own unchanged ownership is NOT an operator act, so this is
       // also what finally stamps an explicit `scope` on a legacy record.
       ...ownershipPayload(ownership),
+      // #2158: only a System Admin's form renders this control at all — see
+      // below — so a non-admin's submit never mentions `global`, which is
+      // exactly the "an ordinary save must not drop it" contract the server
+      // gate relies on.
+      ...(isSysAdmin ? { global: isGlobal } : {}),
     });
   };
 
@@ -342,20 +354,39 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         </div>
       </div>
 
-      {/* #2083 — ownership. The same control the SSH-key, GitHub-token and
-          Model-Provider forms render, because the tier shape is the same one
-          (resource-tier.js); a second, differently-worded picker for the same
-          three tiers is exactly the drift #1928's shared-component discipline
-          exists to prevent. `disabled` while a non-System-Admin edits, since
-          only an operator may re-tier. */}
-      <CredentialOwnership
-        value={ownership}
-        onChange={setOwnership}
-        teams={teams}
-        isSysAdmin={isSysAdmin}
-        adminTeamIds={adminTeamIds}
-        disabled={ownershipLocked}
-      />
+      {/* Global environment (#2158) — a System-Admin-only publish flag, the
+          same control the Model Providers page renders (#2136). */}
+      {isSysAdmin && (
+        <label style={{
+          display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start', cursor: 'pointer',
+        }}>
+          <input
+            type="checkbox"
+            checked={isGlobal}
+            onChange={e => setIsGlobal(e.target.checked)}
+            style={{ marginTop: 3, flexShrink: 0 }}
+          />
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+            <strong>Global</strong> — every team, including teams created later, can select and use it with no admin involvement.
+            <span style={{ display: 'block', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+              Anyone can select and use it; only a System Admin can manage it.
+            </span>
+          </span>
+        </label>
+      )}
+
+      {/* #2083 — ownership. Hidden while Global is on — a global environment
+          carries no team assignment (#2158), same rule as Model Providers. */}
+      {isGlobal ? null : (
+        <CredentialOwnership
+          value={ownership}
+          onChange={setOwnership}
+          teams={teams}
+          isSysAdmin={isSysAdmin}
+          adminTeamIds={adminTeamIds}
+          disabled={ownershipLocked}
+        />
+      )}
 
       <div style={{ ...helpTextStyle, marginTop: 0 }}>
         Skills are managed on the team (or agent) itself — see the Agents page, the Team-Setup wizard, or the Knowledge page.

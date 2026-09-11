@@ -86,6 +86,12 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
   const [ownership, setOwnership] = useState(
     () => defaultOwnership({ isSysAdmin, adminTeamIds }),
   );
+  // Global MCP server (#2158 decision 6): set at CREATE time only — this form
+  // stays create-only (no ownership-edit path is added here, matching the
+  // environment/Model-Provider forms would be a bigger change than the
+  // ticket asks for). Publishing/retracting afterwards is still possible
+  // through `PUT /api/mcp-servers/:id`, just not from this console.
+  const [isGlobal, setIsGlobal] = useState(false);
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName,
     setId,
@@ -200,16 +206,44 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
         </div>
       </div>
 
+      {/* Global MCP server (#2158 decision 6) — System-Admin-only, set at
+          CREATE time only. AC3b: state plainly that the reach can afterwards
+          be changed only by an administrator through the API, so the
+          missing edit control here is an explained limitation, not a silent
+          one. */}
+      {isSysAdmin && (
+        <label style={{
+          display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start', cursor: 'pointer',
+        }}>
+          <input
+            type="checkbox"
+            checked={isGlobal}
+            onChange={e => setIsGlobal(e.target.checked)}
+            style={{ marginTop: 3, flexShrink: 0 }}
+          />
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+            <strong>Global</strong> — every team, including teams created later, can select and use it with no admin involvement.
+            <span style={{ display: 'block', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+              Anyone can select and use it; only a System Admin can manage it. Once created, the reach can be
+              changed only by an administrator through the API — this form has no edit control for it.
+            </span>
+          </span>
+        </label>
+      )}
+
       {/* #2083 — the same control the credential forms render, over the same
           tier shape. A shared server is what lets a fresh team reach an MCP
-          backend without registering its own (AC11). */}
-      <CredentialOwnership
-        value={ownership}
-        onChange={setOwnership}
-        teams={Array.isArray(teamsData) ? teamsData : []}
-        isSysAdmin={isSysAdmin}
-        adminTeamIds={adminTeamIds}
-      />
+          backend without registering its own (AC11). Hidden while Global is
+          on — a global server carries no team assignment (#2158). */}
+      {isGlobal ? null : (
+        <CredentialOwnership
+          value={ownership}
+          onChange={setOwnership}
+          teams={Array.isArray(teamsData) ? teamsData : []}
+          isSysAdmin={isSysAdmin}
+          adminTeamIds={adminTeamIds}
+        />
+      )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         {!saving && <SubmitBlockers label="Save server" reasons={submitBlockers} />}
@@ -228,6 +262,7 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
                   env: parseKeyValue(envText, '='),
                 }),
             ...ownershipPayload(ownership),
+            ...(isSysAdmin ? { global: isGlobal } : {}),
           })}
           disabled={saving || !canSave}
           style={{
@@ -412,6 +447,21 @@ export default function McpServers() {
   const SERVER_COLUMNS = [
     { key: 'id', label: 'ID', render: v => <span style={monoStyle}>{v}</span> },
     { key: 'name', label: 'Name' },
+    // #2158: the reach column the MCP table never had (E9's own flag).
+    // `global` is a DERIVED field on the list projection (AC8) — never an
+    // echoed raw flag — so this can never show a badge for a record that has
+    // stopped qualifying. Nothing more than the badge: no scope/team detail
+    // travels on this projection, and Administration → Resources gains no
+    // MCP section (scope-out).
+    { key: 'global', label: 'Reach', render: v => v
+      ? (
+        <span title="Available to every user and agent — no team required" style={{
+          display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)', fontSize: 'var(--eb-text-xs)',
+          background: 'var(--eb-accent-subtle, var(--eb-bg-elevated))', color: 'var(--eb-accent, var(--eb-text-secondary))',
+          fontWeight: 'var(--eb-font-medium)',
+        }}>Global</span>
+      )
+      : <span style={{ color: 'var(--eb-text-muted)' }}>—</span> },
     { key: 'transport', label: 'Transport' },
     { key: 'command', label: 'Command/URL', render: (_, r) => (
       <span style={monoStyle}>

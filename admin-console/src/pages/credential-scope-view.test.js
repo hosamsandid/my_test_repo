@@ -15,6 +15,7 @@ import {
   adminTeamIdsOf,
   canAccessCredentialPages,
   isAdminForTeam,
+  isGlobalRecord,
 } from './credential-scope-view.js';
 
 const names = { default: 'Default', payments: 'Payments', risk: 'Risk' };
@@ -214,4 +215,15 @@ test('ownershipFromRecord: a personal record keeps its owner rather than being r
   const own = ownershipFromRecord({ scope: 'personal', userId: 'u-ada' }, { isSysAdmin: false });
   assert.equal(own.scope, 'personal');
   assert.equal(own.userId, 'u-ada');
+});
+
+// ── isGlobalRecord (#2158) ───────────────────────────────────────────────
+
+test('isGlobalRecord: true only with BOTH global:true AND scope:"system" — mirrors the server predicate', () => {
+  assert.equal(isGlobalRecord({ global: true, scope: 'system' }), true);
+  assert.equal(isGlobalRecord({ global: true, scope: 'team' }), false, 'hand-edited/stale — not global');
+  assert.equal(isGlobalRecord({ global: false, scope: 'system' }), false);
+  assert.equal(isGlobalRecord({ scope: 'system' }), false, 'no global key — an ordinary unassigned shared record');
+  assert.equal(isGlobalRecord(null), false);
+  assert.equal(isGlobalRecord(undefined), false);
 });

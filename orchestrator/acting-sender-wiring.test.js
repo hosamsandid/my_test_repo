@@ -138,3 +138,48 @@ test('neither attributed-credential resolver is ever called with a literal/hardc
     assert.doesNotMatch(src, /resolveAttributed(GithubToken|SshKey)\([^)]*,\s*"[^"]*:[^"]*"\s*\)/);
   }
 });
+
+// ── #2176 (epic #2166 B4): team-admin baseline + interactive JIT refusal ────
+//
+// Both resolvers must (1) thread the `{ users, memberships }` baseline
+// snapshot into `resolveEffectiveOwnerId` — the wiring that lets an
+// autonomous run resolve the CURRENT team-admin rather than the static
+// creator owner — and (2) compute and forward an `interactive` flag into
+// `resolveCredential`, derived from the resolved (trusted) sender itself, not
+// re-derived from the raw untrusted matrix id.
+
+test('resolveAttributedGithubToken threads the team-admin baseline snapshot and the interactive flag', () => {
+  const src = attributedToken();
+  assert.match(
+    src,
+    /resolveEffectiveOwnerId\(\s*cfg, loadAgentConfig, actingSenderUserId, loadBaselineDeps\(\)\)/,
+    'must pass a { users, memberships } snapshot so the autonomous fallback can resolve the team-admin baseline (#2176 B4)',
+  );
+  assert.match(
+    src,
+    /const interactive = actingSenderUserId != null;/,
+    'interactive must be derived from the resolved (trusted) sender, not the raw actingSenderMatrixId',
+  );
+  assert.match(src, /interactive,?\s*\}\);/, 'the computed interactive flag must reach resolveCredential');
+});
+
+test('resolveAttributedSshKey threads the team-admin baseline snapshot and the interactive flag', () => {
+  const src = attributedSshKey();
+  assert.match(
+    src,
+    /resolveEffectiveOwnerId\(\s*cfg, loadAgentConfig, actingSenderUserId, loadBaselineDeps\(\)\)/,
+  );
+  assert.match(src, /const interactive = actingSenderUserId != null;/);
+  assert.match(src, /interactive,?\s*\}\);/);
+});
+
+test('loadBaselineDeps reads live users/memberships, not a cached or hardcoded snapshot', () => {
+  const src = region('function loadBaselineDeps(', '\n}');
+  assert.match(src, /teamsStore\.listUsers\(\)/);
+  assert.match(src, /teamsStore\.listMemberships\(\)/);
+  // Fail-open, the `loadLiveUserGate` convention: an unreadable store must
+  // degrade to empty arrays (which `resolveBaselineOwnerId` already handles),
+  // never throw out of the credential-resolution path.
+  assert.match(src, /catch/);
+  assert.match(src, /users: \[\], memberships: \[\]/);
+});

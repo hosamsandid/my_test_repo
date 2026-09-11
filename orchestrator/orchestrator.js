@@ -4491,10 +4491,32 @@ function resolveActingSenderUserId(actingSenderMatrixId, cfg) {
   return credentialResolution.isActingSenderTrusted(cfg, userId, hasMembership) ? userId : null;
 }
 
+// The `{ users, memberships }` snapshot `resolveBaselineOwnerId` (#2176, epic
+// #2166 B4) needs to find a team's CURRENT `team-admin`. Loaded fresh per call
+// like `loadLiveUserGate` — a succession must be picked up on the very next
+// run, not cached — and fails open to empty arrays, which
+// `resolveBaselineOwnerId` already degrades gracefully from (falls back to the
+// static owner, exactly the pre-B4 answer).
+function loadBaselineDeps() {
+  try {
+    return { users: teamsStore.listUsers(), memberships: teamsStore.listMemberships() };
+  } catch (err) {
+    console.warn(`[Orchestrator] could not read users/memberships for the team-admin baseline: ${err.message}`);
+    return { users: [], memberships: [] };
+  }
+}
+
 function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) {
   const cfg = loadAgentConfig(id) || {};
   const actingSenderUserId = resolveActingSenderUserId(actingSenderMatrixId, cfg);
-  const ownerId = credentialResolution.resolveEffectiveOwnerId(cfg, loadAgentConfig, actingSenderUserId);
+  // Interactive = a live chat turn whose sender resolved to a real, TRUSTED
+  // platform user (#2176 B4). An unresolvable/unprovisioned/untrusted sender —
+  // like an autonomous trigger — takes the non-refusing baseline path; we
+  // cannot justify refusing a write "in the name of" a human we cannot
+  // identify or vouch for.
+  const interactive = actingSenderUserId != null;
+  const ownerId = credentialResolution.resolveEffectiveOwnerId(
+    cfg, loadAgentConfig, actingSenderUserId, loadBaselineDeps());
   const personal = credentialResolution.findPersonalCredentialState(
     loadGithubTokenIndex(), ownerId, undefined, loadLiveUserGate());
   const decision = credentialResolution.resolveCredential({
@@ -4505,6 +4527,7 @@ function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) 
     personalCredentialOrphaned: personal.orphaned,
     sharedCredentialId: env?.githubTokenId || null,
     kind: "GitHub token",
+    interactive,
   });
   if (decision.refuse) {
     const e = new Error(decision.refuse.message);
@@ -4525,7 +4548,9 @@ function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) 
 function resolveAttributedSshKey(id, sharedSshKeyId, operation, actingSenderMatrixId) {
   const cfg = loadAgentConfig(id) || {};
   const actingSenderUserId = resolveActingSenderUserId(actingSenderMatrixId, cfg);
-  const ownerId = credentialResolution.resolveEffectiveOwnerId(cfg, loadAgentConfig, actingSenderUserId);
+  const interactive = actingSenderUserId != null;
+  const ownerId = credentialResolution.resolveEffectiveOwnerId(
+    cfg, loadAgentConfig, actingSenderUserId, loadBaselineDeps());
   const personal = credentialResolution.findPersonalCredentialState(
     loadSshKeyIndex(), ownerId, undefined, loadLiveUserGate());
   const decision = credentialResolution.resolveCredential({
@@ -4536,6 +4561,7 @@ function resolveAttributedSshKey(id, sharedSshKeyId, operation, actingSenderMatr
     personalCredentialOrphaned: personal.orphaned,
     sharedCredentialId: sharedSshKeyId || null,
     kind: "SSH key",
+    interactive,
   });
   if (decision.refuse) {
     const e = new Error(decision.refuse.message);

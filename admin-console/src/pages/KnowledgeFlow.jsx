@@ -13,6 +13,7 @@ import PageHelpButton from '../components/PageHelpButton';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
 import SkillMarkdown from '../components/SkillMarkdown';
+import PublishSkillAction from '../components/PublishSkillAction';
 import KnowledgeLearningSections, {
   AUTONOMY_LEVELS, GATE_ORDER, GATE_LABELS, GATE_TIPS, PanelSection,
 } from '../components/KnowledgeLearningConfig';
@@ -3704,7 +3705,7 @@ function PrivateSkillsBlock({ teamId, skills, onLifted }) {
         hint="one agent only"
         tip={{
           title: 'Skills a single agent made for itself',
-          text: 'These exist only in one agent’s workspace — teammates can’t use them. “Lift to team” copies a skill into the team pool so every agent on the team loads it.',
+          text: 'These exist only in one agent’s workspace — teammates can’t use them. “Lift to team” copies a skill into the team pool so every agent on the team loads it. An edited copy of a skill the agent was granted shows here too — “Publish” pushes the edit up to the team pool and/or the global pool directly.',
         }}
       />
       {skills.map(sk => {
@@ -3716,21 +3717,32 @@ function PrivateSkillsBlock({ teamId, skills, onLifted }) {
             padding: 'var(--eb-space-2) var(--eb-space-3)', marginBottom: 'var(--eb-space-2)',
           }}>
             <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{sk.name}</div>
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+                {sk.name}
+                {sk.granted && (
+                  <span style={{ marginLeft: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-regular, normal)' }}>
+                    (edited copy of a granted skill)
+                  </span>
+                )}
+              </div>
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>{sk.agentId}</div>
             </div>
-            <button
-              onClick={() => lift(sk)}
-              disabled={st === 'lifting' || st === 'activating' || st === 'done' || st === 'done-noact'}
-              title="Copy this skill into the team pool and activate it so every agent on the team loads it"
-              style={miniBtn}>
-              {st === 'lifting' ? 'Lifting…'
-                : st === 'activating' ? 'Activating…'
-                : st === 'done' ? 'Lifted & active ✓'
-                : st === 'done-noact' ? 'Lifted ✓ (activation failed — use the skill card)'
-                : st === 'exists' ? 'Name taken'
-                : 'Lift to team'}
-            </button>
+            {sk.granted ? (
+              <PublishSkillAction name={sk.name} agentId={sk.agentId} teamId={teamId} onPublished={() => onLifted && onLifted()} />
+            ) : (
+              <button
+                onClick={() => lift(sk)}
+                disabled={st === 'lifting' || st === 'activating' || st === 'done' || st === 'done-noact'}
+                title="Copy this skill into the team pool and activate it so every agent on the team loads it"
+                style={miniBtn}>
+                {st === 'lifting' ? 'Lifting…'
+                  : st === 'activating' ? 'Activating…'
+                  : st === 'done' ? 'Lifted & active ✓'
+                  : st === 'done-noact' ? 'Lifted ✓ (activation failed — use the skill card)'
+                  : st === 'exists' ? 'Name taken'
+                  : 'Lift to team'}
+              </button>
+            )}
           </div>
         );
       })}

@@ -154,7 +154,7 @@ stored state that can rot.
 
 | From \ To | Agent | Team | Global |
 |---|---|---|---|
-| **Agent** | *(agent authors)* | **lift** ✅ exists | *(via team — direct path retired)* |
+| **Agent** | *(agent authors)* | **lift** ✅ exists | **publish** ✅ direct (#2180 — offered alongside the staged lift-then-promote path) |
 | **Team** | activate/seed ✅ | **share** (cross-team) ✅ | **promote** ✅ |
 | **Global** | activate/seed ✅ | **adopt** 🆕 first-class (copy) / **move** 🆕 (copy + retire global) | *(edit in place)* |
 | **External** | — | **import** 🆕 | **import** ✅ |
@@ -177,14 +177,18 @@ skill a global skill" are thereby both one-click, in both copy and move flavors.
 ```
 
 One pure validator + planner (`skill-transfer.js`): containment-guarded paths, permission
-check per tier (Team Admin for team targets, System Admin for global targets and any
-`move` out of global), provenance carried forward (share/lift semantics preserved),
+check per tier (Team Admin for team targets; for a global target, System Admin **or**
+Team Admin of the content's own team — #2180 — the agent's real owning team resolved
+server-side, never client-supplied; any `move` OUT of global or an agent's own workspace
+stays System-Admin-only, since retiring someone else's content is a separate,
+still-governance-level act), provenance carried forward (share/lift semantics preserved),
 `skill.json` stamped on the target, history entry on both ends. Activation reuses
 `setTeamSkillActive` — transfers end active by default, never in the historic
 "promoted-but-invisible" dead-end.
 
 The legacy endpoints become thin delegating wrappers and are removed from the UI:
-`/api/skills/promote` (agent→global bypassing the team tier and provenance),
+`/api/skills/promote` (agent→global bypassing the team tier and provenance — now
+superseded by the engine's own first-class agent→global cell, #2180),
 `/api/skills/promote-to-global`, and the Share/adopt special cases all route through the
 engine. `/api/knowledge/promote` keeps its KB-specific work (draft synthesis, entryIds,
 candidate lifecycle) and calls the engine for the file write.

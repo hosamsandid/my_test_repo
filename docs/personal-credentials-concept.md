@@ -283,7 +283,8 @@ actually chatting. That gap is now closed for **interactive** runs, keeping §6'
 - **Deliberately unchanged:** the in-container `gh` calls an agent runs directly (issue/PR comments,
   `gh pr review`) still use the container's spawn-time baked token, and the poller/claim-swap path
   stays on the baseline credential (both explicitly named as out of scope by the ticket) — a later
-  block of epic #2166 (B4) is where the team-admin baseline for non-interactive work is decided.
+  block of epic #2166 (B4) is where the team-admin baseline for non-interactive work is decided
+  (see Amendment 2 below).
 - **The claim is bounded, not trusted outright (#2187 review hardening).** `AEE_ACTING_SENDER` is set
   once into the container's environment for a live chat turn, but for the rest of that run it is an
   ordinary env var — any Bash call the agent makes (potentially steered by content it read, e.g. a
@@ -301,3 +302,38 @@ actually chatting. That gap is now closed for **interactive** runs, keeping §6'
   the claim unforgeable *within* that boundary (e.g. one member impersonating another on the same
   team), which would need a signed, per-run claim the container cannot re-mint — left as a separate,
   larger hardening step.
+
+## 14 — Amendment 2 (#2176, epic #2166 block B4): the team-admin baseline, and interactive refusal on a missing credential
+
+Amendment 1 named this block as still open: "a later block of epic #2166 (B4) is where the
+team-admin baseline for non-interactive work is decided." B4 has landed and decides it as follows —
+refining §6's D4 for team-bounded agents, and drawing the line §5's refusal rule always intended but
+the shipped implementation never did.
+
+- **The baseline owner is no longer a static `ownerId` for a team-bounded agent (narrows D4).** §6's
+  D4 said an autonomous run acts under the agent's `config.ownerId`, unchanged since #1569.
+  `resolveBaselineOwnerId` (`orchestrator/credential-resolution.js`) now resolves a **team-bounded**
+  agent's non-interactive owner to that team's **current** `team-admin` (`resolveScopeOwner`,
+  `ownership-migration.js` — earliest-promoted admin when several exist, falling further to the
+  earliest member if the team currently has none) rather than the immutable id it was created with,
+  so a D4 admin succession (already the intra-app source of truth since #2077's D6) is honoured
+  without redeploying the agent. A **standalone** agent has no team to defer to and keeps resolving
+  to its own static `ownerId`, exactly as D4 specified — the amendment narrows D4's scope to
+  standalone agents rather than replacing it.
+- **An interactive write can now refuse on a missing (not just underscoped) credential, exactly for
+  the case a human is actually chatting (refines §5's refusal rule).** §5 specified refusal on *any*
+  missing-or-underscoped personal credential, but what actually shipped (#2077 AC7/AC8) never
+  refuses on *absent* — only on present-but-unusable — because refusing every team member who simply
+  never added a token would take their agents offline for no protective benefit; that reading stands
+  unchanged for an **autonomous** run (no acting sender), which must always have a working path. B4
+  draws the line §5 always intended at the one place it matters: an **interactive** attributed write
+  — a chat turn with a resolved, *trusted* acting sender (the #2187 boundary above) — whose owner has
+  no usable personal credential at all now refuses with the same 424 `personal-credential-required`
+  message, because a human chatting right now can be told to add one instead of having the write
+  silently re-attributed to the team's shared identity. `resolveCredential`'s new `interactive` flag
+  (`actingSenderUserId != null`) is what `resolveAttributedGithubToken`/`resolveAttributedSshKey`
+  compute and pass through.
+- **Deliberately still out of scope**, named by B4 itself: the read/clone/poll call sites that read
+  `env.githubTokenId` directly (~40 sites — seeding, the poller's per-repo token pick,
+  `cloneRepository`) are not rewired to prefer the baseline credential; that is the field-semantics
+  migration a later epic block, **B5**, owns.

@@ -57,8 +57,26 @@
 // honestly: with no `isUsable` probe wired yet (see `findPersonalCredential`),
 // the refusal branch is currently unreachable in this tree and becomes
 // reachable again when the concept's §5/§6 scope probe lands.
+//
+// ── #2176 (epic #2166 B4) splits the "no personal credential" row by sender ──
+// The table above governs equally whether the run is autonomous or a live
+// chat turn — B3 (#2175) only re-keyed WHO the owner is, not whether the
+// no-credential-at-all row still falls to shared. B4 says it should not, for
+// an INTERACTIVE write: a human who never added a personal credential must be
+// told to, not silently attributed to the team's shared identity. So the row
+// splits in two, both driven by the new `interactive` flag on
+// `resolveCredential` (see its own header comment):
+//
+//   owner, no personal cred., AUTONOMOUS   → shared, never refuse (unchanged)
+//   owner, no personal cred., INTERACTIVE  → REFUSE (new, #2176 B4)
+//
+// The owner itself also changes for the autonomous row: it is no longer the
+// static `resolveAgentOwnerId` but the team's CURRENT `team-admin`
+// (`resolveBaselineOwnerId`) — the "baseline identity" the ticket names, which
+// keeps working across a D4 succession without redeploying the agent.
 
 const { resolveAgentTeam } = require("./agent-team");
+const { resolveScopeOwner } = require("./ownership-migration");
 
 const DEFAULT_TEAM_ID = "default";
 
@@ -111,11 +129,39 @@ function resolveAgentOwnerId(cfg, loadAgentConfig) {
 // resolution falls through to the existing static `resolveAgentOwnerId`
 // unchanged, which is what keeps autonomous runs byte-identical to before B3
 // (the ticket's own AC).
-function resolveEffectiveOwnerId(cfg, loadAgentConfig, actingSenderUserId) {
+function resolveEffectiveOwnerId(cfg, loadAgentConfig, actingSenderUserId, baselineDeps) {
   const acting = actingSenderUserId != null && String(actingSenderUserId) !== ""
     ? String(actingSenderUserId)
     : null;
   if (acting) return acting;
+  return resolveBaselineOwnerId(cfg, { loadAgentConfig, ...(baselineDeps || {}) });
+}
+
+// The BASELINE owner for non-interactive work (#2176, epic #2166 B4): the
+// identity an autonomous run (cron/github-event/loop, no acting sender)
+// resolves credentials under. For a team-bounded agent (`resolveAgentTeam`
+// resolves a team id) this is the team's CURRENT `team-admin` — not the
+// static, immutable `ownerId` the team was created with — so a D4 succession
+// (`team-admin-succession.js`) is honoured without redeploying the agent:
+// `resolveScopeOwner` reads whoever presently holds `team-admin` in the
+// membership array, preferring the earliest-promoted admin when several
+// exist (a team that never changed hands resolves to its creator, same as
+// before). A standalone `role: 'agent'` has no team to defer to
+// (`resolveAgentTeam` → `null`) and keeps resolving to its own static owner,
+// unchanged.
+//
+// `users`/`memberships` are the caller's already-loaded snapshots — this
+// module takes no fs dependency of its own. Omitting them (or handing over
+// an empty/unreadable snapshot) degrades to the static owner rather than to
+// `null`, the same fail-open direction `buildLiveUserGate` takes: an
+// unreadable membership index must not disable every autonomous run's
+// credential resolution at once.
+function resolveBaselineOwnerId(cfg, { loadAgentConfig, users, memberships } = {}) {
+  const teamId = resolveAgentTeam(cfg);
+  if (teamId) {
+    const scopeOwner = resolveScopeOwner({ scopeId: teamId, users, memberships });
+    if (scopeOwner) return scopeOwner;
+  }
   return resolveAgentOwnerId(cfg, loadAgentConfig);
 }
 
@@ -275,6 +321,19 @@ function isLiveUnderGate(gate, userId) {
 // A caller that wants refuse-on-missing must therefore say so by reporting a
 // credential it actually found — the refusal can no longer be reached by
 // omission, which is what made populating `ownerId` an outage before #2077.
+//
+// `interactive` (#2176, epic #2166 B4) widens the refusal for an INTERACTIVE
+// attributed write only: today's rule (`personalCredentialPresent`) refuses
+// only when the owner's personal credential is present-but-unusable, and
+// falls to shared when the owner has none at all — the #2077 AC7 branch every
+// agent needs until it opts into the personal tier. That branch is still
+// correct for an AUTONOMOUS run (B4's baseline point: it must always have a
+// working path, never block on a human who never set one up), but a human
+// actually chatting right now must never have their write silently
+// re-attributed to a shared identity just because they have not added a
+// credential yet — that is exactly the "silent failure" B4's own AC refuses.
+// So an interactive write refuses on ABSENT-OR-UNUSABLE; an autonomous one
+// keeps refusing only on present-but-unusable, exactly as before.
 function resolveCredential({
   operation,
   ownerId,
@@ -283,6 +342,7 @@ function resolveCredential({
   personalCredentialOrphaned = false,
   sharedCredentialId = null,
   kind = "GitHub token",
+  interactive = false,
 }) {
   const attributed = operationPrefersPersonal(operation);
 
@@ -299,9 +359,11 @@ function resolveCredential({
     return { tier: "personal", credentialId: personalCredential.id };
   }
 
-  // Owner known, and the owner HAS a personal credential of this kind that the
-  // caller's usability check rejected (present but underscoped).
-  if (attributed && personalCredentialPresent) {
+  // Owner known, and EITHER the owner HAS a personal credential of this kind
+  // that the caller's usability check rejected (present but underscoped) OR
+  // this is an INTERACTIVE write and the owner has no usable credential at
+  // all (#2176 B4 — see the header comment above).
+  if (attributed && (personalCredentialPresent || interactive)) {
     // Refuse — an attributed write must NEVER silently drop to a shared
     // team/system credential and act under someone else's name (AC2/AC5, D5).
     //
@@ -452,6 +514,7 @@ module.exports = {
   operationPrefersPersonal,
   resolveAgentOwnerId,
   resolveEffectiveOwnerId,
+  resolveBaselineOwnerId,
   isActingSenderTrusted,
   findPersonalCredential,
   findPersonalCredentialState,

@@ -284,3 +284,20 @@ actually chatting. That gap is now closed for **interactive** runs, keeping §6'
   `gh pr review`) still use the container's spawn-time baked token, and the poller/claim-swap path
   stays on the baseline credential (both explicitly named as out of scope by the ticket) — a later
   block of epic #2166 (B4) is where the team-admin baseline for non-interactive work is decided.
+- **The claim is bounded, not trusted outright (#2187 review hardening).** `AEE_ACTING_SENDER` is set
+  once into the container's environment for a live chat turn, but for the rest of that run it is an
+  ordinary env var — any Bash call the agent makes (potentially steered by content it read, e.g. a
+  prompt injection) can overwrite it before `gh-as-agent` forwards whatever value is currently
+  present, with no signature or binding to the real triggering Matrix event. Trusting the resolved
+  user unconditionally would let a compromised or misdirected agent pick an *arbitrary* platform
+  user's personal credential for a write — a strictly worse trust model than the pre-B3 static,
+  config-only owner. `isActingSenderTrusted(cfg, userId, hasMembership)` closes this: it bounds the
+  claim to whoever could plausibly *be* the real sender for this specific agent — its own team's
+  members for a `team`/`team-member` agent (boundary resolved the same way `scope.js` does), or its
+  own `ownerId` for a standalone agent (D8, no team boundary) — and `resolveActingSenderUserId`
+  filters every resolved id through it before `resolveEffectiveOwnerId` ever sees it; a sender
+  outside that boundary degrades to `null`, the same safe path autonomous runs already take. This
+  closes cross-team (and, for a standalone agent, cross-owner) impersonation; it does **not** make
+  the claim unforgeable *within* that boundary (e.g. one member impersonating another on the same
+  team), which would need a signed, per-run claim the container cannot re-mint — left as a separate,
+  larger hardening step.

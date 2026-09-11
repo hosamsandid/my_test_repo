@@ -11,6 +11,7 @@ const assert = require("node:assert/strict");
 const {
   operationPrefersPersonal,
   resolveAgentOwnerId,
+  resolveEffectiveOwnerId,
   findPersonalCredential,
   findPersonalCredentialState,
   resolveCredential,
@@ -57,12 +58,37 @@ test("resolveAgentOwnerId: member's own ownerId wins when set; falls back to par
 // ── operation classification (AC7) ──────────────────────────────────────────
 
 test("operationPrefersPersonal: attributed writes prefer personal, reads/poll do not", () => {
-  for (const op of ["commit", "pr", "review", "push-https"]) {
+  // push-ssh joined the attributed set in #2175 (B3) once resolveAttributedSshKey
+  // existed to prefer a personal SSH key for it — see the ATTRIBUTED_OPERATIONS
+  // comment.
+  for (const op of ["commit", "pr", "review", "push-https", "push-ssh"]) {
     assert.equal(operationPrefersPersonal(op), true, op);
   }
-  for (const op of ["clone", "poll", "probe", "push-ssh", "anything"]) {
+  for (const op of ["clone", "poll", "probe", "anything"]) {
     assert.equal(operationPrefersPersonal(op), false, op);
   }
+});
+
+// ── acting-sender re-keying (#2175, epic #2166 B3) ──────────────────────────
+
+test("resolveEffectiveOwnerId: prefers the acting sender's userId when present", () => {
+  const cfg = { role: "agent", ownerId: "u-team-creator" };
+  assert.equal(resolveEffectiveOwnerId(cfg, () => null, "u-chatting-human"), "u-chatting-human");
+});
+
+test("resolveEffectiveOwnerId: falls back to the static owner with no acting sender (autonomous runs unaffected)", () => {
+  const cfg = { role: "agent", ownerId: "u-team-creator" };
+  assert.equal(resolveEffectiveOwnerId(cfg, () => null, null), "u-team-creator");
+  assert.equal(resolveEffectiveOwnerId(cfg, () => null, undefined), "u-team-creator");
+  assert.equal(resolveEffectiveOwnerId(cfg, () => null, ""), "u-team-creator");
+});
+
+test("resolveEffectiveOwnerId: a team-member without an acting sender still resolves through its parent (AC4 unchanged)", () => {
+  const load = () => ({ role: "team", ownerId: "u-parent" });
+  assert.equal(
+    resolveEffectiveOwnerId({ role: "team-member", parentTeamId: "squad" }, load, null),
+    "u-parent",
+  );
 });
 
 // ── personal credential lookup ───────────────────────────────────────────────
@@ -150,7 +176,7 @@ test("resolveCredential: owner + attributed write + unusable personal → refuse
 // today. This is the branch every existing agent lands in once the D6 backfill
 // stamps its `ownerId`; refusing here would stop every agent opening a PR.
 test("resolveCredential: owner + attributed write + owner has no personal credential → shared (#2077 AC7)", () => {
-  for (const operation of ["commit", "pr", "review", "push-https"]) {
+  for (const operation of ["commit", "pr", "review", "push-https", "push-ssh"]) {
     assert.deepEqual(
       resolveCredential({
         operation,
@@ -176,7 +202,7 @@ test("resolveCredential: an omitted personalCredentialPresent never refuses (#20
 
 // AC2 second half / AC7: owner, no personal, but a SHARED-eligible op → shared, no refusal.
 test("resolveCredential: owner + read/poll + no personal → shared, no refusal (AC2/AC7)", () => {
-  for (const operation of ["clone", "poll", "probe", "push-ssh"]) {
+  for (const operation of ["clone", "poll", "probe"]) {
     assert.deepEqual(
       resolveCredential({
         operation,

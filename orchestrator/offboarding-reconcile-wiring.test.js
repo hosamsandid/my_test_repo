@@ -44,7 +44,7 @@ const CHECKS = {
   // AC6. The gate must reach the resolver, or the pure orphan check is dead
   // code and a departed human's PAT keeps signing pushes exactly as before.
   'attributed-write-consults-the-live-user-gate'(src) {
-    const body = slice(src, 'function resolveAttributedGithubToken(id, env, operation)', '  return { githubTokenId:', 1400);
+    const body = slice(src, 'function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId)', '  return { githubTokenId:', 1400);
     return /findPersonalCredentialState\(\s*loadGithubTokenIndex\(\), ownerId, undefined, loadLiveUserGate\(\)\)/.test(body)
       && /personalCredentialOrphaned: personal\.orphaned,/.test(body);
   },

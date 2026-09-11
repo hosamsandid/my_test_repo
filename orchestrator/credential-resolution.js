@@ -64,7 +64,12 @@ const DEFAULT_TEAM_ID = "default";
 // personal identity when an owner is set (concept §5 table). Everything else is
 // a shared-eligible operation (read-only clone, the repo-check probe, event
 // polling) where a shared team/system credential misattributes no one.
-const ATTRIBUTED_OPERATIONS = new Set(["commit", "pr", "review", "push-https"]);
+//
+// `push-ssh` joined this set in #2175 (epic #2166 B3): the concept's §5 table
+// always named "HTTPS/SSH push" together, but no SSH-key resolver existed
+// until B3 built `resolveAttributedSshKey` — so it sat classified alongside
+// the shared-eligible operations only for lack of a resolver to prefer.
+const ATTRIBUTED_OPERATIONS = new Set(["commit", "pr", "review", "push-https", "push-ssh"]);
 
 function operationPrefersPersonal(operation) {
   return ATTRIBUTED_OPERATIONS.has(operation);
@@ -88,6 +93,28 @@ function resolveAgentOwnerId(cfg, loadAgentConfig) {
     if (parent && parent.ownerId) return String(parent.ownerId);
   }
   return cfg.ownerId ? String(cfg.ownerId) : null;
+}
+
+// Resolve the owner id an ATTRIBUTED WRITE should run under (#2175, epic #2166
+// block B3). `resolveAgentOwnerId` alone answers "who does this agent's config
+// say it belongs to" — the static team-creator identity B1's Matrix-identity
+// work now lets us do better than for an INTERACTIVE run: the human actually
+// chatting right now (the caller resolves their Matrix sender id to a platform
+// user id and passes it in here) is who the write must be attributed to, not
+// whoever happened to create the team.
+//
+// `actingSenderUserId` is null for every run this cannot apply to — an
+// autonomous trigger (cron/github-event/loop) carries no chat sender at all,
+// and an unresolvable/unprovisioned sender resolves to null upstream — and the
+// resolution falls through to the existing static `resolveAgentOwnerId`
+// unchanged, which is what keeps autonomous runs byte-identical to before B3
+// (the ticket's own AC).
+function resolveEffectiveOwnerId(cfg, loadAgentConfig, actingSenderUserId) {
+  const acting = actingSenderUserId != null && String(actingSenderUserId) !== ""
+    ? String(actingSenderUserId)
+    : null;
+  if (acting) return acting;
+  return resolveAgentOwnerId(cfg, loadAgentConfig);
 }
 
 // Find the owner's usable personal credential of one kind (SSH key or GitHub
@@ -388,6 +415,7 @@ module.exports = {
   ATTRIBUTED_OPERATIONS,
   operationPrefersPersonal,
   resolveAgentOwnerId,
+  resolveEffectiveOwnerId,
   findPersonalCredential,
   findPersonalCredentialState,
   buildLiveUserGate,

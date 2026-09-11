@@ -245,9 +245,42 @@ Copy should make the tier and its identity consequence explicit (a personal cred
 
 1. **Data model** — add `scope: 'personal'` + `userId` to credential entries; extend `normalizeCredential` (personal passthrough; legacy untouched) and `resolveCredentialOwnership`. *(shipped — #1576)*
 2. **RBAC** — extend `canCreateCredential` (self-scoped personal create for any human), `canManageCredential` and `visibleCredential` (owner-only, **no `scope.all`** for personal), and reject reassignment of personal credentials. *(shipped — #1576)*
-3. **Runtime resolution** — implement the personal → team → system order per operation class in the orchestrator, with the refuse-on-missing/underscoped behaviour (D5). *(pure decision core + attributed-write wiring shipped — #1569; the live end-to-end path activates once `config.ownerId` population lands, and the present-but-underscoped scope probe is the completion step)*
+3. **Runtime resolution** — implement the personal → team → system order per operation class in the orchestrator, with the refuse-on-missing/underscoped behaviour (D5). *(pure decision core + attributed-write wiring shipped — #1569; the live end-to-end path activates once `config.ownerId` population lands, and the present-but-underscoped scope probe is the completion step. The interactive-run half of §5/§6 — "the acting human is obvious" for a chat turn — shipped as its own follow-up, see Amendment 1 below. SSH-transport attributed writes shipped in the same follow-up.)*
 4. **Respawn propagation** — scope the existing credential-change → respawn path to an owner's agents on personal-credential set/rotate (D3). *(shipped — #1570)*
 5. **Offboarding hook** — on user deactivation, auto-delete the person's personal credentials and pause their affected agents (D6). *(shipped — #1571)*
 6. **UI** — the self-service personal-credential surface on `/ssh-keys` and `/github-tokens` (§11).
 
 Depends on #1456 (trustworthy `req.user`) landing first.
+
+---
+
+## 13 — Amendment 1 (#2175, epic #2166 block B3): interactive runs key off the acting sender
+
+§5's "the agent's owner is `config.ownerId`" and §6's "for a chat turn the acting human is obvious"
+were both true of the *design* from the start but not of the *implementation*: #1569 resolved every
+operation — chat-triggered or autonomous — through the one static `resolveAgentOwnerId`, so a shared
+agent's commit/PR/push was always attributed to the team's creator, never to whichever human was
+actually chatting. That gap is now closed for **interactive** runs, keeping §6's D4 default
+(autonomous runs use the owner's identity, unchanged) exactly as specified.
+
+- `orchestrator/credential-resolution.js` gains `resolveEffectiveOwnerId(cfg, loadAgentConfig,
+  actingSenderUserId)` — a pure fallback: prefer the acting sender's resolved platform-user id, else
+  fall through to the existing `resolveAgentOwnerId`. A `null` sender (no acting-sender identity, or
+  an autonomous trigger's run context) reproduces the pre-amendment answer byte for byte.
+- The sender travels **orchestrator-side only**, matching this concept's own credential-boundary
+  discipline (the secret never enters the container, only the identity CLAIM does): the acting
+  human's Matrix id (available since #2173/B1) rides from `agent-entrypoint.py` → `AEE_ACTING_SENDER`
+  env var → `gh-as-agent push`/`pr`'s POST body → `orchestrator.js`, which resolves it to a platform
+  user id via the same `usageAttribution.userIdForMatrixId` lookup `enrichUsageRecord` (#2137) already
+  uses for cost attribution — one hop, reused, so a run's credential and its cost can never disagree
+  about who is asking.
+- **The SSH equivalent §5's table always named is built for the first time**: `resolveAttributedSshKey`
+  mirrors `resolveAttributedGithubToken` against the SSH-key credential index, and `push-ssh` joins
+  `ATTRIBUTED_OPERATIONS` now that a resolver exists to prefer a personal key for it (previously it sat
+  classified as shared-eligible only for lack of that resolver — see the code comment on
+  `ATTRIBUTED_OPERATIONS`). Both resolvers are wired into `agentGitPush` (previously unwired for any
+  personal-credential preference) and the branch-push `agentCreatePr` performs before opening the PR.
+- **Deliberately unchanged:** the in-container `gh` calls an agent runs directly (issue/PR comments,
+  `gh pr review`) still use the container's spawn-time baked token, and the poller/claim-swap path
+  stays on the baseline credential (both explicitly named as out of scope by the ticket) — a later
+  block of epic #2166 (B4) is where the team-admin baseline for non-interactive work is decided.

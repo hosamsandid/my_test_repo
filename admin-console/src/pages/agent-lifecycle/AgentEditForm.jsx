@@ -43,6 +43,7 @@ import SkillPicker from '../../components/SkillPicker';
 import PluginGrantPicker from '../../components/PluginGrantPicker';
 import SyncReposPanel from '../../components/SyncReposPanel';
 import AgentRepositoriesPanel from '../agent-chat/AgentRepositoriesPanel';
+import TeamEnvironmentPanel from '../agent-chat/TeamEnvironmentPanel';
 import { effectiveGrantFor } from '../plugin-grant-view.js';
 import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
@@ -422,6 +423,23 @@ export default function AgentEditForm({
           <div style={{ marginTop: 'var(--eb-space-1)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
             Prompt changes take effect from each member's next session.
           </div>
+        </div>
+      )}
+
+      {/* #2167: the team's environment fields, edited here rather than on a
+          separate Working Environments page. Applies immediately through its
+          own PUT to the environment record — like PluginGrantSection and
+          ContextMountControl, this does not batch into this form's Save
+          button, because PUT /api/agents/:id has no environment fields in its
+          whitelist. */}
+      {agent.role === 'team' && (
+        <div>
+          <div style={labelStyle}>Working Environment</div>
+          <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
+            Repositories, model provider, toolchain, MCP servers and additional context for this
+            team — the same fields a Working Environment holds, edited in place.
+          </div>
+          <TeamEnvironmentPanel agent={agent} />
         </div>
       )}
 

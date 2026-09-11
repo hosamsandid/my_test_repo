@@ -409,8 +409,13 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the `create.md` topic plus its `seeAlso` neighbours — at **322,473 — 94.8% used,
-17,527 left** (#2195 added +93 via `working-environments.md` and the `/environments`/`/mcp`
+the `create.md` topic plus its `seeAlso` neighbours — at **324,900 — 95.6% used,
+15,100 left** (#2179 added +408 via a new `team-setup.md` bullet — "Create team" disabled with
+the guidance message when the platform has no registered model provider — landing on an
+already-stale 324,492 live on `main`: +2,019 over the 322,473 this paragraph previously stamped,
+from intervening merges (#2175/#2176's credential-resolution doc growth, #2193's undocumented
+system-event rendering) that earned a live-budget check but no restamp at the time, since neither
+touched a `/quickstart` `seeAlso` topic the way this one does. #2195 added +93 via `working-environments.md` and the `/environments`/`/mcp`
 help topics, correcting the ownership-picker-removal description, still unmerged when the
 figure below was stamped — re-measured on this merge rather than trusted, per the #1996 lesson.
 #2175/#2187 added +1,260 via `credentials.md`'s acting-sender/SSH-equivalent

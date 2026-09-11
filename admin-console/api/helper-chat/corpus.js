@@ -117,7 +117,15 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the `create.md` topic plus its `seeAlso` neighbours) at
-// 322 473 of 340 000 — 94.8% used, 17 527 left — against
+// 324 900 of 340 000 — 95.6% used, 15 100 left. #2179's own +408 — a new
+// `team-setup.md` bullet ("Create team" disabled with no model provider
+// registered), a `/quickstart` `seeAlso` neighbour via `create.md` — landed on
+// an already-stale 324 492 live on `origin/main` (measured directly, not
+// carried forward): +2 019 over the 322 473 last stamped here from intervening
+// merges (#2175/#2176's credential-resolution doc growth, #2193's undocumented
+// system-event rendering) that, per the #2187-cycle convention, earned a
+// live-budget check but no restamp at the time, since none of them touched a
+// `/quickstart` `seeAlso` topic the way this one does. Against
 // 322 243 (94.8%) for the all-topics fold route-scoping replaced. (#2195's own
 // +93 — the corpus-vendored `working-environments.md` plus the `/environments`
 // and `/mcp` help topics, correcting the ownership-picker-removal description —

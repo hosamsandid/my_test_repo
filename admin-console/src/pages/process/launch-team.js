@@ -33,6 +33,13 @@ export const SUFFIX_HINT = 'Up to 8 lowercase letters, digits and single inner d
 export const TEAM_ID_ERROR = `Team id: ${TEAM_ID_HINT}`;
 export const SUFFIX_ERROR = `Label suffix: ${SUFFIX_HINT}`;
 
+// #2179: a platform with no registered model provider cannot bind ANY new
+// team to a working one — team creation would proceed and 500 on first run.
+// Mirrors the server-side message (admin-console/api/team-provider-check.js)
+// so the client-blocked reason and the 400 a caller would otherwise get read
+// the same.
+export const NO_PROVIDER_ERROR = 'No model provider is set up yet — ask a Team or System Administrator to add one before creating a team.';
+
 // Slug rules shared by both entry points (was duplicated in MaterializeDialog,
 // TeamSetup and LaunchStep's own `slugifyLocal`, all collapsed onto this one —
 // #1934): lowercase, dashes for runs of non-[a-z0-9], no leading/trailing
@@ -125,10 +132,15 @@ export function isRepoLessEnv(env) {
 // auto-create path (env id = team id), which is what makes "no UI path forces
 // naming or picking an environment" hold for every launch surface, not just the
 // wizard. Returns the first error string, or null when the inputs are launchable.
-export function validateLaunch({ teamId, teamName, labelSuffix } = {}) {
+// `hasProvider` defaults to `true` (not blocking) so a caller that doesn't
+// yet know the provider-registry state — or an older test fixture — is
+// unaffected; only an explicit `false` (the platform-has-zero-providers case)
+// blocks the launch (#2179).
+export function validateLaunch({ teamId, teamName, labelSuffix, hasProvider = true } = {}) {
   if (!TEAM_ID_RE.test(String(teamId || ''))) return TEAM_ID_ERROR;
   if (!String(teamName || '').trim()) return 'Team name required.';
   if (labelSuffix && !SUFFIX_RE.test(labelSuffix)) return SUFFIX_ERROR;
+  if (!hasProvider) return NO_PROVIDER_ERROR;
   return null;
 }
 

@@ -114,6 +114,7 @@ const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = requ
 const { classifyMemberResidue, decideTeamCreate } = require('./team-residue');
 const { reposFromEnv, repoVars } = require('./team-repo-resolve');
 const { planCreatorMembership, creatorEnvironmentOwnership } = require('./creator-membership');
+const { validateTeamProviderAvailability } = require('./team-provider-check');
 const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
 const { admitsToChatList } = require('./matrix-agent-list');
 const { parseMemberMaterialize } = require('./member-materialize');
@@ -14605,6 +14606,15 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   if (typeof teamName !== 'string' || !teamName.trim()) {
     return res.status(400).json({ error: 'teamName required' });
   }
+  // #2179: a platform with zero registered model providers cannot bind ANY
+  // team to a working one — `pickDefaultLlmBinding()` below would silently
+  // spread `{llmEndpointId: null, defaultModelId: null}` into the new
+  // environment and the team's first run would 500. Block here instead, at
+  // the server boundary, with the guidance the member needs to unblock it.
+  {
+    const providerCheck = validateTeamProviderAvailability(listLlmEndpoints().length);
+    if (providerCheck) return res.status(400).json(providerCheck);
+  }
   // Reject unknown initial skill names (#633) — in create mode the team pool
   // does not exist yet, so this validates against the global pool only, which
   // is exactly the create-mode picker contract (global-only). No prior grant to
@@ -15311,6 +15321,11 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   }
   if (typeof teamName !== 'string' || !teamName.trim()) {
     return fail(400, 'teamName required');
+  }
+  // #2179: see the non-streaming handler above.
+  {
+    const providerCheck = validateTeamProviderAvailability(listLlmEndpoints().length);
+    if (providerCheck) return fail(400, providerCheck.error);
   }
   // Reject unknown initial skill names (#633) — create-mode team pool doesn't
   // exist yet, so this validates against the global pool only (create-mode

@@ -93,6 +93,12 @@ stored on it.
 
 ## Collisions, failure and growing later
 
+- **Create team** is disabled, with the reason stated next to the button, on a
+  platform with no model provider registered at all — a fresh team's
+  environment cannot bind to a working one, and creating it anyway used to
+  succeed here and fail later at the team's first run. Ask a Team or System
+  Administrator to add one under **Model Providers**; the button re-enables the
+  moment one exists (#2179).
 - Re-running the wizard with an existing Team ID switches to **extend** mode and
   adds the missing roles instead of starting over.
 - If a member id is already held by an *unrelated* agent, the wizard refuses with a

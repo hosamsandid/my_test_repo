@@ -809,6 +809,10 @@ export default function TeamSetup() {
   const { data: mcpServers } = useApi('/api/mcp-servers');
   const { data: mcpCredentials } = useApi('/api/mcp-credentials');
   const { data: skillsData } = useApi('/api/skills');
+  // #2179: block team creation on a platform with no registered model
+  // provider — mirrors the server-side check in POST /api/teams(/stream).
+  const { data: llmEndpoints, loading: llmEndpointsLoading } = useApi('/api/llm-endpoints');
+  const hasUsableProvider = llmEndpointsLoading ? undefined : (Array.isArray(llmEndpoints) && llmEndpoints.length > 0);
   // Create-only wizard: the team pool does not exist yet, so only global skills
   // are grantable here (Proposal 3, #633). A team-tier pool appears once the
   // team exists and can then be granted from the team card on the Agents page.
@@ -1072,6 +1076,7 @@ export default function TeamSetup() {
           extraBody={launchExtraBody()}
           onComplete={onLaunchComplete}
           onBusyChange={setLaunchBusy}
+          hasUsableProvider={hasUsableProvider}
           leftAction={(
             <button
               type="button"

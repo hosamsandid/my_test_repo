@@ -2,6 +2,8 @@ import React, { useState, useMemo } from 'react';
 import { Loader2, Check, X, ChevronRight, Circle, CircleDot } from 'lucide-react';
 import { isTaskTool, formatTodoSummary } from './task-todo.js';
 import { computeLineDiff } from './edit-diff.js';
+import { renderableRows } from './tool-value-view.js';
+import { SafeMarkdown } from './Message';
 
 /**
  * Collapsible tool-use / tool-result block, ported from
@@ -66,14 +68,8 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
     ? 'var(--eb-accent-muted)'
     : (ok ? 'var(--eb-border-default)' : 'var(--eb-status-error)');
 
-  const resultText = toolResult?.content == null
-    ? ''
-    : (typeof toolResult.content === 'string'
-        ? toolResult.content
-        : JSON.stringify(toolResult.content, null, 2));
-  const RESULT_MAX = 2000;
-  const resultTruncated = resultText.length > RESULT_MAX;
-  const resultDisplay = resultTruncated ? resultText.slice(0, RESULT_MAX) : resultText;
+  const resultContent = toolResult?.content;
+  const hasResultContent = resultContent !== null && resultContent !== undefined && resultContent !== '';
 
   return (
     <div style={{
@@ -171,14 +167,7 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
                 textTransform: 'uppercase',
                 letterSpacing: 0.4,
               }}>Input</div>
-              <pre style={{
-                margin: '0 0 8px',
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                color: 'var(--eb-text-primary)',
-              }}>
-                {typeof input === 'string' ? input : JSON.stringify(input, null, 2)}
-              </pre>
+              <ValueRows value={input} />
             </>
           )}
 
@@ -192,15 +181,15 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
                 textTransform: 'uppercase',
                 letterSpacing: 0.4,
               }}>Result{ok ? '' : ' (error)'}</div>
-              <pre style={{
-                margin: 0,
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                color: ok ? 'var(--eb-text-primary)' : 'var(--eb-status-error)',
-              }}>
-                {resultDisplay}
-                {resultTruncated && '\n… (truncated)'}
-              </pre>
+              {hasResultContent ? (
+                <div style={{ color: ok ? 'var(--eb-text-primary)' : 'var(--eb-status-error)' }}>
+                  <ValueRows value={resultContent} />
+                </div>
+              ) : (
+                <div style={{ color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
+                  (empty result)
+                </div>
+              )}
             </>
           ) : (
             <div style={{
@@ -315,6 +304,77 @@ function EditDiff({ oldString, newString }) {
           </div>
         ))}
       </pre>
+    </div>
+  );
+}
+
+const VALUE_ROW_INDENT = 14;
+
+function formatScalar(v) {
+  if (v === null) return 'null';
+  if (v === undefined) return '';
+  return String(v);
+}
+
+/** Generic pretty-printed key/value renderer for a tool's `input` or
+ *  `toolResult.content` (#2197) — the fallback every tool hits unless it has
+ *  its own bespoke render (task list, Edit/Write diff, task_updated/
+ *  task_notification). No raw JSON punctuation: unquoted `key:` labels, one
+ *  field per line, nested objects/arrays indented recursively, multi-line
+ *  strings shown as real line breaks and markdown-like strings rendered via
+ *  the same `SafeMarkdown` chat messages use. */
+function ValueRows({ value }) {
+  const rows = useMemo(() => renderableRows(value), [value]);
+  return (
+    <div>
+      {rows.map((row) => (
+        <ValueRow key={row.path || 'root'} row={row} />
+      ))}
+    </div>
+  );
+}
+
+function ValueRow({ row }) {
+  const indent = row.depth * VALUE_ROW_INDENT;
+  const keyLabel = row.key == null ? null : row.key;
+  const keyPrefix = keyLabel != null ? `${keyLabel}: ` : '';
+
+  if (row.kind === 'object' || row.kind === 'array') {
+    return (
+      <div style={{ marginLeft: indent, color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-semibold)' }}>
+        {keyLabel}:
+      </div>
+    );
+  }
+  if (row.kind === 'empty-object' || row.kind === 'empty-array') {
+    return (
+      <div style={{ marginLeft: indent }}>
+        {keyPrefix}<span style={{ color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>(empty)</span>
+      </div>
+    );
+  }
+  if (row.kind === 'multiline') {
+    return (
+      <div style={{ marginLeft: indent }}>
+        {keyLabel != null && <div style={{ color: 'var(--eb-text-muted)' }}>{keyLabel}:</div>}
+        <pre style={{ margin: '0 0 4px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+          {row.value}{row.truncated ? '\n… (truncated)' : ''}
+        </pre>
+      </div>
+    );
+  }
+  if (row.kind === 'markdown') {
+    return (
+      <div style={{ marginLeft: indent }}>
+        {keyLabel != null && <div style={{ color: 'var(--eb-text-muted)' }}>{keyLabel}:</div>}
+        <SafeMarkdown body={row.truncated ? row.value + '\n\n… (truncated)' : row.value} />
+      </div>
+    );
+  }
+  // 'scalar'
+  return (
+    <div style={{ marginLeft: indent, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+      {keyPrefix}{formatScalar(row.value)}{row.truncated ? ' …' : ''}
     </div>
   );
 }

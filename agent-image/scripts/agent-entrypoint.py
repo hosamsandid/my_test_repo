@@ -1084,6 +1084,19 @@ def _requested_by(raw) -> dict | None:
     return {"matrixUserId": mxid.strip()}
 
 
+def _acting_sender_env_value(run_context: dict | None) -> str:
+    """The `AEE_ACTING_SENDER` value for this invocation's Claude subprocess env
+    (#2175, epic #2166 B3). Reuses `_requested_by`'s normalization of the same
+    `requestedBy` block `build_usage_record` reads, so the two can never
+    disagree about what counts as a known chat sender. Empty for anything that
+    isn't a live chat turn — an autonomous trigger's run_context sets no
+    `requestedBy` at all."""
+    if not isinstance(run_context, dict):
+        return ""
+    requested_by = _requested_by(run_context.get("requestedBy"))
+    return requested_by["matrixUserId"] if requested_by else ""
+
+
 def build_usage_record(ctx: dict) -> dict:
     """Pure assembler for a §4.1 token-usage record (#654). Takes a run-context
     dict (identity + trigger/github/git provenance + the captured `resultEvent`
@@ -2863,6 +2876,13 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     # run that opened the PR onto the pr-created record. Empty when unknown — the
     # record then lands with correlationId:null and tier C covers attribution.
     env["AEE_CORRELATION_ID"] = correlation_id or ""
+    # Acting-sender passthrough (#2175, epic #2166 B3): `gh-as-agent push`/`pr`
+    # forwards this in its POST body so the orchestrator can re-key an
+    # attributed write's personal-credential resolution off the human actually
+    # chatting right now instead of the agent's static config owner. Empty for
+    # anything that isn't a live chat turn (cron/github-event/loop/DM-less run),
+    # which is exactly what keeps autonomous runs unaffected (the ticket's AC).
+    env["AEE_ACTING_SENDER"] = _acting_sender_env_value(run_context)
     if resume_id:
         env["KNOWLEDGE_SESSION_ID"] = resume_id
 

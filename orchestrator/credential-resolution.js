@@ -58,13 +58,20 @@
 // the refusal branch is currently unreachable in this tree and becomes
 // reachable again when the concept's §5/§6 scope probe lands.
 
+const { resolveAgentTeam } = require("./agent-team");
+
 const DEFAULT_TEAM_ID = "default";
 
 // Attributed writes carry the human's name and MUST run under the owner's
 // personal identity when an owner is set (concept §5 table). Everything else is
 // a shared-eligible operation (read-only clone, the repo-check probe, event
 // polling) where a shared team/system credential misattributes no one.
-const ATTRIBUTED_OPERATIONS = new Set(["commit", "pr", "review", "push-https"]);
+//
+// `push-ssh` joined this set in #2175 (epic #2166 B3): the concept's §5 table
+// always named "HTTPS/SSH push" together, but no SSH-key resolver existed
+// until B3 built `resolveAttributedSshKey` — so it sat classified alongside
+// the shared-eligible operations only for lack of a resolver to prefer.
+const ATTRIBUTED_OPERATIONS = new Set(["commit", "pr", "review", "push-https", "push-ssh"]);
 
 function operationPrefersPersonal(operation) {
   return ATTRIBUTED_OPERATIONS.has(operation);
@@ -88,6 +95,62 @@ function resolveAgentOwnerId(cfg, loadAgentConfig) {
     if (parent && parent.ownerId) return String(parent.ownerId);
   }
   return cfg.ownerId ? String(cfg.ownerId) : null;
+}
+
+// Resolve the owner id an ATTRIBUTED WRITE should run under (#2175, epic #2166
+// block B3). `resolveAgentOwnerId` alone answers "who does this agent's config
+// say it belongs to" — the static team-creator identity B1's Matrix-identity
+// work now lets us do better than for an INTERACTIVE run: the human actually
+// chatting right now (the caller resolves their Matrix sender id to a platform
+// user id and passes it in here) is who the write must be attributed to, not
+// whoever happened to create the team.
+//
+// `actingSenderUserId` is null for every run this cannot apply to — an
+// autonomous trigger (cron/github-event/loop) carries no chat sender at all,
+// and an unresolvable/unprovisioned sender resolves to null upstream — and the
+// resolution falls through to the existing static `resolveAgentOwnerId`
+// unchanged, which is what keeps autonomous runs byte-identical to before B3
+// (the ticket's own AC).
+function resolveEffectiveOwnerId(cfg, loadAgentConfig, actingSenderUserId) {
+  const acting = actingSenderUserId != null && String(actingSenderUserId) !== ""
+    ? String(actingSenderUserId)
+    : null;
+  if (acting) return acting;
+  return resolveAgentOwnerId(cfg, loadAgentConfig);
+}
+
+// Is `userId` someone this agent could legitimately be acting for right now
+// (#2187 review finding, hardening #2175/B3)?
+//
+// `AEE_ACTING_SENDER` is set once into the Claude subprocess's environment for
+// a live chat turn, but for the rest of that run it is just an ordinary env
+// var: any Bash tool call the agent makes — potentially steered by content it
+// read, e.g. a prompt injection in an issue or file — can overwrite it before
+// calling `gh-as-agent`, which forwards whatever value is CURRENTLY present
+// with no signature or binding to the real triggering Matrix event.
+// `resolveEffectiveOwnerId` above trusts its `actingSenderUserId` argument
+// unconditionally, so the caller MUST filter it through this predicate first —
+// a self-asserted identity in a request body is never authentication on its
+// own (the same discipline `wake-agent.js`'s producer-id cross-check applies
+// against the caller's real team, #2030).
+//
+// The boundary: a team-bound agent (a `team` or one of its `team-member`s)
+// trusts only its own team's members; a standalone agent (D8, no team
+// boundary — `resolveAgentTeam` returns null) trusts only its own owner, the
+// one relationship it has. This closes cross-team (and, for a standalone
+// agent, cross-owner) impersonation — it does not make the claim unforgeable
+// within that boundary, which would need a signed, per-run claim the
+// container cannot re-mint; that is a larger, separate hardening step.
+//
+// `hasMembership(teamId, userId)` is the injected, impure membership lookup
+// (mirrors `loadAgentConfig` above) — this module stays fs-free.
+function isActingSenderTrusted(cfg, userId, hasMembership) {
+  if (!userId) return false;
+  const teamId = resolveAgentTeam(cfg);
+  if (teamId) {
+    return typeof hasMembership === "function" ? !!hasMembership(teamId, userId) : false;
+  }
+  return !!(cfg && cfg.ownerId && String(cfg.ownerId) === String(userId));
 }
 
 // Find the owner's usable personal credential of one kind (SSH key or GitHub
@@ -388,6 +451,8 @@ module.exports = {
   ATTRIBUTED_OPERATIONS,
   operationPrefersPersonal,
   resolveAgentOwnerId,
+  resolveEffectiveOwnerId,
+  isActingSenderTrusted,
   findPersonalCredential,
   findPersonalCredentialState,
   buildLiveUserGate,

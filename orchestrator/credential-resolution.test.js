@@ -12,6 +12,7 @@ const {
   operationPrefersPersonal,
   resolveAgentOwnerId,
   resolveEffectiveOwnerId,
+  resolveBaselineOwnerId,
   isActingSenderTrusted,
   findPersonalCredential,
   findPersonalCredentialState,
@@ -90,6 +91,64 @@ test("resolveEffectiveOwnerId: a team-member without an acting sender still reso
     resolveEffectiveOwnerId({ role: "team-member", parentTeamId: "squad" }, load, null),
     "u-parent",
   );
+});
+
+// ── the team-admin BASELINE (#2176, epic #2166 B4) ──────────────────────────
+
+test("resolveBaselineOwnerId: a team-bounded agent defers to the CURRENT team-admin, not the static creator ownerId", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const users = [{ id: "u-creator" }, { id: "u-newadmin" }];
+  // A D4 succession demoted the creator and promoted someone else — the
+  // creator no longer holds a `team-admin` membership at all.
+  const memberships = [
+    { userId: "u-newadmin", teamId: "squad", role: "team-admin", createdAt: "2020-02-01" },
+    { userId: "u-creator", teamId: "squad", role: "team-member", createdAt: "2020-01-01" },
+  ];
+  assert.equal(resolveBaselineOwnerId(cfg, { users, memberships }), "u-newadmin");
+});
+
+test("resolveBaselineOwnerId: a team-member resolves the admin of its PARENT team", () => {
+  const cfg = { role: "team-member", parentTeamId: "squad" };
+  const users = [{ id: "u-admin" }];
+  const memberships = [{ userId: "u-admin", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }];
+  assert.equal(resolveBaselineOwnerId(cfg, { users, memberships }), "u-admin");
+});
+
+test("resolveBaselineOwnerId: a standalone agent has no team boundary — falls back to its own static owner", () => {
+  const cfg = { role: "agent", ownerId: "u-alice" };
+  assert.equal(resolveBaselineOwnerId(cfg, {}), "u-alice");
+  assert.equal(resolveBaselineOwnerId(cfg), "u-alice");
+});
+
+test("resolveBaselineOwnerId: no membership data available degrades to the static owner (fail-open)", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  // Same fail-open direction as `buildLiveUserGate`: an unreadable/absent
+  // membership snapshot must not disable resolution, only widen it once real
+  // data is supplied.
+  assert.equal(resolveBaselineOwnerId(cfg, {}), "u-creator");
+  assert.equal(resolveBaselineOwnerId(cfg), "u-creator");
+  assert.equal(resolveBaselineOwnerId(cfg, { users: [], memberships: [] }), "u-creator");
+});
+
+test("resolveEffectiveOwnerId: with no acting sender, resolves the team-admin baseline once membership data is supplied", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const users = [{ id: "u-newadmin" }];
+  const memberships = [{ userId: "u-newadmin", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }];
+  assert.equal(
+    resolveEffectiveOwnerId(cfg, () => null, null, { users, memberships }),
+    "u-newadmin",
+  );
+  // An acting sender still wins outright — B4 only changes the AUTONOMOUS
+  // fallback, never overriding B3's interactive re-keying.
+  assert.equal(
+    resolveEffectiveOwnerId(cfg, () => null, "u-chatting-human", { users, memberships }),
+    "u-chatting-human",
+  );
+});
+
+test("resolveEffectiveOwnerId: omitting baselineDeps reproduces the pre-B4 static-owner answer exactly", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  assert.equal(resolveEffectiveOwnerId(cfg, () => null, null), "u-creator");
 });
 
 // ── acting-sender TRUST boundary (#2187 review finding) ─────────────────────
@@ -261,6 +320,82 @@ test("resolveCredential: an omitted personalCredentialPresent never refuses (#20
     resolveCredential({ operation: "pr", ownerId: "u-alice", sharedCredentialId: "team-1" }),
     { tier: "shared", credentialId: "team-1" },
   );
+});
+
+// ── #2176 (epic #2166 B4): just-in-time refusal for INTERACTIVE writes ──────
+
+test("resolveCredential: INTERACTIVE attributed write + owner has NO personal credential at all → refuse (B4 widening)", () => {
+  for (const operation of ["commit", "pr", "review", "push-https", "push-ssh"]) {
+    const r = resolveCredential({
+      operation,
+      ownerId: "u-alice",
+      personalCredential: null,
+      personalCredentialPresent: false,
+      sharedCredentialId: "team-1",
+      interactive: true,
+    });
+    assert.ok(r.refuse, operation);
+    assert.equal(r.refuse.code, "personal-credential-required", operation);
+    assert.match(r.refuse.message, /u-alice/, operation);
+  }
+});
+
+test("resolveCredential: AUTONOMOUS (non-interactive) attributed write with no personal credential is UNAFFECTED — still shared, no refusal (B4 AC)", () => {
+  for (const operation of ["commit", "pr", "review", "push-https", "push-ssh"]) {
+    assert.deepEqual(
+      resolveCredential({
+        operation,
+        ownerId: "u-alice",
+        personalCredential: null,
+        personalCredentialPresent: false,
+        sharedCredentialId: "team-1",
+        interactive: false, // the default — an explicit autonomous run
+      }),
+      { tier: "shared", credentialId: "team-1" },
+      operation,
+    );
+  }
+});
+
+test("resolveCredential: interactive does not widen an already-usable personal credential (AC1 unaffected)", () => {
+  const r = resolveCredential({
+    operation: "pr",
+    ownerId: "u-alice",
+    personalCredential: { id: "pers-alice" },
+    sharedCredentialId: "team-1",
+    interactive: true,
+  });
+  assert.deepEqual(r, { tier: "personal", credentialId: "pers-alice" });
+});
+
+test("resolveCredential: interactive read/poll still falls back to shared even with no personal credential (B4 AC — reads via baseline)", () => {
+  for (const operation of ["clone", "poll", "probe"]) {
+    assert.deepEqual(
+      resolveCredential({
+        operation,
+        ownerId: "u-alice",
+        personalCredential: null,
+        personalCredentialPresent: false,
+        sharedCredentialId: "team-1",
+        interactive: true,
+      }),
+      { tier: "shared", credentialId: "team-1" },
+      operation,
+    );
+  }
+});
+
+test("resolveCredential: interactive + present-but-unusable still refuses with the ordinary (non-orphan) message", () => {
+  const r = resolveCredential({
+    operation: "pr",
+    ownerId: "u-alice",
+    personalCredential: null,
+    personalCredentialPresent: true,
+    sharedCredentialId: "team-1",
+    interactive: true,
+  });
+  assert.ok(r.refuse);
+  assert.equal(r.refuse.code, "personal-credential-required");
 });
 
 // AC2 second half / AC7: owner, no personal, but a SHARED-eligible op → shared, no refusal.

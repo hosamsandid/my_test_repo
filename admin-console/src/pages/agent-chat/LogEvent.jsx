@@ -4,9 +4,14 @@ import {
   Send, ArrowDown, Cpu, Clock, Settings2, ChevronRight, Repeat,
 } from 'lucide-react';
 import ToolBlock from './ToolBlock';
-import { systemEventSummary, systemEventHasDetail } from './system-event.js';
+import {
+  systemEventSummary, systemEventHasDetail,
+  isTaskEvent, taskEventSummary, taskUpdatedPatchRows,
+  taskNotificationSummary, formatOutputFileRef,
+} from './system-event.js';
 import { buildSystemInitView } from './system-init.js';
 import { isLoopFired, loopFiredLabel } from './loop-run-view.js';
+import { SafeMarkdown } from './Message';
 
 /**
  * One row in the SessionLogPanel.
@@ -405,6 +410,49 @@ function Body({ event, expanded }) {
         </div>
       );
     case 'system_event': {
+      // `task_updated`/`task_notification` (#2191) — background sub-agent
+      // task tracking — get a purpose-built render instead of the generic
+      // scalar-only handling below, which drops the nested `patch` and
+      // JSON-escapes the markdown `summary`.
+      if (isTaskEvent(event)) {
+        const summary = taskEventSummary(event);
+        const patchRows = taskUpdatedPatchRows(event);
+        const notifSummary = taskNotificationSummary(event);
+        const outputRef = formatOutputFileRef(event);
+        return (
+          <div style={{ ...baseStyle, color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
+            system / <span style={{ color: 'var(--eb-text-secondary)' }}>{event.subtype}</span>
+            {summary && <span style={{ color: 'var(--eb-text-secondary)' }}> — {summary}</span>}
+            {expanded && patchRows.length > 0 && (
+              <div style={{
+                marginTop: 4,
+                paddingLeft: 8,
+                display: 'grid',
+                gridTemplateColumns: 'auto 1fr',
+                columnGap: 8,
+                rowGap: 1,
+              }}>
+                {patchRows.map(([k, v]) => (
+                  <React.Fragment key={k}>
+                    <span style={{ color: 'var(--eb-text-muted)' }}>{k}</span>
+                    <span style={{ color: 'var(--eb-text-secondary)', overflowWrap: 'anywhere' }}>{String(v)}</span>
+                  </React.Fragment>
+                ))}
+              </div>
+            )}
+            {expanded && notifSummary && (
+              <div style={{ marginTop: 4, paddingLeft: 8, fontFamily: 'var(--eb-font-sans)', fontSize: 'var(--eb-text-sm)' }}>
+                <SafeMarkdown body={notifSummary} />
+              </div>
+            )}
+            {expanded && outputRef && (
+              <div style={{ marginTop: 4, paddingLeft: 8, color: 'var(--eb-text-muted)' }}>
+                output: <span style={{ color: 'var(--eb-text-secondary)' }}>{outputRef}</span>
+              </div>
+            )}
+          </div>
+        );
+      }
       // Surface the informative content the CLI reported (captured in `raw`,
       // e.g. a thinking-token count) inline, and offer the full raw JSON on
       // expand — mirroring the default/unknown case below. Degrades to the

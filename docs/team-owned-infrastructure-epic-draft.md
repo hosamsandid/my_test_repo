@@ -58,7 +58,7 @@ identity & credentials; **B1 is its root** (B2/B3 depend on it, B4 on B3, B5 las
 - **B — Identity & person-bound credentials**
   - [x] B1 — Humans post under their own Matrix identity into the shared per-agent room (#2173)
   - [ ] B2 — Sharing a team invites the human into the team's agent rooms
-  - [ ] B3 — Thread the acting sender into credential resolution (re-key off the sender)
+  - [x] B3 — Thread the acting sender into credential resolution (re-key off the sender, #2175)
   - [ ] B4 — Team-admin baseline for non-interactive work; just-in-time refusal for writes
   - [ ] B5 — Retire the shared team credential; personal is the norm
 - **C — Cross-cutting (schedule anywhere)**

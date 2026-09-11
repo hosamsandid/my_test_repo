@@ -192,6 +192,11 @@ case "${1:-}" in
     # Forward the invocation's correlation id (#655 tier A) when the runtime set
     # it, so the orchestrator can tie the resulting pr-events record to this run.
     [[ -n "${AEE_CORRELATION_ID:-}" ]] && pairs+=(correlationId="$AEE_CORRELATION_ID")
+    # Forward the acting human's Matrix id (#2175, epic #2166 B3) for an
+    # interactive chat turn — orchestrator-side resolution keys the personal
+    # credential on this sender instead of the agent's static config owner.
+    # Empty for an autonomous run (nothing sets it then).
+    [[ -n "${AEE_ACTING_SENDER:-}" ]] && pairs+=(actingSender="$AEE_ACTING_SENDER")
     _post "/internal/agents/${AGENT_ID}/git/push" "$(_json "${pairs[@]}")"
     ;;
 
@@ -223,6 +228,8 @@ case "${1:-}" in
     # it, so the orchestrator can tie the pr-created record to the run that opened
     # the PR (the exact "which run created this PR" signal).
     [[ -n "${AEE_CORRELATION_ID:-}" ]] && pairs+=(correlationId="$AEE_CORRELATION_ID")
+    # See the push case above (#2175, epic #2166 B3).
+    [[ -n "${AEE_ACTING_SENDER:-}" ]] && pairs+=(actingSender="$AEE_ACTING_SENDER")
     _post "/internal/agents/${AGENT_ID}/git/pr" "$(_json "${pairs[@]}")"
     ;;
 

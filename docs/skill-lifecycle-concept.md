@@ -177,8 +177,9 @@ skill a global skill" are thereby both one-click, in both copy and move flavors.
 ```
 
 One pure validator + planner (`skill-transfer.js`): containment-guarded paths, permission
-check per tier (Team Admin for team targets, System Admin for global targets and any
-`move` out of global), provenance carried forward (share/lift semantics preserved),
+check per tier (Team Admin for team targets; for a global target, Team Admin of the
+source team suffices — System Admin is required only for a `move` out of global/agent,
+i.e. retiring shared content, #2178), provenance carried forward (share/lift semantics preserved),
 `skill.json` stamped on the target, history entry on both ends. Activation reuses
 `setTeamSkillActive` — transfers end active by default, never in the historic
 "promoted-but-invisible" dead-end.

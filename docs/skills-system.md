@@ -13,7 +13,7 @@ Skills exist on two tiers, and an agent resolves a skill name **team-first, then
 
 At agent creation the orchestrator copies each granted skill from the owning team's pool when it has that name, otherwise from the global pool. A team with no own skills behaves exactly as a global-only setup — so this is fully backward compatible. This is how a team curates **private** domain skills without leaking them to other teams: the skill is only ever seeded into that team's agents.
 
-**Two-stage promotion** (relates to skill propagation, #173): an agent-extracted skill is promoted to the **team** pool by a Team Admin, and optionally lifted to the **global** pool by a System Admin (*Promote to global* in the Skills Registry).
+**Two-stage promotion** (relates to skill propagation, #173): an agent-extracted skill is promoted to the **team** pool by a Team Admin, and optionally lifted to the **global** pool by a System Admin *or by a Team Admin of that source team* (*Promote to global* in the Skills Registry, #2178) — landing in the global pool grants nothing automatically, so another team still needs an explicit grant to use it. Retiring a skill *out of* the global pool stays System-Admin-only.
 
 ## Adding a new skill
 

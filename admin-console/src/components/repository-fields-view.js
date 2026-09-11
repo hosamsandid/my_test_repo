@@ -36,10 +36,26 @@ export function tokenIsElsewhere(target) {
 // token rather than let the reader try a key — the client-side twin of the
 // server's AC19 refusal. Deliberately only on a FAILED probe: an HTTPS URL
 // that resolves fine (a public repo) needs no nudge.
-export function shouldShowTokenHint(check, url, githubTokenId) {
+//
+// `hasEnvironmentToken` (#2161 follow-up) is a SEPARATE suppression signal from
+// `githubTokenId`, never sent to the API. On the agent-scoped surface
+// (`tokenTarget="environment"`) the card carries no credential of its own and
+// deliberately sends `githubTokenId=""` to the reachability probe (D5 — the
+// probe must never be handed a client-guessed placeholder id, which is what
+// #2161 fixed: `'environment'` isn't a real token id and 400s against the
+// registry). Before that fix, the hint's visibility happened to be suppressed
+// too, because the panel overloaded `githubTokenId` with the truthy string
+// `'environment'` whenever the agent's Working Environment already had a real
+// token bound. Fixing #2161 by sending an honest `githubTokenId=""` dropped
+// that suppression as a side effect: a probe failure (private repo, wrong URL,
+// anything — the probe never actually exercises the real environment token
+// either way) would tell a reader to add a token their environment already
+// has. `hasEnvironmentToken` restores exactly that suppression through its own
+// channel, so the probe stays honest AND the hint stays accurate.
+export function shouldShowTokenHint(check, url, githubTokenId, hasEnvironmentToken) {
   const status = check && check.status;
   const isHttps = /^https:\/\//i.test(String(url || '').trim());
-  return status === 'error' && isHttps && !githubTokenId;
+  return status === 'error' && isHttps && !githubTokenId && !hasEnvironmentToken;
 }
 
 // One repository row's edit state, normalised for the form. Mirrors the

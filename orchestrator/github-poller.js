@@ -853,6 +853,28 @@ class GitHubPoller {
             wakeArmory.disarmLabel(armed, { kind, number: num, label: removed });
           } else if (key.endsWith('.closed')) {
             wakeArmory.disarmObject(armed, { kind, number: num });
+          } else if (key.endsWith('.labeled')) {
+            // Presence-based disarm (#2152 follow-up): the Events API never
+            // delivers a standalone `unlabeled(<wake>)` for a PR (the removal is
+            // collapsed with the paired claim-swap add, or dropped entirely), so
+            // the `unlabeled` branch above never fires for the dominant flow and
+            // an arm set on the first wake is otherwise never cleared. Every
+            // `labeled` event, however, carries the object's CURRENT full label
+            // set — so any wake armed on an earlier event but no longer present
+            // has been removed by SOME means (the agent's claim swap, a human
+            // web-UI removal, CI) and is disarmed here, without ever needing to
+            // observe the removal itself. Guarded on the full set being present:
+            // a synthetic fast-path event carries none, and absence must never be
+            // read as "all removed". The non-atomic `<wake>:wip` snapshot that
+            // still lists `<wake>` correctly does NOT disarm here — it re-checks
+            // on the next event, whose snapshot is current.
+            const labelsArr = Array.isArray(ghEvent.payload?.labels) ? ghEvent.payload.labels : null;
+            if (labelsArr) {
+              const present = new Set(
+                labelsArr.map((l) => (typeof l === 'string' ? l : l?.name)).filter(Boolean),
+              );
+              wakeArmory.disarmAbsent(armed, { kind, number: num, presentLabels: present });
+            }
           }
         }
       }

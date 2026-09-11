@@ -93,6 +93,32 @@ function disarmObject(armed, { kind, number }) {
   return armed;
 }
 
+// Presence-based disarm: drop every entry for (kind, number) whose label is NOT
+// in the object's CURRENT full label set. This does not depend on ever
+// observing the label's removal event — which is the whole point, because the
+// Events API does not deliver a standalone `unlabeled(<wake>)` for a PR (a
+// removal is collapsed with the paired add, or dropped), so the `unlabeled`
+// disarm never fires for the dominant claim-swap flow. Every `labeled` event
+// instead carries the object's full set, so a wake armed earlier but no longer
+// present has been removed by SOME means and is disarmed here.
+//
+// `presentLabels` is a Set of the label names on the object right now. Call ONLY
+// when that snapshot is genuinely present on the event — an ABSENT set must
+// never be read as "everything was removed" (it would disarm every wake on the
+// object). The failure direction is deliberately benign either way: a wrongly
+// kept arm suppresses at most a duplicate wake, a wrongly cleared one permits at
+// most a duplicate — never a lost first wake (the module's fail-open contract).
+function disarmAbsent(armed, { kind, number, presentLabels }) {
+  if (!armed || !presentLabels) return armed;
+  for (const k of Object.keys(armed)) {
+    const p = parseArmedKey(k);
+    if (p && p.kind === kind && p.number === number && !presentLabels.has(p.label)) {
+      delete armed[k];
+    }
+  }
+  return armed;
+}
+
 // Drop armed entries past the TTL, then enforce the per-repo cap by evicting
 // the oldest. Cheap for the handful of live entries a stack ever holds.
 function gcArmed(armed, { now = Date.now(), ttlMs = ARMED_TTL_MS, maxEntries = ARMED_MAX } = {}) {
@@ -117,6 +143,7 @@ module.exports = {
   arm,
   disarmLabel,
   disarmObject,
+  disarmAbsent,
   gcArmed,
   ARMED_TTL_MS,
   ARMED_MAX,

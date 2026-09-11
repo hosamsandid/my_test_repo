@@ -918,6 +918,61 @@ test("_fanOutBatch (#2152 follow-up): the disarm does not re-open the double-fir
   }
 });
 
+test("_fanOutBatch (#2152 follow-up): presence-based disarm re-opens the edge with NO unlabeled and NO claim swap (human web-UI removal)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    // 1. wake — arm `ready`.
+    const ev1 = labeledIssueEvent("pd-1", "ready", ["ready"], 2153);
+    // 2. `ready` is gone from the object's full set (a human removed it in the
+    //    web UI — no unlabeled event ever reaches the poller). An unrelated label
+    //    add is the next thing the poller sees; its snapshot no longer lists
+    //    `ready`, so the presence-based disarm clears the stale arm.
+    const ev2 = labeledIssueEvent("pd-2", "other", ["other"], 2153);
+    // 3. `ready` re-added → not armed → fires again.
+    const ev3 = labeledIssueEvent("pd-3", "ready", ["ready", "other"], 2153);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], readyDeveloperSub(), "tok");
+
+    assert.deepEqual(
+      enqueued.map((e) => e.entry.github.eventId),
+      ["pd-1", "pd-3"],
+      "the wake re-fires once the label is observed absent, without any removal event",
+    );
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch (#2152 follow-up): presence-based disarm does NOT fire while the wake label persists", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ev1 = labeledIssueEvent("pp-1", "ready", ["next-wave", "ready"], 2154);
+    // unrelated churn while `ready` is STILL on the object — the snapshot lists
+    // it, so presence-based disarm must keep the arm and the churn stays dropped.
+    const ev2 = labeledIssueEvent("pp-2", "next-wave", ["next-wave", "ready"], 2154);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2], readyDeveloperSub(), "tok");
+
+    assert.deepEqual(
+      enqueued.map((e) => e.entry.github.eventId),
+      ["pp-1"],
+      "only the rising-edge wake fires; churn while the label persists does not",
+    );
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
 test("_fanOutBatch (#2152): the #1376 collapsed multi-add still fires (rising edge, not a regression)", async () => {
   const origRecord = githubEventLog.record;
   githubEventLog.record = () => {};

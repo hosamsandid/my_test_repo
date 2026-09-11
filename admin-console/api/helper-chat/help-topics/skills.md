@@ -121,21 +121,41 @@ Everything else on this page moves a skill between the tiers or reshapes it:
 | **Adopt** | Copies a global skill into one team's pool and activates it there, so that team owns a curatable copy. | Global skill, side panel |
 | **Move to team** | Relocates a global skill into a team pool and retires the global copy (recoverable snapshot; System Admin only). | Global skill, side panel |
 | **Install into agent** | Activates a global skill for one running agent — see the chapter above. | Global skill, side panel |
+| **Publish** | Pushes an agent's edited skill up to the team pool and/or straight to global — see the chapter below. | Agent skill, side panel or the Knowledge page |
 | **Distill** | Re-synthesises a single skill from everything that accumulated in it: dedupe, restructure, re-abstract. | Team skill, side panel |
 | **Merge** | Folds several selected skills into one. | Table selection → **Merge selected** |
 | **Export ZIP** | Downloads the whole skill directory as an archive. | Any skill, side panel |
 | **Import skill** | Reads a `.zip` / `.skill` archive back into the pool you choose. | Page header |
 
-Promotion is deliberately two-staged: an agent-extracted skill is lifted to the
-**team** pool by a Team Admin first. Promoting that team-tier copy into the
-**global** pool is *also* a Team Admin act, by the admin of the skill's own
-team — not System-Admin-only — because landing in the global pool does not by
-itself make the skill visible or usable anywhere: another team still has to be
-granted it separately, so nothing becomes house-wide by accident. What stays
-System-Admin-only is *moving OUT* of the global pool (retiring that copy),
-since deleting shared content is a governance-level act regardless of who put
-it there. The Team-Admin-only actions simply do not appear when the skill you
+A skill entering the **global** pool for the first time is a Team-Admin act too,
+not System-Admin-only: a Team Admin may promote their own team's skill to global,
+and — since **Publish** — may also push an agent's edited skill straight to global
+without a team-pool hop. What stays System-Admin-only is *moving OUT* of the
+global pool or an agent's own workspace (retiring that copy), because deleting
+someone else's content is a governance-level act regardless of who is adding to
+global. The Team-Admin-only actions simply do not appear when the skill you
 opened is not on their tier.
+
+### Publishing an agent's edited skill (Publish)
+
+An agent-tier skill row on this page — or the matching entry in the Knowledge
+page's private-skills panel — offers **Publish** whenever there is something
+worth publishing: a skill the agent authored itself, or its **edited** copy of a
+skill it was granted (the common case: an agent improves a shared skill like
+Flow Designer inside its own workspace, and the edit should become the new
+global version). An **unchanged** copy of a granted skill is never offered —
+there is nothing local to give back, and a copy whose *source* moved on while
+the agent's own copy did not (`outdated`) should be resynced instead, not
+published.
+
+Publish offers **either** path, your choice each time: **Publish to global**
+copies the edit directly into the global pool in one step; **Publish via team
+pool** lifts it into the team pool first, then promotes that copy to global —
+two steps, same engine. Both reuse the ordinary tier-transfer machinery, so a
+name already taken at the destination asks for the familiar overwrite
+confirmation (replaces the entire destination skill directory) before
+proceeding, and the publish is recorded in the destination's own version
+history and lineage like any other transfer.
 
 **Distill** is available for team skills, and it only rewrites wording: it
 re-synthesises the skill from its own accumulated content so it stays tight as

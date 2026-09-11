@@ -24,13 +24,18 @@ const POOL_TEAM_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 // The transition matrix (concept §3.1): the semantic COPY action per
 // (from → to) cell. A cell absent from this map is not a valid transfer:
-//   - agent→global is deliberately retired (go via the team tier);
 //   - global→global / agent→agent are edit / author, not a transfer;
 //   - *→agent is activation / seed, a different path.
+// agent→global (#2180) was "deliberately retired, go via the team tier" until
+// the #2180 design decision explicitly re-enabled it as an offered option
+// alongside the staged agent→team→global path — a direct publish of an
+// agent's edited copy of a skill (incl. an edited copy of a granted/seeded
+// global skill) straight into the global pool.
 const COPY_ACTION = {
   'agent>team': 'lifted',
   'team>team': 'shared',
   'team>global': 'promoted',
+  'agent>global': 'promoted',
   'global>team': 'adopted',
 };
 
@@ -65,24 +70,25 @@ function normTierRef(ref, { agentIdRe, teamIdRe }) {
   return out;
 }
 
-// The permission the caller must hold for a transfer (concept §3.2, relaxed by
-// #2178/G8/H5a): Team Admin for team targets; System Admin for any `move` out
-// of global/agent (deleting those is a governance-level action). A move also
-// needs authority over the source it retires (team source → Team Admin of that
-// team).
+// The permission the caller must hold for a transfer (concept §3.2): Team Admin
+// for team targets; System Admin for any `move` out of global/agent (deleting
+// those is a governance-level action). A move also needs authority over the
+// source it retires (team source → Team Admin of that team).
 //
-// Publishing into GLOBAL no longer requires System Admin outright — a Team
-// Admin of the CONTENT'S OWN team may promote it too (visibility still stays
-// "created by sharing": promoting to global does not auto-grant any team). The
-// only source that can reach a global target today is `team` (agent→global is
-// retired — see COPY_ACTION above), so the source team is always known here and
-// folded into `orTeamAdminOf`.
+// Global targets (#2180 governance change): publishing into global no longer
+// requires System Admin outright — a Team Admin of the CONTENT'S OWN team may
+// publish too, not only into their team pool. For a team-tier source that team
+// is `from.teamId`, known here and folded straight into `orTeamAdminOf`. For an
+// agent-tier source this module (pure, fs-free) cannot resolve which team owns
+// the agent, so the safe default is `needsSystemAdmin: true`; the caller
+// resolves the agent's REAL owning team server-side (never client-supplied —
+// a self-asserted team id here would be a privilege escalation) and relaxes
+// this permission itself before calling `permitTransfer`, the same way the
+// endpoint already recomputes other business rules the pure planner can't see.
 //
 // Returns { needsSystemAdmin, teamAdminOf: [], orTeamAdminOf: [] } — the first
 // two are AND'd (every named team's admin, or System Admin); `orTeamAdminOf` is
-// OR'd (System Admin, or Team Admin of ANY one of these) — used here because the
-// target-side relaxation (promote to global) must not tighten the separate
-// move/retire-source requirement computed independently below.
+// OR'd (System Admin, or Team Admin of ANY one of these).
 function requiredPermission(from, to, mode) {
   const teamAdminOf = new Set();
   const orTeamAdminOf = new Set();
@@ -90,7 +96,7 @@ function requiredPermission(from, to, mode) {
   // Target side.
   if (to.tier === 'global') {
     if (from.tier === 'team') orTeamAdminOf.add(from.teamId);
-    else needsSystemAdmin = true; // no source team to relax against (should be unreachable — see COPY_ACTION).
+    else needsSystemAdmin = true; // agent source: caller relaxes after resolving the real team.
   } else if (to.tier === 'team') teamAdminOf.add(to.teamId);
   // Move retires the source — require authority over it too.
   if (mode === 'move') {
@@ -180,8 +186,8 @@ function permitTransfer(permission, caps = {}) {
       return { ok: false, error: `forbidden: requires Team Admin of '${teamId}'` };
     }
   }
-  // An OR-set of alternative teams — System Admin, or Team Admin of ANY one of
-  // them (the "promote to global" rule: the content's own team is enough).
+  // #2180: an OR-set of alternative teams — System Admin, or Team Admin of ANY
+  // one of them (a global publish's "the content's own team" rule).
   if (Array.isArray(p.orTeamAdminOf) && p.orTeamAdminOf.length > 0) {
     if (!systemAdmin && !p.orTeamAdminOf.some((teamId) => isTeamAdmin(teamId))) {
       return { ok: false, error: `forbidden: requires System Admin or Team Admin of ${p.orTeamAdminOf.map((t) => `'${t}'`).join(' / ')}` };

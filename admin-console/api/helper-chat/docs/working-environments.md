@@ -147,3 +147,17 @@ carries a persistent *"N agents not up to date"* badge derived from the agents'
 actual workspaces, and clicking it runs the same propagation. For one agent the
 same job is **Sync repositories** on its Settings tab; both surfaces drive the
 same propagation, so they cannot disagree about what a change would do.
+
+## Editing from a team's Settings tab
+
+A `role: 'team'` agent's Working Environment can also be edited without leaving
+Agent Chat: open the team's **Settings** tab and its **Working Environment**
+section renders grouped tabs — **Repositories · Model provider · Toolchain ·
+MCP servers · Additional context** — over the same environment record, saved
+through the same `PUT /api/environments/:id` this page's own form uses. A
+repository change still gets the save-time propagation offer described above;
+a provider or toolchain change still respawns the team's running agents.
+
+Not carried onto that surface: the environment's **Name**/**ID**, its **GitHub
+Token**, and its **Ownership** — those stay edited here, on the Working
+Environments page.

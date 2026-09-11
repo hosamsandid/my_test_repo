@@ -148,8 +148,9 @@ test('the point-of-decision microcopy the ticket protects is still on the page',
   // Scope — out: this ticket expands the topic and adds "?" links; it must not
   // strip a hint that sits next to the control it qualifies.
   const kept = [
-    // the agent-skill "copy it to a team first" hint
-    'It can&apos;t be shared directly — copy it to a team first',
+    // the agent-skill "unmodified granted copy" hint (#2180 — an unchanged seed
+    // copy still cannot be published directly; a diverged one now can)
+    'This is an unmodified copy of a granted skill',
     // the Adopt-vs-Move-to-team blurb
     'relocates it and retires the global copy',
     // the Retire-source-skills checkbox hint

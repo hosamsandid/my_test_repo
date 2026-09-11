@@ -3,7 +3,7 @@ import {
   MessageCircle, Sparkles, Wrench, CheckCircle2, AlertTriangle, Brain,
   Send, ArrowDown, Cpu, Clock, Settings2, ChevronRight, Repeat, Gauge,
 } from 'lucide-react';
-import ToolBlock from './ToolBlock';
+import ToolBlock, { ValueRows } from './ToolBlock';
 import {
   systemEventSummary, systemEventHasDetail,
   isTaskEvent, taskEventSummary, taskUpdatedPatchRows,
@@ -411,10 +411,13 @@ function Body({ event, expanded }) {
       // #2202: a purpose-built render instead of the generic `unknown` bucket
       // — a plain-language summary line up front, full field-by-field detail
       // (including both raw epoch timestamps converted to local time) on
-      // expand, and the full raw JSON below that for anyone who wants it.
+      // expand, and the full raw payload below that for anyone who wants it —
+      // through the same `ValueRows` pretty key/value renderer #2197 gave
+      // every tool Input/Result fallback (#2204 review finding: this used to
+      // be a `JSON.stringify` escaped dump, exactly what AC4 asks to avoid).
       const summary = rateLimitEventSummary(event);
       const detailRows = rateLimitEventDetailRows(event);
-      const detail = expanded ? JSON.stringify(event.raw ?? event, null, 2) : null;
+      const rawValue = event.raw ?? event;
       return (
         <div style={{ ...baseStyle, color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
           {summary || 'Rate limit event'}
@@ -435,10 +438,11 @@ function Body({ event, expanded }) {
               ))}
             </div>
           )}
-          {detail && (
-            <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', fontSize: 'inherit', color: 'var(--eb-text-muted)' }}>
-              {detail}
-            </pre>
+          {expanded && rawValue != null && (
+            <div style={{ marginTop: 4, paddingLeft: 8 }}>
+              <div style={{ color: 'var(--eb-text-muted)' }}>raw:</div>
+              <ValueRows value={rawValue} />
+            </div>
           )}
         </div>
       );

@@ -961,6 +961,17 @@ function resolveTieredOwnership(body) {
     err.status = 400;
     throw err;
   }
+  // #2169: infrastructure carries no independent ACL, so a create body that
+  // omits ownership altogether must NOT fall through to
+  // `resolveCredentialOwnership`'s bare-credential default (the picked
+  // 'default' team) — that was only ever safe while a client-side ownership
+  // picker guaranteed an explicit choice. With the picker gone (the
+  // environment/MCP-server forms), an omitted ownership resolves to an
+  // unassigned system tier instead: invisible to everyone but a System Admin
+  // until it is published global or assigned a team.
+  if (b.scope === undefined && b.teamId === undefined && b.assignedTeamIds === undefined) {
+    return { scope: 'system', teamId: null, assignedTeamIds: [] };
+  }
   // No `actingUserId`: without it `resolveCredentialOwnership` refuses a
   // personal request anyway, so the explicit 400 above is the message and this
   // is the backstop.

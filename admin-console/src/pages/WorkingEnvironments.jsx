@@ -16,8 +16,7 @@ import PageHelpButton from '../components/PageHelpButton';
 import RepositoryCard from '../components/RepositoryCard';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { useAuth } from '../auth/AuthContext';
-import CredentialOwnership from '../components/CredentialOwnership';
-import { ownershipFromRecord, ownershipPayload, adminTeamIdsOf, canReassignCredentialClient, isGlobalRecord } from './credential-scope-view.js';
+import { isGlobalRecord } from './credential-scope-view.js';
 import { describeWorkingEnvSubmitState } from './working-env-submit-state.js';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning, availableToolchains, versionSourceLine } from './toolchain-select-view.js';
 import { initialMcpRows, mcpSubmitValue, mcpRowHint, mcpChangeNotice, mcpServerLabel } from './working-env-mcp-view.js';
@@ -94,22 +93,8 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     toolchainId: initial?.toolchainId || '',
   }));
 
-  // #2083: the ownership control. Fetched here rather than threaded from the
-  // page, matching every other list this form loads for itself.
-  const { data: teamsData } = useApi('/api/admin/teams');
   const { user } = useAuth();
   const isSysAdmin = !!user?.admin;
-  const adminTeamIds = adminTeamIdsOf(user);
-  const teams = Array.isArray(teamsData) ? teamsData : [];
-  // Seeded from the record on an edit, so a shared environment opens as shared
-  // and an ordinary save cannot silently un-share it; from the role defaults on
-  // a create. Only a System Admin may re-tier (canRetierEnvironment server-side),
-  // so for anyone else the control is read-only rather than a button that 403s —
-  // the `settingsSubject` convention (concept §6, implementation note 2).
-  const [ownership, setOwnership] = useState(
-    () => ownershipFromRecord(initial, { isSysAdmin, adminTeamIds }),
-  );
-  const ownershipLocked = isEdit && !canReassignCredentialClient({ isSysAdmin });
 
   // Global environment (#2158): a System-Admin-only flag mirroring the
   // Model-Providers "Global provider" toggle (#2136) — reachable by every
@@ -244,10 +229,10 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
       defaultModelId: form.defaultModelId || null,
       // An ID, never an image reference (#1940) — the server resolves it.
       toolchainId: form.toolchainId || null,
-      // #2083. Sent on an edit too: `isRetier` server-side means restating the
-      // record's own unchanged ownership is NOT an operator act, so this is
-      // also what finally stamps an explicit `scope` on a legacy record.
-      ...ownershipPayload(ownership),
+      // #2169 — no independent ownership picker on this form any more: the
+      // environment already belongs to its team (stamped at creation), and
+      // editing content here is not a re-tier. Omitting teamId/scope entirely
+      // keeps the server's re-tier branch from firing at all.
       // #2158: only a System Admin's form renders this control at all — see
       // below — so a non-admin's submit never mentions `global`, which is
       // exactly the "an ordinary save must not drop it" contract the server
@@ -373,19 +358,6 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
             </span>
           </span>
         </label>
-      )}
-
-      {/* #2083 — ownership. Hidden while Global is on — a global environment
-          carries no team assignment (#2158), same rule as Model Providers. */}
-      {isGlobal ? null : (
-        <CredentialOwnership
-          value={ownership}
-          onChange={setOwnership}
-          teams={teams}
-          isSysAdmin={isSysAdmin}
-          adminTeamIds={adminTeamIds}
-          disabled={ownershipLocked}
-        />
       )}
 
       <div style={{ ...helpTextStyle, marginTop: 0 }}>

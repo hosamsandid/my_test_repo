@@ -335,6 +335,25 @@ test('a personal environment / MCP server cannot be created — the AC1 deviatio
   }
 });
 
+// ── #2169: an omitted ownership does not default to a picked team ──────────
+
+test('an ownership-less create body resolves to an unassigned system tier, not the default-team fallback', () => {
+  const src = stripComments(API_SRC);
+  const at = src.indexOf('function resolveTieredOwnership(');
+  assert.ok(at > 0, 'resolveTieredOwnership must exist');
+  const body = src.slice(at, src.indexOf('\nfunction ', at + 1));
+  // The environment/MCP-server forms no longer send scope/teamId/assignedTeamIds
+  // at all (the CredentialOwnership picker is gone) — a body missing all three
+  // must NOT fall through to resolveCredentialOwnership's bare-credential
+  // default (resolveOwnerTeamId's implicit 'default' team).
+  assert.match(body, /scope === undefined && b\.teamId === undefined && b\.assignedTeamIds === undefined/);
+  assert.match(body, /scope: 'system', teamId: null, assignedTeamIds: \[\] \};/);
+  // That early return must come BEFORE the fall-through call, not after.
+  const guardAt = body.search(/scope === undefined && b\.teamId === undefined/);
+  const fallThroughAt = body.search(/return resolveCredentialOwnership\(b\);/);
+  assert.ok(guardAt > 0 && fallThroughAt > guardAt, 'the no-ownership guard must be checked before the generic resolver');
+});
+
 // ── #2158: the global rule lives ONLY in global-resource.js, composed at the
 //    api.js call sites above — never inside resource-tier.js / scope.js's
 //    generic credential predicates (AC4) ──

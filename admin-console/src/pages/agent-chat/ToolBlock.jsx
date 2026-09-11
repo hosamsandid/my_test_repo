@@ -167,7 +167,7 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
                 textTransform: 'uppercase',
                 letterSpacing: 0.4,
               }}>Input</div>
-              <ValueRows value={input} />
+              <ValueRows value={input} isInput />
             </>
           )}
 
@@ -323,8 +323,8 @@ function formatScalar(v) {
  *  field per line, nested objects/arrays indented recursively, multi-line
  *  strings shown as real line breaks and markdown-like strings rendered via
  *  the same `SafeMarkdown` chat messages use. */
-function ValueRows({ value }) {
-  const rows = useMemo(() => renderableRows(value), [value]);
+function ValueRows({ value, isInput }) {
+  const rows = useMemo(() => renderableRows(value, { isInput }), [value, isInput]);
   return (
     <div>
       {rows.map((row) => (

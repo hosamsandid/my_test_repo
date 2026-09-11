@@ -135,3 +135,34 @@ test('looksLikeMarkdown: plain multi-line text is not markdown', () => {
   assert.equal(looksLikeMarkdown('just one line'), false);
   assert.equal(looksLikeMarkdown(42), false);
 });
+
+// #2198 review finding: a shell `#`-comment line (and the issue's own
+// motivating heredoc example) matches MARKDOWN_PATTERN, which would
+// otherwise re-interpret a Bash `command` Input as markdown instead of
+// showing the literal text the agent ran (AC2). `isInput: true` must force
+// it to 'multiline' regardless of what `looksLikeMarkdown` itself reports.
+test('renderableRows: a shell command with "#" comments stays "multiline" for Input, even though it reads as markdown', () => {
+  const command = 'set -e\n# build the project\nnpm run build\n# run tests\nnpm test';
+  assert.equal(looksLikeMarkdown(command), true); // the heuristic alone still fires
+
+  const inputRows = renderableRows({ command }, { isInput: true });
+  assert.equal(inputRows[0].kind, 'multiline');
+  assert.equal(inputRows[0].value, command);
+
+  // Same string with no `isInput` flag (e.g. a Result) is unaffected —
+  // markdown detection stays enabled there, matching AC4.
+  const resultRows = renderableRows({ stdout: command });
+  assert.equal(resultRows[0].kind, 'markdown');
+});
+
+test('renderableRows: the issue #2197 heredoc example also stays literal for Input', () => {
+  const heredocBody = '## Problem\n\nIn the Agent Chat session log, a Bash tool call renders its command as raw JSON.';
+  const rows = renderableRows({ command: heredocBody }, { isInput: true });
+  assert.equal(rows[0].kind, 'multiline');
+  assert.equal(rows[0].value, heredocBody);
+});
+
+test('renderableRows: isInput leaves non-markdown-like plain multiline Input untouched', () => {
+  const rows = renderableRows({ command: 'echo hi\necho bye' }, { isInput: true });
+  assert.equal(rows[0].kind, 'multiline');
+});

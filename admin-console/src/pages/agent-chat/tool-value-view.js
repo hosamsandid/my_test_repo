@@ -38,13 +38,18 @@ function childPath(parentPath, key, isIndex) {
 // Build the leaf row for a scalar (string/number/boolean/null/undefined)
 // value: classifies a string as 'scalar' (single line), 'multiline' (contains
 // a newline, not markdown-like) or 'markdown' (contains a newline and looks
-// like markdown), and truncates an overlong string leaf.
-function leafRow(key, value, path, depth, out) {
+// like markdown), and truncates an overlong string leaf. `allowMarkdown`
+// false forces a newline-containing string to 'multiline' even when it
+// matches `MARKDOWN_PATTERN` — a tool's `Input` (e.g. Bash's `command`) is
+// literal text the agent ran, not prose to reinterpret, and shell `#`
+// comments / `**glob**`-ish tokens are exactly the false positives a real
+// markdown heading/bold pattern also matches (#2198 review finding).
+function leafRow(key, value, path, depth, out, allowMarkdown) {
   if (typeof value === 'string') {
     const truncated = value.length > MAX_LEAF_LEN;
     const text = truncated ? value.slice(0, MAX_LEAF_LEN) : value;
     const kind = text.includes('\n')
-      ? (looksLikeMarkdown(text) ? 'markdown' : 'multiline')
+      ? (allowMarkdown && looksLikeMarkdown(text) ? 'markdown' : 'multiline')
       : 'scalar';
     out.push({ path, key, depth, kind, value: text, truncated });
     return;
@@ -57,7 +62,7 @@ function leafRow(key, value, path, depth, out) {
 // 'object'/'array', no value rendered inline) immediately followed by its
 // children at depth+1; an empty container is a single leaf-like row (kind
 // 'empty-object'/'empty-array'); everything else is a `leafRow`.
-function walk(key, value, path, depth, out) {
+function walk(key, value, path, depth, out, allowMarkdown) {
   if (Array.isArray(value)) {
     if (value.length === 0) {
       out.push({ path, key, depth, kind: 'empty-array', value });
@@ -66,7 +71,7 @@ function walk(key, value, path, depth, out) {
     out.push({ path, key, depth, kind: 'array', value });
     const items = value.slice(0, MAX_ARRAY_ITEMS);
     items.forEach((item, i) => {
-      walk(`[${i}]`, item, childPath(path, i, true), depth + 1, out);
+      walk(`[${i}]`, item, childPath(path, i, true), depth + 1, out, allowMarkdown);
     });
     if (value.length > MAX_ARRAY_ITEMS) {
       out.push({
@@ -88,11 +93,11 @@ function walk(key, value, path, depth, out) {
     }
     out.push({ path, key, depth, kind: 'object', value });
     for (const [k, v] of entries) {
-      walk(k, v, childPath(path, k, false), depth + 1, out);
+      walk(k, v, childPath(path, k, false), depth + 1, out, allowMarkdown);
     }
     return;
   }
-  leafRow(key, value, path, depth, out);
+  leafRow(key, value, path, depth, out, allowMarkdown);
 }
 
 /**
@@ -104,19 +109,28 @@ function walk(key, value, path, depth, out) {
  * scalar (no field name to show); a top-level object/array is unwrapped so
  * its own fields/items start at depth 0 rather than nesting one level under
  * a value-less root row.
+ *
+ * Pass `{ isInput: true }` for a tool's `Input` — it is the literal text the
+ * agent supplied (e.g. Bash's `command`), so it is always rendered
+ * 'multiline'/preformatted rather than promoted to 'markdown', even when it
+ * contains a `#`-prefixed shell comment or a `**glob**`-shaped token that
+ * would otherwise match `MARKDOWN_PATTERN` (#2198 review finding — AC2 needs
+ * Input to stay literal; only Result content is a markdown-detection
+ * target, matching AC4's own example).
  */
-export function renderableRows(value) {
+export function renderableRows(value, { isInput = false } = {}) {
+  const allowMarkdown = !isInput;
   const out = [];
   if (isPlainObject(value)) {
     const entries = Object.entries(value);
     if (entries.length === 0) return [{ path: '', key: null, depth: 0, kind: 'empty-object', value }];
-    for (const [k, v] of entries) walk(k, v, childPath('', k, false), 0, out);
+    for (const [k, v] of entries) walk(k, v, childPath('', k, false), 0, out, allowMarkdown);
     return out;
   }
   if (Array.isArray(value)) {
     if (value.length === 0) return [{ path: '', key: null, depth: 0, kind: 'empty-array', value }];
     const items = value.slice(0, MAX_ARRAY_ITEMS);
-    items.forEach((item, i) => walk(`[${i}]`, item, childPath('', i, true), 0, out));
+    items.forEach((item, i) => walk(`[${i}]`, item, childPath('', i, true), 0, out, allowMarkdown));
     if (value.length > MAX_ARRAY_ITEMS) {
       out.push({
         path: '[…]',
@@ -129,6 +143,6 @@ export function renderableRows(value) {
     }
     return out;
   }
-  leafRow(null, value, '', 0, out);
+  leafRow(null, value, '', 0, out, allowMarkdown);
   return out;
 }

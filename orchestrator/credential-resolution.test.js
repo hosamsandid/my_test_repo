@@ -12,6 +12,7 @@ const {
   operationPrefersPersonal,
   resolveAgentOwnerId,
   resolveEffectiveOwnerId,
+  isActingSenderTrusted,
   findPersonalCredential,
   findPersonalCredentialState,
   resolveCredential,
@@ -89,6 +90,68 @@ test("resolveEffectiveOwnerId: a team-member without an acting sender still reso
     resolveEffectiveOwnerId({ role: "team-member", parentTeamId: "squad" }, load, null),
     "u-parent",
   );
+});
+
+// ── acting-sender TRUST boundary (#2187 review finding) ─────────────────────
+//
+// `resolveEffectiveOwnerId` trusts `actingSenderUserId` unconditionally, so
+// the caller (orchestrator.js's `resolveActingSenderUserId`) MUST filter a
+// resolved user through `isActingSenderTrusted` first. These pin the actual
+// security boundary — not just that a sender is threaded through, but that an
+// UNRELATED platform user can never be selected.
+
+test("isActingSenderTrusted: a member of the team-agent's own team is trusted", () => {
+  const cfg = { role: "team", id: "squad" };
+  const hasMembership = (teamId, userId) => teamId === "squad" && userId === "u-alice";
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", hasMembership), true);
+});
+
+test("isActingSenderTrusted: a team-member resolves the boundary to its PARENT team, not its own id", () => {
+  const cfg = { role: "team-member", id: "squad-dev", parentTeamId: "squad" };
+  let queriedTeamId = null;
+  const hasMembership = (teamId, userId) => { queriedTeamId = teamId; return userId === "u-alice"; };
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", hasMembership), true);
+  assert.equal(queriedTeamId, "squad", "must check membership of the PARENT team, never the member's own id");
+});
+
+test("isActingSenderTrusted: THE ACTUAL FINDING — a real platform user with no relationship to this team is refused", () => {
+  const cfg = { role: "team", id: "squad" };
+  // u-mallory resolves to a real user (that is exactly the vulnerable case —
+  // an installation-wide lookup with no boundary), but is not a member of
+  // this agent's team.
+  const hasMembership = (teamId, userId) => teamId === "squad" && userId === "u-alice";
+  assert.equal(isActingSenderTrusted(cfg, "u-mallory", hasMembership), false);
+});
+
+test("isActingSenderTrusted: no membership lookup injected → fails closed, never trusts by default", () => {
+  const cfg = { role: "team", id: "squad" };
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", undefined), false);
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", null), false);
+});
+
+test("isActingSenderTrusted: a standalone agent (no team boundary, D8) trusts ONLY its own owner", () => {
+  const cfg = { role: "agent", ownerId: "u-alice" };
+  // No hasMembership call should even matter here — the standalone branch
+  // never reaches it. Passing a lookup that would say "yes to anyone" proves
+  // the owner check is what actually gates this, not an unreachable no-op.
+  const wouldTrustAnyone = () => true;
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", wouldTrustAnyone), true);
+  assert.equal(isActingSenderTrusted(cfg, "u-bob", wouldTrustAnyone), false, "wrong owner must be refused even if a membership lookup would have said yes");
+});
+
+test("isActingSenderTrusted: a standalone agent with no ownerId trusts nobody (fail closed)", () => {
+  assert.equal(isActingSenderTrusted({ role: "agent" }, "u-alice", () => true), false);
+});
+
+test("isActingSenderTrusted: no userId is always refused, regardless of shape", () => {
+  assert.equal(isActingSenderTrusted({ role: "team", id: "squad" }, null, () => true), false);
+  assert.equal(isActingSenderTrusted({ role: "team", id: "squad" }, "", () => true), false);
+  assert.equal(isActingSenderTrusted(null, "u-alice", () => true), false);
+});
+
+test("isActingSenderTrusted: a broken/unresolvable config (no team, no owner) trusts nobody", () => {
+  assert.equal(isActingSenderTrusted({ role: "team-member" }, "u-alice", () => true), false);
+  assert.equal(isActingSenderTrusted({}, "u-alice", () => true), false);
 });
 
 // ── personal credential lookup ───────────────────────────────────────────────

@@ -55,6 +55,24 @@ test('resolveActingSenderUserId resolves through the shared usage-attribution lo
   assert.match(src, /teamsStore\.listUsers\(\)/);
 });
 
+// #2187 review finding: an unauthenticated, self-asserted sender string must
+// never be trusted for credential resolution as-is. A resolved userId must be
+// filtered through the pure `isActingSenderTrusted` boundary before it is
+// returned — the vulnerable pre-fix shape returned `usageAttribution.
+// userIdForMatrixId(...)`'s result directly with no further check.
+test('#2187: a resolved userId is filtered through credentialResolution.isActingSenderTrusted before being returned', () => {
+  const src = actingSenderResolver();
+  assert.match(
+    src,
+    /credentialResolution\.isActingSenderTrusted\(cfg, userId, hasMembership\)/,
+    'the resolved userId must be re-checked against the agent\'s own team/owner before use — trusting it as-is is the #2187 finding',
+  );
+  // The membership lookup passed in must be a REAL, injected function over the
+  // teams store — not a stub that always says yes (which would defeat the
+  // whole point while still satisfying the call-shape assertion above).
+  assert.match(src, /teamsStore\.listMemberships\(\{ teamId, userId: uid \}\)/);
+});
+
 // ── both attributed-credential resolvers key on the effective (not static) owner ─
 
 test('resolveAttributedGithubToken resolves the owner through resolveEffectiveOwnerId, not resolveAgentOwnerId directly', () => {
@@ -69,13 +87,13 @@ test('resolveAttributedGithubToken resolves the owner through resolveEffectiveOw
     /credentialResolution\.resolveAgentOwnerId\(/,
     'must not also call the static resolver directly — resolveEffectiveOwnerId already falls back to it when there is no acting sender',
   );
-  assert.match(src, /resolveActingSenderUserId\(actingSenderMatrixId\)/);
+  assert.match(src, /resolveActingSenderUserId\(actingSenderMatrixId, cfg\)/);
 });
 
 test('resolveAttributedSshKey exists as the SSH sibling and resolves the same way', () => {
   const src = attributedSshKey();
   assert.match(src, /credentialResolution\.resolveEffectiveOwnerId\(/);
-  assert.match(src, /resolveActingSenderUserId\(actingSenderMatrixId\)/);
+  assert.match(src, /resolveActingSenderUserId\(actingSenderMatrixId, cfg\)/);
   assert.match(src, /kind: "SSH key"/);
   assert.match(src, /loadSshKeyIndex\(\)/, 'must resolve against the SSH-key credential index, not the GitHub-token one');
 });

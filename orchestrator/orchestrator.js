@@ -4447,9 +4447,31 @@ function loadLiveUserGate() {
 // `matrixUserId` is stamped on their user record at Matrix-identity
 // provisioning (#1458), so this is the one hop from "who sent the message"
 // to a stable account id. Returns null for an autonomous run (no sender at
-// all) and for a sender that resolves to nobody (deleted/never-provisioned) —
-// both cases fall through to the static `resolveAgentOwnerId` unchanged.
-function resolveActingSenderUserId(actingSenderMatrixId) {
+// all), for a sender that resolves to nobody (deleted/never-provisioned), and
+// — #2187 review finding — for a sender who resolves to a REAL platform user
+// with no legitimate relationship to THIS agent. All three fall through to
+// the static `resolveAgentOwnerId`, unchanged.
+//
+// WHY THE THIRD CASE IS NEEDED: `AEE_ACTING_SENDER` is set once into the
+// Claude subprocess's environment for a live chat turn, but for the rest of
+// that run it is just an ordinary env var — any Bash tool call the agent
+// makes (potentially steered by content it read, e.g. a prompt injection in
+// an issue or file) can overwrite it before calling `gh-as-agent`, which
+// forwards whatever value is currently present with no signature or binding
+// to the real triggering Matrix event. Trusting the resolved user
+// unconditionally would let a compromised or misdirected agent pick an
+// ARBITRARY platform user's personal GitHub token / SSH key for a write —
+// this codebase already treats a self-asserted identity in a request body as
+// never being authentication on its own (`wake-agent.js`'s producer-id
+// cross-check against the caller's real team, #2030, is the precedent). The
+// actual boundary check — `credentialResolution.isActingSenderTrusted` — is
+// a pure, unit-tested function (`credential-resolution.test.js`): its own team's
+// members for a team-bound agent, or its own owner for a standalone one. That
+// closes cross-team (and, for a standalone agent, cross-owner) impersonation;
+// it does not make the claim unforgeable within that boundary, which would
+// need a signed, per-run claim the container cannot re-mint — a larger,
+// separate hardening step (see the #2187 review discussion).
+function resolveActingSenderUserId(actingSenderMatrixId, cfg) {
   if (!actingSenderMatrixId) return null;
   let knownUsers = [];
   try {
@@ -4457,12 +4479,21 @@ function resolveActingSenderUserId(actingSenderMatrixId) {
   } catch {
     knownUsers = [];
   }
-  return usageAttribution.userIdForMatrixId(knownUsers, actingSenderMatrixId);
+  const userId = usageAttribution.userIdForMatrixId(knownUsers, actingSenderMatrixId);
+  if (!userId) return null;
+  const hasMembership = (teamId, uid) => {
+    try {
+      return teamsStore.listMemberships({ teamId, userId: uid }).length > 0;
+    } catch {
+      return false;
+    }
+  };
+  return credentialResolution.isActingSenderTrusted(cfg, userId, hasMembership) ? userId : null;
 }
 
 function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) {
   const cfg = loadAgentConfig(id) || {};
-  const actingSenderUserId = resolveActingSenderUserId(actingSenderMatrixId);
+  const actingSenderUserId = resolveActingSenderUserId(actingSenderMatrixId, cfg);
   const ownerId = credentialResolution.resolveEffectiveOwnerId(cfg, loadAgentConfig, actingSenderUserId);
   const personal = credentialResolution.findPersonalCredentialState(
     loadGithubTokenIndex(), ownerId, undefined, loadLiveUserGate());
@@ -4493,7 +4524,7 @@ function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) 
 // the environment".
 function resolveAttributedSshKey(id, sharedSshKeyId, operation, actingSenderMatrixId) {
   const cfg = loadAgentConfig(id) || {};
-  const actingSenderUserId = resolveActingSenderUserId(actingSenderMatrixId);
+  const actingSenderUserId = resolveActingSenderUserId(actingSenderMatrixId, cfg);
   const ownerId = credentialResolution.resolveEffectiveOwnerId(cfg, loadAgentConfig, actingSenderUserId);
   const personal = credentialResolution.findPersonalCredentialState(
     loadSshKeyIndex(), ownerId, undefined, loadLiveUserGate());

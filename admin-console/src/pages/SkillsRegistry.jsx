@@ -9,10 +9,12 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
 import SkillMarkdown from '../components/SkillMarkdown';
+import PublishSkillAction from '../components/PublishSkillAction';
 import { usePageActions } from '../context/PageActionsContext';
 import { useHelpSubject } from '../context/HelperChatContext';
 import { OVERLAY_SKILL_DETAIL, OVERLAY_SKILLS_MERGE } from '../context/page-help-view.js';
 import { SKILLS_HELP_SECTIONS } from './skills-help-sections.js';
+import { isPublishEligible } from './skill-publish-view.js';
 
 /* ─── Skill name validation (mirrors SKILL_NAME_RE in api.js) ─────────── */
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
@@ -863,16 +865,25 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
             </button>
           </>
         )}
-        {isAgent && (
+        {isAgent && isPublishEligible(skill.drift) && (
+          <PublishSkillAction
+            name={skill.name}
+            agentId={skill.agentId}
+            teamId={skill.knowledgeTeamId || skill.teamId}
+            onPublished={() => onPromoted?.({ name: skill.name })}
+          />
+        )}
+        {isAgent && !isPublishEligible(skill.drift) && (
           <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
-            This skill lives inside a single agent. It can&apos;t be shared directly — copy it to a team first, then promote that team skill to global.{' '}
+            {skill.drift === 'outdated'
+              ? 'This is an unmodified copy of a granted skill whose source has since moved on — nothing local to publish. Resync it instead.'
+              : 'This is an unmodified copy of a granted skill — edit it in the agent\'s workspace before publishing.'}{' '}
             <Link
               to={skill.teamId ? `/knowledge?team=${encodeURIComponent(skill.teamId)}` : '/knowledge'}
               style={{ color: 'var(--eb-accent-primary)', fontStyle: 'normal' }}
             >
               Open the Knowledge page{skill.teamId ? ' for this team' : ''} →
-            </Link>{' '}
-            to lift it into a team pool, then use Promote to global on the resulting team skill. Both steps write provenance and skill.json lineage.
+            </Link>
           </span>
         )}
         {/* The action panel's own "?" — opens the Skills topic at the chapter

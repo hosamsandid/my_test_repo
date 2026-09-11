@@ -7,7 +7,7 @@ seeAlso:
   - { label: "SSH Keys", to: "/ssh-keys" }
   - { label: "GitHub Tokens", to: "/github-tokens" }
   - { label: "My Credentials", to: "/my-credentials" }
-  - { label: "Working Environments", to: "/environments" }
+  - { label: "Environment Templates", to: "/environment-templates" }
   - { label: "Administration", to: "/users" }
   - { label: "GitHub Event Log", to: "/github-events" }
 askPrompts:

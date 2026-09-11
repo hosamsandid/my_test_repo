@@ -4,9 +4,16 @@
 // Environment (`cfg.environmentId`), which until now was reachable only from
 // the separate Working Environments page. This module derives the form state
 // and the PUT body for editing that SAME environment record in place — the
-// fields it edits (repositories / model provider / toolchain / MCP servers /
-// additional context) map 1:1 onto what `POST`/`PUT /api/environments`
-// already accepts (no data-model change).
+// fields it edits (repositories / GitHub token / model provider / toolchain /
+// MCP servers / additional context) map 1:1 onto what `POST`/`PUT
+// /api/environments` already accepts (no data-model change).
+//
+// `githubTokenId` joined this form in #2170 (epic #2166 A4): the standalone
+// Working Environments page — the ONLY surface that could set it — was
+// retired, so without this the field would have become unreachable for an
+// ordinary team the moment the page disappeared (a real regression, not a
+// scope trim; #2167/A1 left it there deliberately, on the assumption that
+// page would keep existing).
 //
 // Deliberately NOT carried here: Name/ID (the environment already has them —
 // this surface edits content, not identity) and ownership/team (the
@@ -22,7 +29,7 @@ export const TEAM_ENV_TABS = [
   { id: 'context', label: 'Additional context' },
 ];
 
-// Mirrors WorkingEnvironments.jsx's initialRepositories() so the two forms
+// Mirrors EnvironmentTemplates.jsx's initialRepositories() so the two forms
 // read a stored environment identically.
 function initialRepositories(env) {
   if (Array.isArray(env?.repositories) && env.repositories.length > 0) {
@@ -48,6 +55,7 @@ export function initialTeamEnvForm(env) {
   return {
     repositories: initialRepositories(env),
     mcpServers: initialMcpRows(env),
+    githubTokenId: env?.githubTokenId || '',
     llmEndpointId: env?.llmEndpointId || '',
     defaultModelId: env?.defaultModelId || '',
     toolchainId: env?.toolchainId || '',
@@ -70,6 +78,7 @@ export function teamEnvSubmitBody(baseline, form) {
         sshKeyId: r.sshKeyId || null,
         readOnly: r.readOnly === true,
       })),
+    githubTokenId: form.githubTokenId || null,
     llmEndpointId: form.llmEndpointId || null,
     defaultModelId: form.defaultModelId || null,
     toolchainId: form.toolchainId || null,

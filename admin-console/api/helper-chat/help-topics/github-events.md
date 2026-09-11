@@ -6,7 +6,7 @@ summary: A read-only timeline of every GitHub event the platform saw and what ha
 seeAlso:
   - { label: "Flows", to: "/flows" }
   - { label: "Agent Chat", to: "/chats" }
-  - { label: "Working Environments", to: "/environments" }
+  - { label: "Environment Templates", to: "/environment-templates" }
   - { label: "Maintenance Mode", to: "/maintenance-mode" }
 askPrompts:
   - "What is the difference between Processed events and the Pending queue?"

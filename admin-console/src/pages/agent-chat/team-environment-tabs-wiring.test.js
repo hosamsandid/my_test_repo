@@ -37,7 +37,7 @@ function stripComments(src) {
 }
 
 const panel = () => stripComments(read('TeamEnvironmentPanel.jsx'));
-const envPage = () => stripComments(read('../WorkingEnvironments.jsx'));
+const envPage = () => stripComments(read('../EnvironmentTemplates.jsx'));
 const editForm = () => stripComments(read('../agent-lifecycle/AgentEditForm.jsx'));
 
 test('the team panel and the Working Environments form render the same shared RepositoryCard', () => {

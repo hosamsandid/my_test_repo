@@ -295,8 +295,8 @@ either. A broker image is a few MB and any installation that installs a plugin
 needs it; a toolchain variant downloads a JDK and is only needed by
 installations that actually register one. Run it explicitly.
 
-Then, in the console, on **Working Environments → Toolchains** (System Admin
-only):
+Then, in the console, on **Environment Templates → Toolchains** (System Admin
+only — moved from the retired Working Environments page by #2170):
 
 1. **Available to install** lists the variants this repository ships, each with
    its description and its version story. **Install** registers it — the image

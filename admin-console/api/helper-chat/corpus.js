@@ -151,6 +151,23 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // #2138's orphaned-credential refusal added the last +1 179, mostly through the
 // corpus-vendored `credentials.md` — which counts on every context, this crown
 // included — plus the `/my-credentials`+`/github-tokens`+`/ssh-keys` help topic.)
+//
+// **#2170 SHRANK the crown instead of growing it — a rare direction for this
+// number to move.** Removing the Working Environments page retired the
+// `/environments` help topic (`environments.md`, 349 lines) outright rather
+// than folding it whole into a survivor: the material describing a still-live
+// surface (repositories, credentials, MCP references, the propagation dialog)
+// moved into the existing `agent-chat.md` (+61 net lines, since it now also
+// hosts the Working-Environment-section chapter), and the System-Admin-only
+// half (Toolchains) moved into a new, small `environment-templates.md` (76
+// lines) — which is NOT on `/quickstart`'s `seeAlso` chain (only System Admins
+// reach it, from Administration), so it does not fold into this crown at all.
+// Net effect measured on the merge (overlaid onto post-#2204/#2206 `main`,
+// since this branch was 12 commits behind at review time): **314 890 of
+// 340 000 — 92.6% used, 25 110 left**, down from the last-stamped 324 900 (a
+// ~462-char pre-existing drift from unstamped intervening merges is folded
+// into that delta, same as every prior cycle). Reconciled here + the CLAUDE.md
+// #1872 paragraph + `context-help-system-concept.md` §9.
 // #2195 (A3 of epic #2166) removed the ownership/team picker from the
 // Working Environments and MCP Servers forms — the corpus-vendored
 // `working-environments.md` table row correcting to "derived from the team,

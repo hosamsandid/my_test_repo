@@ -7,7 +7,7 @@ seeAlso:
   - { label: "Agent Team Wizard", to: "/team-setup" }
   - { label: "Flows", to: "/flows" }
   - { label: "Agent Chat", to: "/chats" }
-  - { label: "Working Environments", to: "/environments" }
+  - { label: "Environment Templates", to: "/environment-templates" }
   - { label: "Model Providers", to: "/models" }
   - { label: "SSH Keys", to: "/ssh-keys" }
   - { label: "GitHub Tokens", to: "/github-tokens" }
@@ -213,8 +213,8 @@ puts you straight back on the repo-less path, where they *are* used — but if y
 type a name, paste a repository URL and submit, the name you typed is not the
 name you get.
 
-Either way you can fine-tune the result afterwards under **Working Environments**
-and **Agents** — nothing here is a one-way door.
+Either way you can fine-tune the result afterwards from the agent's own
+**Settings** tab in Agent Chat — nothing here is a one-way door.
 
 ## What you need before you start
 

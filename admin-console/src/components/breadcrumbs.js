@@ -16,7 +16,9 @@ export const BREADCRUMBS = {
   '/flow-control': 'Flow Control',
   '/knowledge':    'Knowledge',
   '/chats':        'Agent Chat',
-  '/environments': 'Working Environments',
+  // `/environments` carries no entry any more (#2170): the page is gone and
+  // the route is a bare redirect, exactly like `/teams` below.
+  '/environment-templates': 'Environment Templates',
   '/ssh-keys':     'SSH Keys',
   '/github-tokens': 'GitHub Tokens',
   '/my-credentials': 'My Credentials',

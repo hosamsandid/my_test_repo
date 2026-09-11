@@ -5,7 +5,7 @@ title: Administration
 summary: The one System-Admin surface — the human user records that can sign in, every team on the platform, and which team owns each agent and Working Environment.
 seeAlso:
   - { label: "Agent Chat", to: "/chats" }
-  - { label: "Working Environments", to: "/environments" }
+  - { label: "Environment Templates", to: "/environment-templates" }
   - { label: "My Credentials", to: "/my-credentials" }
   - { label: "SSH Keys", to: "/ssh-keys" }
 askPrompts:

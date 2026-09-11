@@ -42,7 +42,7 @@ function at(src, needle, label) {
 const workspace = () => stripComments(read(path.join(HERE, 'WorkspaceBrowser.jsx')));
 const settings = () => stripComments(read(path.join(SRC, 'pages/agent-lifecycle/AgentEditForm.jsx')));
 const panel = () => stripComments(read(path.join(HERE, 'AgentRepositoriesPanel.jsx')));
-const envPage = () => stripComments(read(path.join(SRC, 'pages/WorkingEnvironments.jsx')));
+const envPage = () => stripComments(read(path.join(SRC, 'pages/EnvironmentTemplates.jsx')));
 
 // ── AC20: one panel, two hosts ──────────────────────────────────────────────
 

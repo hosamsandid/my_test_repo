@@ -7,7 +7,7 @@ seeAlso:
   - { label: "Agent Chat", to: "/chats" }
   - { label: "Create something new", to: "/create" }
   - { label: "Agent Team Wizard", to: "/team-setup" }
-  - { label: "Working Environments", to: "/environments" }
+  - { label: "Environment Templates", to: "/environment-templates" }
   - { label: "GitHub Event Log", to: "/github-events" }
 askPrompts:
   - "How do agents hand work over to each other in a flow?"

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Plus, X, AlertTriangle, Info, Loader2 } from 'lucide-react';
+import { Plus, X, AlertTriangle, Info, Loader2, Github } from 'lucide-react';
 import { useApi, apiCall } from '../../hooks/useApi';
 // One repository card for the whole console (#2067): rendering it here rather
 // than a second, differently-worded card is what stops this surface and the
@@ -81,12 +81,14 @@ function TeamEnvironmentFields({ env, onSaved }) {
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
 
   const { data: sshKeysData } = useApi('/api/ssh-keys');
+  const { data: tokensData } = useApi('/api/github-tokens');
   const { data: endpointsData } = useApi('/api/llm-endpoints');
   const { data: toolchainData } = useApi('/api/toolchains');
   const { data: mcpServerData, loading: mcpServersLoading } = useApi('/api/mcp-servers');
   const { data: mcpCredentialData } = useApi('/api/mcp-credentials');
 
   const sshKeys = sshKeysData || [];
+  const ghTokens = tokensData || [];
   const llmEndpoints = endpointsData || [];
   const mcpServers = mcpServerData || [];
   const mcpCredentials = mcpCredentialData || [];
@@ -233,9 +235,9 @@ function TeamEnvironmentFields({ env, onSaved }) {
               idx={idx}
               repo={repo}
               sshKeys={sshKeys}
-              githubTokenId={baseline?.githubTokenId || null}
+              githubTokenId={form.githubTokenId || null}
               tokenTarget="environment"
-              hasEnvironmentToken={!!baseline?.githubTokenId}
+              hasEnvironmentToken={!!form.githubTokenId}
               onChange={(key, val) => updateRepo(idx, key, val)}
               onRemove={() => removeRepo(idx)}
             />
@@ -243,6 +245,33 @@ function TeamEnvironmentFields({ env, onSaved }) {
           <button type="button" onClick={addRepo} style={dashedButtonStyle}>
             <Plus size={13} /> Add repository
           </button>
+
+          {/* GitHub Token (#2170): the only surface this could be set from —
+              the standalone Working Environments page — was retired, so this
+              joined the Repositories tab rather than being left unreachable. */}
+          <div style={{
+            border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)',
+            padding: 'var(--eb-space-3)',
+            display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+              <Github size={14} />
+              <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>GitHub Token</span>
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>(optional)</span>
+            </div>
+            <div style={helpTextStyle}>
+              Injected into agents as <code>GH_TOKEN</code> / <code>GITHUB_TOKEN</code>. Needed for the <code>gh</code>{' '}
+              CLI, HTTPS pushes and the GitHub poller. Only needed for a private HTTPS URL above — a private SSH
+              URL uses the repository's own SSH key instead. Manage tokens on the <em>GitHub Tokens</em> page.
+            </div>
+            <select value={form.githubTokenId} onChange={e => update('githubTokenId', e.target.value)} style={inputStyle}>
+              <option value="">— no token —</option>
+              {ghTokens.map(t => (
+                <option key={t.id} value={t.id}>{t.name} ({t.preview})</option>
+              ))}
+            </select>
+          </div>
         </div>
       )}
 

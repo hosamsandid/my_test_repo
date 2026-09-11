@@ -149,10 +149,11 @@ test('requiredPermission: team target needs Team Admin of the target team', () =
   assert.deepEqual(perm.teamAdminOf, ['alpha']);
 });
 
-test('requiredPermission: global target needs System Admin', () => {
+test('requiredPermission: a global target needs System Admin OR Team Admin of the source team (#2178)', () => {
   const perm = T.requiredPermission({ tier: 'team', teamId: 'alpha' }, { tier: 'global' }, 'copy');
-  assert.equal(perm.needsSystemAdmin, true);
+  assert.equal(perm.needsSystemAdmin, false);
   assert.deepEqual(perm.teamAdminOf, []);
+  assert.deepEqual(perm.orTeamAdminOf, ['alpha']);
 });
 
 test('requiredPermission: move out of global needs System Admin for the source too', () => {
@@ -185,11 +186,35 @@ test('permitTransfer: Team Admin of the target team passes a plain team adopt', 
   assert.equal(T.permitTransfer(perm, caps({ teams: ['alpha'] })).ok, true);
 });
 
-test('permitTransfer: a non-admin is forbidden from a global target', () => {
+test('permitTransfer: Team Admin of the SOURCE team may promote it to global (#2178)', () => {
   const perm = T.requiredPermission({ tier: 'team', teamId: 'alpha' }, { tier: 'global' }, 'copy');
-  const r = T.permitTransfer(perm, caps({ teams: ['alpha'] }));
+  assert.equal(T.permitTransfer(perm, caps({ teams: ['alpha'] })).ok, true);
+});
+
+test('permitTransfer: Team Admin of an UNRELATED team cannot promote another team\'s skill to global', () => {
+  const perm = T.requiredPermission({ tier: 'team', teamId: 'alpha' }, { tier: 'global' }, 'copy');
+  const r = T.permitTransfer(perm, caps({ teams: ['beta'] }));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /System Admin or Team Admin of 'alpha'/);
+});
+
+test('permitTransfer: a non-admin with no team rights is forbidden from a global target', () => {
+  const perm = T.requiredPermission({ tier: 'team', teamId: 'alpha' }, { tier: 'global' }, 'copy');
+  const r = T.permitTransfer(perm, caps({}));
   assert.equal(r.ok, false);
   assert.match(r.error, /System Admin/);
+});
+
+test('permitTransfer: System Admin still satisfies a global-target promotion with no team rights', () => {
+  const perm = T.requiredPermission({ tier: 'team', teamId: 'alpha' }, { tier: 'global' }, 'copy');
+  assert.equal(T.permitTransfer(perm, caps({ systemAdmin: true })).ok, true);
+});
+
+test('permitTransfer: moving a team skill to global (retiring the source) is System Admin OR Team Admin of that team', () => {
+  const perm = T.requiredPermission({ tier: 'team', teamId: 'alpha' }, { tier: 'global' }, 'move');
+  assert.equal(T.permitTransfer(perm, caps({ teams: ['alpha'] })).ok, true);
+  const r = T.permitTransfer(perm, caps({ teams: ['beta'] }));
+  assert.equal(r.ok, false);
 });
 
 test('permitTransfer: Team Admin of only one side cannot move team→team', () => {
@@ -209,8 +234,9 @@ test('permitTransfer: Team Admin of both sides can move team→team', () => {
 test('planTransfer: the plan embeds the required permission', () => {
   const p = T.planTransfer({ name: 'x', mode: 'move', from: { tier: 'team', teamId: 'alpha' }, to: { tier: 'global' } });
   assert.equal(p.ok, true);
-  assert.equal(p.permission.needsSystemAdmin, true);
+  assert.equal(p.permission.needsSystemAdmin, false);
   assert.deepEqual(p.permission.teamAdminOf, ['alpha']);
+  assert.deepEqual(p.permission.orTeamAdminOf, ['alpha']);
 });
 
 /* ─── buildTransferOrigin ────────────────────────────────────────────────── */

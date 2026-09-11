@@ -127,9 +127,15 @@ Everything else on this page moves a skill between the tiers or reshapes it:
 | **Import skill** | Reads a `.zip` / `.skill` archive back into the pool you choose. | Page header |
 
 Promotion is deliberately two-staged: an agent-extracted skill is lifted to the
-**team** pool by a Team Admin, and only a System Admin lifts it further into the
-**global** pool — so nothing becomes house-wide by accident. The Team-Admin-only
-actions simply do not appear when the skill you opened is not on their tier.
+**team** pool by a Team Admin first. Promoting that team-tier copy into the
+**global** pool is *also* a Team Admin act, by the admin of the skill's own
+team — not System-Admin-only — because landing in the global pool does not by
+itself make the skill visible or usable anywhere: another team still has to be
+granted it separately, so nothing becomes house-wide by accident. What stays
+System-Admin-only is *moving OUT* of the global pool (retiring that copy),
+since deleting shared content is a governance-level act regardless of who put
+it there. The Team-Admin-only actions simply do not appear when the skill you
+opened is not on their tier.
 
 **Distill** is available for team skills, and it only rewrites wording: it
 re-synthesises the skill from its own accumulated content so it stays tight as

@@ -11030,13 +11030,16 @@ app.post('/api/skills/archive/prune', (req, res) => {
 });
 
 // Two-stage promotion (#306, relates to #173): promote a TEAM skill up to the
-// GLOBAL pool. The team-tier copy is the Team-Admin's curation; lifting it to
-// the global pool is a System-Admin / governance action. Copies the whole skill
-// directory recursively. Refuses to clobber an existing global skill unless
-// `overwrite: true`.
+// GLOBAL pool. The team-tier copy is the Team-Admin's curation; lifting it into
+// the shared global catalog is now ALSO a Team-Admin act (#2178/G8/H5a) — not
+// only System-Admin — since publishing does not by itself grant the skill to
+// any other team (a team still has to be granted it separately, so visibility
+// stays "created by sharing"). Copies the whole skill directory recursively.
+// Refuses to clobber an existing global skill unless `overwrite: true`.
 // DEPRECATED (#626): the team→global cell is now the unified POST
 // /api/skills/transfer ({from:{tier:'team',teamId}, to:{tier:'global'}}). Kept
-// for older clients; the UI promotes via the transfer engine.
+// for older clients; the UI promotes via the transfer engine. The permission
+// check is reused from there so the two paths can never disagree (#2178).
 app.post('/api/skills/promote-to-global', (req, res) => {
   const { name, teamId, overwrite = false } = req.body || {};
   if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) {
@@ -11044,6 +11047,12 @@ app.post('/api/skills/promote-to-global', (req, res) => {
   }
   const srcDir = safeTeamSkillDir(teamId, name);
   if (!srcDir) return res.status(400).json({ error: 'Invalid team id or skill name' });
+  const scope = getScope(req);
+  const permit = skillTransfer.permitTransfer(
+    skillTransfer.requiredPermission({ tier: 'team', teamId }, { tier: 'global' }, 'copy'),
+    { systemAdmin: !!scope.all, isTeamAdmin: (tid) => canManageTeam(scope, tid) },
+  );
+  if (!permit.ok) return res.status(403).json({ error: permit.error });
   if (!fs.existsSync(path.join(srcDir, 'SKILL.md'))) {
     return res.status(404).json({ error: `Skill '${name}' not found in team '${teamId}'` });
   }

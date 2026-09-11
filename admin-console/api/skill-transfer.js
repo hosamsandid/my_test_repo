@@ -65,24 +65,40 @@ function normTierRef(ref, { agentIdRe, teamIdRe }) {
   return out;
 }
 
-// The permission the caller must hold for a transfer (concept §3.2): Team Admin
-// for team targets; System Admin for global targets and for any `move` out of
-// global. A move also needs authority over the source it retires (team source →
-// Team Admin of that team; global/agent source → System Admin — deleting those
-// is a governance-level action). Returns { needsSystemAdmin, teamAdminOf: [] }.
+// The permission the caller must hold for a transfer (concept §3.2, relaxed by
+// #2178/G8/H5a): Team Admin for team targets; System Admin for any `move` out
+// of global/agent (deleting those is a governance-level action). A move also
+// needs authority over the source it retires (team source → Team Admin of that
+// team).
+//
+// Publishing into GLOBAL no longer requires System Admin outright — a Team
+// Admin of the CONTENT'S OWN team may promote it too (visibility still stays
+// "created by sharing": promoting to global does not auto-grant any team). The
+// only source that can reach a global target today is `team` (agent→global is
+// retired — see COPY_ACTION above), so the source team is always known here and
+// folded into `orTeamAdminOf`.
+//
+// Returns { needsSystemAdmin, teamAdminOf: [], orTeamAdminOf: [] } — the first
+// two are AND'd (every named team's admin, or System Admin); `orTeamAdminOf` is
+// OR'd (System Admin, or Team Admin of ANY one of these) — used here because the
+// target-side relaxation (promote to global) must not tighten the separate
+// move/retire-source requirement computed independently below.
 function requiredPermission(from, to, mode) {
   const teamAdminOf = new Set();
+  const orTeamAdminOf = new Set();
   let needsSystemAdmin = false;
   // Target side.
-  if (to.tier === 'global') needsSystemAdmin = true;
-  else if (to.tier === 'team') teamAdminOf.add(to.teamId);
+  if (to.tier === 'global') {
+    if (from.tier === 'team') orTeamAdminOf.add(from.teamId);
+    else needsSystemAdmin = true; // no source team to relax against (should be unreachable — see COPY_ACTION).
+  } else if (to.tier === 'team') teamAdminOf.add(to.teamId);
   // Move retires the source — require authority over it too.
   if (mode === 'move') {
     if (from.tier === 'global') needsSystemAdmin = true; // move OUT of global
     else if (from.tier === 'team') teamAdminOf.add(from.teamId);
     else if (from.tier === 'agent') needsSystemAdmin = true;
   }
-  return { needsSystemAdmin, teamAdminOf: [...teamAdminOf] };
+  return { needsSystemAdmin, teamAdminOf: [...teamAdminOf], orTeamAdminOf: [...orTeamAdminOf] };
 }
 
 // Validate a transfer request and produce a plan. Returns { ok: false, error }
@@ -162,6 +178,13 @@ function permitTransfer(permission, caps = {}) {
   for (const teamId of p.teamAdminOf || []) {
     if (!systemAdmin && !isTeamAdmin(teamId)) {
       return { ok: false, error: `forbidden: requires Team Admin of '${teamId}'` };
+    }
+  }
+  // An OR-set of alternative teams — System Admin, or Team Admin of ANY one of
+  // them (the "promote to global" rule: the content's own team is enough).
+  if (Array.isArray(p.orTeamAdminOf) && p.orTeamAdminOf.length > 0) {
+    if (!systemAdmin && !p.orTeamAdminOf.some((teamId) => isTeamAdmin(teamId))) {
+      return { ok: false, error: `forbidden: requires System Admin or Team Admin of ${p.orTeamAdminOf.map((t) => `'${t}'`).join(' / ')}` };
     }
   }
   return { ok: true };

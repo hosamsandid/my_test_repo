@@ -323,7 +323,7 @@ function formatScalar(v) {
  *  field per line, nested objects/arrays indented recursively, multi-line
  *  strings shown as real line breaks and markdown-like strings rendered via
  *  the same `SafeMarkdown` chat messages use. */
-function ValueRows({ value, isInput }) {
+export function ValueRows({ value, isInput }) {
   const rows = useMemo(() => renderableRows(value, { isInput }), [value, isInput]);
   return (
     <div>

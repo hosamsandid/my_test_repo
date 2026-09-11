@@ -45,7 +45,6 @@ export default function LaunchStep({
   fields = ['name', 'id', 'environment', 'labelSuffix', 'extend', 'materializeNow'],
   extraBody = {},
   onComplete,
-  onCreateEnvironment,
   summary = null,
   leftAction = null,
   // Shown inside the success card and beside it (#2053 AC12). Optional, so the
@@ -230,15 +229,11 @@ export default function LaunchStep({
             noEnvs ? (
               <div style={emptyBox}>
                 <span>
-                  No working environment exists yet. A team materialises onto an existing
-                  environment — it supplies the repository and the credentials (SSH key +
-                  GitHub token).
+                  No working environment exists yet — that&apos;s fine. Leave this unset and the
+                  team gets a fresh, repo-less one of its own (#2168 A2); an environment
+                  supplies the repository and the credentials (SSH key + GitHub token) only
+                  when you want the team to start from one.
                 </span>
-                {onCreateEnvironment && (
-                  <button type="button" onClick={onCreateEnvironment} style={linkBtn}>
-                    Create a working environment →
-                  </button>
-                )}
               </div>
             ) : (
               <Field label="Working environment">
@@ -275,12 +270,6 @@ export default function LaunchStep({
               issue channels) won't be available.
             </div>
           )}
-          {has('environment') && !noEnvs && onCreateEnvironment && (
-            <button type="button" onClick={onCreateEnvironment} style={{ ...linkBtn, alignSelf: 'flex-start' }}>
-              Need a different setup? Create a working environment →
-            </button>
-          )}
-
           {has('extend') && (
             <label style={checkboxRow}>
               <input type="checkbox" checked={!!values.extend} onChange={e => set({ extend: e.target.checked })} />
@@ -478,11 +467,6 @@ const cardBox = {
 const checkboxRow = {
   display: 'flex', alignItems: 'center', gap: 8,
   fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
-};
-const linkBtn = {
-  background: 'none', border: 'none', padding: 0, cursor: 'pointer',
-  color: 'var(--eb-accent-primary)', fontFamily: 'inherit', fontSize: 'var(--eb-text-sm)',
-  textAlign: 'left', textDecoration: 'underline',
 };
 const ghost = {
   background: 'none', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',

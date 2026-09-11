@@ -1253,25 +1253,21 @@ export default function WorkingEnvironments() {
   async function handleSave(form) {
     setSaving(true); setFormError(null);
     try {
-      if (panelMode === 'edit') {
-        const saved = await apiCall('PUT', `/api/environments/${selected.id}`, form);
-        // #2066 D3: the offer is made HERE, once the save has SUCCEEDED, and
-        // the panel still closes as it always did. The diff is computed from
-        // two server-supplied lists — the list as it was persisted a moment ago
-        // (`previousRepositories`, captured inside the PUT) and the list the
-        // server saved — so it can never be computed against a draft this
-        // browser has been holding since another admin saved the same
-        // environment, which is the exact defect this ticket removes.
-        //
-        // Scoped to an environment that already HAS agents (AC4): with none
-        // there is no workspace that could be out of date, whatever changed.
-        const agents = Array.isArray(selected.agents) ? selected.agents : [];
-        const diff = classifyRepositoryChanges(saved?.previousRepositories, saved?.repositories);
-        if (agents.length > 0 && hasRepositoryChanges(diff)) {
-          setOffer({ env: { ...selected, ...saved }, diff, catchUp: false });
-        }
-      } else {
-        await apiCall('POST', '/api/environments', form);
+      const saved = await apiCall('PUT', `/api/environments/${selected.id}`, form);
+      // #2066 D3: the offer is made HERE, once the save has SUCCEEDED, and
+      // the panel still closes as it always did. The diff is computed from
+      // two server-supplied lists — the list as it was persisted a moment ago
+      // (`previousRepositories`, captured inside the PUT) and the list the
+      // server saved — so it can never be computed against a draft this
+      // browser has been holding since another admin saved the same
+      // environment, which is the exact defect this ticket removes.
+      //
+      // Scoped to an environment that already HAS agents (AC4): with none
+      // there is no workspace that could be out of date, whatever changed.
+      const agents = Array.isArray(selected.agents) ? selected.agents : [];
+      const diff = classifyRepositoryChanges(saved?.previousRepositories, saved?.repositories);
+      if (agents.length > 0 && hasRepositoryChanges(diff)) {
+        setOffer({ env: { ...selected, ...saved }, diff, catchUp: false });
       }
       setPanelMode(null); setSelected(null);
       refetch();
@@ -1305,12 +1301,6 @@ export default function WorkingEnvironments() {
           <Package size={15} /> Toolchains
         </button>
       )}
-      <button
-        onClick={() => { setPanelMode('create'); setSelected(null); setFormError(null); }}
-        style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
-      >
-        <Plus size={15} /> New Environment
-      </button>
     </>
   );
 
@@ -1366,19 +1356,19 @@ export default function WorkingEnvironments() {
       <DataTable
         columns={COLUMNS}
         data={envs ?? []}
-        emptyText="No Working Environments yet. Click 'New Environment' to create the first one."
+        emptyText="No Working Environments yet — creating a team provisions one automatically."
       />
 
       <SidePanel
-        open={panelMode === 'create' || panelMode === 'edit'}
+        open={panelMode === 'edit'}
         onClose={() => { setPanelMode(null); setSelected(null); }}
-        title={panelMode === 'edit' ? `Edit: ${selected?.name || selected?.id}` : 'New Working Environment'}
+        title={`Edit: ${selected?.name || selected?.id}`}
         width="560px"
       >
-        {(panelMode === 'create' || (panelMode === 'edit' && selected)) && (
+        {panelMode === 'edit' && selected && (
           <EnvironmentForm
-            initial={panelMode === 'edit' ? selected : null}
-            isEdit={panelMode === 'edit'}
+            initial={selected}
+            isEdit
             onSave={handleSave}
             onCancel={() => { setPanelMode(null); setSelected(null); }}
             saving={saving}

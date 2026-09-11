@@ -117,8 +117,13 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the `create.md` topic plus its `seeAlso` neighbours) at
-// 318 602 of 340 000 — 93.7% used, 21 398 left — against
-// 322 243 (94.8%) for the all-topics fold route-scoping replaced. (#2158's
+// 321 120 of 340 000 — 94.4% used, 18 880 left — against
+// 322 243 (94.8%) for the all-topics fold route-scoping replaced. (Several
+// merges landed between the last stamp here (318 602) and this one without
+// re-stamping — #2168's own `team-setup.md` update (Working Environment is now
+// optional at team creation) adds only +265; the remaining +2 253 predates this
+// PR and is unattributed here, same shape as the #2158/#2164/#2146 drift the
+// last budget-restamp chore folded in. #2158's
 // `working-environments.md` growth — a CORPUS_FILES member, counted on EVERY
 // context rather than only a seeAlso neighbourhood — added the last +1 069 to
 // this crown, unstamped until now; #2146's *Inline image thumbnails* chapter

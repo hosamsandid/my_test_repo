@@ -7377,7 +7377,9 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
 
 // List an agent's PRIVATE (agent-tier) skills — the bottom rung of the skill
 // ladder. They live in the agent's own pool and never appear in the shared
-// knowledge graph, so the operator lifts them to the team (agent→team) from here.
+// knowledge graph, so the operator lifts/publishes them from here — either an
+// agent-authored skill, or (#2180) an agent's EDITED copy of a skill it was
+// granted (an unchanged seed copy still never surfaces).
 app.get('/api/agents/:id/private-skills', (req, res) => {
   const scope = getScope(req);
   const { id } = req.params;
@@ -7418,14 +7420,31 @@ app.get('/api/agents/:id/private-skills', (req, res) => {
     : Array.isArray(cfg.skills) ? cfg.skills
     : (parentCfg && Array.isArray(parentCfg.skills)) ? parentCfg.skills
     : []);
+  // #2180: a granted/seeded skill is no longer a hard exclusion — an agent's
+  // EDITED copy of it (the Flow Designer case) is still a publish candidate.
+  // Drift is computed the same way /api/skills does (seeded-skills.json is the
+  // anchor, not the copy's own skill.json origin); only `diverged`/`conflict`
+  // (the copy carries local edits) qualify — an unchanged seed copy, or one
+  // whose source moved on with no local edit (`outdated`), is not something to
+  // publish back.
+  const seededManifest = readJsonFile(path.join(resolveAgentStateDir(agentDir), 'seeded-skills.json'), {}) || {};
   const skillsDir = path.join(agentDir, 'skills');
   const skills = [];
   try {
     for (const name of fs.readdirSync(skillsDir)) {
-      if (granted.has(name)) continue;
       const dir = path.join(skillsDir, name);
       if (!fs.existsSync(path.join(dir, 'SKILL.md'))) continue;
       const prov = readSkillProvenance(dir);
+      if (granted.has(name)) {
+        const seeded = seededManifest[name];
+        const origin = seeded && seeded.tier
+          ? { tier: seeded.tier, teamId: seeded.tier === 'team' ? cfg.teamId : undefined, sourceHash: seeded.contentHash }
+          : null;
+        const d = skillDriftSummary(dir, origin);
+        if (d.drift !== 'diverged' && d.drift !== 'conflict') continue;
+        skills.push({ name, provenance: prov || null, granted: true, drift: d.drift });
+        continue;
+      }
       skills.push({ name, provenance: prov || null });
     }
   } catch { /* no private pool yet */ }
@@ -10127,7 +10146,12 @@ app.get('/api/skills', (req, res) => {
               : null;
             // Carry the owning team so the UI can deep-link the "share it" path
             // into the (team-scoped) Knowledge page for this agent (#1144).
-            skills.push({ name, source: 'agent', agentId, teamId: cfg.teamId, path: skillMd, ...skillDescriptionSummary(skillMd), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) });
+            // `knowledgeTeamId` (#2180) is the actual skill-POOL key (the squad
+            // id a team-member's `teamId` does not carry — agentKnowledgeTeam
+            // resolves `parentTeamId` for a member) — the "publish via team
+            // pool" action must land in the pool the agent's squad actually
+            // reads from, not the human access-scope `teamId`.
+            skills.push({ name, source: 'agent', agentId, teamId: cfg.teamId, knowledgeTeamId: agentKnowledgeTeam({ ...cfg, id: cfg.id || agentId }), path: skillMd, ...skillDescriptionSummary(skillMd), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) });
           }
         }
       });
@@ -10558,9 +10582,10 @@ app.post('/api/skills', (req, res) => {
 // ENTIRE skill directory (SKILL.md plus any scripts/assets) recursively so it
 // can be reused by other agents. Refuses to clobber an existing pool skill
 // unless `overwrite: true` is passed.
-// DEPRECATED (#626): superseded by POST /api/skills/transfer. The agent→global
-// cell is retired from the transition matrix (go via the team tier), so this
-// path is kept only for older clients and removed from the UI.
+// DEPRECATED (#626): superseded by POST /api/skills/transfer, which now also
+// covers the agent→global cell directly (#2180 — the old "go via the team
+// tier" retirement no longer holds). Kept only for older clients and removed
+// from the UI.
 app.post('/api/skills/promote', (req, res) => {
   const { agentId, name, overwrite = false } = req.body || {};
   if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) {
@@ -11030,13 +11055,16 @@ app.post('/api/skills/archive/prune', (req, res) => {
 });
 
 // Two-stage promotion (#306, relates to #173): promote a TEAM skill up to the
-// GLOBAL pool. The team-tier copy is the Team-Admin's curation; lifting it to
-// the global pool is a System-Admin / governance action. Copies the whole skill
-// directory recursively. Refuses to clobber an existing global skill unless
-// `overwrite: true`.
+// GLOBAL pool. The team-tier copy is the Team-Admin's curation; lifting it into
+// the shared global catalog is now ALSO a Team-Admin act (#2178/G8/H5a) — not
+// only System-Admin — since publishing does not by itself grant the skill to
+// any other team (a team still has to be granted it separately, so visibility
+// stays "created by sharing"). Copies the whole skill directory recursively.
+// Refuses to clobber an existing global skill unless `overwrite: true`.
 // DEPRECATED (#626): the team→global cell is now the unified POST
 // /api/skills/transfer ({from:{tier:'team',teamId}, to:{tier:'global'}}). Kept
-// for older clients; the UI promotes via the transfer engine.
+// for older clients; the UI promotes via the transfer engine. The permission
+// check is reused from there so the two paths can never disagree (#2178).
 app.post('/api/skills/promote-to-global', (req, res) => {
   const { name, teamId, overwrite = false } = req.body || {};
   if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) {
@@ -11044,6 +11072,12 @@ app.post('/api/skills/promote-to-global', (req, res) => {
   }
   const srcDir = safeTeamSkillDir(teamId, name);
   if (!srcDir) return res.status(400).json({ error: 'Invalid team id or skill name' });
+  const scope = getScope(req);
+  const permit = skillTransfer.permitTransfer(
+    skillTransfer.requiredPermission({ tier: 'team', teamId }, { tier: 'global' }, 'copy'),
+    { systemAdmin: !!scope.all, isTeamAdmin: (tid) => canManageTeam(scope, tid) },
+  );
+  if (!permit.ok) return res.status(403).json({ error: permit.error });
   if (!fs.existsSync(path.join(srcDir, 'SKILL.md'))) {
     return res.status(404).json({ error: `Skill '${name}' not found in team '${teamId}'` });
   }
@@ -11180,6 +11214,29 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
   if (!plan.ok) return res.status(400).json({ error: plan.error });
 
   // 2. Permission gate — map the caller's scope to transfer capabilities.
+  //
+  // #2180: an agent→global publish is planned System-Admin-only by default
+  // (skillTransfer.requiredPermission — the pure planner has no fs access and
+  // cannot resolve which team owns the source agent). Resolve the agent's
+  // REAL owning team from its own config on disk — never from the request
+  // body, which would let a caller self-assert an unrelated team's ownership
+  // and escalate — and relax the requirement to "System Admin, or Team Admin
+  // of that team", same as the existing team→global cell. This only widens
+  // the TARGET-side (publish-into-global) requirement: a `move` still needs
+  // System Admin to retire the agent's own workspace copy, since deleting an
+  // agent's files is a separate, still-governance-level act this ticket does
+  // not touch.
+  if (plan.from.tier === 'agent' && plan.to.tier === 'global') {
+    const agentCfg = readJsonFile(path.join(AGENTS_DIR, plan.from.agentId, 'config.json'), null);
+    const ownerTeamId = agentCfg ? agentKnowledgeTeam({ ...agentCfg, id: agentCfg.id || plan.from.agentId }) : null;
+    if (ownerTeamId) {
+      plan.permission = {
+        ...plan.permission,
+        needsSystemAdmin: plan.mode === 'move',
+        orTeamAdminOf: [...(plan.permission.orTeamAdminOf || []), ownerTeamId],
+      };
+    }
+  }
   const scope = getScope(req);
   const permit = skillTransfer.permitTransfer(plan.permission, {
     systemAdmin: !!scope.all,

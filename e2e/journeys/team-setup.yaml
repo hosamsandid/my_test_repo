@@ -93,9 +93,9 @@ steps:
     narrative: |
       The second step is the Working Environment. If the process defines what the team does, the environment defines where it does it.
 
-      A Working Environment is a reusable infrastructure template. It bundles the GitHub repository the team works on, the branch, the SSH deploy key and the GitHub token used for git operations and API access, plus any knowledge sources. The key point is that we don't reassemble all of that here from raw credentials — the environment already packages it. So on this step we simply pick one from a card grid. Each card shows the environment's name, its repository, and warns us if something essential is missing — for example, if there's no repository configured, the card can't be selected, because a team needs a repository to work on.
+      A Working Environment is a reusable infrastructure template. It bundles the GitHub repository the team works on, the branch, the SSH deploy key and the GitHub token used for git operations and API access, plus any knowledge sources. The key point is that we don't reassemble all of that here from raw credentials — the environment already packages it. So on this step we simply pick one from a card grid, if a suitable one already exists.
 
-      This separation is deliberate: the same environment can be reused across many teams, and credentials live in their own store, so you can rotate a token without touching every team. If we don't have a suitable environment yet, there's a direct link to create one — but for the demo we just select the one that points at our target repository and move on.
+      This separation is deliberate: the same environment can be reused across many teams, and credentials live in their own store, so you can rotate a token without touching every team. Picking one is entirely optional, though — there's no separate place to create a working environment up front any more; leave this step empty and the team gets a fresh one of its own the moment it's created. For the demo we just select the one that points at our target repository and move on.
     assert:
       do: wizard.expectEnvironmentStep
       envName: Agentic Demos

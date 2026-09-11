@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  armedKey, parseArmedKey, isArmed, arm, disarmLabel, disarmObject, gcArmed,
+  armedKey, parseArmedKey, isArmed, arm, disarmLabel, disarmObject, disarmAbsent, gcArmed,
   ARMED_TTL_MS,
 } = require('./wake-armory');
 
@@ -73,6 +73,30 @@ test('disarmObject clears every label of a closed object', () => {
 
   assert.equal(Object.keys(armed).length, 1);
   assert.equal(isArmed(armed, armedKey({ triggerId: 't-a', kind: 'pr', number: 8, label: 'ready-for-review' })), true);
+});
+
+test('disarmAbsent drops armed wakes not in the current full set, keeps present ones', () => {
+  const armed = {};
+  arm(armed, armedKey({ triggerId: 't-a', kind: 'pr', number: 9, label: 'ready-for-review' }), 1);
+  arm(armed, armedKey({ triggerId: 't-b', kind: 'pr', number: 9, label: 'revisions-required' }), 1);
+  arm(armed, armedKey({ triggerId: 't-a', kind: 'pr', number: 8, label: 'ready-for-review' }), 1);
+
+  // #9's current labels no longer include `ready-for-review` (swapped away),
+  // but still include `revisions-required`.
+  disarmAbsent(armed, { kind: 'pr', number: 9, presentLabels: new Set(['revisions-required', 'ready-for-review:completed']) });
+
+  assert.equal(isArmed(armed, armedKey({ triggerId: 't-a', kind: 'pr', number: 9, label: 'ready-for-review' })), false);
+  assert.equal(isArmed(armed, armedKey({ triggerId: 't-b', kind: 'pr', number: 9, label: 'revisions-required' })), true);
+  // a different object is untouched even when its label is absent from #9's set
+  assert.equal(isArmed(armed, armedKey({ triggerId: 't-a', kind: 'pr', number: 8, label: 'ready-for-review' })), true);
+});
+
+test('disarmAbsent is a no-op when the full set is missing (absence must not read as "all removed")', () => {
+  const armed = {};
+  const k = armedKey({ triggerId: 't-a', kind: 'pr', number: 9, label: 'ready-for-review' });
+  arm(armed, k, 1);
+  disarmAbsent(armed, { kind: 'pr', number: 9, presentLabels: null });
+  assert.equal(isArmed(armed, k), true);
 });
 
 test('gcArmed drops entries past the TTL', () => {

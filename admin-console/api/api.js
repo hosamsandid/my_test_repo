@@ -13894,6 +13894,7 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
   // 2. Reuse env if any references this repo URL, else create a new one.
   let env = findEnvByRepoUrl(sshUrl);
   let envReused = !!env;
+  let tokenAttachRefused = false;
 
   if (!env) {
     const baseEnvId = `repo-${slugifyRepoSegment(org)}-${slugifyRepoSegment(repo)}` || 'repo';
@@ -13915,11 +13916,27 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
     };
     saveEnvironment(envId, env);
   } else if (!env.githubTokenId) {
-    // Existing env without a token — attach the chosen one so the clone works.
-    env.githubTokenId = chosenTokenId;
-    env.updatedAt = new Date().toISOString();
-    saveEnvironment(env.id, env);
+    // Existing env without a token — attach the chosen one so the clone works,
+    // but ONLY when the caller may actually manage this environment (#2158
+    // AC11). Environments are now discoverable by every user via the global
+    // tier, so writing env.githubTokenId unconditionally here let any
+    // authenticated caller attach a credential to a system-tier record they
+    // cannot otherwise touch, just by POSTing a repo URL that happens to
+    // match a reused env. The wider ungated-reuse leak (returning another
+    // team's agent, the missing-scope-stamp write on a freshly created env)
+    // is deliberately left to #2071 — this only closes the mutation.
+    if (canManageEnvironment(getScope(req), env)) {
+      env.githubTokenId = chosenTokenId;
+      env.updatedAt = new Date().toISOString();
+      saveEnvironment(env.id, env);
+    } else {
+      tokenAttachRefused = true;
+    }
   }
+
+  const tokenWarning = tokenAttachRefused
+    ? 'This working environment has no GitHub token and you do not have permission to attach one. An administrator can add it under "Working Environments".'
+    : null;
 
   const llmWarning = env.llmEndpointId
     ? null
@@ -13933,6 +13950,7 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
       environment: { id: env.id, name: env.name, reused: envReused },
       agent: { id: existingAgent.id, displayName: existingAgent.displayName },
       ...(llmWarning ? { llmWarning } : {}),
+      ...(tokenWarning ? { tokenWarning } : {}),
     });
   }
 
@@ -13972,6 +13990,7 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
     agent: { id: agentId, displayName },
     seed: agentResp,
     ...(llmWarning ? { llmWarning } : {}),
+    ...(tokenWarning ? { tokenWarning } : {}),
   });
 });
 

@@ -117,13 +117,16 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the `create.md` topic plus its `seeAlso` neighbours) at
-// 317 533 of 340 000 — 93.4% used, 22 467 left — against
-// 322 243 (94.8%) for the all-topics fold route-scoping replaced. (#2146's
-// *Inline image thumbnails* chapter in `agent-chat.md` — the `/chats` topic,
-// which `create.md` names among its `seeAlso` — added the last +284 to this
-// crown; #2131's *When a flow is too large to generate in one go* chapter in
-// `flows.md`, the `/flows` topic on the same `seeAlso` list, had added +674
-// before it; #2136's *Global providers* chapter in `models.md`, the
+// 318 602 of 340 000 — 93.7% used, 21 398 left — against
+// 322 243 (94.8%) for the all-topics fold route-scoping replaced. (#2158's
+// `working-environments.md` growth — a CORPUS_FILES member, counted on EVERY
+// context rather than only a seeAlso neighbourhood — added the last +1 069 to
+// this crown, unstamped until now; #2146's *Inline image thumbnails* chapter
+// in `agent-chat.md` — the `/chats` topic, which `create.md` names among its
+// `seeAlso` — had added +284 before it; #2131's *When a flow is too large to
+// generate in one go* chapter in `flows.md`, the `/flows` topic on the same
+// `seeAlso` list, had added +674 before it; #2136's *Global providers* chapter
+// in `models.md`, the
 // `/models` topic on the same `seeAlso` list, had added +3 012 before it;
 // #1459's work-plane bullet in `access-users.md` had added +319 before it.
 // #2138's orphaned-credential refusal added the last +1 179, mostly through the

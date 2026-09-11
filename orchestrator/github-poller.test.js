@@ -842,6 +842,82 @@ test("_fanOutBatch (#2152): a genuine remove -> re-add re-fires (disarm reopens 
   }
 });
 
+const reviewerSub = () => [{
+  agentId: "code-reviewer",
+  triggerId: "code-reviewer-on-pr-ready-for-review",
+  events: new Set(["issues.labeled"]),
+  labelFilter: "ready-for-review",
+  claimAdd: "ready-for-review:wip",
+  horizon: null,
+}];
+
+test("_fanOutBatch (#2152 follow-up): the collapsed claim swap disarms the wake, so a later re-hand-off re-fires", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    // 1. the genuine upstream wake — arm + fire.
+    const ev1 = labeledIssueEvent("csw-1", "ready-for-review", ["ready-for-review"], 2187);
+    // 2. the agent's OWN claim swap: `gh issue edit --remove ready-for-review
+    //    --add ready-for-review:wip` is ONE action, which the Events API
+    //    collapses to a single labeled(ready-for-review:wip). No standalone
+    //    unlabeled(ready-for-review) ever arrives, so this claim-label add is the
+    //    only disarm signal there is. Its event-time snapshot still carries
+    //    `ready-for-review` (the paired remove is not atomic).
+    const ev2 = labeledIssueEvent(
+      "csw-2", "ready-for-review:wip",
+      ["ready-for-review", "ready-for-review:wip"], 2187,
+    );
+    // 3. the reworker delegates back by re-adding `ready-for-review` (a bare
+    //    --add-label; on GitHub the label has been absent since the swap). Before
+    //    this fix the stale arm dropped it as 'wake-already-armed'; now it fires.
+    const ev3 = labeledIssueEvent("csw-3", "ready-for-review", ["ready-for-review"], 2187);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], reviewerSub(), "tok");
+
+    assert.deepEqual(
+      enqueued.map((e) => e.entry.github.eventId),
+      ["csw-1", "csw-3"],
+      "the rising-edge wake AND the post-swap re-hand-off both fire",
+    );
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch (#2152 follow-up): the disarm does not re-open the double-fire (unrelated churn after the swap stays dropped)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ev1 = labeledIssueEvent("csw2-1", "ready-for-review", ["ready-for-review"], 2190);
+    // claim swap disarms `ready-for-review`; on GitHub the label is now gone.
+    const ev2 = labeledIssueEvent(
+      "csw2-2", "ready-for-review:wip",
+      ["ready-for-review", "ready-for-review:wip"], 2190,
+    );
+    // unrelated churn AFTER the swap — a current snapshot no longer carries
+    // `ready-for-review`, so full-set matching must not re-fire the reviewer.
+    const ev3 = labeledIssueEvent("csw2-3", "bug", ["ready-for-review:wip", "bug"], 2190);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], reviewerSub(), "tok");
+
+    assert.deepEqual(
+      enqueued.map((e) => e.entry.github.eventId),
+      ["csw2-1"],
+      "only the rising-edge wake fires; post-swap churn without the wake label does not",
+    );
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
 test("_fanOutBatch (#2152): the #1376 collapsed multi-add still fires (rising edge, not a regression)", async () => {
   const origRecord = githubEventLog.record;
   githubEventLog.record = () => {};

@@ -895,9 +895,34 @@ class GitHubPoller {
           typeof key === 'string' && key.endsWith('.labeled') &&
           ghEvent.payload?.label?.name === sub.claimAdd
         ) {
+          // #2152 follow-up: the wake label's DISARM (wake-armory) keys on a
+          // standalone `*.unlabeled(<wake>)` event — but the claim swap removes
+          // `<wake>` and adds `<wake>:wip` in ONE `gh issue edit` action, which
+          // the Events API collapses to a single `labeled(<wake>:wip)` event: the
+          // `unlabeled(<wake>)` signal never arrives, so the arm set on the first
+          // wake is NEVER cleared, and a legitimate later re-hand-off that re-adds
+          // `<wake>` (e.g. reworker → code-reviewer) is silently dropped as
+          // `wake-already-armed`. Seeing THIS claim-label add is a reliable proxy
+          // for that lost removal (the swap's contract is remove-`<wake>` +
+          // add-`<wake>:wip`, and this event the poller DOES observe), so disarm
+          // `<wake>` here. Object-scoped (across all triggers), like the
+          // `unlabeled` disarm. Safe against re-opening the #2152 double-fire: any
+          // later churn event carries a current snapshot with `<wake>` gone, so
+          // full-set matching can no longer re-fire it — only a genuine fresh
+          // `labeled(<wake>)` will, which is exactly the wake we want restored.
+          if (this._wakeEdgeDedup && sub.labelFilter) {
+            const num = workItemNumber(ghEvent);
+            if (num != null) {
+              wakeArmory.disarmLabel(armed, {
+                kind: key.startsWith('pull_request') ? 'pr' : 'issue',
+                number: num,
+                label: sub.labelFilter,
+              });
+            }
+          }
           console.log(
             `[GH-Poller] self-claim-label: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
-            `(claim label '${sub.claimAdd}' is agent-set, never a wake)`,
+            `(claim label '${sub.claimAdd}' is agent-set, never a wake; disarmed '${sub.labelFilter}')`,
           );
           outcome.status = 'dropped';
           outcome.reason = 'self-claim-label';

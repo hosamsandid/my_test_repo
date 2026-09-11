@@ -4439,9 +4439,62 @@ function loadLiveUserGate() {
   }
 }
 
-function resolveAttributedGithubToken(id, env, operation) {
+// Resolve which platform user is "acting" for this run (#2175, epic #2166
+// B3), from the raw Matrix sender id `gh-as-agent` forwarded (via
+// AEE_ACTING_SENDER, itself set by agent-entrypoint.py only for a live chat
+// turn — see docs/multi-user-concept.md). Reuses the same lookup
+// enrichUsageRecord already does for cost attribution (#2137): a human's
+// `matrixUserId` is stamped on their user record at Matrix-identity
+// provisioning (#1458), so this is the one hop from "who sent the message"
+// to a stable account id. Returns null for an autonomous run (no sender at
+// all), for a sender that resolves to nobody (deleted/never-provisioned), and
+// — #2187 review finding — for a sender who resolves to a REAL platform user
+// with no legitimate relationship to THIS agent. All three fall through to
+// the static `resolveAgentOwnerId`, unchanged.
+//
+// WHY THE THIRD CASE IS NEEDED: `AEE_ACTING_SENDER` is set once into the
+// Claude subprocess's environment for a live chat turn, but for the rest of
+// that run it is just an ordinary env var — any Bash tool call the agent
+// makes (potentially steered by content it read, e.g. a prompt injection in
+// an issue or file) can overwrite it before calling `gh-as-agent`, which
+// forwards whatever value is currently present with no signature or binding
+// to the real triggering Matrix event. Trusting the resolved user
+// unconditionally would let a compromised or misdirected agent pick an
+// ARBITRARY platform user's personal GitHub token / SSH key for a write —
+// this codebase already treats a self-asserted identity in a request body as
+// never being authentication on its own (`wake-agent.js`'s producer-id
+// cross-check against the caller's real team, #2030, is the precedent). The
+// actual boundary check — `credentialResolution.isActingSenderTrusted` — is
+// a pure, unit-tested function (`credential-resolution.test.js`): its own team's
+// members for a team-bound agent, or its own owner for a standalone one. That
+// closes cross-team (and, for a standalone agent, cross-owner) impersonation;
+// it does not make the claim unforgeable within that boundary, which would
+// need a signed, per-run claim the container cannot re-mint — a larger,
+// separate hardening step (see the #2187 review discussion).
+function resolveActingSenderUserId(actingSenderMatrixId, cfg) {
+  if (!actingSenderMatrixId) return null;
+  let knownUsers = [];
+  try {
+    knownUsers = teamsStore.listUsers();
+  } catch {
+    knownUsers = [];
+  }
+  const userId = usageAttribution.userIdForMatrixId(knownUsers, actingSenderMatrixId);
+  if (!userId) return null;
+  const hasMembership = (teamId, uid) => {
+    try {
+      return teamsStore.listMemberships({ teamId, userId: uid }).length > 0;
+    } catch {
+      return false;
+    }
+  };
+  return credentialResolution.isActingSenderTrusted(cfg, userId, hasMembership) ? userId : null;
+}
+
+function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) {
   const cfg = loadAgentConfig(id) || {};
-  const ownerId = credentialResolution.resolveAgentOwnerId(cfg, loadAgentConfig);
+  const actingSenderUserId = resolveActingSenderUserId(actingSenderMatrixId, cfg);
+  const ownerId = credentialResolution.resolveEffectiveOwnerId(cfg, loadAgentConfig, actingSenderUserId);
   const personal = credentialResolution.findPersonalCredentialState(
     loadGithubTokenIndex(), ownerId, undefined, loadLiveUserGate());
   const decision = credentialResolution.resolveCredential({
@@ -4460,6 +4513,37 @@ function resolveAttributedGithubToken(id, env, operation) {
     throw e;
   }
   return { githubTokenId: decision.credentialId };
+}
+
+// SSH-key sibling of `resolveAttributedGithubToken` (#2175 B3) — the "SSH
+// equivalent" the ticket names. `_buildAgentGitEnv`'s `overrides.sshKeyId` seam
+// has existed since #1569 but nothing ever populated it, so an attributed SSH
+// push always ran under the environment's shared deploy key regardless of who
+// triggered it. `sharedSshKeyId` is the specific repo's own key (the caller has
+// already resolved which repo this push targets) — not "any key somewhere on
+// the environment".
+function resolveAttributedSshKey(id, sharedSshKeyId, operation, actingSenderMatrixId) {
+  const cfg = loadAgentConfig(id) || {};
+  const actingSenderUserId = resolveActingSenderUserId(actingSenderMatrixId, cfg);
+  const ownerId = credentialResolution.resolveEffectiveOwnerId(cfg, loadAgentConfig, actingSenderUserId);
+  const personal = credentialResolution.findPersonalCredentialState(
+    loadSshKeyIndex(), ownerId, undefined, loadLiveUserGate());
+  const decision = credentialResolution.resolveCredential({
+    operation,
+    ownerId,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
+    personalCredentialOrphaned: personal.orphaned,
+    sharedCredentialId: sharedSshKeyId || null,
+    kind: "SSH key",
+  });
+  if (decision.refuse) {
+    const e = new Error(decision.refuse.message);
+    e.personalCredentialRequired = true;
+    e.refusalCode = decision.refuse.code;
+    throw e;
+  }
+  return { sshKeyId: decision.credentialId };
 }
 
 // ── Shared team Knowledge Base (Shared Agent Learning, Phase 1) ──────────────
@@ -7304,7 +7388,8 @@ async function _execRepo(cmd, args, { cwd, env, timeout = 30_000 }) {
 }
 
 // Push the agent's committed work. `body` = { repo?, branch?, remote?,
-// setUpstream? }. Throws caller-facing Errors (safe to return over the API).
+// setUpstream?, actingSender? }. Throws caller-facing Errors (safe to return
+// over the API).
 async function agentGitPush(id, env, body = {}) {
   const repo = agentGitOps.resolveAgentRepo({
     repositories: env?.repositories,
@@ -7312,7 +7397,18 @@ async function agentGitPush(id, env, body = {}) {
     agentWorkspace: agentDir(id),
   });
   const req = agentGitOps.normalizePushRequest(body);
-  const gitEnv = _buildAgentGitEnv(id, repo, env);
+  // #1569/#2175: a push is an attributed write — resolve the owner's personal
+  // credential (personal → team → system), keyed on the acting human for an
+  // interactive run (B3) or the static config owner otherwise. Only the
+  // credential this push's transport actually uses is resolved/overridden;
+  // the other stays whatever `_buildAgentGitEnv` would already fall back to.
+  const overrides = {};
+  if (agentGitOps.isSshUrl(repo.url)) {
+    overrides.sshKeyId = resolveAttributedSshKey(id, repo.sshKeyId, "push-ssh", body.actingSender).sshKeyId;
+  } else {
+    overrides.githubTokenId = resolveAttributedGithubToken(id, env, "push-https", body.actingSender).githubTokenId;
+  }
+  const gitEnv = _buildAgentGitEnv(id, repo, env, overrides);
   return _repoGitQueue(repo.repoPath, () => _agentGitPushLocked(id, repo, req, gitEnv, body));
 }
 
@@ -7391,9 +7487,20 @@ async function agentCreatePr(id, env, body = {}) {
   // #1569: opening a PR is an attributed write — resolve the owner's personal
   // PAT (personal → team → system), refusing rather than acting under a shared
   // identity when an owner is set but has no usable personal token. No owner
-  // (AC8) ⇒ the env's shared token, unchanged.
-  const { githubTokenId } = resolveAttributedGithubToken(id, env, "pr");
-  const gitEnv = _buildAgentGitEnv(id, repo, env, { githubTokenId });
+  // (AC8) ⇒ the env's shared token, unchanged. #2175 (B3): keyed on the acting
+  // human for an interactive run, the static config owner otherwise.
+  // `gh pr create` always needs the PAT regardless of transport (it talks to
+  // the REST API, not the git remote — see `buildRepoGitEnv`'s note on why the
+  // `gh` credential is not scheme-gated), so the token is resolved
+  // unconditionally; the branch push this function does before opening the PR
+  // additionally needs the owner's personal SSH key when the repo is an SSH
+  // remote.
+  const { githubTokenId } = resolveAttributedGithubToken(id, env, "pr", body.actingSender);
+  const overrides = { githubTokenId };
+  if (agentGitOps.isSshUrl(repo.url)) {
+    overrides.sshKeyId = resolveAttributedSshKey(id, repo.sshKeyId, "push-ssh", body.actingSender).sshKeyId;
+  }
+  const gitEnv = _buildAgentGitEnv(id, repo, env, overrides);
   return _repoGitQueue(repo.repoPath, () =>
     _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body, githubTokenId));
 }

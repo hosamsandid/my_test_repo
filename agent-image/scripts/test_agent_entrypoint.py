@@ -1302,6 +1302,35 @@ class RequestedByBlock(unittest.TestCase):
             'dm_run_context["requestedBy"]', ''))
 
 
+class ActingSenderEnvValue(unittest.TestCase):
+    """#2175 (epic #2166 B3): the `AEE_ACTING_SENDER` env value `gh-as-agent`
+    forwards so the orchestrator can re-key an attributed write's personal
+    credential off the human actually chatting, instead of the agent's static
+    config owner. Built on top of `_requested_by` so the two can never
+    disagree about what counts as a known chat sender."""
+
+    def test_a_chat_turns_sender_is_carried(self):
+        self.assertEqual(
+            entrypoint._acting_sender_env_value({"requestedBy": {"matrixUserId": "@ada:local"}}),
+            "@ada:local",
+        )
+
+    def test_an_autonomous_run_carries_no_sender(self):
+        # A cron/github-event/loop run_context sets no `requestedBy` at all —
+        # this must resolve to empty, not raise, so autonomous runs are
+        # unaffected (the ticket's own AC).
+        for ctx in (None, {}, {"trigger": {"type": "cron"}}, {"requestedBy": None}):
+            with self.subTest(ctx=ctx):
+                self.assertEqual(entrypoint._acting_sender_env_value(ctx), "")
+
+    def test_matches_requested_by_normalization_exactly(self):
+        # Same whitelist/trim/reject rules as build_usage_record's own
+        # requestedBy handling — the two must never diverge on what "a known
+        # chat sender" means.
+        raw = {"requestedBy": {"matrixUserId": "  @ada:local  ", "body": "ignored"}}
+        self.assertEqual(entrypoint._acting_sender_env_value(raw), "@ada:local")
+
+
 class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
     """#504: cron/once triggers must not fire while Maintenance Mode (#501) is
     active, http/github-event pending entries must not be drained/processed

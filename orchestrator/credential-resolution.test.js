@@ -11,6 +11,8 @@ const assert = require("node:assert/strict");
 const {
   operationPrefersPersonal,
   resolveAgentOwnerId,
+  resolveEffectiveOwnerId,
+  isActingSenderTrusted,
   findPersonalCredential,
   findPersonalCredentialState,
   resolveCredential,
@@ -57,12 +59,99 @@ test("resolveAgentOwnerId: member's own ownerId wins when set; falls back to par
 // ── operation classification (AC7) ──────────────────────────────────────────
 
 test("operationPrefersPersonal: attributed writes prefer personal, reads/poll do not", () => {
-  for (const op of ["commit", "pr", "review", "push-https"]) {
+  // push-ssh joined the attributed set in #2175 (B3) once resolveAttributedSshKey
+  // existed to prefer a personal SSH key for it — see the ATTRIBUTED_OPERATIONS
+  // comment.
+  for (const op of ["commit", "pr", "review", "push-https", "push-ssh"]) {
     assert.equal(operationPrefersPersonal(op), true, op);
   }
-  for (const op of ["clone", "poll", "probe", "push-ssh", "anything"]) {
+  for (const op of ["clone", "poll", "probe", "anything"]) {
     assert.equal(operationPrefersPersonal(op), false, op);
   }
+});
+
+// ── acting-sender re-keying (#2175, epic #2166 B3) ──────────────────────────
+
+test("resolveEffectiveOwnerId: prefers the acting sender's userId when present", () => {
+  const cfg = { role: "agent", ownerId: "u-team-creator" };
+  assert.equal(resolveEffectiveOwnerId(cfg, () => null, "u-chatting-human"), "u-chatting-human");
+});
+
+test("resolveEffectiveOwnerId: falls back to the static owner with no acting sender (autonomous runs unaffected)", () => {
+  const cfg = { role: "agent", ownerId: "u-team-creator" };
+  assert.equal(resolveEffectiveOwnerId(cfg, () => null, null), "u-team-creator");
+  assert.equal(resolveEffectiveOwnerId(cfg, () => null, undefined), "u-team-creator");
+  assert.equal(resolveEffectiveOwnerId(cfg, () => null, ""), "u-team-creator");
+});
+
+test("resolveEffectiveOwnerId: a team-member without an acting sender still resolves through its parent (AC4 unchanged)", () => {
+  const load = () => ({ role: "team", ownerId: "u-parent" });
+  assert.equal(
+    resolveEffectiveOwnerId({ role: "team-member", parentTeamId: "squad" }, load, null),
+    "u-parent",
+  );
+});
+
+// ── acting-sender TRUST boundary (#2187 review finding) ─────────────────────
+//
+// `resolveEffectiveOwnerId` trusts `actingSenderUserId` unconditionally, so
+// the caller (orchestrator.js's `resolveActingSenderUserId`) MUST filter a
+// resolved user through `isActingSenderTrusted` first. These pin the actual
+// security boundary — not just that a sender is threaded through, but that an
+// UNRELATED platform user can never be selected.
+
+test("isActingSenderTrusted: a member of the team-agent's own team is trusted", () => {
+  const cfg = { role: "team", id: "squad" };
+  const hasMembership = (teamId, userId) => teamId === "squad" && userId === "u-alice";
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", hasMembership), true);
+});
+
+test("isActingSenderTrusted: a team-member resolves the boundary to its PARENT team, not its own id", () => {
+  const cfg = { role: "team-member", id: "squad-dev", parentTeamId: "squad" };
+  let queriedTeamId = null;
+  const hasMembership = (teamId, userId) => { queriedTeamId = teamId; return userId === "u-alice"; };
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", hasMembership), true);
+  assert.equal(queriedTeamId, "squad", "must check membership of the PARENT team, never the member's own id");
+});
+
+test("isActingSenderTrusted: THE ACTUAL FINDING — a real platform user with no relationship to this team is refused", () => {
+  const cfg = { role: "team", id: "squad" };
+  // u-mallory resolves to a real user (that is exactly the vulnerable case —
+  // an installation-wide lookup with no boundary), but is not a member of
+  // this agent's team.
+  const hasMembership = (teamId, userId) => teamId === "squad" && userId === "u-alice";
+  assert.equal(isActingSenderTrusted(cfg, "u-mallory", hasMembership), false);
+});
+
+test("isActingSenderTrusted: no membership lookup injected → fails closed, never trusts by default", () => {
+  const cfg = { role: "team", id: "squad" };
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", undefined), false);
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", null), false);
+});
+
+test("isActingSenderTrusted: a standalone agent (no team boundary, D8) trusts ONLY its own owner", () => {
+  const cfg = { role: "agent", ownerId: "u-alice" };
+  // No hasMembership call should even matter here — the standalone branch
+  // never reaches it. Passing a lookup that would say "yes to anyone" proves
+  // the owner check is what actually gates this, not an unreachable no-op.
+  const wouldTrustAnyone = () => true;
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", wouldTrustAnyone), true);
+  assert.equal(isActingSenderTrusted(cfg, "u-bob", wouldTrustAnyone), false, "wrong owner must be refused even if a membership lookup would have said yes");
+});
+
+test("isActingSenderTrusted: a standalone agent with no ownerId trusts nobody (fail closed)", () => {
+  assert.equal(isActingSenderTrusted({ role: "agent" }, "u-alice", () => true), false);
+});
+
+test("isActingSenderTrusted: no userId is always refused, regardless of shape", () => {
+  assert.equal(isActingSenderTrusted({ role: "team", id: "squad" }, null, () => true), false);
+  assert.equal(isActingSenderTrusted({ role: "team", id: "squad" }, "", () => true), false);
+  assert.equal(isActingSenderTrusted(null, "u-alice", () => true), false);
+});
+
+test("isActingSenderTrusted: a broken/unresolvable config (no team, no owner) trusts nobody", () => {
+  assert.equal(isActingSenderTrusted({ role: "team-member" }, "u-alice", () => true), false);
+  assert.equal(isActingSenderTrusted({}, "u-alice", () => true), false);
 });
 
 // ── personal credential lookup ───────────────────────────────────────────────
@@ -150,7 +239,7 @@ test("resolveCredential: owner + attributed write + unusable personal → refuse
 // today. This is the branch every existing agent lands in once the D6 backfill
 // stamps its `ownerId`; refusing here would stop every agent opening a PR.
 test("resolveCredential: owner + attributed write + owner has no personal credential → shared (#2077 AC7)", () => {
-  for (const operation of ["commit", "pr", "review", "push-https"]) {
+  for (const operation of ["commit", "pr", "review", "push-https", "push-ssh"]) {
     assert.deepEqual(
       resolveCredential({
         operation,
@@ -176,7 +265,7 @@ test("resolveCredential: an omitted personalCredentialPresent never refuses (#20
 
 // AC2 second half / AC7: owner, no personal, but a SHARED-eligible op → shared, no refusal.
 test("resolveCredential: owner + read/poll + no personal → shared, no refusal (AC2/AC7)", () => {
-  for (const operation of ["clone", "poll", "probe", "push-ssh"]) {
+  for (const operation of ["clone", "poll", "probe"]) {
     assert.deepEqual(
       resolveCredential({
         operation,

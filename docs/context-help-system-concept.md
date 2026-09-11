@@ -409,8 +409,11 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the `create.md` topic plus its `seeAlso` neighbours — at **314,890 — 92.6% used,
-25,110 left** (#2170 SHRANK this crown, a rare direction for the number to move: removing the
+the `create.md` topic plus its `seeAlso` neighbours — at **315,448 — 92.8% used,
+24,552 left** (re-measured on the real post-merge commit — #2170's own "overlaid onto main"
+estimate had read 314,890/92.6%/25,110 left, undercounting by 558 chars in a way
+`corpus.test.js`'s `< 340,000`-only assertion never catches; the lesson generalizes the
+existing "never trust a branch's self-report" rule to overlay estimates too) (#2170 SHRANK this crown, a rare direction for the number to move: removing the
 Working Environments page retired the `/environments` help topic outright (349 lines) rather than
 folding it whole into a survivor — the still-live half (repositories, credentials, MCP references,
 the propagation dialog) moved into the existing `agent-chat.md` (+61 net lines) and the

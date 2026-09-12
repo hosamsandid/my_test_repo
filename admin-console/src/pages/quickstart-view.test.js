@@ -45,17 +45,24 @@ test('quickstartEndpoint: empty URL → LLM-only path', () => {
 
 // --- quickstartBody --------------------------------------------------------
 
-test('quickstartBody: repo path trims the URL and passes optional pickers', () => {
+test('quickstartBody: repo path trims the URL, passes optional pickers, and carries the name (#2222)', () => {
   assert.deepEqual(
-    quickstartBody({ url: '  https://github.com/o/r ', tokenId: 't1', sshKeyId: 'k1' }),
-    { url: 'https://github.com/o/r', githubTokenId: 't1', sshKeyId: 'k1' },
+    quickstartBody({ url: '  https://github.com/o/r ', tokenId: 't1', sshKeyId: 'k1', displayName: ' Repo Bot ' }),
+    { url: 'https://github.com/o/r', githubTokenId: 't1', sshKeyId: 'k1', displayName: 'Repo Bot' },
   );
 });
 
 test('quickstartBody: repo path with default (unset) pickers → undefined, not empty string', () => {
   assert.deepEqual(
-    quickstartBody({ url: 'https://github.com/o/r', tokenId: '', sshKeyId: '' }),
-    { url: 'https://github.com/o/r', githubTokenId: undefined, sshKeyId: undefined },
+    quickstartBody({ url: 'https://github.com/o/r', tokenId: '', sshKeyId: '', displayName: 'Repo Bot' }),
+    { url: 'https://github.com/o/r', githubTokenId: undefined, sshKeyId: undefined, displayName: 'Repo Bot' },
+  );
+});
+
+test('quickstartBody: repo path with no name typed → trimmed empty string, never a repo-derived fallback (#2222 D1)', () => {
+  assert.deepEqual(
+    quickstartBody({ url: 'https://github.com/o/r', displayName: '  ' }),
+    { url: 'https://github.com/o/r', githubTokenId: undefined, sshKeyId: undefined, displayName: '' },
   );
 });
 
@@ -95,14 +102,16 @@ test('canSubmit: repo-less needs provider + name, NOT token / ssh (AC4 / AC5)', 
   );
 });
 
-test('canSubmit: repo path requires the GitHub prerequisites, independent of name', () => {
+test('canSubmit: repo path requires the GitHub prerequisites AND a name (#2222 D1)', () => {
   // #2084: `hasLlmEndpoints: true` here where it used to be false — the repo
-  // path is gated on a provider too now (see the lock test below). What this
-  // test is about is unchanged: token + SSH key, and the name is irrelevant.
-  const repo = { url: 'https://github.com/o/r', hasLlmEndpoints: true, displayName: '', selectedLlmId: '' };
+  // path is gated on a provider too now (see the lock test below).
+  const repo = { url: 'https://github.com/o/r', hasLlmEndpoints: true, displayName: 'x', selectedLlmId: '' };
   assert.equal(canSubmitQuickstart({ ...repo, hasTokens: true, hasSshKeys: true }), true);
   assert.equal(canSubmitQuickstart({ ...repo, hasTokens: true, hasSshKeys: false }), false);
   assert.equal(canSubmitQuickstart({ ...repo, hasTokens: false, hasSshKeys: true }), false);
+  // #2222: a blank name blocks even with both GitHub prerequisites met — no
+  // repo-derived fallback name exists any more.
+  assert.equal(canSubmitQuickstart({ ...repo, displayName: '  ', hasTokens: true, hasSshKeys: true }), false);
 });
 
 // --- #2084: no usable provider locks the form ------------------------------
@@ -224,6 +233,8 @@ test('quickstartSubmitReasons: canSubmit matches canSubmitQuickstart across case
     { url: 'https://github.com/o/r', hasTokens: true, hasSshKeys: false, hasLlmEndpoints: false, displayName: 'x', selectedLlmId: '' },
     { url: 'https://github.com/o/r', hasTokens: false, hasSshKeys: true, hasLlmEndpoints: false, displayName: 'x', selectedLlmId: '' },
     { url: 'https://github.com/o/r', hasTokens: true, hasSshKeys: true, hasLlmEndpoints: false, displayName: 'x', selectedLlmId: '' },
+    { url: 'https://github.com/o/r', hasTokens: true, hasSshKeys: true, hasLlmEndpoints: true, displayName: '', selectedLlmId: '' },
+    { url: 'https://github.com/o/r', hasTokens: true, hasSshKeys: true, hasLlmEndpoints: true, displayName: 'x', selectedLlmId: '' },
   ];
   for (const c of cases) {
     assert.equal(
@@ -300,11 +311,21 @@ test('quickstartSubmitReasons: repo path lists missing GitHub prerequisites (ssh
   assert.deepEqual(reasons.map(r => r.field), ['ssh-key', 'github-token']);
 });
 
-test('quickstartSubmitReasons: repo path with both prerequisites met has no reasons', () => {
+test('quickstartSubmitReasons: repo path with a blank name lists it first, ahead of the GitHub prerequisites (#2222 D1)', () => {
+  const { canSubmit, reasons } = quickstartSubmitReasons({
+    url: 'https://github.com/o/r', hasTokens: false, hasSshKeys: false,
+    hasLlmEndpoints: true, displayName: '  ', selectedLlmId: 'ep1',
+  });
+  assert.equal(canSubmit, false);
+  assert.deepEqual(reasons.map(r => r.field), ['name', 'ssh-key', 'github-token']);
+  assert.match(reasons[0].message, /name/i);
+});
+
+test('quickstartSubmitReasons: repo path with name + both prerequisites met has no reasons', () => {
   const { canSubmit, reasons } = quickstartSubmitReasons({
     url: 'https://github.com/o/r', hasTokens: true, hasSshKeys: true,
     // #2084: was `false` — a provider is now required on this path too.
-    hasLlmEndpoints: true, displayName: '', selectedLlmId: '',
+    hasLlmEndpoints: true, displayName: 'Repo Bot', selectedLlmId: '',
   });
   assert.equal(canSubmit, true);
   assert.equal(reasons.length, 0);

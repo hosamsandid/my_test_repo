@@ -32,8 +32,8 @@ export const CREATE_HELP_SECTIONS = {
   // 1 — the launcher tiles and what each one produces (draft / wizard / fast
   //     lane / direct form), plus one-assistant vs one-agent
   entryPaths: 'the-entry-paths',
-  // 3 — the SSH probe, environment reuse, agent reuse, and why Name / Model
-  //     Provider are unused once a repository URL is entered
+  // 3 — the SSH probe, environment reuse, agent reuse, and why Model Provider
+  //     (but not Name) is unused once a repository URL is entered
   fastLane: 'the-repository-fast-lane',
   // 4 — model provider / SSH key / GitHub token, and how the warning cards and
   //     the submit checklist differ

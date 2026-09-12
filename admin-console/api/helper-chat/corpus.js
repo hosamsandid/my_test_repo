@@ -163,11 +163,17 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // lines) — which is NOT on `/quickstart`'s `seeAlso` chain (only System Admins
 // reach it, from Administration), so it does not fold into this crown at all.
 // Net effect measured on the merge (overlaid onto post-#2204/#2206 `main`,
-// since this branch was 12 commits behind at review time): **314 890 of
-// 340 000 — 92.6% used, 25 110 left**, down from the last-stamped 324 900 (a
-// ~462-char pre-existing drift from unstamped intervening merges is folded
-// into that delta, same as every prior cycle). Reconciled here + the CLAUDE.md
-// #1872 paragraph + `context-help-system-concept.md` §9.
+// since this branch was 12 commits behind at review time): the PR's own
+// stamp read **314 890 of 340 000 — 92.6% used, 25 110 left**, but
+// `measureWorstCaseSystemPrompt()` on the actual post-merge tree
+// (commit 36aebb4d4, /quickstart) returns **315 448** — the overlay
+// estimate undercounted by 558 chars, not caught by `corpus.test.js`
+// (which only asserts `< 340 000`). Re-stamped here to the verified figure:
+// **315 448 of 340 000 — 92.8% used, 24 552 left**, down from the
+// last-stamped 324 900. Reconciled here + the CLAUDE.md #1872 paragraph +
+// `context-help-system-concept.md` §9 — the lesson: an "overlaid onto main"
+// estimate is still an estimate; re-measure on the real merge commit before
+// stamping, the same rule that already applies to a branch's own self-report.
 // #2195 (A3 of epic #2166) removed the ownership/team picker from the
 // Working Environments and MCP Servers forms — the corpus-vendored
 // `working-environments.md` table row correcting to "derived from the team,

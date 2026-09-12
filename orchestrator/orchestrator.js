@@ -86,7 +86,7 @@ const ownershipMigration = require("./ownership-migration");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assessConversionEligibility, planTeamConversion } = require("./team-conversion");
-const { nextAvailableAgentId } = require("./agent-id-resolution");
+const { nextAvailableAgentId, suggestFreeAgentId } = require("./agent-id-resolution");
 const { syncAgentRepoPlan, summarizeRepoResults, repoDivergence } = require("./repo-sync");
 // Agent-scoped repositories (#2067): a repository attached to ONE agent,
 // outside its Working Environment. Every decision — shape, the merged
@@ -16458,8 +16458,25 @@ async function main() {
         // resolves and reserves itself inside `createAgent`, so a collision on
         // it is not a refusal, it is the very thing autoId exists to absorb.
         if (!autoId && (loadAgentConfig(id) || agentTeardownRegistry.has(id))) {
+          // #2218 — name a free alternative alongside the refusal, in the
+          // same `{ code: 'id-conflict', agentId }` shape the clone/import
+          // routes already emit, so one client handler can serve all three.
+          // `id` itself is never taken here — only the SUGGESTION is resolved
+          // by the strict #2217 predicate, and only that predicate: the
+          // suggestion must be free by the same rule a submit will be
+          // re-checked against, or it could hand back an id that fails on
+          // accept (teardown-in-flight, AC4/edge case).
+          let suggestedId;
+          try {
+            suggestedId = suggestFreeAgentId(id, isAgentIdTaken);
+          } catch { /* id-sequence-exhausted — omit the suggestion, not the refusal */ }
           res.writeHead(409, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: `Agent '${id}' already exists` }));
+          res.end(JSON.stringify({
+            error: `Agent '${id}' already exists — choose a different id.`,
+            code: 'id-conflict',
+            agentId: id,
+            ...(suggestedId ? { suggestedId } : {}),
+          }));
           return;
         }
 

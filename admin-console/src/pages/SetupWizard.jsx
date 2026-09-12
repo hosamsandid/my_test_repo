@@ -12,6 +12,7 @@ import { buildLlmProviderPayload, canSaveLlmProvider } from './setup-wizard-payl
 import { useHelperChat } from '../context/HelperChatContext.jsx';
 import { resolveHelpContext, OVERLAY_SETUP_WIZARD } from '../context/page-help-view.js';
 import { SafeMarkdown, ensureAgentChatMdCss } from './agent-chat/Message.jsx';
+import ModeToggle from '../components/ModeToggle';
 
 /* ─── Shared button styles ─────────────────────────────────────── */
 
@@ -572,36 +573,6 @@ function PublicKeyReveal({ publicKey }) {
   );
 }
 
-function ModeTabs({ mode, onChange }) {
-  const tab = (id, label, Icon) => {
-    const active = mode === id;
-    return (
-      <button
-        type="button"
-        onClick={() => onChange(id)}
-        style={{
-          display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
-          padding: 'var(--eb-space-2) var(--eb-space-3)',
-          background: active ? 'var(--eb-bg-elevated)' : 'transparent',
-          border: '1px solid var(--eb-border-default)',
-          borderRadius: 'var(--eb-radius-md)',
-          color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
-          fontSize: 'var(--eb-text-sm)', fontWeight: active ? 'var(--eb-font-medium)' : 'normal',
-          cursor: 'pointer', fontFamily: 'inherit',
-        }}
-      >
-        <Icon size={13} /> {label}
-      </button>
-    );
-  };
-  return (
-    <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-      {tab('generate', 'Generate new keypair', KeyRound)}
-      {tab('paste', 'Paste existing key', ClipboardPaste)}
-    </div>
-  );
-}
-
 function StepSshKey({ onNext, onSkip }) {
   const [mode, setMode]           = useState('generate');
   const [name, setName]           = useState('');
@@ -654,7 +625,17 @@ function StepSshKey({ onNext, onSkip }) {
 
       <ErrorBanner msg={error} />
 
-      {!saved && <ModeTabs mode={mode} onChange={setMode} />}
+      {!saved && (
+        <ModeToggle
+          value={mode}
+          onChange={setMode}
+          question="Choose how you'd like to add a key:"
+          options={[
+            { id: 'generate', label: 'Generate new keypair', icon: KeyRound },
+            { id: 'paste', label: 'Paste existing key', icon: ClipboardPaste },
+          ]}
+        />
+      )}
 
       {!saved && mode === 'generate' && (
         <>

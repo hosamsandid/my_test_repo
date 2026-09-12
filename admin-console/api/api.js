@@ -126,7 +126,7 @@ const { validateTeamProviderAvailability } = require('./team-provider-check');
 const { buildAgentStatus, statusCacheFresh } = require('./agent-statuses');
 const { admitsToChatList } = require('./matrix-agent-list');
 const { parseMemberMaterialize } = require('./member-materialize');
-const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentId } = require('./quickstart-llm');
+const { quickstartLlmSystemPrompt, validateQuickstartLlmInput, llmEnvId, llmAgentBaseId } = require('./quickstart-llm');
 const { validatePluginManifest } = require('./plugin-manifest');
 // Agent toolchain registry (#1940) — the pure validator/resolver, byte-identical
 // to orchestrator/toolchain-registry.js. The console owns the WRITE side (a
@@ -14242,12 +14242,12 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
     ? null
     : 'No LLM endpoint is registered. Register one under "LLM Endpoints" and bind it to the environment before chatting — otherwise the agent will fail on its first message.';
 
+  // #2217 — the base id is a derivation, not a choice the caller made, so a
+  // collision on it must never surface as an error. `autoId: true` hands the
+  // base to the orchestrator, which resolves the first free id AND reserves
+  // it atomically (no TOCTOU gap between this request and the reservation) —
+  // the id actually used comes back on the response, never guessed here.
   const baseAgentId = `${slugifyRepoSegment(repo)}-agent` || 'repo-agent';
-  let agentId = baseAgentId;
-  let agentSuffix = 2;
-  while (fs.existsSync(path.join(AGENTS_DIR, agentId))) {
-    agentId = `${baseAgentId}-${agentSuffix++}`;
-  }
   const displayName = `${repo} Agent`;
   const systemPrompt = quickstartSystemPrompt(org, repo);
 
@@ -14257,7 +14257,8 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        id: agentId,
+        id: baseAgentId,
+        autoId: true,
         displayName,
         role: 'agent',
         systemPrompt,
@@ -14271,6 +14272,7 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
   } catch (err) {
     return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
   }
+  const agentId = agentResp.id || baseAgentId;
 
   res.status(201).json({
     reused: false,
@@ -14319,7 +14321,11 @@ app.post('/api/quickstart/llm', heavyLimiter, async (req, res) => {
   };
   saveEnvironment(envId, env);
 
-  const agentId = llmAgentId(name, id => fs.existsSync(path.join(AGENTS_DIR, id)));
+  // #2217 — same fast lane as the repository path above: hand the base id to
+  // the orchestrator with `autoId: true` rather than guessing a free one here
+  // (a console-side advisory check racing the orchestrator's own is exactly
+  // the divergence that produced the unactionable 409 this ticket closes).
+  const baseAgentId = llmAgentBaseId(name);
   const systemPrompt = quickstartLlmSystemPrompt(name);
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
 
@@ -14329,7 +14335,8 @@ app.post('/api/quickstart/llm', heavyLimiter, async (req, res) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        id: agentId,
+        id: baseAgentId,
+        autoId: true,
         displayName: name,
         role: 'agent',
         systemPrompt,
@@ -14343,6 +14350,7 @@ app.post('/api/quickstart/llm', heavyLimiter, async (req, res) => {
   } catch (err) {
     return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
   }
+  const agentId = agentResp.id || baseAgentId;
 
   res.status(201).json({
     reused: false,

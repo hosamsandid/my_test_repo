@@ -335,8 +335,10 @@ const GroupSection = React.memo(function GroupSection({
   const stubs = group.stubs || [];
   // Stubs count towards the header's total (#1957): they are members of this
   // team, and a team whose members are *all* stubs would otherwise announce
-  // itself with a `0` next to a section listing several names.
-  const count = group.children.length + stubs.length + (group.header ? 1 : 0);
+  // itself with a `0` next to a section listing several names. The team
+  // `group.header` row itself is the template, not a member (it hosts no chat),
+  // so it is deliberately NOT counted here (#2216).
+  const count = group.children.length + stubs.length;
   const memberScope = `members:${groupDragKey}`;
   const memberDragEnabled = memberReorder && group.children.length > 1;
   const handleToggle = useCallback(() => onToggle(group), [onToggle, group]);
@@ -377,16 +379,15 @@ const GroupSection = React.memo(function GroupSection({
         dragEnabled={dragEnabled}
         onRequestMenu={headerMenu}
       />
-      {!collapsed && group.header && (
-        <AgentRow
-          agent={group.header}
-          selected={group.header.id === selectedAgentId}
-          onSelect={onSelect}
-          activityState={statuses[group.header.id] || 'idle'}
-          environmentName={rowEnvironmentName(group.header, groupEnv)}
-          onRequestMenu={onRequestMenu}
-        />
-      )}
+      {/*
+       * The team's `group.header` (`role: 'team'`) is NOT rendered as a member
+       * row (#2216). It is a tokenless template that hosts no chat of its own,
+       * and the CollapsibleHeader above IS its interactive row: clicking it
+       * selects the team and opens Settings (#2213), and it carries the team
+       * kebab menu. Rendering it a second time as an AgentRow only duplicated
+       * the team (a redundant, mislabeled "DISABLED" row) — a leftover from the
+       * pre-#1964 model where a group header was a chat-openable orchestrator.
+       */}
       {!collapsed && group.children.map((agent) => (
         <AgentRow
           key={agent.id}

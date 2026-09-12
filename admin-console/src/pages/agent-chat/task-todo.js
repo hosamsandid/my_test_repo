@@ -22,6 +22,11 @@
 const TASK_WRITE_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite']);
 const TASK_READ_TOOLS = new Set(['TaskList', 'TaskGet']);
 
+// Shown in place of a blank row when a TaskUpdate lands on an id whose
+// TaskCreate fell outside the current fold window (#2203) — a status-only
+// update (the realistic shape) never has a subject to fill the gap with.
+const UNKNOWN_CONTENT_PLACEHOLDER = '(task created earlier in this session)';
+
 /** True for any of the current task-tracking tools (writes and reads) plus the
  *  legacy `TodoWrite`, so the Session Log renders them as rich TODO entries. */
 export function isTaskTool(tool) {
@@ -105,13 +110,19 @@ export function applyTaskOp(state, tool, input) {
     if (!task) {
       // Update for an id we never saw created (diverged numbering, missed
       // event, resumed session): create a stub so the update still shows.
-      task = { content: '', activeForm: '', status: 'pending' };
+      // `contentUnknown` distinguishes this from a legitimately empty
+      // content and drives the placeholder `snapshotTasks` renders instead
+      // of a blank row (#2203) — it clears the moment real content arrives.
+      task = { content: '', activeForm: '', status: 'pending', contentUnknown: true };
       state.byId.set(id, task);
       state.order.push(id);
       const n = Number(id);
       if (Number.isFinite(n) && n > state.seq) state.seq = n;
     }
-    if (typeof input.subject === 'string' && input.subject.length > 0) task.content = input.subject;
+    if (typeof input.subject === 'string' && input.subject.length > 0) {
+      task.content = input.subject;
+      task.contentUnknown = false;
+    }
     if (input.activeForm != null) task.activeForm = str(input.activeForm);
     if (typeof input.status === 'string' && input.status.length > 0) task.status = input.status;
     return true;
@@ -125,7 +136,8 @@ export function applyTaskOp(state, tool, input) {
 export function snapshotTasks(state) {
   return state.order.map((id) => {
     const t = state.byId.get(id);
-    return { content: t.content, activeForm: t.activeForm, status: t.status };
+    const content = t.contentUnknown && !t.content ? UNKNOWN_CONTENT_PLACEHOLDER : t.content;
+    return { content, activeForm: t.activeForm, status: t.status };
   });
 }
 

@@ -7,7 +7,7 @@
 // #1940 that was a single process-wide value (`AGENT_IMAGE`, default
 // `as-agent:latest`) read inside both spawn implementations, so giving one team
 // a JVM toolchain meant moving EVERY agent of the installation onto that image.
-// A Working Environment may now name a **toolchain**; agents bound to it are
+// An environment may now name a **toolchain**; agents bound to it are
 // spawned from that toolchain's image and everything else keeps using
 // `AGENT_IMAGE` byte-identically.
 //
@@ -408,9 +408,9 @@ function resolveAgentImage(opts) {
     return {
       error: 'toolchain-not-registered',
       message:
-        `Working Environment ${envLabel(environmentId, environmentName)} selects toolchain '${wanted}', ` +
+        `Environment ${envLabel(environmentId, environmentName)} selects toolchain '${wanted}', ` +
         'which is not in the operator toolchain registry. A System Admin must register it ' +
-        '(Working Environments → Toolchains), or clear the toolchain on the environment to ' +
+        '(Environment Templates → Toolchains), or clear the toolchain on the environment to ' +
         `fall back to the default image '${fallback}'.`,
     };
   }
@@ -419,7 +419,7 @@ function resolveAgentImage(opts) {
     return {
       error: 'toolchain-platform-mismatch',
       message:
-        `Working Environment ${envLabel(environmentId, environmentName)} selects toolchain '${toolchain.id}' ` +
+        `Environment ${envLabel(environmentId, environmentName)} selects toolchain '${toolchain.id}' ` +
         `(${toolchain.name}), which declares platforms [${toolchain.platforms.join(', ')}] and so is not ` +
         `available on the '${rt}' runtime this installation uses.`,
     };
@@ -443,7 +443,7 @@ function missingImageMessage(opts) {
     : 'is not present in the local image store (build it with `make toolchain-images`, or pull it)';
   const tc = String(toolchainId || '').trim();
   return (
-    `Working Environment ${envLabel(environmentId, environmentName)} selects toolchain ` +
+    `Environment ${envLabel(environmentId, environmentName)} selects toolchain ` +
     `'${tc || '<unknown>'}', whose image '${image}' ${where}. ` +
     'Refusing to spawn the agent — falling back to the default image would start it without ' +
     'its toolchain and fail later at the first build command.'

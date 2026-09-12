@@ -6,7 +6,7 @@ summary: A quick tour of the core concepts — the home base of the Help panel.
 seeAlso:
   - { label: "Administration", to: "/users" }
   - { label: "Flows", to: "/flows" }
-  - { label: "Working Environments", to: "/environments" }
+  - { label: "Environment Templates", to: "/environment-templates" }
   - { label: "Knowledge", to: "/knowledge" }
   - { label: "Model Providers", to: "/models" }
   - { label: "Agent Chat", to: "/chats" }
@@ -41,8 +41,10 @@ big picture.
 - **Flows** — the wiring diagram of a team: which agent starts the work, how
   outcomes and labels hand off between agents, and where a human approves or
   receives the result. Design it visually, then materialise it into a live team.
-- **Working Environments** — where an agent runs and which repository it clones,
-  together with the credentials (SSH key or GitHub token) it uses.
+- **Environment** — where a team's agents run and which repository they
+  clone, together with the credentials (SSH key or GitHub token) they use. A
+  team edits its own from its **Settings** tab in Agent Chat; a System Admin
+  curates reusable **Environment Templates** a new team can start from.
 - **Knowledge** — the team-shared memory: durable facts, entities and
   conventions any agent can learn from. The best lessons distil into **Skills**.
 - **Model Providers** — connect the platform to the LLMs your agents run on (for

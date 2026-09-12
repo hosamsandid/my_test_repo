@@ -65,7 +65,7 @@ const AgentChat           = lazy(() => import('./pages/AgentChat'));
 const QuickStart          = lazy(() => import('./pages/QuickStart'));
 const Create              = lazy(() => import('./pages/Create'));
 const TeamSetup           = lazy(() => import('./pages/TeamSetup'));
-const WorkingEnvironments = lazy(() => import('./pages/WorkingEnvironments'));
+const EnvironmentTemplates  = lazy(() => import('./pages/EnvironmentTemplates'));
 const SshKeys             = lazy(() => import('./pages/SshKeys'));
 const GithubTokens        = lazy(() => import('./pages/GithubTokens'));
 const MyCredentials       = lazy(() => import('./pages/MyCredentials'));
@@ -171,7 +171,15 @@ export default function App() {
           <Route path="/quickstart"   element={<QuickStart />} />
           <Route path="/team-setup"   element={<TeamSetupRoute />} />
           <Route path="/wizard/team"  element={<TeamSetupRoute />} />
-          <Route path="/environments" element={<WorkingEnvironments />} />
+          {/* The general-purpose Working Environments page was removed (#2170,
+              epic #2166 A4): a team now edits its own environment from the
+              Agent Chat Settings tab (A1), and the general list an ordinary
+              user could browse has no successor a redirect can usefully point
+              at — so, like /agents → /chats (#1930), it lands on the app home. */}
+          <Route path="/environments" element={<Navigate to="/chats" replace />} />
+          {/* System-Admin curated copy-source catalog that replaced the other
+              half of the old page (curating a shared environment). */}
+          <Route path="/environment-templates" element={<AdminRoute><EnvironmentTemplates /></AdminRoute>} />
           <Route path="/ssh-keys"     element={<CredentialRoute><SshKeys /></CredentialRoute>} />
           <Route path="/github-tokens" element={<CredentialRoute><GithubTokens /></CredentialRoute>} />
           {/* Self-service personal credentials (#1568) — open to any authenticated

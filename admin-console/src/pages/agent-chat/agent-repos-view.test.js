@@ -64,7 +64,7 @@ test('AC8: only the agent-scoped row is removable, and the inherited one says wh
   const rows = repositoryRows(VIEW);
   assert.equal(rows[0].removable, false);
   assert.equal(rows[1].removable, true);
-  assert.match(INHERITED_ROW_NOTE, /Working Environment/);
+  assert.match(INHERITED_ROW_NOTE, /environment/i);
 });
 
 test('the clone path is rendered in the same form the agent prompt uses', () => {
@@ -224,5 +224,5 @@ test('the detach notice reports which of the three things actually happened', ()
 
 test('the empty state distinguishes "no repositories" from "none of your own"', () => {
   assert.match(emptyStateText({ repositories: [] }), /declares none/);
-  assert.match(emptyStateText({ repositories: [VIEW.repositories[0]] }), /comes from its\s+Working Environment/);
+  assert.match(emptyStateText({ repositories: [VIEW.repositories[0]] }), /comes from its\s+environment/);
 });

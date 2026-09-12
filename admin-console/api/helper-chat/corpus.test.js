@@ -103,13 +103,15 @@ test('the WORST assembled prompt the mechanism can produce is below the char lim
 });
 
 test('a route with a topic grounds on that topic and its seeAlso neighbours only', () => {
-  // /models links to /environments, /chats and /token-usage — and to nothing
-  // else, so the unrelated topics must be absent (AC1). The middle link was
-  // /agents until #1930 removed that page and its topic.
+  // /models links to /environment-templates, /chats and /token-usage — and to
+  // nothing else, so the unrelated topics must be absent (AC1). The middle
+  // link was /agents until #1930 removed that page and its topic; the first
+  // was /environments until #2170 retired that page in favour of the
+  // Environment Templates catalog.
   const prompt = buildSystemPrompt('Model Providers', '/models');
   const registry = helpRegistry.loadRegistry();
   const included = helpRegistry.contextTopics(registry, '/models').map(t => t.id);
-  assert.deepEqual(included, ['models', 'environments', 'agent-chat', 'token-usage']);
+  assert.deepEqual(included, ['models', 'environment-templates', 'agent-chat', 'token-usage']);
   // Assert inside the help-topics block: a topic *title* can legitimately also be
   // a heading in the docs corpus (which is unchanged and always folded in full),
   // so scanning the whole prompt would report a false presence.

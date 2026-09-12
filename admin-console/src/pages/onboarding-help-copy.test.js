@@ -205,7 +205,7 @@ test('the wizard step intros no longer restate what the wizard builds', () => {
   // What remains on each step is the line that guides its own input. #2168 A2
   // reworded this from a required pick to an optional reuse (no UI path may
   // force naming or picking an environment before a team exists).
-  assert.match(wizard, /Optionally reuse an existing <strong[^>]*>Working Environment<\/strong>/);
+  assert.match(wizard, /Optionally reuse an existing <strong[^>]*>Environment<\/strong>/);
   assert.match(wizard, /This step is optional/);
 });
 

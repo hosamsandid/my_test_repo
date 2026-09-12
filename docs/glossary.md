@@ -19,7 +19,7 @@ newcomer misreads at least one of them.
 | **Team** | **Access scope** — the older, coarser tenant every resource is *stamped* with. A System Admin re-assigns it on **Administration → Resources**; no new one can be minted. | **Agent Team** — a squad of *agents* working one repository (agent `role: team` + its members), created by the **Team-Setup wizard**. This is what a person is given access to, and what **Share…** shares. |
 | **Orchestrator** | **Orchestrator** (service) — the control-plane container that spawns and supervises every agent container. There is exactly one. | **Orchestrator** (agent role) — an agent bound to a Briefing-Pack directory that spawns one `bp-instance` per pack. |
 | **Memory** | **Memory** (per agent) — the private files an agent reads and writes about *its own* work and *its* user. Never shared. | **Knowledge** (per team) — the curated, shared, searchable knowledge base a whole team draws on. |
-| **Skill** | **Skill** (the files) — a folder of domain know-how in the skill pool. | **Skill grant** (the assignment) — which agent construct is actually allowed to use it. The grant lives on the *team agent*, never on a Working Environment. |
+| **Skill** | **Skill** (the files) — a folder of domain know-how in the skill pool. | **Skill grant** (the assignment) — which agent construct is actually allowed to use it. The grant lives on the *team agent*, never on an environment. |
 
 And three names for one product — see [What is this thing called?](#what-is-this-thing-called) at the end.
 
@@ -49,18 +49,20 @@ What kind of agent this is. Five values:
 
 *Read more:* [agent-roles.md](agent-roles.md)
 
-### Working Environment
+### Environment
 A reusable **workspace recipe**: which git repository to clone, which SSH key and GitHub
 token to use for it, which MCP knowledge sources to connect, and what extra context to
 append to the agent's prompt. Point several agents at one environment and they all start
 from the same footing.
 
-> **Common misconception:** a Working Environment does **not** carry skills. Skills are
+> **Common misconception:** an environment does **not** carry skills. Skills are
 > granted on the agent construct (the team agent, or a standalone agent), not on the
 > environment. This moved deliberately; if you find an older doc that says otherwise, the
 > doc is stale.
 
-*Where you meet it:* the **Working Environments** page; step 2 of the Team-Setup wizard.
+*Where you meet it:* a team's own **Settings** tab in Agent Chat; the System-Admin
+**Environment Templates** catalog (`/environment-templates`, #2170); step 2 of the Team-Setup
+wizard.
 *Read more:* [working-environments.md](working-environments.md)
 
 ### Workspace
@@ -242,7 +244,7 @@ because one member is not dozens — so a stub can also be created long after it
 ## People, access, credentials
 
 ### Team (human)
-The tenant. Every agent, Working Environment and credential belongs to exactly one
+The tenant. Every agent, environment and credential belongs to exactly one
 tenant, and it is the tenant that scopes who can see and manage what. Roles:
 **System Admin** (global), **Team Admin**, **Team Member** — the latter two being
 memberships in an **Agent Team** since epic #2076, which is what makes sharing
@@ -276,7 +278,7 @@ PRs, and a leaked token was not what granted repository access in the first plac
 Skills are static files; **MCP servers** are how an agent queries something live — a
 wiki, a vector store, a graph database. The *catalog* (which servers exist) and the
 *credentials* (the tokens to reach them) are stored separately, so a token can be rotated
-without touching the catalog. A Working Environment binds the two together per agent.
+without touching the catalog. An environment binds the two together per agent.
 
 *Read more:* [mcp-servers.md](mcp-servers.md)
 

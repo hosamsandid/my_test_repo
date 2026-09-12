@@ -52,15 +52,15 @@ identity & credentials; **B1 is its root** (B2/B3 depend on it, B4 on B3, B5 las
   - [ ] A1 — Team edit form carries the environment fields (tabs)
   - [x] A2 — Reverse creation order: team-first, no standalone environment creation (#2168)
   - [x] A3 — Derive infrastructure visibility from the team; remove the ownership/team picker (#2195)
-  - [ ] A4 — Remove the Working Environments page; add a Sysadmin template catalog (redirects #2158)
-  - [ ] A5 — Team clone copies structure only, prompts for credentials
+  - [x] A4 — Remove the Working Environments page; add a Sysadmin template catalog (redirects #2158) (#2207)
+  - [x] A5 — Team clone copies structure only, prompts for credentials (#2171)
   - [ ] A6 — Terminology sweep: "Working Environment" out of the frontend, help, copilot
 - **B — Identity & person-bound credentials**
   - [x] B1 — Humans post under their own Matrix identity into the shared per-agent room (#2173)
-  - [ ] B2 — Sharing a team invites the human into the team's agent rooms
+  - [x] B2 — Sharing a team invites the human into the team's agent rooms (#2174)
   - [x] B3 — Thread the acting sender into credential resolution (re-key off the sender, #2175)
   - [x] B4 — Team-admin baseline for non-interactive work; just-in-time refusal for writes (#2176)
-  - [ ] B5 — Retire the shared team credential; personal is the norm
+  - [x] B5 — Retire the shared team credential; personal is the norm (#2177)
 - **C — Cross-cutting (schedule anywhere)**
   - [ ] C1 — Move skill promote-to-global and plugin-apply to Team Admin
   - [x] C2 — Guide provider onboarding; block team-create without a provider (#2179)

@@ -37,7 +37,7 @@ function stripComments(src) {
 }
 
 const panel = () => stripComments(read('TeamEnvironmentPanel.jsx'));
-const envPage = () => stripComments(read('../WorkingEnvironments.jsx'));
+const envPage = () => stripComments(read('../EnvironmentTemplates.jsx'));
 const editForm = () => stripComments(read('../agent-lifecycle/AgentEditForm.jsx'));
 
 test('the team panel and the Working Environments form render the same shared RepositoryCard', () => {
@@ -82,7 +82,7 @@ test('the team panel saves through PUT /api/environments/:id, not the agent rout
 test('AgentEditForm renders the team environment panel only for a team agent', () => {
   const src = editForm();
   assert.match(src, /import TeamEnvironmentPanel from '\.\.\/agent-chat\/TeamEnvironmentPanel'/);
-  assert.match(src, /agent\.role === 'team' && \(\s*<div>\s*<div style=\{labelStyle\}>Working Environment<\/div>/);
+  assert.match(src, /agent\.role === 'team' && \(\s*<div>\s*<div style=\{labelStyle\}>Environment<\/div>/);
   assert.match(src, /<TeamEnvironmentPanel agent=\{agent\} \/>/);
 });
 

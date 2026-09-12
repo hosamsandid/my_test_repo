@@ -6,7 +6,7 @@ summary: A read-only timeline of every GitHub event the platform saw and what ha
 seeAlso:
   - { label: "Flows", to: "/flows" }
   - { label: "Agent Chat", to: "/chats" }
-  - { label: "Working Environments", to: "/environments" }
+  - { label: "Environment Templates", to: "/environment-templates" }
   - { label: "Maintenance Mode", to: "/maintenance-mode" }
 askPrompts:
   - "What is the difference between Processed events and the Pending queue?"
@@ -176,7 +176,7 @@ Work down the row, in this order:
 
 A repository is polled only if **both** are true:
 
-- some Working Environment carries a **GitHub token** for it, and
+- some environment carries a **GitHub token** for it, and
 - at least one **enabled** agent has an **enabled** `github-event` trigger on it.
 
 A repository nobody subscribes to, or one whose only subscriber is a disabled

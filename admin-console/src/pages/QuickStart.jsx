@@ -429,7 +429,7 @@ export default function QuickStart() {
                   {result.reused ? 'Agent reused' : 'Agent created'}: {result.agent.displayName}
                 </div>
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 2 }}>
-                  Working Environment: {result.environment.name}
+                  Environment: {result.environment.name}
                   {result.environment.reused ? ' (reused)' : ' (new)'} · redirecting to chat …
                 </div>
                 {result.llmWarning && (

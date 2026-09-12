@@ -267,8 +267,8 @@ This builds the per-agent container image (`as-agent:latest`) and starts all ser
 Open <http://localhost:4000> in your browser. Log in with the credentials from your `.env` (`ADMIN_USERNAME` / `ADMIN_PASSWORD`, default `admin` / `admin` for local use).
 
 From here you can:
-- Create **Working Environments** — shared workspace recipes that define skills, repos, SSH keys, and MCP servers for a group of agents
-- Create **Agents** and **Teams** — the orchestrator spawns one Podman container per agent, lifecycle-managed via the Admin Console
+- Create **Agents** and **Teams** — the orchestrator spawns one Podman container per agent, lifecycle-managed via the Admin Console; each team gets its own **Working Environment** (repos, SSH keys, MCP servers, model provider), edited from its Agent Chat **Settings** tab
+- As a System Admin, curate the **Environment Templates** catalog — ready-made environments a new team can start from
 - Chat with agents via the embedded chat UI at `/chats/:agentId`
 - Browse agent workspaces, session logs, and triggers in the right rail
 

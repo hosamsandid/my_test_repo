@@ -34,6 +34,11 @@ export const AGENT_CHAT_HELP_SECTIONS = {
   settings: 'settings-configuring-the-agent',
   // 7 — sharing a team (#2082): who may open it, and who may change it
   shareTeam: 'sharing-a-team-who-can-open-it-and-who-can-change-it',
+  // 8 — the team's Working Environment section, and its save-time propagation
+  // offer (#2170, folded in from the retired environments.md/Working
+  // Environments page). Sub-sections of Settings — configuring the agent.
+  teamEnvironment: 'the-team-s-environment-section-in-detail',
+  bringingAgentsUpToDate: 'bringing-existing-agents-up-to-date',
 };
 
 export default AGENT_CHAT_HELP_SECTIONS;

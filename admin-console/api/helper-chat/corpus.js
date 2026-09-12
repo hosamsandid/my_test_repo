@@ -151,6 +151,29 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // #2138's orphaned-credential refusal added the last +1 179, mostly through the
 // corpus-vendored `credentials.md` — which counts on every context, this crown
 // included — plus the `/my-credentials`+`/github-tokens`+`/ssh-keys` help topic.)
+//
+// **#2170 SHRANK the crown instead of growing it — a rare direction for this
+// number to move.** Removing the Working Environments page retired the
+// `/environments` help topic (`environments.md`, 349 lines) outright rather
+// than folding it whole into a survivor: the material describing a still-live
+// surface (repositories, credentials, MCP references, the propagation dialog)
+// moved into the existing `agent-chat.md` (+61 net lines, since it now also
+// hosts the Working-Environment-section chapter), and the System-Admin-only
+// half (Toolchains) moved into a new, small `environment-templates.md` (76
+// lines) — which is NOT on `/quickstart`'s `seeAlso` chain (only System Admins
+// reach it, from Administration), so it does not fold into this crown at all.
+// Net effect measured on the merge (overlaid onto post-#2204/#2206 `main`,
+// since this branch was 12 commits behind at review time): the PR's own
+// stamp read **314 890 of 340 000 — 92.6% used, 25 110 left**, but
+// `measureWorstCaseSystemPrompt()` on the actual post-merge tree
+// (commit 36aebb4d4, /quickstart) returns **315 448** — the overlay
+// estimate undercounted by 558 chars, not caught by `corpus.test.js`
+// (which only asserts `< 340 000`). Re-stamped here to the verified figure:
+// **315 448 of 340 000 — 92.8% used, 24 552 left**, down from the
+// last-stamped 324 900. Reconciled here + the CLAUDE.md #1872 paragraph +
+// `context-help-system-concept.md` §9 — the lesson: an "overlaid onto main"
+// estimate is still an estimate; re-measure on the real merge commit before
+// stamping, the same rule that already applies to a branch's own self-report.
 // #2195 (A3 of epic #2166) removed the ownership/team picker from the
 // Working Environments and MCP Servers forms — the corpus-vendored
 // `working-environments.md` table row correcting to "derived from the team,
@@ -276,6 +299,26 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // Re-measure rather than trust this comment —
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.
+// #2172 (epic #2166 A6, terminology sweep) swept the phrase "Working
+// Environment" out of every user-facing string and help surface, replacing it
+// with the shorter "environment"/"an environment" throughout — every
+// CORPUS_FILES doc it touched got a few characters shorter, not longer, since
+// the change is a word removal, not new material. Measured on this branch:
+// `/quickstart` went 316 087 → **315 387** (92.8%, 24 613 left). No topic's
+// `seeAlso` chain changed and no chapter heading the deep-link mechanism
+// depends on was renamed (only body prose and the two H3 sub-headings under
+// `agent-chat.md`'s "Settings — configuring the agent" chapter, which the
+// `##`-only chapter guard does not read), so the crown-holding context is
+// unchanged from the prior stamp.
+//
+// #2177 (epic #2166 B5) rewired the container's own spawn-time credential bake
+// to prefer the team-admin's personal GitHub token/SSH key, correcting the
+// corpus-vendored `docs/credentials.md` (every context) and the multi-route
+// `credentials` help topic (`/ssh-keys`, `/github-tokens`, `/my-credentials` —
+// all three `create.md` `seeAlso` neighbours, so the growth lands on this crown
+// in full). Pre-edit `/quickstart` measured exactly the last-stamped 315 387 (no
+// unrelated drift this cycle); post-edit **318 054 of 340 000 — 93.5% used,
+// 21 946 left**, a clean +2 667 attributable entirely to this change.
 //
 // If this ever gets tight again, the next structural step is the docs corpus
 // (route-scoped `CORPUS_FILES`, or splitting the two largest docs), NOT a fourth

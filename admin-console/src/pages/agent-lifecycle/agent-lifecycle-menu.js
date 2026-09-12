@@ -70,8 +70,8 @@ const EXPORTABLE_ROLES = new Set(['agent', 'team-member', 'team']);
 // ALONE: a `team` already is one, a `team-member` already belongs to one, and
 // there is no reverse conversion, so a near-miss here is not a cosmetic bug.
 // `expert` is the pre-#1961 name the orchestrator normalizes to `agent` on
-// startup, listed for the same reason `findStandaloneAgentForEnv` still accepts
-// it — a list entry read before that normalization has landed.
+// startup, listed so a config read before that normalization has landed still
+// offers the entry.
 const CONVERTIBLE_ROLES = new Set(['agent', 'expert']);
 
 /**
@@ -276,6 +276,12 @@ export function buildTeamMenu({
     title: canManageMembers ? MEMBERS_MANAGE_HINT : MEMBERS_READ_ONLY_HINT,
   });
   items.push({ key: 'export-team', label: 'Export team (ZIP)', disabled: false });
+  // Clone team (#2171, epic #2166 A5): a new, independent team with this
+  // one's structure — repositories, MCP refs, toolchain, context — and none
+  // of its credentials. Ungated like Export team: it reads the source team's
+  // structure (never a secret) and creates a wholly separate team, so it
+  // needs no more right over the source than any other visible row has.
+  items.push({ key: 'clone-team', label: 'Clone team…', disabled: busy });
   items.push({ key: 'open-flow-editor', label: 'Open in Flow Editor', disabled: false });
   items.push({ key: 'delete-team', label: 'Delete team…', danger: true, ...gate(false) });
 
@@ -286,9 +292,14 @@ export function buildTeamMenu({
  * A disabled agent cannot be chatted with — the DM-room route rejects it with a
  * 409 (`Agent disabled`). With the disabled filter on, such a row is listed but
  * must not open a chat (AC6); the row's own Enable entry is the way forward.
+ *
+ * A `role: 'team'` agent hosts no chat/session of its own either (#2213) — it
+ * has no `dmRoomId`, so selecting it must not attempt to open one against a
+ * null room. Its row instead moves the selection onto the team and opens the
+ * Settings tab (see `AgentList.jsx`'s `CollapsibleHeader`).
  */
 export function isChatOpenable(agent) {
-  return !!agent && agent.enabled !== false;
+  return !!agent && agent.enabled !== false && agent.role !== 'team';
 }
 
 /**

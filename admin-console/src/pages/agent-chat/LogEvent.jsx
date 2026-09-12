@@ -1,14 +1,15 @@
 import React, { useState, memo } from 'react';
 import {
   MessageCircle, Sparkles, Wrench, CheckCircle2, AlertTriangle, Brain,
-  Send, ArrowDown, Cpu, Clock, Settings2, ChevronRight, Repeat,
+  Send, ArrowDown, Cpu, Clock, Settings2, ChevronRight, Repeat, Gauge,
 } from 'lucide-react';
-import ToolBlock from './ToolBlock';
+import ToolBlock, { ValueRows } from './ToolBlock';
 import {
   systemEventSummary, systemEventHasDetail,
   isTaskEvent, taskEventSummary, taskUpdatedPatchRows,
   taskNotificationSummary, formatOutputFileRef,
 } from './system-event.js';
+import { rateLimitEventSummary, rateLimitEventDetailRows } from './rate-limit-event.js';
 import { buildSystemInitView } from './system-init.js';
 import { isLoopFired, loopFiredLabel } from './loop-run-view.js';
 import { SafeMarkdown } from './Message';
@@ -62,6 +63,7 @@ function iconForType(type) {
     case 'parse_error':      return AlertTriangle;
     case 'system_init':      return Cpu;
     case 'system_event':     return Settings2;
+    case 'rate_limit_event': return Gauge;
     case 'trigger.fired':    return Clock;
     case '_truncated':       return AlertTriangle;
     default:                 return MessageCircle;
@@ -77,6 +79,7 @@ function colorForType(type) {
     case 'assistant_text':   return 'var(--eb-accent-primary)';
     case '_truncated':       return 'var(--eb-status-warning)';
     case 'system_event':     return 'var(--eb-text-muted)';
+    case 'rate_limit_event': return 'var(--eb-text-muted)';
     default:                 return 'var(--eb-text-secondary)';
   }
 }
@@ -179,6 +182,7 @@ function hasExpansion(ev) {
     case 'error':
     case 'unknown':
     case 'parse_error':
+    case 'rate_limit_event':
       return true;
     case 'system_event':
       // Expandable only when `raw` carries content beyond the subtype label.
@@ -403,6 +407,46 @@ function Body({ event, expanded }) {
           Log truncated — refreshed
         </div>
       );
+    case 'rate_limit_event': {
+      // #2202: a purpose-built render instead of the generic `unknown` bucket
+      // — a plain-language summary line up front, full field-by-field detail
+      // (including both raw epoch timestamps converted to local time) on
+      // expand, and the full raw payload below that for anyone who wants it —
+      // through the same `ValueRows` pretty key/value renderer #2197 gave
+      // every tool Input/Result fallback (#2204 review finding: this used to
+      // be a `JSON.stringify` escaped dump, exactly what AC4 asks to avoid).
+      const summary = rateLimitEventSummary(event);
+      const detailRows = rateLimitEventDetailRows(event);
+      const rawValue = event.raw ?? event;
+      return (
+        <div style={{ ...baseStyle, color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>
+          {summary || 'Rate limit event'}
+          {expanded && detailRows.length > 0 && (
+            <div style={{
+              marginTop: 4,
+              paddingLeft: 8,
+              display: 'grid',
+              gridTemplateColumns: 'auto 1fr',
+              columnGap: 8,
+              rowGap: 1,
+            }}>
+              {detailRows.map(([k, v]) => (
+                <React.Fragment key={k}>
+                  <span style={{ color: 'var(--eb-text-muted)' }}>{k}</span>
+                  <span style={{ color: 'var(--eb-text-secondary)', overflowWrap: 'anywhere' }}>{v}</span>
+                </React.Fragment>
+              ))}
+            </div>
+          )}
+          {expanded && rawValue != null && (
+            <div style={{ marginTop: 4, paddingLeft: 8 }}>
+              <div style={{ color: 'var(--eb-text-muted)' }}>raw:</div>
+              <ValueRows value={rawValue} />
+            </div>
+          )}
+        </div>
+      );
+    }
     case 'parse_error':
       return (
         <div style={{ ...baseStyle, color: 'var(--eb-status-error)' }}>

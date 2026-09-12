@@ -85,6 +85,7 @@ const CHECKS = {
   // ── tier-aware reads ──
   'env-list-is-tiered': (s) => /visibleEnvironment\(scope, e\)/.test(route(s, MARKERS.envList)),
   'env-list-has-no-bare-team-filter': (s) => !/visibleTeam\(scope, e\.teamId\)/.test(route(s, MARKERS.envList)),
+  'env-read-templates-bypass-tier-gate': (s) => has(route(s, MARKERS.envRead), 'if (!isTemplateEnvironment(env)) {'),
   'env-read-is-gated': (s) => /visibleEnvironment\(scope, env\)/.test(route(s, MARKERS.envRead)),
   'env-read-refusal-is-404': (s) => has(route(s, MARKERS.envRead), "!visibleEnvironment(scope, env)") && /res\.status\(404\)/.test(route(s, MARKERS.envRead)),
   'env-sync-is-tiered': (s) => /visibleEnvironment\(scope, env\)/.test(route(s, MARKERS.envSync)),
@@ -115,6 +116,12 @@ const CHECKS = {
   'env-update-still-gated': (s) => /canManageEnvironment\(envScope, env\)/.test(route(s, MARKERS.envUpdate)),
   'env-delete-still-gated': (s) => /canManageEnvironment\(getScope\(req\), env\)/.test(route(s, MARKERS.envDelete)),
   'env-sync-still-manage-gated': (s) => /canManageEnvironment\(scope, env\)/.test(route(s, MARKERS.envSync)),
+
+  // ── #2170: a template is a copy source, never a live-shared binding — the
+  //     ordinary list must exclude it regardless of tier, and the dedicated
+  //     `?isTemplate=true` catalog view must select it by the SAME predicate ──
+  'env-list-excludes-templates': (s) => has(route(s, MARKERS.envList), '!isTemplateEnvironment(e) && (visibleEnvironment(scope, e)'),
+  'env-list-templates-view-uses-isTemplateEnvironment': (s) => has(route(s, MARKERS.envList), '? isTemplateEnvironment(e)'),
 
   // ── #2158: global reachability composed at exactly the six read/visibility
   //     call sites, on top of (never instead of) the #2083 tier check ──
@@ -171,16 +178,28 @@ test('every tiered-resource route carries its gate', () => {
 
 const MUTATIONS = [
   {
-    why: 'the environment list falls back to the bare team filter (hides every shared AND every global env)',
-    from: '.filter(e => visibleEnvironment(scope, e) || isGlobalEnvironment(e))',
-    to: '.filter(e => visibleTeam(scope, e.teamId))',
-    expect: ['env-list-is-tiered', 'env-list-has-no-bare-team-filter', 'env-list-is-global-aware'],
+    why: 'the environment list falls back to the bare team filter (hides every shared AND every global env, and stops excluding templates)',
+    from: ': !isTemplateEnvironment(e) && (visibleEnvironment(scope, e) || isGlobalEnvironment(e)))',
+    to: ': visibleTeam(scope, e.teamId))',
+    expect: ['env-list-is-tiered', 'env-list-has-no-bare-team-filter', 'env-list-is-global-aware', 'env-list-excludes-templates'],
   },
   {
     why: 'the environment list forgets the global OR-clause (shared-but-tiered stays visible, global stops being reachable with no assignment)',
-    from: '.filter(e => visibleEnvironment(scope, e) || isGlobalEnvironment(e))',
-    to: '.filter(e => visibleEnvironment(scope, e))',
+    from: ': !isTemplateEnvironment(e) && (visibleEnvironment(scope, e) || isGlobalEnvironment(e)))',
+    to: ': !isTemplateEnvironment(e) && (visibleEnvironment(scope, e)))',
     expect: ['env-list-is-global-aware'],
+  },
+  {
+    why: 'the environment list stops excluding templates (a curated copy source leaks into every team/agent picker)',
+    from: ': !isTemplateEnvironment(e) && (visibleEnvironment(scope, e) || isGlobalEnvironment(e)))',
+    to: ': (visibleEnvironment(scope, e) || isGlobalEnvironment(e)))',
+    expect: ['env-list-excludes-templates'],
+  },
+  {
+    why: 'the ?isTemplate=true catalog view stops actually filtering to templates (returns every environment to any authenticated caller)',
+    from: '.filter(e => wantTemplates\n      ? isTemplateEnvironment(e)',
+    to: '.filter(e => wantTemplates\n      ? true',
+    expect: ['env-list-templates-view-uses-isTemplateEnvironment'],
   },
   {
     why: 'the MCP list falls back to the bare team filter',
@@ -231,10 +250,16 @@ const MUTATIONS = [
     expect: ['mcp-create-uses-canCreate'],
   },
   {
-    why: 'the environment read-one loses the gate §11.4 recorded as missing',
-    from: "if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env)) {\n    return res.status(404).json({ error: 'Environment not found' });\n  }\n  const agents = agentsUsingEnvironment(env.id, scope); // (#439)\n  res.json({ ...env, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, env) });",
-    to: "const agents = agentsUsingEnvironment(env.id, scope); // (#439)\n  res.json({ ...env, agents, agentCount: agents.length });",
+    why: 'the environment read-one loses the tier gate §11.4 recorded as missing (the template-bypass half is proven by the next mutation)',
+    from: "if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env) && agents.length === 0) {\n      return res.status(404).json({ error: 'Environment not found' });\n    }",
+    to: '',
     expect: ['env-read-is-gated', 'env-read-refusal-is-404', 'env-read-is-global-aware'],
+  },
+  {
+    why: 'the environment read-one stops admitting a template regardless of tier (a curated catalog entry becomes unreadable by an ordinary team-creation picker)',
+    from: 'if (!isTemplateEnvironment(env)) {',
+    to: 'if (false) {',
+    expect: ['env-read-templates-bypass-tier-gate'],
   },
   {
     why: 'the environment update reintroduces the || default collapse (§8.4)',
@@ -244,8 +269,8 @@ const MUTATIONS = [
   },
   {
     why: 'a global environment create no longer forces the system-with-no-teams shape, so a client-sent team tier survives alongside global:true',
-    from: "if (globalFlag.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };\n\n  // Config-write authorization",
-    to: '  // Config-write authorization',
+    from: "if (globalFlag.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };\n\n  // #2170: the `isTemplate` flag",
+    to: '  // #2170: the `isTemplate` flag',
     expect: ['env-create-forces-system-tier-when-global'],
   },
   {

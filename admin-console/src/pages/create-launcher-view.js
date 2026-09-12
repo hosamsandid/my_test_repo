@@ -189,7 +189,7 @@ const CREATE_ENTRIES = [
     // I want" path, and someone who reaches for it already knows the word. It
     // was the tile that *sounded* simplest while being the specialist form, so
     // #2027 moved it behind the disclosure and renamed it after what it costs.
-    description: 'Set the id, role, Working Environment and system prompt yourself. For specialists who want full control.',
+    description: 'Set the id, role, environment and system prompt yourself. For specialists who want full control.',
     outcome: '→ Opens the agent editor',
     // No `preview` (#2034): this is the deliberate specialist path, and someone
     // who opens the disclosure to reach it does not need to be shown a form.

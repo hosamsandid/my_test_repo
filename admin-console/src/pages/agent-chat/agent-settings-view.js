@@ -24,9 +24,10 @@
  * Which agent the Settings tab is for, and whether the tab exists at all.
  *
  * An explicit override always wins and is always visible: it only ever arrives
- * from a rail menu entry that is itself gated on `canManage`, and the server
- * re-checks on the PUT regardless. Without one, the tab follows the open chat
- * and disappears for a caller who may not manage that agent.
+ * from a rail menu entry or a team header-row click (#2213), both gated on
+ * `canManage` before they set it, and the server re-checks on the PUT
+ * regardless. Without one, the tab follows the open chat and disappears for a
+ * caller who may not manage that agent.
  *
  * @param {object}  o
  * @param {?string} o.chatAgentId    the agent whose chat is open, or null

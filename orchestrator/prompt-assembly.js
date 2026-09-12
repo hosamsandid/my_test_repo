@@ -263,7 +263,7 @@ function workingEnvironmentSection(env, skills = [], agentRepositories = []) {
     : [];
   if (!env && !(Array.isArray(skills) && skills.length > 0) && ownRepos.length === 0) return "";
   const parts = [];
-  if (env && env.name) parts.push(`**Working Environment:** ${env.name}`);
+  if (env && env.name) parts.push(`**Environment:** ${env.name}`);
   if (env && env.description) parts.push(env.description);
   const envRepos = env && Array.isArray(env.repositories) ? env.repositories : [];
   const repos = [...envRepos, ...ownRepos];
@@ -288,7 +288,7 @@ function workingEnvironmentSection(env, skills = [], agentRepositories = []) {
   }
   if (env && env.additionalContext) parts.push(env.additionalContext);
   if (parts.length === 0) return "";
-  return `## Working Environment\n\n${parts.join("\n\n")}`;
+  return `## Environment\n\n${parts.join("\n\n")}`;
 }
 
 // Fixed base target for the host-folder mount(s). The single/legacy folder sits

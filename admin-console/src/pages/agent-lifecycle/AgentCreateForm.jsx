@@ -155,7 +155,7 @@ export default function AgentCreateForm({ onSave, onCancel, saving, error }) {
       />
 
       <div>
-        <div style={labelStyle}>Working Environment <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+        <div style={labelStyle}>Environment <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <select value={form.environmentId} onChange={e => update('environmentId', e.target.value)} style={inputStyle} disabled={envs.length === 0}>
           <option value="">— please select —</option>
           {envs.map(env => (
@@ -167,8 +167,8 @@ export default function AgentCreateForm({ onSave, onCancel, saving, error }) {
         </select>
         <div style={helpTextStyle}>
           Defines the repositories, GitHub token and model provider the agent receives at creation time.
-          Manage these on the <em>Working Environments</em> page. Each agent gets its own isolated workspace,
-          but the recipe is shared.
+          Manage these from the owning team's <em>Settings</em> tab in Agent Chat. Each agent gets its own
+          isolated workspace, but the recipe is shared.
         </div>
         {envs.length === 0 && (
           <div style={{
@@ -183,9 +183,9 @@ export default function AgentCreateForm({ onSave, onCancel, saving, error }) {
             {/* #1956 edge case: on `/create` this form is reachable on a stack
                 that has no environment at all, and the picker above is already
                 disabled. #2168 A2 removed the standalone "create environment"
-                entry point, so the fix is no longer a link to that page — a
-                Working Environment now only comes from creating a team. */}
-            No Working Environments yet — creating a team provisions one automatically. Use the
+                entry point, so the fix is no longer a link to that page — an
+                environment now only comes from creating a team. */}
+            No environments yet — creating a team provisions one automatically. Use the
             {' '}<Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-semibold)' }}>
               Agent Team Wizard
             </Link>{' '}

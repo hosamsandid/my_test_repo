@@ -67,7 +67,7 @@ export function convertConsequences(agent) {
     `${(agent && (agent.displayName || agent.id)) || 'This assistant'} becomes the only member of a `
     + `new team called "${previewTeamName(agent)}", with the id ${previewTeamId(agent)}.`,
     'It keeps its id, its chat room and history, its system prompt, its skills, '
-    + 'its triggers and its Working Environment.',
+    + 'its triggers and its environment.',
     'It moves from the "Single agents" section of the chat list into its own team '
     + 'group, and the new team appears in Flows as a one-node flow you can wire up.',
     'The agent restarts to pick up its new team scope, and comes back on its own.',

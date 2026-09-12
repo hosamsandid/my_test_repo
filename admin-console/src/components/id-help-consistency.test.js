@@ -32,7 +32,7 @@ const ID_HINT_PAGES = [
   'GithubTokens.jsx',
   'McpServers.jsx',
   'MyCredentials.jsx',
-  'WorkingEnvironments.jsx',
+  'EnvironmentTemplates.jsx',
   join('process', 'NodeInspector.jsx'),
 ];
 

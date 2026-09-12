@@ -13,6 +13,9 @@ import { Link } from 'react-router';
 import FormInput from '../../components/FormInput';
 import { sanitizeId } from '../../hooks/useAutoDerivedId';
 import { PrimaryBtn, SecondaryBtn, labelStyle, inputStyle, helpTextStyle } from './form-kit.jsx';
+import {
+  suggestCloneTeamId, isValidCloneTeamId, suggestCloneTeamName, credentialsNeededLines, cloneResultNotice,
+} from './clone-team-view.js';
 
 // Mirrors AGENT_ID_RE in admin-console/api/api.js — used only to give inline
 // feedback before the server round-trip; the server remains the source of
@@ -390,6 +393,114 @@ export function ExtractTemplateForm({ agent, existingTemplateIds, onSubmit, onCa
       <div style={footerStyle}>
         <PrimaryBtn onClick={submit} saving={busy} disabled={busy || !canSubmit}>
           {busy ? 'Saving…' : 'Save as template'}
+        </PrimaryBtn>
+        <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
+      </div>
+    </div>
+  );
+}
+
+/* ── Clone Team Form (#2171, epic #2166 A5) ─────────────────────────── */
+// Clones a team's STRUCTURE (repositories, MCP refs, toolchain, additional
+// context, process wiring) into a brand new team — never its credentials.
+// `onSubmit` does the two-step work server-side supplies no single endpoint
+// for (create the credential-stripped environment, then materialize the team
+// from the source's exported process bundle) and returns the parsed team
+// response, whose `credentialsNeeded` this form renders so the creator knows
+// exactly what to add before materializing the new team's members.
+export function CloneTeamForm({ team, existingIds, onSubmit, onCancel }) {
+  const [teamId, setTeamId] = useState(() => suggestCloneTeamId(team.id, existingIds));
+  const [teamName, setTeamName] = useState(() => suggestCloneTeamName(team.displayName || team.id));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [done, setDone] = useState(null); // the server's team-create response
+
+  const trimmedId = teamId.trim();
+  const idError = trimmedId && !isValidCloneTeamId(trimmedId)
+    ? 'Lowercase letters, digits and hyphens only; must not start with a hyphen.'
+    : null;
+  const canSubmit = trimmedId && !idError && teamName.trim();
+
+  async function submit() {
+    setBusy(true);
+    setError(null);
+    try {
+      const { ok, data } = await onSubmit({ teamId: trimmedId, teamName: teamName.trim() });
+      if (ok) {
+        setDone(data);
+      } else {
+        if (data?.code === 'id-conflict' || /already exists/.test(data?.error || '')) {
+          setTeamId(suggestCloneTeamId(trimmedId, existingIds));
+        }
+        setError(data?.error || 'Clone failed.');
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (done) {
+    const needs = credentialsNeededLines(done.credentialsNeeded);
+    return (
+      <div style={bodyStyle}>
+        <div style={leadStyle}>{cloneResultNotice(done)}</div>
+        {needs.length > 0 && (
+          <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+            {needs.map((line, i) => (<li key={i}>{line}</li>))}
+          </ul>
+        )}
+        <div style={footerStyle}>
+          <Link
+            to={`/chats/${encodeURIComponent(done.teamId)}`}
+            style={{
+              display: 'inline-flex', alignItems: 'center', padding: '8px 16px',
+              borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-accent-primary)',
+              color: 'var(--eb-text-inverted)', fontWeight: 600, textDecoration: 'none',
+              fontSize: 'var(--eb-text-sm)',
+            }}
+          >
+            Open the new team
+          </Link>
+          <SecondaryBtn onClick={onCancel}>Close</SecondaryBtn>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={bodyStyle}>
+      {error && <div role="alert" style={errorBannerStyle}>{error}</div>}
+
+      <div style={leadStyle}>
+        Clones <strong style={{ color: 'var(--eb-text-primary)' }}>{team.displayName || team.id}</strong>'s
+        structure — its repository URLs and branches, MCP server references, toolchain and additional
+        context — into a brand new team. Credentials (SSH keys, the GitHub token, MCP credentials) are
+        never copied; the new team's members are created as stubs so nothing is cloned or attempted until
+        you supply them and materialize.
+      </div>
+
+      <FormInput
+        label="New Team ID"
+        required
+        value={teamId}
+        onChange={v => setTeamId(sanitizeId(v).toLowerCase())}
+        error={idError}
+        placeholder="e.g. payments-team-clone"
+      />
+
+      <FormInput
+        label="New Team Name"
+        required
+        value={teamName}
+        onChange={setTeamName}
+        placeholder="e.g. Payments Team (Clone)"
+      />
+
+      <div style={footerStyle}>
+        <PrimaryBtn onClick={submit} saving={busy} disabled={busy || !canSubmit}>
+          {busy ? 'Cloning…' : 'Clone team'}
         </PrimaryBtn>
         <SecondaryBtn onClick={onCancel}>Cancel</SecondaryBtn>
       </div>

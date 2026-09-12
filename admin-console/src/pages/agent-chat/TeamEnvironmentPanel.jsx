@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Plus, X, AlertTriangle, Info, Loader2 } from 'lucide-react';
+import { Plus, X, AlertTriangle, Info, Loader2, Github } from 'lucide-react';
 import { useApi, apiCall } from '../../hooks/useApi';
 // One repository card for the whole console (#2067): rendering it here rather
 // than a second, differently-worded card is what stops this surface and the
@@ -40,7 +40,7 @@ export default function TeamEnvironmentPanel({ agent }) {
   if (!envId) {
     return (
       <div style={helpTextStyle}>
-        This team has no Working Environment bound yet — repositories, model provider,
+        This team has no Environment bound yet — repositories, model provider,
         toolchain, MCP servers and additional context have nothing to attach to.
       </div>
     );
@@ -61,7 +61,92 @@ export default function TeamEnvironmentPanel({ agent }) {
   }
   if (!env) return null;
 
+  // A shared environment the caller can see (it backs one of their agents) but
+  // does not administer is read-only here: editing it would change
+  // infrastructure other teams depend on, and `PUT /api/environments/:id` would
+  // 403 anyway (`canManageEnvironment`). This is the common shape after #2052 —
+  // a single agent on a reused shared environment, converted into a team of one.
+  if (env.canManage === false) {
+    return <ReadOnlyEnvSummary env={env} />;
+  }
+
   return <TeamEnvironmentFields env={env} onSaved={refetch} />;
+}
+
+// Read-only view of an environment the caller may see but not manage.
+function ReadOnlyEnvSummary({ env }) {
+  const repositories = Array.isArray(env.repositories) ? env.repositories : [];
+  const mcpServers = Array.isArray(env.mcpServers) ? env.mcpServers : [];
+  const rowStyle = {
+    fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
+    padding: 'var(--eb-space-1) 0',
+  };
+  const section = (label, children) => (
+    <div>
+      <div style={labelStyle}>{label}</div>
+      {children}
+    </div>
+  );
+  const none = <div style={{ ...rowStyle, color: 'var(--eb-text-muted)' }}>—</div>;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+      <div style={{
+        display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+        fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+        padding: 'var(--eb-space-2) var(--eb-space-3)',
+        background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-md)',
+      }}>
+        <Info size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
+        <span>
+          This team runs on a shared Working Environment managed by another team.
+          You can view it here but not edit it — ask a System Admin or the owning
+          team's admin to change its repositories, credentials or model provider.
+        </span>
+      </div>
+
+      {section('Repositories', repositories.length === 0 ? none : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-0-5)' }}>
+          {repositories.map((r, i) => (
+            <div key={i} style={rowStyle}>
+              <code>{r.url || '(no url)'}</code>
+              {r.branch ? <span style={{ color: 'var(--eb-text-muted)' }}> @ {r.branch}</span> : null}
+              {r.readOnly ? <span style={{ color: 'var(--eb-text-muted)' }}> · read-only</span> : null}
+            </div>
+          ))}
+        </div>
+      ))}
+
+      {section('Model provider', (
+        <div style={rowStyle}>
+          {env.llmEndpointId
+            ? <>{env.llmEndpointId}{env.defaultModelId ? <span style={{ color: 'var(--eb-text-muted)' }}> · {env.defaultModelId}</span> : null}</>
+            : <span style={{ color: 'var(--eb-text-muted)' }}>Built-in default</span>}
+        </div>
+      ))}
+
+      {section('Toolchain', (
+        <div style={rowStyle}>
+          {env.toolchainId || <span style={{ color: 'var(--eb-text-muted)' }}>Default image</span>}
+        </div>
+      ))}
+
+      {section('MCP servers', mcpServers.length === 0 ? none : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-0-5)' }}>
+          {mcpServers.map((m, i) => (
+            <div key={i} style={rowStyle}><code>{m.serverId}</code></div>
+          ))}
+        </div>
+      ))}
+
+      {env.additionalContext
+        ? section('Additional context', (
+          <div style={{ ...rowStyle, whiteSpace: 'pre-wrap', color: 'var(--eb-text-secondary)' }}>
+            {env.additionalContext}
+          </div>
+        ))
+        : null}
+    </div>
+  );
 }
 
 function TeamEnvironmentFields({ env, onSaved }) {
@@ -81,12 +166,14 @@ function TeamEnvironmentFields({ env, onSaved }) {
   const update = (key, val) => setForm(f => ({ ...f, [key]: val }));
 
   const { data: sshKeysData } = useApi('/api/ssh-keys');
+  const { data: tokensData } = useApi('/api/github-tokens');
   const { data: endpointsData } = useApi('/api/llm-endpoints');
   const { data: toolchainData } = useApi('/api/toolchains');
   const { data: mcpServerData, loading: mcpServersLoading } = useApi('/api/mcp-servers');
   const { data: mcpCredentialData } = useApi('/api/mcp-credentials');
 
   const sshKeys = sshKeysData || [];
+  const ghTokens = tokensData || [];
   const llmEndpoints = endpointsData || [];
   const mcpServers = mcpServerData || [];
   const mcpCredentials = mcpCredentialData || [];
@@ -224,8 +311,7 @@ function TeamEnvironmentFields({ env, onSaved }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
           <div style={helpTextStyle}>
             Repositories are cloned into a member's workspace when it is first created. Editing
-            the list here offers to bring already-materialized members up to date, the same way
-            the Working Environments form does.
+            the list here offers to bring already-materialized members up to date.
           </div>
           {form.repositories.map((repo, idx) => (
             <RepositoryCard
@@ -233,9 +319,9 @@ function TeamEnvironmentFields({ env, onSaved }) {
               idx={idx}
               repo={repo}
               sshKeys={sshKeys}
-              githubTokenId={baseline?.githubTokenId || null}
+              githubTokenId={form.githubTokenId || null}
               tokenTarget="environment"
-              hasEnvironmentToken={!!baseline?.githubTokenId}
+              hasEnvironmentToken={!!form.githubTokenId}
               onChange={(key, val) => updateRepo(idx, key, val)}
               onRemove={() => removeRepo(idx)}
             />
@@ -243,6 +329,33 @@ function TeamEnvironmentFields({ env, onSaved }) {
           <button type="button" onClick={addRepo} style={dashedButtonStyle}>
             <Plus size={13} /> Add repository
           </button>
+
+          {/* GitHub Token (#2170): the only surface this could be set from —
+              the standalone Working Environments page — was retired, so this
+              joined the Repositories tab rather than being left unreachable. */}
+          <div style={{
+            border: '1px solid var(--eb-border-default)',
+            borderRadius: 'var(--eb-radius-md)',
+            padding: 'var(--eb-space-3)',
+            display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+              <Github size={14} />
+              <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>GitHub Token</span>
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>(optional)</span>
+            </div>
+            <div style={helpTextStyle}>
+              Injected into agents as <code>GH_TOKEN</code> / <code>GITHUB_TOKEN</code>. Needed for the <code>gh</code>{' '}
+              CLI, HTTPS pushes and the GitHub poller. Only needed for a private HTTPS URL above — a private SSH
+              URL uses the repository's own SSH key instead. Manage tokens on the <em>GitHub Tokens</em> page.
+            </div>
+            <select value={form.githubTokenId} onChange={e => update('githubTokenId', e.target.value)} style={inputStyle}>
+              <option value="">— no token —</option>
+              {ghTokens.map(t => (
+                <option key={t.id} value={t.id}>{t.name} ({t.preview})</option>
+              ))}
+            </select>
+          </div>
         </div>
       )}
 

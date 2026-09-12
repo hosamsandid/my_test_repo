@@ -180,7 +180,7 @@ test('AC7/AC8: a toolchain not built for this runtime refuses by name', () => {
 
 test('the environment label degrades gracefully without a name', () => {
   const r = resolveAgentImage({ environmentId: 'build', toolchainId: 'nope', toolchains: [] });
-  assert.match(r.message, /Working Environment 'build' selects/);
+  assert.match(r.message, /Environment 'build' selects/);
   const anon = resolveAgentImage({ toolchainId: 'nope', toolchains: [] });
   assert.match(anon.message, /'<unknown>'/);
 });

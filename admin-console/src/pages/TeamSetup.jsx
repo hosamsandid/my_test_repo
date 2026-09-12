@@ -1,10 +1,10 @@
 import React, { useState, useMemo } from 'react';
-import { useNavigate, Link } from 'react-router';
+import { useNavigate } from 'react-router';
 import {
   ArrowLeft, ArrowRight, Check, AlertCircle, Github,
   Layers, RefreshCw, AlertTriangle,
 } from 'lucide-react';
-import { useApi } from '../hooks/useApi';
+import { useApi, apiCall } from '../hooks/useApi';
 import SkillPicker from '../components/SkillPicker';
 import PageHelpButton from '../components/PageHelpButton';
 import KnowledgeLearningSections, {
@@ -102,7 +102,7 @@ function ErrorBox({ message }) {
 // else (environment, name, knowledge) qualifies it. The step lands directly on
 // the template/draft gallery (#1703); describe/blank-canvas authoring lives in
 // the "+ Create" launcher.
-const STEPS = ['Process', 'Working Environment', 'Team', 'Knowledge (optional)', 'Review'];
+const STEPS = ['Process', 'Environment', 'Team', 'Knowledge (optional)', 'Review'];
 
 // The help-context key per step (E17 #1892). A wizard step is a sub-state of one
 // route, so it has no pathname of its own: the page publishes `<step>` and the
@@ -417,8 +417,12 @@ function EnvironmentCard({ env, selected, onSelect }) {
   );
 }
 
-function StepEnvironmentSelect({ form, environments, envsLoading, refetchEnvs, onSelect, error }) {
+function StepEnvironmentSelect({
+  form, environments, envsLoading, refetchEnvs, onSelect, error,
+  envTemplates, envTemplatesLoading, refetchEnvTemplates, onSelectTemplate, templateMinting,
+}) {
   const envs = environments || [];
+  const templates = envTemplates || [];
   return (
     <Card>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -436,11 +440,40 @@ function StepEnvironmentSelect({ form, environments, envsLoading, refetchEnvs, o
               gone — that belongs to the team-setup topic. What remains is the one
               line that names the immediate input. */}
           <p style={{ margin: 0 }}>
-            Optionally reuse an existing <strong style={{ color: 'var(--eb-text-primary)' }}>Working Environment</strong> —
+            Optionally reuse an existing <strong style={{ color: 'var(--eb-text-primary)' }}>Environment</strong> —
             it already bundles the repository, credentials and knowledge sources. Pick nothing and the team
             gets a fresh, repo-less one of its own (#2168 A2 — no environment to name or find first).
           </p>
         </div>
+
+        {/* Start from a template (#2170, epic #2166 A4). Distinct from reusing an
+            existing environment below: a template is a curated copy source, so
+            picking one mints a brand-new environment seeded from its structure —
+            the team gets its OWN environment, never a live binding to the
+            template, and never the template's credentials. */}
+        {templates.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+            <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+              Start from a template
+            </div>
+            <div style={{ ...hintStyle, marginTop: 0 }}>
+              A System-Admin-curated starting point. Repositories, MCP pairings, model provider,
+              toolchain and additional context are copied into a fresh environment of your own —
+              credentials are never copied, so you supply your own afterwards.
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 'var(--eb-space-3)' }} role="radiogroup" aria-label="Environment template">
+              {templates.map(t => (
+                <EnvironmentCard
+                  key={t.id}
+                  env={t}
+                  selected={false}
+                  onSelect={() => { if (!templateMinting) onSelectTemplate?.(t); }}
+                />
+              ))}
+            </div>
+            {templateMinting && <div style={{ ...hintStyle, marginTop: 0 }}>Creating environment from template…</div>}
+          </div>
+        )}
 
         {envsLoading ? (
           <div style={{ ...hintStyle, marginTop: 0 }}>Loading working environments…</div>
@@ -463,7 +496,7 @@ function StepEnvironmentSelect({ form, environments, envsLoading, refetchEnvs, o
           </div>
         ) : (
           <>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 'var(--eb-space-3)' }} role="radiogroup" aria-label="Working Environment">
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 'var(--eb-space-3)' }} role="radiogroup" aria-label="Environment">
               {envs.map(env => (
                 <EnvironmentCard
                   key={env.id}
@@ -475,8 +508,8 @@ function StepEnvironmentSelect({ form, environments, envsLoading, refetchEnvs, o
             </div>
             <div style={{ ...hintStyle, marginTop: 0 }}>
               Not picking one is fine too — click <strong>Next</strong> and the team gets its own, freshly
-              created. To manage an existing one, open{' '}
-              <Link to="/environments" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments →</Link>
+              created. To change an existing one, open its owning team and use the <strong>Settings</strong>{' '}
+              tab's Environment section in Agent Chat.
               {' '}<button
                 type="button"
                 onClick={refetchEnvs}
@@ -527,8 +560,7 @@ function StepKnowledgeSummary({ form, setForm, poolSkills, environments, mcpServ
             that the step is optional) stays — it guides this step's decision. */}
         <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.6 }}>
           Knowledge sources are inherited read-only from the working environment{env ? <> <strong style={{ color: 'var(--eb-text-primary)' }}>{env.name}</strong></> : null};
-          change them at{' '}
-          <Link to="/environments" target="_blank" style={{ color: 'var(--eb-accent-primary)' }}>Working Environments →</Link>.
+          change them from that environment's owning team, in Agent Chat's Settings tab.
           {' '}<strong style={{ color: 'var(--eb-text-primary)' }}>This step is optional</strong> — just continue if the inherited set looks right.
         </div>
         <div>
@@ -803,6 +835,11 @@ export default function TeamSetup() {
 
   const { data: templatesResp, loading: tplLoading } = useApi('/api/agent-templates');
   const { data: environments, loading: envsLoading, refetch: refetchEnvs } = useApi('/api/environments');
+  // Environment Templates (#2170, epic #2166 A4) — a System-Admin-curated copy
+  // source, NOT the same thing as the process/role `templatesResp` above. Open
+  // to any authenticated caller (the catalog read), so no admin gate is needed
+  // here.
+  const { data: envTemplates, loading: envTemplatesLoading, refetch: refetchEnvTemplates } = useApi('/api/environments?isTemplate=true');
   const { data: agentsList } = useApi('/api/agents');
   const { data: sshKeys } = useApi('/api/ssh-keys');
   const { data: githubTokens } = useApi('/api/github-tokens');
@@ -866,6 +903,36 @@ export default function TeamSetup() {
     setStepError(null);
     // Card click both selects and advances — the pick is the whole step.
     setStep(2);
+  }
+
+  // Start from a template (#2170, epic #2166 A4): a template is a copy source,
+  // never a live-shared binding, so picking one mints a brand-new, real
+  // environment (`copyFromTemplateId`) rather than binding to the template
+  // directly — the server refuses that outright (`template-not-bindable`).
+  // Once minted, the fresh environment is an ORDINARY reused environment, so
+  // `selectEnvironment` handles the rest unchanged (repo/creds/MCP pull,
+  // team-name suggestion, step advance) — no separate code path downstream.
+  const [templateMinting, setTemplateMinting] = useState(false);
+  async function selectTemplate(template) {
+    setStepError(null);
+    setTemplateMinting(true);
+    try {
+      const suffix = Math.random().toString(36).slice(2, 8);
+      const minted = await apiCall('POST', '/api/environments', {
+        id: `${template.id}-${suffix}`,
+        name: template.name,
+        description: template.description || '',
+        copyFromTemplateId: template.id,
+      });
+      // The minted record is an ORDINARY environment now — refresh the reuse
+      // list so it appears there too if the user navigates back to this step.
+      refetchEnvs();
+      selectEnvironment(minted);
+    } catch (e) {
+      setStepError(e.message);
+    } finally {
+      setTemplateMinting(false);
+    }
   }
 
   // Create mode composes the team via the Process step (#422).
@@ -1010,6 +1077,11 @@ export default function TeamSetup() {
           envsLoading={envsLoading}
           refetchEnvs={refetchEnvs}
           onSelect={selectEnvironment}
+          envTemplates={envTemplates}
+          envTemplatesLoading={envTemplatesLoading}
+          refetchEnvTemplates={refetchEnvTemplates}
+          onSelectTemplate={selectTemplate}
+          templateMinting={templateMinting}
           error={stepError}
         />
       )}

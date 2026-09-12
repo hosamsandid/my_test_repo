@@ -49,6 +49,14 @@ const { resolveGlobalFlag, isGlobalProvider } = require('./llm-endpoint-global')
 // sites below — never inside scope.js or resource-tier.js (AC4), for the same
 // reason `isGlobalProvider` stays out of the generic credential predicates.
 const { resolveGlobalFlag: resolveEnvGlobalFlag, isGlobalEnvironment } = require('./global-resource');
+// Environment templates (#2170, epic #2166 A4): the environment-side successor
+// to the `global` live-sharing mechanism above — a template is a curated copy
+// SOURCE for team creation, never a live-shared binding. See
+// environment-template.js for the full rationale; MCP servers keep their own
+// `global` toggle untouched, and Model Providers keep #2136's live-global
+// behaviour untouched — this only replaces the environment side of #2158.
+const { isTemplateEnvironment, resolveTemplateFlag, copyEnvironmentStructure } = require('./environment-template');
+const { validateCloneSource, describeClonedCredentialNeeds } = require('./team-clone');
 const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
@@ -394,6 +402,27 @@ auth.registerAuthRoutes(app, {
   usersSeeded: () => readJsonFile(USERS_INDEX, []).length > 0,
 });
 app.use('/api', auth.gate);
+
+// Team-share room sync (#2174, epic #2166 B2). Mirrors the `auditMutations`
+// pattern above: mounted before the two routes it watches and listening for
+// `res.on('finish')` rather than wrapping their handlers, so it needs no
+// change to `POST`/`DELETE /api/admin/memberships` — including their own
+// `canManageTeam` gate and `proxyAdmin` plumbing — and always reads the real
+// final status. A denied (403) or failed (4xx/5xx) write is never followed by
+// a room change.
+app.use('/api/admin/memberships', (req, res, next) => {
+  res.on('finish', () => {
+    if (res.statusCode >= 400) return;
+    if (req.method === 'POST') {
+      const shared = req.body || {};
+      if (shared.teamId && shared.userId) syncSharedMemberRooms(shared.teamId, shared.userId, 'invite');
+    } else if (req.method === 'DELETE') {
+      const unshared = req.query || {};
+      if (unshared.teamId && unshared.userId) syncSharedMemberRooms(unshared.teamId, unshared.userId, 'remove');
+    }
+  });
+  next();
+});
 
 // Work-plane tenant isolation (#1459 §2 — GOV-ACCESS-3 / GOV-PLATFORM-4).
 //
@@ -1096,6 +1125,46 @@ async function ensureHumanJoinedToRoom(identity, roomId) {
       `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/join`,
       { method: 'POST', body: {} });
   } catch { /* already joined */ }
+}
+
+// Sharing/unsharing an Agent Team should reach its members' rooms immediately
+// rather than waiting for a shared-in human's first message to trigger the
+// #2173 lazy invite above (#2174, epic #2166 B2). `role: 'team'` itself hosts
+// no chat and has no `dm-room.json` (docs: "hosts no agent itself"), so only
+// its materialized `team-member`s are ever in scope.
+//
+// Best-effort + idempotent (the #1458 provisioning discipline): a human with
+// no provisioned Matrix identity yet is silently skipped — the lazy path still
+// covers them once provisioning finishes — and a member with no DM room (never
+// opened, or a stub not yet materialized) has nothing to invite into or remove
+// from. Fired-and-forgotten by its caller; every failure is caught here so it
+// can never surface as (or delay) the membership write's own response.
+function syncSharedMemberRooms(teamId, userId, action) {
+  Promise.resolve().then(async () => {
+    const identity = humanMatrixStore.readIdentity(userId);
+    if (!identity || !identity.matrixUserId) return;
+    const configs = listAgentDirs().map(
+      id => ({ id, ...readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {}) }));
+    const memberIds = membersOfTeam(configs, teamId).map(m => m.id);
+    for (const memberId of memberIds) {
+      const dm = matrix.getAgentDmRoom(memberId);
+      if (!dm?.roomId) continue;
+      try {
+        if (action === 'invite') {
+          await ensureHumanJoinedToRoom(identity, dm.roomId);
+        } else {
+          await matrix.matrixFetch(matrix.ADMIN_TOKEN,
+            `/_matrix/client/v3/rooms/${encodeURIComponent(dm.roomId)}/kick`,
+            { method: 'POST', body: { user_id: identity.matrixUserId, reason: 'Removed from team' } });
+        }
+      } catch (err) {
+        console.error(`[API] Failed to ${action} user ${userId} ${action === 'invite' ? 'into' : 'from'} `
+          + `room ${dm.roomId} (agent ${memberId}, team ${teamId}): ${err.message}`);
+      }
+    }
+  }).catch((err) => {
+    console.error(`[API] syncSharedMemberRooms(${teamId}, ${userId}, ${action}) failed: ${err.message}`);
+  });
 }
 
 // The `{ ownerId, ownerSource }` stamp a create request carries to the
@@ -3104,20 +3173,17 @@ app.post('/api/agents/:id/convert-to-team', heavyLimiter, async (req, res) => {
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  // Two gates, because the conversion does two things: it edits this agent AND
-  // it creates a team in its tenant. A caller who may do the first but not the
-  // second (the ticket's own edge case) must be refused, so the tenant check is
-  // made without the ownership escape hatch `agentMetaForScope` grants.
-  //
-  // #2078: this second gate deliberately stays on the legacy access scope. It
-  // asks "may you mint a team here", and team creation is System-Admin-only
-  // until P3 makes it self-service — so it is the one place the collapsed
-  // boundary must NOT be used, or a standalone agent's owner (who now passes the
-  // first gate under D8) could convert their way into owning a team.
+  // One gate: the caller must be able to manage THIS agent. That is the whole
+  // authorization the conversion needs, because since #2081 (epic #2076 P3)
+  // minting an Agent Team is SELF-SERVICE — `POST /api/teams` is ungated and the
+  // creating human becomes the new team's Team Admin in the same operation. The
+  // old second gate ("may you mint a team here", `canManageTeam` over the
+  // agent's credential-axis tenant) predated P3 and assumed team creation was
+  // System-Admin-only; it wrongly 403'd a standalone agent's own owner, who
+  // passes this first gate under D8 but is not a Team Admin of the `default`
+  // access scope. It is removed — a caller who owns the agent may grow it into a
+  // team of one, exactly as they could create a fresh team from scratch.
   if (denyUnlessCanManageAgent(req, res, { ...cfg, id })) return;
-  if (!canManageAgent(getScope(req), { teamId: agentTeamId({ ...cfg, id }) })) {
-    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
-  }
 
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
@@ -3133,6 +3199,32 @@ app.post('/api/agents/:id/convert-to-team', heavyLimiter, async (req, res) => {
     // A 409 carrying `warning` is the busy-agent refusal, not a failure —
     // forward it verbatim so the UI can offer to convert anyway.
     if (!resp.ok) return res.status(resp.status).json(data);
+
+    // The conversion succeeded. Record the caller as the new team's Team Admin,
+    // exactly as the self-service team-create handlers do (#2081): a `role: 'team'`
+    // agent IS its own access boundary (`resolveAgentTeam` → its own id), so
+    // `visibleAgent`/`canManageAgent` take the membership branch — without this
+    // grant the creator could not see or manage the team they just made. Reuses
+    // `planCreatorMembership` so the condition (a real user record; a team was
+    // actually created) stays single-sourced with the create paths. Best-effort:
+    // the agent is already a team-member, so a failed membership write is a
+    // visibility problem a System Admin can repair, not a reason to fail the
+    // whole conversion (which is not reversible from here).
+    const creatorMembership = planCreatorMembership({
+      userId: getScope(req).userId,
+      teamAgentId: data.teamId,
+      teamCreated: true,
+    });
+    if (creatorMembership) {
+      try {
+        const { status } = await callAdmin('POST', 'memberships', creatorMembership);
+        if (status >= 400) {
+          console.error(`[api] convert-to-team: team-admin membership for ${data.teamId} failed (HTTP ${status})`);
+        }
+      } catch (err) {
+        console.error(`[api] convert-to-team: team-admin membership for ${data.teamId} error: ${err.message}`);
+      }
+    }
     res.json(data);
   } catch (err) {
     res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
@@ -3849,7 +3941,7 @@ function resolveTeamMemberVars(teamId, overrides = {}) {
   if (!teamCfg) return { error: 'Team not found' };
   const envId = teamCfg.environmentId;
   const env = envId ? loadEnvironment(envId) : null;
-  if (!env) return { error: `Team '${teamId}' has no Working Environment` };
+  if (!env) return { error: `Team '${teamId}' has no environment` };
   const primary = reposFromEnv(env)[0];
   // A repo-less team (#1623) resolves empty repo vars rather than erroring, so
   // roles can still be added to it after materialization.
@@ -3999,8 +4091,17 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
   if (!systemPrompt && role !== 'team') {
     return res.status(400).json({ error: 'systemPrompt is required for every role except team' });
   }
-  if (!loadEnvironment(environmentId)) {
-    return res.status(400).json({ error: `Working Environment '${environmentId}' not found` });
+  const boundEnv = loadEnvironment(environmentId);
+  if (!boundEnv) {
+    return res.status(400).json({ error: `Environment '${environmentId}' not found` });
+  }
+  // #2170: a template is a copy source, never a live-shared binding — refuse
+  // direct binding, same rule as the two team-creation paths below.
+  if (isTemplateEnvironment(boundEnv)) {
+    return res.status(400).json({
+      error: `Environment '${environmentId}' is a template — copy it into a new environment instead of binding to it directly`,
+      code: 'template-not-bindable',
+    });
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
@@ -13455,7 +13556,7 @@ app.delete('/api/toolchains/:id', heavyLimiter, (req, res) => {
   const usedBy = environmentsUsingToolchain(id);
   if (usedBy.length) {
     return res.status(409).json({
-      error: `Toolchain '${id}' is selected by ${usedBy.length} Working Environment(s): `
+      error: `Toolchain '${id}' is selected by ${usedBy.length} environment(s): `
         + `${usedBy.map((e) => e.name || e.id).join(', ')}. Clear it there first.`,
       environments: usedBy,
     });
@@ -13482,14 +13583,27 @@ function resolveToolchainSelection(toolchainId) {
 
 app.get('/api/environments', (req, res) => {
   const scope = getScope(req);
-  // #2083: tier-aware. Was `visibleTeam(scope, e.teamId)`, which reaches a
-  // team-tier record only — a shared environment carries no `teamId` at all, so
-  // the old filter hid every one of them from everybody but an admin.
+  // #2170: two disjoint views over the SAME store, switched by `?isTemplate=`.
+  // The default (ordinary) list is what every team/agent picker has always
+  // read — templates are copy sources, never a live-shared binding, so they
+  // are excluded here regardless of tier so a picker can never bind one
+  // directly (defense in depth alongside the explicit refusals below).
+  // `?isTemplate=true` is the admin catalog's own read: open to any
+  // authenticated caller (so a team-creation "start from a template" picker
+  // needs no admin rights to list them), unfiltered by team tier — a template
+  // is a curated catalog entry, not a team-owned resource.
+  const wantTemplates = req.query.isTemplate === 'true';
   const envs = listEnvironmentIds().map(loadEnvironment).filter(Boolean)
-    // #2158: a GLOBAL environment is visible to everyone regardless of team
-    // assignment — `isGlobalEnvironment` re-reads its own preconditions, so
-    // this can never widen past what the record currently qualifies for.
-    .filter(e => visibleEnvironment(scope, e) || isGlobalEnvironment(e))
+    .filter(e => wantTemplates
+      ? isTemplateEnvironment(e)
+      // #2083: tier-aware. Was `visibleTeam(scope, e.teamId)`, which reaches a
+      // team-tier record only — a shared environment carries no `teamId` at
+      // all, so the old filter hid every one of them from everybody but an
+      // admin. #2158: a GLOBAL environment is visible to everyone regardless
+      // of team assignment — `isGlobalEnvironment` re-reads its own
+      // preconditions, so this can never widen past what the record currently
+      // qualifies for.
+      : !isTemplateEnvironment(e) && (visibleEnvironment(scope, e) || isGlobalEnvironment(e)))
     .map(e => {
       const agents = agentsUsingEnvironment(e.id, scope); // (#439)
       return { ...e, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, e) };
@@ -13501,15 +13615,29 @@ app.get('/api/environments/:id', (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const scope = getScope(req);
-  // #2083: this read was ungated (concept §11.4) — any authenticated caller
-  // could fetch any environment by id and read its repositories, its
-  // `githubTokenId` and its MCP references. A tier the read-one path ignores is
-  // decorative, so the gate lands with the tier. 404 rather than 403, matching
-  // `GET /api/llm-endpoints/:id`, so the route is not an existence oracle.
-  if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env)) {
-    return res.status(404).json({ error: 'Environment not found' });
-  }
   const agents = agentsUsingEnvironment(env.id, scope); // (#439)
+  // #2170: a template is readable by any authenticated caller (the catalog
+  // read, mirroring the list above) — checked BEFORE the tier gate below, so
+  // a template need carry no team tier at all to be readable.
+  if (!isTemplateEnvironment(env)) {
+    // #2083: this read was ungated (concept §11.4) — any authenticated caller
+    // could fetch any environment by id and read its repositories, its
+    // `githubTokenId` and its MCP references. A tier the read-one path ignores is
+    // decorative, so the gate lands with the tier. 404 rather than 403, matching
+    // `GET /api/llm-endpoints/:id`, so the route is not an existence oracle.
+    //
+    // A caller who can SEE an agent bound to this environment may read it too:
+    // the agent already depends on this infrastructure and its Settings tab must
+    // render the environment it runs on. This covers a standalone agent (and,
+    // after #2052, the team it was converted into) that reuses a shared
+    // environment its owner is not a member of — otherwise the team's Working
+    // Environment section 404s. `canManage` below still reflects
+    // `canManageEnvironment`, so a shared environment the caller does not
+    // administer is readable but not editable here.
+    if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env) && agents.length === 0) {
+      return res.status(404).json({ error: 'Environment not found' });
+    }
+  }
   res.json({ ...env, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, env) });
 });
 
@@ -13563,6 +13691,56 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   if (!name) return res.status(400).json({ error: 'name is required' });
   if (loadEnvironment(id)) return res.status(409).json({ error: `Environment '${id}' already exists` });
 
+  // #2170: create-time template copy — "start from a template". Resolved
+  // before any of the fields below so an unset field can default to what the
+  // template carries. Structure only (credentials always stripped, see
+  // copyEnvironmentStructure) — the caller supplies their own SSH key / GitHub
+  // token / MCP credential, exactly as #2171 (A5, team clone) states for its
+  // own copy mechanism.
+  let templateSeed = null;
+  // #2171 (A5, team clone): the same copy mechanism, sourced from a live
+  // `role: 'team'` agent's own environment instead of a curated template —
+  // "clone team X into team Y" copies X's structure, never X's credentials.
+  // Mutually exclusive with copyFromTemplateId (checked first, so a caller
+  // sending both gets the template behaviour and this branch never runs).
+  let clonedFromTeamId = null;
+  if (typeof req.body?.copyFromTemplateId === 'string' && req.body.copyFromTemplateId.trim()) {
+    const template = loadEnvironment(normalizeEnvId(req.body.copyFromTemplateId));
+    if (!template) return res.status(400).json({ error: `Template environment '${req.body.copyFromTemplateId}' not found` });
+    if (!isTemplateEnvironment(template)) {
+      return res.status(400).json({ error: `Environment '${req.body.copyFromTemplateId}' is not a template`, code: 'not-a-template' });
+    }
+    templateSeed = copyEnvironmentStructure(template);
+  } else if (typeof req.body?.copyFromTeamId === 'string' && req.body.copyFromTeamId.trim()) {
+    const sourceTeamId = req.body.copyFromTeamId.trim();
+    if (!AGENT_ID_RE.test(sourceTeamId)) {
+      return res.status(400).json({ error: 'Invalid copyFromTeamId' });
+    }
+    // Containment: resolve under AGENTS_DIR and reject any id that escapes it
+    // (the `PUT /api/agents/:id` barrier — AGENT_ID_RE alone is not modelled
+    // as a path sanitiser by CodeQL's path-injection query).
+    const teamsBaseDir = path.resolve(AGENTS_DIR);
+    const teamDir = path.resolve(teamsBaseDir, sourceTeamId);
+    const teamRel = path.relative(teamsBaseDir, teamDir);
+    if (teamRel.startsWith('..') || path.isAbsolute(teamRel)) {
+      return res.status(400).json({ error: 'Invalid copyFromTeamId' });
+    }
+    const sourceCfg = readJsonFile(path.join(teamDir, 'config.json'), null);
+    const cloneScope = getScope(req);
+    // The same 404 a non-existent team would get — a team the caller cannot
+    // even see must not be distinguishable from one that isn't there.
+    if (!sourceCfg || !visibleAgent(cloneScope, agentMetaForScope(sourceCfg))) {
+      return res.status(404).json({ error: `Team '${sourceTeamId}' not found` });
+    }
+    const sourceValidity = validateCloneSource(sourceCfg);
+    if (sourceValidity.error === 'not-a-team') {
+      return res.status(400).json({ error: `'${sourceTeamId}' is not an Agent Team`, code: 'not-a-team' });
+    }
+    const sourceEnv = sourceCfg.environmentId ? loadEnvironment(sourceCfg.environmentId) : null;
+    templateSeed = copyEnvironmentStructure(sourceEnv || {});
+    clonedFromTeamId = sourceTeamId;
+  }
+
   // #2083: ownership is now the three-tier triple, resolved and validated by the
   // SAME function the four credential kinds use — one validator for every
   // tiered resource, so "which teams exist" cannot be answered two ways.
@@ -13590,6 +13768,18 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   }
   if (globalFlag.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };
 
+  // #2170: the `isTemplate` flag — System-Admin-only to set, mirroring the
+  // global flag immediately above. `currentTemplate` is always `false` on
+  // create.
+  const templateFlag = resolveTemplateFlag({
+    wantTemplate: req.body?.isTemplate,
+    currentTemplate: false,
+    scopeAll: createScope.all,
+  });
+  if (templateFlag.error) {
+    return res.status(templateFlag.status).json({ error: templateFlag.error, code: templateFlag.code });
+  }
+
   // Config-write authorization (#989, tiered by #2083): creating a team-tier
   // environment requires team-admin rights over its owning team; creating a
   // SHARED one is System-Admin-only (§5.2 — declaring a resource cross-tenant
@@ -13600,7 +13790,13 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
 
   let normalizedRepos;
   try {
-    normalizedRepos = normalizeRepositoriesInput(repositories, repository);
+    // #2170: fall back to the template's structure only when the caller sent
+    // neither shape at all — an explicit (even empty) `repositories`/
+    // `repository` always wins, so a caller who deliberately started repo-less
+    // from a template is never re-populated against their will.
+    normalizedRepos = (repositories === undefined && repository === undefined && templateSeed?.repositories?.length)
+      ? templateSeed.repositories
+      : normalizeRepositoriesInput(repositories, repository);
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
@@ -13615,17 +13811,22 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
 
   let normalizedMcp;
   try {
-    normalizedMcp = normalizeMcpServersInput(mcpServers);
+    normalizedMcp = (mcpServers === undefined && templateSeed?.mcpServers?.length)
+      ? templateSeed.mcpServers
+      : normalizeMcpServersInput(mcpServers);
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
 
-  const llm = resolveLlmBinding(llmEndpointId, defaultModelId);
+  const llm = resolveLlmBinding(
+    llmEndpointId !== undefined ? llmEndpointId : templateSeed?.llmEndpointId,
+    defaultModelId !== undefined ? defaultModelId : templateSeed?.defaultModelId,
+  );
   if (llm.error) return res.status(400).json({ error: llm.error });
 
   // Agent toolchain (#1940): an ID from the operator registry, resolved to an
   // image server-side at spawn time. Never an image string from the client.
-  const toolchain = resolveToolchainSelection(toolchainId);
+  const toolchain = resolveToolchainSelection(toolchainId !== undefined ? toolchainId : templateSeed?.toolchainId);
   if (toolchain.error) return res.status(400).json({ error: toolchain.error });
 
   // #2158 AC9: publishing (this create IS the publish transition, since a
@@ -13651,16 +13852,26 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
     mcpServers: normalizedMcp,
     llmEndpointId: llm.llmEndpointId,
     defaultModelId: llm.defaultModelId,
-    additionalContext: additionalContext || '',
+    additionalContext: additionalContext !== undefined ? additionalContext : (templateSeed?.additionalContext || ''),
     createdAt: new Date().toISOString(),
   };
   // Written only when a toolchain was actually selected, so an environment
   // without one is byte-identical to a pre-#1940 environment on disk (AC1) —
   // the same discipline as contextMountRw (#1289).
   if (toolchain.toolchainId) env.toolchainId = toolchain.toolchainId;
+  // #2170: written only when true — no dangling `isTemplate: false` on disk,
+  // same discipline as `global` below.
+  if (templateFlag.isTemplate) env.isTemplate = true;
   // #2158 AC6: written only when true — no dangling `global: false` on disk.
   if (globalFlag.global) env.global = true;
   saveEnvironment(id, env);
+  // #2171: the clone dialog needs to say exactly which credentials the new
+  // environment still needs — computed here, from the very structure that
+  // was copied, and never persisted onto the environment itself.
+  if (clonedFromTeamId) {
+    res.status(201).json({ ...env, credentialsNeeded: describeClonedCredentialNeeds(templateSeed) });
+    return;
+  }
   res.status(201).json(env);
 });
 
@@ -13714,6 +13925,27 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   });
   if (globalFlag.error) {
     return res.status(globalFlag.status).json({ error: globalFlag.error, code: globalFlag.code });
+  }
+
+  // #2170: publish/retract the `isTemplate` flag — System-Admin-only, same
+  // discipline as the global flag immediately above. Independent of
+  // `canManageEnvironment`: a team admin who can edit an environment's content
+  // may not unilaterally turn it into (or out of) a curated template.
+  const templateFlag = resolveTemplateFlag({
+    wantTemplate: req.body?.isTemplate,
+    // Deliberately the EXPLICIT flag only, not `isTemplateEnvironment(env)`
+    // (which also reads a legacy `global: true` record as a template): an
+    // ordinary content edit through some other surface (e.g. Administration →
+    // Resources re-tiering) must never silently persist `isTemplate: true` as
+    // a side effect just because the record happened to qualify under the
+    // migration read. The explicit flag is what the dedicated template-catalog
+    // page sends on every save, which is what turns the migration inference
+    // into a real, on-disk flag the first time such a record is opened there.
+    currentTemplate: env.isTemplate === true,
+    scopeAll: envScope.all,
+  });
+  if (templateFlag.error) {
+    return res.status(templateFlag.status).json({ error: templateFlag.error, code: templateFlag.code });
   }
 
   // #2083: ownership is now a tier, so an update may re-TIER the record. The
@@ -13776,6 +14008,13 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   // #2158 AC6: cleared explicitly rather than left as a dangling `false`.
   if (globalFlag.global) env.global = true;
   else delete env.global;
+  // #2170: same discipline for the template flag. Explicitly persisted even
+  // when the record's "current" value was only inferred from a legacy
+  // `global: true` (the migration read in isTemplateEnvironment) — the first
+  // save through this route is what turns that inference into a real,
+  // on-disk `isTemplate: true`.
+  if (templateFlag.isTemplate) env.isTemplate = true;
+  else delete env.isTemplate;
 
   if (name !== undefined) env.name = name;
   if (description !== undefined) env.description = description;
@@ -13893,51 +14132,14 @@ app.post('/api/repositories/check', heavyLimiter, async (req, res) => {
 // parseGitHubUrl / deriveRepoIdentity are extracted to ./repo-identity (required
 // at the top of this file) so the URL parsing is unit-testable in isolation.
 
-// Reduce any GitHub URL form to a canonical "<org>/<repo>" string for
-// equality checks across SSH/HTTPS variants. Returns null for unparseable
-// input so callers can fall back to literal comparison.
-function githubRepoKey(url) {
-  try {
-    const { org, repo } = parseGitHubUrl(url);
-    return `${org.toLowerCase()}/${repo.toLowerCase()}`;
-  } catch {
-    return null;
-  }
-}
-
 function slugifyRepoSegment(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
-function findEnvByRepoUrl(targetUrl) {
-  const targetKey = githubRepoKey(targetUrl);
-  for (const envId of listEnvironmentIds()) {
-    const env = loadEnvironment(envId);
-    const repos = Array.isArray(env?.repositories) ? env.repositories : [];
-    const match = repos.some(r => {
-      const u = typeof r?.url === 'string' ? r.url.trim() : '';
-      if (!u) return false;
-      if (u === targetUrl) return true;
-      const k = githubRepoKey(u);
-      return targetKey && k && k === targetKey;
-    });
-    if (match) return env;
-  }
-  return null;
-}
-
-function findStandaloneAgentForEnv(envId) {
-  const matches = [];
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    if (!cfg || cfg.environmentId !== envId) continue;
-    // Accept legacy 'expert' configs that haven't been migrated yet.
-    if (cfg.role !== 'agent' && cfg.role !== 'expert') continue;
-    matches.push(cfg);
-  }
-  matches.sort((a, b) => a.id.localeCompare(b.id));
-  return matches[0] || null;
-}
+// NOTE: `findEnvByRepoUrl` / `findStandaloneAgentForEnv` were removed with the
+// ungated QuickStart reuse (#2071) — the fast lane now always creates a fresh,
+// owner-stamped environment and a fresh agent, so a matching repo URL never
+// binds a caller to another team's shared infrastructure or agent.
 
 function quickstartSystemPrompt(org, repo) {
   return [
@@ -14026,68 +14228,42 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
     return res.status(502).json({ error: `Repository probe failed: ${err.message}` });
   }
 
-  // 2. Reuse env if any references this repo URL, else create a new one.
-  let env = findEnvByRepoUrl(sshUrl);
-  let envReused = !!env;
-  let tokenAttachRefused = false;
-
-  if (!env) {
-    const baseEnvId = `repo-${slugifyRepoSegment(org)}-${slugifyRepoSegment(repo)}` || 'repo';
-    let envId = baseEnvId;
-    let suffix = 2;
-    while (loadEnvironment(envId)) {
-      envId = `${baseEnvId}-${suffix++}`;
-    }
-    const llmBinding = pickDefaultLlmBinding();
-    env = {
-      id: envId,
-      name: `${org}/${repo}`,
-      description: `Quick-start environment for ${org}/${repo}`,
-      repositories: [{ url: sshUrl, branch: resolvedBranch, sshKeyId: chosenSshKeyId }],
-      githubTokenId: chosenTokenId,
-      ...llmBinding,
-      additionalContext: '',
-      createdAt: new Date().toISOString(),
-    };
-    saveEnvironment(envId, env);
-  } else if (!env.githubTokenId) {
-    // Existing env without a token — attach the chosen one so the clone works,
-    // but ONLY when the caller may actually manage this environment (#2158
-    // AC11). Environments are now discoverable by every user via the global
-    // tier, so writing env.githubTokenId unconditionally here let any
-    // authenticated caller attach a credential to a system-tier record they
-    // cannot otherwise touch, just by POSTing a repo URL that happens to
-    // match a reused env. The wider ungated-reuse leak (returning another
-    // team's agent, the missing-scope-stamp write on a freshly created env)
-    // is deliberately left to #2071 — this only closes the mutation.
-    if (canManageEnvironment(getScope(req), env)) {
-      env.githubTokenId = chosenTokenId;
-      env.updatedAt = new Date().toISOString();
-      saveEnvironment(env.id, env);
-    } else {
-      tokenAttachRefused = true;
-    }
+  // 2. Always create a FRESH Working Environment for this repository (#2071).
+  // The old fast lane silently REUSED any environment whose repository URL
+  // matched — ungated, so a normal user creating an agent for a repo another
+  // team already had an environment for was bound to that team's shared
+  // infrastructure (its repositories, its GitHub token, its model provider)
+  // without consent, and could even be handed that team's existing agent
+  // (`reused: true`). That surprise is removed: the caller always gets their
+  // OWN environment and their OWN agent for this repository.
+  const baseEnvId = `repo-${slugifyRepoSegment(org)}-${slugifyRepoSegment(repo)}` || 'repo';
+  let envId = baseEnvId;
+  let envSuffix = 2;
+  while (loadEnvironment(envId)) {
+    envId = `${baseEnvId}-${envSuffix++}`;
   }
-
-  const tokenWarning = tokenAttachRefused
-    ? 'This working environment has no GitHub token and you do not have permission to attach one. An administrator can add it under "Working Environments".'
-    : null;
+  const llmBinding = pickDefaultLlmBinding();
+  // Stamp the creator as owner so a teamless user can see AND manage their own
+  // environment: it has no team to be scoped to, and since #2078 an untiered
+  // environment is invisible to a non-admin. `ownsEnvironment` (scope.js) is the
+  // D8 owner branch that reads this — the same shape a standalone agent uses.
+  const ownerId = getScope(req).userId;
+  const env = {
+    id: envId,
+    name: `${org}/${repo}`,
+    description: `Quick-start environment for ${org}/${repo}`,
+    repositories: [{ url: sshUrl, branch: resolvedBranch, sshKeyId: chosenSshKeyId }],
+    githubTokenId: chosenTokenId,
+    ...llmBinding,
+    ...(ownerId ? { ownerId } : {}),
+    additionalContext: '',
+    createdAt: new Date().toISOString(),
+  };
+  saveEnvironment(envId, env);
 
   const llmWarning = env.llmEndpointId
     ? null
-    : 'No LLM endpoint is registered. Register one under "LLM Endpoints" and bind it to the Working Environment before chatting — otherwise the agent will fail on its first message.';
-
-  // 2. Reuse an existing standalone agent on this env, else create one.
-  const existingAgent = findStandaloneAgentForEnv(env.id);
-  if (existingAgent) {
-    return res.status(200).json({
-      reused: true,
-      environment: { id: env.id, name: env.name, reused: envReused },
-      agent: { id: existingAgent.id, displayName: existingAgent.displayName },
-      ...(llmWarning ? { llmWarning } : {}),
-      ...(tokenWarning ? { tokenWarning } : {}),
-    });
-  }
+    : 'No LLM endpoint is registered. Register one under "LLM Endpoints" and bind it to the environment before chatting — otherwise the agent will fail on its first message.';
 
   const baseAgentId = `${slugifyRepoSegment(repo)}-agent` || 'repo-agent';
   let agentId = baseAgentId;
@@ -14121,11 +14297,10 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
 
   res.status(201).json({
     reused: false,
-    environment: { id: env.id, name: env.name, reused: envReused },
+    environment: { id: env.id, name: env.name, reused: false },
     agent: { id: agentId, displayName },
     seed: agentResp,
     ...(llmWarning ? { llmWarning } : {}),
-    ...(tokenWarning ? { tokenWarning } : {}),
   });
 });
 
@@ -14659,6 +14834,16 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     const reusedEnv = loadEnvironment(environmentId);
     if (!reusedEnv) {
       return res.status(400).json({ error: `Working environment '${environmentId}' not found` });
+    }
+    // #2170: a template is a copy source, never a live-shared binding —
+    // "start from a template" goes through POST /api/environments'
+    // copyFromTemplateId (which mints a real, credential-less environment the
+    // team then reuses normally), not through this reuse path directly.
+    if (isTemplateEnvironment(reusedEnv)) {
+      return res.status(400).json({
+        error: `Environment '${environmentId}' is a template — copy it into a new environment first`,
+        code: 'template-not-bindable',
+      });
     }
     const primary = reposFromEnv(reusedEnv)[0];
     if (primary?.url) {
@@ -15366,6 +15551,11 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
     const reusedEnv = loadEnvironment(environmentId);
     if (!reusedEnv) {
       return fail(400, `Working environment '${environmentId}' not found`);
+    }
+    // #2170: same guard as the non-streaming handler above — a template is a
+    // copy source, never a live-shared binding.
+    if (isTemplateEnvironment(reusedEnv)) {
+      return fail(400, `Environment '${environmentId}' is a template — copy it into a new environment first`);
     }
     const primary = reposFromEnv(reusedEnv)[0];
     if (primary?.url) {

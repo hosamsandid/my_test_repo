@@ -45,7 +45,7 @@ export function describeAgentSubmitState(form = {}) {
     reasons.push({ field: 'id', message: 'Enter an ID (auto-derived from the display name).' });
   }
   if (!trimmed(environmentId)) {
-    reasons.push({ field: 'environmentId', message: 'Choose a Working Environment.' });
+    reasons.push({ field: 'environmentId', message: 'Choose an environment.' });
   }
   if (!PROMPT_OPTIONAL_ROLES.has(role) && !trimmed(systemPrompt)) {
     reasons.push({ field: 'systemPrompt', message: 'Write the system prompt.' });

@@ -12,7 +12,7 @@ const {
   normalizeCredential, visibleCredential, canManageCredential,
   canCreateCredential, canReassignCredential, credentialVisibleToTeam,
   canViewUsageStatistics, assistSelectableEndpoint, resolveAgentTenant,
-  visibleEnvironment, canCreateEnvironment, canRetierEnvironment,
+  visibleEnvironment, canCreateEnvironment, canRetierEnvironment, ownsEnvironment,
 } = require('./scope');
 // #2158: the global reach for environments/MCP servers is composed at the
 // api.js call sites, never inside scope.js itself (AC4) — imported here only
@@ -779,6 +779,24 @@ test('#2083: visibility is MEMBERSHIP, not the admin role — the documented div
   // The same record as a CREDENTIAL is invisible to her — that is the #798
   // deferral this ticket deliberately does not import into the env path.
   assert.equal(visibleCredential(alice, { scope: 'team', teamId: 'default' }), false);
+});
+
+test('#2071: an owner-stamped environment is visible AND manageable by its owner, and no one else', () => {
+  const carol = computeScope({ username: 'carol@corp.com', adminUsername: 'admin', users, memberships });
+  const bob = computeScope({ username: 'bob@corp.com', adminUsername: 'admin', users, memberships });
+  // A teamless user's own QuickStart environment: no team tier, an ownerId (the
+  // D8 owner branch, the shape POST /api/quickstart writes since #2071).
+  const owned = { id: 'env-quickstart', ownerId: 'u-c' };
+  assert.equal(ownsEnvironment(carol, owned), true);
+  assert.equal(visibleEnvironment(carol, owned), true, 'the owner sees their own environment');
+  assert.equal(canManageEnvironment(carol, owned), true, 'and may edit it in place');
+  // Private to its owner — another ordinary user sees and manages nothing.
+  assert.equal(ownsEnvironment(bob, owned), false);
+  assert.equal(visibleEnvironment(bob, owned), false);
+  assert.equal(canManageEnvironment(bob, owned), false);
+  // A record with no ownerId never triggers the owner branch (no regression on
+  // the team/system tiers).
+  assert.equal(ownsEnvironment(carol, { id: 'x', teamId: 'payments' }), false);
 });
 
 test('#2083: a shared environment reaches every assigned team, and no other', () => {

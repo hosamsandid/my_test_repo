@@ -3150,20 +3150,17 @@ app.post('/api/agents/:id/convert-to-team', heavyLimiter, async (req, res) => {
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
   const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  // Two gates, because the conversion does two things: it edits this agent AND
-  // it creates a team in its tenant. A caller who may do the first but not the
-  // second (the ticket's own edge case) must be refused, so the tenant check is
-  // made without the ownership escape hatch `agentMetaForScope` grants.
-  //
-  // #2078: this second gate deliberately stays on the legacy access scope. It
-  // asks "may you mint a team here", and team creation is System-Admin-only
-  // until P3 makes it self-service — so it is the one place the collapsed
-  // boundary must NOT be used, or a standalone agent's owner (who now passes the
-  // first gate under D8) could convert their way into owning a team.
+  // One gate: the caller must be able to manage THIS agent. That is the whole
+  // authorization the conversion needs, because since #2081 (epic #2076 P3)
+  // minting an Agent Team is SELF-SERVICE — `POST /api/teams` is ungated and the
+  // creating human becomes the new team's Team Admin in the same operation. The
+  // old second gate ("may you mint a team here", `canManageTeam` over the
+  // agent's credential-axis tenant) predated P3 and assumed team creation was
+  // System-Admin-only; it wrongly 403'd a standalone agent's own owner, who
+  // passes this first gate under D8 but is not a Team Admin of the `default`
+  // access scope. It is removed — a caller who owns the agent may grow it into a
+  // team of one, exactly as they could create a fresh team from scratch.
   if (denyUnlessCanManageAgent(req, res, { ...cfg, id })) return;
-  if (!canManageAgent(getScope(req), { teamId: agentTeamId({ ...cfg, id }) })) {
-    return res.status(403).json({ error: 'forbidden', code: 'forbidden' });
-  }
 
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
@@ -3179,6 +3176,32 @@ app.post('/api/agents/:id/convert-to-team', heavyLimiter, async (req, res) => {
     // A 409 carrying `warning` is the busy-agent refusal, not a failure —
     // forward it verbatim so the UI can offer to convert anyway.
     if (!resp.ok) return res.status(resp.status).json(data);
+
+    // The conversion succeeded. Record the caller as the new team's Team Admin,
+    // exactly as the self-service team-create handlers do (#2081): a `role: 'team'`
+    // agent IS its own access boundary (`resolveAgentTeam` → its own id), so
+    // `visibleAgent`/`canManageAgent` take the membership branch — without this
+    // grant the creator could not see or manage the team they just made. Reuses
+    // `planCreatorMembership` so the condition (a real user record; a team was
+    // actually created) stays single-sourced with the create paths. Best-effort:
+    // the agent is already a team-member, so a failed membership write is a
+    // visibility problem a System Admin can repair, not a reason to fail the
+    // whole conversion (which is not reversible from here).
+    const creatorMembership = planCreatorMembership({
+      userId: getScope(req).userId,
+      teamAgentId: data.teamId,
+      teamCreated: true,
+    });
+    if (creatorMembership) {
+      try {
+        const { status } = await callAdmin('POST', 'memberships', creatorMembership);
+        if (status >= 400) {
+          console.error(`[api] convert-to-team: team-admin membership for ${data.teamId} failed (HTTP ${status})`);
+        }
+      } catch (err) {
+        console.error(`[api] convert-to-team: team-admin membership for ${data.teamId} error: ${err.message}`);
+      }
+    }
     res.json(data);
   } catch (err) {
     res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
@@ -13569,6 +13592,7 @@ app.get('/api/environments/:id', (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   const scope = getScope(req);
+  const agents = agentsUsingEnvironment(env.id, scope); // (#439)
   // #2170: a template is readable by any authenticated caller (the catalog
   // read, mirroring the list above) — checked BEFORE the tier gate below, so
   // a template need carry no team tier at all to be readable.
@@ -13578,11 +13602,19 @@ app.get('/api/environments/:id', (req, res) => {
     // `githubTokenId` and its MCP references. A tier the read-one path ignores is
     // decorative, so the gate lands with the tier. 404 rather than 403, matching
     // `GET /api/llm-endpoints/:id`, so the route is not an existence oracle.
-    if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env)) {
+    //
+    // A caller who can SEE an agent bound to this environment may read it too:
+    // the agent already depends on this infrastructure and its Settings tab must
+    // render the environment it runs on. This covers a standalone agent (and,
+    // after #2052, the team it was converted into) that reuses a shared
+    // environment its owner is not a member of — otherwise the team's Working
+    // Environment section 404s. `canManage` below still reflects
+    // `canManageEnvironment`, so a shared environment the caller does not
+    // administer is readable but not editable here.
+    if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env) && agents.length === 0) {
       return res.status(404).json({ error: 'Environment not found' });
     }
   }
-  const agents = agentsUsingEnvironment(env.id, scope); // (#439)
   res.json({ ...env, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, env) });
 });
 
@@ -14077,51 +14109,14 @@ app.post('/api/repositories/check', heavyLimiter, async (req, res) => {
 // parseGitHubUrl / deriveRepoIdentity are extracted to ./repo-identity (required
 // at the top of this file) so the URL parsing is unit-testable in isolation.
 
-// Reduce any GitHub URL form to a canonical "<org>/<repo>" string for
-// equality checks across SSH/HTTPS variants. Returns null for unparseable
-// input so callers can fall back to literal comparison.
-function githubRepoKey(url) {
-  try {
-    const { org, repo } = parseGitHubUrl(url);
-    return `${org.toLowerCase()}/${repo.toLowerCase()}`;
-  } catch {
-    return null;
-  }
-}
-
 function slugifyRepoSegment(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
-function findEnvByRepoUrl(targetUrl) {
-  const targetKey = githubRepoKey(targetUrl);
-  for (const envId of listEnvironmentIds()) {
-    const env = loadEnvironment(envId);
-    const repos = Array.isArray(env?.repositories) ? env.repositories : [];
-    const match = repos.some(r => {
-      const u = typeof r?.url === 'string' ? r.url.trim() : '';
-      if (!u) return false;
-      if (u === targetUrl) return true;
-      const k = githubRepoKey(u);
-      return targetKey && k && k === targetKey;
-    });
-    if (match) return env;
-  }
-  return null;
-}
-
-function findStandaloneAgentForEnv(envId) {
-  const matches = [];
-  for (const id of listAgentDirs()) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    if (!cfg || cfg.environmentId !== envId) continue;
-    // Accept legacy 'expert' configs that haven't been migrated yet.
-    if (cfg.role !== 'agent' && cfg.role !== 'expert') continue;
-    matches.push(cfg);
-  }
-  matches.sort((a, b) => a.id.localeCompare(b.id));
-  return matches[0] || null;
-}
+// NOTE: `findEnvByRepoUrl` / `findStandaloneAgentForEnv` were removed with the
+// ungated QuickStart reuse (#2071) — the fast lane now always creates a fresh,
+// owner-stamped environment and a fresh agent, so a matching repo URL never
+// binds a caller to another team's shared infrastructure or agent.
 
 function quickstartSystemPrompt(org, repo) {
   return [
@@ -14210,68 +14205,42 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
     return res.status(502).json({ error: `Repository probe failed: ${err.message}` });
   }
 
-  // 2. Reuse env if any references this repo URL, else create a new one.
-  let env = findEnvByRepoUrl(sshUrl);
-  let envReused = !!env;
-  let tokenAttachRefused = false;
-
-  if (!env) {
-    const baseEnvId = `repo-${slugifyRepoSegment(org)}-${slugifyRepoSegment(repo)}` || 'repo';
-    let envId = baseEnvId;
-    let suffix = 2;
-    while (loadEnvironment(envId)) {
-      envId = `${baseEnvId}-${suffix++}`;
-    }
-    const llmBinding = pickDefaultLlmBinding();
-    env = {
-      id: envId,
-      name: `${org}/${repo}`,
-      description: `Quick-start environment for ${org}/${repo}`,
-      repositories: [{ url: sshUrl, branch: resolvedBranch, sshKeyId: chosenSshKeyId }],
-      githubTokenId: chosenTokenId,
-      ...llmBinding,
-      additionalContext: '',
-      createdAt: new Date().toISOString(),
-    };
-    saveEnvironment(envId, env);
-  } else if (!env.githubTokenId) {
-    // Existing env without a token — attach the chosen one so the clone works,
-    // but ONLY when the caller may actually manage this environment (#2158
-    // AC11). Environments are now discoverable by every user via the global
-    // tier, so writing env.githubTokenId unconditionally here let any
-    // authenticated caller attach a credential to a system-tier record they
-    // cannot otherwise touch, just by POSTing a repo URL that happens to
-    // match a reused env. The wider ungated-reuse leak (returning another
-    // team's agent, the missing-scope-stamp write on a freshly created env)
-    // is deliberately left to #2071 — this only closes the mutation.
-    if (canManageEnvironment(getScope(req), env)) {
-      env.githubTokenId = chosenTokenId;
-      env.updatedAt = new Date().toISOString();
-      saveEnvironment(env.id, env);
-    } else {
-      tokenAttachRefused = true;
-    }
+  // 2. Always create a FRESH Working Environment for this repository (#2071).
+  // The old fast lane silently REUSED any environment whose repository URL
+  // matched — ungated, so a normal user creating an agent for a repo another
+  // team already had an environment for was bound to that team's shared
+  // infrastructure (its repositories, its GitHub token, its model provider)
+  // without consent, and could even be handed that team's existing agent
+  // (`reused: true`). That surprise is removed: the caller always gets their
+  // OWN environment and their OWN agent for this repository.
+  const baseEnvId = `repo-${slugifyRepoSegment(org)}-${slugifyRepoSegment(repo)}` || 'repo';
+  let envId = baseEnvId;
+  let envSuffix = 2;
+  while (loadEnvironment(envId)) {
+    envId = `${baseEnvId}-${envSuffix++}`;
   }
-
-  const tokenWarning = tokenAttachRefused
-    ? 'This environment has no GitHub token and you do not have permission to attach one. An administrator can add it from the team\'s Settings tab in Agent Chat.'
-    : null;
+  const llmBinding = pickDefaultLlmBinding();
+  // Stamp the creator as owner so a teamless user can see AND manage their own
+  // environment: it has no team to be scoped to, and since #2078 an untiered
+  // environment is invisible to a non-admin. `ownsEnvironment` (scope.js) is the
+  // D8 owner branch that reads this — the same shape a standalone agent uses.
+  const ownerId = getScope(req).userId;
+  const env = {
+    id: envId,
+    name: `${org}/${repo}`,
+    description: `Quick-start environment for ${org}/${repo}`,
+    repositories: [{ url: sshUrl, branch: resolvedBranch, sshKeyId: chosenSshKeyId }],
+    githubTokenId: chosenTokenId,
+    ...llmBinding,
+    ...(ownerId ? { ownerId } : {}),
+    additionalContext: '',
+    createdAt: new Date().toISOString(),
+  };
+  saveEnvironment(envId, env);
 
   const llmWarning = env.llmEndpointId
     ? null
     : 'No LLM endpoint is registered. Register one under "LLM Endpoints" and bind it to the environment before chatting — otherwise the agent will fail on its first message.';
-
-  // 2. Reuse an existing standalone agent on this env, else create one.
-  const existingAgent = findStandaloneAgentForEnv(env.id);
-  if (existingAgent) {
-    return res.status(200).json({
-      reused: true,
-      environment: { id: env.id, name: env.name, reused: envReused },
-      agent: { id: existingAgent.id, displayName: existingAgent.displayName },
-      ...(llmWarning ? { llmWarning } : {}),
-      ...(tokenWarning ? { tokenWarning } : {}),
-    });
-  }
 
   const baseAgentId = `${slugifyRepoSegment(repo)}-agent` || 'repo-agent';
   let agentId = baseAgentId;
@@ -14305,11 +14274,10 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
 
   res.status(201).json({
     reused: false,
-    environment: { id: env.id, name: env.name, reused: envReused },
+    environment: { id: env.id, name: env.name, reused: false },
     agent: { id: agentId, displayName },
     seed: agentResp,
     ...(llmWarning ? { llmWarning } : {}),
-    ...(tokenWarning ? { tokenWarning } : {}),
   });
 });
 

@@ -61,7 +61,92 @@ export default function TeamEnvironmentPanel({ agent }) {
   }
   if (!env) return null;
 
+  // A shared environment the caller can see (it backs one of their agents) but
+  // does not administer is read-only here: editing it would change
+  // infrastructure other teams depend on, and `PUT /api/environments/:id` would
+  // 403 anyway (`canManageEnvironment`). This is the common shape after #2052 —
+  // a single agent on a reused shared environment, converted into a team of one.
+  if (env.canManage === false) {
+    return <ReadOnlyEnvSummary env={env} />;
+  }
+
   return <TeamEnvironmentFields env={env} onSaved={refetch} />;
+}
+
+// Read-only view of an environment the caller may see but not manage.
+function ReadOnlyEnvSummary({ env }) {
+  const repositories = Array.isArray(env.repositories) ? env.repositories : [];
+  const mcpServers = Array.isArray(env.mcpServers) ? env.mcpServers : [];
+  const rowStyle = {
+    fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
+    padding: 'var(--eb-space-1) 0',
+  };
+  const section = (label, children) => (
+    <div>
+      <div style={labelStyle}>{label}</div>
+      {children}
+    </div>
+  );
+  const none = <div style={{ ...rowStyle, color: 'var(--eb-text-muted)' }}>—</div>;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+      <div style={{
+        display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+        fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+        padding: 'var(--eb-space-2) var(--eb-space-3)',
+        background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-md)',
+      }}>
+        <Info size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
+        <span>
+          This team runs on a shared Working Environment managed by another team.
+          You can view it here but not edit it — ask a System Admin or the owning
+          team's admin to change its repositories, credentials or model provider.
+        </span>
+      </div>
+
+      {section('Repositories', repositories.length === 0 ? none : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-0-5)' }}>
+          {repositories.map((r, i) => (
+            <div key={i} style={rowStyle}>
+              <code>{r.url || '(no url)'}</code>
+              {r.branch ? <span style={{ color: 'var(--eb-text-muted)' }}> @ {r.branch}</span> : null}
+              {r.readOnly ? <span style={{ color: 'var(--eb-text-muted)' }}> · read-only</span> : null}
+            </div>
+          ))}
+        </div>
+      ))}
+
+      {section('Model provider', (
+        <div style={rowStyle}>
+          {env.llmEndpointId
+            ? <>{env.llmEndpointId}{env.defaultModelId ? <span style={{ color: 'var(--eb-text-muted)' }}> · {env.defaultModelId}</span> : null}</>
+            : <span style={{ color: 'var(--eb-text-muted)' }}>Built-in default</span>}
+        </div>
+      ))}
+
+      {section('Toolchain', (
+        <div style={rowStyle}>
+          {env.toolchainId || <span style={{ color: 'var(--eb-text-muted)' }}>Default image</span>}
+        </div>
+      ))}
+
+      {section('MCP servers', mcpServers.length === 0 ? none : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-0-5)' }}>
+          {mcpServers.map((m, i) => (
+            <div key={i} style={rowStyle}><code>{m.serverId}</code></div>
+          ))}
+        </div>
+      ))}
+
+      {env.additionalContext
+        ? section('Additional context', (
+          <div style={{ ...rowStyle, whiteSpace: 'pre-wrap', color: 'var(--eb-text-secondary)' }}>
+            {env.additionalContext}
+          </div>
+        ))
+        : null}
+    </div>
+  );
 }
 
 function TeamEnvironmentFields({ env, onSaved }) {

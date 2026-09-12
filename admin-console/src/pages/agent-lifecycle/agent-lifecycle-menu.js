@@ -70,8 +70,8 @@ const EXPORTABLE_ROLES = new Set(['agent', 'team-member', 'team']);
 // ALONE: a `team` already is one, a `team-member` already belongs to one, and
 // there is no reverse conversion, so a near-miss here is not a cosmetic bug.
 // `expert` is the pre-#1961 name the orchestrator normalizes to `agent` on
-// startup, listed for the same reason `findStandaloneAgentForEnv` still accepts
-// it — a list entry read before that normalization has landed.
+// startup, listed so a config read before that normalization has landed still
+// offers the entry.
 const CONVERTIBLE_ROLES = new Set(['agent', 'expert']);
 
 /**

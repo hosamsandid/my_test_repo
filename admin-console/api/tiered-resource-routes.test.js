@@ -250,10 +250,10 @@ const MUTATIONS = [
     expect: ['mcp-create-uses-canCreate'],
   },
   {
-    why: 'the environment read-one loses the gate §11.4 recorded as missing',
-    from: "if (!isTemplateEnvironment(env)) {\n    // #2083: this read was ungated (concept §11.4) — any authenticated caller\n    // could fetch any environment by id and read its repositories, its\n    // `githubTokenId` and its MCP references. A tier the read-one path ignores is\n    // decorative, so the gate lands with the tier. 404 rather than 403, matching\n    // `GET /api/llm-endpoints/:id`, so the route is not an existence oracle.\n    if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env)) {\n      return res.status(404).json({ error: 'Environment not found' });\n    }\n  }\n  const agents = agentsUsingEnvironment(env.id, scope); // (#439)\n  res.json({ ...env, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, env) });",
-    to: "const agents = agentsUsingEnvironment(env.id, scope); // (#439)\n  res.json({ ...env, agents, agentCount: agents.length });",
-    expect: ['env-read-is-gated', 'env-read-refusal-is-404', 'env-read-is-global-aware', 'env-read-templates-bypass-tier-gate'],
+    why: 'the environment read-one loses the tier gate §11.4 recorded as missing (the template-bypass half is proven by the next mutation)',
+    from: "if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env) && agents.length === 0) {\n      return res.status(404).json({ error: 'Environment not found' });\n    }",
+    to: '',
+    expect: ['env-read-is-gated', 'env-read-refusal-is-404', 'env-read-is-global-aware'],
   },
   {
     why: 'the environment read-one stops admitting a template regardless of tier (a curated catalog entry becomes unreadable by an ordinary team-creation picker)',

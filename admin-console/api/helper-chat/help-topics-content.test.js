@@ -702,8 +702,11 @@ const TOPIC_CONTENT = [
       'Convert into a team',
       'one-way door',
       'default branch',
-      'reuses',
-      'Agent reused',
+      // #2071 removed the ungated QuickStart reuse: the fast lane now always
+      // creates a fresh, owner-stamped environment and a fresh agent, so the
+      // chapter documents that instead of "Agent reused"/"Environment reuse".
+      'A fresh environment',
+      'silently reused',
       'not used',
       'Model Provider',
       'SSH key',

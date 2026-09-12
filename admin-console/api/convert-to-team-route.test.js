@@ -51,15 +51,33 @@ test('a missing agent is a 404, decided here rather than proxied blind', () => {
   assert.match(src, /if \(!cfg\) return res\.status\(404\)/);
 });
 
-test('both authorization gates are present — manage the agent AND its tenant', () => {
+test('one authorization gate — the caller may manage this agent', () => {
   const src = convertRoute();
-  // The conversion edits this agent and creates a team in its tenant. A caller
-  // who owns the agent but is not a Team Admin for the tenant may do the first
-  // and not the second, so the tenant check must NOT go through
-  // `agentMetaForScope` (which carries the ownership escape hatch).
+  // Managing the source agent is the whole authorization the conversion needs:
+  // since #2081 minting an Agent Team is self-service, so a caller who owns the
+  // agent (passing this gate under D8) may grow it into a team of one.
   assert.match(src, /denyUnlessCanManageAgent\(req, res,/);
-  assert.match(src, /canManageAgent\(getScope\(req\),\s*\{ teamId: agentTeamId\(/);
-  assert.match(src, /res\.status\(403\)\.json\(\{ error: 'forbidden', code: 'forbidden' \}\)/);
+});
+
+test('the stale "may you mint a team in this tenant" gate is gone (#2081)', () => {
+  const src = convertRoute();
+  // The old second gate required Team-Admin rights over the agent's
+  // credential-axis tenant (usually `default`), which 403'd a standalone
+  // agent's own owner — the bug this fix closes. Self-service team creation
+  // makes it wrong, so it must not come back.
+  assert.doesNotMatch(src, /canManageAgent\(getScope\(req\),\s*\{ teamId: agentTeamId\(/);
+  assert.doesNotMatch(src, /error: 'forbidden', code: 'forbidden'/);
+});
+
+test('the creator is recorded as the new team\'s Team Admin, single-sourced with team-create', () => {
+  const src = convertRoute();
+  // A `role: 'team'` agent is its own access boundary, so without this
+  // membership the creator could not see or manage the team they just made.
+  // Reuses `planCreatorMembership` so the condition stays in step with the
+  // self-service create paths.
+  assert.match(src, /planCreatorMembership\(\{/);
+  assert.match(src, /teamAgentId: data\.teamId/);
+  assert.match(src, /callAdmin\('POST', 'memberships'/);
 });
 
 test('it proxies to the orchestrator route that owns the conversion', () => {

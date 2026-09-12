@@ -199,18 +199,20 @@ The platform does more work for you, in this order.
    (its credentials, its model provider) that you cannot manage, which is the
    surprise this path no longer springs.
 3. **A fresh agent.** It creates a **new** standalone assistant on that
-   environment. Submitting the same repository twice gives you two separate
-   assistants, each on its own environment — nothing is silently reused.
+   environment, named exactly what you typed into **Agent Name** — the field is
+   required on this path too, the same as it is without a repository. Submitting
+   the same repository twice gives you two separate assistants, each on its own
+   environment — nothing is silently reused.
 
-### Why Name and Model Provider are not used here
+### Why Model Provider is not used here
 
-Because step 2 derives everything from the repository, the **Name** and
-**Model Provider** fields above the URL are **not used** on the repository path.
-The assistant is named after the repository, and it runs on the platform's
-default model provider. The two fields stay on screen because clearing the URL
-puts you straight back on the repo-less path, where they *are* used — but if you
-type a name, paste a repository URL and submit, the name you typed is not the
-name you get.
+The **Model Provider** field above the URL is **not used** on the repository
+path — the assistant runs on the platform's default model provider regardless
+of what you select there. The field stays on screen because clearing the URL
+puts you straight back on the repo-less path, where it *is* used. **Agent
+Name**, by contrast, is used on both paths: whatever you type is exactly the
+name you get, with or without a repository — there is no repository-derived
+fallback.
 
 Either way you can fine-tune the result afterwards from the agent's own
 **Settings** tab in Agent Chat — nothing here is a one-way door.

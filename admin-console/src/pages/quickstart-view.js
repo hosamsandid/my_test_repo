@@ -27,14 +27,17 @@ export function quickstartEndpoint(url) {
 }
 
 // The request body for the chosen endpoint. Repo path: url + optional token/ssh
-// pickers, exactly as today. LLM path: display name + selected provider only —
-// no token or SSH key demanded (AC4).
+// pickers, exactly as today, PLUS the display name (#2222 D1 — the field is the
+// only source of the agent's name on this path too, never a repo-derived one).
+// LLM path: display name + selected provider only — no token or SSH key
+// demanded (AC4).
 export function quickstartBody({ url, tokenId, sshKeyId, displayName, llmEndpointId }) {
   if (hasRepoUrl(url)) {
     return {
       url: url.trim(),
       githubTokenId: tokenId || undefined,
       sshKeyId: sshKeyId || undefined,
+      displayName: (displayName || '').trim(),
     };
   }
   return {
@@ -127,8 +130,9 @@ export function providerBlockerMessage(canAddProvider) {
 //     provider there and reports an `llmWarning` instead, which created an
 //     agent that could not answer its first message. That is the same dead end
 //     from the other side, so the lock covers both paths.
-//   - repo present: GitHub prerequisites must be met (token + SSH key) — the URL
-//     itself is non-empty by definition here.
+//   - repo present: a name must be given (#2222 D1 — no repo-derived fallback)
+//     AND GitHub prerequisites must be met (token + SSH key) — the URL itself
+//     is non-empty by definition here.
 //   - repo absent : a model provider must be selected, and a name given
 //     (AC4 / AC6).
 export function canSubmitQuickstart({
@@ -141,7 +145,7 @@ export function canSubmitQuickstart({
 }) {
   if (!hasLlmEndpoints) return false;
   if (hasRepoUrl(url)) {
-    return repoPrerequisitesMet({ hasTokens, hasSshKeys });
+    return !!(displayName || '').trim() && repoPrerequisitesMet({ hasTokens, hasSshKeys });
   }
   return !!(displayName || '').trim() && !!selectedLlmId;
 }
@@ -180,9 +184,14 @@ export function quickstartSubmitReasons({
   }
   const reasons = [];
   if (hasRepoUrl(url)) {
-    // Repo path: the backend auto-binds the default model provider, so the gate
-    // is only the two GitHub prerequisites. Field order matches the form — the
-    // SSH-key picker is rendered above the token picker.
+    // Repo path: the backend auto-binds the default model provider, so besides
+    // the name (#2222 D1 — no repo-derived fallback) the gate is only the two
+    // GitHub prerequisites. Field order matches the form — the Agent Name field
+    // is rendered above the URL field, which is above the SSH-key picker, which
+    // is above the token picker.
+    if (!(displayName || '').trim()) {
+      reasons.push({ field: 'name', message: 'Enter a name for your assistant.' });
+    }
     if (!hasSshKeys) {
       reasons.push({
         field: 'ssh-key',

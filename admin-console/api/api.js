@@ -14155,7 +14155,17 @@ function quickstartSystemPrompt(org, repo) {
 // repo, and return (or create) a default agent bound to it. Reuses
 // existing artefacts when possible so repeat clicks are safe.
 app.post('/api/quickstart', heavyLimiter, async (req, res) => {
-  const { url, githubTokenId, sshKeyId } = req.body || {};
+  const { url, githubTokenId, sshKeyId, displayName: rawDisplayName } = req.body || {};
+
+  // #2222 D1: the Agent Name field is the ONLY source of the agent's display
+  // name on this path too — no repo-derived fallback. The client gates
+  // submission on this already (quickstartSubmitReasons/canSubmitQuickstart),
+  // but this route is reachable directly, so it re-enforces the requirement
+  // server-side rather than trusting the UI.
+  const displayName = typeof rawDisplayName === 'string' ? rawDisplayName.trim() : '';
+  if (!displayName) {
+    return res.status(400).json({ error: 'A display name is required.', code: 'no_name' });
+  }
 
   let parsed;
   try {
@@ -14271,7 +14281,6 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
   // it atomically (no TOCTOU gap between this request and the reservation) —
   // the id actually used comes back on the response, never guessed here.
   const baseAgentId = `${slugifyRepoSegment(repo)}-agent` || 'repo-agent';
-  const displayName = `${repo} Agent`;
   const systemPrompt = quickstartSystemPrompt(org, repo);
 
   let agentResp;

@@ -702,3 +702,116 @@ test("selectOrphanedOwnerIds: an UNKNOWN live-user gate sweeps nothing", () => {
     );
   }
 });
+
+// ── #2177 (epic #2166 B5): the baseline re-interpretation of a "shared"
+// binding for a non-attributed, non-interactive operation (container spawn,
+// the first clone at team/agent creation) ──────────────────────────────────
+//
+// `orchestrator.js`'s `resolveBaselineGithubTokenId` is a thin wrapper
+// composing exactly the three pure calls exercised below (`resolveBaselineOwnerId`
+// → `findPersonalCredentialState` → `resolveCredential` with an operation
+// OUTSIDE `ATTRIBUTED_OPERATIONS`, e.g. `"spawn"`). These tests pin that
+// composition's behaviour directly, since the wrapper itself is fs-bound and
+// can only be guarded by a source-reading wiring test (see
+// `baseline-github-token-wiring.test.js`).
+//
+// This is the "migrate existing team/system credential bindings to this
+// model" AC: nothing on disk changes — an existing `env.githubTokenId` (a
+// team/system-scope token, exactly what every environment carries today)
+// keeps resolving to itself when nobody has a personal credential, and
+// AUTOMATICALLY starts resolving to the team's current team-admin's personal
+// credential the moment one exists, with no redeploy and no data migration.
+function resolveBaselineGithubTokenIdForTest({ cfg, users, memberships, tokenIndex, sharedCredentialId }) {
+  const ownerId = resolveBaselineOwnerId(cfg, { users, memberships });
+  const personal = findPersonalCredentialState(tokenIndex || [], ownerId);
+  const decision = resolveCredential({
+    operation: "spawn",
+    ownerId,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
+    personalCredentialOrphaned: personal.orphaned,
+    sharedCredentialId: sharedCredentialId || null,
+    kind: "GitHub token",
+  });
+  return decision.credentialId || null;
+}
+
+test("B5 migration: an existing shared/system binding is unchanged when nobody has a personal credential", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const resolved = resolveBaselineGithubTokenIdForTest({
+    cfg,
+    users: [{ id: "u-creator" }],
+    memberships: [{ userId: "u-creator", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }],
+    tokenIndex: [],
+    sharedCredentialId: "tok-shared-legacy",
+  });
+  assert.equal(resolved, "tok-shared-legacy", "an unmigrated binding must keep working exactly as before (AC8)");
+});
+
+test("B5 migration: the SAME binding automatically re-resolves to the team-admin's personal token once one exists", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const resolved = resolveBaselineGithubTokenIdForTest({
+    cfg,
+    users: [{ id: "u-creator" }],
+    memberships: [{ userId: "u-creator", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }],
+    tokenIndex: [{ id: "tok-personal-creator", scope: "personal", userId: "u-creator" }],
+    sharedCredentialId: "tok-shared-legacy",
+  });
+  assert.equal(resolved, "tok-personal-creator", "the field's meaning re-interprets to the baseline pointer — no data edit needed");
+});
+
+test("B5 migration: a D4 succession moves the baseline WITHOUT redeploying the agent or touching env.githubTokenId", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const users = [{ id: "u-creator" }, { id: "u-newadmin" }];
+  const memberships = [
+    { userId: "u-newadmin", teamId: "squad", role: "team-admin", createdAt: "2020-02-01" },
+    { userId: "u-creator", teamId: "squad", role: "team-member", createdAt: "2020-01-01" },
+  ];
+  const tokenIndex = [
+    { id: "tok-personal-creator", scope: "personal", userId: "u-creator" },
+    { id: "tok-personal-newadmin", scope: "personal", userId: "u-newadmin" },
+  ];
+  const resolved = resolveBaselineGithubTokenIdForTest({ cfg, users, memberships, tokenIndex, sharedCredentialId: "tok-shared-legacy" });
+  assert.equal(resolved, "tok-personal-newadmin", "the CURRENT team-admin's credential wins, not the demoted creator's");
+});
+
+test("B5 migration: a team-member resolves through its parent team's baseline, same as the container-spawn path uses", () => {
+  const users = [{ id: "u-admin" }];
+  const memberships = [{ userId: "u-admin", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }];
+  const tokenIndex = [{ id: "tok-personal-admin", scope: "personal", userId: "u-admin" }];
+  const resolved = resolveBaselineGithubTokenIdForTest({
+    cfg: { role: "team-member", parentTeamId: "squad" },
+    users,
+    memberships,
+    tokenIndex,
+    sharedCredentialId: "tok-shared-legacy",
+  });
+  assert.equal(resolved, "tok-personal-admin");
+});
+
+test("B5 migration: a standalone (unowned) agent's binding never refuses and never needs a personal credential", () => {
+  const resolved = resolveBaselineGithubTokenIdForTest({
+    cfg: { role: "agent" },
+    users: [],
+    memberships: [],
+    tokenIndex: [],
+    sharedCredentialId: "tok-shared-legacy",
+  });
+  assert.equal(resolved, "tok-shared-legacy", "no owner anywhere → shared, unchanged, never a refusal (AC8)");
+});
+
+test("B5 migration: an owner whose personal credential is present but rejected by isUsable still falls back to shared, never refuses", () => {
+  // `operation: 'spawn'` is not in ATTRIBUTED_OPERATIONS, so unlike an
+  // attributed write this can NEVER reach resolveCredential's refuse branch —
+  // a container must always have a working path to spawn.
+  const cfg = { role: "agent", ownerId: "u-alice" };
+  const decision = resolveCredential({
+    operation: "spawn",
+    ownerId: "u-alice",
+    personalCredential: null,
+    personalCredentialPresent: true, // present but the caller's isUsable check rejected it
+    sharedCredentialId: "tok-shared-legacy",
+    kind: "GitHub token",
+  });
+  assert.deepEqual(decision, { tier: "shared", credentialId: "tok-shared-legacy" });
+});

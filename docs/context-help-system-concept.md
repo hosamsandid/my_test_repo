@@ -409,8 +409,11 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the `create.md` topic plus its `seeAlso` neighbours — at **318,054 — 93.5% used,
-21,946 left** (#2172's terminology sweep had already shaved the figure to 315,387/92.8%/24,613 left
+the `create.md` topic plus its `seeAlso` neighbours — at **318,724 — 93.7% used,
+21,276 left** (#2216's right-rail team-narrowing addition to `agent-chat.md`, itself a `create.md`
+`seeAlso` neighbour, is a clean +314 on top of a live pre-edit 318,410 that already carried a +356 gap
+over the 318,054 last stamped here from unrelated intervening merges; #2172's terminology sweep had
+already shaved the figure to 315,387/92.8%/24,613 left
 — a word-removal pass, not new material, and this paragraph had not been restamped for it until now;
 #2177, epic #2166 B5, then corrected the corpus-vendored `docs/credentials.md` and the multi-route
 `credentials` help topic — both `create.md` `seeAlso` neighbours — for the container's spawn-time

@@ -320,6 +320,14 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // unrelated drift this cycle); post-edit **318 054 of 340 000 — 93.5% used,
 // 21 946 left**, a clean +2 667 attributable entirely to this change.
 //
+// #2216 narrowed the Agent Chat right rail to Settings-only when a team is
+// selected, and its own `agent-chat.md` "The right rail" chapter addition is a
+// `create.md` `seeAlso` neighbour, so it lands on this crown too. Live
+// `/quickstart` measured 318 410 pre-edit — already +356 over the 318 054 last
+// stamped here, from intervening merges that never touched this crown — and
+// **318 724 of 340 000 — 93.7% used, 21 276 left** post-edit, this change's own
+// delta a clean +314.
+//
 // If this ever gets tight again, the next structural step is the docs corpus
 // (route-scoped `CORPUS_FILES`, or splitting the two largest docs), NOT a fourth
 // raise and NOT trimming a topic.

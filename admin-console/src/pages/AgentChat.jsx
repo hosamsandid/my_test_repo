@@ -788,6 +788,10 @@ export default function AgentChat() {
           // member (#963 AC1). `/api/matrix/agents` already carries the
           // membership, so the rail needs no extra fetch to decide.
           agentTeamId={selectedAgent?.parentTeamId || null}
+          // #2216: a team hosts no chat, so `agentId` is null both while
+          // nothing has loaded and while the routed subject IS a team —
+          // this tells RightRail which one, so it can narrow to Settings.
+          subjectIsTeam={routedAgent?.role === 'team'}
           roomId={effectiveRoomId}
           hoveredCorrelationId={hoveredCorrelationId}
           onHoverCorrelation={setHoveredCorrelationId}

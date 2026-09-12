@@ -192,6 +192,32 @@ test('a stale persisted Settings tab falls back like the Outcomes one does', () 
   assert.match(rail, /if \(!showSettings && tab === 'settings'\) setTab\('sessions'\)/);
 });
 
+/* ── #2216: a team subject narrows the rail to Settings alone ────── */
+
+test('the chat tells the rail when the routed subject is a team', () => {
+  assert.match(agentChat, /subjectIsTeam=\{routedAgent\?\.role === 'team'\}/);
+  assert.match(rail, /subjectIsTeam = false,/);
+});
+
+test('a team subject collapses the tab list to Settings, never the others', () => {
+  assert.match(rail, /if \(subjectIsTeam\) \{\s*return showSettings/);
+  // The other tabs' bodies are guarded too, so a stale persisted tab from
+  // before the subject became a team can never render one behind the scenes.
+  for (const key of ['sessions', 'workspace', 'triggers', 'outcomes', 'knowledge']) {
+    assert.match(
+      rail, new RegExp(`!subjectIsTeam && tab === '${key}'`),
+      `the ${key} panel must stay hidden while subjectIsTeam`,
+    );
+  }
+});
+
+test('the persisted tab is forced onto Settings for a team subject', () => {
+  assert.match(
+    rail,
+    /if \(subjectIsTeam\) \{\s*if \(showSettings && tab !== 'settings'\) setTab\('settings'\);\s*return;\s*\}/,
+  );
+});
+
 /* ── AC8: role gating parity ─────────────────────────────────────── */
 
 test('the chat feeds the server-shipped canManage into the tab decision', () => {

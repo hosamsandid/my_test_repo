@@ -339,7 +339,11 @@ The rail on the right holds everything about the agent that is not the
 conversation. Toggle it with **Cmd/Ctrl+Shift+L** or the chevron in its tab
 strip; it can also collapse to a strip of icons. Two of its tabs are
 conditional: **Outcomes** appears only for an agent that belongs to a team, and
-**Settings** only when you are allowed to manage that agent.
+**Settings** only when you are allowed to manage that agent. When the rail is
+open for a **team** rather than an agent — the state the team header row's
+click puts you in — none of Sessions, Workspace, Triggers, Outcomes or
+Knowledge apply (a team hosts none of what they show), so the rail narrows to
+Settings alone, or shows no tabs at all if you may not manage that team.
 
 ### Sessions — watching a run
 

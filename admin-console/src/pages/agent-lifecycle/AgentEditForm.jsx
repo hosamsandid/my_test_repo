@@ -434,10 +434,10 @@ export default function AgentEditForm({
           whitelist. */}
       {agent.role === 'team' && (
         <div>
-          <div style={labelStyle}>Working Environment</div>
+          <div style={labelStyle}>Environment</div>
           <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
             Repositories, model provider, toolchain, MCP servers and additional context for this
-            team — the same fields a Working Environment holds, edited in place.
+            team, edited in place.
           </div>
           <TeamEnvironmentPanel agent={agent} />
         </div>
@@ -541,7 +541,7 @@ export default function AgentEditForm({
           <SyncReposPanel
             endpoint={`/api/agents/${encodeURIComponent(agent.id)}/sync-repositories`}
             actionLabel="Sync repositories"
-            description={"Clone any repositories added to this agent's Working Environment that are missing from its workspace. Already-cloned repositories are left untouched."}
+            description={"Clone any repositories added to this agent's Environment that are missing from its workspace. Already-cloned repositories are left untouched."}
           />
         </div>
       )}

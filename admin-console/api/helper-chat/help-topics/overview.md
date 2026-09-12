@@ -41,7 +41,7 @@ big picture.
 - **Flows** — the wiring diagram of a team: which agent starts the work, how
   outcomes and labels hand off between agents, and where a human approves or
   receives the result. Design it visually, then materialise it into a live team.
-- **Working Environment** — where a team's agents run and which repository they
+- **Environment** — where a team's agents run and which repository they
   clone, together with the credentials (SSH key or GitHub token) they use. A
   team edits its own from its **Settings** tab in Agent Chat; a System Admin
   curates reusable **Environment Templates** a new team can start from.

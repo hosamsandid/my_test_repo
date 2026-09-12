@@ -40,7 +40,7 @@ Bottom line: manually approving 500 tiny facts is not realistic, so automatic sh
 
 ## 3. Shared Credentials
 
-**Question:** One GitHub PAT per Working Environment, shared by all agents. Single point of failure. Who owns it, who rotates it?
+**Question:** One GitHub PAT per environment, shared by all agents. Single point of failure. Who owns it, who rotates it?
 
 **Resolution:**
 Credentials can be assigned **per agent team**. Under the scaling assumption from Point 1 — one agent team per human — this yields a clean mapping: each human-assigned agent team can manage its own individual key. Ownership and rotation of that key therefore sit with the respective human and their team, not with a shared pool.

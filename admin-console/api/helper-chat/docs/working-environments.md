@@ -1,6 +1,6 @@
-# Working Environments
+# Environments
 
-A **Working Environment** is a reusable workspace recipe applied when an agent is created. It bundles the infrastructure an agent needs to operate: credentials, repositories, MCP servers, and a model provider. Skills are **not** part of a Working Environment — they are granted to a team or an agent (see [Skills System](skills-system.md)).
+An **environment** is a reusable workspace recipe applied when an agent is created. It bundles the infrastructure an agent needs to operate: credentials, repositories, MCP servers, and a model provider. Skills are **not** part of an environment — they are granted to a team or an agent (see [Skills System](skills-system.md)).
 
 ## Fields
 
@@ -26,7 +26,7 @@ here.
 
 ## What happens at agent creation
 
-When a new agent is created with a Working Environment, the orchestrator:
+When a new agent is created with an environment, the orchestrator:
 
 1. Seeds `.claude/` and `memory/` from the skill-pool volume
 2. Copies the agent's granted skills into the workspace (resolved team-pool-first, then global — the grant lives on the team or agent, not on the environment)
@@ -34,11 +34,11 @@ When a new agent is created with a Working Environment, the orchestrator:
 4. Materialises the environment's MCP server references into the agent's `.claude/settings.json`
 5. Assembles a merged `CLAUDE.md` from the base template, the environment section, and the agent's own prompt
 
-This means all agents in the same Working Environment share the same repository and credential access — but each gets an independent workspace and memory that evolves separately from that point on.
+This means all agents in the same environment share the same repository and credential access — but each gets an independent workspace and memory that evolves separately from that point on.
 
 ## Repository-less environments
 
-A Working Environment may have **no repository** at all. Materializing a team onto
+An environment may have **no repository** at all. Materializing a team onto
 a repo-less environment creates the team and its agents normally — nothing is
 cloned, and the agents run with their own workspace as the working directory
 rather than a `/repo` checkout. This suits teams whose work is not tied to a
@@ -85,7 +85,7 @@ Python, Node, git/ssh/`gh`, the Claude Code CLI and the platform CLIs, but **no
 other language runtime**: no JDK, no Maven, no .NET, no Go. An agent bound to a
 Java repository can read and edit the code but cannot compile or test it.
 
-A Working Environment may therefore name a **toolchain**: a container image
+An environment may therefore name a **toolchain**: a container image
 derived from the default one, adding a language stack. Agents bound to that
 environment are spawned from the toolchain's image; every other environment
 keeps the default, unchanged.
@@ -96,7 +96,7 @@ Two properties are worth knowing before you use it:
   receives its environment's SSH identity, its GitHub token and the model
   credential, so whoever chooses the image chooses what executes with those
   secrets. Only a **System Admin** can register a toolchain (the **Toolchains**
-  button on the Working Environments page); a **Team Admin** selects an
+  button on the Environment Templates page); a **Team Admin** selects an
   already-registered one. Both halves are enforced server-side, so the split
   holds regardless of what any UI shows.
 - **Changing it restarts the environment's running agents.** A container's image
@@ -121,7 +121,7 @@ the test/preprod overlays pointing it at the Artifact Registry), and
 
 Use it to move the *whole installation* onto a different base image. It is the
 wrong tool for giving one team a language stack: repointing it moves every agent
-of the installation, and a toolchain on that team's Working Environment does
+of the installation, and a toolchain on that team's environment does
 exactly that job without touching anyone else.
 
 On Kubernetes a toolchain image must exist in the registry the cluster's nodes
@@ -134,9 +134,9 @@ Concept and roadmap (why the *version* of a stack belongs in the project
 repository rather than in the image): [Agent
 toolchains](agent-toolchains-concept.md).
 
-## Editing a Working Environment
+## Editing an environment
 
-Most changes to a Working Environment affect newly created agents only — an
+Most changes to an environment affect newly created agents only — an
 existing agent keeps the workspace state it was created with.
 
 **Repositories are the exception (#2066).** Saving an environment that already
@@ -160,11 +160,11 @@ same propagation, so they cannot disagree about what a change would do.
 
 ## Editing from a team's Settings tab
 
-The general-purpose Working Environments page described above is **retired**
+The general-purpose environments page described above is **retired**
 (#2170, epic #2166 A4) — there is no longer a standalone page listing every
-environment. A `role: 'team'` agent's Working Environment is now edited
-without leaving Agent Chat: open the team's **Settings** tab and its **Working
-Environment** section renders grouped tabs — **Repositories · Model provider ·
+environment. A `role: 'team'` agent's environment is now edited
+without leaving Agent Chat: open the team's **Settings** tab and its **Environment**
+section renders grouped tabs — **Repositories · Model provider ·
 Toolchain · MCP servers · Additional context** — over the same environment
 record, saved through the same `PUT /api/environments/:id` the retired page's
 form used. A repository change still gets the save-time propagation offer

@@ -40,7 +40,7 @@ export default function TeamEnvironmentPanel({ agent }) {
   if (!envId) {
     return (
       <div style={helpTextStyle}>
-        This team has no Working Environment bound yet — repositories, model provider,
+        This team has no Environment bound yet — repositories, model provider,
         toolchain, MCP servers and additional context have nothing to attach to.
       </div>
     );
@@ -226,8 +226,7 @@ function TeamEnvironmentFields({ env, onSaved }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
           <div style={helpTextStyle}>
             Repositories are cloned into a member's workspace when it is first created. Editing
-            the list here offers to bring already-materialized members up to date, the same way
-            the Working Environments form does.
+            the list here offers to bring already-materialized members up to date.
           </div>
           {form.repositories.map((repo, idx) => (
             <RepositoryCard

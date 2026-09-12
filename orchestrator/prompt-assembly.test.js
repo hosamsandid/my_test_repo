@@ -524,7 +524,7 @@ test('workingEnvironmentSection renders repo + the granted skills and is empty f
   assert.equal(workingEnvironmentSection(null), '');
   assert.equal(workingEnvironmentSection({}), '');
   const s = workingEnvironmentSection({ name: 'E', repositories: [{ url: 'git@github.com:a/b.git' }] }, ['x']);
-  assert.match(s, /## Working Environment/);
+  assert.match(s, /## Environment/);
   assert.match(s, /cloned to `\.\/b\/`/);
   assert.match(s, /\*\*Skills:\*\* `x`/);
   // Skills come from the resolved grant, never from a legacy env.skills field.
@@ -581,7 +581,7 @@ test('a lone agent-scoped repository renders the singular Repository line', () =
 
 test('an agent-scoped repository alone is enough to emit the section', () => {
   const s = workingEnvironmentSection(null, [], [{ url: 'git@github.com:a/docs.git' }]);
-  assert.match(s, /## Working Environment/);
+  assert.match(s, /## Environment/);
   // …and a junk entry is ignored rather than rendered as an empty bullet.
   assert.equal(workingEnvironmentSection(null, [], [{ url: '  ' }, null]), '');
 });

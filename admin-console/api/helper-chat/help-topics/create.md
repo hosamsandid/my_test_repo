@@ -65,7 +65,7 @@ you are doing. On those two the "→ …" line is the whole promise.
 | **Start from a ready-made team** | Pick a proven template (or one of your saved drafts) and adjust it. The fastest route to a working team when a pattern already fits. | The Agent Team Wizard, on its template gallery |
 | **Describe what you need** | Tell it in plain language what you want done. The Flow Copilot drafts a flow and shows a live preview — nothing is created until you confirm. | A new draft in the Flows canvas |
 | **Design it on the canvas** | Lay the agents out on the canvas and connect them yourself. Full control from a blank slate. | A fresh, empty draft in the Flows canvas |
-| **Configure an agent manually** | Fill in the fields yourself: id, role, Working Environment, skills, system prompt. Nothing is inferred and nothing else is created alongside it. | A panel on this page |
+| **Configure an agent manually** | Fill in the fields yourself: id, role, environment, skills, system prompt. Nothing is inferred and nothing else is created alongside it. | A panel on this page |
 
 The **Recommended** badge on *Start from a ready-made team* and **Fastest start**
 on the hero are advice, not a restriction — every entry stays one click away, and
@@ -163,7 +163,7 @@ the assistant itself, which is why it is the shorter answer when the thing you
 want to grow *is* this assistant.
 
 One detail worth knowing after converting: the repository fast lane below only
-reuses a **standalone** assistant on a Working Environment. Submitting the same
+reuses a **standalone** assistant on an environment. Submitting the same
 repository again once your assistant is a team member creates a second,
 standalone assistant on that environment rather than adding to the team — use
 **Add member** on the team for that.
@@ -175,7 +175,7 @@ repository URL.
 
 ### Without a repository
 
-You get a new repo-less Working Environment bound to the model provider you
+You get a new repo-less environment bound to the model provider you
 selected, plus one standalone chat agent on top of it. Nothing is cloned. The
 **Name** and **Model Provider** fields are both required here, and both are used
 exactly as you set them.
@@ -191,7 +191,7 @@ The platform does more work for you, in this order.
    repository's **default branch** from the remote's own HEAD, so nothing assumes
    `main`. A repository living on `master`, `develop` or anything else is picked
    up correctly without being asked.
-2. **Environment reuse.** It **reuses** a Working Environment that already points
+2. **Environment reuse.** It **reuses** an environment that already points
    at that repository URL; only if none exists does it create one named after the
    repository. An existing environment with no GitHub token attached gets the
    selected one. This is what stops a team accumulating five near-identical
@@ -207,7 +207,7 @@ The platform does more work for you, in this order.
 Because steps 2 and 3 derive everything from the repository, the **Name** and
 **Model Provider** fields above the URL are **not used** on the repository path.
 The assistant is named after the repository, and it runs on the provider the
-resolved Working Environment already carries (the platform default when that
+resolved environment already carries (the platform default when that
 environment has none). The two fields stay on screen because clearing the URL
 puts you straight back on the repo-less path, where they *are* used — but if you
 type a name, paste a repository URL and submit, the name you typed is not the

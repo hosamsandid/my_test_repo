@@ -2,7 +2,7 @@
 id: users
 routes: ["/users"]
 title: Administration
-summary: The one System-Admin surface — the human user records that can sign in, every team on the platform, and which team owns each agent and Working Environment.
+summary: The one System-Admin surface — the human user records that can sign in, every team on the platform, and which team owns each agent and environment.
 seeAlso:
   - { label: "Agent Chat", to: "/chats" }
   - { label: "Environment Templates", to: "/environment-templates" }
@@ -16,7 +16,7 @@ askPrompts:
   - "What is the difference between System Admin and Team Admin?"
   - "Where did the Access page go, and how do I add someone to a team now?"
   - "What is the difference between a team and an access scope?"
-  - "How do I share one Working Environment with several teams?"
+  - "How do I share one environment with several teams?"
 ---
 
 ## What this page manages
@@ -28,7 +28,7 @@ three tabs:
 |---|---|
 | **Users** | The human user **records** — who can sign in, under which name, with a login password or not, and who is a global System Admin. |
 | **All Teams** | Every team on the platform, including the ones you are not a member of. A clean-up view: see them, and delete one. |
-| **Resources** | Which tenant owns each agent and Working Environment — the ownership *tiers*. |
+| **Resources** | Which tenant owns each agent and environment — the ownership *tiers*. |
 
 Nothing here is where you **add somebody to a team**. That moved to the team
 itself: **Share…** in an Agent Team's context menu in the Agent Chat, where the
@@ -332,7 +332,7 @@ the squad is briefly split across two tenants, and retrying is what resolves it.
 Reassigning changes **who may see and manage** the resource. It does not restart
 an agent, move a repository, or alter what the resource does.
 
-### Working Environments, and the shared tier
+### Environments, and the shared tier
 
 An environment is **tiered**, not simply owned, so its row states the tier first
 and **Change ownership** edits it as one:
@@ -358,7 +358,7 @@ platform does not create.
 
 Ownership is enforced by the API, not just hidden in the UI:
 
-- **Lists are filtered** by the owning tenant — agents, Working Environments and
+- **Lists are filtered** by the owning tenant — agents, environments and
   team-scoped credentials outside your teams are not returned at all.
 - **An agent's work plane follows its agent** — the chat transcript, the session
   log, the workspace browser and the git actions in it. Reaching one for an agent

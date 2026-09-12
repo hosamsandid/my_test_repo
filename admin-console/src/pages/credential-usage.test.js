@@ -95,7 +95,7 @@ test('usageCountLabel: pluralization', () => {
 });
 
 test('usageTooltip: lists names one per line, friendly empty note', () => {
-  assert.equal(usageTooltip([]), 'Not used by any Working Environment');
+  assert.equal(usageTooltip([]), 'Not used by any environment');
   assert.equal(
     usageTooltip([{ id: 'prod', name: 'Production' }, { id: 'staging', name: 'Staging' }]),
     'Production\nStaging',

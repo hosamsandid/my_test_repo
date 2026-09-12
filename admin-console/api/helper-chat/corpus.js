@@ -299,6 +299,17 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // Re-measure rather than trust this comment —
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.
+// #2172 (epic #2166 A6, terminology sweep) swept the phrase "Working
+// Environment" out of every user-facing string and help surface, replacing it
+// with the shorter "environment"/"an environment" throughout — every
+// CORPUS_FILES doc it touched got a few characters shorter, not longer, since
+// the change is a word removal, not new material. Measured on this branch:
+// `/quickstart` went 316 087 → **315 387** (92.8%, 24 613 left). No topic's
+// `seeAlso` chain changed and no chapter heading the deep-link mechanism
+// depends on was renamed (only body prose and the two H3 sub-headings under
+// `agent-chat.md`'s "Settings — configuring the agent" chapter, which the
+// `##`-only chapter guard does not read), so the crown-holding context is
+// unchanged from the prior stamp.
 //
 // If this ever gets tight again, the next structural step is the docs corpus
 // (route-scoped `CORPUS_FILES`, or splitting the two largest docs), NOT a fourth

@@ -188,7 +188,7 @@ function credentialRefusal(repo, credentials = {}) {
       message:
         `\`${url}\` is an HTTPS GitHub URL, but this environment has no GitHub token, so there ` +
         `is nothing to authenticate the clone with. SSH keys do not authenticate HTTPS ` +
-        `transports. Add a token to the Working Environment, or attach the repository by its ` +
+        `transports. Add a token to the environment, or attach the repository by its ` +
         `SSH URL (\`git@github.com:…\`) and select an SSH key.`,
     };
   }
@@ -233,7 +233,7 @@ function planAgentRepoAttach({ env, agentRepositories, repo, occupiedNames = [],
       ok: false,
       code: "environment-declares-repo",
       message:
-        `\`${requested.url}\` already comes from the Working Environment, so this agent ` +
+        `\`${requested.url}\` already comes from the environment, so this agent ` +
         `has it. Attaching it again would put a second entry on the same directory.`,
       dirName,
     };
@@ -249,7 +249,7 @@ function planAgentRepoAttach({ env, agentRepositories, repo, occupiedNames = [],
       ok: false,
       code: "dir-name-taken-by-environment",
       message:
-        `The clone directory \`./${dirName}/\` is already taken by the Working Environment's ` +
+        `The clone directory \`./${dirName}/\` is already taken by the environment's ` +
         `\`${envClash.url.trim()}\`. Two repositories cannot share one directory — the ` +
         `environment's repository stays.`,
       dirName,
@@ -313,8 +313,8 @@ function planAgentRepoDetach({ env, agentRepositories, url } = {}) {
         ok: false,
         code: "environment-repository",
         message:
-          `\`${target}\` comes from the Working Environment, not from this agent. Change it ` +
-          `on the Working Environment — every agent in that environment shares it.`,
+          `\`${target}\` comes from the environment, not from this agent. Change it ` +
+          `on the environment — every agent in that environment shares it.`,
       };
     }
     return {
@@ -337,7 +337,7 @@ function planAgentRepoDetach({ env, agentRepositories, url } = {}) {
     // to delete.
     deleteWorkingCopy: !envOwnsDir,
     keptReason: envOwnsDir
-      ? `\`./${dirName}/\` is now also declared by the Working Environment, so the working ` +
+      ? `\`./${dirName}/\` is now also declared by the environment, so the working ` +
         `copy was kept — only the agent-scoped attachment was removed.`
       : null,
     agentRepositories: attached.filter((r) => r.url !== entry.url),

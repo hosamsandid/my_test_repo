@@ -15,7 +15,7 @@ askPrompts:
   - "What does 'start from a template' copy, and what does it leave out?"
   - "Do I need to supply my own SSH key and GitHub token after starting from a template?"
   - "Who can create or edit a template?"
-  - "Where did the Working Environments page go?"
+  - "Where did the old environments page go?"
 ---
 
 ## What an Environment Template is
@@ -33,7 +33,7 @@ binding, not a copy. A template is deliberately the opposite: every team that
 starts from one gets its own, independent environment, seeded once from the
 template's structure.
 
-### Where did the Working Environments page go?
+### Where did the old environments page go?
 
 The general-purpose environments list every user could see is gone. What
 replaced it, depending on who is looking:

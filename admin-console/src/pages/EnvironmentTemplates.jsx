@@ -323,7 +323,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
               environment — and why an added repository does not reach an agent
               that already exists. The per-field hints below stay put. */}
           <PageHelpButton
-            label="About repositories in a Working Environment"
+            label="About repositories in an environment"
             size={14}
             style={{ padding: 0, marginLeft: 'auto', flexShrink: 0 }}
             section={ENVIRONMENT_TEMPLATES_HELP_SECTIONS.repositories}
@@ -859,7 +859,7 @@ function ToolchainRegistryPanel({ data, onChanged }) {
 
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
         A toolchain is a container image derived from the default agent image, adding one language
-        stack. Registering it here is what makes it selectable on a Working Environment — it grants
+        stack. Registering it here is what makes it selectable on an environment — it grants
         nothing on its own. Only a System Admin can register one, because an agent container
         receives its environment's SSH key, GitHub token and model credential: whoever picks the
         image picks what runs with those secrets.

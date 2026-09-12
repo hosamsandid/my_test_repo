@@ -17,7 +17,7 @@
 // ---------------------------------------------------------------------------
 
 export const SCOPE_LABELS = {
-  environment: 'From Working Environment',
+  environment: 'From Environment',
   agent: 'This agent only',
 };
 
@@ -50,7 +50,7 @@ export function agentScopedRows(view) {
 // The one-line note under an inherited row. AC8 is a refusal the reader meets
 // before trying, not an error afterwards.
 export const INHERITED_ROW_NOTE =
-  'Shared by every agent in this Working Environment — change it there, not here.';
+  'Shared by every agent in this environment — change it there, not here.';
 
 // A shadowed row is the environment-caught-up edge case: the directory is now
 // the environment's, so this attachment no longer owns the files. Removing it
@@ -58,7 +58,7 @@ export const INHERITED_ROW_NOTE =
 // to be said, because "Remove" otherwise reads as "delete that directory".
 export function shadowNote(row) {
   if (!row || !row.shadowed) return null;
-  return `The Working Environment now also declares ${row.clonePath}, so it owns those files. `
+  return `The environment now also declares ${row.clonePath}, so it owns those files. `
     + 'Removing this attachment leaves the working copy in place.';
 }
 
@@ -125,8 +125,8 @@ export const ADD_DIALOG_TITLE = 'Add a repository to this agent';
 export function addDialogLead(view) {
   const name = (view && view.agentName) || 'this agent';
   const envPart = view && view.environmentId
-    ? ` Its Working Environment (${view.environmentId}) is not changed, and no other agent in it is affected.`
-    : ' Its Working Environment is not changed, and no other agent in it is affected.';
+    ? ` Its environment (${view.environmentId}) is not changed, and no other agent in it is affected.`
+    : ' Its environment is not changed, and no other agent in it is affected.';
   return `The repository is cloned into ${name}'s own workspace.${envPart}`;
 }
 
@@ -157,7 +157,7 @@ export function removeConfirmation(row) {
     for (const line of facts.lines || []) lines.push(line);
   }
 
-  lines.push('The Working Environment is not changed, and no other agent is affected.');
+  lines.push('The environment is not changed, and no other agent is affected.');
 
   return {
     title: `Remove ${row.url}?`,
@@ -192,9 +192,9 @@ export function detachedNotice(result) {
 export function emptyStateText(view) {
   const rows = repositoryRows(view);
   if (rows.length === 0) {
-    return 'This agent has no repositories. Its Working Environment declares none, and nothing '
+    return 'This agent has no repositories. Its environment declares none, and nothing '
       + 'is attached to the agent itself.';
   }
   return 'Nothing is attached to this agent on its own — every repository above comes from its '
-    + 'Working Environment.';
+    + 'environment.';
 }

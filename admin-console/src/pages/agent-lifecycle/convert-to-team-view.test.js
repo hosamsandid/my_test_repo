@@ -50,7 +50,7 @@ test('AC2 — the consequences name the new team, what survives, and the one-way
   assert.match(blob, /Research Assistant Team/);
   assert.match(blob, /research-assistant-team/);
   // What survives — the questions users actually have.
-  for (const kept of [/history/i, /system prompt/i, /skills/i, /triggers/i, /Working Environment/i]) {
+  for (const kept of [/history/i, /system prompt/i, /skills/i, /triggers/i, /environment/i]) {
     assert.match(blob, kept);
   }
   // And the two things that change.

@@ -830,10 +830,10 @@ function ResourcesTab() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       <TabLead
-        label="What ownership means for an agent and for a Working Environment"
+        label="What ownership means for an agent and for an environment"
         section={ADMINISTRATION_HELP_SECTIONS.resources}
       >
-        Which tenant owns each agent and Working Environment. An environment can also be
+        Which tenant owns each agent and environment. An environment can also be
         <strong> shared</strong> across several teams; an agent is always owned by exactly one.
       </TabLead>
 
@@ -847,7 +847,7 @@ function ResourcesTab() {
           {agentTeams.map(teamGroup)}
           {standaloneAgents.map(standaloneRow)}
         </Section>
-        <Section title={`Working Environments (${envList.length})`}>
+        <Section title={`Environments (${envList.length})`}>
           {envList.length === 0 && <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No environments.</div>}
           {envList.map(e => (
             <EnvironmentOwnershipRow

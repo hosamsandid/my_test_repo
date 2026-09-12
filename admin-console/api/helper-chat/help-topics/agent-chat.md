@@ -10,7 +10,7 @@ seeAlso:
   - { label: "Environment Templates", to: "/environment-templates" }
   - { label: "GitHub Event Log", to: "/github-events" }
 askPrompts:
-  - "Where did the Working Environments page go?"
+  - "Where did the old environments page go?"
   - "What is the difference between a loop trigger and a cron trigger?"
   - "Why is my trigger not firing while a loop is running?"
   - "What is the difference between Reset Session and Clear History?"
@@ -107,8 +107,8 @@ where its prompt and skills come from:
 | Role | What it is | When to use it |
 |---|---|---|
 | **Agent** (standalone) | A single chat agent with its own system prompt. The prompt shapes its persona — a COBOL specialist, a code-review buddy, a release manager. Add cron / GitHub triggers later to make it run autonomously as well as answer messages. | One-of-a-kind agents that act on their own. |
-| **Agent Team** | A squad of agents working a repository. It stores a system-prompt template and hosts no agent itself — **Add member…** on the team's group header spawns agents that share the prompt and Working Environment but each get their own workspace and their own conversation. | Several copies of the same kind of agent — e.g. three reviewer agents in parallel. Start one from the **Create** launcher rather than by hand. |
-| **Team Member** | One agent spawned from an Agent Team. Its system prompt, skills and MCP servers **inherit** from the parent team unless you flip a field from *Inherit* to *Custom*. Role, Working Environment and parent team are fixed at creation; of those, only the parent team is shown in the Settings form. | You do not pick this role — it is assigned when you add a member to a team. |
+| **Agent Team** | A squad of agents working a repository. It stores a system-prompt template and hosts no agent itself — **Add member…** on the team's group header spawns agents that share the prompt and environment but each get their own workspace and their own conversation. | Several copies of the same kind of agent — e.g. three reviewer agents in parallel. Start one from the **Create** launcher rather than by hand. |
+| **Team Member** | One agent spawned from an Agent Team. Its system prompt, skills and MCP servers **inherit** from the parent team unless you flip a field from *Inherit* to *Custom*. Role, environment and parent team are fixed at creation; of those, only the parent team is shown in the Settings form. | You do not pick this role — it is assigned when you add a member to a team. |
 
 > An **Agent Team** is *not* the same thing as an **access scope**. The scope is
 > the older, coarser tenant every agent, environment and credential is stamped
@@ -130,7 +130,7 @@ The left rail lists every agent you can see, and clicking one opens its room.
 
 **Grouping and order.** Agents that belong to an Agent Team are grouped under
 that team; standalone agents are collected under *Single agents*. When every row
-in a group shares one Working Environment, the environment name is hoisted onto
+in a group shares one environment, the environment name is hoisted onto
 the group header and the rows stay single-line; a member that deviates keeps its
 own environment line. Groups collapse and expand, and both the collapse state
 and your own ordering are remembered per user. Drag a row by its grip to
@@ -167,7 +167,7 @@ on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:
   already is one and a team member already belongs to one. It lifts this
   assistant into a team of one *in place*: a team named after it is created and
   this agent becomes its only member, keeping its id, its chat room and history,
-  its system prompt, its skills, its triggers and its Working Environment. The
+  its system prompt, its skills, its triggers and its environment. The
   row then moves out of *Single agents* into its own team group, the team shows
   up in **Flows** as a one-node flow, and **Add member…** on that group is how it
   grows. It is a **one-way door** — there is no convert-back, and deleting the
@@ -241,7 +241,7 @@ this agent has contributed to its team's knowledge base — clicking it opens th
 Knowledge tab.
 
 **The model selector** shows the model the agent actually runs on, as
-*model · provider*. An agent inherits the model provider its Working Environment
+*model · provider*. An agent inherits the model provider its environment
 names; picking a different one here is a **per-agent override**, and *Reset to
 environment default* takes it back off. Two things are worth knowing before you
 switch: each row shows that model's **context window**, and changing the
@@ -257,7 +257,7 @@ number to watch when replies start losing earlier detail — that is the point t
 
 **About this chat** (the **i**) opens the detail behind that one-line indicator:
 
-- **About** — the agent's Working Environment and each repository it has cloned,
+- **About** — the agent's environment and each repository it has cloned,
   with the branch and a dot when the clone has uncommitted changes.
 - **Session** — the current session id, copyable, which is what you quote when
   something needs looking up in the logs.
@@ -380,9 +380,9 @@ The Workspace toolbar's **repositories** button (and the same panel in
 **Settings**, next to *Sync repositories*) lists every repository this agent
 has, and is where you attach one more.
 
-Repositories normally come from the agent's **Working Environment**, which means
+Repositories normally come from the agent's **environment**, which means
 *every* agent in that environment gets them. Those rows are marked
-**From Working Environment** and carry no remove action: change them on the
+**From Environment** and carry no remove action: change them on the
 environment, where the decision belongs. Often, though, only one agent needs one
 more repository — a reference codebase to read, a second service it has to
 touch, a documentation repo. **Add repository** attaches one to **that agent
@@ -434,7 +434,7 @@ same question, "what wakes this agent", and every one of them delivers a
 | **Cron (recurring)** | a 5-field schedule (`Minute Hour Day Month Weekday`) comes due. If the previous run of *this* trigger is still going, the tick is skipped rather than queued. |
 | **Once (one-shot)** | a specific date and time is reached. It then deletes itself — a reminder, not a schedule. |
 | **HTTP webhook** | something outside the platform sends `POST /hooks/<agentId>/<triggerId>` with the trigger's own `X-Hook-Secret`. Each trigger carries its own generated secret; there is no open mode. Used by CI pipelines, monitoring, GitHub webhooks. |
-| **GitHub event** | the built-in poller sees a matching event on a repository of the agent's Working Environment (about every 30 seconds). The full event payload is appended to the prompt as JSON. Needs a GitHub token on that environment. |
+| **GitHub event** | the built-in poller sees a matching event on a repository of the agent's environment (about every 30 seconds). The full event payload is appended to the prompt as JSON. Needs a GitHub token on that environment. |
 | **Data flow (agent dependency)** | a teammate pushes to the team repository — the committed work *is* the hand-off. Under the hood this is a GitHub `push` subscription with a marker. |
 | **Loop (re-run until done)** | you start it. It is not a subscription (see below). |
 
@@ -572,8 +572,8 @@ configured: the Agents page that used to host a second copy of this form was
 removed once the tab covered it (see *Where the Agents page went* below).
 
 Its **role** is fixed at creation and is not shown here — the agent's role is
-what its list icon shows. The **Working Environment** binding itself is fixed
-too, but on a **team** agent this tab also renders a **Working Environment**
+what its list icon shows. The **environment** binding itself is fixed
+too, but on a **team** agent this tab also renders an **Environment**
 section — grouped tabs (Repositories · Model provider · Toolchain · MCP
 servers · Additional context) editing the bound environment's own content in
 place, through that record's own save rather than this form's. There is no
@@ -617,9 +617,9 @@ most consequential thing in this form, so it is not below the plugin grants.
   agent change files on the host. Saving re-provisions the agent's container.
   Offered only on the local / self-hosted stack.
 
-### The team's Working Environment section, in detail
+### The team's Environment section, in detail
 
-On a **team** agent the **Working Environment** section edits the bound
+On a **team** agent the **Environment** section edits the bound
 environment's own record in place — the same record `PUT /api/environments/:id`
 always has, just reached from here instead of a standalone page. There is no
 ownership/team picker: the environment already belongs to this team.
@@ -746,19 +746,19 @@ member…** above, and read the real gaps off the **Flow editor**, where an
 unconsumed label or an idle gate is visible instead of inferred. Roles added
 through the old button are unaffected and keep working.
 
-## Where the Working Environments page went
+## Where the old environments page went
 
-There used to be a general-purpose **Working Environments** page listing every
-environment on the platform, open to any user. It was removed (#2170) once its
+There used to be a general-purpose page listing every environment on the
+platform, open to any user. It was removed (#2170) once its
 two audiences each had their own home: an ordinary team edits its own
-environment right here, in the **Settings** tab's **Working Environment**
+environment right here, in the **Settings** tab's **Environment**
 section above; a System Admin curates reusable **Environment Templates** — a
 catalog a new team can start from, never a live-shared binding — on its own
 System-Admin-only page. Old `/environments` links land here.
 
 | What it offered | Where it is now |
 |---|---|
-| Editing a team's own environment | this page's **Settings** tab, **Working Environment** section |
+| Editing a team's own environment | this page's **Settings** tab, **Environment** section |
 | The **Global** checkbox (any team could select the record with no admin action) | retired — see below |
 | A System Admin's shared catalog of reusable environments | the **Environment Templates** page (System-Admin-only) |
 | The Toolchains registry panel | moved to the Environment Templates page |

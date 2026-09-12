@@ -215,7 +215,27 @@ test('the chat lifts the settings subject and hands it to both sides', () => {
 });
 
 test('the override clears when the conversation moves on', () => {
-  assert.match(agentChat, /useEffect\(\(\) => \{ setSettingsAgentId\(null\); \}, \[agentId\]\)/);
+  assert.match(agentChat, /useEffect\(\(\) => \{[\s\S]{0,400}setSettingsAgentId\(null\);[\s\S]{0,50}\}, \[agentId\]\)/);
+});
+
+// #2214 code-review finding: the team-header row click (#2213) fires
+// `onSelect` (routes to the team, changing `agentId`) and
+// `onOpenTeamSettings` (sets the override) for the SAME target in one event
+// handler — so the reset effect above, written for the pre-#2213 menu-only
+// override where opening settings never moved the route, fired right after
+// the render that set the override and unconditionally clobbered it back to
+// null, and the Settings tab never actually showed. `handleOpenSettings` now
+// also stamps a ref with the target it was just called for, and the reset
+// effect consumes (and unconditionally clears) that ref before deciding
+// whether to null the override.
+test('an override set for the SAME target the route is about to become is not immediately clobbered (#2214)', () => {
+  assert.match(agentChat, /const explicitSettingsTargetRef = useRef\(null\);/);
+  const handler = code(agentChat).match(/const handleOpenSettings = useCallback\(\(id\) => \{[\s\S]*?\}, \[\]\);/)[0];
+  assert.match(handler, /explicitSettingsTargetRef\.current = id;/);
+  const resetEffect = code(agentChat).match(/useEffect\(\(\) => \{\s*const openedFor = explicitSettingsTargetRef\.current;[\s\S]*?\}, \[agentId\]\);/)[0];
+  assert.match(resetEffect, /explicitSettingsTargetRef\.current = null;/);
+  assert.match(resetEffect, /if \(openedFor === agentId\) return;/);
+  assert.match(resetEffect, /setSettingsAgentId\(null\);/);
 });
 
 /* ── AC4: a restart is confirmed and reported ────────────────────── */

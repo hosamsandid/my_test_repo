@@ -397,14 +397,32 @@ export default function AgentChat() {
   // (AC10). Cleared whenever the chat moves on, so the tab silently follows the
   // conversation again rather than stranding the user on a stale subject.
   const [settingsAgentId, setSettingsAgentId] = useState(null);
+  // The team-header row click (#2213) fires `onSelect` (routes to the team,
+  // changing `agentId`) and `onOpenTeamSettings` (sets this override) for the
+  // SAME target in one event handler. Without this ref the `[agentId]` reset
+  // effect below — written for the pre-#2213 menu-only override, where opening
+  // settings never changes the route — fires right after the render that set
+  // the override and unconditionally nulls it back out, so the Settings tab
+  // never actually shows (#2214 code-review finding). The ref records the
+  // target `handleOpenSettings` was JUST called for; the effect consumes it
+  // exactly once (cleared unconditionally on every fire, matched or not, so a
+  // stale value from an earlier menu-only override — set while the route was
+  // unmoving — can never suppress an unrelated later reset).
+  const explicitSettingsTargetRef = useRef(null);
   const handleOpenSettings = useCallback((id) => {
     if (!id) return;
     setLogOpen(true);
     setSettingsAgentId(id);
+    explicitSettingsTargetRef.current = id;
     setRailTabRequest({ tab: 'settings', ts: Date.now() });
   }, []);
   const clearSettingsAgent = useCallback(() => setSettingsAgentId(null), []);
-  useEffect(() => { setSettingsAgentId(null); }, [agentId]);
+  useEffect(() => {
+    const openedFor = explicitSettingsTargetRef.current;
+    explicitSettingsTargetRef.current = null;
+    if (openedFor === agentId) return;
+    setSettingsAgentId(null);
+  }, [agentId]);
 
   // "Reference in chat" (#1699): the workspace browser (RightRail) asks to splice
   // a `@<workspace-relative-path>` token into the composer (ChatPanel). The two are

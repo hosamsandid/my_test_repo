@@ -692,7 +692,7 @@ export default function SshKeys() {
                 <code style={{ display: 'block', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>{rotateTarget.id}</code>
               </p>
               <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
-                Keeps the same id, name and ownership. Every Working Environment that references this key
+                Keeps the same id, name and ownership. Every environment that references this key
                 has its running agents <strong>restarted</strong> so they pick up the new key — a running
                 loop or trigger is cut off, so replace at a quiet moment. Remember to add the new public
                 key as a deploy key on GitHub.

@@ -515,7 +515,7 @@ export default function GithubTokens() {
                 This dialog changes only the name and ownership. <strong>To replace an expiring or
                 leaked token value in place,</strong> close this and use <strong>Replace value</strong>{' '}
                 (the <RefreshCw size={12} style={{ verticalAlign: 'middle' }} /> action on the row). Any
-                running agents in a Working Environment that references this token are restarted so they
+                running agents in an environment that references this token are restarted so they
                 pick up the new value — in-flight work is interrupted, so replace at a quiet moment.
               </>
             )}
@@ -544,7 +544,7 @@ export default function GithubTokens() {
               <code style={{ display: 'block', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>{rotateTarget.id}</code>
             </p>
             <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
-              Keeps the same id, name and ownership. Every Working Environment that references this token
+              Keeps the same id, name and ownership. Every environment that references this token
               has its running agents <strong>restarted</strong> so they pick up the new value — a running
               loop or trigger is cut off, so replace at a quiet moment.
             </div>

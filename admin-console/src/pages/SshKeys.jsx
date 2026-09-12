@@ -10,6 +10,7 @@ import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
+import ModeToggle from '../components/ModeToggle';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
 import ReassignPanel from '../components/CredentialReassignPanel';
@@ -107,27 +108,6 @@ function Step({ n, children }) {
       }}>{n}</span>
       <div style={{ paddingTop: 1 }}>{children}</div>
     </div>
-  );
-}
-
-function ModeTab({ active, onClick, icon: Icon, children }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      style={{
-        display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
-        padding: 'var(--eb-space-2) var(--eb-space-3)',
-        background: active ? 'var(--eb-bg-elevated)' : 'transparent',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)',
-        color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
-        fontSize: 'var(--eb-text-sm)', fontWeight: active ? 'var(--eb-font-medium)' : 'normal',
-        cursor: 'pointer', fontFamily: 'inherit',
-      }}
-    >
-      <Icon size={13} /> {children}
-    </button>
   );
 }
 
@@ -244,14 +224,15 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
         }}>{error}</div>
       )}
 
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-        <ModeTab active={mode === 'generate'} onClick={() => setMode('generate')} icon={KeyRound}>
-          Generate new keypair
-        </ModeTab>
-        <ModeTab active={mode === 'paste'} onClick={() => setMode('paste')} icon={ClipboardPaste}>
-          Paste existing key
-        </ModeTab>
-      </div>
+      <ModeToggle
+        value={mode}
+        onChange={setMode}
+        question="Choose how you'd like to add a key:"
+        options={[
+          { id: 'generate', label: 'Generate new keypair', icon: KeyRound },
+          { id: 'paste', label: 'Paste existing key', icon: ClipboardPaste },
+        ]}
+      />
 
       {mode === 'generate' ? (
         <>

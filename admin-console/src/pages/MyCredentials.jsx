@@ -15,6 +15,7 @@ import GithubTokenHint from '../components/GithubTokenHint';
 import { GITHUB_TOKEN_PREFIX_HINT } from './github-token-view';
 import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
+import ModeToggle from '../components/ModeToggle';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { useAuth } from '../auth/AuthContext';
 import {
@@ -58,27 +59,6 @@ const secondaryBtn = {
   borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)',
   cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
 };
-
-function ModeTab({ active, onClick, icon: Icon, children }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      style={{
-        display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
-        padding: 'var(--eb-space-2) var(--eb-space-3)',
-        background: active ? 'var(--eb-bg-elevated)' : 'transparent',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)',
-        color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
-        fontSize: 'var(--eb-text-sm)', fontWeight: active ? 'var(--eb-font-medium)' : 'normal',
-        cursor: 'pointer', fontFamily: 'inherit',
-      }}
-    >
-      <Icon size={13} /> {children}
-    </button>
-  );
-}
 
 function FormError({ error }) {
   if (!error) return null;
@@ -211,14 +191,15 @@ function SshKeyForm({ rotateTarget, onCreatePaste, onCreateGenerate, onRotatePas
       <FormError error={error} />
       {rotating && <RotationCaveat />}
 
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-        <ModeTab active={mode === 'generate'} onClick={() => setMode('generate')} icon={KeyRound}>
-          Generate new keypair
-        </ModeTab>
-        <ModeTab active={mode === 'paste'} onClick={() => setMode('paste')} icon={ClipboardPaste}>
-          Paste existing key
-        </ModeTab>
-      </div>
+      <ModeToggle
+        value={mode}
+        onChange={setMode}
+        question="Choose how you'd like to add a key:"
+        options={[
+          { id: 'generate', label: 'Generate new keypair', icon: KeyRound },
+          { id: 'paste', label: 'Paste existing key', icon: ClipboardPaste },
+        ]}
+      />
 
       {mode === 'generate' ? (
         <InfoNote>

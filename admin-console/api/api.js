@@ -56,6 +56,7 @@ const { resolveGlobalFlag: resolveEnvGlobalFlag, isGlobalEnvironment } = require
 // `global` toggle untouched, and Model Providers keep #2136's live-global
 // behaviour untouched — this only replaces the environment side of #2158.
 const { isTemplateEnvironment, resolveTemplateFlag, copyEnvironmentStructure } = require('./environment-template');
+const { validateCloneSource, describeClonedCredentialNeeds } = require('./team-clone');
 const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
@@ -13642,6 +13643,12 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   // token / MCP credential, exactly as #2171 (A5, team clone) states for its
   // own copy mechanism.
   let templateSeed = null;
+  // #2171 (A5, team clone): the same copy mechanism, sourced from a live
+  // `role: 'team'` agent's own environment instead of a curated template —
+  // "clone team X into team Y" copies X's structure, never X's credentials.
+  // Mutually exclusive with copyFromTemplateId (checked first, so a caller
+  // sending both gets the template behaviour and this branch never runs).
+  let clonedFromTeamId = null;
   if (typeof req.body?.copyFromTemplateId === 'string' && req.body.copyFromTemplateId.trim()) {
     const template = loadEnvironment(normalizeEnvId(req.body.copyFromTemplateId));
     if (!template) return res.status(400).json({ error: `Template environment '${req.body.copyFromTemplateId}' not found` });
@@ -13649,6 +13656,34 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
       return res.status(400).json({ error: `Environment '${req.body.copyFromTemplateId}' is not a template`, code: 'not-a-template' });
     }
     templateSeed = copyEnvironmentStructure(template);
+  } else if (typeof req.body?.copyFromTeamId === 'string' && req.body.copyFromTeamId.trim()) {
+    const sourceTeamId = req.body.copyFromTeamId.trim();
+    if (!AGENT_ID_RE.test(sourceTeamId)) {
+      return res.status(400).json({ error: 'Invalid copyFromTeamId' });
+    }
+    // Containment: resolve under AGENTS_DIR and reject any id that escapes it
+    // (the `PUT /api/agents/:id` barrier — AGENT_ID_RE alone is not modelled
+    // as a path sanitiser by CodeQL's path-injection query).
+    const teamsBaseDir = path.resolve(AGENTS_DIR);
+    const teamDir = path.resolve(teamsBaseDir, sourceTeamId);
+    const teamRel = path.relative(teamsBaseDir, teamDir);
+    if (teamRel.startsWith('..') || path.isAbsolute(teamRel)) {
+      return res.status(400).json({ error: 'Invalid copyFromTeamId' });
+    }
+    const sourceCfg = readJsonFile(path.join(teamDir, 'config.json'), null);
+    const cloneScope = getScope(req);
+    // The same 404 a non-existent team would get — a team the caller cannot
+    // even see must not be distinguishable from one that isn't there.
+    if (!sourceCfg || !visibleAgent(cloneScope, agentMetaForScope(sourceCfg))) {
+      return res.status(404).json({ error: `Team '${sourceTeamId}' not found` });
+    }
+    const sourceValidity = validateCloneSource(sourceCfg);
+    if (sourceValidity.error === 'not-a-team') {
+      return res.status(400).json({ error: `'${sourceTeamId}' is not an Agent Team`, code: 'not-a-team' });
+    }
+    const sourceEnv = sourceCfg.environmentId ? loadEnvironment(sourceCfg.environmentId) : null;
+    templateSeed = copyEnvironmentStructure(sourceEnv || {});
+    clonedFromTeamId = sourceTeamId;
   }
 
   // #2083: ownership is now the three-tier triple, resolved and validated by the
@@ -13775,6 +13810,13 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   // #2158 AC6: written only when true — no dangling `global: false` on disk.
   if (globalFlag.global) env.global = true;
   saveEnvironment(id, env);
+  // #2171: the clone dialog needs to say exactly which credentials the new
+  // environment still needs — computed here, from the very structure that
+  // was copied, and never persisted onto the environment itself.
+  if (clonedFromTeamId) {
+    res.status(201).json({ ...env, credentialsNeeded: describeClonedCredentialNeeds(templateSeed) });
+    return;
+  }
   res.status(201).json(env);
 });
 

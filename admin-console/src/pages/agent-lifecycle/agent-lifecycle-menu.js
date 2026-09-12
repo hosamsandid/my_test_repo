@@ -276,6 +276,12 @@ export function buildTeamMenu({
     title: canManageMembers ? MEMBERS_MANAGE_HINT : MEMBERS_READ_ONLY_HINT,
   });
   items.push({ key: 'export-team', label: 'Export team (ZIP)', disabled: false });
+  // Clone team (#2171, epic #2166 A5): a new, independent team with this
+  // one's structure — repositories, MCP refs, toolchain, context — and none
+  // of its credentials. Ungated like Export team: it reads the source team's
+  // structure (never a secret) and creates a wholly separate team, so it
+  // needs no more right over the source than any other visible row has.
+  items.push({ key: 'clone-team', label: 'Clone team…', disabled: busy });
   items.push({ key: 'open-flow-editor', label: 'Open in Flow Editor', disabled: false });
   items.push({ key: 'delete-team', label: 'Delete team…', danger: true, ...gate(false) });
 

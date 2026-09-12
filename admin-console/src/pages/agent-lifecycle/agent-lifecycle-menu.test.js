@@ -206,7 +206,7 @@ test('a visible team header offers the full AC2 action set', () => {
     team: { id: 't1', role: 'team', enabled: true },
   });
   assert.deepEqual(keys(items), [
-    'toggle-team', 'add-member', 'edit-team', 'share', 'export-team', 'open-flow-editor',
+    'toggle-team', 'add-member', 'edit-team', 'share', 'export-team', 'clone-team', 'open-flow-editor',
     'delete-team',
   ]);
 });
@@ -224,7 +224,7 @@ test('without a visible team row the fan-out toggle is omitted, not guessed', ()
   const items = buildTeamMenu({ teamId: 't1', team: null });
   assert.ok(!keys(items).includes('toggle-team'));
   assert.deepEqual(keys(items), [
-    'add-member', 'edit-team', 'share', 'export-team', 'open-flow-editor', 'delete-team',
+    'add-member', 'edit-team', 'share', 'export-team', 'clone-team', 'open-flow-editor', 'delete-team',
   ]);
 });
 
@@ -260,9 +260,16 @@ test('AC8 — team mutations are inert without rights; navigation stays live', (
   // which is hidden for exactly this caller, so a live entry would open nothing.
   assert.equal(byKey(items, 'edit-team').disabled, true, 'edit-team should be inert');
   assert.equal(byKey(items, 'edit-team').title, NO_RIGHTS_HINT);
-  for (const key of ['export-team', 'open-flow-editor']) {
+  for (const key of ['export-team', 'clone-team', 'open-flow-editor']) {
     assert.equal(byKey(items, key).disabled, false, `${key} should stay live`);
   }
+});
+
+test('#2171 — Clone team stays live without rights, but goes inert while a team mutation is in flight', () => {
+  const withoutRights = buildTeamMenu({ teamId: 't1', team: { enabled: true }, canManage: false });
+  assert.equal(byKey(withoutRights, 'clone-team').disabled, false);
+  const busy = buildTeamMenu({ teamId: 't1', team: { enabled: true }, busy: true });
+  assert.equal(byKey(busy, 'clone-team').disabled, true);
 });
 
 test('#2082 — Share stays live without rights, and says what it will and will not do', () => {

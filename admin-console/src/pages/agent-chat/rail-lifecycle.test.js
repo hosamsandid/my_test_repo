@@ -243,7 +243,7 @@ test('railMenuItems routes each target kind to its own menu', () => {
   });
   assert.equal(team.label, 'Team actions for Zeta Team');
   assert.deepEqual(team.items.map(i => i.key), [
-    'toggle-team', 'add-member', 'edit-team', 'share', 'export-team', 'open-flow-editor',
+    'toggle-team', 'add-member', 'edit-team', 'share', 'export-team', 'clone-team', 'open-flow-editor',
     'delete-team', 'help',
   ]);
 });

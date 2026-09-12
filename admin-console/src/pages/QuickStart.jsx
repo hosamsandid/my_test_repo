@@ -426,7 +426,7 @@ export default function QuickStart() {
                 : <CheckCircle size={16} style={{ color: 'var(--eb-status-success)', flexShrink: 0, marginTop: 2 }} />}
               <div>
                 <div style={{ fontWeight: 'var(--eb-font-medium)' }}>
-                  Agent created: {result.agent.displayName}
+                  Agent created: {result.agent.displayName} ({result.agent.id})
                 </div>
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 2 }}>
                   Environment: {result.environment.name} (new) · redirecting to chat …

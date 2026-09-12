@@ -90,3 +90,24 @@ test('id-sequence-exhausted is a named 409, not a bare 500', () => {
   const idxGenericFallback = body.indexOf('const isUserError');
   assert.ok(idxGenericFallback > idxExhausted, 'the named refusal must be checked before the generic 400/500 fallback');
 });
+
+test('the manual-create route names a stable code and a suggestion alongside the refusal (#2218)', () => {
+  const src = route();
+  assert.match(src, /code: 'id-conflict'/, 'the refusal must carry the same code the clone/import routes use');
+  assert.match(src, /suggestFreeAgentId\(id, isAgentIdTaken\)/, 'the suggestion must be resolved by the strict #2217 predicate');
+  const conflictIdx = src.indexOf("if (!autoId && (loadAgentConfig(id) || agentTeardownRegistry.has(id))) {");
+  const suggestIdx = src.indexOf('suggestFreeAgentId(id, isAgentIdTaken)');
+  assert.ok(conflictIdx > 0 && suggestIdx > conflictIdx, 'the suggestion must be computed inside the collision branch, not before it is known to be taken');
+});
+
+test('suggestFreeAgentId is imported alongside nextAvailableAgentId', () => {
+  assert.match(SRC, /suggestFreeAgentId/);
+  assert.match(SRC, /require\("\.\/agent-id-resolution"\)/);
+});
+
+test('an id-sequence-exhausted suggestion failure omits the suggestion, never the refusal itself', () => {
+  const src = route();
+  const tryIdx = src.indexOf('suggestFreeAgentId(id, isAgentIdTaken)');
+  const writeHeadIdx = src.indexOf('res.writeHead(409', tryIdx);
+  assert.ok(tryIdx > 0 && writeHeadIdx > tryIdx, 'the suggestion call must be wrapped so a failure to compute it cannot suppress the 409 itself');
+});

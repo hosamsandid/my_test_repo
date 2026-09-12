@@ -97,7 +97,7 @@ function RoleCard({ value, current, onSelect }) {
 }
 
 /* ── Agent Create Form ─────────────────────────────────────────────── */
-export default function AgentCreateForm({ onSave, onCancel, saving, error }) {
+export default function AgentCreateForm({ onSave, onCancel, saving, error, idConflict }) {
   const [form, setForm] = useState({
     id: '', displayName: '', role: 'agent', environmentId: '', systemPrompt: '',
     skills: [],
@@ -153,6 +153,34 @@ export default function AgentCreateForm({ onSave, onCancel, saving, error }) {
           </>
         }
       />
+      {/* #2218 — the refusal is scoped to the id it was about: once the user
+          edits the field away from that id, the suggestion no longer applies
+          to what is currently typed and disappears rather than going stale.
+          Accepting it goes through `handleIdChange` — the same path a keystroke
+          takes — so it counts as a manual edit and a later name change never
+          silently overwrites it (the useAutoDerivedId edge case). */}
+      {idConflict?.suggestedId && form.id === idConflict.agentId && (
+        <div style={{
+          display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'center', flexWrap: 'wrap',
+          marginTop: 'calc(-1 * var(--eb-space-2))',
+          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
+        }}>
+          <span>
+            <code>{idConflict.suggestedId}</code> is free.
+          </span>
+          <button
+            type="button"
+            onClick={() => handleIdChange(idConflict.suggestedId)}
+            style={{
+              background: 'none', border: 'none', padding: 0,
+              color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-semibold)',
+              cursor: 'pointer', fontSize: 'inherit', textDecoration: 'underline',
+            }}
+          >
+            Use this id
+          </button>
+        </div>
+      )}
 
       <div>
         <div style={labelStyle}>Environment <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>

@@ -292,9 +292,14 @@ export function buildTeamMenu({
  * A disabled agent cannot be chatted with — the DM-room route rejects it with a
  * 409 (`Agent disabled`). With the disabled filter on, such a row is listed but
  * must not open a chat (AC6); the row's own Enable entry is the way forward.
+ *
+ * A `role: 'team'` agent hosts no chat/session of its own either (#2213) — it
+ * has no `dmRoomId`, so selecting it must not attempt to open one against a
+ * null room. Its row instead moves the selection onto the team and opens the
+ * Settings tab (see `AgentList.jsx`'s `CollapsibleHeader`).
  */
 export function isChatOpenable(agent) {
-  return !!agent && agent.enabled !== false;
+  return !!agent && agent.enabled !== false && agent.role !== 'team';
 }
 
 /**

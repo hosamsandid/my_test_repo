@@ -84,6 +84,11 @@ function saveOrder(order) {
  *   caller's business (it owns the dialogs and the API calls). Omitted → the
  *   rail renders no kebabs and right-click keeps the browser menu, so every
  *   other embedding of this list is unaffected.
+ * @param {(teamId:string)=>void} onOpenTeamSettings
+ *   Clicking a team's header row, anywhere but its chevron (#2213), moves the
+ *   selection onto the team (via `onSelect`) and opens the Settings tab for it
+ *   — a team hosts no chat of its own, so selecting one is otherwise a dead
+ *   end. Omitted → the header row only toggles/selects, same as before.
  */
 export default function AgentList({
   agents,
@@ -94,6 +99,7 @@ export default function AgentList({
   showDisabled = false,
   busyIds = EMPTY_BUSY,
   onRequestMenu = null,
+  onOpenTeamSettings = null,
 }) {
   const [sidebarOrder, setSidebarOrder] = useState(loadOrder);
   useEffect(() => { saveOrder(sidebarOrder); }, [sidebarOrder]);
@@ -267,6 +273,7 @@ export default function AgentList({
           dragEnabled={canReorder && visibleGroups.length > 1}
           busyIds={busyIds}
           onRequestMenu={onRequestMenu}
+          onOpenTeamSettings={onOpenTeamSettings}
         />
       ))}
 
@@ -322,6 +329,7 @@ const GroupSection = React.memo(function GroupSection({
   dragEnabled,
   busyIds,
   onRequestMenu,
+  onOpenTeamSettings,
 }) {
   const Icon = Users;
   const stubs = group.stubs || [];
@@ -332,6 +340,17 @@ const GroupSection = React.memo(function GroupSection({
   const memberScope = `members:${groupDragKey}`;
   const memberDragEnabled = memberReorder && group.children.length > 1;
   const handleToggle = useCallback(() => onToggle(group), [onToggle, group]);
+  // Clicking the header row anywhere but its chevron (#2213) moves the real
+  // selection onto the team — `group.id` is the team's own agent id whether or
+  // not its row is currently visible (a filtered-out/orphaned header) — and,
+  // only when this caller may manage it, opens the Settings tab for it. An
+  // unmanageable team still gets a real selection; it just gets no Settings
+  // tab, matching the tab's own visibility rule elsewhere (`settingsSubject`).
+  const canManageTeam = group.header ? group.header.canManage !== false : true;
+  const handleActivate = useCallback(() => {
+    onSelect(group.id);
+    if (onOpenTeamSettings && canManageTeam) onOpenTeamSettings(group.id);
+  }, [onSelect, onOpenTeamSettings, group.id, canManageTeam]);
   // Team management (AC2) hangs off the group header.
   const headerMenu = onRequestMenu
     ? anchor => onRequestMenu({ kind: 'team', group }, anchor)
@@ -348,7 +367,9 @@ const GroupSection = React.memo(function GroupSection({
         count={count}
         environmentName={groupEnv}
         collapsed={collapsed}
+        selected={selectedAgentId === group.id}
         onToggle={handleToggle}
+        onActivate={handleActivate}
         onReorder={onReorder}
         drag={drag}
         dragScope="groups"
@@ -476,7 +497,7 @@ function StubSection({ stubs, groupEnv, selectedAgentId, onSelect, busyIds, onRe
   );
 }
 
-function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, collapsed, onToggle, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
+function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, collapsed, selected, onToggle, onActivate, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
   const [hovered, setHovered] = useState(false);
 
   const dnd = dragEnabled && drag ? makeRowDnd(drag, dragScope, dragKey) : null;
@@ -484,7 +505,7 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, 
   return (
     <button
       type="button"
-      onClick={onToggle}
+      onClick={onActivate}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onDragOver={dnd ? dnd.onDragOver : undefined}
@@ -509,16 +530,18 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, 
       // Surfaces the (still-live) Alt+↑/↓ reorder shortcut to assistive tech now
       // that the visible arrow buttons — previously its only affordance — are gone.
       aria-keyshortcuts={dragEnabled ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
-      aria-expanded={!collapsed}
+      aria-selected={selected}
       style={{
         display: 'flex',
         alignItems: 'center',
         gap: 'var(--eb-space-2)',
         width: '100%',
         padding: 'var(--eb-space-3) var(--eb-space-3) var(--eb-space-1)',
-        background: hovered ? 'var(--eb-bg-hover)' : 'transparent',
-        border: 'none',
+        background: selected ? 'var(--eb-bg-selected)' : hovered ? 'var(--eb-bg-hover)' : 'transparent',
+        borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
         borderTop: 'none',
+        borderRight: 'none',
+        borderBottom: 'none',
         fontSize: 'var(--eb-text-xs)',
         fontWeight: 'var(--eb-font-semibold)',
         letterSpacing: '0.04em',
@@ -532,9 +555,32 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, 
         transition: 'background var(--eb-transition-fast)',
       }}
     >
-      {collapsed
-        ? <ChevronRight size={12} style={{ flexShrink: 0 }} />
-        : <ChevronDown  size={12} style={{ flexShrink: 0 }} />}
+      {/*
+       * The chevron is now the ONLY expand/collapse control (#2213) — a `span`
+       * rather than a nested `<button>` (the `KebabButton`/`DragGrip` pattern
+       * just below, since a `<button>` inside a `<button>` is invalid HTML).
+       * `stopPropagation` keeps its click off the row's own `onActivate`.
+       */}
+      <span
+        role="button"
+        tabIndex={0}
+        aria-expanded={!collapsed}
+        aria-label={collapsed ? `Expand ${label}` : `Collapse ${label}`}
+        title={collapsed ? 'Expand' : 'Collapse'}
+        onClick={e => { e.stopPropagation(); onToggle(); }}
+        onKeyDown={e => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            e.stopPropagation();
+            onToggle();
+          }
+        }}
+        style={{ display: 'flex', flexShrink: 0, cursor: 'pointer' }}
+      >
+        {collapsed
+          ? <ChevronRight size={12} />
+          : <ChevronDown  size={12} />}
+      </span>
       {Icon && <Icon size={12} style={{ flexShrink: 0 }} />}
       <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

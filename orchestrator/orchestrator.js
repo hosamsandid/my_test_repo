@@ -624,27 +624,40 @@ function startAgentProcess(config) {
   const endpointConfigured = !!(config.llmEndpointOverride || env?.llmEndpointId);
   Object.assign(childEnv, buildLlmProvenanceEnv(llm, config, { endpointConfigured }));
 
-  // If the agent's environment has a GitHub token attached, expose it as
-  // GH_TOKEN so the `gh` CLI authenticates without `gh auth login`.
-  // (Also exported as GITHUB_TOKEN for git-over-HTTPS pushes.)
-  if (env?.githubTokenId) {
-    const tokenPath = path.join(GH_TOKENS_DIR, env.githubTokenId);
+  // Expose a GitHub token as GH_TOKEN so the `gh` CLI authenticates without
+  // `gh auth login` (also GITHUB_TOKEN for git-over-HTTPS pushes). Which
+  // credential that is now goes through `resolveBaselineGithubTokenId`
+  // (#2177, epic #2166 B5) rather than the environment's raw `githubTokenId`
+  // directly: this baked-at-spawn token is what every `gh`/`git` call the
+  // agent runs DIRECTLY inside its own container authenticates with
+  // (issue/PR comments, `gh pr review`) — the one path B3/#2175 explicitly
+  // left "the container's spawn-time baked token... out of scope, pending a
+  // later block of the epic", since `resolveAttributedGithubToken` only ever
+  // covers the orchestrator-mediated commit/PR/push path. Preferring the
+  // team's current team-admin's personal credential here is what makes "no
+  // interactive action uses a shared team secret" true end to end. An env
+  // with no owner/baseline personal credential resolves to the same
+  // `env.githubTokenId` as before — nothing on disk changes, only what the
+  // binding resolves against (the "migrate existing bindings" half).
+  const resolvedGithubTokenId = resolveBaselineGithubTokenId(config, env);
+  if (resolvedGithubTokenId) {
+    const tokenPath = path.join(GH_TOKENS_DIR, resolvedGithubTokenId);
     try {
       const ghToken = fs.readFileSync(tokenPath, "utf8").trim();
       if (ghToken) {
         childEnv.GH_TOKEN = ghToken;
         childEnv.GITHUB_TOKEN = ghToken;
-        console.log(`[Orchestrator] Agent ${id} → GH_TOKEN injected (env=${env.id}, token=${env.githubTokenId})`);
+        console.log(`[Orchestrator] Agent ${id} → GH_TOKEN injected (env=${env?.id}, token=${resolvedGithubTokenId})`);
       }
     } catch (err) {
-      console.error(`[Orchestrator] Cannot read GitHub token ${env.githubTokenId} for agent ${id}: ${err.message}`);
+      console.error(`[Orchestrator] Cannot read GitHub token ${resolvedGithubTokenId} for agent ${id}: ${err.message}`);
     }
   }
 
   // Per-agent SSH identity (see materializeAgentSshKey). Always runs — even for
   // envless agents — because it also strips the orchestrator's inherited
   // GIT_SSH_COMMAND, which would otherwise dangle in every agent.
-  materializeAgentSshKey(id, env, childEnv);
+  materializeAgentSshKey(id, env, childEnv, config);
 
   // Shared Agent Learning (Phase 1): expose the team Knowledge Base to the
   // agent runtime + `knowledge` CLI. The autonomy dial is ALWAYS injected
@@ -4293,7 +4306,7 @@ const CLAUDE_HOME_AGENT_DIR = "/root/.claude";
 // HOME=/workspace/agents/<id>, so the image-baked /root/.ssh/config is never
 // read). The config carries the github.com -> ssh.github.com:443 routing that
 // corporate networks blocking outbound TCP 22 require.
-function materializeAgentSshKey(id, env, childEnv) {
+function materializeAgentSshKey(id, env, childEnv, cfg) {
   delete childEnv.GIT_SSH_COMMAND;
 
   const orchSshDir = path.join(CLAUDE_HOME_ORCH_DIR, "homes", id, ".ssh");
@@ -4305,7 +4318,15 @@ function materializeAgentSshKey(id, env, childEnv) {
   const agentKnownHosts = path.join(agentSshDir, "known_hosts");
 
   const repos = Array.isArray(env?.repositories) ? env.repositories : [];
-  const sshKeyId = repos.find((r) => r && r.sshKeyId)?.sshKeyId;
+  const sharedSshKeyId = repos.find((r) => r && r.sshKeyId)?.sshKeyId;
+  // Baseline resolution (#2177/#2212, epic #2166 B5) — mirrors the GH_TOKEN
+  // bake above: prefer the team's current team-admin's personal SSH key over
+  // the environment's raw shared deploy key, so a directly-run `git`/`gh`
+  // SSH transport (clone, fetch, and any push that bypasses the
+  // `gh-as-agent` convention) isn't left on the shared secret the GitHub-
+  // token half was fixed for. No owner/no personal key degrades to the exact
+  // pre-existing `sharedSshKeyId` — no data migration needed.
+  const sshKeyId = resolveBaselineSshKeyId(cfg, sharedSshKeyId);
   if (!sshKeyId) {
     // No key for this env — make sure no stale identity lingers from a prior
     // spawn under a different (key-bearing) environment.
@@ -4570,6 +4591,77 @@ function resolveAttributedSshKey(id, sharedSshKeyId, operation, actingSenderMatr
     throw e;
   }
   return { sshKeyId: decision.credentialId };
+}
+
+// The BASELINE GitHub-token resolver (#2177, epic #2166 B5) — re-interprets
+// `env.githubTokenId` from "the shared team token" to a pointer at the
+// team's current team-admin's personal credential, for the one
+// non-interactive, non-attributed call site this ticket wires: the
+// container's spawn-time GH_TOKEN/GITHUB_TOKEN bake (`startAgentProcess`
+// below). Unlike `resolveAttributedGithubToken` there is no acting sender
+// (a spawn is not a chat turn) and `operation` is always OUTSIDE
+// `ATTRIBUTED_OPERATIONS`, so `resolveCredential` can never refuse — a
+// container that fails to spawn over a missing personal credential would be
+// a far worse outage than the shared secret it replaces. `cfg` may be
+// `null`/incomplete (a not-yet-persisted config at first creation): with no
+// owner to resolve, this degrades to the environment's raw `githubTokenId`,
+// byte-identical to pre-#2177 behaviour — the "migrate existing bindings"
+// half needs no data migration at all, only this resolution change.
+//
+// Deliberately NOT wired (yet) into the other ~40 direct `env.githubTokenId`
+// reads B4's own scope note named (agent-creation seeding clone, the
+// poller's per-repo token pick, `cloneRepository`, the KB checkout, the
+// repo-check probe, ticket binding, …): those are read/clone/poll-shaped
+// operations that already never refuse under `resolveCredential`'s existing
+// rules, several (the poller especially) have no per-agent/team context to
+// resolve a baseline owner from at all without a larger reverse-mapping
+// change, and rewiring all of them in one pass is exactly the "doing it
+// piecemeal risks regressing the seeding/clone paths every agent depends
+// on" risk B4's own scope note called out. Flagged here rather than
+// guessed, for a follow-up ticket to pick up.
+function resolveBaselineGithubTokenId(cfg, env) {
+  const sharedCredentialId = env?.githubTokenId || null;
+  if (!cfg) return sharedCredentialId;
+  const ownerId = credentialResolution.resolveBaselineOwnerId(cfg, { loadAgentConfig, ...loadBaselineDeps() });
+  const tokenIndex = loadGithubTokenIndex();
+  const liveUserGate = loadLiveUserGate();
+  const personal = credentialResolution.findPersonalCredentialState(tokenIndex, ownerId, undefined, liveUserGate);
+  const decision = credentialResolution.resolveCredential({
+    operation: "spawn",
+    ownerId,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
+    personalCredentialOrphaned: personal.orphaned,
+    sharedCredentialId,
+    kind: "GitHub token",
+  });
+  return decision.credentialId || null;
+}
+
+// SSH-key sibling of `resolveBaselineGithubTokenId` (#2212 review finding —
+// the issue's own AC names "`env.githubTokenId` (and per-repo `sshKeyId`)"
+// together, but the shipped PR only wired the GitHub-token half). Same
+// composition, same non-refusing `operation: "spawn"`, same graceful
+// cfg-less/unowned degradation to the environment's raw shared key — the only
+// difference is the credential kind and index. `sharedSshKeyId` is the
+// specific repo key `materializeAgentSshKey` already picked (today: the
+// first repo carrying one), not "any key somewhere on the environment".
+function resolveBaselineSshKeyId(cfg, sharedSshKeyId) {
+  if (!cfg) return sharedSshKeyId || null;
+  const ownerId = credentialResolution.resolveBaselineOwnerId(cfg, { loadAgentConfig, ...loadBaselineDeps() });
+  const keyIndex = loadSshKeyIndex();
+  const liveUserGate = loadLiveUserGate();
+  const personal = credentialResolution.findPersonalCredentialState(keyIndex, ownerId, undefined, liveUserGate);
+  const decision = credentialResolution.resolveCredential({
+    operation: "spawn",
+    ownerId,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
+    personalCredentialOrphaned: personal.orphaned,
+    sharedCredentialId: sharedSshKeyId || null,
+    kind: "SSH key",
+  });
+  return decision.credentialId || null;
 }
 
 // ── Shared team Knowledge Base (Shared Agent Learning, Phase 1) ──────────────

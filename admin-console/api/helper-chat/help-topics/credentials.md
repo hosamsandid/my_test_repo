@@ -310,3 +310,13 @@ nobody can add a personal token for an account that no longer exists: finish the
 offboarding, delete the orphaned credential and **revoke it at GitHub**. Reads
 are unaffected — a clone or a poll may still use a shared credential, so one
 stale index entry never takes a whole flow offline.
+
+**The same preference now reaches the token an agent's container is actually
+started with.** `GH_TOKEN`/`GITHUB_TOKEN` and the per-repository SSH identity —
+what a `gh`/`git` call the agent runs directly (commenting on an issue,
+reviewing a pull request) authenticates with — no longer come straight from the
+environment's own fields: if the team's current Team Admin has a personal SSH
+key or GitHub token, agents in that environment start using it automatically on
+their **next spawn**, with no environment edit and no restart needed beyond the
+ordinary next enable/respawn. An environment whose admin has never added a
+personal credential behaves exactly as before.

@@ -50,6 +50,21 @@ test('admitsToChatList: the default response is the pre-#1957 one (AC8)', () => 
   assert.equal(admitsToChatList(null), false);
 });
 
+// A `role: 'team'` row is the group HEADER the chat list is built around; it
+// has no Matrix token by design, so it must be admitted despite the tokenless
+// cut that drops every other tokenless agent (#2216 root cause: without this
+// the header never ships, selecting a team can't resolve as a team, and the
+// right rail can't narrow to Settings).
+test('admitsToChatList: a tokenless team row is admitted (it is the group header)', () => {
+  const TEAM = { id: 't', role: 'team', enabled: true };
+  assert.equal(admitsToChatList(TEAM), true);
+  assert.equal(admitsToChatList(TEAM, { includeStubs: true }), true);
+  // A team is created enabled:true, but the enabled gate still governs it like
+  // any other row — the exemption is for the token check alone.
+  assert.equal(admitsToChatList({ id: 't', role: 'team', enabled: false }), false);
+  assert.equal(admitsToChatList({ id: 't', role: 'team', enabled: false }, { includeDisabled: true }), true);
+});
+
 test('admitsToChatList: includeDisabled admits paused agents but never stubs', () => {
   assert.equal(admitsToChatList(PAUSED, { includeDisabled: true }), true);
   assert.equal(admitsToChatList(STUB, { includeDisabled: true }), false);

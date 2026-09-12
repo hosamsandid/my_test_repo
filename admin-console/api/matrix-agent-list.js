@@ -62,6 +62,24 @@ function admitsToChatList(cfg, { includeDisabled = false, includeStubs = false }
   if (isStubMember(cfg)) return includeStubs;
 
   if (cfg.enabled === false && !includeDisabled) return false;
+
+  // A `role: 'team'` row is the group HEADER the chat list is built around, not
+  // a chat participant: it hosts no chat and therefore has no Matrix token BY
+  // DESIGN (pure metadata — no Matrix user, no workspace, no container). It
+  // must be exempt from the tokenless cut below, or the header is never shipped
+  // and every team surface that keys on it silently breaks:
+  //   - buildGroups uses it as `group.header` (proper display name, canManage),
+  //     falling back to a "subtle" headerless group built only from members'
+  //     parentTeamId when it is absent;
+  //   - the route ships `canManageTeam` only for team rows (#2082 Share panel);
+  //   - selecting a team header resolves the routed subject through it, which is
+  //     what lets the middle pane show TeamSelectedState (#2213) and the right
+  //     rail narrow to Settings (#2216) — both dead unless the row is present;
+  //   - KnowledgeFlow reads the team's display name off it.
+  // The enabled/includeDisabled gate above still applies (a team is created
+  // enabled:true), so this only exempts the token check, nothing else.
+  if (cfg.role === 'team') return true;
+
   // Any other tokenless agent has no chat identity to list and no section to
   // show it in — unchanged from before #1957.
   if (!cfg.token) return false;

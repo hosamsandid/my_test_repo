@@ -40,6 +40,11 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'knowledge', 
  *     point it at another one (a team, a disabled agent). Hidden for a caller
  *     who may not manage the agent, hence `agentCanManage` gating the tab.
  *
+ * When the open subject is a TEAM (`subjectIsTeam`, #2216) — which hosts no
+ * chat and therefore none of Sessions/Workspace/Triggers/Outcomes/Knowledge —
+ * the rail narrows to Settings alone (or to no tabs at all for a caller who
+ * may not manage that team).
+ *
  * The active tab is persisted in localStorage so it survives reloads; an old
  * stored 'log' value silently falls back to the default 'sessions' tab (it is
  * no longer a member of TAB_KEYS), which is where Log used to live.
@@ -65,6 +70,13 @@ export default function RightRail({
   onResumeSession, sessionSelectRequest = null, collapsed = false, onReferenceInChat = null,
   agentCanManage = true, settingsAgentId = null, chatAgentName = '',
   onClearSettingsAgent = null, onAgentConfigChanged = null,
+  // #2216: `agentId` is null both while nothing has loaded yet and while the
+  // open subject is a TEAM (a team hosts no chat, so it is never
+  // `selectedAgent`) — those are different states, and only the caller
+  // (AgentChat, which resolves the routed subject's role) can tell them
+  // apart. A team hosts none of what Sessions/Workspace/Triggers/Outcomes/
+  // Knowledge show, so this flag narrows the rail to Settings alone.
+  subjectIsTeam = false,
 }) {
   // Outcomes describe hand-offs to teammates, so the tab is meaningless for a
   // standalone agent (#963 AC1).
@@ -102,11 +114,21 @@ export default function RightRail({
   // Gated on `agentId`: until a selection resolves, `agentTeamId` is null for
   // "not loaded yet" as much as for "not in a team", and reacting to that would
   // throw away a persisted Outcomes tab on every page load.
+  //
+  // A team subject is a THIRD state that also has `agentId === null` (#2216)
+  // and is handled by its own branch rather than folded into the `!agentId`
+  // guard below, which stays scoped to the standalone-agent cases it was
+  // written for: a team's persisted tab is forced to Settings (the only tab a
+  // team ever offers) whenever it isn't already there.
   useEffect(() => {
+    if (subjectIsTeam) {
+      if (showSettings && tab !== 'settings') setTab('settings');
+      return;
+    }
     if (!agentId) return;
     if (!showOutcomes && tab === 'outcomes') setTab('sessions');
     if (!showSettings && tab === 'settings') setTab('sessions');
-  }, [agentId, showOutcomes, showSettings, tab]);
+  }, [agentId, showOutcomes, showSettings, tab, subjectIsTeam]);
 
   // Session COUNT for the "Sessions" tab badge — regardless of which tab is
   // visible, and even while the rail is collapsed (the icon dot). Derived from
@@ -119,14 +141,23 @@ export default function RightRail({
   // `Icon` is the component (not a rendered element) because the tab strip and
   // the collapsed icon rail render it at different sizes — 13 inline next to a
   // label, 20 standalone to match the left nav's icon-only items.
-  const tabs = useMemo(() => [
-    { key: 'sessions', Icon: Activity, label: 'Sessions', hint: 'Live and past runs — each session\'s log, cost and context usage', badge: sessionCount > 0 ? sessionCount : null },
-    { key: 'workspace', Icon: FolderTree, label: 'Workspace', hint: 'Read-only file tree of this agent\'s workspace' },
-    { key: 'triggers', Icon: CalendarClock, label: 'Triggers', hint: 'Schedules, one-shot and loop triggers that start runs' },
-    ...(showOutcomes ? [{ key: 'outcomes', Icon: Target, label: 'Outcomes', hint: 'Hand-off outcomes and labels this team member can emit' }] : []),
-    { key: 'knowledge', Icon: Brain, label: 'Knowledge', hint: 'The team knowledge this agent can read and add to' },
-    ...(showSettings ? [{ key: 'settings', Icon: Settings, label: 'Settings', hint: 'This agent\'s configuration — prompt, skills, plugins, context folders, repositories' }] : []),
-  ], [sessionCount, showOutcomes, showSettings]);
+  const tabs = useMemo(() => {
+    // A team hosts no sessions, no workspace, no triggers and no knowledge of
+    // its own — Settings is the only tab that ever applies (#2216).
+    if (subjectIsTeam) {
+      return showSettings
+        ? [{ key: 'settings', Icon: Settings, label: 'Settings', hint: 'This team\'s configuration — prompt, skills, plugins, context folders, repositories' }]
+        : [];
+    }
+    return [
+      { key: 'sessions', Icon: Activity, label: 'Sessions', hint: 'Live and past runs — each session\'s log, cost and context usage', badge: sessionCount > 0 ? sessionCount : null },
+      { key: 'workspace', Icon: FolderTree, label: 'Workspace', hint: 'Read-only file tree of this agent\'s workspace' },
+      { key: 'triggers', Icon: CalendarClock, label: 'Triggers', hint: 'Schedules, one-shot and loop triggers that start runs' },
+      ...(showOutcomes ? [{ key: 'outcomes', Icon: Target, label: 'Outcomes', hint: 'Hand-off outcomes and labels this team member can emit' }] : []),
+      { key: 'knowledge', Icon: Brain, label: 'Knowledge', hint: 'The team knowledge this agent can read and add to' },
+      ...(showSettings ? [{ key: 'settings', Icon: Settings, label: 'Settings', hint: 'This agent\'s configuration — prompt, skills, plugins, context folders, repositories' }] : []),
+    ];
+  }, [sessionCount, showOutcomes, showSettings, subjectIsTeam]);
 
   // --- Overflow measurement ---------------------------------------------
   // We render a hidden, full-width copy of the tab row to learn each tab's
@@ -359,11 +390,11 @@ export default function RightRail({
       {/* Body — keep both subtrees mounted via display:none so the user
           doesn't lose log scroll position / expanded folders when toggling. */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-        <div style={{ display: tab === 'sessions' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+        <div style={{ display: !subjectIsTeam && tab === 'sessions' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <SessionsPanel
             agentId={agentId}
             roomId={roomId}
-            active={tab === 'sessions'}
+            active={!subjectIsTeam && tab === 'sessions'}
             hoveredCorrelationId={hoveredCorrelationId}
             onHoverCorrelation={onHoverCorrelation}
             onCostUpdate={onCostUpdate}
@@ -373,21 +404,21 @@ export default function RightRail({
             selectRequest={sessionSelectRequest}
           />
         </div>
-        <div style={{ display: tab === 'workspace' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <WorkspaceBrowser agentId={agentId} active={tab === 'workspace'} refreshKey={workspaceRefreshKey} onReference={onReferenceInChat} />
+        <div style={{ display: !subjectIsTeam && tab === 'workspace' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+          <WorkspaceBrowser agentId={agentId} active={!subjectIsTeam && tab === 'workspace'} refreshKey={workspaceRefreshKey} onReference={onReferenceInChat} />
         </div>
-        <div style={{ display: tab === 'triggers' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <TriggersPanel agentId={agentId} active={tab === 'triggers'} />
+        <div style={{ display: !subjectIsTeam && tab === 'triggers' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+          <TriggersPanel agentId={agentId} active={!subjectIsTeam && tab === 'triggers'} />
         </div>
         {showOutcomes && (
-          <div style={{ display: tab === 'outcomes' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-            <OutcomesPanel agentId={agentId} active={tab === 'outcomes'} />
+          <div style={{ display: !subjectIsTeam && tab === 'outcomes' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+            <OutcomesPanel agentId={agentId} active={!subjectIsTeam && tab === 'outcomes'} />
           </div>
         )}
-        <div style={{ display: tab === 'knowledge' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+        <div style={{ display: !subjectIsTeam && tab === 'knowledge' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           {/* #1922: no external refresh signal any more (Save & Learn was its
               only feeder) — the panel reloads when the tab becomes active. */}
-          <AgentKnowledgePanel agentId={agentId} active={tab === 'knowledge'} />
+          <AgentKnowledgePanel agentId={agentId} active={!subjectIsTeam && tab === 'knowledge'} />
         </div>
         {showSettings && (
           <div style={{ display: tab === 'settings' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>

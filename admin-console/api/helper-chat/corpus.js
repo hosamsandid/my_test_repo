@@ -311,6 +311,15 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // `##`-only chapter guard does not read), so the crown-holding context is
 // unchanged from the prior stamp.
 //
+// #2177 (epic #2166 B5) rewired the container's own spawn-time credential bake
+// to prefer the team-admin's personal GitHub token/SSH key, correcting the
+// corpus-vendored `docs/credentials.md` (every context) and the multi-route
+// `credentials` help topic (`/ssh-keys`, `/github-tokens`, `/my-credentials` —
+// all three `create.md` `seeAlso` neighbours, so the growth lands on this crown
+// in full). Pre-edit `/quickstart` measured exactly the last-stamped 315 387 (no
+// unrelated drift this cycle); post-edit **318 054 of 340 000 — 93.5% used,
+// 21 946 left**, a clean +2 667 attributable entirely to this change.
+//
 // If this ever gets tight again, the next structural step is the docs corpus
 // (route-scoped `CORPUS_FILES`, or splitting the two largest docs), NOT a fourth
 // raise and NOT trimming a topic.

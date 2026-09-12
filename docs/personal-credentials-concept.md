@@ -336,4 +336,39 @@ the shipped implementation never did.
 - **Deliberately still out of scope**, named by B4 itself: the read/clone/poll call sites that read
   `env.githubTokenId` directly (~40 sites — seeding, the poller's per-repo token pick,
   `cloneRepository`) are not rewired to prefer the baseline credential; that is the field-semantics
-  migration a later epic block, **B5**, owns.
+  migration a later epic block, **B5**, owns (see Amendment 3 below).
+
+## 15 — Amendment 3 (#2177, epic #2166 block B5): the container's spawn-time bake, and what is still not migrated
+
+B4 named B5 as the owner of the field-semantics migration over `env.githubTokenId`/per-repo
+`sshKeyId`. B5 has landed, but as a **narrower slice** of that charter than "migrate every read
+site" — it closes the one gap that is actually interactive-adjacent, and leaves the rest flagged
+for a further ticket rather than silently declaring the migration complete.
+
+- **What shipped.** The container's own spawn-time bake — `GH_TOKEN`/`GITHUB_TOKEN` injected by
+  `startAgentProcess`, and the per-repo SSH identity `materializeAgentSshKey` selects — is what every
+  `gh`/`git` call the agent runs **directly** inside its own container authenticates with (issue/PR
+  comments, `gh pr review`). Amendment 1 named this exact path as "explicitly out of scope, pending a
+  later block of the epic" precisely because it is not orchestrator-mediated and so was never reached
+  by `resolveAttributedGithubToken`/`SshKey`. Two new resolvers, `resolveBaselineGithubTokenId` and
+  `resolveBaselineSshKeyId` (`orchestrator/orchestrator.js`), compose the *same* pure core the
+  attributed resolvers do (`resolveBaselineOwnerId` → `findPersonalCredentialState` →
+  `resolveCredential`), with `operation: "spawn"` — outside `ATTRIBUTED_OPERATIONS`, so it can never
+  refuse a container's own start-up. `resolveBaselineSshKeyId` arrived one commit later than
+  `resolveBaselineGithubTokenId`, added against a code-review finding that the issue's own AC named
+  `sshKeyId` alongside `githubTokenId` but the first commit had only wired the token half.
+- **No data migration needed**, exactly as B3/B4 needed none: an env with no owner, or an owner (the
+  team's current team-admin) with no personal credential of that kind, resolves to the identical
+  `env.githubTokenId`/shared `sshKeyId` as before — the moment the team-admin adds a personal
+  credential, every team-bound agent's *next spawn* starts using it automatically.
+- **What is still NOT wired, on purpose.** B4's scope note named ~40 other direct
+  `env.githubTokenId` reads as B5's charter — agent-creation seeding clone, the GitHub poller's
+  per-repo token pick, the catch-up/propagation sync path, the KB checkout, the repo-check probe,
+  ticket binding, the GitHub-Issues plugin's credential push — and none of them are rewired by this
+  block. They are read/clone/poll-shaped, where `resolveCredential` already never refuses regardless
+  of whether the baseline is wired in, so B5's own AC ("no interactive action uses a shared team
+  secret") does not actually require touching them, unlike the spawn-time bake this block does close.
+  The poller in particular has no per-agent/team context to resolve a baseline owner from without a
+  new env→Agent-Team reverse-mapping step — a materially larger, separately riskier change. Flagged
+  in the implementing PR for a dedicated follow-up ticket rather than guessed at or silently declared
+  done.

@@ -60,7 +60,7 @@ identity & credentials; **B1 is its root** (B2/B3 depend on it, B4 on B3, B5 las
   - [x] B2 — Sharing a team invites the human into the team's agent rooms (#2174)
   - [x] B3 — Thread the acting sender into credential resolution (re-key off the sender, #2175)
   - [x] B4 — Team-admin baseline for non-interactive work; just-in-time refusal for writes (#2176)
-  - [ ] B5 — Retire the shared team credential; personal is the norm
+  - [x] B5 — Retire the shared team credential; personal is the norm (#2177)
 - **C — Cross-cutting (schedule anywhere)**
   - [ ] C1 — Move skill promote-to-global and plugin-apply to Team Admin
   - [x] C2 — Guide provider onboarding; block team-create without a provider (#2179)

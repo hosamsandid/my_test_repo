@@ -41,6 +41,8 @@ function region(openingLine, endNeedle) {
 
 const startAgentProcessBody = () => region('function startAgentProcess(', '\n}\n');
 const baselineResolver = () => region('function resolveBaselineGithubTokenId(', '\n}');
+const baselineSshResolver = () => region('function resolveBaselineSshKeyId(', '\n}');
+const materializeAgentSshKeyBody = () => region('function materializeAgentSshKey(', '\n}\n');
 
 test('resolveBaselineGithubTokenId exists and is composed from the same three pure calls the attributed resolvers use', () => {
   const src = baselineResolver();
@@ -90,5 +92,69 @@ test('startAgentProcess injects GH_TOKEN/GITHUB_TOKEN via resolveBaselineGithubT
     src,
     /GH_TOKENS_DIR,\s*env\.githubTokenId/,
     'must not read env.githubTokenId directly for the injected token — the whole point of #2177 is that this id is now RESOLVED, not read raw',
+  );
+});
+
+// #2212 review finding: the issue's own AC names "`env.githubTokenId` (and
+// per-repo `sshKeyId`)" together, but the shipped PR wired only the
+// GitHub-token half — `materializeAgentSshKey` still read the environment's
+// raw shared deploy key directly. These mirror the GitHub-token guards above
+// for the SSH-key sibling.
+
+test('resolveBaselineSshKeyId is composed from the same three pure calls the attributed resolvers use, and can never refuse', () => {
+  const src = baselineSshResolver();
+  assert.match(
+    src,
+    /credentialResolution\.resolveBaselineOwnerId\(/,
+    'must resolve WHO through the team-admin baseline, not a static/effective-owner call meant for a live chat turn',
+  );
+  assert.doesNotMatch(
+    src,
+    /credentialResolution\.resolveEffectiveOwnerId\(/,
+    'a container spawn has no acting sender — resolveEffectiveOwnerId would be reaching for interactive-only machinery',
+  );
+  assert.match(src, /const keyIndex = loadSshKeyIndex\(\);/);
+  assert.match(src, /credentialResolution\.findPersonalCredentialState\(keyIndex, ownerId, undefined, liveUserGate\)/);
+  assert.match(src, /credentialResolution\.resolveCredential\(\{/);
+  assert.doesNotMatch(src, /operation:\s*"(commit|pr|review|push-https|push-ssh)"/);
+  assert.match(src, /sharedCredentialId:\s*sharedSshKeyId \|\| null,?\s*\n?\s*kind: "SSH key"/);
+});
+
+test('resolveBaselineSshKeyId falls back to the raw shared sshKeyId when there is no cfg (AC8/"migrate existing bindings")', () => {
+  const src = baselineSshResolver();
+  assert.match(
+    src,
+    /if \(!cfg\) return sharedSshKeyId \|\| null;/,
+    'a not-yet-persisted or missing config must resolve byte-identically to the pre-#2212 behaviour',
+  );
+});
+
+test('materializeAgentSshKey resolves its key through resolveBaselineSshKeyId, not the raw env.repositories[].sshKeyId', () => {
+  const src = materializeAgentSshKeyBody();
+  assert.match(
+    src,
+    /const sharedSshKeyId = repos\.find\(\(r\) => r && r\.sshKeyId\)\?\.sshKeyId;/,
+    'the per-repo shared key is still discovered the same way — only what feeds the actual bake changes',
+  );
+  assert.match(
+    src,
+    /const sshKeyId = resolveBaselineSshKeyId\(cfg, sharedSshKeyId\);/,
+    'the installed identity must come from the baseline resolver, mirroring the GH_TOKEN bake',
+  );
+  // Negative: nothing downstream in this function reads sharedSshKeyId again
+  // for the actual install (only the resolved `sshKeyId` may feed the copy).
+  assert.doesNotMatch(
+    src,
+    /SSH_KEYS_DIR,\s*sharedSshKeyId\)/,
+    'must not read the raw shared sshKeyId directly for the installed key material',
+  );
+});
+
+test('startAgentProcess threads cfg into materializeAgentSshKey so the baseline resolver has an owner to resolve', () => {
+  const src = startAgentProcessBody();
+  assert.match(
+    src,
+    /materializeAgentSshKey\(id, env, childEnv, config\);/,
+    'materializeAgentSshKey needs the agent config to resolve a baseline owner — calling it with 3 args silently reverts to the raw shared key',
   );
 });

@@ -815,3 +815,102 @@ test("B5 migration: an owner whose personal credential is present but rejected b
   });
   assert.deepEqual(decision, { tier: "shared", credentialId: "tok-shared-legacy" });
 });
+
+// ── #2212 (review finding on #2177/#2212, epic #2166 B5): the SSH-key half
+// of the same re-interpretation. The issue's own AC names "`env.githubTokenId`
+// (and per-repo `sshKeyId`)" together; #2212 shipped only the GitHub-token
+// wrapper. `orchestrator.js`'s `resolveBaselineSshKeyId` composes the exact
+// same three pure calls as `resolveBaselineGithubTokenIdForTest` above, only
+// with `kind: "SSH key"` — these mirror that section's cases rather than
+// re-deriving new ones, since the underlying pure core is credential-kind-
+// agnostic.
+function resolveBaselineSshKeyIdForTest({ cfg, users, memberships, keyIndex, sharedSshKeyId }) {
+  if (!cfg) return sharedSshKeyId || null;
+  const ownerId = resolveBaselineOwnerId(cfg, { users, memberships });
+  const personal = findPersonalCredentialState(keyIndex || [], ownerId);
+  const decision = resolveCredential({
+    operation: "spawn",
+    ownerId,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
+    personalCredentialOrphaned: personal.orphaned,
+    sharedCredentialId: sharedSshKeyId || null,
+    kind: "SSH key",
+  });
+  return decision.credentialId || null;
+}
+
+test("B5 migration (SSH): an existing shared/env deploy key is unchanged when nobody has a personal SSH key", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const resolved = resolveBaselineSshKeyIdForTest({
+    cfg,
+    users: [{ id: "u-creator" }],
+    memberships: [{ userId: "u-creator", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }],
+    keyIndex: [],
+    sharedSshKeyId: "key-shared-legacy",
+  });
+  assert.equal(resolved, "key-shared-legacy", "an unmigrated binding must keep working exactly as before (AC8)");
+});
+
+test("B5 migration (SSH): the SAME binding automatically re-resolves to the team-admin's personal key once one exists", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const resolved = resolveBaselineSshKeyIdForTest({
+    cfg,
+    users: [{ id: "u-creator" }],
+    memberships: [{ userId: "u-creator", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }],
+    keyIndex: [{ id: "key-personal-creator", scope: "personal", userId: "u-creator" }],
+    sharedSshKeyId: "key-shared-legacy",
+  });
+  assert.equal(resolved, "key-personal-creator", "the field's meaning re-interprets to the baseline pointer — no data edit needed");
+});
+
+test("B5 migration (SSH): a D4 succession moves the baseline WITHOUT redeploying the agent or touching the env's repo sshKeyId", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const users = [{ id: "u-creator" }, { id: "u-newadmin" }];
+  const memberships = [
+    { userId: "u-newadmin", teamId: "squad", role: "team-admin", createdAt: "2020-02-01" },
+    { userId: "u-creator", teamId: "squad", role: "team-member", createdAt: "2020-01-01" },
+  ];
+  const keyIndex = [
+    { id: "key-personal-creator", scope: "personal", userId: "u-creator" },
+    { id: "key-personal-newadmin", scope: "personal", userId: "u-newadmin" },
+  ];
+  const resolved = resolveBaselineSshKeyIdForTest({ cfg, users, memberships, keyIndex, sharedSshKeyId: "key-shared-legacy" });
+  assert.equal(resolved, "key-personal-newadmin", "the CURRENT team-admin's key wins, not the demoted creator's");
+});
+
+test("B5 migration (SSH): a team-member resolves through its parent team's baseline, same as the container-spawn path uses", () => {
+  const users = [{ id: "u-admin" }];
+  const memberships = [{ userId: "u-admin", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }];
+  const keyIndex = [{ id: "key-personal-admin", scope: "personal", userId: "u-admin" }];
+  const resolved = resolveBaselineSshKeyIdForTest({
+    cfg: { role: "team-member", parentTeamId: "squad" },
+    users,
+    memberships,
+    keyIndex,
+    sharedSshKeyId: "key-shared-legacy",
+  });
+  assert.equal(resolved, "key-personal-admin");
+});
+
+test("B5 migration (SSH): a standalone (unowned) agent's binding never refuses and never needs a personal key", () => {
+  const resolved = resolveBaselineSshKeyIdForTest({
+    cfg: { role: "agent" },
+    users: [],
+    memberships: [],
+    keyIndex: [],
+    sharedSshKeyId: "key-shared-legacy",
+  });
+  assert.equal(resolved, "key-shared-legacy", "no owner anywhere → shared, unchanged, never a refusal (AC8)");
+});
+
+test("B5 migration (SSH): a cfg-less spawn (not-yet-persisted config) degrades byte-identically to the raw shared key", () => {
+  const resolved = resolveBaselineSshKeyIdForTest({
+    cfg: null,
+    users: [],
+    memberships: [],
+    keyIndex: [],
+    sharedSshKeyId: "key-shared-legacy",
+  });
+  assert.equal(resolved, "key-shared-legacy");
+});

@@ -657,7 +657,7 @@ function startAgentProcess(config) {
   // Per-agent SSH identity (see materializeAgentSshKey). Always runs — even for
   // envless agents — because it also strips the orchestrator's inherited
   // GIT_SSH_COMMAND, which would otherwise dangle in every agent.
-  materializeAgentSshKey(id, env, childEnv);
+  materializeAgentSshKey(id, env, childEnv, config);
 
   // Shared Agent Learning (Phase 1): expose the team Knowledge Base to the
   // agent runtime + `knowledge` CLI. The autonomy dial is ALWAYS injected
@@ -4306,7 +4306,7 @@ const CLAUDE_HOME_AGENT_DIR = "/root/.claude";
 // HOME=/workspace/agents/<id>, so the image-baked /root/.ssh/config is never
 // read). The config carries the github.com -> ssh.github.com:443 routing that
 // corporate networks blocking outbound TCP 22 require.
-function materializeAgentSshKey(id, env, childEnv) {
+function materializeAgentSshKey(id, env, childEnv, cfg) {
   delete childEnv.GIT_SSH_COMMAND;
 
   const orchSshDir = path.join(CLAUDE_HOME_ORCH_DIR, "homes", id, ".ssh");
@@ -4318,7 +4318,15 @@ function materializeAgentSshKey(id, env, childEnv) {
   const agentKnownHosts = path.join(agentSshDir, "known_hosts");
 
   const repos = Array.isArray(env?.repositories) ? env.repositories : [];
-  const sshKeyId = repos.find((r) => r && r.sshKeyId)?.sshKeyId;
+  const sharedSshKeyId = repos.find((r) => r && r.sshKeyId)?.sshKeyId;
+  // Baseline resolution (#2177/#2212, epic #2166 B5) — mirrors the GH_TOKEN
+  // bake above: prefer the team's current team-admin's personal SSH key over
+  // the environment's raw shared deploy key, so a directly-run `git`/`gh`
+  // SSH transport (clone, fetch, and any push that bypasses the
+  // `gh-as-agent` convention) isn't left on the shared secret the GitHub-
+  // token half was fixed for. No owner/no personal key degrades to the exact
+  // pre-existing `sharedSshKeyId` — no data migration needed.
+  const sshKeyId = resolveBaselineSshKeyId(cfg, sharedSshKeyId);
   if (!sshKeyId) {
     // No key for this env — make sure no stale identity lingers from a prior
     // spawn under a different (key-bearing) environment.
@@ -4626,6 +4634,32 @@ function resolveBaselineGithubTokenId(cfg, env) {
     personalCredentialOrphaned: personal.orphaned,
     sharedCredentialId,
     kind: "GitHub token",
+  });
+  return decision.credentialId || null;
+}
+
+// SSH-key sibling of `resolveBaselineGithubTokenId` (#2212 review finding —
+// the issue's own AC names "`env.githubTokenId` (and per-repo `sshKeyId`)"
+// together, but the shipped PR only wired the GitHub-token half). Same
+// composition, same non-refusing `operation: "spawn"`, same graceful
+// cfg-less/unowned degradation to the environment's raw shared key — the only
+// difference is the credential kind and index. `sharedSshKeyId` is the
+// specific repo key `materializeAgentSshKey` already picked (today: the
+// first repo carrying one), not "any key somewhere on the environment".
+function resolveBaselineSshKeyId(cfg, sharedSshKeyId) {
+  if (!cfg) return sharedSshKeyId || null;
+  const ownerId = credentialResolution.resolveBaselineOwnerId(cfg, { loadAgentConfig, ...loadBaselineDeps() });
+  const keyIndex = loadSshKeyIndex();
+  const liveUserGate = loadLiveUserGate();
+  const personal = credentialResolution.findPersonalCredentialState(keyIndex, ownerId, undefined, liveUserGate);
+  const decision = credentialResolution.resolveCredential({
+    operation: "spawn",
+    ownerId,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
+    personalCredentialOrphaned: personal.orphaned,
+    sharedCredentialId: sharedSshKeyId || null,
+    kind: "SSH key",
   });
   return decision.credentialId || null;
 }

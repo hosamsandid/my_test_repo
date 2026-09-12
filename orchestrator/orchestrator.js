@@ -86,6 +86,7 @@ const ownershipMigration = require("./ownership-migration");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assessConversionEligibility, planTeamConversion } = require("./team-conversion");
+const { nextAvailableAgentId } = require("./agent-id-resolution");
 const { syncAgentRepoPlan, summarizeRepoResults, repoDivergence } = require("./repo-sync");
 // Agent-scoped repositories (#2067): a repository attached to ONE agent,
 // outside its Working Environment. Every decision — shape, the merged
@@ -874,6 +875,15 @@ async function startAllEnabledAgents() {
 // ============================================================
 function agentDir(id) {
   return path.join(AGENTS_DIR, id);
+}
+
+// The strictest "is this id taken" predicate in the codebase (#2217, matching
+// the team-conversion `teamIdTaken` check): a persisted config, an on-disk
+// directory, or an id whose background teardown is still in flight (its
+// config.json is already gone but its network/volume/Matrix reaping may
+// still be racing a same-id re-create, #1525/#1791).
+function isAgentIdTaken(id) {
+  return !!loadAgentConfig(id) || agentTeardownRegistry.has(id) || fs.existsSync(agentDir(id));
 }
 
 // Control-plane location for an agent's pushed state (#185).
@@ -8846,10 +8856,35 @@ class Orchestrator {
   // ===========================================================
   // Agent creation
   // ===========================================================
+  // #2217 — resolve the first free id under `isAgentIdTaken` (the strictest
+  // predicate in the codebase) and reserve it IMMEDIATELY, synchronously,
+  // before any async provisioning — the same TOCTOU guard `addTeamMember`'s
+  // auto-numbered path uses (#1525/#1791): two concurrent callers racing the
+  // same base id must not compute the same free id, because nothing else
+  // holds it in between. The placeholder is overwritten by the real config a
+  // few lines later in `createAgent`.
+  resolveAndReserveAgentId(baseId) {
+    const id = nextAvailableAgentId(baseId, isAgentIdTaken);
+    const placeholder = { id, role: 'agent', enabled: false, _provisioning: true };
+    saveAgentConfig(id, placeholder);
+    this.agentConfigs.set(id, { config: placeholder });
+    return id;
+  }
+
   async createAgent(id, displayName, role, systemPrompt, environmentId, extra = {}) {
     const env = loadEnvironment(environmentId);
     if (!env) {
       throw new Error(`Environment not found: ${environmentId}`);
+    }
+
+    // #2217 — the caller (quickstart's fast lane) hands over a BASE id and
+    // asks the platform to resolve the collision itself: `id` is reinterpreted
+    // as the base, the first free id is picked and reserved synchronously
+    // (below), and everything from here on uses the resolved id. The route
+    // handler skips its own collision refusal for this request precisely
+    // because the reservation below is what settles it.
+    if (extra.autoId) {
+      id = this.resolveAndReserveAgentId(id);
     }
 
     // team: save a template config (no Matrix user, no process) and
@@ -16392,6 +16427,12 @@ async function main() {
           // For role: 'team' — admission control (#2114, flow-control concept
           // §4.0): the declarative per-flow WIP limit the dispatch path enforces.
           wipLimit,
+          // #2217 — when set, `id` is a BASE id: the orchestrator resolves the
+          // first free id itself (reserving it before this request returns)
+          // instead of refusing on collision. Used by quickstart's fast lanes,
+          // which derive the id from a repository/name the caller never chose
+          // and has no form field to change.
+          autoId,
         } = JSON.parse(body);
         if (!id || !displayName || !role || !environmentId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -16413,13 +16454,17 @@ async function main() {
           res.end(JSON.stringify({ error: 'systemPrompt required for role: agent' }));
           return;
         }
-        if (loadAgentConfig(id) || agentTeardownRegistry.has(id)) {
+        // #2217 — skipped for `autoId`: the id is a base the orchestrator
+        // resolves and reserves itself inside `createAgent`, so a collision on
+        // it is not a refusal, it is the very thing autoId exists to absorb.
+        if (!autoId && (loadAgentConfig(id) || agentTeardownRegistry.has(id))) {
           res.writeHead(409, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: `Agent '${id}' already exists` }));
           return;
         }
 
         const extra = { schedule, taskPrompt };
+        if (autoId) extra.autoId = true;
         // Wizard-side extras layered on top of the legacy fields.
         if (team) extra.team = team;
         if (sessionPolicy) extra.sessionPolicy = sessionPolicy;
@@ -16452,6 +16497,13 @@ async function main() {
             error: matrixLoginRetry.DEACTIVATED_USER_MESSAGE,
             code: 'matrix_user_deactivated',
           }));
+          return;
+        }
+        // #2217 — the pathological "50 ids for this base already taken" case:
+        // a real, actionable refusal rather than a generic 500.
+        if (err.code === 'id-sequence-exhausted') {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message, code: err.code }));
           return;
         }
         // 400 for caller-fixable misconfigurations (missing env / token, clone

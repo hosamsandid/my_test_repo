@@ -73,10 +73,13 @@ function llmEnvId(name, exists) {
   return nextUniqueId(`llm-${slug}`, exists);
 }
 
-function llmAgentId(name, exists) {
+function llmAgentBaseId(name) {
   const slug = slugifyName(name) || 'agent';
-  const base = slug === 'agent' ? 'agent' : `${slug}-agent`;
-  return nextUniqueId(base, exists);
+  return slug === 'agent' ? 'agent' : `${slug}-agent`;
+}
+
+function llmAgentId(name, exists) {
+  return nextUniqueId(llmAgentBaseId(name), exists);
 }
 
 module.exports = {
@@ -86,4 +89,5 @@ module.exports = {
   nextUniqueId,
   llmEnvId,
   llmAgentId,
+  llmAgentBaseId,
 };

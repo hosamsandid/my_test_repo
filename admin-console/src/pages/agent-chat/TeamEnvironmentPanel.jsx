@@ -98,7 +98,7 @@ function ReadOnlyEnvSummary({ env }) {
       }}>
         <Info size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
         <span>
-          This team runs on a shared Working Environment managed by another team.
+          This team runs on a shared environment managed by another team.
           You can view it here but not edit it — ask a System Admin or the owning
           team's admin to change its repositories, credentials or model provider.
         </span>

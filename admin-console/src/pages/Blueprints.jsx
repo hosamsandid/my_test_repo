@@ -78,7 +78,7 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
   const submitHint = missingFieldsHint([
     { label: 'Display Name', filled: !!form.displayName },
     { label: 'ID', filled: !!form.id },
-    { label: 'Working Environment', filled: !!form.environmentId },
+    { label: 'Environment', filled: !!form.environmentId },
     { label: 'System Prompt', filled: !!form.systemPrompt },
   ]);
 
@@ -102,7 +102,7 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
       />
 
       <div>
-        <div style={labelStyle}>Working Environment <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
+        <div style={labelStyle}>Environment <span style={{ color: 'var(--eb-status-error)' }}>*</span></div>
         <select value={form.environmentId} onChange={e => update('environmentId', e.target.value)} style={inputStyle} disabled={envs.length === 0}>
           <option value="">— please select —</option>
           {envs.map(env => (
@@ -114,7 +114,7 @@ function BlueprintCreateForm({ onSave, onCancel, saving, error }) {
         </select>
         {envs.length === 0 && (
           <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-warning)', marginTop: 'var(--eb-space-1)' }}>
-            No Working Environments yet — create one first.
+            No environments yet — create one first.
           </div>
         )}
       </div>

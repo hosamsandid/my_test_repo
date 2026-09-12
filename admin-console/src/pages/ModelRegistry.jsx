@@ -987,7 +987,7 @@ function EnvProviderPanel({ provider, onClose }) {
       }}>
         <Lock size={14} style={{ flexShrink: 0, marginTop: 2 }} />
         <span>
-          Read-only mirror of the <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ANTHROPIC_*</code> variables in <code style={{ fontFamily: 'var(--eb-font-mono)' }}>.env</code>. Working Environments that pick <em>“inherit from .env”</em> resolve to these values. To change them, edit <code style={{ fontFamily: 'var(--eb-font-mono)' }}>.env</code> and restart the stack (<code style={{ fontFamily: 'var(--eb-font-mono)' }}>make restart</code>).
+          Read-only mirror of the <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ANTHROPIC_*</code> variables in <code style={{ fontFamily: 'var(--eb-font-mono)' }}>.env</code>. Environments that pick <em>“inherit from .env”</em> resolve to these values. To change them, edit <code style={{ fontFamily: 'var(--eb-font-mono)' }}>.env</code> and restart the stack (<code style={{ fontFamily: 'var(--eb-font-mono)' }}>make restart</code>).
         </span>
       </div>
 
@@ -1543,7 +1543,7 @@ export default function ModelRegistry() {
       <ConfirmDialog
         open={!!deleteTarget}
         title="Delete model provider"
-        message={`Really delete "${deleteTarget?.name || deleteTarget?.id}"? Working Environments using this provider must detach it first.`}
+        message={`Really delete "${deleteTarget?.name || deleteTarget?.id}"? Environments using this provider must detach it first.`}
         variant="danger"
         confirmLabel="Delete"
         onConfirm={handleDelete}

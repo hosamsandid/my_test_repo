@@ -123,6 +123,20 @@ test('the new page supports create, unlike the retired list-only page (AC: Syste
   assert.match(page, /isTemplate: true/, 'every save through this page must be forced to isTemplate: true');
 });
 
+// #2172 (epic #2166 A6, terminology sweep): the retired page's own NAME must
+// not survive as user-facing vocabulary either — the phrase "Working
+// Environment" should read nowhere a user looks (menus, forms, labels,
+// messages). Comment-stripped, like every other check in this file, because
+// this ticket's own commit history and the historical comments elsewhere in
+// this file legitimately still say it.
+test('no rendered string anywhere still says "Working Environment" — the phrase, not just the page', () => {
+  const offenders = SOURCES
+    .filter(([name]) => !/\.test\.jsx?$/.test(name))
+    .filter(([, code]) => /Working Environments?/.test(code))
+    .map(([name]) => name);
+  assert.deepEqual(offenders, [], `these files still render the retired phrase: ${offenders.join(', ')}`);
+});
+
 /* ── the mutation proof ──────────────────────────────────────────────────
    Every check above is written over a source string, so each can be re-run
    against a sabotaged copy. Without this the suite would pass identically if
@@ -156,4 +170,8 @@ test('each source-reading check actually fires on a reintroduction', () => {
   const page = SOURCES.find(([name]) => name === 'pages/EnvironmentTemplates.jsx')[1];
   const propagationBack = `${page}\n<RepoPropagationDialog />`;
   assert.match(propagationBack, /RepoPropagationDialog/, 'the propagation check would catch a reintroduction');
+
+  // Re-introducing the retired phrase in a rendered string.
+  const phraseBack = `${page}\nconst label = 'Working Environment';`;
+  assert.match(phraseBack, /Working Environment/, 'the phrase check would catch a reintroduction');
 });

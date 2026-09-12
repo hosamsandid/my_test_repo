@@ -36,11 +36,11 @@ both.
 | Authenticates | Git **transport** over an `ssh://` / `git@…` remote — clone, fetch, push | GitHub's **API**: the Events poller, `gh` / `gh-as-agent` (pull requests, reviews, comments) and HTTPS git |
 | Can be narrowed to | A single repository, as a read-only **deploy key** | Repository and organisation permissions, but never below "this whole account/org surface" |
 | Registered as | The **private** key here; the matching **public** key goes on the Git host (GitHub → Settings → SSH and GPG keys) | The token value here |
-| Reaches the agent as | An SSH agent configured in the workspace at creation time | `GH_TOKEN` and `GITHUB_TOKEN` environment variables in every agent process of the Working Environment |
+| Reaches the agent as | An SSH agent configured in the workspace at creation time | `GH_TOKEN` and `GITHUB_TOKEN` environment variables in every agent process of the environment |
 | Read back afterwards | Never — only a SHA256 **fingerprint** | Never — only a **preview** (prefix + last 4 characters) and a fingerprint |
 
 Which one a repository needs follows from its URL: an **SSH URL needs a key**, an
-**HTTPS URL needs the token**. A Working Environment can link one SSH key per
+**HTTPS URL needs the token**. An environment can link one SSH key per
 repository entry and one GitHub token for the whole environment.
 
 A token-only setup would technically work: a PAT can clone over HTTPS as well as
@@ -67,7 +67,7 @@ Environments clone. Personal keys are deliberately not listed here — they live
 itself is reachable by a System Admin or a Team Admin of at least one access
 scope; which rows you may then edit or delete follows the tier table below.
 
-The table shows **ID** (what a Working Environment refers to, and the filename the
+The table shows **ID** (what an environment refers to, and the filename the
 secret is stored under), **Name**, **Scope / Teams**, **Fingerprint**, **Added**
 and **Used by**, plus a rename/reassign pencil and a delete bin per row.
 
@@ -101,14 +101,14 @@ stored at mode 0600 in the workspace volume and is never returned by the API
 again — not to a System Admin either.
 
 **Deleting.** A key can only be deleted once nothing references it. The **Used by**
-column shows how many Working Environments hold on to each key (hover for their
+column shows how many environments hold on to each key (hover for their
 names), and the delete dialog lists the blocking environments so you know exactly
 where to detach it first. That list is advice, not a lock — the button stays
 active and the **server** is what refuses, so a stale view can never let a
 still-referenced key through. Until environment data has loaded the column shows
 `—` rather than a misleading "None".
 
-**Using a key.** Assign it to a repository entry in a Working Environment. When an
+**Using a key.** Assign it to a repository entry in an environment. When an
 agent is created, the orchestrator clones with that key and configures the
 workspace's SSH agent accordingly.
 
@@ -116,7 +116,7 @@ workspace's SSH agent accordingly.
 
 The **GitHub Tokens** page holds the shared **team** and **system** GitHub
 Personal Access Tokens. A token is injected as `GH_TOKEN` and `GITHUB_TOKEN` into
-every agent process of the Working Environment it is linked to, so the agents in
+every agent process of the environment it is linked to, so the agents in
 one environment share one token instead of each carrying their own. Personal
 tokens are filtered out here and managed on **My Credentials**.
 
@@ -166,7 +166,7 @@ which scope or team owns it. It cannot change the secret: a token value is set
 once, at creation. Rotation therefore works differently here than on the personal
 tier; see the last chapter.
 
-**Deleting** behaves exactly as for SSH keys: blocked while a Working Environment
+**Deleting** behaves exactly as for SSH keys: blocked while an environment
 still references the token, with **Used by** and the delete dialog naming the
 environments to detach it from.
 
@@ -193,7 +193,7 @@ The page has two sections, one per credential kind, each with its own table and 
 | Personal GitHub token | **Name**, **Token** (masked preview), **Fingerprint**, **Added** |
 
 There is no *Scope / Teams* column and no *Used by* column: a personal credential
-has exactly one owner and is not linked to a Working Environment at all — the
+has exactly one owner and is not linked to an environment at all — the
 runtime picks it up from the agent's owner instead (see the last chapter).
 
 Each row offers three actions:
@@ -270,7 +270,7 @@ differently.**
   restart interrupts any in-flight work in those agents, so rotate at a quiet
   moment.
 - **Team and system** credentials are rotated the **create-new-and-repoint** way:
-  add the new credential, then change the Working Environment's *SSH Key* or
+  add the new credential, then change the environment's *SSH Key* or
   *GitHub Token* field to it. The Edit panel can only rename a credential and
   change which scope owns it — the secret itself is create-only. Repointing the
   environment restarts its running agents for the same reason, and disabled agents

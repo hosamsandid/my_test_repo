@@ -288,7 +288,7 @@ function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       <div style={panelLeadStyle}>
         <span>
-          One secret, stored under its own id and never read back. Mark where it goes with <code style={monoStyle}>{'${credential}'}</code> in a server&apos;s template, then pair the two in a Working Environment.
+          One secret, stored under its own id and never read back. Mark where it goes with <code style={monoStyle}>{'${credential}'}</code> in a server&apos;s template, then pair the two in an environment.
         </span>
         <PageHelpButton
           label="How the credential store and ${credential} substitution work"
@@ -470,7 +470,7 @@ export default function McpServers() {
         </span>
       </span>
     ), render: v => v
-      ? <span title="This server's template references ${credential} — bind a credential in the Working Environment.">required</span>
+      ? <span title="This server's template references ${credential} — bind a credential in the environment.">required</span>
       : '—' },
     { key: '_actions', label: '', sortable: false, render: (_, row) => (
       <div onClick={e => e.stopPropagation()}><IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteServer(row)} /></div>
@@ -517,7 +517,7 @@ export default function McpServers() {
       }}>
         <span>
           Runtime knowledge sources and tools agents can query through the Model Context Protocol — a
-          catalog of servers, a separate store for their secrets, and a Working Environment that pairs the two.
+          catalog of servers, a separate store for their secrets, and an environment that pairs the two.
         </span>
         <PageHelpButton
           label="How MCP servers and credentials fit together"
@@ -600,7 +600,7 @@ export default function McpServers() {
       <ConfirmDialog
         open={!!deleteServer}
         title="Delete MCP server"
-        message={`Really delete "${deleteServer?.name || deleteServer?.id}"? Working Environments using it must detach it first.`}
+        message={`Really delete "${deleteServer?.name || deleteServer?.id}"? Environments using it must detach it first.`}
         variant="danger"
         confirmLabel="Delete"
         onConfirm={doDeleteServer}
@@ -609,7 +609,7 @@ export default function McpServers() {
       <ConfirmDialog
         open={!!deleteCred}
         title="Delete MCP credential"
-        message={`Really delete "${deleteCred?.name || deleteCred?.id}"? Working Environments using it must detach it first.`}
+        message={`Really delete "${deleteCred?.name || deleteCred?.id}"? Environments using it must detach it first.`}
         variant="danger"
         confirmLabel="Delete"
         onConfirm={doDeleteCred}

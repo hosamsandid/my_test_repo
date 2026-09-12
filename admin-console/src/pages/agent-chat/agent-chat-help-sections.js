@@ -37,7 +37,7 @@ export const AGENT_CHAT_HELP_SECTIONS = {
   // 8 — the team's Working Environment section, and its save-time propagation
   // offer (#2170, folded in from the retired environments.md/Working
   // Environments page). Sub-sections of Settings — configuring the agent.
-  teamEnvironment: 'the-team-s-working-environment-section-in-detail',
+  teamEnvironment: 'the-team-s-environment-section-in-detail',
   bringingAgentsUpToDate: 'bringing-existing-agents-up-to-date',
 };
 

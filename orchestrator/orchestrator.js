@@ -8757,7 +8757,7 @@ class Orchestrator {
   async createAgent(id, displayName, role, systemPrompt, environmentId, extra = {}) {
     const env = loadEnvironment(environmentId);
     if (!env) {
-      throw new Error(`Working Environment not found: ${environmentId}`);
+      throw new Error(`Environment not found: ${environmentId}`);
     }
 
     // team: save a template config (no Matrix user, no process) and
@@ -8954,7 +8954,7 @@ class Orchestrator {
     }
 
     const env = loadEnvironment(teamCfg.environmentId);
-    if (!env) throw new Error(`Working Environment '${teamCfg.environmentId}' not found`);
+    if (!env) throw new Error(`Environment '${teamCfg.environmentId}' not found`);
 
     let memberId, memberDisplayName;
     if (opts.id) {
@@ -9136,7 +9136,7 @@ class Orchestrator {
       throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
     }
     const env = loadEnvironment(teamCfg.environmentId);
-    if (!env) throw new Error(`Working Environment '${teamCfg.environmentId}' not found`);
+    if (!env) throw new Error(`Environment '${teamCfg.environmentId}' not found`);
 
     teamCfg.systemPromptTemplate = typeof newTemplate === 'string' ? newTemplate : '';
     saveAgentConfig(teamId, teamCfg);
@@ -10005,7 +10005,7 @@ class Orchestrator {
       throw new Error(`Agent '${id}' is a stub but has unexpected role '${cfg.role}'`);
     }
     const env = loadEnvironment(cfg.environmentId);
-    if (!env) throw new Error(`Working Environment '${cfg.environmentId}' not found`);
+    if (!env) throw new Error(`Environment '${cfg.environmentId}' not found`);
 
     const password = `agent-${id}-${Date.now()}`;
     const userId = `@${id}:local`;
@@ -10952,7 +10952,7 @@ class Orchestrator {
     if (loadAgentConfig(instanceId) || agentTeardownRegistry.has(instanceId)) throw new Error(`Agent '${instanceId}' already exists`);
 
     const env = loadEnvironment(blueprint.environmentId);
-    if (!env) throw new Error(`Working Environment '${blueprint.environmentId}' not found`);
+    if (!env) throw new Error(`Environment '${blueprint.environmentId}' not found`);
 
     const password = `agent-${instanceId}-${Date.now()}`;
     const userId = `@${instanceId}:local`;
@@ -12180,7 +12180,7 @@ async function main() {
           }
           if (!loadEnvironment(environmentId)) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: `Working Environment '${environmentId}' not found` }));
+            res.end(JSON.stringify({ error: `Environment '${environmentId}' not found` }));
             return;
           }
           const blueprint = { id, displayName, role, systemPrompt, environmentId, createdAt: new Date().toISOString() };
@@ -12856,7 +12856,7 @@ async function main() {
           const env = loadEnvironment(environmentId);
           if (!env) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: `Working Environment not found: ${environmentId}` }));
+            res.end(JSON.stringify({ error: `Environment not found: ${environmentId}` }));
             return;
           }
 

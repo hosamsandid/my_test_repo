@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import { Link } from 'react-router';
 import { Trash2, Pencil, Plus, ChevronDown, ChevronRight } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
@@ -444,7 +443,7 @@ export default function GithubTokens() {
       }}>
         <span>
           Shared team and platform GitHub Personal Access Tokens — injected as <code>GH_TOKEN</code> /{' '}
-          <code>GITHUB_TOKEN</code> into every agent of the Working Environment they are linked to.
+          <code>GITHUB_TOKEN</code> into every agent of the environment they are linked to.
         </span>
         <PageHelpButton
           label="Why both a GitHub token and an SSH key?"
@@ -499,8 +498,8 @@ export default function GithubTokens() {
               <>
                 The token value can't be changed here — a token secret is set once, at creation.
                 {' '}<strong>To rotate an expiring or leaked token:</strong> create a new GitHub token,
-                then repoint the <Link to="/environments" style={{ color: 'var(--eb-accent-primary)' }}>Working Environment</Link>{' '}
-                to it. Any running agents in that environment are restarted so they pick up the new
+                then repoint the affected team's environment (Agent Chat → Settings tab) at it. Any
+                running agents in that environment are restarted so they pick up the new
                 token — in-flight work is interrupted, so rotate at a quiet moment.
               </>
             )}
@@ -526,14 +525,14 @@ export default function GithubTokens() {
             </p>
             {!envsLoaded ? (
               <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
-                Any Working Environment still referencing this token must detach it first.
+                Any environment still referencing this token must detach it first.
               </p>
             ) : deleteUsage.length > 0 ? (
               <div style={{ marginTop: 'var(--eb-space-3)' }}>
                 <p style={{ margin: '0 0 var(--eb-space-1)', fontSize: 'var(--eb-text-sm)' }}>
                   {deleteUsage.length === 1
-                    ? '1 Working Environment still uses this token — detach it there first:'
-                    : `${deleteUsage.length} Working Environments still use this token — detach it there first:`}
+                    ? '1 environment still uses this token — detach it there first:'
+                    : `${deleteUsage.length} environments still use this token — detach it there first:`}
                 </p>
                 <ul style={{ margin: 0, paddingLeft: '1.25rem', fontSize: 'var(--eb-text-sm)' }}>
                   {deleteUsage.map(e => <li key={e.id}>{e.name || e.id}</li>)}
@@ -541,7 +540,7 @@ export default function GithubTokens() {
               </div>
             ) : (
               <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
-                Not in use by any Working Environment.
+                Not in use by any environment.
               </p>
             )}
           </>

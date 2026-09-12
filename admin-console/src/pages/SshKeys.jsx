@@ -601,7 +601,7 @@ export default function SshKeys() {
       }}>
         <span>
           Shared team and platform SSH keys — the private keys that authenticate git transport
-          for the repositories your Working Environments clone.
+          for the repositories your environments clone.
         </span>
         <PageHelpButton
           label="Why both an SSH key and a GitHub token?"
@@ -677,14 +677,14 @@ export default function SshKeys() {
             </p>
             {!envsLoaded ? (
               <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
-                Any Working Environment still referencing this key must detach it first.
+                Any environment still referencing this key must detach it first.
               </p>
             ) : deleteUsage.length > 0 ? (
               <div style={{ marginTop: 'var(--eb-space-3)' }}>
                 <p style={{ margin: '0 0 var(--eb-space-1)', fontSize: 'var(--eb-text-sm)' }}>
                   {deleteUsage.length === 1
-                    ? '1 Working Environment still uses this key — detach it there first:'
-                    : `${deleteUsage.length} Working Environments still use this key — detach it there first:`}
+                    ? '1 environment still uses this key — detach it there first:'
+                    : `${deleteUsage.length} environments still use this key — detach it there first:`}
                 </p>
                 <ul style={{ margin: 0, paddingLeft: '1.25rem', fontSize: 'var(--eb-text-sm)' }}>
                   {deleteUsage.map(e => <li key={e.id}>{e.name || e.id}</li>)}
@@ -692,7 +692,7 @@ export default function SshKeys() {
               </div>
             ) : (
               <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
-                Not in use by any Working Environment.
+                Not in use by any environment.
               </p>
             )}
           </>

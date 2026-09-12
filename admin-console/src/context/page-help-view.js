@@ -71,7 +71,7 @@ export const CONTEXT_KEYS = {
   'wizard:setup#ssh-key': { label: 'First-run · SSH Key', alias: '/ssh-keys' },
   'wizard:setup#gh-token': { label: 'First-run · GitHub Token', alias: '/github-tokens' },
   '/team-setup#process': { label: 'Agent Team Wizard · Process' },
-  '/team-setup#environment': { label: 'Agent Team Wizard · Working Environment' },
+  '/team-setup#environment': { label: 'Agent Team Wizard · Environment' },
   '/team-setup#team': { label: 'Agent Team Wizard · Team' },
   '/team-setup#knowledge': { label: 'Agent Team Wizard · Knowledge' },
   '/team-setup#review': { label: 'Agent Team Wizard · Review' },

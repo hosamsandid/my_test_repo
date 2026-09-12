@@ -3895,7 +3895,7 @@ function resolveTeamMemberVars(teamId, overrides = {}) {
   if (!teamCfg) return { error: 'Team not found' };
   const envId = teamCfg.environmentId;
   const env = envId ? loadEnvironment(envId) : null;
-  if (!env) return { error: `Team '${teamId}' has no Working Environment` };
+  if (!env) return { error: `Team '${teamId}' has no environment` };
   const primary = reposFromEnv(env)[0];
   // A repo-less team (#1623) resolves empty repo vars rather than erroring, so
   // roles can still be added to it after materialization.
@@ -4047,7 +4047,7 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
   }
   const boundEnv = loadEnvironment(environmentId);
   if (!boundEnv) {
-    return res.status(400).json({ error: `Working Environment '${environmentId}' not found` });
+    return res.status(400).json({ error: `Environment '${environmentId}' not found` });
   }
   // #2170: a template is a copy source, never a live-shared binding — refuse
   // direct binding, same rule as the two team-creation paths below.
@@ -13510,7 +13510,7 @@ app.delete('/api/toolchains/:id', heavyLimiter, (req, res) => {
   const usedBy = environmentsUsingToolchain(id);
   if (usedBy.length) {
     return res.status(409).json({
-      error: `Toolchain '${id}' is selected by ${usedBy.length} Working Environment(s): `
+      error: `Toolchain '${id}' is selected by ${usedBy.length} environment(s): `
         + `${usedBy.map((e) => e.name || e.id).join(', ')}. Clear it there first.`,
       environments: usedBy,
     });
@@ -14254,12 +14254,12 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
   }
 
   const tokenWarning = tokenAttachRefused
-    ? 'This working environment has no GitHub token and you do not have permission to attach one. An administrator can add it under "Working Environments".'
+    ? 'This environment has no GitHub token and you do not have permission to attach one. An administrator can add it from the team\'s Settings tab in Agent Chat.'
     : null;
 
   const llmWarning = env.llmEndpointId
     ? null
-    : 'No LLM endpoint is registered. Register one under "LLM Endpoints" and bind it to the Working Environment before chatting — otherwise the agent will fail on its first message.';
+    : 'No LLM endpoint is registered. Register one under "LLM Endpoints" and bind it to the environment before chatting — otherwise the agent will fail on its first message.';
 
   // 2. Reuse an existing standalone agent on this env, else create one.
   const existingAgent = findStandaloneAgentForEnv(env.id);

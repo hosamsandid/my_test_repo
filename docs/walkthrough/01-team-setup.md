@@ -30,7 +30,7 @@ Then one bordered group, headed **"Or build a team of agents that work together 
 
 And finally, folded away behind a collapsed **"Advanced options"** disclosure, one last entry — out of the way by design rather than competing with the four above it:
 
-- **"Configure an agent manually"** — badged *Advanced*. This is the direct form: you set the id, the role (a plain agent, an Agent Team template or an orchestrator), the Working Environment and the system prompt yourself, on an environment that already exists, and nothing is created alongside it. It's the "I already know exactly what I want" path, which is why it's the one entry that *does* name the artifact: saying anything vaguer would make it indistinguishable from the hero at the top — which is exactly the confusion the ranking was introduced to end. It opens right here on the launcher, in a side panel, so the ranked entries stay in view behind it. → *Opens the agent editor.*
+- **"Configure an agent manually"** — badged *Advanced*. This is the direct form: you set the id, the role (a plain agent, an Agent Team template or an orchestrator), the environment and the system prompt yourself, on an environment that already exists, and nothing is created alongside it. It's the "I already know exactly what I want" path, which is why it's the one entry that *does* name the artifact: saying anything vaguer would make it indistinguishable from the hero at the top — which is exactly the confusion the ranking was introduced to end. It opens right here on the launcher, in a side panel, so the ranked entries stay in view behind it. → *Opens the agent editor.*
 
 Two of these (describe / design-on-the-canvas) produce a **flow draft** that you refine on the canvas and then launch; one (ready-made team) runs the **guided wizard**; the hero is the **fast lane** to a lone chat agent; and the manual form decides nothing for you at all. They all end at the same place — running agents — they just differ in how much you decide up front versus how much the studio decides for you. Nothing changed about where any of them takes you, by the way: the launcher was re-sorted and re-labelled, not rewired. Let's take the ready-made-team path first, because it's the most complete and shows every step of standing up a team; then we'll come back to the other three and show what's different about each.
 
@@ -53,13 +53,13 @@ Core SDLC gives us four agents that cover a complete build-and-review loop:
 
 Notice the division of labour: the agents do the heavy lifting, but the human stays in control of the two decisions that matter — what gets built, by approving the issue, and the final merge. Below the selection you also see a small live preview of the flow and a wiring check, so you can confirm the hand-offs actually connect before moving on. Any blocking wiring errors are surfaced here and stop you from advancing until they're resolved.
 
-### Step 2: Working Environment (slide 4)
+### Step 2: Environment (slide 4)
 
-Screenshot: wizard Working Environment step — card grid of environments; one card selected, a repo-less card visibly non-selectable for a repo-based process.
+Screenshot: wizard Environment step — card grid of environments; one card selected, a repo-less card visibly non-selectable for a repo-based process.
 
-The second step is the Working Environment. If the process defines what the team does, the environment defines where it does it.
+The second step is the Environment. If the process defines what the team does, the environment defines where it does it.
 
-A Working Environment is a reusable infrastructure template. It bundles the GitHub repository the team works on, the branch, the SSH deploy key and the GitHub token used for git operations and API access, plus any knowledge sources. The key point is that we don't reassemble all of that here from raw credentials — the environment already packages it. So on this step we simply pick one from a card grid. Each card shows the environment's name, its repository, and warns us if something essential is missing — for example, if there's no GitHub token, it flags that the reactive roles won't be able to trigger on issues and pull requests.
+An environment is a reusable infrastructure template. It bundles the GitHub repository the team works on, the branch, the SSH deploy key and the GitHub token used for git operations and API access, plus any knowledge sources. The key point is that we don't reassemble all of that here from raw credentials — the environment already packages it. So on this step we simply pick one from a card grid. Each card shows the environment's name, its repository, and warns us if something essential is missing — for example, if there's no GitHub token, it flags that the reactive roles won't be able to trigger on issues and pull requests.
 
 This step is also where the "repo-less first-class" idea shows up. Every environment card is selectable — including one with no repository at all (#1623/#1668). A repo-less environment is a legitimate pick: the team then runs on chat and skills only, with no GitHub hand-offs, so the reactive roles of a repository-driven process would have nothing to react to. The card says what it lacks and leaves the judgement to you rather than blocking the pick.
 

@@ -156,7 +156,7 @@ test('AC4 — every visible string matches the binding copy inventory', () => {
     },
     'single-agent': {
       title: 'Configure an agent manually',
-      description: 'Set the id, role, Working Environment and system prompt yourself. '
+      description: 'Set the id, role, environment and system prompt yourself. '
         + 'For specialists who want full control.',
       badge: 'Advanced',
       outcome: '→ Opens the agent editor',

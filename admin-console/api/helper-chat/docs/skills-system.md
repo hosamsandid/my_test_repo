@@ -1,6 +1,6 @@
 # Skills System
 
-Skills are domain knowledge packages. Each skill is a `SKILL.md` file stored in the central skill pool. A skill granted to an agent (or its team) is copied into that agent's workspace at creation time — no code change required. You grant a skill to a team or an agent from the **Settings** tab of Agent Chat's right rail (`/chats`; the Agents page that used to host this form was removed in #1930), in the Team-Setup wizard, or on the Knowledge page — Working Environments carry only infrastructure (repos, credentials, MCP servers, context) and never skills.
+Skills are domain knowledge packages. Each skill is a `SKILL.md` file stored in the central skill pool. A skill granted to an agent (or its team) is copied into that agent's workspace at creation time — no code change required. You grant a skill to a team or an agent from the **Settings** tab of Agent Chat's right rail (`/chats`; the Agents page that used to host this form was removed in #1930), in the Team-Setup wizard, or on the Knowledge page — environments carry only infrastructure (repos, credentials, MCP servers, context) and never skills.
 
 ## Two tiers: global and team (#306)
 

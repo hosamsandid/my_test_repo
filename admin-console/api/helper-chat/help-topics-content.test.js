@@ -340,7 +340,7 @@ const TOPIC_CONTENT = [
       'Anthropic Messages API',
       'LiteLLM',
       'catalog',
-      'Working Environment',
+      'Environment default',
       'Agent override',
       'api-key',
       'Bearer header',
@@ -748,7 +748,7 @@ const TOPIC_CONTENT = [
       'Agent Team',
       'access scope',
       'Process',
-      'Working Environment',
+      'Environment',
       'Team ID',
       'Knowledge',
       'Review',
@@ -957,7 +957,7 @@ const TOPIC_CONTENT = [
       // directory-name collision is refused rather than renamed, that the
       // attachment survives a re-seed, and what removal costs. Each is a
       // question a reader asks BEFORE clicking, so a reword must not lose them.
-      'From Working Environment',
+      'From Environment',
       'This agent only',
       'no credential of its own',
       'refused',

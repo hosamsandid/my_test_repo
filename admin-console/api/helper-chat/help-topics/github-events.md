@@ -176,7 +176,7 @@ Work down the row, in this order:
 
 A repository is polled only if **both** are true:
 
-- some Working Environment carries a **GitHub token** for it, and
+- some environment carries a **GitHub token** for it, and
 - at least one **enabled** agent has an **enabled** `github-event` trigger on it.
 
 A repository nobody subscribes to, or one whose only subscriber is a disabled

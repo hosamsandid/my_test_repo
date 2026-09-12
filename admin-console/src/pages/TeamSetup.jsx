@@ -102,7 +102,7 @@ function ErrorBox({ message }) {
 // else (environment, name, knowledge) qualifies it. The step lands directly on
 // the template/draft gallery (#1703); describe/blank-canvas authoring lives in
 // the "+ Create" launcher.
-const STEPS = ['Process', 'Working Environment', 'Team', 'Knowledge (optional)', 'Review'];
+const STEPS = ['Process', 'Environment', 'Team', 'Knowledge (optional)', 'Review'];
 
 // The help-context key per step (E17 #1892). A wizard step is a sub-state of one
 // route, so it has no pathname of its own: the page publishes `<step>` and the
@@ -440,7 +440,7 @@ function StepEnvironmentSelect({
               gone — that belongs to the team-setup topic. What remains is the one
               line that names the immediate input. */}
           <p style={{ margin: 0 }}>
-            Optionally reuse an existing <strong style={{ color: 'var(--eb-text-primary)' }}>Working Environment</strong> —
+            Optionally reuse an existing <strong style={{ color: 'var(--eb-text-primary)' }}>Environment</strong> —
             it already bundles the repository, credentials and knowledge sources. Pick nothing and the team
             gets a fresh, repo-less one of its own (#2168 A2 — no environment to name or find first).
           </p>
@@ -496,7 +496,7 @@ function StepEnvironmentSelect({
           </div>
         ) : (
           <>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 'var(--eb-space-3)' }} role="radiogroup" aria-label="Working Environment">
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 'var(--eb-space-3)' }} role="radiogroup" aria-label="Environment">
               {envs.map(env => (
                 <EnvironmentCard
                   key={env.id}
@@ -509,7 +509,7 @@ function StepEnvironmentSelect({
             <div style={{ ...hintStyle, marginTop: 0 }}>
               Not picking one is fine too — click <strong>Next</strong> and the team gets its own, freshly
               created. To change an existing one, open its owning team and use the <strong>Settings</strong>{' '}
-              tab's Working Environment section in Agent Chat.
+              tab's Environment section in Agent Chat.
               {' '}<button
                 type="button"
                 onClick={refetchEnvs}

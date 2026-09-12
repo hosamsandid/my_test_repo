@@ -126,7 +126,7 @@ export function chatNotice(options) {
       : 'No model providers are available for this team.';
   }
   if (!options.endpointId) {
-    return 'No model provider is bound to this environment — set one in Working Environments.';
+    return 'No model provider is bound to this environment — set one on the team’s Settings tab.';
   }
   if (!(options.models || []).length) {
     return `Provider “${options.endpointName || options.endpointId}” has no models in its catalogue.`;

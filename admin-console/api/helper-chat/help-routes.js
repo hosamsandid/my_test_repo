@@ -208,7 +208,7 @@ const OVERLAY_KEYS = {
   'modal:user-edit': 'The Edit side panel on the Administration page\u2019s Users tab.',
   'modal:user-delete': 'The delete/offboarding confirmation on the Administration page\u2019s Users tab.',
   'modal:agent-template': 'The template editor side panel on the Agent Templates page.',
-  'modal:env-propagation': 'The repositories-changed / catch-up dialog on the team\'s Working Environment section (Agent Chat Settings tab).',
+  'modal:env-propagation': 'The repositories-changed / catch-up dialog on the team\'s Environment section (Agent Chat Settings tab).',
 };
 
 const CONTEXT_KEYS = {
@@ -234,7 +234,7 @@ const CONTEXT_KEYS = {
   // wizard's topic content and may claim these keys to make a step's help
   // step-specific.
   '/team-setup#process': { label: 'Agent Team Wizard · Process' },
-  '/team-setup#environment': { label: 'Agent Team Wizard · Working Environment' },
+  '/team-setup#environment': { label: 'Agent Team Wizard · Environment' },
   '/team-setup#team': { label: 'Agent Team Wizard · Team' },
   '/team-setup#knowledge': { label: 'Agent Team Wizard · Knowledge' },
   '/team-setup#review': { label: 'Agent Team Wizard · Review' },

@@ -260,21 +260,31 @@ supplies their own.
 
 ## Rotation and runtime resolution
 
-**Rotation depends on the tier, because the two tiers hold the secret
-differently.**
+**Every tier can now rotate in place** — replace the stored secret while the id,
+name and owner stay — and the affected running agents are **automatically
+restarted** so they pick up the new value immediately. Only the *fan-out* differs
+between tiers, because a personal secret is held per owner and a team/system
+secret per Working Environment:
 
-- **Personal** keys and tokens **rotate in place** — the secret is replaced while
-  the id, name and owner stay — using the *Rotate* action on My Credentials.
-  Afterwards the owner's affected running agents are **automatically restarted**
-  so they pick up the new value immediately; only yours, never anyone else's. That
-  restart interrupts any in-flight work in those agents, so rotate at a quiet
-  moment.
-- **Team and system** credentials are rotated the **create-new-and-repoint** way:
-  add the new credential, then change the environment's *SSH Key* or
-  *GitHub Token* field to it. The Edit panel can only rename a credential and
-  change which scope owns it — the secret itself is create-only. Repointing the
-  environment restarts its running agents for the same reason, and disabled agents
-  pick the fresh credential up the next time they are enabled.
+- **Personal** keys and tokens rotate in place using the *Rotate* action on My
+  Credentials. Afterwards the owner's affected running agents are restarted; only
+  yours, never anyone else's.
+- **Team and system** keys and tokens rotate in place using the **Replace value**
+  (GitHub token) / **Replace key** (SSH key) action — the circular-arrows icon on
+  the row — of the shared **SSH Keys** / **GitHub Tokens** pages. For an SSH key
+  you can paste a replacement private key or have the server generate a fresh
+  keypair and show you the new public key once. Afterwards every Working
+  Environment that references the credential has its running agents restarted. The
+  separate **Edit** dialog changes only the name and which scope owns it — it does
+  not touch the secret.
+
+In every case that restart interrupts any in-flight work in those agents, so
+rotate at a quiet moment; disabled agents pick the fresh secret up the next time
+they are enabled. The older **create-new-and-repoint** route still works for a
+team/system credential when you want a genuinely new credential rather than a new
+value under the same one (for example to change its scope at the same time): add
+the new credential, then change the Working Environment's *SSH Key* or *GitHub
+Token* field to it, which restarts that environment's agents for the same reason.
 
 **Which credential an agent actually uses** is decided **per operation class**,
 because attribution and transport differ:

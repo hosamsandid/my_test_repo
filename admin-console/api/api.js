@@ -2535,6 +2535,29 @@ function notifyOwnerCredentialChange(ownerId, reason) {
   }).catch(() => {});
 }
 
+// Best-effort: after a TEAM/SYSTEM credential's secret VALUE is replaced in place
+// (an in-place rotate on a non-personal token/key), respawn the running agents of
+// every environment that references it — the env-scoped counterpart of
+// notifyOwnerCredentialChange, which only covers the personal (owner) tier. A
+// team/system secret is baked into each container at spawn, so without this a
+// replaced value would only reach agents on a manual disable/enable. One env
+// respawn per referencing env (notifyEnvCredentialChange is a single call per
+// env, so two repos on one env can't double-fire).
+function respawnEnvsUsingGithubToken(tokenId, reason) {
+  if (!tokenId) return;
+  for (const envId of listEnvironmentIds()) {
+    if (loadEnvironment(envId)?.githubTokenId === tokenId) notifyEnvCredentialChange(envId, reason);
+  }
+}
+
+function respawnEnvsUsingSshKey(keyId, reason) {
+  if (!keyId) return;
+  for (const envId of listEnvironmentIds()) {
+    const repos = loadEnvironment(envId)?.repositories;
+    if (Array.isArray(repos) && repos.some(r => r?.sshKeyId === keyId)) notifyEnvCredentialChange(envId, reason);
+  }
+}
+
 app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
@@ -16423,13 +16446,14 @@ app.delete('/api/ssh-keys/:id', apiLimiter, (req, res) => {
   res.status(204).end();
 });
 
-// Rotate a PERSONAL SSH key in place (#1568 AC4): replace the stored private key
-// — pasted or server-generated — while keeping the same credential id, name and
-// owner. Personal-tier ONLY: a team/system key is deliberately rotated by
-// creating a new credential and repointing the environment (see the admin page
-// copy), so an in-place secret swap that silently changes what many agents use
-// is refused here. Owner-gated via canManageCredential — the personal tier has
-// no scope.all bypass, so not even a System Admin can rotate someone else's key.
+// Rotate an SSH key in place: replace the stored private key — pasted or
+// server-generated — while keeping the same credential id, name and owner, then
+// respawn the running agents that hold it so the new secret takes effect (a
+// value baked at spawn only reaches a container on recreate). Any tier: a
+// personal key fans the respawn out per-owner, a team/system key per-referencing
+// environment (respawnEnvsUsingSshKey). Gated via canManageCredential — the
+// personal tier has no scope.all bypass, so not even a System Admin can rotate
+// someone else's key; a team/system key is rotatable by whoever may manage it.
 app.post('/api/ssh-keys/:id/rotate', heavyLimiter, (req, res) => {
   const { id } = req.params;
   if (!SSH_KEY_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid ssh key id' });
@@ -16437,12 +16461,6 @@ app.post('/api/ssh-keys/:id/rotate', heavyLimiter, (req, res) => {
   const keys = listSshKeys();
   const cred = keys.find(k => k.id === id);
   if (!cred) return res.status(404).json({ error: 'SSH key not found' });
-  if (normalizeCredential(cred).scope !== 'personal') {
-    return res.status(400).json({
-      error: 'Only a personal SSH key can be rotated in place; rotate a team/system key by creating a new one and repointing the environment.',
-      code: 'rotate-personal-only',
-    });
-  }
   if (!canManageCredential(scope, cred)) {
     return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
   }
@@ -16476,8 +16494,13 @@ app.post('/api/ssh-keys/:id/rotate', heavyLimiter, (req, res) => {
 
   const updated = { ...cred, fingerprint, rotatedAt: new Date().toISOString() };
   saveSshKeysIndex(keys.map(k => (k.id === id ? updated : k)));
-  // Propagate the rotated secret to the owner's running agents (#1570 Phase 4).
-  notifyOwnerCredentialChange(updated.userId, 'personal-ssh-key-rotated');
+  // Propagate the replaced secret to the running agents that hold it — per-owner
+  // for a personal key (#1570 Phase 4), per-referencing-env for a team/system key.
+  if (normalizeCredential(updated).scope === 'personal') {
+    notifyOwnerCredentialChange(updated.userId, 'personal-ssh-key-rotated');
+  } else {
+    respawnEnvsUsingSshKey(id, 'team-ssh-key-rotated');
+  }
   const body = normalizeCredential(updated);
   res.status(200).json(publicKey ? { ...body, publicKey } : body);
 });
@@ -16587,7 +16610,10 @@ app.delete('/api/github-tokens/:id', apiLimiter, (req, res) => {
 
 // Rotate a PERSONAL GitHub token in place (#1568 AC4) — same model as the SSH
 // rotate above: replace the stored secret, recompute preview + fingerprint, keep
-// the id/name/owner. Personal-tier ONLY and owner-gated (no scope.all bypass).
+// the id/name/owner, then respawn the running agents that hold it. Any tier: a
+// personal token fans the respawn out per-owner, a team/system token per
+// referencing environment. Gated via canManageCredential (personal = owner only,
+// no scope.all bypass; team/system = whoever may manage the credential).
 app.post('/api/github-tokens/:id/rotate', apiLimiter, (req, res) => {
   const { id } = req.params;
   if (!GH_TOKEN_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid token id' });
@@ -16595,12 +16621,6 @@ app.post('/api/github-tokens/:id/rotate', apiLimiter, (req, res) => {
   const tokens = listGithubTokens();
   const cred = tokens.find(t => t.id === id);
   if (!cred) return res.status(404).json({ error: 'GitHub token not found' });
-  if (normalizeCredential(cred).scope !== 'personal') {
-    return res.status(400).json({
-      error: 'Only a personal GitHub token can be rotated in place; rotate a team/system token by creating a new one and repointing the environment.',
-      code: 'rotate-personal-only',
-    });
-  }
   if (!canManageCredential(scope, cred)) {
     return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
   }
@@ -16623,8 +16643,14 @@ app.post('/api/github-tokens/:id/rotate', apiLimiter, (req, res) => {
     rotatedAt: new Date().toISOString(),
   };
   saveGithubTokensIndex(tokens.map(t => (t.id === id ? updated : t)));
-  // Propagate the rotated secret to the owner's running agents (#1570 Phase 4).
-  notifyOwnerCredentialChange(updated.userId, 'personal-github-token-rotated');
+  // Propagate the replaced secret to the running agents that hold it. A personal
+  // token is baked per-owner (#1570 Phase 4); a team/system token is baked per
+  // environment, so fan the respawn out to every env that references it.
+  if (normalizeCredential(updated).scope === 'personal') {
+    notifyOwnerCredentialChange(updated.userId, 'personal-github-token-rotated');
+  } else {
+    respawnEnvsUsingGithubToken(id, 'team-github-token-rotated');
+  }
   res.status(200).json(normalizeCredential(updated));
 });
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router';
-import { MessageCircle, Loader2, Plus, Upload, Eye, EyeOff } from 'lucide-react';
+import { MessageCircle, Loader2, Plus, Upload, Eye, EyeOff, Users } from 'lucide-react';
 import { useApi } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import { usePageActions } from '../context/PageActionsContext';
@@ -452,11 +452,12 @@ export default function AgentChat() {
   }, [requestedSession, loading, agents, agentId, searchParams, setSearchParams]);
 
   // A disabled agent is only ever in this list because the opt-in is on (#1928
-  // AC6), and it has no chat to open — the DM route rejects it with a 409. Treat
-  // it as no selection so the panel shows the empty state rather than a
-  // dead-end error, matching what the rail does when its row is clicked.
-  const selectedAgent =
-    (agents ?? []).find(a => a.id === agentId && isChatOpenable(a)) || null;
+  // AC6), and it has no chat to open — the DM route rejects it with a 409. A
+  // `role: 'team'` agent (#2213) never has a chat to open either — it hosts no
+  // room at all. Both cases treat the route as no *chat* selection so the panel
+  // never attempts `ChatPanel` against a null room.
+  const routedAgent = (agents ?? []).find(a => a.id === agentId) || null;
+  const selectedAgent = routedAgent && isChatOpenable(routedAgent) ? routedAgent : null;
   const effectiveRoomId =
     (selectedAgent && createdRooms[selectedAgent.id]) ||
     selectedAgent?.dmRoomId ||
@@ -696,6 +697,7 @@ export default function AgentChat() {
               showDisabled={showDisabled}
               busyIds={railBusyIds}
               onRequestMenu={handleRequestMenu}
+              onOpenTeamSettings={handleOpenSettings}
             />
           )}
         </div>
@@ -736,6 +738,8 @@ export default function AgentChat() {
             resumeRequest={resumeRequest}
             insertRefRequest={composerRefRequest}
           />
+        ) : routedAgent?.role === 'team' ? (
+          <TeamSelectedState team={routedAgent} />
         ) : (
           <EmptyState />
         )}
@@ -977,6 +981,65 @@ function EmptyState() {
           lineHeight: 1.5,
         }}>
           Replies stream in real time as the agent thinks.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Centered card shown when the route points at a `role: 'team'` agent (#2213)
+ * — clicking a team's header row moves the selection here, but a team hosts no
+ * chat/session of its own, so this is a deliberate state rather than an
+ * attempt to render `ChatPanel` against a null room. The right rail's Settings
+ * tab (opened by the same click, when the caller may manage the team) is
+ * where the real content is.
+ */
+function TeamSelectedState({ team }) {
+  return (
+    <div style={{
+      flex: 1,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 'var(--eb-space-6)',
+    }}>
+      <div style={{
+        background: 'var(--eb-bg-surface)',
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-lg)',
+        padding: 'var(--eb-space-6) var(--eb-space-8)',
+        maxWidth: 420,
+        textAlign: 'center',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 'var(--eb-space-2)',
+        boxShadow: 'var(--eb-shadow-sm)',
+      }}>
+        <div style={{
+          width: 48,
+          height: 48,
+          borderRadius: 'var(--eb-radius-full)',
+          background: 'var(--eb-accent-muted)',
+          color: 'var(--eb-accent-primary)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <Users size={22} />
+        </div>
+        <div style={{
+          fontSize: 'var(--eb-text-md)',
+          fontWeight: 'var(--eb-font-semibold)',
+          color: 'var(--eb-text-primary)',
+        }}>
+          {team?.displayName || team?.id} has no chat of its own
+        </div>
+        <div style={{
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-muted)',
+          lineHeight: 1.5,
+        }}>
+          A team hosts no conversation — its settings are open in the right rail. Pick a member on the left to chat.
         </div>
       </div>
     </div>

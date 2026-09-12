@@ -126,16 +126,20 @@ team's *Not materialized yet* section brings it to life.
 
 ## The agent list
 
-The left rail lists every agent you can see, and clicking one opens its room.
+The left rail lists every agent you can see, and clicking one opens its room —
+except a team's own header row, which has no room to open (see below).
 
 **Grouping and order.** Agents that belong to an Agent Team are grouped under
 that team; standalone agents are collected under *Single agents*. When every row
 in a group shares one environment, the environment name is hoisted onto
 the group header and the rows stay single-line; a member that deviates keeps its
-own environment line. Groups collapse and expand, and both the collapse state
-and your own ordering are remembered per user. Drag a row by its grip to
-reorder, or move the focused row with **Alt+↑** / **Alt+↓** if you would rather
-not drag.
+own environment line. The **chevron** on a group header is the only control that
+collapses/expands it; clicking anywhere else on that row selects the team and
+opens its **Settings** tab in the right rail instead — a team hosts no chat of
+its own, so the middle pane shows a short explanation rather than an empty room.
+Both the collapse state and your own ordering are remembered per user. Drag a
+row by its grip to reorder, or move the focused row with **Alt+↑** / **Alt+↓**
+if you would rather not drag.
 
 **Finding an agent.** The filter box above the list narrows it as you type. Next
 to it, the **eye** toggle is the *show disabled agents* opt-in: disabled agents
@@ -175,8 +179,9 @@ on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:
   refuses while the agent is mid-run unless you choose *Convert anyway*. The
   agent restarts once and comes back on its own.
 - A group header carries the team-wide equivalents: **Enable/Disable** for the
-  whole team, **Add member…**, **Team settings…** (which opens the team's own
-  Settings tab here rather than jumping to another page), **Share…** (who may
+  whole team, **Add member…**, **Team settings…** (the same Settings tab a
+  plain click on the header row already opens — this menu entry is the
+  keyboard/no-mouse path to it), **Share…** (who may
   open this team — see *Sharing a team* below), **Export team
   (ZIP)**, **Open in Flow Editor** and **Delete team**.
 - **Add member…** asks one question before it acts: **Materialize now**, which is

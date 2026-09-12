@@ -10,7 +10,7 @@ import ConfirmDialog from '../../components/ConfirmDialog';
 import SidePanel from '../../components/SidePanel';
 import { summarizeTeamAction } from '../team-action-summary.js';
 import {
-  ImportAgentForm, CloneAgentForm, ExtractTemplateForm,
+  ImportAgentForm, CloneAgentForm, ExtractTemplateForm, CloneTeamForm,
 } from '../agent-lifecycle/AgentLifecycleForms.jsx';
 import {
   DisableWarningDialog, TeamDisableDialog, DeactivateWarningDialog,
@@ -115,7 +115,7 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   const [notice, setNotice] = useState(null);
 
   // Panels reuse the Agents page's forms verbatim.
-  const [panelMode, setPanelMode] = useState(null); // null | 'clone' | 'extract' | 'import'
+  const [panelMode, setPanelMode] = useState(null); // null | 'clone' | 'clone-team' | 'extract' | 'import'
   const [panelAgent, setPanelAgent] = useState(null);
   const [importFile, setImportFile] = useState(null);
   const [extractTemplateIds, setExtractTemplateIds] = useState(() => new Set());
@@ -386,6 +386,53 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
     return { ok: resp.ok, status: resp.status, data };
   }
 
+  // Clone team (#2171, epic #2166 A5): two requests, since no single server
+  // route does both halves — the credential-stripped environment copy
+  // (`copyFromTeamId`, reusing #2170's template-copy mechanism) and the
+  // ordinary team materialize (the ticket's "existing clone path": export the
+  // source's process bundle, feed it to team-create). `materializeMembers:
+  // false` is deliberate, not a default left alone: it is what turns "a repo
+  // with no credential yet" into a stub nobody tried to clone, rather than a
+  // failed member the AC says must not happen.
+  async function submitCloneTeam({ teamId, teamName }) {
+    const source = panelAgent;
+    try {
+      const envResp = await fetch('/api/environments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: teamId, name: `${teamName} environment`, copyFromTeamId: source.id }),
+      });
+      const envData = await envResp.json().catch(() => ({}));
+      if (!envResp.ok) return { ok: false, status: envResp.status, data: envData };
+
+      const bundle = await apiCall('GET', `/api/process/template?team=${encodeURIComponent(source.id)}`);
+      // The clone can point at the SAME repository as its source (the
+      // structure copy carries the repo URL verbatim) — a fresh label suffix
+      // (#902) is what keeps the two teams' identical label vocabulary from
+      // cross-triggering each other's flow once both are materialized.
+      const { suffix: labelSuffix } = await apiCall('GET', '/api/teams/suggest-suffix');
+
+      const teamResp = await fetch('/api/teams', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          teamId,
+          teamName,
+          environmentId: envData.id,
+          processTemplate: bundle,
+          materializeMembers: false,
+          labelSuffix,
+        }),
+      });
+      const teamData = await teamResp.json().catch(() => ({}));
+      if (!teamResp.ok) return { ok: false, status: teamResp.status, data: teamData };
+      refresh();
+      return { ok: true, status: teamResp.status, data: { ...teamData, credentialsNeeded: envData.credentialsNeeded } };
+    } catch (e) {
+      return { ok: false, status: 0, data: { error: e.message } };
+    }
+  }
+
   async function submitImport({ newId, parentTeamId }) {
     const formData = new FormData();
     formData.append('file', importFile);
@@ -551,6 +598,7 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
           if (teamId) setShareTeam({ id: teamId, name: target.group?.displayName || teamId });
           break;
         case 'export-team':      window.open(`/api/agents/${encodeURIComponent(teamId)}/export`, '_blank'); break;
+        case 'clone-team':       if (team) { setPanelAgent(team); setPanelMode('clone-team'); } break;
         case 'open-flow-editor': navigate(`/flows?proc=${encodeURIComponent(teamId)}`); break;
         case 'delete-team':      if (team) setDeleteTarget(deleteTargetFor(team, agents)); break;
         default: break;
@@ -630,6 +678,22 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
             teams={teams}
             existingIds={existingIds}
             onSubmit={submitClone}
+            onCancel={closePanel}
+          />
+        )}
+      </SidePanel>
+
+      <SidePanel
+        open={panelMode === 'clone-team' && !!panelAgent}
+        onClose={closePanel}
+        title={`Clone Team — ${panelAgent?.displayName ?? ''}`}
+        width="480px"
+      >
+        {panelMode === 'clone-team' && panelAgent && (
+          <CloneTeamForm
+            team={panelAgent}
+            existingIds={existingIds}
+            onSubmit={submitCloneTeam}
             onCancel={closePanel}
           />
         )}

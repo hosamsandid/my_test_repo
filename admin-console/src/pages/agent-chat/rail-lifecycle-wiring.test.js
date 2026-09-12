@@ -388,6 +388,32 @@ test('#2052 AC2 — the dialog copy comes from the pure module, not inline JSX',
   assert.doesNotMatch(host, /cannot be undone/i);
 });
 
+/* ── #2171 clone team ───────────────────────────────────────────────── */
+
+test('#2171 — the clone-team entry is routed to the form, not just described', () => {
+  // The item comes from `buildTeamMenu`; without a case in `choose()` it would
+  // render, be clickable, and do nothing at all.
+  assert.match(host, /case 'clone-team':\s*if \(team\) \{ setPanelAgent\(team\); setPanelMode\('clone-team'\); \}/);
+  assert.match(host, /<CloneTeamForm/);
+});
+
+test('#2171 — the clone never sends a credential, and stubs the new members', () => {
+  // The literal AC: "no credential id from X appears on Y's environment" —
+  // enforced server-side by `copyFromTeamId` (see team-clone-routes.test.js),
+  // but the client must actually ASK for that mechanism rather than resolving
+  // and forwarding the source's own repositories/mcpServers/githubTokenId.
+  assert.match(host, /copyFromTeamId: source\.id/);
+  assert.doesNotMatch(host, /githubTokenId/);
+  // Deferred materialization (#1955) is what turns "no credential yet" into a
+  // stub nobody tried to clone with, rather than a failed member.
+  assert.match(host, /materializeMembers: false/);
+});
+
+test('#2171 — the clone requests a fresh label suffix, so a clone pointed at the same repo cannot cross-trigger its source', () => {
+  assert.match(host, /suggest-suffix/);
+  assert.match(host, /labelSuffix,?\s*\}\)/);
+});
+
 test('#2052 — the request hits the convert route and only forces on the retry', () => {
   assert.match(host, /\/convert-to-team`/);
   // `force` is the answer to the server's mid-run question, so it may only ever

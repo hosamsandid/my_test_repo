@@ -2226,6 +2226,29 @@ function _teamPooledRoles(teamId) {
   return roles;
 }
 
+// Every LIVE instance of a pooled role template (any work item, not just one)
+// — "live" meaning it still has a config, the same test `_teamPooledRoles`
+// itself uses. Shared by the per-role `maxInstances` cap (`routePooledDispatch`,
+// code-review finding on #2246: the original per-item-only check could never
+// actually reach the refuse branch) and the hard-timeout reaper below, so the
+// two can't independently drift on what "an instance of this role" means.
+function _liveInstanceIdsForRole(roleFullId) {
+  const prefix = `${roleFullId}-i`;
+  const ids = [];
+  for (const id of listAgentIds()) {
+    if (!id.startsWith(prefix)) continue;
+    let cfg = null;
+    try {
+      cfg = loadAgentConfig(id);
+    } catch {
+      continue;
+    }
+    if (!cfg || !cfg.poolInstance || cfg.poolOf !== roleFullId) continue;
+    ids.push(id);
+  }
+  return ids;
+}
+
 // A released ticket's lane key is `<repo>#<number>` (`admission-control.js`
 // `objectKey`) — the item id every pooled role's instance is keyed on.
 function _ticketItemKey(laneKey) {
@@ -2266,10 +2289,29 @@ async function _reapTimedOutPoolInstances(teamId, now = Date.now()) {
       }
       if (!cfg || !cfg.poolInstance || cfg.poolOf !== role.id) continue;
       if (!agentPool.isInstanceTimedOut({ spawnedAt: cfg.poolSpawnedAt, maxRuntimeMs }, now)) continue;
-      console.warn(
-        `[AgentPool] ${teamId}: ${id} exceeded its ${maxRuntimeMs}ms runtime budget — ` +
-        `reaping and marking item ${cfg.poolItem} needs-human`,
-      );
+      console.warn(`[AgentPool] ${teamId}: ${id} exceeded its ${maxRuntimeMs}ms runtime budget — reaping`);
+      // Code-review finding on #2246: this used to only console.warn "marking
+      // item X needs-human" without ever actually doing it — a timed-out
+      // ticket silently lost its worker with no trace outside the server log.
+      // `poolRepo` is stamped on the instance at spawn time (`spawnPoolInstance`)
+      // precisely so the reaper never has to re-derive which repo the item's
+      // issue lives in. Best-effort, mirroring every other GitHub-write in this
+      // file: a failed stamp is logged and never blocks the reap itself — the
+      // instance must not linger just because GitHub was unreachable.
+      if (cfg.poolRepo && cfg.poolItem != null) {
+        const labelWarnings = [];
+        const stamped = await stampMirrorLabel(cfg.poolRepo, cfg.poolItem, "needs-human", labelWarnings);
+        if (stamped) {
+          console.log(`[AgentPool] ${teamId}: marked ${cfg.poolRepo}#${cfg.poolItem} needs-human (hard timeout)`);
+        } else {
+          console.warn(
+            `[AgentPool] ${teamId}: could not mark ${cfg.poolRepo}#${cfg.poolItem} needs-human: ` +
+            (labelWarnings.join("; ") || "unknown error"),
+          );
+        }
+      } else {
+        console.warn(`[AgentPool] ${teamId}: ${id} has no poolRepo/poolItem recorded — cannot mark needs-human`);
+      }
       await _internalSelfDelete(id);
     }
   }
@@ -3440,11 +3482,18 @@ function seedAgentWorkspace(id, env, opts = {}) {
   //    re-seed (AC5/D9): reset-to-stub wipes everything but config.json, and
   //    config.json is where the attachment lives, so the next activation
   //    re-clones it rather than leaving the prompt naming a missing directory.
-  // #2246 D2: a pool INSTANCE's workspace binding rides in on `opts.pool` (the
-  // template's own normalized config, passed through unchanged by whichever
-  // caller is seeding it) — only "git-clean-base" wants pull-on-demand.
+  // #2246 D2/D3: a pool INSTANCE's workspace binding rides in on `opts.pool`
+  // (the template's own normalized config plus the per-dispatch `reworkBranch`/
+  // `reworkRepo` `spawnPoolInstance` resolved, passed through unchanged by
+  // whichever caller is seeding it) — only "git-clean-base" wants pull-on-demand,
+  // and `reworkBranch` is `null` for ordinary new work (D3 never applies).
   const poolWorkspace = opts.pool && opts.pool.workspace === "git-clean-base"
-    ? { pullOnDemand: true, baseBranch: opts.pool.baseBranch }
+    ? {
+      pullOnDemand: true,
+      baseBranch: opts.pool.baseBranch,
+      reworkBranch: opts.pool.reworkBranch || null,
+      reworkRepo: opts.pool.reworkRepo || null,
+    }
     : undefined;
   const clones = [
     ...cloneEnvironmentRepositories(dest, env, warnings, poolWorkspace),
@@ -3781,12 +3830,45 @@ function repoGitCredentials(repository, envGithubTokenId = null) {
   return env;
 }
 
+// D3 (#2246): does `poolWorkspace`'s resolved rework target apply to THIS
+// repository? Unconditional (applies) when the dispatch couldn't resolve
+// which repo the PR belongs to (`reworkRepo` unset — the common single-repo
+// SDLC team), otherwise matched by full name so a multi-repo environment
+// never checks out a PR's branch in the wrong checkout.
+function _poolReworkAppliesTo(repository, poolWorkspace) {
+  if (!poolWorkspace || !poolWorkspace.reworkBranch) return false;
+  if (!poolWorkspace.reworkRepo) return true;
+  const { parseRepoFullName } = require("./github-poller");
+  const { githubApiBase, DEFAULT_GITHUB_API_BASE } = require("./github-api-base");
+  const allowNonGithubHost = githubApiBase() !== DEFAULT_GITHUB_API_BASE;
+  return parseRepoFullName(repository?.url, { allowNonGithubHost }) === poolWorkspace.reworkRepo;
+}
+
+// D3: point an already-cloned/copied working tree at the existing PR's head
+// branch instead of whatever base branch it was seeded on. Throws on failure
+// (never silently degrades to base) — a rework instance silently working
+// against clean main is precisely the bug this exists to close, and a failed
+// fetch/checkout means the caller's seed should fail loudly, not proceed on
+// the wrong branch.
+function _checkoutReworkBranch(repoDir, repository, envGithubTokenId, branch) {
+  const env = repoGitCredentials(repository, envGithubTokenId);
+  try {
+    execFileSync("git", ["fetch", "origin", branch], { cwd: repoDir, env, stdio: "pipe", timeout: 120_000 });
+    execFileSync("git", ["checkout", "-B", branch, `origin/${branch}`], { cwd: repoDir, env, stdio: "pipe", timeout: 60_000 });
+    console.log(`[AgentPool] ${repoDir}: checked out rework branch ${branch} (D3)`);
+  } catch (err) {
+    const stderr = (err.stderr || "").toString();
+    throw new Error(`rework checkout of '${branch}' failed: ${stderr.substring(0, 400) || err.message}`);
+  }
+}
+
 function cloneRepository(targetDir, repository, envGithubTokenId = null, envId = null, poolWorkspace = undefined) {
   const { url, branch } = repository;
   if (!url) return null;
 
   const repoName = (url.split("/").pop() || "repo").replace(/\.git$/, "");
   const repoDir = path.join(targetDir, repoName);
+  const reworkBranch = _poolReworkAppliesTo(repository, poolWorkspace) ? poolWorkspace.reworkBranch : null;
 
   if (fs.existsSync(repoDir)) {
     console.log(`[Orchestrator] Repo dir already exists: ${repoDir} — skipping clone`);
@@ -3804,15 +3886,23 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null, envId =
     if (poolWorkspace && poolWorkspace.pullOnDemand) {
       refreshRepoCacheIfStale(cacheDir, repository, envGithubTokenId, poolWorkspace.baseBranch);
     }
+    let copiedFromCache = false;
     try {
       fs.cpSync(cacheDir, repoDir, { recursive: true });
+      copiedFromCache = true;
       console.log(`[Orchestrator] Copied ${repoName} from env cache → ${repoDir}`);
-      return { repoName, skipped: false, fromCache: true };
     } catch (err) {
       // Fall through to a fresh clone if the copy fails — the cache may be
       // corrupted or hit a permission edge case. Don't let the optimisation
       // fail seeding outright.
       console.warn(`[Orchestrator] Cache copy for ${repoName} failed (${err.message}); falling back to git clone`);
+    }
+    if (copiedFromCache) {
+      // Deliberately OUTSIDE the try above and left to throw uncaught: a
+      // rework-checkout failure must fail the seed, never fall through to a
+      // fresh clone that would silently reproduce the bug D3 exists to close.
+      if (reworkBranch) _checkoutReworkBranch(repoDir, repository, envGithubTokenId, reworkBranch);
+      return { repoName, skipped: false, fromCache: true };
     }
   }
 
@@ -3840,10 +3930,17 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null, envId =
     throw new Error(`git clone failed: ${msg}`);
   }
 
+  if (reworkBranch) _checkoutReworkBranch(repoDir, repository, envGithubTokenId, reworkBranch);
+
   // Seed the env-level cache so the next member in the same env can skip
   // the network round-trip. Failure here is non-fatal: subsequent members
   // simply re-clone instead of copying.
-  if (cacheDir) {
+  //
+  // A rework checkout is DELIBERATELY never cached: the cache exists to give
+  // siblings a clean-base starting point, and seeding it from a PR's head
+  // branch would hand the next NEW-work dispatch someone else's in-progress
+  // branch instead of clean main.
+  if (cacheDir && !reworkBranch) {
     try {
       fs.mkdirSync(path.dirname(cacheDir), { recursive: true });
       if (!fs.existsSync(cacheDir)) {
@@ -8685,6 +8782,36 @@ function resolveRepoGithubTokenId(repoFullName) {
   return null;
 }
 
+// D3's fallback (#2246): when the triggering event carries no PR directly
+// (`agentPool.reworkRefFromPayload` returned null — a plain `issues.*` relabel,
+// e.g. `ready` redelivered after a hard-timeout reap), ask GitHub whether an
+// open PR already exists for this item. Best-effort and fail-SAFE, mirroring
+// the admission sweep's own `openPrs` read: any failure (no token, no repo, a
+// bad response) degrades to `null` — new-work-from-clean-base — never throws,
+// because guessing "this is rework" wrongly would check out a branch that may
+// not exist; guessing "this is new work" wrongly just repeats a workspace the
+// agent's own next `git pull`/PR-push step already has to reconcile.
+async function _lookupPoolReworkRef(repoFullName, itemKey) {
+  if (!repoFullName || itemKey == null) return null;
+  try {
+    const tokenId = resolveRepoGithubTokenId(repoFullName);
+    if (!tokenId) return null;
+    const token = fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim();
+    const [owner, name] = repoFullName.split("/");
+    const seg = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+    const openPrs = await _flowGithubGetJson(`${seg}/pulls?state=open&per_page=100`, token);
+    const list = Array.isArray(openPrs) ? openPrs : [];
+    const linked = flowAnomalySweep.prsForIssue(list, itemKey);
+    if (!linked.length) return null;
+    const pr = list.find((p) => Number(p?.number) === Number(linked[0]));
+    const branch = pr && pr.head && typeof pr.head.ref === "string" ? pr.head.ref : null;
+    return branch ? { branch, repo: repoFullName } : null;
+  } catch (err) {
+    console.warn(`[AgentPool] rework-branch lookup for ${repoFullName}#${itemKey} failed: ${err.message}`);
+    return null;
+  }
+}
+
 // #1173: mirror a label onto an issue/PR after an internal-channel delivery.
 // Decoration only — the wake already went through the queue, so every failure
 // here becomes a returned warning, never a delivery failure (concept §4.2
@@ -9034,7 +9161,7 @@ function drainPendingOne(agentId) {
 // pooled dispatch. Idempotent by construction (D11): a redelivered event
 // recomputes the SAME instance id and `addTeamMember`'s own id-collision guard
 // makes a concurrent second spawn attempt a no-op reuse, never a duplicate.
-async function spawnPoolInstance(teamId, templateCfg, instanceId, itemKey) {
+async function spawnPoolInstance(teamId, templateCfg, instanceId, itemKey, { repoFullName = null, directReworkRef = null } = {}) {
   if (loadAgentConfig(instanceId) || agentTeardownRegistry.has(instanceId)) {
     return { id: instanceId, reused: true };
   }
@@ -9048,6 +9175,12 @@ async function spawnPoolInstance(teamId, templateCfg, instanceId, itemKey) {
     const raw = JSON.parse(fs.readFileSync(agentStatePath(templateCfg.id, "triggers.json"), "utf8"));
     if (Array.isArray(raw)) triggers = raw;
   } catch { /* template has no triggers yet — the instance runs with none either */ }
+  // D3: resolve rework-or-new-work BEFORE seeding, not inside the sync
+  // `routePooledDispatch` (which cannot await) — the free signal first
+  // (the triggering event's own embedded PR), a live GitHub lookup only when
+  // that comes back empty (an `issues.*` relabel with no PR in its payload).
+  const reworkRef = directReworkRef || await _lookupPoolReworkRef(repoFullName, itemKey);
+  const normalizedPool = agentPool.normalizePoolConfig(templateCfg.pool);
   try {
     const result = await orchestratorSingleton.addTeamMember(teamId, {
       id: instanceId,
@@ -9058,15 +9191,31 @@ async function spawnPoolInstance(teamId, templateCfg, instanceId, itemKey) {
       sessionPolicy: 'per-invocation',
       triggers,
       // Threaded through to `seedAgentWorkspace` for the workspace-binding
-      // decision (D2) — see the addTeamMember/materialized branch above. Also
-      // lands on the instance's own config, which is harmless: `isPooledRole`
-      // checks `poolInstance` FIRST, so an instance never re-pools.
-      pool: agentPool.normalizePoolConfig(templateCfg.pool),
+      // decision (D2/D3) — see the addTeamMember/materialized branch above.
+      // Also lands on the instance's own config, which is harmless:
+      // `isPooledRole` checks `poolInstance` FIRST, so an instance never
+      // re-pools. `reworkBranch`/`reworkRepo` are additive fields
+      // `normalizePoolConfig` never produces itself (they are resolved per
+      // DISPATCH, not part of the role's static config) — read directly by
+      // `seedAgentWorkspace`'s `poolWorkspace` construction, not re-validated.
+      pool: normalizedPool && {
+        ...normalizedPool,
+        reworkBranch: reworkRef?.branch || null,
+        reworkRepo: reworkRef?.repo || null,
+      },
       poolInstance: true,
       poolOf: templateCfg.id,
       poolItem: itemKey,
+      // #2246 finding on the hard-timeout reaper: recorded here (not derived
+      // later) because a redelivery may have resolved a DIFFERENT repo token
+      // than the one the eventual reap needs to stamp `needs-human` on —
+      // stamping at spawn time means the reaper never has to re-derive it.
+      poolRepo: repoFullName || null,
     });
-    console.log(`[AgentPool] spawned ${instanceId} (template=${templateCfg.id}, item=${itemKey})`);
+    console.log(
+      `[AgentPool] spawned ${instanceId} (template=${templateCfg.id}, item=${itemKey}` +
+      `${reworkRef ? `, rework@${reworkRef.branch}` : ""})`,
+    );
     return { id: instanceId, reused: false, ...result };
   } catch (err) {
     // Another concurrent spawn for the same item won the id — reuse it rather
@@ -9097,8 +9246,13 @@ function routePooledDispatch(agentId, entry) {
   const roleId = agentPool.roleIdFromMemberId(agentId, teamId);
   const decision = agentPool.planPoolDispatch({
     teamId, roleId, pool, itemKey,
-    existingInstanceIds: itemKey == null ? [] : [agentPool.poolInstanceId(teamId, roleId, itemKey)]
-      .filter((id) => loadAgentConfig(id) || agentTeardownRegistry.has(id)),
+    // Code-review finding on #2246: this used to be `[thisItem'sOwnInstanceId]`
+    // filtered down to 0-or-1 elements — a length that can never reach a real
+    // `maxInstances` cap, since the `reuse` branch always fires first on the
+    // one case (length 1) that wasn't already 0. `maxInstances` caps the ROLE
+    // across every item it is currently working, so it needs every live
+    // instance of the role, not just this one item's.
+    existingInstanceIds: itemKey == null ? [] : _liveInstanceIdsForRole(agentId),
   });
   if (decision.action === 'unpooled') return null;
   if (decision.action === 'refuse') {
@@ -9111,8 +9265,10 @@ function routePooledDispatch(agentId, entry) {
   // action === 'spawn' — kick it off asynchronously and redeliver the entry
   // once the instance exists; the ticket is already admitted into the lane, so
   // nothing here can lose the dispatch, only delay its landing by however long
-  // provisioning takes.
-  spawnPoolInstance(teamId, cfg, decision.instanceId, itemKey)
+  // provisioning takes. D3: the triggering event's own embedded PR (free, when
+  // present) rides along so the async spawn need not re-derive it.
+  const directReworkRef = agentPool.reworkRefFromPayload(entry?.github?.payload);
+  spawnPoolInstance(teamId, cfg, decision.instanceId, itemKey, { repoFullName: ref?.repo || null, directReworkRef })
     .then((r) => enqueuePending(r.id, entry, { admissionChecked: true }))
     .catch((err) => console.error(`[AgentPool] spawn ${decision.instanceId} failed: ${err.message}`));
   return { targetId: decision.instanceId, spawning: true };

@@ -166,3 +166,34 @@ test('isInstanceTimedOut: within budget → false, at/after the deadline → tru
   assert.equal(pool.isInstanceTimedOut({ spawnedAt, maxRuntimeMs: 3_600_000 }, start + 3_600_000), true);
   assert.equal(pool.isInstanceTimedOut({ spawnedAt, maxRuntimeMs: 3_600_000 }, start + 10_000_000), true);
 });
+
+// ─── reworkRefFromPayload (D3 — rework resolves to the PR head branch) ─────────
+
+test('reworkRefFromPayload: a pull_request event yields its own head branch + repo', () => {
+  assert.deepEqual(
+    pool.reworkRefFromPayload({
+      pull_request: { head: { ref: 'fix/123-thing', repo: { full_name: 'acme/widgets' } } },
+    }),
+    { branch: 'fix/123-thing', repo: 'acme/widgets' },
+  );
+});
+
+test('reworkRefFromPayload: repo is null when the payload does not carry one (still usable — branch alone is the signal)', () => {
+  assert.deepEqual(
+    pool.reworkRefFromPayload({ pull_request: { head: { ref: 'fix/123-thing' } } }),
+    { branch: 'fix/123-thing', repo: null },
+  );
+});
+
+test('reworkRefFromPayload: an issue-shaped event (no pull_request) is not rework — null, not a guess', () => {
+  assert.equal(pool.reworkRefFromPayload({ issue: { number: 7 } }), null);
+  assert.equal(pool.reworkRefFromPayload({}), null);
+  assert.equal(pool.reworkRefFromPayload(null), null);
+  assert.equal(pool.reworkRefFromPayload(undefined), null);
+});
+
+test('reworkRefFromPayload: a pull_request with no resolvable head.ref is null, never a malformed branch name', () => {
+  assert.equal(pool.reworkRefFromPayload({ pull_request: {} }), null);
+  assert.equal(pool.reworkRefFromPayload({ pull_request: { head: {} } }), null);
+  assert.equal(pool.reworkRefFromPayload({ pull_request: { head: { ref: '' } } }), null);
+});

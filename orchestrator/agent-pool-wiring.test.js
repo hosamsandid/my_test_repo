@@ -128,7 +128,7 @@ test("CodeQL js/second-order-command-line-injection: both git-argument sites val
   const refreshStart = SRC.indexOf("function refreshRepoCacheIfStale(");
   assert.ok(refreshStart > 0, "refreshRepoCacheIfStale not found");
   const refreshBody = SRC.slice(refreshStart, SRC.indexOf("\nfunction repoGitCredentials("));
-  assert.match(refreshBody, /agentPool\.isSafeGitRef\(rawBranch\)/);
+  assert.match(refreshBody, /agentPool\.isSafeGitRef\(branch\)/);
 });
 
 test("mutation-proved: an unvalidated branch/rawBranch would fail the check above", () => {

@@ -119,21 +119,25 @@ test("D3: a fresh clone and a cache-copy both apply the resolved rework branch b
   assert.equal(hits.length, 2, "expected the rework checkout on both the cache-copy path and the fresh-clone path");
 });
 
-test("CodeQL js/second-order-command-line-injection: both git-argument sites validate via isSafeGitRef before executing", () => {
+test("CodeQL js/second-order-command-line-injection: both git-argument sites validate branch.startsWith('-') inline before executing", () => {
+  // Inlined literally rather than delegated to `agentPool.isSafeGitRef` —
+  // CodeQL's sanitizer recognition for this query does not trace through a
+  // call into another module (a helper-function guard, tried both as a
+  // ternary and as a throw-guard, still left these sinks flagged).
   const checkoutStart = SRC.indexOf("function _checkoutReworkBranch(");
   assert.ok(checkoutStart > 0, "_checkoutReworkBranch not found");
   const checkoutBody = SRC.slice(checkoutStart, SRC.indexOf("\nfunction cloneRepository("));
-  assert.match(checkoutBody, /agentPool\.isSafeGitRef\(branch\)/);
+  assert.match(checkoutBody, /branch\.startsWith\("-"\)/);
 
   const refreshStart = SRC.indexOf("function refreshRepoCacheIfStale(");
   assert.ok(refreshStart > 0, "refreshRepoCacheIfStale not found");
   const refreshBody = SRC.slice(refreshStart, SRC.indexOf("\nfunction repoGitCredentials("));
-  assert.match(refreshBody, /agentPool\.isSafeGitRef\(branch\)/);
+  assert.match(refreshBody, /branch\.startsWith\("-"\)/);
 });
 
 test("mutation-proved: an unvalidated branch/rawBranch would fail the check above", () => {
   const checkoutStart = SRC.indexOf("function _checkoutReworkBranch(");
   const checkoutBody = SRC.slice(checkoutStart, SRC.indexOf("\nfunction cloneRepository("));
-  const buggyCheckout = checkoutBody.replace(/if \(!agentPool\.isSafeGitRef\(branch\)\) \{[\s\S]*?\}\n/, "");
-  assert.doesNotMatch(buggyCheckout, /agentPool\.isSafeGitRef\(branch\)/);
+  const buggyCheckout = checkoutBody.replace(/if \(typeof branch !== "string" \|\| branch\.length === 0 \|\| branch\.startsWith\("-"\)\) \{[\s\S]*?\}\n/, "");
+  assert.doesNotMatch(buggyCheckout, /branch\.startsWith\("-"\)/);
 });

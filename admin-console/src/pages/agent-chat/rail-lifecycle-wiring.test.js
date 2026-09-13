@@ -372,20 +372,13 @@ test('#2082 — a write re-reads the list rather than trusting its own response'
   assert.match(sharePanel, /await apiCall\(req\.method, req\.url[\s\S]{0,200}?await load\(\)/);
 });
 
-/* ── #2052 convert into a team of one ───────────────────────────────── */
-
-test('#2052 AC1 — the convert entry is routed, not just described', () => {
-  // The item comes from `buildAgentMenu`; without a case in `choose()` it would
-  // render, be clickable, and do nothing at all.
-  assert.match(host, /case 'convert-to-team':\s*setConvertTarget\(/);
-  assert.match(host, /<ConvertToTeamDialog/);
-});
-
-test('#2052 AC2 — the dialog copy comes from the pure module, not inline JSX', () => {
-  assert.match(host, /copy=\{convertDialogCopy\(/);
-  assert.match(host, /consequences=\{convertConsequences\(/);
-  // A literal confirmation body here would be the copy that drifts.
-  assert.doesNotMatch(host, /cannot be undone/i);
+test('#2232 — the retired convert-to-team entry, dialog and request are gone', () => {
+  // Phase C of epic #2229 retires the manual conversion action (#2052); its
+  // menu case, dialog and request must not linger in the host that used to
+  // route them.
+  assert.doesNotMatch(host, /case 'convert-to-team':/);
+  assert.doesNotMatch(host, /ConvertToTeamDialog/);
+  assert.doesNotMatch(host, /\/convert-to-team`/);
 });
 
 /* ── #2171 clone team ───────────────────────────────────────────────── */
@@ -412,32 +405,6 @@ test('#2171 — the clone never sends a credential, and stubs the new members', 
 test('#2171 — the clone requests a fresh label suffix, so a clone pointed at the same repo cannot cross-trigger its source', () => {
   assert.match(host, /suggest-suffix/);
   assert.match(host, /labelSuffix,?\s*\}\)/);
-});
-
-test('#2052 — the request hits the convert route and only forces on the retry', () => {
-  assert.match(host, /\/convert-to-team`/);
-  // `force` is the answer to the server's mid-run question, so it may only ever
-  // be derived from the warning the server sent back.
-  assert.match(host, /force: !!convertTarget\?\.busyNotice/);
-  assert.doesNotMatch(host, /force: true/);
-});
-
-test('#2052 — the mid-run 409 re-opens the same dialog instead of throwing', () => {
-  // Raw fetch, like `toggleEnabled`: `apiCall` turns a 409 into an exception,
-  // which would surface the refusal as an error toast rather than a question.
-  assert.match(
-    host,
-    /convert-to-team`[\s\S]{0,600}?res\.status === 409[\s\S]{0,200}?convertBusyNotice\(data\)/,
-  );
-  assert.match(host, /setConvertTarget\(\{ agent, busyNotice \}\)/);
-});
-
-test('#2052 — a failed conversion closes the dialog so its error is readable', () => {
-  // Same stacking-context reason as the Add member sibling above.
-  assert.match(
-    host,
-    /convert-to-team`[\s\S]{0,1200}?catch \(e\) \{\s*setConvertTarget\(null\)/,
-  );
 });
 
 /* ── #2213 — the team header row selects + opens Settings; the chevron

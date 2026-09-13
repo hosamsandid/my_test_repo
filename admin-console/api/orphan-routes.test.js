@@ -34,25 +34,29 @@ test('the orphan routes are registered ABOVE the parameterised /api/agents/:id',
   assert.ok(cleanup < byId, 'POST /api/agents/orphans/cleanup must precede GET /api/agents/:id');
 });
 
+// The team-of-one migration sweep (#2232) sits between the orphan cleanup and
+// `/api/agents/:id` too — same reasoning, same shape — so these guards slice
+// only up to that sibling block rather than all the way to `:id`.
+const migrationScan = () => at("app.get('/api/agents/team-of-one-migration'");
+
 test('both orphan routes are System-Admin gated', () => {
   // The scan is installation-wide and the cleanup deletes agents across every
   // team; neither is expressible as a team-scoped permission, so a missing gate
   // here is a real privilege hole rather than a cosmetic one.
   const scan = at("app.get('/api/agents/orphans'");
   const cleanup = at("app.post('/api/agents/orphans/cleanup'");
-  const byId = at("app.get('/api/agents/:id'");
-  const block = SRC.slice(scan, byId);
+  const block = SRC.slice(scan, migrationScan());
   assert.strictEqual(
     (block.match(/if \(!getScope\(req\)\.all\)/g) || []).length, 2,
     'each orphan route must refuse a caller without full visibility',
   );
-  assert.ok(SRC.slice(cleanup, byId).includes("if (!getScope(req).all)"),
+  assert.ok(SRC.slice(cleanup, migrationScan()).includes("if (!getScope(req).all)"),
     'the cleanup route in particular must be gated');
 });
 
 test('the cleanup proxies the orchestrator rather than deleting agents itself', () => {
   const cleanup = at("app.post('/api/agents/orphans/cleanup'");
-  const block = SRC.slice(cleanup, at("app.get('/api/agents/:id'"));
+  const block = SRC.slice(cleanup, migrationScan());
   assert.ok(block.includes('/internal/agents/orphans/cleanup'),
     'the console must delegate to the orchestrator, which owns agent teardown');
   assert.ok(!/fs\.rm|rmSync/.test(block), 'the console must not remove agent files itself');

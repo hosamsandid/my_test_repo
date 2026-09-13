@@ -693,14 +693,16 @@ const TOPIC_CONTENT = [
       'one assistant',
       'draft',
       'team of one',
-      'Grow into a full team',
       'creates a new team',
-      // #2052 made "a single agent is a team of one" an operation rather than
-      // only a framing: chapter 2 used to document the dead end (growing could
-      // not convert this assistant) and now has to document the action that
-      // replaced it, plus the one-way-door warning the dialog gives.
-      'Convert into a team',
-      'one-way door',
+      // #2232 (Phase C of epic #2229) retired the manual "Convert into a
+      // team…" action #2052 introduced: every agent is minted as a team of
+      // one from creation since Phase B, and a one-time sweep brought every
+      // agent that predated it up to the same shape. The chapter now
+      // documents growing via Add member instead of a conversion action, plus
+      // the honest Clone/Import edge case and the re-runnable migration sweep
+      // that covers it.
+      'Add member',
+      'team-of-one migration sweep',
       'default branch',
       // #2071 removed the ungated QuickStart reuse: the fast lane now always
       // creates a fresh, owner-stamped environment and a fresh agent, so the

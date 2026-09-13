@@ -169,6 +169,8 @@ Nothing was rewired: every entry still hands off to exactly the route it did bef
 
 D5 deferred the technical unification of the single-agent and team data-model paths as out of scope. Epic #2229 is that ticket: Phase A (#2230) generalised `team-conversion.js`'s target-shape logic into a shared core (`buildTeamOfOnePlan`) driven by a normalized input rather than a live config, and Phase B (#2231) wired it into all three single-agent creation lanes (`POST /api/quickstart`, `/api/quickstart/llm`, `/api/agents` with `role: 'agent'` and no `teamId`) — none of them can produce a standalone `role: 'agent'` any more; each now mints a `role: 'team'` record plus one `team-member` in the same request. D5's own framing ("UX framing only... not a backend merge") is superseded by this: it is now a real backend unification, not just copy. See `orchestrator/team-conversion.js`'s Key Files entry in `CLAUDE.md` for the mechanism.
 
+**Epic #2229 completed — Phase C (#2232).** The cleanup half: a one-time, operator-invoked sweep (`orchestrator/team-of-one-migration.js`) brought every agent created *before* Phase B up to the same team-of-one shape, and the manual `POST /api/agents/:id/convert-to-team` bridge (#2052) was retired outright — both routes, the row-menu entry and its dialog are gone. Growing a single assistant is now the same **Add member** action any team uses, documented in `help-topics/create.md`. One known gap is flagged rather than closed: **Clone** and **Import** still build their config directly and can still land a standalone `role: 'agent'` after the sweep has run once; the migration sweep is idempotent and safe to re-run, which is the recommended recovery rather than a new per-agent UI action.
+
 ---
 
 ## 9 — Edge cases, constraints, dependencies

@@ -2169,6 +2169,73 @@ app.post('/api/agents/orphans/cleanup', heavyLimiter, async (req, res) => {
   }
 });
 
+/* ─── Team-of-one migration — one-time sweep (#2232, Phase C of #2229) ──
+   Retires the manual, per-agent "Convert into a team..." action (#2052):
+   every remaining standalone `role: 'agent'` is brought up to a team of one
+   in one operator-invoked pass, reusing the same conversion mechanics the
+   manual action used. Same shape as the #1960 orphan cleanup just above —
+   GET is a dry run, POST acts — and for the same reason: System-Admin-only,
+   because the sweep is installation-wide and not expressible as a
+   team-scoped right.
+
+   MUST stay registered ABOVE `/api/agents/:id` — Express matches in
+   registration order, and `team-of-one-migration` would otherwise be read as
+   an agent id (the `/api/agents/orphans` precedent immediately above). */
+
+app.get('/api/agents/team-of-one-migration', apiLimiter, async (req, res) => {
+  if (!getScope(req).all) {
+    return res.status(403).json({ error: 'forbidden: the team-of-one migration requires System Admin' });
+  }
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/team-of-one-migration`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+app.post('/api/agents/team-of-one-migration/apply', heavyLimiter, async (req, res) => {
+  if (!getScope(req).all) {
+    return res.status(403).json({ error: 'forbidden: the team-of-one migration requires System Admin' });
+  }
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const resp = await fetch(`${orchestratorUrl}/internal/agents/team-of-one-migration/apply`, { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status >= 400) return res.status(resp.status).json(data);
+
+    // One membership grant per newly-minted team, exactly as the self-service
+    // team-create handlers and the retired manual conversion did (#2081): a
+    // `role: 'team'` agent is its own access boundary, so without this the
+    // caller running the sweep could not see or manage the teams it just
+    // made. Best-effort per team — a failed write is a visibility problem a
+    // System Admin (this caller) can repair later, not a reason to report the
+    // whole sweep as failed.
+    const migrated = Array.isArray(data.migrated) ? data.migrated : [];
+    for (const { teamId } of migrated) {
+      const creatorMembership = planCreatorMembership({
+        userId: getScope(req).userId,
+        teamAgentId: teamId,
+        teamCreated: true,
+      });
+      if (!creatorMembership) continue;
+      try {
+        const { status } = await callAdmin('POST', 'memberships', creatorMembership);
+        if (status >= 400) {
+          console.error(`[api] team-of-one-migration: team-admin membership for ${teamId} failed (HTTP ${status})`);
+        }
+      } catch (err) {
+        console.error(`[api] team-of-one-migration: team-admin membership for ${teamId} error: ${err.message}`);
+      }
+    }
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 app.get('/api/agents/:id', (req, res) => {
   const { id } = req.params;
   if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
@@ -3158,77 +3225,6 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // next action anyway, so this is just a harmless idempotent re-sync there.
   notifyAgentReload(id);
   res.json({ id, ...fresh });
-});
-
-/* ─── Convert a standalone agent into a team of one (#2052) ─────────── */
-
-// The launcher has promised since #1667 that "a single agent is simply a team of
-// one"; this is the action that makes it true, in place, for one agent the user
-// already has. Thin proxy on purpose: eligibility, the derived team id and every
-// re-keying decision live in the orchestrator (`team-conversion.js`), which is
-// the only process that can rewrite the prompt file, re-mint plugin scopes and
-// respawn the container. Duplicating the rule here would only let the two drift.
-app.post('/api/agents/:id/convert-to-team', heavyLimiter, async (req, res) => {
-  const { id } = req.params;
-  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
-  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-  if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  // One gate: the caller must be able to manage THIS agent. That is the whole
-  // authorization the conversion needs, because since #2081 (epic #2076 P3)
-  // minting an Agent Team is SELF-SERVICE — `POST /api/teams` is ungated and the
-  // creating human becomes the new team's Team Admin in the same operation. The
-  // old second gate ("may you mint a team here", `canManageTeam` over the
-  // agent's credential-axis tenant) predated P3 and assumed team creation was
-  // System-Admin-only; it wrongly 403'd a standalone agent's own owner, who
-  // passes this first gate under D8 but is not a Team Admin of the `default`
-  // access scope. It is removed — a caller who owns the agent may grow it into a
-  // team of one, exactly as they could create a fresh team from scratch.
-  if (denyUnlessCanManageAgent(req, res, { ...cfg, id })) return;
-
-  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
-  try {
-    const resp = await fetch(
-      `${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/convert-to-team`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ force: req.body?.force === true }),
-      },
-    );
-    const data = await resp.json();
-    // A 409 carrying `warning` is the busy-agent refusal, not a failure —
-    // forward it verbatim so the UI can offer to convert anyway.
-    if (!resp.ok) return res.status(resp.status).json(data);
-
-    // The conversion succeeded. Record the caller as the new team's Team Admin,
-    // exactly as the self-service team-create handlers do (#2081): a `role: 'team'`
-    // agent IS its own access boundary (`resolveAgentTeam` → its own id), so
-    // `visibleAgent`/`canManageAgent` take the membership branch — without this
-    // grant the creator could not see or manage the team they just made. Reuses
-    // `planCreatorMembership` so the condition (a real user record; a team was
-    // actually created) stays single-sourced with the create paths. Best-effort:
-    // the agent is already a team-member, so a failed membership write is a
-    // visibility problem a System Admin can repair, not a reason to fail the
-    // whole conversion (which is not reversible from here).
-    const creatorMembership = planCreatorMembership({
-      userId: getScope(req).userId,
-      teamAgentId: data.teamId,
-      teamCreated: true,
-    });
-    if (creatorMembership) {
-      try {
-        const { status } = await callAdmin('POST', 'memberships', creatorMembership);
-        if (status >= 400) {
-          console.error(`[api] convert-to-team: team-admin membership for ${data.teamId} failed (HTTP ${status})`);
-        }
-      } catch (err) {
-        console.error(`[api] convert-to-team: team-admin membership for ${data.teamId} error: ${err.message}`);
-      }
-    }
-    res.json(data);
-  } catch (err) {
-    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
-  }
 });
 
 /* ─── Reset agent to stub state ─────────────────────────────────────── */

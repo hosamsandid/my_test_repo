@@ -134,41 +134,45 @@ Start with one assistant, find out what the work actually needs, and add the res
 once you know.
 
 A freshly created assistant is already that team of one the moment it exists —
-there is nothing left to convert. **Convert into a team…**, below, is for an
-assistant that predates this, or one you brought in through **Clone** or
-**Import**.
+every agent this launcher creates is minted that way from the start, so there is
+nothing left to convert. There used to be a manual **Convert into a team…**
+action for an assistant that predated this; it has since been retired — a
+one-time sweep brought every such assistant up to the same shape, and the
+action would have had nothing left to do.
 
-### Two ways to grow: convert this assistant, or build a new team
+### Growing a single assistant: Add member, or build a new team
 
-**Convert this assistant.** Open its row menu in Agent Chat and choose
-**Convert into a team…**. The assistant you have been talking to becomes the only member
-of a new team named after it, in place: it keeps its id, its chat room, its
-chat history, its system prompt, its skills, its triggers and its Working
-Environment. It moves out of the *Single agents* section into its own team group
-and the team shows up in **Flows** as a one-node flow you can wire up, ready for
-a second member through **Add member**. The agent restarts once to pick up its
-new team scope and comes back on its own. This is a one-way door — there is no
-convert-back, and deleting the team afterwards deletes the agent with it — so it
-asks you to confirm, and it refuses while the assistant is mid-run unless you
-tell it to convert anyway.
+**Add a colleague to this assistant.** Since the assistant is already a team of
+one, growing it is the same **Add member** action any team uses: open its row
+in Agent Chat and choose **Add member** from its team menu. Nothing about the
+assistant itself changes — it keeps its id, its chat room, its chat history, its
+system prompt, its skills, its triggers and its Working Environment — a second
+member simply joins it, and the team shows up in **Flows** as a graph you can
+wire up from there.
 
 **Build a new team instead.** When what you want is a whole development workflow
 with roles you have already thought through, go through the **Agent Team
 Wizard** — from **+ Create**, under *Or build a team of agents that work
-together*. The one-assistant form used to carry a **Grow into a full team** link
-of its own; it was removed so the form keeps a single call to action, and the
-path itself is unchanged.
+together*.
 
 The difference is what happens to the assistant you already have: the wizard
 **creates a new team** and leaves it running independently, so nothing moves
 across on its own — if it has accumulated knowledge or skills you want the team
 to have, carry them over deliberately from the Knowledge and Skills pages, and
-retire the assistant from its row menu if the team replaces it. Converting moves
-the assistant itself, which is why it is the shorter answer when the thing you
-want to grow *is* this assistant.
+retire the assistant from its row menu if the team replaces it. Adding a member
+grows the assistant itself, which is why it is the shorter answer when the thing
+you want to grow *is* this assistant.
 
-One detail worth knowing after converting: the repository fast lane below never
-adds to an existing team. Submitting the same repository again always creates a
+A brought-in assistant (via **Clone** or **Import**) can still occasionally land
+as a standalone agent rather than a team of one, since those two paths build
+their config directly rather than going through the ordinary create flow. There
+is no manual conversion action to reach for any more — a System Admin can bring
+such an agent into line by re-running the team-of-one migration sweep, which is
+safe to run again at any time and only ever acts on agents still in the old
+shape.
+
+One detail worth knowing either way: the repository fast lane below never adds
+to an existing team. Submitting the same repository again always creates a
 fresh assistant on a fresh environment — itself its own new team of one — use
 **Add member** on the team when you want another agent inside the team you built.
 

@@ -86,6 +86,7 @@ const ownershipMigration = require("./ownership-migration");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assessConversionEligibility, planTeamConversion, planTeamOfOneCreation } = require("./team-conversion");
+const teamOfOneMigration = require("./team-of-one-migration");
 const { nextAvailableAgentId, suggestFreeAgentId } = require("./agent-id-resolution");
 const { syncAgentRepoPlan, summarizeRepoResults, repoDivergence } = require("./repo-sync");
 // Agent-scoped repositories (#2067): a repository attached to ONE agent,
@@ -12655,32 +12656,6 @@ async function main() {
       return;
     }
 
-    // Convert one standalone agent into a team of one, in place (#2052).
-    const convertMatch = req.method === 'POST'
-      && req.url.match(/^\/internal\/agents\/([^/]+)\/convert-to-team$/);
-    if (convertMatch) {
-      const agentId = decodeURIComponent(convertMatch[1]);
-      let body = '';
-      req.on('data', d => body += d);
-      req.on('end', async () => {
-        try {
-          const parsed = body ? JSON.parse(body) : {};
-          const result = await orchestrator.convertAgentToTeam(agentId, { force: parsed.force === true });
-          // A busy agent is a refusal the caller can retry with `force`, not an
-          // error — the same 409-with-a-warning contract disable/enable uses.
-          sendJson(res, result && result.warning ? 409 : 200, result);
-        } catch (err) {
-          console.error(`[Orchestrator] Convert-to-team error for ${agentId}: ${err.message}`);
-          const status = /not found/i.test(err.message) ? 404
-                       : /already taken/i.test(err.message) ? 409
-                       : /cannot be converted|Cannot derive/i.test(err.message) ? 400
-                       : 500;
-          sendJson(res, status, { error: err.message, ...(err.code ? { code: err.code } : {}) });
-        }
-      });
-      return;
-    }
-
     const cloneMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/clone$/);
     if (cloneMatch) {
       const sourceId = decodeURIComponent(cloneMatch[1]);
@@ -12851,6 +12826,83 @@ async function main() {
           console.error(`[Orchestrator] Orphan cleanup background sweep crashed: ${err.message}`));
       })().catch(err => {
         console.error(`[Orchestrator] Orphan cleanup failed: ${err.message}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Team-of-one migration — one-time sweep (#2232, Phase C of #2229) ────
+    //
+    // Phase B (#2231) stopped new standalone agents being minted; this sweep
+    // brings every agent created BEFORE that change up to the same shape,
+    // reusing #2052's own conversion mechanics (`convertAgentToTeam`) one
+    // agent at a time. It replaces the manual, per-agent "Convert into a
+    // team..." action, which is retired now that nothing needs it to be
+    // user-triggered.
+    //
+    // Same #1960 dry-run/apply discipline: GET changes nothing; POST re-plans
+    // (never trusting a stale client-side plan), logs the plan before the
+    // first conversion, and never aborts the whole sweep on one agent's
+    // failure — a busy agent is skipped (not force-converted), so an operator
+    // can re-run once it is idle.
+    if (req.method === 'GET' && req.url.split('?')[0] === '/internal/agents/team-of-one-migration') {
+      const plan = teamOfOneMigration.planTeamOfOneMigration(listAgentConfigs());
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(plan));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url.split('?')[0] === '/internal/agents/team-of-one-migration/apply') {
+      (async () => {
+        const plan = teamOfOneMigration.planTeamOfOneMigration(listAgentConfigs());
+        if (plan.candidates.length === 0) {
+          console.log('[Orchestrator] Team-of-one migration: no standalone agents left to migrate');
+        } else {
+          console.log(
+            `[Orchestrator] Team-of-one migration: ${plan.candidates.length} standalone agent(s) to migrate:\n`
+            + plan.candidates.map(c => `  - ${teamOfOneMigration.formatMigrationLine(c)}`).join('\n')
+          );
+        }
+
+        const migrated = [];
+        const skipped = [];
+        const warnings = [];
+        for (const candidate of plan.candidates) {
+          try {
+            // Never `force`: a busy agent is reported as skipped rather than
+            // interrupted mid-turn, and a re-run picks it up once idle —
+            // mirroring the orphan sweep's "never abort on one failure".
+            const result = await orchestrator.convertAgentToTeam(candidate.id, { force: false });
+            if (result && result.warning) {
+              skipped.push({ id: candidate.id, reason: 'busy' });
+            } else {
+              migrated.push({ id: candidate.id, teamId: result.teamId });
+            }
+          } catch (err) {
+            console.error(`[Orchestrator] Team-of-one migration: '${candidate.id}' failed: ${err.message}`);
+            warnings.push({ id: candidate.id, error: err.message });
+          }
+        }
+
+        if (migrated.length > 0) {
+          console.log(`[Orchestrator] Team-of-one migration: migrated ${migrated.length} agent(s): `
+            + migrated.map(m => m.id).join(', '));
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          scanned: plan.scanned,
+          planned: plan.candidates,
+          ineligible: plan.ineligible,
+          migrated,
+          skipped,
+          ...(warnings.length ? { warnings } : {}),
+        }));
+      })().catch(err => {
+        console.error(`[Orchestrator] Team-of-one migration failed: ${err.message}`);
         if (!res.headersSent) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));

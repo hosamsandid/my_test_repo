@@ -17,6 +17,7 @@ const {
   envHasRepository,
   hasSkillGrant,
   skillsSection,
+  backgroundTasksSection,
   GIT_SECTION,
   TRIGGER_SECTION,
   WORKSPACE_SECTION,
@@ -124,6 +125,33 @@ test('without knowledgeDigestRef no digest import appears (autonomy 0 / no KB)',
   const md = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null });
   assert.ok(!md.includes('@knowledge-digest.md'));
   assert.ok(!md.includes('Team Knowledge (digest)'));
+});
+
+// ---- background tasks (dangling-promise steering) --------------------------
+
+test('Background tasks section is ALWAYS present (Task(*) is always allowed)', () => {
+  for (const autonomous of [true, false]) {
+    const md = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null, autonomous });
+    const order = headings(md);
+    assert.ok(order.includes('Background tasks'), `missing when autonomous=${autonomous}`);
+    // The universal rule an agent gets wrong on its own.
+    assert.match(md, /\*\*single turn\*\*/);
+    assert.match(md, /stopped/);
+    // Sits before Important Notes, so the run-semantics warning precedes the
+    // generic notes.
+    assert.ok(order.indexOf('Background tasks') < order.indexOf('Important Notes'));
+  }
+});
+
+test('the wait-for-an-external-event advice is autonomous-only', () => {
+  const auto = backgroundTasksSection(true);
+  const plain = backgroundTasksSection(false);
+  assert.match(auto, /github-event.*trigger|trigger.*re-wake/is);
+  assert.match(auto, /check_suite\.completed/);
+  // A non-autonomous agent gets the core rule but not the trigger advice.
+  assert.doesNotMatch(plain, /check_suite\.completed/);
+  assert.ok(plain.startsWith('## Background tasks'));
+  assert.ok(auto.startsWith(plain)); // autonomous = core + advice appended
 });
 
 // ---- read-only host context folder (#1283 mount, #1286 prompt block) --------
@@ -400,7 +428,9 @@ test('assembleClaudeMd stays pure: descriptions come only from the caller (AC5)'
   assert.match(md, /- \*\*a\*\*$/m);
   assert.match(md, /- \*\*b\*\*$/m);
   // No description separator inside the Skills section when none were supplied.
-  const skillsPart = md.split('## Skills')[1];
+  // Scope to the Skills block only (sections are joined by "\n\n---\n\n"); later
+  // code-owned sections legitimately use " — " in their prose.
+  const skillsPart = md.split('## Skills')[1].split('\n\n---\n\n')[0];
   assert.ok(!skillsPart.includes(' — '));
 });
 

@@ -2847,6 +2847,114 @@ class _ThinkingTokenThrottle:
         return ev
 
 
+# ---- orphaned background tasks (dangling-promise detector) ----
+#
+# `Task(*)`/`Monitor`/background shell commands are always in the agent's
+# allowedTools, but a run is a single headless `claude --print` turn: the CLI
+# stops every still-running background task the instant the turn's `result`
+# event is produced (it emits `task_notification status:stopped` right after the
+# result), and nothing in this platform re-invokes the agent when one would have
+# finished. So a background task that outlives the turn is silently killed and
+# the model's "I'll wait in the background and continue" becomes a dead promise —
+# the chat freezes on that message forever. We detect it and append an honest
+# notice to the reply instead of letting the promise dangle.
+_BG_TASK_SUBTYPES = frozenset({
+    "task_started", "task_updated", "task_notification", "background_tasks_changed",
+})
+# A task that reached one of these actually finished on its own — leave it alone.
+# Anything else at turn end (`stopped`, or never a terminal status) was cut off.
+_BG_TASK_TERMINAL_STATUSES = frozenset({"completed", "failed"})
+
+
+def _orphaned_background_tasks(task_events: list[dict]) -> list[dict]:
+    """Fold the raw background-task system-event payloads seen during a run into
+    per-task final state and return those left unfinished at turn end.
+
+    Pure: takes the raw `parsed` payloads (subtype + task_id + status fields) in
+    stream order, returns ``[{task_id, description, status}]`` for every task
+    whose last known status is not terminal. Empty when nothing was orphaned —
+    which is the byte-identical common case (no background tasks, or all joined
+    within the turn)."""
+    tasks: dict[str, dict] = {}
+    order: list[str] = []
+
+    def ensure(task_id, description=None):
+        tid = str(task_id)
+        if tid not in tasks:
+            tasks[tid] = {"description": (description or "").strip(), "status": None}
+            order.append(tid)
+        elif description and not tasks[tid]["description"]:
+            tasks[tid]["description"] = str(description).strip()
+
+    for ev in task_events:
+        if not isinstance(ev, dict):
+            continue
+        sub = ev.get("subtype")
+        if sub == "background_tasks_changed":
+            for t in (ev.get("tasks") or []):
+                if isinstance(t, dict) and t.get("task_id"):
+                    ensure(t["task_id"], t.get("description"))
+        elif sub == "task_started":
+            if ev.get("task_id"):
+                ensure(ev["task_id"], ev.get("description"))
+        elif sub == "task_updated":
+            if ev.get("task_id"):
+                ensure(ev["task_id"], ev.get("description"))
+                st = (ev.get("patch") or {}).get("status")
+                if st:
+                    tasks[str(ev["task_id"])]["status"] = st
+        elif sub == "task_notification":
+            if ev.get("task_id"):
+                ensure(ev["task_id"], ev.get("description") or ev.get("summary"))
+                st = ev.get("status")
+                if st:
+                    tasks[str(ev["task_id"])]["status"] = st
+
+    orphaned = []
+    for tid in order:
+        t = tasks[tid]
+        if t["status"] not in _BG_TASK_TERMINAL_STATUSES:
+            orphaned.append({"task_id": tid, "description": t["description"],
+                             "status": t["status"]})
+    return orphaned
+
+
+def _format_orphaned_bg_task_warning(orphaned: list[dict]) -> str | None:
+    """Honest, human-facing notice for background tasks stopped at turn end.
+
+    Rendered as a Markdown blockquote so it reads as a distinct system note under
+    the agent's own reply. Returns None when nothing was orphaned (the caller
+    then leaves the reply byte-identical)."""
+    if not orphaned:
+        return None
+    n = len(orphaned)
+    noun = "background task" if n == 1 else "background tasks"
+    lines = [
+        "---",
+        f"> ⚠️ **{n} {noun} still running when this turn ended — stopped, not finished.**",
+        ">",
+        "> An agent run is a single turn: background work is stopped the moment the "
+        "turn ends and is **not** resumed or reported back. This did not complete:"
+        if n == 1 else
+        "> An agent run is a single turn: background work is stopped the moment the "
+        "turn ends and is **not** resumed or reported back. These did not complete:",
+    ]
+    for t in orphaned[:5]:
+        desc = (t.get("description") or t.get("task_id") or "background task")
+        desc = " ".join(str(desc).split())
+        if len(desc) > 140:
+            desc = desc[:139] + "…"
+        lines.append(f">   • `{desc}`")
+    if n > 5:
+        lines.append(f">   • …and {n - 5} more")
+    lines.append(">")
+    lines.append(
+        "> To wait for something outside this turn (CI, another agent, a long job), "
+        "re-wake with a trigger or loop instead of waiting in the background."
+    )
+    return "\n".join(lines)
+
+
 def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                       resume_id: str | None, blueprint_id: str | None,
                       timeout_sec: int, run_context: dict | None = None) -> tuple[str, str | None]:
@@ -2942,6 +3050,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     stderr_chunks: list[str] = []
     ask_question_input: dict | None = None  # first AskUserQuestion tool input (#447)
     context_usage: dict = {}  # last assistant-message usage this invocation (#509)
+    bg_task_events: list[dict] = []  # raw background-task payloads for orphan detection
     # Coalesce the CLI's high-frequency thinking_tokens ticks into a throttled
     # subset of JSONL lines (#870) — the UI collapses them to one live row.
     tt_throttle = _ThinkingTokenThrottle()
@@ -2966,6 +3075,13 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                 # so a run that ultimately exhausts them carries the real cause
                 # (e.g. a sustained 500) rather than a bare exit code.
                 last_api_status = ev["raw"].get("error_status") or last_api_status
+            if (ev.get("type") == "system_event"
+                    and ev.get("subtype") in _BG_TASK_SUBTYPES
+                    and isinstance(ev.get("raw"), dict)):
+                # Collect the raw payload so the orphan detector can fold the
+                # whole run's task lifecycle at turn end (the `stopped` we care
+                # about arrives after the `result` but before stdout EOF).
+                bg_task_events.append(ev["raw"])
             _append_event(room_id, ev)  # log tab is unchanged (#447 AC6)
             if ev.get("type") == "system_init" and isinstance(ev.get("sessionId"), str):
                 observed_session = ev["sessionId"]
@@ -3096,6 +3212,22 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
         return ask_reply, observed_session
 
     final_text = final_result if final_result is not None else "".join(assistant_chunks)
+
+    # Dangling-promise guard: if background tasks were still running when the turn
+    # ended, the CLI has stopped them and nothing will resume them — say so in the
+    # reply instead of letting the model's "I'll wait…" hang forever.
+    orphaned = _orphaned_background_tasks(bg_task_events)
+    warning = _format_orphaned_bg_task_warning(orphaned)
+    if warning is not None:
+        final_text = (final_text.rstrip() + "\n\n" + warning) if final_text.strip() else warning
+        _append_event(room_id, {
+            "type": "system_event",
+            "subtype": "background-tasks-orphaned",
+            "count": len(orphaned),
+            "detail": [(t.get("description") or t.get("task_id")) for t in orphaned][:10],
+            "correlationId": correlation_id,
+        })
+
     return final_text, observed_session
 
 

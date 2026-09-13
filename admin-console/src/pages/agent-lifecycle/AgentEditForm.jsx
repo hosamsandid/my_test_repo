@@ -459,41 +459,56 @@ export default function AgentEditForm({
           Model provider · Toolchain · MCP servers · Additional context ·
           Skills · Plugins, always in this order and always all eight
           (AC1/AC2/AC3/AC9/AC15) — replacing the old boxed "Environment"
-          section with its own nested sub-tab strip. */}
+          section with its own nested sub-tab strip.
+          #2253: restyled to match the Agent Chat right-rail TabButton look
+          (RightRail.jsx) — a bottom-border underline for the active state
+          instead of a filled pill, the same active/inactive color and
+          weight rules, and a fixed-height stretch layout. Behaviour
+          (role="tablist"/"tab", aria-selected, the PageHelpButton anchored
+          right, the overflowX:auto narrow-width fallback) is unchanged. */}
       {isTeam && (
         <div style={{
-          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
-          overflowX: 'auto', flexWrap: 'nowrap',
-          borderBottom: '1px solid var(--eb-border-default)', paddingBottom: 'var(--eb-space-2)',
+          display: 'flex', alignItems: 'stretch',
+          height: 'var(--eb-header-height)', flexShrink: 0,
+          overflowX: 'auto',
+          borderBottom: '1px solid var(--eb-border-default)',
         }}>
-          <div role="tablist" aria-label="Team configuration" style={{ display: 'flex', gap: 'var(--eb-space-1)', flexWrap: 'nowrap' }}>
-            {TEAM_CONFIG_TABS.map(t => (
-              <button
-                key={t.id}
-                type="button"
-                role="tab"
-                aria-selected={activeTab === t.id}
-                onClick={() => setTeamTab(t.id)}
-                style={{
-                  flexShrink: 0,
-                  padding: 'var(--eb-space-1-5) var(--eb-space-3)',
-                  background: activeTab === t.id ? 'var(--eb-accent-muted)' : 'transparent',
-                  color: activeTab === t.id ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
-                  border: 'none', borderRadius: 'var(--eb-radius-md)',
-                  fontSize: 'var(--eb-text-sm)', whiteSpace: 'nowrap',
-                  fontWeight: activeTab === t.id ? 'var(--eb-font-medium)' : 'var(--eb-font-normal)',
-                  cursor: 'pointer', fontFamily: 'inherit',
-                }}
-              >
-                {t.label}
-              </button>
-            ))}
+          <div role="tablist" aria-label="Team configuration" style={{ display: 'flex', alignItems: 'stretch', flexShrink: 0 }}>
+            {TEAM_CONFIG_TABS.map(t => {
+              const active = activeTab === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setTeamTab(t.id)}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center',
+                    flexShrink: 0,
+                    padding: '0 var(--eb-space-3)',
+                    background: 'none',
+                    border: 'none',
+                    borderBottom: `2px solid ${active ? 'var(--eb-accent-primary)' : 'transparent'}`,
+                    color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)',
+                    fontSize: 'var(--eb-text-sm)', whiteSpace: 'nowrap',
+                    fontWeight: active ? 'var(--eb-font-semibold)' : 'var(--eb-font-medium)',
+                    cursor: 'pointer', fontFamily: 'inherit',
+                    transition: 'color var(--eb-transition-fast), border-color var(--eb-transition-fast)',
+                  }}
+                  onMouseEnter={e => { if (!active) e.currentTarget.style.color = 'var(--eb-text-secondary)'; }}
+                  onMouseLeave={e => { if (!active) e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+                >
+                  {t.label}
+                </button>
+              );
+            })}
           </div>
           <PageHelpButton
             label={`How the ${TEAM_CONFIG_TAB_LABEL[activeTab] || 'team configuration'} tab works`}
             size={13}
             section={TEAM_CONFIG_TAB_HELP[activeTab] || AGENT_CHAT_HELP_SECTIONS.teamEnvironment}
-            style={{ marginLeft: 'auto', flexShrink: 0, padding: 2 }}
+            style={{ marginLeft: 'auto', flexShrink: 0, alignSelf: 'center', padding: 2 }}
           />
         </div>
       )}

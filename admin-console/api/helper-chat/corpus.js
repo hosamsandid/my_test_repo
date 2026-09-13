@@ -328,6 +328,21 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // **318 724 of 340 000 — 93.7% used, 21 276 left** post-edit, this change's own
 // delta a clean +314.
 //
+// This comment lagged two cycles behind the other two homes (CLAUDE.md,
+// context-help-system-concept.md §9) before this entry — #2231 (`create.md`
+// corrections for the plain-agent/fast-lane team-of-one mint) added +1 849
+// (318 724 → 320 573) and #2232 (retiring the manual "Convert into a team…"
+// action) shaved -659 off that (320 573 → 319 914), neither restamped here at
+// the time.
+//
+// #2235 (merge the team chat column and right rail into one full-width
+// surface) reworded `agent-chat.md`'s "The right rail" and "Settings —
+// configuring the agent" chapters — both `create.md` `seeAlso` neighbours, so
+// it lands on this crown too. Pre-edit `/quickstart` measured exactly the
+// last-stamped 319 914 (no further unrelated drift this cycle); post-edit
+// **321 092 of 340 000 — 94.4% used, 18 908 left**, this change's own delta a
+// clean +1 178.
+//
 // If this ever gets tight again, the next structural step is the docs corpus
 // (route-scoped `CORPUS_FILES`, or splitting the two largest docs), NOT a fourth
 // raise and NOT trimming a topic.

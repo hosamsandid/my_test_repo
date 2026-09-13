@@ -65,7 +65,7 @@ you are doing. On those two the "→ …" line is the whole promise.
 | **Start from a ready-made team** | Pick a proven template (or one of your saved drafts) and adjust it. The fastest route to a working team when a pattern already fits. | The Agent Team Wizard, on its template gallery |
 | **Describe what you need** | Tell it in plain language what you want done. The Flow Copilot drafts a flow and shows a live preview — nothing is created until you confirm. | A new draft in the Flows canvas |
 | **Design it on the canvas** | Lay the agents out on the canvas and connect them yourself. Full control from a blank slate. | A fresh, empty draft in the Flows canvas |
-| **Configure an agent manually** | Fill in the fields yourself: id, role, environment, skills, system prompt. Nothing is inferred and nothing else is created alongside it. | A panel on this page |
+| **Configure an agent manually** | Fill in the fields yourself: id, role, environment, skills, system prompt. Nothing is inferred — though a plain agent role still comes with its own one-member team under the hood, the same as every other single-agent path below. | A panel on this page |
 
 The **Recommended** badge on *Start from a ready-made team* and **Fastest start**
 on the hero are advice, not a restriction — every entry stays one click away, and
@@ -133,6 +133,11 @@ That framing is what saves you from having to classify your problem up front.
 Start with one assistant, find out what the work actually needs, and add the rest
 once you know.
 
+A freshly created assistant is already that team of one the moment it exists —
+there is nothing left to convert. **Convert into a team…**, below, is for an
+assistant that predates this, or one you brought in through **Clone** or
+**Import**.
+
 ### Two ways to grow: convert this assistant, or build a new team
 
 **Convert this assistant.** Open its row menu in Agent Chat and choose
@@ -164,8 +169,8 @@ want to grow *is* this assistant.
 
 One detail worth knowing after converting: the repository fast lane below never
 adds to an existing team. Submitting the same repository again always creates a
-fresh standalone assistant on a fresh environment — use **Add member** on the
-team when you want another agent inside the team you built.
+fresh assistant on a fresh environment — itself its own new team of one — use
+**Add member** on the team when you want another agent inside the team you built.
 
 ## The repository fast lane
 
@@ -175,7 +180,8 @@ repository URL.
 ### Without a repository
 
 You get a new repo-less environment bound to the model provider you
-selected, plus one standalone chat agent on top of it. Nothing is cloned. The
+selected, plus one chat agent on top of it — itself a new team of one, the same
+as every single-agent path. Nothing is cloned. The
 **Name** and **Model Provider** fields are both required here, and both are used
 exactly as you set them.
 
@@ -198,10 +204,10 @@ The platform does more work for you, in this order.
    repository: that used to bind you silently to another team's infrastructure
    (its credentials, its model provider) that you cannot manage, which is the
    surprise this path no longer springs.
-3. **A fresh agent.** It creates a **new** standalone assistant on that
-   environment, named exactly what you typed into **Agent Name** — the field is
-   required on this path too, the same as it is without a repository. Submitting
-   the same repository twice gives you two separate assistants, each on its own
+3. **A fresh agent.** It creates a **new** assistant on that environment —
+   itself a new team of one — named exactly what you typed into **Agent Name**
+   — the field is required on this path too, the same as it is without a
+   repository. Submitting the same repository twice gives you two separate assistants, each on its own
    environment — nothing is silently reused.
 
 ### Why Model Provider is not used here

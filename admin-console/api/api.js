@@ -4103,6 +4103,12 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
       code: 'template-not-bindable',
     });
   }
+  // #2231 (Phase B of #2229): a standalone `role: 'agent'` with no `teamId`
+  // is the Agents-page "+ New Agent" fast lane's own shape — mint a team of
+  // one instead (a `role: 'team'` record + one `team-member`) so no route
+  // can still produce a standalone agent. An explicit `teamId` (an existing
+  // access-scope tenant assignment) is left untouched — out of scope here.
+  const mintTeamOfOne = role === 'agent' && !teamId;
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/agents`, {
@@ -4110,6 +4116,7 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         id, displayName, role, systemPrompt, environmentId, schedule, taskPrompt, teamId,
+        ...(mintTeamOfOne ? { mintTeamOfOne: true } : {}),
         // Human owner (#2077, D8) — the authenticated caller, resolved here and
         // never taken from the request body. `getScope(req).userId` is null for
         // the env single-admin (no user record), and `ownerFor` omits the key
@@ -4119,6 +4126,29 @@ app.post('/api/agents', heavyLimiter, async (req, res) => {
     });
     const data = await resp.json();
     if (!resp.ok) return res.status(resp.status).json(data);
+    // The creator becomes the new team's Team Admin, in the same operation
+    // (#2081/#2052's guarantee, reused here): a `role: 'team'` agent IS its
+    // own access boundary, so without this grant the creator could not see
+    // or manage the team they just made. Best-effort, like `convert-to-team`
+    // — a failed membership write is a visibility problem a System Admin can
+    // repair, not a reason to fail a create that already succeeded.
+    if (mintTeamOfOne && data.teamId) {
+      const creatorMembership = planCreatorMembership({
+        userId: getScope(req).userId,
+        teamAgentId: data.teamId,
+        teamCreated: true,
+      });
+      if (creatorMembership) {
+        try {
+          const { status } = await callAdmin('POST', 'memberships', creatorMembership);
+          if (status >= 400) {
+            console.error(`[api] create agent: team-admin membership for ${data.teamId} failed (HTTP ${status})`);
+          }
+        } catch (err) {
+          console.error(`[api] create agent: team-admin membership for ${data.teamId} error: ${err.message}`);
+        }
+      }
+    }
     // Eagerly provision the DM room for the freshly-created agent so it is
     // ready before the first message (#184). Best-effort — never fails create.
     if (data.enabled !== false) await preCreateAgentDmRoom(id, 'create');
@@ -14293,6 +14323,11 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
         autoId: true,
         displayName,
         role: 'agent',
+        // #2231 (Phase B of #2229) — mint a team of one (a `role: 'team'`
+        // record + one `team-member`) instead of a standalone agent. `id` on
+        // the response below is still the member's id, so the redirect to
+        // `/chats/:agentId` and the success card are unaffected.
+        mintTeamOfOne: true,
         systemPrompt,
         environmentId: env.id,
         // Human owner (#2077, D8) — the authenticated creator.
@@ -14305,6 +14340,27 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
     return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
   }
   const agentId = agentResp.id || baseAgentId;
+
+  // The creator becomes the new team's Team Admin, in the same operation
+  // (#2081/#2052's guarantee, reused here) — see the `POST /api/agents` note
+  // above for why this is best-effort rather than fatal.
+  if (agentResp.teamId) {
+    const creatorMembership = planCreatorMembership({
+      userId: getScope(req).userId,
+      teamAgentId: agentResp.teamId,
+      teamCreated: true,
+    });
+    if (creatorMembership) {
+      try {
+        const { status } = await callAdmin('POST', 'memberships', creatorMembership);
+        if (status >= 400) {
+          console.error(`[api] quickstart: team-admin membership for ${agentResp.teamId} failed (HTTP ${status})`);
+        }
+      } catch (err) {
+        console.error(`[api] quickstart: team-admin membership for ${agentResp.teamId} error: ${err.message}`);
+      }
+    }
+  }
 
   res.status(201).json({
     reused: false,
@@ -14371,6 +14427,8 @@ app.post('/api/quickstart/llm', heavyLimiter, async (req, res) => {
         autoId: true,
         displayName: name,
         role: 'agent',
+        // #2231 (Phase B of #2229) — same repointing as the repository path.
+        mintTeamOfOne: true,
         systemPrompt,
         environmentId: envId,
         // Human owner (#2077, D8) — the authenticated creator.
@@ -14383,6 +14441,27 @@ app.post('/api/quickstart/llm', heavyLimiter, async (req, res) => {
     return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
   }
   const agentId = agentResp.id || baseAgentId;
+
+  // The creator becomes the new team's Team Admin, in the same operation
+  // (#2081/#2052's guarantee, reused here) — see the `POST /api/agents` note
+  // above for why this is best-effort rather than fatal.
+  if (agentResp.teamId) {
+    const creatorMembership = planCreatorMembership({
+      userId: getScope(req).userId,
+      teamAgentId: agentResp.teamId,
+      teamCreated: true,
+    });
+    if (creatorMembership) {
+      try {
+        const { status } = await callAdmin('POST', 'memberships', creatorMembership);
+        if (status >= 400) {
+          console.error(`[api] quickstart/llm: team-admin membership for ${agentResp.teamId} failed (HTTP ${status})`);
+        }
+      } catch (err) {
+        console.error(`[api] quickstart/llm: team-admin membership for ${agentResp.teamId} error: ${err.message}`);
+      }
+    }
+  }
 
   res.status(201).json({
     reused: false,

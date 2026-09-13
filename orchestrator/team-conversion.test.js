@@ -9,6 +9,7 @@ const {
   assessConversionEligibility,
   canConvertToTeam,
   planTeamConversion,
+  planTeamOfOneCreation,
 } = require('./team-conversion');
 // AC4 is a statement about the *platform's* prompt resolution, not about this
 // module's own fields — so it is asserted through the real resolver rather than
@@ -363,4 +364,126 @@ test('AC3 — applying the plan leaves a member the platform recognises', () => 
   assert.equal('systemPromptTemplate' in member, false);
   assert.equal('skills' in member, false);
   assert.equal('plugins' in member, false);
+});
+
+// ── #2230 Phase A: the same core, driven from scratch ───────────────────────
+// `planTeamOfOneCreation` has no config to read — it is what Phase B (the
+// creation endpoints) will call directly. These tests prove it shares the
+// core with `planTeamConversion` rather than duplicating the four re-keyings.
+
+test('planTeamOfOneCreation needs no eligibility check — there is nothing on disk yet', () => {
+  // A shape that `assessConversionEligibility` would refuse outright (no
+  // token, no role) is perfectly fine here: it describes an agent that does
+  // not exist yet, not one already on disk in a bad state.
+  const plan = planTeamOfOneCreation({
+    agentId: 'new-assistant',
+    displayName: 'New Assistant',
+    environmentId: 'env-9',
+    ownerTeamId: 'acme',
+    ownPrompt: 'You help with onboarding.',
+    ownerId: 'u-ada',
+    ownerSource: 'creator',
+  });
+  assert.equal(plan.teamId, 'new-assistant-team');
+  assert.equal(plan.teamConfig.displayName, 'New Assistant Team');
+  assert.equal(plan.teamConfig.ownerId, 'u-ada');
+  assert.equal(plan.teamConfig.ownerSource, 'creator');
+  // No prior agent — nothing to name as the conversion source.
+  assert.equal('convertedFromAgentId' in plan.teamConfig, false);
+});
+
+test('planTeamOfOneCreation refuses a taken team id with its own (non-"convert") wording', () => {
+  assert.throws(
+    () => planTeamOfOneCreation(
+      { agentId: 'new-assistant', ownerTeamId: 'acme' },
+      { teamIdTaken: (id) => id === 'new-assistant-team' },
+    ),
+    /team id 'new-assistant-team' is already taken/,
+  );
+  // The message must not borrow the conversion's "cannot convert" phrasing —
+  // nothing is being converted here.
+  try {
+    planTeamOfOneCreation(
+      { agentId: 'new-assistant', ownerTeamId: 'acme' },
+      { teamIdTaken: () => true },
+    );
+    assert.fail('expected a throw');
+  } catch (err) {
+    assert.equal(/cannot convert/i.test(err.message), false);
+  }
+});
+
+test('planTeamOfOneCreation requires an agent id', () => {
+  assert.throws(() => planTeamOfOneCreation({ ownerTeamId: 'acme' }), /no agent id/);
+});
+
+test('#2230 — conversion and from-scratch creation share one core: byte-identical shared fields', () => {
+  const cfg = standalone({
+    skills: ['flow-designer', 'cobol-analysis'],
+    plugins: [{ id: 'github-issues', scopeGranularity: 'team' }, { id: 'podman-mcp', scopeGranularity: 'agent' }],
+  });
+  const skills = effectiveSkills(cfg, () => null);
+  const plugins = effectivePlugins(cfg, () => null);
+
+  const conversionPlan = planTeamConversion(cfg, { skills, plugins });
+
+  // The same target, described from scratch rather than read off a live cfg.
+  const creationPlan = planTeamOfOneCreation({
+    agentId: cfg.id,
+    displayName: cfg.displayName,
+    environmentId: cfg.environmentId,
+    ownerTeamId: cfg.teamId,
+    ownPrompt: cfg.systemPrompt,
+    roleId: cfg.id,
+    skills,
+    plugins,
+  });
+
+  // Own exclusive system prompt (AC2's own words).
+  assert.equal(creationPlan.memberPatch.systemPrompt, conversionPlan.memberPatch.systemPrompt);
+  assert.equal(resolvePromptMode(creationPlan.memberPatch), resolvePromptMode(conversionPlan.memberPatch));
+  assert.equal(creationPlan.effectivePrompt, conversionPlan.effectivePrompt);
+
+  // Squad-tier agentKnowledgeTeamId — both derive the identical team id.
+  assert.equal(creationPlan.teamId, conversionPlan.teamId);
+  assert.deepEqual(creationPlan.knowledgeScope, conversionPlan.knowledgeScope);
+
+  // Member-shape skill/plugin grant.
+  assert.deepEqual(creationPlan.memberPatch.skillsOverride, conversionPlan.memberPatch.skillsOverride);
+  assert.deepEqual(creationPlan.memberPatch.pluginsOverride, conversionPlan.memberPatch.pluginsOverride);
+  assert.deepEqual(creationPlan.teamConfig.skills, conversionPlan.teamConfig.skills);
+  assert.deepEqual(creationPlan.teamConfig.plugins, conversionPlan.teamConfig.plugins);
+  assert.deepEqual(creationPlan.memberUnset, conversionPlan.memberUnset);
+  assert.deepEqual(creationPlan.pluginScopeChanges, conversionPlan.pluginScopeChanges);
+  assert.deepEqual(creationPlan.skillPoolCopies, conversionPlan.skillPoolCopies);
+
+  // The two fields that are legitimately allowed to differ: the creation plan
+  // names no prior agent, and the conversion plan does.
+  assert.equal(conversionPlan.teamConfig.convertedFromAgentId, cfg.id);
+  assert.equal('convertedFromAgentId' in creationPlan.teamConfig, false);
+});
+
+test('#2230 — a from-scratch team of one resolves the same effective grants as a converted one', () => {
+  const cfg = standalone({
+    skills: ['flow-designer'],
+    plugins: [{ id: 'github-issues', scopeGranularity: 'team' }],
+  });
+  const skills = effectiveSkills(cfg, () => null);
+  const plugins = effectivePlugins(cfg, () => null);
+  const plan = planTeamOfOneCreation({
+    agentId: cfg.id,
+    displayName: cfg.displayName,
+    environmentId: cfg.environmentId,
+    ownerTeamId: cfg.teamId,
+    ownPrompt: cfg.systemPrompt,
+    skills,
+    plugins,
+  });
+
+  // Applied the same way `convertAgentToTeam` applies a conversion plan.
+  const member = { ...plan.memberPatch, id: cfg.id, token: cfg.token, enabled: true };
+  const load = (id) => (id === plan.teamId ? plan.teamConfig : null);
+
+  assert.deepEqual(effectiveSkills(member, load), skills);
+  assert.deepEqual(effectivePlugins(member, load), plugins);
 });

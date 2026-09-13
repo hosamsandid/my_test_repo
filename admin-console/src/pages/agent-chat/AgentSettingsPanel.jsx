@@ -36,6 +36,12 @@ import {
  */
 export default function AgentSettingsPanel({
   agentId, active, chatAgentId = null, chatAgentName = '', onBackToChatAgent = null, onSaved = null,
+  // #2236: the selected tab of a team's flat configuration row. Owned by the
+  // host (`TeamConfigSurface`, via `?tab=`) rather than by this panel or by
+  // `AgentEditForm`, so it survives both the post-save remount below
+  // (`formEpoch`) and this panel's own per-agent draft remount. `null` for
+  // every non-team host (RightRail's ordinary Settings tab) — inert there.
+  teamConfigTab = null, onTeamConfigTabChange = null,
 }) {
   const [agent, setAgent] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -254,6 +260,8 @@ export default function AgentSettingsPanel({
               error={saveError}
               confirmRestart
               onImmediateApply={handleImmediateApply}
+              teamConfigTab={teamConfigTab}
+              onTeamConfigTabChange={onTeamConfigTabChange}
             />
           </div>
         )}

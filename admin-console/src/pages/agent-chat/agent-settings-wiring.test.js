@@ -114,10 +114,12 @@ test('the system prompt renders after Display Name and before Plugins', () => {
     assert.ok(displayName < pos, `${name} must render after Display Name`);
     assert.ok(pos < plugins, `${name} must render before Plugins`);
   }
-  // Each block still carries its role guard, immediately before it.
+  // Each block still carries its role guard, immediately before it. The team
+  // prompt's guard is now "isTeam && activeTab === 'general'" (#2236 — it is
+  // one of the flat row's own tabs, not an unconditional team-role block).
   assert.match(
     editForm.slice(displayName, teamPrompt),
-    /agent\.role === 'team' &&\s*\(\s*$/m,
+    /isTeam && activeTab === 'general' &&\s*\(\s*$/m,
   );
   assert.match(
     editForm.slice(displayName, memberPrompt),

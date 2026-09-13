@@ -79,11 +79,14 @@ test('the team panel saves through PUT /api/environments/:id, not the agent rout
   assert.doesNotMatch(src, /\/api\/agents\/\$\{[^}]+\}`,\s*body/, 'must not batch environment fields into the agent PUT');
 });
 
-test('AgentEditForm renders the team environment panel only for a team agent', () => {
+test('AgentEditForm renders the team environment panel only for a team agent, on its own flat tab', () => {
   const src = editForm();
   assert.match(src, /import TeamEnvironmentPanel from '\.\.\/agent-chat\/TeamEnvironmentPanel'/);
-  assert.match(src, /agent\.role === 'team' && \(\s*<div>\s*<div style=\{labelStyle\}>Environment<\/div>/);
-  assert.match(src, /<TeamEnvironmentPanel agent=\{agent\} \/>/);
+  // #2236: the old boxed "Environment" section is gone — the panel is one of
+  // the flat row's own tabs, gated on the tab id rather than wrapped in a
+  // labelled box.
+  assert.doesNotMatch(src, /<div style=\{labelStyle\}>Environment<\/div>/, 'the boxed Environment label must be gone (#2236)');
+  assert.match(src, /isTeam && ENV_TAB_IDS\.has\(activeTab\) && \(\s*<TeamEnvironmentPanel agent=\{agent\} tab=\{activeTab\} \/>/);
 });
 
 test('the five field groups the issue names are all present as tabs', () => {

@@ -24,7 +24,9 @@ const standalone = (id, displayName) => ({ id, role: 'agent', displayName });
 // Leftover BriefingPack configs (#1964). The epic's hard cut means the platform
 // can no longer create these roles, but an installation upgraded across the cut
 // still has the config.json files on disk, so the list endpoint can still ship
-// such a row. These fixtures keep the removal guards below non-vacuous.
+// such a row. These fixtures keep the removal guards below non-vacuous, and
+// double as "some other-role single" fixtures below (#2234) since — unlike a
+// bare `standalone` — they still land in `singles`.
 const orch = (id, displayName) => ({ id, role: 'orchestrator', displayName });
 const bp   = (id, parentOrchestratorId, displayName) => ({ id, role: 'bp-instance', parentOrchestratorId, displayName });
 
@@ -35,7 +37,6 @@ test('buildGroups groups team members under their team header', () => {
     team('t1', 'Alpha'),
     member('t1-dev', 't1', 'Dev'),
     member('t1-qa', 't1', 'QA'),
-    standalone('solo', 'Solo'),
   ];
   const { groups, singles } = buildGroups(agents);
   assert.equal(groups.length, 1);
@@ -43,7 +44,18 @@ test('buildGroups groups team members under their team header', () => {
   assert.equal(groups[0].id, 't1');
   assert.equal(groups[0].header.id, 't1');
   assert.deepEqual(groups[0].children.map(c => c.id), ['t1-dev', 't1-qa']);
-  assert.deepEqual(singles.map(s => s.id), ['solo']);
+  assert.deepEqual(singles, []);
+});
+
+test('#2234 — a standalone agent (role: "agent") never appears in buildGroups', () => {
+  // Every agent minted since #2229 Phase B is a team of one; the only
+  // standalone `role: 'agent'` configs left are ephemeral one-shot workers,
+  // which have no UI surface at all by design. A leftover other-role config
+  // (#1964) still lands in singles — only `agent` is excluded.
+  const agents = [team('t1', 'Alpha'), standalone('solo', 'Solo'), orch('o1', 'Orch')];
+  const { groups, singles } = buildGroups(agents);
+  assert.deepEqual(singles.map(s => s.id), ['o1']);
+  assert.deepEqual(groups.map(g => g.id), ['t1']);
 });
 
 test('buildGroups sorts children by display name', () => {
@@ -158,8 +170,8 @@ test('orderModel applies group, single, and per-member stored order', () => {
     member('t1-a', 't1', 'Aardvark'),
     member('t1-z', 't1', 'Zeta'),
     team('t2', 'Beta'),
-    standalone('s1', 'S1'),
-    standalone('s2', 'S2'),
+    orch('s1', 'S1'),
+    orch('s2', 'S2'),
   ]);
   const order = {
     groups: ['team:t2', 'team:t1'],
@@ -195,7 +207,7 @@ test('filterModel drops groups with no matching header or child', () => {
 });
 
 test('filterModel reports empty when nothing matches', () => {
-  const { groups, singles } = buildGroups([standalone('solo', 'Solo')]);
+  const { groups, singles } = buildGroups([orch('solo', 'Solo')]);
   const { orderedGroups, orderedSingles } = orderModel(groups, singles, EMPTY_ORDER);
   const model = filterModel(orderedGroups, orderedSingles, { kind: 'agent', id: 'nope' });
   assert.equal(model.empty, true);
@@ -209,7 +221,7 @@ test('buildAgentListModel composes the three layers end-to-end', () => {
   const agents = [
     team('t1', 'Alpha'),
     member('t1-dev', 't1', 'Dev'),
-    standalone('solo', 'Solo'),
+    orch('solo', 'Solo'),
   ];
   const model = buildAgentListModel(agents, EMPTY_ORDER, ALL);
   assert.deepEqual(model.visibleGroups.map(g => g.id), ['t1']);
@@ -246,8 +258,8 @@ test('AC6 — with the filter off the list is exactly what it was before', () =>
     team('t1', 'Alpha'),
     member('t1-dev', 't1', 'Dev'),
     off(member('t1-qa', 't1', 'QA')),
-    standalone('solo', 'Solo'),
-    off(standalone('paused', 'Paused')),
+    orch('solo', 'Solo'),
+    off(orch('paused', 'Paused')),
   ];
   const model = buildAgentListModel(agents, EMPTY_ORDER, ALL);
   assert.deepEqual(model.visibleGroups[0].children.map(c => c.id), ['t1-dev']);
@@ -259,8 +271,8 @@ test('AC6 — with the filter on the disabled rows appear alongside the rest', (
     team('t1', 'Alpha'),
     member('t1-dev', 't1', 'Dev'),
     off(member('t1-qa', 't1', 'QA')),
-    standalone('solo', 'Solo'),
-    off(standalone('paused', 'Paused')),
+    orch('solo', 'Solo'),
+    off(orch('paused', 'Paused')),
   ];
   const model = buildAgentListModel(agents, EMPTY_ORDER, ALL, true);
   assert.deepEqual(model.visibleGroups[0].children.map(c => c.id), ['t1-dev', 't1-qa']);
@@ -298,7 +310,7 @@ test('the disabled filter composes with the text/entity filter rather than overr
   const agents = [
     team('t1', 'Alpha'),
     off(member('t1-qa', 't1', 'QA')),
-    off(standalone('paused', 'Paused')),
+    off(orch('paused', 'Paused')),
   ];
   const model = buildAgentListModel(agents, EMPTY_ORDER, { kind: 'team', id: 't1' }, true);
   // Filter says "team t1 only", so the disabled standalone stays out even

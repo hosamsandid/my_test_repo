@@ -163,14 +163,17 @@ same propagation, so they cannot disagree about what a change would do.
 The general-purpose environments page described above is **retired**
 (#2170, epic #2166 A4) — there is no longer a standalone page listing every
 environment. A `role: 'team'` agent's environment is now edited
-without leaving Agent Chat: open the team's **Settings** tab and its **Environment**
-section renders grouped tabs — **Repositories · Model provider ·
-Toolchain · MCP servers · Additional context** — over the same environment
-record, saved through the same `PUT /api/environments/:id` the retired page's
-form used. A repository change still gets the save-time propagation offer
-described above; a provider or toolchain change still respawns the team's
-running agents. The **GitHub Token** select joined the Repositories tab in
-#2170, since that page was the only surface that could set it.
+without leaving Agent Chat: open the team's **Settings** tab, which for a team
+is **one flat row of tabs** (#2167, flattened into a single level by #2236) —
+General · Repositories · Model provider · Toolchain · MCP servers ·
+Additional context · Skills · Plugins, always in that order. Five of those
+tabs — **Repositories · Model provider · Toolchain · MCP servers · Additional
+context** — edit the same environment record, saved through the same
+`PUT /api/environments/:id` the retired page's form used. A repository change
+still gets the save-time propagation offer described above; a provider or
+toolchain change still respawns the team's running agents. The **GitHub
+Token** select joined the Repositories tab in #2170, since that page was the
+only surface that could set it.
 
 Not carried onto that surface: the environment's **Name**/**ID** (fixed at
 creation, rarely revisited) and ownership/team (the environment already

@@ -16,7 +16,8 @@
     "usage",
     "knowledge",
     "users",
-    "access"
+    "access",
+    "team-config"
   ],
   "steps": [
     {
@@ -2090,6 +2091,142 @@
         }
       ],
       "example": "- action:\n    do: knowledge.openTeam\n    teamId: knowledge-demo\n  screenshot: knowledge-team-flow"
+    },
+    {
+      "name": "team-config.captureRailState",
+      "module": "team-config",
+      "description": "Snapshot the right rail's persisted open/collapsed state and width (`agentChat.logOpen` / `agentChat.rightWidth`, AgentChat.jsx) under a name, so a later step can assert it survived a member<->team round trip. Stashed on `ctx` for the run's lifetime — the same pattern as flows.js's `captureDraftWiring`/`expectDraftWiringEqual`.",
+      "params": [
+        {
+          "name": "as",
+          "required": true,
+          "type": "string",
+          "description": "Name to store the snapshot under."
+        }
+      ],
+      "example": "- action:\n    do: team-config.captureRailState\n    as: beforeTeamSwitch"
+    },
+    {
+      "name": "team-config.expectFullWidthSurface",
+      "module": "team-config",
+      "description": "Assert the routed team landed on the #2235 full-width `TeamConfigSurface`, not the ordinary chat-column + tabbed-right-rail split every other entry point used to fall back to: - the team's own edit form is showing directly (\"Team Default Prompt\" is a field label rendered only for `agent.role === 'team'`, AgentEditForm.jsx) rather than behind a Settings tab click; - no chat composer (a team hosts no conversation of its own, AC1); - no RightRail tab bar at all (Sessions/Workspace/Triggers/Outcomes/ Knowledge/Settings — AgentChat.jsx's `subjectIsTeam` branch never mounts `RightRail`, so this is a structural absence, not merely an unselected tab).",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "The team's own agent id (asserts the URL landed here)."
+        }
+      ],
+      "example": "- assert:\n    do: team-config.expectFullWidthSurface\n    teamId: team-config-demo"
+    },
+    {
+      "name": "team-config.expectRailStateEqual",
+      "module": "team-config",
+      "description": "Assert two captured rail-state snapshots are identical — the member<->team round-trip guarantee (AC: switching to a member and back restores the right rail's prior open/collapsed state and width).",
+      "params": [
+        {
+          "name": "a",
+          "required": true,
+          "type": "string",
+          "description": "First snapshot name (team-config.captureRailState)."
+        },
+        {
+          "name": "b",
+          "required": true,
+          "type": "string",
+          "description": "Second snapshot name."
+        }
+      ],
+      "example": "- assert:\n    do: team-config.expectRailStateEqual\n    a: beforeTeamSwitch\n    b: afterTeamSwitch"
+    },
+    {
+      "name": "team-config.expectShortcutNoOpOnTeam",
+      "module": "team-config",
+      "description": "Assert the shortcut has NO effect while a team is the routed subject (AC13/AC14): press it, then assert the persisted `agentChat.logOpen` preference is byte-identical to what it was immediately before — proving the team view neither reacts to the key nor touches the stored preference.",
+      "params": [],
+      "example": "- assert:\n    do: team-config.expectShortcutNoOpOnTeam"
+    },
+    {
+      "name": "team-config.openMemberFromRow",
+      "module": "team-config",
+      "description": "Click a member's row in the rail (the ordinary chat-openable path back out of a team surface) and wait for its composer, so the member<->team switch can be driven entirely through the rail rather than a raw URL.",
+      "params": [
+        {
+          "name": "agentId",
+          "required": true,
+          "type": "string",
+          "description": "The member's agent id."
+        },
+        {
+          "name": "label",
+          "required": true,
+          "type": "string",
+          "description": "The member row's rendered label (its display name)."
+        }
+      ],
+      "example": "- action:\n    do: team-config.openMemberFromRow\n    agentId: team-config-demo-business-analyst\n    label: Business Analyst"
+    },
+    {
+      "name": "team-config.openTeamByUrl",
+      "module": "team-config",
+      "description": "Entry point 3: a direct `/chats/<teamId>` URL (a bookmark, or a link from elsewhere in the console) — the route-driven `subjectIsTeam` derivation means no prior rail interaction is needed for this to resolve to the same surface as the other two entry points.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "The team's own agent id."
+        }
+      ],
+      "example": "- action:\n    do: team-config.openTeamByUrl\n    teamId: team-config-demo"
+    },
+    {
+      "name": "team-config.openTeamFromMenu",
+      "module": "team-config",
+      "description": "Entry point 2: the team row's context menu's \"Team settings…\" entry (`agent-lifecycle-menu.js` `buildTeamMenu`, key `edit-team`) — opened via the always-present (dimmed until hover) kebab, which `RailLifecycleHost.jsx` routes to the same `/chats/<teamId>` navigation as the row click.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "The team's own agent id."
+        },
+        {
+          "name": "label",
+          "required": true,
+          "type": "string",
+          "description": "The team row's rendered label (its display name)."
+        }
+      ],
+      "example": "- action:\n    do: team-config.openTeamFromMenu\n    teamId: team-config-demo\n    label: Team Config Demo"
+    },
+    {
+      "name": "team-config.openTeamFromRow",
+      "module": "team-config",
+      "description": "Entry point 1: click the team's row in the Agent Chat left rail. Clicking it anywhere but its chevron selects the team and opens Settings (AgentList.jsx `handleActivate`), landing on `/chats/<teamId>`.",
+      "params": [
+        {
+          "name": "teamId",
+          "required": true,
+          "type": "string",
+          "description": "The team's own agent id."
+        },
+        {
+          "name": "label",
+          "required": true,
+          "type": "string",
+          "description": "The team row's rendered label (its display name)."
+        }
+      ],
+      "example": "- action:\n    do: team-config.openTeamFromRow\n    teamId: team-config-demo\n    label: Team Config Demo"
+    },
+    {
+      "name": "team-config.toggleRailPanel",
+      "module": "team-config",
+      "description": "Toggle the right rail's open/collapsed state via the Cmd/Ctrl+Shift+L shortcut (AgentChat.jsx) — only meaningful while a MEMBER chat is open; the shortcut is a deliberate no-op while a team subject is routed (AC13/AC14), which is exercised separately by `expectShortcutNoOpOnTeam`.",
+      "params": [],
+      "example": "- action:\n    do: team-config.toggleRailPanel"
     },
     {
       "name": "teardown.deleteEnv",

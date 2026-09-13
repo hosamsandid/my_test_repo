@@ -17,13 +17,30 @@ function rail(page) {
   return page.locator('[role="listbox"]').first();
 }
 
-// The team group header (CollapsibleHeader) is a real `<button>` carrying
-// `aria-selected` — no other rail row (AgentRow is `role="option"`, the kebab
-// is a `role="button"` `<span>`) carries that attribute, so this is an
-// unambiguous locator even though "Team actions for <label>" also contains
-// the label as a substring.
+// The team group header (CollapsibleHeader) is a real `<button aria-selected>`
+// with NO explicit `role` (default implicit role "button") — a member row
+// (AgentRow) ALSO sets `aria-selected` on its own `<button>`, but stamps
+// `role="option"`, so `:not([role="option"])` is what actually disambiguates
+// the two (a bare `hasText` filter alone is not enough once a journey's team
+// and member labels could ever coincide).
 function teamHeaderButton(page, label) {
-  return rail(page).locator('button[aria-selected]').filter({ hasText: label });
+  return rail(page).locator('button[aria-selected]:not([role="option"])').filter({ hasText: label });
+}
+
+// CSS attribute selector matching the literal `aria-label` DOM attribute —
+// deliberately NOT `getByRole('button', {name})`, whose match is against the
+// COMPUTED accessible name: the kebab (`KebabButton`, a `role="button"` span
+// with its own `aria-label="Team actions for <label>"`) sits INSIDE the
+// header `<button>`, so "name from contents" folds the kebab's aria-label
+// into the header's own accessible name too — `getByRole` then resolves BOTH
+// elements and throws a strict-mode violation (found live in CI on this exact
+// journey). An attribute selector matches the DOM attribute directly, so it
+// can only ever hit the one element that actually carries it.
+function cssAttrValue(value) {
+  return value.replace(/["\\]/g, '\\$&');
+}
+function teamKebabButton(page, label) {
+  return rail(page).locator(`[aria-label="Team actions for ${cssAttrValue(label)}"]`);
 }
 
 /**
@@ -65,7 +82,7 @@ async function openTeamFromRow(ctx, { teamId, label }) {
 async function openTeamFromMenu(ctx, { teamId, label }) {
   const { page } = ctx;
   await page.goto('/chats');
-  const kebab = rail(page).getByRole('button', { name: `Team actions for ${label}` });
+  const kebab = teamKebabButton(page, label);
   await expect(kebab).toBeVisible();
   await kebab.click();
   const menuItem = page.getByRole('menuitem', { name: 'Team settings…' });

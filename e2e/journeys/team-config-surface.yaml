@@ -1,0 +1,115 @@
+journeyVersion: 1
+id: team-config-surface
+title: Team Full-Width Configuration Surface
+order: 49
+# CI lane only: fake-claude, in-stack git remote, no external GitHub — the
+# team never needs to run a trigger or open a PR for this journey.
+lanes: [ci]
+
+# #2235/#2240 AC12: a routed `role: 'team'` agent gets the whole area right of
+# the agent list as one full-width configuration surface (`TeamConfigSurface`,
+# AgentChat.jsx) instead of the ordinary chat column + tabbed right rail — and
+# switching to a member and back must leave the right rail's persisted
+# open/collapsed state and width untouched. Net-new coverage: no journey
+# covered the Settings tab or a team's own environment before this (#2235 AC12).
+#
+# Precondition: one Business-Analyst member on a credential-less env pointing
+# at the in-stack git remote (the `triggerAgent` fixture, reused as-is — it is
+# already the cheapest "team + one materialized member" shape in the library).
+# Fixed ids keep this deterministic and re-runnable.
+fixtures:
+  - fixture: triggerAgent
+    params:
+      teamId: team-config-demo
+      envId: team-config-demo-env
+      envName: Team Config Demo
+      repoUrl: "http://git-remote/e2e/fixture.git"
+
+steps:
+  - kind: narrative-only
+    id: intro
+    narrative: |
+      A `role: 'team'` agent hosts no conversation of its own, so routing to
+      one no longer shares a chat column and a tabbed right rail the way an
+      ordinary agent does — its whole configuration is the surface. This
+      journey drives all three ways of getting there (a rail row click, the
+      row's "Team settings…" menu entry, and a direct URL) and proves
+      switching to a member and back leaves the right rail exactly as it was.
+
+  # ── Entry point 1: the team row in the rail ─────────────────────────────────
+  - id: open-from-row
+    action:
+      do: team-config.openTeamFromRow
+      teamId: team-config-demo
+      label: Team Config Demo
+    assert:
+      do: team-config.expectFullWidthSurface
+      teamId: team-config-demo
+    screenshot: team-config-full-width-surface
+
+  # ── Entry point 2: the row context menu's "Team settings…" entry ───────────
+  - id: open-from-menu
+    action:
+      do: team-config.openTeamFromMenu
+      teamId: team-config-demo
+      label: Team Config Demo
+    assert:
+      do: team-config.expectFullWidthSurface
+      teamId: team-config-demo
+
+  # ── Entry point 3: a direct /chats/<teamId> URL ─────────────────────────────
+  - id: open-by-url
+    action:
+      do: team-config.openTeamByUrl
+      teamId: team-config-demo
+    assert:
+      do: team-config.expectFullWidthSurface
+      teamId: team-config-demo
+
+  # The keyboard shortcut that toggles the right rail elsewhere must stay
+  # inert while a team is the routed subject, and must not touch the stored
+  # preference (AC13/AC14) — asserted while still on the team surface from
+  # entry point 3 above.
+  - id: shortcut-inert-on-team
+    assert:
+      do: team-config.expectShortcutNoOpOnTeam
+
+  # ── Member <-> team switch preserves the right rail's state ────────────────
+  - id: member-chat
+    action:
+      do: team-config.openMemberFromRow
+      agentId: team-config-demo-business-analyst
+      label: Business Analyst
+
+  # Force the rail into a known, non-default state so the round trip below
+  # is actually exercising something (not merely re-confirming the default).
+  - action:
+      do: team-config.toggleRailPanel
+  - action:
+      do: team-config.captureRailState
+      as: beforeTeamSwitch
+
+  - id: switch-to-team
+    action:
+      do: team-config.openTeamFromRow
+      teamId: team-config-demo
+      label: Team Config Demo
+    assert:
+      do: team-config.expectFullWidthSurface
+      teamId: team-config-demo
+
+  - id: switch-back-to-member
+    action:
+      do: team-config.openMemberFromRow
+      agentId: team-config-demo-business-analyst
+      label: Business Analyst
+
+  - action:
+      do: team-config.captureRailState
+      as: afterTeamSwitch
+  - id: rail-state-restored
+    assert:
+      do: team-config.expectRailStateEqual
+      a: beforeTeamSwitch
+      b: afterTeamSwitch
+    screenshot: team-config-member-rail-restored

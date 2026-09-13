@@ -73,8 +73,9 @@ function admitsToChatList(cfg, { includeDisabled = false, includeStubs = false }
   //     parentTeamId when it is absent;
   //   - the route ships `canManageTeam` only for team rows (#2082 Share panel);
   //   - selecting a team header resolves the routed subject through it, which is
-  //     what lets the middle pane show TeamSelectedState (#2213) and the right
-  //     rail narrow to Settings (#2216) — both dead unless the row is present;
+  //     what lets the merged full-width configuration surface (#2235,
+  //     superseding #2213's TeamSelectedState placeholder and #2216's
+  //     Settings-only rail) render at all — dead unless the row is present;
   //   - KnowledgeFlow reads the team's display name off it.
   // The enabled/includeDisabled gate above still applies (a team is created
   // enabled:true), so this only exempts the token check, nothing else.

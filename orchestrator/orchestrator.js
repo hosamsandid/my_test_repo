@@ -85,7 +85,7 @@ const credentialResolution = require("./credential-resolution");
 const ownershipMigration = require("./ownership-migration");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
-const { assessConversionEligibility, planTeamConversion } = require("./team-conversion");
+const { assessConversionEligibility, planTeamConversion, planTeamOfOneCreation } = require("./team-conversion");
 const { nextAvailableAgentId, suggestFreeAgentId } = require("./agent-id-resolution");
 const { syncAgentRepoPlan, summarizeRepoResults, repoDivergence } = require("./repo-sync");
 // Agent-scoped repositories (#2067): a repository attached to ONE agent,
@@ -9252,6 +9252,115 @@ class Orchestrator {
     };
   }
 
+  // ===========================================================
+  // Mint a team of one at CREATION time (#2231, Phase B of #2229)
+  // ===========================================================
+  // The from-scratch sibling of `convertAgentToTeam` above: instead of a
+  // standalone `role: 'agent'`, the three creation fast lanes (quickstart's
+  // repo path, its LLM-only sibling, and the Agents-page "+ New Agent"
+  // action with no `teamId`) call this so every agent is a team of one from
+  // the moment it exists (#2229) — one request still produces one usable,
+  // chattable agent, whose id is the returned team-member's id.
+  //
+  // Shares its target-shape decisions with `convertAgentToTeam` via the
+  // Phase-A core `planTeamOfOneCreation` (`team-conversion.js`): the derived
+  // team id, the legacy-exclusive prompt shape, and the member-shape grant
+  // are computed in exactly the same place regardless of which caller asks.
+  // Unlike a conversion there is nothing pre-existing to re-key — the team
+  // and its one member are minted together — so there is no eligibility
+  // check, no skill-pool copy, no plugin-scope teardown, and no rollback of
+  // config already on disk beyond what `resolveAndReserveAgentId` itself
+  // already risks (the same residue a failed `createAgent` can already
+  // leave behind).
+  async createTeamOfOneAgent(baseId, displayName, systemPrompt, environmentId, extra = {}) {
+    const env = loadEnvironment(environmentId);
+    if (!env) {
+      throw new Error(`Environment not found: ${environmentId}`);
+    }
+
+    // #2217 — same base/autoId contract `createAgent` honours: the quickstart
+    // fast lanes hand over a BASE id and ask the platform to resolve the
+    // first free one itself; the manual create form (no autoId) has already
+    // had its literal id checked for collision by the caller.
+    let id = baseId;
+    if (extra.autoId) {
+      id = this.resolveAndReserveAgentId(baseId);
+    }
+
+    const ownerTeamId = resolveOwnerTeamId(extra.teamId);
+    const grantedSkills = Array.isArray(extra.skills)
+      ? extra.skills.filter((s) => typeof s === "string" && s.trim()).map((s) => s.trim())
+      : [];
+
+    let plan;
+    try {
+      plan = planTeamOfOneCreation({
+        agentId: id,
+        displayName,
+        environmentId: env.id,
+        ownerTeamId,
+        ownPrompt: systemPrompt || "",
+        ownerId: extra.ownerId,
+        ownerSource: extra.ownerId
+          ? (ownershipMigration.OWNER_SOURCES.includes(extra.ownerSource)
+            ? extra.ownerSource
+            : ownershipMigration.OWNER_SOURCE_CREATOR)
+          : undefined,
+        roleId: id,
+        skills: grantedSkills,
+      }, {
+        teamIdTaken: isAgentIdTaken,
+      });
+    } catch (err) {
+      // The derived team id (`<id>-team`) collided with something already on
+      // disk — vanishingly rare for a freshly-resolved agent id, but named
+      // distinctly so the route can answer 409 rather than a generic 500.
+      err.code = err.code || "team-id-taken";
+      throw err;
+    }
+
+    // ── 1. The team metadata record — pure config, no Matrix identity, no
+    // workspace (mirrors the `role: 'team'` branch of `createAgent`).
+    saveAgentConfig(plan.teamId, plan.teamConfig);
+    this.agentConfigs.set(plan.teamId, { config: plan.teamConfig });
+
+    // ── 2. The one member — the same Matrix + workspace materialization a
+    // standalone agent gets, just filed under `role: 'team-member'`.
+    const password = `agent-${id}-${Date.now()}`;
+    const userId = `@${id}:local`;
+    if (this.adminClient) await ensureMatrixUser(this.adminClient, id, password);
+    const token = await loginMatrixUser(id, password, this.adminClient);
+    await setDisplayName(token, userId, displayName);
+
+    const seedResult = seedAgentWorkspace(id, env, { teamId: ownerTeamId, skills: grantedSkills });
+
+    const memberConfig = {
+      id,
+      displayName,
+      userId,
+      token,
+      environmentId: env.id,
+      teamId: ownerTeamId,
+      ...plan.memberPatch,
+      enabled: true,
+    };
+    saveAgentConfig(id, memberConfig);
+    saveAgentPrompt(id, plan.effectivePrompt, "team-member", env);
+
+    this.agentConfigs.set(id, { config: memberConfig });
+    startAgentProcess(memberConfig);
+
+    console.log(`[Orchestrator] Created team of one: team ${plan.teamId}, member ${id}`);
+    return {
+      id,
+      teamId: plan.teamId,
+      userId,
+      seeded: seedResult.seeded,
+      warnings: seedResult.warnings || [],
+      clones: seedResult.clones || [],
+    };
+  }
+
   // Update a team's `systemPromptTemplate` and eagerly push the new value
   // to all members that inherit it (i.e. don't carry their own
   // `systemPrompt` override). Skill changes on the team's env are NOT
@@ -16427,6 +16536,13 @@ async function main() {
           // For role: 'team' — admission control (#2114, flow-control concept
           // §4.0): the declarative per-flow WIP limit the dispatch path enforces.
           wipLimit,
+          // #2231 (Phase B of #2229) — for `role: 'agent'` only: mint a team of
+          // one (a `role: 'team'` record + one `team-member`) instead of a
+          // standalone agent. `id` still names the AGENT (the member keeps it;
+          // the team id is derived as `<id>-team`), so every existing response
+          // consumer (the `id` the success card and the `/chats/:agentId`
+          // redirect use) is unaffected.
+          mintTeamOfOne,
           // #2217 — when set, `id` is a BASE id: the orchestrator resolves the
           // first free id itself (reserving it before this request returns)
           // instead of refusing on collision. Used by quickstart's fast lanes,
@@ -16497,7 +16613,9 @@ async function main() {
         if (typeof labelSuffix === 'string' && labelSuffix) extra.labelSuffix = labelSuffix;
         if (hillClimb && typeof hillClimb === 'object' && !Array.isArray(hillClimb)) extra.hillClimb = hillClimb;
         if (Number.isInteger(wipLimit) && wipLimit >= 1) extra.wipLimit = wipLimit;
-        const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
+        const result = (role === 'agent' && mintTeamOfOne === true)
+          ? await orchestrator.createTeamOfOneAgent(id, displayName, systemPrompt, environmentId, extra)
+          : await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (err) {
@@ -16519,6 +16637,13 @@ async function main() {
         // #2217 — the pathological "50 ids for this base already taken" case:
         // a real, actionable refusal rather than a generic 500.
         if (err.code === 'id-sequence-exhausted') {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message, code: err.code }));
+          return;
+        }
+        // #2231 — the derived team id (`<id>-team`) was already taken by an
+        // unrelated agent/team; the same "actionable, not a 500" treatment.
+        if (err.code === 'team-id-taken') {
           res.writeHead(409, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message, code: err.code }));
           return;

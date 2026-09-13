@@ -73,9 +73,16 @@ export function buildGroups(agents) {
   const teamRows   = agents.filter(a => a.role === 'team');
   const memberRows = agents.filter(a => a.role === 'team-member' && !isStub(a));
   const stubRows   = agents.filter(a => a.role === 'team-member' && isStub(a));
+  // A standalone `role: 'agent'` (no team) is never listed here (#2234): every
+  // agent created since #2229 Phase B is minted as a team of one, so the only
+  // standalone agents left are ephemeral one-shot workers — which have no UI
+  // surface at all, by design (see orchestrator's `/internal/agents/ephemeral`
+  // route). This is narrower than "everything but team/team-member" so an
+  // unrecognised future role still lands in `others` rather than vanishing.
   const others = agents.filter(a =>
     a.role !== 'team' &&
-    a.role !== 'team-member',
+    a.role !== 'team-member' &&
+    a.role !== 'agent',
   );
 
   // Union of team ids that should appear as a section: real team rows, plus any

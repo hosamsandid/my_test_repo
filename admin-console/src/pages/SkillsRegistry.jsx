@@ -1757,9 +1757,12 @@ export default function SkillsRegistry() {
   // no workspace yet and would be re-seeded from its environment on enable).
   // A `team` construct is excluded because it hosts no agent of its own — the
   // grant belongs on it, but the files have nowhere to land. (The `orchestrator`
-  // exclusion beside it went with the role in #1964.)
+  // exclusion beside it went with the role in #1964.) A standalone `agent`
+  // (no team — always an ephemeral worker post-#2229) is excluded too: it has
+  // no surface in the UI any more, so a skill installed onto it could never
+  // be seen or removed again.
   const installableAgents = (allAgents ?? [])
-    .filter(a => a.enabled !== false && a.token && a.role !== 'team')
+    .filter(a => a.enabled !== false && a.token && a.role !== 'team' && a.role !== 'agent')
     .map(a => ({ id: a.id, displayName: a.displayName || a.id }));
 
   async function confirmRowDelete(cascade = false) {

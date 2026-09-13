@@ -141,10 +141,13 @@ export function teamDeleteImpact(row) {
 //   - `agentTeams` is `[{ team, members }]` — one entry per `role: "team"`
 //     agent, `members` being its `team-member` agents (sorted). This is the
 //     unit of assignment: the whole group moves together.
-//   - `standaloneAgents` is every other agent — a `role: "agent"` with no
-//     parent, still assignable individually. The grouping is role-agnostic
-//     rather than an allow-list, so a leftover config from a retired role
-//     (#1964) lands here and stays assignable instead of vanishing.
+//   - `standaloneAgents` is every OTHER-role agent that is still individually
+//     assignable — an orphan `team-member` (E2) or a leftover config from a
+//     retired role (#1964). A bare `role: "agent"` (standalone, no team —
+//     always an ephemeral worker post-#2229) is deliberately EXCLUDED: #2234
+//     decided that no admin-console surface shows a standalone agent any
+//     more, not even this ownership-management one, so an ephemeral agent's
+//     owner/tier can no longer be changed from the UI at all.
 //
 // Edge cases:
 //   - E1: a team with no members yields `members: []` (still assignable).
@@ -163,8 +166,9 @@ export function groupAgentsForOwnership(agents) {
     if (a.role === MEMBER_ROLE && a.parentTeamId && teamIds.has(a.parentTeamId)) {
       if (!membersByParent.has(a.parentTeamId)) membersByParent.set(a.parentTeamId, []);
       membersByParent.get(a.parentTeamId).push(a);
-    } else {
-      // Standalone, or an orphan team-member (E2) whose parent is gone.
+    } else if (a.role !== 'agent') {
+      // An orphan team-member (E2) or an unrecognised/retired role — surfaced
+      // for cleanup. A plain standalone `agent` is never surfaced (#2234).
       standaloneAgents.push(a);
     }
   }

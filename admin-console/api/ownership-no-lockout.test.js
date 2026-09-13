@@ -88,6 +88,15 @@ const configsBefore = {
   payments: { id: 'payments', role: 'team', teamId: 'payments' },
   // An unstamped legacy agent: collapses to the default scope in both worlds.
   legacy: { id: 'legacy', role: 'agent' },
+  // Post-#2229 (epic; #2234 decision), an ordinary standalone agent like
+  // `scratch` no longer exists — this shape is now reached only by an
+  // EPHEMERAL agent (`orchestrator/orchestrator.js`'s
+  // `POST /internal/agents/ephemeral`, permanently excluded from the
+  // team-of-one migration) or a malformed config. The owner-branch backfill
+  // must not distinguish it from `scratch` — this fixture proves that,
+  // alongside `scratch` rather than replacing it
+  // (docs/decentralised-access-concept.md Amendment 10).
+  ephemeral: { id: 'ephemeral', role: 'agent', ephemeral: true, teamId: 'risk' },
 };
 
 const environments = [
@@ -197,9 +206,9 @@ test('AC4 — the assertion is not vacuous: the estate really is reachable befor
   // Option C (PR #2094): the pure env admin reaches nothing once seeded, so a
   // real System-Admin record stands in as the full-visibility principal here.
   assert.ok(reach('sys@corp.com', configsBefore, membershipsBefore).size > 0);
-  // 6 principals × (7 teams×2 + 9 agents×2 + 3 envs×2 + 6 credentials) = every
+  // 6 principals × (7 teams×2 + 10 agents×2 + 3 envs×2 + 6 credentials) = every
   // pair is evaluated, so a silent fixture shrink is visible here.
-  assert.equal(Object.keys(configsBefore).length, 9);
+  assert.equal(Object.keys(configsBefore).length, 10);
   assert.equal(principals.length, 6);
 });
 
@@ -398,6 +407,9 @@ test('AC5 — every team and standalone agent carries an owner afterwards', () =
   assert.equal(after.configs.scratch.ownerId, 'u-cyd');
   assert.equal(after.configs.payments.ownerId, 'u-ada');
   assert.equal(after.configs.legacy.ownerId, 'u-ada'); // unstamped → default scope
+  // #2234: the ephemeral-agent shape backfills identically to `scratch` — the
+  // owner-branch code does not (and must not) branch on `ephemeral`.
+  assert.equal(after.configs.ephemeral.ownerId, after.configs.scratch.ownerId);
 });
 
 test('AC2/AC3 — memberships now reference Agent Team ids, with roles preserved', () => {

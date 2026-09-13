@@ -124,10 +124,19 @@ test('groups team-members under their parent Agent Team', () => {
 test('standalone agents exclude team agents and grouped members', () => {
   const { standaloneAgents } = groupAgentsForOwnership(OWNERSHIP_AGENTS);
   const ids = standaloneAgents.map(a => a.id);
-  assert.ok(ids.includes('lonewolf'));
   assert.ok(ids.includes('orch'));
   assert.ok(!ids.includes('sdlc'));
   assert.ok(!ids.includes('sdlc-dev'));
+});
+
+test('#2234 — a bare role:"agent" (standalone, no team) never surfaces here either', () => {
+  // Every admin-console surface, including this ownership view, stopped
+  // showing standalone agents (#2234) — the only ones left post-#2229 are
+  // ephemeral one-shot workers with no UI surface at all. An unrecognised
+  // other role (like the leftover `orchestrator` fixture above) still needs
+  // to be reachable for cleanup, so only `agent` is excluded.
+  const { standaloneAgents } = groupAgentsForOwnership(OWNERSHIP_AGENTS);
+  assert.ok(!standaloneAgents.map(a => a.id).includes('lonewolf'));
 });
 
 test('orphan member (parent gone) falls back to standalone, not crashing (E2)', () => {
@@ -153,12 +162,14 @@ test('groups + standalone are sorted by label for stable rendering', () => {
   const many = [
     { id: 'b-team', role: 'team', displayName: 'Bravo' },
     { id: 'a-team', role: 'team', displayName: 'Alpha' },
-    { id: 'z-agent', role: 'agent', displayName: 'Zeta' },
-    { id: 'm-agent', role: 'agent', displayName: 'Mike' },
+    // Not `role: 'agent'` — those are excluded outright (#2234) — but an
+    // other-role leftover (#1964) is still assignable and still sorted.
+    { id: 'z-orch', role: 'orchestrator', displayName: 'Zeta' },
+    { id: 'm-orch', role: 'orchestrator', displayName: 'Mike' },
   ];
   const { agentTeams, standaloneAgents } = groupAgentsForOwnership(many);
   assert.deepEqual(agentTeams.map(g => g.team.id), ['a-team', 'b-team']);
-  assert.deepEqual(standaloneAgents.map(a => a.id), ['m-agent', 'z-agent']);
+  assert.deepEqual(standaloneAgents.map(a => a.id), ['m-orch', 'z-orch']);
 });
 
 /* ── Environment tiers (D7/D12) ────────────────────────────────────────── */

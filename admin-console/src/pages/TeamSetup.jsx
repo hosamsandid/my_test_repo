@@ -378,11 +378,25 @@ function EnvironmentCard({ env, selected, onSelect }) {
         <Layers size={18} />
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 'var(--eb-space-2)' }}>
-          <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 'var(--eb-space-2)', minWidth: 0 }}>
+          <div
+            title={env.name}
+            style={{
+              fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)',
+              flex: '1 1 auto', minWidth: 0,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+          >
             {env.name}
           </div>
-          <code style={{ fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)', flexShrink: 0 }}>
+          <code
+            title={env.id}
+            style={{
+              fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)',
+              flex: '0 1 auto', minWidth: '4.5em', maxWidth: '55%',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+          >
             {env.id}
           </code>
         </div>

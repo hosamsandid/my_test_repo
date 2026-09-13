@@ -409,8 +409,16 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the `create.md` topic plus its `seeAlso` neighbours — at **318,724 — 93.7% used,
-21,276 left** (#2216's right-rail team-narrowing addition to `agent-chat.md`, itself a `create.md`
+the `create.md` topic plus its `seeAlso` neighbours — currently at **321,092 — 94.4% used,
+18,908 left** (this paragraph's own chain below had lagged at 318,724 for two cycles: #2231's
+`create.md` corrections for the plain-agent/fast-lane team-of-one mint added +1,849 — 320,573 —
+and #2232's retirement of the manual "Convert into a team…" action shaved -659 off that — 319,914,
+matching CLAUDE.md's #1872 paragraph exactly, so no further drift had crept in beyond those two
+unstamped cycles; #2235, merging the team chat column and right rail into one full-width surface,
+reworded `agent-chat.md`'s *The right rail* and *Settings — configuring the agent* chapters, again a
+`create.md` `seeAlso` neighbour, for a clean +1,178 on top of the verified 319,914 baseline — taking
+it to the current 321,092). The figure below, **318,724 — 93.7% used,
+21,276 left**, is kept as the earlier history (#2216's right-rail team-narrowing addition to `agent-chat.md`, itself a `create.md`
 `seeAlso` neighbour, is a clean +314 on top of a live pre-edit 318,410 that already carried a +356 gap
 over the 318,054 last stamped here from unrelated intervening merges; #2172's terminology sweep had
 already shaved the figure to 315,387/92.8%/24,613 left

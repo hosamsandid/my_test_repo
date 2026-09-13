@@ -9,8 +9,10 @@
  * lands on both surfaces at once. Same route the dialog bodies (#1928) and the
  * edit form (#1929) already took into `agent-lifecycle/`.
  *
- * Behaviour is unchanged from the Agents page. The role picker (`RoleCard`) and
- * the `hasRepos` helper came along because nothing else on that page used them.
+ * Behaviour is unchanged from the Agents page, other than #2233 removing the
+ * `agent` vs `team` role picker: the action now always produces a plain agent,
+ * itself minted as a team of one (#2231) — there is nothing left to pick. The
+ * `hasRepos` helper came along because nothing else on that page used it.
  *
  * The caller owns the request: `onSave(form)` receives the raw form object and
  * POSTs it to `/api/agents`; `saving` / `error` render the busy and failure
@@ -29,72 +31,10 @@ import { describeAgentSubmitState } from '../agent-create-submit-state.js';
 import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
 } from './form-kit.jsx';
-import { ROLE_INFO, RoleHelpTip } from './agent-form-fields.jsx';
 
 const hasRepos = (env) =>
   (Array.isArray(env?.repositories) && env.repositories.length > 0) ||
   !!env?.repository?.url;
-
-/* ── Role picker ───────────────────────────────────────────────────────
-   Card-style radio group. Single source of truth for what each role
-   means; same component is reused for the in-form info banner. */
-
-function RoleCard({ value, current, onSelect }) {
-  const info = ROLE_INFO[value];
-  if (!info) return null;
-  const Icon = info.icon;
-  const active = current === value;
-  return (
-    <button
-      type="button"
-      onClick={() => onSelect(value)}
-      style={{
-        textAlign: 'left',
-        display: 'grid',
-        gridTemplateColumns: 'auto 1fr auto',
-        gap: 'var(--eb-space-3)',
-        alignItems: 'flex-start',
-        padding: 'var(--eb-space-3)',
-        background: active ? 'var(--eb-bg-elevated)' : 'var(--eb-bg-surface)',
-        border: `1px solid ${active ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
-        borderRadius: 'var(--eb-radius-md)',
-        cursor: 'pointer',
-        fontFamily: 'inherit',
-        color: 'var(--eb-text-primary)',
-        outline: active ? '2px solid var(--eb-accent-primary)' : 'none',
-        outlineOffset: -2,
-      }}
-    >
-      <span style={{
-        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-        width: 28, height: 28, borderRadius: 'var(--eb-radius-md)',
-        background: active ? 'var(--eb-accent-primary)' : 'var(--eb-bg-app)',
-        color: active ? 'var(--eb-text-inverted)' : 'var(--eb-text-secondary)',
-        flexShrink: 0,
-      }}>
-        <Icon size={15} />
-      </span>
-      <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-        <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)' }}>
-          {info.title}
-        </span>
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
-          {info.short}
-        </span>
-      </span>
-      <span
-        aria-hidden="true"
-        style={{
-          width: 14, height: 14, borderRadius: '50%', flexShrink: 0,
-          marginTop: 4,
-          border: `2px solid ${active ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
-          background: active ? 'var(--eb-accent-primary)' : 'transparent',
-          boxShadow: active ? 'inset 0 0 0 3px var(--eb-bg-elevated)' : 'none',
-        }}
-      />
-    </button>
-  );
-}
 
 /* ── Agent Create Form ─────────────────────────────────────────────── */
 export default function AgentCreateForm({ onSave, onCancel, saving, error, idConflict }) {
@@ -116,11 +56,9 @@ export default function AgentCreateForm({ onSave, onCancel, saving, error, idCon
   const { data: skillsData } = useApi('/api/skills');
   const poolSkills = (skillsData || []).filter(s => s.source === 'pool');
 
-  // System prompt is optional for a team: members can be given their own
-  // per-role prompts later, so a team can be created without a default. The
-  // pure helper derives the gate AND the ordered list of unmet requirements
-  // from one place, so the disabled button and the "why" hint below can never
-  // disagree.
+  // The pure helper derives the gate AND the ordered list of unmet
+  // requirements from one place, so the disabled button and the "why" hint
+  // below can never disagree.
   const { canSubmit, reasons: submitBlockers } = describeAgentSubmitState(form);
 
   return (
@@ -222,47 +160,10 @@ export default function AgentCreateForm({ onSave, onCancel, saving, error, idCon
         )}
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-        {/* The role explanation is a "?" on the label rather than a box below
-            the cards (#2026): it follows the selection and costs no height in a
-            form whose subject is the prompt. */}
-        <div style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-          <span>Role <span style={{ color: 'var(--eb-status-error)' }}>*</span></span>
-          <RoleHelpTip role={form.role} />
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-          <RoleCard value="agent" current={form.role} onSelect={v => update('role', v)} />
-          <RoleCard value="team"  current={form.role} onSelect={v => update('role', v)} />
-        </div>
-        {(form.role === 'team' || form.role === 'team-member') && (
-          <div style={{
-            display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
-            padding: 'var(--eb-space-3)',
-            background: 'color-mix(in srgb, var(--eb-accent-primary) 8%, transparent)',
-            border: '1px solid var(--eb-accent-primary)',
-            borderRadius: 'var(--eb-radius-md)',
-            fontSize: 'var(--eb-text-xs)',
-            color: 'var(--eb-text-primary)',
-            lineHeight: 1.6,
-          }}>
-            <Info size={14} style={{ flexShrink: 0, marginTop: 2, color: 'var(--eb-accent-primary)' }} />
-            <span>
-              Consider using the{' '}
-              <Link to="/team-setup" style={{ color: 'var(--eb-accent-primary)' }}>
-                Agent Team Wizard
-              </Link>{' '}
-              instead — it sets up the full team structure automatically.
-            </span>
-          </div>
-        )}
-      </div>
-
       <div>
         <div style={labelStyle}>Skills</div>
         <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
-          {form.role === 'team'
-            ? "The whole team's skill set, copied into every member's workspace at seed time — members inherit it unless they set their own override."
-            : "Skills copied into this agent's workspace at seed time. Only global-pool skills are offered here; team-tier skills become available once the agent belongs to a team and you edit it there."}
+          Skills copied into this agent's workspace at seed time. Only global-pool skills are offered here; team-tier skills become available once the agent belongs to a team and you edit it there.
         </div>
         <SkillPicker
           skills={poolSkills}
@@ -273,15 +174,10 @@ export default function AgentCreateForm({ onSave, onCancel, saving, error, idCon
 
       <div>
         <div style={labelStyle}>
-          {form.role === 'team' ? 'System Prompt Template' : 'System Prompt'}
-          {form.role === 'team'
-            ? <span style={{ marginLeft: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-normal)' }}>(optional)</span>
-            : <>{' '}<span style={{ color: 'var(--eb-status-error)' }}>*</span></>}
+          System Prompt <span style={{ color: 'var(--eb-status-error)' }}>*</span>
         </div>
         <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-1)' }}>
-          {form.role === 'team'
-            ? <>Stored once and reused for every member that inherits it. Define the persona, expertise, and tone — each member gets its own workspace but the same instructions. Leave blank to give members an empty default; you can then set a custom prompt per member.</>
-            : <>The persona Claude reads at startup. Describe the agent's role, expertise, communication style and any constraints. Markdown is fine; treat it like the <code>system</code> message in a chat completion.</>}
+          The persona Claude reads at startup. Describe the agent's role, expertise, communication style and any constraints. Markdown is fine; treat it like the <code>system</code> message in a chat completion.
         </div>
         <textarea
           value={form.systemPrompt}

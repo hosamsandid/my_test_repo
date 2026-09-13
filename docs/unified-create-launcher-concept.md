@@ -171,6 +171,10 @@ D5 deferred the technical unification of the single-agent and team data-model pa
 
 **Epic #2229 completed — Phase C (#2232).** The cleanup half: a one-time, operator-invoked sweep (`orchestrator/team-of-one-migration.js`) brought every agent created *before* Phase B up to the same team-of-one shape, and the manual `POST /api/agents/:id/convert-to-team` bridge (#2052) was retired outright — both routes, the row-menu entry and its dialog are gone. Growing a single assistant is now the same **Add member** action any team uses, documented in `help-topics/create.md`. One known gap is flagged rather than closed: **Clone** and **Import** still build their config directly and can still land a standalone `role: 'agent'` after the sweep has run once; the migration sweep is idempotent and safe to re-run, which is the recommended recovery rather than a new per-agent UI action.
 
+### AC7 / D3 superseded — #2233 (Phase D of #2229)
+
+The AC7 paragraph above ("its role picker includes `orchestrator`") had already gone stale once #1964 (BP removal) dropped the `orchestrator` card from `AgentCreateForm.jsx`, leaving only `agent`/`team` selectable — that drift predates this ticket. #2233 removes what was left of the choice outright, per D2 of #2229: after Phase B there is no real distinction between "a lone agent" and "a team" (both mint a team, differing only in member count), so the `agent`/`team` role picker and its backing catalogue (`agent-lifecycle/agent-form-fields.jsx`, `ROLE_INFO`/`RoleHelpTip`) are deleted rather than left offering a choice with no answer. **Configure an agent manually** now asks for an id, a Working Environment, skills and a system prompt — nothing else — and always creates a plain agent (itself a team of one, #2231). This is the last word on D3: no role is picked on this form any more, `orchestrator` included.
+
 ---
 
 ## 9 — Edge cases, constraints, dependencies

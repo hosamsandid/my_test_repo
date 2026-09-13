@@ -71,29 +71,6 @@ test('the form and its sub-controls live in exactly one place', () => {
   }
 });
 
-test('the shared field controls are imported back, not re-typed', () => {
-  // #1929 asserted this on the Agents page, because the create form that
-  // renders these controls was still defined there. #1956 moved that form into
-  // `agent-lifecycle/AgentCreateForm.jsx`, so the importer moved with it — the
-  // invariant is unchanged (one definition, imported by whoever renders it),
-  // only its address is.
-  assert.match(createForm, /from '\.\/agent-form-fields\.jsx'/);
-  // `MissionDirectoryField` / `repoDirName` left this list with the field
-  // itself (#1964) — see the removal guard in `bp-removal-ui.test.js`, which
-  // asserts neither is re-typed anywhere rather than merely not duplicated here.
-  // `RoleDetailBanner` left it in #2026: the big blue box is gone, and its
-  // successor `RoleHelpTip` is rendered by the create form alone (the edit form
-  // dropped the read-only Role field and its explanation), so what is asserted
-  // here is that the create form imports it instead of re-typing the tip.
-  for (const symbol of ['ROLE_INFO', 'RoleHelpTip']) {
-    assert.doesNotMatch(
-      createForm, new RegExp(`(function|const) ${symbol}\\b\\s*[({=]`),
-      `${symbol} must not be redefined in the create form`,
-    );
-  }
-  assert.match(createForm, /<RoleHelpTip role=\{form\.role\}/);
-});
-
 /* ── #2026: the settings form's field set and its ordering ───────── */
 
 test('the read-only Role and Working Environment fields are gone', () => {
@@ -110,14 +87,13 @@ test('the read-only Role and Working Environment fields are gone', () => {
   assert.match(editForm, /label="Display Name \*"/);
 });
 
-test('the big-box role banner is not left behind as an orphan', () => {
-  const fields = code(read('../agent-lifecycle/agent-form-fields.jsx'));
-  assert.doesNotMatch(fields, /RoleDetailBanner/);
-  // The compact successor renders the shared InfoTip rather than a second
-  // hand-rolled popover, and still reads its copy from the one catalogue.
-  assert.match(fields, /import InfoTip from '\.\.\/\.\.\/components\/InfoTip'/);
-  assert.match(fields, /export function RoleHelpTip/);
-  assert.match(fields, /export const ROLE_INFO/);
+test('the role catalogue is gone with the last picker that used it (#2233)', () => {
+  // `agent-form-fields.jsx` carried `ROLE_INFO`/`RoleHelpTip` for the create
+  // form's role picker alone (the edit form dropped its own role explanation
+  // in #2026) — once #2233 removed that picker, the module has no reader left
+  // and is deleted rather than kept as dead weight.
+  assert.equal(fs.existsSync(path.join(HERE, '../agent-lifecycle/agent-form-fields.jsx')), false);
+  assert.doesNotMatch(createForm, /agent-form-fields/);
 });
 
 test('the system prompt renders after Display Name and before Plugins', () => {

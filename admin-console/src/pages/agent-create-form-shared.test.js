@@ -58,11 +58,11 @@ test('the create form lives in one shared module (AC5)', () => {
   assert.doesNotMatch(create, /function AgentCreateForm/, 'Create.jsx defines no second copy');
 });
 
-test('the role picker stays inside the form module (AC5)', () => {
-  // `RoleCard` is only ever used by this form. A copy in the host page is a
-  // fork waiting to be edited on one side only — which is what happened while
-  // the Agents page rendered its own inline create form.
-  assert.match(form, /function RoleCard/);
+test('the role picker is gone, not merely moved (#2233)', () => {
+  // The `agent` vs `team` choice was removed outright rather than hidden — the
+  // form always produces a plain agent (itself minted as a team of one,
+  // #2231), so neither surface may define or render a role picker any more.
+  assert.doesNotMatch(form, /function RoleCard/);
   assert.doesNotMatch(create, /function RoleCard/);
   assert.doesNotMatch(create, /<RoleCard/);
 });

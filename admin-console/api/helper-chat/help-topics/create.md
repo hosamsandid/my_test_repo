@@ -65,7 +65,7 @@ you are doing. On those two the "→ …" line is the whole promise.
 | **Start from a ready-made team** | Pick a proven template (or one of your saved drafts) and adjust it. The fastest route to a working team when a pattern already fits. | The Agent Team Wizard, on its template gallery |
 | **Describe what you need** | Tell it in plain language what you want done. The Flow Copilot drafts a flow and shows a live preview — nothing is created until you confirm. | A new draft in the Flows canvas |
 | **Design it on the canvas** | Lay the agents out on the canvas and connect them yourself. Full control from a blank slate. | A fresh, empty draft in the Flows canvas |
-| **Configure an agent manually** | Fill in the fields yourself: id, role, environment, skills, system prompt. Nothing is inferred — though a plain agent role still comes with its own one-member team under the hood, the same as every other single-agent path below. | A panel on this page |
+| **Configure an agent manually** | Fill in the fields yourself: id, environment, skills, system prompt. There is no role to pick any more — it always creates a plain agent, which comes with its own one-member team under the hood, the same as every other single-agent path below. | A panel on this page |
 
 The **Recommended** badge on *Start from a ready-made team* and **Fastest start**
 on the hero are advice, not a restriction — every entry stays one click away, and
@@ -113,11 +113,12 @@ repository) and it works out the rest — it creates a Working Environment of yo
 own, picks the branch off the remote, and names the assistant after the
 repository. Choose it when you want to be talking to something in a minute.
 
-**Configure an agent manually** decides nothing for you. You pick the id, the
-role (a plain agent, an Agent Team template or an orchestrator), the Working
-Environment it binds to, its skills and its system prompt — and it creates
-exactly that, on an environment that must already exist. Choose it when the
-answer to each of those is already settled.
+**Configure an agent manually** decides nothing for you except *what kind of
+thing this becomes* — that question is gone. You pick the id, the Working
+Environment it binds to, its skills and its system prompt, and it creates a
+plain agent — itself its own one-member team under the hood — on an
+environment that must already exist. Choose it when the answer to each of
+those is already settled.
 
 Both leave you with something you can grow later; neither is a one-way door.
 

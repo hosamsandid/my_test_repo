@@ -171,6 +171,13 @@ function ownedByCaller(scope, resource) {
 //     standalone agent, not an opt-in: the pre-#2078 `visibility === 'private'`
 //     condition is retired unread (nothing ever wrote the field, verified in
 //     concept §3.5), so a standalone agent is private to its creator full stop.
+//
+// Post-#2229 (epic; #2234 decision), "a standalone agent" reaching this branch
+// means an **ephemeral** agent or a malformed config, not an ordinary
+// user-created one — Phase C's team-of-one migration converts every ordinary
+// standalone agent into a team of one, and the ephemeral-agent route is a
+// permanent exception the migration does not touch. The rule itself is
+// unchanged: docs/decentralised-access-concept.md Amendment 10.
 function visibleAgent(scope, agent) {
   if (!scope) return false;
   if (scope.all) return true;
@@ -451,6 +458,8 @@ function credentialVisibleToTeam(cred, teamId) {
 // no team, so its creator is the only non-admin who may change it. Without this
 // the owner could see their own private agent and not edit it — and nobody but a
 // System Admin could, since no membership can name a standalone agent's id.
+// Post-#2229, that standalone agent is an ephemeral one or a malformed config
+// (see the note above `visibleAgent`) — the rule is unchanged.
 function canManageAgent(scope, agent) {
   if (!scope) return false;
   if (scope.all) return true;

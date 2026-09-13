@@ -1022,6 +1022,14 @@ const tenantAgents = {
   payments: { id: 'payments', role: 'team', teamId: 'payments' },
   'payments-dev': { id: 'payments-dev', role: 'team-member', teamId: 'payments', parentTeamId: 'payments' },
   standalone: { id: 'standalone', role: 'agent', teamId: 'risk' },
+  // Post-#2229 (epic; #2234 decision), an ordinary standalone agent no longer
+  // exists — this shape is now reached only by an ephemeral agent
+  // (`orchestrator/orchestrator.js`'s `POST /internal/agents/ephemeral`,
+  // permanently excluded from the team-of-one migration) or a malformed
+  // config. `resolveAgentTenant` doesn't branch on `ephemeral` either way —
+  // this fixture proves that stays true, alongside `standalone` above rather
+  // than replacing it (docs/decentralised-access-concept.md Amendment 10).
+  standaloneEphemeral: { id: 'standalone-ephemeral', role: 'agent', ephemeral: true, teamId: 'risk' },
 };
 const loadTenantAgent = (id) => tenantAgents[id] || null;
 
@@ -1043,6 +1051,10 @@ test('tenant: the coinciding-id case keeps resolving as before', () => {
 test('tenant: agents without a parent use their own teamId', () => {
   assert.equal(resolveAgentTenant(tenantAgents.standalone, loadTenantAgent), 'risk');
   assert.equal(resolveAgentTenant(tenantAgents['sdlc-2-0'], loadTenantAgent), 'default');
+});
+
+test('tenant: an ephemeral agent resolves exactly like any other standalone agent (#2234)', () => {
+  assert.equal(resolveAgentTenant(tenantAgents.standaloneEphemeral, loadTenantAgent), 'risk');
 });
 
 test('tenant: falls back to the own stamp when the parent is missing or unstamped', () => {

@@ -148,7 +148,8 @@ function resolveEffectiveOwnerId(cfg, loadAgentConfig, actingSenderUserId, basel
 // exist (a team that never changed hands resolves to its creator, same as
 // before). A standalone `role: 'agent'` has no team to defer to
 // (`resolveAgentTeam` → `null`) and keeps resolving to its own static owner,
-// unchanged.
+// unchanged — post-#2229 (epic; #2234 decision) that is an ephemeral agent or
+// a malformed config, not an ordinary user-created one (see agent-team.js).
 //
 // `users`/`memberships` are the caller's already-loaded snapshots — this
 // module takes no fs dependency of its own. Omitting them (or handing over
@@ -182,11 +183,12 @@ function resolveBaselineOwnerId(cfg, { loadAgentConfig, users, memberships } = {
 //
 // The boundary: a team-bound agent (a `team` or one of its `team-member`s)
 // trusts only its own team's members; a standalone agent (D8, no team
-// boundary — `resolveAgentTeam` returns null) trusts only its own owner, the
-// one relationship it has. This closes cross-team (and, for a standalone
-// agent, cross-owner) impersonation — it does not make the claim unforgeable
-// within that boundary, which would need a signed, per-run claim the
-// container cannot re-mint; that is a larger, separate hardening step.
+// boundary — `resolveAgentTeam` returns null — post-#2229 an ephemeral agent
+// or a malformed config) trusts only its own owner, the one relationship it
+// has. This closes cross-team (and, for a standalone agent, cross-owner)
+// impersonation — it does not make the claim unforgeable within that
+// boundary, which would need a signed, per-run claim the container cannot
+// re-mint; that is a larger, separate hardening step.
 //
 // `hasMembership(teamId, userId)` is the injected, impure membership lookup
 // (mirrors `loadAgentConfig` above) — this module stays fs-free.

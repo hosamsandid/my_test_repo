@@ -36,6 +36,20 @@
 // name a team no membership can reference: the same outcome, but a value that
 // looks like a boundary and grants nothing.
 //
+// WHO STILL REACHES THIS BRANCH (#2229/#2232/#2234). Epic #2229's team-of-one
+// migration (Phase C, #2232) converts every ordinary standalone agent into a
+// team of one and closes off the UI paths that used to create a fresh one, so
+// after that migration has run a `role: 'agent'` config with no team is no
+// longer the general case D8 was written for — it is now reached by exactly
+// two things: an **ephemeral** agent (`orchestrator/orchestrator.js`'s
+// `POST /internal/agents/ephemeral`, which persists `role: 'agent',
+// ephemeral: true` as a permanent, by-design exception — `team-of-one-
+// migration.js` refuses to convert it) and a genuinely malformed/legacy
+// config. The owner-branch code below is UNCHANGED and still required for
+// both — this paragraph corrects the prose, not the behavior (Issue #2234's
+// own decision: a docs/comment sweep only). See `docs/decentralised-access-
+// concept.md` Amendment 10.
+//
 // Pure and dependency-free. Duplicated byte-identically into the admin-console
 // image (which copies only `api/*.js`), two-sided-guarded by agent-team.test.js
 // — the same arrangement as toolchain-registry.js / plugin-manifest.js.
@@ -55,8 +69,9 @@ function resolveAgentTeam(cfg) {
 }
 
 // Is this agent decided by ownership alone rather than by team membership?
-// True for a standalone `role: 'agent'` (D8) and for any config too broken to
-// name a team.
+// True for a standalone `role: 'agent'` (D8 — post-#2229 an ephemeral agent or
+// a malformed config, not an ordinary user-created one) and for any config too
+// broken to name a team.
 function isOwnerScopedAgent(cfg) {
   return resolveAgentTeam(cfg) === null;
 }

@@ -1877,3 +1877,55 @@ a re-argument of the questions Amendment 9 already answered: whether reach and
 authority may diverge (yes), where the rule lives (its own small module,
 composed at the family's own call sites), and what it is called in the UI
 (**Global**).
+
+## Amendment 10 (#2229 epic, #2232/#2234) — the standalone-agent case D8 introduced is now exceptional, not general
+
+Everywhere above, "a standalone `role: 'agent'`" is written as the ordinary,
+expected shape of an agent with no team — the ONLY kind D8 (§3.5/§7.4) and its
+owner branch (`visibleAgent`/`canManageAgent` in `scope.js`,
+`resolveAgentOwnerId`/`resolveBaselineOwnerId`/`isActingSenderTrusted` in
+`credential-resolution.js`, `resolveAgentTeam` in `agent-team.js`) were written
+to handle. Epic **#2229** (the team-of-one migration) changes that premise: its
+Phase C (**#2232**) converts every existing standalone agent into a team of
+one and the earlier phases close off the UI paths that used to mint a fresh
+one, so after that migration has run, an ordinary user can no longer create or
+be left holding a bare `role: 'agent'` config.
+
+**#2234** — the phase that was supposed to sweep the now-dead branch away —
+found a real exception before touching any code: the **ephemeral agent** route
+(`orchestrator/orchestrator.js`'s internal `POST /internal/agents/ephemeral`)
+persists `role: 'agent', ephemeral: true` as a permanent, by-design write path,
+and `team-of-one-migration.js` explicitly refuses to convert it
+(`{ eligible: false, code: 'ephemeral' }`). So `resolveAgentTeam → null` is
+*not* only reachable via a genuinely malformed/legacy config post-#2229 — an
+ephemeral agent reaches it too, by design, and still needs D8's owner-private
+visibility exactly as before.
+
+**Decision (recorded on issue #2234, superseding the two options it raised):**
+keep the owner-branch code in every function named above completely
+unchanged — ephemeral agents still need it — and correct only the PROSE, here
+and at each call site, to say the `null`/owner-branch case is now reached by
+**an ephemeral agent or a malformed config**, not "a standalone agent a user
+could still create." This is a documentation correction, not a behavior
+change: AC1 of #2234 ("no production code path branches on 'is this a
+standalone agent with no team' as a case distinct from 'is this a team
+member'") is satisfied by the *fact* that no new standalone agent can be
+created, not by deleting code a real, ongoing case still depends on — deleting
+it would have been re-opening Phase C's own exception, which #2234's Scope
+explicitly puts out of bounds ("No re-opening of #2077/#2078/#2041's actual
+decisions").
+
+**What actually shipped for #2234**, split across two PRs since the first
+under-scoped its own "Closes" claim: a UI-only sweep (three client-side list
+surfaces — the Agent Chat left rail, the SkillsRegistry "Install into agent"
+picker, and Administration → Resources' ownership grouping — now filter out a
+bare `role: 'agent'` row; server responses are unchanged, and the Flows →
+Import-packs picker is deliberately left showing standalone agents since it
+exists specifically to recover a leftover pack tree that may sit on one) plus
+this prose correction and three `ephemeral: true` regression fixtures
+(`ownership-no-lockout.test.js`, `scope.test.js`; `bound-agents-visibility.
+test.js` carries no agent-config fixture at all, so nothing there needed
+extending — noted in place rather than silently skipped). **Consequence
+recorded, not silently accepted:** there is now no admin-console UI path at
+all to inspect, re-own or delete a standalone/ephemeral agent — that requires
+direct API/CLI access.

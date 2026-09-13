@@ -20,6 +20,19 @@ test('isGracefulDeleteRole: a leftover bp-instance/orchestrator config is force-
   assert.strictEqual(isGracefulDeleteRole('orchestrator'), false);
 });
 
+// #2246 (Agent Pools epic #2251 Phase 1, D8): a pooled instance is graceful
+// again — the marker lives on `cfg`, not the role name, since a pool instance
+// is an ordinary `team-member` by role.
+test('isGracefulDeleteRole: a pool instance (cfg.poolInstance) is graceful; an ordinary team-member is not', () => {
+  assert.strictEqual(isGracefulDeleteRole('team-member', { poolInstance: true }), true);
+  assert.strictEqual(isGracefulDeleteRole('team-member', { poolInstance: false }), false);
+  assert.strictEqual(isGracefulDeleteRole('team-member', {}), false);
+  assert.strictEqual(isGracefulDeleteRole('team-member', null), false);
+  assert.strictEqual(isGracefulDeleteRole('team-member', undefined), false);
+  // A cfg-less call (role only, the pre-#2246 call shape) stays false.
+  assert.strictEqual(isGracefulDeleteRole('team-member'), false);
+});
+
 test('TeardownRegistry: begin arms the guard, has() reports it, finish clears it', () => {
   const reg = new TeardownRegistry();
   assert.strictEqual(reg.has('a1'), false);

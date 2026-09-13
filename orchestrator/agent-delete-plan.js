@@ -17,16 +17,17 @@
 // nothing to flush, so its container is force-removed immediately.
 //
 // #1962 removed the BriefingPack model, and with it `bp-instance`. **No
-// supported role is graceful any more**, so this predicate is now constantly
-// false. #1967 then removed the handler branch itself — the entrypoint's
-// SIGTERM path no longer commits anything, so even a hand-restored
-// `bp-instance` config would have nothing to flush. It is kept as the single named place that decision lives (rather than
-// inlining `false` at the call site) because the seam it feeds —
-// `removePerAgentNetwork`/`ensureAgentContainerGone`'s `graceful` flag in
-// spawn-container.js — is still there for the next role that needs a flush
-// window, and because "which roles flush on shutdown" stays unit-testable.
-function isGracefulDeleteRole(_role) {
-  return false;
+// supported role was graceful for a long stretch**, so this predicate stayed
+// constantly false — until #2246 (Agent Pools epic #2251 Phase 1) became "the
+// next role that needs a flush window" the comment below always expected: a
+// pooled instance is graceful again, precisely because it exists to run
+// exactly one ticket and then die, and losing its partial work on teardown
+// would be worse than a noisy, best-effort commit+push (D8, design of record
+// `docs/parallel-workers-concept.md` §4/§8). `cfg` (not `role`) is what
+// carries the marker, since a pool instance is an ordinary `team-member` by
+// role — only `cfg.poolInstance` distinguishes it from one.
+function isGracefulDeleteRole(_role, cfg) {
+  return !!(cfg && cfg.poolInstance === true);
 }
 
 // In-memory registry of agent ids whose background teardown is still running.

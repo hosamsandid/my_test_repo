@@ -141,6 +141,39 @@ function normalizeWipLimit(v) {
   return Number.isInteger(v) && v >= 1 ? v : null;
 }
 
+// Agent instance pools (#2246, epic #2251 Phase 1; design of record
+// `docs/parallel-workers-concept.md` §9). Opt-in `pool` config on a ROLE — a
+// non-pooled role (the default, no `pool` field) is byte-identical to today.
+// Round-tripped through export → materialise → Edit-as-draft like `wipLimit`/
+// `hillClimb`. Normalized here (bundle round-trip time) so a saved role always
+// carries a clean shape; the orchestrator's own `agent-pool.js` re-derives the
+// identical defaults when reading a materialised member's config at dispatch
+// time — the two are kept in sync by hand, the same duplication `wipLimit`'s
+// own `limitInForce` already lives with.
+const POOL_WORKSPACES = ['git-clean-base', 'input-copy', 'none'];
+
+function normalizePool(raw) {
+  if (!raw || typeof raw !== 'object' || raw.enabled !== true) return null;
+  const maxInstances = Number.isInteger(raw.maxInstances) && raw.maxInstances >= 1 ? raw.maxInstances : null;
+  const workspace = POOL_WORKSPACES.includes(raw.workspace) ? raw.workspace : 'git-clean-base';
+  const baseBranch = typeof raw.baseBranch === 'string' && raw.baseBranch.trim() ? raw.baseBranch.trim() : null;
+  const t = raw.teardown && typeof raw.teardown === 'object' ? raw.teardown : {};
+  const positiveMs = (v) => (Number.isFinite(v) && v > 0 ? v : null);
+  return {
+    enabled: true,
+    ...(maxInstances != null ? { maxInstances } : {}),
+    workspace,
+    ...(baseBranch ? { baseBranch } : {}),
+    ...((positiveMs(t.idleTimeoutMs) || positiveMs(t.maxRuntimeMs) || positiveMs(t.retainLogsMs)) ? {
+      teardown: {
+        ...(positiveMs(t.idleTimeoutMs) ? { idleTimeoutMs: positiveMs(t.idleTimeoutMs) } : {}),
+        ...(positiveMs(t.maxRuntimeMs) ? { maxRuntimeMs: positiveMs(t.maxRuntimeMs) } : {}),
+        ...(positiveMs(t.retainLogsMs) ? { retainLogsMs: positiveMs(t.retainLogsMs) } : {}),
+      },
+    } : {}),
+  };
+}
+
 // Strip a leading `<teamId>-` so an exported member id becomes a reusable role
 // key (e.g. `acme-developer` → `developer`). Idempotent for ids without it.
 function roleKeyOf(id, teamId) {
@@ -520,6 +553,10 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
       // Process stage band — portable so an exported team round-trips its stage
       // layout back into a draft (Edit as draft) and re-materialises unchanged.
       ...(typeof r.stage === 'string' && r.stage ? { stage: r.stage } : {}),
+      // Agent instance pools (#2246) — opt-in pooling config, round-tripped like
+      // every other declarative port; omitted entirely for a non-pooled role so
+      // it stays byte-identical to a bundle that never heard of pooling.
+      ...((() => { const p = normalizePool(r.pool); return p ? { pool: p } : {}; })()),
       // GitHub artifact ports (#380): what this role produces (PR/issue) and the
       // PR/issue channels it consumes. Declarative source of truth — the runtime
       // github-event triggers are re-derived from these (expandGithubChannels),
@@ -609,6 +646,47 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
       // "may not target its own role" and the same-team check both need it.
       const vo = validateOutcomes(r.outcomes, { labels: b.labels, agents: b.roles, roleId: r.id });
       if (!vo.ok) return { ok: false, error: `role ${r.id}: ${vo.error}` };
+    }
+    // Agent instance pools (#2246): checked, not silently coerced — a typo'd
+    // `workspace`/`enabled` value should refuse the save rather than quietly
+    // materialise as an unpooled role (the same discipline `wipLimit`'s own
+    // "0 is refused, not tolerated" rule follows).
+    if (r.pool !== undefined && r.pool !== null) {
+      if (typeof r.pool !== 'object' || Array.isArray(r.pool)) {
+        return { ok: false, error: `role ${r.id}: pool must be an object` };
+      }
+      if (r.pool.enabled !== undefined && typeof r.pool.enabled !== 'boolean') {
+        return { ok: false, error: `role ${r.id}: pool.enabled must be a boolean` };
+      }
+      if (r.pool.maxInstances !== undefined && r.pool.maxInstances !== null
+          && !(Number.isInteger(r.pool.maxInstances) && r.pool.maxInstances >= 1)) {
+        return { ok: false, error: `role ${r.id}: pool.maxInstances must be a positive integer (omit it for no per-role cap)` };
+      }
+      if (r.pool.workspace !== undefined && !POOL_WORKSPACES.includes(r.pool.workspace)) {
+        return { ok: false, error: `role ${r.id}: pool.workspace must be one of ${POOL_WORKSPACES.join(', ')}` };
+      }
+      if (r.pool.baseBranch !== undefined && r.pool.baseBranch !== null && typeof r.pool.baseBranch !== 'string') {
+        return { ok: false, error: `role ${r.id}: pool.baseBranch must be a string` };
+      }
+      if (r.pool.teardown !== undefined && r.pool.teardown !== null) {
+        if (typeof r.pool.teardown !== 'object' || Array.isArray(r.pool.teardown)) {
+          return { ok: false, error: `role ${r.id}: pool.teardown must be an object` };
+        }
+        for (const key of ['idleTimeoutMs', 'maxRuntimeMs', 'retainLogsMs']) {
+          const v = r.pool.teardown[key];
+          if (v !== undefined && v !== null && !(Number.isFinite(v) && v > 0)) {
+            return { ok: false, error: `role ${r.id}: pool.teardown.${key} must be a positive number` };
+          }
+        }
+      }
+      // A pooled role's concurrency and reap tick both piggyback on the team's
+      // wipLimit (concept §12 Phase 1: "conflict protection = WIP count … only")
+      // — a pool with no wipLimit would spawn unboundedly and never be swept for
+      // release, since the reconcile tick that reaps a finished ticket's
+      // instance is itself gated on a configured limit.
+      if (r.pool.enabled === true && (b.wipLimit === undefined || b.wipLimit === null)) {
+        return { ok: false, error: `role ${r.id}: pool.enabled requires the flow's own wipLimit to be set (it governs and reaps pooled instances)` };
+      }
     }
     if (r.channels !== undefined) {
       if (!Array.isArray(r.channels)) return { ok: false, error: `role ${r.id}: channels must be an array` };
@@ -811,6 +889,11 @@ function templateToCustomRoles(bundle) {
     // live graph reproduces the draft's stage layout instead of collapsing to
     // the auto-layered columns.
     ...(typeof r.stage === 'string' && r.stage ? { stage: r.stage } : {}),
+    // Agent instance pools (#2246) — carried onto the materialised role
+    // TEMPLATE's own member config, where the orchestrator's dispatch path
+    // reads it (an ephemeral instance never carries this field — it opts out
+    // of further nested pooling by construction).
+    ...(normalizePool(r.pool) ? { pool: normalizePool(r.pool) } : {}),
     // Agent-level OUTCOMES port (#827) — recorded on member config; supersedes
     // `emits` when present (the two never coexist on a materialised member).
     ...(isAuthoredOutcomes(r.outcomes) ? { outcomes: normalizeOutcomes(r.outcomes) } : {}),
@@ -1911,6 +1994,11 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
           (to) => `${teamId}-${to}`) }
       : (Array.isArray(t.emits) && t.emits.length ? { emits: t.emits } : {})),
     ...(typeof t.stage === 'string' && t.stage ? { stage: t.stage } : {}),
+    // Agent instance pools (#2246) — carried verbatim onto the materialised
+    // role-template member; already normalized by `templateToCustomRoles`
+    // (a customRole) or `buildProcessTemplate` (a catalog role re-imported via
+    // a bundle), so no `{{var}}` substitution applies to it.
+    ...(t.pool && typeof t.pool === 'object' ? { pool: t.pool } : {}),
     ...(t.github && (t.github.producesPr || t.github.producesIssue) ? { github: t.github } : {}),
     ...(Array.isArray(t.channels) && t.channels.length
       ? { channels: t.channels.map((c) => ({ ...c, from: `${teamId}-${c.from}` })) }
@@ -1933,6 +2021,8 @@ module.exports = {
   emptyDraftBundle, roleKeyOf, VERSION, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb,
   // Admission control (#2114)
   normalizeWipLimit,
+  // Agent instance pools (#2246)
+  normalizePool, POOL_WORKSPACES,
   artifactKey, artifactHint, artifactIsNamed,
   slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,
   // Claim labels (#958) + success mirror (#1163)

@@ -436,7 +436,16 @@ export default function AgentEditForm({
   // provider/Toolchain/MCP servers/Additional context save through the
   // environment record's own button (`TeamEnvironmentPanel`) and Plugins
   // applies immediately (`PluginGrantSection`), both unchanged (AC5).
-  const showBatchedSave = !isTeam || activeTab === 'general' || activeTab === 'skills';
+  //
+  // `|| !!onCancel` (code-review finding on #2236): those two tabs are only
+  // where an edit CAN be made, not the only tabs it can be VIEWED from once
+  // made. `AgentSettingsPanel` only ever passes a non-null `onCancel` while
+  // its own `dirty` flag is true — the same batched fields this row acts on —
+  // so without this a pending edit made on General/Skills would leave no
+  // Save/Discard reachable at all the moment the user switched to another
+  // tab to check something, stranding the "unsaved changes" banner with
+  // nothing on screen to resolve it.
+  const showBatchedSave = !isTeam || activeTab === 'general' || activeTab === 'skills' || !!onCancel;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>

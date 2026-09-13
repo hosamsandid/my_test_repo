@@ -17,6 +17,7 @@ import { SessionsActiveProvider } from './agent-chat/SessionsActiveContext';
 import { resolveRailWidths } from './agent-chat/rail-layout';
 import { CREATE_ROUTE, emptyStatePointer } from './agent-chat/empty-state';
 import { describeAgentCreateAccess } from './agent-lifecycle/agent-create-access.js';
+import { resolveTeamConfigTab } from './agent-lifecycle/team-config-tabs-view.js';
 import PageHelpButton from '../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat/agent-chat-help-sections.js';
 
@@ -1061,6 +1062,17 @@ function EmptyState() {
  */
 function TeamConfigSurface({ team, onAgentConfigChanged }) {
   const canManage = team?.canManage !== false;
+  // #2236 AC7: the selected tab of the flat configuration row is addressable
+  // by `?tab=<name>` — owned here (above `AgentSettingsPanel`'s own
+  // post-save/draft remounts) so it survives a save and round-trips through a
+  // bookmark or a shared link.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const teamConfigTab = resolveTeamConfigTab(searchParams.get('tab'));
+  const setTeamConfigTab = useCallback((id) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('tab', id);
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
   return (
     <div style={{
       flex: 1,
@@ -1077,6 +1089,8 @@ function TeamConfigSurface({ team, onAgentConfigChanged }) {
             agentId={team.id}
             active
             onSaved={onAgentConfigChanged}
+            teamConfigTab={teamConfigTab}
+            onTeamConfigTabChange={setTeamConfigTab}
           />
         ) : (
           <TeamReadOnlyNotice team={team} />

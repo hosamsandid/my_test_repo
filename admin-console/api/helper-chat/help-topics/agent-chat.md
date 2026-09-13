@@ -581,14 +581,11 @@ configured: the Agents page that used to host a second copy of this form was
 removed once the tab covered it (see *Where the Agents page went* below).
 
 Its **role** is fixed at creation and is not shown here — the agent's role is
-what its list icon shows. The **environment** binding itself is fixed
-too, but on a **team** agent this tab also renders an **Environment**
-section — grouped tabs (Repositories · Model provider · Toolchain · MCP
-servers · Additional context) editing the bound environment's own content in
-place, through that record's own save rather than this form's. There is no
-ownership/team picker there — the environment already belongs to this team.
-On any other role the environment's name just sits under the agent's name in
-the list (on a team, once per group header), with no edit surface here.
+what its list icon shows. The **environment** binding itself is fixed too. On
+any other role the environment's name just sits under the agent's name in the
+list (on a team, once per group header), with no edit surface here — a
+**team** agent's own configuration is a different surface entirely (see *The
+team's configuration tabs, in detail* below).
 
 Three things behave differently from an ordinary form:
 
@@ -603,9 +600,13 @@ Three things behave differently from an ordinary form:
   *disabled* agent instead — the one way to reach a chatless agent's settings.
   A **team**'s settings work differently: they are not reached through this
   tab at all, but through the team's own full-width surface (see *The right
-  rail* above) — selecting its row is what opens them. Either way, the form is
-  hidden entirely when you may not manage the agent, so it is never a control
-  the server would refuse.
+  rail* above), presented as **one row of tabs** — General, Repositories,
+  Model provider, Toolchain, MCP servers, Additional context, Skills, Plugins,
+  all at the same level and always in that order, addressable by
+  `?tab=<name>` in the URL (an unrecognised or missing value opens General).
+  Selecting its row is what opens them. Either way, the form is hidden
+  entirely when you may not manage the agent, so it is never a control the
+  server would refuse.
 
 ### What the form fields control
 
@@ -629,12 +630,15 @@ most consequential thing in this form, so it is not below the plugin grants.
   agent change files on the host. Saving re-provisions the agent's container.
   Offered only on the local / self-hosted stack.
 
-### The team's Environment section, in detail
+### The team's configuration tabs, in detail
 
-On a **team** agent the **Environment** section edits the bound
-environment's own record in place — the same record `PUT /api/environments/:id`
-always has, just reached from here instead of a standalone page. There is no
-ownership/team picker: the environment already belongs to this team.
+A team's whole configuration is **one flat row of tabs** — there is no
+grouping label and no tab nested inside another. **General** carries the
+read-only ID, the Display Name and the Team Default Prompt. Five tabs edit
+the bound environment's own record in place — the same record
+`PUT /api/environments/:id` always has, just reached from here instead of a
+standalone page, with no ownership/team picker (the environment already
+belongs to this team):
 
 | Tab | What it does |
 |---|---|
@@ -643,6 +647,17 @@ ownership/team picker: the environment already belongs to this team.
 | **Toolchain** | Optional — which container image members are spawned from, picked from the System-Admin-registered list. Absent means the default image. |
 | **MCP servers** | Optional server + credential pairs from the MCP registry, materialised into each member's `.claude/settings.json` at seed time. |
 | **Additional context** | Optional text appended to every member's `CLAUDE.md`. |
+
+**Skills** and **Plugins** carry the team's own grant — the same fields the
+*What the form fields control* chapter describes for an ordinary agent —
+sitting at the same level as everything else rather than as separate sections
+below a box; a team with nothing installed or configured still shows all
+eight tabs, each explaining its own empty state rather than disappearing.
+
+Saving General or Skills uses this form's own Save button; the five
+environment tabs and Plugins keep their own, unrelated save/apply behaviour
+exactly as before — switching tabs never loses an edit in progress, and the
+selected tab survives a save.
 
 **A repository change reaches only members created afterwards** — cloning
 happens once, at creation. To bring already-running members up to date, saving

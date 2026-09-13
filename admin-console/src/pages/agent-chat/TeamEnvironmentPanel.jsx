@@ -11,10 +11,11 @@ import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning } from '.
 import { mcpRowHint, mcpChangeNotice, mcpServerLabel } from '../working-env-mcp-view.js';
 import { classifyRepositoryChanges, hasRepositoryChanges } from '../working-env-repo-diff.js';
 import { describeWorkingEnvSubmitState } from '../working-env-submit-state.js';
-import { TEAM_ENV_TABS, initialTeamEnvForm, teamEnvSubmitBody } from './team-environment-view.js';
+import { initialTeamEnvForm, teamEnvSubmitBody } from './team-environment-view.js';
 
 /**
- * Team Settings — Environment tabs (#2167).
+ * Team Settings — the five environment tabs of the flat configuration row
+ * (#2167, re-hosted as top-level tabs by #2236).
  *
  * A `role: 'team'` agent has no configuration of its own beyond its bound
  * Working Environment (`cfg.environmentId` → `loadEnvironment`) — until now
@@ -28,10 +29,14 @@ import { TEAM_ENV_TABS, initialTeamEnvForm, teamEnvSubmitBody } from './team-env
  * propagation offer, and a provider/toolchain change still respawns the
  * team's running agents.
  *
+ * `tab` selects which single environment field-group to render — the
+ * top-level tab strip lives one level up now (`AgentEditForm`'s flat row,
+ * #2236); this component owns no tab strip of its own any more.
+ *
  * Deliberately NOT rendered here: the ownership/team picker. The environment
  * already belongs to this team — editing its content is not a re-tier.
  */
-export default function TeamEnvironmentPanel({ agent }) {
+export default function TeamEnvironmentPanel({ agent, tab }) {
   const envId = agent?.environmentId || null;
   const { data: env, loading, error, refetch } = useApi(
     envId ? `/api/environments/${encodeURIComponent(envId)}` : null,
@@ -67,14 +72,17 @@ export default function TeamEnvironmentPanel({ agent }) {
   // 403 anyway (`canManageEnvironment`). This is the common shape after #2052 —
   // a single agent on a reused shared environment, converted into a team of one.
   if (env.canManage === false) {
-    return <ReadOnlyEnvSummary env={env} />;
+    return <ReadOnlyEnvSummary env={env} tab={tab} />;
   }
 
-  return <TeamEnvironmentFields env={env} onSaved={refetch} />;
+  return <TeamEnvironmentFields env={env} onSaved={refetch} tab={tab} />;
 }
 
-// Read-only view of an environment the caller may see but not manage.
-function ReadOnlyEnvSummary({ env }) {
+// Read-only view of an environment the caller may see but not manage — one
+// field group at a time, matching whichever of the five environment tabs is
+// selected (#2236; each tab renders its own explanation rather than one
+// combined read-only page).
+function ReadOnlyEnvSummary({ env, tab }) {
   const repositories = Array.isArray(env.repositories) ? env.repositories : [];
   const mcpServers = Array.isArray(env.mcpServers) ? env.mcpServers : [];
   const rowStyle = {
@@ -88,73 +96,79 @@ function ReadOnlyEnvSummary({ env }) {
     </div>
   );
   const none = <div style={{ ...rowStyle, color: 'var(--eb-text-muted)' }}>—</div>;
+
+  const banner = (
+    <div style={{
+      display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+      fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+      padding: 'var(--eb-space-2) var(--eb-space-3)',
+      background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-md)',
+    }}>
+      <Info size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
+      <span>
+        This team runs on a shared environment managed by another team.
+        You can view it here but not edit it — ask a System Admin or the owning
+        team's admin to change its repositories, credentials or model provider.
+      </span>
+    </div>
+  );
+
+  let content = null;
+  if (tab === 'repositories') {
+    content = section('Repositories', repositories.length === 0 ? none : (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-0-5)' }}>
+        {repositories.map((r, i) => (
+          <div key={i} style={rowStyle}>
+            <code>{r.url || '(no url)'}</code>
+            {r.branch ? <span style={{ color: 'var(--eb-text-muted)' }}> @ {r.branch}</span> : null}
+            {r.readOnly ? <span style={{ color: 'var(--eb-text-muted)' }}> · read-only</span> : null}
+          </div>
+        ))}
+      </div>
+    ));
+  } else if (tab === 'provider') {
+    content = section('Model provider', (
+      <div style={rowStyle}>
+        {env.llmEndpointId
+          ? <>{env.llmEndpointId}{env.defaultModelId ? <span style={{ color: 'var(--eb-text-muted)' }}> · {env.defaultModelId}</span> : null}</>
+          : <span style={{ color: 'var(--eb-text-muted)' }}>Built-in default</span>}
+      </div>
+    ));
+  } else if (tab === 'toolchain') {
+    content = section('Toolchain', (
+      <div style={rowStyle}>
+        {env.toolchainId || <span style={{ color: 'var(--eb-text-muted)' }}>Default image</span>}
+      </div>
+    ));
+  } else if (tab === 'mcp') {
+    content = section('MCP servers', mcpServers.length === 0 ? none : (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-0-5)' }}>
+        {mcpServers.map((m, i) => (
+          <div key={i} style={rowStyle}><code>{m.serverId}</code></div>
+        ))}
+      </div>
+    ));
+  } else if (tab === 'context') {
+    content = section('Additional context', (
+      <div style={{ ...rowStyle, whiteSpace: 'pre-wrap', color: 'var(--eb-text-secondary)' }}>
+        {env.additionalContext || <span style={{ color: 'var(--eb-text-muted)' }}>—</span>}
+      </div>
+    ));
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-      <div style={{
-        display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
-        fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
-        padding: 'var(--eb-space-2) var(--eb-space-3)',
-        background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-md)',
-      }}>
-        <Info size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
-        <span>
-          This team runs on a shared environment managed by another team.
-          You can view it here but not edit it — ask a System Admin or the owning
-          team's admin to change its repositories, credentials or model provider.
-        </span>
-      </div>
-
-      {section('Repositories', repositories.length === 0 ? none : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-0-5)' }}>
-          {repositories.map((r, i) => (
-            <div key={i} style={rowStyle}>
-              <code>{r.url || '(no url)'}</code>
-              {r.branch ? <span style={{ color: 'var(--eb-text-muted)' }}> @ {r.branch}</span> : null}
-              {r.readOnly ? <span style={{ color: 'var(--eb-text-muted)' }}> · read-only</span> : null}
-            </div>
-          ))}
-        </div>
-      ))}
-
-      {section('Model provider', (
-        <div style={rowStyle}>
-          {env.llmEndpointId
-            ? <>{env.llmEndpointId}{env.defaultModelId ? <span style={{ color: 'var(--eb-text-muted)' }}> · {env.defaultModelId}</span> : null}</>
-            : <span style={{ color: 'var(--eb-text-muted)' }}>Built-in default</span>}
-        </div>
-      ))}
-
-      {section('Toolchain', (
-        <div style={rowStyle}>
-          {env.toolchainId || <span style={{ color: 'var(--eb-text-muted)' }}>Default image</span>}
-        </div>
-      ))}
-
-      {section('MCP servers', mcpServers.length === 0 ? none : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-0-5)' }}>
-          {mcpServers.map((m, i) => (
-            <div key={i} style={rowStyle}><code>{m.serverId}</code></div>
-          ))}
-        </div>
-      ))}
-
-      {env.additionalContext
-        ? section('Additional context', (
-          <div style={{ ...rowStyle, whiteSpace: 'pre-wrap', color: 'var(--eb-text-secondary)' }}>
-            {env.additionalContext}
-          </div>
-        ))
-        : null}
+      {banner}
+      {content}
     </div>
   );
 }
 
-function TeamEnvironmentFields({ env, onSaved }) {
+function TeamEnvironmentFields({ env, onSaved, tab }) {
   // The record last confirmed by the server — form gating and change notices
   // compare against this, not the initial prop, so a second save in the same
   // session still detects what actually changed.
   const [baseline, setBaseline] = useState(env);
-  const [tab, setTab] = useState(TEAM_ENV_TABS[0].id);
   const [form, setForm] = useState(() => initialTeamEnvForm(env));
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
@@ -270,30 +284,6 @@ function TeamEnvironmentFields({ env, onSaved }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-      <div style={{
-        display: 'flex', gap: 'var(--eb-space-1)', flexWrap: 'wrap',
-        borderBottom: '1px solid var(--eb-border-default)', paddingBottom: 'var(--eb-space-2)',
-      }}>
-        {TEAM_ENV_TABS.map(t => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            style={{
-              padding: 'var(--eb-space-1-5) var(--eb-space-3)',
-              background: tab === t.id ? 'var(--eb-accent-muted)' : 'transparent',
-              color: tab === t.id ? 'var(--eb-accent-primary)' : 'var(--eb-text-secondary)',
-              border: 'none', borderRadius: 'var(--eb-radius-md)',
-              fontSize: 'var(--eb-text-sm)',
-              fontWeight: tab === t.id ? 'var(--eb-font-medium)' : 'var(--eb-font-normal)',
-              cursor: 'pointer', fontFamily: 'inherit',
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
       {saveError && (
         <div role="alert" style={{
           color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)',

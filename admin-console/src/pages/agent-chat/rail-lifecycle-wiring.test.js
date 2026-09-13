@@ -466,8 +466,29 @@ test('#2213 — the chat wires the header-row activation to the same Settings me
   assert.match(agentChat.match(/<AgentList[\s\S]*?\/>/)[0], /onOpenTeamSettings=\{handleOpenSettings\}/);
 });
 
-test('#2213 — a role:team agent is never resolved as the open chat, and the middle pane says so', () => {
+test('#2213 — a role:team agent is never resolved as the open chat', () => {
   assert.match(agentChat, /const routedAgent = \(agents \?\? \[\]\)\.find\(a => a\.id === agentId\)/);
-  assert.match(agentChat, /routedAgent\?\.role === 'team'/);
-  assert.match(agentChat, /<TeamSelectedState team=\{routedAgent\}/);
+});
+
+/* ── #2235: the team surface replaces the chat+rail split entirely ── */
+
+test('a routed team gets the merged full-width surface, not the chat+rail split', () => {
+  assert.match(agentChat, /const subjectIsTeam = routedAgent\?\.role === 'team';/);
+  assert.match(agentChat, /\{subjectIsTeam \? \(/);
+  assert.match(agentChat, /<TeamConfigSurface team=\{routedAgent\} onAgentConfigChanged=\{refetch\} \/>/);
+  // The old placeholder — and the narrow, Settings-only rail it sat beside —
+  // are retired, not merely unreached.
+  assert.doesNotMatch(agentChat, /TeamSelectedState/);
+  assert.doesNotMatch(agentChat, /subjectIsTeam=\{routedAgent\?\.role === 'team'\}\s*\n\s*roomId=\{effectiveRoomId\}/);
+});
+
+test('the team surface renders the shared Settings form, not a second implementation', () => {
+  assert.match(agentChat, /function TeamConfigSurface\(/);
+  assert.match(agentChat, /<AgentSettingsPanel\s*\n\s*agentId=\{team\.id\}/);
+});
+
+test('a team the caller may see but not manage gets a read-only notice, never an editable form', () => {
+  assert.match(agentChat, /const canManage = team\?\.canManage !== false;/);
+  assert.match(agentChat, /canManage \? \(\s*<AgentSettingsPanel/);
+  assert.match(agentChat, /<TeamReadOnlyNotice team=\{team\} \/>/);
 });

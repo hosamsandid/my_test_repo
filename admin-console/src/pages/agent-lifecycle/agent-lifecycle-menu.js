@@ -257,13 +257,15 @@ export function buildTeamMenu({
   // Flow editor — both explicit choices rather than an inferred one.
 
   // Phase 2 (#1929) replaced Phase 1's jump to the Agents page: the team's own
-  // edit form now opens in the chat's Settings tab, which is where AC5 wants
-  // team settings reachable from. Gated like the mutating entries because that
-  // tab is hidden for a caller who may not manage the team.
+  // edit form opens in the chat, which is where AC5 wants team settings
+  // reachable from. #2235 widened that surface to the full width right of the
+  // agent list rather than the narrow rail, so this entry now lands there.
+  // Gated like the mutating entries because that surface is hidden for a
+  // caller who may not manage the team.
   items.push({
     key: 'edit-team',
     label: 'Team settings…',
-    ...gate(false, 'Opens the team\'s configuration in the right rail.'),
+    ...gate(false, 'Opens the team\'s configuration.'),
   });
   // Sharing (#2082, #2041 P4): who may open, chat with and administer this
   // team. The one entry in this menu that stays live without rights, because

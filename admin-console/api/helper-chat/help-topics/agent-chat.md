@@ -339,11 +339,22 @@ The rail on the right holds everything about the agent that is not the
 conversation. Toggle it with **Cmd/Ctrl+Shift+L** or the chevron in its tab
 strip; it can also collapse to a strip of icons. Two of its tabs are
 conditional: **Outcomes** appears only for an agent that belongs to a team, and
-**Settings** only when you are allowed to manage that agent. When the rail is
-open for a **team** rather than an agent — the state the team header row's
-click puts you in — none of Sessions, Workspace, Triggers, Outcomes or
-Knowledge apply (a team hosts none of what they show), so the rail narrows to
-Settings alone, or shows no tabs at all if you may not manage that team.
+**Settings** only when you are allowed to manage that agent.
+
+This rail is an **ordinary-agent** surface. Selecting a **team** in the left
+list — its own row, not one of its members — does not open a narrower version
+of it: it replaces the whole area right of the agent list, chat column and
+rail together, with the team's configuration as **one full-width surface**.
+There is no separate chat pane (a team hosts no conversation of its own, so
+none of Sessions, Workspace, Triggers, Outcomes or Knowledge apply) and this
+surface offers no collapse or width control of its own — the left list's own
+divider is the only way to resize it. It has no shortcut of its own either:
+Cmd/Ctrl+Shift+L does nothing while a team is open, and switching back to a
+member restores the rail exactly as you left it (width and open/collapsed).
+Every entry point lands here alike — clicking the team's row, **Team
+settings…** on its row menu, and a bookmarked `/chats/<teamId>` URL. A team you
+may see but not manage gets the same surface with a plain notice instead of an
+editable form; nothing about it becomes editable that was not editable before.
 
 ### Sessions — watching a run
 
@@ -599,10 +610,13 @@ Three things behave differently from an ordinary form:
 - **Some changes apply immediately**, without Save — plugin grants and context
   folders have their own endpoints. A context-folder change re-provisions the
   container, which ends the run you are watching, so it asks first.
-- **The tab follows the open chat**, but a rail menu can point it at another
-  agent — which is how a *team*'s settings, or a *disabled* agent's, are
-  reachable at all. It is hidden entirely when you may not manage the agent, so
-  the tab is never a control the server would refuse.
+- **The tab follows the open chat**, but a rail menu can point it at a
+  *disabled* agent instead — the one way to reach a chatless agent's settings.
+  A **team**'s settings work differently: they are not reached through this
+  tab at all, but through the team's own full-width surface (see *The right
+  rail* above) — selecting its row is what opens them. Either way, the form is
+  hidden entirely when you may not manage the agent, so it is never a control
+  the server would refuse.
 
 ### What the form fields control
 

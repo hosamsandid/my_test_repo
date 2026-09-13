@@ -589,9 +589,12 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         // whose label ends in an ellipsis.
         case 'add-member':       openAddMember(teamId); break;
         // Phase 2 (#1929) answers open question 3 the other way round: the
-        // team's own edit form now renders in the rail's Settings tab, so this
-        // opens it there instead of leaving the chat for the Agents page.
-        case 'edit-team':        if (onOpenSettings && teamId) onOpenSettings(teamId); break;
+        // team's own edit form renders in the chat, so this opens it there
+        // instead of leaving the chat for the Agents page. #2235 widened that
+        // surface to the full width right of the agent list, reached by being
+        // routed to the team like any other row selection — so this now also
+        // navigates, the same landing point as clicking the team's own row.
+        case 'edit-team':        if (onOpenSettings && teamId) onOpenSettings(teamId); if (teamId) navigate(`/chats/${encodeURIComponent(teamId)}`); break;
         case 'share':
           // Enabled for anyone who can see the team: a Team Member gets the
           // list read-only (#2041 AC9), the panel gates the controls.

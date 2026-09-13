@@ -75,6 +75,24 @@ test('the id keeps room to stay recognisable, truncates, and is never forced wid
   assert.match(region, /title=\{env\.id\}/, 'the full id must stay reachable on hover (#1835) — it is what disambiguates identically-named environments (AC5)');
 });
 
+test('the id truncates from its own start, not its end, so a disambiguating trailing suffix survives (AC5)', () => {
+  // Standard `text-overflow: ellipsis` + `white-space: nowrap` truncates from
+  // the END of the string. #2217's collision suffix (`-2`, `-3`, ...) sits at
+  // the END of the id, so two ids differing only in that suffix render
+  // IDENTICALLY truncated with the plain pattern — the Code Reviewer's
+  // blocking finding on #2228's first attempt. Rendering the id
+  // right-to-left flips which end the ellipsis eats without reordering the
+  // (plain-ASCII, therefore LTR-resolving) characters themselves.
+  const region = idBlock(ROW);
+  assert.match(region, /direction:\s*'rtl'/, 'the id must render right-to-left so its ellipsis clips the START of the string, keeping the trailing disambiguator (e.g. "-2") visible');
+  assert.match(region, /textAlign:\s*'left'/, "an rtl block's own text-align must be pinned to 'left' or the id's (LTR) characters visually right-align inside the box");
+});
+
+test('the tail-preserving direction check fires on the pre-fix (plain-ellipsis) shape (mutation-proved)', () => {
+  const buggyId = idBlock(ROW).replace(/\s*direction:\s*'rtl',\s*\n\s*textAlign:\s*'left',/, '');
+  assert.doesNotMatch(buggyId, /direction:\s*'rtl'/, 'direction check must fail on the buggy (plain-ellipsis) shape');
+});
+
 test('each check above actually fires on the pre-fix shape (mutation-proved)', () => {
   const outerTagEnd = ROW.indexOf('>');
   const buggyOuter = ROW.slice(0, outerTagEnd).replace(/,?\s*minWidth:\s*0/, '');

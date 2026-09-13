@@ -395,6 +395,16 @@ function EnvironmentCard({ env, selected, onSelect }) {
               fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-muted)',
               flex: '0 1 auto', minWidth: '4.5em', maxWidth: '55%',
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              // The disambiguating suffix (#2217's `-2`/`-3`) sits at the END of
+              // the id, but plain ellipsis+nowrap truncates from the end — so
+              // two ids differing only in that suffix render identically
+              // truncated (AC5, reviewer finding on #2228). Rendering the box
+              // right-to-left flips which end the ellipsis eats: the id's own
+              // characters stay LTR (they're plain ASCII, so the bidi
+              // algorithm keeps them in source order), but the *overflow* now
+              // clips the START of the string instead of the end.
+              direction: 'rtl',
+              textAlign: 'left',
             }}
           >
             {env.id}

@@ -118,3 +118,22 @@ test("D3: a fresh clone and a cache-copy both apply the resolved rework branch b
   const hits = body.match(/_checkoutReworkBranch\(repoDir, repository, envGithubTokenId, reworkBranch\)/g) || [];
   assert.equal(hits.length, 2, "expected the rework checkout on both the cache-copy path and the fresh-clone path");
 });
+
+test("CodeQL js/second-order-command-line-injection: both git-argument sites validate via isSafeGitRef before executing", () => {
+  const checkoutStart = SRC.indexOf("function _checkoutReworkBranch(");
+  assert.ok(checkoutStart > 0, "_checkoutReworkBranch not found");
+  const checkoutBody = SRC.slice(checkoutStart, SRC.indexOf("\nfunction cloneRepository("));
+  assert.match(checkoutBody, /agentPool\.isSafeGitRef\(branch\)/);
+
+  const refreshStart = SRC.indexOf("function refreshRepoCacheIfStale(");
+  assert.ok(refreshStart > 0, "refreshRepoCacheIfStale not found");
+  const refreshBody = SRC.slice(refreshStart, SRC.indexOf("\nfunction repoGitCredentials("));
+  assert.match(refreshBody, /agentPool\.isSafeGitRef\(rawBranch\)/);
+});
+
+test("mutation-proved: an unvalidated branch/rawBranch would fail the check above", () => {
+  const checkoutStart = SRC.indexOf("function _checkoutReworkBranch(");
+  const checkoutBody = SRC.slice(checkoutStart, SRC.indexOf("\nfunction cloneRepository("));
+  const buggyCheckout = checkoutBody.replace(/if \(!agentPool\.isSafeGitRef\(branch\)\) \{[\s\S]*?\}\n/, "");
+  assert.doesNotMatch(buggyCheckout, /agentPool\.isSafeGitRef\(branch\)/);
+});

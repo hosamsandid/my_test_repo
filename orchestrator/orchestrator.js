@@ -3740,7 +3740,18 @@ function refreshRepoCacheIfStale(cacheDir, repository, envGithubTokenId, baseBra
   const now = Date.now();
   const last = _poolBaseRefreshedAt.get(cacheDir) || 0;
   if (now - last < POOL_BASE_REFRESH_TTL_MS) return;
-  const branch = baseBranch || repository.branch || null;
+  // CodeQL js/second-order-command-line-injection: `baseBranch` is
+  // operator-configured (the role's `pool.baseBranch`), but `repository.branch`
+  // is a Working Environment field editable by any Team Admin — neither is
+  // safe to hand `git` unvalidated. Same rule as `_checkoutReworkBranch`'s D3
+  // ref: an unsafe value degrades to "use the repo's default branch"
+  // (`branch = null` below), never a thrown error, since a misconfigured
+  // branch name here must not break the whole pull-on-demand cache refresh.
+  const rawBranch = baseBranch || repository.branch || null;
+  const branch = agentPool.isSafeGitRef(rawBranch) ? rawBranch : null;
+  if (rawBranch && !branch) {
+    console.warn(`[AgentPool] refusing unsafe-looking branch '${rawBranch}' for ${cacheDir} — using the repo default instead`);
+  }
   try {
     const env = repoGitCredentials(repository, envGithubTokenId);
     execFileSync("git", ["fetch", "origin", ...(branch ? [branch] : [])], {
@@ -3851,8 +3862,22 @@ function _poolReworkAppliesTo(repository, poolWorkspace) {
 // fetch/checkout means the caller's seed should fail loudly, not proceed on
 // the wrong branch.
 function _checkoutReworkBranch(repoDir, repository, envGithubTokenId, branch) {
+  // Defense in depth (CodeQL js/second-order-command-line-injection): both
+  // callers already validate via `agentPool.isSafeGitRef` before a branch
+  // ever becomes a "resolved rework ref", but this function is the one place
+  // that actually hands the value to `git`, so it refuses again rather than
+  // trusting every present and future caller to have checked.
+  if (!agentPool.isSafeGitRef(branch)) {
+    throw new Error(`refusing to check out unsafe-looking ref '${branch}'`);
+  }
   const env = repoGitCredentials(repository, envGithubTokenId);
   try {
+    // No `--` end-of-options marker here: `git checkout`'s own grammar gives
+    // `--` a DIFFERENT meaning (revision-vs-pathspec disambiguation), so
+    // adding one before the start-point would make git treat it as a file to
+    // restore rather than a ref — `isSafeGitRef` above is what actually
+    // closes the injection vector, by refusing any value that could be
+    // parsed as an option in the first place.
     execFileSync("git", ["fetch", "origin", branch], { cwd: repoDir, env, stdio: "pipe", timeout: 120_000 });
     execFileSync("git", ["checkout", "-B", branch, `origin/${branch}`], { cwd: repoDir, env, stdio: "pipe", timeout: 60_000 });
     console.log(`[AgentPool] ${repoDir}: checked out rework branch ${branch} (D3)`);
@@ -8804,7 +8829,11 @@ async function _lookupPoolReworkRef(repoFullName, itemKey) {
     const linked = flowAnomalySweep.prsForIssue(list, itemKey);
     if (!linked.length) return null;
     const pr = list.find((p) => Number(p?.number) === Number(linked[0]));
-    const branch = pr && pr.head && typeof pr.head.ref === "string" ? pr.head.ref : null;
+    // Refused here too (agent-pool.js `isSafeGitRef`), not just at the point
+    // of use: a branch name is GitHub-attacker-controlled data (CodeQL
+    // js/second-order-command-line-injection) and must never even LOOK like a
+    // resolved rework ref if it isn't safe to pass to `git`.
+    const branch = pr && agentPool.isSafeGitRef(pr.head && pr.head.ref) ? pr.head.ref : null;
     return branch ? { branch, repo: repoFullName } : null;
   } catch (err) {
     console.warn(`[AgentPool] rework-branch lookup for ${repoFullName}#${itemKey} failed: ${err.message}`);

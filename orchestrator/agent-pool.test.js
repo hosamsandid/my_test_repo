@@ -197,3 +197,30 @@ test('reworkRefFromPayload: a pull_request with no resolvable head.ref is null, 
   assert.equal(pool.reworkRefFromPayload({ pull_request: { head: {} } }), null);
   assert.equal(pool.reworkRefFromPayload({ pull_request: { head: { ref: '' } } }), null);
 });
+
+// ─── isSafeGitRef (CodeQL js/second-order-command-line-injection) ──────────────
+
+test('isSafeGitRef: an ordinary branch name is safe', () => {
+  assert.equal(pool.isSafeGitRef('fix/123-thing'), true);
+  assert.equal(pool.isSafeGitRef('main'), true);
+  assert.equal(pool.isSafeGitRef('feature/2246_pool'), true);
+});
+
+test('isSafeGitRef: a value beginning with "-" is refused — git parses it as an option, not a ref', () => {
+  assert.equal(pool.isSafeGitRef('--upload-pack=touch /tmp/pwned'), false);
+  assert.equal(pool.isSafeGitRef('-x'), false);
+});
+
+test('isSafeGitRef: empty/missing/non-string is refused, never coerced', () => {
+  assert.equal(pool.isSafeGitRef(''), false);
+  assert.equal(pool.isSafeGitRef(null), false);
+  assert.equal(pool.isSafeGitRef(undefined), false);
+  assert.equal(pool.isSafeGitRef(123), false);
+});
+
+test('reworkRefFromPayload: an unsafe-looking head.ref is refused, not merely passed through', () => {
+  assert.equal(
+    pool.reworkRefFromPayload({ pull_request: { head: { ref: '--upload-pack=x' } } }),
+    null,
+  );
+});

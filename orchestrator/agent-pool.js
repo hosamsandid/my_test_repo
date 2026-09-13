@@ -65,15 +65,29 @@ function isPooledRole(cfg) {
 // main)
 // ---------------------------------------------------------------------------
 
+// A git ref name can contain almost anything, but git's OWN argument parser
+// treats any argv entry beginning with `-` as an OPTION regardless of where
+// it sits — e.g. a branch literally named `--upload-pack=<cmd>` turns
+// `git fetch origin <branch>` into arbitrary command execution on some git
+// versions (CodeQL `js/second-order-command-line-injection`; the CVE class
+// this whole D3 feature has to be careful of, since a GitHub branch name is
+// attacker-controlled — anyone who can open a PR names its branch). Refused
+// at the SOURCE, not just at the point of use, so a rejected value never even
+// looks like a resolved rework ref to a caller that forgot to re-check it.
+function isSafeGitRef(ref) {
+  return typeof ref === 'string' && ref.length > 0 && !ref.startsWith('-');
+}
+
 /**
  * D3, the free (no network) signal: when the GitHub event that triggered a
  * pooled dispatch is ITSELF a `pull_request.*` event (or an `issue_comment` on
  * a PR, which arrives with the same `pull_request` field), the PR under work
  * is already sitting in the payload — this is the common case the review's
  * repro names (a reviewer role dispatched by a PR event). Returns `null` for
- * everything else (an `issues.*` event, e.g. a plain `ready` relabel), which
- * is the caller's cue to fall back to a live lookup (`_lookupPoolReworkRef`
- * in orchestrator.js) rather than guess.
+ * everything else (an `issues.*` event, e.g. a plain `ready` relabel, or an
+ * unsafe/malformed branch name — see `isSafeGitRef`), which is the caller's
+ * cue to fall back to a live lookup (`_lookupPoolReworkRef` in
+ * orchestrator.js) rather than guess.
  *
  * @returns {{branch:string, repo:string|null}|null}
  */
@@ -81,7 +95,7 @@ function reworkRefFromPayload(payload) {
   if (!payload || typeof payload !== 'object') return null;
   const pr = payload.pull_request && typeof payload.pull_request === 'object' ? payload.pull_request : null;
   const head = pr && pr.head && typeof pr.head === 'object' ? pr.head : null;
-  if (!head || typeof head.ref !== 'string' || !head.ref) return null;
+  if (!head || !isSafeGitRef(head.ref)) return null;
   const repo = head.repo && typeof head.repo.full_name === 'string' ? head.repo.full_name : null;
   return { branch: head.ref, repo };
 }
@@ -162,6 +176,7 @@ module.exports = {
   POOL_WORKSPACES,
   normalizePoolConfig,
   isPooledRole,
+  isSafeGitRef,
   reworkRefFromPayload,
   poolInstanceId,
   roleIdFromMemberId,

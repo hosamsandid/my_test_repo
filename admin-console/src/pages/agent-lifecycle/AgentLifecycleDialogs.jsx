@@ -245,50 +245,6 @@ export function ResetToStubDialog({ open, agent, onConfirm, onCancel }) {
 }
 
 /**
- * The convert-into-a-team-of-one confirm (#2052 AC2).
- *
- * Nothing is lost by converting, so this is deliberately not a `danger` dialog —
- * but it IS a one-way door, and the user is about to see a new group appear in
- * the chat list and a new flow in Flows. So the copy lists what happens rather
- * than asking "are you sure?", and the lines come from the pure
- * `convert-to-team-view.js` so they can be asserted.
- *
- * `busyNotice` is the server's own refusal (`409 { warning: true }`): when it is
- * present the agent is mid-run, the confirm label changes to say so, and
- * confirming re-sends with `force`. Same two-phase shape the disable flow uses —
- * the server decides that converting mid-turn needs a second opinion, not the UI.
- */
-export function ConvertToTeamDialog({ open, agent, copy, consequences, busyNotice, error, busy, onConfirm, onCancel }) {
-  return (
-    <ConfirmDialog
-      open={open}
-      title={copy?.title ?? 'Convert into a team?'}
-      message={(
-        <div>
-          <ul style={{ margin: '0 0 var(--eb-space-2)', paddingLeft: 'var(--eb-space-5)', fontSize: 'var(--eb-text-sm)' }}>
-            {(consequences || []).map((line, i) => (<li key={i}>{line}</li>))}
-          </ul>
-          {busyNotice && (
-            <p style={{ color: 'var(--eb-status-warning)', fontSize: 'var(--eb-text-sm)', margin: '0 0 var(--eb-space-2)' }}>
-              {busyNotice}
-            </p>
-          )}
-          {error && (
-            <p style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)', margin: 0 }}>{error}</p>
-          )}
-        </div>
-      )}
-      variant={busyNotice ? 'warning' : 'info'}
-      confirmLabel={busyNotice ? 'Convert anyway' : (copy?.confirmLabel ?? 'Convert into a team')}
-      maxWidth={copy?.maxWidth}
-      busy={busy}
-      onConfirm={onConfirm}
-      onCancel={onCancel}
-    />
-  );
-}
-
-/**
  * The team *enable* fan-out confirm. It names the members the team disabled
  * automatically, because those are exactly the ones coming back — a member that
  * was already off on its own stays off, and the operator has to be able to see

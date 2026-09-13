@@ -66,13 +66,6 @@ const CLONEABLE_ROLES = new Set(['agent', 'team-member']);
 // produced a bundle whose only consumer — an import that re-creates the role —
 // the platform refuses since #1962.
 const EXPORTABLE_ROLES = new Set(['agent', 'team-member', 'team']);
-// Converting into a team of one (#2052) is offered to the standalone role
-// ALONE: a `team` already is one, a `team-member` already belongs to one, and
-// there is no reverse conversion, so a near-miss here is not a cosmetic bug.
-// `expert` is the pre-#1961 name the orchestrator normalizes to `agent` on
-// startup, listed so a config read before that normalization has landed still
-// offers the entry.
-const CONVERTIBLE_ROLES = new Set(['agent', 'expert']);
 
 /**
  * The hint on **Share…** for someone who may see the team but not administer it
@@ -91,11 +84,6 @@ export const MEMBERS_READ_ONLY_HINT =
 /** The same entry for someone who *can* change the list — what it opens. */
 export const MEMBERS_MANAGE_HINT =
   'Add colleagues to this team, change their role, or remove them.';
-
-/** Converting is one-way — the entry says so before it is clicked, not after. */
-export const CONVERT_TO_TEAM_HINT =
-  'Turn this assistant into a team of one, keeping its prompt, skills, '
-  + 'triggers and chat history. Cannot be undone.';
 
 /**
  * Per-agent context-menu items for one chat row / agent card.
@@ -174,19 +162,6 @@ export function buildAgentMenu({ agent, canManage = true, locked = false, busy =
       key: 'extract-template',
       label: 'Save as template…',
       ...gate(isStub, isStub ? 'Activate the agent before saving it as a template.' : undefined),
-    });
-  }
-
-  // Grow into a team (#2052). Not in the destructive tail and not marked
-  // danger: nothing is lost, the agent keeps everything it has. But it IS
-  // one-way, so it always opens a confirm (the trailing "…") and carries the
-  // hint above rather than leaving "what happens to my assistant?" to the
-  // dialog alone.
-  if (CONVERTIBLE_ROLES.has(role)) {
-    items.push({
-      key: 'convert-to-team',
-      label: 'Convert into a team…',
-      ...gate(isStub, isStub ? 'Materialize the agent before converting it.' : CONVERT_TO_TEAM_HINT),
     });
   }
 

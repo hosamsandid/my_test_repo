@@ -4,8 +4,8 @@
 //
 // `draft-access.test.js` proves the decisions; what a unit test cannot see is
 // whether api.js still *reaches* them. api.js boots Express and cannot be
-// required, so this reads its source — the same drift-guard technique
-// `convert-to-team-route.test.js` and the sibling api guards use.
+// required, so this reads its source — the same drift-guard technique the
+// sibling api guards use.
 //
 // The specific failure this exists for: every one of these gates is invisible
 // when it goes missing. A route that stops calling the predicate returns the

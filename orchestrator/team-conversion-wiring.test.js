@@ -1,6 +1,6 @@
 'use strict';
 
-// Drift guard for `Orchestrator.convertAgentToTeam()` and its internal route (#2052).
+// Drift guard for `Orchestrator.convertAgentToTeam()` (#2052).
 //
 // The decisions are covered by `team-conversion.test.js` as real unit tests.
 // What those cannot see is the ORDER the orchestrator applies them in, and the
@@ -12,6 +12,14 @@
 // `orchestrator.js` boots two HTTP servers on require, so it cannot be loaded in
 // a unit test (the same reason `admin-console/api/api.js` is guarded this way).
 // These assertions read its source instead.
+//
+// `convertAgentToTeam()` itself is unchanged mechanics-wise by #2232 (Phase C
+// of epic #2229) — only its manual, per-agent HTTP entry point
+// (`POST /internal/agents/:id/convert-to-team`) was retired, in favour of the
+// operator-invoked migration sweep (`team-of-one-migration.js`) that now calls
+// this same method for every remaining standalone agent. So this file keeps
+// guarding the method and drops the route-only assertions that guarded the
+// retired entry point.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -130,24 +138,7 @@ test('a converted agent is never left stopped, and never left silently broken', 
   assert.match(src, /\.\.\.\(warnings\.length \? \{ warnings \} : \{\}\)/);
 });
 
-/* ── the internal route ─────────────────────────────────────────────────── */
-
-test('the route is registered ABOVE the catch-all POST /internal/agents', () => {
-  const convertRoute = SRC.indexOf("/^\\/internal\\/agents\\/([^/]+)\\/convert-to-team$/");
-  assert.ok(convertRoute > 0, 'convert-to-team route not found — this guard needs re-pointing');
-  // That branch 404s anything it does not match, so a route declared after it is
-  // unreachable no matter how correct its handler is.
-  const catchAll = SRC.lastIndexOf("req.url !== '/internal/agents'");
-  assert.ok(catchAll > 0, 'the POST /internal/agents branch moved — re-point this guard');
-  assert.ok(convertRoute < catchAll, 'convert-to-team must be declared before the catch-all');
-});
-
-test('the route maps each refusal onto a status the console can act on', () => {
-  const start = SRC.indexOf('const convertMatch = req.method');
-  const src = stripComments(SRC.slice(start, SRC.indexOf('const cloneMatch = req.method', start)));
-  // A busy refusal is a question (409 + warning), not a 500.
-  assert.match(src, /result && result\.warning \? 409 : 200/);
-  assert.match(src, /already taken/);
-  assert.match(src, /cannot be converted\|Cannot derive/);
-  assert.match(src, /force: parsed\.force === true/);
+test('the manual convert-to-team internal route is gone (#2232)', () => {
+  assert.ok(!SRC.includes('/convert-to-team$/'),
+    'the per-agent HTTP entry point is retired — the migration sweep replaces it');
 });

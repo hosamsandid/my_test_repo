@@ -48,9 +48,6 @@ test('a standalone agent offers the full AC1 action set', () => {
   const items = buildAgentMenu({ agent: { id: 'a', role: 'agent', hasToken: true, enabled: true } });
   assert.deepEqual(keys(items), [
     'toggle-enabled', 'settings', 'clone', 'export', 'extract-template',
-    // #2052 — growing into a team of one is a standalone-only action, and it
-    // sits before the destructive tail because nothing is lost by taking it.
-    'convert-to-team',
     'reset-to-stub', 'delete',
   ]);
   assert.ok(items.every(i => !i.disabled));
@@ -113,50 +110,14 @@ test('a stub is not exportable and its clone/template/reset entries are inert', 
   assert.equal(byKey(items, 'toggle-enabled').disabled, false);
 });
 
-/* ── #2052 convert into a team of one ───────────────────────────────── */
-
-test('#2052 AC1 — only a standalone agent is offered the conversion', () => {
-  const offered = (agent) => keys(buildAgentMenu({ agent })).includes('convert-to-team');
-
-  assert.equal(offered({ id: 'a', role: 'agent', hasToken: true, enabled: true }), true);
-  // The legacy pre-#1961 name for the same role, which an entry read before the
-  // orchestrator's startup normalization can still carry.
-  assert.equal(offered({ id: 'a', role: 'expert', hasToken: true, enabled: true }), true);
-  // A role that has nowhere to go: already a team, or already in one.
-  assert.equal(offered({ id: 't', role: 'team', hasToken: true, enabled: true }), false);
-  assert.equal(offered({ id: 'm', role: 'team-member', parentTeamId: 't', hasToken: true, enabled: true }), false);
-  // A missing role defaults to 'agent' (the module's own default), and a
-  // retired one is not converted into anything.
-  assert.equal(offered({ id: 'o', role: 'orchestrator', hasToken: true, enabled: true }), false);
-});
-
-test('#2052 AC1 — a stub is offered nothing to convert yet, and says why', () => {
-  const items = buildAgentMenu({ agent: { id: 'a', role: 'agent', token: null, enabled: false } });
-  const convert = byKey(items, 'convert-to-team');
-  assert.equal(convert.disabled, true);
-  assert.match(convert.title, /Materialize the agent before converting/);
-});
-
-test('#2052 AC2 — the entry opens a confirm and warns it is one-way', () => {
-  const convert = byKey(
-    buildAgentMenu({ agent: { id: 'a', role: 'agent', hasToken: true, enabled: true } }),
-    'convert-to-team',
-  );
-  // The trailing ellipsis is this menu's contract for "opens a dialog".
-  assert.match(convert.label, /…$/);
-  assert.equal(convert.disabled, false);
-  assert.match(convert.title, /Cannot be undone/);
-  // Nothing is lost by converting, so it must not read as destructive.
-  assert.ok(!convert.danger);
-});
-
-test('#2052 — converting is a mutation, so it is inert without rights', () => {
-  const convert = byKey(
-    buildAgentMenu({ agent: { id: 'a', role: 'agent', hasToken: true, enabled: true }, canManage: false }),
-    'convert-to-team',
-  );
-  assert.equal(convert.disabled, true);
-  assert.equal(convert.title, NO_RIGHTS_HINT);
+test('#2232 — the retired convert-to-team entry no longer appears on any role', () => {
+  // Phase C of epic #2229 retires the manual, per-agent "Convert into a
+  // team..." action (#2052) in favour of a one-time operator-invoked sweep —
+  // every agent is a team of one from creation since Phase B (#2231).
+  for (const role of ['agent', 'expert', 'team', 'team-member', 'orchestrator', 'bp-instance']) {
+    const items = buildAgentMenu({ agent: { id: 'a', role, hasToken: true, enabled: true, parentTeamId: 't' } });
+    assert.ok(!keys(items).includes('convert-to-team'), `${role} menu must not offer convert-to-team`);
+  }
 });
 
 test('AC5 — a member of a disabled team cannot be toggled, and says why', () => {

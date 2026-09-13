@@ -11,6 +11,14 @@
 // respawn wrapper around it, in the same shape `clone-target.js` has for the
 // clone/import flows.
 //
+// `planTeamConversion` computes the target shape FROM AN EXISTING agent (this
+// module's original job); `planTeamOfOneCreation` computes the identical shape
+// FROM SCRATCH — no prior config, nothing to move, just the target state to
+// set (#2230, Phase A of #2229: "every agent is a team of one from creation").
+// Both call the shared core `buildTeamOfOnePlan`, so the four re-keying
+// decisions below are made in exactly one place regardless of which caller is
+// asking.
+//
 // ── What the conversion is, mechanically ──────────────────────────────────────
 //
 // A team record is pure metadata: no Matrix identity, no token, no workspace, no
@@ -141,80 +149,79 @@ function canConvertToTeam(cfg) {
   return assessConversionEligibility(cfg).eligible;
 }
 
-// Build the full conversion plan, or throw with a message the API hands to the
-// user verbatim. Throwing (rather than returning a half-plan) is what AC9's "no
-// partial state" rests on: every refusal is decided here, before the caller has
-// written anything.
+// ── the shared core (#2230) ─────────────────────────────────────────────────
+// Both `planTeamConversion` (an existing agent, read from `cfg`) and
+// `planTeamOfOneCreation` (no prior agent — Phase B's creation endpoints)
+// need the identical target shape: a `role: 'team'` record + one `team-member`
+// with its own exclusive prompt, squad-tier skills/knowledge, and squad-scoped
+// plugin ids. This is that one core, driven by a normalized input rather than
+// a config object, so neither caller duplicates the four re-keying decisions
+// documented in the header comment above.
 //
-//   cfg            the standalone agent's config, as loaded from disk
-//   teamIdTaken    (id) => bool — does any agent/team already own that id?
-//   skills         the agent's resolved effective skill grant (array of names)
-//   plugins        its resolved effective plugin grant ([{ id, scopeGranularity }])
-//   tenantSkills   names whose CONTENT currently comes from the tenant pool —
-//                  the caller resolves the tiers, this module decides what that
-//                  means (see `skillPoolCopies`)
-//   promptFallback the on-disk AGENT-PROMPT.md text, used only when the config
-//                  carries no `systemPrompt` of its own
-function planTeamConversion(cfg, {
-  teamIdTaken = () => false,
+//   agentId             the agent's own id (existing or about-to-be-created)
+//   teamDisplayName     the team's display name, already derived by the caller
+//                       (`deriveTeamDisplayName`) — kept out of this function
+//                       because a conversion derives it from a live `cfg` and
+//                       a creation from the not-yet-persisted display name
+//   environmentId       the environment the team + agent share
+//   ownerTeamId         the human tenant the new team belongs to (AC8)
+//   ownPrompt           the prompt text the agent must resolve to (AC4)
+//   ownerId / ownerSource   optional — who owns the resulting team and how
+//                       that was decided (`'conversion'` for an existing
+//                       agent, `'creator'` for a fresh one — the caller's
+//                       call, not this function's)
+//   roleId              usage-attribution id (defaults to `agentId`)
+//   convertedFromAgentId   set only by the conversion caller; a fresh
+//                       creation has no prior agent to name
+//   skills/plugins/tenantSkills   see `planTeamConversion`'s own doc below
+function buildTeamOfOnePlan({
+  agentId,
+  teamDisplayName,
+  environmentId,
+  ownerTeamId,
+  ownPrompt,
+  ownerId,
+  ownerSource,
+  roleId,
+  convertedFromAgentId,
   skills = [],
   plugins = [],
   tenantSkills = [],
-  promptFallback = '',
-  defaultTeamId = DEFAULT_TEAM_ID,
+}, {
+  teamIdTaken = () => false,
+  collisionMessage = (teamId) => `Cannot use agent '${agentId}': the team id '${teamId}' is already taken.`,
 } = {}) {
-  const verdict = assessConversionEligibility(cfg);
-  if (!verdict.eligible) {
-    throw new Error(`Agent '${(cfg && cfg.id) || '?'}' cannot be converted into a team: ${verdict.reason}`);
-  }
-
-  const agentId = cfg.id;
   const teamId = deriveTeamId(agentId);
   if (!AGENT_ID_RE.test(teamId)) {
     throw new Error(`Cannot derive a valid team id from agent '${agentId}'`);
   }
   if (teamIdTaken(teamId)) {
-    throw new Error(
-      `Cannot convert '${agentId}': the team id '${teamId}' is already taken. `
-      + 'Rename or remove that agent first.',
-    );
+    throw new Error(collisionMessage(teamId));
   }
-
-  // AC8 — the new team belongs to the same human tenant as the agent, so the
-  // tenant-drift scan (`agent-tenant.js`) has nothing to report.
-  const ownerTeamId = cfg.teamId || defaultTeamId;
-
-  // The prompt the agent must still resolve to afterwards (AC4).
-  const ownPrompt = (typeof cfg.systemPrompt === 'string' && cfg.systemPrompt.length > 0)
-    ? cfg.systemPrompt
-    : String(promptFallback || '');
 
   const grantedSkills = Array.isArray(skills) ? [...skills] : [];
   const grantedPlugins = Array.isArray(plugins) ? plugins.map((p) => ({ ...p })) : [];
 
   const teamConfig = {
     id: teamId,
-    displayName: deriveTeamDisplayName(cfg),
+    displayName: teamDisplayName,
     role: 'team',
-    environmentId: cfg.environmentId,
+    environmentId,
     teamId: ownerTeamId,
     // Deliberately empty — see decision 1 in the header comment.
     systemPromptTemplate: '',
     skills: grantedSkills,
     enabled: true,
-    convertedFromAgentId: agentId,
   };
-  // The human OWNER moves onto the team, exactly like the skill and plugin
+  if (convertedFromAgentId) teamConfig.convertedFromAgentId = convertedFromAgentId;
+  // The human OWNER lives on the team, exactly like the skill and plugin
   // grants above (#2077, D8): a `team-member` carries no `ownerId` of its own
   // and resolves it from its parent (`resolveAgentOwnerId`). Leaving a copy on
   // the member would be a second source of truth that a later owner reassign
-  // on the team would silently fail to update. `ownerSource` travels with it —
-  // a converted team's owner is as authoritative as the agent's was, so it is
-  // recorded as a conversion rather than re-labelled a creator or a migration
-  // placeholder.
-  if (cfg.ownerId) {
-    teamConfig.ownerId = String(cfg.ownerId);
-    teamConfig.ownerSource = OWNER_SOURCE_CONVERSION;
+  // on the team would silently fail to update.
+  if (ownerId) {
+    teamConfig.ownerId = String(ownerId);
+    teamConfig.ownerSource = ownerSource;
   }
   if (grantedPlugins.length > 0) teamConfig.plugins = grantedPlugins;
 
@@ -226,7 +233,7 @@ function planTeamConversion(cfg, {
     // its own id, which carries no such prefix, so without this its usage rows
     // would all report the literal role `team-member`. Its own id is the only
     // label that means anything for a team of one.
-    roleId: cfg.roleId || agentId,
+    roleId: roleId || agentId,
   };
   // The prompt is only written when there is one — an empty `systemPrompt` key
   // is not the legacy exclusive shape, it is noise that reads as `inherit`
@@ -270,6 +277,122 @@ function planTeamConversion(cfg, {
   };
 }
 
+// Build the full conversion plan, or throw with a message the API hands to the
+// user verbatim. Throwing (rather than returning a half-plan) is what AC9's "no
+// partial state" rests on: every refusal is decided here, before the caller has
+// written anything.
+//
+//   cfg            the standalone agent's config, as loaded from disk
+//   teamIdTaken    (id) => bool — does any agent/team already own that id?
+//   skills         the agent's resolved effective skill grant (array of names)
+//   plugins        its resolved effective plugin grant ([{ id, scopeGranularity }])
+//   tenantSkills   names whose CONTENT currently comes from the tenant pool —
+//                  the caller resolves the tiers, this module decides what that
+//                  means (see `skillPoolCopies`)
+//   promptFallback the on-disk AGENT-PROMPT.md text, used only when the config
+//                  carries no `systemPrompt` of its own
+function planTeamConversion(cfg, {
+  teamIdTaken = () => false,
+  skills = [],
+  plugins = [],
+  tenantSkills = [],
+  promptFallback = '',
+  defaultTeamId = DEFAULT_TEAM_ID,
+} = {}) {
+  const verdict = assessConversionEligibility(cfg);
+  if (!verdict.eligible) {
+    throw new Error(`Agent '${(cfg && cfg.id) || '?'}' cannot be converted into a team: ${verdict.reason}`);
+  }
+
+  const agentId = cfg.id;
+
+  // AC8 — the new team belongs to the same human tenant as the agent, so the
+  // tenant-drift scan (`agent-tenant.js`) has nothing to report.
+  const ownerTeamId = cfg.teamId || defaultTeamId;
+
+  // The prompt the agent must still resolve to afterwards (AC4).
+  const ownPrompt = (typeof cfg.systemPrompt === 'string' && cfg.systemPrompt.length > 0)
+    ? cfg.systemPrompt
+    : String(promptFallback || '');
+
+  return buildTeamOfOnePlan({
+    agentId,
+    teamDisplayName: deriveTeamDisplayName(cfg),
+    environmentId: cfg.environmentId,
+    ownerTeamId,
+    ownPrompt,
+    ownerId: cfg.ownerId,
+    // A converted team's owner is as authoritative as the agent's was, so it
+    // is recorded as a conversion rather than re-labelled a creator or a
+    // migration placeholder.
+    ownerSource: cfg.ownerId ? OWNER_SOURCE_CONVERSION : undefined,
+    roleId: cfg.roleId || agentId,
+    convertedFromAgentId: agentId,
+    skills,
+    plugins,
+    tenantSkills,
+  }, {
+    teamIdTaken,
+    collisionMessage: (teamId) => `Cannot convert '${agentId}': the team id '${teamId}' is already taken. `
+      + 'Rename or remove that agent first.',
+  });
+}
+
+// The from-scratch sibling (#2230, Phase A): the identical target shape,
+// computed with no prior agent to read from — for Phase B's creation
+// endpoints (`POST /api/quickstart`, `/api/quickstart/llm`, `POST
+// /api/agents`) to call directly, without needing a real pre-existing agent
+// on disk to drive it. No eligibility check runs here: there is nothing on
+// disk yet that could be ineligible — the agent and the team are minted
+// together.
+//
+//   agentId        the id the about-to-be-created agent will use
+//   displayName    the agent's own display name (the team's is derived from
+//                  it the same way `deriveTeamDisplayName` derives one from a
+//                  live config)
+//   environmentId  the environment the team + agent will share
+//   ownerTeamId    the human tenant the new team belongs to (AC8's mirror)
+//   ownPrompt      the prompt text the agent will be created with
+//   ownerId / ownerSource   who owns the resulting team, e.g. `'creator'`
+//   roleId         usage-attribution id (defaults to `agentId`)
+//   skills/plugins/tenantSkills   see `planTeamConversion`'s own doc above
+function planTeamOfOneCreation({
+  agentId,
+  displayName,
+  environmentId,
+  ownerTeamId,
+  ownPrompt = '',
+  ownerId,
+  ownerSource,
+  roleId,
+  skills = [],
+  plugins = [],
+  tenantSkills = [],
+} = {}, {
+  teamIdTaken = () => false,
+} = {}) {
+  if (!agentId) {
+    throw new Error('Cannot build a team of one with no agent id');
+  }
+
+  return buildTeamOfOnePlan({
+    agentId,
+    teamDisplayName: deriveTeamDisplayName({ id: agentId, displayName }),
+    environmentId,
+    ownerTeamId,
+    ownPrompt: String(ownPrompt || ''),
+    ownerId,
+    ownerSource,
+    roleId: roleId || agentId,
+    skills,
+    plugins,
+    tenantSkills,
+  }, {
+    teamIdTaken,
+    collisionMessage: (teamId) => `Cannot create a team of one for '${agentId}': the team id '${teamId}' is already taken.`,
+  });
+}
+
 module.exports = {
   DEFAULT_TEAM_ID,
   TEAM_ID_SUFFIX,
@@ -279,4 +402,6 @@ module.exports = {
   assessConversionEligibility,
   canConvertToTeam,
   planTeamConversion,
+  planTeamOfOneCreation,
+  buildTeamOfOnePlan,
 };

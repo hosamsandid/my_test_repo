@@ -400,10 +400,10 @@ where its object lives.
 - **Per-role (agent) surface — shipped (#2271, Amendment 7).** The Flow editor's
   `NodeInspector` for a role node, and the agent's own **Settings** tab (Agent
   Chat → Settings). Controls: "This role auto-scales" (`pool.enabled`), max
-  parallel instances (`maxInstances`), workspace binding (`git-clean-base |
-  input-copy | none`), teardown timeouts. A read-only "pooled role · up to N"
-  badge on the single-agent view so an operator looking at one agent sees its
-  scaling at a glance.
+  parallel instances (`maxInstances`), teardown timeouts. A read-only "pooled
+  role · up to N" badge on the single-agent view so an operator looking at one
+  agent sees its scaling at a glance. (The workspace-binding control shown here
+  in the original design was removed — see Amendment 7 A7.4, #2294.)
 - **Team / flow surface — shipped (#2272, Amendment 5).** A **Parallelism**
   panel in the Flow editor (team scope) + a compact read-only summary on the
   team view. Controls: `wipLimit`, `autoDispatch.enabled` (the Flow
@@ -487,7 +487,6 @@ Per-role surface — NodeInspector / agent Settings tab
 ┌ Scaling ─────────────────────────────────────────┐
 │  [x] This role auto-scales (pool)                 │
 │      Max parallel instances   [ 4 ]               │
-│      Workspace   ( git-clean-base ▾ )             │
 │      Idle timeout [ 30m ]   Hard timeout [ 2h ]   │
 └───────────────────────────────────────────────────┘
 
@@ -862,6 +861,21 @@ through only accepts a materialised team-member, so the Scaling section is
 live-only, gated the same way the route itself is (`node.role ===
 'team-member'`); a bundle round-trip already carries the field with no UI
 needed on that path.
+
+**A7.4 — the Workspace dropdown itself was removed again (#2294).** Every
+pooled role now behaves as `workspace: "git-clean-base"` implicitly:
+`ScalingSection.jsx` no longer renders the field or threads a `workspace`
+value into `buildPoolPayload` (which already defaults an omitted `workspace`
+to `git-clean-base`), so this is a no-op for every configuration that could
+actually be reached through the form — `input-copy`/`none` were never
+selectable in the shipped picker without a `workSource` editor to back them
+(A2.5/A3's "not owed" list, still true). `POOL_WORKSPACE_OPTIONS`/
+`workspaceValue` stay in `scaling-view.js`, pure and still unit-tested, as the
+reusable building block for the future ticket that adds a `workSource`
+configuration screen. The live route's own closed `workspace` enum (A2.4) and
+`pool.workspace`/`normalizePool` are untouched — a hand-authored template or
+API call can still set `input-copy`/`none`, there is simply no UI control for
+it.
 
 ---
 

@@ -40,6 +40,14 @@ test('#2101 — the two remaining live kinds no longer read as unrecognised', ()
   assert.notEqual(kindTooltip('loop-verify'), fallback);
 });
 
+test('#2277 — the bg-orphan-correction self-wake no longer reads as unrecognised', () => {
+  // agent-entrypoint.py's own drain dispatches on this kind; before this it
+  // rendered as a raw token with the tooltip "An unrecognised queue entry"
+  // (the same drift the #2101 test above guards against for its two kinds).
+  assert.equal(kindLabel('bg-orphan-correction'), 'Self-correction (background task)');
+  assert.notEqual(kindTooltip('bg-orphan-correction'), kindTooltip('unknown'));
+});
+
 // ── the GitHub detail string (#2101) ────────────────────────────────────────
 // Three fragments left this string: the repository (the same long value on
 // every row), the GitHub event id (whose `#` sigil made an internal id read as

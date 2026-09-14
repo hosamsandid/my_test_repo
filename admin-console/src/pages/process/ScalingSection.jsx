@@ -1,8 +1,6 @@
 import React, { useState } from 'react';
 import { apiCall } from '../../hooks/useApi';
 import {
-  POOL_WORKSPACE_OPTIONS,
-  workspaceValue,
   scalingPrerequisite,
   parseMaxInstancesInput,
   parseMinutesInput,
@@ -12,21 +10,26 @@ import {
 
 // Role-axis config surface for agent pools (#2271, Amendment 2 A2.2 of
 // `docs/parallel-workers-concept.md`): "This role auto-scales" (pool.enabled),
-// max parallel instances, workspace binding, teardown timeouts. Shared by the
-// Flow editor's NodeInspector (a live team-member node's Details tab) and the
-// agent's own Settings tab (AgentEditForm), per #2272's "one model, several
-// surfaces" precedent — one component, two hosts, so they never drift.
+// max parallel instances, teardown timeouts. Shared by the Flow editor's
+// NodeInspector (a live team-member node's Details tab) and the agent's own
+// Settings tab (AgentEditForm), per #2272's "one model, several surfaces"
+// precedent — one component, two hosts, so they never drift.
 // Self-contained with its own Save (mirrors NodeInspector's LivePromptEditor),
 // not a SidePanel — both hosts embed it inline inside an existing panel.
 // Writes through the live `pool` route (#2270, `PUT /api/agents/:memberId`).
 // `parentWipLimit` is passed in by the caller (both hosts already hold the
 // parent team's config), never fetched here.
+// No workspace binding control here (#2294): every pooled role is created
+// implicitly as `git-clean-base` (`buildPoolPayload`'s default in
+// `scaling-view.js`) — the other two `pool.workspace` values (`input-copy`,
+// `none`) stay fully functional server-side but have no UI anywhere to
+// configure the `pool.workSource` they'd need, so offering them here would
+// be a selectable option that silently does nothing.
 export default function ScalingSection({ agentId, pool, parentWipLimit, onChanged }) {
   const [enabled, setEnabled] = useState(!!(pool && pool.enabled === true));
   const [maxInstancesText, setMaxInstancesText] = useState(
     pool && Number.isInteger(pool.maxInstances) ? String(pool.maxInstances) : ''
   );
-  const [workspace, setWorkspace] = useState(workspaceValue(pool));
   const [idleText, setIdleText] = useState(msToMinutesText(pool?.teardown?.idleTimeoutMs));
   const [hardText, setHardText] = useState(msToMinutesText(pool?.teardown?.maxRuntimeMs));
   const [retainText, setRetainText] = useState(msToMinutesText(pool?.teardown?.retainLogsMs));
@@ -53,7 +56,6 @@ export default function ScalingSection({ agentId, pool, parentWipLimit, onChange
         pool: buildPoolPayload({
           enabled,
           maxInstances: maxInstances.value,
-          workspace,
           idleTimeoutMs: idle.value,
           maxRuntimeMs: hard.value,
           retainLogsMs: retain.value,
@@ -98,12 +100,6 @@ export default function ScalingSection({ agentId, pool, parentWipLimit, onChange
             />
           </Field>
           {maxInstances.error && <FieldError text={maxInstances.error} />}
-
-          <Field label="Workspace">
-            <select value={workspace} onChange={(e) => { setWorkspace(e.target.value); dirty(); }} style={fieldInput}>
-              {POOL_WORKSPACE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          </Field>
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
             <Field label="Idle timeout (min)">

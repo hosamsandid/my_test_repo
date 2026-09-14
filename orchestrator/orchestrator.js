@@ -2698,8 +2698,18 @@ async function flowSupervisorSweepTeam(teamId, { now = Date.now() } = {}) {
   const wipLimit = admissionControl.limitInForce(teamCfg.wipLimit);
   if (wipLimit === null) return null; // §9: pooling (and its supervisor) piggyback on the flow's own wipLimit
 
-  const pooledRoleIds = new Set(_teamPooledRoles(teamId).map((r) => r.id));
-  if (pooledRoleIds.size === 0) return null; // nothing pooled — nothing for the supervisor to time
+  // #2250 Phase 5: a role an operator paused/drained from the Flow Control
+  // board is excluded from AUTO-dispatch here — its ready-but-undispatched
+  // tickets simply sit, exactly as if `autoDispatch` never selected them.
+  // (A human can still force one through; see `forceDispatchHeld` below. The
+  // SDLC label path gets the same hold independently, in `routePooledDispatch`.)
+  const poolControl = loadPoolControl(teamId);
+  const pooledRoleIds = new Set(
+    _teamPooledRoles(teamId)
+      .filter((r) => agentPool.poolControlState(poolControl, agentPool.roleIdFromMemberId(r.id, teamId)) === 'running')
+      .map((r) => r.id),
+  );
+  if (pooledRoleIds.size === 0) return null; // nothing pooled (or running) — nothing for the supervisor to time
 
   const windowMs = Number.isFinite(autoDispatch.actionWindowMs) && autoDispatch.actionWindowMs > 0
     ? autoDispatch.actionWindowMs : FLOW_SUPERVISOR_DEFAULT_WINDOW_MS;
@@ -2874,6 +2884,7 @@ async function recurringPoolSweepTeam(teamId, { now = Date.now() } = {}) {
   }
   if (!teamCfg) return null;
 
+  const poolControl = loadPoolControl(teamId);
   const reaped = [];
   const dispatched = [];
   for (const role of _teamPooledRoles(teamId)) {
@@ -2900,6 +2911,11 @@ async function recurringPoolSweepTeam(teamId, { now = Date.now() } = {}) {
       await _internalSelfDelete(instanceId);
       reaped.push(instanceId);
     }
+
+    // #2250 Phase 5: paused/draining stops NEW dispatch only — the reap pass
+    // just above (D4-equivalent completion release) always runs, so a drained
+    // role's in-flight items still get torn down as they finish.
+    if (agentPool.poolControlState(poolControl, roleId) !== 'running') continue;
 
     const stillLiveItemIds = _liveInstanceIdsForRole(role.id).map(itemOfInstance).filter((v) => v != null);
     const completedItemIds = workSource.items.filter((item) => _recurringItemComplete(workSource.outputDir, item));
@@ -9240,6 +9256,35 @@ function saveAdmissionLane(teamId, lane) {
   }
 }
 
+// Pool runtime control (#2250 Phase 5) — pause/drain per pooled role, beside
+// the lane it gates. Deliberately its own file, not a field on the lane
+// itself: the lane is a queue of TICKETS, this is a per-ROLE operator switch,
+// and the two churn independently (a pause survives every ticket the lane
+// cycles through while it's on).
+function poolControlPath(teamId) {
+  return controlOrPoolPath(teamId, "pool-control.json");
+}
+
+function loadPoolControl(teamId) {
+  try {
+    return agentPool.normalizePoolControl(JSON.parse(fs.readFileSync(poolControlPath(teamId), "utf8")));
+  } catch {
+    return {};
+  }
+}
+
+function savePoolControl(teamId, control) {
+  const p = poolControlPath(teamId);
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(control, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`[AgentPool] cannot persist pool-control for ${teamId}: ${err.message}`);
+    return false;
+  }
+}
+
 // Which flow governs a dispatch, and with what limit. A member points at its
 // team through `parentTeamId`; a team agent hosts no run of its own but is
 // accepted for completeness. `null` means "no admission control" — the answer
@@ -9813,8 +9858,9 @@ function routePooledDispatch(agentId, entry) {
   const itemKey = ref ? ref.ticket : null;
   const pool = agentPool.normalizePoolConfig(cfg.pool);
   const roleId = agentPool.roleIdFromMemberId(agentId, teamId);
+  const controlState = agentPool.poolControlState(loadPoolControl(teamId), roleId);
   const decision = agentPool.planPoolDispatch({
-    teamId, roleId, pool, itemKey,
+    teamId, roleId, pool, itemKey, controlState,
     // Code-review finding on #2246: this used to be `[thisItem'sOwnInstanceId]`
     // filtered down to 0-or-1 elements — a length that can never reach a real
     // `maxInstances` cap, since the `reuse` branch always fires first on the
@@ -17022,6 +17068,128 @@ async function main() {
           return sendJson(res, 500, { error: err.message });
         }
       })();
+      return;
+    }
+
+    // GET /internal/teams/:teamId/pool-control — board data for #2250 Phase 5:
+    // every pooled role's live pause/drain state + instance count, plus the
+    // team's admission-lane `held` entries (each carrying an `id` — the same
+    // `heldIdentity` a "Force dispatch" POST names) so the Flow Control board
+    // can render pause/resume/drain and force-dispatch buttons without a
+    // second round trip. Observe-only, gated like `tickets`/`flow-anomalies`.
+    const poolControlGetMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/pool-control(?:\?.*)?$/);
+    if (poolControlGetMatch) {
+      const teamId = decodeURIComponent(poolControlGetMatch[1]);
+      try {
+        const cfg = loadAgentConfig(teamId);
+        if (!cfg || cfg.role !== 'team') {
+          return sendJson(res, 404, { error: 'agent team not found' });
+        }
+        const control = loadPoolControl(teamId);
+        const roles = _teamPooledRoles(teamId).map((role) => {
+          const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
+          return {
+            roleId,
+            agentId: role.id,
+            displayName: role.cfg.displayName || roleId,
+            maxInstances: role.pool.maxInstances,
+            liveInstanceCount: _liveInstanceIdsForRole(role.id).length,
+            state: agentPool.poolControlState(control, roleId),
+          };
+        });
+        const lane = loadAdmissionLane(teamId);
+        const held = lane.held.map((h) => ({
+          id: admissionControl.heldIdentity(h.agentId, h.entry),
+          agentId: h.agentId,
+          ticket: h.ticket,
+          heldAt: h.heldAt,
+        }));
+        return sendJson(res, 200, { teamId, roles, held });
+      } catch (err) {
+        console.error(`[AgentPool] pool-control read error for ${teamId}: ${err.message}`);
+        return sendJson(res, 500, { error: err.message });
+      }
+    }
+
+    // POST /internal/teams/:teamId/pool-control/:roleId — set/clear a pooled
+    // role's pause/drain state (#2250 Phase 5). `{ state: "paused"|"draining" }`
+    // sets it; `{ state: "running" }` (or omitted) clears it back to the
+    // implicit default. Does not touch `pool` config or respawn anything —
+    // purely gates the NEXT dispatch (`routePooledDispatch` /
+    // `flowSupervisorSweepTeam` / `recurringPoolSweepTeam`, all read-through).
+    const poolControlSetMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/pool-control\/([^/]+)$/);
+    if (poolControlSetMatch) {
+      const teamId = decodeURIComponent(poolControlSetMatch[1]);
+      const roleId = decodeURIComponent(poolControlSetMatch[2]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 10_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') {
+            return sendJson(res, 404, { error: 'agent team not found' });
+          }
+          const roleFullId = `${teamId}-${roleId}`;
+          const roleCfg = loadAgentConfig(roleFullId);
+          if (!roleCfg || !agentPool.isPooledRole(roleCfg) || (roleCfg.parentTeamId || null) !== teamId) {
+            return sendJson(res, 404, { error: 'pooled role not found on this team' });
+          }
+          const parsed = JSON.parse(body || '{}');
+          const state = parsed && parsed.state;
+          const control = loadPoolControl(teamId);
+          if (state === 'running' || state == null) {
+            delete control[roleId];
+          } else if (agentPool.POOL_CONTROL_STATES.includes(state)) {
+            control[roleId] = { state, changedAt: new Date().toISOString() };
+          } else {
+            return sendJson(res, 400, { error: `state must be one of running, ${agentPool.POOL_CONTROL_STATES.join(', ')}` });
+          }
+          savePoolControl(teamId, control);
+          console.log(`[AgentPool] ${teamId}: ${roleId} set to ${agentPool.poolControlState(control, roleId)}`);
+          return sendJson(res, 200, { teamId, roleId, state: agentPool.poolControlState(control, roleId) });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      });
+      return;
+    }
+
+    // POST /internal/teams/:teamId/force-dispatch — the board's "Force
+    // dispatch" button (#2250 Phase 5): promote ONE named held entry right
+    // now, bypassing the team's `wipLimit` for that entry alone. `{ id }` is
+    // the `heldIdentity` a `pool-control` GET already returned. A stale id
+    // (already promoted/released) is reported `found:false`, not an error —
+    // the board's own next refresh will simply no longer show it.
+    const forceDispatchMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/force-dispatch$/);
+    if (forceDispatchMatch) {
+      const teamId = decodeURIComponent(forceDispatchMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 10_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') {
+            return sendJson(res, 404, { error: 'agent team not found' });
+          }
+          const parsed = JSON.parse(body || '{}');
+          const id = typeof parsed.id === 'string' ? parsed.id : null;
+          if (!id) return sendJson(res, 400, { error: 'id is required' });
+          const lane = loadAdmissionLane(teamId);
+          const result = admissionControl.forcePromoteHeld({ lane, id });
+          if (!result.found) return sendJson(res, 200, { teamId, found: false });
+          saveAdmissionLane(teamId, result.lane);
+          if (result.entry) {
+            enqueuePending(result.agentId, result.entry, { admissionChecked: true });
+            console.log(`[AgentPool] ${teamId}: force-dispatched ${result.ticketKey} for ${result.agentId}`);
+          }
+          return sendJson(res, 200, { teamId, found: true, agentId: result.agentId, ticketKey: result.ticketKey });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      });
       return;
     }
 

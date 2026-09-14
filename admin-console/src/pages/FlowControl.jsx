@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { AlertTriangle, RefreshCw, ExternalLink, CheckCircle2, Info, UserRound } from 'lucide-react';
+import { AlertTriangle, RefreshCw, ExternalLink, CheckCircle2, Info, UserRound, Pause, Play, Waves, Zap } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import PageHelpButton from '../components/PageHelpButton';
 import WhenCell from '../components/WhenCell';
 import { usePageActions } from '../context/PageActionsContext';
 import {
-  groupIntoLanes, epicRollups, rollupSummary, boardSummary,
+  groupIntoLanes, epicRollups, rollupSummary, boardSummary, poolControlRows, heldRows,
 } from './process/flow-control-view';
 import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
 
@@ -17,9 +17,12 @@ import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
 // label, which is what makes a false `Done` impossible (AC2, proven in
 // `process/flow-control-view.test.js` rather than claimed here).
 //
-// Read-only, like the ledger behind it: there is no repair action anywhere on
-// this page. §4.3's supervisor owns that, and §4.5's inbox owns acting on the
-// `needsHuman` rows.
+// The ledger itself stays read-only — no repair button touches it directly.
+// #2250 Phase 5 adds one *adjacent* mutation surface, the pool-control panel
+// below the board: pause/resume/drain a pooled role, and force-dispatch a
+// held ticket past the WIP limit. Both act on the admission lane / pool
+// runtime state, never on a ticket's derived state — the ledger's own honesty
+// guarantee (§4.1) is untouched.
 
 const PAGE_DESCRIPTION = 'Which ticket is where, in what state, and who owns it — derived from GitHub, never from labels.';
 
@@ -32,6 +35,8 @@ export default function FlowControl() {
 
   const [teamId, setTeamId] = useState('');
   const [state, setState] = useState({ loading: false, error: null, data: null });
+  const [poolState, setPoolState] = useState({ loading: false, error: null, data: null });
+  const [poolActionError, setPoolActionError] = useState(null);
 
   // Default to the first team once the list arrives; never override a choice.
   useEffect(() => {
@@ -49,7 +54,42 @@ export default function FlowControl() {
     }
   }, [teamId]);
 
-  useEffect(() => { load(); }, [load]);
+  const loadPoolControl = useCallback(async () => {
+    if (!teamId) return;
+    setPoolState((s) => ({ ...s, loading: true, error: null }));
+    try {
+      const data = await apiCall('GET', `/api/teams/${encodeURIComponent(teamId)}/pool-control`);
+      setPoolState({ loading: false, error: null, data });
+    } catch (err) {
+      setPoolState({ loading: false, error: err.message || 'Failed to load', data: null });
+    }
+  }, [teamId]);
+
+  useEffect(() => { load(); loadPoolControl(); }, [load, loadPoolControl]);
+
+  // Pause/resume/drain: fire the write, then refresh both panels — a role's
+  // state change can immediately change which held entries are meaningful,
+  // and the ticket ledger is cheap enough to just re-sweep rather than patch
+  // the previous snapshot in place.
+  const setRoleState = useCallback(async (roleId, nextState) => {
+    setPoolActionError(null);
+    try {
+      await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/pool-control/${encodeURIComponent(roleId)}`, { state: nextState });
+      await Promise.all([loadPoolControl(), load()]);
+    } catch (err) {
+      setPoolActionError(err.message || 'Failed to update');
+    }
+  }, [teamId, loadPoolControl, load]);
+
+  const forceDispatch = useCallback(async (id) => {
+    setPoolActionError(null);
+    try {
+      await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/force-dispatch`, { id });
+      await Promise.all([loadPoolControl(), load()]);
+    } catch (err) {
+      setPoolActionError(err.message || 'Failed to force-dispatch');
+    }
+  }, [teamId, loadPoolControl, load]);
 
   // Hooks must run before any early return, so the portal is built here and
   // simply not mounted while the page renders its empty state.
@@ -74,6 +114,8 @@ export default function FlowControl() {
   const summary = boardSummary(data);
   const lanes = useMemo(() => groupIntoLanes(data && data.tickets), [data]);
   const rollups = useMemo(() => epicRollups(data && data.tickets), [data]);
+  const poolRoles = useMemo(() => poolControlRows(poolState.data), [poolState.data]);
+  const held = useMemo(() => heldRows(poolState.data), [poolState.data]);
 
   return (
     <>
@@ -125,6 +167,13 @@ export default function FlowControl() {
             {data && !state.error && (
               <>
                 <SummaryRow summary={summary} />
+                {poolActionError && <Banner icon={AlertTriangle} tone="error">{poolActionError}</Banner>}
+                {poolRoles.length > 0 && (
+                  <PoolControlPanel roles={poolRoles} onSetState={setRoleState} busy={poolState.loading} />
+                )}
+                {held.length > 0 && (
+                  <HeldPanel held={held} onForceDispatch={forceDispatch} busy={poolState.loading} />
+                )}
                 {rollups.length > 0 && <EpicRollups rollups={rollups} />}
                 {summary.total === 0 && !data.maintenance && !summary.noRepos ? (
                   <Banner icon={CheckCircle2} tone="ok">
@@ -221,6 +270,130 @@ function EpicRollups({ rollups }) {
           >
             <strong style={{ color: 'var(--eb-text-primary)' }}>Epic #{r.epicId}</strong>: {rollupSummary(r)}
           </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── pool controls (#2250 Phase 5) ────────────────────────────────────── */
+
+// One row per pooled role: current pause/drain state + its live instance
+// count vs. `maxInstances`, and the button that changes it. A role already
+// `running` gets Pause + Drain; a paused/draining one gets Resume only —
+// there is deliberately no direct paused↔draining swap (resume, then pick
+// the other one, keeps the state machine to three states and two edges per
+// state instead of a matrix).
+function PoolControlPanel({ roles, onSetState, busy }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+        <h2 style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 600 }}>
+          Pooled roles
+        </h2>
+        <PageHelpButton
+          label="What pause / drain / force dispatch do"
+          size={13}
+          section={FLOW_CONTROL_HELP_SECTIONS.poolControls}
+          style={{ padding: 0, flexShrink: 0 }}
+        />
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+        {roles.map((r) => (
+          <div
+            key={r.roleId}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
+              padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-bg-surface)',
+              border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+              fontSize: 'var(--eb-text-sm)',
+            }}
+          >
+            <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>{r.displayName}</span>
+            <span style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' }}>
+              {r.liveInstanceCount} running{r.maxInstances != null ? ` / up to ${r.maxInstances}` : ''}
+            </span>
+            <PoolStateBadge state={r.state} />
+            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginLeft: 'auto' }}>
+              {r.state === 'running' ? (
+                <>
+                  <PoolButton icon={Pause} label="Pause" onClick={() => onSetState(r.roleId, 'paused')} disabled={busy} />
+                  <PoolButton icon={Waves} label="Drain" onClick={() => onSetState(r.roleId, 'draining')} disabled={busy} />
+                </>
+              ) : (
+                <PoolButton icon={Play} label="Resume" onClick={() => onSetState(r.roleId, 'running')} disabled={busy} />
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PoolStateBadge({ state }) {
+  if (state === 'running') return null;
+  return (
+    <span style={{
+      fontSize: 'var(--eb-text-xs)', padding: '2px 8px', borderRadius: 'var(--eb-radius-sm)',
+      border: '1px solid var(--eb-status-warning, #d97706)', color: 'var(--eb-status-warning, #d97706)',
+    }}>
+      {state === 'paused' ? 'Paused' : 'Draining'}
+    </span>
+  );
+}
+
+function PoolButton({ icon: Icon, label, onClick, disabled }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 4, background: 'none',
+        border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+        padding: '3px 8px', fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
+        color: 'var(--eb-text-primary)', cursor: disabled ? 'default' : 'pointer',
+      }}
+    >
+      <Icon size={12} />
+      {label}
+    </button>
+  );
+}
+
+// A held ticket is waiting on the team's `wipLimit`, not on anything wrong
+// with it — "Force dispatch" is the one place this board mutates a DISPATCH
+// (never the ledger's own derived state). Oldest-held first (`heldRows`).
+function HeldPanel({ held, onForceDispatch, busy }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+      <h2 style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 600 }}>
+        Held on the WIP limit
+      </h2>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+        {held.map((h) => (
+          <div
+            key={h.id}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
+              padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-bg-surface)',
+              border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+              fontSize: 'var(--eb-text-sm)',
+            }}
+          >
+            <span style={{ fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-primary)' }}>
+              {h.ticket || 'unknown ticket'}
+            </span>
+            {h.agentId && (
+              <code style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                {h.agentId}
+              </code>
+            )}
+            <span style={{ marginLeft: 'auto' }}>
+              <PoolButton icon={Zap} label="Force dispatch" onClick={() => onForceDispatch(h.id)} disabled={busy} />
+            </span>
+          </div>
         ))}
       </div>
     </div>

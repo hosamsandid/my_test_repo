@@ -8425,6 +8425,73 @@ app.get('/api/teams/:teamId/tickets', apiLimiter, async (req, res) => {
   }
 });
 
+// GET /api/teams/:teamId/pool-control — board data for the Flow Control
+// board's pause/drain/force-dispatch controls (#2250 Phase 5, epic #2251).
+// Visibility-only like `tickets`/`flow-anomalies`: no `canManageTeam` gate on
+// the READ, since seeing the pool state is the same "who can see this team"
+// question every other board panel already answers.
+app.get('/api/teams/:teamId/pool-control', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/pool-control`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/pool-control/:roleId — pause / resume / drain one
+// pooled role (#2250 Phase 5). A live operational toggle, not a config write,
+// but still a mutation that changes what the team does next — gated like
+// every other team-mutating route (`canManageTeam`), and captured by the
+// standard mutation-audit middleware same as any other `/api/*` write.
+app.post('/api/teams/:teamId/pool-control/:roleId', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  const roleId = req.params.roleId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  if (!AGENT_ID_RE.test(roleId)) return res.status(400).json({ error: 'Invalid role id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/pool-control/${encodeURIComponent(roleId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: req.body && req.body.state }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/force-dispatch — the board's "Force dispatch"
+// button (#2250 Phase 5): promote one named held dispatch right now, past the
+// team's `wipLimit`. Same mutation gate as `pool-control` above.
+app.post('/api/teams/:teamId/force-dispatch', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  const id = req.body && typeof req.body.id === 'string' ? req.body.id : null;
+  if (!id) return res.status(400).json({ error: 'id is required' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/force-dispatch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // GET /api/teams/:teamId/hill-climb/metrics — latest persisted run-metrics
 // snapshot (hill-climbing loop Phase 1, #1222). Team-scoped read-only proxy;
 // the Improvements panel (#1223) renders the metric tiles from this.

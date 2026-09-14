@@ -19,6 +19,8 @@ import {
   epicRollups,
   rollupSummary,
   boardSummary,
+  poolControlRows,
+  heldRows,
 } from './flow-control-view.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -356,4 +358,52 @@ test('boardSummary survives a missing or malformed payload', () => {
     assert.equal(s.total, 0);
     assert.deepEqual(s.errors, []);
   }
+});
+
+// ── pool controls (#2250 Phase 5) ──────────────────────────────────────────
+
+test('poolControlRows normalizes fields and sorts alphabetically by role id', () => {
+  const rows = poolControlRows({
+    roles: [
+      { roleId: 'reviewer', agentId: 'acme-reviewer', displayName: 'Reviewer', maxInstances: 2, liveInstanceCount: 1, state: 'running' },
+      { roleId: 'developer', agentId: 'acme-developer', displayName: 'Developer', maxInstances: null, liveInstanceCount: 3, state: 'paused' },
+    ],
+  });
+  assert.deepEqual(rows.map((r) => r.roleId), ['developer', 'reviewer']);
+  assert.equal(rows[0].state, 'paused');
+  assert.equal(rows[0].maxInstances, null);
+  assert.equal(rows[1].maxInstances, 2);
+});
+
+test('poolControlRows defaults an unrecognised/missing state to running', () => {
+  const rows = poolControlRows({ roles: [{ roleId: 'x', state: 'bogus' }, { roleId: 'y' }] });
+  assert.equal(rows[0].state, 'running');
+  assert.equal(rows[1].state, 'running');
+});
+
+test('poolControlRows survives a missing or malformed payload', () => {
+  for (const data of [null, undefined, {}, { roles: null }]) {
+    assert.deepEqual(poolControlRows(data), []);
+  }
+});
+
+test('heldRows splits the ticket ref for display and sorts oldest-held first', () => {
+  const rows = heldRows({
+    held: [
+      { id: 'b', agentId: 'acme-developer-i2', ticket: 'acme/repo#5', heldAt: '2026-09-14T10:00:00.000Z' },
+      { id: 'a', agentId: 'acme-developer-i1', ticket: 'acme/repo#2', heldAt: '2026-09-14T09:00:00.000Z' },
+    ],
+  });
+  assert.deepEqual(rows.map((r) => r.id), ['a', 'b']);
+  assert.equal(rows[0].repo, 'acme/repo');
+  assert.equal(rows[0].number, 2);
+});
+
+test('heldRows survives a missing/malformed payload and an unparseable ticket ref', () => {
+  for (const data of [null, undefined, {}, { held: null }]) {
+    assert.deepEqual(heldRows(data), []);
+  }
+  const rows = heldRows({ held: [{ id: 'x', ticket: null }] });
+  assert.equal(rows[0].repo, null);
+  assert.equal(rows[0].number, null);
 });

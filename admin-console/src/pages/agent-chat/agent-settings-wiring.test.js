@@ -130,7 +130,10 @@ test('the system prompt renders after Display Name and before Plugins', () => {
 test('the shape logic is the pure module, not inlined in the form again', () => {
   assert.match(editForm, /from '\.\/agent-edit-form-model\.js'/);
   assert.match(editForm, /buildInitialForm\(agent\)/);
-  assert.match(editForm, /onSave\(buildEditSubmit\(agent, form\)\)/);
+  // #2295 AC11: Scaling folded into this one Save, so the click handler also
+  // threads the parent team's wipLimit through to `buildEditSubmit` (the one
+  // gate `scalingSaveDecision` needs) rather than calling it bare.
+  assert.match(editForm, /onSave\(buildEditSubmit\(agent, form, \{ parentWipLimit: parentTeam\?\.wipLimit \}\)\)/);
 });
 
 /* ── AC9: the chat-only props stay optional ──────────────────────── */

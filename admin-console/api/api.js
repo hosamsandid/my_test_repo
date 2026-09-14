@@ -83,7 +83,7 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 // Process-draft access model (#2068) — one predicate for every draft route.
 const draftAccess = require('./draft-access');
@@ -2638,7 +2638,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(agentDir, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, autoDispatch, github, channels, assistLlmEndpointId } = req.body;
+  const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, autoDispatch, pool, github, channels, assistLlmEndpointId } = req.body;
 
   // ── Label registry (#928/#981) ────────────────────────────────────────────
   // The gate/brake flags live on the TEAM agent (like `stages`) — the live
@@ -3002,6 +3002,37 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
       const norm = normalizeAutoDispatch(autoDispatch);
       if (!norm) return res.status(400).json({ error: 'autoDispatch.enabled must be true, or null to remove it' });
       fresh.autoDispatch = norm;
+    }
+  }
+
+  // Agent instance pools (#2246), live write for a role/member (#2270,
+  // config UI) — until now `pool` could only be set at process-template
+  // materialise time. Same runtime-effect discipline as wipLimit/autoDispatch
+  // immediately above: `null` clears it (the role reverts to a persistent
+  // singleton), anything else invalid is refused rather than half-applied.
+  // `poolConfigError` is the SAME shape check the bundle validator runs
+  // (process-template.js), so a live edit and an imported draft agree.
+  if (pool !== undefined && fresh.role === 'team-member') {
+    if (pool === null) delete fresh.pool;
+    else {
+      // pool.enabled piggybacks on the PARENT TEAM's wipLimit (it governs and
+      // reaps pooled instances) — the same prerequisite the bundle validator
+      // checks against the bundle's own wipLimit, but a member's governing
+      // limit lives on its team, not on itself.
+      const teamCfg = fresh.parentTeamId
+        ? readJsonFile(path.join(AGENTS_DIR, fresh.parentTeamId, 'config.json'), null) : null;
+      const perr = poolConfigError(pool, { wipLimitSet: !!normalizeWipLimit(teamCfg?.wipLimit) });
+      if (perr) return res.status(400).json({ error: perr });
+      // `poolConfigError` accepts a valid-but-not-enabled shape (e.g.
+      // `{enabled: false, workspace: ...}`, exactly what a config-UI toggle
+      // sends when a user unchecks "enable pooling" while leaving the other
+      // fields in place) as having no error — matching how the bundle path
+      // (process-template.js `normalizePool(r.pool) ? {pool: p} : {}`) treats
+      // it: the field is simply omitted, never a 400. `normalizePool`
+      // returning `null` here is that same case, not a distinct error one.
+      const norm = normalizePool(pool);
+      if (!norm) delete fresh.pool;
+      else fresh.pool = norm;
     }
   }
 

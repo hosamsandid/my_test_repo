@@ -9285,6 +9285,37 @@ function savePoolControl(teamId, control) {
   }
 }
 
+// Paused/draining hold queue (code-review finding on #2281's review of this
+// Phase) — sibling file, same convention as `poolControlPath` above. See
+// `agentPool.normalizePausedHold`'s doc comment for why this exists and why
+// it's per-role rather than reusing the admission lane's own `held` (that one
+// is keyed by wipLimit capacity, this one by an operator's pause/drain switch;
+// conflating them would let a paused role's held count toward the team's
+// ticket-capacity math it has nothing to do with).
+function pausedHoldPath(teamId) {
+  return controlOrPoolPath(teamId, "pool-paused-hold.json");
+}
+
+function loadPausedHold(teamId) {
+  try {
+    return agentPool.normalizePausedHold(JSON.parse(fs.readFileSync(pausedHoldPath(teamId), "utf8")));
+  } catch {
+    return {};
+  }
+}
+
+function savePausedHold(teamId, held) {
+  const p = pausedHoldPath(teamId);
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(held, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`[AgentPool] cannot persist pool-paused-hold for ${teamId}: ${err.message}`);
+    return false;
+  }
+}
+
 // Which flow governs a dispatch, and with what limit. A member points at its
 // team through `parentTeamId`; a team agent hosts no run of its own but is
 // accepted for completeness. `null` means "no admission control" — the answer
@@ -9336,8 +9367,9 @@ function enqueuePending(agentId, entry, { admissionChecked = false } = {}) {
     }
   }
   // Agent instance pools (#2246): route onto the item-keyed instance.
-  const pooled = routePooledDispatch(agentId, entry);
+  const pooled = routePooledDispatch(agentId, entry); // #2281: held already durable
   if (pooled) {
+    if (pooled.held) return true;
     if (pooled.spawning) return true;
     agentId = pooled.targetId;
   }
@@ -9871,6 +9903,25 @@ function routePooledDispatch(agentId, entry) {
   });
   if (decision.action === 'unpooled') return null;
   if (decision.action === 'refuse') {
+    // Code-review finding on #2281: a pause/drain refusal must never look
+    // like "not pooled at all" to the caller — `enqueuePending` would then
+    // fall through and dispatch to the role TEMPLATE's own pending queue,
+    // running the ticket under the shared, unpooled identity while the
+    // operator believes the role is stopped. Held durably per role instead,
+    // replayed the moment it resumes (the pool-control POST route below).
+    // An ordinary `max-instances` refusal is unaffected — that ticket is
+    // still governed by the team's admission lane/reconcile tick, which is
+    // what already promotes it once a slot frees.
+    if (agentPool.POOL_CONTROL_STATES.includes(decision.reason)) {
+      const held = agentPool.normalizePausedHold(loadPausedHold(teamId));
+      held[roleId] = [...(held[roleId] || []), { agentId, entry, heldAt: new Date().toISOString() }];
+      savePausedHold(teamId, held);
+      console.warn(
+        `[AgentPool] ${agentId}: held dispatch for ${decision.instanceId} (${decision.reason}) — ` +
+        `will redeliver once the role resumes`,
+      );
+      return { held: true };
+    }
     console.warn(`[AgentPool] ${agentId}: refused to spawn ${decision.instanceId} (${decision.reason})`);
     return null;
   }
@@ -17139,8 +17190,10 @@ async function main() {
           const parsed = JSON.parse(body || '{}');
           const state = parsed && parsed.state;
           const control = loadPoolControl(teamId);
+          let resumed = false;
           if (state === 'running' || state == null) {
             delete control[roleId];
+            resumed = true;
           } else if (agentPool.POOL_CONTROL_STATES.includes(state)) {
             control[roleId] = { state, changedAt: new Date().toISOString() };
           } else {
@@ -17148,6 +17201,22 @@ async function main() {
           }
           savePoolControl(teamId, control);
           console.log(`[AgentPool] ${teamId}: ${roleId} set to ${agentPool.poolControlState(control, roleId)}`);
+          // Code-review finding on #2281: redeliver whatever the pause/drain
+          // fallthrough fix above held while this role was stopped — the SAME
+          // entries `routePooledDispatch` refused to hand to the template.
+          // `admissionChecked: true` because these were already admitted into
+          // the wipLimit lane (if any) on their FIRST attempt; re-checking now
+          // would double-count them.
+          if (resumed) {
+            const held = agentPool.normalizePausedHold(loadPausedHold(teamId));
+            const queued = held[roleId] || [];
+            if (queued.length) {
+              delete held[roleId];
+              savePausedHold(teamId, held);
+              for (const h of queued) enqueuePending(h.agentId, h.entry, { admissionChecked: true });
+              console.log(`[AgentPool] ${teamId}: resumed ${roleId}, redelivering ${queued.length} held dispatch(es)`);
+            }
+          }
           return sendJson(res, 200, { teamId, roleId, state: agentPool.poolControlState(control, roleId) });
         } catch (err) {
           return sendJson(res, 400, { error: err.message });
@@ -17182,6 +17251,14 @@ async function main() {
           if (!result.found) return sendJson(res, 200, { teamId, found: false });
           saveAdmissionLane(teamId, result.lane);
           if (result.entry) {
+            // Force-dispatch bypasses `wipLimit`, not pause/drain: if the
+            // target role is currently paused/draining, `enqueuePending` →
+            // `routePooledDispatch` now correctly holds this entry in the
+            // paused-hold queue (the #2281 review's noted "much smaller
+            // version" of the pause/drain fallthrough finding, resolved by
+            // the same fix rather than needing its own branch here) — it
+            // redelivers once the role resumes, same as any other dispatch
+            // that arrived while paused.
             enqueuePending(result.agentId, result.entry, { admissionChecked: true });
             console.log(`[AgentPool] ${teamId}: force-dispatched ${result.ticketKey} for ${result.agentId}`);
           }

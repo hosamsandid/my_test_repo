@@ -68,6 +68,81 @@ test("mutation-proved: dropping controlState from the planPoolDispatch call woul
   assert.doesNotMatch(buggy, /teamId, roleId, pool, itemKey, controlState,/);
 });
 
+// Code-review finding on #2281: a pause/drain refusal used to be
+// indistinguishable from "not pooled at all" (both returned `null`), so
+// `enqueuePending` fell through and dispatched the ticket to the role
+// TEMPLATE's own pending queue under the shared, unpooled identity while the
+// operator believed the role was stopped.
+
+test("routePooledDispatch holds a paused/draining refusal durably instead of returning null (the fallthrough bug)", () => {
+  const src = fn("routePooledDispatch");
+  assert.match(
+    src,
+    /if \(agentPool\.POOL_CONTROL_STATES\.includes\(decision\.reason\)\) \{/,
+    "a pause/drain refusal must be told apart from an ordinary (e.g. max-instances) refusal",
+  );
+  assert.match(src, /savePausedHold\(teamId, held\)/, "the refused entry must be persisted, not just logged");
+  assert.match(
+    src,
+    /if \(agentPool\.POOL_CONTROL_STATES\.includes\(decision\.reason\)\) \{[\s\S]{0,400}?return \{ held: true \};/,
+    "the paused/draining branch must return a distinguishable {held:true}, never null",
+  );
+});
+
+test("mutation-proved: reverting the held branch to `return null` would fail the check above", () => {
+  const src = fn("routePooledDispatch");
+  const buggy = src.replace(
+    /if \(agentPool\.POOL_CONTROL_STATES\.includes\(decision\.reason\)\) \{[\s\S]*?return \{ held: true \};\n\s*\}\n/,
+    "",
+  );
+  assert.doesNotMatch(buggy, /return \{ held: true \};/);
+});
+
+test("enqueuePending never falls through to the template's own pending queue for a held (paused/draining) entry", () => {
+  const src = fn("enqueuePending");
+  assert.match(
+    src,
+    /if \(pooled\.held\) return true;/,
+    "a {held:true} result from routePooledDispatch must short-circuit before agentId is reassigned/used below",
+  );
+  const heldIdx = src.indexOf("if (pooled.held) return true;");
+  const spawningIdx = src.indexOf("if (pooled.spawning) return true;");
+  const pendingPathIdx = src.indexOf("pendingPath(agentId)");
+  assert.ok(heldIdx > 0 && spawningIdx > heldIdx && pendingPathIdx > spawningIdx, "held must be checked before spawning and before the template fallthrough");
+});
+
+test("mutation-proved: dropping the held check from enqueuePending would fail the check above", () => {
+  const buggy = fn("enqueuePending").replace("if (pooled.held) return true;\n    ", "");
+  assert.doesNotMatch(buggy, /if \(pooled\.held\) return true;/);
+});
+
+test("resuming a role (POST pool-control with state:running/null) redelivers everything held while it was paused/draining", () => {
+  const start = SRC.indexOf("const poolControlSetMatch =");
+  assert.ok(start > 0, "poolControlSetMatch route not found");
+  const body = SRC.slice(start, SRC.indexOf("const forceDispatchMatch ="));
+  assert.match(body, /let resumed = false;/);
+  assert.match(body, /resumed = true;/);
+  assert.match(
+    body,
+    /if \(resumed\) \{[\s\S]*?enqueuePending\(h\.agentId, h\.entry, \{ admissionChecked: true \}\)/,
+    "resuming must redeliver every held entry for this role through enqueuePending",
+  );
+  // The redelivery must happen AFTER savePoolControl persists the resumed
+  // state — otherwise a redelivered dispatch could race the still-paused
+  // control file and be held right back into the queue it was just drained
+  // from.
+  const saveAt = body.indexOf("savePoolControl(teamId, control)");
+  const redeliverAt = body.indexOf("enqueuePending(h.agentId, h.entry");
+  assert.ok(saveAt > 0 && redeliverAt > saveAt, "resume must persist the cleared control state before redelivering held entries");
+});
+
+test("mutation-proved: dropping the resume redelivery would fail the check above", () => {
+  const start = SRC.indexOf("const poolControlSetMatch =");
+  const body = SRC.slice(start, SRC.indexOf("const forceDispatchMatch ="));
+  const buggy = body.replace(/if \(resumed\) \{[\s\S]*?\n {10}\}\n/, "");
+  assert.doesNotMatch(buggy, /enqueuePending\(h\.agentId, h\.entry, \{ admissionChecked: true \}\)/);
+});
+
 test("flowSupervisorSweepTeam excludes a paused/draining role from the auto-dispatch candidate set", () => {
   const src = fn("flowSupervisorSweepTeam", { async: true });
   assert.match(src, /const poolControl = loadPoolControl\(teamId\)/);

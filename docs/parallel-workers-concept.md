@@ -658,6 +658,37 @@ still fork the two (e.g. auto-suggest disabling the role once a draining
 role's instance count hits zero); nothing here forecloses that, it simply
 isn't built.
 
+**A5.2b — a refusal must be held, never allowed to fall through to the
+TEMPLATE's own queue (code-review finding, rework of #2281).** The first cut
+of A5.2 above had `routePooledDispatch` return the same bare `null` for a
+pause/drain refusal as it does for "not pooled at all" — the caller
+(`enqueuePending`) cannot tell those apart, so it fell through to its
+unconditional final branch and dispatched straight to the pooled ROLE's own
+`pending-triggers.json`, i.e. ran the ticket under the shared, unpooled
+identity *while the board showed the role as paused*. `flowSupervisorSweepTeam`
+and `recurringPoolSweepTeam` never had this gap — both filter the role out of
+their candidate set before ever attempting a dispatch, so there is no
+downstream branch that can fall through. It is specific to the
+`routePooledDispatch`/`enqueuePending` pair on the SDLC label-triggered path
+(and, by the same code path, force-dispatch — see A5.3). Fixed by giving the
+refusal a durable home instead of vanishing into `null`: a paused/draining
+refusal is appended to a new per-team, per-role hold file
+(`pool-paused-hold.json`, sibling of `pool-control.json`, validated by
+`agentPool.normalizePausedHold`) and `routePooledDispatch` returns a
+distinguishable `{ held: true }`, which `enqueuePending` short-circuits on
+(`return true` — recorded, will fire later, the same "durably queued" contract
+the admission lane's own `held` array makes) rather than falling through. The
+hold is replayed the moment the role resumes (`POST .../pool-control/:roleId`
+with `state: "running"` or omitted): every entry queued for that role is
+redelivered through `enqueuePending(..., { admissionChecked: true })` —
+`admissionChecked` because these already passed the wipLimit gate on their
+first attempt, and a second pass would double-count them in the lane. This is
+deliberately its OWN file, not a reuse of the admission lane's `held` array:
+that one is keyed by wipLimit capacity math (`inFlight`/`held` bookkeeping a
+paused-but-not-capacity-limited ticket has nothing to do with), and
+conflating the two would let a paused role's holds count toward — or worse,
+silently mutate — a team-wide capacity number they were never part of.
+
 **A5.3 — force-dispatch promotes ONE named held entry past the WIP limit,
 recording it in `inFlight` exactly like a normal admit.** `heldIdentity`
 (already used internally by `admit`/`promoteHeld`) is now also the
@@ -673,7 +704,12 @@ release tracking and to the very next `wipLimit` check. It instead mirrors
 `admit`'s own capacity-admit bookkeeping directly: append to `inFlight` (or
 merge into an existing same-ticket entry), still counted, still released
 normally — only the REFUSAL is skipped, never the accounting the refusal
-exists to protect.
+exists to protect. Force-dispatch bypasses `wipLimit` only, never pause/drain:
+if the target role is currently paused/draining, the same A5.2b fix applies —
+`enqueuePending` holds the forced entry in the paused-hold queue rather than
+falling through to the template, and it redelivers on resume like any other
+held dispatch. This resolved, as a side effect of A5.2b rather than its own
+branch, the smaller related gap the #2281 code review flagged.
 
 **A5.4 — the board controls landed on the EXISTING Flow Control board
 (#2116), not the Amendment 2 "Live surface" lane visualization.** Two new

@@ -192,6 +192,29 @@ test('poolControlState: running for anything not recorded; the recorded state ot
   assert.equal(pool.poolControlState(null, 'developer'), 'running');
 });
 
+// ─── paused/draining hold queue (code-review finding on #2281) ─────────────
+
+test('normalizePausedHold: an absent/empty/malformed record is the empty map', () => {
+  assert.deepEqual(pool.normalizePausedHold(undefined), {});
+  assert.deepEqual(pool.normalizePausedHold(null), {});
+  assert.deepEqual(pool.normalizePausedHold([]), {});
+  assert.deepEqual(pool.normalizePausedHold({}), {});
+});
+
+test('normalizePausedHold: keeps a valid held entry, drops one missing agentId/entry, drops an empty list', () => {
+  assert.deepEqual(
+    pool.normalizePausedHold({
+      developer: [
+        { agentId: 't-developer', entry: { github: {} }, heldAt: '2026-09-14T09:00:00.000Z' },
+        { agentId: 't-developer' }, // no `entry` — dropped
+        { entry: { github: {} } }, // no `agentId` — dropped
+      ],
+      reviewer: [], // empties to nothing — the key itself must not survive
+    }),
+    { developer: [{ agentId: 't-developer', entry: { github: {} }, heldAt: '2026-09-14T09:00:00.000Z' }] },
+  );
+});
+
 test('planPoolDispatch: paused/draining refuses a NEW spawn but still reuses an existing instance (D4)', () => {
   for (const controlState of ['paused', 'draining']) {
     assert.deepEqual(

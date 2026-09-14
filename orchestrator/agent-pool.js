@@ -180,6 +180,36 @@ function poolControlState(control, roleId) {
   return c && POOL_CONTROL_STATES.includes(c.state) ? c.state : 'running';
 }
 
+// Paused/draining hold queue (code-review finding on #2281's review of this
+// Phase). A dispatch refused because its role is `paused`/`draining` must
+// never silently fall through to the role TEMPLATE's own pending queue — that
+// would run the ticket under the shared, unpooled identity while the operator
+// believes it is stopped. It is held here instead, durably, and replayed the
+// moment the role resumes (`orchestrator.js`'s pool-control POST route) —
+// mirroring the admission lane's own `held` shape (verbatim entry + agentId),
+// but keyed per pooled ROLE rather than per team, since this has nothing to do
+// with `wipLimit` capacity.
+function normalizePausedHold(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [roleId, list] of Object.entries(raw)) {
+    if (typeof roleId !== 'string' || !roleId || !Array.isArray(list)) continue;
+    const entries = [];
+    for (const h of list) {
+      if (!h || typeof h !== 'object') continue;
+      if (typeof h.agentId !== 'string' || !h.agentId) continue;
+      if (!h.entry || typeof h.entry !== 'object') continue;
+      entries.push({
+        agentId: h.agentId,
+        entry: h.entry,
+        heldAt: typeof h.heldAt === 'string' ? h.heldAt : null,
+      });
+    }
+    if (entries.length) out[roleId] = entries;
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch routing — spawn, reuse, or refuse
 // ---------------------------------------------------------------------------
@@ -244,6 +274,7 @@ module.exports = {
   roleIdFromMemberId,
   normalizePoolControl,
   poolControlState,
+  normalizePausedHold,
   planPoolDispatch,
   isInstanceTimedOut,
 };

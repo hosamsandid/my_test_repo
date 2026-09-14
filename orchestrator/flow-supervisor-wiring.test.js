@@ -91,10 +91,20 @@ test("epic-serialization: busyEpicIds is computed from every ACTIVE (non-backlog
 test("mutation-proved: dropping busyEpicIds from the selector call would fail the check above", () => {
   const src = fn("flowSupervisorSweepTeam");
   const buggy = src.replace(
-    /const toDispatch = flowSupervisor\.selectAutoDispatch\(\{\s*\n\s*candidates: pooledCandidates, busyEpicIds, budget, now, windowMs, limit: wipLimit,\s*\n\s*\}\);/,
-    "const toDispatch = flowSupervisor.selectAutoDispatch({ candidates: pooledCandidates, budget, now, windowMs, limit: wipLimit });",
+    /const toDispatch = flowSupervisor\.selectAutoDispatch\(\{\s*\n\s*candidates: pooledCandidates, busyEpicIds, budget, now, windowMs, limit: wipLimit,\s*\n\s*contentionPolicy: autoDispatch\.contentionPolicy, busyPathSets,\s*\n\s*\}\);/,
+    "const toDispatch = flowSupervisor.selectAutoDispatch({ candidates: pooledCandidates, budget, now, windowMs, limit: wipLimit, contentionPolicy: autoDispatch.contentionPolicy, busyPathSets });",
   );
   assert.doesNotMatch(buggy, /selectAutoDispatch\(\{[\s\S]*?busyEpicIds,/);
+});
+
+// Phase 4 (#2249, D6): predicted-paths contention is layered on TOP of
+// epic-serialization, opt-in, and must never fire a prediction unless the
+// team's own `autoDispatch.contentionPolicy` names it — see
+// `predicted-paths-wiring.test.js` for the full drift guard on this half.
+test("predicted-paths contention is threaded into the SAME selector call, gated on autoDispatch.contentionPolicy", () => {
+  const src = fn("flowSupervisorSweepTeam");
+  assert.match(src, /usePathContention = autoDispatch\.contentionPolicy === flowSupervisor\.CONTENTION_PREDICTED_PATHS/);
+  assert.match(src, /selectAutoDispatch\(\{[\s\S]*?contentionPolicy: autoDispatch\.contentionPolicy, busyPathSets,/);
 });
 
 test("auto-dispatch and the 'unclaimed' remediation row are ONE code path: both run through wakeGithubLabelListeners, no bespoke GitHub write", () => {

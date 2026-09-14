@@ -176,6 +176,7 @@ const ticketReconcileSweep = require("./ticket-reconcile-sweep");
 const agentPool = require("./agent-pool");
 const flowSupervisor = require("./flow-supervisor");
 const recurringPoolSource = require("./recurring-pool-source");
+const predictedPaths = require("./predicted-paths");
 
 // ── Read-write context mount helpers (writing into a mounted host folder) ──
 // A caller path is RELATIVE to /context. For a single legacy folder the mount
@@ -2537,6 +2538,138 @@ function saveFlowSupervisorBudget(teamId, budget) {
   }
 }
 
+// ============================================================
+// Agent Pools — Phase 4: LLM conflict prediction (#2249, epic #2251; design of
+// record `docs/parallel-workers-concept.md` D6, §7). Fully gated behind
+// `autoDispatch.contentionPolicy === 'predicted-paths'` (off by default) — a
+// team that never opts in never triggers a single fetch or LLM call here. The
+// pure shape (sanitizing/overlap/prompt/parse) lives in `predicted-paths.js`;
+// this is its fs/GitHub/LLM half, mirroring the flow-supervisor split above.
+// ============================================================
+
+function predictedPathsCachePath(teamId) {
+  return controlOrPoolPath(teamId, "predicted-paths-cache.json");
+}
+
+// A flat `{ "<ticketId>": { paths: string[], source, predictedAt } }` map. A
+// prediction is computed ONCE per ticket and kept forever (no TTL/invalidation
+// — an issue's scope rarely changes after it's marked ready, and re-predicting
+// every tick would turn an advisory pre-flight into a recurring LLM bill for no
+// behavioural gain). Missing/corrupt degrades to "nothing predicted yet",
+// never to a throw on the sweep.
+function loadPredictedPathsCache(teamId) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(predictedPathsCachePath(teamId), "utf8"));
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePredictedPathsCache(teamId, cache) {
+  const p = predictedPathsCachePath(teamId);
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(cache, null, 2));
+  } catch (err) {
+    console.error(`[PredictedPaths] cannot persist cache for ${teamId}: ${err.message}`);
+  }
+}
+
+// A capped, best-effort sample of a repo's file tree via the GitHub API — the
+// "repo structure" half of the AC. Reuses `_flowGithubGetJson`, the SAME
+// GET-JSON hand the ticket ledger/anomaly sweeps already use, rather than a new
+// fetch primitive. Any failure (rate limit, empty repo, private submodule
+// weirdness) degrades to `[]`, which just means the LLM prompt loses its repo
+// listing — the issue text alone is still a usable prediction input.
+async function _fetchRepoTreeSample(repo, token) {
+  try {
+    const meta = await _flowGithubGetJson(`repos/${repo}`, token);
+    const branch = (meta && typeof meta.default_branch === "string" && meta.default_branch) || "main";
+    const tree = await _flowGithubGetJson(`repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`, token);
+    const entries = Array.isArray(tree && tree.tree) ? tree.tree : [];
+    return entries
+      .filter((e) => e && e.type === "blob" && typeof e.path === "string")
+      .map((e) => e.path)
+      .slice(0, predictedPaths.MAX_REPO_TREE_SAMPLE);
+  } catch {
+    return [];
+  }
+}
+
+// Predict one ticket's likely-touched paths: LLM-over-(issue+repo-tree) when
+// the team has an assist provider configured (`resolveAssistBindingForTeam`,
+// #1213 — reused verbatim, no new billing path), else the deterministic
+// heuristic (`predicted-paths.js#extractHeuristicPaths`) — the AC's own
+// "LLM ... or a heuristic". An LLM call that fails outright (network, no
+// binding, unparseable response) falls back to the heuristic rather than
+// reporting "no prediction", since the heuristic is always available and free.
+// Returns `{ paths, source }`; `paths` may legitimately be `[]` (advisory
+// miss — `selectAutoDispatch` treats that as "no extra restriction", D6).
+async function _predictTicketPaths(teamId, ticket, repoToken, repoTreeCache) {
+  const { repo, number, title } = ticket;
+  const token = repo ? repoToken.get(repo) : null;
+  let body = "";
+  if (repo && token && Number.isInteger(number)) {
+    try {
+      const obj = await _flowGithubGetJson(`repos/${repo}/issues/${number}`, token);
+      body = typeof obj?.body === "string" ? obj.body : "";
+    } catch {
+      body = "";
+    }
+  }
+  let repoTree = [];
+  if (repo && token) {
+    if (repoTreeCache.has(repo)) {
+      repoTree = repoTreeCache.get(repo);
+    } else {
+      repoTree = await _fetchRepoTreeSample(repo, token);
+      repoTreeCache.set(repo, repoTree);
+    }
+  }
+  const binding = resolveAssistBindingForTeam(teamId);
+  if (binding) {
+    try {
+      const prompt = predictedPaths.buildPredictionPrompt({ title, body, repoTree });
+      const text = await _synthesizeSkillMd(null, { messages: [{ role: "user", content: prompt }], max_tokens: 400 }, binding);
+      const parsed = text ? predictedPaths.parsePredictedPathsResponse(text) : null;
+      if (parsed !== null) return { paths: parsed, source: "llm" };
+    } catch (err) {
+      console.warn(`[PredictedPaths] ${teamId}: LLM prediction for ${ticket.ticketId} failed: ${err.message}`);
+    }
+  }
+  const heuristicPaths = predictedPaths.extractHeuristicPaths(`${title || ""}\n${body || ""}`);
+  return { paths: heuristicPaths, source: "heuristic" };
+}
+
+// Fill in any missing cache entry for the given (already-narrowed) candidates,
+// mutating `cache` in place and returning it. Bounded to `limit` NEW
+// predictions per sweep (oldest-first, matching dispatch order) so a large
+// backlog cannot turn one tick into an unbounded burst of LLM/GitHub calls —
+// once cached, a ticket never needs predicting again (see
+// `loadPredictedPathsCache`).
+const PREDICTED_PATHS_MAX_NEW_PER_TICK = 50;
+async function _ensurePredictedPaths(teamId, candidates, cache) {
+  const pending = candidates
+    .filter((t) => !cache[t.ticketId])
+    .sort((a, b) => (b.ageInStateMs || 0) - (a.ageInStateMs || 0))
+    .slice(0, PREDICTED_PATHS_MAX_NEW_PER_TICK);
+  if (pending.length === 0) return cache;
+  const { envIds } = _flowTeamMembers(teamId);
+  const repoToken = _flowRepoTokens(envIds);
+  const repoTreeCache = new Map();
+  for (const t of pending) {
+    try {
+      const { paths, source } = await _predictTicketPaths(teamId, t, repoToken, repoTreeCache);
+      cache[t.ticketId] = { paths, source, predictedAt: new Date().toISOString() };
+    } catch (err) {
+      console.warn(`[PredictedPaths] ${teamId}: prediction for ${t.ticketId} failed: ${err.message}`);
+      cache[t.ticketId] = { paths: [], source: "error", predictedAt: new Date().toISOString() };
+    }
+  }
+  return cache;
+}
+
 // Lifecycle states counted as "this epic already has active work" for
 // epic-serialization (D6/D10) — everything past `backlog` and short of `done`.
 // A ticket merely `backlog` has not been dispatched at all, so it cannot make
@@ -2589,9 +2722,34 @@ async function flowSupervisorSweepTeam(teamId, { now = Date.now() } = {}) {
 
   const pooledCandidates = tickets.filter((t) => t.ownerAgentId && pooledRoleIds.has(t.ownerAgentId));
 
+  // Phase 4 (#2249, D6): layered ON TOP of epic-serialization above, and ONLY
+  // when the team opted in — an unset/`'epic-serial'` policy never reads or
+  // writes the predicted-paths cache, never fetches an issue body, never calls
+  // an LLM (§9: "gated behind config; off by default").
+  const usePathContention = autoDispatch.contentionPolicy === flowSupervisor.CONTENTION_PREDICTED_PATHS;
+  let pathsCache = null;
+  let busyPathSets = [];
+  if (usePathContention) {
+    pathsCache = loadPredictedPathsCache(teamId);
+    const unclaimedCandidates = pooledCandidates.filter((t) => t.blocker === flowSupervisor.AUTO_DISPATCH_BLOCKER);
+    await _ensurePredictedPaths(teamId, unclaimedCandidates, pathsCache);
+    for (const t of unclaimedCandidates) {
+      t.predictedPaths = pathsCache[t.ticketId] ? pathsCache[t.ticketId].paths : [];
+    }
+    // Every ACTIVE ticket's already-cached prediction is "busy" — mirroring
+    // busyEpicIds above, but never itself triggers a new prediction: an active
+    // ticket was a candidate on some earlier tick (or predates this policy
+    // being turned on, in which case it simply imposes no path restriction).
+    busyPathSets = tickets
+      .filter((t) => FLOW_SUPERVISOR_ACTIVE_STATES.has(t.state) && pathsCache[t.ticketId])
+      .map((t) => pathsCache[t.ticketId].paths)
+      .filter((p) => Array.isArray(p) && p.length);
+  }
+
   let budget = loadFlowSupervisorBudget(teamId);
   const toDispatch = flowSupervisor.selectAutoDispatch({
     candidates: pooledCandidates, busyEpicIds, budget, now, windowMs, limit: wipLimit,
+    contentionPolicy: autoDispatch.contentionPolicy, busyPathSets,
   });
   const toRework = flowSupervisor.selectStaleBaseRework({ candidates: pooledCandidates, budget, now, windowMs });
 
@@ -2642,6 +2800,7 @@ async function flowSupervisorSweepTeam(teamId, { now = Date.now() } = {}) {
   if (firedKeys.length) budget = flowSupervisor.recordFired(budget, firedKeys, now);
   budget = flowSupervisor.pruneBudget(budget, now, windowMs);
   saveFlowSupervisorBudget(teamId, budget);
+  if (usePathContention) savePredictedPathsCache(teamId, pathsCache);
 
   return { teamId, dispatched, reworked };
 }

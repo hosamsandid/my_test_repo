@@ -321,7 +321,7 @@ test('autoDispatch: enabled:false is treated as not configured (dropped on build
 
 test('autoDispatch: an unimplemented selection/contentionPolicy is refused, not silently ignored', () => {
   assert.equal(validateProcessTemplate(pooledRoleWithWipLimit({
-    autoDispatch: { enabled: true, contentionPolicy: 'predicted-paths' },
+    autoDispatch: { enabled: true, contentionPolicy: 'no-such-policy' },
   })).ok, false);
   assert.equal(validateProcessTemplate(pooledRoleWithWipLimit({
     autoDispatch: { enabled: true, selection: 'newest-first' },
@@ -329,6 +329,18 @@ test('autoDispatch: an unimplemented selection/contentionPolicy is refused, not 
   // The implemented values are accepted and round-trip.
   const ok = pooledRoleWithWipLimit({
     autoDispatch: { enabled: true, selection: 'oldest-first', contentionPolicy: 'epic-serial' },
+  });
+  assert.equal(validateProcessTemplate(ok).ok, true);
+});
+
+test('autoDispatch: predicted-paths (#2249, Phase 4) is an implemented contentionPolicy value and round-trips', () => {
+  const b = buildProcessTemplate({
+    name: 'x', level: 'live', teamId: 'acme', roles: sampleRoles, wipLimit: 1,
+    autoDispatch: { enabled: true, contentionPolicy: 'predicted-paths' },
+  });
+  assert.deepEqual(b.autoDispatch, { enabled: true, contentionPolicy: 'predicted-paths' });
+  const ok = pooledRoleWithWipLimit({
+    autoDispatch: { enabled: true, contentionPolicy: 'predicted-paths' },
   });
   assert.equal(validateProcessTemplate(ok).ok, true);
 });

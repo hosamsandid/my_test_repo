@@ -202,13 +202,15 @@ function normalizePool(raw) {
 //
 // `selection`/`contentionPolicy` are named in the design's config surface
 // (`docs/parallel-workers-concept.md` §9) for forward-compatibility, but only
-// one value of each is actually implemented in this phase — `oldest-first` and
-// `epic-serial` (the AC's own "never two in-flight items sharing epicId" is not
-// optional). An unimplemented value is refused by `validateProcessTemplate`
-// rather than silently accepted and ignored, which would misrepresent what the
-// author asked for.
+// a subset of each is actually implemented — `oldest-first`, and `epic-serial`
+// (the AC's own "never two in-flight items sharing epicId" is not optional —
+// it is always on, `contentionPolicy` never turns it off) plus, as of Phase 4
+// (#2249), `predicted-paths` (a read-only LLM/heuristic pre-flight, layered ON
+// TOP of epic-serial, opt-in and off by default). An unimplemented value is
+// still refused by `validateProcessTemplate` rather than silently accepted and
+// ignored, which would misrepresent what the author asked for.
 const AUTO_DISPATCH_SELECTIONS = ['oldest-first'];
-const AUTO_DISPATCH_CONTENTION_POLICIES = ['epic-serial'];
+const AUTO_DISPATCH_CONTENTION_POLICIES = ['epic-serial', 'predicted-paths'];
 
 function normalizeAutoDispatch(raw) {
   if (!raw || typeof raw !== 'object' || raw.enabled !== true) return null;

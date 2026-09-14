@@ -942,3 +942,40 @@ member.
 - Read-only, no new persistence beyond the existing collapse-state map: an
   instance still disappears from the sub-list the moment the pool reaper (or a
   manual teardown) removes it, exactly as it already did.
+
+## Amendment 10 — the `AEE_POOLS_ENABLED` feature flag (#2302)
+
+Everything above (Amendments 1–9) shipped visible and reachable by default.
+#2302 adds a boot-time kill switch — `AEE_POOLS_ENABLED`, **off by default** —
+because the mechanism still needs teardown/reaping polish before it is
+production-ready: `admin-console/api/pools-mode.js` mirrors `auth-mode.js`'s
+own `AUTH_ENABLED` resolver exactly (same `ON_TOKENS`/`OFF_TOKENS`, same
+read-once-at-boot pattern), and `GET /api/pools-mode` feeds a one-shot
+`PoolsFeatureProvider` context (no polling — the flag can't change without a
+restart, unlike Maintenance Mode).
+
+Flag off (the default) hides vs. disables, deliberately per-surface:
+
+- **Flow Editor toolbar** (`ProcessCanvas.jsx`): the **Parallelism**
+  button/panel (Amendment 2/6/8's board) disappear entirely — this surface
+  configures `wipLimit`/`autoDispatch`, which stay meaningless until pooling
+  itself is on.
+- **Per-role Scaling section** (Amendment 7's shared `ScalingSection.jsx`, in
+  both Agent Chat Settings and the Flow Editor's `NodeInspector`): stays
+  **visible but inert** — every input and the Save button disabled
+  (`ScalingSection`'s new `disabled` prop folds into its existing `blocked`
+  check) — plus a "Coming Soon" badge (`ComingSoonBadge.jsx`) next to the
+  "Scaling" label — rather than vanishing, so the feature isn't forgotten and
+  a role's already-persisted `pool` config stays visible.
+
+**Not wired: docker-compose passthrough.** Every other boot flag documented
+in `.env.example` (`AUTH_ENABLED`, `AUTH_SESSION_SECRET`,
+`AUTH_COOKIE_SECURE`, …) has a matching `"${VAR:-}"` line in the
+`admin-console` service's `environment:` block in `docker-compose.yml` — the
+container has no `env_file`, so a var only reaches `process.env` there if it
+is listed explicitly. `AEE_POOLS_ENABLED` was added to `.env.example`
+(documentation fix, #2302 follow-up) but **not** to `docker-compose.yml`, so
+on a standard compose deployment setting it in `.env` currently has no
+effect — the flag reads as unset (off) regardless. Flagging here rather than
+patching `docker-compose.yml` silently, since that is a deployment-manifest
+change outside a docs fix.

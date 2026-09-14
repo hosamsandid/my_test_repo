@@ -25,7 +25,12 @@ import {
 // `none`) stay fully functional server-side but have no UI anywhere to
 // configure the `pool.workSource` they'd need, so offering them here would
 // be a selectable option that silently does nothing.
-export default function ScalingSection({ agentId, pool, parentWipLimit, onChanged }) {
+// `disabled` (#2302): the agent-pools feature flag is off — render the
+// current persisted state but block every input and the Save button, so the
+// section stays visible ("Coming Soon", the badge lives with the caller's
+// "Scaling" label) without letting anyone half-configure a pool the platform
+// won't actually spawn.
+export default function ScalingSection({ agentId, pool, parentWipLimit, onChanged, disabled = false }) {
   const [enabled, setEnabled] = useState(!!(pool && pool.enabled === true));
   const [maxInstancesText, setMaxInstancesText] = useState(
     pool && Number.isInteger(pool.maxInstances) ? String(pool.maxInstances) : ''
@@ -43,7 +48,7 @@ export default function ScalingSection({ agentId, pool, parentWipLimit, onChange
   const retain = parseMinutesInput(retainText);
   const prereq = scalingPrerequisite({ parentWipLimit });
   const parseError = maxInstances.error || idle.error || hard.error || retain.error;
-  const blocked = !!parseError || (enabled && !prereq.ok);
+  const blocked = disabled || !!parseError || (enabled && !prereq.ok);
 
   const dirty = () => { setSaved(false); };
 
@@ -72,11 +77,11 @@ export default function ScalingSection({ agentId, pool, parentWipLimit, onChange
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', cursor: (enabled || prereq.ok) ? 'pointer' : 'not-allowed' }}>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', cursor: (!disabled && (enabled || prereq.ok)) ? 'pointer' : 'not-allowed' }}>
         <input
           type="checkbox"
           checked={enabled}
-          disabled={!enabled && !prereq.ok}
+          disabled={disabled || (!enabled && !prereq.ok)}
           onChange={(e) => { setEnabled(e.target.checked); dirty(); }}
         />
         <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)' }}>This role auto-scales</span>
@@ -94,6 +99,7 @@ export default function ScalingSection({ agentId, pool, parentWipLimit, onChange
               type="text"
               inputMode="numeric"
               value={maxInstancesText}
+              disabled={disabled}
               onChange={(e) => { setMaxInstancesText(e.target.value); dirty(); }}
               placeholder="no cap"
               style={{ ...fieldInput, width: 100 }}
@@ -103,17 +109,17 @@ export default function ScalingSection({ agentId, pool, parentWipLimit, onChange
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
             <Field label="Idle timeout (min)">
-              <input type="text" inputMode="numeric" value={idleText}
+              <input type="text" inputMode="numeric" value={idleText} disabled={disabled}
                 onChange={(e) => { setIdleText(e.target.value); dirty(); }}
                 placeholder="default" style={{ ...fieldInput, width: 90 }} />
             </Field>
             <Field label="Hard timeout (min)">
-              <input type="text" inputMode="numeric" value={hardText}
+              <input type="text" inputMode="numeric" value={hardText} disabled={disabled}
                 onChange={(e) => { setHardText(e.target.value); dirty(); }}
                 placeholder="default" style={{ ...fieldInput, width: 90 }} />
             </Field>
             <Field label="Retain logs (min)">
-              <input type="text" inputMode="numeric" value={retainText}
+              <input type="text" inputMode="numeric" value={retainText} disabled={disabled}
                 onChange={(e) => { setRetainText(e.target.value); dirty(); }}
                 placeholder="default" style={{ ...fieldInput, width: 90 }} />
             </Field>

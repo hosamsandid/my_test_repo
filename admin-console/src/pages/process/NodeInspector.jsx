@@ -12,6 +12,8 @@ import { ID_FORMAT_HINT } from '../../components/id-field-view';
 import PromptHistory from '../agent-chat/PromptHistory';
 import ScalingSection from './ScalingSection';
 import { poolBadgeText } from './scaling-view.js';
+import ComingSoonBadge from '../../components/ComingSoonBadge';
+import { usePoolsEnabled } from '../../context/PoolsFeatureContext';
 import {
   PROMPT_MODES,
   PROMPT_MODE_LABELS,
@@ -65,6 +67,7 @@ export default function NodeInspector({
   // (60/61), so the subject is published here — by the component that owns the
   // panel body — to lift the help panel in front of it (#1984).
   useHelpSubject({ overlay: OVERLAY_FLOW_NODE });
+  const poolsEnabled = usePoolsEnabled();
   const isLive = mode === 'live';
   const structureFocus = focus?.section === 'structure' && (focus?.tab || 'details') === 'details';
   const [tab, setTab] = useState(focus?.tab || 'details');
@@ -251,11 +254,17 @@ export default function NodeInspector({
                   editor above — not batched into the Details Save below. */}
               {isPooledRoleNode && (
                 <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)' }}>
-                  <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-2)' }}>Scaling</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-2)' }}>
+                    <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)' }}>Scaling</div>
+                    {/* #2302: mirror the same disabled + "Coming Soon" treatment
+                        as the agent Settings tab so the two surfaces agree. */}
+                    {!poolsEnabled && <ComingSoonBadge title="Agent-pool autoscaling is not yet enabled on this platform." />}
+                  </div>
                   <ScalingSection
                     agentId={node.id}
                     pool={memberCfg.pool}
                     parentWipLimit={parentCfg?.wipLimit}
+                    disabled={!poolsEnabled}
                     onChanged={onChanged}
                   />
                 </div>

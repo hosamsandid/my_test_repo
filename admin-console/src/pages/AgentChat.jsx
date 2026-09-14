@@ -497,6 +497,17 @@ export default function AgentChat() {
   // click, the row menu's "Team settings…", a direct /chats/<teamId> URL)
   // converges on it.
   const subjectIsTeam = routedAgent?.role === 'team';
+  // #2267: a team's Settings request (handleOpenSettings below) has nowhere to
+  // be consumed — RightRail doesn't render for a team subject at all (#2235,
+  // TeamConfigSurface takes over instead) — so it sits pending in state. Left
+  // alone, selecting an unrelated individual Agent afterwards remounts
+  // RightRail fresh, and its openTabRequest effect fires on that FIRST mount
+  // with the still-pending `{tab:'settings'}` value, forcing that unrelated
+  // agent onto Settings. Clearing it the moment the subject becomes a team
+  // means there is nothing left to leak by the time any later agent mounts.
+  useEffect(() => {
+    if (subjectIsTeam) setRailTabRequest(null);
+  }, [subjectIsTeam]);
   const effectiveRoomId =
     (selectedAgent && createdRooms[selectedAgent.id]) ||
     selectedAgent?.dmRoomId ||

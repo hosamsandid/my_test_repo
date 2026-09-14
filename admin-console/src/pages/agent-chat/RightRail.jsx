@@ -11,8 +11,20 @@ import { fitTabCount } from './rail-layout';
 import { useSessionsActive } from './SessionsActiveContext';
 import { activeSessionCount } from './sessions-active';
 import { settingsSubject } from './agent-settings-view';
+import { parseTabMap, tabForAgent, withAgentTab } from './rail-tab-memory';
 
-const TAB_KEY = 'agentChat.rightRailTab';
+// #2267: was a single global "last active tab overall" key. Replaced with a
+// map keyed by agent id (below) so each agent restores its own last tab
+// rather than sharing one global value with every other agent and team.
+const TAB_MAP_KEY = 'agentChat.rightRailTabByAgent';
+
+function loadTabMap() {
+  try {
+    return parseTabMap(localStorage.getItem(TAB_MAP_KEY));
+  } catch {
+    return {};
+  }
+}
 
 // The whole rail toggles with Cmd+Shift+L on macOS / Ctrl+Shift+L elsewhere
 // (handler in AgentChat.jsx). Detect the platform once so the visible hint and
@@ -45,7 +57,9 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'knowledge', 
  * so its configuration is rendered on its own full-width surface by
  * `AgentChat.jsx` instead — see `TeamConfigSurface` there.
  *
- * The active tab is persisted in localStorage so it survives reloads; an old
+ * The active tab is persisted per agent in localStorage (#2267) so it survives
+ * reloads AND so switching agents restores each agent's own last tab rather
+ * than sharing one global "last active tab" across all of them; an old
  * stored 'log' value silently falls back to the default 'sessions' tab (it is
  * no longer a member of TAB_KEYS), which is where Log used to live.
  *
@@ -84,16 +98,28 @@ export default function RightRail({
     overrideId: settingsAgentId,
   });
   const showSettings = settings.visible;
-  const [tab, setTab] = useState(() => {
-    try {
-      const v = localStorage.getItem(TAB_KEY);
-      if (TAB_KEYS.includes(v)) return v;
-    } catch { /* ignore */ }
-    return 'sessions';
-  });
+  const [tab, setTab] = useState(() => tabForAgent(loadTabMap(), agentId, TAB_KEYS) || 'sessions');
+
+  // Restore-then-persist, in that order, for the same reason they're one
+  // effect rather than two: the rail is NOT remounted for an ordinary
+  // agent-to-agent switch (only its `agentId` prop changes), so on a subject
+  // change this has to overwrite `tab` with the NEW agent's own remembered
+  // value before anything persists — otherwise a separate "persist on any
+  // [agentId, tab] change" effect would, on the very first render of the new
+  // agent, write the OLD agent's still-current `tab` into the new agent's
+  // slot (a same-commit race, not just a display flicker), permanently
+  // seeding it with a tab that was never actually active for it. Falls back
+  // like the initializer does when the new agent has no history yet (AC3).
+  const prevAgentIdRef = useRef(agentId);
   useEffect(() => {
-    try { localStorage.setItem(TAB_KEY, tab); } catch { /* ignore */ }
-  }, [tab]);
+    if (agentId !== prevAgentIdRef.current) {
+      prevAgentIdRef.current = agentId;
+      setTab(tabForAgent(loadTabMap(), agentId, TAB_KEYS) || 'sessions');
+      return;
+    }
+    if (!agentId) return;
+    try { localStorage.setItem(TAB_MAP_KEY, JSON.stringify(withAgentTab(loadTabMap(), agentId, tab))); } catch { /* ignore */ }
+  }, [agentId, tab]);
 
   // External tab request (e.g. clicking the "N learned" badge in the chat
   // header switches to the Knowledge tab). `ts` disambiguates repeat clicks.

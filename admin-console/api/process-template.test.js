@@ -188,6 +188,53 @@ test('stage: per-role stage + ordered stages survive build → customRoles (#sta
   assert.equal('stage' in noStage[0], false);
 });
 
+// ─── Agent instance pools (#2246, epic #2251 Phase 1) ──────────────────────────
+
+test('pool: a role with no pool field round-trips byte-identically (non-pooled default)', () => {
+  const b = buildProcessTemplate({ name: 'x', level: 'live', teamId: 'acme', roles: sampleRoles, wipLimit: 1 });
+  assert.equal('pool' in b.roles[0], false);
+  const cr = templateToCustomRoles(b);
+  assert.equal('pool' in cr[0], false);
+  const member = buildMemberFromTemplate(cr[0], { teamId: 'acme' });
+  assert.equal('pool' in member, false);
+});
+
+test('pool: an enabled pool config survives build → customRoles → member, normalized', () => {
+  const pooled = [{ ...sampleRoles[0], pool: { enabled: true, maxInstances: 3, workspace: 'git-clean-base' } }];
+  const b = buildProcessTemplate({ name: 'x', level: 'live', teamId: 'acme', roles: pooled, wipLimit: 2 });
+  assert.deepEqual(b.roles[0].pool, { enabled: true, maxInstances: 3, workspace: 'git-clean-base' });
+  const cr = templateToCustomRoles(b);
+  assert.deepEqual(cr[0].pool, { enabled: true, maxInstances: 3, workspace: 'git-clean-base' });
+  const member = buildMemberFromTemplate(cr[0], { teamId: 'acme' });
+  assert.deepEqual(member.pool, { enabled: true, maxInstances: 3, workspace: 'git-clean-base' });
+});
+
+test('pool: an invalid shape is refused rather than silently dropped', () => {
+  const bad = (pool) => ({
+    processTemplateVersion: 1, roles: [{ id: 'r', systemPrompt: 'p', pool }],
+  });
+  assert.equal(validateProcessTemplate(bad('nope')).ok, false);
+  assert.equal(validateProcessTemplate(bad({ enabled: 'yes' })).ok, false);
+  assert.equal(validateProcessTemplate(bad({ enabled: true, maxInstances: 0 })).ok, false);
+  assert.equal(validateProcessTemplate(bad({ enabled: true, workspace: 'teleport' })).ok, false);
+  assert.equal(validateProcessTemplate(bad({ enabled: true, teardown: { maxRuntimeMs: -1 } })).ok, false);
+});
+
+test('pool: a pooled role requires the flow to declare wipLimit (it governs and reaps instances)', () => {
+  const b = { processTemplateVersion: 1, roles: [{ id: 'r', systemPrompt: 'p', pool: { enabled: true } }] };
+  assert.equal(validateProcessTemplate(b).ok, false);
+  const withLimit = { ...b, wipLimit: 1 };
+  assert.equal(validateProcessTemplate(withLimit).ok, true);
+});
+
+test('pool: enabled:false is treated as not pooled (field dropped on build)', () => {
+  const b = buildProcessTemplate({
+    name: 'x', level: 'live', teamId: 'acme',
+    roles: [{ ...sampleRoles[0], pool: { enabled: false } }],
+  });
+  assert.equal('pool' in b.roles[0], false);
+});
+
 test('round-trip: build → validate → customRoles preserves wiring', () => {
   const b = buildProcessTemplate({ name: 'rt', level: 'live', teamId: 'acme', roles: sampleRoles });
   assert.equal(validateProcessTemplate(b).ok, true);

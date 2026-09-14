@@ -900,3 +900,31 @@ role's live state, and a fourth route/registration for the same team-scoped
 data would be a second home for one fact. Polls on the same refresh cadence
 as the rest of the board (manual Refresh + after every pause/resume/drain/
 force-dispatch action), no dedicated auto-refresh timer of its own.
+
+## Amendment 9 — Agent Chat left-rail sub-grouping (#2297)
+
+Amendment 8 gave a pooled role's live instances a home on the Flow Control
+board; #2297 gives them one in **Agent Chat** too, where the rail previously
+listed every instance as a flat, indented sibling of every other team member —
+scattered as instances came and went, indistinguishable from a hand-created
+member.
+
+- `GET /api/matrix/agents` now ships `poolInstance: true` / `poolOf` /
+  `poolItem` / `poolSpawnedAt` on an instance row (present only on such a row,
+  same convention as `canManageTeam`) — the same identity fields Amendment 8
+  reads server-side, now surfaced client-side.
+- `agent-list-model.js` `buildGroups` nests each role's live instances onto
+  it (`role.instances`, sorted by `poolItem`) rather than leaving them in the
+  flat member list; an instance whose `poolOf` names no role in the team
+  (template hidden/filtered) stays flat instead of vanishing.
+- `AgentList.jsx` renders it as a collapsible **Instances (N)** sub-list one
+  indent level deeper than the role, persisted like a team group's own
+  collapse state (`{kind:'pool', id:<roleId>}` in the same `collapsedMap`) —
+  deliberately unlike the `StubSection`'s local, always-collapsed-by-default
+  state, since a live pool's instance list is activity to keep an eye on, not
+  a to-do list that empties itself. Each row is an ordinary, chat-openable
+  `AgentRow` — same status dot off the same `statuses` poll, same click-to-open
+  path — reusing existing machinery rather than adding a second one.
+- Read-only, no new persistence beyond the existing collapse-state map: an
+  instance still disappears from the sub-list the moment the pool reaper (or a
+  manual teardown) removes it, exactly as it already did.

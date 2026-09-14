@@ -349,8 +349,13 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   that one entry). **Pool instance lanes** (#2273): a read-only third board
   panel, per pooled role's live instances tagged running / held-same-epic /
   timed-out (`pool-instance-lanes.js`, pure, no new persistence — derived
-  from live instance configs + the ticket ledger). A headless runtime (D7)
-  and provider-health-aware admission (D9) remain undesigned.
+  from live instance configs + the ticket ledger). **Agent Chat rail
+  sub-grouping** (#2297): the same live instances, nested under their role as a
+  collapsible **Instances (N)** sub-list in the left rail instead of scattered
+  flat among the team's members — `poolInstance`/`poolOf`/`poolItem` surfaced on
+  `GET /api/matrix/agents`, nested by `agent-list-model.js` `buildGroups`.
+  A headless runtime (D7) and provider-health-aware admission (D9) remain
+  undesigned. Detail: `docs/parallel-workers-concept.md` Amendment 9.
 
 ### GitHub poller
 
@@ -431,7 +436,8 @@ The console embeds a Matrix client at `/chats` (+ `/chats/:agentId`), under
 in pure, unit-tested `*-view.js`/model modules per the #651 convention (JSX
 uncovered). Key pieces:
 - `AgentList` — left rail (drag-reorder, grouping, disabled/stub opt-ins,
-  lifecycle context menu via `RailLifecycleHost`).
+  pool-instance sub-grouping (#2297), lifecycle context menu via
+  `RailLifecycleHost`).
 - `ChatPanel` — backfill/pagination/optimistic-send/SSE tail; transcript
   **windowed** (`VirtualList`/`virtual-window.js`), stick-to-bottom.
 - `Message` — sanitised markdown (`react-markdown` + gfm + pretty-code +

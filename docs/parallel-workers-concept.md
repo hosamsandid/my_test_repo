@@ -1,11 +1,12 @@
 # Agent instance pools — ephemeral, self-cleaning workers over a stream of work items
 
-> Status: **concept / design of record**. No code yet. This document scopes the
-> discussion in issue #2251 (the Agent Pools epic). Its SDLC binding builds
-> directly on the shipped Flow Control machinery (`docs/flow-control-concept.md`):
-> admission control (#2114), the ticket ledger (#2115) and the board (#2116). Its
-> autonomous half is, in effect, the concrete design for that document's
-> **unbuilt §4.3 Flow Supervisor**, generalised beyond a single repository.
+> Status: **design of record; Phases 1–2 shipped** (see Amendment 1). This
+> document scopes the discussion in issue #2251 (the Agent Pools epic). Its
+> SDLC binding builds directly on the shipped Flow Control machinery
+> (`docs/flow-control-concept.md`): admission control (#2114), the ticket
+> ledger (#2115) and the board (#2116). Its autonomous half is, in effect, the
+> concrete design for that document's **§4.3 Flow Supervisor**, generalised
+> beyond a single repository and now shipped as `orchestrator/flow-supervisor.js`.
 
 ## 1. The problem
 
@@ -257,14 +258,15 @@ Round-tripped through the process-template bundle like `stages` / `labels` /
 
 ## 12. Phases
 
-- **Phase 1 — Pool core + SDLC binding (label-triggered).** Neutral core + the
-  four GitHub/git adapters; conflict protection = WIP count + post-hoc detection
-  only; pull-on-demand base; graceful teardown with log archive; item-keyed
-  idempotency. *Result: one label → N auto-scaling, self-cleaning workers — no
-  hand-cloning.* Readiness still applied by a human/upstream agent.
-- **Phase 2 — Autonomous supervisor.** Drain the backlog up to the limit,
-  oldest-first, epic-serialization, plus the designed remediation ladder.
-  *Result: apply `ready` and walk away.*
+- **Phase 1 — Pool core + SDLC binding (label-triggered). Shipped (#2246).**
+  Neutral core + the four GitHub/git adapters; conflict protection = WIP count +
+  post-hoc detection only; pull-on-demand base; graceful teardown with log
+  archive; item-keyed idempotency. *Result: one label → N auto-scaling,
+  self-cleaning workers — no hand-cloning.* Readiness still applied by a
+  human/upstream agent.
+- **Phase 2 — Autonomous supervisor. Shipped (#2247, Amendment 1).** Drain the
+  backlog up to the limit, oldest-first, epic-serialization, plus the narrowed
+  remediation ladder (§A1.2). *Result: apply `ready` and walk away.*
 - **Phase 3 — Second binding: recurring analysis.** Prove generality with no
   GitHub (list/cron source, input-copy workspace, artifact completion, no
   contention). Independent of Phase 2.

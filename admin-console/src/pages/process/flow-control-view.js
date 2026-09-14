@@ -266,6 +266,57 @@ function boardSummary(data) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Pool controls (#2250 Phase 5, epic #2251) — render-ready rows for the
+// board's pause/resume/drain buttons (one per pooled role) and its
+// "Force dispatch" list (one per held admission-lane entry). Input is the
+// `GET /api/teams/<id>/pool-control` response: `{ roles: [{roleId, agentId,
+// displayName, maxInstances, liveInstanceCount, state}], held: [{id, agentId,
+// ticket, heldAt}] }` (`orchestrator.js`'s pool-control route).
+// ---------------------------------------------------------------------------
+
+const POOL_STATES = Object.freeze(['running', 'paused', 'draining']);
+
+function poolRoleRow(r) {
+  return {
+    roleId: r.roleId || '',
+    agentId: r.agentId || null,
+    displayName: r.displayName || r.roleId || '',
+    maxInstances: Number.isInteger(r.maxInstances) ? r.maxInstances : null,
+    liveInstanceCount: Number.isFinite(r.liveInstanceCount) ? r.liveInstanceCount : 0,
+    state: POOL_STATES.includes(r.state) ? r.state : 'running',
+  };
+}
+
+// Alphabetical by role id so the panel's order is stable across refreshes
+// (the server has no inherent order — it walks the filesystem).
+function poolControlRows(data) {
+  const roles = data && Array.isArray(data.roles) ? data.roles : [];
+  return roles.map(poolRoleRow).sort((a, b) => a.roleId.localeCompare(b.roleId));
+}
+
+// A held entry's `ticket` is already `repo#number` (`admission-control.js`'s
+// `objectKey`); split back out only for display — `id` (`heldIdentity`)
+// remains the sole thing the Force-dispatch POST is keyed on.
+function heldRow(h) {
+  const m = /^(.*)#(\d+)$/.exec((h && h.ticket) || '');
+  return {
+    id: (h && h.id) || null,
+    agentId: (h && h.agentId) || null,
+    repo: m ? m[1] : null,
+    number: m ? Number(m[2]) : null,
+    ticket: (h && h.ticket) || null,
+    heldAt: (h && h.heldAt) || null,
+  };
+}
+
+// Oldest-held first — the entry that has been waiting longest is the one an
+// operator is most likely to want to force through.
+function heldRows(data) {
+  const held = data && Array.isArray(data.held) ? data.held : [];
+  return held.map(heldRow).sort((a, b) => String(a.heldAt || '').localeCompare(String(b.heldAt || '')));
+}
+
 export {
   LIFECYCLE_STAGES,
   TICKET_STATES,
@@ -281,4 +332,9 @@ export {
   epicRollups,
   rollupSummary,
   boardSummary,
+  POOL_STATES,
+  poolRoleRow,
+  poolControlRows,
+  heldRow,
+  heldRows,
 };

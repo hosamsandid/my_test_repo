@@ -135,15 +135,92 @@ function roleIdFromMemberId(memberId, teamId) {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime control (Phase 5 #2250, epic #2251; concept §11's open board-control
+// item) — pause / drain a pooled role from the Flow Control board, WITHOUT
+// touching its `pool` config (§9). Config is the static template shape
+// round-tripped through the bundle; this is an operator's live on/off switch,
+// so it is kept out of the bundle entirely and persisted beside the admission
+// lane / flow-supervisor budget (`orchestrator.js`'s `poolControlPath`).
+//
+// Two states beyond the implicit default, deliberately given the SAME
+// dispatch-refusing effect (the concept's own §11 leaves the pause/drain
+// distinction open; a judgement call, flagged in the PR): `paused` reads as
+// "temporary, expect to resume"; `draining` reads as "shutting this role down
+// — flip pool.enabled off once it goes idle". Both let an already-running
+// instance finish (D4's slot-held-until-completion is untouched) and both
+// only block a NEW spawn — a redelivered event for a ticket already in flight
+// still resolves to its existing instance (D11), because pausing dispatch of
+// new work is not the same as abandoning work already admitted.
+const POOL_CONTROL_STATES = ['paused', 'draining'];
+
+/**
+ * `raw` is the whole team's `{ "<roleId>": { state, changedAt } }` map as
+ * persisted on disk. `running` (the default) is never stored — an absent key
+ * IS running, so an unconfigured team is byte-identical to today and the file
+ * never grows for a team that has never paused anything.
+ */
+function normalizePoolControl(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [roleId, v] of Object.entries(raw)) {
+    if (typeof roleId !== 'string' || !roleId) continue;
+    if (!v || typeof v !== 'object' || !POOL_CONTROL_STATES.includes(v.state)) continue;
+    out[roleId] = {
+      state: v.state,
+      changedAt: typeof v.changedAt === 'string' ? v.changedAt : null,
+    };
+  }
+  return out;
+}
+
+// The effective state for one role — `running` for anything not recorded
+// (never-touched, or explicitly resumed, which simply deletes the key).
+function poolControlState(control, roleId) {
+  const c = control && control[roleId];
+  return c && POOL_CONTROL_STATES.includes(c.state) ? c.state : 'running';
+}
+
+// Paused/draining hold queue (code-review finding on #2281's review of this
+// Phase). A dispatch refused because its role is `paused`/`draining` must
+// never silently fall through to the role TEMPLATE's own pending queue — that
+// would run the ticket under the shared, unpooled identity while the operator
+// believes it is stopped. It is held here instead, durably, and replayed the
+// moment the role resumes (`orchestrator.js`'s pool-control POST route) —
+// mirroring the admission lane's own `held` shape (verbatim entry + agentId),
+// but keyed per pooled ROLE rather than per team, since this has nothing to do
+// with `wipLimit` capacity.
+function normalizePausedHold(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [roleId, list] of Object.entries(raw)) {
+    if (typeof roleId !== 'string' || !roleId || !Array.isArray(list)) continue;
+    const entries = [];
+    for (const h of list) {
+      if (!h || typeof h !== 'object') continue;
+      if (typeof h.agentId !== 'string' || !h.agentId) continue;
+      if (!h.entry || typeof h.entry !== 'object') continue;
+      entries.push({
+        agentId: h.agentId,
+        entry: h.entry,
+        heldAt: typeof h.heldAt === 'string' ? h.heldAt : null,
+      });
+    }
+    if (entries.length) out[roleId] = entries;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch routing — spawn, reuse, or refuse
 // ---------------------------------------------------------------------------
 
 /**
  * Decide what a dispatch destined for a pooled role's TEMPLATE should actually
- * do: spawn a fresh instance, reuse the one already there (D11), or refuse
- * (the additive per-role `maxInstances` cap, D5's later refinement — the
+ * do: spawn a fresh instance, reuse the one already there (D11), or refuse —
+ * either the additive per-role `maxInstances` cap (D5's later refinement — the
  * team-wide `wipLimit` is the primary governor and is enforced upstream by
- * `admission-control.js`, not here).
+ * `admission-control.js`, not here) or an operator's `paused`/`draining` hold
+ * on the role (above).
  *
  * `itemKey` is the work-item id (an issue number for the SDLC binding) — `null`
  * means the dispatch names no item to key on (control traffic, or a malformed
@@ -154,11 +231,14 @@ function roleIdFromMemberId(memberId, teamId) {
  *           {action:'spawn',instanceId:string}|
  *           {action:'refuse',reason:string,instanceId:string}}
  */
-function planPoolDispatch({ teamId, roleId, pool, itemKey, existingInstanceIds = [] }) {
+function planPoolDispatch({ teamId, roleId, pool, itemKey, existingInstanceIds = [], controlState = 'running' }) {
   if (itemKey === null || itemKey === undefined) return { action: 'unpooled' };
   const instanceId = poolInstanceId(teamId, roleId, itemKey);
   if (existingInstanceIds.includes(instanceId)) {
     return { action: 'reuse', instanceId };
+  }
+  if (POOL_CONTROL_STATES.includes(controlState)) {
+    return { action: 'refuse', reason: controlState, instanceId };
   }
   if (pool && pool.maxInstances != null && existingInstanceIds.length >= pool.maxInstances) {
     return { action: 'refuse', reason: 'max-instances', instanceId };
@@ -185,12 +265,16 @@ function isInstanceTimedOut({ spawnedAt, maxRuntimeMs }, now = Date.now()) {
 
 module.exports = {
   POOL_WORKSPACES,
+  POOL_CONTROL_STATES,
   normalizePoolConfig,
   isPooledRole,
   isSafeGitRef,
   reworkRefFromPayload,
   poolInstanceId,
   roleIdFromMemberId,
+  normalizePoolControl,
+  poolControlState,
+  normalizePausedHold,
   planPoolDispatch,
   isInstanceTimedOut,
 };

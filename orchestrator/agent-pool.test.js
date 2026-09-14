@@ -164,6 +164,80 @@ test('planPoolDispatch: an unset maxInstances (null) is unbounded — only wipLi
   );
 });
 
+// ─── pool runtime control: pause/drain (#2250 Phase 5) ──────────────────────────
+
+test('normalizePoolControl: an absent/empty/malformed record is the empty map (default running)', () => {
+  assert.deepEqual(pool.normalizePoolControl(undefined), {});
+  assert.deepEqual(pool.normalizePoolControl(null), {});
+  assert.deepEqual(pool.normalizePoolControl([]), {});
+  assert.deepEqual(pool.normalizePoolControl({}), {});
+});
+
+test('normalizePoolControl: keeps a valid paused/draining record, drops an invalid state', () => {
+  assert.deepEqual(
+    pool.normalizePoolControl({
+      developer: { state: 'paused', changedAt: '2026-09-14T09:00:00.000Z' },
+      reviewer: { state: 'bogus' },
+      merger: { state: 'running' }, // the implicit default is never itself stored
+    }),
+    { developer: { state: 'paused', changedAt: '2026-09-14T09:00:00.000Z' } },
+  );
+});
+
+test('poolControlState: running for anything not recorded; the recorded state otherwise', () => {
+  const control = pool.normalizePoolControl({ developer: { state: 'draining' } });
+  assert.equal(pool.poolControlState(control, 'developer'), 'draining');
+  assert.equal(pool.poolControlState(control, 'reviewer'), 'running');
+  assert.equal(pool.poolControlState({}, 'developer'), 'running');
+  assert.equal(pool.poolControlState(null, 'developer'), 'running');
+});
+
+// ─── paused/draining hold queue (code-review finding on #2281) ─────────────
+
+test('normalizePausedHold: an absent/empty/malformed record is the empty map', () => {
+  assert.deepEqual(pool.normalizePausedHold(undefined), {});
+  assert.deepEqual(pool.normalizePausedHold(null), {});
+  assert.deepEqual(pool.normalizePausedHold([]), {});
+  assert.deepEqual(pool.normalizePausedHold({}), {});
+});
+
+test('normalizePausedHold: keeps a valid held entry, drops one missing agentId/entry, drops an empty list', () => {
+  assert.deepEqual(
+    pool.normalizePausedHold({
+      developer: [
+        { agentId: 't-developer', entry: { github: {} }, heldAt: '2026-09-14T09:00:00.000Z' },
+        { agentId: 't-developer' }, // no `entry` — dropped
+        { entry: { github: {} } }, // no `agentId` — dropped
+      ],
+      reviewer: [], // empties to nothing — the key itself must not survive
+    }),
+    { developer: [{ agentId: 't-developer', entry: { github: {} }, heldAt: '2026-09-14T09:00:00.000Z' }] },
+  );
+});
+
+test('planPoolDispatch: paused/draining refuses a NEW spawn but still reuses an existing instance (D4)', () => {
+  for (const controlState of ['paused', 'draining']) {
+    assert.deepEqual(
+      pool.planPoolDispatch({ teamId: 't', roleId: 'developer', pool: POOL, itemKey: 7, controlState }),
+      { action: 'refuse', reason: controlState, instanceId: 't-developer-i7' },
+    );
+    assert.deepEqual(
+      pool.planPoolDispatch({
+        teamId: 't', roleId: 'developer', pool: POOL, itemKey: 7, controlState,
+        existingInstanceIds: ['t-developer-i7'],
+      }),
+      { action: 'reuse', instanceId: 't-developer-i7' },
+    );
+  }
+});
+
+test('planPoolDispatch: an omitted controlState defaults to running (back-compat)', () => {
+  assert.deepEqual(
+    pool.planPoolDispatch({ teamId: 't', roleId: 'developer', pool: POOL, itemKey: 7 }),
+    { action: 'spawn', instanceId: 't-developer-i7' },
+  );
+});
+
 // ─── isInstanceTimedOut (D8 hard timeout) ───────────────────────────────────────
 
 test('isInstanceTimedOut: no maxRuntimeMs configured → never times out', () => {

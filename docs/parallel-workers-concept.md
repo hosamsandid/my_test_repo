@@ -1,9 +1,10 @@
 # Agent instance pools — ephemeral, self-cleaning workers over a stream of work items
 
 > Status: **design of record; Phases 1–4 shipped** (see Amendments 1, 3 and 4);
-> **team-axis config UI shipped** (#2272, see Amendment 5); **per-role config
-> UI and live lane visualization still pending** (Amendment 2's remaining
-> surfaces, Phase 5).
+> **Phase 5 partially shipped** — team-axis config UI (#2272, Amendment 5),
+> board controls (#2250, Amendment 6) and per-role config UI (#2271, Amendment
+> 7); a headless runtime (D7), provider-aware admission (D9), and Amendment
+> 2's remaining "Live surface" lane visualization are still undesigned/unbuilt.
 > This document scopes the discussion in issue #2251 (the Agent Pools epic). Its
 > SDLC binding builds directly on the shipped Flow Control machinery
 > (`docs/flow-control-concept.md`): admission control (#2114), the ticket
@@ -261,10 +262,13 @@ authors both without hand-editing a bundle, and for the one live-write endpoint
 - **Non-goal:** eliminating sequential merge conflicts (D6) — accepted and
   handled by the existing `stale-base` path.
 - **Non-goal (first cuts):** a headless runtime (D7), provider-aware admission
-  (D9), per-role caps (D5), LLM path-prediction (D6) — all later/additive.
+  (D9) — still later/additive, no design beyond D7/D9 themselves exists yet;
+  per-role caps (D5) shipped in Phase 1 despite being filed under Phase 5
+  (Amendment 2 §A2.1); LLM path-prediction (D6) shipped as Phase 4 (#2249).
 - **Open:** exact retention window for archived instance logs; whether §6
-  precedes or follows §7; board controls for a pool (pause / drain / force
-  dispatch) land in polish.
+  precedes or follows §7. Board controls for a pool (pause / drain / force
+  dispatch) shipped in Phase 5 (Amendment 6, #2250) — the pause/draining
+  distinction the concept left open is resolved there as a judgement call.
 
 ## 12. Phases
 
@@ -284,8 +288,14 @@ authors both without hand-editing a bundle, and for the one live-write endpoint
   only; opt-in via `autoDispatch.contentionPolicy: "predicted-paths"`, off by
   default — epic-serialization (Phase 2) remains the always-on baseline this
   layers on top of.
-- **Phase 5 — Polish.** Board controls, per-role caps, reviewer pools, optional
-  headless runtime, provider-aware admission.
+- **Phase 5 — Polish. Partially shipped (#2250, Amendment 6; #2272, Amendment
+  5; #2271, Amendment 7).** Board controls (pause / drain / force-dispatch),
+  the team-axis config UI (the Parallelism panel) and the per-role config UI
+  (the Scaling section) shipped; per-role caps and reviewer pools were
+  already true before this phase started (Amendment 6's own audit). The live
+  lane visualization (Amendment 2's remaining surface), plus optional
+  headless runtime (D7) and provider-aware admission (D9), remain
+  undesigned/unbuilt.
 
 ---
 
@@ -353,7 +363,7 @@ and any board control (pause/drain/force-dispatch) — all later phases per §12
 
 ---
 
-## Amendment 2 — the configuration & visualization UX (design; team/flow surface shipped, see Amendment 5)
+## Amendment 2 — the configuration & visualization UX (design; team/flow surface shipped, see Amendment 5; board controls shipped, see Amendment 6; per-role surface shipped, see Amendment 7)
 
 Phases 1–2 shipped the *mechanism* but left it **headless**: until #2272 the only
 way to turn on pooling, a WIP limit or the supervisor was a hand-authored
@@ -387,21 +397,25 @@ where its object lives.
 
 **A2.2 — Three surfaces, one model.**
 
-- **Per-role (agent) surface** — the Flow editor's `NodeInspector` for a role
-  node, and the agent's own **Settings** tab (Agent Chat → Settings). Controls:
-  "This role auto-scales" (`pool.enabled`), max parallel instances
-  (`maxInstances`), workspace binding (`git-clean-base | input-copy | none`),
-  teardown timeouts. A read-only "pooled role · up to N" badge on the single-agent
-  view so an operator looking at one agent sees its scaling at a glance.
+- **Per-role (agent) surface — shipped (#2271, Amendment 7).** The Flow editor's
+  `NodeInspector` for a role node, and the agent's own **Settings** tab (Agent
+  Chat → Settings). Controls: "This role auto-scales" (`pool.enabled`), max
+  parallel instances (`maxInstances`), workspace binding (`git-clean-base |
+  input-copy | none`), teardown timeouts. A read-only "pooled role · up to N"
+  badge on the single-agent view so an operator looking at one agent sees its
+  scaling at a glance.
 - **Team / flow surface — shipped (#2272, Amendment 5).** A **Parallelism**
   panel in the Flow editor (team scope) + a compact read-only summary on the
   team view. Controls: `wipLimit`, `autoDispatch.enabled` (the Flow
   Supervisor), and the contention-strategy selector (A2.3).
 - **Live surface** — the combined lane visualization: per pooled role, its active
   instances as lanes, each tagged running / held-same-epic / timed-out, derived
-  from the admission lane (`inFlight`/`held`) + the ticket ledger. **Read-only**
-  in this phase; the pause / drain / force-dispatch board controls stay Phase 5
-  (#2250).
+  from the admission lane (`inFlight`/`held`) + the ticket ledger. **Still not
+  built** — Amendment 6 (#2250) shipped the pause / drain / force-dispatch
+  CONTROLS this bullet named, but as a simpler pair of panels on the existing
+  Flow Control board (one row per pooled role; one row per held entry), not
+  this per-instance lane visualization. The full lane view (running /
+  held-same-epic / timed-out per instance) remains open for a later pass.
 
 **A2.3 — The contention strategy is the extensible "wow" seam, designed for the
 LLM future NOW.** One selector renders `autoDispatch.contentionPolicy` in plain
@@ -449,9 +463,10 @@ editing gap; the per-role config-UI panel itself (the mockup below) remains
 unbuilt.
 
 **A2.5 — Out of scope for this UI (kept for the named later phases).** Board
-runtime controls (pause / drain / force-dispatch, Phase 5 #2250); building the
-`predicted-paths` predictor itself (Phase 4 #2249); a per-role `wipLimit`
-(intentionally absent, A2.1). No new contention semantics.
+runtime controls (pause / drain / force-dispatch, shipped as Amendment 6
+#2250 — see its own scope note there for what still isn't built); building the
+`predicted-paths` predictor itself (shipped as Phase 4 #2249, Amendment 4); a
+per-role `wipLimit` (intentionally absent, A2.1). No new contention semantics.
 
 ### Mockups
 
@@ -661,14 +676,142 @@ mostly-blank rows.
 **Not built, and not owed by this ticket:** the per-role surface (`pool.enabled`
 picker in `NodeInspector`/agent Settings, A2.2's other bullet — A2.4 shipped
 only the live-write endpoint it would call, #2280; the picker itself shipped
-next, see Amendment 6, #2271); the live lane visualization (A2.2's "Live
+next, see Amendment 7, #2271); the live lane visualization (A2.2's "Live
 surface," Phase 5 #2250); enabling the `predicted-paths` radio (A5.1 —
 deferred by the issue's own design, tracked alongside Phase 5's board
 controls, not a gap this ticket left open).
 
 ---
 
-## Amendment 6 — what the per-role config UI (#2271) actually shipped
+## Amendment 6 — what Phase 5 (board controls) actually shipped (#2250)
+
+An audit against §12's five-item Phase 5 list, then the one item this ticket
+actually built.
+
+**A6.0 — three of the five items were already true before this ticket
+started; only board controls needed building.** Per-role concurrency caps
+(`maxInstances`) shipped in Phase 1 (#2246) and are enforced in
+`planPoolDispatch` — filed under Phase 5 in §12's original list, corrected by
+Amendment 2 §A2.1. Reviewer pools need no new code: nothing in
+`agent-pool.js`/`flow-supervisor.js`/`recurring-pool-source.js` names a role
+id or role KIND — `pool.enabled` is a plain per-role opt-in, so a `reviewer`
+role pools exactly like a `developer` role today. The remaining two —
+**headless (Matrix-less) runtime (D7)** and **provider-health-aware admission
+(D9)** — have no design beyond the one sentence each got in §11 ("later,
+additive"); this ticket does not guess at one. They need their own design
+pass (open questions: what a headless instance's chat-equivalent surface is
+for `AskUserQuestion`/approval gates; what "provider health" means as an
+admission signal beyond the existing WIP limit) and are flagged as a
+follow-up ticket rather than implemented speculatively.
+
+**A6.1 — pause/drain is a RUNTIME toggle, deliberately kept out of `pool`
+config.** `pool` (§9) is the static, bundle-round-tripped template shape;
+pausing a role is an operator action from the board, not a template edit, so
+it is persisted separately (`pool-control.json`, a sibling of the admission
+lane and the Flow Supervisor's budget file — same `controlOrPoolPath`
+convention) and never touches the bundle, live-write endpoint, or respawn
+path. Clearing it (`state: "running"` or omitted) deletes the record rather
+than writing the default explicitly, so an unconfigured team's file never
+grows, and reading it back is `poolControlState(control, roleId)` →
+`'running'` for anything not recorded.
+
+**A6.2 — `paused` and `draining` are, deliberately, the same dispatch-refusing
+effect — the distinction §11 left open is resolved as a naming/intent
+convention, not a behavioural fork.** Both refuse a NEW spawn
+(`planPoolDispatch`'s new `controlState` parameter) while leaving an
+already-admitted ticket's REUSE untouched (D11/D4: pausing intake is not the
+same as abandoning work already in flight) — `routePooledDispatch` (SDLC),
+`flowSupervisorSweepTeam` (autonomous dispatch) and `recurringPoolSweepTeam`
+(the recurring binding, dispatch half only — its reap/completion half runs
+unconditionally either way, so a drained role's finishing instances are still
+torn down) all read the same control state through the same gate. `paused`
+reads as "temporary, expect to resume"; `draining` reads as "shutting this
+role down — flip `pool.enabled` off once it goes idle." A future UI could
+still fork the two (e.g. auto-suggest disabling the role once a draining
+role's instance count hits zero); nothing here forecloses that, it simply
+isn't built.
+
+**A6.2b — a refusal must be held, never allowed to fall through to the
+TEMPLATE's own queue (code-review finding, rework of #2281).** The first cut
+of A6.2 above had `routePooledDispatch` return the same bare `null` for a
+pause/drain refusal as it does for "not pooled at all" — the caller
+(`enqueuePending`) cannot tell those apart, so it fell through to its
+unconditional final branch and dispatched straight to the pooled ROLE's own
+`pending-triggers.json`, i.e. ran the ticket under the shared, unpooled
+identity *while the board showed the role as paused*. `flowSupervisorSweepTeam`
+and `recurringPoolSweepTeam` never had this gap — both filter the role out of
+their candidate set before ever attempting a dispatch, so there is no
+downstream branch that can fall through. It is specific to the
+`routePooledDispatch`/`enqueuePending` pair on the SDLC label-triggered path
+(and, by the same code path, force-dispatch — see A6.3). Fixed by giving the
+refusal a durable home instead of vanishing into `null`: a paused/draining
+refusal is appended to a new per-team, per-role hold file
+(`pool-paused-hold.json`, sibling of `pool-control.json`, validated by
+`agentPool.normalizePausedHold`) and `routePooledDispatch` returns a
+distinguishable `{ held: true }`, which `enqueuePending` short-circuits on
+(`return true` — recorded, will fire later, the same "durably queued" contract
+the admission lane's own `held` array makes) rather than falling through. The
+hold is replayed the moment the role resumes (`POST .../pool-control/:roleId`
+with `state: "running"` or omitted): every entry queued for that role is
+redelivered through `enqueuePending(..., { admissionChecked: true })` —
+`admissionChecked` because these already passed the wipLimit gate on their
+first attempt, and a second pass would double-count them in the lane. This is
+deliberately its OWN file, not a reuse of the admission lane's `held` array:
+that one is keyed by wipLimit capacity math (`inFlight`/`held` bookkeeping a
+paused-but-not-capacity-limited ticket has nothing to do with), and
+conflating the two would let a paused role's holds count toward — or worse,
+silently mutate — a team-wide capacity number they were never part of.
+
+**A6.3 — force-dispatch promotes ONE named held entry past the WIP limit,
+recording it in `inFlight` exactly like a normal admit.** `heldIdentity`
+(already used internally by `admit`/`promoteHeld`) is now also the
+client-facing id `GET .../pool-control` returns for each held entry, and the
+only thing `POST .../force-dispatch` accepts — never a ticket number or agent
+id alone, both of which can be ambiguous (the same agent can hold more than
+one entry; force-dispatch must promote the exact one the operator looked at).
+`admission-control.js`'s new `forcePromoteHeld` deliberately does NOT reuse
+`admit({wipLimit: null, ...})` — that path hits the `no-limit` back-compat
+branch and returns the lane UNCHANGED (§4.0's "an ungated flow never grows a
+lane record"), which would have made the forced ticket invisible to D4
+release tracking and to the very next `wipLimit` check. It instead mirrors
+`admit`'s own capacity-admit bookkeeping directly: append to `inFlight` (or
+merge into an existing same-ticket entry), still counted, still released
+normally — only the REFUSAL is skipped, never the accounting the refusal
+exists to protect. Force-dispatch bypasses `wipLimit` only, never pause/drain:
+if the target role is currently paused/draining, the same A6.2b fix applies —
+`enqueuePending` holds the forced entry in the paused-hold queue rather than
+falling through to the template, and it redelivers on resume like any other
+held dispatch. This resolved, as a side effect of A6.2b rather than its own
+branch, the smaller related gap the #2281 code review flagged.
+
+**A6.4 — the board controls landed on the EXISTING Flow Control board
+(#2116), not the Amendment 2 "Live surface" lane visualization.** Two new
+panels (`PoolControlPanel`, `HeldPanel` in `FlowControl.jsx`) read a new
+`GET /api/teams/<id>/pool-control` proxy alongside the existing ticket-ledger
+fetch: one row per pooled role (state + live instance count vs.
+`maxInstances`, with Pause/Drain/Resume buttons) and one row per held
+admission-lane entry (with a Force-dispatch button). The ticket LEDGER itself
+stays exactly as observe-only as §4.1 requires — these two panels act on the
+admission lane / pool-control file, never on a ticket's own derived state, so
+the board's core honesty guarantee (a card's stage is never set by a label or
+a click) is untouched; `flow-control-help-extraction.test.js` now asserts
+that every mutating call the page makes targets one of these two endpoints,
+never `/tickets`. The full per-instance lane view A2.2 designed (running /
+held-same-epic / timed-out per instance, derived from `inFlight`) is still
+not built — these panels answer "which role is paused and what is held",
+not "show me every live instance."
+
+**Not built, and not owed by this ticket:** the A2.2 per-instance lane
+visualization (above); a headless runtime (D7) and provider-health-aware
+admission (D9) — flagged for a follow-up design ticket, per A6.0; any
+audit-log entry beyond the existing mutation-audit middleware + a
+`console.log` (pause/resume/drain and force-dispatch are visible on the board
+itself and in the server log; a dedicated GitHub Event Log row was judged not
+worth a new event-log call site for an internal-only toggle).
+
+---
+
+## Amendment 7 — what the per-role config UI (#2271) actually shipped
 
 Landed as a pure `admin-console/src/pages/process/scaling-view.js` (#651) +
 `ScalingSection.jsx`, ONE component embedded in both per-role hosts A2.2 names
@@ -679,7 +822,7 @@ No backend change: `pool` already round-tripped through `PUT
 /api/agents/:memberId` (#2270); this ticket is UI only. Three things sharpen
 A2.2/A2.4 as written.
 
-**A6.1 — the prerequisite is the PARENT TEAM's `wipLimit`, not the member's
+**A7.1 — the prerequisite is the PARENT TEAM's `wipLimit`, not the member's
 own.** Unlike the team-axis panel (Amendment 5, whose two prerequisites both
 read fields on the team object being edited), a team-member carries no
 `wipLimit` of its own (A2.4) — `scaling-view.js#scalingPrerequisite` takes
@@ -689,7 +832,7 @@ already-fetched `parentTeam` config in `AgentEditForm.jsx`), mirroring the
 live route's own `fresh.parentTeamId` lookup (`api.js`, #2270) rather than a
 second fetch inside the shared component.
 
-**A6.2 — teardown timeouts are authored in minutes, persisted in
+**A7.2 — teardown timeouts are authored in minutes, persisted in
 milliseconds.** The mockup's own shorthand ("30m," "2h") reads as a duration
 unit, not a raw millisecond count — `scaling-view.js#parseMinutesInput`/
 `msToMinutesText` is the one place either direction of that conversion
@@ -697,7 +840,7 @@ happens, so the three teardown fields (idle / hard / retain) round-trip
 through the same pair of pure functions rather than three hand-rolled
 conversions.
 
-**A6.3 — the read-only "at a glance" badge lives in `NodeInspector`'s
+**A7.3 — the read-only "at a glance" badge lives in `NodeInspector`'s
 existing top badge row, not a duplicate of the editable section.** A2.2 asks
 for a read-only "pooled role · up to N" badge "on the single-agent view, so
 an operator looking at one agent sees its scaling at a glance" — as a

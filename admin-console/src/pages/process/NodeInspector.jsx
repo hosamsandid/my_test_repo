@@ -1,17 +1,18 @@
 import React, { useEffect, useState } from 'react';
 import { Save, Trash2, Loader2 } from 'lucide-react';
 import SidePanel from '../../components/SidePanel';
+import ConfirmDialog from '../../components/ConfirmDialog';
 import { useHelpSubject } from '../../context/HelperChatContext';
 import { OVERLAY_FLOW_NODE } from '../../context/page-help-view.js';
 import { apiCall } from '../../hooks/useApi';
 import RoutingSection from './RoutingSection';
 import { resolveInheritedStage } from './hierarchy-utils';
-import { applyDetailsSave } from './node-inspector-save';
+import { applyDetailsSave, parseSaveError, savedSummary } from './node-inspector-save';
 import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
 import { ID_FORMAT_HINT } from '../../components/id-field-view';
 import PromptHistory from '../agent-chat/PromptHistory';
 import ScalingSection from './ScalingSection';
-import { poolBadgeText } from './scaling-view.js';
+import { poolBadgeText, scalingDraftFromPool, scalingDraftDirty, scalingSaveDecision } from './scaling-view.js';
 import {
   PROMPT_MODES,
   PROMPT_MODE_LABELS,
@@ -37,10 +38,19 @@ import {
 //   - Agent ID is editable in draft (rewires references on rename) and
 //     read-only in live (a materialized agent's id is its identity).
 //   - The prompt is a plain textarea in draft (batched into the Details Save)
-//     and the richer live editor (inherit/override toggle + file path, with its
-//     own Save) in live — preserved verbatim from the old PromptTab.
+//     and the richer live editor (inherit/override toggle + file path) in
+//     live — preserved from the old PromptTab, but #2295 lifted its state up
+//     here so it batches into the SAME Details Save (see below).
 //   - Delete is offered in draft only; live member deletion stays on the Agents
 //     page (destructive — removes a running member).
+//
+// #2295: the Details tab has exactly ONE save control in every mode. The live
+// prompt editor's own "Save prompt", the Scaling section's own "Save", and
+// the Parent picker's apply-on-selection are gone — all four (name/prompt/
+// stage/parent/scaling) batch through `applyDetailsSave` and one click. An
+// unsaved-edits guard gates closing the panel, and the save button reports
+// which parts actually changed (`savedSummary`) or which one failed
+// (`parseSaveError`).
 export default function NodeInspector({
   mode,
   node,
@@ -73,16 +83,37 @@ export default function NodeInspector({
   const [prompt, setPrompt] = useState(node.systemPrompt || '');  // draft only
   const [stage, setStage] = useState(node.stage || '');
   const [newStage, setNewStage] = useState('');
-  const [parent, setParentState] = useState(node.parent || '');
-  const [parentErr, setParentErr] = useState(null);
+  const [parent, setParent] = useState(node.parent || '');
   const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState(null);
+  const [saved, setSaved] = useState('');            // savedSummary() text, '' when not shown
+  const [saveError, setSaveError] = useState(null);   // {label, message} | null, from parseSaveError
+  const [confirmClose, setConfirmClose] = useState(false);
+
+  // Live prompt editor state, lifted here (out of LivePromptEditor) so it can
+  // batch into this tab's one Save (#2295) instead of owning its own. `null`
+  // until LivePromptEditor's fetch resolves; `livePromptBaseline` is what was
+  // loaded (or last saved), the yardstick `promptDirty` compares against.
+  const [livePromptDraft, setLivePromptDraft] = useState(null);
+  const [livePromptBaseline, setLivePromptBaseline] = useState(null);
+  const [historyReloadKey, setHistoryReloadKey] = useState(0);
 
   // A jump (edge dialog "Open in Routing/Details", or outcome-edge click) can
   // change `focus` while this inspector is already mounted on the same node —
   // follow it to the requested tab (#865). Normal node selection clears focus.
   useEffect(() => { if (focus?.tab) setTab(focus.tab); }, [focus]);
+
+  const peers = isLive ? nodes : roles;
+  const memberCfg = isLive ? agents.find(a => a.id === node?.id) : null;
+  const isPooledRoleNode = isLive && memberCfg?.role === 'team-member';
+  const parentCfg = isPooledRoleNode && memberCfg.parentTeamId
+    ? agents.find(a => a.id === memberCfg.parentTeamId) : null;
+
+  // Scaling draft (#2295), only meaningful for a pooled role node — declared
+  // unconditionally (hooks can't be conditional) with a harmless blank/
+  // disabled default otherwise. `poolBaseline` moves to whatever was just
+  // written after a successful save, the same way `livePromptBaseline` does.
+  const [poolDraft, setPoolDraft] = useState(() => scalingDraftFromPool(memberCfg?.pool));
+  const [poolBaseline, setPoolBaseline] = useState(() => (memberCfg ? memberCfg.pool : null));
 
   if (!node) return null;
   const isTemplate = level === 'template' || node.role === 'template';
@@ -90,18 +121,8 @@ export default function NodeInspector({
   // (today: duplicate-listener), so problems are findable without opening it (§3).
   const routingHasLint = (lints || []).some(l => l.code === 'duplicate-listener' && l.nodeId === node.id);
 
-  const peers = isLive ? nodes : roles;
   const siblings = peers.filter(n => n.id !== node.id).map(n => ({ id: n.id, displayName: n.displayName || n.id }));
 
-  // Role-axis pool config (#2271, Amendment 2 A2.2): `pool` and
-  // `parentTeamId` don't live on the graph node (process-graph.js), so the
-  // already-fetched flat `/api/agents` list is the source, same discipline
-  // ParallelismPanel/`hasPooledMember` already follow for the team axis — no
-  // second fetch.
-  const memberCfg = isLive ? agents.find(a => a.id === node.id) : null;
-  const isPooledRoleNode = isLive && memberCfg?.role === 'team-member';
-  const parentCfg = isPooledRoleNode && memberCfg.parentTeamId
-    ? agents.find(a => a.id === memberCfg.parentTeamId) : null;
   const inheritedStage = isLive
     ? (!node.stage && node.effectiveStage ? node.effectiveStage : '')
     : resolveInheritedStage(roles, node);
@@ -116,10 +137,37 @@ export default function NodeInspector({
     ? { ...ops, addStage: (n) => ops.addStage(teamId, n) }
     : ops;
 
+  const nameDirty = name !== (node.displayName ?? node.id);
+  const idDirty = mode === 'draft' && id !== node.id;
+  const promptDirty = mode === 'draft'
+    ? prompt !== (node.systemPrompt || '')
+    : !!(livePromptDraft && livePromptBaseline && (
+      livePromptDraft.role === 'member'
+        ? (livePromptDraft.promptMode !== livePromptBaseline.promptMode || livePromptDraft.text !== livePromptBaseline.text)
+        : livePromptDraft.text !== livePromptBaseline.text
+    ));
+  const stageDirty = stage !== (node.stage || '') || !!newStage.trim();
+  const parentDirty = !!ops.setParent && parent !== (node.parent || '');
+  const scalingDirty = isPooledRoleNode && scalingDraftDirty(poolDraft, poolBaseline);
+  const dirty = nameDirty || idDirty || promptDirty || stageDirty || parentDirty || scalingDirty;
+
+  function markDirty() { setSaved(''); setSaveError(null); }
+
   async function saveMeta() {
-    setBusy(true); setSaved(false); setError(null);
+    setBusy(true); setSaved(''); setSaveError(null);
     try {
-      const res = await applyDetailsSave(saveOps, node, { name, id, prompt, stage, newStage }, { mode });
+      const res = await applyDetailsSave(saveOps, node, {
+        name, id, prompt, stage, newStage,
+        parent: ops.setParent ? parent : undefined,
+        livePrompt: (mode === 'live' && livePromptDraft) ? {
+          ...livePromptDraft,
+          initialPromptMode: livePromptBaseline?.promptMode,
+          initialText: livePromptBaseline?.text,
+        } : undefined,
+        pool: isPooledRoleNode
+          ? { draft: poolDraft, parentWipLimit: parentCfg?.wipLimit, initialPool: poolBaseline }
+          : undefined,
+      }, { mode });
       setNewStage('');
       setStage(res.stage);
       if (res.renamedId) {
@@ -129,24 +177,36 @@ export default function NodeInspector({
       } else {
         onChanged?.();
       }
-      setSaved(true);
+      if (mode === 'live' && livePromptDraft) {
+        setLivePromptBaseline(livePromptDraft);
+        if (promptDirty) setHistoryReloadKey(k => k + 1);
+      }
+      if (isPooledRoleNode) {
+        setPoolBaseline(scalingSaveDecision(poolDraft, parentCfg?.wipLimit).payload);
+      }
+      setSaved(savedSummary([
+        { label: 'Display name', dirty: nameDirty },
+        { label: 'Agent prompt', dirty: promptDirty },
+        { label: 'Stage', dirty: stageDirty },
+        { label: 'Parent', dirty: parentDirty },
+        { label: 'Scaling', dirty: scalingDirty },
+        { label: 'Agent ID', dirty: idDirty },
+      ]));
     } catch (e) {
-      setError(e.message || String(e));
+      setSaveError(parseSaveError(e.message || String(e)));
     } finally { setBusy(false); }
   }
 
-  // Parent is static placement, not flow — it applies immediately (like it did
-  // in the retired Connections tab), independent of the batched Details Save.
-  // The cycle guard lives server/adapter-side; we just surface its error.
-  async function applyParent(v) {
-    const next = v || '';
-    setParentState(next); setParentErr(null);
-    try { await ops.setParent(node.id, next || null); onChanged?.(); }
-    catch (e) { setParentState(node.parent || ''); setParentErr(e?.message || String(e)); }
+  // #2295 AC9: closing with unsaved edits is confirmed rather than silently
+  // discarding them — the panel's only "cancel" is the X/Escape, so that is
+  // where the guard has to sit.
+  function requestClose() {
+    if (dirty) setConfirmClose(true);
+    else onClose?.();
   }
 
   return (
-    <SidePanel open onClose={onClose} title={node.displayName || node.id} width="560px">
+    <SidePanel open onClose={requestClose} title={node.displayName || node.id} width="560px">
       <div style={{ display: 'flex', gap: 6, marginBottom: 'var(--eb-space-4)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
         {isLive ? (
           <>
@@ -175,7 +235,7 @@ export default function NodeInspector({
           {tab === 'details' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
               <Field label="Display name">
-                <input value={name} onChange={e => { setName(e.target.value); setSaved(false); }} style={input} />
+                <input value={name} onChange={e => { setName(e.target.value); markDirty(); }} style={input} />
               </Field>
 
               <Field label="Agent ID">
@@ -188,7 +248,7 @@ export default function NodeInspector({
                 ) : (
                   <>
                     <input value={id}
-                      onChange={e => { setId(e.target.value); setSaved(false); setError(null); }}
+                      onChange={e => { setId(e.target.value); markDirty(); }}
                       style={{ ...input, fontFamily: 'var(--eb-font-mono)' }} />
                     <span style={hint}>{ID_FORMAT_HINT} Renaming rewires all of this agent's inputs and hand-offs.</span>
                   </>
@@ -197,17 +257,25 @@ export default function NodeInspector({
 
               <Field label="Agent prompt">
                 {isLive ? (
-                  <LivePromptEditor agentId={node.id} onChanged={onChanged} />
+                  <LivePromptEditor
+                    agentId={node.id}
+                    draft={livePromptDraft}
+                    onLoaded={(initial) => { setLivePromptDraft(initial); setLivePromptBaseline(initial); }}
+                    onDraftChange={(next) => { setLivePromptDraft(next); markDirty(); }}
+                    historyReloadKey={historyReloadKey}
+                    dirty={promptDirty}
+                  />
                 ) : (
-                  <textarea value={prompt} onChange={e => { setPrompt(e.target.value); setSaved(false); }}
+                  <textarea value={prompt} onChange={e => { setPrompt(e.target.value); markDirty(); }}
                     placeholder="What this agent does, its responsibilities and tone…"
                     style={{ ...input, minHeight: 220, resize: 'vertical', fontFamily: 'var(--eb-font-mono)', lineHeight: 1.5 }} />
                 )}
               </Field>
 
               {/* Structure — static placement (Stage + Parent), not flow. Moved
-                  here from the retired Connections tab (#865). Parent applies
-                  immediately; Stage is part of the batched Save below. */}
+                  here from the retired Connections tab (#865). #2295 AC3:
+                  Parent is now batched like everything else — it no longer
+                  applies the moment it's touched. */}
               {(canStage || ops.setParent) && (
                 <div style={{
                   borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)',
@@ -218,11 +286,11 @@ export default function NodeInspector({
                   {canStage && (
                     <Field label="Stage (layout column)">
                       <select value={stages.includes(stage) ? stage : ''}
-                        onChange={e => { setStage(e.target.value); setNewStage(''); setSaved(false); }} style={input}>
+                        onChange={e => { setStage(e.target.value); setNewStage(''); markDirty(); }} style={input}>
                         <option value="">{inheritedStage ? `— inherit (${inheritedStage}) —` : '— none —'}</option>
                         {stages.map(s => <option key={s} value={s}>{s}</option>)}
                       </select>
-                      <input value={newStage} onChange={e => { setNewStage(e.target.value); setSaved(false); }}
+                      <input value={newStage} onChange={e => { setNewStage(e.target.value); markDirty(); }}
                         placeholder="＋ or type a new stage name…" style={{ ...input, marginTop: 4 }} />
                       <span style={hint}>
                         Stages are the ordered columns of the flow — manage the order under <strong>Stages</strong> in the toolbar.
@@ -232,12 +300,12 @@ export default function NodeInspector({
                   {ops.setParent && (
                     <Field label="Parent (optional)">
                       <select value={siblings.some(s => s.id === parent) ? parent : ''}
-                        onChange={e => applyParent(e.target.value)} style={input}>
+                        onChange={e => { setParent(e.target.value); markDirty(); }} style={input}>
                         <option value="">— none —</option>
                         {siblings.map(s => <option key={s.id} value={s.id}>{s.displayName || s.id}</option>)}
                       </select>
-                      <span style={hint}>Nests this agent under a parent for the hierarchy layout. Applied immediately.</span>
-                      {parentErr && <span style={{ ...hint, color: 'var(--eb-status-error)' }}>{parentErr}</span>}
+                      <span style={hint}>Nests this agent under a parent for the hierarchy layout. Applies on Save.</span>
+                      {saveError?.label === 'Parent' && <span style={{ ...hint, color: 'var(--eb-status-error)' }}>{saveError.message}</span>}
                     </Field>
                   )}
                 </div>
@@ -246,27 +314,39 @@ export default function NodeInspector({
               {/* Scaling (#2271, Amendment 2 A2.2 of
                   `docs/parallel-workers-concept.md`) — the role-axis config
                   surface for agent pools, live team-member nodes only (the
-                  live `pool` route, #2270, is gated the same way). Applies
-                  immediately through its own Save, like the live prompt
-                  editor above — not batched into the Details Save below. */}
+                  live `pool` route, #2270, is gated the same way). #2295
+                  AC11: folds into this tab's Save, not its own. */}
               {isPooledRoleNode && (
                 <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)' }}>
                   <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-2)' }}>Scaling</div>
                   <ScalingSection
-                    agentId={node.id}
-                    pool={memberCfg.pool}
+                    draft={poolDraft}
+                    onChange={(next) => { setPoolDraft(next); markDirty(); }}
                     parentWipLimit={parentCfg?.wipLimit}
-                    onChanged={onChanged}
+                    error={saveError?.label === 'Scaling' ? saveError.message : null}
                   />
                 </div>
               )}
 
-              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-                <button onClick={saveMeta} disabled={busy} style={primary}>
-                  <Save size={14} /> Save
-                </button>
-                {saved && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-success)' }}>Saved.</span>}
-                {error && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</span>}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+                {dirty && (
+                  <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                    Unsaved changes — press Save to apply them.
+                  </span>
+                )}
+                {!dirty && saved && (
+                  <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-success)' }}>{saved}</span>
+                )}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+                  <button onClick={saveMeta} disabled={busy} style={primary}>
+                    <Save size={14} /> Save
+                  </button>
+                  {saveError && (
+                    <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>
+                      {saveError.label ? `${saveError.label}: ` : ''}{saveError.message}
+                    </span>
+                  )}
+                </div>
               </div>
 
               {!isLive && (
@@ -281,22 +361,41 @@ export default function NodeInspector({
           )}
 
           {tab === 'routing' && (
-            <RoutingSection
-              node={node}
-              peers={peers}
-              lints={lints}
-              labels={labels}
-              humans={humans}
-              humanOps={humanOps}
-              ops={ops}
-              mode={mode}
-              focusOutcome={focus?.tab === 'routing' ? focus?.outcome : null}
-              focusSection={focus?.tab === 'routing' ? focus?.section : null}
-              onChanged={onChanged}
-            />
+            <>
+              {/* #2295 AC13: the Details tab now batches everything behind
+                  one Save, so it matters that Routing evidently does not —
+                  each action here (wiring an input, an outcome, a channel)
+                  is a graph edit that has to show on the canvas at once. */}
+              <div style={{ ...hint, marginBottom: 'var(--eb-space-3)' }}>
+                Routing changes apply immediately — there is no Save on this tab.
+              </div>
+              <RoutingSection
+                node={node}
+                peers={peers}
+                lints={lints}
+                labels={labels}
+                humans={humans}
+                humanOps={humanOps}
+                ops={ops}
+                mode={mode}
+                focusOutcome={focus?.tab === 'routing' ? focus?.outcome : null}
+                focusSection={focus?.tab === 'routing' ? focus?.section : null}
+                onChanged={onChanged}
+              />
+            </>
           )}
         </>
       )}
+
+      <ConfirmDialog
+        open={confirmClose}
+        title="Discard unsaved changes?"
+        message="This agent's Details tab has unsaved edits. Closing now discards them."
+        variant="warning"
+        confirmLabel="Discard"
+        onConfirm={() => { setConfirmClose(false); onClose?.(); }}
+        onCancel={() => setConfirmClose(false)}
+      />
     </SidePanel>
   );
 }
@@ -304,21 +403,15 @@ export default function NodeInspector({
 // Live-only prompt editor — the old ProcessNodeInspector PromptTab (#692): a
 // team-member gets the three-mode system-prompt control (#1511: Inherit /
 // Additional input / Exclusive overriding input), a non-member gets the
-// file-based prompt path (PUT /api/agents/:id/prompt). Self-contained + own Save.
-function LivePromptEditor({ agentId, onChanged }) {
+// file-based prompt path. #2295: fully controlled by the host (`draft`/
+// `onDraftChange`/`onLoaded`) so it batches into the Details tab's one Save —
+// it still owns its own initial fetch (the host has no reason to know the
+// agent's role or the parent team's template ahead of time), but never
+// writes and carries no Save button of its own any more.
+function LivePromptEditor({ agentId, draft, onLoaded, onDraftChange, historyReloadKey, dirty }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [mode, setMode] = useState('file');   // 'file' (AGENT-PROMPT.md) | 'member'
-  const [text, setText] = useState('');
-  // Team-member system-prompt mode (#1511). One shared `text` field backs both
-  // additional (the addition) and exclusive (the full override) so switching
-  // between them keeps typed text.
-  const [promptMode, setPromptMode] = useState(PROMPT_MODES.INHERIT);
   const [inheritedPreview, setInheritedPreview] = useState('');
-  // Bumped on save / revert so the editor text + history list re-fetch.
-  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -327,19 +420,16 @@ function LivePromptEditor({ agentId, onChanged }) {
         const cfg = await apiCall('GET', `/api/agents/${agentId}`);
         if (!alive) return;
         if (cfg.role === 'team-member') {
-          setMode('member');
-          setPromptMode(resolvePromptMode(cfg));
-          setText(cfg.systemPrompt || '');
           if (cfg.parentTeamId) {
             try {
               const team = await apiCall('GET', `/api/agents/${cfg.parentTeamId}`);
               if (alive) setInheritedPreview(team.systemPromptTemplate || '');
             } catch { /* preview best-effort */ }
           }
+          if (alive) onLoaded({ role: 'member', promptMode: resolvePromptMode(cfg), text: cfg.systemPrompt || '' });
         } else {
-          setMode('file');
           const { content } = await apiCall('GET', `/api/agents/${agentId}/prompt`);
-          if (alive) setText(content || '');
+          if (alive) onLoaded({ role: 'file', promptMode: null, text: content || '' });
         }
       } catch (e) {
         if (alive) setError(e.message);
@@ -348,43 +438,25 @@ function LivePromptEditor({ agentId, onChanged }) {
       }
     })();
     return () => { alive = false; };
-  }, [agentId, reloadKey]);
+    // agentId is stable for this component's lifetime (NodeInspector remounts
+    // — new `key` — on node switch), so this fetch runs exactly once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId]);
 
-  async function save() {
-    setSaving(true); setError(null); setSaved(false);
-    try {
-      if (mode === 'member') {
-        await apiCall('PUT', `/api/agents/${agentId}`, {
-          promptMode,
-          systemPrompt: promptMode === PROMPT_MODES.INHERIT ? null : text,
-        });
-      } else {
-        await apiCall('PUT', `/api/agents/${agentId}/prompt`, { content: text });
-      }
-      setSaved(true);
-      setReloadKey(k => k + 1);   // refresh the history list with the new version
-      onChanged?.();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setSaving(false);
-    }
-  }
+  if (loading || !draft) return <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}><Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> Loading prompt…</span>;
 
-  if (loading) return <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}><Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> Loading prompt…</span>;
-
-  const memberInherit = mode === 'member' && promptMode === PROMPT_MODES.INHERIT;
+  const memberInherit = draft.role === 'member' && draft.promptMode === PROMPT_MODES.INHERIT;
   // The main textarea is read-only only when inheriting (member) — it then
-  // previews the team template. Additional/exclusive/file all edit `text`.
+  // previews the team template. Additional/exclusive/file all edit `draft.text`.
   const editingDisabled = memberInherit;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-      {mode === 'member' && (
+      {draft.role === 'member' && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-3)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
           {[PROMPT_MODES.INHERIT, PROMPT_MODES.ADDITIONAL, PROMPT_MODES.EXCLUSIVE].map(m => (
             <label key={m} style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', cursor: 'pointer' }}>
-              <input type="radio" checked={promptMode === m} onChange={() => { setPromptMode(m); setSaved(false); }} />
+              <input type="radio" checked={draft.promptMode === m} onChange={() => onDraftChange({ ...draft, promptMode: m })} />
               {PROMPT_MODE_LABELS[m]}
             </label>
           ))}
@@ -392,11 +464,11 @@ function LivePromptEditor({ agentId, onChanged }) {
       )}
 
       <textarea
-        value={editingDisabled ? inheritedPreview : text}
-        onChange={e => { setText(e.target.value); setSaved(false); }}
+        value={editingDisabled ? inheritedPreview : draft.text}
+        onChange={e => onDraftChange({ ...draft, text: e.target.value })}
         readOnly={editingDisabled}
-        placeholder={mode === 'member'
-          ? (promptMode === PROMPT_MODES.ADDITIONAL
+        placeholder={draft.role === 'member'
+          ? (draft.promptMode === PROMPT_MODES.ADDITIONAL
             ? 'Agent-specific instructions to append after the team prompt…'
             : 'Full system prompt that replaces the team prompt…')
           : 'AGENT-PROMPT.md…'}
@@ -414,7 +486,7 @@ function LivePromptEditor({ agentId, onChanged }) {
           Showing the team template (read-only). Choose “Additional input” or “Exclusive overriding input” to set a prompt for this member.
         </span>
       )}
-      {mode === 'member' && promptMode === PROMPT_MODES.ADDITIONAL && (
+      {draft.role === 'member' && draft.promptMode === PROMPT_MODES.ADDITIONAL && (
         <>
           <span style={hint}>Effective prompt preview (team prompt + your addition):</span>
           <div style={{
@@ -424,26 +496,19 @@ function LivePromptEditor({ agentId, onChanged }) {
             border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
             padding: 'var(--eb-space-3)',
           }}>
-            {composeMemberPrompt(PROMPT_MODES.ADDITIONAL, inheritedPreview, text) || '(the team prompt is empty)'}
+            {composeMemberPrompt(PROMPT_MODES.ADDITIONAL, inheritedPreview, draft.text) || '(the team prompt is empty)'}
           </div>
         </>
       )}
 
       {error && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>{error}</span>}
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
-        <button onClick={save} disabled={saving} style={{ ...primary, cursor: saving ? 'wait' : 'pointer' }}>
-          {saving ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={14} />}
-          Save prompt
-        </button>
-        {saved && <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-success)' }}>Saved.</span>}
-      </div>
-
       <div style={{ marginTop: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px solid var(--eb-border-default)' }}>
         <PromptHistory
           agentId={agentId}
-          reloadKey={reloadKey}
-          onReverted={() => { setReloadKey(k => k + 1); onChanged?.(); }}
+          reloadKey={historyReloadKey}
+          dirty={dirty}
+          onLoadVersion={(content) => onDraftChange({ ...draft, text: content })}
         />
       </div>
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>

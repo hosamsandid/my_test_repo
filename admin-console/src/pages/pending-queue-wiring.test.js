@@ -81,6 +81,14 @@ const PRODUCERS = [
     where: ['agent-image', 'scripts', 'agent-entrypoint.py'],
     pattern: /"kind": "loop-verify"/,
   },
+  {
+    // #2277: the runtime's own bounded self-correction for a turn that
+    // orphans a background task — built via a module constant rather than a
+    // literal, unlike loop-verify above.
+    kind: 'bg-orphan-correction',
+    where: ['agent-image', 'scripts', 'agent-entrypoint.py'],
+    pattern: /_BG_ORPHAN_CORRECTION_KIND = "bg-orphan-correction"/,
+  },
 ];
 
 test('AC8 — every producer-side queue kind still has a producer, a label and a tooltip', () => {

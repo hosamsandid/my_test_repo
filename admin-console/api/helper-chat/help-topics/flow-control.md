@@ -158,6 +158,9 @@ Pausing or draining a role affects **new** dispatch only: a ticket already
 being worked keeps its instance, and a redelivered event for that same ticket
 still finds it. Both the label-triggered path and the autonomous Flow
 Supervisor honor the pause — neither starts a new instance for a paused role.
+A brand-new ticket that would have triggered a paused role isn't dropped
+either: it's held and automatically dispatched the moment you Resume the
+role.
 
 **Held on the WIP limit.** One row per dispatch currently on hold because the
 team's `wipLimit` (the cap on how many tickets flow at once) is already full.

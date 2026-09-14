@@ -312,6 +312,20 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   `wipLimit` enforced at dispatch (`admission-control.js`); a read-only **ticket
   ledger** deriving true state from GitHub evidence (`ticket-reconciler.js`);
   the `/flow-control` board (no nav entry).
+- **Agent Pools** (epic #2251, `docs/parallel-workers-concept.md`): a role opts
+  into `pool: {enabled: true, …}` (bundle field, sibling of `wipLimit`) to become
+  a template — one wake spawns an item-keyed ephemeral instance
+  (`<team>-<role>-i<item>`), reusing the admission lane as the instance registry
+  and its reconcile tick as the reaper (`agent-pool.js`, Phase 1 #2246). The
+  **Flow Supervisor** (`autoDispatch: {enabled: true}`, sibling field, requires
+  `wipLimit` + a pooled role — `flow-supervisor.js`, Phase 2 #2247) is a
+  maintenance-gated timer that auto-dispatches ready-but-undispatched pooled
+  tickets up to the limit, oldest-first, never two in flight sharing an
+  epic — and folds in a bounded remediation ladder (re-fire a dropped dispatch;
+  nudge a `stale-base` PR's owner), each action capped at ≤1 per
+  `(ticket, blocker)` per window and recorded in the GitHub Event Log
+  (`source: 'supervisor'`). Deterministic, no LLM; the human still decides
+  readiness, the supervisor only times the dispatch.
 
 ### GitHub poller
 

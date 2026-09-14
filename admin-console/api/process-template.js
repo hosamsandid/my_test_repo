@@ -174,6 +174,38 @@ function normalizePool(raw) {
   };
 }
 
+// Agent Pools — Phase 2 (#2247, epic #2251 §9): the Flow Supervisor's opt-in.
+// Team-level, sibling of `wipLimit`/`hillClimb` — round-tripped the same way.
+// `enabled: true` piggybacks on the SAME `wipLimit`/pooled-role prerequisites
+// pooling itself has (checked in `validateProcessTemplate`, not here, since
+// this function has no view of the rest of the bundle).
+//
+// `selection`/`contentionPolicy` are named in the design's config surface
+// (`docs/parallel-workers-concept.md` §9) for forward-compatibility, but only
+// one value of each is actually implemented in this phase — `oldest-first` and
+// `epic-serial` (the AC's own "never two in-flight items sharing epicId" is not
+// optional). An unimplemented value is refused by `validateProcessTemplate`
+// rather than silently accepted and ignored, which would misrepresent what the
+// author asked for.
+const AUTO_DISPATCH_SELECTIONS = ['oldest-first'];
+const AUTO_DISPATCH_CONTENTION_POLICIES = ['epic-serial'];
+
+function normalizeAutoDispatch(raw) {
+  if (!raw || typeof raw !== 'object' || raw.enabled !== true) return null;
+  const out = { enabled: true };
+  if (typeof raw.selection === 'string' && AUTO_DISPATCH_SELECTIONS.includes(raw.selection)) {
+    out.selection = raw.selection;
+  }
+  if (typeof raw.contentionPolicy === 'string' && AUTO_DISPATCH_CONTENTION_POLICIES.includes(raw.contentionPolicy)) {
+    out.contentionPolicy = raw.contentionPolicy;
+  }
+  // How often the remediation ladder may re-fire the SAME (ticket, blocker) —
+  // the ≤1-action-per-(item,blocker)-per-window budget the design requires.
+  // Unset uses the orchestrator's own default (1h).
+  if (Number.isFinite(raw.actionWindowMs) && raw.actionWindowMs > 0) out.actionWindowMs = raw.actionWindowMs;
+  return out;
+}
+
 // Strip a leading `<teamId>-` so an exported member id becomes a reusable role
 // key (e.g. `acme-developer` → `developer`). Idempotent for ids without it.
 function roleKeyOf(id, teamId) {
@@ -497,10 +529,11 @@ function bundleTrigger(t) {
  * @param {Array} [opts.gates]
  * @param {Array} [opts.labels]
  */
-function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stages, humans, hillClimb, wipLimit }) {
+function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stages, humans, hillClimb, wipLimit, autoDispatch }) {
   const normHumans = normalizeHumans(humans);
   const normHillClimb = normalizeHillClimb(hillClimb);
   const normWipLimit = normalizeWipLimit(wipLimit);
+  const normAutoDispatch = normalizeAutoDispatch(autoDispatch);
   return {
     processTemplateVersion: VERSION,
     name: name || 'process-template',
@@ -521,6 +554,9 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
     // enforces; omitted when unset so a flow that never configured it stays
     // byte-identical.
     ...(normWipLimit ? { wipLimit: normWipLimit } : {}),
+    // The Flow Supervisor's opt-in (#2247) — omitted when unset so a flow that
+    // never configured it stays byte-identical.
+    ...(normAutoDispatch ? { autoDispatch: normAutoDispatch } : {}),
     roles: (roles || []).map(r => ({
       id: roleKeyOf(r.id, teamId),
       displayName: r.displayName || r.id,
@@ -785,6 +821,39 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
   if (b.wipLimit !== undefined && b.wipLimit !== null) {
     if (!Number.isInteger(b.wipLimit) || b.wipLimit < 1) {
       return { ok: false, error: 'wipLimit must be a positive integer (omit it for no limit)' };
+    }
+  }
+  // The Flow Supervisor's opt-in (#2247, §9). Checked, not tolerated — the same
+  // discipline `pool`/`wipLimit` follow: a typo'd `selection`/`contentionPolicy`
+  // must refuse the save rather than quietly running with a default the author
+  // never asked for.
+  if (b.autoDispatch !== undefined && b.autoDispatch !== null) {
+    const ad = b.autoDispatch;
+    if (typeof ad !== 'object' || Array.isArray(ad)) return { ok: false, error: 'autoDispatch must be an object' };
+    if (ad.enabled !== undefined && typeof ad.enabled !== 'boolean') {
+      return { ok: false, error: 'autoDispatch.enabled must be a boolean' };
+    }
+    if (ad.selection !== undefined && !AUTO_DISPATCH_SELECTIONS.includes(ad.selection)) {
+      return { ok: false, error: `autoDispatch.selection must be one of ${AUTO_DISPATCH_SELECTIONS.join(', ')}` };
+    }
+    if (ad.contentionPolicy !== undefined && !AUTO_DISPATCH_CONTENTION_POLICIES.includes(ad.contentionPolicy)) {
+      return { ok: false, error: `autoDispatch.contentionPolicy must be one of ${AUTO_DISPATCH_CONTENTION_POLICIES.join(', ')}` };
+    }
+    if (ad.actionWindowMs !== undefined && !(Number.isFinite(ad.actionWindowMs) && ad.actionWindowMs > 0)) {
+      return { ok: false, error: 'autoDispatch.actionWindowMs must be a positive number' };
+    }
+    // The supervisor times pooled roles only, and pooling itself already
+    // requires `wipLimit` (checked per-role above) — enabling it on a flow with
+    // no pooled role at all would be a no-op the author should be told about
+    // rather than a silent no-op.
+    if (ad.enabled === true) {
+      if (b.wipLimit === undefined || b.wipLimit === null) {
+        return { ok: false, error: 'autoDispatch.enabled requires the flow\'s own wipLimit to be set (pooling and the supervisor both piggyback on it)' };
+      }
+      const hasPooledRole = (b.roles || []).some(r => r && r.pool && typeof r.pool === 'object' && r.pool.enabled === true);
+      if (!hasPooledRole) {
+        return { ok: false, error: 'autoDispatch.enabled requires at least one role with pool.enabled (the supervisor only times pooled roles)' };
+      }
     }
   }
   // Named human roles (#987): unique slug ids, non-empty names, well-formed
@@ -2023,6 +2092,8 @@ module.exports = {
   normalizeWipLimit,
   // Agent instance pools (#2246)
   normalizePool, POOL_WORKSPACES,
+  // Agent Pools — Phase 2: the Flow Supervisor (#2247)
+  normalizeAutoDispatch, AUTO_DISPATCH_SELECTIONS, AUTO_DISPATCH_CONTENTION_POLICIES,
   artifactKey, artifactHint, artifactIsNamed,
   slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,
   // Claim labels (#958) + success mirror (#1163)

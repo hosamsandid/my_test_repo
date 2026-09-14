@@ -83,7 +83,7 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, normalizeWipLimit, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 // Process-draft access model (#2068) — one predicate for every draft route.
 const draftAccess = require('./draft-access');
@@ -2638,7 +2638,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   const cfgPath = path.join(agentDir, 'config.json');
   const cfg = readJsonFile(cfgPath, null);
   if (!cfg) return res.status(404).json({ error: 'Agent not found' });
-  const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, github, channels, assistLlmEndpointId } = req.body;
+  const { displayName, role, enabled, systemPromptTemplate, systemPrompt, promptMode, skills, skillsOverride, mcpServersOverride, disableMode, teamId, emits, outcomes, dataFlow, parentMemberId, stage, stages, labels, humans, wipLimit, autoDispatch, github, channels, assistLlmEndpointId } = req.body;
 
   // ── Label registry (#928/#981) ────────────────────────────────────────────
   // The gate/brake flags live on the TEAM agent (like `stages`) — the live
@@ -2971,6 +2971,37 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
       const norm = normalizeWipLimit(wipLimit);
       if (!norm) return res.status(400).json({ error: 'wipLimit must be a positive integer, or null to remove the limit' });
       fresh.wipLimit = norm;
+    }
+  }
+
+  // The Flow Supervisor's opt-in (#2247), team-agent only — same field, same
+  // runtime-effect discipline as wipLimit immediately above: `null` clears it,
+  // anything else invalid is refused rather than half-applied. No Flow-Editor
+  // control yet (like wipLimit itself): set through the bundle or this route.
+  if (autoDispatch !== undefined && fresh.role === 'team') {
+    if (autoDispatch === null) delete fresh.autoDispatch;
+    else {
+      if (typeof autoDispatch !== 'object' || Array.isArray(autoDispatch)) {
+        return res.status(400).json({ error: 'autoDispatch must be an object, or null to remove it' });
+      }
+      if (autoDispatch.enabled === true) {
+        const limitNow = autoDispatch.wipLimit !== undefined ? autoDispatch.wipLimit
+          : (wipLimit !== undefined ? wipLimit : fresh.wipLimit);
+        if (!normalizeWipLimit(limitNow)) {
+          return res.status(400).json({ error: "autoDispatch.enabled requires the flow's own wipLimit to be set (pooling and the supervisor both piggyback on it)" });
+        }
+        const hasPooledRole = listAgentDirs().some((mid) => {
+          if (mid === id) return false;
+          const mcfg = readJsonFile(path.join(AGENTS_DIR, mid, 'config.json'), null);
+          return !!(mcfg && mcfg.parentTeamId === id && mcfg.pool && typeof mcfg.pool === 'object' && mcfg.pool.enabled === true);
+        });
+        if (!hasPooledRole) {
+          return res.status(400).json({ error: 'autoDispatch.enabled requires at least one team member with pool.enabled (the supervisor only times pooled roles)' });
+        }
+      }
+      const norm = normalizeAutoDispatch(autoDispatch);
+      if (!norm) return res.status(400).json({ error: 'autoDispatch.enabled must be true, or null to remove it' });
+      fresh.autoDispatch = norm;
     }
   }
 
@@ -8799,6 +8830,7 @@ app.get('/api/process/template', (req, res) => {
   let teamStages = [];
   let teamHillClimb = null;
   let teamWipLimit = null;
+  let teamAutoDispatch = null;
   if (team) {
     const teamCfg = readJsonFile(path.join(AGENTS_DIR, team, 'config.json'), null);
     if (teamCfg?.displayName) teamName = teamCfg.displayName;
@@ -8809,6 +8841,8 @@ app.get('/api/process/template', (req, res) => {
     // Admission control (#2114) — the per-flow WIP limit lives on the team agent
     // like stages/labels, so the export carries it back into a portable bundle.
     teamWipLimit = normalizeWipLimit(teamCfg?.wipLimit);
+    // The Flow Supervisor's opt-in (#2247) — same team-agent field, same reason.
+    teamAutoDispatch = normalizeAutoDispatch(teamCfg?.autoDispatch);
   }
   for (const id of listAgentDirs()) {
     const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), {});
@@ -8864,6 +8898,8 @@ app.get('/api/process/template', (req, res) => {
     hillClimb: teamHillClimb,
     // Admission control (#2114) rides along on the team agent, same as above.
     wipLimit: teamWipLimit,
+    // The Flow Supervisor's opt-in (#2247) rides along on the team agent, same as above.
+    autoDispatch: teamAutoDispatch,
   }));
 });
 
@@ -15058,6 +15094,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // reads the team config, never a draft. null when the bundle set no limit, in
   // which case dispatch stays unbounded exactly as before.
   const bundleWipLimit = normalizeWipLimit(body.processTemplate?.wipLimit);
+  // The Flow Supervisor's opt-in (#2247) — same team-agent field, same reason.
+  const bundleAutoDispatch = normalizeAutoDispatch(body.processTemplate?.autoDispatch);
 
   // Label-suffix stamping (#902): one-shot rename applied to the member array
   // + bundle label registry before any agent is created. No-op when labelSuffix
@@ -15359,6 +15397,8 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
           ...(bundleHillClimb ? { hillClimb: bundleHillClimb } : {}),
           // Admission control (#2114) — held on the team agent like hillClimb.
           ...(bundleWipLimit ? { wipLimit: bundleWipLimit } : {}),
+          // The Flow Supervisor's opt-in (#2247) — held on the team agent like wipLimit.
+          ...(bundleAutoDispatch ? { autoDispatch: bundleAutoDispatch } : {}),
           // Authoritative gate/brake label registry (#928): the live graph has no
           // bundle to read it from and gate-ness is no longer inferable from the
           // label's name, so the team agent holds it — same pattern as `stages`.
@@ -15748,6 +15788,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // reads the team config, never a draft. null when the bundle set no limit, in
   // which case dispatch stays unbounded exactly as before.
   const bundleWipLimit = normalizeWipLimit(body.processTemplate?.wipLimit);
+  // The Flow Supervisor's opt-in (#2247) — same team-agent field, same reason.
+  const bundleAutoDispatch = normalizeAutoDispatch(body.processTemplate?.autoDispatch);
 
   // Label-suffix stamping (#902) — see the non-streaming handler.
   let suffixWarnings = [];
@@ -16073,6 +16115,8 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           ...(bundleHillClimb ? { hillClimb: bundleHillClimb } : {}),
           // Admission control (#2114) — held on the team agent like hillClimb.
           ...(bundleWipLimit ? { wipLimit: bundleWipLimit } : {}),
+          // The Flow Supervisor's opt-in (#2247) — held on the team agent like wipLimit.
+          ...(bundleAutoDispatch ? { autoDispatch: bundleAutoDispatch } : {}),
           // Authoritative gate/brake label registry (#928) — see the sibling
           // materialise path; the live graph reads it back off the team agent.
           ...(bundleLabels.length ? { labels: bundleLabels } : {}),

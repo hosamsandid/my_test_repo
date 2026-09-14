@@ -134,6 +134,16 @@ For **standalone agents** the same pair exists as
 `POST /internal/agents/:id/{activate,deactivate}-skill`, operating on the agent's own
 `skills[]` and single workspace.
 
+**A third entry point (#2286)** reuses this exact mechanism for the team's Settings →
+**Skills** tab bulk "Save Changes" edit (`PUT /api/agents/:id` on a `role: "team"` agent),
+which historically wrote `skills[]` to `config.json` only and left already-materialized
+members to pick the change up at their next re-seed/enable. `POST
+/internal/teams/:teamId/skills` (`{ "skills": string[] }`) now diffs the submitted list
+against the team's current one and re-runs the activation/deactivation sync above for every
+name that newly entered or left the set — same guarantees (CLAUDE.md rebuild, isolated-
+volume mirroring, no respawn, `skillsOverride` members skipped), same manifest. A save whose
+effective set is unchanged (including a pure reorder) does no work.
+
 ### 4.1 Seed manifest — the truth for "is it active?"
 
 Today nobody records which skills actually landed in a workspace. `seedAgentWorkspace`
@@ -230,7 +240,7 @@ teams adopt via Share or the global-skill picker.
 | Member has `skillsOverride` | Skipped (`excluded-override`), surfaced in the popover, opt-in per member (writes into the override + syncs). |
 | **Name collision** team vs global | Team-pool-first resolution, identical to seed behaviour. |
 | Repeated activation | Fully idempotent: set-insert, file copy overwrites, manifest updates. |
-| Team list edited via agent edit form meanwhile | Graph computes `pending` from manifest vs list; the skill card offers **Activate** to reconcile. Both doors act on the same lever. |
+| Team list edited via the Skills tab (agent edit form) | Eager, since #2286 — the bulk save propagates immediately (see §4), same as the Knowledge page toggle. The graph's `pending`/**Activate** reconciliation now only matters for drift from a source that bypassed both write paths (e.g. a member added between two saves, or manual file tampering). |
 | Activation failure mid-fanout | Per-member results; card shows 🟡; retry via the same idempotent call. |
 | Pre-migration clients sending `env.skills` | Accepted and discarded by the API; the field is dead after migration. |
 

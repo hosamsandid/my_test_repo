@@ -2820,20 +2820,40 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
     }
   }
 
+  // Team skills bulk edit (#2286): route through the orchestrator so every
+  // add/remove gets eagerly pushed to already-materialized, non-overriding
+  // members in the same call — mirrors the systemPromptTemplate branch above.
+  // Standalone agents have no members to propagate to, so their `skills[]`
+  // stays a plain local write below.
+  if (cfg.role === 'team' && Array.isArray(skills)) {
+    const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+    try {
+      const resp = await fetch(`${orchestratorUrl}/internal/teams/${encodeURIComponent(id)}/skills`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skills }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) return res.status(resp.status).json(data);
+    } catch (err) {
+      return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+    }
+  }
+
   // Apply the rest of the field updates directly to the on-disk config.
   // (The orchestrator's enable/disable already wrote enabled itself; the
-  // team-prompt branch above also wrote canonically.)
+  // team-prompt and team-skills branches above also wrote canonically.)
   const fresh = readJsonFile(cfgPath, cfg);
   if (displayName !== undefined) fresh.displayName = displayName;
   if (role !== undefined) fresh.role = role;
   // ── Team-owned skill grant (skill-grants.js) ──────────────────────────────
   // `skills` lives on the construct itself: a team agent carries the team's
   // ACTIVE skill set (inherited by every member without a skillsOverride), a
-  // standalone agent its own list. The Working Environment no
-  // longer carries skills. Propagation to already-materialized workspaces is
-  // lazy (next re-seed/enable) — the Knowledge activation flow adds the eager
-  // sync in a later phase. Members use skillsOverride below instead.
-  if (skills !== undefined && fresh.role !== 'team-member') {
+  // standalone agent its own list. The Working Environment no longer carries
+  // skills. A team agent's propagation to already-materialized members is
+  // handled eagerly above (updateTeamSkills); this local write only applies to
+  // non-team constructs (standalone agents have no members to sync).
+  if (skills !== undefined && fresh.role !== 'team-member' && fresh.role !== 'team') {
     fresh.skills = Array.isArray(skills)
       ? skills.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim())
       : [];

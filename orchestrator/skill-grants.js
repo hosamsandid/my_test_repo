@@ -114,4 +114,32 @@ function planAgentGrantEdit(cfg, skillName, active, loadCfg = null) {
   return { field, list };
 }
 
-module.exports = { effectiveSkills, hasSkillGrant, migrateSkillGrant, planSkillSync, planAgentGrantEdit };
+// Diff a team's requested skill list against its current one for a bulk
+// Skills-tab save (#2286): dedupe/trim the incoming list (order-preserving,
+// first occurrence wins), then compute which names newly become active and
+// which newly become inactive relative to the CURRENT list. Pure — the
+// orchestrator persists the returned `skills` list once and fans `added`/
+// `removed` out to members via the existing per-skill setTeamSkillActive
+// (itself built on planSkillSync above), so a save with no effective change
+// (`changed: false`) triggers no write and no per-member sync (AC8).
+function planTeamSkillsUpdate(currentSkills, requestedSkills) {
+  const newList = [];
+  const seen = new Set();
+  for (const s of (Array.isArray(requestedSkills) ? requestedSkills : [])) {
+    if (typeof s !== "string" || !s.trim()) continue;
+    const name = s.trim();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    newList.push(name);
+  }
+  const oldList = Array.isArray(currentSkills) ? currentSkills : [];
+  const oldSet = new Set(oldList);
+  const added = newList.filter((s) => !oldSet.has(s));
+  const removed = oldList.filter((s) => !seen.has(s));
+  return { skills: newList, added, removed, changed: added.length > 0 || removed.length > 0 };
+}
+
+module.exports = {
+  effectiveSkills, hasSkillGrant, migrateSkillGrant, planSkillSync, planAgentGrantEdit,
+  planTeamSkillsUpdate,
+};

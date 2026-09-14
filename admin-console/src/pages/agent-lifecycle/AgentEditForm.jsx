@@ -513,6 +513,12 @@ export default function AgentEditForm({
         </div>
       )}
 
+      {/* #2264: a readable width cap for the form body, left-anchored (no
+          auto margins) rather than centered — so dragging the sidebar's
+          resize handle grows/shrinks only the right-hand whitespace and the
+          form's left edge never shifts. The tab strip above stays full width
+          on its own (AC4). */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)', width: '100%', maxWidth: 720 }}>
       {(!isTeam || activeTab === 'general') && (
         <div>
           <div style={labelStyle}>ID (read-only)</div>
@@ -683,6 +689,7 @@ export default function AgentEditForm({
           {onCancel && <SecondaryBtn onClick={onCancel}>{cancelLabel}</SecondaryBtn>}
         </div>
       )}
+      </div>
     </div>
   );
 }

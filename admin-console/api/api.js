@@ -2976,8 +2976,12 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
 
   // The Flow Supervisor's opt-in (#2247), team-agent only — same field, same
   // runtime-effect discipline as wipLimit immediately above: `null` clears it,
-  // anything else invalid is refused rather than half-applied. No Flow-Editor
-  // control yet (like wipLimit itself): set through the bundle or this route.
+  // anything else invalid is refused rather than half-applied. Both fields'
+  // Flow-Editor control is the Parallelism panel (#2272, ParallelismPanel.jsx),
+  // which sends exactly this shape — the two prerequisite checks below are
+  // mirrored client-side (`autoDispatchPrerequisite` in parallelism-view.js)
+  // so the panel can explain a refusal inline instead of the user hitting the
+  // 400s here.
   if (autoDispatch !== undefined && fresh.role === 'team') {
     if (autoDispatch === null) delete fresh.autoDispatch;
     else {

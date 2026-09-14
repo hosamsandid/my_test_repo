@@ -158,6 +158,35 @@ test('buildPodManifest honours a full toolchain resources override (limit + both
   });
 });
 
+// Code-review finding on #2291: the registry's shared MEMORY_QUANTITY_RE
+// accepts a shape k8s's own quantity grammar does not (a bare-byte suffix
+// with no magnitude letter) — this must fall back to the fleet default, not
+// silently drop the whole `resources` object (limits AND requests).
+test('buildPodManifest falls back to the fleet default when memoryLimit is registry-valid but k8s-unparseable', () => {
+  const dflt = buildPodManifest('a1', {}, 'p', [], 'as-agent:latest');
+  const pod = buildPodManifest('a1', {}, 'p', [], 'as-agent-jvm:latest', {
+    toolchainId: 'jvm',
+    resources: { memoryLimit: '1024b' },
+  });
+  assert.deepEqual(pod.spec.containers[0].resources, dflt.spec.containers[0].resources);
+});
+
+// Code-review finding on #2291: memoryRequest used to reach the pod spec RAW
+// (never run through parseMemoryQuantity, unlike memoryLimit) — a
+// podman-style shorthand like "512m" hit the k8s API verbatim, where a bare
+// "m" suffix means MILLI, not mega: a silent near-zero request instead of
+// the 512 megabytes the operator wrote (matching memoryLimit's own examples).
+test('buildPodManifest normalizes a podman-style memoryRequest through the same k8s-quantity conversion memoryLimit gets', () => {
+  const pod = buildPodManifest('a1', {}, 'p', [], 'as-agent-jvm:latest', {
+    toolchainId: 'jvm',
+    resources: { memoryLimit: '4g', memoryRequest: '512m' },
+  });
+  assert.deepEqual(pod.spec.containers[0].resources, {
+    limits: { memory: '4Gi' },
+    requests: { memory: '512Mi', cpu: '100m' },
+  });
+});
+
 test('buildContextHostPathVolumes renders hostPath volumes with per-folder read-only semantics', () => {
   withContextGate('1', () => {
     const { volumes, volumeMounts } = buildContextHostPathVolumes([

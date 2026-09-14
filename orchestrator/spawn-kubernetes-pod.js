@@ -463,9 +463,22 @@ function buildPodManifest(id, env, podName, contextMounts, image, toolchain = nu
   // fleet-wide default for agents bound to it (e.g. a JVM/Gradle build that
   // would otherwise OOM at AEE_AGENT_MEM_LIMIT). No override -> AGENT_MEM_LIMIT
   // and the same '256Mi'/'100m' requests as before this field existed (AC2).
+  //
+  // Code-review finding: the registry's shared `MEMORY_QUANTITY_RE` accepts a
+  // shape k8s's own quantity grammar does not (e.g. a bare-byte "1024b", no
+  // magnitude letter) — an override that parses at validation time but not
+  // here must fall back to the fleet default, mirroring
+  // spawn-container.js's `resolveMemLimitBytes`, rather than letting the
+  // WHOLE `resources` object (limits *and* requests) silently disappear.
+  // `memoryRequest` is now run through the same parser `memoryLimit` always
+  // was: unlike `memoryLimit`, it used to reach the pod spec RAW, so a
+  // podman-style shorthand like "512m" (which `parseMemoryQuantity` converts
+  // to the unambiguous "512Mi") hit the k8s API verbatim — where a bare "m"
+  // suffix means MILLI, not mega, silently requesting ~0 memory instead of
+  // 512 megabytes.
   const resources = toolchain && toolchain.resources ? toolchain.resources : null;
-  const memory = parseMemoryQuantity((resources && resources.memoryLimit) || AGENT_MEM_LIMIT);
-  const memoryRequest = (resources && resources.memoryRequest) || '256Mi';
+  const memory = parseMemoryQuantity(resources && resources.memoryLimit) || parseMemoryQuantity(AGENT_MEM_LIMIT);
+  const memoryRequest = parseMemoryQuantity(resources && resources.memoryRequest) || '256Mi';
   const cpuRequest = (resources && resources.cpuRequest) || '100m';
   // Seam #3 equivalent: the agent sees ONLY its own slice of the shared
   // workspace PVC via subPath, mounted at the same /workspace/agents/<id>

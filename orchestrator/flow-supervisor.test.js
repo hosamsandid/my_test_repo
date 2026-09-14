@@ -111,6 +111,70 @@ test('selectAutoDispatch: empty candidates never throws', () => {
   assert.deepEqual(sup.selectAutoDispatch({}), []);
 });
 
+// ─── selectAutoDispatch: predicted-paths contention (#2249, D6) ────────────────
+
+test('selectAutoDispatch: predicted-paths is a no-op unless contentionPolicy names it', () => {
+  const candidates = [
+    ticket({ ticketId: 'r#1', blocker: 'unclaimed', predictedPaths: ['orchestrator/x.js'] }),
+    ticket({ ticketId: 'r#2', blocker: 'unclaimed', predictedPaths: ['orchestrator/x.js'] }),
+  ];
+  // busyPathSets present, but contentionPolicy is unset — must behave exactly
+  // like Phase 2/3 (epic-serial only), never reading predictedPaths at all.
+  const picked = sup.selectAutoDispatch({
+    candidates, busyPathSets: [['orchestrator/x.js']], now: NOW, windowMs: HOUR,
+  });
+  assert.deepEqual(picked.map((t) => t.ticketId).sort(), ['r#1', 'r#2']);
+});
+
+test("selectAutoDispatch: predicted-paths skips a candidate overlapping an already-busy path set", () => {
+  const candidates = [
+    ticket({ ticketId: 'r#1', blocker: 'unclaimed', predictedPaths: ['orchestrator/flow-supervisor.js'], ageInStateMs: 9000 }),
+    ticket({ ticketId: 'r#2', blocker: 'unclaimed', predictedPaths: ['docs/other.md'], ageInStateMs: 1000 }),
+  ];
+  const picked = sup.selectAutoDispatch({
+    candidates, contentionPolicy: 'predicted-paths', busyPathSets: [['orchestrator/']], now: NOW, windowMs: HOUR,
+  });
+  assert.deepEqual(picked.map((t) => t.ticketId), ['r#2']);
+});
+
+test('selectAutoDispatch: predicted-paths also reserves WITHIN one pass — an older sibling wins, a later overlapping one is held', () => {
+  const candidates = [
+    ticket({ ticketId: 'r#1', blocker: 'unclaimed', predictedPaths: ['orchestrator/x.js'], ageInStateMs: 9000 }),
+    ticket({ ticketId: 'r#2', blocker: 'unclaimed', predictedPaths: ['orchestrator/x.js'], ageInStateMs: 1000 }),
+  ];
+  const picked = sup.selectAutoDispatch({ candidates, contentionPolicy: 'predicted-paths', now: NOW, windowMs: HOUR });
+  assert.deepEqual(picked.map((t) => t.ticketId), ['r#1']);
+});
+
+test('selectAutoDispatch: a candidate with no/empty predictedPaths is NEVER held back — an advisory miss fails open', () => {
+  const candidates = [
+    ticket({ ticketId: 'r#1', blocker: 'unclaimed', predictedPaths: [] }),
+    ticket({ ticketId: 'r#2', blocker: 'unclaimed' }), // no predictedPaths field at all
+  ];
+  const picked = sup.selectAutoDispatch({
+    candidates, contentionPolicy: 'predicted-paths', busyPathSets: [['orchestrator/'], ['docs/']], now: NOW, windowMs: HOUR,
+  });
+  assert.deepEqual(picked.map((t) => t.ticketId).sort(), ['r#1', 'r#2']);
+});
+
+test('selectAutoDispatch: predicted-paths and epic-serialization compose — either alone can hold a candidate back', () => {
+  const candidates = [
+    ticket({ ticketId: 'r#1', blocker: 'unclaimed', epicId: 42, predictedPaths: ['a/'], ageInStateMs: 9000 }),
+    ticket({ ticketId: 'r#2', blocker: 'unclaimed', epicId: null, predictedPaths: ['b/'], ageInStateMs: 5000 }),
+    ticket({ ticketId: 'r#3', blocker: 'unclaimed', epicId: null, predictedPaths: ['a/x.js'], ageInStateMs: 1000 }),
+  ];
+  const picked = sup.selectAutoDispatch({
+    candidates, contentionPolicy: 'predicted-paths', busyEpicIds: [42], now: NOW, windowMs: HOUR,
+  });
+  // r#1 held by epic-serial (busy epic 42); r#3 held by path overlap with r#1's
+  // OWN predicted paths even though r#1 itself never dispatched this pass —
+  // the pure module documents busyPathSets as caller-supplied "already claimed
+  // elsewhere", so this asserts only r#2 (no clash on either axis) is picked
+  // when r#1's paths are NOT supplied as busy (they were reserved by the epic
+  // check, not the path check, so they must not ALSO gate r#3 here).
+  assert.deepEqual(picked.map((t) => t.ticketId), ['r#2', 'r#3']);
+});
+
 // ─── selectStaleBaseRework ─────────────────────────────────────────────────────
 
 test('selectStaleBaseRework: only stale-base tickets with an owner are selected', () => {

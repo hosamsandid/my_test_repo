@@ -29,8 +29,15 @@
 // already built (the label fast-path's wake half, `wake-agent`) — never a new
 // GitHub-writing primitive.
 
+const { pathsOverlap } = require('./predicted-paths');
+
 const AUTO_DISPATCH_BLOCKER = 'unclaimed';
 const REMEDIATION_STALE_BASE = 'stale-base';
+// Phase 4 (#2249, D6): the ONE additional contention policy this phase adds,
+// layered ON TOP of epic-serialization (which is always on, per Amendment 1
+// A1.4 — never gated by `contentionPolicy`) rather than replacing it. Off by
+// default: unset/`'epic-serial'` behaves byte-identically to before this phase.
+const CONTENTION_PREDICTED_PATHS = 'predicted-paths';
 
 function budgetKey(ticketId, blocker) {
   return `${ticketId}::${blocker}`;
@@ -65,12 +72,27 @@ function firedRecently(budget, key, now, windowMs) {
  * capacity gate every dispatch still passes through, so an over-eager pick
  * here is merely held, never double-admitted.
  *
+ * `contentionPolicy`/`busyPathSets` are Phase 4's addition (#2249, D6): when
+ * `contentionPolicy === 'predicted-paths'`, a candidate carrying a non-empty
+ * `predictedPaths` array is ALSO skipped if it overlaps any set in
+ * `busyPathSets` (paths already claimed by active tickets elsewhere, or by a
+ * ticket picked earlier in this same pass — reserved the same way `busy`
+ * reserves epics). Any other value (including unset) leaves this branch dead —
+ * byte-identical to the pre-#2249 behaviour. A candidate with no/empty
+ * `predictedPaths` (no assist LLM configured, prediction failed, or nothing
+ * confident to report) is NEVER held back by this policy — an advisory miss
+ * must fail open, not become a silent extra restriction (D6: the ledger stays
+ * the real safety net).
+ *
  * @returns {Array} the picked ticket rows, unmodified.
  */
 function selectAutoDispatch({
   candidates = [], busyEpicIds = [], budget = {}, now = Date.now(), windowMs, limit = Infinity,
+  contentionPolicy = null, busyPathSets = [],
 } = {}) {
   const busy = new Set(busyEpicIds.filter((e) => e != null));
+  const pathContentionOn = contentionPolicy === CONTENTION_PREDICTED_PATHS;
+  const busyPaths = pathContentionOn ? busyPathSets.filter((p) => Array.isArray(p) && p.length) : [];
   const sorted = [...candidates]
     .filter((t) => t && t.blocker === AUTO_DISPATCH_BLOCKER && t.kind === 'issue' && t.lane)
     .sort((a, b) => (b.ageInStateMs || 0) - (a.ageInStateMs || 0));
@@ -78,9 +100,13 @@ function selectAutoDispatch({
   for (const t of sorted) {
     if (picked.length >= limit) break;
     if (t.epicId != null && busy.has(t.epicId)) continue;
+    const ownPaths = pathContentionOn && Array.isArray(t.predictedPaths) && t.predictedPaths.length
+      ? t.predictedPaths : null;
+    if (ownPaths && busyPaths.some((paths) => pathsOverlap(ownPaths, paths))) continue;
     if (firedRecently(budget, budgetKey(t.ticketId, AUTO_DISPATCH_BLOCKER), now, windowMs)) continue;
     picked.push(t);
     if (t.epicId != null) busy.add(t.epicId);
+    if (ownPaths) busyPaths.push(ownPaths);
   }
   return picked;
 }
@@ -122,6 +148,7 @@ function pruneBudget(budget, now, windowMs) {
 module.exports = {
   AUTO_DISPATCH_BLOCKER,
   REMEDIATION_STALE_BASE,
+  CONTENTION_PREDICTED_PATHS,
   budgetKey,
   firedRecently,
   selectAutoDispatch,

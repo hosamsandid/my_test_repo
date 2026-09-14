@@ -331,7 +331,17 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   contention — a maintenance-gated tick (`recurringPoolSweepTeam`) enumerates a
   static item list, reaps an instance once its item's output artifact appears,
   and (re-)spawns the rest via the SAME item-keyed `spawnPoolInstance`, up to
-  `maxInstances`/`wipLimit`.
+  `maxInstances`/`wipLimit`. **LLM conflict prediction** (`autoDispatch.
+  contentionPolicy: "predicted-paths"`, sibling value of `"epic-serial"`, opt-in
+  and off by default — Phase 4 #2249) layers a read-only pre-flight ON TOP of
+  epic-serialization: `predicted-paths.js` predicts the files a ready ticket will
+  likely touch (an LLM call over the issue + a repo-tree sample, reusing the
+  #1213 team-billed assist provider — or a deterministic heuristic when no
+  provider is configured or the call fails) and `selectAutoDispatch` skips a
+  candidate whose predicted paths overlap another ticket's already-active
+  prediction. Advisory only — an empty/failed prediction never adds a
+  restriction, and the ledger's `conflict`/`stale-base` detection stays the real
+  safety net.
 
 ### GitHub poller
 

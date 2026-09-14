@@ -278,8 +278,10 @@ authors both without hand-editing a bundle, and for the one live-write endpoint
 - **Phase 3 — Second binding: recurring analysis. Shipped (#2248, Amendment 3).**
   Proved generality with no GitHub (list source, input-copy workspace, artifact
   completion, no contention). Independent of Phase 2.
-- **Phase 4 — LLM conflict prediction** (SDLC only, only if epic-serialization is
-  not enough).
+- **Phase 4 — LLM conflict prediction. Shipped (#2249, Amendment 4).** SDLC
+  only; opt-in via `autoDispatch.contentionPolicy: "predicted-paths"`, off by
+  default — epic-serialization (Phase 2) remains the always-on baseline this
+  layers on top of.
 - **Phase 5 — Polish.** Board controls, per-role caps, reviewer pools, optional
   headless runtime, provider-aware admission.
 
@@ -408,10 +410,13 @@ UI redesign:
   limit.
 - **Serialize same epic** (`epic-serial`, the default and the *only* rule
   enforced today) — never two in-flight tickets sharing `epicId`.
-- **Smart: LLM predicts file conflicts** (`predicted-paths`, Phase 4 #2249) —
-  rendered but **disabled / "coming"**. The bundle validator already refuses an
-  unimplemented `contentionPolicy` (Amendment 1 A1.4), so the disabled option is
-  fail-safe: it cannot be saved before the predictor exists.
+- **Smart: LLM predicts file conflicts** (`predicted-paths`, Phase 4 #2249,
+  Amendment 4) — the predictor itself has shipped (`predicted-paths.js` +
+  its `orchestrator.js` wiring); this UI surface has not (Amendment 2 stayed
+  design-only — no Parallelism panel exists yet), so the option is reachable
+  today only via a hand-authored `autoDispatch.contentionPolicy` in the bundle
+  or a raw `PUT`, not a picker. The bundle validator now accepts the value
+  (Amendment 1 A1.4 is updated by Amendment 4).
 
 **A2.4 — Backend prerequisite: a live `pool` write, at parity with
 `wipLimit`/`autoDispatch`.** `PUT /api/agents/:teamId` already accepts live
@@ -518,3 +523,72 @@ unchanged — it has no notion of GitHub either); any UI for authoring
 `workSource` (Amendment 2 scoped the config UI to `pool.enabled`/
 `maxInstances`/`workspace`/teardown — a `workSource` editor is later, additive
 work, same as everything Amendment 2 §A2.5 already deferred).
+
+---
+
+## Amendment 4 — what Phase 4 (LLM conflict prediction) actually shipped (#2249)
+
+Landed as `orchestrator/predicted-paths.js` (pure — mirrors `flow-supervisor.js`'s
+no-fs/no-network shape: sanitizing a path list, the overlap check, the LLM
+prompt/response builders, and the heuristic fallback) + an `orchestrator.js`
+extension of the EXISTING Flow Supervisor sweep (no new timer) that predicts
+paths for about-to-dispatch candidates and folds the result into
+`flow-supervisor.js`'s `selectAutoDispatch`. Four things sharpen D6/§7 as
+written.
+
+**A4.1 — layered, not exclusive: epic-serialization is untouched.** D6 calls
+conflict avoidance "layered," and Amendment 1 A1.4 already established that
+epic-serialization is not itself optional. `predicted-paths` therefore ADDS a
+second, independent skip condition to `selectAutoDispatch` (a candidate whose
+predicted paths overlap an already-busy path set) rather than replacing or
+branching around the epic check — a candidate can be held back by either axis,
+and both are checked on every candidate. `autoDispatch.contentionPolicy:
+'epic-serial'` (or unset) is byte-identical to pre-#2249 behaviour; only
+`'predicted-paths'` activates the new branch, and it does so entirely inside
+`selectAutoDispatch` — the pure core takes `busyPathSets` and each candidate's
+own `predictedPaths` as plain data, never touching fs/network/an LLM itself.
+
+**A4.2 — prediction is computed ONCE per ticket, only for candidates actually
+about to be considered, and never blocks on failure.** `orchestrator.js`'s
+`_ensurePredictedPaths` fills in the predicted-paths cache
+(`predicted-paths-cache.json`, a sibling of `flow-supervisor-budget.json`) only
+for tickets with the `unclaimed` blocker (the same set `selectAutoDispatch`
+would dispatch this tick) that have no cache entry yet — an active ticket's
+prediction, once made, is read from the cache as a "busy" set forever after,
+never recomputed. A prediction is advisory: an empty/missing/failed result
+(`[]`, or no `predictedPaths` field at all) imposes **no extra restriction** —
+`selectAutoDispatch` only ever narrows the field for a candidate that reported a
+non-empty guess, so a mispredicting or unconfigured team degrades to exactly
+Phase 2's behaviour, never to an unexplained stall. Nothing here removes or
+weakens the ledger's `conflict`/`stale-base`/`superseded` blockers (D6's
+non-goal — sequential conflicts are still accepted, not eliminated).
+
+**A4.3 — "LLM over the issue + repo structure, or a heuristic" reuses existing
+hands on both halves, adding no new billing or fetch primitive.** The LLM half
+resolves the SAME team-billed provider #1213 already established
+(`resolveAssistBindingForTeam`) and calls the SAME generic single-turn
+synthesis function knowledge curation already uses (`_synthesizeSkillMd`) — no
+new `/v1/messages` call site. The issue body and a capped repo-tree sample
+(`_fetchRepoTreeSample`) are both fetched via `_flowGithubGetJson`, the exact
+GET-JSON hand the ticket ledger and flow-anomaly sweeps already use — no new
+GitHub client. When no assist provider is configured for the team, or the LLM
+call/response-parse fails outright, `predicted-paths.js#extractHeuristicPaths`
+(a regex scan for path-shaped tokens in the ticket's own title/body — the
+`` `docs/x.md` `` convention this repo's own issues already follow) is the
+fallback — always available, no network, no cost.
+
+**A4.4 — the `predicted-paths` contentionPolicy value is now accepted, not
+refused.** Amendment 1 A1.4 had `validateProcessTemplate` refuse it as
+not-yet-implemented; `AUTO_DISPATCH_CONTENTION_POLICIES` now lists it alongside
+`epic-serial`. `'none'` (full parallelism) remains unimplemented — the closed-set
+refusal discipline is unchanged for any value this phase did not add.
+
+**Not built, and not owed by this ticket:** the Amendment 2 "Smart: LLM
+predicts file conflicts" picker in the Parallelism panel — the config UI
+(A2.2/A2.3) was never built for ANY `contentionPolicy` value, so
+`predicted-paths` is reachable today the same way `epic-serial` always has
+been (a hand-authored bundle or a raw `PUT`), not a new gap this phase opened;
+board-visible predicted-path lanes (Amendment 2's "Live surface," Phase 5); any
+cache-invalidation on issue-body edits (a prediction is computed once and kept
+forever — re-predicting on every edit was judged not worth the added
+complexity/cost for an advisory, safety-netted signal).

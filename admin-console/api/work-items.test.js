@@ -115,6 +115,17 @@ test('BA→Dev→Reviewer→Reworker on one issue↔PR chain = ONE work item', (
   assert.equal(res.coverage.attributedPct, 1);
 });
 
+test('startedAt (#2261) is the earliest run.ts across the work item, regardless of run order', () => {
+  const prEvents = [prCreated({ prNumber: 42, branch: 'agent/dev/issue-99', closes: [99], correlationId: 'cid-dev' })];
+  const usage = [
+    run({ agentId: 'dev', correlationId: 'cid-dev', ts: '2026-07-16T10:00:00.000Z' }),
+    run({ agentId: 'rev', github: { repo: REPO, prNumber: 42 }, ts: '2026-07-14T09:00:00.000Z' }), // earliest
+    run({ agentId: 'rw', github: { repo: REPO, prNumber: 42 }, ts: '2026-07-18T12:00:00.000Z' }),
+  ];
+  const res = buildWorkItems(usage, prEvents, {});
+  assert.equal(res.workItems[0].startedAt, '2026-07-14T09:00:00.000Z');
+});
+
 test('a missing `closes #N` degrades visibly into TWO work items', () => {
   const prEvents = [
     prCreated({ prNumber: 42, branch: 'agent/dev/issue-99', closes: [99], correlationId: 'cid-dev' }),

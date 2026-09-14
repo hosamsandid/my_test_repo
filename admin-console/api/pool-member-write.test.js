@@ -86,6 +86,16 @@ test('normalizePool round-trips a valid config and drops enabled:false', () => {
   assert.equal(normalizePool(null), null);
 });
 
+// Code-review finding (#2280 review): a well-formed, non-null `pool` payload
+// that isn't `enabled: true` — exactly what a config-UI toggle sends when a
+// user unchecks "enable pooling" while leaving the other fields in place —
+// must read the same as `poolConfigError` already does: no error, not a 400.
+test('a valid-but-not-enabled pool payload (e.g. enabled:false + other fields) is not an error', () => {
+  const payload = { enabled: false, workspace: 'git-clean-base' };
+  assert.equal(poolConfigError(payload, { wipLimitSet: false }), null, 'poolConfigError accepts the shape');
+  assert.equal(normalizePool(payload), null, 'normalizePool omits the field — this is NOT the error case');
+});
+
 // ------------------------------------------------------- the route's wiring
 
 const API_SRC = fs.readFileSync(path.join(__dirname, 'api.js'), 'utf8');
@@ -123,6 +133,31 @@ test('null clears the field; anything else runs the shared shape check before wr
     'a shape error must short-circuit with a 400 before any write',
   );
   assert.ok(route.includes('fresh.pool = norm'), 'a valid pool must be normalized before assignment');
+});
+
+// Code-review finding (#2280): a valid-but-not-enabled `normalizePool` result
+// (null) must be treated as clearing the field, matching the bundle path's own
+// "omit the field" behavior for the identical input — never a second 400 after
+// `poolConfigError` already found no error.
+test('a valid-but-not-enabled pool clears the field rather than 400ing', () => {
+  const route = code(putAgentRoute());
+  assert.ok(
+    !route.includes('pool.enabled must be true, or null to remove it'),
+    'normalizePool()===null must no longer be treated as a distinct error case',
+  );
+  assert.ok(
+    /const norm = normalizePool\(pool\);\s*\n\s*if \(!norm\) delete fresh\.pool;\s*\n\s*else fresh\.pool = norm;/.test(route),
+    'normalizePool()===null must delete fresh.pool, mirroring the null-clear branch above',
+  );
+});
+
+test('mutation-proved: reverting to the pre-fix 400 would fail the check above', () => {
+  const route = code(putAgentRoute());
+  const buggy = route.replace(
+    "if (!norm) delete fresh.pool;\n      else fresh.pool = norm;",
+    "if (!norm) return res.status(400).json({ error: 'pool.enabled must be true, or null to remove it' });\n      fresh.pool = norm;",
+  );
+  assert.ok(buggy.includes('pool.enabled must be true, or null to remove it'));
 });
 
 test('pool.enabled is checked against the PARENT TEAM\'s wipLimit, not the member\'s own', () => {

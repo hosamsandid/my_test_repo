@@ -3023,9 +3023,16 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         ? readJsonFile(path.join(AGENTS_DIR, fresh.parentTeamId, 'config.json'), null) : null;
       const perr = poolConfigError(pool, { wipLimitSet: !!normalizeWipLimit(teamCfg?.wipLimit) });
       if (perr) return res.status(400).json({ error: perr });
+      // `poolConfigError` accepts a valid-but-not-enabled shape (e.g.
+      // `{enabled: false, workspace: ...}`, exactly what a config-UI toggle
+      // sends when a user unchecks "enable pooling" while leaving the other
+      // fields in place) as having no error — matching how the bundle path
+      // (process-template.js `normalizePool(r.pool) ? {pool: p} : {}`) treats
+      // it: the field is simply omitted, never a 400. `normalizePool`
+      // returning `null` here is that same case, not a distinct error one.
       const norm = normalizePool(pool);
-      if (!norm) return res.status(400).json({ error: 'pool.enabled must be true, or null to remove it' });
-      fresh.pool = norm;
+      if (!norm) delete fresh.pool;
+      else fresh.pool = norm;
     }
   }
 

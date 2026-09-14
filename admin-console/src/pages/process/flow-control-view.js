@@ -317,6 +317,46 @@ function heldRows(data) {
   return held.map(heldRow).sort((a, b) => String(a.heldAt || '').localeCompare(String(b.heldAt || '')));
 }
 
+// ---------------------------------------------------------------------------
+// Pool instance lanes (#2273, epic #2251) — render-ready rows for the read-
+// only "Live surface" panel: per pooled role, its live/held instances as
+// lanes. Input is the `GET /api/teams/<id>/pool-lanes` response: `{ roles: [
+// {roleId, agentId, displayName, maxInstances, lanes: [{instanceId, ticketId,
+// repo, number, epicId, status, spawnedAt, sameEpicAs}]}] }`
+// (`orchestrator.js`'s pool-lanes route, backed by the pure
+// `pool-instance-lanes.js`).
+// ---------------------------------------------------------------------------
+
+const LANE_STATUSES = Object.freeze(['running', 'held-same-epic', 'timed-out']);
+
+function laneRow(l) {
+  return {
+    instanceId: (l && l.instanceId) || null,
+    ticketId: (l && l.ticketId) || '',
+    repo: (l && l.repo) || null,
+    number: Number.isFinite(l && l.number) ? l.number : null,
+    epicId: l && l.epicId != null ? l.epicId : null,
+    status: LANE_STATUSES.includes(l && l.status) ? l.status : 'running',
+    spawnedAt: (l && l.spawnedAt) || null,
+    sameEpicAs: (l && l.sameEpicAs) || null,
+  };
+}
+
+// One row per pooled role (alphabetical, matching `poolControlRows`), each
+// carrying its own lanes in the pure module's stable ticketId order.
+function poolLaneRoleRows(data) {
+  const roles = data && Array.isArray(data.roles) ? data.roles : [];
+  return roles
+    .map((r) => ({
+      roleId: (r && r.roleId) || '',
+      agentId: (r && r.agentId) || null,
+      displayName: (r && r.displayName) || (r && r.roleId) || '',
+      maxInstances: Number.isInteger(r && r.maxInstances) ? r.maxInstances : null,
+      lanes: (r && Array.isArray(r.lanes) ? r.lanes : []).map(laneRow),
+    }))
+    .sort((a, b) => a.roleId.localeCompare(b.roleId));
+}
+
 export {
   LIFECYCLE_STAGES,
   TICKET_STATES,
@@ -337,4 +377,7 @@ export {
   poolControlRows,
   heldRow,
   heldRows,
+  LANE_STATUSES,
+  laneRow,
+  poolLaneRoleRows,
 };

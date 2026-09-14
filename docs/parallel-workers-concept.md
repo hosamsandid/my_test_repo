@@ -363,7 +363,7 @@ and any board control (pause/drain/force-dispatch) — all later phases per §12
 
 ---
 
-## Amendment 2 — the configuration & visualization UX (design; team/flow surface shipped, see Amendment 5; board controls shipped, see Amendment 6; per-role surface shipped, see Amendment 7)
+## Amendment 2 — the configuration & visualization UX (design; team/flow surface shipped, see Amendment 5; board controls shipped, see Amendment 6; per-role surface shipped, see Amendment 7; live surface shipped, see Amendment 8)
 
 Phases 1–2 shipped the *mechanism* but left it **headless**: until #2272 the only
 way to turn on pooling, a WIP limit or the supervisor was a hand-authored
@@ -408,14 +408,12 @@ where its object lives.
   panel in the Flow editor (team scope) + a compact read-only summary on the
   team view. Controls: `wipLimit`, `autoDispatch.enabled` (the Flow
   Supervisor), and the contention-strategy selector (A2.3).
-- **Live surface** — the combined lane visualization: per pooled role, its active
-  instances as lanes, each tagged running / held-same-epic / timed-out, derived
-  from the admission lane (`inFlight`/`held`) + the ticket ledger. **Still not
-  built** — Amendment 6 (#2250) shipped the pause / drain / force-dispatch
-  CONTROLS this bullet named, but as a simpler pair of panels on the existing
-  Flow Control board (one row per pooled role; one row per held entry), not
-  this per-instance lane visualization. The full lane view (running /
-  held-same-epic / timed-out per instance) remains open for a later pass.
+- **Live surface — shipped (#2273, Amendment 8).** The combined lane
+  visualization: per pooled role, its active instances as lanes, each tagged
+  running / held-same-epic / timed-out. Amendment 6 (#2250) shipped the pause
+  / drain / force-dispatch CONTROLS this bullet named as a simpler pair of
+  panels on the Flow Control board; Amendment 8 adds the per-instance lane
+  view itself, read-only, as a third panel on the same board.
 
 **A2.3 — The contention strategy is the extensible "wow" seam, designed for the
 LLM future NOW.** One selector renders `autoDispatch.contentionPolicy` in plain
@@ -856,10 +854,49 @@ badge, since its own Scaling section (with the same checkbox/maxInstances
 state) is right there.
 
 **Not built, and not owed by this ticket:** the live lane visualization
-(A2.2's "Live surface," Phase 5 #2250); `pool.workSource` authoring (Amendment
-3's own "not owed" list, unchanged); a draft-mode (pre-materialise) editor for
+(A2.2's "Live surface," shipped separately as Amendment 8 #2273);
+`pool.workSource` authoring (Amendment 3's own "not owed" list, unchanged); a
+draft-mode (pre-materialise) editor for
 `pool` — the live `PUT /api/agents/:memberId` route (#2270) this ticket writes
 through only accepts a materialised team-member, so the Scaling section is
 live-only, gated the same way the route itself is (`node.role ===
 'team-member'`); a bundle round-trip already carries the field with no UI
 needed on that path.
+
+---
+
+## Amendment 8 — what the live lane visualization (#2273) actually shipped
+
+Landed as a pure `orchestrator/pool-instance-lanes.js` (mirroring
+`admission-control.js`/`agent-pool.js`'s own shape — no fs, no network, no
+clock of its own) + `GET /internal/teams/:id/pool-lanes` /
+`GET /api/teams/:id/pool-lanes` (read-only, gated like `tickets`/
+`pool-control`) + a third, read-only panel on the Flow Control board
+(`PoolLanesPanel`, beside the Amendment 6 `PoolControlPanel`/`HeldPanel`).
+No new persistence, as A2.2 demanded. Two decisions sharpen A2.2 as written.
+
+**A8.1 — only two of the mockup's three tags are drawn from the same source.**
+`running`/`timed-out` come from each role's actual LIVE instances
+(`_liveInstancesForRole`, the same identity fields — `poolRepo`/`poolItem`/
+`poolSpawnedAt` — the D8 hard-timeout reaper already trusts, so the lane view
+can never disagree with what will actually get reaped). `held-same-epic` is
+NOT read off the admission lane's `held` list — that list's own hold reason
+is always `at-limit` (a WIP-limit refusal, already fully surfaced by the
+Amendment 6 `HeldPanel`); epic-serialization (Amendment 1 A1.4, always on)
+never touches the admission lane at all, it simply never gets SELECTED by the
+Flow Supervisor. So `held-same-epic` is derived entirely from the ticket
+ledger instead: any of the role's own active-state tickets
+(`ownerAgentId === role.agentId`, mirroring `orchestrator.js`'s own
+`FLOW_SUPERVISOR_ACTIVE_STATES`) that has not itself spawned an instance yet,
+but shares an `epicId` with one that has. A ticket held on the WIP limit for
+a reason OTHER than same-epic gets no lane here — duplicating the WIP-limit
+panel per-role would be a second, driftable rendering of the same fact.
+
+**A8.2 — the panel is additive to the existing board, not a new route.** A2.2
+asked for the surface "in the Flow editor (and/or the team view)"; this ships
+it on the Flow Control board instead, alongside the Amendment 6 controls it
+narrates — the board is already the one place an operator watches a pooled
+role's live state, and a fourth route/registration for the same team-scoped
+data would be a second home for one fact. Polls on the same refresh cadence
+as the rest of the board (manual Refresh + after every pause/resume/drain/
+force-dispatch action), no dedicated auto-refresh timer of its own.

@@ -169,3 +169,25 @@ starts it right now anyway, past the limit — a deliberate, one-off override
 for when you know it's safe to run one more than usual. It does not change
 the limit itself: the next ticket to finish still frees a slot exactly as it
 would have.
+
+## Pool instance lanes
+
+Below Pool controls, one lane per pooled role's live and held work — the
+read-only counterpart to the buttons above. Nothing here can be clicked;
+it exists so you can *see* what the pool is doing, not just change it.
+
+Each lane is tagged one of three ways:
+
+- **Running** — a real instance is working this ticket right now.
+- **Held** — no instance has started yet, because another instance of the
+  same role is already working a ticket from the **same epic**. Every pooled
+  role always serializes same-epic work (it is never disabled), so this is
+  the one contention reason worth naming on its own; the lane names which
+  running ticket it is waiting behind.
+- **Timed out** — an instance ran past the role's configured hard-timeout
+  budget and is being torn down.
+
+A ticket held on the team's `wipLimit` instead of on same-epic contention is
+not repeated here — the **Held on the WIP limit** panel above already shows
+it, and a ticket can only be in one of these two waiting states at a time.
+This panel has no Refresh of its own; it reloads with the rest of the board.

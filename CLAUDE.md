@@ -346,8 +346,11 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   `pool-control.json`, kept out of the `pool` bundle field — blocks only NEW
   spawns, an existing instance runs to completion) and a per-held-entry Force
   dispatch (`admissionControl.forcePromoteHeld`, promotes past `wipLimit` for
-  that one entry). A headless runtime (D7) and provider-health-aware admission
-  (D9) remain undesigned.
+  that one entry). **Pool instance lanes** (#2273): a read-only third board
+  panel, per pooled role's live instances tagged running / held-same-epic /
+  timed-out (`pool-instance-lanes.js`, pure, no new persistence — derived
+  from live instance configs + the ticket ledger). A headless runtime (D7)
+  and provider-health-aware admission (D9) remain undesigned.
 
 ### GitHub poller
 

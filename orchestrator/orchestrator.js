@@ -177,6 +177,7 @@ const agentPool = require("./agent-pool");
 const flowSupervisor = require("./flow-supervisor");
 const recurringPoolSource = require("./recurring-pool-source");
 const predictedPaths = require("./predicted-paths");
+const poolInstanceLanes = require("./pool-instance-lanes");
 
 // ── Read-write context mount helpers (writing into a mounted host folder) ──
 // A caller path is RELATIVE to /context. For a single legacy folder the mount
@@ -2310,6 +2311,35 @@ function _liveInstanceIdsForRole(roleFullId) {
     ids.push(id);
   }
   return ids;
+}
+
+// The lane-view's own read of "a live instance" (#2273): the same set
+// `_liveInstanceIdsForRole` walks, but carrying the fields
+// `pool-instance-lanes.js`'s pure core needs (`poolRepo`/`poolItem`/
+// `poolSpawnedAt`, stamped at spawn time by `spawnPoolInstance`) rather than
+// just the id. Kept as a SEPARATE walk (not a wrapper around
+// `_liveInstanceIdsForRole`) so a caller that only needs ids never pays for a
+// second `loadAgentConfig` per instance.
+function _liveInstancesForRole(roleFullId) {
+  const prefix = `${roleFullId}-i`;
+  const out = [];
+  for (const id of listAgentIds()) {
+    if (!id.startsWith(prefix)) continue;
+    let cfg = null;
+    try {
+      cfg = loadAgentConfig(id);
+    } catch {
+      continue;
+    }
+    if (!cfg || !cfg.poolInstance || cfg.poolOf !== roleFullId) continue;
+    out.push({
+      instanceId: id,
+      repo: cfg.poolRepo || null,
+      itemKey: cfg.poolItem != null ? Number(cfg.poolItem) : null,
+      spawnedAt: cfg.poolSpawnedAt || null,
+    });
+  }
+  return out;
 }
 
 // A released ticket's lane key is `<repo>#<number>` (`admission-control.js`
@@ -17201,6 +17231,52 @@ async function main() {
         console.error(`[AgentPool] pool-control read error for ${teamId}: ${err.message}`);
         return sendJson(res, 500, { error: err.message });
       }
+    }
+
+    // GET /internal/teams/:teamId/pool-lanes — the read-only "Live surface"
+    // (#2273, concept Amendment 2 A2.2): per pooled role, its live instances
+    // as lanes, tagged running / held-same-epic / timed-out. No new
+    // persistence — `pool-instance-lanes.js`'s pure core is fed each role's
+    // live instance configs (`_liveInstancesForRole`) plus the ticket ledger
+    // this endpoint already sweeps for `tickets`. Maintenance-gated for the
+    // same reason as `tickets`/`flow-anomalies`: it is a GitHub sweep via the
+    // ledger, and the window must stay quiet.
+    const poolLanesMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/pool-lanes(?:\?.*)?$/);
+    if (poolLanesMatch) {
+      const teamId = decodeURIComponent(poolLanesMatch[1]);
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') {
+            return sendJson(res, 404, { error: 'agent team not found' });
+          }
+          const maint = readMaintenanceState();
+          if (maint && maint.active) {
+            return sendJson(res, 200, {
+              teamId, maintenance: true, roles: [], generatedAt: new Date().toISOString(),
+            });
+          }
+          const ledger = await computeTeamTicketLedger(teamId);
+          const pooledRoles = _teamPooledRoles(teamId);
+          const roleInputs = pooledRoles.map((role) => ({
+            role: {
+              roleId: agentPool.roleIdFromMemberId(role.id, teamId),
+              agentId: role.id,
+              maxInstances: role.pool.maxInstances,
+              maxRuntimeMs: role.pool.teardown.maxRuntimeMs,
+            },
+            instances: _liveInstancesForRole(role.id),
+          }));
+          const roles = poolInstanceLanes.buildTeamPoolLanes(roleInputs, ledger.tickets || [])
+            .map((r, i) => ({ ...r, displayName: pooledRoles[i].cfg.displayName || r.roleId }));
+          return sendJson(res, 200, { teamId, maintenance: false, roles, generatedAt: new Date().toISOString() });
+        } catch (err) {
+          console.error(`[AgentPool] pool-lanes read error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
     }
 
     // POST /internal/teams/:teamId/pool-control/:roleId — set/clear a pooled

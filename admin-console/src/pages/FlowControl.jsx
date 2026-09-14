@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { AlertTriangle, RefreshCw, ExternalLink, CheckCircle2, Info, UserRound, Pause, Play, Waves, Zap } from 'lucide-react';
+import { AlertTriangle, RefreshCw, ExternalLink, CheckCircle2, Info, UserRound, Pause, Play, Waves, Zap, Clock, PauseCircle } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import PageHelpButton from '../components/PageHelpButton';
 import WhenCell from '../components/WhenCell';
 import { usePageActions } from '../context/PageActionsContext';
 import {
-  groupIntoLanes, epicRollups, rollupSummary, boardSummary, poolControlRows, heldRows,
+  groupIntoLanes, epicRollups, rollupSummary, boardSummary, poolControlRows, heldRows, poolLaneRoleRows,
 } from './process/flow-control-view';
 import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
 
@@ -37,6 +37,7 @@ export default function FlowControl() {
   const [state, setState] = useState({ loading: false, error: null, data: null });
   const [poolState, setPoolState] = useState({ loading: false, error: null, data: null });
   const [poolActionError, setPoolActionError] = useState(null);
+  const [laneState, setLaneState] = useState({ loading: false, error: null, data: null });
 
   // Default to the first team once the list arrives; never override a choice.
   useEffect(() => {
@@ -65,7 +66,18 @@ export default function FlowControl() {
     }
   }, [teamId]);
 
-  useEffect(() => { load(); loadPoolControl(); }, [load, loadPoolControl]);
+  const loadLanes = useCallback(async () => {
+    if (!teamId) return;
+    setLaneState((s) => ({ ...s, loading: true, error: null }));
+    try {
+      const data = await apiCall('GET', `/api/teams/${encodeURIComponent(teamId)}/pool-lanes`);
+      setLaneState({ loading: false, error: null, data });
+    } catch (err) {
+      setLaneState({ loading: false, error: err.message || 'Failed to load', data: null });
+    }
+  }, [teamId]);
+
+  useEffect(() => { load(); loadPoolControl(); loadLanes(); }, [load, loadPoolControl, loadLanes]);
 
   // Pause/resume/drain: fire the write, then refresh both panels — a role's
   // state change can immediately change which held entries are meaningful,
@@ -75,27 +87,29 @@ export default function FlowControl() {
     setPoolActionError(null);
     try {
       await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/pool-control/${encodeURIComponent(roleId)}`, { state: nextState });
-      await Promise.all([loadPoolControl(), load()]);
+      await Promise.all([loadPoolControl(), load(), loadLanes()]);
     } catch (err) {
       setPoolActionError(err.message || 'Failed to update');
     }
-  }, [teamId, loadPoolControl, load]);
+  }, [teamId, loadPoolControl, load, loadLanes]);
 
   const forceDispatch = useCallback(async (id) => {
     setPoolActionError(null);
     try {
       await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/force-dispatch`, { id });
-      await Promise.all([loadPoolControl(), load()]);
+      await Promise.all([loadPoolControl(), load(), loadLanes()]);
     } catch (err) {
       setPoolActionError(err.message || 'Failed to force-dispatch');
     }
-  }, [teamId, loadPoolControl, load]);
+  }, [teamId, loadPoolControl, load, loadLanes]);
 
   // Hooks must run before any early return, so the portal is built here and
   // simply not mounted while the page renders its empty state.
+  const refreshAll = useCallback(() => { load(); loadPoolControl(); loadLanes(); }, [load, loadPoolControl, loadLanes]);
+
   const headerAction = usePageActions(
     <button
-      onClick={load}
+      onClick={refreshAll}
       disabled={state.loading || !teamId}
       title="Re-run the reconciler sweep"
       style={{
@@ -116,6 +130,7 @@ export default function FlowControl() {
   const rollups = useMemo(() => epicRollups(data && data.tickets), [data]);
   const poolRoles = useMemo(() => poolControlRows(poolState.data), [poolState.data]);
   const held = useMemo(() => heldRows(poolState.data), [poolState.data]);
+  const laneRoles = useMemo(() => poolLaneRoleRows(laneState.data), [laneState.data]);
 
   return (
     <>
@@ -173,6 +188,9 @@ export default function FlowControl() {
                 )}
                 {held.length > 0 && (
                   <HeldPanel held={held} onForceDispatch={forceDispatch} busy={poolState.loading} />
+                )}
+                {laneRoles.some((r) => r.lanes.length > 0) && (
+                  <PoolLanesPanel roles={laneRoles} />
                 )}
                 {rollups.length > 0 && <EpicRollups rollups={rollups} />}
                 {summary.total === 0 && !data.maintenance && !summary.noRepos ? (
@@ -396,6 +414,80 @@ function HeldPanel({ held, onForceDispatch, busy }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+/* ── pool instance lanes (#2273) ──────────────────────────────────────── */
+
+// The read-only "Live surface" (concept Amendment 2 A2.2): per pooled role,
+// its live instances as lanes. Read-only by design — pause/drain/force-
+// dispatch already live in `PoolControlPanel`/`HeldPanel` above; this panel
+// never issues a mutation, only renders what those two (plus the ticket
+// ledger) already imply.
+function PoolLanesPanel({ roles }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+        <h2 style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 600 }}>
+          Pool instance lanes
+        </h2>
+        <PageHelpButton
+          label="What running / held / timed-out mean"
+          size={13}
+          section={FLOW_CONTROL_HELP_SECTIONS.poolLanes}
+          style={{ padding: 0, flexShrink: 0 }}
+        />
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+        {roles.filter((r) => r.lanes.length > 0).map((r) => (
+          <div key={r.roleId} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+              {r.displayName}{r.maxInstances != null ? ` · up to ${r.maxInstances}` : ''}
+            </span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+              {r.lanes.map((l) => <PoolLaneRow key={l.ticketId} lane={l} />)}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const LANE_STATUS_PRESENTATION = {
+  running: { icon: Play, label: 'Running', color: 'var(--eb-status-success, #16a34a)' },
+  'held-same-epic': { icon: PauseCircle, label: 'Held', color: 'var(--eb-status-warning, #d97706)' },
+  'timed-out': { icon: Clock, label: 'Timed out', color: 'var(--eb-status-error, #dc2626)' },
+};
+
+function PoolLaneRow({ lane }) {
+  const presentation = LANE_STATUS_PRESENTATION[lane.status] || LANE_STATUS_PRESENTATION.running;
+  const Icon = presentation.icon;
+  return (
+    <div
+      style={{
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
+        padding: 'var(--eb-space-1) var(--eb-space-3)', background: 'var(--eb-bg-surface)',
+        border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+        fontSize: 'var(--eb-text-sm)',
+      }}
+    >
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: presentation.color }}>
+        <Icon size={12} />
+        {presentation.label}
+      </span>
+      <code style={{ fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-primary)' }}>{lane.ticketId}</code>
+      {lane.status === 'held-same-epic' && lane.sameEpicAs && (
+        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+          same epic as <code style={{ fontFamily: 'var(--eb-font-mono)' }}>{lane.sameEpicAs}</code>
+        </span>
+      )}
+      {lane.instanceId && (
+        <code style={{ marginLeft: 'auto', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+          {lane.instanceId}
+        </code>
+      )}
     </div>
   );
 }

@@ -8499,6 +8499,26 @@ app.get('/api/teams/:teamId/pool-control', apiLimiter, async (req, res) => {
   }
 });
 
+// GET /api/teams/:teamId/pool-lanes — the read-only "Live surface" for the
+// Flow Control board (#2273, epic #2251, concept Amendment 2 A2.2): per
+// pooled role, its live instances as lanes tagged running / held-same-epic /
+// timed-out. Visibility-only like `tickets`/`pool-control`: no `canManageTeam`
+// gate on the READ — seeing the pool's live state is the same "who can see
+// this team" question every other board panel already answers.
+app.get('/api/teams/:teamId/pool-lanes', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/pool-lanes`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // POST /api/teams/:teamId/pool-control/:roleId — pause / resume / drain one
 // pooled role (#2250 Phase 5). A live operational toggle, not a config write,
 // but still a mutation that changes what the team does next — gated like

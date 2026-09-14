@@ -52,6 +52,7 @@ import {
 } from './form-kit.jsx';
 import { buildInitialForm, buildEditSubmit, hasOwnSkills } from './agent-edit-form-model.js';
 import { TEAM_CONFIG_TABS, ENV_TAB_IDS, resolveTeamConfigTab } from './team-config-tabs-view.js';
+import { parallelismSummary } from '../process/parallelism-view.js';
 
 // #2236: which help chapter each tab's "?" opens, and the tab's own label for
 // the button's title. General/Skills/Plugins point at the same field-by-field
@@ -552,6 +553,23 @@ export default function AgentEditForm({
           <div style={{ marginTop: 'var(--eb-space-1)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
             Prompt changes take effect from each member's next session.
           </div>
+        </div>
+      )}
+
+      {/* #2272 AC3: a compact, read-only echo of the team-axis Parallelism
+          panel (Flow editor → Parallelism) — `wipLimit`/`autoDispatch` already
+          ride on this same `agent` config object, no separate fetch. Editing
+          happens in the Flow editor, not here — this is the "team view"
+          summary the design doc's A2.2 asks for, not a second edit surface. */}
+      {isTeam && activeTab === 'general' && (
+        <div>
+          <div style={labelStyle}>Parallelism (read-only)</div>
+          <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', lineHeight: 1.6 }}>
+            {parallelismSummary({ wipLimit: agent.wipLimit, autoDispatch: agent.autoDispatch }).map((line) => (
+              <div key={line}>{line}</div>
+            ))}
+          </div>
+          <div style={helpTextStyle}>Edit in the Flow editor's Parallelism panel.</div>
         </div>
       )}
 

@@ -1,7 +1,9 @@
 # Agent instance pools — ephemeral, self-cleaning workers over a stream of work items
 
-> Status: **design of record; Phases 1–3 shipped** (see Amendments 1 and 3);
-> **configuration & visualization UX designed, pre-build** (see Amendment 2).
+> Status: **design of record; Phases 1–4 shipped** (see Amendments 1, 3 and 4);
+> **team-axis config UI shipped** (#2272, see Amendment 5); **per-role config
+> UI and live lane visualization still pending** (Amendment 2's remaining
+> surfaces, Phase 5).
 > This document scopes the discussion in issue #2251 (the Agent Pools epic). Its
 > SDLC binding builds directly on the shipped Flow Control machinery
 > (`docs/flow-control-concept.md`): admission control (#2114), the ticket
@@ -351,15 +353,16 @@ and any board control (pause/drain/force-dispatch) — all later phases per §12
 
 ---
 
-## Amendment 2 — the configuration & visualization UX (design, pre-build)
+## Amendment 2 — the configuration & visualization UX (design; team/flow surface shipped, see Amendment 5)
 
-Phases 1–2 shipped the *mechanism* but left it **headless**: the only way to turn
-on pooling, a WIP limit, the supervisor or epic-serialization is a hand-authored
-process-template bundle or a raw `PUT`. `admin-console/api/api.js` says so in a
-comment ("No Flow-Editor control yet"). This amendment is the design of record
-for the first-class UI that makes the mechanism configurable *and* observable. It
-introduces **no new contention semantics** — it is UI plus one live-write
-endpoint over what already exists. Five decisions.
+Phases 1–2 shipped the *mechanism* but left it **headless**: until #2272 the only
+way to turn on pooling, a WIP limit or the supervisor was a hand-authored
+process-template bundle or a raw `PUT` (`admin-console/api/api.js` said so in a
+comment, "No Flow-Editor control yet" — since replaced, #2272 added one for the
+team axis). This amendment is the design of record for the first-class UI that
+makes the mechanism configurable *and* observable. It introduces **no new
+contention semantics** — it is UI plus one live-write endpoint over what
+already exists. Five decisions.
 
 **A2.1 — The config is TWO independent axes, and the UI must mirror them, not
 flatten them into one "how parallel" number.** This is D5 re-stated for the UI,
@@ -390,10 +393,10 @@ where its object lives.
   (`maxInstances`), workspace binding (`git-clean-base | input-copy | none`),
   teardown timeouts. A read-only "pooled role · up to N" badge on the single-agent
   view so an operator looking at one agent sees its scaling at a glance.
-- **Team / flow surface** — a **Parallelism** panel in the Flow editor (team
-  scope) + a compact read-only summary on the team view. Controls: `wipLimit`,
-  `autoDispatch.enabled` (the Flow Supervisor), and the contention-strategy
-  selector (A2.3).
+- **Team / flow surface — shipped (#2272, Amendment 5).** A **Parallelism**
+  panel in the Flow editor (team scope) + a compact read-only summary on the
+  team view. Controls: `wipLimit`, `autoDispatch.enabled` (the Flow
+  Supervisor), and the contention-strategy selector (A2.3).
 - **Live surface** — the combined lane visualization: per pooled role, its active
   instances as lanes, each tagged running / held-same-epic / timed-out, derived
   from the admission lane (`inFlight`/`held`) + the ticket ledger. **Read-only**
@@ -407,16 +410,22 @@ rules and (later) an LLM"* — is present from day one and Phase 4 slots in with
 UI redesign:
 
 - **Full parallelism** (`none`) — items are independent; run up to the count
-  limit.
+  limit. **Rendered disabled in the shipped picker (#2272)** — Amendment 1 A1.4
+  / Amendment 4 A4.4 already established this value was never implemented
+  (epic-serialization runs unconditionally in `selectAutoDispatch`, regardless
+  of `contentionPolicy`), so the picker shows it with an inline explanation
+  rather than wiring a radio to a value the backend silently ignores.
 - **Serialize same epic** (`epic-serial`, the default and the *only* rule
-  enforced today) — never two in-flight tickets sharing `epicId`.
+  enforced today) — never two in-flight tickets sharing `epicId`. The one
+  selectable option in the shipped picker.
 - **Smart: LLM predicts file conflicts** (`predicted-paths`, Phase 4 #2249,
-  Amendment 4) — the predictor itself has shipped (`predicted-paths.js` +
-  its `orchestrator.js` wiring); this UI surface has not (Amendment 2 stayed
-  design-only — no Parallelism panel exists yet), so the option is reachable
-  today only via a hand-authored `autoDispatch.contentionPolicy` in the bundle
-  or a raw `PUT`, not a picker. The bundle validator now accepts the value
-  (Amendment 1 A1.4 is updated by Amendment 4).
+  Amendment 4) — the predictor itself shipped in Amendment 4
+  (`predicted-paths.js` + its `orchestrator.js` wiring); the picker (#2272,
+  Amendment 5) renders the option too, but still **disabled/"coming"** by this
+  issue's own design — deferred alongside the live lane visualization
+  (Phase 5) rather than exposed the moment the panel ships. The bundle
+  validator accepts the value (Amendment 1 A1.4 is updated by Amendment 4);
+  only the UI keeps it off for now.
 
 **A2.4 — Backend prerequisite: a live `pool` write, at parity with
 `wipLimit`/`autoDispatch`. Shipped (#2280).** `PUT /api/agents/:teamId` already
@@ -600,3 +609,58 @@ board-visible predicted-path lanes (Amendment 2's "Live surface," Phase 5); any
 cache-invalidation on issue-body edits (a prediction is computed once and kept
 forever — re-predicting on every edit was judged not worth the added
 complexity/cost for an advisory, safety-netted signal).
+
+---
+
+## Amendment 5 — what the team/flow config UI (#2272) actually shipped
+
+Landed as a pure `admin-console/src/pages/process/parallelism-view.js` (#651)
++ `ParallelismPanel.jsx` (the Flow editor's new toolbar button, live-team scope
+only) + a compact read-only summary reusing the same module on the team view
+(`AgentEditForm.jsx`'s General tab). No backend change — both fields already
+round-tripped through `PUT /api/agents/:teamId` (#2114/#2247); this ticket is
+UI only, exactly as A2.2's "Team / flow surface" scoped it. Three things
+sharpen A2.2/A2.3 as written.
+
+**A5.1 — "Full parallelism" ships disabled, contrary to the A2.3 mockup.** The
+mockup (and the issue's own AC list) shows only "Smart: LLM predicts
+conflicts" marked `(coming)`, with "Full parallelism" as a plain selectable
+radio. But Amendment 1 A1.4 and Amendment 4 A4.4 had already established that
+`contentionPolicy: "none"` was never implemented — epic-serialization in
+`orchestrator/flow-supervisor.js#selectAutoDispatch` runs unconditionally,
+regardless of `contentionPolicy` — and the live `PUT` route's
+`normalizeAutoDispatch` silently drops an unrecognised `contentionPolicy`
+rather than erroring. Shipping "Full parallelism" as a live, enabled radio
+would therefore have looked like a working choice while silently doing
+nothing — exactly the "half-applies with no error" failure this codebase's
+validators are written to avoid (`poolConfigError`, the bundle's closed enums).
+The panel instead renders it disabled with an inline explanation, the same
+treatment as "Smart," so **only `epic-serial` is selectable** in this first
+cut — a deliberate deviation from the issue's literal AC text, grounded in
+two Amendments already on record, not a fresh judgement call made in
+isolation.
+
+**A5.2 — the auto-dispatch prerequisite is mirrored client-side, not
+re-derived.** `parallelism-view.js#autoDispatchPrerequisite` restates the exact
+two checks `PUT /api/agents/:teamId` runs (`api.js`: `wipLimit` set, at least
+one team member with `pool.enabled`) so the panel can grey the "Auto-start
+ready tickets" toggle with the actual reason instead of letting the save 400.
+The pooled-role check reads the SAME `/api/agents` list the page's team picker
+already fetches (`hasPooledMember`, keyed on `parentTeamId` + `pool.enabled`)
+— no second fetch, and the two prerequisite checks can never drift out of sync
+with different data than the panel's own team/role list.
+
+**A5.3 — the compact team-view summary reuses the panel's own formatter,
+verbatim.** `parallelismSummary()` is the one function behind both surfaces
+(A2.2's "one model" for the team axis): the Flow editor's toolbar tooltip and
+the read-only General-tab block never restate the wipLimit/contention/
+auto-dispatch logic a second time. An unconfigured team (the common case
+pre-#2272) reads as a single "No ticket limit set" line rather than three
+mostly-blank rows.
+
+**Not built, and not owed by this ticket:** the per-role surface (`pool.enabled`
+picker in `NodeInspector`/agent Settings, A2.2's other bullet — A2.4 shipped
+only the live-write endpoint it would call, #2280); the live lane
+visualization (A2.2's "Live surface," Phase 5 #2250); enabling the
+`predicted-paths` radio (A5.1 — deferred by the issue's own design, tracked
+alongside Phase 5's board controls, not a gap this ticket left open).

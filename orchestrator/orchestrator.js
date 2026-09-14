@@ -174,6 +174,7 @@ const admissionControl = require("./admission-control");
 const { buildTicketLedger } = require("./ticket-reconciler");
 const ticketReconcileSweep = require("./ticket-reconcile-sweep");
 const agentPool = require("./agent-pool");
+const flowSupervisor = require("./flow-supervisor");
 
 // ── Read-write context mount helpers (writing into a mounted host folder) ──
 // A caller path is RELATIVE to /context. For a single legacy folder the mount
@@ -1746,6 +1747,66 @@ async function fetchWorkItemTitle(repoFullName, kind, number) {
   return (await fetchWorkItemDetail(repoFullName, kind, number)).title;
 }
 
+// The wake half of the internal label fast-path (#1858), extracted so it has
+// TWO callers: the `POST /internal/github-label-applied` handler below (a
+// human applied the label through the console) and the Flow Supervisor's
+// auto-dispatch (#2247 — the label is already on the object; only the wake
+// needs to run again). Does NOT write the label to GitHub — same discipline
+// as the endpoint it was extracted from, "the label itself is unchanged; this
+// path does not stamp any label".
+async function wakeGithubLabelListeners({ repo, number, kind, label, actor, source = 'internal-plugin' }) {
+  const key = labelFastPath.eventKeyForKind(kind);
+  const agents = listAgentIds().map((aid) => ({
+    agentId: aid,
+    enabled: loadAgentConfig(aid)?.enabled !== false,
+    triggers: loadTriggers(aid),
+  }));
+  const listeners = labelFastPath.matchPollerListeners({ repo, label, kind }, agents);
+  const now = new Date().toISOString();
+  // #1897 AC8: resolve the title best-effort so the notice isn't blank.
+  // #2114: also carry the PR's closesIssues (from the same fetch) so the
+  // admission gate keys this hand-off to the issue's ticket, not a new one.
+  const { title, closesIssues } = await fetchWorkItemDetail(repo, kind, number);
+  const ghEvent = labelFastPath.buildSyntheticEvent({
+    repo, label, kind, number, title, closesIssues, actor,
+    eventId: `intlbl:${crypto.randomBytes(6).toString('hex')}`,
+    now,
+  });
+  for (const l of listeners) {
+    // Enqueue first (immediate wake), then arm the dedup marker so the
+    // poller's later delivery of the same label is dropped.
+    enqueuePending(l.agentId, {
+      ...flowEmit.buildPendingEntry(l.triggerId, key, ghEvent),
+      source,
+    });
+    labelDedupMarkers.add({
+      agentId: l.agentId, triggerId: l.triggerId,
+      repo, kind, number, label, appliedAt: now,
+    });
+    console.log(
+      `[Orchestrator] label-fastpath: ${repo}#${number} +${label} ` +
+      `by ${actor || 'console'} → agent=${l.agentId} trigger=${l.triggerId}`);
+  }
+  // Same transparency log the poller writes, tagged with the delivery path so
+  // operators see an honest "delivered internally"/"delivered by the
+  // supervisor" line — the AC that "who dispatched" stays clear.
+  githubEventLog.record({
+    ...githubEventLog.buildEventEntry({
+      ghEvent, repoFullName: repo, key,
+      outcomes: listeners.map((l) => ({
+        agentId: l.agentId, triggerId: l.triggerId,
+        status: 'delivered', reason: null, digest: false, wakeLabel: label,
+      })),
+    }),
+    source,
+  });
+  if (listeners.length === 0) {
+    console.log(
+      `[Orchestrator] label-fastpath: ${repo}#${number} +${label} matched no poller listener`);
+  }
+  return { listeners };
+}
+
 function _flowLiftEmits(cfgEmits, triggers) {
   const base = Array.isArray(cfgEmits) ? cfgEmits.filter((e) => typeof e === "string" && e) : [];
   const lifted = [];
@@ -2432,6 +2493,156 @@ async function admissionSweepTeam(teamId) {
     inFlight: promoted.lane.inFlight.length,
     held: promoted.lane.held.length,
   };
+}
+
+// ============================================================
+// Agent Pools — Phase 2: the Flow Supervisor (#2247, epic #2251; design of
+// record `docs/parallel-workers-concept.md` §7 + `docs/flow-control-concept.md`
+// §4.3a). Deterministic core in `flow-supervisor.js`; this is its fs/GitHub
+// half — reusing the ticket ledger (#2115), the admission lane (#2114) and the
+// two existing audited hands: the label fast-path's wake half (#1858, above)
+// and `wake-agent` (#2030). No LLM anywhere in this path (§4.3b is unbuilt).
+//
+// Opt-in per team (`autoDispatch.enabled`), and piggybacks on the flow's own
+// `wipLimit` exactly like pooling itself (§9 of the concept: "a pool with no
+// wipLimit would spawn unboundedly and never be swept") — so a team with no
+// pooled role, or no wipLimit, costs one config read and returns.
+// ============================================================
+const FLOW_SUPERVISOR_DEFAULT_WINDOW_MS = 60 * 60 * 1000; // 1h: a stuck item is nudged at most hourly
+
+function flowSupervisorBudgetPath(teamId) {
+  return controlOrPoolPath(teamId, "flow-supervisor-budget.json");
+}
+
+// A flat `{ "<ticketId>::<blocker>": "<iso timestamp>" }` map — the ≤1-action-
+// per-(item,blocker)-per-window budget the design (§7) requires. Missing or
+// corrupt degrades to "nothing has fired yet", never to a throw on the sweep.
+function loadFlowSupervisorBudget(teamId) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(flowSupervisorBudgetPath(teamId), "utf8"));
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveFlowSupervisorBudget(teamId, budget) {
+  const p = flowSupervisorBudgetPath(teamId);
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(budget, null, 2));
+  } catch (err) {
+    console.error(`[FlowSupervisor] cannot persist budget for ${teamId}: ${err.message}`);
+  }
+}
+
+// Lifecycle states counted as "this epic already has active work" for
+// epic-serialization (D6/D10) — everything past `backlog` and short of `done`.
+// A ticket merely `backlog` has not been dispatched at all, so it cannot make
+// its own epic busy; `done` work no longer occupies anything.
+const FLOW_SUPERVISOR_ACTIVE_STATES = new Set(['ready', 'in-dev', 'in-review', 'rework', 'doc', 'mergeable']);
+
+/**
+ * One team's Flow Supervisor tick: auto-dispatch ready-but-undispatched pooled
+ * items up to the limit, oldest-first, epic-serialized, then run the two named
+ * remediation-ladder rows (re-fire an unclaimed dispatch — the same operation
+ * — and hand a `stale-base` PR back to its owner), each bounded to at most one
+ * action per (ticket, blocker) per window. Returns `null` when there is
+ * nothing this team opted into or nothing to do.
+ */
+async function flowSupervisorSweepTeam(teamId, { now = Date.now() } = {}) {
+  let teamCfg = null;
+  try {
+    teamCfg = loadAgentConfig(teamId);
+  } catch {
+    return null;
+  }
+  if (!teamCfg) return null;
+  const autoDispatch = teamCfg.autoDispatch && typeof teamCfg.autoDispatch === "object" ? teamCfg.autoDispatch : null;
+  if (!autoDispatch || autoDispatch.enabled !== true) return null;
+
+  const wipLimit = admissionControl.limitInForce(teamCfg.wipLimit);
+  if (wipLimit === null) return null; // §9: pooling (and its supervisor) piggyback on the flow's own wipLimit
+
+  const pooledRoleIds = new Set(_teamPooledRoles(teamId).map((r) => r.id));
+  if (pooledRoleIds.size === 0) return null; // nothing pooled — nothing for the supervisor to time
+
+  const windowMs = Number.isFinite(autoDispatch.actionWindowMs) && autoDispatch.actionWindowMs > 0
+    ? autoDispatch.actionWindowMs : FLOW_SUPERVISOR_DEFAULT_WINDOW_MS;
+
+  let ledger;
+  try {
+    ledger = await computeTeamTicketLedger(teamId, { now });
+  } catch (err) {
+    console.warn(`[FlowSupervisor] ${teamId}: ledger read failed: ${err.message}`);
+    return null;
+  }
+  const tickets = ledger.tickets || [];
+
+  // Every epic with active (non-backlog, non-done) work anywhere in the team —
+  // reserved BEFORE this pass picks anything, so a backlog ticket never fires
+  // alongside work already underway on the same epic (D6).
+  const busyEpicIds = tickets
+    .filter((t) => FLOW_SUPERVISOR_ACTIVE_STATES.has(t.state) && t.epicId != null)
+    .map((t) => t.epicId);
+
+  const pooledCandidates = tickets.filter((t) => t.ownerAgentId && pooledRoleIds.has(t.ownerAgentId));
+
+  let budget = loadFlowSupervisorBudget(teamId);
+  const toDispatch = flowSupervisor.selectAutoDispatch({
+    candidates: pooledCandidates, busyEpicIds, budget, now, windowMs, limit: wipLimit,
+  });
+  const toRework = flowSupervisor.selectStaleBaseRework({ candidates: pooledCandidates, budget, now, windowMs });
+
+  const firedKeys = [];
+  const dispatched = [];
+  for (const t of toDispatch) {
+    try {
+      const { listeners } = await wakeGithubLabelListeners({
+        repo: t.repo, number: t.number, kind: 'issue', label: t.lane,
+        actor: 'flow-supervisor', source: 'supervisor',
+      });
+      firedKeys.push(flowSupervisor.budgetKey(t.ticketId, flowSupervisor.AUTO_DISPATCH_BLOCKER));
+      dispatched.push({ ticketId: t.ticketId, listeners: listeners.length });
+      console.log(`[FlowSupervisor] ${teamId}: auto-dispatched ${t.ticketId} (+${t.lane}) → ${listeners.length} listener(s)`);
+    } catch (err) {
+      console.warn(`[FlowSupervisor] ${teamId}: auto-dispatch of ${t.ticketId} failed: ${err.message}`);
+    }
+  }
+
+  const reworked = [];
+  for (const t of toRework) {
+    try {
+      const note = `Flow Supervisor: ${t.ticketId} is stale-base (its PR text-merges cleanly but the base has moved since it branched) — please rebase.`;
+      const enqueued = enqueuePending(t.ownerAgentId, wakeAgent.buildWakeEntry({ from: 'flow-supervisor', note, teamId }));
+      if (enqueued !== false) {
+        const eventId = `flowsup:${crypto.randomBytes(6).toString('hex')}`;
+        const ghEvent = wakeAgent.buildWakeLogEvent({
+          producerId: 'flow-supervisor', targetId: t.ownerAgentId, note, eventId, now: new Date(now).toISOString(),
+        });
+        githubEventLog.record({
+          ...githubEventLog.buildEventEntry({
+            ghEvent, repoFullName: t.repo, key: wakeAgent.WAKE_EVENT_KEY,
+            outcomes: [{ agentId: t.ownerAgentId, triggerId: null, status: 'delivered', reason: null, digest: false }],
+          }),
+          source: 'supervisor',
+          emittedBy: 'flow-supervisor',
+          ...wakeAgent.buildWakeLogFields({ producerId: 'flow-supervisor', targetId: t.ownerAgentId, note }),
+        });
+        firedKeys.push(flowSupervisor.budgetKey(t.ticketId, flowSupervisor.REMEDIATION_STALE_BASE));
+        reworked.push(t.ticketId);
+        console.log(`[FlowSupervisor] ${teamId}: nudged ${t.ownerAgentId} to rework stale-base ${t.ticketId}`);
+      }
+    } catch (err) {
+      console.warn(`[FlowSupervisor] ${teamId}: stale-base nudge for ${t.ticketId} failed: ${err.message}`);
+    }
+  }
+
+  if (firedKeys.length) budget = flowSupervisor.recordFired(budget, firedKeys, now);
+  budget = flowSupervisor.pruneBudget(budget, now, windowMs);
+  saveFlowSupervisorBudget(teamId, budget);
+
+  return { teamId, dispatched, reworked };
 }
 
 // ============================================================
@@ -14318,6 +14529,10 @@ async function main() {
     // poller drops the later duplicate. The label itself is unchanged on GitHub
     // (the human already applied it) — this path does NOT stamp any label. The
     // target trigger stays transport:'github' (no config change).
+    //
+    // #2247: the same wake half is reused by the Flow Supervisor's auto-dispatch
+    // — see `wakeGithubLabelListeners` below, which THIS handler is now a thin
+    // HTTP wrapper over.
     if (req.method === 'POST' && req.url === '/internal/github-label-applied') {
       let body = '';
       req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
@@ -14335,54 +14550,9 @@ async function main() {
         }
         try {
           const { repo, number, kind, label, actor } = parsed.value;
-          const key = labelFastPath.eventKeyForKind(kind);
-          const agents = listAgentIds().map((aid) => ({
-            agentId: aid,
-            enabled: loadAgentConfig(aid)?.enabled !== false,
-            triggers: loadTriggers(aid),
-          }));
-          const listeners = labelFastPath.matchPollerListeners({ repo, label, kind }, agents);
-          const now = new Date().toISOString();
-          // #1897 AC8: resolve the title best-effort so the notice isn't blank.
-          // #2114: also carry the PR's closesIssues (from the same fetch) so the
-          // admission gate keys this hand-off to the issue's ticket, not a new one.
-          const { title, closesIssues } = await fetchWorkItemDetail(repo, kind, number);
-          const ghEvent = labelFastPath.buildSyntheticEvent({
-            repo, label, kind, number, title, closesIssues, actor,
-            eventId: `intlbl:${crypto.randomBytes(6).toString('hex')}`,
-            now,
+          const { listeners } = await wakeGithubLabelListeners({
+            repo, number, kind, label, actor, source: 'internal-plugin',
           });
-          for (const l of listeners) {
-            // Enqueue first (immediate wake), then arm the dedup marker so the
-            // poller's later delivery of the same label is dropped.
-            enqueuePending(l.agentId, {
-              ...flowEmit.buildPendingEntry(l.triggerId, key, ghEvent),
-              source: 'internal-plugin',
-            });
-            labelDedupMarkers.add({
-              agentId: l.agentId, triggerId: l.triggerId,
-              repo, kind, number, label, appliedAt: now,
-            });
-            console.log(
-              `[Orchestrator] label-fastpath: ${repo}#${number} +${label} ` +
-              `by ${actor || 'console'} → agent=${l.agentId} trigger=${l.triggerId}`);
-          }
-          // Same transparency log the poller writes, tagged with the delivery
-          // path so operators see an honest "delivered internally" line.
-          githubEventLog.record({
-            ...githubEventLog.buildEventEntry({
-              ghEvent, repoFullName: repo, key,
-              outcomes: listeners.map((l) => ({
-                agentId: l.agentId, triggerId: l.triggerId,
-                status: 'delivered', reason: null, digest: false, wakeLabel: label,
-              })),
-            }),
-            source: 'internal-plugin',
-          });
-          if (listeners.length === 0) {
-            console.log(
-              `[Orchestrator] label-fastpath: ${repo}#${number} +${label} matched no poller listener`);
-          }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, matched: listeners.length, listeners }));
         } catch (err) {
@@ -17593,6 +17763,48 @@ async function main() {
   };
   const admissionTimer = setInterval(runAdmissionTick, ADMISSION_TICK_INTERVAL_MS);
   if (typeof admissionTimer.unref === "function") admissionTimer.unref();
+
+  // ============================================================
+  // Agent Pools — Phase 2 (#2247): the Flow Supervisor's reconcile tick.
+  // Maintenance-gated — unlike the admission tick above, this one STARTS work
+  // (a dispatch, a rework nudge), the same distinction that gates the
+  // anomaly-history and hill-climb sweeps. Opt-in per team and a no-op for
+  // every team with no pooled role or no `wipLimit` (`flowSupervisorSweepTeam`
+  // returns before its first request in either case), so an installation that
+  // never opted into Agent Pools pays nothing beyond one config read per team.
+  // ============================================================
+  const FLOW_SUPERVISOR_TICK_INTERVAL_MS = Number(process.env.AEE_FLOW_SUPERVISOR_TICK_INTERVAL_MS || 60_000);
+  let flowSupervisorBusy = false;
+  const runFlowSupervisorTick = async () => {
+    if (flowSupervisorBusy) return; // overlap guard — a slow sweep must not stack
+    flowSupervisorBusy = true;
+    try {
+      const maint = readMaintenanceState();
+      if (maint && maint.active) return; // human owns readiness; the supervisor only owns timing, and pauses like every other scheduled dispatcher during maintenance
+      let teamIds = [];
+      try {
+        teamIds = listAgentIds().filter((id) => {
+          try { const c = loadAgentConfig(id); return c && c.role === "team"; }
+          catch { return false; }
+        });
+      } catch (err) {
+        console.warn(`[FlowSupervisor] team enumeration failed: ${err.message}`);
+        return;
+      }
+      for (const teamId of teamIds) {
+        try {
+          await flowSupervisorSweepTeam(teamId);
+        } catch (err) {
+          // Never let one team's failure stop the others or escape the timer.
+          console.warn(`[FlowSupervisor] ${teamId}: sweep failed: ${err.message}`);
+        }
+      }
+    } finally {
+      flowSupervisorBusy = false;
+    }
+  };
+  const flowSupervisorTimer = setInterval(runFlowSupervisorTick, FLOW_SUPERVISOR_TICK_INTERVAL_MS);
+  if (typeof flowSupervisorTimer.unref === "function") flowSupervisorTimer.unref();
 
   // ============================================================
   // Hill-climbing loop Phase 1 (#1222): daily per-team metrics collector.

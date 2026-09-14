@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt, deriveClaim, claimLabelFor, claimError, channelAutoClaim, CLAIM_SUFFIX, completedLabelFor, COMPLETED_SUFFIX, normalizeHillClimb, normalizeWipLimit, expandWakeHandoffs, isWakeHandoffTrigger, wakeTriggerId, POSTCONDITIONS, cleanPostcondition, strictestPostcondition, channelPostcondition } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt, deriveClaim, claimLabelFor, claimError, channelAutoClaim, CLAIM_SUFFIX, completedLabelFor, COMPLETED_SUFFIX, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, expandWakeHandoffs, isWakeHandoffTrigger, wakeTriggerId, POSTCONDITIONS, cleanPostcondition, strictestPostcondition, channelPostcondition } = require('./process-template');
 
 // A tiny stand-in for the on-disk draft store: an id is "taken" iff present.
 const existsIn = (set) => (id) => set.has(id);
@@ -233,6 +233,88 @@ test('pool: enabled:false is treated as not pooled (field dropped on build)', ()
     roles: [{ ...sampleRoles[0], pool: { enabled: false } }],
   });
   assert.equal('pool' in b.roles[0], false);
+});
+
+// ─── The Flow Supervisor's opt-in (#2247, epic #2251 Phase 2) ──────────────────
+
+function pooledRoleWithWipLimit(extra) {
+  return {
+    processTemplateVersion: 1,
+    wipLimit: 1,
+    roles: [{ id: 'r', systemPrompt: 'p', pool: { enabled: true } }],
+    ...extra,
+  };
+}
+
+test('autoDispatch: absent field round-trips byte-identically', () => {
+  const b = buildProcessTemplate({ name: 'x', level: 'live', teamId: 'acme', roles: sampleRoles, wipLimit: 1 });
+  assert.equal('autoDispatch' in b, false);
+});
+
+test('autoDispatch: enabled:true survives the build with defaults omitted', () => {
+  const b = buildProcessTemplate({
+    name: 'x', level: 'live', teamId: 'acme', roles: sampleRoles, wipLimit: 1,
+    autoDispatch: { enabled: true },
+  });
+  assert.deepEqual(b.autoDispatch, { enabled: true });
+});
+
+test('autoDispatch: enabled:false is treated as not configured (dropped on build), same as pool', () => {
+  const b = buildProcessTemplate({
+    name: 'x', level: 'live', teamId: 'acme', roles: sampleRoles, wipLimit: 1,
+    autoDispatch: { enabled: false },
+  });
+  assert.equal('autoDispatch' in b, false);
+  assert.equal(normalizeAutoDispatch({ enabled: false }), null);
+  assert.equal(normalizeAutoDispatch(undefined), null);
+});
+
+test('autoDispatch: an unimplemented selection/contentionPolicy is refused, not silently ignored', () => {
+  assert.equal(validateProcessTemplate(pooledRoleWithWipLimit({
+    autoDispatch: { enabled: true, contentionPolicy: 'predicted-paths' },
+  })).ok, false);
+  assert.equal(validateProcessTemplate(pooledRoleWithWipLimit({
+    autoDispatch: { enabled: true, selection: 'newest-first' },
+  })).ok, false);
+  // The implemented values are accepted and round-trip.
+  const ok = pooledRoleWithWipLimit({
+    autoDispatch: { enabled: true, selection: 'oldest-first', contentionPolicy: 'epic-serial' },
+  });
+  assert.equal(validateProcessTemplate(ok).ok, true);
+});
+
+test('autoDispatch: enabled requires the flow\'s own wipLimit', () => {
+  const noLimit = {
+    processTemplateVersion: 1,
+    roles: [{ id: 'r', systemPrompt: 'p', pool: { enabled: true } }],
+    autoDispatch: { enabled: true },
+  };
+  assert.equal(validateProcessTemplate(noLimit).ok, false);
+  assert.equal(validateProcessTemplate({ ...noLimit, wipLimit: 1 }).ok, true);
+});
+
+test('autoDispatch: enabled requires at least one pooled role — a supervisor with nothing to time is refused', () => {
+  const noPool = {
+    processTemplateVersion: 1,
+    wipLimit: 1,
+    roles: [{ id: 'r', systemPrompt: 'p' }],
+    autoDispatch: { enabled: true },
+  };
+  assert.equal(validateProcessTemplate(noPool).ok, false);
+});
+
+test('autoDispatch: actionWindowMs must be a positive number when present', () => {
+  assert.equal(validateProcessTemplate(pooledRoleWithWipLimit({
+    autoDispatch: { enabled: true, actionWindowMs: -1 },
+  })).ok, false);
+  assert.equal(validateProcessTemplate(pooledRoleWithWipLimit({
+    autoDispatch: { enabled: true, actionWindowMs: 30 * 60_000 },
+  })).ok, true);
+});
+
+test('autoDispatch: a non-object shape is refused', () => {
+  assert.equal(validateProcessTemplate(pooledRoleWithWipLimit({ autoDispatch: 'yes' })).ok, false);
+  assert.equal(validateProcessTemplate(pooledRoleWithWipLimit({ autoDispatch: ['nope'] })).ok, false);
 });
 
 test('round-trip: build → validate → customRoles preserves wiring', () => {

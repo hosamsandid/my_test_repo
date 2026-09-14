@@ -1,11 +1,12 @@
 # Agent instance pools — ephemeral, self-cleaning workers over a stream of work items
 
-> Status: **concept / design of record**. No code yet. This document scopes the
-> discussion in issue #2251 (the Agent Pools epic). Its SDLC binding builds
-> directly on the shipped Flow Control machinery (`docs/flow-control-concept.md`):
-> admission control (#2114), the ticket ledger (#2115) and the board (#2116). Its
-> autonomous half is, in effect, the concrete design for that document's
-> **unbuilt §4.3 Flow Supervisor**, generalised beyond a single repository.
+> Status: **design of record; Phases 1–2 shipped** (see Amendment 1). This
+> document scopes the discussion in issue #2251 (the Agent Pools epic). Its
+> SDLC binding builds directly on the shipped Flow Control machinery
+> (`docs/flow-control-concept.md`): admission control (#2114), the ticket
+> ledger (#2115) and the board (#2116). Its autonomous half is, in effect, the
+> concrete design for that document's **§4.3 Flow Supervisor**, generalised
+> beyond a single repository and now shipped as `orchestrator/flow-supervisor.js`.
 
 ## 1. The problem
 
@@ -257,14 +258,15 @@ Round-tripped through the process-template bundle like `stages` / `labels` /
 
 ## 12. Phases
 
-- **Phase 1 — Pool core + SDLC binding (label-triggered).** Neutral core + the
-  four GitHub/git adapters; conflict protection = WIP count + post-hoc detection
-  only; pull-on-demand base; graceful teardown with log archive; item-keyed
-  idempotency. *Result: one label → N auto-scaling, self-cleaning workers — no
-  hand-cloning.* Readiness still applied by a human/upstream agent.
-- **Phase 2 — Autonomous supervisor.** Drain the backlog up to the limit,
-  oldest-first, epic-serialization, plus the designed remediation ladder.
-  *Result: apply `ready` and walk away.*
+- **Phase 1 — Pool core + SDLC binding (label-triggered). Shipped (#2246).**
+  Neutral core + the four GitHub/git adapters; conflict protection = WIP count +
+  post-hoc detection only; pull-on-demand base; graceful teardown with log
+  archive; item-keyed idempotency. *Result: one label → N auto-scaling,
+  self-cleaning workers — no hand-cloning.* Readiness still applied by a
+  human/upstream agent.
+- **Phase 2 — Autonomous supervisor. Shipped (#2247, Amendment 1).** Drain the
+  backlog up to the limit, oldest-first, epic-serialization, plus the narrowed
+  remediation ladder (§A1.2). *Result: apply `ready` and walk away.*
 - **Phase 3 — Second binding: recurring analysis.** Prove generality with no
   GitHub (list/cron source, input-copy workspace, artifact completion, no
   contention). Independent of Phase 2.
@@ -272,3 +274,67 @@ Round-tripped through the process-template bundle like `stages` / `labels` /
   not enough).
 - **Phase 5 — Polish.** Board controls, per-role caps, reviewer pools, optional
   headless runtime, provider-aware admission.
+
+---
+
+## Amendment 1 — what §7 (Phase 2) actually shipped (#2247)
+
+Landed as `orchestrator/flow-supervisor.js` (pure — mirrors `admission-control.js`'s
+no-fs/no-network/injected-`now` shape) + a maintenance-gated `orchestrator.js`
+timer (`flowSupervisorSweepTeam`, `runFlowSupervisorTick`), reusing the ticket
+ledger (#2115) and two existing audited hands: the label fast-path's wake half
+(#1858, extracted into `wakeGithubLabelListeners` so the HTTP endpoint and the
+supervisor share one implementation) and `wake-agent` (#2030). Config surface:
+team-level `autoDispatch: {enabled, selection?, contentionPolicy?, actionWindowMs?}`,
+sibling of `wipLimit`, round-tripped through export/materialise/Edit-as-draft the
+same way. Four things sharpen or deviate from §7 as written.
+
+**A1.1 — "auto-dispatch" and "re-fire a dropped dispatch" are ONE code path, not
+two.** §7 and the issue's own AC list them as separate behaviours; reading the
+shipped ticket ledger (#2115) shows they are the same fact under two names. The
+ledger's `unclaimed` blocker (§4.1: "dispatched > T1, no `:wip`, no run") IS
+"a ready-but-undispatched item" — a wake label already on the issue that the
+platform never actually delivered a run for, whatever the cause (a dropped
+poller event, a label applied while nothing was listening, GitHub's own event
+loss). The supervisor's `selectAutoDispatch` therefore selects on `blocker ===
+'unclaimed'` alone; there is no separate "is this newly ready" classification to
+get wrong, and the T1 age gate already built into `unclaimed` is what supplies
+"oldest-first" for free (sorted by `ageInStateMs` descending) without a second
+timer.
+
+**A1.2 — the remediation ladder is deliberately narrowed to two rows.** The
+issue's AC says "fold in the designed remediation ladder (re-fire a dropped
+dispatch; hand a stale-base PR back to rework)" — a named SUBSET of
+`flow-control-concept.md` §4.3a's five-row table, not the whole thing. Only
+`unclaimed` (via A1.1) and `stale-base` are wired; `claimed-done-not-merged`
+(claim rollback), `conflict` (ask-to-rebase) and `ci-red` (GH re-run) are left
+for the still-unbuilt general §4.3a supervisor. The `stale-base` action is a
+`wake-agent` hand-off to the ticket's `ownerAgentId` with a note — not a label
+re-application, since "hand back to rework" has no single well-known label
+across an arbitrary flow's vocabulary, while every team already has a working,
+audited way to reach an agent directly.
+
+**A1.3 — epic-serialization is a genuinely NEW contention rule, not a restatement
+of admission control.** The admission lane (#2114) counts TICKETS, not epics —
+two different tickets from the same epic can each legally hold their own lane
+slot when `wipLimit >= 2`, which is exactly the "two parallel P-number tracks"
+failure mode §8 of `flow-control-concept.md` names as the deeper, unfixed cause
+of the original stall. `selectAutoDispatch` reserves an epic BOTH against every
+ticket already active elsewhere in the ledger (`ready` through `mergeable`,
+excluding `backlog`/`done`) and within its own pass (a same-epic sibling later
+in the oldest-first order is skipped), so the reservation cannot be defeated by
+the very pass that is supposed to enforce it.
+
+**A1.4 — `selection`/`contentionPolicy` are validated closed sets, not free
+strings.** §9's config surface names them as extension points
+(`contentionPolicy: "epic-serial" | "none" | "predicted-paths"`), but only
+`oldest-first`/`epic-serial` exist in this phase — `epic-serial` is not actually
+optional (the AC's "never two in-flight items sharing epicId" has no stated
+exception), and `predicted-paths` is explicitly Phase 4. `validateProcessTemplate`
+refuses an unimplemented value rather than silently accepting and ignoring it,
+which would misrepresent what the author asked for; the same discipline
+`pool.workspace`'s closed enum already follows.
+
+**Not built, and not owed by this ticket:** §7's remaining named rows
+(`claimed-done-not-merged`, `conflict`, `ci-red`), §4.3b's LLM escalation layer,
+and any board control (pause/drain/force-dispatch) — all later phases per §12.

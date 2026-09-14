@@ -70,6 +70,15 @@ function parseBytes(s) {
 }
 const AGENT_MEM_LIMIT_BYTES = parseBytes(process.env.AEE_AGENT_MEM_LIMIT || '2g');
 const AGENT_PIDS_LIMIT = Number(process.env.AEE_AGENT_PIDS_LIMIT || 512);
+// #2282 Band 1: a toolchain may declare `resources.memoryLimit` to raise the
+// fleet-wide default for agents bound to it (e.g. a JVM/Gradle build that would
+// otherwise OOM at AEE_AGENT_MEM_LIMIT). No override, or one that fails to
+// parse -> AGENT_MEM_LIMIT_BYTES, byte-identical to before this field existed.
+function resolveMemLimitBytes(toolchain) {
+  const override = toolchain && toolchain.resources && toolchain.resources.memoryLimit;
+  if (!override) return AGENT_MEM_LIMIT_BYTES;
+  return parseBytes(override) || AGENT_MEM_LIMIT_BYTES;
+}
 // Label stamped on every agent container so the orchestrator can reconcile
 // live container state against its in-memory process map (source of truth).
 const AGENT_LABEL_KEY = 'aee.agent.id';
@@ -571,8 +580,10 @@ async function reseedPerAgentVolume(id, paths) {
 // Environment by the caller (orchestrator.js → resolveAgentImage). It is a
 // required part of the seam: this file must not decide the image, or a
 // per-environment toolchain could never take effect (AC2).
-// `toolchain` is the {toolchainId, environmentId, environmentName} context of a
-// NON-default image, used only to word the AC7 refusal; null for the default.
+// `toolchain` is the {toolchainId, environmentId, environmentName, resources}
+// context of a NON-default image: `resources` (#2282 Band 1) sizes the
+// container's memory limit, the rest words the AC7 refusal; null for the
+// default image.
 function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
   const handle = new EventEmitter();
   handle.stdout = new PassThrough();
@@ -691,7 +702,8 @@ function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
           ]
         : [{ Name: WORKSPACE_VOLUME, Dest: '/workspace' }];
       const resourceLimits = {};
-      if (AGENT_MEM_LIMIT_BYTES) resourceLimits.memory = { limit: AGENT_MEM_LIMIT_BYTES };
+      const memBytes = resolveMemLimitBytes(toolchain);
+      if (memBytes) resourceLimits.memory = { limit: memBytes };
       if (AGENT_PIDS_LIMIT) resourceLimits.pids = { limit: AGENT_PIDS_LIMIT };
       const createBody = {
         // #1940 AC2: the RESOLVED image, never the module-level default — the
@@ -785,4 +797,10 @@ module.exports = {
   // Plugin broker sidecars are implemented on this runtime only (#1547) — see
   // the Deliberate differences block in spawn-kubernetes-pod.js.
   PLUGIN_SIDECARS_SUPPORTED: true,
+  // Pure helpers exposed for unit tests only — not part of the runtime seam.
+  _internal: {
+    parseBytes,
+    resolveMemLimitBytes,
+    AGENT_MEM_LIMIT_BYTES,
+  },
 };

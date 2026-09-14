@@ -1654,6 +1654,10 @@ function resolveImageForAgent(config) {
           toolchainId: resolved.toolchainId,
           environmentId: env ? env.id : null,
           environmentName: env ? env.name : null,
+          // #2282 Band 1: carried through so the spawners can size the
+          // container/pod's memory (and, on k8s, cpu/memory requests) off the
+          // toolchain's own declaration instead of only the fleet default.
+          resources: resolved.toolchain.resources || null,
         }
       : null,
   };

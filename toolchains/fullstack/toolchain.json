@@ -11,5 +11,8 @@
   ],
   "versionSource": "bootstrap",
   "versionManager": "mise",
-  "baseline": "java temurin-21, node 22, maven 3.9, gradle 8.10.2"
+  "baseline": "java temurin-21, node 22, maven 3.9, gradle 8.10.2",
+  "resources": {
+    "memoryLimit": "4g"
+  }
 }

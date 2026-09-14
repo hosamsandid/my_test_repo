@@ -2955,6 +2955,97 @@ def _format_orphaned_bg_task_warning(orphaned: list[dict]) -> str | None:
     return "\n".join(lines)
 
 
+# ---- runtime self-correction for orphaned background tasks (#2277) ----
+#
+# #2259 (above) made an orphaned task HONEST — the reply says so — but the run
+# still ends with the work unfinished, and only a human re-sending the same
+# message continues it. This is the bounded, self-generated recovery: when a
+# turn ends with >=1 non-terminal background task, enqueue exactly ONE
+# corrective re-wake that resumes the same room/session and is told to redo
+# the work in the foreground. Delivery reuses the existing self-enqueue path
+# (`POST /internal/agents/<id>/enqueue-pending`, the same one `_run_agent_verify`
+# uses to hand a loop-verify request to another agent — here the target is
+# this agent itself) so the correction inherits, for free, everything that
+# path already guarantees: Maintenance Mode leaves it durably queued but
+# undrained (`_pending_loop`), and `_execute`/`_execute_guarded` runs it
+# through the #1157 WorkspaceGate and the #611 TriggerBackstop like any other
+# triggered spawn.
+_BG_ORPHAN_CORRECTION_KIND = "bg-orphan-correction"
+# Ctx key stamped on the correction's own run (see `_execute_bg_orphan_correction`)
+# so the loop guard below can tell "this run IS a correction" from "this run
+# orphaned for the first time" — the depth=1 cap #606 requires.
+_BG_ORPHAN_CORRECTION_CTX_KEY = "bgOrphanCorrection"
+
+
+def _should_self_correct_bg_orphan(orphaned: list[dict], already_corrected: bool) -> bool:
+    """Pure decision: does THIS turn's end warrant enqueuing one corrective
+    re-wake? Mirrors `_orphaned_background_tasks`'s pure-core style so the
+    "correct once vs. fall back to honest notice" call is unit-testable
+    without a live scheduler.
+
+    True iff the turn left >=1 background task non-terminal (`orphaned`, the
+    `_orphaned_background_tasks` result — already excludes `completed`/`failed`)
+    AND this turn is not itself already a correction (`already_corrected`) —
+    the #606 loop-guard: at most one self-correction per originating turn, then
+    honesty only."""
+    return bool(orphaned) and not already_corrected
+
+
+def _format_bg_orphan_correction_prompt(descriptions: list[str]) -> str:
+    """The corrective steering prompt carried on the re-wake — the instruction
+    the consumer run reads as its own task, not untrusted context (there is no
+    other producer here to guard against, unlike a direct hand-off note)."""
+    shown = [str(d).strip() for d in (descriptions or []) if str(d).strip()][:5]
+    items = ", ".join(f"`{d}`" for d in shown) if shown else "a background task"
+    return (
+        "Your previous turn ended while background task(s) "
+        f"{items} were still running, so the platform stopped them and they "
+        "did not finish. Re-do that work now, but run it in the foreground and "
+        "block until it completes before you answer. If you were waiting on "
+        "something outside this turn (CI, another agent's PR, a long external "
+        "job), do not wait in-band — end the turn and arm a `github-event`/"
+        "`loop` trigger instead."
+    )
+
+
+def _build_bg_orphan_correction_entry(room_id: str, orphaned: list[dict]) -> dict:
+    """The self-enqueued pending-queue entry for one corrective re-wake.
+
+    `kind` routes it to `_handle_pending_entry`'s dedicated branch (mirroring
+    `_WAKE_PENDING_KIND`'s placement, above the `_PENDING_OUT_OF_SCOPE_KINDS`
+    check). Carries only what `_execute_bg_orphan_correction` needs to rebuild
+    the prompt — no task ids, no raw event payloads."""
+    descriptions = [
+        str(t.get("description") or t.get("task_id") or "background task").strip()
+        for t in (orphaned or [])
+    ][:5]
+    return {
+        "kind": _BG_ORPHAN_CORRECTION_KIND,
+        "roomId": room_id,
+        "descriptions": descriptions,
+    }
+
+
+def _enqueue_bg_orphan_correction(agent_id: str, room_id: str,
+                                  orphaned: list[dict]) -> bool:
+    """Best-effort self-enqueue of one corrective re-wake (#2277). Blocking —
+    callers run it via `asyncio.to_thread`. Failure just means the #2259
+    honest notice stands alone; it never raises."""
+    entry = _build_bg_orphan_correction_entry(room_id, orphaned)
+    route = f"/internal/agents/{urllib.parse.quote(agent_id, safe='')}/enqueue-pending"
+    try:
+        status, body = TriggerScheduler._orch_post_json(route, entry)
+    except Exception as exc:
+        print(f"[Runner:{agent_id}] bg-orphan-correction enqueue failed: {exc}",
+              file=sys.stderr)
+        return False
+    if status not in (200, 202):
+        print(f"[Runner:{agent_id}] bg-orphan-correction enqueue HTTP {status}: {body}",
+              file=sys.stderr)
+        return False
+    return True
+
+
 def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                       resume_id: str | None, blueprint_id: str | None,
                       timeout_sec: int, run_context: dict | None = None) -> tuple[str, str | None]:
@@ -3217,6 +3308,12 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     # ended, the CLI has stopped them and nothing will resume them — say so in the
     # reply instead of letting the model's "I'll wait…" hang forever.
     orphaned = _orphaned_background_tasks(bg_task_events)
+    # Stashed onto the caller's run_context by reference (#2277) — the same
+    # channel `_loopOutputTokens`/`_askQuestion` already use to cross this
+    # function's return boundary without widening it. Always set (including the
+    # empty list) so a --resume retry's LAST invocation is what the caller sees.
+    if isinstance(run_context, dict):
+        run_context["_bgOrphaned"] = orphaned
     warning = _format_orphaned_bg_task_warning(orphaned)
     if warning is not None:
         final_text = (final_text.rstrip() + "\n\n" + warning) if final_text.strip() else warning
@@ -5601,6 +5698,17 @@ class TriggerScheduler:
                     print(f"[Runner:{self._agent_id}] wake-agent error: {exc}",
                           file=sys.stderr)
                 return
+            if kind == _BG_ORPHAN_CORRECTION_KIND:
+                # #2277: this agent's OWN prior turn self-enqueued this. Same
+                # placement requirement as wake-agent above — it names no
+                # triggers.json entry, so it MUST be handled before the
+                # out-of-scope/trigger-id fall-through.
+                try:
+                    await self._execute_bg_orphan_correction(entry)
+                except Exception as exc:
+                    print(f"[Runner:{self._agent_id}] bg-orphan-correction error: {exc}",
+                          file=sys.stderr)
+                return
             if kind in _PENDING_OUT_OF_SCOPE_KINDS:
                 print(
                     f"[Runner:{self._agent_id}] pending kind={kind} not yet ported "
@@ -5704,6 +5812,45 @@ class TriggerScheduler:
             "from": frm,
             **({"note": note} if note else {}),
         }})
+
+    # -- runtime self-correction for orphaned background tasks (#2277) ------
+
+    async def _execute_bg_orphan_correction(self, entry: dict) -> None:
+        """Run one bounded, self-generated corrective re-wake.
+
+        Unlike `_execute_wake_agent` there is no producer/consumer pair and no
+        triggers.json listener to look up — this agent enqueued the entry for
+        ITSELF, so the trigger is synthesized here. Goes through the ordinary
+        `_execute` chokepoint for the same reason `_execute_wake_agent` does
+        (the AC-6 answer, not tidiness): it is the only path holding BOTH the
+        #1157 WorkspaceGate and the #611 TriggerBackstop.
+
+        `ctx={_BG_ORPHAN_CORRECTION_CTX_KEY: True}` is the depth marker
+        `_execute_inner` reads at the end of ITS run — if this corrective run
+        ALSO orphans a task, that flag is what stops a second correction from
+        chaining (the #606 loop guard: at most one self-correction per
+        originating turn)."""
+        room_id = entry.get("roomId") if isinstance(entry.get("roomId"), str) else None
+        if not room_id or not _MATRIX_ROOM_ID_RE.match(room_id):
+            print(f"[Runner:{self._agent_id}] bg-orphan-correction: no valid "
+                  f"roomId — dropping", file=sys.stderr)
+            return
+        descriptions = entry.get("descriptions") if isinstance(entry.get("descriptions"), list) else []
+        synthetic_trigger = {
+            "id": "bg-orphan-correction",
+            "type": "internal",
+            "description": "Corrective re-wake (orphaned background task)",
+            "roomId": room_id,
+            "prompt": _format_bg_orphan_correction_prompt(descriptions),
+            "timeoutSeconds": CLAUDE_TIMEOUT_SEC,
+        }
+        print(
+            f"[Runner:{self._agent_id}] bg-orphan-correction: resuming {room_id} "
+            f"({len(descriptions)} task(s))",
+            file=sys.stderr,
+        )
+        await self._execute(
+            synthetic_trigger, ctx={_BG_ORPHAN_CORRECTION_CTX_KEY: True})
 
     # -- handover DM ---------------------------------------------------------
 
@@ -6649,6 +6796,46 @@ class TriggerScheduler:
                 + int(run_context.get("_loopOutputTokens", 0) or 0)
             )
 
+        # Runtime self-correction for orphaned background tasks (#2277): this
+        # run's own turn just left >=1 background task non-terminal
+        # (stashed by _call_claude_once). `ctx` carries the depth marker THIS
+        # run was dispatched with (set only by `_execute_bg_orphan_correction`
+        # below) — if it's already a correction, the #606 loop guard says fall
+        # back to the #2259 honest notice (already appended to `result`) and
+        # stop, never chain a second one.
+        orphaned_this_run = run_context.get("_bgOrphaned") or []
+        already_corrected = bool((ctx or {}).get(_BG_ORPHAN_CORRECTION_CTX_KEY))
+        if _should_self_correct_bg_orphan(orphaned_this_run, already_corrected):
+            enqueued = await asyncio.to_thread(
+                _enqueue_bg_orphan_correction, self._agent_id, room_id,
+                orphaned_this_run,
+            )
+            try:
+                _append_event(room_id, {
+                    "type": "system_event",
+                    "subtype": "background-tasks-orphan-correction-queued"
+                              if enqueued else
+                              "background-tasks-orphan-correction-enqueue-failed",
+                    "correlationId": correlation_id,
+                    "count": len(orphaned_this_run),
+                })
+            except Exception:
+                pass
+        elif orphaned_this_run:
+            # Either depth already exhausted (this run WAS the correction and
+            # orphaned again) or nothing orphaned — the honest notice already
+            # covers it; record why no second correction was queued.
+            try:
+                _append_event(room_id, {
+                    "type": "system_event",
+                    "subtype": "background-tasks-orphan-correction-skipped",
+                    "reason": "depth-exhausted",
+                    "correlationId": correlation_id,
+                    "count": len(orphaned_this_run),
+                })
+            except Exception:
+                pass
+
         # Deterministic KB harvest (issue #602): record the structured
         # ```knowledge block the run emitted, then drop it from the reply. Only
         # per-invocation runs carry the block instruction.
@@ -6950,6 +7137,28 @@ async def run_dm_listener() -> None:
                 )
             finally:
                 _bump_active(-1, session)
+
+            # Runtime self-correction for orphaned background tasks (#2277): a
+            # chat/DM turn is never itself a correction (that only ever arrives
+            # via the pending-queue `bg-orphan-correction` kind, resumed through
+            # _execute_inner), so the depth guard is trivially "not corrected".
+            orphaned_this_turn = dm_run_context.get("_bgOrphaned") or []
+            if _should_self_correct_bg_orphan(orphaned_this_turn, False):
+                enqueued = await asyncio.to_thread(
+                    _enqueue_bg_orphan_correction, agent_id, room_id,
+                    orphaned_this_turn,
+                )
+                try:
+                    _append_event(room_id, {
+                        "type": "system_event",
+                        "subtype": "background-tasks-orphan-correction-queued"
+                                  if enqueued else
+                                  "background-tasks-orphan-correction-enqueue-failed",
+                        "correlationId": correlation_id,
+                        "count": len(orphaned_this_turn),
+                    })
+                except Exception:
+                    pass
 
             # Guard empty/whitespace output: posting a blank message looks like
             # "no reply" to the user. Substitute a visible notice and log it so

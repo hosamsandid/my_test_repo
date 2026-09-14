@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Plus, X, AlertTriangle, Info, Loader2, Github } from 'lucide-react';
+import { Plus, X, AlertTriangle, Info, Loader2, Github, Layers } from 'lucide-react';
 import { useApi, apiCall } from '../../hooks/useApi';
 // One repository card for the whole console (#2067): rendering it here rather
 // than a second, differently-worded card is what stops this surface and the
@@ -391,19 +391,36 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
 
       {tab === 'toolchain' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-          <select
-            value={form.toolchainId}
-            onChange={e => update('toolchainId', e.target.value)}
-            disabled={toolchainRows.length === 0}
-            style={{ ...inputStyle, opacity: toolchainRows.length ? 1 : 0.5 }}
+          {/* Tile/radio-card grid (#2279), replacing a native <select> whose
+              concatenated name+description ran on into one unreadable,
+              browser-truncated line. Same accessibility contract as
+              TeamSetup.jsx's EnvironmentCard (role="radio"/"radiogroup",
+              keyboard support, selected-state styling) rather than a fourth,
+              differently-behaved selection widget (AC3). */}
+          <div
+            role="radiogroup"
+            aria-label="Agent toolchain"
+            style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 'var(--eb-space-3)' }}
           >
-            <option value="">
-              — default agent image{toolchainData?.defaultImage ? ` (${toolchainData.defaultImage})` : ''} —
-            </option>
+            <ToolchainCard
+              label={`— default agent image${toolchainData?.defaultImage ? ` (${toolchainData.defaultImage})` : ''} —`}
+              selected={!form.toolchainId}
+              available
+              onSelect={() => update('toolchainId', '')}
+            />
             {toolchainRows.map(t => (
-              <option key={t.id} value={t.id} disabled={!t.available}>{t.label}{t.hint ? ` — ${t.hint}` : ''}</option>
+              <ToolchainCard
+                key={t.id}
+                label={t.label}
+                hint={t.hint}
+                platforms={t.platforms}
+                baseline={t.baseline}
+                selected={form.toolchainId === t.id}
+                available={t.available}
+                onSelect={() => update('toolchainId', t.id)}
+              />
             ))}
-          </select>
+          </div>
           {toolchainNotice && <div style={helpTextStyle}>{toolchainNotice}</div>}
           {toolchainWarning && (
             <div role="alert" style={warnBoxStyle}>
@@ -547,6 +564,78 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
     </div>
   );
 }
+
+// One toolchain tile in the Toolchain tab's radio-card grid (#2279). Mirrors
+// EnvironmentCard's (TeamSetup.jsx) accessibility contract exactly — a
+// role="radio" card in a role="radiogroup" grid, Space/Enter keyboard
+// support, selected-state border — but its own content shape, since a
+// toolchain has no repos/id-code the way an environment does. `hint` is
+// already the FULL description (or, when unavailable, the full reason) from
+// `toolchainOptions` — no truncation, no expand/collapse (AC6).
+function ToolchainCard({ label, hint, platforms, baseline, selected, available, onSelect }) {
+  return (
+    <div
+      onClick={available ? onSelect : undefined}
+      role="radio"
+      aria-checked={selected}
+      aria-disabled={!available}
+      tabIndex={available ? 0 : -1}
+      onKeyDown={available ? (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); onSelect(); } } : undefined}
+      style={{
+        textAlign: 'left',
+        background: selected ? 'var(--eb-bg-surface)' : 'var(--eb-bg-app)',
+        border: `2px solid ${selected ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
+        borderRadius: 'var(--eb-radius-lg)',
+        padding: 'var(--eb-space-4)',
+        cursor: available ? 'pointer' : 'not-allowed',
+        opacity: available ? 1 : 0.55,
+        fontFamily: 'inherit',
+        color: 'var(--eb-text-primary)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 'var(--eb-space-2)',
+        transition: 'border-color 0.1s',
+        userSelect: 'none',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)' }}>
+        <div style={{
+          flexShrink: 0, width: 28, height: 28,
+          borderRadius: 'var(--eb-radius-md)',
+          background: selected ? 'var(--eb-accent-primary)' : 'var(--eb-bg-elevated)',
+          color: selected ? 'var(--eb-text-inverted)' : 'var(--eb-text-primary)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <Layers size={14} />
+        </div>
+        <div style={{ fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', lineHeight: 1.3 }}>
+          {label}
+        </div>
+      </div>
+      {hint && (
+        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.4 }}>
+          {hint}
+        </div>
+      )}
+      {(platforms?.length > 0 || baseline) && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-1)' }}>
+          {(platforms || []).map(p => (
+            <span key={p} style={toolchainBadgeStyle}>{p}</span>
+          ))}
+          {baseline && <span style={toolchainBadgeStyle}>{baseline}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const toolchainBadgeStyle = {
+  fontSize: 'var(--eb-text-xs)',
+  padding: '1px 7px',
+  borderRadius: 'var(--eb-radius-full)',
+  border: '1px solid var(--eb-border-default)',
+  color: 'var(--eb-text-secondary)',
+};
 
 const labelStyle = {
   fontSize: 'var(--eb-text-xs)',

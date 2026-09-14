@@ -40,6 +40,11 @@ export function toolchainOptions(toolchains, runtime) {
         hint: available
           ? (t.description || '')
           : `not available on ${rt} (built for ${platforms.join(', ')})`,
+        // Small badge facts for the tile/radio-card grid (#2279) — carried
+        // alongside `hint` rather than replacing it, so the native <select>
+        // in EnvironmentTemplates.jsx (out of scope for #2279) is unaffected.
+        platforms,
+        baseline: t.baseline || '',
       };
     });
 }

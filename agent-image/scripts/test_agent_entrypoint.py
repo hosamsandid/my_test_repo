@@ -5201,5 +5201,92 @@ class GhPostconditionFacts(unittest.TestCase):
         self.assertEqual(len(facts["prs"]), entrypoint.CLAIM_VERIFY_MAX_LINKED)
 
 
+class OrphanedBackgroundTasks(unittest.TestCase):
+    """A run is a single headless turn: any background task still running when
+    the turn ends is stopped by the CLI and never resumes. The detector folds the
+    raw task-event payloads and reports those left unfinished so the reply can
+    say so instead of hanging on the model's "I'll wait…" promise.
+
+    Fixtures are the exact event shapes captured from a live session log
+    (`background_tasks_changed` inventory, `task_started`, `task_updated.patch`,
+    `task_notification.status`).
+    """
+
+    orphaned = staticmethod(entrypoint._orphaned_background_tasks)
+    warn = staticmethod(entrypoint._format_orphaned_bg_task_warning)
+
+    def test_no_task_events_is_empty(self):
+        self.assertEqual(self.orphaned([]), [])
+        self.assertIsNone(self.warn([]))
+
+    def test_task_joined_within_the_turn_is_not_orphaned(self):
+        # started → completed before the turn ended (the safe fan-out pattern).
+        events = [
+            {"subtype": "task_started", "task_id": "b9rov6p1s", "description": "gh run watch"},
+            {"subtype": "task_updated", "task_id": "b9rov6p1s", "patch": {"status": "completed"}},
+            {"subtype": "task_notification", "task_id": "b9rov6p1s", "status": "completed"},
+        ]
+        self.assertEqual(self.orphaned(events), [])
+        self.assertIsNone(self.warn(self.orphaned(events)))
+
+    def test_task_stopped_at_turn_end_is_orphaned(self):
+        # The reproduced bug: a Monitor/background wait the agent did NOT join —
+        # the CLI stops it after the result event (`status: stopped`).
+        events = [
+            {"subtype": "task_started", "task_id": "bynzgmmd9",
+             "description": "until CI completed; do sleep 15; done"},
+            {"subtype": "task_notification", "task_id": "bynzgmmd9", "status": "stopped",
+             "summary": "until CI completed; do sleep 15; done"},
+        ]
+        orphaned = self.orphaned(events)
+        self.assertEqual([t["task_id"] for t in orphaned], ["bynzgmmd9"])
+        self.assertEqual(orphaned[0]["status"], "stopped")
+        warning = self.warn(orphaned)
+        self.assertIsNotNone(warning)
+        self.assertIn("stopped, not finished", warning)
+        self.assertIn("until CI completed", warning)
+
+    def test_started_but_never_terminal_is_orphaned(self):
+        # Defensive: the CLI was killed by the watchdog before emitting any stop.
+        events = [{"subtype": "task_started", "task_id": "abc", "description": "long job"}]
+        self.assertEqual([t["task_id"] for t in self.orphaned(events)], ["abc"])
+
+    def test_description_recovered_from_background_tasks_changed(self):
+        # A task that only ever appears in the inventory event still carries its
+        # command text into the warning.
+        events = [
+            {"subtype": "background_tasks_changed",
+             "tasks": [{"task_id": "z1", "task_type": "local_bash",
+                        "description": "sleep forever"}]},
+        ]
+        orphaned = self.orphaned(events)
+        self.assertEqual(orphaned[0]["description"], "sleep forever")
+        self.assertIn("sleep forever", self.warn(orphaned))
+
+    def test_mixed_run_reports_only_the_unfinished_one(self):
+        events = [
+            {"subtype": "task_started", "task_id": "done1", "description": "d1"},
+            {"subtype": "task_notification", "task_id": "done1", "status": "completed"},
+            {"subtype": "task_started", "task_id": "hang1", "description": "d2"},
+            {"subtype": "task_notification", "task_id": "hang1", "status": "stopped"},
+        ]
+        self.assertEqual([t["task_id"] for t in self.orphaned(events)], ["hang1"])
+
+    def test_warning_pluralises_and_caps_the_list(self):
+        events = [{"subtype": "task_started", "task_id": f"t{i}", "description": f"cmd {i}"}
+                  for i in range(7)]
+        warning = self.warn(self.orphaned(events))
+        self.assertIn("7 background tasks", warning)
+        self.assertIn("and 2 more", warning)  # 5 shown + 2 folded
+
+    def test_failed_task_is_not_orphaned(self):
+        # `failed` is a real conclusion the agent could react to within the turn.
+        events = [
+            {"subtype": "task_started", "task_id": "f1", "description": "x"},
+            {"subtype": "task_updated", "task_id": "f1", "patch": {"status": "failed"}},
+        ]
+        self.assertEqual(self.orphaned(events), [])
+
+
 if __name__ == "__main__":
     unittest.main()

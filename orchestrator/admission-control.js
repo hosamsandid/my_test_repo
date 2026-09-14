@@ -408,9 +408,64 @@ function promoteHeld({ lane, wipLimit, now = Date.now() }) {
   return { lane: { ...cur, updatedAt: new Date(now).toISOString(), held: stillHeld }, release };
 }
 
+/**
+ * Force-dispatch (#2250 Phase 5, concept §11's open board-control item): an
+ * operator explicitly overrides the WIP hold on ONE named held entry, right
+ * now, at their own risk — the Flow Control board's "Force dispatch" button.
+ * Unlike `promoteHeld` (which only ever promotes an entry the LIMIT already
+ * has room for), this always admits the match regardless of capacity — but it
+ * still RECORDS the ticket in `inFlight` exactly like a normal admit would
+ * (merging into an existing same-ticket entry when one exists), so D4 release
+ * tracking and the next `wipLimit` check both see it; only the refusal itself
+ * is skipped, not the bookkeeping the refusal exists to protect.
+ *
+ * `id` is `heldIdentity(agentId, entry)` — the same identity a caller reads
+ * off a held entry to know which one to force. Returns `found: false` when no
+ * held entry matches (already promoted, already released, or a stale id from
+ * a client showing an old snapshot) — the caller's cue to treat it as a no-op,
+ * not an error.
+ *
+ * @returns {{found:boolean, lane:object, agentId:string|null, entry:object|null, ticketKey:string|null}}
+ */
+function forcePromoteHeld({ lane, id, now = Date.now() }) {
+  const cur = normalizeLane(lane);
+  const idx = cur.held.findIndex((h) => heldIdentity(h.agentId, h.entry) === id);
+  if (idx === -1) return { found: false, lane: cur, agentId: null, entry: null, ticketKey: null };
+
+  const target = cur.held[idx];
+  const stillHeld = cur.held.filter((_, i) => i !== idx);
+  const iso = new Date(now).toISOString();
+  const ref = entryTicketRef(target.entry);
+  if (!ref) {
+    // A held entry is only ever created for a resolved ticket ref (`admit`'s
+    // hold branch), so this is defensive, not an expected path: drop it from
+    // `held` (there is nothing left to force it INTO) rather than leave a
+    // dead entry a client can never successfully force again.
+    return {
+      found: true, lane: { ...cur, held: stillHeld, updatedAt: iso },
+      agentId: target.agentId, entry: target.entry, ticketKey: null,
+    };
+  }
+
+  const ticketKey = objectKey(ref.repo, ref.ticket);
+  const objects = [...new Set(ref.refs.map((n) => objectKey(ref.repo, n)))];
+  const existing = cur.inFlight.find((t) => t.objects.some((o) => objects.includes(o)));
+  const inFlight = existing
+    ? cur.inFlight.map((t) => (t.key === existing.key
+      ? { ...t, objects: [...new Set([...t.objects, ...objects])] }
+      : t))
+    : [...cur.inFlight, { key: ticketKey, repo: ref.repo, number: ref.ticket, admittedAt: iso, objects }];
+
+  return {
+    found: true,
+    lane: { ...cur, inFlight, held: stillHeld, updatedAt: iso },
+    agentId: target.agentId, entry: target.entry, ticketKey: existing ? existing.key : ticketKey,
+  };
+}
+
 module.exports = {
   DEFAULT_GRACE_MS, LANE_VERSION,
   emptyLane, normalizeLane, laneNeedsRefresh, objectKey,
-  entryTicketRef, limitInForce, evaluate, admit,
-  activeFlowLabels, reconcileInFlight, promoteHeld,
+  entryTicketRef, limitInForce, evaluate, admit, heldIdentity,
+  activeFlowLabels, reconcileInFlight, promoteHeld, forcePromoteHeld,
 };

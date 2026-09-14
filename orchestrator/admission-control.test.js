@@ -414,6 +414,57 @@ test('promotion: removing the wipLimit releases everything that was held', () =>
   assert.equal(p.lane.held.length, 0);
 });
 
+// ─── force-dispatch: an operator override past the WIP limit (#2250 Phase 5) ─
+
+test('forcePromoteHeld: promotes the named held entry even though the lane is full', () => {
+  let lane = ac.admit({ lane: ac.emptyLane(), wipLimit: 1, agentId: 'dev', entry: issueEntry(42), now: T0 }).lane;
+  lane = ac.admit({ lane, wipLimit: 1, agentId: 'dev', entry: issueEntry(43), now: T0 + 1 }).lane;
+  assert.equal(lane.held.length, 1);
+  const id = ac.heldIdentity('dev', issueEntry(43));
+
+  const forced = ac.forcePromoteHeld({ lane, id, now: T0 + 2 });
+  assert.equal(forced.found, true);
+  assert.equal(forced.agentId, 'dev');
+  assert.deepEqual(forced.entry, issueEntry(43));
+  assert.equal(forced.ticketKey, `${REPO}#43`);
+  assert.equal(forced.lane.held.length, 0, 'left the hold queue');
+  // Both tickets now occupy the lane — deliberately past wipLimit: 1, the
+  // whole point of a manual override.
+  assert.deepEqual(forced.lane.inFlight.map((t) => t.key).sort(), [`${REPO}#42`, `${REPO}#43`]);
+});
+
+test('forcePromoteHeld: an unknown id is a no-op, not an error', () => {
+  const lane = ac.admit({ lane: ac.emptyLane(), wipLimit: 1, agentId: 'dev', entry: issueEntry(42), now: T0 }).lane;
+  const forced = ac.forcePromoteHeld({ lane, id: 'not-a-real-id', now: T0 + 1 });
+  assert.equal(forced.found, false);
+  assert.deepEqual(forced.lane, lane);
+});
+
+test('forcePromoteHeld: merges into an existing same-ticket inFlight entry rather than duplicating the slot', () => {
+  let lane = ac.admit({ lane: ac.emptyLane(), wipLimit: 1, agentId: 'dev', entry: issueEntry(42), now: T0 }).lane;
+  // Held not because of a limit conflict but because a second dispatch about
+  // the SAME ticket arrived while the lane was still catching up — the same
+  // shape `promoteHeld`'s own same-ticket test exercises.
+  lane = { ...lane, held: [...lane.held, { heldAt: null, agentId: 'reviewer', entry: prEntry(77, { closes: [42] }), ticket: `${REPO}#42` }] };
+  const id = ac.heldIdentity('reviewer', prEntry(77, { closes: [42] }));
+
+  const forced = ac.forcePromoteHeld({ lane, id, now: T0 + 1 });
+  assert.equal(forced.found, true);
+  assert.equal(forced.ticketKey, `${REPO}#42`);
+  assert.equal(forced.lane.inFlight.length, 1, 'no second slot — same ticket, same entry');
+  assert.deepEqual(forced.lane.inFlight[0].objects.sort(), [`${REPO}#42`, `${REPO}#77`]);
+});
+
+test('forcePromoteHeld: is idempotent-safe on a re-delivered id — the second call finds nothing left to force', () => {
+  let lane = ac.admit({ lane: ac.emptyLane(), wipLimit: 1, agentId: 'dev', entry: issueEntry(42), now: T0 }).lane;
+  lane = ac.admit({ lane, wipLimit: 1, agentId: 'dev', entry: issueEntry(43), now: T0 + 1 }).lane;
+  const id = ac.heldIdentity('dev', issueEntry(43));
+  const first = ac.forcePromoteHeld({ lane, id, now: T0 + 2 });
+  assert.equal(first.found, true);
+  const second = ac.forcePromoteHeld({ lane: first.lane, id, now: T0 + 3 });
+  assert.equal(second.found, false);
+});
+
 // ─── lane hygiene ───────────────────────────────────────────────────────────
 
 test('normalizeLane survives a missing, corrupt or foreign lane file', () => {

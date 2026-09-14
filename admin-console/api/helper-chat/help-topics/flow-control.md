@@ -14,6 +14,8 @@ askPrompts:
   - "Why is a lane empty when I know there is work in it?"
   - "How often is this board refreshed?"
   - "Can I fix something from this page?"
+  - "What does Force dispatch do?"
+  - "What is the difference between Pause and Drain?"
 ---
 
 ## What the Flow Control board shows
@@ -42,9 +44,14 @@ Two consequences follow:
   derived from the team's own flow graph, so a team with a completely different
   label vocabulary gets the same nine stages.
 
-**The board is read-only.** There is no repair button anywhere on it: the ledger
-observes and never mutates. Acting on what you see is a person's job today —
-follow the deep links to the issue or the PR.
+**The ticket ledger itself is read-only.** There is no repair button on the
+board: a card's stage and blocker are derived from GitHub evidence, never set
+by a click. Acting on a ticket's own state is a person's job today — follow
+the deep links to the issue or the PR.
+
+There is one thing on this page that *does* act: the **Pool controls** panel
+below the board (pause/drain a pooled role, force-dispatch a held ticket). It
+changes who is admitted to run, never a ticket's own derived stage.
 
 ### When the board is empty, or missing something
 
@@ -127,3 +134,38 @@ they always add up to its total:
 - **waiting** — `Backlog`, `Refining` or `Ready`: nothing is working on it.
 
 Epics are listed most-blocked first, so the one needing attention is leftmost.
+
+## Pool controls
+
+Below the board, two panels appear for a team with at least one **pooled**
+role (`pool.enabled` — a role that auto-scales one ephemeral instance per
+ticket instead of working one at a time).
+
+**Pooled roles.** One row per pooled role: how many instances are running now
+(and, if the role has a `maxInstances` cap, how many it's allowed), and its
+current state.
+
+- **Pause** — stop starting new instances for this role. Anything already
+  running keeps running to completion; nothing new starts until you Resume.
+- **Drain** — the same effect as Pause (nothing new starts), used when the
+  intent is to wind the role down rather than pick it back up shortly — for
+  example before disabling pooling on it entirely. There is no functional
+  difference between the two today; pick whichever name matches your intent.
+- **Resume** — clears Pause/Drain; the role goes back to starting new
+  instances normally.
+
+Pausing or draining a role affects **new** dispatch only: a ticket already
+being worked keeps its instance, and a redelivered event for that same ticket
+still finds it. Both the label-triggered path and the autonomous Flow
+Supervisor honor the pause — neither starts a new instance for a paused role.
+A brand-new ticket that would have triggered a paused role isn't dropped
+either: it's held and automatically dispatched the moment you Resume the
+role.
+
+**Held on the WIP limit.** One row per dispatch currently on hold because the
+team's `wipLimit` (the cap on how many tickets flow at once) is already full.
+Each row shows which ticket and which agent is waiting. **Force dispatch**
+starts it right now anyway, past the limit — a deliberate, one-off override
+for when you know it's safe to run one more than usual. It does not change
+the limit itself: the next ticket to finish still frees a slot exactly as it
+would have.

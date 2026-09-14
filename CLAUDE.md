@@ -341,7 +341,13 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   candidate whose predicted paths overlap another ticket's already-active
   prediction. Advisory only — an empty/failed prediction never adds a
   restriction, and the ledger's `conflict`/`stale-base` detection stays the real
-  safety net.
+  safety net. **Board controls** (Phase 5 #2250): the Flow Control board
+  (`/flow-control`) gets a per-role Pause/Drain/Resume (a runtime toggle,
+  `pool-control.json`, kept out of the `pool` bundle field — blocks only NEW
+  spawns, an existing instance runs to completion) and a per-held-entry Force
+  dispatch (`admissionControl.forcePromoteHeld`, promotes past `wipLimit` for
+  that one entry). A headless runtime (D7) and provider-health-aware admission
+  (D9) remain undesigned.
 
 ### GitHub poller
 

@@ -5106,6 +5106,106 @@ async function setDisplayName(token, userId, displayName) {
   );
 }
 
+// Eagerly provision an agent's 1:1 DM room at spawn time (#2251).
+//
+// The DM room — and its `dm-room.json` pointer — is normally created LAZILY by
+// the admin console the first time a human opens the agent's chat
+// (`ensureAgentDmRoom` in admin-console/api/matrix.js). That is fine for an
+// agent a human talks to, but an autonomously spawned pool instance has nobody
+// opening its chat: its inherited github-event kickoff trigger fires seconds
+// after boot, and the container's `_execute_inner` HARD-SKIPS any triggered run
+// when no room exists yet ("Trigger … skipped: no roomId and no DM room exists
+// yet" — agent-entrypoint.py). The instance would spawn, match its trigger, and
+// then do nothing: an empty session.
+//
+// So for a pool instance we create the room HERE, before the container boots,
+// with the AGENT's own token, inviting + joining the admin exactly as the admin
+// console does — so the pointer already on disk is the SAME room the admin
+// console reuses when a human later opens the chat (its `ensureAgentDmRoom`
+// short-circuits on an existing room the admin is still joined to). The
+// container's start() runs one `_sync()` (which pulls `dm-room.json` when
+// isolated) BEFORE it starts the pending-drain loop, so the kickoff trigger
+// posts to a real room instead of being skipped.
+//
+// Best-effort: a Matrix hiccup here must never fail the spawn — the lazy
+// admin-console path remains the fallback (the run just skips until then, i.e.
+// the pre-fix behaviour). Returns a small result object for the caller to log.
+async function provisionAgentDmRoom(agentId, agentToken, displayName) {
+  if (!agentToken) return { ok: false, reason: "no-agent-token" };
+  if (!HOMESERVER || !CONDUWUIT_ADMIN_TOKEN) return { ok: false, reason: "matrix-not-configured" };
+  // Path-injection guard for the dm-room.json write below (mirrors matrix.js).
+  if (!AGENT_ID_RE.test(agentId)) return { ok: false, reason: "invalid-agent-id" };
+
+  const dmPath = path.join(agentDir(agentId), "dm-room.json");
+  // Idempotent: never clobber an existing pointer (e.g. a reused instance).
+  if (fs.existsSync(dmPath)) return { ok: true, reused: true };
+
+  const matrixCall = async (token, apiPath, body) => {
+    const headers = { Authorization: `Bearer ${token}` };
+    let payload;
+    if (body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      payload = JSON.stringify(body);
+    }
+    const resp = await fetch(`${HOMESERVER}${apiPath}`, {
+      method: body !== undefined ? "POST" : "GET",
+      headers,
+      body: payload,
+    });
+    const text = await resp.text();
+    let data = null;
+    if (text) { try { data = JSON.parse(text); } catch { data = text; } }
+    return { status: resp.status, data };
+  };
+
+  // Resolve the admin user id (owner of CONDUWUIT_ADMIN_TOKEN) so the human is
+  // invited into the same room the admin console would reuse. Conduwuit serves
+  // whoami at the legacy r0 path; v3 may 405 — try both (mirrors matrix.js).
+  let adminUserId = process.env.ADMIN_USER_ID || "@admin:local";
+  for (const p of [
+    "/_matrix/client/v3/account/whoami",
+    "/_matrix/client/r0/account/whoami",
+  ]) {
+    try {
+      const r = await matrixCall(CONDUWUIT_ADMIN_TOKEN, p);
+      if (r.status === 200 && r.data?.user_id) { adminUserId = r.data.user_id; break; }
+    } catch { /* try next path */ }
+  }
+
+  // Create the room AS THE AGENT, inviting the admin (human) — a 1:1 direct chat.
+  let createResp;
+  try {
+    createResp = await matrixCall(agentToken, "/_matrix/client/v3/createRoom", {
+      preset: "trusted_private_chat",
+      invite: [adminUserId],
+      is_direct: true,
+      name: `DM with ${displayName || agentId}`,
+    });
+  } catch (err) {
+    return { ok: false, reason: `createRoom error: ${err.message}` };
+  }
+  const roomId = createResp.status < 400 ? createResp.data?.room_id : null;
+  if (!roomId) return { ok: false, reason: `createRoom HTTP ${createResp.status}` };
+
+  // Admin (human) accepts the invite. We hold a token, not a syncing client, so
+  // no auto-join happens — POST /join explicitly (mirrors ensureAgentDmRoom).
+  try {
+    await matrixCall(
+      CONDUWUIT_ADMIN_TOKEN,
+      `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/join`,
+      {},
+    );
+  } catch { /* non-fatal: the admin can still join on chat-open */ }
+
+  // Persist the pointer the agent reads. Atomic tmp+rename, same shape/format
+  // as matrix.setAgentDmRoom so the admin console reuses it verbatim.
+  const dm = { roomId, createdAt: new Date().toISOString(), createdBy: adminUserId };
+  const tmp = dmPath + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(dm, null, 2));
+  fs.renameSync(tmp, dmPath);
+  return { ok: true, roomId };
+}
+
 // ============================================================
 // Per-human Matrix identity (#1458, epic #2076 P1)
 // ============================================================
@@ -10454,6 +10554,25 @@ class Orchestrator {
     }
 
     this.agentConfigs.set(memberId, { config: memberConfig });
+
+    // #2251: an autonomously spawned pool instance has nobody to open its chat,
+    // so its inherited kickoff trigger would fire against no DM room and be
+    // skipped (empty session). Pre-create the room NOW — before the container
+    // boots — so the container's initial `_sync()` has `dm-room.json` in hand
+    // before its pending loop drains that trigger. Best-effort and awaited so
+    // the write lands first; the lazy admin-console path stays the fallback.
+    if (opts.poolInstance && memberConfig.enabled !== false) {
+      const r = await provisionAgentDmRoom(memberId, token, memberDisplayName);
+      if (r.ok) {
+        console.log(
+          `[Orchestrator] Pre-created DM room for pool instance ${memberId}` +
+          `${r.reused ? " (reused existing)" : r.roomId ? ` (${r.roomId})` : ""}`,
+        );
+      } else {
+        console.warn(`[Orchestrator] DM-room pre-create skipped for ${memberId}: ${r.reason}`);
+      }
+    }
+
     if (memberConfig.enabled !== false) startAgentProcess(memberConfig);
 
     console.log(

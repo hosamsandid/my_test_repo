@@ -76,3 +76,16 @@ test('mutation-proved: a canManageTeam check downgraded to visibleTeam would fai
   const buggy = body.replace('canManageTeam(scope, teamId)', 'visibleTeam(scope, teamId)');
   assert.doesNotMatch(buggy, /canManageTeam\(scope, teamId\)/);
 });
+
+// #2273 — the read-only lane visualization's own proxy route.
+
+test('GET /api/teams/:teamId/pool-lanes is visibility-only, like pool-control/tickets', () => {
+  const body = routeBody(
+    "app.get('/api/teams/:teamId/pool-lanes'",
+    "app.post('/api/teams/:teamId/pool-control/:roleId'",
+  );
+  assert.match(body, /AGENT_ID_RE\.test\(teamId\)/);
+  assert.match(body, /visibleTeam\(scope, teamId\)/);
+  assert.doesNotMatch(body, /canManageTeam/, 'the read must not require management rights');
+  assert.match(body, /\/internal\/teams\/\$\{encodeURIComponent\(teamId\)\}\/pool-lanes`/);
+});

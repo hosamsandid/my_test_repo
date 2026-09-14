@@ -73,7 +73,7 @@ test('the four areas are top-level chapters, not sub-headings', () => {
   }
   // The empty/degraded-board material is deliberately a `###` inside chapter 1 —
   // this catches a stray top-level chapter splitting a deep-link target in two.
-  assert.equal(h2.length, 5, `expected exactly the five chapters, got ${h2.join(' · ')}`);
+  assert.equal(h2.length, 6, `expected exactly the six chapters, got ${h2.join(' · ')}`);
 });
 
 test('each board surface mounts a "?" pointed at its own chapter', () => {
@@ -85,7 +85,7 @@ test('each board surface mounts a "?" pointed at its own chapter', () => {
     /import \{ FLOW_CONTROL_HELP_SECTIONS \} from '\.\/flow-control-help-sections'/.test(page),
     'the slugs must come from the shared registry, never be written out inline',
   );
-  for (const key of ['page', 'states', 'epics', 'poolControls']) {
+  for (const key of ['page', 'states', 'epics', 'poolControls', 'poolLanes']) {
     assert.ok(
       page.includes(`FLOW_CONTROL_HELP_SECTIONS.${key}`),
       `the ${key} surface must deep-link to its chapter (never a hand-written slug)`,

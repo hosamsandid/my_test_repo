@@ -1,0 +1,221 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const lanes = require('./pool-instance-lanes');
+
+const ROLE = { roleId: 'developer', agentId: 'acme-developer', maxInstances: 4, maxRuntimeMs: null };
+
+function ticket(overrides) {
+  return {
+    ticketId: 'acme/widgets#1',
+    repo: 'acme/widgets',
+    number: 1,
+    epicId: null,
+    state: 'in-dev',
+    ownerAgentId: 'acme-developer',
+    ...overrides,
+  };
+}
+
+function instance(overrides) {
+  return {
+    instanceId: 'acme-developer-i1',
+    repo: 'acme/widgets',
+    itemKey: 1,
+    spawnedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+// ─── running / timed-out ─────────────────────────────────────────────────
+
+test('a live instance with no configured runtime budget is running', () => {
+  const out = lanes.buildPoolInstanceLanes({
+    role: ROLE,
+    instances: [instance()],
+    tickets: [ticket()],
+    now: Date.parse('2026-01-01T05:00:00.000Z'),
+  });
+  assert.equal(out.roleId, 'developer');
+  assert.equal(out.agentId, 'acme-developer');
+  assert.equal(out.maxInstances, 4);
+  assert.equal(out.lanes.length, 1);
+  assert.deepEqual(out.lanes[0], {
+    instanceId: 'acme-developer-i1',
+    ticketId: 'acme/widgets#1',
+    repo: 'acme/widgets',
+    number: 1,
+    epicId: null,
+    status: 'running',
+    spawnedAt: '2026-01-01T00:00:00.000Z',
+    sameEpicAs: null,
+  });
+});
+
+test('a live instance past its maxRuntimeMs is tagged timed-out, not running', () => {
+  const role = { ...ROLE, maxRuntimeMs: 3_600_000 };
+  const out = lanes.buildPoolInstanceLanes({
+    role,
+    instances: [instance()],
+    tickets: [ticket()],
+    now: Date.parse('2026-01-01T00:00:00.000Z') + 3_600_000,
+  });
+  assert.equal(out.lanes[0].status, 'timed-out');
+});
+
+test('a live instance within its maxRuntimeMs budget stays running', () => {
+  const role = { ...ROLE, maxRuntimeMs: 3_600_000 };
+  const out = lanes.buildPoolInstanceLanes({
+    role,
+    instances: [instance()],
+    tickets: [ticket()],
+    now: Date.parse('2026-01-01T00:00:00.000Z') + 1_000,
+  });
+  assert.equal(out.lanes[0].status, 'running');
+});
+
+test('a live instance with no matching ledger ticket still gets a lane, keyed on repo#itemKey', () => {
+  const out = lanes.buildPoolInstanceLanes({
+    role: ROLE,
+    instances: [instance({ itemKey: 99 })],
+    tickets: [],
+  });
+  assert.equal(out.lanes.length, 1);
+  assert.equal(out.lanes[0].ticketId, 'acme/widgets#99');
+  assert.equal(out.lanes[0].epicId, null);
+  assert.equal(out.lanes[0].status, 'running');
+});
+
+// ─── held-same-epic ──────────────────────────────────────────────────────
+
+test('a not-yet-spawned ticket sharing an epic with a running instance is held-same-epic', () => {
+  const out = lanes.buildPoolInstanceLanes({
+    role: ROLE,
+    instances: [instance({ itemKey: 412 })],
+    tickets: [
+      ticket({ ticketId: 'acme/widgets#412', number: 412, epicId: 100 }),
+      ticket({ ticketId: 'acme/widgets#421', number: 421, epicId: 100, state: 'ready' }),
+    ],
+  });
+  assert.equal(out.lanes.length, 2);
+  const running = out.lanes.find((l) => l.ticketId === 'acme/widgets#412');
+  const held = out.lanes.find((l) => l.ticketId === 'acme/widgets#421');
+  assert.equal(running.status, 'running');
+  assert.equal(held.status, 'held-same-epic');
+  assert.equal(held.instanceId, null);
+  assert.equal(held.sameEpicAs, 'acme/widgets#412');
+});
+
+test('a not-yet-spawned ticket with no epic in common with any running instance gets no lane', () => {
+  const out = lanes.buildPoolInstanceLanes({
+    role: ROLE,
+    instances: [instance({ itemKey: 412 })],
+    tickets: [
+      ticket({ ticketId: 'acme/widgets#412', number: 412, epicId: 100 }),
+      ticket({ ticketId: 'acme/widgets#500', number: 500, epicId: 200, state: 'ready' }),
+    ],
+  });
+  assert.equal(out.lanes.length, 1);
+  assert.equal(out.lanes[0].ticketId, 'acme/widgets#412');
+});
+
+test('a ready ticket with epicId null gets no held-same-epic lane (nothing to attribute it to)', () => {
+  const out = lanes.buildPoolInstanceLanes({
+    role: ROLE,
+    instances: [instance({ itemKey: 412 })],
+    tickets: [
+      ticket({ ticketId: 'acme/widgets#412', number: 412, epicId: 100 }),
+      ticket({ ticketId: 'acme/widgets#500', number: 500, epicId: null, state: 'ready' }),
+    ],
+  });
+  assert.equal(out.lanes.length, 1);
+});
+
+test('a ticket owned by a DIFFERENT role never becomes a held-same-epic lane here', () => {
+  const out = lanes.buildPoolInstanceLanes({
+    role: ROLE,
+    instances: [instance({ itemKey: 412 })],
+    tickets: [
+      ticket({ ticketId: 'acme/widgets#412', number: 412, epicId: 100 }),
+      ticket({
+        ticketId: 'acme/widgets#421', number: 421, epicId: 100, state: 'ready', ownerAgentId: 'acme-reviewer',
+      }),
+    ],
+  });
+  assert.equal(out.lanes.length, 1);
+});
+
+test('a done ticket sharing an epic with a running instance is not surfaced as held (it is finished, not waiting)', () => {
+  const out = lanes.buildPoolInstanceLanes({
+    role: ROLE,
+    instances: [instance({ itemKey: 412 })],
+    tickets: [
+      ticket({ ticketId: 'acme/widgets#412', number: 412, epicId: 100 }),
+      ticket({ ticketId: 'acme/widgets#380', number: 380, epicId: 100, state: 'done' }),
+    ],
+  });
+  assert.equal(out.lanes.length, 1);
+});
+
+test('a backlog ticket for this role is never surfaced (not yet dispatched at all)', () => {
+  const out = lanes.buildPoolInstanceLanes({
+    role: ROLE,
+    instances: [],
+    tickets: [ticket({ state: 'backlog', epicId: 5 })],
+  });
+  assert.equal(out.lanes.length, 0);
+});
+
+// ─── ordering / determinism ──────────────────────────────────────────────
+
+test('lanes are sorted by ticketId for a stable render across refreshes', () => {
+  const out = lanes.buildPoolInstanceLanes({
+    role: ROLE,
+    instances: [instance({ itemKey: 9 }), instance({ instanceId: 'acme-developer-i2', itemKey: 2 })],
+    tickets: [
+      ticket({ ticketId: 'acme/widgets#9', number: 9 }),
+      ticket({ ticketId: 'acme/widgets#2', number: 2 }),
+    ],
+  });
+  assert.deepEqual(out.lanes.map((l) => l.ticketId), ['acme/widgets#2', 'acme/widgets#9']);
+});
+
+test('no instances and no candidate tickets yields an empty lane list, not an error', () => {
+  const out = lanes.buildPoolInstanceLanes({ role: ROLE, instances: [], tickets: [] });
+  assert.deepEqual(out.lanes, []);
+});
+
+test('a malformed role/instances/tickets input degrades to empty rather than throwing', () => {
+  assert.deepEqual(lanes.buildPoolInstanceLanes({ role: null }).lanes, []);
+  assert.equal(lanes.buildPoolInstanceLanes({ role: null }).roleId, null);
+  assert.deepEqual(lanes.buildPoolInstanceLanes({ role: ROLE, instances: null, tickets: null }).lanes, []);
+  assert.deepEqual(lanes.buildPoolInstanceLanes({ role: ROLE, instances: [null, 'x', 42], tickets: [null, 'x'] }).lanes, []);
+});
+
+// ─── buildTeamPoolLanes ──────────────────────────────────────────────────
+
+test('buildTeamPoolLanes computes each role independently, sharing one ticket ledger', () => {
+  const reviewer = { roleId: 'reviewer', agentId: 'acme-reviewer', maxInstances: 2, maxRuntimeMs: null };
+  const tickets = [
+    ticket({ ticketId: 'acme/widgets#412', number: 412, epicId: 100, ownerAgentId: 'acme-developer' }),
+    ticket({ ticketId: 'acme/widgets#407', number: 407, epicId: null, ownerAgentId: 'acme-reviewer' }),
+  ];
+  const out = lanes.buildTeamPoolLanes(
+    [
+      { role: ROLE, instances: [instance({ itemKey: 412 })] },
+      { role: reviewer, instances: [instance({ instanceId: 'acme-reviewer-i407', itemKey: 407 })] },
+    ],
+    tickets,
+  );
+  assert.equal(out.length, 2);
+  assert.equal(out[0].roleId, 'developer');
+  assert.equal(out[0].lanes[0].ticketId, 'acme/widgets#412');
+  assert.equal(out[1].roleId, 'reviewer');
+  assert.equal(out[1].lanes[0].ticketId, 'acme/widgets#407');
+});
+
+test('buildTeamPoolLanes on an empty role list returns an empty array', () => {
+  assert.deepEqual(lanes.buildTeamPoolLanes([], []), []);
+  assert.deepEqual(lanes.buildTeamPoolLanes(null, null), []);
+});

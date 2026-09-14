@@ -21,6 +21,7 @@ import {
   boardSummary,
   poolControlRows,
   heldRows,
+  poolLaneRoleRows,
 } from './flow-control-view.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -406,4 +407,45 @@ test('heldRows survives a missing/malformed payload and an unparseable ticket re
   const rows = heldRows({ held: [{ id: 'x', ticket: null }] });
   assert.equal(rows[0].repo, null);
   assert.equal(rows[0].number, null);
+});
+
+// ── pool instance lanes (#2273) ────────────────────────────────────────────
+
+test('poolLaneRoleRows normalizes each role and its lanes, sorted alphabetically by role id', () => {
+  const rows = poolLaneRoleRows({
+    roles: [
+      {
+        roleId: 'reviewer', agentId: 'acme-reviewer', displayName: 'Reviewer', maxInstances: 2,
+        lanes: [{ instanceId: 'acme-reviewer-i407', ticketId: 'acme/repo#407', repo: 'acme/repo', number: 407, epicId: null, status: 'running', spawnedAt: '2026-09-14T09:00:00.000Z', sameEpicAs: null }],
+      },
+      {
+        roleId: 'developer', agentId: 'acme-developer', displayName: 'Developer', maxInstances: 4,
+        lanes: [
+          { instanceId: 'acme-developer-i412', ticketId: 'acme/repo#412', repo: 'acme/repo', number: 412, epicId: 100, status: 'running', spawnedAt: '2026-09-14T08:00:00.000Z', sameEpicAs: null },
+          { instanceId: null, ticketId: 'acme/repo#421', repo: 'acme/repo', number: 421, epicId: 100, status: 'held-same-epic', spawnedAt: null, sameEpicAs: 'acme/repo#412' },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(rows.map((r) => r.roleId), ['developer', 'reviewer']);
+  assert.equal(rows[0].lanes.length, 2);
+  assert.equal(rows[0].lanes[1].status, 'held-same-epic');
+  assert.equal(rows[0].lanes[1].sameEpicAs, 'acme/repo#412');
+  assert.equal(rows[1].lanes[0].status, 'running');
+});
+
+test('poolLaneRoleRows defaults an unrecognised/missing lane status to running', () => {
+  const rows = poolLaneRoleRows({
+    roles: [{ roleId: 'x', lanes: [{ ticketId: 't#1', status: 'bogus' }, { ticketId: 't#2' }] }],
+  });
+  assert.equal(rows[0].lanes[0].status, 'running');
+  assert.equal(rows[0].lanes[1].status, 'running');
+});
+
+test('poolLaneRoleRows survives a missing or malformed payload', () => {
+  for (const data of [null, undefined, {}, { roles: null }]) {
+    assert.deepEqual(poolLaneRoleRows(data), []);
+  }
+  const rows = poolLaneRoleRows({ roles: [{ roleId: 'x', lanes: null }] });
+  assert.deepEqual(rows[0].lanes, []);
 });

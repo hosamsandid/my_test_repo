@@ -619,13 +619,6 @@ export default function AgentEditForm({
 
       {agent.role === 'team-member' && (
         <>
-          <div>
-            <div style={labelStyle}>Parent Team (read-only)</div>
-            <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
-              {agent.parentTeamId || '—'}
-            </div>
-          </div>
-
           {/* #2271, Amendment 2 A2.2 of `docs/parallel-workers-concept.md` —
               the role-axis config surface for agent pools, the agent's own
               Settings-tab half of the "one model, several surfaces"

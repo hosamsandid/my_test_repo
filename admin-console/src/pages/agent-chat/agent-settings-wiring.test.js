@@ -228,6 +228,51 @@ test('an override set for the SAME target the route is about to become is not im
   assert.match(resetEffect, /setSettingsAgentId\(null\);/);
 });
 
+/* ── #2267: a team's settings request must not leak onto a later agent ──── */
+
+// A team subject never mounts RightRail (#2235), so a railTabRequest fired for
+// a team's settings (handleOpenSettings above) is never consumed there — left
+// alone it survives in state until an unrelated agent is selected next, at
+// which point RightRail mounts fresh and applies the stale request on that
+// very first mount, forcing that unrelated agent onto Settings. Clearing the
+// request the moment the routed subject becomes a team means there is nothing
+// left to apply by the time any later agent's RightRail mounts.
+test('a pending rail tab request is dropped once the routed subject is a team', () => {
+  const effect = agentChat.match(/useEffect\(\(\) => \{\s*if \(subjectIsTeam\) setRailTabRequest\(null\);\s*\}, \[subjectIsTeam\]\);/);
+  assert.ok(effect, 'expected a useEffect clearing railTabRequest keyed on subjectIsTeam');
+});
+
+test('a pending rail tab request is not cleared just because some other state changed', () => {
+  // The guard must be `subjectIsTeam` specifically — clearing on every render
+  // (e.g. a bare `useEffect` with no deps, or deps unrelated to the team
+  // subject) would also erase a legitimate, still-pending request for the
+  // currently open agent (e.g. the Knowledge-badge click) before RightRail
+  // ever gets to consume it.
+  assert.doesNotMatch(agentChat, /useEffect\(\(\) => \{\s*setRailTabRequest\(null\);\s*\}, \[\]\);/);
+});
+
+/* ── #2267: per-agent tab memory replaces one global "last tab" ─────────── */
+
+test('the rail persists and restores the active tab per agent, not globally', () => {
+  assert.match(rail, /from '\.\/rail-tab-memory'/);
+  assert.doesNotMatch(rail, /const TAB_KEY = 'agentChat\.rightRailTab';/);
+  assert.match(rail, /tabForAgent\(loadTabMap\(\), agentId, TAB_KEYS\)/);
+  assert.match(rail, /withAgentTab\(loadTabMap\(\), agentId, tab\)/);
+});
+
+test('a subject change restores that agent\'s own tab before anything persists', () => {
+  // Restore-then-persist must be ONE effect (not persist-on-[agentId,tab] +
+  // restore-on-[agentId] as two separate effects): with two effects, the
+  // persistence one fires on the same agentId change and would write the
+  // OUTGOING agent's still-current tab into the NEW agent's slot before the
+  // restore effect corrects `tab` — permanently seeding it with a tab that
+  // was never active for it.
+  const combined = code(rail).match(/useEffect\(\(\) => \{\s*if \(agentId !== prevAgentIdRef\.current\) \{[\s\S]*?\}, \[agentId, tab\]\);/);
+  assert.ok(combined, 'expected one combined restore+persist effect keyed on [agentId, tab]');
+  assert.match(combined[0], /setTab\(tabForAgent\(loadTabMap\(\), agentId, TAB_KEYS\) \|\| 'sessions'\)/);
+  assert.match(combined[0], /localStorage\.setItem\(TAB_MAP_KEY, JSON\.stringify\(withAgentTab\(loadTabMap\(\), agentId, tab\)\)\)/);
+});
+
 /* ── AC4: a restart is confirmed and reported ────────────────────── */
 
 test('the chat asks before a re-provision, through one gate', () => {

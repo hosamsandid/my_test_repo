@@ -5288,5 +5288,260 @@ class OrphanedBackgroundTasks(unittest.TestCase):
         self.assertEqual(self.orphaned(events), [])
 
 
+class BgOrphanCorrectionDecision(unittest.TestCase):
+    """#2277's pure core: "correct once vs. fall back to notice", mirroring the
+    `OrphanedBackgroundTasks` pure-function test style so the loop-guard rule
+    is checkable with no live scheduler."""
+
+    decide = staticmethod(entrypoint._should_self_correct_bg_orphan)
+
+    def test_nothing_orphaned_never_corrects(self):
+        self.assertFalse(self.decide([], False))
+        self.assertFalse(self.decide([], True))
+
+    def test_orphaned_and_not_yet_corrected_corrects(self):
+        self.assertTrue(self.decide([{"task_id": "a"}], False))
+
+    def test_orphaned_but_already_a_correction_does_not_chain(self):
+        # The #606 loop guard: depth=1, then honesty only.
+        self.assertFalse(self.decide([{"task_id": "a"}], True))
+
+
+class BgOrphanCorrectionEntry(unittest.TestCase):
+    """The self-enqueued pending entry + the prompt it carries."""
+
+    def test_entry_shape_and_kind(self):
+        entry = entrypoint._build_bg_orphan_correction_entry(
+            "!room:local", [{"task_id": "t1", "description": "gh run watch"}])
+        self.assertEqual(entry["kind"], entrypoint._BG_ORPHAN_CORRECTION_KIND)
+        self.assertEqual(entry["roomId"], "!room:local")
+        self.assertEqual(entry["descriptions"], ["gh run watch"])
+
+    def test_entry_falls_back_to_task_id_when_no_description(self):
+        entry = entrypoint._build_bg_orphan_correction_entry(
+            "!room:local", [{"task_id": "t1", "description": ""}])
+        self.assertEqual(entry["descriptions"], ["t1"])
+
+    def test_entry_caps_descriptions_at_five(self):
+        orphaned = [{"task_id": f"t{i}", "description": f"d{i}"} for i in range(9)]
+        entry = entrypoint._build_bg_orphan_correction_entry("!room:local", orphaned)
+        self.assertEqual(len(entry["descriptions"]), 5)
+
+    def test_prompt_names_the_tasks_and_steers_foreground_and_out_of_band(self):
+        prompt = entrypoint._format_bg_orphan_correction_prompt(["gh run watch"])
+        self.assertIn("gh run watch", prompt)
+        self.assertIn("foreground", prompt)
+        self.assertIn("block until it completes", prompt)
+        self.assertIn("github-event", prompt)
+        self.assertIn("loop", prompt)
+
+    def test_prompt_degrades_gracefully_with_no_descriptions(self):
+        prompt = entrypoint._format_bg_orphan_correction_prompt([])
+        self.assertIn("a background task", prompt)
+
+
+class BgOrphanCorrectionEnqueue(unittest.TestCase):
+    """`_enqueue_bg_orphan_correction` is a thin, never-raising wrapper over the
+    existing self-target `enqueue-pending` HTTP call — the same one
+    `_run_agent_verify` uses to hand work to ANOTHER agent (#933); here the
+    route's `{id}` is this agent's own id."""
+
+    def test_success_posts_to_this_agents_own_enqueue_route_and_returns_true(self):
+        with patch.object(entrypoint.TriggerScheduler, "_orch_post_json",
+                          return_value=(202, "{}")) as post:
+            ok = entrypoint._enqueue_bg_orphan_correction(
+                "acme-dev", "!room:local", [{"task_id": "t1", "description": "d"}])
+        self.assertTrue(ok)
+        route, entry = post.call_args.args
+        self.assertEqual(route, "/internal/agents/acme-dev/enqueue-pending")
+        self.assertEqual(entry["kind"], entrypoint._BG_ORPHAN_CORRECTION_KIND)
+        self.assertEqual(entry["roomId"], "!room:local")
+
+    def test_non_2xx_status_is_reported_as_failure_not_raised(self):
+        with patch.object(entrypoint.TriggerScheduler, "_orch_post_json",
+                          return_value=(500, "boom")):
+            ok = entrypoint._enqueue_bg_orphan_correction("acme-dev", "!room:local", [{}])
+        self.assertFalse(ok)
+
+    def test_transport_exception_is_swallowed_not_raised(self):
+        with patch.object(entrypoint.TriggerScheduler, "_orch_post_json",
+                          side_effect=OSError("unreachable")):
+            ok = entrypoint._enqueue_bg_orphan_correction("acme-dev", "!room:local", [{}])
+        self.assertFalse(ok)
+
+
+class BgOrphanCorrectionDelivery(unittest.IsolatedAsyncioTestCase):
+    """Driven through the real drain, mirroring `WakeAgentDelivery`: a
+    `kind: 'bg-orphan-correction'` entry reaches `_execute` with a SYNTHESIZED
+    trigger (no triggers.json listener to look up, unlike wake-agent) carrying
+    the depth marker."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.workdir = Path(self._tmpdir.name)
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir", return_value=self.workdir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="acme-dev",
+            user_id="@acme-dev:local",
+            send_formatted=AsyncMock(return_value="$evt"), blueprint_id=None,
+        )
+
+    def _queue(self, *entries):
+        entrypoint._atomic_write_json(
+            self.workdir / entrypoint._PENDING_FILENAME, list(entries))
+
+    async def test_the_entry_drives_execute_with_a_synthetic_trigger_and_depth_marker(self):
+        scheduler = self._scheduler()
+        self._queue({"kind": "bg-orphan-correction", "roomId": "!room:local",
+                     "descriptions": ["gh run watch"]})
+        scheduler._execute = AsyncMock()
+
+        await scheduler._process_pending()
+
+        scheduler._execute.assert_awaited_once()
+        trigger, = scheduler._execute.await_args.args
+        self.assertEqual(trigger["roomId"], "!room:local")
+        self.assertIn("gh run watch", trigger["prompt"])
+        ctx = scheduler._execute.await_args.kwargs["ctx"]
+        self.assertEqual(ctx, {entrypoint._BG_ORPHAN_CORRECTION_CTX_KEY: True})
+        # The #506 marker was attached before the run and cleared after it.
+        self.assertEqual(entrypoint._load_in_flight(), [])
+
+    async def test_no_valid_room_id_is_dropped_not_crashed(self):
+        scheduler = self._scheduler()
+        self._queue({"kind": "bg-orphan-correction", "roomId": "not-a-room-id",
+                     "descriptions": ["x"]})
+        scheduler._execute = AsyncMock()
+
+        await scheduler._process_pending()
+
+        scheduler._execute.assert_not_awaited()
+        self.assertEqual(entrypoint._load_in_flight(), [])
+
+    async def test_the_entry_is_not_logged_as_out_of_scope(self):
+        self.assertNotIn("bg-orphan-correction", entrypoint._PENDING_OUT_OF_SCOPE_KINDS)
+        scheduler = self._scheduler()
+        self._queue({"kind": "bg-orphan-correction", "roomId": "!room:local",
+                     "descriptions": ["x"]})
+        scheduler._execute = AsyncMock()
+
+        await scheduler._process_pending()
+
+        scheduler._execute.assert_awaited_once()
+
+
+class BgOrphanCorrectionExecuteInnerWiring(unittest.IsolatedAsyncioTestCase):
+    """The enqueue DECISION as `_execute_inner` (any trigger run, including a
+    dispatched correction) actually makes it, driven the same way
+    `WakeAgentDelivery.test_the_note_lands_in_the_untrusted_envelope...` drives
+    `_execute_inner` directly with `_call_claude` faked out."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.workdir = Path(self._tmpdir.name)
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir", return_value=self.workdir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="acme-dev",
+            user_id="@acme-dev:local",
+            send_formatted=AsyncMock(return_value="$evt"), blueprint_id=None,
+        )
+
+    @staticmethod
+    def _fake_call_claude_orphaning(*args, **kwargs):
+        # Positional call shape from _execute_inner:
+        # _call_claude(prompt, room_id, correlation_id, blueprint_id, timeout_sec, run_context)
+        run_context = args[5] if len(args) > 5 else kwargs.get("run_context")
+        run_context["_bgOrphaned"] = [{"task_id": "t1", "description": "gh run watch",
+                                       "status": "stopped"}]
+        return "some reply\n\n> stopped, not finished"
+
+    async def test_a_fresh_orphaning_run_enqueues_exactly_one_correction(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(entrypoint, "_call_claude",
+                          side_effect=self._fake_call_claude_orphaning), \
+             patch.object(entrypoint, "_enqueue_bg_orphan_correction",
+                          return_value=True) as enqueue:
+            await scheduler._execute_inner(
+                {"id": "t1", "type": "cron", "roomId": "!room:local", "prompt": "do work"},
+                ctx=None,
+            )
+        enqueue.assert_called_once_with("acme-dev", "!room:local",
+                                        [{"task_id": "t1", "description": "gh run watch",
+                                          "status": "stopped"}])
+
+    async def test_a_run_that_is_itself_a_correction_does_not_chain(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(entrypoint, "_call_claude",
+                          side_effect=self._fake_call_claude_orphaning), \
+             patch.object(entrypoint, "_enqueue_bg_orphan_correction") as enqueue:
+            await scheduler._execute_inner(
+                {"id": "bg-orphan-correction", "type": "internal",
+                 "roomId": "!room:local", "prompt": "redo"},
+                ctx={entrypoint._BG_ORPHAN_CORRECTION_CTX_KEY: True},
+            )
+        enqueue.assert_not_called()
+
+    async def test_a_clean_run_never_enqueues(self):
+        scheduler = self._scheduler()
+
+        def fake_clean(*args, **kwargs):
+            run_context = args[5] if len(args) > 5 else kwargs.get("run_context")
+            run_context["_bgOrphaned"] = []
+            return "[PASS]"
+
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(entrypoint, "_call_claude", side_effect=fake_clean), \
+             patch.object(entrypoint, "_enqueue_bg_orphan_correction") as enqueue:
+            await scheduler._execute_inner(
+                {"id": "t1", "type": "cron", "roomId": "!room:local", "prompt": "do work"},
+                ctx=None,
+            )
+        enqueue.assert_not_called()
+
+
+class BgOrphanCorrectionDispatchPlacement(unittest.TestCase):
+    """Source-reading placement guards, mirroring `WakeAgentDispatchPlacement` —
+    the two async listener paths (DM handler, `_handle_pending_entry`) have no
+    dedicated test harness in this suite, so the wiring facts are read off the
+    module instead of driven."""
+
+    SRC = _MODULE_PATH.read_text(encoding="utf-8")
+
+    def test_bg_orphan_branch_sits_above_the_out_of_scope_check(self):
+        body = self.SRC[self.SRC.index("async def _handle_pending_entry"):]
+        branch = body.index('if kind == _BG_ORPHAN_CORRECTION_KIND:')
+        out_of_scope = body.index("if kind in _PENDING_OUT_OF_SCOPE_KINDS:")
+        self.assertLess(branch, out_of_scope)
+        self.assertIn("await self._execute_bg_orphan_correction(entry)", body)
+
+    def test_the_correction_run_goes_through_execute_not_call_claude_directly(self):
+        body = self.SRC[self.SRC.index("async def _execute_bg_orphan_correction"):]
+        body = body[:body.index("# -- handover DM")]
+        self.assertIn("await self._execute(", body)
+        self.assertNotIn("_call_claude", body)
+        self.assertNotIn("_gate_held", body)
+
+    def test_the_dm_handler_checks_bg_orphaned_after_the_claude_call(self):
+        # on_direct_message has no dedicated test harness (deeply nested async
+        # Matrix listener) — assert the enqueue check reads from the SAME
+        # run_context object the _call_claude invocation was given, in order.
+        body = self.SRC[self.SRC.index("async def on_message"):]
+        call_site = body.index("_call_claude, send_body, room_id, correlation_id, blueprint_id")
+        check_site = body.index('dm_run_context.get("_bgOrphaned")')
+        self.assertLess(call_site, check_site)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,8 @@
 # Agent instance pools — ephemeral, self-cleaning workers over a stream of work items
 
-> Status: **design of record; Phases 1–2 shipped** (see Amendment 1). This
-> document scopes the discussion in issue #2251 (the Agent Pools epic). Its
+> Status: **design of record; Phases 1–2 shipped** (see Amendment 1);
+> **configuration & visualization UX designed, pre-build** (see Amendment 2).
+> This document scopes the discussion in issue #2251 (the Agent Pools epic). Its
 > SDLC binding builds directly on the shipped Flow Control machinery
 > (`docs/flow-control-concept.md`): admission control (#2114), the ticket
 > ledger (#2115) and the board (#2116). Its autonomous half is, in effect, the
@@ -232,6 +233,13 @@ Round-tripped through the process-template bundle like `stages` / `labels` /
 }
 ```
 
+Both blocks are round-tripped through the bundle today, and the *team* half
+(`wipLimit`/`autoDispatch`) is already live-editable via `PUT /api/agents/:teamId`.
+The *role* half (`pool`) is **not** live-editable yet — only settable at bundle
+materialise. **Amendment 2** is the design of record for the first-class UI that
+authors both without hand-editing a bundle, and for the one live-write endpoint
+(`pool` on a member) it needs.
+
 ## 10. Relationship to existing code
 
 - **Reuse unchanged:** admission lane + tick, ticket ledger, board, poller +
@@ -338,3 +346,121 @@ which would misrepresent what the author asked for; the same discipline
 **Not built, and not owed by this ticket:** §7's remaining named rows
 (`claimed-done-not-merged`, `conflict`, `ci-red`), §4.3b's LLM escalation layer,
 and any board control (pause/drain/force-dispatch) — all later phases per §12.
+
+---
+
+## Amendment 2 — the configuration & visualization UX (design, pre-build)
+
+Phases 1–2 shipped the *mechanism* but left it **headless**: the only way to turn
+on pooling, a WIP limit, the supervisor or epic-serialization is a hand-authored
+process-template bundle or a raw `PUT`. `admin-console/api/api.js` says so in a
+comment ("No Flow-Editor control yet"). This amendment is the design of record
+for the first-class UI that makes the mechanism configurable *and* observable. It
+introduces **no new contention semantics** — it is UI plus one live-write
+endpoint over what already exists. Five decisions.
+
+**A2.1 — The config is TWO independent axes, and the UI must mirror them, not
+flatten them into one "how parallel" number.** This is D5 re-stated for the UI,
+because "how parallel" reads as a single knob and is not:
+
+- **Team axis — how many *tickets* flow at once.** `wipLimit` counts *work items*
+  (issue + its PR(s) = one slot the whole way through developer → reviewer →
+  merger), **not agents**, because the governing scarce resource is the shared
+  `main`, not the agent count. Plus how tickets are *serialized*
+  (`autoDispatch.contentionPolicy`) and whether dispatch is automatic
+  (`autoDispatch.enabled`).
+- **Role axis — how far a *single role* fans out.** `pool.enabled` +
+  `maxInstances`, **independently per role**. Several pooled roles (many
+  developers, many reviewers, many mergers) coexist by construction; each is its
+  own template with its own cap. `maxInstances` is already enforced in
+  `planPoolDispatch` (`refuse: max-instances`) — Phase 1 shipped the per-role cap
+  even though §12 files it under Phase 5.
+
+There is deliberately **no per-role `wipLimit`**: `maxInstances` is the per-role
+knob; the team `wipLimit` stays the ticket budget (D5). The UI surfaces each axis
+where its object lives.
+
+**A2.2 — Three surfaces, one model.**
+
+- **Per-role (agent) surface** — the Flow editor's `NodeInspector` for a role
+  node, and the agent's own **Settings** tab (Agent Chat → Settings). Controls:
+  "This role auto-scales" (`pool.enabled`), max parallel instances
+  (`maxInstances`), workspace binding (`git-clean-base | input-copy | none`),
+  teardown timeouts. A read-only "pooled role · up to N" badge on the single-agent
+  view so an operator looking at one agent sees its scaling at a glance.
+- **Team / flow surface** — a **Parallelism** panel in the Flow editor (team
+  scope) + a compact read-only summary on the team view. Controls: `wipLimit`,
+  `autoDispatch.enabled` (the Flow Supervisor), and the contention-strategy
+  selector (A2.3).
+- **Live surface** — the combined lane visualization: per pooled role, its active
+  instances as lanes, each tagged running / held-same-epic / timed-out, derived
+  from the admission lane (`inFlight`/`held`) + the ticket ledger. **Read-only**
+  in this phase; the pause / drain / force-dispatch board controls stay Phase 5
+  (#2250).
+
+**A2.3 — The contention strategy is the extensible "wow" seam, designed for the
+LLM future NOW.** One selector renders `autoDispatch.contentionPolicy` in plain
+language, so the mental model — *"how many can safely run in parallel, decided by
+rules and (later) an LLM"* — is present from day one and Phase 4 slots in with no
+UI redesign:
+
+- **Full parallelism** (`none`) — items are independent; run up to the count
+  limit.
+- **Serialize same epic** (`epic-serial`, the default and the *only* rule
+  enforced today) — never two in-flight tickets sharing `epicId`.
+- **Smart: LLM predicts file conflicts** (`predicted-paths`, Phase 4 #2249) —
+  rendered but **disabled / "coming"**. The bundle validator already refuses an
+  unimplemented `contentionPolicy` (Amendment 1 A1.4), so the disabled option is
+  fail-safe: it cannot be saved before the predictor exists.
+
+**A2.4 — Backend prerequisite: a live `pool` write, at parity with
+`wipLimit`/`autoDispatch`.** `PUT /api/agents/:teamId` already accepts live
+`wipLimit`/`autoDispatch` (team-agent only), but there is **no** live write for
+`pool` on a member — it can only be set at bundle materialise. The per-role
+surface needs `PUT /api/agents/:memberId` to accept `pool` (member/role config
+only), reusing `normalizePoolConfig` and the same discipline the bundle validator
+applies: closed `workspace` enum, `maxInstances` a positive int or `null`, and
+`pool.enabled` requiring the parent team's `wipLimit` to be set (else the pool
+would spawn unbounded and never be reaped). It is an **additive** effect — no
+respawn of the template (instances spawn on the next dispatch); clearing it
+(`null`) reverts the role to a persistent singleton. Draft round-trip already
+carries `pool`, so this closes only the *live-team* editing gap.
+
+**A2.5 — Out of scope for this UI (kept for the named later phases).** Board
+runtime controls (pause / drain / force-dispatch, Phase 5 #2250); building the
+`predicted-paths` predictor itself (Phase 4 #2249); a per-role `wipLimit`
+(intentionally absent, A2.1). No new contention semantics.
+
+### Mockups
+
+```
+Team / flow surface — "Parallelism" panel (Flow editor, team scope)
+┌ Parallelism ─────────────────────────────────────┐
+│  Work in parallel                                 │
+│  Up to  [ 3 ▾ ]  tickets at the same time         │
+│                                                   │
+│  Contention                                       │
+│   ( ) Full parallelism                            │
+│   (•) Serialize same epic          ← today        │
+│   ( ) Smart: LLM predicts conflicts   (coming)    │
+│                                                   │
+│  Auto-start ready tickets            ( ●  on )    │
+│      Oldest first, up to the limit above          │
+└───────────────────────────────────────────────────┘
+
+Per-role surface — NodeInspector / agent Settings tab
+┌ Scaling ─────────────────────────────────────────┐
+│  [x] This role auto-scales (pool)                 │
+│      Max parallel instances   [ 4 ]               │
+│      Workspace   ( git-clean-base ▾ )             │
+│      Idle timeout [ 30m ]   Hard timeout [ 2h ]   │
+└───────────────────────────────────────────────────┘
+
+Live surface — lanes per pooled role (read-only)
+  developer   ⚙ up to 4 · 🔒 same-epic serialized
+    ├─ i412  ● running
+    ├─ i418  ● running
+    └─ i421  ⏸ held (same epic as i412)
+  reviewer    ⚙ up to 2
+    └─ i407  ● running
+```

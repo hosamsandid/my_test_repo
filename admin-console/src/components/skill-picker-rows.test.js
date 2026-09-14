@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { tierOf, buildRows, driftLineageHref } from './skill-picker-rows.js';
+import { tierOf, buildRows, driftLineageHref, rowDetailLines } from './skill-picker-rows.js';
 
 test('tierOf maps team → team and everything else → global', () => {
   assert.equal(tierOf('team'), 'team');
@@ -84,4 +84,25 @@ test('driftLineageHref carries teamId for a team row', () => {
 test('driftLineageHref returns null without a name', () => {
   assert.equal(driftLineageHref({}), null);
   assert.equal(driftLineageHref(null), null);
+});
+
+test('rowDetailLines: a plain known row with no flags has nothing to expand into', () => {
+  assert.deepEqual(rowDetailLines({ name: 'x', tier: 'global', unknown: false }), []);
+  assert.deepEqual(rowDetailLines(null), []);
+});
+
+test('rowDetailLines: unknown row explains itself and nothing else', () => {
+  const lines = rowDetailLines({ name: 'ghost', unknown: true, shadowsGlobal: true, drift: 'behind' });
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /matches no skill in the current pool/);
+});
+
+test('rowDetailLines: shadowsGlobal, version and drift each contribute one sentence', () => {
+  const lines = rowDetailLines({
+    name: 'lint', unknown: false, shadowsGlobal: true, version: 3, drift: 'ahead',
+  });
+  assert.equal(lines.length, 3);
+  assert.match(lines[0], /shadows the global skill/);
+  assert.match(lines[1], /Manifest version 3/);
+  assert.match(lines[2], /drifted from its source skill \(ahead\)/);
 });

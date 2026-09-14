@@ -7,6 +7,8 @@ import { useApi, apiCall } from '../../hooks/useApi';
 import RepositoryCard from '../../components/RepositoryCard';
 import RepoPropagationDialog from '../../components/RepoPropagationDialog';
 import IconButton from '../../components/IconButton';
+import OptionList from '../../components/OptionList';
+import OptionRow from '../../components/OptionRow';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning } from '../toolchain-select-view.js';
 import { mcpRowHint, mcpChangeNotice, mcpServerLabel } from '../working-env-mcp-view.js';
 import { classifyRepositoryChanges, hasRepositoryChanges } from '../working-env-repo-diff.js';
@@ -414,57 +416,60 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
 
       {tab === 'mcp' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-          {form.mcpServers.map((row, idx) => {
-            const hint = mcpRowHint(row, mcpServers);
-            const unknownServer = row.serverId && !mcpServers.some(s => s.id === row.serverId);
-            return (
-              <div key={idx} style={mcpRowStyle}>
-                <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-                  <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
-                    <div style={{ flex: '1 1 180px', minWidth: 0 }}>
-                      <div style={labelStyle}>Server</div>
-                      <select value={row.serverId} onChange={e => updateMcp(idx, 'serverId', e.target.value)} style={inputStyle}>
-                        <option value="">— choose a server —</option>
-                        {mcpServers.map(s => <option key={s.id} value={s.id}>{mcpServerLabel(s.id, mcpServers)}</option>)}
-                        {unknownServer && <option value={row.serverId}>{mcpServerLabel(row.serverId, mcpServers)}</option>}
-                      </select>
-                    </div>
-                    <div style={{ flex: '1 1 180px', minWidth: 0 }}>
-                      <div style={labelStyle}>Credential</div>
-                      <select
-                        value={row.credentialId}
-                        onChange={e => updateMcp(idx, 'credentialId', e.target.value)}
-                        disabled={!row.serverId}
-                        style={{ ...inputStyle, opacity: row.serverId ? 1 : 0.5 }}
-                      >
-                        <option value="">— no credential —</option>
-                        {mcpCredentials.map(c => (
-                          <option key={c.id} value={c.id}>
-                            {c.name}{c.serverId === row.serverId ? ' (default for this server)' : ''}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  {hint && (
-                    <div style={{
-                      display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
-                      fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)',
-                    }}>
-                      <AlertTriangle
-                        size={13}
-                        style={{ flexShrink: 0, marginTop: 1, color: hint.tone === 'warn' ? 'var(--eb-status-warning)' : 'var(--eb-text-muted)' }}
-                      />
-                      <span>{hint.message}</span>
-                    </div>
-                  )}
-                </div>
-                <div style={{ flexShrink: 0, paddingTop: 18 }}>
-                  <IconButton icon={X} label="Remove MCP server" danger onClick={() => removeMcp(idx)} size={12} />
-                </div>
-              </div>
-            );
-          })}
+          {form.mcpServers.length > 0 && (
+            <OptionList>
+              {form.mcpServers.map((row, idx) => {
+                const hint = mcpRowHint(row, mcpServers);
+                const unknownServer = row.serverId && !mcpServers.some(s => s.id === row.serverId);
+                return (
+                  <OptionRow
+                    key={idx}
+                    expandedContent={hint ? <div>{hint.message}</div> : null}
+                    header={
+                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)' }}>
+                        <div style={{ flex: 1, minWidth: 0, display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+                          <div style={{ flex: '1 1 180px', minWidth: 0 }}>
+                            <div style={labelStyle}>Server</div>
+                            <select value={row.serverId} onChange={e => updateMcp(idx, 'serverId', e.target.value)} style={inputStyle}>
+                              <option value="">— choose a server —</option>
+                              {mcpServers.map(s => <option key={s.id} value={s.id}>{mcpServerLabel(s.id, mcpServers)}</option>)}
+                              {unknownServer && <option value={row.serverId}>{mcpServerLabel(row.serverId, mcpServers)}</option>}
+                            </select>
+                          </div>
+                          <div style={{ flex: '1 1 180px', minWidth: 0 }}>
+                            <div style={labelStyle}>Credential</div>
+                            <select
+                              value={row.credentialId}
+                              onChange={e => updateMcp(idx, 'credentialId', e.target.value)}
+                              disabled={!row.serverId}
+                              style={{ ...inputStyle, opacity: row.serverId ? 1 : 0.5 }}
+                            >
+                              <option value="">— no credential —</option>
+                              {mcpCredentials.map(c => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}{c.serverId === row.serverId ? ' (default for this server)' : ''}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          {hint && (
+                            <AlertTriangle
+                              size={13}
+                              title={hint.message}
+                              style={{ flexShrink: 0, marginTop: 20, color: hint.tone === 'warn' ? 'var(--eb-status-warning)' : 'var(--eb-text-muted)' }}
+                            />
+                          )}
+                        </div>
+                        <div style={{ flexShrink: 0, paddingTop: 18 }}>
+                          <IconButton icon={X} label="Remove MCP server" danger onClick={() => removeMcp(idx)} size={12} />
+                        </div>
+                      </div>
+                    }
+                  />
+                );
+              })}
+            </OptionList>
+          )}
           {mcpServersLoading ? null : mcpServers.length === 0 ? (
             <div style={helpTextStyle}>No MCP servers are registered yet.</div>
           ) : (
@@ -581,14 +586,6 @@ const dashedButtonStyle = {
   cursor: 'pointer',
   fontSize: 'var(--eb-text-sm)',
   fontFamily: 'inherit',
-};
-
-const mcpRowStyle = {
-  display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
-  padding: 'var(--eb-space-2)',
-  background: 'var(--eb-bg-elevated)',
-  border: '1px solid var(--eb-border-default)',
-  borderRadius: 'var(--eb-radius-md)',
 };
 
 const warnBoxStyle = {

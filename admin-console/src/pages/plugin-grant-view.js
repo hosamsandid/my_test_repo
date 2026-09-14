@@ -116,6 +116,14 @@ export function platformMismatch(manifest, stackRuntime) {
   };
 }
 
+// Does a row have anything to say beyond its header (#2269 AC3)? The expand
+// affordance only renders when there is: a description to show in full, a
+// platform mismatch to explain, or (once granted) the Scope/quota controls.
+export function hasExpandableDetail(row) {
+  if (!row) return false;
+  return !!(row.description || (row.platform && !row.platform.ok) || row.granted);
+}
+
 // Fold everything into a single row view the JSX renders directly.
 //   manifest      : the installed plugin's normalised manifest
 //   grant         : the resolved grant entry for this agent/team, or null

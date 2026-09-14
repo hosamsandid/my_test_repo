@@ -235,6 +235,56 @@ test('pool: enabled:false is treated as not pooled (field dropped on build)', ()
   assert.equal('pool' in b.roles[0], false);
 });
 
+// ─── Agent Pools — Phase 3: the recurring-analysis binding (#2248, epic #2251) ──
+
+test('pool.workSource: a valid config survives build → customRoles → member, normalized', () => {
+  const pooled = [{
+    ...sampleRoles[0],
+    pool: {
+      enabled: true, workspace: 'input-copy',
+      workSource: { items: [' ds-2 ', 'ds-1', 'ds-2'], outputDir: '/out', inputDir: '/in' },
+    },
+  }];
+  const b = buildProcessTemplate({ name: 'x', level: 'live', teamId: 'acme', roles: pooled, wipLimit: 2 });
+  assert.deepEqual(b.roles[0].pool.workSource, { items: ['ds-2', 'ds-1'], outputDir: '/out', inputDir: '/in' });
+  const cr = templateToCustomRoles(b);
+  assert.deepEqual(cr[0].pool.workSource, { items: ['ds-2', 'ds-1'], outputDir: '/out', inputDir: '/in' });
+  const member = buildMemberFromTemplate(cr[0], { teamId: 'acme' });
+  assert.deepEqual(member.pool.workSource, { items: ['ds-2', 'ds-1'], outputDir: '/out', inputDir: '/in' });
+});
+
+test('pool.workSource: absent is dropped, not defaulted (a git-binding role stays byte-identical)', () => {
+  const pooled = [{ ...sampleRoles[0], pool: { enabled: true, workspace: 'git-clean-base' } }];
+  const b = buildProcessTemplate({ name: 'x', level: 'live', teamId: 'acme', roles: pooled, wipLimit: 1 });
+  assert.equal('workSource' in b.roles[0].pool, false);
+});
+
+test('pool.workSource: refused (not silently dropped) on a malformed shape', () => {
+  const bad = (workSource) => ({
+    processTemplateVersion: 1, wipLimit: 1,
+    roles: [{ id: 'r', systemPrompt: 'p', pool: { enabled: true, workspace: 'input-copy', workSource } }],
+  });
+  assert.equal(validateProcessTemplate(bad('nope')).ok, false);
+  assert.equal(validateProcessTemplate(bad({})).ok, false);
+  assert.equal(validateProcessTemplate(bad({ items: [] })).ok, false);
+  assert.equal(validateProcessTemplate(bad({ items: [1, 2] })).ok, false);
+  assert.equal(validateProcessTemplate(bad({ items: ['a'] })).ok, false); // no outputDir
+  assert.equal(validateProcessTemplate(bad({ items: ['a'], outputDir: '' })).ok, false);
+  assert.equal(validateProcessTemplate(bad({ items: ['a'], outputDir: '/out', inputDir: 42 })).ok, false);
+  assert.equal(validateProcessTemplate(bad({ items: ['a'], outputDir: '/out' })).ok, true);
+});
+
+test('pool.workSource: refused on the git-clean-base binding (it has no meaning there)', () => {
+  const b = {
+    processTemplateVersion: 1, wipLimit: 1,
+    roles: [{
+      id: 'r', systemPrompt: 'p',
+      pool: { enabled: true, workspace: 'git-clean-base', workSource: { items: ['a'], outputDir: '/out' } },
+    }],
+  };
+  assert.equal(validateProcessTemplate(b).ok, false);
+});
+
 // ─── The Flow Supervisor's opt-in (#2247, epic #2251 Phase 2) ──────────────────
 
 function pooledRoleWithWipLimit(extra) {

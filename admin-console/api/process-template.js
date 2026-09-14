@@ -152,11 +152,30 @@ function normalizeWipLimit(v) {
 // own `limitInForce` already lives with.
 const POOL_WORKSPACES = ['git-clean-base', 'input-copy', 'none'];
 
+// Agent Pools — Phase 3 (#2248, epic #2251 §6): the recurring-analysis
+// binding's own config, a sibling of `baseBranch` (the git binding's own
+// field) on this same `pool` surface. Kept in sync by hand with
+// `orchestrator/recurring-pool-source.js`'s `normalizeWorkSource`, the same
+// duplication discipline `normalizePool` below already follows against
+// `agent-pool.js`.
+function normalizeWorkSource(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const items = Array.isArray(raw.items)
+    ? [...new Set(raw.items.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim()))]
+    : [];
+  if (!items.length) return null;
+  const outputDir = typeof raw.outputDir === 'string' && raw.outputDir.trim() ? raw.outputDir.trim() : null;
+  if (!outputDir) return null;
+  const inputDir = typeof raw.inputDir === 'string' && raw.inputDir.trim() ? raw.inputDir.trim() : null;
+  return { items, outputDir, ...(inputDir ? { inputDir } : {}) };
+}
+
 function normalizePool(raw) {
   if (!raw || typeof raw !== 'object' || raw.enabled !== true) return null;
   const maxInstances = Number.isInteger(raw.maxInstances) && raw.maxInstances >= 1 ? raw.maxInstances : null;
   const workspace = POOL_WORKSPACES.includes(raw.workspace) ? raw.workspace : 'git-clean-base';
   const baseBranch = typeof raw.baseBranch === 'string' && raw.baseBranch.trim() ? raw.baseBranch.trim() : null;
+  const workSource = normalizeWorkSource(raw.workSource);
   const t = raw.teardown && typeof raw.teardown === 'object' ? raw.teardown : {};
   const positiveMs = (v) => (Number.isFinite(v) && v > 0 ? v : null);
   return {
@@ -164,6 +183,7 @@ function normalizePool(raw) {
     ...(maxInstances != null ? { maxInstances } : {}),
     workspace,
     ...(baseBranch ? { baseBranch } : {}),
+    ...(workSource ? { workSource } : {}),
     ...((positiveMs(t.idleTimeoutMs) || positiveMs(t.maxRuntimeMs) || positiveMs(t.retainLogsMs)) ? {
       teardown: {
         ...(positiveMs(t.idleTimeoutMs) ? { idleTimeoutMs: positiveMs(t.idleTimeoutMs) } : {}),
@@ -703,6 +723,29 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
       }
       if (r.pool.baseBranch !== undefined && r.pool.baseBranch !== null && typeof r.pool.baseBranch !== 'string') {
         return { ok: false, error: `role ${r.id}: pool.baseBranch must be a string` };
+      }
+      // Agent Pools — Phase 3 (#2248, concept §6): the recurring-analysis
+      // binding's work source. Refused on a malformed shape, not silently
+      // dropped — the same "typo'd value refuses the save" discipline as
+      // every other `pool.*` field above.
+      if (r.pool.workSource !== undefined && r.pool.workSource !== null) {
+        if (typeof r.pool.workSource !== 'object' || Array.isArray(r.pool.workSource)) {
+          return { ok: false, error: `role ${r.id}: pool.workSource must be an object` };
+        }
+        if (r.pool.workspace === 'git-clean-base') {
+          return { ok: false, error: `role ${r.id}: pool.workSource requires pool.workspace to be "input-copy" or "none" (it has no meaning for git-clean-base)` };
+        }
+        if (!Array.isArray(r.pool.workSource.items) || r.pool.workSource.items.length === 0
+            || !r.pool.workSource.items.every((v) => typeof v === 'string' && v.trim())) {
+          return { ok: false, error: `role ${r.id}: pool.workSource.items must be a non-empty array of non-empty strings` };
+        }
+        if (typeof r.pool.workSource.outputDir !== 'string' || !r.pool.workSource.outputDir.trim()) {
+          return { ok: false, error: `role ${r.id}: pool.workSource.outputDir must be a non-empty string (the completion signal)` };
+        }
+        if (r.pool.workSource.inputDir !== undefined && r.pool.workSource.inputDir !== null
+            && (typeof r.pool.workSource.inputDir !== 'string' || !r.pool.workSource.inputDir.trim())) {
+          return { ok: false, error: `role ${r.id}: pool.workSource.inputDir must be a non-empty string` };
+        }
       }
       if (r.pool.teardown !== undefined && r.pool.teardown !== null) {
         if (typeof r.pool.teardown !== 'object' || Array.isArray(r.pool.teardown)) {

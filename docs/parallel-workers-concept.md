@@ -1,6 +1,6 @@
 # Agent instance pools — ephemeral, self-cleaning workers over a stream of work items
 
-> Status: **design of record; Phases 1–2 shipped** (see Amendment 1);
+> Status: **design of record; Phases 1–3 shipped** (see Amendments 1 and 3);
 > **configuration & visualization UX designed, pre-build** (see Amendment 2).
 > This document scopes the discussion in issue #2251 (the Agent Pools epic). Its
 > SDLC binding builds directly on the shipped Flow Control machinery
@@ -275,9 +275,9 @@ authors both without hand-editing a bundle, and for the one live-write endpoint
 - **Phase 2 — Autonomous supervisor. Shipped (#2247, Amendment 1).** Drain the
   backlog up to the limit, oldest-first, epic-serialization, plus the narrowed
   remediation ladder (§A1.2). *Result: apply `ready` and walk away.*
-- **Phase 3 — Second binding: recurring analysis.** Prove generality with no
-  GitHub (list/cron source, input-copy workspace, artifact completion, no
-  contention). Independent of Phase 2.
+- **Phase 3 — Second binding: recurring analysis. Shipped (#2248, Amendment 3).**
+  Proved generality with no GitHub (list source, input-copy workspace, artifact
+  completion, no contention). Independent of Phase 2.
 - **Phase 4 — LLM conflict prediction** (SDLC only, only if epic-serialization is
   not enough).
 - **Phase 5 — Polish.** Board controls, per-role caps, reviewer pools, optional
@@ -464,3 +464,57 @@ Live surface — lanes per pooled role (read-only)
   reviewer    ⚙ up to 2
     └─ i407  ● running
 ```
+
+---
+
+## Amendment 3 — what §6 (Phase 3) actually shipped (#2248)
+
+Landed as `orchestrator/recurring-pool-source.js` (pure — mirrors
+`agent-pool.js`'s / `flow-supervisor.js`'s no-fs/no-network shape) + a
+maintenance-gated `orchestrator.js` timer (`runRecurringPoolTick` →
+`recurringPoolSweepTeam`), reusing the SAME item-keyed identity
+(`agentPool.poolInstanceId`) and spawn hand (`spawnPoolInstance`) the SDLC
+binding uses — no new spawn primitive. Three things sharpen §6 as written.
+
+**A3.1 — the config surface is `pool.workSource`, a sibling of `baseBranch` on
+the same normalized `pool` object.** §9 named `workspace`/`baseBranch` as the
+git binding's own fields on the shared surface; `workSource: {items[],
+outputDir, inputDir?}` is this binding's equivalent, following the identical
+precedent — meaningless (and refused by `validateProcessTemplate`) on
+`workspace: "git-clean-base"`. `items` is the "list" work source (§6): a
+static, operator-authored array of work-item ids, deduplicated on normalize.
+`outputDir` is **required** — it is simultaneously the completion signal ("the
+output artifact exists") and the D11 "already done this cycle?" check: an
+item is done when `<outputDir>/<item>.json` exists, checked fresh every tick,
+no separate state file needed. `inputDir` is optional and consulted only for
+the `input-copy` workspace binding (a `none` binding never reads it — concept
+Insight B).
+
+**A3.2 — release (D4) and dispatch are the same tick, release first.** Unlike
+the SDLC binding (whose release is the admission-control reconcile tick,
+separate from the Flow Supervisor's dispatch tick), there is no ticket ledger
+here to reconcile — `recurringPoolSweepTeam` itself reaps every live instance
+whose item's output artifact has appeared (`_internalSelfDelete`, the same
+teardown hand-off every pooled role uses), THEN computes the still-live set
+and dispatches the rest. Reaping first means a slot an item just vacated is
+immediately available to a still-pending item in the same pass, rather than
+waiting a full tick.
+
+**A3.3 — contention = none still means "up to a limit," not "unbounded."** §6
+reads "full parallelism up to the resource/rate limit" — this phase resolves
+that limit as `pool.maxInstances` if set, else the team's `wipLimit` (D5's
+precedence, matching the SDLC binding). Unlike the SDLC path, there is no
+admission lane underneath to fall back on as a second gate, so a role with
+NEITHER configured is a refusal (logged, not a spawn) rather than silently
+falling through to `Infinity` — `pool.enabled` already requires `wipLimit` be
+set (`validateProcessTemplate`), so this is a defensive floor for a
+hand-edited or pre-validation config, not the expected path.
+
+**Not built, and not owed by this ticket:** a `dir`-enumeration work source
+(only a static `items` list ships — §6 says "a list / cron enumerating," and
+the list half is what proves neutrality); per-item retry/backoff on a crashed
+instance beyond the existing D8 hard-timeout reaper (which already applies
+unchanged — it has no notion of GitHub either); any UI for authoring
+`workSource` (Amendment 2 scoped the config UI to `pool.enabled`/
+`maxInstances`/`workspace`/teardown — a `workSource` editor is later, additive
+work, same as everything Amendment 2 §A2.5 already deferred).

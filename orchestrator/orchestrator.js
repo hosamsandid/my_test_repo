@@ -3752,25 +3752,25 @@ function refreshRepoCacheIfStale(cacheDir, repository, envGithubTokenId, baseBra
   // cache refresh.
   const branch = baseBranch || repository.branch || null;
   try {
-    // Inlined literally (rather than delegated to `agentPool.isSafeGitRef`)
-    // because CodeQL's sanitizer recognition for this query does not trace
-    // through a call into another module — the same guard expressed as a
-    // helper-function call (both as a ternary and as a throw-guard) still
-    // left this sink flagged. This is the exact pattern CodeQL's own "OK"
-    // example for js/second-order-command-line-injection uses.
+    // Defense in depth (CodeQL js/second-order-command-line-injection): git's
+    // own option parser treats any argument starting with "-" as a flag
+    // regardless of position (e.g. a branch literally named
+    // "--upload-pack=<cmd>"). Refused right next to the sink and left to the
+    // existing catch below — a misconfigured branch name must not throw out to
+    // the caller, since a delayed refresh is the whole point of a cache.
     if (typeof branch === "string" && branch.startsWith("-")) {
       throw new Error(`refusing unsafe-looking branch '${branch}'`);
     }
     const env = repoGitCredentials(repository, envGithubTokenId);
-    // The literal "--" end-of-options marker (on top of the isSafeGitRef
-    // guard above) is the standard mitigation for this CWE class on `fetch`
-    // specifically: even if a validated-but-still-odd value slipped through,
-    // "--" forces git to treat everything after it as a positional refspec,
-    // never as an option like `--upload-pack=<cmd>`. Safe here in a way it is
-    // NOT for `git checkout` below (see `_checkoutReworkBranch`): `fetch`
-    // has no pathspec argument for "--" to collide with.
-    const branchArgs = branch ? ["--", branch] : [];
-    execFileSync("git", ["fetch", "origin", ...branchArgs], {
+    // Fetch ALL of origin's refs rather than passing the (user-controlled)
+    // branch as a git argument at all: the branch is only ever consumed below
+    // as the constant-prefixed `origin/<branch>` reset target, which git can
+    // never parse as an option, so no tainted value reaches a `git` argv here.
+    // This is strictly more robust than a "--" end-of-options marker (which
+    // CodeQL does not model as a barrier for `git fetch`, and which a spread of
+    // it here confused its guard→sink tracing besides), and it matches the
+    // default refspec of the `git clone` this cache is copied from anyway.
+    execFileSync("git", ["fetch", "origin"], {
       cwd: cacheDir, env, stdio: "pipe", timeout: 60_000,
     });
     const ref = branch ? `origin/${branch}` : "origin/HEAD";
@@ -3891,14 +3891,17 @@ function _checkoutReworkBranch(repoDir, repository, envGithubTokenId, branch) {
   }
   const env = repoGitCredentials(repository, envGithubTokenId);
   try {
-    // "--" on fetch (same mitigation as refreshRepoCacheIfStale's fetch, and
-    // safe for the same reason: fetch takes no pathspec for "--" to collide
-    // with) — but deliberately NOT on the checkout below: `git checkout`'s
-    // own grammar gives "--" a DIFFERENT meaning (revision-vs-pathspec
-    // disambiguation), so adding one before the start-point would make git
-    // treat it as a file to restore rather than a ref. `isSafeGitRef` above
-    // is what actually closes the injection vector for checkout, by refusing
-    // any value that could be parsed as an option in the first place.
+    // The "--" end-of-options marker is safe on `fetch` (which takes no
+    // pathspec for "--" to collide with), but deliberately NOT on the checkout
+    // below: `git checkout`'s own grammar gives "--" a DIFFERENT meaning
+    // (revision-vs-pathspec disambiguation), so adding one before the
+    // start-point would make git treat it as a file to restore rather than a
+    // ref. Unlike refreshRepoCacheIfStale — which can fetch all of origin and
+    // pick the branch out via a constant-prefixed reset ref — rework must fetch
+    // this specific branch, so the value does reach the argv here; the
+    // `startsWith("-")` refusal above is what actually closes the injection
+    // vector, on both this fetch and the `-B <branch>` checkout, by rejecting
+    // any value git could parse as an option in the first place.
     execFileSync("git", ["fetch", "origin", "--", branch], { cwd: repoDir, env, stdio: "pipe", timeout: 120_000 });
     execFileSync("git", ["checkout", "-B", branch, `origin/${branch}`], { cwd: repoDir, env, stdio: "pipe", timeout: 60_000 });
     console.log(`[AgentPool] ${repoDir}: checked out rework branch ${branch} (D3)`);

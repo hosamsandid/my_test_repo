@@ -354,8 +354,13 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   collapsible **Instances (N)** sub-list in the left rail instead of scattered
   flat among the team's members — `poolInstance`/`poolOf`/`poolItem` surfaced on
   `GET /api/matrix/agents`, nested by `agent-list-model.js` `buildGroups`.
-  A headless runtime (D7) and provider-health-aware admission (D9) remain
-  undesigned. Detail: `docs/parallel-workers-concept.md` Amendment 9.
+  **`AEE_POOLS_ENABLED`** (#2302, default off — `pools-mode.js`, mirrors
+  `AUTH_ENABLED`): hides the Parallelism button/panel entirely and renders the
+  per-role Scaling section disabled with a "Coming Soon" badge until an
+  operator opts in; not yet wired into `docker-compose.yml`'s env passthrough
+  (see Amendment 10). A headless runtime (D7) and provider-health-aware
+  admission (D9) remain undesigned. Detail: `docs/parallel-workers-concept.md`
+  Amendment 10.
 
 ### GitHub poller
 

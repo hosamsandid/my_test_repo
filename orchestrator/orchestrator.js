@@ -175,6 +175,7 @@ const { buildTicketLedger } = require("./ticket-reconciler");
 const ticketReconcileSweep = require("./ticket-reconcile-sweep");
 const agentPool = require("./agent-pool");
 const flowSupervisor = require("./flow-supervisor");
+const recurringPoolSource = require("./recurring-pool-source");
 
 // ── Read-write context mount helpers (writing into a mounted host folder) ──
 // A caller path is RELATIVE to /context. For a single legacy folder the mount
@@ -2646,6 +2647,135 @@ async function flowSupervisorSweepTeam(teamId, { now = Date.now() } = {}) {
 }
 
 // ============================================================
+// Agent Pools — Phase 3: the recurring-analysis binding (#2248, epic #2251;
+// design of record `docs/parallel-workers-concept.md` §6). Proves the pool
+// core is domain-neutral: no GitHub, no git-merge contention, no ticket
+// ledger, no admission lane — a pooled role opts in via `pool.workSource`
+// (`recurring-pool-source.js`'s `normalizeWorkSource`) naming the current N
+// work items and where their output artifacts land. This maintenance-gated
+// tick enumerates the list directly, reaps every instance whose item already
+// produced its output artifact (D4's "held until completion", this binding's
+// own completion signal — concept §6: "the run succeeded / the output
+// artifact exists"), then spawns the rest — skipping items already done this
+// cycle or already running (D11) — up to the concurrency limit (contention =
+// none, full parallelism up to the limit). Independent of Phase 2: no
+// `autoDispatch` involved.
+// ============================================================
+
+// Where a recurring item's completion artifact is expected to land — one file
+// per item, named after the item id, directly under the role's `outputDir`.
+// The spawned instance is responsible for actually writing it; this only
+// checks for its existence — the "already done this cycle?" / release signal.
+function _recurringOutputPath(outputDir, itemId) {
+  return path.join(outputDir, `${itemId}.json`);
+}
+
+function _recurringItemComplete(outputDir, itemId) {
+  try {
+    return fs.existsSync(_recurringOutputPath(outputDir, itemId));
+  } catch {
+    return false;
+  }
+}
+
+// The `input-copy` workspace binding (concept §6): a plain recursive copy of
+// `<inputDir>/<itemId>` into the instance's own `input/` dir — no VCS, no
+// branch, the non-git counterpart of D2's pull-on-demand git base. Best-effort,
+// mirroring every other seed step: a missing/unreadable source is a warning,
+// never a thrown seed failure.
+function _seedRecurringInput(dest, inputDir, itemId, warnings) {
+  if (!inputDir) {
+    warnings.push(`recurring input: no pool.workSource.inputDir configured for item ${itemId}`);
+    return;
+  }
+  const src = path.join(inputDir, itemId);
+  try {
+    if (!fs.existsSync(src)) {
+      warnings.push(`recurring input: no source found for item ${itemId} at ${src}`);
+      return;
+    }
+    fs.cpSync(src, path.join(dest, "input"), { recursive: true });
+  } catch (err) {
+    warnings.push(`recurring input copy for item ${itemId} failed: ${err.message}`);
+  }
+}
+
+/**
+ * One team's recurring-pool tick. Returns `null` when no pooled role on the
+ * team configured a `workSource` — i.e. every pooled role here is the SDLC
+ * binding (§5), which this function never touches (no GitHub call anywhere
+ * in this path).
+ */
+async function recurringPoolSweepTeam(teamId, { now = Date.now() } = {}) {
+  let teamCfg = null;
+  try {
+    teamCfg = loadAgentConfig(teamId);
+  } catch {
+    return null;
+  }
+  if (!teamCfg) return null;
+
+  const reaped = [];
+  const dispatched = [];
+  for (const role of _teamPooledRoles(teamId)) {
+    const workSource = role.pool.workSource;
+    if (!workSource) continue; // this pooled role is the SDLC binding, not Phase 3
+
+    const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
+    const itemOfInstance = (instanceId) => {
+      try {
+        const cfg = loadAgentConfig(instanceId);
+        return cfg && cfg.poolItem != null ? String(cfg.poolItem) : null;
+      } catch {
+        return null;
+      }
+    };
+
+    // Release (D4): an item's own output artifact IS the completion signal —
+    // no ticket, no PR, no ledger. Reap first, so a just-completed slot is
+    // free for this same tick's dispatch pass below.
+    for (const instanceId of _liveInstanceIdsForRole(role.id)) {
+      const itemId = itemOfInstance(instanceId);
+      if (itemId == null || !_recurringItemComplete(workSource.outputDir, itemId)) continue;
+      console.log(`[AgentPool] ${teamId}: reaping ${instanceId} — item ${itemId} completed this cycle`);
+      await _internalSelfDelete(instanceId);
+      reaped.push(instanceId);
+    }
+
+    const stillLiveItemIds = _liveInstanceIdsForRole(role.id).map(itemOfInstance).filter((v) => v != null);
+    const completedItemIds = workSource.items.filter((item) => _recurringItemComplete(workSource.outputDir, item));
+
+    // D5: one team-wide concurrency limit governs unless the role's own
+    // `maxInstances` is tighter — the same precedence the SDLC binding's own
+    // admission lane applies. No limit configured anywhere is refused, not
+    // treated as unbounded (concept §6 caps at "the resource/rate limit" —
+    // it does not mean "no limit").
+    const teamLimit = admissionControl.limitInForce(teamCfg.wipLimit);
+    const limit = role.pool.maxInstances != null ? role.pool.maxInstances : teamLimit;
+    if (limit == null) {
+      console.warn(`[AgentPool] ${teamId}: ${role.id} has no wipLimit/maxInstances configured — refusing to dispatch`);
+      continue;
+    }
+
+    const toDispatch = recurringPoolSource.selectRecurringDispatch({
+      items: workSource.items, completedItemIds, existingItemIds: stillLiveItemIds, limit,
+    });
+    for (const itemId of toDispatch) {
+      const instanceId = agentPool.poolInstanceId(teamId, roleId, itemId);
+      try {
+        await spawnPoolInstance(teamId, role.cfg, instanceId, itemId, { repoFullName: null, directReworkRef: null });
+        dispatched.push(instanceId);
+        console.log(`[AgentPool] ${teamId}: recurring-dispatched ${instanceId} (item=${itemId})`);
+      } catch (err) {
+        console.warn(`[AgentPool] ${teamId}: recurring spawn of ${instanceId} failed: ${err.message}`);
+      }
+    }
+  }
+
+  return (reaped.length || dispatched.length) ? { teamId, reaped, dispatched } : null;
+}
+
+// ============================================================
 // Hill-climbing loop Phase 1 (#1222): per-team run-metrics collector.
 // Concept `docs/hill-climbing-agent-concept.md` §3.1/§4/§7. The deterministic
 // side lives in the pure `hill-climb-metrics.js` + `hill-climb-sweep.js`
@@ -3710,6 +3840,16 @@ function seedAgentWorkspace(id, env, opts = {}) {
     ...cloneEnvironmentRepositories(dest, env, warnings, poolWorkspace),
     ...cloneAgentScopedRepositories(dest, env, (loadAgentConfig(id) || {}).agentRepositories, warnings),
   ];
+
+  // #2248 Phase 3 (concept §6): the recurring-analysis binding's "input-copy"
+  // workspace — the non-git counterpart of D2's pull-on-demand git base. No
+  // repo, no branch: a plain recursive copy of THIS item's own input into the
+  // instance's workspace. `none` deliberately never reaches this (a stateless
+  // task has a trivially clean start, concept Insight B); a role with no
+  // `workSource` configured (the SDLC binding) is unaffected.
+  if (opts.pool && opts.pool.workspace === "input-copy" && opts.pool.workSource && opts.poolItem != null) {
+    _seedRecurringInput(dest, opts.pool.workSource.inputDir, String(opts.poolItem), warnings);
+  }
 
   // 6. Shared team Knowledge Base working copy (Shared Agent Learning, Phase 1).
   //    Only when the autonomy dial is on (>= 1); best-effort, never fails the seed.
@@ -9959,6 +10099,11 @@ class Orchestrator {
       // pool config through here purely for the workspace-binding decision
       // (git-clean-base → pull-on-demand) — unset for every ordinary member.
       ...(opts.pool && typeof opts.pool === 'object' ? { pool: opts.pool } : {}),
+      // #2248 Phase 3: the item this instance was spawned for, so an
+      // `input-copy` binding knows which item's input to seed — see
+      // `_seedRecurringInput` below. Harmless for every other binding, which
+      // never reads it.
+      ...(opts.poolInstance && opts.poolItem != null ? { poolItem: opts.poolItem } : {}),
     });
 
     // Resolve effective values once, here. The member's config records ONLY
@@ -17805,6 +17950,46 @@ async function main() {
   };
   const flowSupervisorTimer = setInterval(runFlowSupervisorTick, FLOW_SUPERVISOR_TICK_INTERVAL_MS);
   if (typeof flowSupervisorTimer.unref === "function") flowSupervisorTimer.unref();
+
+  // ============================================================
+  // Agent Pools — Phase 3 (#2248): the recurring-analysis binding's tick.
+  // Maintenance-gated for the same reason the Flow Supervisor's is — this one
+  // STARTS work (a spawn). Independent of Phase 2/`autoDispatch`: opt-in per
+  // pooled role via `pool.workSource`, a no-op (one config read per team) for
+  // every installation that never configured one.
+  // ============================================================
+  const RECURRING_POOL_TICK_INTERVAL_MS = Number(process.env.AEE_RECURRING_POOL_TICK_INTERVAL_MS || 60_000);
+  let recurringPoolBusy = false;
+  const runRecurringPoolTick = async () => {
+    if (recurringPoolBusy) return; // overlap guard — a slow sweep must not stack
+    recurringPoolBusy = true;
+    try {
+      const maint = readMaintenanceState();
+      if (maint && maint.active) return; // pauses like every other scheduled dispatcher during maintenance
+      let teamIds = [];
+      try {
+        teamIds = listAgentIds().filter((id) => {
+          try { const c = loadAgentConfig(id); return c && c.role === "team"; }
+          catch { return false; }
+        });
+      } catch (err) {
+        console.warn(`[AgentPool] recurring-pool team enumeration failed: ${err.message}`);
+        return;
+      }
+      for (const teamId of teamIds) {
+        try {
+          await recurringPoolSweepTeam(teamId);
+        } catch (err) {
+          // Never let one team's failure stop the others or escape the timer.
+          console.warn(`[AgentPool] ${teamId}: recurring-pool sweep failed: ${err.message}`);
+        }
+      }
+    } finally {
+      recurringPoolBusy = false;
+    }
+  };
+  const recurringPoolTimer = setInterval(runRecurringPoolTick, RECURRING_POOL_TICK_INTERVAL_MS);
+  if (typeof recurringPoolTimer.unref === "function") recurringPoolTimer.unref();
 
   // ============================================================
   // Hill-climbing loop Phase 1 (#1222): daily per-team metrics collector.

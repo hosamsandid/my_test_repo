@@ -325,7 +325,13 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   nudge a `stale-base` PR's owner), each action capped at ≤1 per
   `(ticket, blocker)` per window and recorded in the GitHub Event Log
   (`source: 'supervisor'`). Deterministic, no LLM; the human still decides
-  readiness, the supervisor only times the dispatch.
+  readiness, the supervisor only times the dispatch. **The recurring-analysis
+  binding** (`pool.workSource: {items, outputDir, inputDir}`, Phase 3 #2248)
+  proves the pool core is domain-neutral: no GitHub, no ticket, no git
+  contention — a maintenance-gated tick (`recurringPoolSweepTeam`) enumerates a
+  static item list, reaps an instance once its item's output artifact appears,
+  and (re-)spawns the rest via the SAME item-keyed `spawnPoolInstance`, up to
+  `maxInstances`/`wipLimit`.
 
 ### GitHub poller
 

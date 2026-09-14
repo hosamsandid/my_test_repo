@@ -23,6 +23,7 @@ test('normalizePoolConfig: minimal enabled config gets full defaults', () => {
     maxInstances: null,
     workspace: 'git-clean-base',
     baseBranch: null,
+    workSource: null,
     teardown: { idleTimeoutMs: null, maxRuntimeMs: null, retainLogsMs: null },
   });
 });
@@ -39,8 +40,24 @@ test('normalizePoolConfig: carries through valid fields, drops invalid ones', ()
     maxInstances: 3,
     workspace: 'input-copy',
     baseBranch: 'develop',
+    workSource: null,
     teardown: { idleTimeoutMs: 60_000, maxRuntimeMs: null, retainLogsMs: null },
   });
+});
+
+test('normalizePoolConfig: carries through a valid recurring-analysis workSource (#2248 Phase 3)', () => {
+  const cfg = pool.normalizePoolConfig({
+    enabled: true,
+    workspace: 'input-copy',
+    workSource: { items: ['ds-002', 'ds-001', 'ds-002'], outputDir: '/out', inputDir: '/in' },
+  });
+  assert.deepEqual(cfg.workSource, { items: ['ds-002', 'ds-001'], outputDir: '/out', inputDir: '/in' });
+});
+
+test('normalizePoolConfig: a malformed workSource (no items, no outputDir) reads as null, not a guess', () => {
+  assert.equal(pool.normalizePoolConfig({ enabled: true, workSource: {} }).workSource, null);
+  assert.equal(pool.normalizePoolConfig({ enabled: true, workSource: { items: [] } }).workSource, null);
+  assert.equal(pool.normalizePoolConfig({ enabled: true, workSource: { items: ['a'] } }).workSource, null);
 });
 
 test('normalizePoolConfig: an unrecognised workspace binding falls back to git-clean-base', () => {

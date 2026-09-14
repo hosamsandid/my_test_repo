@@ -18,6 +18,8 @@
 // injected) — mirroring `admission-control.js`'s own shape. `orchestrator.js` is
 // the fs/spawn/reap half.
 
+const { normalizeWorkSource } = require('./recurring-pool-source');
+
 const POOL_WORKSPACES = ['git-clean-base', 'input-copy', 'none'];
 
 // ---------------------------------------------------------------------------
@@ -31,6 +33,7 @@ const POOL_WORKSPACES = ['git-clean-base', 'input-copy', 'none'];
  *
  * @returns {{enabled:true, maxInstances:number|null, workspace:string,
  *            baseBranch:string|null,
+ *            workSource:{items:string[],outputDir:string,inputDir:string|null}|null,
  *            teardown:{idleTimeoutMs:number|null,maxRuntimeMs:number|null,retainLogsMs:number|null}}|null}
  */
 function normalizePoolConfig(raw) {
@@ -38,6 +41,13 @@ function normalizePoolConfig(raw) {
   const maxInstances = Number.isInteger(raw.maxInstances) && raw.maxInstances >= 1 ? raw.maxInstances : null;
   const workspace = POOL_WORKSPACES.includes(raw.workspace) ? raw.workspace : 'git-clean-base';
   const baseBranch = typeof raw.baseBranch === 'string' && raw.baseBranch.trim() ? raw.baseBranch.trim() : null;
+  // Phase 3 (#2248, concept §6) — the recurring-analysis binding's own
+  // config, a sibling of `baseBranch` (the git binding's own field) on this
+  // same normalized surface. Meaningless for `git-clean-base`; left in place
+  // even then rather than cross-validated against `workspace` here, since
+  // `normalizePoolConfig` never refuses input (it only defaults) — the strict
+  // typo/shape refusal lives in `process-template.js`'s `validateProcessTemplate`.
+  const workSource = normalizeWorkSource(raw.workSource);
   const t = raw.teardown && typeof raw.teardown === 'object' ? raw.teardown : {};
   const positiveMs = (v) => (Number.isFinite(v) && v > 0 ? v : null);
   return {
@@ -45,6 +55,7 @@ function normalizePoolConfig(raw) {
     maxInstances,
     workspace,
     baseBranch,
+    workSource,
     teardown: {
       idleTimeoutMs: positiveMs(t.idleTimeoutMs),
       maxRuntimeMs: positiveMs(t.maxRuntimeMs),

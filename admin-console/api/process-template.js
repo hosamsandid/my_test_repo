@@ -194,6 +194,78 @@ function normalizePool(raw) {
   };
 }
 
+// Strict shape check for a `pool` config — checked, not silently coerced (a
+// typo'd `workspace`/`enabled` value refuses the save rather than quietly
+// materialising as an unpooled role, the same discipline `wipLimit`'s own "0
+// is refused, not tolerated" rule follows). Returns an error string, or null
+// when `pool` is absent/null or well-formed. Shared by the bundle validator
+// (`validateProcessTemplate`, one error per role) and the live per-member
+// write route (`PUT /api/agents/:memberId`, #2270) — the two write paths for
+// the same config surface, so the check lives once rather than drifting.
+// `wipLimitSet` is the caller's own answer to "is the governing wipLimit
+// configured" (the bundle's own `wipLimit` field for a draft/materialise, the
+// parent team's live `wipLimit` for a member write) — this function has no
+// view of either.
+function poolConfigError(pool, { wipLimitSet } = {}) {
+  if (pool === undefined || pool === null) return null;
+  if (typeof pool !== 'object' || Array.isArray(pool)) return 'pool must be an object';
+  if (pool.enabled !== undefined && typeof pool.enabled !== 'boolean') {
+    return 'pool.enabled must be a boolean';
+  }
+  if (pool.maxInstances !== undefined && pool.maxInstances !== null
+      && !(Number.isInteger(pool.maxInstances) && pool.maxInstances >= 1)) {
+    return 'pool.maxInstances must be a positive integer (omit it for no per-role cap)';
+  }
+  if (pool.workspace !== undefined && !POOL_WORKSPACES.includes(pool.workspace)) {
+    return `pool.workspace must be one of ${POOL_WORKSPACES.join(', ')}`;
+  }
+  if (pool.baseBranch !== undefined && pool.baseBranch !== null && typeof pool.baseBranch !== 'string') {
+    return 'pool.baseBranch must be a string';
+  }
+  // Agent Pools — Phase 3 (#2248, concept §6): the recurring-analysis binding's
+  // work source. Refused on a malformed shape, not silently dropped — same
+  // discipline as every other `pool.*` field above.
+  if (pool.workSource !== undefined && pool.workSource !== null) {
+    if (typeof pool.workSource !== 'object' || Array.isArray(pool.workSource)) {
+      return 'pool.workSource must be an object';
+    }
+    if (pool.workspace === 'git-clean-base') {
+      return 'pool.workSource requires pool.workspace to be "input-copy" or "none" (it has no meaning for git-clean-base)';
+    }
+    if (!Array.isArray(pool.workSource.items) || pool.workSource.items.length === 0
+        || !pool.workSource.items.every((v) => typeof v === 'string' && v.trim())) {
+      return 'pool.workSource.items must be a non-empty array of non-empty strings';
+    }
+    if (typeof pool.workSource.outputDir !== 'string' || !pool.workSource.outputDir.trim()) {
+      return 'pool.workSource.outputDir must be a non-empty string (the completion signal)';
+    }
+    if (pool.workSource.inputDir !== undefined && pool.workSource.inputDir !== null
+        && (typeof pool.workSource.inputDir !== 'string' || !pool.workSource.inputDir.trim())) {
+      return 'pool.workSource.inputDir must be a non-empty string';
+    }
+  }
+  if (pool.teardown !== undefined && pool.teardown !== null) {
+    if (typeof pool.teardown !== 'object' || Array.isArray(pool.teardown)) {
+      return 'pool.teardown must be an object';
+    }
+    for (const key of ['idleTimeoutMs', 'maxRuntimeMs', 'retainLogsMs']) {
+      const v = pool.teardown[key];
+      if (v !== undefined && v !== null && !(Number.isFinite(v) && v > 0)) {
+        return `pool.teardown.${key} must be a positive number`;
+      }
+    }
+  }
+  // A pooled role's concurrency and reap tick both piggyback on the governing
+  // wipLimit (concept §12 Phase 1: "conflict protection = WIP count … only") —
+  // a pool with no wipLimit would spawn unboundedly and never be swept for
+  // release, since the reconcile tick that reaps a finished ticket's instance
+  // is itself gated on a configured limit.
+  if (pool.enabled === true && !wipLimitSet) {
+    return "pool.enabled requires the flow's own wipLimit to be set (it governs and reaps pooled instances)";
+  }
+  return null;
+}
+
 // Agent Pools — Phase 2 (#2247, epic #2251 §9): the Flow Supervisor's opt-in.
 // Team-level, sibling of `wipLimit`/`hillClimb` — round-tripped the same way.
 // `enabled: true` piggybacks on the SAME `wipLimit`/pooled-role prerequisites
@@ -705,69 +777,10 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
       const vo = validateOutcomes(r.outcomes, { labels: b.labels, agents: b.roles, roleId: r.id });
       if (!vo.ok) return { ok: false, error: `role ${r.id}: ${vo.error}` };
     }
-    // Agent instance pools (#2246): checked, not silently coerced — a typo'd
-    // `workspace`/`enabled` value should refuse the save rather than quietly
-    // materialise as an unpooled role (the same discipline `wipLimit`'s own
-    // "0 is refused, not tolerated" rule follows).
-    if (r.pool !== undefined && r.pool !== null) {
-      if (typeof r.pool !== 'object' || Array.isArray(r.pool)) {
-        return { ok: false, error: `role ${r.id}: pool must be an object` };
-      }
-      if (r.pool.enabled !== undefined && typeof r.pool.enabled !== 'boolean') {
-        return { ok: false, error: `role ${r.id}: pool.enabled must be a boolean` };
-      }
-      if (r.pool.maxInstances !== undefined && r.pool.maxInstances !== null
-          && !(Number.isInteger(r.pool.maxInstances) && r.pool.maxInstances >= 1)) {
-        return { ok: false, error: `role ${r.id}: pool.maxInstances must be a positive integer (omit it for no per-role cap)` };
-      }
-      if (r.pool.workspace !== undefined && !POOL_WORKSPACES.includes(r.pool.workspace)) {
-        return { ok: false, error: `role ${r.id}: pool.workspace must be one of ${POOL_WORKSPACES.join(', ')}` };
-      }
-      if (r.pool.baseBranch !== undefined && r.pool.baseBranch !== null && typeof r.pool.baseBranch !== 'string') {
-        return { ok: false, error: `role ${r.id}: pool.baseBranch must be a string` };
-      }
-      // Agent Pools — Phase 3 (#2248, concept §6): the recurring-analysis
-      // binding's work source. Refused on a malformed shape, not silently
-      // dropped — the same "typo'd value refuses the save" discipline as
-      // every other `pool.*` field above.
-      if (r.pool.workSource !== undefined && r.pool.workSource !== null) {
-        if (typeof r.pool.workSource !== 'object' || Array.isArray(r.pool.workSource)) {
-          return { ok: false, error: `role ${r.id}: pool.workSource must be an object` };
-        }
-        if (r.pool.workspace === 'git-clean-base') {
-          return { ok: false, error: `role ${r.id}: pool.workSource requires pool.workspace to be "input-copy" or "none" (it has no meaning for git-clean-base)` };
-        }
-        if (!Array.isArray(r.pool.workSource.items) || r.pool.workSource.items.length === 0
-            || !r.pool.workSource.items.every((v) => typeof v === 'string' && v.trim())) {
-          return { ok: false, error: `role ${r.id}: pool.workSource.items must be a non-empty array of non-empty strings` };
-        }
-        if (typeof r.pool.workSource.outputDir !== 'string' || !r.pool.workSource.outputDir.trim()) {
-          return { ok: false, error: `role ${r.id}: pool.workSource.outputDir must be a non-empty string (the completion signal)` };
-        }
-        if (r.pool.workSource.inputDir !== undefined && r.pool.workSource.inputDir !== null
-            && (typeof r.pool.workSource.inputDir !== 'string' || !r.pool.workSource.inputDir.trim())) {
-          return { ok: false, error: `role ${r.id}: pool.workSource.inputDir must be a non-empty string` };
-        }
-      }
-      if (r.pool.teardown !== undefined && r.pool.teardown !== null) {
-        if (typeof r.pool.teardown !== 'object' || Array.isArray(r.pool.teardown)) {
-          return { ok: false, error: `role ${r.id}: pool.teardown must be an object` };
-        }
-        for (const key of ['idleTimeoutMs', 'maxRuntimeMs', 'retainLogsMs']) {
-          const v = r.pool.teardown[key];
-          if (v !== undefined && v !== null && !(Number.isFinite(v) && v > 0)) {
-            return { ok: false, error: `role ${r.id}: pool.teardown.${key} must be a positive number` };
-          }
-        }
-      }
-      // A pooled role's concurrency and reap tick both piggyback on the team's
-      // wipLimit (concept §12 Phase 1: "conflict protection = WIP count … only")
-      // — a pool with no wipLimit would spawn unboundedly and never be swept for
-      // release, since the reconcile tick that reaps a finished ticket's
-      // instance is itself gated on a configured limit.
-      if (r.pool.enabled === true && (b.wipLimit === undefined || b.wipLimit === null)) {
-        return { ok: false, error: `role ${r.id}: pool.enabled requires the flow's own wipLimit to be set (it governs and reaps pooled instances)` };
-      }
+    // Agent instance pools (#2246) — shared shape check, see `poolConfigError`.
+    if (r.pool !== undefined) {
+      const perr = poolConfigError(r.pool, { wipLimitSet: b.wipLimit !== undefined && b.wipLimit !== null });
+      if (perr) return { ok: false, error: `role ${r.id}: ${perr}` };
     }
     if (r.channels !== undefined) {
       if (!Array.isArray(r.channels)) return { ok: false, error: `role ${r.id}: channels must be an array` };
@@ -2135,8 +2148,9 @@ module.exports = {
   emptyDraftBundle, roleKeyOf, VERSION, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb,
   // Admission control (#2114)
   normalizeWipLimit,
-  // Agent instance pools (#2246)
-  normalizePool, POOL_WORKSPACES,
+  // Agent instance pools (#2246); poolConfigError also backs the live
+  // per-member write route (PUT /api/agents/:memberId, #2270)
+  normalizePool, POOL_WORKSPACES, poolConfigError,
   // Agent Pools — Phase 2: the Flow Supervisor (#2247)
   normalizeAutoDispatch, AUTO_DISPATCH_SELECTIONS, AUTO_DISPATCH_CONTENTION_POLICIES,
   artifactKey, artifactHint, artifactIsNamed,

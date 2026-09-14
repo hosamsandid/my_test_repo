@@ -1026,6 +1026,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           mode="live"
           node={selectedNode}
           nodes={displayGraph?.nodes || []}
+          agents={agents || []}
           stages={displayGraph?.stages || []}
           lints={displayGraph?.lints || []}
           labels={displayGraph?.labels || []}

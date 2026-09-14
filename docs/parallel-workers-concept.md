@@ -660,7 +660,63 @@ mostly-blank rows.
 
 **Not built, and not owed by this ticket:** the per-role surface (`pool.enabled`
 picker in `NodeInspector`/agent Settings, A2.2's other bullet — A2.4 shipped
-only the live-write endpoint it would call, #2280); the live lane
-visualization (A2.2's "Live surface," Phase 5 #2250); enabling the
-`predicted-paths` radio (A5.1 — deferred by the issue's own design, tracked
-alongside Phase 5's board controls, not a gap this ticket left open).
+only the live-write endpoint it would call, #2280; the picker itself shipped
+next, see Amendment 6, #2271); the live lane visualization (A2.2's "Live
+surface," Phase 5 #2250); enabling the `predicted-paths` radio (A5.1 —
+deferred by the issue's own design, tracked alongside Phase 5's board
+controls, not a gap this ticket left open).
+
+---
+
+## Amendment 6 — what the per-role config UI (#2271) actually shipped
+
+Landed as a pure `admin-console/src/pages/process/scaling-view.js` (#651) +
+`ScalingSection.jsx`, ONE component embedded in both per-role hosts A2.2 names
+— the Flow editor's `NodeInspector` (a live team-member node's Details tab)
+and the agent's own Settings tab (`AgentEditForm.jsx`) — following the exact
+"one model, several surfaces" precedent Amendment 5 set for the team axis.
+No backend change: `pool` already round-tripped through `PUT
+/api/agents/:memberId` (#2270); this ticket is UI only. Three things sharpen
+A2.2/A2.4 as written.
+
+**A6.1 — the prerequisite is the PARENT TEAM's `wipLimit`, not the member's
+own.** Unlike the team-axis panel (Amendment 5, whose two prerequisites both
+read fields on the team object being edited), a team-member carries no
+`wipLimit` of its own (A2.4) — `scaling-view.js#scalingPrerequisite` takes
+`parentWipLimit` as a plain parameter the caller resolves from its own
+already-fetched data (the flat `/api/agents` list in `ProcessCanvas.jsx`, the
+already-fetched `parentTeam` config in `AgentEditForm.jsx`), mirroring the
+live route's own `fresh.parentTeamId` lookup (`api.js`, #2270) rather than a
+second fetch inside the shared component.
+
+**A6.2 — teardown timeouts are authored in minutes, persisted in
+milliseconds.** The mockup's own shorthand ("30m," "2h") reads as a duration
+unit, not a raw millisecond count — `scaling-view.js#parseMinutesInput`/
+`msToMinutesText` is the one place either direction of that conversion
+happens, so the three teardown fields (idle / hard / retain) round-trip
+through the same pair of pure functions rather than three hand-rolled
+conversions.
+
+**A6.3 — the read-only "at a glance" badge lives in `NodeInspector`'s
+existing top badge row, not a duplicate of the editable section.** A2.2 asks
+for a read-only "pooled role · up to N" badge "on the single-agent view, so
+an operator looking at one agent sees its scaling at a glance" — as a
+judgement call, this reads that badge as living somewhere OTHER than the
+editable Scaling section itself (echoing a value already visible there would
+be redundant), matching Amendment 5's own read-only-summary-in-a-different-
+place pattern for the team axis. `NodeInspector` already carries a top badge
+row (role / `per-invocation` / "DM entry point") visible regardless of which
+tab is active — the pooled badge (`scaling-view.js#poolBadgeText`) joins it
+there, so the "at a glance" framing holds even before Details is opened or
+scrolled to the Scaling section. The Settings-tab host does not repeat the
+badge, since its own Scaling section (with the same checkbox/maxInstances
+state) is right there.
+
+**Not built, and not owed by this ticket:** the live lane visualization
+(A2.2's "Live surface," Phase 5 #2250); `pool.workSource` authoring (Amendment
+3's own "not owed" list, unchanged); a draft-mode (pre-materialise) editor for
+`pool` — the live `PUT /api/agents/:memberId` route (#2270) this ticket writes
+through only accepts a materialised team-member, so the Scaling section is
+live-only, gated the same way the route itself is (`node.role ===
+'team-member'`); a bundle round-trip already carries the field with no UI
+needed on that path.

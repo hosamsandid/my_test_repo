@@ -49,6 +49,37 @@ export function buildRows(skills, selected) {
   return rows;
 }
 
+// The prose behind a row's expand affordance (#2269 AC3) — the same facts the
+// chips already signal (shadows-global, version, drift, unknown), spelled out
+// in full sentences rather than only reachable by hovering a chip's `title`.
+// Returns [] when a row has nothing more to say than its chips already do.
+export function rowDetailLines(row) {
+  if (!row) return [];
+  if (row.unknown) {
+    return [
+      'This granted skill matches no skill in the current pool. It is kept and '
+      + 'flagged, not dropped — uncheck it to remove it from the grant.',
+    ];
+  }
+  const lines = [];
+  if (row.shadowsGlobal) {
+    lines.push(
+      'A team skill of this name shadows the global skill — team-first resolution '
+      + 'means the team version is the one granted.',
+    );
+  }
+  if (row.version != null) {
+    lines.push(`Manifest version ${row.version}.`);
+  }
+  if (row.drift) {
+    lines.push(
+      `This copy has drifted from its source skill (${row.drift}) — use the drift `
+      + 'chip above to open the Lineage view.',
+    );
+  }
+  return lines;
+}
+
 // Deep-link a drifted row to its Lineage/Drift view on the Skills page. Mirrors
 // the SkillsRegistry deep-link contract (#774 AC5, extended with `tab` in #1143):
 // `?skill=<name>&tier=<pool|team>&team=<id>&tab=lineage`. Team rows carry their

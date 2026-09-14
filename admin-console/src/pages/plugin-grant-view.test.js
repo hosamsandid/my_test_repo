@@ -9,6 +9,7 @@ import {
   pluginGrantRow,
   normalizeGrantEntries,
   effectiveGrantFor,
+  hasExpandableDetail,
 } from './plugin-grant-view.js';
 
 const TEAM_ONLY = { id: 'p', name: 'P', scopes: ['team'], platforms: ['any'] };
@@ -134,4 +135,33 @@ test('a standalone agent carries its own grant, ignoring any team', () => {
   assert.deepEqual(effectiveGrantFor(agent, { plugins: [{ id: 'y' }] }), [
     { id: 'x', scopeGranularity: 'team' },
   ]);
+});
+
+// ── expand affordance (#2269 AC3) ────────────────────────────────────────────
+
+test('hasExpandableDetail: nothing to say when ungranted, matched platform, no description', () => {
+  const row = pluginGrantRow(TEAM_ONLY, null, { stackRuntime: 'podman' });
+  assert.equal(hasExpandableDetail(row), false);
+});
+
+test('hasExpandableDetail: a description alone is expandable', () => {
+  const row = pluginGrantRow(BOTH, null, { stackRuntime: 'podman' });
+  assert.equal(hasExpandableDetail(row), true);
+});
+
+test('hasExpandableDetail: a platform mismatch alone is expandable', () => {
+  const podmanOnlyNoDesc = { id: 'r', name: 'R', scopes: ['team'], platforms: ['podman'] };
+  const row = pluginGrantRow(podmanOnlyNoDesc, null, { stackRuntime: 'kubernetes' });
+  assert.equal(row.description, '');
+  assert.equal(hasExpandableDetail(row), true);
+});
+
+test('hasExpandableDetail: a granted row is expandable (Scope/quota controls)', () => {
+  const row = pluginGrantRow(TEAM_ONLY, { id: 'p', scopeGranularity: 'team' }, { stackRuntime: 'podman' });
+  assert.equal(hasExpandableDetail(row), true);
+});
+
+test('hasExpandableDetail tolerates junk', () => {
+  assert.equal(hasExpandableDetail(null), false);
+  assert.equal(hasExpandableDetail(undefined), false);
 });

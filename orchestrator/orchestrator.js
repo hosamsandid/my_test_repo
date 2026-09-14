@@ -3733,6 +3733,12 @@ function isUsableRepoCache(cacheDir) {
 // (concurrency governed by the team's wipLimit, so a burst is bounded) into
 // one real `fetch`; `reset --hard` is safe here specifically because the
 // cache directory is never itself a working agent (nothing commits into it).
+//
+// NOTE: this coalescing is only race-free because the whole refresh is
+// synchronous (`execFileSync`) — the timestamp is stamped after the blocking
+// fetch/reset completes, so a concurrent caller can never observe the map
+// mid-refresh. An async refactor here would reopen that race and needs a real
+// per-repo lock instead (the mechanism §4 D2 of the concept describes).
 const POOL_BASE_REFRESH_TTL_MS = Number(process.env.AEE_POOL_BASE_REFRESH_TTL_MS) || 30_000;
 const _poolBaseRefreshedAt = new Map(); // cacheDir → ms epoch of its last refresh
 

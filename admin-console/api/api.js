@@ -17350,6 +17350,18 @@ app.get('/api/matrix/agents', (req, res) => {
       environmentName: env?.name || cfg.environmentId || null,
       parentTeamId: cfg.parentTeamId || null,
       parentOrchestratorId: cfg.parentOrchestratorId || null,
+      // Pool instance markers (#2297): present only on an ephemeral
+      // `<team>-<role>-i<item>` spawned from a pooled role — `poolOf` names the
+      // role template's own agent id, which is what lets the rail
+      // (`agent-list-model.js` `buildGroups`) nest the instance under it
+      // instead of listing it as a flat sibling. Absent on every other row, same
+      // shape convention as `canManageTeam` above.
+      ...(cfg.poolInstance ? {
+        poolInstance: true,
+        poolOf: cfg.poolOf || null,
+        poolItem: cfg.poolItem != null ? cfg.poolItem : null,
+        poolSpawnedAt: cfg.poolSpawnedAt || null,
+      } : {}),
     });
   }
   res.json(out);

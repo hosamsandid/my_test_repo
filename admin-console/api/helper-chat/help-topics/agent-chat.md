@@ -216,6 +216,17 @@ different marks. If the team itself is disabled, **Materialize** is offered but
 inert with *enable the team first* — a member cannot be started while its team
 is off.
 
+**A pooled role's live instances.** A role that spawns ephemeral
+`<team>-<role>-i<item>` workers (an Agent Pool, configured on the Flows editor)
+shows them nested directly under that role, in a collapsible **Instances (N)**
+sub-list — instead of scattering them through the team as flat, indistinguishable
+rows. It expands/collapses and remembers your choice the same way a team group
+does, and stays empty (no sub-list at all) while the role has nothing live. Each
+instance row is an ordinary agent: its status dot follows the same activity poll,
+and clicking it opens its own chat/session log exactly like any other member —
+they are just as ephemeral as the role that spawned them, so a row can disappear
+once its instance is torn down.
+
 **Adding an agent** is done from the page header, not the list. **New Agent**
 (top right) hands over to the create launcher, where *Configure an agent
 manually* — under **Advanced options** — opens the direct form; **Import Agent**

@@ -419,17 +419,25 @@ UI redesign:
   (Amendment 1 A1.4 is updated by Amendment 4).
 
 **A2.4 — Backend prerequisite: a live `pool` write, at parity with
-`wipLimit`/`autoDispatch`.** `PUT /api/agents/:teamId` already accepts live
-`wipLimit`/`autoDispatch` (team-agent only), but there is **no** live write for
-`pool` on a member — it can only be set at bundle materialise. The per-role
-surface needs `PUT /api/agents/:memberId` to accept `pool` (member/role config
-only), reusing `normalizePoolConfig` and the same discipline the bundle validator
-applies: closed `workspace` enum, `maxInstances` a positive int or `null`, and
-`pool.enabled` requiring the parent team's `wipLimit` to be set (else the pool
-would spawn unbounded and never be reaped). It is an **additive** effect — no
-respawn of the template (instances spawn on the next dispatch); clearing it
-(`null`) reverts the role to a persistent singleton. Draft round-trip already
-carries `pool`, so this closes only the *live-team* editing gap.
+`wipLimit`/`autoDispatch`. Shipped (#2280).** `PUT /api/agents/:teamId` already
+accepted live `wipLimit`/`autoDispatch` (team-agent only); `PUT
+/api/agents/:memberId` now accepts `pool` too (member/role config only, gated
+to `fresh.role === 'team-member'`). Rather than reaching into
+`orchestrator/agent-pool.js`'s `normalizePoolConfig` directly, the route follows
+the same hand-synced-twin precedent `wipLimit`/`autoDispatch` already set:
+it reuses `process-template.js`'s own `normalizePool`, and the bundle
+validator's inline shape check was extracted into a shared, exported
+`poolConfigError(pool, { wipLimitSet })` so the bundle path and the live route
+run the identical check rather than a second hand-synced copy. Same discipline
+as before: closed `workspace` enum, `maxInstances` a positive int or `null`,
+and `pool.enabled` requiring the parent team's `wipLimit` to be set (else the
+pool would spawn unbounded and never be reaped) — looked up via
+`fresh.parentTeamId`, since the member itself carries no `wipLimit`. It is an
+**additive** effect — no respawn of the template (instances spawn on the next
+dispatch); clearing it (`null`) reverts the role to a persistent singleton.
+Draft round-trip already carried `pool`, so this closed the *live-team*
+editing gap; the per-role config-UI panel itself (the mockup below) remains
+unbuilt.
 
 **A2.5 — Out of scope for this UI (kept for the named later phases).** Board
 runtime controls (pause / drain / force-dispatch, Phase 5 #2250); building the

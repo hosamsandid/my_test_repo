@@ -88,6 +88,15 @@ test('#2067: a repository change never claims a restart the conversation did not
   assert.equal(notice, restartNoticeText({ kind: 'agent-repositories', respawned: true }));
 });
 
+test('#2271 code-review finding: a Scaling save never claims a context-folder change', () => {
+  const notice = restartNoticeText({ kind: 'pool' });
+  assert.doesNotMatch(notice, /context folder|re-provisioned|fresh session/i);
+  assert.match(notice, /Scaling settings saved/);
+  assert.match(notice, /conversation above is unaffected/);
+  // `respawned` is meaningless on this path and must not flip the wording.
+  assert.equal(notice, restartNoticeText({ kind: 'pool', respawned: true }));
+});
+
 test('the unsaved banner only speaks when there is something unsaved', () => {
   assert.equal(unsavedDraftNotice(false), '');
   assert.match(unsavedDraftNotice(true), /Unsaved changes/);

@@ -1079,11 +1079,10 @@ function TeamConfigSurface({ team, onAgentConfigChanged }) {
       minWidth: 0,
       height: '100%',
       display: 'flex',
-      justifyContent: 'center',
       overflow: 'hidden',
       background: 'var(--eb-bg-app)',
     }}>
-      <div style={{ width: '100%', maxWidth: 900, height: '100%', minWidth: 0 }}>
+      <div style={{ width: '100%', height: '100%', minWidth: 0 }}>
         {canManage ? (
           <AgentSettingsPanel
             agentId={team.id}

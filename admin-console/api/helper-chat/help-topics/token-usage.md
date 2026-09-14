@@ -126,8 +126,9 @@ Follow-up PRs that close the same issue fall into the same chain automatically,
 so a BA → Developer → Reviewer → Reworker sequence shows up as one item with no
 per-flow configuration.
 
-The table lists one row per chain with its repo, the roles that worked on it,
-its run count and its token totals. Selecting a row opens the detail below it,
+The table lists one row per chain with its repo, when it started (the earliest
+run in the chain), the roles that worked on it, its run count and its token
+totals. Selecting a row opens the detail below it,
 listing the individual runs; **Open session** on a run jumps straight to that
 run in Agent Chat, which is the fastest way to see what an expensive run was
 actually doing.

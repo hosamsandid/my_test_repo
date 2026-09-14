@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router';
 import { useApi } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import DataTable from '../components/DataTable';
+import WhenCell from '../components/WhenCell';
 import InfoTip from '../components/InfoTip';
 import PageHelpButton from '../components/PageHelpButton';
 import { TOKEN_USAGE_HELP_SECTIONS } from './token-usage-help-sections.js';
@@ -539,6 +540,7 @@ function WorkItemsTab({ team }) {
       ...w.issues.map((n) => `#${n}`),
       ...w.prs.map((n) => `PR #${n}`),
     ].join(' · ') || w.id,
+    startedAt: w.startedAt || null,
     repo: w.repo || '—',
     runs: w.runs || 0,
     total: w.tokens?.total || 0,
@@ -554,6 +556,7 @@ function WorkItemsTab({ team }) {
     { key: 'chain', label: 'Work item', render: (v, r) => (
       <span>{v}{r.flags ? <span style={{ marginLeft: 6 }}>{r.flags.split(' ').map((f) => <Chip key={f} color="var(--eb-status-warning)">{f}</Chip>)}</span> : null}</span>
     ) },
+    { key: 'startedAt', label: 'Started', render: (v) => <WhenCell iso={v} /> },
     { key: 'repo', label: 'Repo' },
     { key: 'roles', label: 'Roles' },
     { key: 'runs', label: 'Runs', align: 'right', render: (v) => formatInt(v) },

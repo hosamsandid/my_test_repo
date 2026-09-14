@@ -53,6 +53,7 @@ import {
 import { buildInitialForm, buildEditSubmit, hasOwnSkills } from './agent-edit-form-model.js';
 import { TEAM_CONFIG_TABS, ENV_TAB_IDS, resolveTeamConfigTab } from './team-config-tabs-view.js';
 import { parallelismSummary } from '../process/parallelism-view.js';
+import ScalingSection from '../process/ScalingSection';
 
 // #2236: which help chapter each tab's "?" opens, and the tab's own label for
 // the button's title. General/Skills/Plugins point at the same field-by-field
@@ -623,6 +624,22 @@ export default function AgentEditForm({
             <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
               {agent.parentTeamId || '—'}
             </div>
+          </div>
+
+          {/* #2271, Amendment 2 A2.2 of `docs/parallel-workers-concept.md` —
+              the role-axis config surface for agent pools, the agent's own
+              Settings-tab half of the "one model, several surfaces"
+              precedent #2272 set for the team axis. Applies immediately
+              through its own Save (like PluginGrantSection/ContextMountControl
+              above), not batched into this form's own Save button. */}
+          <div style={{ paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+            <div style={labelStyle}>Scaling</div>
+            <ScalingSection
+              agentId={agent.id}
+              pool={agent.pool}
+              parentWipLimit={parentTeam?.wipLimit}
+              onChanged={onImmediateApply ? (() => onImmediateApply({ kind: 'pool' })) : undefined}
+            />
           </div>
 
           <InheritOrCustom

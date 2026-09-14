@@ -1,10 +1,10 @@
 # Agent instance pools — ephemeral, self-cleaning workers over a stream of work items
 
 > Status: **design of record; Phases 1–4 shipped** (see Amendments 1, 3 and 4);
-> **Phase 5 partially shipped** — team-axis config UI (#2272, Amendment 5) and
-> board controls (#2250, Amendment 6); a headless runtime (D7), provider-aware
-> admission (D9), and the remaining Amendment 2 surfaces (per-role config UI,
-> live lane visualization) are still undesigned/unbuilt.
+> **Phase 5 partially shipped** — team-axis config UI (#2272, Amendment 5),
+> board controls (#2250, Amendment 6) and per-role config UI (#2271, Amendment
+> 7); a headless runtime (D7), provider-aware admission (D9), and Amendment
+> 2's remaining "Live surface" lane visualization are still undesigned/unbuilt.
 > This document scopes the discussion in issue #2251 (the Agent Pools epic). Its
 > SDLC binding builds directly on the shipped Flow Control machinery
 > (`docs/flow-control-concept.md`): admission control (#2114), the ticket
@@ -289,12 +289,13 @@ authors both without hand-editing a bundle, and for the one live-write endpoint
   default — epic-serialization (Phase 2) remains the always-on baseline this
   layers on top of.
 - **Phase 5 — Polish. Partially shipped (#2250, Amendment 6; #2272, Amendment
-  5).** Board controls (pause / drain / force-dispatch) and the team-axis
-  config UI (the Parallelism panel) shipped; per-role caps and reviewer pools
-  were already true before this phase started (Amendment 6's own audit).
-  The per-role config-UI panel and the live lane visualization (Amendment 2's
-  remaining surfaces), plus optional headless runtime (D7) and provider-aware
-  admission (D9), remain undesigned/unbuilt.
+  5; #2271, Amendment 7).** Board controls (pause / drain / force-dispatch),
+  the team-axis config UI (the Parallelism panel) and the per-role config UI
+  (the Scaling section) shipped; per-role caps and reviewer pools were
+  already true before this phase started (Amendment 6's own audit). The live
+  lane visualization (Amendment 2's remaining surface), plus optional
+  headless runtime (D7) and provider-aware admission (D9), remain
+  undesigned/unbuilt.
 
 ---
 
@@ -362,7 +363,7 @@ and any board control (pause/drain/force-dispatch) — all later phases per §12
 
 ---
 
-## Amendment 2 — the configuration & visualization UX (design; team/flow surface shipped, see Amendment 5; board controls shipped, see Amendment 6)
+## Amendment 2 — the configuration & visualization UX (design; team/flow surface shipped, see Amendment 5; board controls shipped, see Amendment 6; per-role surface shipped, see Amendment 7)
 
 Phases 1–2 shipped the *mechanism* but left it **headless**: until #2272 the only
 way to turn on pooling, a WIP limit or the supervisor was a hand-authored
@@ -396,12 +397,13 @@ where its object lives.
 
 **A2.2 — Three surfaces, one model.**
 
-- **Per-role (agent) surface** — the Flow editor's `NodeInspector` for a role
-  node, and the agent's own **Settings** tab (Agent Chat → Settings). Controls:
-  "This role auto-scales" (`pool.enabled`), max parallel instances
-  (`maxInstances`), workspace binding (`git-clean-base | input-copy | none`),
-  teardown timeouts. A read-only "pooled role · up to N" badge on the single-agent
-  view so an operator looking at one agent sees its scaling at a glance.
+- **Per-role (agent) surface — shipped (#2271, Amendment 7).** The Flow editor's
+  `NodeInspector` for a role node, and the agent's own **Settings** tab (Agent
+  Chat → Settings). Controls: "This role auto-scales" (`pool.enabled`), max
+  parallel instances (`maxInstances`), workspace binding (`git-clean-base |
+  input-copy | none`), teardown timeouts. A read-only "pooled role · up to N"
+  badge on the single-agent view so an operator looking at one agent sees its
+  scaling at a glance.
 - **Team / flow surface — shipped (#2272, Amendment 5).** A **Parallelism**
   panel in the Flow editor (team scope) + a compact read-only summary on the
   team view. Controls: `wipLimit`, `autoDispatch.enabled` (the Flow
@@ -673,10 +675,11 @@ mostly-blank rows.
 
 **Not built, and not owed by this ticket:** the per-role surface (`pool.enabled`
 picker in `NodeInspector`/agent Settings, A2.2's other bullet — A2.4 shipped
-only the live-write endpoint it would call, #2280); the live lane
-visualization (A2.2's "Live surface," Phase 5 #2250); enabling the
-`predicted-paths` radio (A5.1 — deferred by the issue's own design, tracked
-alongside Phase 5's board controls, not a gap this ticket left open).
+only the live-write endpoint it would call, #2280; the picker itself shipped
+next, see Amendment 7, #2271); the live lane visualization (A2.2's "Live
+surface," Phase 5 #2250); enabling the `predicted-paths` radio (A5.1 —
+deferred by the issue's own design, tracked alongside Phase 5's board
+controls, not a gap this ticket left open).
 
 ---
 
@@ -805,3 +808,58 @@ audit-log entry beyond the existing mutation-audit middleware + a
 `console.log` (pause/resume/drain and force-dispatch are visible on the board
 itself and in the server log; a dedicated GitHub Event Log row was judged not
 worth a new event-log call site for an internal-only toggle).
+
+---
+
+## Amendment 7 — what the per-role config UI (#2271) actually shipped
+
+Landed as a pure `admin-console/src/pages/process/scaling-view.js` (#651) +
+`ScalingSection.jsx`, ONE component embedded in both per-role hosts A2.2 names
+— the Flow editor's `NodeInspector` (a live team-member node's Details tab)
+and the agent's own Settings tab (`AgentEditForm.jsx`) — following the exact
+"one model, several surfaces" precedent Amendment 5 set for the team axis.
+No backend change: `pool` already round-tripped through `PUT
+/api/agents/:memberId` (#2270); this ticket is UI only. Three things sharpen
+A2.2/A2.4 as written.
+
+**A7.1 — the prerequisite is the PARENT TEAM's `wipLimit`, not the member's
+own.** Unlike the team-axis panel (Amendment 5, whose two prerequisites both
+read fields on the team object being edited), a team-member carries no
+`wipLimit` of its own (A2.4) — `scaling-view.js#scalingPrerequisite` takes
+`parentWipLimit` as a plain parameter the caller resolves from its own
+already-fetched data (the flat `/api/agents` list in `ProcessCanvas.jsx`, the
+already-fetched `parentTeam` config in `AgentEditForm.jsx`), mirroring the
+live route's own `fresh.parentTeamId` lookup (`api.js`, #2270) rather than a
+second fetch inside the shared component.
+
+**A7.2 — teardown timeouts are authored in minutes, persisted in
+milliseconds.** The mockup's own shorthand ("30m," "2h") reads as a duration
+unit, not a raw millisecond count — `scaling-view.js#parseMinutesInput`/
+`msToMinutesText` is the one place either direction of that conversion
+happens, so the three teardown fields (idle / hard / retain) round-trip
+through the same pair of pure functions rather than three hand-rolled
+conversions.
+
+**A7.3 — the read-only "at a glance" badge lives in `NodeInspector`'s
+existing top badge row, not a duplicate of the editable section.** A2.2 asks
+for a read-only "pooled role · up to N" badge "on the single-agent view, so
+an operator looking at one agent sees its scaling at a glance" — as a
+judgement call, this reads that badge as living somewhere OTHER than the
+editable Scaling section itself (echoing a value already visible there would
+be redundant), matching Amendment 5's own read-only-summary-in-a-different-
+place pattern for the team axis. `NodeInspector` already carries a top badge
+row (role / `per-invocation` / "DM entry point") visible regardless of which
+tab is active — the pooled badge (`scaling-view.js#poolBadgeText`) joins it
+there, so the "at a glance" framing holds even before Details is opened or
+scrolled to the Scaling section. The Settings-tab host does not repeat the
+badge, since its own Scaling section (with the same checkbox/maxInstances
+state) is right there.
+
+**Not built, and not owed by this ticket:** the live lane visualization
+(A2.2's "Live surface," Phase 5 #2250); `pool.workSource` authoring (Amendment
+3's own "not owed" list, unchanged); a draft-mode (pre-materialise) editor for
+`pool` — the live `PUT /api/agents/:memberId` route (#2270) this ticket writes
+through only accepts a materialised team-member, so the Scaling section is
+live-only, gated the same way the route itself is (`node.role ===
+'team-member'`); a bundle round-trip already carries the field with no UI
+needed on that path.

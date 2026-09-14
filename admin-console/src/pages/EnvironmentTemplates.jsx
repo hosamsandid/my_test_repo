@@ -15,6 +15,7 @@ import PageHelpButton from '../components/PageHelpButton';
 import RepositoryCard from '../components/RepositoryCard';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import { describeWorkingEnvSubmitState } from './working-env-submit-state.js';
+import { providerOptionLabel } from './provider-option-view.js';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning, availableToolchains, versionSourceLine } from './toolchain-select-view.js';
 import { initialMcpRows, mcpSubmitValue, mcpRowHint, mcpChangeNotice, mcpServerLabel } from './working-env-mcp-view.js';
 import { ENVIRONMENT_TEMPLATES_HELP_SECTIONS } from './environment-templates-help-sections.js';
@@ -607,7 +608,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
             <option value="">— inherit from .env —</option>
             {llmEndpoints.map(ep => (
               <option key={ep.id} value={ep.id}>
-                {ep.name} ({ep.baseUrl})
+                {providerOptionLabel(ep)}
               </option>
             ))}
           </select>

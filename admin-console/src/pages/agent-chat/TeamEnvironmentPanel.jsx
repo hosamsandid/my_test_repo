@@ -11,6 +11,7 @@ import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning } from '.
 import { mcpRowHint, mcpChangeNotice, mcpServerLabel } from '../working-env-mcp-view.js';
 import { classifyRepositoryChanges, hasRepositoryChanges } from '../working-env-repo-diff.js';
 import { describeWorkingEnvSubmitState } from '../working-env-submit-state.js';
+import { providerOptionLabel } from '../provider-option-view.js';
 import { initialTeamEnvForm, teamEnvSubmitBody } from './team-environment-view.js';
 
 /**
@@ -356,7 +357,7 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
             <select value={form.llmEndpointId} onChange={e => updateEndpoint(e.target.value)} style={inputStyle}>
               <option value="">— inherit from .env —</option>
               {llmEndpoints.map(ep => (
-                <option key={ep.id} value={ep.id}>{ep.name} ({ep.baseUrl})</option>
+                <option key={ep.id} value={ep.id}>{providerOptionLabel(ep)}</option>
               ))}
             </select>
           </div>

@@ -50,7 +50,9 @@ import { effectiveGrantFor } from '../plugin-grant-view.js';
 import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
 } from './form-kit.jsx';
-import { buildInitialForm, buildEditSubmit, hasOwnSkills } from './agent-edit-form-model.js';
+import {
+  buildInitialForm, buildEditSubmit, hasOwnSkills, poolSectionError,
+} from './agent-edit-form-model.js';
 import { TEAM_CONFIG_TABS, ENV_TAB_IDS, resolveTeamConfigTab } from './team-config-tabs-view.js';
 import { parallelismSummary } from '../process/parallelism-view.js';
 import ScalingSection from '../process/ScalingSection';
@@ -408,6 +410,10 @@ export default function AgentEditForm({
     return next;
   });
   const canSubmit = !!form.displayName;
+  // #2295 AC11: Scaling's own validation (mirrors ScalingSection's old
+  // save()) now blocks this form's ONE Save button rather than a second one
+  // of its own — set on click, cleared on the next edit anywhere in the form.
+  const [scalingError, setScalingError] = useState(null);
 
   // Skills live on the agent construct itself for non-member roles.
   const ownSkills = hasOwnSkills(agent.role);
@@ -629,16 +635,16 @@ export default function AgentEditForm({
           {/* #2271, Amendment 2 A2.2 of `docs/parallel-workers-concept.md` —
               the role-axis config surface for agent pools, the agent's own
               Settings-tab half of the "one model, several surfaces"
-              precedent #2272 set for the team axis. Applies immediately
-              through its own Save (like PluginGrantSection/ContextMountControl
-              above), not batched into this form's own Save button. */}
+              precedent #2272 set for the team axis. #2295 AC11/AC12: folded
+              into this form's own single Save (no more second Save button —
+              ScalingSection is now a controlled draft). */}
           <div style={{ paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
             <div style={labelStyle}>Scaling</div>
             <ScalingSection
-              agentId={agent.id}
-              pool={agent.pool}
+              draft={form.poolDraft}
+              onChange={v => update('poolDraft', v)}
               parentWipLimit={parentTeam?.wipLimit}
-              onChanged={onImmediateApply ? (() => onImmediateApply({ kind: 'pool' })) : undefined}
+              error={scalingError}
             />
           </div>
 
@@ -717,11 +723,27 @@ export default function AgentEditForm({
       )}
 
       {showBatchedSave && (
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-          <PrimaryBtn onClick={() => onSave(buildEditSubmit(agent, form))} saving={saving} disabled={!canSubmit}>
-            {saving ? 'Saving…' : 'Save Changes'}
-          </PrimaryBtn>
-          {onCancel && <SecondaryBtn onClick={onCancel}>{cancelLabel}</SecondaryBtn>}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+          {scalingError && (
+            <div role="alert" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
+              Scaling: {scalingError}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+            <PrimaryBtn
+              onClick={() => {
+                const err = poolSectionError(agent, form, { parentWipLimit: parentTeam?.wipLimit });
+                if (err) { setScalingError(err); return; }
+                setScalingError(null);
+                onSave(buildEditSubmit(agent, form, { parentWipLimit: parentTeam?.wipLimit }));
+              }}
+              saving={saving}
+              disabled={!canSubmit}
+            >
+              {saving ? 'Saving…' : 'Save Changes'}
+            </PrimaryBtn>
+            {onCancel && <SecondaryBtn onClick={onCancel}>{cancelLabel}</SecondaryBtn>}
+          </div>
         </div>
       )}
       </div>

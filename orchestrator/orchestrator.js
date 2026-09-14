@@ -134,7 +134,7 @@ const { buildTar } = require("./tar-single");
 // In-container exec seam (context browse/write): libpod exec on podman,
 // pods/exec on kubernetes — selected the same way as container-runtime.
 const { execInAgentContainer, putArchiveToAgentContainer } = require("./container-exec-runtime");
-const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
+const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit, planTeamSkillsUpdate } = require("./skill-grants");
 // Plugin system (#1516). The grant is the sibling of the skill grant — it lives
 // on the agent construct, never on the environment — and (de)activation is the
 // same additive live file sync, no respawn (#1547).
@@ -10678,6 +10678,46 @@ class Orchestrator {
     return { teamId, skillName: name, active, members: results };
   }
 
+  // Bulk-update a team's active skill set (#2286, the Skills-tab "Save
+  // Changes" button) and eagerly push every add/remove to already-materialized
+  // members — mirrors updateTeamPrompt's diff-and-push shape for the analogous
+  // systemPromptTemplate field. Deliberately does NOT re-implement the fan-out:
+  // it diffs old vs new list, then re-runs the existing per-skill
+  // setTeamSkillActive for each changed name, so the propagation gets exactly
+  // the same guarantees (CLAUDE.md rebuild, isolated-volume mirroring, no
+  // respawn, skillsOverride members skipped) as the Knowledge page's per-skill
+  // toggle — one sync mechanism, not two. A save whose effective set doesn't
+  // change is a no-op (AC8): no config write, no per-member sync, no event.
+  async updateTeamSkills(teamId, skills) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+    if (teamCfg.role !== "team") {
+      throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
+    }
+    const plan = planTeamSkillsUpdate(teamCfg.skills, skills);
+    if (!plan.changed) {
+      return { teamId, skills: plan.skills, added: [], removed: [], members: {} };
+    }
+
+    teamCfg.skills = plan.skills;
+    saveAgentConfig(teamId, teamCfg);
+    this.agentConfigs.set(teamId, { config: teamCfg });
+
+    const members = {};
+    for (const name of plan.added) {
+      const res = await this.setTeamSkillActive(teamId, name, { active: true });
+      members[name] = res.members;
+    }
+    for (const name of plan.removed) {
+      const res = await this.setTeamSkillActive(teamId, name, { active: false });
+      members[name] = res.members;
+    }
+    console.log(
+      `[Orchestrator] Team ${teamId} skills bulk-updated: +${plan.added.length} -${plan.removed.length}`
+    );
+    return { teamId, skills: plan.skills, added: plan.added, removed: plan.removed, members };
+  }
+
   // Refresh an ALREADY-ACTIVE team skill's files on every member that currently
   // carries it (#553, AC10/E1): re-copy the (re-synthesised) SKILL.md into each
   // seeded member's workspace and rebuild its CLAUDE.md, WITHOUT touching the
@@ -17263,6 +17303,45 @@ async function main() {
           console.error(`[Orchestrator] setTeamSkillActive error for ${teamId}: ${err.message}`);
           const status = /not found/i.test(err.message) ? 404
             : /not a team|required/i.test(err.message) ? 400
+            : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // POST /internal/teams/:teamId/skills — bulk set the team's active skill
+    // list (#2286, the Skills-tab "Save Changes" button) and eagerly push
+    // every add/remove to already-materialized members in the same call, the
+    // way /prompt does for systemPromptTemplate. Body: { skills: string[] }.
+    const teamSkillsBulkMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/skills$/);
+    if (teamSkillsBulkMatch) {
+      const teamId = decodeURIComponent(teamSkillsBulkMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body || '{}'); }
+        catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Invalid JSON body: ${err.message}` }));
+          return;
+        }
+        if (!Array.isArray(payload?.skills)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'skills (array) required' }));
+          return;
+        }
+        try {
+          const result = await orchestrator.updateTeamSkills(teamId, payload.skills);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] updateTeamSkills error for ${teamId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404
+            : /not a team/i.test(err.message) ? 400
             : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));

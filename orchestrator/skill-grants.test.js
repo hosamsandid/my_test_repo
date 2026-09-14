@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 
-const { effectiveSkills, hasSkillGrant, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
+const { effectiveSkills, hasSkillGrant, migrateSkillGrant, planSkillSync, planAgentGrantEdit, planTeamSkillsUpdate } = require("./skill-grants");
 
 // ---- effectiveSkills --------------------------------------------------------
 
@@ -216,5 +216,80 @@ test("planAgentGrantEdit: trims the skill name", () => {
   assert.deepEqual(
     planAgentGrantEdit({ role: "agent", skills: [] }, "  spaced  ", true),
     { field: "skills", list: ["spaced"] },
+  );
+});
+
+// ---- planTeamSkillsUpdate (#2286 bulk Skills-tab save) ----------------------
+
+test("planTeamSkillsUpdate: adding one skill on top of an existing set", () => {
+  assert.deepEqual(
+    planTeamSkillsUpdate(["a"], ["a", "b"]),
+    { skills: ["a", "b"], added: ["b"], removed: [], changed: true },
+  );
+});
+
+test("planTeamSkillsUpdate: removing one skill", () => {
+  assert.deepEqual(
+    planTeamSkillsUpdate(["a", "b"], ["a"]),
+    { skills: ["a"], added: [], removed: ["b"], changed: true },
+  );
+});
+
+test("planTeamSkillsUpdate: simultaneous add and remove", () => {
+  assert.deepEqual(
+    planTeamSkillsUpdate(["a", "b"], ["b", "c"]),
+    { skills: ["b", "c"], added: ["c"], removed: ["a"], changed: true },
+  );
+});
+
+test("planTeamSkillsUpdate: an identical set (same members, any order) is a no-op (AC8)", () => {
+  assert.deepEqual(
+    planTeamSkillsUpdate(["a", "b"], ["a", "b"]),
+    { skills: ["a", "b"], added: [], removed: [], changed: false },
+  );
+  // Re-submitting in a different order is still the same active SET.
+  assert.equal(planTeamSkillsUpdate(["a", "b"], ["b", "a"]).changed, false);
+});
+
+test("planTeamSkillsUpdate: from empty and to empty", () => {
+  assert.deepEqual(
+    planTeamSkillsUpdate([], ["a"]),
+    { skills: ["a"], added: ["a"], removed: [], changed: true },
+  );
+  assert.deepEqual(
+    planTeamSkillsUpdate(["a"], []),
+    { skills: [], added: [], removed: ["a"], changed: true },
+  );
+  assert.deepEqual(
+    planTeamSkillsUpdate([], []),
+    { skills: [], added: [], removed: [], changed: false },
+  );
+});
+
+test("planTeamSkillsUpdate: trims and dedupes the requested list, order-preserving", () => {
+  assert.deepEqual(
+    planTeamSkillsUpdate([], ["  a  ", "b", "a", "b", "  c"]),
+    { skills: ["a", "b", "c"], added: ["a", "b", "c"], removed: [], changed: true },
+  );
+});
+
+test("planTeamSkillsUpdate: non-string/blank entries in the requested list are dropped", () => {
+  assert.deepEqual(
+    planTeamSkillsUpdate(["a"], ["a", "", "   ", null, 42, undefined, "b"]),
+    { skills: ["a", "b"], added: ["b"], removed: [], changed: true },
+  );
+});
+
+test("planTeamSkillsUpdate: a non-array current list is treated as empty", () => {
+  assert.deepEqual(
+    planTeamSkillsUpdate(undefined, ["a"]),
+    { skills: ["a"], added: ["a"], removed: [], changed: true },
+  );
+});
+
+test("planTeamSkillsUpdate: a non-array requested list clears everything", () => {
+  assert.deepEqual(
+    planTeamSkillsUpdate(["a", "b"], null),
+    { skills: [], added: [], removed: ["a", "b"], changed: true },
   );
 });

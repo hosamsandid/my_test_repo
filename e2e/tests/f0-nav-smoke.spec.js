@@ -82,9 +82,17 @@ test('F0: authenticated shell renders and every nav page mounts', async ({ page 
     await test.step(`navigate to ${label}`, async () => {
       // A nav entry's optional subtitle joins the button's accessible name
       // ("Agent Team Wizard Build a squad of agents"), so exact equality fails
-      // on subtitled entries — match the label as a NAME PREFIX instead.
+      // on subtitled entries — match the label as a NAME PREFIX instead. Exclude
+      // the accordion GROUP headers: since #2085 a group ("Administration") and
+      // a leaf item under it ("Administration", subtitle "Users, teams…") share
+      // a base name, and only the group header carries aria-expanded — so the
+      // nav item is the one WITHOUT it.
       const esc = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      await page.getByRole('button', { name: new RegExp(`^${esc}( |$)`) }).click();
+      await page
+        .getByRole('button', { name: new RegExp(`^${esc}( |$)`) })
+        .and(page.locator('button:not([aria-expanded])'))
+        .first()
+        .click();
 
       // Breadcrumb reflects the resolved route.
       await expect(

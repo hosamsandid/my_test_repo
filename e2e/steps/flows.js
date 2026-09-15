@@ -270,7 +270,21 @@ function nodeSel(slug) {
   return `.bp-node[data-id="${slug}"], .bp-node[data-id$="-${slug}"]`;
 }
 
+// The canvas legend (flow-graph-render.js) is an expanded overlay pinned to the
+// bottom-left of the viewport (z-index 20). At the e2e's fixed viewport it can
+// sit over the lower nodes and intercept the clicks and drag-drops these steps
+// perform — its "human role" chip was caught intercepting a node click, and a
+// drop landing on it never resolves to a `.bp-node`. Collapse it to its pill so
+// the canvas is clear. Idempotent: it only clicks while the legend is expanded
+// (the toggle reads title="Hide legend" then), and the collapsed state persists
+// per browser context, so later canvas loads in the same journey stay clear.
+async function collapseLegend(page) {
+  const toggle = page.locator('[data-legend-toggle][title="Hide legend"]');
+  if (await toggle.count()) await toggle.first().click();
+}
+
 async function connectPort(page, fromSlug, toSlug) {
+  await collapseLegend(page);
   const fromNode = page.locator(nodeSel(fromSlug)).first();
   const toNode = page.locator(nodeSel(toSlug)).first();
   await expect(fromNode).toBeVisible();
@@ -516,6 +530,7 @@ async function expectCreateTeamAvailable(ctx) {
  */
 async function openRouting(ctx, { name }) {
   const { page } = ctx;
+  await collapseLegend(page);
   await page.locator(nodeSel(slugRole(name))).first().click();
   const inspector = page.getByRole('dialog', { name });
   await expect(inspector).toBeVisible();
@@ -625,6 +640,7 @@ async function suggestOutcomes(ctx, { name }) {
 // Drag an outcome's output port (the amber square, title `Outcome "<title>" …`)
 // onto the target node — the #828 sibling of connectPort for the ● port.
 async function connectOutcomePort(page, fromSlug, outcomeTitle, toSlug) {
+  await collapseLegend(page);
   const fromNode = page.locator(nodeSel(fromSlug)).first();
   const toNode = page.locator(nodeSel(toSlug)).first();
   await expect(fromNode).toBeVisible();

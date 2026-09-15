@@ -299,9 +299,15 @@
           "required": true,
           "type": "string",
           "description": "Team slug id that must NOT be reachable."
+        },
+        {
+          "name": "teamName",
+          "required": false,
+          "type": "string",
+          "description": "Team display name that must not appear in"
         }
       ],
-      "example": "- assert:\n    do: access.expectTeamHidden\n    teamId: share-demo"
+      "example": "- assert:\n    do: access.expectTeamHidden\n    teamId: share-demo\n    teamName: Share Demo"
     },
     {
       "name": "access.expectTeamVisible",
@@ -313,14 +319,20 @@
           "required": true,
           "type": "string",
           "description": "Team slug id that must be reachable."
+        },
+        {
+          "name": "teamName",
+          "required": false,
+          "type": "string",
+          "description": "Team display name shown as the rail's"
         }
       ],
-      "example": "- assert:\n    do: access.expectTeamVisible\n    teamId: share-demo"
+      "example": "- assert:\n    do: access.expectTeamVisible\n    teamId: share-demo\n    teamName: Share Demo"
     },
     {
       "name": "access.openShare",
       "module": "access",
-      "description": "Open the team's Share… panel from the rail's group context menu. The kebab is a `<span role=\"button\">` labelled `Team actions for <label>`; the portaled menu carries the same accessible name, so both are matched by role to disambiguate. The menu closes on any scroll, so nothing scrolls in between.",
+      "description": "Open the team's Share… panel from the rail's group context menu. The kebab is a `<span role=\"button\">` labelled `Team actions for <label>`, where <label> is the team's DISPLAY NAME (rail-lifecycle.js: `displayName || id`), and the portaled menu carries the same accessible name. The acting identity sees only the one shared team in its rail here, so match the stable `Team actions for ` prefix rather than the display name. The menu closes on any scroll, so nothing scrolls in between.",
       "params": [
         {
           "name": "teamId",
@@ -438,7 +450,13 @@
           "name": "teamId",
           "required": true,
           "type": "string",
-          "description": "Team slug id rendered as the rail's group header."
+          "description": "Team slug id; the group's fallback header text."
+        },
+        {
+          "name": "teamName",
+          "required": false,
+          "type": "string",
+          "description": "Team display name shown as the group header"
         },
         {
           "name": "roleIds",
@@ -453,7 +471,7 @@
           "description": "Explicit member ids (alternative to roleIds)."
         }
       ],
-      "example": "- assert:\n    do: agents.expectTeamInRail\n    teamId: agentic-demos\n    roleIds: [business-analyst, developer]"
+      "example": "- assert:\n    do: agents.expectTeamInRail\n    teamId: agentic-demos\n    teamName: Agentic Demos\n    roleIds: [business-analyst, developer]"
     },
     {
       "name": "chat.ensureDmRoom",

@@ -7,6 +7,8 @@ import ConfirmDialog from '../../components/ConfirmDialog';
 import FormInput from '../../components/FormInput';
 import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
+import { effectiveGrantFor } from '../plugin-grant-view.js';
+import { pluginEventOptions, defaultPluginId } from './plugin-event-options.js';
 import { liveOps } from '../process/edit-adapters';
 import { isGateLabel, isBrakeLabel } from '../process/label-flags';
 import {
@@ -701,6 +703,51 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     }
   }, [availableRepos, form.repo]);
 
+  // Plugin-event picker inputs — the installed registry plus this agent's
+  // effective plugin grant, fetched once, only while plugin-event is the
+  // active type (the `availableRepos` pattern). `grant: null` means "cannot
+  // know" — draft mode, or the parent team's config was unreadable — and the
+  // pure module then offers everything un-marked rather than marking every
+  // plugin "not granted" on a read failure. `null` state = not loaded.
+  const [pluginInputs, setPluginInputs] = useState(null);
+  useEffect(() => {
+    if (form.type !== 'plugin-event' || pluginInputs !== null) return undefined;
+    let cancelled = false;
+    (async () => {
+      let installed = [];
+      let grant = null;
+      try {
+        const reg = await apiCall('GET', '/api/plugins');
+        installed = Array.isArray(reg?.installed) ? reg.installed : [];
+      } catch { /* registry unreadable → empty list → NO_PLUGINS_NOTICE */ }
+      if (!isDraftMode) {
+        try {
+          const agent = await apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}`);
+          let parentTeam = null;
+          if (agent?.role === 'team-member' && agent.parentTeamId && !Array.isArray(agent.pluginsOverride)) {
+            // Only the inherit case needs the parent; an override is self-contained.
+            parentTeam = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.parentTeamId)}`);
+          }
+          grant = effectiveGrantFor(agent, parentTeam);
+        } catch { grant = null; }
+      }
+      if (!cancelled) setPluginInputs({ installed, grant });
+    })();
+    return () => { cancelled = true; };
+  }, [form.type, agentId, pluginInputs, isDraftMode]);
+
+  const pluginPick = pluginInputs === null
+    ? null
+    : pluginEventOptions({ ...pluginInputs, currentId: form.pluginId, draft: isDraftMode });
+
+  // Auto-pick when there is exactly one plugin that could fire this listener
+  // and nothing is chosen yet — mirrors the single-repo auto-pick above.
+  useEffect(() => {
+    if (!pluginPick || form.pluginId) return;
+    const only = defaultPluginId(pluginPick.options);
+    if (only) setForm(f => (f.pluginId ? f : { ...f, pluginId: only }));
+  }, [pluginPick, form.pluginId]);
+
   // Loop verifier roster — for a team agent, the "separate verifier" default is
   // enforced by the backend (concept §4.6), so the UI must reflect it: pre-fill
   // a *sibling* role (never the agent itself) and let the author override. Only
@@ -776,7 +823,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
     }
     if (form.type === 'http' && !form.secret.trim()) { setFormError('Secret is required for HTTP triggers.'); return; }
-    if (form.type === 'plugin-event' && !form.pluginId.trim()) { setFormError('Plugin id is required (the plugin that may fire this listener).'); return; }
+    if (form.type === 'plugin-event' && !form.pluginId.trim()) { setFormError('Select the plugin that may fire this listener.'); return; }
     if (form.type === 'loop') {
       if (!isValidMaxIterations(form.maxIterations)) { setFormError('Max iterations is required and must be a positive whole number.'); return; }
       if (form.verifyMode === 'command' && !form.verifyCommand.trim()) { setFormError('Enter the verifier command, or choose a different verifier mode.'); return; }
@@ -916,12 +963,37 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             The plugin is granted on the Plugins page; the event name is the broker&rsquo;s
             own (e.g. <code style={{ fontFamily: 'var(--eb-font-mono)' }}>status_changed</code>).
           </div>
-          <FormInput
-            label="Plugin id"
-            value={form.pluginId}
-            onChange={v => set('pluginId', v)}
-            placeholder="jira"
-          />
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Plugin
+            </div>
+            {pluginPick === null ? (
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2)' }}>
+                <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', marginRight: 6, verticalAlign: 'middle' }} />
+                Loading plugins…
+              </div>
+            ) : (
+              <>
+                {/* A select, not free text: pluginId is a foreign key the orchestrator
+                    matches exactly and only fires for a granted plugin — see
+                    plugin-event-options.js for the option rules. */}
+                <select
+                  value={form.pluginId}
+                  onChange={e => set('pluginId', e.target.value)}
+                  style={{ ...FIELD_STYLE, width: '100%' }}
+                >
+                  {pluginPick.options.map(o => (
+                    <option key={o.value || '__placeholder'} value={o.value} disabled={o.disabled}>{o.label}</option>
+                  ))}
+                </select>
+                {pluginPick.notice && (
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                    {pluginPick.notice}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
           <FormInput
             label="Event filter (optional)"
             value={form.eventFilter}

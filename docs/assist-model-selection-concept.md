@@ -60,7 +60,7 @@ All nine already pass `req.body.llmEndpointId` into `resolveGenerationTarget` �
 | 11 | Skill distillation pass | N amendments threshold | `orchestrator.js:5038` |
 | 12 | Knowledge-domain bootstrap | user-triggered (proxied) | `orchestrator.js:10900` |
 
-Related but not a completion: provider test-connection / discover-models (`GET /v1/models`) — bills a single metadata request to the probed provider itself; correct as-is, out of scope.
+Related but not a completion: provider test-connection / discover-models (`GET /v1/models`, falling back to a free `POST /v1/messages/count_tokens` when that route doesn't exist, #2306) — bills a single metadata request to the probed provider itself; correct as-is, out of scope.
 
 ## 4. Concept overview
 

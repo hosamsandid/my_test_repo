@@ -325,8 +325,11 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
 - **Agent Pools** (epic #2251, `docs/parallel-workers-concept.md`): a role opts
   into `pool: {enabled: true, …}` (bundle field, sibling of `wipLimit`) to become
   a template — one wake spawns an item-keyed ephemeral instance
-  (`<team>-<role>-i<item>`), reusing the admission lane as the instance registry
-  and its reconcile tick as the reaper (`agent-pool.js`, Phase 1 #2246). The
+  (`<team>-<role>-i<item>`), reusing the admission lane as the instance registry;
+  ticket-release reap piggybacks on the lane's own reconcile tick, while the
+  hard-timeout/idle/archive-prune axes run on their own `wipLimit`-independent
+  tick so a pooled role with no `wipLimit` still gets reaped (`agent-pool.js`,
+  Phase 1 #2246, gaps closed by #2301). The
   **Flow Supervisor** (`autoDispatch: {enabled: true}`, sibling field, requires
   `wipLimit` + a pooled role — `flow-supervisor.js`, Phase 2 #2247) is a
   maintenance-gated timer that auto-dispatches ready-but-undispatched pooled

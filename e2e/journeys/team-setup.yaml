@@ -168,6 +168,7 @@ steps:
   - assert:
       do: agents.expectTeamInRail
       teamId: agentic-demos
+      teamName: Agentic Demos
       roleIds: [business-analyst, developer, code-reviewer, reworker]
   - assert:
       do: agents.expectMembersRunning

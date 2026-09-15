@@ -479,10 +479,19 @@ const usageData = {
     if (!teamId || !teamName) {
       throw new Error('usageData fixture requires { teamId, teamName }');
     }
-    // Pre-clean: drop leftover seed files and any leftover team from a crashed run.
+    // Pre-clean: drop leftover seed files and any leftover team (+ its
+    // auto-created env) from a crashed run.
     removeUsageFiles();
-    await ctx.request.delete(`/api/admin/teams/${encodeURIComponent(teamId)}`);
-    const res = await ctx.request.post('/api/admin/teams', { data: { id: teamId, name: teamName } });
+    await teardown.teardownTeam(ctx, { teamId, envId: teamId });
+    // #2081: standalone access-scope creation (POST /api/admin/teams) is retired
+    // (410 team-create-retired). An Agent Team IS the team now, so mint one the
+    // cheap way — a single stub role, no members materialised, no repo or
+    // credentials — which still records the team in teams/index.json, so the
+    // page's Team filter (GET /api/admin/teams) lists it by name.
+    const res = await ctx.request.post('/api/teams', {
+      timeout: 120_000,
+      data: { teamId, teamName, roles: ['generic'], materializeMembers: false },
+    });
     if (!res.ok() && res.status() !== 409) {
       throw new Error(`usageData: create team ${teamId} failed HTTP ${res.status()}: ${await res.text()}`);
     }
@@ -494,7 +503,7 @@ const usageData = {
   async teardown(ctx, params = {}) {
     const { teamId } = params;
     removeUsageFiles();
-    if (teamId) await ctx.request.delete(`/api/admin/teams/${encodeURIComponent(teamId)}`);
+    if (teamId) await teardown.teardownTeam(ctx, { teamId, envId: teamId });
   },
 };
 

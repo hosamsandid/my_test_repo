@@ -161,12 +161,15 @@ async function createTeam(ctx, { teamId, teamName, roleTemplate = 'generic' }) {
  * Agent Chat rail.
  *
  * @param {string} params.teamId - Team slug id that must be reachable.
+ * @param {string} [params.teamName] - Team display name shown as the rail's
+ *   group header (the team agent's displayName); defaults to the id.
  * @example
  * - assert:
  *     do: access.expectTeamVisible
  *     teamId: share-demo
+ *     teamName: Share Demo
  */
-async function expectTeamVisible(ctx, { teamId }) {
+async function expectTeamVisible(ctx, { teamId, teamName }) {
   const who = identity.activeName(ctx);
   await expect
     .poll(async () => reachesTeam(await chatAgents(ctx), teamId), {
@@ -176,7 +179,9 @@ async function expectTeamVisible(ctx, { teamId }) {
     .toBe(true);
   await ctx.page.reload();
   const rail = ctx.page.locator('[role="listbox"]').first();
-  await expect(rail.getByText(teamId, { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+  // The rail group header shows the team's display NAME (the team agent's
+  // displayName), not the raw slug — assert on it when the caller gives one.
+  await expect(rail.getByText(teamName || teamId, { exact: true }).first()).toBeVisible({ timeout: 30_000 });
 }
 
 /**
@@ -185,12 +190,15 @@ async function expectTeamVisible(ctx, { teamId }) {
  * rail, so a filtered API with a leaky UI, or the reverse, both fail.
  *
  * @param {string} params.teamId - Team slug id that must NOT be reachable.
+ * @param {string} [params.teamName] - Team display name that must not appear in
+ *   the rail (the header text when present); defaults to the id.
  * @example
  * - assert:
  *     do: access.expectTeamHidden
  *     teamId: share-demo
+ *     teamName: Share Demo
  */
-async function expectTeamHidden(ctx, { teamId }) {
+async function expectTeamHidden(ctx, { teamId, teamName }) {
   const who = identity.activeName(ctx);
   const rows = await chatAgents(ctx);
   expect(
@@ -210,8 +218,10 @@ async function expectTeamHidden(ctx, { teamId }) {
   const rail = ctx.page.locator('[role="listbox"]').first();
   const noAgents = ctx.page.getByText(EMPTY_RAIL_LEAD, { exact: true });
   await expect(rail.or(noAgents).first()).toBeVisible({ timeout: 30_000 });
-  // Page-wide rather than rail-scoped, so it holds in both renderings.
-  await expect(ctx.page.getByText(teamId, { exact: true })).toHaveCount(0);
+  // Page-wide rather than rail-scoped, so it holds in both renderings. The rail
+  // header would show the display NAME if the team were present, so assert that
+  // (falling back to the id) is absent.
+  await expect(ctx.page.getByText(teamName || teamId, { exact: true })).toHaveCount(0);
 }
 
 /**

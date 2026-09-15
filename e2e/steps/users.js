@@ -31,8 +31,11 @@ function userRow(page, subject) {
 async function openUsersPage(ctx) {
   const { page } = ctx;
   await page.goto('/users');
-  await expect(page.getByRole('heading', { name: 'Users', level: 1 })).toBeVisible();
-  await expect(page.getByText('Human user records', { exact: false })).toBeVisible();
+  // /users is the System-Admin "Administration" page since #2085 (the former
+  // Access page was dissolved into it): one H1 with Users / All Teams /
+  // Resources tabs, the standalone Users page folded into its default Users tab.
+  await expect(page.getByRole('heading', { name: 'Administration', level: 1 })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Users' })).toHaveAttribute('aria-selected', 'true');
 }
 
 /**

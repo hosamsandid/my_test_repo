@@ -66,6 +66,7 @@ steps:
   - assert:
       do: access.expectTeamVisible
       teamId: share-demo
+      teamName: Share Demo
   - assert:
       do: access.expectMemberships
       teamId: share-demo
@@ -90,6 +91,7 @@ steps:
   - assert:
       do: access.expectTeamHidden
       teamId: share-demo
+      teamName: Share Demo
     screenshot: access-colleague-sees-nothing
 
   # ── Slide 4: Ada shares the team with Bea, as a Team Member ─────────────────
@@ -146,6 +148,7 @@ steps:
   - assert:
       do: access.expectTeamVisible
       teamId: share-demo
+      teamName: Share Demo
   - action:
       do: access.openShare
       teamId: share-demo
@@ -295,6 +298,7 @@ steps:
   - assert:
       do: access.expectTeamVisible
       teamId: share-demo
+      teamName: Share Demo
   - action:
       do: access.openShare
       teamId: share-demo
@@ -367,3 +371,4 @@ steps:
   - assert:
       do: access.expectTeamHidden
       teamId: share-demo
+      teamName: Share Demo

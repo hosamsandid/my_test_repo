@@ -549,6 +549,7 @@ test('aee-jira: no subcommand → exit 2, --help → 0 with domain verbs', () =>
   assert.match(help.stdout, /show/);
   assert.match(help.stdout, /comment/);
   assert.match(help.stdout, /transition/);
+  assert.match(help.stdout, /update/);
 });
 
 test('aee-jira: unknown subcommand → exit 2 (usage)', () => {
@@ -588,4 +589,11 @@ test('aee-jira: list without --project / comment without --body → exit 2 (usag
   assert.equal(runJira(['list', '--json'], grantedJiraWorkspace()).status, 2);
   assert.equal(runJira(['comment', 'KAN-1', '--json'], grantedJiraWorkspace()).status, 2);
   assert.equal(runJira(['transition', 'KAN-1', '--json'], grantedJiraWorkspace()).status, 2);
+  assert.equal(runJira(['update', 'KAN-1', '--json'], grantedJiraWorkspace()).status, 2);
+});
+
+test('aee-jira: update against an unreachable broker → exit 3 (the verb is wired to a broker call)', () => {
+  const r = runJira(['update', 'KAN-1', '--description', 'x', '--json'], grantedJiraWorkspace());
+  assert.equal(r.status, 3);
+  assert.equal(JSON.parse(r.stdout).error, 'broker-unreachable');
 });

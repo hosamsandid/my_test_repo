@@ -23,6 +23,7 @@ ticket is routine and reversible):
 
     aee-jira comment KAN-6 --body "Picked this up, see PR #123"
     aee-jira transition KAN-6 --to "In Progress"
+    aee-jira update KAN-6 --description "…"   # replace the issue description (the old one stays in Jira's history)
 
 `inbox` without `--consume` peeks; with `--consume` it drains the queue (use it
 once per wake). `transition` names the TARGET status; the broker resolves the
@@ -148,6 +149,10 @@ def build_parser():
     p_trans.add_argument("issue", help="issue key, e.g. KAN-6")
     p_trans.add_argument("--to", required=True, help="the TARGET status name, e.g. \"In Progress\"")
 
+    p_update = sub.add_parser("update", parents=[common], help="replace an issue's description (previous text stays in Jira's history)")
+    p_update.add_argument("issue", help="issue key, e.g. KAN-6")
+    p_update.add_argument("--description", required=True, help="the complete new description text (plain text; blank lines become paragraphs)")
+
     return parser
 
 
@@ -191,6 +196,8 @@ def main(argv=None):
         path, method, body = "/comment", "POST", {"issue": args.issue, "body": args.body}
     elif args.cmd == "transition":
         path, method, body = "/transition", "POST", {"issue": args.issue, "to": getattr(args, "to")}
+    elif args.cmd == "update":
+        path, method, body = "/update", "POST", {"issue": args.issue, "description": args.description}
     else:
         parser.print_help()
         return EXIT_USAGE

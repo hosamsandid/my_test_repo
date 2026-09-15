@@ -2,7 +2,7 @@
   "pluginVersion": 1,
   "id": "jira",
   "name": "Jira",
-  "description": "Wakes an agent when a Jira Cloud issue changes status, and lets it read what happened. A Team Admin binds their team's Jira site and API token and configures which projects to watch and which status transitions matter (e.g. \"In Progress → Ready for Dev\"); the broker sidecar holds that credential and polls Jira server-side, so the token never reaches your browser or an agent container. On a matching transition the broker wakes the granted agents and queues the event; the agent drains the queue with the `aee-jira inbox` command-line tool. This replaces the reverted built-in Jira integration (PR #1539) with an installable, uninstallable plugin — removing it leaves the platform byte-identical. Jira Server / Data Center is not supported; there is no two-way sync.",
+  "description": "Wakes an agent when a Jira Cloud issue changes status, and lets it read what happened, comment, rewrite the description and move the ticket on. A Team Admin binds their team's Jira site and API token and configures which projects to watch and which status transitions matter (e.g. \"In Progress → Ready for Dev\"); the broker sidecar holds that credential and polls Jira server-side, so the token never reaches your browser or an agent container. On a matching transition the broker wakes the granted agents and queues the event; the agent drains the queue with the `aee-jira inbox` command-line tool and acts with `aee-jira comment` / `update` / `transition`. This replaces the reverted built-in Jira integration (PR #1539) with an installable, uninstallable plugin — removing it leaves the platform byte-identical. Jira Server / Data Center is not supported; there is no two-way sync.",
   "sidecar": {
     "image": "localhost/aee-plugin-jira:latest",
     "capabilities": ["egress"],
@@ -36,5 +36,5 @@
       { "path": "/admin", "minRole": "team-admin" }
     ]
   },
-  "promptLine": "When a watched Jira issue changes status you are woken; then work it with `aee-jira`: `aee-jira inbox` (the queued status changes — `--consume` drains them, use it once per wake), `aee-jira list --project KAN [--status \"Ready for Dev\"]`, `aee-jira show KAN-6`, `aee-jira comment KAN-6 --body \"…\"`, `aee-jira transition KAN-6 --to \"In Progress\"`. All Jira access is server-side in the broker; you never see the Jira token."
+  "promptLine": "When a watched Jira issue changes status you are woken; then work it with `aee-jira`: `aee-jira inbox` (the queued status changes — `--consume` drains them, use it once per wake), `aee-jira list --project KAN [--status \"Ready for Dev\"]`, `aee-jira show KAN-6`, `aee-jira comment KAN-6 --body \"…\"`, `aee-jira transition KAN-6 --to \"In Progress\"`, `aee-jira update KAN-6 --description \"…\"` (replaces the whole description — keep what the human wrote and add your section; the previous text stays in Jira's history). A transition you make is itself a status change and wakes whichever teammate's trigger names that target status. All Jira access is server-side in the broker; you never see the Jira token."
 }

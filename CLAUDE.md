@@ -363,7 +363,13 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   sub-grouping** (#2297): the same live instances, nested under their role as a
   collapsible **Instances (N)** sub-list in the left rail instead of scattered
   flat among the team's members — `poolInstance`/`poolOf`/`poolItem` surfaced on
-  `GET /api/matrix/agents`, nested by `agent-list-model.js` `buildGroups`.
+  `GET /api/matrix/agents`, nested by `agent-list-model.js` `buildGroups`. **The
+  rail live-refreshes** (#2311): `AgentRosterContext` polls the same endpoint on
+  its own ~5s beat (a shared singleton poll, mirroring `AgentStatusesContext`'s
+  #1677 pattern; paused while the tab is hidden), diffed by `roster-diff.js` so
+  only actually-changed rows re-render — a spawned/reaped/renamed instance (or
+  any other roster change) now appears/disappears/updates within ~5s with no
+  manual reload, instead of only at the next navigation or filter toggle.
   **`AEE_POOLS_ENABLED`** (#2302, default off — `pools-mode.js`, mirrors
   `AUTH_ENABLED`): hides the Parallelism button/panel entirely and renders the
   per-role Scaling section disabled with a "Coming Soon" badge until an

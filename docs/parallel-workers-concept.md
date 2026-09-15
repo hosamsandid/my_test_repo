@@ -915,7 +915,7 @@ data would be a second home for one fact. Polls on the same refresh cadence
 as the rest of the board (manual Refresh + after every pause/resume/drain/
 force-dispatch action), no dedicated auto-refresh timer of its own.
 
-## Amendment 9 — Agent Chat left-rail sub-grouping (#2297)
+## Amendment 9 — Agent Chat left-rail sub-grouping (#2297; live-refreshed, see Amendment 11)
 
 Amendment 8 gave a pooled role's live instances a home on the Flow Control
 board; #2297 gives them one in **Agent Chat** too, where the rail previously
@@ -979,3 +979,66 @@ on a standard compose deployment setting it in `.env` currently has no
 effect — the flag reads as unset (off) regardless. Flagging here rather than
 patching `docker-compose.yml` silently, since that is a deployment-manifest
 change outside a docs fix.
+
+## Amendment 11 — Agent Chat left-rail live refresh (#2311)
+
+Amendment 9 shipped the **Instances (N)** sub-list, but its own closing line
+overstated what it actually did: *"an instance still disappears from the
+sub-list the moment the pool reaper (or a manual teardown) removes it, exactly
+as it already did."* That was aspirational, not true — the rail's whole roster
+(`GET /api/matrix/agents`) was fetched exactly **once**, on mount/navigation/
+filter-toggle (`useApi`), so a spawn, reap, rename, or enable/disable
+happening anywhere else (another tab, another user, autoscaling) never showed
+up until the user manually reloaded. #2311 makes that sentence true.
+
+- **`AgentRosterContext.jsx`** (new) polls the same `GET /api/matrix/agents`
+  endpoint on its own ~5s interval, mounted once inside `AgentChat.jsx` (not
+  globally) — a singleton-context poll mirroring `AgentStatusesContext.jsx`'s
+  #1677 pattern, so however many rail pieces read the roster, the endpoint is
+  still hit at most once per interval per open tab. Deliberately a *second*,
+  independent timer rather than merged into the existing `/api/agents/statuses`
+  beat: same ~5s cadence by convention (D1), but the two payloads (roster
+  shape vs. per-agent activity state) stay decoupled, and the existing status
+  beat's own frequency is untouched.
+- **`roster-diff.js`** (new, pure) `mergeRoster(prev, next)` reuses each
+  agent's previous object reference when its fields are unchanged, and reports
+  `changed: false` (returning the *exact previous array*) when the fetched
+  roster is a no-op. This is what makes the refresh actually safe to run every
+  5s over an open chat: `agent-list-model.js`'s `useMemo` grouping chain
+  (#1682) only re-runs when something real changed, no row unmounts/remounts
+  for unchanged data, and — the sharpest edge case — `ChatPanel`'s lazy
+  DM-room-creation effect (keyed on `[agent, roomId, onRoomCreated]`) does not
+  refire `POST /api/matrix/agents/:id/dm` forever on a stuck room, because a
+  poll tick that didn't touch that agent hands the effect the identical
+  object it already had. `AgentChat.jsx` also memoizes its `onRoomCreated`
+  callback itself (`handleChatRoomCreated`) for the same reason — an inline
+  arrow rebuilt every render would have defeated the object-reference fix.
+- **`agent-roster-poll.js`** (new, pure) `shouldTickPoll`/
+  `shouldRefreshOnVisible` implement D5: the interval is suppressed while
+  `document.hidden`, and the hidden→visible edge fires one immediate
+  out-of-band refresh on top of resuming the normal interval.
+- **Failure handling**: a failed background tick is silent — the last good
+  roster and any prior error state stay exactly as they were, and polling
+  continues at the same fixed interval (no backoff, so no request-storm risk
+  either way). Only the initial load (or an explicit caller-triggered
+  `refetch()`, e.g. after a lifecycle mutation) surfaces a failure via the
+  existing error/Retry banner, unchanged from the pre-#2311 `useApi` behavior.
+  A 401 on any tick — foreground or background — routes through the existing
+  `UNAUTHORIZED_EVENT` (the same mechanism `useApi` itself uses) and stops
+  the poller for that provider instance.
+- **The currently open chat's agent disappearing** (open question D2) does
+  NOT auto-navigate away and does NOT fall back to the unrelated "pick an
+  agent" empty state: `AgentChat.jsx` remembers the last confirmed-present
+  snapshot for the routed `:agentId` (`seenAgentIdRef`/`lastSeenAgentRef`) and
+  keeps rendering `ChatPanel` against it — same room, same transcript, same
+  scroll position — with an inline notice banner
+  (`agent-removed-notice.js` / `ChatPanel`'s `removedFromRoster` prop) instead
+  of the disabled-agent banner. A route that never named a real agent at all
+  (a bad deep link) still bounces to `/chats` exactly as before.
+- **Scope**: Agent Chat rail only (D4) — the pure `roster-diff.js` module has
+  no Agent Chat import and could back another live list later, but nothing
+  else was wired to it. Independent of `AEE_POOLS_ENABLED` (Amendment 10):
+  the refresh mechanism is roster-generic and always on; with pooling off
+  there simply are no pool instances for it to reveal.
+- **Not done**: no highlight/flash animation on a newly-appeared row (D3) —
+  judged not worth the added state/timer risk for a cosmetic nice-to-have.

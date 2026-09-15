@@ -26,7 +26,7 @@ const { detectRasterImageType, imageContentType } = require('./image-type');
 const { discoverBoundAgents, hiddenBlastRadius, projectRespawnOutcome, respawnWithConcurrency } = require('./respawn-agents');
 const { githubApiBase } = require('./github-api-base');
 const { createTtlCache } = require('./ttl-cache');
-const { computeScope, visibleTeam, visibleAgent, canManageTeam, canManageAgent,
+const { computeScope, visibleTeam, visibleAgent, canManageTeam, isTeamAdminOfAny, canManageAgent,
         visibleEnvironment, canManageEnvironment, canCreateEnvironment, canRetierEnvironment,
         visibleUser, describeAuthz,
         normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
@@ -10708,6 +10708,20 @@ app.put('/api/skills/:name/file', (req, res) => {
   if (source === 'agent') {
     return res.status(403).json({ error: 'Agent skills are read-only from the registry. Promote the skill to the pool to edit it.' });
   }
+  // Name/team-id shape checked before the permission gate, same reasoning as
+  // POST /api/skills — malformed input 400s rather than 403ing (skillRootDir
+  // re-checks both below, since it also does the containment resolution).
+  if (!SKILL_NAME_RE.test(name || '') || (source === 'team' && !POOL_TEAM_ID_RE.test(teamId || ''))) {
+    return res.status(400).json({ error: 'Invalid skill name or team id' });
+  }
+  // Permission gate (#2307): this route had none. Same rule as create/edit.
+  const scope = getScope(req);
+  const permit = skillTransfer.permitTransfer(
+    skillTransfer.requiredPoolWritePermission(source === 'team' ? 'team' : 'global', teamId),
+    { systemAdmin: !!scope.all, isTeamAdmin: (tid) => canManageTeam(scope, tid), isTeamAdminOfAny: () => isTeamAdminOfAny(scope) },
+    'edit',
+  );
+  if (!permit.ok) return res.status(403).json({ error: permit.error });
   const root = skillRootDir(source, name, undefined, teamId);
   if (!root) return res.status(400).json({ error: 'Invalid skill name or team id' });
   const target = safeSkillFilePath(root, file);
@@ -10849,13 +10863,16 @@ app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), 
     );
     if (!plan.ok) return res.status(400).json({ error: plan.error });
 
-    // Permission gate — the transfer rules (Team Admin for a team pool, System
-    // Admin for global). Reuses the shared permit checker.
+    // Permission gate — the one global-entry rule (#2307): Team Admin for a
+    // team pool, System Admin OR Team Admin of ANY team for global. Reuses the
+    // shared permit checker; `action: 'import'` so a refusal names Import, not
+    // "transfer" (the reported bug — the user pressed Import, not Transfer).
     const scope = getScope(req);
     const permit = skillTransfer.permitTransfer(plan.permission, {
       systemAdmin: !!scope.all,
       isTeamAdmin: (teamId) => canManageTeam(scope, teamId),
-    });
+      isTeamAdminOfAny: () => isTeamAdminOfAny(scope),
+    }, 'import');
     if (!permit.ok) return res.status(403).json({ error: permit.error });
 
     if (plan.tier === 'team' && !resolveTeamExists(plan.teamId)) {
@@ -10906,6 +10923,24 @@ app.post('/api/skills', (req, res) => {
   if (typeof name !== 'string' || !SKILL_NAME_RE.test(name)) {
     return res.status(400).json({ error: 'Invalid skill name' });
   }
+  // Team id shape is validated up front (before the permission gate below) so
+  // a malformed request 400s the same way it always has, rather than 403ing on
+  // a `teamId` that was never going to resolve to anything.
+  if (source === 'team' && !POOL_TEAM_ID_RE.test(teamId || '')) {
+    return res.status(400).json({ error: 'Invalid team id or skill name' });
+  }
+  // Permission gate (#2307): this route had none — anyone signed in could
+  // create a global or team skill outright. The one write-into-a-pool rule:
+  // Team Admin of that team for a team-tier create, System Admin OR Team
+  // Admin of any team for global.
+  const tier = source === 'team' ? 'team' : 'global';
+  const scope = getScope(req);
+  const permit = skillTransfer.permitTransfer(
+    skillTransfer.requiredPoolWritePermission(tier, teamId),
+    { systemAdmin: !!scope.all, isTeamAdmin: (tid) => canManageTeam(scope, tid), isTeamAdminOfAny: () => isTeamAdminOfAny(scope) },
+    'create',
+  );
+  if (!permit.ok) return res.status(403).json({ error: permit.error });
   // Team-scoped skill (#306): write into /workspace/teams/<teamId>/skills.
   if (source === 'team') {
     const skillDir = safeTeamSkillDir(teamId, name);
@@ -11071,6 +11106,19 @@ app.put('/api/skills/:name', (req, res) => {
   if (source === 'agent') {
     return res.status(403).json({ error: 'Agent skills are read-only from the registry. Use the propagation flow to promote a skill to the pool.' });
   }
+  // Team id shape checked before the permission gate, same reasoning as
+  // POST /api/skills — a malformed teamId 400s rather than 403ing.
+  if (source === 'team' && !POOL_TEAM_ID_RE.test(req.query.teamId || '')) {
+    return res.status(400).json({ error: 'Invalid team id or skill name' });
+  }
+  // Permission gate (#2307): this route had none. Same rule as create.
+  const scope = getScope(req);
+  const permit = skillTransfer.permitTransfer(
+    skillTransfer.requiredPoolWritePermission(source === 'team' ? 'team' : 'global', req.query.teamId),
+    { systemAdmin: !!scope.all, isTeamAdmin: (tid) => canManageTeam(scope, tid), isTeamAdminOfAny: () => isTeamAdminOfAny(scope) },
+    'edit',
+  );
+  if (!permit.ok) return res.status(403).json({ error: permit.error });
   const { content } = req.body || {};
   if (typeof content !== 'string') return res.status(400).json({ error: 'content must be a string' });
   if (source === 'team') {
@@ -11812,6 +11860,7 @@ app.post('/api/skills/merge-draft', heavyLimiter, async (req, res) => {
   const scope = getScope(req);
   const permit = skillMerge.permitMerge(plan.permission, {
     systemAdmin: !!scope.all, isTeamAdmin: (teamId) => canManageTeam(scope, teamId),
+    isTeamAdminOfAny: () => isTeamAdminOfAny(scope),
   });
   if (!permit.ok) return res.status(403).json({ error: permit.error });
 
@@ -11854,6 +11903,7 @@ app.post('/api/skills/merge', heavyLimiter, async (req, res) => {
   const scope = getScope(req);
   const permit = skillMerge.permitMerge(plan.permission, {
     systemAdmin: !!scope.all, isTeamAdmin: (teamId) => canManageTeam(scope, teamId),
+    isTeamAdminOfAny: () => isTeamAdminOfAny(scope),
   });
   if (!permit.ok) return res.status(403).json({ error: permit.error });
 

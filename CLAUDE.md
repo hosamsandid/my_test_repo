@@ -569,10 +569,13 @@ Migration (COBOL, JCL, DB2, IMS/VSAM).
 ### Two-tier skill pool
 
 Resolved **team-first then global** at seeding (`orchestrator/skill-source.js`).
-**Global**: `/template-workspace/skills/` (RO) = `/pool/skills/` (RW),
-System-Admin-managed. **Team**: `/workspace/teams/<teamId>/skills/` (RW),
-Team-Admin-managed. `/api/skills` tags `source` = `pool`/`team`/`agent`;
-`POST /api/skills/promote-to-global` lifts a team skill into the global pool.
+**Global**: `/template-workspace/skills/` (RO) = `/pool/skills/` (RW), writable by
+System Admin or Team Admin of any team — promote, publish, import, merge,
+create and edit all apply that one rule (#2178/#2180/#2307;
+`skill-transfer.js`'s `requiredPoolWritePermission`). **Team**:
+`/workspace/teams/<teamId>/skills/` (RW), Team-Admin-of-that-team-managed.
+`/api/skills` tags `source` = `pool`/`team`/`agent`; `POST
+/api/skills/promote-to-global` lifts a team skill into the global pool.
 
 ### Skill seeding & activation
 

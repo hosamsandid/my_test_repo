@@ -232,6 +232,43 @@ test('permitTransfer: Team Admin of both sides can move team→team', () => {
   assert.equal(T.permitTransfer(perm, caps({ teams: ['alpha', 'beta'] })).ok, true);
 });
 
+/* ─── #2307: requiredPoolWritePermission + the anyTeamAdmin branch of
+ * permitTransfer (import/create/edit reuse both) ─────────────────────────── */
+
+test('requiredPoolWritePermission: team tier needs Team Admin of that team, unchanged shape', () => {
+  assert.deepEqual(T.requiredPoolWritePermission('team', 'alpha'), { needsSystemAdmin: false, teamAdminOf: ['alpha'] });
+});
+
+test('requiredPoolWritePermission: global tier needs System Admin OR Team Admin of ANY team, not System-Admin-only', () => {
+  assert.deepEqual(T.requiredPoolWritePermission('global'), { needsSystemAdmin: false, teamAdminOf: [], anyTeamAdmin: true });
+});
+
+test('permitTransfer: anyTeamAdmin passes for a caller who is Team Admin of at least one (unnamed) team', () => {
+  const perm = T.requiredPoolWritePermission('global');
+  const r = T.permitTransfer(perm, { systemAdmin: false, isTeamAdminOfAny: () => true });
+  assert.deepEqual(r, { ok: true });
+});
+
+test('permitTransfer: anyTeamAdmin refuses a caller who is Team Admin of no team, naming the actual authority (#2307 AC2)', () => {
+  const perm = T.requiredPoolWritePermission('global');
+  const r = T.permitTransfer(perm, { systemAdmin: false, isTeamAdminOfAny: () => false });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /System Admin or Team Admin/);
+});
+
+test('permitTransfer: a missing isTeamAdminOfAny capability fails closed rather than granting silently', () => {
+  const perm = T.requiredPoolWritePermission('global');
+  assert.equal(T.permitTransfer(perm, { systemAdmin: false }).ok, false);
+});
+
+test('permitTransfer: the action parameter names the refused act, not a hardcoded "transfer" (#2307 AC2/AC10)', () => {
+  const perm = T.requiredPermission({ tier: 'agent', agentId: 'a' }, { tier: 'global' }, 'copy'); // needsSystemAdmin: true
+  const r = T.permitTransfer(perm, { systemAdmin: false }, 'import');
+  assert.equal(r.ok, false);
+  assert.match(r.error, /this import requires System Admin/);
+  assert.doesNotMatch(r.error, /transfer/);
+});
+
 /* ─── the end-to-end plan carries a correct permission block ─────────────── */
 
 test('planTransfer: the plan embeds the required permission', () => {

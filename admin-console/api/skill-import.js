@@ -21,6 +21,11 @@
 // import, deletion and transfer.
 // ---------------------------------------------------------------------------
 
+// #2307: the write-into-a-pool-tier rule is now shared with skill-transfer.js
+// (create/edit reuse it too) so it cannot drift between paths again — see
+// requiredPermission below.
+const { requiredPoolWritePermission } = require('./skill-transfer');
+
 const TIERS = ['global', 'team'];
 const COLLISION_MODES = ['reject', 'overwrite', 'rename'];
 
@@ -121,13 +126,14 @@ function planImport(input, opts = {}) {
   return out;
 }
 
-// The permission the caller must hold to import at a tier — the transfer rules
-// (concept §3.5 / §3): Team Admin for a team pool, System Admin for the global
-// pool. Returns the { needsSystemAdmin, teamAdminOf: [] } shape skill-deletion
-// and skill-transfer use, so the endpoint reuses one permit helper.
+// The permission the caller must hold to import at a tier — the one
+// global-entry rule (#2307, concept §3.5 / §3): Team Admin for a team pool,
+// System Admin OR Team Admin of ANY team for the global pool (entering global
+// is a Team-Admin act, not System-Admin-only — #2178/#2180). Returns the
+// { needsSystemAdmin, teamAdminOf, anyTeamAdmin } shape skill-transfer's
+// permitTransfer reads, so the endpoint reuses one permit helper.
 function requiredPermission(plan) {
-  if (plan.tier === 'team') return { needsSystemAdmin: false, teamAdminOf: [plan.teamId] };
-  return { needsSystemAdmin: true, teamAdminOf: [] };
+  return requiredPoolWritePermission(plan.tier, plan.teamId);
 }
 
 module.exports = {

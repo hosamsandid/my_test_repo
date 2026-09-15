@@ -172,14 +172,19 @@ function planTransfer(input, opts = {}) {
 }
 
 // Check a plan's permission against the caller's capabilities. `caps` is
-// { systemAdmin: bool, isTeamAdmin: (teamId) => bool } — kept abstract so this
-// module never imports scope.js. Returns { ok } or { ok: false, error }.
-function permitTransfer(permission, caps = {}) {
+// { systemAdmin: bool, isTeamAdmin: (teamId) => bool, isTeamAdminOfAny?: () =>
+// bool } — kept abstract so this module never imports scope.js. `action` names
+// the act being refused (default 'transfer') so a caller reusing this checker
+// for a different act (e.g. import, #2307) gets a message that names THAT act,
+// never a hardcoded "transfer" the user never asked for. Returns { ok } or
+// { ok: false, error }.
+function permitTransfer(permission, caps = {}, action = 'transfer') {
   const p = permission && typeof permission === 'object' ? permission : {};
   const systemAdmin = !!caps.systemAdmin;
   const isTeamAdmin = typeof caps.isTeamAdmin === 'function' ? caps.isTeamAdmin : () => false;
+  const isTeamAdminOfAny = typeof caps.isTeamAdminOfAny === 'function' ? caps.isTeamAdminOfAny : () => false;
   if (p.needsSystemAdmin && !systemAdmin) {
-    return { ok: false, error: 'forbidden: this transfer requires System Admin' };
+    return { ok: false, error: `forbidden: this ${action} requires System Admin` };
   }
   for (const teamId of p.teamAdminOf || []) {
     if (!systemAdmin && !isTeamAdmin(teamId)) {
@@ -193,7 +198,25 @@ function permitTransfer(permission, caps = {}) {
       return { ok: false, error: `forbidden: requires System Admin or Team Admin of ${p.orTeamAdminOf.map((t) => `'${t}'`).join(' / ')}` };
     }
   }
+  // #2307: the unnamed-team floor for writing into the global pool — System
+  // Admin, or Team Admin of ANY team (no single team is "the content's own").
+  if (p.anyTeamAdmin && !systemAdmin && !isTeamAdminOfAny()) {
+    return { ok: false, error: `forbidden: this ${action} requires System Admin or Team Admin of a team` };
+  }
   return { ok: true };
+}
+
+// The permission required to WRITE into a pool tier directly — not a transfer,
+// but the SAME governance rule this ticket (#2307) makes into one rule for
+// every path that enters a tier: Team Admin of that team for a team-tier write
+// (create / edit); System Admin OR Team Admin of ANY team for a global-tier
+// write (entering the global pool is a Team-Admin act, #2178/#2180 — not
+// System-Admin-only, and unlike promote/transfer there is no "content's own
+// team" to name here). Returns the same { needsSystemAdmin, teamAdminOf,
+// anyTeamAdmin } shape `permitTransfer` reads, so create/edit reuse it too.
+function requiredPoolWritePermission(tier, teamId) {
+  if (tier === 'team') return { needsSystemAdmin: false, teamAdminOf: [teamId] };
+  return { needsSystemAdmin: false, teamAdminOf: [], anyTeamAdmin: true };
 }
 
 // Build the `origin` object recorded on the target's skill.json (concept §2.2):
@@ -245,6 +268,7 @@ module.exports = {
   COPY_ACTION,
   transferAction,
   requiredPermission,
+  requiredPoolWritePermission,
   planTransfer,
   permitTransfer,
   buildTransferOrigin,

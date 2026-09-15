@@ -1,11 +1,11 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router';
 import { MessageCircle, Loader2, Plus, Upload, Eye, EyeOff, Users } from 'lucide-react';
-import { useApi } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
 import { usePageActions } from '../context/PageActionsContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
 import { computeAgentStatusMap } from '../context/agent-statuses';
+import { AgentRosterProvider, useAgentRoster } from '../context/AgentRosterContext.jsx';
 import AgentList, { buildGroups } from './agent-chat/AgentList';
 import RailLifecycleHost from './agent-chat/RailLifecycleHost.jsx';
 import { loadShowDisabled, saveShowDisabled, matrixAgentsUrl } from './agent-chat/rail-lifecycle.js';
@@ -136,7 +136,9 @@ function saveLastViewed(map) {
  *
  * Layout: [agent list 260 px] [chat panel: header / messages / input].
  * Owns:
- *   - the list of Matrix-enabled agents (fetched once)
+ *   - the list of Matrix-enabled agents (live — polled in the background every
+ *     ~5s via `AgentRosterContext`, #2311; the initial fetch still gates the
+ *     loading/error UI exactly like the one-shot fetch it replaced)
  *   - which agent is selected (from `:agentId` route param)
  *   - the live `dmRoomId` for the selected agent (created lazily on first open)
  *
@@ -145,17 +147,37 @@ function saveLastViewed(map) {
  * Shell's <main> without overflowing.
  */
 export default function AgentChat() {
-  const { agentId } = useParams();
-  const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
   // Per-user opt-in to also listing disabled agents (#1928 AC6/AC7). It widens
   // the list URL, so it is read before the fetch — with the opt-in off no paused
   // agent is asked for and the chat shows exactly what it always showed. (Since
   // #1957 the URL also carries an unconditional `includeStubs=1`, which is not a
   // preference — see `matrixAgentsUrl`.)
+  //
+  // Lifted above `AgentRosterProvider` (#2311): the provider needs to know
+  // which URL to poll, and a component cannot consume a context it renders
+  // itself — see `AgentChatInner` below for the rest of the page.
   const [showDisabled, setShowDisabled] = useState(loadShowDisabled);
   useEffect(() => { saveShowDisabled(showDisabled); }, [showDisabled]);
-  const { data: agents, loading, error, refetch } = useApi(matrixAgentsUrl(showDisabled));
+
+  return (
+    <AgentRosterProvider showDisabled={showDisabled} buildUrl={matrixAgentsUrl}>
+      <AgentChatInner showDisabled={showDisabled} setShowDisabled={setShowDisabled} />
+    </AgentRosterProvider>
+  );
+}
+
+/**
+ * The actual page body, split out from `AgentChat` so it can sit *inside*
+ * `AgentRosterProvider` and read the shared, polled roster via
+ * `useAgentRoster()` (#2311) instead of the one-shot `useApi` fetch it used
+ * before. Everything below is otherwise unchanged from the original
+ * component.
+ */
+function AgentChatInner({ showDisabled, setShowDisabled }) {
+  const { agentId } = useParams();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { agents, loading, error, refetch } = useAgentRoster();
 
   // The open lifecycle context menu: `{ target, anchor }` or null. The rail only
   // reports *that* a menu was asked for and for which row (#1928); which items
@@ -489,7 +511,32 @@ export default function AgentChat() {
   // room at all. Both cases treat the route as no *chat* selection so the panel
   // never attempts `ChatPanel` against a null room.
   const routedAgent = (agents ?? []).find(a => a.id === agentId) || null;
-  const selectedAgent = routedAgent && isChatOpenable(routedAgent) ? routedAgent : null;
+
+  // #2311 D2: the roster now refreshes in the background, so the currently
+  // open chat's agent can vanish (pool reap, deletion elsewhere) while the
+  // user is looking at it. `seenAgentIdRef`/`lastSeenAgentRef` remember the
+  // last agent object confirmed present for the CURRENT `:agentId` route, so
+  // a later disappearance can be told apart from a route that never named a
+  // real agent (a bad deep link, which the redirect effect below still bounces
+  // to /chats exactly as before #2311).
+  const seenAgentIdRef = useRef(null);
+  const lastSeenAgentRef = useRef(null);
+  useEffect(() => {
+    if (!agents) return;
+    const found = agents.find(a => a.id === agentId);
+    if (found) {
+      seenAgentIdRef.current = agentId;
+      lastSeenAgentRef.current = found;
+    }
+  }, [agents, agentId]);
+  const agentRemoved = !!agentId && !!agents && !routedAgent && seenAgentIdRef.current === agentId;
+  // D2: keep the last known snapshot on screen instead of falling back to the
+  // unrelated "pick an agent" empty state — an inline notice (rendered by
+  // `ChatPanel` via `removedFromRoster`) replaces the live data instead, and
+  // the transcript/room/scroll position are all untouched since `ChatPanel`
+  // never remounts (same `key={selectedAgent.id}` below).
+  const effectiveRoutedAgent = routedAgent || (agentRemoved ? lastSeenAgentRef.current : null);
+  const selectedAgent = effectiveRoutedAgent && isChatOpenable(effectiveRoutedAgent) ? effectiveRoutedAgent : null;
   // #2235: a routed `role: 'team'` subject gets the whole area right of the
   // agent list as one full-width configuration surface — see
   // `TeamConfigSurface` below — rather than the ordinary chat + right-rail
@@ -537,9 +584,30 @@ export default function AgentChat() {
     setCreatedRooms(prev => prev[id] === roomId ? prev : { ...prev, [id]: roomId });
   }, []);
 
-  // If the URL points at a no-longer-existing agent, reset to /chats.
+  // A stable wrapper for `ChatPanel`'s `onRoomCreated` (#2311 AC8): an inline
+  // arrow built fresh in JSX would give `ChatPanel`'s DM-room-creation effect
+  // (`[agent, roomId, onRoomCreated]`) a new callback identity on every render
+  // of this page — including a render caused only by an unrelated background
+  // roster poll tick — which defeats the point of keeping `selectedAgent`'s own
+  // reference stable across those ticks. Depends on `selectedAgent` itself
+  // (stable across a poll tick that doesn't touch this agent, thanks to
+  // `mergeRoster`'s per-row reference reuse) and the already-stable
+  // `handleRoomCreated`, so it only changes identity when the selected agent
+  // actually does.
+  const handleChatRoomCreated = useCallback((roomId) => {
+    if (selectedAgent) handleRoomCreated(selectedAgent.id, roomId);
+  }, [selectedAgent, handleRoomCreated]);
+
+  // If the URL points at a no-longer-existing agent, reset to /chats — UNLESS
+  // that agent was confirmed present earlier under this same route (#2311 D2):
+  // that case means the roster's background poll just removed the chat the
+  // user has open, and D2 wants the chat to stay put with an inline notice,
+  // not an auto-navigate away. A route that never named a real agent (bad
+  // deep link, or the initial load for one) still bounces to /chats exactly
+  // as before.
   useEffect(() => {
     if (!loading && agentId && agents && !agents.find(a => a.id === agentId)) {
+      if (seenAgentIdRef.current === agentId) return;
       navigate('/chats', { replace: true });
     }
   }, [agentId, agents, loading, navigate]);
@@ -795,7 +863,7 @@ export default function AgentChat() {
                 key={selectedAgent.id}
                 agent={selectedAgent}
                 roomId={effectiveRoomId}
-                onRoomCreated={(roomId) => handleRoomCreated(selectedAgent.id, roomId)}
+                onRoomCreated={handleChatRoomCreated}
                 hoveredCorrelationId={hoveredCorrelationId}
                 onHoverCorrelation={setHoveredCorrelationId}
                 sessionCost={sessionCost}
@@ -805,6 +873,7 @@ export default function AgentChat() {
                 onOpenKnowledge={handleOpenKnowledge}
                 resumeRequest={resumeRequest}
                 insertRefRequest={composerRefRequest}
+                removedFromRoster={agentRemoved}
               />
             ) : (
               <EmptyState />

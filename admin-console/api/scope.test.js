@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   computeScope, visibleTeam, visibleAgent,
-  canManageTeam, canManageAgent, canManageEnvironment, visibleUser, describeAuthz, isKnownPrincipal,
+  canManageTeam, isTeamAdminOfAny, canManageAgent, canManageEnvironment, visibleUser, describeAuthz, isKnownPrincipal,
   normalizeCredential, visibleCredential, canManageCredential,
   canCreateCredential, canReassignCredential, credentialVisibleToTeam,
   canViewUsageStatistics, assistSelectableEndpoint, resolveAgentTenant,
@@ -243,6 +243,26 @@ test('canManageTeam: team-admin manages only their admin team', () => {
 test('canManageTeam: team-member manages nothing', () => {
   const bob = computeScope({ username: 'bob@corp.com', users, memberships });
   assert.equal(canManageTeam(bob, 'risk'), false);
+});
+
+// #2307: the floor permission for writing into the global skill pool — Team
+// Admin of ANY team, not one named team. Distinct from canManageTeam, which
+// only ever answers for one specific team.
+test('isTeamAdminOfAny: admin is always any-team-admin, without needing a role map', () => {
+  const seeded = computeScope({ username: 'admin', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', users, memberships });
+  assert.equal(isTeamAdminOfAny(seeded), true);
+  assert.equal(isTeamAdminOfAny(sys), true);
+});
+
+test('isTeamAdminOfAny: true for a Team Admin of at least one team, even if not of every team they belong to', () => {
+  const alice = computeScope({ username: 'alice@corp.com', users, memberships }); // team-admin of payments, member of default
+  assert.equal(isTeamAdminOfAny(alice), true);
+});
+
+test('isTeamAdminOfAny: false for a plain team-member of every team they belong to', () => {
+  const bob = computeScope({ username: 'bob@corp.com', users, memberships }); // team-member of risk only
+  assert.equal(isTeamAdminOfAny(bob), false);
 });
 
 test('canManageTeam: a missing teamId fails closed, it does not collapse to default (#2078/§8.4)', () => {

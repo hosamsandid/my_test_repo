@@ -61,12 +61,12 @@ test('missing name or description rejected with a clear error', () => {
 
 /* ─── planImport ──────────────────────────────────────────────────────────── */
 
-test('defaults: global tier, reject collision', () => {
+test('defaults: global tier, reject collision — #2307: System Admin OR Team Admin of ANY team, not System-Admin-only', () => {
   const p = si.planImport({ name: 'foo' });
   assert.equal(p.ok, true);
   assert.equal(p.tier, 'global');
   assert.equal(p.onCollision, 'reject');
-  assert.deepEqual(p.permission, { needsSystemAdmin: true, teamAdminOf: [] });
+  assert.deepEqual(p.permission, { needsSystemAdmin: false, teamAdminOf: [], anyTeamAdmin: true });
 });
 
 test('team tier requires a valid teamId and gates on Team Admin', () => {
@@ -89,4 +89,27 @@ test('accepts each collision mode', () => {
   for (const mode of ['reject', 'overwrite', 'rename']) {
     assert.equal(si.planImport({ name: 'foo', onCollision: mode }).onCollision, mode);
   }
+});
+
+/* ─── #2307: global import permission — one rule, checked end-to-end with the
+ * shared permitTransfer checker the import endpoint actually calls. ───────── */
+
+const { permitTransfer } = require('./skill-transfer');
+
+test('AC1/AC2: a Team Admin of at least one team may import to global; a Team Admin of no team may not', () => {
+  const plan = si.planImport({ name: 'foo' });
+  const isTeamAdmin = (id) => id === 'squad-a';
+  const asTeamAdmin = permitTransfer(plan.permission, { systemAdmin: false, isTeamAdmin, isTeamAdminOfAny: () => true }, 'import');
+  assert.equal(asTeamAdmin.ok, true);
+  const asPlainMember = permitTransfer(plan.permission, { systemAdmin: false, isTeamAdmin: () => false, isTeamAdminOfAny: () => false }, 'import');
+  assert.equal(asPlainMember.ok, false);
+  assert.match(asPlainMember.error, /System Admin or Team Admin/);
+  assert.doesNotMatch(asPlainMember.error, /transfer/, 'the message must name Import, not Transfer, for an import request');
+});
+
+test('AC3: importing into a team pool still names the refused team, unaffected by the global relaxation', () => {
+  const plan = si.planImport({ name: 'foo', tier: 'team', teamId: 'squad-a' });
+  const r = permitTransfer(plan.permission, { systemAdmin: false, isTeamAdmin: (id) => id === 'squad-b', isTeamAdminOfAny: () => true }, 'import');
+  assert.equal(r.ok, false);
+  assert.match(r.error, /Team Admin of 'squad-a'/);
 });

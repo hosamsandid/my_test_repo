@@ -246,6 +246,18 @@ function canManageTeam(scope, teamId) {
   return scope.roles instanceof Map && scope.roles.get(teamId) === 'team-admin';
 }
 
+// Is the caller Team Admin of AT LEAST ONE team (any team, unnamed)? Distinct
+// from `canManageTeam`, which answers for one specific named team. This is the
+// floor permission for writing into the GLOBAL skill pool (#2178/#2180/#2307):
+// entering the global pool is a Team-Admin act, not System-Admin-only, and
+// unlike a transfer/promote there is no single "content's own team" to name —
+// any team the caller administers clears the bar.
+function isTeamAdminOfAny(scope) {
+  if (!scope) return false;
+  if (scope.all) return true;
+  return scope.roles instanceof Map && [...scope.roles.values()].includes('team-admin');
+}
+
 // Is this user visible to the caller? A non-admin sees only users who share at
 // least one of their teams (which includes the caller themselves). A caller who
 // is a member of no team therefore sees no user at all — fail-closed (AC5).
@@ -637,6 +649,7 @@ module.exports = {
   visibleAgent,
   resolveAgentTenant,
   canManageTeam,
+  isTeamAdminOfAny,
   canManageAgent,
   ownsEnvironment,
   visibleEnvironment,

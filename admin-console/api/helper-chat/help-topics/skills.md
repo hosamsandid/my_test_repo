@@ -128,13 +128,21 @@ Everything else on this page moves a skill between the tiers or reshapes it:
 | **Import skill** | Reads a `.zip` / `.skill` archive back into the pool you choose. | Page header |
 
 A skill entering the **global** pool for the first time is a Team-Admin act too,
-not System-Admin-only: a Team Admin may promote their own team's skill to global,
-and — since **Publish** — may also push an agent's edited skill straight to global
-without a team-pool hop. What stays System-Admin-only is *moving OUT* of the
-global pool or an agent's own workspace (retiring that copy), because deleting
-someone else's content is a governance-level act regardless of who is adding to
-global. The Team-Admin-only actions simply do not appear when the skill you
-opened is not on their tier.
+not System-Admin-only — and that is now one rule for every path in, not just
+promote and publish: a Team Admin may promote their own team's skill to global,
+push an agent's edited skill straight to global (**Publish**), **import** an
+archive straight into the global pool, **merge** several skills into a global
+target, create a brand-new global skill (**+ New Skill**), or edit an existing
+global skill's content — all without a System Admin. For import, merge, create
+and edit there is no single "content's own team" the way there is for a
+promote or publish, so the floor is simply Team Admin of *any* team you
+administer, not the one that happens to own the content. What stays
+System-Admin-only is *moving OUT* of the global pool or an agent's own
+workspace (retiring that copy), because deleting someone else's content is a
+governance-level act regardless of who is adding to global. The
+Team-Admin-only actions simply do not appear when the skill you opened is not
+on their tier, and the **Import to:** / **+ New Skill** target pickers only
+ever offer a pool you may actually write to.
 
 ### Publishing an agent's edited skill (Publish)
 

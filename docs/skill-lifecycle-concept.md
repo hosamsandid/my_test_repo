@@ -236,17 +236,25 @@ heuristic concat fallback), the operator edits it in the dialog, then the merge 
 - retired sources go through the §3.3 archive path.
 
 Merge is operator-only (never the curator) and works cross-tier (two team skills, a team
-+ an adopted global copy, …) with target-tier permissions.
++ an adopted global copy, …) with target-tier permissions: Team Admin of the target team
+for a team target; for a **global** target, System Admin **or** Team Admin of *any* team
+(#2307 — a merge has no single "content's own team" to name the way a transfer does, so
+the floor is any team the caller administers, not System-Admin-only).
 
 ### 3.5 Export / import — round-trip with identity
 
 - **Export** (exists) now includes `skill.json` + `provenance.json` in the ZIP.
-- **Import** gains a target selector (`global` | `team`+teamId — same permission rules as
-  transfer), validates `SKILL.md` (parseable frontmatter with `name` + `description`,
-  size caps), and honors an embedded `skill.json`: version chain continues,
-  `origin: {tier: "external"}` + `action: "imported"` appended. Skills can thus travel
-  between installations without losing their history — the enterprise "skills from
-  outside / to the outside" path.
+- **Import** gains a target selector (`global` | `team`+teamId), validates `SKILL.md`
+  (parseable frontmatter with `name` + `description`, size caps), and honors an embedded
+  `skill.json`: version chain continues, `origin: {tier: "external"}` + `action:
+  "imported"` appended. Skills can thus travel between installations without losing
+  their history — the enterprise "skills from outside / to the outside" path.
+  **Permission** (#2307): Team Admin for a team target; for a **global** target, System
+  Admin **or** Team Admin of *any* team — an external archive has no resolvable owning
+  team the way a transfer's source does, so the floor is any team the caller
+  administers. `+ New Skill` (`POST /api/skills`) and editing an existing skill's
+  content (`PUT /api/skills/:name`, `PUT /api/skills/:name/file`) apply the identical
+  per-tier rule — before #2307 those two routes had no permission check at all.
 
 ### 3.6 Edit propagation & resync
 

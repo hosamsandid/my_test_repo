@@ -15,6 +15,9 @@ import { useHelpSubject } from '../context/HelperChatContext';
 import { OVERLAY_SKILL_DETAIL, OVERLAY_SKILLS_MERGE } from '../context/page-help-view.js';
 import { SKILLS_HELP_SECTIONS } from './skills-help-sections.js';
 import { isPublishEligible } from './skill-publish-view.js';
+import { useAuth } from '../auth/AuthContext';
+import { adminTeamIdsOf } from './credential-scope-view.js';
+import { writableSkillTargets, defaultSkillTarget } from './skill-target-view.js';
 
 /* ─── Skill name validation (mirrors SKILL_NAME_RE in api.js) ─────────── */
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
@@ -61,13 +64,25 @@ const dangerBtnStyle = {
 };
 
 /* ─── New skill form ───────────────────────────────────────────────────── */
-function NewSkillForm({ onCreated, onCancel, teams = [] }) {
+function NewSkillForm({ onCreated, onCancel, teams = [], caller }) {
+  // #2307 AC12/AC13: offer only targets the signed-in caller may write to, and
+  // only the teams they administer — never every team they merely belong to.
+  const targets = writableSkillTargets(caller, teams);
+  const canWriteAnywhere = targets.length > 0;
   const [name, setName] = useState('');
   const [content, setContent] = useState('');
-  const [target, setTarget] = useState('global'); // 'global' or 'team:<id>'
+  const [target, setTarget] = useState(() => defaultSkillTarget(caller, teams)); // 'global' or 'team:<id>'
   const [preview, setPreview] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+
+  // Re-pin the selection if the writable set changes under us (teams load
+  // async) and the current value is no longer offered — AC11: the selector's
+  // value must always be a permitted target.
+  useEffect(() => {
+    if (targets.some(t => t.value === target)) return;
+    setTarget(targets[0]?.value || '');
+  }, [targets, target]);
 
   const nameValid = SKILL_NAME_RE.test(name);
 
@@ -99,6 +114,11 @@ function NewSkillForm({ onCreated, onCancel, teams = [] }) {
 
   return (
     <form onSubmit={handleCreate} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+      {!canWriteAnywhere && (
+        <div role="alert" style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error)' }}>
+          You are not Team Admin of any team, so there is nowhere you may create a skill. Ask a Team Admin or System Admin.
+        </div>
+      )}
       <div>
         <label style={{ display: 'block', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', marginBottom: 4 }}>
           Target pool
@@ -106,6 +126,7 @@ function NewSkillForm({ onCreated, onCancel, teams = [] }) {
         <select
           value={target}
           onChange={e => setTarget(e.target.value)}
+          disabled={!canWriteAnywhere}
           style={{
             width: '100%', padding: '6px 10px',
             border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
@@ -113,8 +134,7 @@ function NewSkillForm({ onCreated, onCancel, teams = [] }) {
             fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', boxSizing: 'border-box',
           }}
         >
-          <option value="global">Global pool (visible to all teams)</option>
-          {teams.map(t => <option key={t.id} value={`team:${t.id}`}>Team: {t.name} ({t.id})</option>)}
+          {targets.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
         </select>
         <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
           A team skill is seeded only into agents owned by that team; global skills go to everyone.
@@ -194,7 +214,7 @@ function NewSkillForm({ onCreated, onCancel, teams = [] }) {
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
         <button type="button" onClick={onCancel} disabled={saving} style={secondaryBtnStyle}>Cancel</button>
-        <button type="submit" disabled={saving || !nameValid} style={primaryBtnStyle(saving || !nameValid)}>
+        <button type="submit" disabled={saving || !nameValid || !canWriteAnywhere} style={primaryBtnStyle(saving || !nameValid || !canWriteAnywhere)}>
           {saving ? 'Creating…' : 'Create skill'}
         </button>
       </div>
@@ -1622,6 +1642,14 @@ export default function SkillsRegistry() {
   const { data: allSkills, loading, error, refetch } = useApi('/api/skills');
   const { data: allAgents } = useApi('/api/agents');
   const { data: allTeams } = useApi('/api/admin/teams');
+  // #2307 AC11-14: the Import-to and +New Skill target selectors offer only
+  // targets the signed-in caller may actually write to.
+  const { user } = useAuth();
+  const isSysAdmin = !!user?.admin;
+  const adminTeamIds = adminTeamIdsOf(user);
+  const caller = { isSysAdmin, adminTeamIds };
+  const skillTargets = writableSkillTargets(caller, allTeams ?? []);
+  const canWriteAnywhere = skillTargets.length > 0;
   const [filter, setFilter] = useState('All');
   const [showNewForm, setShowNewForm] = useState(false);
   const [selectedSkill, setSelectedSkill] = useState(null);
@@ -1635,7 +1663,13 @@ export default function SkillsRegistry() {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState(null);
   const [importSuccess, setImportSuccess] = useState(null);
-  const [importTarget, setImportTarget] = useState('global'); // 'global' or 'team:<id>'
+  const [importTarget, setImportTarget] = useState(() => defaultSkillTarget(caller, allTeams ?? [])); // 'global' or 'team:<id>'
+  // #2307 AC11: re-pin the selection if the writable set changes under us
+  // (auth/teams load async) and the current value is no longer offered.
+  useEffect(() => {
+    if (skillTargets.some(t => t.value === importTarget)) return;
+    setImportTarget(skillTargets[0]?.value || '');
+  }, [skillTargets, importTarget]);
   // multi-select → merge (#631): rowKey → row for the selected skills
   const [selectedRows, setSelectedRows] = useState({});
   const [mergeOpen, setMergeOpen] = useState(false);
@@ -1829,11 +1863,13 @@ export default function SkillsRegistry() {
             onChange={handleImport}
             style={{ display: 'none' }}
           />
+          {/* #2307 AC11/AC13: only targets the caller may write to, teams
+              they administer only — never every team they merely belong to. */}
           <select
             value={importTarget}
             onChange={e => setImportTarget(e.target.value)}
-            disabled={importing}
-            title="Where to import the skill — the global pool (System Admin) or a team pool (Team Admin)"
+            disabled={importing || !canWriteAnywhere}
+            title="Where to import the skill — the global pool (Team Admin or System Admin) or a team pool (Team Admin of that team)"
             style={{
               padding: '6px 10px',
               border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
@@ -1841,20 +1877,26 @@ export default function SkillsRegistry() {
               fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
             }}
           >
-            <option value="global">Import to: Global pool</option>
-            {(allTeams ?? []).map(t => (
-              <option key={t.id} value={`team:${t.id}`}>Import to: Team {t.name} ({t.id})</option>
-            ))}
+            {canWriteAnywhere
+              ? skillTargets.map(t => <option key={t.value} value={t.value}>Import to: {t.label}</option>)
+              : <option value="">Import to: (no permitted target)</option>}
           </select>
           <button
             onClick={() => importFileRef.current?.click()}
-            disabled={importing}
+            disabled={importing || !canWriteAnywhere}
             style={secondaryBtnStyle}
-            title="Upload a skill packaged as a .zip or .skill archive and add it to the selected pool"
+            title={canWriteAnywhere
+              ? 'Upload a skill packaged as a .zip or .skill archive and add it to the selected pool'
+              : 'You are not Team Admin of any team, so there is nowhere you may import a skill'}
           >
             {importing ? 'Importing…' : 'Import skill'}
           </button>
-          <button onClick={() => setShowNewForm(f => !f)} style={primaryBtnStyle(false)}>
+          <button
+            onClick={() => setShowNewForm(f => !f)}
+            disabled={!canWriteAnywhere && !showNewForm}
+            style={primaryBtnStyle(!canWriteAnywhere && !showNewForm)}
+            title={canWriteAnywhere ? undefined : 'You are not Team Admin of any team, so there is nowhere you may create a skill'}
+          >
             {showNewForm ? 'Cancel' : '+ New Skill'}
           </button>
           {/* The page's own "?" (#1990). The #1847 header unification left this
@@ -1898,7 +1940,7 @@ export default function SkillsRegistry() {
           <h2 style={{ fontSize: 'var(--eb-text-base)', fontWeight: 'var(--eb-font-semibold)', margin: '0 0 var(--eb-space-3)' }}>
             Create skill
           </h2>
-          <NewSkillForm onCreated={handleCreated} onCancel={() => setShowNewForm(false)} teams={allTeams ?? []} />
+          <NewSkillForm onCreated={handleCreated} onCancel={() => setShowNewForm(false)} teams={allTeams ?? []} caller={caller} />
         </div>
       )}
 

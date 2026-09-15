@@ -176,6 +176,18 @@ since there is no Base URL to ask) — and differ in what they do with the answe
   wholesale, and **Dismiss** throws the suggestion away. Nothing is written until
   you save the provider.
 
+**A `404`/`405` from `/v1/models` doesn't end the probe.** Some Anthropic-compatible
+gateways — an Azure AI Foundry endpoint is the concrete case — serve `/v1/messages`
+but expose no model-listing route at all, which used to read as a broken provider.
+Both buttons now fall back to a `POST` of `/v1/messages/count_tokens` with a
+placeholder model name that is never actually served: a `400` (or `2xx`) means the
+endpoint is reachable and your credential works, just with no catalog to offer; a
+`401`/`403` still means a real auth failure; a `404` on that route too means the
+Base URL itself is wrong. On a successful fallback, **Test connection** reports OK
+and **Discover models** tells you to enter the model name(s) manually instead of
+showing an empty list or a raw HTTP error. A provider whose `/v1/models` already
+works is completely unaffected — the fallback only fires on a route-missing status.
+
 **A probe always names the credential it used**, in a line under the two buttons,
 because a `401` means something completely different depending on which one it
 was. There are three cases:

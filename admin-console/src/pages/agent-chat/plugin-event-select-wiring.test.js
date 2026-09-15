@@ -58,3 +58,17 @@ test('the single-choice auto-pick is wired', () => {
 test('eventFilter stays free text (the manifest declares no event names)', () => {
   assert.match(triggers, /label="Event filter \(optional\)"/);
 });
+
+test('the payload filter is authored through the pure plugin-event-filter module', () => {
+  assert.match(triggers, /import \{ parsePayloadFilter, formatPayloadFilter, payloadFilterSummary \} from '\.\/plugin-event-filter\.js'/);
+  // Initial value comes from the stored object, the wire value from the parser…
+  assert.match(triggers, /payloadFilter:\s*formatPayloadFilter\(initialValues\?\.payloadFilter\)/);
+  assert.match(triggers, /body\.payloadFilter = parsedPayloadFilter\.value/);
+  // …and a parse error blocks the save with its own message, before the prompt check.
+  const err = triggers.indexOf("setFormError(parsedPayloadFilter.error)");
+  const prompt = triggers.indexOf("setFormError('Prompt is required.')");
+  assert.ok(err !== -1 && prompt !== -1 && err < prompt, 'payload-filter validation must precede the prompt check');
+  // The field itself, and the row summary.
+  assert.match(triggers, /label="Payload filter \(optional\)"/);
+  assert.match(triggers, /payloadFilterSummary\(trigger\.payloadFilter\)/);
+});

@@ -9,6 +9,7 @@ import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 import { effectiveGrantFor } from '../plugin-grant-view.js';
 import { pluginEventOptions, defaultPluginId } from './plugin-event-options.js';
+import { parsePayloadFilter, formatPayloadFilter, payloadFilterSummary } from './plugin-event-filter.js';
 import { liveOps } from '../process/edit-adapters';
 import { isGateLabel, isBrakeLabel } from '../process/label-flags';
 import {
@@ -327,7 +328,8 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
   } else if (trigger.type === 'http') {
     schedule = `/hooks/${agentId}/${trigger.id}`;
   } else if (trigger.type === 'plugin-event') {
-    schedule = `${trigger.pluginId || 'plugin'}${trigger.eventFilter ? ` · ${trigger.eventFilter}` : ' · any event'}`;
+    const filterCopy = payloadFilterSummary(trigger.payloadFilter);
+    schedule = `${trigger.pluginId || 'plugin'}${trigger.eventFilter ? ` · ${trigger.eventFilter}` : ' · any event'}${filterCopy ? ` · ${filterCopy}` : ''}`;
   } else if (ghSummary) {
     schedule = trigger.repo || 'any repo';
   } else if (trigger.cron) {
@@ -636,6 +638,10 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     // platform) — blank = fire on any event from that plugin.
     pluginId:    initialValues?.pluginId    ?? '',
     eventFilter: initialValues?.eventFilter ?? '',
+    // Optional `{ key: value }` matched against the delivered payload's
+    // top-level string fields (plugin-event.js `matchesPayloadFilter`); edited
+    // as key=value lines, parsed back on save. Blank = no filter.
+    payloadFilter: formatPayloadFilter(initialValues?.payloadFilter),
   }));
   const isDataFlow = form.type === 'data-flow';
   const showLabelFilter = form.type === 'github-event'
@@ -824,6 +830,8 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     }
     if (form.type === 'http' && !form.secret.trim()) { setFormError('Secret is required for HTTP triggers.'); return; }
     if (form.type === 'plugin-event' && !form.pluginId.trim()) { setFormError('Select the plugin that may fire this listener.'); return; }
+    const parsedPayloadFilter = form.type === 'plugin-event' ? parsePayloadFilter(form.payloadFilter) : { ok: true, value: null };
+    if (!parsedPayloadFilter.ok) { setFormError(parsedPayloadFilter.error); return; }
     if (form.type === 'loop') {
       if (!isValidMaxIterations(form.maxIterations)) { setFormError('Max iterations is required and must be a positive whole number.'); return; }
       if (form.verifyMode === 'command' && !form.verifyCommand.trim()) { setFormError('Enter the verifier command, or choose a different verifier mode.'); return; }
@@ -877,6 +885,8 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       body.pluginId = form.pluginId.trim();
       // `null` (not omitted) so a PUT clears an existing filter when blanked.
       body.eventFilter = form.eventFilter.trim() || null;
+      // `null` (not omitted) clears a stored filter when the field is blanked.
+      body.payloadFilter = parsedPayloadFilter.value;
     }
     else if (form.type === 'github-event') {
       if (form.repo) body.repo = form.repo; // a draft's repo lands at materialise
@@ -1000,6 +1010,19 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             onChange={v => set('eventFilter', v)}
             placeholder="blank = any event from this plugin"
           />
+          <FormInput
+            label="Payload filter (optional)"
+            value={form.payloadFilter}
+            onChange={v => set('payloadFilter', v)}
+            multiline
+            rows={2}
+            placeholder={'one key=value per line, e.g.\ntoStatus=Ready for Dev'}
+          />
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
+            Wake only when every listed field of the event&rsquo;s payload equals the value
+            exactly (case-sensitive). The field names are the plugin&rsquo;s own &mdash; its help
+            topic lists them. Blank = wake on every matching event.
+          </div>
         </div>
       )}
 

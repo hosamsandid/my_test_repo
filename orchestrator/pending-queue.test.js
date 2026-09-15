@@ -291,3 +291,22 @@ test('a malformed hand-off entry degrades rather than throwing', () => {
 test('entryKind classifies a wake-agent entry from its explicit kind', () => {
   assert.equal(entryKind({ kind: 'wake-agent', from: 'a' }), 'wake-agent');
 });
+
+test('summarizeEntry projects a plugin-event entry (plugin, event, summary, triggerId) and omits the payload', () => {
+  const s = summarizeEntry({
+    id: 'p1', kind: 'plugin-event', source: 'internal-plugin', pluginId: 'jira', event: 'status_changed',
+    summary: 'KAN-6 → Ready for Dev', eventId: 'e-1', triggerId: 'on-jira-ready',
+    payload: { issue: { key: 'KAN-6' } }, receivedAt: '2026-09-15T10:00:00Z',
+  });
+  assert.equal(s.kind, 'plugin-event');
+  assert.equal(s.pluginId, 'jira');
+  assert.equal(s.event, 'status_changed');
+  assert.equal(s.summary, 'KAN-6 → Ready for Dev');
+  assert.equal(s.triggerId, 'on-jira-ready');
+  assert.equal('payload' in s, false);
+  // Optional fields degrade to null / absent rather than throwing.
+  const bare = summarizeEntry({ id: 'p2', kind: 'plugin-event' });
+  assert.equal(bare.pluginId, null);
+  assert.equal(bare.event, null);
+  assert.equal('summary' in bare, false);
+});

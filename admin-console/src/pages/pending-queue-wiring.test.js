@@ -81,6 +81,11 @@ const PRODUCERS = [
     where: ['agent-image', 'scripts', 'agent-entrypoint.py'],
     pattern: /"kind": "loop-verify"/,
   },
+  {
+    kind: 'plugin-event',
+    where: ['orchestrator', 'plugin-event.js'],
+    pattern: /PLUGIN_EVENT_PENDING_KIND = 'plugin-event'/,
+  },
 ];
 
 test('AC8 — every producer-side queue kind still has a producer, a label and a tooltip', () => {

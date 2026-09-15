@@ -363,3 +363,18 @@ test('an unknown kind renders identifiably rather than throwing', () => {
   assert.equal(entryDetail(entry), '');
   assert.equal(entryHoverDetail(entry), '');
 });
+
+test('plugin-event — a queued plugin wake reads as a plugin event, not an unrecognised entry', () => {
+  // The Jira plugin's broker queues `kind: 'plugin-event'` entries
+  // (orchestrator/plugin-event.js); the AC8 ratchet in
+  // pending-queue-wiring.test.js is what caught this kind unlabelled.
+  assert.equal(kindLabel('plugin-event'), 'Plugin event');
+  assert.notEqual(kindTooltip('plugin-event'), kindTooltip('unknown'));
+  assert.equal(
+    entryDetail({ kind: 'plugin-event', pluginId: 'jira', event: 'status_changed', summary: 'KAN-6 → Ready for Dev' }),
+    'jira · status_changed · KAN-6 → Ready for Dev',
+  );
+  // Plugin first, then the event; a missing summary drops silently.
+  assert.equal(entryDetail({ kind: 'plugin-event', pluginId: 'jira', event: 'status_changed' }), 'jira · status_changed');
+  assert.equal(entryDetail({ kind: 'plugin-event' }), '');
+});

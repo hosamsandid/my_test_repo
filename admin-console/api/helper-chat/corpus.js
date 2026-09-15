@@ -343,6 +343,20 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // **321 092 of 340 000 — 94.4% used, 18 908 left**, this change's own delta a
 // clean +1 178.
 //
+// CLAUDE.md's mirror of this paragraph is GONE as of the 2026-09-13 "shrink
+// CLAUDE.md to a lean high-level map" rewrite, which deliberately dropped the
+// per-ticket decision narratives it lived in — this comment and
+// context-help-system-concept.md §9 are now the only two homes; do not
+// reintroduce a restamp paragraph into CLAUDE.md.
+//
+// #2307 (skills-system.md: writing into the global pool is now one rule for
+// import/merge/create/edit too, not just promote/publish) is a CORPUS_FILES
+// member so it lands on EVERY context, not just this crown. Live `/quickstart`
+// measured 323 419 pre-edit — already +2 327 over the 321 092 last stamped
+// here, from unrelated intervening merges (none restamped since #2235) — and
+// **323 959 of 340 000 — 95.3% used, 16 041 left** post-edit, this change's
+// own delta a clean +540.
+//
 // If this ever gets tight again, the next structural step is the docs corpus
 // (route-scoped `CORPUS_FILES`, or splitting the two largest docs), NOT a fourth
 // raise and NOT trimming a topic.

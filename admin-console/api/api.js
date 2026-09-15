@@ -64,6 +64,7 @@ const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
 const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
 const { normalizeDiscoveredModels } = require('./model-discovery');
+const { isRouteMissingStatus, classifyMessagesFallback } = require('./llm-probe-fallback');
 const { CHAT_AUTHOR_FIELD, chatAuthorStamp } = require('./chat-author');
 // Per-human Matrix identity (#1458, epic #2076 P1). Byte-mirrored in
 // orchestrator/human-matrix-store.js — the console reads the same
@@ -1865,6 +1866,13 @@ function buildMessagesUrl(baseUrl) {
   if (/\/messages$/.test(trimmed)) return trimmed;
   if (/\/v\d+$/.test(trimmed)) return `${trimmed}/messages`;
   return `${trimmed}/v1/messages`;
+}
+
+// Companion to buildMessagesUrl for the probe fallback (#2306): Anthropic's
+// token-counting endpoint exercises auth + routing exactly like a real
+// completion, at negligible/zero cost since no inference happens.
+function buildCountTokensUrl(baseUrl) {
+  return `${buildMessagesUrl(baseUrl)}/count_tokens`;
 }
 
 // Plain HTTP/HTTPS POST of a JSON body. Mirrors httpGetJson: returns
@@ -12572,10 +12580,44 @@ function llmProbeTarget(baseUrl, token, authType) {
   };
 }
 
+// Fallback probe for a provider whose /v1/models route doesn't exist (#2306,
+// e.g. Azure AI Foundry's Anthropic-compatible endpoint) — confirms
+// reachability + auth via the cheapest true POST route, count_tokens, instead
+// of declaring the whole provider broken. See llm-probe-fallback.js for the
+// (unit-tested, pure) response classification.
+async function probeMessagesFallback(baseUrl, headers) {
+  const url = buildCountTokensUrl(baseUrl);
+  const payload = {
+    model: '__aee-probe-placeholder__',
+    messages: [{ role: 'user', content: 'ping' }],
+  };
+  const result = await httpPostJson(url, { 'anthropic-version': '2023-06-01', ...headers }, payload);
+  const { ok, error } = classifyMessagesFallback(result, describeProbeFailure);
+  return { ok, url, status: result.status, error };
+}
+
+// The base the fallback messages/count_tokens probe targets — mirrors
+// llmProbeTarget's own oauth-token special case (always api.anthropic.com,
+// never the caller's baseUrl).
+function llmProbeBase(baseUrl, authType) {
+  return normalizeAuthType(authType) === 'oauth-token' ? ANTHROPIC_DIRECT_BASE : baseUrl;
+}
+
 async function probeLlmEndpointTest(baseUrl, token, authType) {
   const { url, headers } = llmProbeTarget(baseUrl, token, authType);
   const result = await httpGetJson(url, headers);
   const ok = result.status >= 200 && result.status < 300;
+  if (!ok && isRouteMissingStatus(result.status)) {
+    const fallback = await probeMessagesFallback(llmProbeBase(baseUrl, authType), headers);
+    return {
+      ok: fallback.ok,
+      url: fallback.url,
+      status: fallback.status,
+      error: fallback.error,
+      sample: null,
+      ...(fallback.ok ? { noModelList: true } : {}),
+    };
+  }
   return {
     ok,
     url,
@@ -12591,6 +12633,19 @@ async function probeLlmEndpointDiscover(baseUrl, token, authType) {
   const { url, headers } = llmProbeTarget(baseUrl, token, authType);
   const result = await httpGetJson(url, headers);
   if (result.error || result.status < 200 || result.status >= 300) {
+    if (isRouteMissingStatus(result.status)) {
+      const fallback = await probeMessagesFallback(llmProbeBase(baseUrl, authType), headers);
+      if (fallback.ok) {
+        return {
+          url: fallback.url,
+          count: 0,
+          models: [],
+          noModelList: true,
+          message: 'This endpoint does not expose a model list — enter the model name(s) manually.',
+        };
+      }
+      return { error: fallback.error, url: fallback.url, status: fallback.status };
+    }
     return { error: result.error || describeProbeFailure(result.status, result.body), url, status: result.status };
   }
   // OpenAI-compatible shape: { data: [{ id, ... }] }; LiteLLM also exposes

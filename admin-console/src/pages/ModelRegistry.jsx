@@ -358,6 +358,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
         ok: r.ok,
         text: r.ok
           ? `OK (HTTP ${r.status}) — ${r.url}`
+            + (r.noModelList ? ' — this endpoint does not expose a model list; enter the model name(s) manually.' : '')
           : `Failed: ${r.error || 'HTTP ' + r.status} (${r.url})`,
       });
     } catch (e) {
@@ -376,8 +377,13 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
     try {
       const { path, body } = probeRequest(probeForm, 'discover');
       const r = await apiCall('POST', path, body);
-      setDiscovered(r.models || []);
-      setProbeMsg({ ok: true, text: `Found ${r.count ?? r.models?.length ?? 0} model(s) at ${r.url}` });
+      if (r.noModelList) {
+        setDiscovered(null);
+        setProbeMsg({ ok: true, text: r.message });
+      } else {
+        setDiscovered(r.models || []);
+        setProbeMsg({ ok: true, text: `Found ${r.count ?? r.models?.length ?? 0} model(s) at ${r.url}` });
+      }
     } catch (e) {
       setProbeMsg({ ok: false, text: e.message });
     } finally {

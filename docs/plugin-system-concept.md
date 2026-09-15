@@ -735,6 +735,21 @@ before it moves from catalog to roadmap.
   memory and never reaches the browser or an agent (AC10). Read-only `aee-issues`
   CLI (`repos`/`list`/`show`); label writes are the human console action.
 
+- **New-member plugin materialisation fix** *(shipped — #2308)*: a new team
+  member's resolved grant was correctly *computed* (`effectivePlugins`) but
+  never *applied* — `addTeamMember`, `enableAgent`'s stub-activation path, and
+  `seedAgentWorkspace` had no plugin equivalent of the skill/MCP seeding they
+  already did, so a member could show a plugin as granted, and advertise its
+  CLI in CLAUDE.md, with nothing actually written to `.agent-studio/`. Fixed by
+  threading the same `_syncPluginIntoWorkspace` seam both creation paths now
+  call, plus a new per-member `.agent-studio/seeded-plugins.json` manifest (the
+  plugin sibling of `seeded-skills.json`) recording which grants actually
+  landed on disk, and a bounded auto-reconcile loop
+  (`orchestrator/plugin-reconcile.js`, `reconcilePendingPlugins`) that repairs
+  members that were created while this bug was live. A sync failure degrades
+  the member rather than blocking the add, and is surfaced as a warning
+  (add-member response + GitHub Event Log) instead of only a log line.
+
 ## 10. Open questions
 
 - **Plugin authorship**: internal curated registry only, or customer-authored

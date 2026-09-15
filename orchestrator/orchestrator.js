@@ -138,7 +138,7 @@ const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit, p
 // Plugin system (#1516). The grant is the sibling of the skill grant — it lives
 // on the agent construct, never on the environment — and (de)activation is the
 // same additive live file sync, no respawn (#1547).
-const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor } = require("./plugin-grants");
+const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor, normalizeGrantList } = require("./plugin-grants");
 const { planWorkspaceSync } = require("./plugin-sync");
 const { resolveAgentStateDir } = require("./agent-state-dir");
 const { resolveScopeId } = require("./plugin-scope");
@@ -146,6 +146,7 @@ const pluginRegistry = require("./plugin-registry");
 const pluginRuntime = require("./plugin-runtime");
 const { resolveScopeGithubCredentials, buildTeamFlowLabels } = require("./plugin-github-creds");
 const { assertGranularityGrantable, defaultGranularity } = require("./plugin-manifest");
+const pluginReconcile = require("./plugin-reconcile");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { isSupportedAgentRole, unsupportedRoleNote } = require("./agent-role-support");
@@ -3767,6 +3768,30 @@ function writeSeededSkills(id, manifest) {
   fs.writeFileSync(p, JSON.stringify(manifest, null, 2));
 }
 
+// The plugin sibling of SEEDED_SKILLS_FILE (#2308): records which plugin ids
+// a member's WORKSPACE actually carries (bin + config on disk), keyed by
+// pluginId → { scopeGranularity, seededAt }. The grant alone (`plugins[]` /
+// `pluginsOverride`) cannot tell whether a member's files were ever written —
+// that gap is the bug this manifest closes, mirroring seeded-skills.json's
+// role exactly. Written by `_syncPluginIntoWorkspace` on every successful
+// per-plugin write/remove; read by `reconcilePendingPlugins` (missing-entry
+// detection) and by `_reconcilePluginNetworks` (never attach a sidecar network
+// for a plugin the member has no config for).
+const SEEDED_PLUGINS_FILE = "seeded-plugins.json";
+
+function readSeededPlugins(id) {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(agentStateDir(id), SEEDED_PLUGINS_FILE), "utf8"));
+    return m && typeof m === "object" ? m : {};
+  } catch { return {}; }
+}
+
+function writeSeededPlugins(id, manifest) {
+  const p = path.join(agentStateDir(id), SEEDED_PLUGINS_FILE);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(manifest, null, 2));
+}
+
 // ── Custom slash-command provisioning (#1796) ──────────────────────────────
 // A granted skill may ship a `commands/*.md` subdir; those command files are
 // projected into the agent workspace's `.claude/commands/<namespace>/` so Claude
@@ -3892,6 +3917,27 @@ function writeSkillReconcileState(id, map) {
     const clean = map && typeof map === "object" ? map : {};
     // An empty map means every skill reconciled — drop the file so it leaves no
     // trace (and the overlay never reads a stale error).
+    if (Object.keys(clean).length === 0) { try { fs.rmSync(p, { force: true }); } catch { /* noop */ } return; }
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(clean, null, 2));
+  } catch { /* best effort */ }
+}
+
+// The plugin sibling of SKILL_RECONCILE_FILE (#2308) — same bounded
+// retry/backoff bookkeeping, keyed by pluginId instead of skill name.
+const PLUGIN_RECONCILE_FILE = "plugin-reconcile.json";
+
+function readPluginReconcileState(id) {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(agentStateDir(id), PLUGIN_RECONCILE_FILE), "utf8"));
+    return m && typeof m === "object" ? m : {};
+  } catch { return {}; }
+}
+
+function writePluginReconcileState(id, map) {
+  const p = path.join(agentStateDir(id), PLUGIN_RECONCILE_FILE);
+  try {
+    const clean = map && typeof map === "object" ? map : {};
     if (Object.keys(clean).length === 0) { try { fs.rmSync(p, { force: true }); } catch { /* noop */ } return; }
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, JSON.stringify(clean, null, 2));
@@ -10559,6 +10605,12 @@ class Orchestrator {
 
     this.agentConfigs.set(memberId, { config: memberConfig });
 
+    // #2308: materialise the member's resolved plugin grant (team's plugins[],
+    // or its own pluginsOverride) into its workspace NOW — before the container
+    // boots — exactly like skills/MCP above. Never blocks the add (AC17); any
+    // failure comes back as a warning (AC18) merged into the response below.
+    const pluginSync = await this._materializeMemberPlugins(memberId, memberConfig);
+
     // #2251: an autonomously spawned pool instance has nobody to open its chat,
     // so its inherited kickoff trigger would fire against no DM room and be
     // skipped (empty session). Pre-create the room NOW — before the container
@@ -10589,7 +10641,7 @@ class Orchestrator {
       id: memberId,
       userId,
       seeded: seedResult.seeded,
-      warnings: seedResult.warnings || [],
+      warnings: [...(seedResult.warnings || []), ...pluginSync.warnings],
       clones: seedResult.clones || [],
     };
   }
@@ -11051,6 +11103,82 @@ class Orchestrator {
     return summary;
   }
 
+  // Auto-reconcile pending PLUGIN members (#2308 D2) — the plugin sibling of
+  // reconcilePendingSkills above, for the same reason: a member whose grant
+  // includes a plugin id its `seeded-plugins.json` manifest doesn't carry
+  // (created before the grant existed, created while a sync failed, or a
+  // member from before this ticket shipped) is repaired here instead of
+  // needing the "deactivate the plugin on the team, then reactivate it" dance
+  // the issue reported — which would also revoke the plugin from every
+  // WORKING member of that team in the process (D2's own reasoning). Bounded
+  // by the same max-attempt + backoff discipline; idempotent (a fully-synced
+  // team does zero work and touches no file).
+  async reconcilePendingPlugins({ now = new Date().toISOString() } = {}) {
+    const teamIds = listAgentIds()
+      .map((id) => loadAgentConfig(id))
+      .filter((c) => c && c.role === "team" && Array.isArray(c.plugins) && c.plugins.length)
+      .map((c) => c.id);
+    const summary = { synced: [], failed: [], exhausted: [] };
+    for (const teamId of teamIds) {
+      const teamCfg = loadAgentConfig(teamId);
+      const activeGrant = normalizeGrantList(teamCfg.plugins);
+      const members = listAgentIds()
+        .map((id) => loadAgentConfig(id))
+        .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+      const plan = pluginReconcile.planTeamReconcile(
+        { members, activeGrant, seededOf: readSeededPlugins, stateOf: readPluginReconcileState },
+        { now },
+      );
+      summary.exhausted.push(...plan.exhausted);
+
+      // Batch every due plugin id PER MEMBER into one _syncPluginIntoWorkspace
+      // call (one CLAUDE.md rebuild instead of N), by presenting a `prev` that
+      // omits exactly the ids being reconciled — the same idempotent-diff
+      // trick `setTeamPluginActive`/`setAgentPluginActive` already rely on.
+      const dueByMember = new Map();
+      for (const t of plan.due) {
+        if (!dueByMember.has(t.agentId)) dueByMember.set(t.agentId, []);
+        dueByMember.get(t.agentId).push(t.pluginId);
+      }
+      for (const [agentId, pluginIds] of dueByMember) {
+        const cfg = members.find((m) => m.id === agentId);
+        if (!cfg) continue;
+        let next = [];
+        let errors = [];
+        try {
+          next = effectivePlugins(cfg, loadAgentConfig);
+          const prev = next.filter((g) => !pluginIds.includes(g.id));
+          const result = await this._syncPluginIntoWorkspace(agentId, cfg, prev, next);
+          errors = result.errors || [];
+        } catch (err) {
+          errors = pluginIds.map((pluginId) => ({ pluginId, error: err.message }));
+        }
+        const failedIds = new Set(errors.map((e) => e.pluginId));
+        const okIds = pluginIds.filter((pid) => !failedIds.has(pid));
+        if (okIds.length) {
+          try { await this._reconcilePluginNetworks(okIds); }
+          catch (err) { console.warn(`[Orchestrator] plugin reconcile network sync ${agentId}: ${err.message}`); }
+        }
+        const state = readPluginReconcileState(agentId);
+        for (const pluginId of pluginIds) {
+          const ok = !failedIds.has(pluginId);
+          const error = ok ? null : ((errors.find((e) => e.pluginId === pluginId) || {}).error || 'sync failed');
+          const nextEntry = pluginReconcile.recordAttempt(state[pluginId], { ok, error, now });
+          if (nextEntry === null) delete state[pluginId]; else state[pluginId] = nextEntry;
+          const target = { agentId, pluginId };
+          if (ok) { summary.synced.push(target); }
+          else { summary.failed.push(target); recordPluginSyncFailure(agentId, pluginId, error); }
+        }
+        writePluginReconcileState(agentId, state);
+      }
+    }
+    const touched = summary.synced.length + summary.failed.length;
+    if (touched) {
+      console.log(`[Orchestrator] plugin reconcile: ${summary.synced.length} synced, ${summary.failed.length} failed, ${summary.exhausted.length} exhausted`);
+    }
+    return summary;
+  }
+
   // Drift state of ONE seeded copy against the source it descends from (#629,
   // concept §2.4). Mirrors admin-console/api/skill-drift.copyDriftState on the
   // orchestrator side: hash the copy dir + the CURRENT source dir on disk and
@@ -11225,33 +11353,59 @@ class Orchestrator {
     const written = [];
     const removed = [];
     const errors = [];
+    const failedPluginIds = new Set();
 
+    // Group by pluginId (both write.js's bin item and config item carry it) so
+    // a partial failure is treated as ONE unit (#2308 AC12): if the CLI copies
+    // but the token config write then throws, the CLI is rolled back too —
+    // never a bin with no config, or a config a broker will refuse to honour.
+    const writesByPlugin = new Map();
     for (const item of plan.write) {
-      const dest = path.join(dir, item.path);
-      try {
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
-        if (item.copyFrom) {
-          // `copyFrom` is the manifest's registry-relative cli.entrypoint.
-          // Match on entrypoint AND cli name so two plugins shipping the same
-          // relative path can't be confused for one another, and resolve the
-          // absolute source through the registry so the containment check
-          // happens in exactly one place.
-          const cliName = path.basename(item.path);
-          const manifest = Object.values(manifests).find(
-            (m) => m.cli && m.cli.entrypoint === item.copyFrom && m.cli.name === cliName,
-          );
-          const src = manifest ? pluginRegistry.cliEntrypointPath(manifest) : null;
-          if (!src) { errors.push({ path: item.path, error: 'CLI entrypoint not resolvable' }); continue; }
-          fs.copyFileSync(src, dest);
-        } else {
-          fs.writeFileSync(dest, `${JSON.stringify(item.content, null, 2)}\n`);
+      const key = item.pluginId || item.path;
+      if (!writesByPlugin.has(key)) writesByPlugin.set(key, []);
+      writesByPlugin.get(key).push(item);
+    }
+
+    for (const [pluginId, items] of writesByPlugin) {
+      const okPaths = [];
+      let failure = null;
+      for (const item of items) {
+        const dest = path.join(dir, item.path);
+        try {
+          fs.mkdirSync(path.dirname(dest), { recursive: true });
+          if (item.copyFrom) {
+            // `copyFrom` is the manifest's registry-relative cli.entrypoint.
+            // Match on entrypoint AND cli name so two plugins shipping the same
+            // relative path can't be confused for one another, and resolve the
+            // absolute source through the registry so the containment check
+            // happens in exactly one place.
+            const cliName = path.basename(item.path);
+            const manifest = Object.values(manifests).find(
+              (m) => m.cli && m.cli.entrypoint === item.copyFrom && m.cli.name === cliName,
+            );
+            const src = manifest ? pluginRegistry.cliEntrypointPath(manifest) : null;
+            if (!src) throw new Error('CLI entrypoint not resolvable');
+            fs.copyFileSync(src, dest);
+          } else {
+            fs.writeFileSync(dest, `${JSON.stringify(item.content, null, 2)}\n`);
+          }
+          // chmod AFTER write: writeFileSync's mode option is masked by umask,
+          // and the token config must be 0600 exactly.
+          fs.chmodSync(dest, item.mode);
+          okPaths.push(item.path);
+        } catch (err) {
+          failure = { pluginId, path: item.path, error: err.message };
+          break;
         }
-        // chmod AFTER write: writeFileSync's mode option is masked by umask,
-        // and the token config must be 0600 exactly.
-        fs.chmodSync(dest, item.mode);
-        written.push(item.path);
-      } catch (err) {
-        errors.push({ path: item.path, error: err.message });
+      }
+      if (failure) {
+        // Roll back whatever this ONE plugin did manage to write — a bin with
+        // no config (or a config with no bin) is a worse state than neither.
+        for (const p of okPaths) { try { fs.rmSync(path.join(dir, p), { force: true }); } catch { /* best effort */ } }
+        errors.push(failure);
+        failedPluginIds.add(pluginId);
+      } else {
+        written.push(...okPaths);
       }
     }
 
@@ -11262,6 +11416,34 @@ class Orchestrator {
       } catch (err) {
         errors.push({ path: rel, error: err.message });
       }
+    }
+
+    // Keep the seeded-plugins manifest (the one source of truth for "does this
+    // member's WORKSPACE actually carry this plugin", #2308) in lockstep with
+    // what was actually written above — never with the grant alone, which is
+    // exactly the gap that let a member look granted with no files on disk.
+    // A plugin whose write failed this round is deliberately left unrecorded
+    // (or untouched if it was already recorded from a prior success) so the
+    // next reconcile pass still sees it as missing.
+    try {
+      const seeded = readSeededPlugins(id);
+      for (const g of (nextGrant || [])) {
+        if (!g || !g.id || failedPluginIds.has(g.id)) continue;
+        // Only a file-bearing, installed plugin ever gets a workspace write
+        // (planWorkspaceSync skips an uninstalled id or a command-only
+        // manifest entirely) — mirror that gate here so neither is ever
+        // recorded as "seeded" with no file behind the claim.
+        const gm = manifests[g.id];
+        if (!gm || !gm.cli) continue;
+        if (seeded[g.id] && !writesByPlugin.has(g.id)) continue; // already recorded, untouched this round
+        seeded[g.id] = { scopeGranularity: g.scopeGranularity, seededAt: new Date().toISOString() };
+      }
+      for (const g of (prevGrant || [])) {
+        if (g && g.id && !(nextGrant || []).some((n) => n && n.id === g.id)) delete seeded[g.id];
+      }
+      writeSeededPlugins(id, seeded);
+    } catch (err) {
+      console.warn(`[Orchestrator] seeded-plugins manifest ${id}: ${err.message}`);
     }
 
     // ── Command-only plugin provisioning (#1798) ──────────────────────────
@@ -11319,6 +11501,48 @@ class Orchestrator {
     return { agentId: id, status: errors.length ? "error" : "synced", written, removed, errors };
   }
 
+  // Materialise a just-created or just-enabled member's resolved plugin grant
+  // into its workspace (#2308). The one seam `addTeamMember`'s materialize
+  // branch and `enableAgent`'s stub branch both call — mirroring how `enableAgent`
+  // already resolves `effectiveSkills` for skills (`orchestrator.js` ~11639) —
+  // so a member inherits its team's plugins at creation time exactly the way it
+  // already inherits skills, MCP servers and everything else team-owned.
+  //
+  // AC17: NEVER throws and never blocks the caller — a plugin that cannot be
+  // installed degrades the member (D5), it does not fail the add/enable. Any
+  // failure is (a) returned as a human-readable warning for the immediate
+  // caller (AC18) and (b) logged to the operator-facing GitHub Event Log so it
+  // stays discoverable afterwards even if nobody was watching (AC19).
+  async _materializeMemberPlugins(id, cfg) {
+    let next;
+    try {
+      next = effectivePlugins(cfg, loadAgentConfig);
+    } catch (err) {
+      console.warn(`[Orchestrator] plugin materialize ${id}: grant resolution failed: ${err.message}`);
+      return { warnings: [] };
+    }
+    if (!Array.isArray(next) || next.length === 0) return { warnings: [] }; // AC7: nothing granted, nothing to do
+
+    const warnings = [];
+    try {
+      const result = await this._syncPluginIntoWorkspace(id, cfg, [], next);
+      for (const e of (result.errors || [])) {
+        const pluginId = e.pluginId || '(unknown)';
+        warnings.push(`plugin '${pluginId}' could not be installed for '${id}': ${e.error}`);
+        recordPluginSyncFailure(id, pluginId, e.error);
+      }
+      const okIds = next.map((g) => g.id).filter((pid) => !(result.errors || []).some((e) => e.pluginId === pid));
+      if (okIds.length) await this._reconcilePluginNetworks(okIds);
+    } catch (err) {
+      // Should not happen (_syncPluginIntoWorkspace is itself best-effort), but
+      // AC17 is absolute: a thrown error here must still degrade, not block.
+      warnings.push(`plugin sync failed for '${id}': ${err.message}`);
+      for (const g of next) recordPluginSyncFailure(id, g.id, err.message);
+      console.warn(`[Orchestrator] plugin materialize ${id}: ${err.message}`);
+    }
+    return { warnings };
+  }
+
   // Reconnect every touched plugin's sidecar to exactly the per-agent networks
   // its current grant implies. Reconciled from truth rather than applied as a
   // delta, so a missed event or a manual disconnect self-heals on the next
@@ -11333,6 +11557,12 @@ class Orchestrator {
           try { return !!pluginGrantFor(effectivePlugins(c, loadAgentConfig), pluginId); }
           catch { return false; }
         })
+        // #2308: reconciled from the GRANT alone, this re-attached a network to
+        // a member whose workspace sync had failed or never run — "networked
+        // yet CLI-less" (the issue's own point 4). Gate on the seeded-plugins
+        // manifest too, so a member only gets the sidecar path once its
+        // config file actually exists to use it.
+        .filter((c) => !!readSeededPlugins(c.id)[pluginId])
         .map((c) => c.id);
       results.push({ pluginId, ...(await pluginRuntime.reconcilePluginAttachments(pluginId, granted)) });
     }
@@ -11385,7 +11615,9 @@ class Orchestrator {
     for (const step of plan) {
       if (step.action === "stub") {
         // Consistent by construction: the team list already carries (or no
-        // longer carries) the grant; the normal seed path applies it at enable.
+        // longer carries) the grant; enableAgent() materialises the resolved
+        // grant into the workspace when the stub is later activated (#2308 —
+        // before this ticket no path ever did, which was the bug).
         results.push({ agentId: step.agentId, status: "stub" });
         continue;
       }
@@ -11664,13 +11896,20 @@ class Orchestrator {
     console.log(`[Orchestrator] Materialized team-member ${id} (team=${cfg.parentTeamId}, prompt=${cfg.systemPrompt ? 'override' : 'inherit'})`);
 
     this.agentConfigs.set(id, { config: updated });
+
+    // #2308: mirrors the `skills: effectiveSkills(...)` resolution above —
+    // this stub's resolved plugin grant is materialised at enable time too,
+    // the seed path that never existed before this ticket (AC5). Never blocks
+    // enabling the member (AC17); a failure comes back as a warning (AC18).
+    const pluginSync = await this._materializeMemberPlugins(id, updated);
+
     startAgentProcess(updated);
     return {
       id,
       materialized: true,
       enabled: true,
       seeded: seedResult.seeded,
-      warnings: seedResult.warnings || [],
+      warnings: [...(seedResult.warnings || []), ...pluginSync.warnings],
       clones: seedResult.clones || [],
     };
   }
@@ -13077,6 +13316,38 @@ function recordOffboardingDegradation(userId, detail) {
     });
   } catch (err) {
     console.error(`[Orchestrator] could not log the offboarding degradation for ${userId}: ${err.message}`);
+  }
+}
+
+// Put a failed plugin materialisation on the operator's timeline (#2308 AC18/
+// AC19). A member whose grant includes a plugin that could not be installed
+// must never fail silently — this is the "discoverable after the fact" half:
+// the immediate caller ALSO gets the error in its response `warnings[]`, but a
+// human who was not watching the add/enable call still needs a way to find
+// out later, which is what the GitHub Event Log (already the operator-facing
+// timeline the console renders) gives for free. Repo-less by construction,
+// same as `recordOffboardingDegradation`; `outcomes` stays empty for the same
+// reason (the console's reader throws on a null-agentId outcome).
+function recordPluginSyncFailure(agentId, pluginId, detail) {
+  try {
+    const now = new Date().toISOString();
+    githubEventLog.record({
+      ts: now,
+      eventId: `plugin-sync:${agentId}:${pluginId}:${Date.now()}`,
+      repo: null,
+      event: 'plugin.sync-failed',
+      actor: null,
+      createdAt: now,
+      label: null,
+      ref: null,
+      workItem: null,
+      noMatchingTrigger: false, // same-shape null-agentId hazard as recordOffboardingDegradation — outcomes stays empty below
+      outcomes: [],
+      source: 'internal',
+      pluginSync: { agentId: String(agentId), pluginId: String(pluginId), ok: false, detail: String(detail || 'unknown') },
+    });
+  } catch (err) {
+    console.error(`[Orchestrator] could not log the plugin sync failure for ${agentId}/${pluginId}: ${err.message}`);
   }
 }
 
@@ -18486,6 +18757,28 @@ async function main() {
   };
   const reconcileTimer = setInterval(runSkillReconcile, RECONCILE_INTERVAL_MS);
   if (typeof reconcileTimer.unref === "function") reconcileTimer.unref();
+
+  // ============================================================
+  // Plugin auto-reconcile loop (#2308 D2) — the plugin sibling of the skill
+  // loop above, same interval class and overlap guard. Heals a member whose
+  // grant includes a plugin its workspace never received: created before this
+  // ticket shipped, created while a sync failed, or any other drift between
+  // the grant and `seeded-plugins.json`.
+  // ============================================================
+  const PLUGIN_RECONCILE_INTERVAL_MS = Math.max(
+    30_000,
+    Number(process.env.PLUGIN_RECONCILE_INTERVAL_MS) || 5 * 60 * 1000,
+  );
+  let pluginReconcileBusy = false;
+  const runPluginReconcile = async () => {
+    if (pluginReconcileBusy) return; // overlap guard — a slow pass must not stack
+    pluginReconcileBusy = true;
+    try { await orchestrator.reconcilePendingPlugins(); }
+    catch (err) { console.warn(`[Orchestrator] plugin reconcile pass failed: ${err.message}`); }
+    finally { pluginReconcileBusy = false; }
+  };
+  const pluginReconcileTimer = setInterval(runPluginReconcile, PLUGIN_RECONCILE_INTERVAL_MS);
+  if (typeof pluginReconcileTimer.unref === "function") pluginReconcileTimer.unref();
 
   // ============================================================
   // Hill-climbing loop Phase 1 (#1221): scheduled flow-anomaly-sweep persistence.

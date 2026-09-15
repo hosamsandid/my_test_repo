@@ -74,13 +74,20 @@ export function addMemberConfirmLabel({ busy, materializeNow } = {}) {
  * key at all. An absent flag is therefore read as the documented backend default
  * (materialize-now) rather than guessed from the request — a backend that
  * ignored the preference must not be reported as if it had honoured it.
+ *
+ * `result.warnings` (clone/skill/plugin sync issues, #2308 AC18) is appended
+ * verbatim rather than dropped: the add still succeeded (the member exists and
+ * is usable), but a human who asked for a plugin the workspace could not
+ * install needs to see that in the SAME moment, not only by later reading the
+ * GitHub Event Log (AC19's fallback for whoever wasn't watching).
  */
 export function addMemberNotice(result) {
   const r = result || {};
   const who = r.id ? `'${r.id}'` : 'Member';
-  if (r.materialized === false) {
-    return `${who} created as a stub — no clone, no container. `
-      + 'It is listed under "Not materialized yet"; materialize it when you are ready.';
-  }
-  return `${who} added and started.`;
+  const base = r.materialized === false
+    ? `${who} created as a stub — no clone, no container. `
+      + 'It is listed under "Not materialized yet"; materialize it when you are ready.'
+    : `${who} added and started.`;
+  const warnings = Array.isArray(r.warnings) ? r.warnings.filter((w) => typeof w === 'string' && w) : [];
+  return warnings.length ? `${base} ${warnings.join(' ')}` : base;
 }

@@ -73,6 +73,23 @@ test('a fresh grant seeds the CLI (0755), the 0600 config with a minted token, a
   });
 });
 
+// #2308 AC12: every write item is tagged with the plugin it belongs to, so an
+// impure caller can group a fresh grant's bin+config pair and treat a partial
+// failure (one write throws, the other already landed) as ONE unit — rolling
+// both back rather than stranding a CLI with no config or vice versa.
+test('every write item (bin, config, and a granularity-flip config-only rewrite) carries pluginId', () => {
+  const fresh = plan([], [{ id: 'dummy-echo', scopeGranularity: 'team' }]);
+  assert.equal(fresh.write.length, 2);
+  assert.ok(fresh.write.every((w) => w.pluginId === 'dummy-echo'));
+
+  const flip = plan(
+    [{ id: 'dummy-echo', scopeGranularity: 'team' }],
+    [{ id: 'dummy-echo', scopeGranularity: 'agent' }],
+  );
+  assert.equal(flip.write.length, 1);
+  assert.equal(flip.write[0].pluginId, 'dummy-echo');
+});
+
 test('agent granularity resolves the member id as the scopeId (and into the token)', () => {
   const out = plan([], [{ id: 'dummy-echo', scopeGranularity: 'agent' }]);
   const cfg = out.write.find((w) => w.path === '.agent-studio/plugins/dummy-echo.json');

@@ -76,6 +76,27 @@ test('the notice survives a payload with no id', () => {
   assert.match(addMemberNotice({ materialized: false }), /stub/i);
 });
 
+// #2308 AC18: a plugin (or clone/skill) sync failure is surfaced to the human
+// who performed the add — not silently dropped from the toast.
+test('warnings (e.g. a plugin that could not be installed) are appended, not dropped', () => {
+  const withWarning = addMemberNotice({
+    id: 'team1-reviewer',
+    userId: '@team1-reviewer:x',
+    seeded: true,
+    warnings: ["plugin 'github-issues' could not be installed for 'team1-reviewer': ECONNREFUSED"],
+  });
+  assert.match(withWarning, /team1-reviewer/);
+  assert.match(withWarning, /added and started/);
+  assert.match(withWarning, /github-issues.*could not be installed/);
+});
+
+test('no warnings key, or an empty one, changes nothing', () => {
+  const bare = addMemberNotice({ id: 'm', seeded: true });
+  const empty = addMemberNotice({ id: 'm', seeded: true, warnings: [] });
+  assert.equal(bare, empty);
+  assert.doesNotMatch(bare, /undefined|null/);
+});
+
 // ----------------------------------------------------------------- the copy
 
 test('the checkbox copy states both halves of the trade — and the stub costs', () => {

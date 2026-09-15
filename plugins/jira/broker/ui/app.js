@@ -235,10 +235,11 @@
       + 'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   }
 
-  function wakeText(w) {
-    var ids = w.wake && w.wake.agentIds;
-    if (Array.isArray(ids)) return 'wakes ' + ids.length + ' agent' + (ids.length === 1 ? '' : 's');
-    return 'wakes every granted agent';
+  // Which agents a transition wakes is decided per agent by its `plugin-event`
+  // trigger (and its payload filter, e.g. `toStatus=…`) — not here. The
+  // pre-Phase-2 `wake.agentIds` is no longer read by the broker.
+  function wakeText() {
+    return 'wakes agents by their plugin-event triggers';
   }
 
   // Decorative dot palette for the watch card's target-status pills (they carry
@@ -288,16 +289,7 @@
 
   function healthyDetail(w) {
     var h = w.health || {};
-    var ids = w.wake && w.wake.agentIds;
-    var wakesCell;
-    if (Array.isArray(ids) && ids.length) {
-      wakesCell = '<div class="wd-span"><span class="dt-label">Wakes ' + ids.length + ' agent' + (ids.length === 1 ? '' : 's') + '</span>'
-        + '<div class="wd-agent-chips">'
-        + ids.map(function (a) { return '<span class="wd-chip">' + esc(a) + '</span>'; }).join('')
-        + '</div></div>';
-    } else {
-      wakesCell = '<div><span class="dt-label">Wakes</span><span>every granted agent</span></div>';
-    }
+    var wakesCell = '<div><span class="dt-label">Wakes</span><span>agents whose plugin-event trigger matches</span></div>';
     return '<div class="watch-detail">'
       + '<div><span class="dt-label">Last poll</span><span>' + (h.lastPolledAt ? esc(fmtTime(h.lastPolledAt)) + ' · ' + esc(fmtDay(h.lastPolledAt)) : 'not yet') + '</span></div>'
       + '<div><span class="dt-label">Seen this cursor</span><span>' + (h.baselined ? esc(h.seenCount) + ' events' : 'not baselined') + '</span></div>'

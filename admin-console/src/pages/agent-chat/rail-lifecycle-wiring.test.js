@@ -39,10 +39,14 @@ const menu = code(read('../../components/RowContextMenu.jsx'));
 const sharePanel = code(read('./ShareTeamPanel.jsx'));
 
 test('the chat page derives its list URL from the opt-in, never a literal', () => {
-  assert.match(agentChat, /useApi\(matrixAgentsUrl\(showDisabled\)\)/);
+  // #2311: the one-shot `useApi(matrixAgentsUrl(showDisabled))` fetch became a
+  // shared background poll (`AgentRosterProvider`), which is handed the SAME
+  // url-builder + opt-in rather than a literal — the toggle still drives which
+  // URL gets polled, just on every tick instead of once.
+  assert.match(agentChat, /AgentRosterProvider showDisabled=\{showDisabled\} buildUrl=\{matrixAgentsUrl\}/);
   // A hard-coded list URL would freeze the chat on the enabled-only payload and
   // make the toggle a no-op that still *looks* live.
-  assert.doesNotMatch(agentChat, /useApi\(\s*['"]\/api\/matrix\/agents/);
+  assert.doesNotMatch(agentChat, /buildUrl=\{\s*\(\)?\s*=>?\s*['"]\/api\/matrix\/agents/);
 });
 
 test('the opt-in is persisted per user, not per session', () => {
@@ -56,7 +60,12 @@ test('the chat page passes the opt-in and the menu request down to the rail', ()
 });
 
 test('a disabled agent is never resolved as the open chat (AC6)', () => {
-  assert.match(agentChat, /isChatOpenable\(routedAgent\)/);
+  // #2311 D2: the openable check now runs against `effectiveRoutedAgent`
+  // (the live routed agent, or its frozen last-known snapshot once it has
+  // vanished from a background roster refresh) rather than `routedAgent`
+  // directly — `effectiveRoutedAgent` is `routedAgent` whenever the agent is
+  // still present, so this is the same check, widened to also cover D2.
+  assert.match(agentChat, /isChatOpenable\(effectiveRoutedAgent\)/);
 });
 
 test('the lifecycle host is mounted with the list and a way to refresh it', () => {

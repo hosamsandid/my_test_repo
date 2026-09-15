@@ -4755,6 +4755,61 @@ class PluginEventDelivery(unittest.IsolatedAsyncioTestCase):
         await scheduler._process_pending()
         scheduler._execute.assert_not_awaited()
 
+    def test_payload_filter_rule_mirrors_plugin_event_js(self):
+        m = entrypoint._matches_payload_filter
+        # no filter → anything
+        self.assertTrue(m(None, None))
+        self.assertTrue(m({}, {"toStatus": "x"}))
+        self.assertTrue(m("not-a-dict", {"toStatus": "x"}))
+        self.assertTrue(m({"toStatus": "  "}, {}))          # blank value = no filter
+        self.assertTrue(m({"toStatus": 5}, {}))             # non-string value = no filter
+        f = {" toStatus ": " Ready for Dev "}
+        self.assertTrue(m(f, {"toStatus": "Ready for Dev"}))
+        self.assertFalse(m(f, {"toStatus": "ready for dev"}))   # case-sensitive
+        self.assertFalse(m(f, {}))
+        self.assertFalse(m(f, None))
+        self.assertFalse(m(f, {"toStatus": {"name": "Ready for Dev"}}))  # only string fields compare
+        self.assertFalse(m({"toStatus": "Ready for Dev", "projectKey": "KAN"},
+                           {"toStatus": "Ready for Dev", "projectKey": "OPS"}))
+        # digest: any contained event
+        digest = {"kind": "digest", "count": 2, "events": [{"toStatus": "Done"}, {"toStatus": "Ready for Dev"}]}
+        self.assertTrue(m(f, digest))
+        self.assertFalse(m(f, {"kind": "digest", "count": 0, "events": []}))
+
+    async def test_payload_filter_mismatch_skips(self):
+        scheduler = self._scheduler()
+        entrypoint._save_triggers([{
+            "id": "on-dev", "type": "plugin-event", "enabled": True,
+            "pluginId": "jira", "payloadFilter": {"toStatus": "Ready for Dev"}, "prompt": "p",
+        }])
+        self._queue({
+            "kind": "plugin-event", "pluginId": "jira", "event": "status_changed",
+            "payload": {"toStatus": "In Progress"}, "triggerId": "on-dev",
+        })
+        scheduler._execute = AsyncMock()
+        await scheduler._process_pending()
+        scheduler._execute.assert_not_awaited()
+
+    async def test_payload_filter_picks_the_right_trigger_over_the_stamped_id(self):
+        # The orchestrator stamped the first match; the consumer re-resolves
+        # with the same rule and must land on the trigger whose filter matches.
+        scheduler = self._scheduler()
+        entrypoint._save_triggers([
+            {"id": "on-ba", "type": "plugin-event", "enabled": True, "pluginId": "jira",
+             "payloadFilter": {"toStatus": "Ready for Refinement"}, "prompt": "ba"},
+            {"id": "on-dev", "type": "plugin-event", "enabled": True, "pluginId": "jira",
+             "payloadFilter": {"toStatus": "Ready for Dev"}, "prompt": "dev"},
+        ])
+        self._queue({
+            "kind": "plugin-event", "pluginId": "jira", "event": "status_changed",
+            "payload": {"toStatus": "Ready for Dev"}, "triggerId": "on-ba",
+        })
+        scheduler._execute = AsyncMock()
+        await scheduler._process_pending()
+        scheduler._execute.assert_awaited_once()
+        trigger, = scheduler._execute.await_args.args
+        self.assertEqual(trigger["id"], "on-dev")
+
     async def test_not_logged_as_out_of_scope(self):
         # The one failure mode that looks like nothing happening: below the
         # _PENDING_OUT_OF_SCOPE_KINDS check the entry is dropped silently.

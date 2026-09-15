@@ -3170,6 +3170,45 @@ _WAKE_TRIGGER_TYPE = "wake-agent"
 _PLUGIN_EVENT_PENDING_KIND = "plugin-event"
 _PLUGIN_EVENT_TRIGGER_TYPE = "plugin-event"
 
+
+def _normalize_payload_filter(raw):
+    """Mirror of `normalizePayloadFilter` in orchestrator/plugin-event.js:
+    a `{key: value}` on a plugin-event trigger, keys/values trimmed, blank or
+    non-string values dropped. `{}` means "no filter"."""
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for k, v in raw.items():
+        key = str(k).strip()
+        if key and isinstance(v, str) and v.strip():
+            out[key] = v.strip()
+    return out
+
+
+def _payload_fields_match(flt, payload):
+    if not isinstance(payload, dict):
+        return False
+    for k, v in flt.items():
+        val = payload.get(k)
+        if not isinstance(val, str) or val != v:
+            return False
+    return True
+
+
+def _matches_payload_filter(raw, payload):
+    """Mirror of `matchesPayloadFilter` in orchestrator/plugin-event.js — the
+    consumer re-resolves its trigger on drain with the SAME rule the
+    orchestrator used to pick it. All keys must equal a top-level STRING field
+    exactly (case-sensitive, the labelFilter rule); a burst digest matches when
+    any contained event does. Keep the two in sync."""
+    flt = _normalize_payload_filter(raw)
+    if not flt:
+        return True
+    if isinstance(payload, dict) and payload.get("kind") == "digest" and isinstance(payload.get("events"), list):
+        return any(_payload_fields_match(flt, e) for e in payload["events"])
+    return _payload_fields_match(flt, payload)
+
+
 # The tag that delimits the untrusted-note envelope (§5.3). Matched
 # case-insensitively with optional inner whitespace, because a closing tag the
 # model would still read as closing must not slip past a stricter pattern.
@@ -5570,11 +5609,12 @@ class TriggerScheduler:
         PREFERENCE, not a filter: the consumer re-resolves against its own
         current triggers so an edit between enqueue and drain (which can change
         the id) does not strand the wake — it falls back to the first trigger
-        that still matches this plugin + event.
+        that still matches this plugin + event + payloadFilter.
         """
         plugin_id = entry.get("pluginId") if isinstance(entry.get("pluginId"), str) else ""
         event = entry.get("event") if isinstance(entry.get("event"), str) else ""
         wanted = entry.get("triggerId") if isinstance(entry.get("triggerId"), str) else ""
+        payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else None
 
         def _base_match(t):
             if not isinstance(t, dict):
@@ -5587,7 +5627,9 @@ class TriggerScheduler:
                 return False
             flt = t.get("eventFilter")
             flt = flt.strip() if isinstance(flt, str) else ""
-            return not flt or flt == event
+            if flt and flt != event:
+                return False
+            return _matches_payload_filter(t.get("payloadFilter"), payload)
 
         candidates = [t for t in triggers if _base_match(t)]
         # Exact id first (the orchestrator's pick), else the first still-matching

@@ -146,6 +146,35 @@ function planWorkspaceSync({
   return { write, remove, connect, disconnect };
 }
 
+// Which of ONE agent's granted CLI copies differ from the registry. The grant
+// sync above seeds the CLI only when the grant CHANGES, so a plugin re-installed
+// with a newer CLI leaves every existing workspace on the old file — the agent
+// then reports verbs "missing" that the broker has served for weeks. This plan
+// is applied on every plugin reconcile: a copy that is absent or byte-different
+// (by digest) is re-written, an identical one is left alone, and nothing is
+// ever removed (a revoke is planWorkspaceSync's job).
+//
+//   grant           : normalised [{ id, scopeGranularity }] (effectivePlugins)
+//   manifests       : { <pluginId>: normalised manifest }
+//   workspaceDigest : (binPath) => digest string | null when the copy is absent
+//   registryDigest  : (manifest) => digest string | null when unreadable
+//
+// Returns write items in planWorkspaceSync's `write` shape, plus a `reason`.
+function planCliRefresh({ grant = [], manifests = {}, workspaceDigest, registryDigest } = {}) {
+  const write = [];
+  for (const g of grant || []) {
+    const manifest = manifests[g.id];
+    if (!manifest || !manifest.cli) continue; // uninstalled / command-only — nothing to refresh
+    const wanted = registryDigest(manifest);
+    if (!wanted) continue; // registry copy unreadable — leave the workspace as it is
+    const { binPath } = agentPluginPaths(g.id, manifest.cli.name);
+    const have = workspaceDigest(binPath);
+    if (have === wanted) continue;
+    write.push({ path: binPath, mode: BIN_MODE, copyFrom: manifest.cli.entrypoint, reason: have ? 'stale' : 'missing' });
+  }
+  return write;
+}
+
 module.exports = {
   STATE_DIR,
   BIN_DIR,
@@ -156,4 +185,5 @@ module.exports = {
   sidecarEndpoint,
   pluginConfigFile,
   planWorkspaceSync,
+  planCliRefresh,
 };

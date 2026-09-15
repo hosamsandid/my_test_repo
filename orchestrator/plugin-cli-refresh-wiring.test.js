@@ -38,3 +38,23 @@ test("AC1: the plugin-event route resolves targets WITH the payload", () => {
   const route = between("req.url === '/internal/plugin-event'", "req.url === '/internal/github-label-applied'");
   assert.match(route, /resolvePluginEventTargets\(\{ pluginId, event, payload \}, agents\)/);
 });
+
+test("AC2: reconcilePluginsAndAttachments refreshes granted CLI copies after the credential pushes", () => {
+  const fn = between("async function reconcilePluginsAndAttachments()", "return { sidecars, networks }");
+  assert.match(fn, /await refreshGrantedPluginClis\(\)/);
+  // Order: sidecars first, then credentials, then the CLI refresh — a fresh CLI
+  // against a broker that is not yet up would only fail its first call anyway,
+  // but the refresh must not run before the registry has been re-validated.
+  assert.ok(fn.indexOf("pushDeclaredScopeCredentials()") < fn.indexOf("refreshGrantedPluginClis()"));
+});
+
+test("AC3: the refresh decides by digest on BOTH files and reseeds .agent-studio for isolated volumes", () => {
+  const fn = between("async function refreshGrantedPluginClis()", "\n}\n");
+  assert.match(fn, /planCliRefresh\(\{/);
+  assert.match(fn, /workspaceDigest:/);
+  assert.match(fn, /registryDigest:/);
+  assert.match(fn, /createHash\("sha256"\)/);
+  assert.match(fn, /fs\.chmodSync\(dest, item\.mode\)/);
+  assert.match(fn, /reseedAgent\(id, \["\.agent-studio"\]\)/);
+  assert.match(SRC, /planCliRefresh \} = require\("\.\/plugin-sync"\)/);
+});

@@ -140,7 +140,7 @@ const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } 
 // on the agent construct, never on the environment — and (de)activation is the
 // same additive live file sync, no respawn (#1547).
 const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor } = require("./plugin-grants");
-const { planWorkspaceSync } = require("./plugin-sync");
+const { planWorkspaceSync, planCliRefresh } = require("./plugin-sync");
 const { resolveAgentStateDir } = require("./agent-state-dir");
 const { resolveScopeId } = require("./plugin-scope");
 const pluginRegistry = require("./plugin-registry");
@@ -2869,6 +2869,64 @@ const pluginCredentialWiring = createPluginCredentialWiring({
 });
 const { pushDeclaredScopeCredentials } = pluginCredentialWiring;
 
+// Re-seed any granted plugin CLI whose workspace copy no longer matches the
+// registry (plugin-sync.js `planCliRefresh`). The grant sync copies the CLI
+// only on a grant change, so a re-installed plugin with a newer CLI would leave
+// every existing agent on the old file. Runs on every reconcile; best-effort
+// per agent; an additive file sync like the grant itself — never a respawn.
+async function refreshGrantedPluginClis() {
+  const manifests = pluginRegistry.installedManifests();
+  const digestOf = (file) => {
+    try { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); } catch { return null; }
+  };
+  const registryDigest = (manifest) => {
+    try { return digestOf(pluginRegistry.cliEntrypointPath(manifest)); } catch { return null; }
+  };
+  let ids = [];
+  try { ids = listAgentIds(); } catch { ids = []; }
+  for (const id of ids) {
+    let cfg = null;
+    try { cfg = loadAgentConfig(id); } catch { cfg = null; }
+    if (!cfg || !cfg.token) continue; // a stub has no workspace to refresh
+    let grant = [];
+    try { grant = effectivePlugins(cfg, loadAgentConfig); } catch { grant = []; }
+    if (!grant.length) continue;
+    const dir = agentDir(id);
+    const plan = planCliRefresh({
+      grant, manifests,
+      registryDigest: registryDigest,
+      workspaceDigest: (binPath) => digestOf(path.join(dir, binPath)),
+    });
+    if (!plan.length) continue;
+    let written = 0;
+    for (const item of plan) {
+      // Same entrypoint+name lookup `_syncPluginIntoWorkspace` uses, so the
+      // containment check stays in pluginRegistry.cliEntrypointPath alone.
+      const cliName = path.basename(item.path);
+      const manifest = Object.values(manifests).find(
+        (m) => m.cli && m.cli.entrypoint === item.copyFrom && m.cli.name === cliName,
+      );
+      const src = manifest ? pluginRegistry.cliEntrypointPath(manifest) : null;
+      if (!src) continue;
+      const dest = path.join(dir, item.path);
+      try {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.copyFileSync(src, dest);
+        fs.chmodSync(dest, item.mode);
+        written += 1;
+        console.log(`[Orchestrator] plugin CLI refreshed for ${id}: ${item.path} (${item.reason})`);
+      } catch (err) {
+        console.warn(`[Orchestrator] plugin CLI refresh ${id} ${item.path}: ${err.message}`);
+      }
+    }
+    if (written) {
+      try { await reseedAgent(id, [".agent-studio"]); } catch (err) {
+        console.warn(`[Orchestrator] plugin CLI refresh ${id}: reseed failed: ${err.message}`);
+      }
+    }
+  }
+}
+
 // Full plugin reconcile (#1547): sidecars first (so a newly-installed plugin
 // has something to attach), then grant-driven network attachment for every
 // installed plugin. Used at boot and after an install/uninstall — idempotent,
@@ -2895,6 +2953,11 @@ async function reconcilePluginsAndAttachments() {
   // plugin that declares `credentials[]` (jira today).
   try { await pushDeclaredScopeCredentials(); } catch (err) {
     console.warn(`[Orchestrator] declared plugin credential push failed: ${err.message}`);
+  }
+  // Bring every granted agent's CLI copy up to the registry (a re-install with
+  // a newer CLI would otherwise never reach an existing workspace).
+  try { await refreshGrantedPluginClis(); } catch (err) {
+    console.warn(`[Orchestrator] plugin CLI refresh failed: ${err.message}`);
   }
   return { sidecars, networks };
 }

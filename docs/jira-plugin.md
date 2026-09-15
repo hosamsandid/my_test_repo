@@ -106,7 +106,7 @@ per-agent trigger: Agent Chat → **Triggers** → add → type **Plugin event**
 
 | Field | |
 |---|---|
-| Plugin id | `jira` |
+| Plugin | pick **Jira** from the list. Only installed plugins are offered; one that is not granted to this agent is shown greyed-out with the reason, because a listener on an ungranted plugin never fires (§*How it works*) |
 | Event filter | blank = any event from jira; or `status_changed` |
 | Wake instruction | what the agent should do — e.g. *"Read the Jira inbox with `aee-jira inbox --consume` and refine the ticket."* |
 

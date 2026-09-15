@@ -470,7 +470,8 @@ function seedTeamRecord(teamId, teamName) {
     let a = [];
     try { a = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { /* first write */ }
     if (!Array.isArray(a)) a = [];
-    const [, , id, name] = process.argv;
+    // node -e has no script element in argv, so the passed args start at [1].
+    const [, id, name] = process.argv;
     const now = new Date().toISOString();
     const i = a.findIndex((t) => t && t.id === id);
     if (i >= 0) a[i] = { ...a[i], name };
@@ -487,7 +488,8 @@ function removeTeamRecord(teamId) {
     let a = [];
     try { a = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { a = []; }
     if (Array.isArray(a)) {
-      const [, , id] = process.argv;
+      // node -e has no script element in argv, so the passed arg is at [1].
+      const [, id] = process.argv;
       fs.writeFileSync(p, JSON.stringify(a.filter((t) => !(t && t.id === id)), null, 2));
     }
   `, teamId]);

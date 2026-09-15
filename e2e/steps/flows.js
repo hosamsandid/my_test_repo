@@ -284,6 +284,7 @@ async function collapseLegend(page) {
 }
 
 async function connectPort(page, fromSlug, toSlug) {
+  await collapseLegend(page);
   const fromNode = page.locator(nodeSel(fromSlug)).first();
   const toNode = page.locator(nodeSel(toSlug)).first();
   await expect(fromNode).toBeVisible();

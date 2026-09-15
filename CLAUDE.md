@@ -214,6 +214,16 @@ Concept: `docs/plugin-system-concept.md`, `docs/cli-contract.md`.
 - **Grant**: team-owned like skills (`plugins[]` on team agents, `pluginsOverride`
   on members; `orchestrator/plugin-grants.js`). Grant → additive workspace sync
   (CLI + 0600 scope-token config + network attach), no respawn.
+- **Materialisation & reconcile** (#2308): a member's resolved grant is
+  seeded into its workspace at creation (`addTeamMember`) and at stub-enable
+  time (`enableAgent`), mirroring `effectiveSkills` — never only on the next
+  grant toggle. Written files are tracked in a per-member
+  `.agent-studio/seeded-plugins.json` (the plugin sibling of
+  `seeded-skills.json`); a background loop (`reconcilePendingPlugins`,
+  `orchestrator/plugin-reconcile.js`) auto-repairs a member whose grant and
+  manifest disagree, bounded by the same backoff as the skill reconciler. A
+  sync failure never blocks the add — it degrades the member and surfaces as a
+  warning (add-member response + GitHub Event Log), never silently.
 - **Manifest** (`pluginVersion: 1`, `plugin-manifest.js`): closed `capabilities`
   enum (`podman-socket`, `egress`, `host-mount:<path>`), `scopes`
   (`team`/`agent`), optional `quota`, `ui.routes[].minRole`, optional

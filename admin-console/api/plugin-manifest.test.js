@@ -440,14 +440,14 @@ test('the shipped jira manifest (plugins/jira) is valid', () => {
   assert.equal(manifest.cli.name, 'aee-jira');
   assert.equal(manifest.quota.maxObjects, 500);
   // Phase 3 read UI (`/` @ team-member) + Phase 4 write config (`/admin` @
-  // team-admin); `policy` declares the two writes as governed subcommands
+  // team-admin); `policy` declares the three writes as governed subcommands
   // (D3 — role-gated, no confirmation pen, so `requiresApproval` stays empty).
   assert.deepEqual(manifest.ui.routes, [
     { path: '/', minRole: 'team-member' },
     { path: '/admin', minRole: 'team-admin' },
   ]);
   assert.notEqual(manifest.ui.global, true);
-  assert.deepEqual(Object.keys(manifest.policy).sort(), ['comment', 'transition']);
+  assert.deepEqual(Object.keys(manifest.policy).sort(), ['comment', 'transition', 'update']);
   assert.deepEqual(manifest.requiresApproval, []);
 });
 

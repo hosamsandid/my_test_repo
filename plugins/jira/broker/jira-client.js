@@ -353,6 +353,38 @@ async function addComment(cred, issueKey, { body, attribution, env } = {}) {
   return { id: res.id || null, issueKey };
 }
 
+// The whole description as ADF paragraphs, the attribution LAST (in italics):
+// this replaces text a human may have written, so the provenance line belongs
+// under it, not above it — the reverse of a comment.
+function descriptionAdf(text, attribution) {
+  const paras = [];
+  for (const line of String(text || '').split('\n')) {
+    paras.push({ type: 'paragraph', content: line ? [{ type: 'text', text: line }] : [] });
+  }
+  if (attribution) {
+    paras.push({ type: 'paragraph', content: [{ type: 'text', text: attribution, marks: [{ type: 'em' }] }] });
+  }
+  return { type: 'doc', version: 1, content: paras };
+}
+
+// Replace an issue's description. Jira keeps the previous value in the issue
+// history, which is why this is a routine, role-gated write (D3) and not an
+// approval-pen one. Jira answers 204 with no body.
+async function updateDescription(cred, issueKey, { description, attribution, env } = {}) {
+  const text = String(description || '').trim();
+  if (!text) { const e = new Error('a description is required'); e.status = 400; throw e; }
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  await requestJson({
+    base,
+    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}`,
+    method: 'PUT',
+    authHeader: auth,
+    body: { fields: { description: descriptionAdf(text, attribution) } },
+  });
+  return { issueKey, updated: 'description' };
+}
+
 // The transitions available from the issue's CURRENT status, as
 // `[{ id, name, toStatus }]` (CLI/UI needs the names to offer a choice).
 async function listTransitions(cred, issueKey, { env } = {}) {
@@ -410,6 +442,7 @@ module.exports = {
   shapeIssue,
   issueTypeOf,
   commentAdf,
+  descriptionAdf,
   mapJiraError,
   apiBaseFor,
   whoAmI,
@@ -420,6 +453,7 @@ module.exports = {
   getIssue,
   listProjects,
   addComment,
+  updateDescription,
   listTransitions,
   transitionIssue,
 };

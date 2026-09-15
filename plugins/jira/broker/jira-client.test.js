@@ -237,6 +237,43 @@ test('transitionIssue: no transition to the target → a 409 naming the options'
   });
 });
 
+test('descriptionAdf: text paragraphs, attribution LAST in italics (a rewritten human description reads its provenance at the end)', () => {
+  const doc = jc.descriptionAdf('Human section\n\nAgent section', 'by an agent');
+  assert.equal(doc.type, 'doc');
+  assert.equal(doc.version, 1);
+  assert.equal(doc.content[0].content[0].text, 'Human section');
+  assert.deepEqual(doc.content[1].content, []);
+  assert.equal(doc.content[2].content[0].text, 'Agent section');
+  const last = doc.content[doc.content.length - 1].content[0];
+  assert.equal(last.text, 'by an agent');
+  assert.equal(last.marks[0].type, 'em');
+  // No attribution → no trailing paragraph.
+  assert.equal(jc.descriptionAdf('x').content.length, 1);
+});
+
+test('updateDescription: PUTs {fields:{description}} to /issue/:key and reports what changed', async () => {
+  await withFetch((url, opts) => {
+    assert.match(url, /\/rest\/api\/3\/issue\/KAN-10$/);
+    assert.equal(opts.method, 'PUT');
+    const body = JSON.parse(opts.body);
+    assert.equal(body.fields.description.type, 'doc');
+    assert.equal(body.fields.description.content[0].content[0].text, 'new text');
+    return { ok: true, status: 204, text: async () => '' };
+  }, async () => {
+    const r = await jc.updateDescription(CRED, 'KAN-10', { description: 'new text', attribution: 'x', env: CRED.env });
+    assert.deepEqual(r, { issueKey: 'KAN-10', updated: 'description' });
+  });
+});
+
+test('updateDescription: a blank description is a 400 before any request', async () => {
+  await withFetch(() => { throw new Error('must not be called'); }, async () => {
+    await assert.rejects(
+      () => jc.updateDescription(CRED, 'KAN-10', { description: '   ', env: CRED.env }),
+      (e) => e.status === 400 && /description is required/.test(e.message),
+    );
+  });
+});
+
 test('getIssue: reads summary/status/issueType/assignee and builds a browse URL from the real site', async () => {
   await withFetch(() => ({ ok: true, status: 200, text: async () => JSON.stringify({
     key: 'ENG-5', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, issuetype: { name: 'Task' } },

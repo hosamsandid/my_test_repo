@@ -193,6 +193,41 @@ test('cli writes: comment + transition are role-gated (pass for team scope), cre
   }
 });
 
+test('cli writes: /update replaces the description through the client, role- and cred-gated', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const seen = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    seen.push({ url: String(url), method: opts && opts.method, body: opts && opts.body });
+    return { ok: true, status: 204, text: async () => '' };
+  };
+  const srv = await listen();
+  try {
+    const u = await call(srv, 'POST', '/cli/update', { token: TOKEN, body: { issue: 'KAN-10', description: 'Refined text' } });
+    assert.equal(u.status, 200);
+    assert.deepEqual(u.body, { issueKey: 'KAN-10', updated: 'description' });
+    assert.equal(seen.length, 1);
+    assert.match(seen[0].url, /\/rest\/api\/3\/issue\/KAN-10$/);
+    assert.equal(seen[0].method, 'PUT');
+    const adf = JSON.parse(seen[0].body).fields.description;
+    assert.equal(adf.content[0].content[0].text, 'Refined text');
+    assert.match(adf.content[adf.content.length - 1].content[0].text, /team "team-1"/);
+
+    const blank = await call(srv, 'POST', '/cli/update', { token: TOKEN, body: { issue: 'KAN-10', description: ' ' } });
+    assert.equal(blank.status, 400);
+    assert.equal(seen.length, 1); // no Jira call for a blank body
+
+    const nocred = await call(srv, 'POST', '/cli/update', { token: OTHER, body: { issue: 'X-1', description: 'y' } });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-credential');
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
 test('ui /admin: team-admin only; PUT replaces the watch config', async () => {
   const srv = await listen();
   const { port } = srv.address();

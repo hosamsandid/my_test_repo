@@ -269,7 +269,7 @@ async function handleCli(req, res, cliPath) {
   }
 
   // ── attributed writes (Phase 4, D3 — role-gated server-side, no confirm) ──
-  const writeOps = { '/comment': 'comment', '/transition': 'transition' };
+  const writeOps = { '/comment': 'comment', '/transition': 'transition', '/update': 'update' };
   if (writeOps[cliPath] && req.method === 'POST') {
     const op = writeOps[cliPath];
     const authz = brokerPolicy.authorizeWrite(op);
@@ -292,6 +292,13 @@ async function handleCli(req, res, cliPath) {
         const text = String(body.body || '').trim();
         if (!text) return sendJson(res, 400, { error: 'a comment body is required' });
         result = await jira.addComment(cred, issue, { body: text, attribution });
+      } else if (op === 'update') {
+        const text = String(body.description || '').trim();
+        if (!text) return sendJson(res, 400, { error: 'a description is required' });
+        result = await jira.updateDescription(cred, issue, {
+          description: text,
+          attribution: `Description rewritten by an agent on team "${scopeId}" via Agent Studio.`,
+        });
       } else {
         result = await jira.transitionIssue(cred, issue, { toStatus: body.to });
       }

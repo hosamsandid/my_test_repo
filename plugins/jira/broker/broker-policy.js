@@ -3,7 +3,7 @@
 // ─── jira broker: write-authorisation glue (Phase 4, D3) ─────────────────────
 //
 // Reads (`projects` / `list` / `show` / `inbox`) are open to any granted agent.
-// The two writes (`comment` / `transition`) are **role-gated, not
+// The three writes (`comment` / `transition` / `update`) are **role-gated, not
 // confirmation-gated** (docs/jira-plugin-plan.md D3): moving a ticket is routine
 // and reversible, and an approval pen on it would stall every unattended run at
 // the first transition. The gate is enforced HERE, server-side, so a prompt
@@ -12,11 +12,12 @@
 //
 // jira declares `scopes: ["team"]` only (a Jira site binding is a team-level
 // fact — §6.1), so every caller resolves to `kind: 'team'`. The manifest's
-// `policy` rules (`{ comment|transition: { scopes: ["team"] } }`) therefore pass
-// for any granted team's agent — which IS D3's intent. The value of routing
-// through `authorizeAction` anyway: the enforcement path exists, so tightening a
-// rule later (e.g. an agent-granularity restriction, or a `requiresApproval`
-// entry for a future destructive op) is a manifest edit, not a broker change.
+// `policy` rules (`{ comment|transition|update: { scopes: ["team"] } }`)
+// therefore pass for any granted team's agent — which IS D3's intent. The value
+// of routing through `authorizeAction` anyway: the enforcement path exists, so
+// tightening a rule later (e.g. an agent-granularity restriction, or a
+// `requiresApproval` entry for a future destructive op) is a manifest edit, not
+// a broker change.
 //
 // `requiresApproval` stays deliberately EMPTY in v1 rather than removed from the
 // design (D3) — it is the right mechanism the day a genuinely destructive Jira
@@ -29,6 +30,7 @@ const { authorizeAction } = require('../../../broker-sdk');
 const POLICY = Object.freeze({
   comment: { scopes: ['team'] },
   transition: { scopes: ['team'] },
+  update: { scopes: ['team'] },
 });
 
 // Wired but empty — see the header.

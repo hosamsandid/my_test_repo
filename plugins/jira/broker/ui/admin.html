@@ -29,10 +29,11 @@
 
   <div style="padding:1rem; max-width:640px;">
     <p class="hint">
-      Which Jira projects (and optionally which target status) the broker polls for
-      status changes. A change wakes only the agents that carry a
-      <code>plugin-event</code> trigger for <code>jira</code> — configured per agent in
-      Agent&nbsp;Chat&nbsp;→&nbsp;Triggers.
+      Which Jira projects the broker polls for status changes, and — per project —
+      which target statuses matter. A watch fires on a transition <em>into any</em>
+      of its statuses; leave the set empty to fire on every status change. A change
+      wakes only the agents that carry a <code>plugin-event</code> trigger for
+      <code>jira</code> — configured per agent in Agent&nbsp;Chat&nbsp;→&nbsp;Triggers.
     </p>
 
     <div id="rows"></div>

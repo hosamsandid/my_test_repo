@@ -9,6 +9,8 @@ const path = require('node:path');
 const { JiraPoller } = require('./poller');
 const { WatchStore } = require('./watch-store');
 const { InboxStore } = require('./inbox-store');
+const { ActivityStore } = require('./activity-store');
+const { deriveWatchHealth } = require('./watch-health');
 
 // A fake Jira: one project's issues keyed by call, driven per test.
 function fakeFetch(script) {
@@ -30,18 +32,20 @@ function harness(opts = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jira-poll-'));
   const watchStore = new WatchStore({ stateDir: dir });
   const inboxStore = new InboxStore({ stateDir: dir, ...(opts.inbox || {}) });
+  const activityStore = new ActivityStore({ stateDir: dir, now: opts.now });
   const delivered = [];
   const poller = new JiraPoller({
     watchStore,
     inboxStore,
-    resolveCredential: () => ({ siteUrl: 'acme', email: 'bot@acme.com', apiToken: 'tok' }),
+    activityStore,
+    resolveCredential: opts.resolveCredential || (() => ({ siteUrl: 'acme', email: 'bot@acme.com', apiToken: 'tok' })),
     deliver: async (payload) => { delivered.push(payload); },
     env: { JIRA_API_BASE: 'http://fake-jira:8080' },
     throttleStatePath: path.join(dir, 'throttle.json'),
     now: opts.now || (() => Date.parse('2026-01-01T12:00:00Z')),
     ...opts.poller,
   });
-  return { dir, watchStore, inboxStore, poller, delivered };
+  return { dir, watchStore, inboxStore, activityStore, poller, delivered };
 }
 
 const issue = (key, histories) => ({ key, fields: { summary: `${key} summary` }, changelog: { histories } });
@@ -146,6 +150,64 @@ test('a project in backoff is skipped until skipUntil passes', async () => {
     await h.poller._tick();               // backoff elapsed → fetch happens
     assert.equal(called, 1);
   } finally { restore(); }
+});
+
+test('multi-status watch: a transition into ANY configured status fires; others are recorded filtered', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', statusFilters: ['Ready for Dev', 'In Review'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [issue('ENG-1', [
+    statusHistory('301', 'To Do', 'In Progress', '2026-01-01T11:58:00Z'),      // not watched
+    statusHistory('302', 'In Progress', 'Ready for Dev', '2026-01-01T11:58:30Z'), // watched
+    statusHistory('303', 'Ready for Dev', 'In Review', '2026-01-01T11:59:00Z'),   // watched
+  ])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.flatMap((d) => d.events.map((e) => e.id)).sort(), ['ENG-1:302', 'ENG-1:303']);
+  const rows = h.activityStore.list('team-1');
+  const byOutcome = (o) => rows.filter((r) => r.outcome === o).map((r) => r.event.id).sort();
+  assert.deepEqual(byOutcome('delivered'), ['ENG-1:302', 'ENG-1:303']);
+  assert.deepEqual(byOutcome('filtered'), ['ENG-1:301']);
+});
+
+test('activity log: a delivered event carries the issue summary + type; a digest is recorded as digested', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG' }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [{
+    key: 'ENG-4', fields: { summary: 'Fix the thing', issuetype: { name: 'Bug' } },
+    changelog: { histories: [statusHistory('401', 'A', 'B', '2026-01-01T11:59:00Z')] },
+  }] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  const [row] = h.activityStore.list('team-1');
+  assert.equal(row.outcome, 'delivered');
+  assert.equal(row.event.summary, 'Fix the thing');
+  assert.equal(row.event.issueType, 'Bug');
+});
+
+test('a search failure appends a timestamped error to the cursor ring; a later success clears the failure but keeps the ring', async () => {
+  let clock = Date.parse('2026-01-01T12:00:00Z');
+  const h = harness({ now: () => clock });
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG' }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+
+  let restore = fakeFetch(() => ({ status: 401, body: { error: 'nope' } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  let cur = h.watchStore.getCursor('team-1', 'acme::ENG');
+  assert.equal(cur.consecutiveFailures, 1);
+  assert.equal(cur.recentErrors.length, 1);
+  assert.match(cur.recentErrors[0].message, /401/);
+  assert.ok(cur.recentErrors[0].at);
+  assert.equal(deriveWatchHealth(cur, clock).status, 'failing');
+
+  // backoff elapses, next poll succeeds
+  clock = Date.parse('2026-01-01T13:00:00Z');
+  restore = fakeFetch(() => ({ body: { isLast: true, issues: [] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  cur = h.watchStore.getCursor('team-1', 'acme::ENG');
+  assert.equal(cur.consecutiveFailures, 0);
+  assert.equal(cur.skipUntil, undefined);
+  assert.equal(cur.recentErrors.length, 1);                 // ring kept
+  assert.equal(deriveWatchHealth(cur, clock).status, 'degraded'); // recovered within the hour
 });
 
 test('the two scopes with the same project key on the same site stay isolated cursors', async () => {

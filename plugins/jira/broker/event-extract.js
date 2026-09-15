@@ -36,12 +36,28 @@ function isChangelogTruncated(changelog) {
     && changelog.total > changelog.histories.length;
 }
 
+// The issue summary and issue-type name, tolerating either the raw Jira issue
+// (`fields.summary` / `fields.issuetype.name`) or the narrowed `shapeIssue`
+// form (`summary` / `issueType`) the poller passes in. Before this the poller
+// path — which passes the shaped issue — always produced `summary: null`,
+// because only the raw `fields.summary` branch existed.
+function issueSummaryOf(issue) {
+  if (issue.summary != null) return issue.summary || null;
+  return (issue.fields && issue.fields.summary) || null;
+}
+function issueTypeNameOf(issue) {
+  if (issue.issueType != null) return issue.issueType || null;
+  return (issue.fields && issue.fields.issuetype && issue.fields.issuetype.name) || null;
+}
+
 // Flatten an issue's (possibly backfilled) changelog into one candidate event
 // per status-field change. `siteBase` builds the browse URL; pass null to omit
 // it. Never throws on a malformed issue — returns [].
 function extractStatusChangeEvents(issue, { projectKey, siteBase } = {}) {
   const events = [];
   if (!issue || !issue.key) return events;
+  const summary = issueSummaryOf(issue);
+  const issueType = issueTypeNameOf(issue);
   const histories = (issue.changelog && Array.isArray(issue.changelog.histories))
     ? issue.changelog.histories
     : [];
@@ -53,11 +69,12 @@ function extractStatusChangeEvents(issue, { projectKey, siteBase } = {}) {
         id: `${issue.key}:${h.id}`,
         issueKey: issue.key,
         projectKey: projectKey || null,
+        issueType,
         created: h.created || null,
         author: (h.author && h.author.displayName) || null,
         fromStatus: item.fromString || null,
         toStatus: item.toString || null,
-        summary: (issue.fields && issue.fields.summary) || null,
+        summary,
         issueUrl: siteBase ? `${siteBase}/browse/${issue.key}` : null,
       });
     }
@@ -71,6 +88,16 @@ function extractStatusChangeEvents(issue, { projectKey, siteBase } = {}) {
 function matchesStatusFilter(toStatus, statusFilter) {
   if (!statusFilter) return true;
   return toStatus === statusFilter;
+}
+
+// The multi-status gate: a watch holds a SET of target statuses and fires on a
+// transition into ANY of them. An empty / absent set = no filter (fires on any
+// status change) — the same "blank means everything" rule as the singular form,
+// so a watch that clears all its chips keeps watching rather than going silent.
+function matchesStatusFilters(toStatus, statusFilters) {
+  const list = Array.isArray(statusFilters) ? statusFilters.filter((s) => typeof s === 'string' && s) : [];
+  if (list.length === 0) return true;
+  return list.includes(toStatus);
 }
 
 const DEFAULT_BASE_MINUTES = 10;
@@ -97,6 +124,7 @@ module.exports = {
   isChangelogTruncated,
   extractStatusChangeEvents,
   matchesStatusFilter,
+  matchesStatusFilters,
   computeQueryWindowMinutes,
   DEFAULT_BASE_MINUTES,
   MAX_WINDOW_MINUTES,

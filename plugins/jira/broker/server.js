@@ -39,7 +39,9 @@ const {
 } = require('../../../broker-sdk');
 const { WatchStore } = require('./watch-store');
 const { InboxStore } = require('./inbox-store');
+const { ActivityStore } = require('./activity-store');
 const { JiraPoller } = require('./poller');
+const { deriveWatchHealth, summariseWatchHealth } = require('./watch-health');
 const jira = require('./jira-client');
 const brokerPolicy = require('./broker-policy');
 const { verifyViewerHeaders, requiredRoleForPath, roleAllows } = require('./viewer-headers');
@@ -61,7 +63,26 @@ const AUDIT_DIR = cfg.auditDir || '/audit';
 
 const watchStore = new WatchStore({ stateDir: STATE_DIR });
 const inboxStore = new InboxStore({ stateDir: STATE_DIR, ttlSeconds: cfg.quota.ttlSeconds, maxObjects: cfg.quota.maxObjects });
+// The retained event log ("what did the poller see, and what did it wake").
+// Its own 14-day retention + row cap — deliberately NOT the manifest quota,
+// which counts inbox objects (see activity-store.js).
+const activityStore = new ActivityStore({ stateDir: STATE_DIR });
 const audit = auditWriter(AUDIT_DIR, { retentionMs: 30 * 24 * 3600 * 1000 });
+
+// Per-watch health from the poll cursors, keyed by the watch's projectKey. When
+// a scope has a credential the cursor key is `<siteUrl>::<projectKey>`; without
+// one there is no cursor yet and every watch reads as not-yet-baselined.
+function watchHealthFor(scopeId) {
+  const conf = watchStore.loadConfig(scopeId);
+  const cred = resolveCredential(scopeId);
+  const now = Date.now();
+  const watches = (conf.watches || []).map((w) => {
+    const ref = cred ? `${cred.siteUrl}::${w.projectKey}` : null;
+    const cursor = ref ? conf.cursors[ref] : null;
+    return { ...w, health: deriveWatchHealth(cursor, now) };
+  });
+  return { watches, summary: summariseWatchHealth(watches.map((w) => w.health)), setBy: conf.setBy, setAt: conf.setAt };
+}
 
 // Per-scope Jira credential, pushed by the orchestrator (Phase 1, Jira plan §5):
 // `PUT /internal/scope-credentials` with `{ scopes: { <scopeId>: { "site-url",
@@ -159,6 +180,7 @@ async function deliver({ scopeId, kind, events }) {
 const poller = new JiraPoller({
   watchStore,
   inboxStore,
+  activityStore,
   resolveCredential,
   deliver,
   intervalMs: Number(process.env.JIRA_POLL_INTERVAL_MS) || undefined,
@@ -305,12 +327,17 @@ async function handleUiApi(req, res, apiPath, viewer) {
   const params = query(req);
 
   if (apiPath === '/context' && req.method === 'GET') {
-    const teams = (viewer.teamIds || []).map((id) => ({
-      teamId: id,
-      hasCredential: !!resolveCredential(id),
-      watches: (watchStore.loadConfig(id).watches || []).map((w) => w.projectKey),
-      inbox: inboxStore.count(id),
-    }));
+    const teams = (viewer.teamIds || []).map((id) => {
+      const health = watchHealthFor(id);
+      return {
+        teamId: id,
+        hasCredential: !!resolveCredential(id),
+        watches: health.watches.map((w) => w.projectKey),
+        watchHealth: health.summary,
+        inbox: inboxStore.count(id),
+        activity: activityStore.count(id),
+      };
+    });
     return sendJson(res, 200, { user: viewer.sub, role: viewer.role, isAdmin: roleAllows(viewer.role, 'team-admin'), teams });
   }
 
@@ -320,9 +347,20 @@ async function handleUiApi(req, res, apiPath, viewer) {
   if (apiPath === '/inbox' && req.method === 'GET') {
     return sendJson(res, 200, { entries: inboxStore.list(team) });
   }
+  if (apiPath === '/activity' && req.method === 'GET') {
+    const limit = Math.min(Math.max(Number(params.get('limit')) || 200, 1), 1000);
+    return sendJson(res, 200, { rows: activityStore.list(team, { limit }) });
+  }
   if (apiPath === '/watches' && req.method === 'GET') {
+    const health = watchHealthFor(team);
     const conf = watchStore.loadConfig(team);
-    return sendJson(res, 200, { watches: conf.watches, cursors: conf.cursors, setBy: conf.setBy, setAt: conf.setAt });
+    return sendJson(res, 200, {
+      watches: health.watches,
+      health: health.summary,
+      cursors: conf.cursors,
+      setBy: conf.setBy,
+      setAt: conf.setAt,
+    });
   }
 
   // ── /admin — the watch config (team-admin; role checked in handleUi) ─────
@@ -341,6 +379,24 @@ async function handleUiApi(req, res, apiPath, viewer) {
       setBy: viewer.sub || 'admin',
     });
     return sendJson(res, 200, { ok: true, watches: conf.watches });
+  }
+
+  // Clear the exponential backoff on one failing watch so the next poll tick
+  // (≤ the poll interval) re-attempts it — after a Team Admin has fixed the
+  // credential. Does not force an immediate poll.
+  if (apiPath === '/admin/retry' && req.method === 'POST') {
+    const body = parseJson(await readBody(req));
+    const projectKey = String(body.projectKey || '').trim();
+    if (!projectKey) return sendJson(res, 400, { error: 'a projectKey is required' });
+    const cred = resolveCredential(team);
+    if (!cred) return sendJson(res, 400, { error: 'This team has no Jira credential configured.', code: 'no-credential' });
+    const ref = `${cred.siteUrl}::${projectKey}`;
+    const cursor = watchStore.getCursor(team, ref) || {};
+    const cleared = { ...cursor, consecutiveFailures: 0 };
+    delete cleared.skipUntil;
+    watchStore.saveCursor(team, ref, cleared);
+    writeAudit(team, viewer.sub || 'admin', 'watch-retry', 'ok', projectKey);
+    return sendJson(res, 200, { ok: true, projectKey });
   }
 
   const cred = resolveCredential(team);
@@ -406,7 +462,7 @@ const handleHealth = healthEndpoint(async () => ({
 }));
 const handleTeardown = teardownScopeEndpoint((scopeId) => {
   scopeCredentials.delete(String(scopeId));
-  return { reaped: watchStore.teardown(scopeId) + inboxStore.teardown(scopeId) };
+  return { reaped: watchStore.teardown(scopeId) + inboxStore.teardown(scopeId) + activityStore.teardown(scopeId) };
 }, { secret: SIGNING_SECRET });
 
 // PUT /internal/scope-credentials — the orchestrator's per-scope credential push
@@ -441,12 +497,15 @@ async function handleRequest(req, res) {
     const v = verifyScopeToken(req, SIGNING_SECRET);
     if (!v || v.pluginId !== PLUGIN_ID) return void sendJson(res, 401, { error: 'unauthorized' });
     const conf = watchStore.loadConfig(v.scopeId);
+    const health = watchHealthFor(v.scopeId);
     return void sendJson(res, 200, {
       scopeId: v.scopeId,
-      watches: conf.watches,
+      watches: health.watches,
+      health: health.summary,
       doorbell: conf.doorbell ? { url: conf.doorbell.url, hasSecret: !!conf.doorbell.secret } : null,
       cursors: conf.cursors,
       inbox: inboxStore.count(v.scopeId),
+      activity: activityStore.count(v.scopeId),
       setBy: conf.setBy,
       setAt: conf.setAt,
       credential: resolveCredential(v.scopeId)
@@ -480,4 +539,4 @@ if (require.main === module) {
   poller.start();
 }
 
-module.exports = { handleRequest, httpServer, watchStore, inboxStore, poller, resolveCredential, deliver, scopeCredentials, PLUGIN_ID, SIGNING_SECRET };
+module.exports = { handleRequest, httpServer, watchStore, inboxStore, activityStore, poller, resolveCredential, deliver, scopeCredentials, PLUGIN_ID, SIGNING_SECRET };

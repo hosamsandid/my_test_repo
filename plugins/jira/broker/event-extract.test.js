@@ -8,6 +8,7 @@ const {
   isChangelogTruncated,
   extractStatusChangeEvents,
   matchesStatusFilter,
+  matchesStatusFilters,
   computeQueryWindowMinutes,
   MAX_WINDOW_MINUTES,
 } = require('./event-extract');
@@ -38,7 +39,7 @@ test('isChangelogTruncated: total > histories.length', () => {
 test('extractStatusChangeEvents: one status item → one event with composite id', () => {
   const issue = {
     key: 'ENG-42',
-    fields: { summary: 'Fix login bug' },
+    fields: { summary: 'Fix login bug', issuetype: { name: 'Bug' } },
     changelog: {
       histories: [{
         id: '10001',
@@ -53,6 +54,7 @@ test('extractStatusChangeEvents: one status item → one event with composite id
     id: 'ENG-42:10001',
     issueKey: 'ENG-42',
     projectKey: 'ENG',
+    issueType: 'Bug',
     created: '2026-07-27T10:00:00.000Z',
     author: 'Jane Doe',
     fromStatus: 'To Do',
@@ -60,6 +62,20 @@ test('extractStatusChangeEvents: one status item → one event with composite id
     summary: 'Fix login bug',
     issueUrl: 'https://acme.atlassian.net/browse/ENG-42',
   }]);
+});
+
+test('extractStatusChangeEvents: reads the narrowed shapeIssue form (summary + issueType), not just raw fields', () => {
+  // The poller passes the shaped issue (`{ key, summary, status, issueType, changelog }`),
+  // which has no `.fields` — before this the poller path always produced summary: null.
+  const shaped = {
+    key: 'ENG-9',
+    summary: 'Shaped summary',
+    issueType: 'Story',
+    changelog: { histories: [{ id: '5', items: [{ field: 'status', fromString: 'A', toString: 'B' }] }] },
+  };
+  const [ev] = extractStatusChangeEvents(shaped, { projectKey: 'ENG' });
+  assert.equal(ev.summary, 'Shaped summary');
+  assert.equal(ev.issueType, 'Story');
 });
 
 test('extractStatusChangeEvents: non-status items ignored; multiple changes get distinct ids', () => {
@@ -90,6 +106,16 @@ test('matchesStatusFilter: no filter matches anything; otherwise exact match', (
   assert.equal(matchesStatusFilter('Ready for Dev', 'Ready for Dev'), true);
   assert.equal(matchesStatusFilter('In Progress', 'Ready for Dev'), false);
   assert.equal(matchesStatusFilter(null, 'Ready for Dev'), false);
+});
+
+test('matchesStatusFilters: empty set fires on anything; otherwise membership', () => {
+  assert.equal(matchesStatusFilters('Done', null), true);
+  assert.equal(matchesStatusFilters('Done', []), true);
+  assert.equal(matchesStatusFilters('Done', ['']), true); // all-blank collapses to "no filter"
+  assert.equal(matchesStatusFilters('Ready for Dev', ['Ready for Dev', 'In Review']), true);
+  assert.equal(matchesStatusFilters('In Review', ['Ready for Dev', 'In Review']), true);
+  assert.equal(matchesStatusFilters('Backlog', ['Ready for Dev', 'In Review']), false);
+  assert.equal(matchesStatusFilters(null, ['Ready for Dev']), false);
 });
 
 // ── computeQueryWindowMinutes ───────────────────────────────────────────────

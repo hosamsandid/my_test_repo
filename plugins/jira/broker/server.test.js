@@ -210,15 +210,88 @@ test('ui /admin: team-admin only; PUT replaces the watch config', async () => {
     const put = await ui('/ui/api/admin/watch?team=team-1', {
       method: 'PUT',
       headers: { ...admin, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ watches: [{ projectKey: 'KAN', statusFilter: 'Ready for Dev' }, { projectKey: '', statusFilter: 'x' }] }),
+      body: JSON.stringify({ watches: [{ projectKey: 'KAN', statusFilters: ['Ready for Dev', 'In Review'] }, { projectKey: '', statusFilters: ['x'] }] }),
     });
     assert.equal(put.status, 200);
     assert.deepEqual(put.body.watches.map((w) => w.projectKey), ['KAN']); // blank dropped by normalizeWatch
 
     const get = await ui('/ui/api/admin/watch?team=team-1', { headers: admin });
-    assert.equal(get.body.watches[0].statusFilter, 'Ready for Dev');
+    assert.deepEqual(get.body.watches[0].statusFilters, ['Ready for Dev', 'In Review']);
     assert.equal(get.body.setBy, 'a');
   } finally {
+    broker.watchStore.teardown('team-1');
+    srv.close();
+  }
+});
+
+test('ui /watches: carries per-watch health + a roll-up; /activity returns the retained log', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  broker.watchStore.setConfig('team-1', { watches: [{ projectKey: 'KAN' }, { projectKey: 'OPS' }] });
+  // KAN healthy (baselined), OPS failing
+  broker.watchStore.saveCursor('team-1', 'acme::KAN', { seen: ['KAN-1:1'], lastPolledAt: new Date().toISOString() });
+  broker.watchStore.saveCursor('team-1', 'acme::OPS', {
+    seen: [], consecutiveFailures: 3, skipUntil: new Date(Date.now() + 300000).toISOString(),
+    recentErrors: [{ at: new Date().toISOString(), message: 'Jira rejected the credential (401).' }],
+  });
+  broker.activityStore.append('team-1', [
+    { event: { id: 'KAN-6:9', issueKey: 'KAN-6', summary: 'Login', issueType: 'Story', toStatus: 'In Review' }, outcome: 'delivered' },
+    { event: { id: 'KAN-7:9', issueKey: 'KAN-7', toStatus: 'Backlog' }, outcome: 'filtered', detail: 'Backlog is not a watched status' },
+  ]);
+  const srv = await listen();
+  const { port } = srv.address();
+  const hdrs = signViewerHeaders({ sub: 'alice', role: 'team-member', teamIds: ['team-1'] }, 'test-secret');
+  const ui = async (p) => {
+    const res = await fetch(`http://127.0.0.1:${port}${p}`, { headers: hdrs });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  };
+  try {
+    const w = await ui('/ui/api/watches?team=team-1');
+    assert.equal(w.status, 200);
+    const byKey = Object.fromEntries(w.body.watches.map((x) => [x.projectKey, x.health.status]));
+    assert.deepEqual(byKey, { KAN: 'watching', OPS: 'failing' });
+    assert.equal(w.body.watches.find((x) => x.projectKey === 'OPS').health.recentErrors.length, 1);
+    assert.deepEqual(w.body.health, { watching: 1, degraded: 0, failing: 1, total: 2, worst: 'failing' });
+
+    const a = await ui('/ui/api/activity?team=team-1');
+    assert.equal(a.status, 200);
+    assert.deepEqual(a.body.rows.map((r) => r.outcome), ['filtered', 'delivered']); // newest-first
+    assert.equal(a.body.rows[1].event.summary, 'Login');
+
+    const ctx = await ui('/ui/api/context');
+    assert.equal(ctx.body.teams[0].activity, 2);
+    assert.equal(ctx.body.teams[0].watchHealth.worst, 'failing');
+  } finally {
+    broker.scopeCredentials.delete('team-1');
+    broker.watchStore.teardown('team-1');
+    broker.activityStore.teardown('team-1');
+    srv.close();
+  }
+});
+
+test('ui /admin/retry: team-admin clears the backoff on one watch', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  broker.watchStore.setConfig('team-1', { watches: [{ projectKey: 'OPS' }] });
+  broker.watchStore.saveCursor('team-1', 'acme::OPS', { seen: [], consecutiveFailures: 4, skipUntil: '2099-01-01T00:00:00Z' });
+  const srv = await listen();
+  const { port } = srv.address();
+  const admin = signViewerHeaders({ sub: 'a', role: 'team-admin', teamIds: ['team-1'] }, 'test-secret');
+  const member = signViewerHeaders({ sub: 'm', role: 'team-member', teamIds: ['team-1'] }, 'test-secret');
+  const post = async (headers, body) => {
+    const res = await fetch(`http://127.0.0.1:${port}/ui/api/admin/retry?team=team-1`, {
+      method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  };
+  try {
+    assert.equal((await post(member, { projectKey: 'OPS' })).status, 403); // team-member refused
+    assert.equal((await post(admin, {})).status, 400);                     // projectKey required
+    assert.equal((await post(admin, { projectKey: 'OPS' })).status, 200);
+    const cur = broker.watchStore.getCursor('team-1', 'acme::OPS');
+    assert.equal(cur.consecutiveFailures, 0);
+    assert.equal(cur.skipUntil, undefined);
+    assert.deepEqual(cur.seen, []); // untouched
+  } finally {
+    broker.scopeCredentials.delete('team-1');
     broker.watchStore.teardown('team-1');
     srv.close();
   }

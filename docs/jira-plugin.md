@@ -26,7 +26,7 @@ Jira Cloud                          the broker sidecar (aee-plugin-jira)
   │  project = "KAN" AND updated       │  per watched project:
   │      >= -Nm ORDER BY updated ASC   │   • flatten each issue's changelog into
   │  expand=changelog                  │     <issueKey>:<historyId> status events
-  │◀──────────────────────────────────│   • gate by the watch's exact statusFilter
+  │◀──────────────────────────────────│   • gate by the watch's status set
   │                                   │   • dedup against a per-site seen-id cursor
   │                                   │   • collapse a burst into one digest
   │                                   │
@@ -90,12 +90,14 @@ no restart.
 
 The Jira plugin's **Watch config** page (`/admin`, team-admin — reached from the
 "Watch config" link on the plugin's main page): a list of
-`{ projectKey, statusFilter? }` rows.
+`{ projectKey, statusFilters? }` rows.
 
 - `projectKey` — e.g. `KAN`.
-- `statusFilter` — blank fires on **any** status change; set it (exact match,
-  case-sensitive — copy it from Jira) to fire only on transitions **into** that
-  status, e.g. `Ready for Dev`.
+- `statusFilters` — a **set** of target statuses (chips). An empty set fires on
+  **any** status change; add one or more (exact match, case-sensitive — copy
+  each from Jira) to fire only on transitions **into any of them**, e.g.
+  `Ready for Dev` + `In Review`. A config written before multi-status support
+  (a singular `statusFilter` string) is migrated to a one-element set on read.
 
 ### 5. Give the agents a `plugin-event` trigger
 
@@ -141,25 +143,40 @@ behind the `requiresApproval` pen, which is wired but unused today.
 ## The console UI
 
 **Jira** in the sidebar (once installed) → the plugin's `/` route (any team
-member of a granted team):
+member of a granted team), two tabs:
 
-- **Issues** — pick a project, optionally filter by status.
-- **Inbox** — the status changes queued for this team's agents.
-- **Watching** — the configured projects and the poller's cursor state (how many
-  events seen, any consecutive failures).
+- **Board**
+  - **Issues** — pick a project, optionally filter by status.
+  - **Watching** — one card per watched project with a health pill
+    (**Watching** / **Degraded** / **Failing**) and a roll-up badge
+    (`1 watch failing`). Click a card to expand it: a healthy card shows the
+    last poll, the cursor and which agents it wakes; a failing one opens the
+    failure detail — the consecutive-failure count, the next retry time, a short
+    log of the actual errors with timestamps, a **Retry now** button
+    (team-admin), and a pointer to *Plugins → Jira → Credentials*.
+  - **Inbox** — the status changes queued for this team's agents.
+- **Activity** — the retained event log (see below).
 
-The **Watch config** link (team-admin only) opens `/admin` — the project/status
-rows from step 4.
+The **Watch config** link (team-admin only) opens `/admin` — the
+project + status-set rows from step 4.
 
 ---
 
 ## The event log
 
-Every wake writes one row to the platform **GitHub Event Log** page
-(`/github-events`), tagged `source: internal-plugin`, event `plugin.event`
-("plugin event"). It has no repo, label or work item — those columns show `—` —
-but the row confirms the fan-out happened and to which agents. The plugin has no
-separate event-log page of its own.
+Two records, for two audiences:
+
+- **Activity tab** (the plugin's `/` route) — the plugin's own retained log:
+  every fresh status change the poller saw in a watched project and what it did
+  with it — `woke agents` / `folded into digest` / `throttled` /
+  `not a watched status` / `baseline`. Grouped by day, filterable by issue type
+  and by *Watched* vs *All activity* (the latter also shows transitions the
+  poller saw but did not act on). Kept **14 days**, independent of the agent
+  inbox. This is the `JiraEventLog.jsx` #1539 deferred, at zero platform cost.
+- **Platform GitHub Event Log** (`/github-events`) — every *wake* also writes one
+  row there, tagged `source: internal-plugin`, event `plugin.event`. It has no
+  repo, label or work item — those columns show `—` — but the row confirms the
+  fan-out happened and to which agents.
 
 ---
 
@@ -186,7 +203,8 @@ separate event-log page of its own.
 | `projects` returns nothing but the account sees projects in a browser | a **scoped** API token missing `read:jira-work` | use a classic (unscoped) token |
 | a transition "no transition to X" | X isn't reachable from the issue's current status, or the name doesn't match | the error lists the available transitions; use one of those target names |
 | the poll log shows `fetch failed` once then recovers | a stale keep-alive socket in the long-running broker | expected — the client retries transport failures once |
-| a fresh transition doesn't wake the agent | the watch's `statusFilter` doesn't exactly match the Jira status name, or the agent has no `plugin-event` trigger, or the poll already baselined the change | check the Watch config page's cursor; copy the status name verbatim from Jira; add the trigger |
+| a fresh transition doesn't wake the agent | no status in the watch's `statusFilters` set exactly matches the Jira status name, or the agent has no `plugin-event` trigger, or the poll already baselined the change | check the Activity tab (a `not a watched status` row means the set is wrong); copy the status name verbatim from Jira; add the trigger |
+| a watch card shows **Failing** | consecutive poll failures — expand it for the error log | usually a bad or expired API token: a Team Admin re-sets it on the Plugins page, then hits **Retry now** |
 
 For a hands-on debug session the broker ships `spike.js` (run inside the
 sidecar): `podman exec aee-plugin-jira node spike.js probe --project KAN

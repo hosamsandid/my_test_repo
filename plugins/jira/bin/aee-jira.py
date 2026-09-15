@@ -16,7 +16,7 @@ Reads:
     aee-jira inbox [--consume]                   # what woke me: queued status-change events
     aee-jira projects                            # the projects in this team's scope
     aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
-    aee-jira show KAN-6                          # one issue (summary, status, assignee, URL)
+    aee-jira show KAN-6                          # one issue (summary, status, type, assignee, URL)
 
 Writes (attributed, role-gated server-side, no human confirmation — moving a
 ticket is routine and reversible):

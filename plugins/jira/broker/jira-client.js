@@ -40,8 +40,9 @@ function buildProjectJql(projectKey, windowMinutes) {
 }
 
 // Body for POST /rest/api/3/search/jql (the "enhanced JQL search" that replaced
-// the deprecated /rest/api/3/search). We only ever need summary + status fields
-// and the changelog expansion.
+// the deprecated /rest/api/3/search). We need summary + status + issuetype (so
+// the Activity view can group / filter status changes by ticket kind — story /
+// bug / task) and the changelog expansion.
 //
 // NOTE: on THIS endpoint `expand` is a comma-delimited STRING, not the array
 // the old /search endpoint took — passing an array is a 400 "Invalid request
@@ -50,12 +51,18 @@ function buildProjectJql(projectKey, windowMinutes) {
 function buildJqlSearchBody(jql, nextPageToken) {
   const body = {
     jql,
-    fields: ['summary', 'status'],
+    fields: ['summary', 'status', 'issuetype'],
     expand: 'changelog',
     maxResults: PAGE_SIZE,
   };
   if (nextPageToken) body.nextPageToken = nextPageToken;
   return body;
+}
+
+// The issue-type name from a raw issue's `fields.issuetype` (Story / Bug / Task /
+// Sub-task / …), or null when the field was not requested or is absent.
+function issueTypeOf(fields) {
+  return fields && fields.issuetype && fields.issuetype.name ? String(fields.issuetype.name) : null;
 }
 
 function changelogPath(issueKey, startAt = 0) {
@@ -71,6 +78,7 @@ function shapeIssue(raw) {
     key: String(raw.key || ''),
     summary: fields.summary == null ? '' : String(fields.summary),
     status,
+    issueType: issueTypeOf(fields),
     changelog: raw.changelog || null,
   };
 }
@@ -205,7 +213,7 @@ async function getIssue(cred, issueKey, { env } = {}) {
   const auth = basicAuthHeader(cred.email, cred.apiToken);
   const raw = await requestJson({
     base,
-    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=summary,status,description,assignee`,
+    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=summary,status,description,assignee,issuetype`,
     authHeader: auth,
   });
   const fields = raw.fields || {};
@@ -213,6 +221,7 @@ async function getIssue(cred, issueKey, { env } = {}) {
     key: String(raw.key || issueKey),
     summary: fields.summary == null ? '' : String(fields.summary),
     status: fields.status && fields.status.name ? String(fields.status.name) : null,
+    issueType: issueTypeOf(fields),
     assignee: fields.assignee && fields.assignee.displayName ? String(fields.assignee.displayName) : null,
     url: `${resolveJiraApiBase(cred.siteUrl)}/browse/${encodeURIComponent(raw.key || issueKey)}`,
   };
@@ -272,7 +281,7 @@ async function listProjectIssues(cred, { projectKey, status, env } = {}) {
     path: '/rest/api/3/search/jql',
     method: 'POST',
     authHeader: auth,
-    body: { jql, fields: ['summary', 'status', 'assignee', 'updated'], maxResults: PAGE_SIZE },
+    body: { jql, fields: ['summary', 'status', 'assignee', 'updated', 'issuetype'], maxResults: PAGE_SIZE },
   });
   const siteBase = resolveJiraApiBase(cred.siteUrl);
   return (Array.isArray(result.issues) ? result.issues : []).map((raw) => {
@@ -281,6 +290,7 @@ async function listProjectIssues(cred, { projectKey, status, env } = {}) {
       key: String(raw.key || ''),
       summary: f.summary == null ? '' : String(f.summary),
       status: f.status && f.status.name ? String(f.status.name) : null,
+      issueType: issueTypeOf(f),
       assignee: f.assignee && f.assignee.displayName ? String(f.assignee.displayName) : null,
       updated: f.updated || null,
       url: `${siteBase}/browse/${encodeURIComponent(raw.key || '')}`,
@@ -398,6 +408,7 @@ module.exports = {
   buildJqlSearchBody,
   changelogPath,
   shapeIssue,
+  issueTypeOf,
   commentAdf,
   mapJiraError,
   apiBaseFor,

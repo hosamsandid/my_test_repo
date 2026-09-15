@@ -18,7 +18,7 @@ test('buildProjectJql: quoted key, escaped quotes, minutes window, oldest-first'
 });
 
 test('buildJqlSearchBody: fields + changelog expansion; expand is a STRING on /search/jql; nextPageToken only when given', () => {
-  assert.deepEqual(jc.buildJqlSearchBody('jql'), { jql: 'jql', fields: ['summary', 'status'], expand: 'changelog', maxResults: 100 });
+  assert.deepEqual(jc.buildJqlSearchBody('jql'), { jql: 'jql', fields: ['summary', 'status', 'issuetype'], expand: 'changelog', maxResults: 100 });
   assert.equal(typeof jc.buildJqlSearchBody('jql').expand, 'string'); // array form is a 400 on this endpoint
   assert.equal(jc.buildJqlSearchBody('jql', 'TOK').nextPageToken, 'TOK');
 });
@@ -27,11 +27,12 @@ test('changelogPath: encodes the issue key and paginates', () => {
   assert.equal(jc.changelogPath('ENG-1', 100), '/rest/api/3/issue/ENG-1/changelog?startAt=100&maxResults=100');
 });
 
-test('shapeIssue: narrows to key/summary/status/changelog', () => {
+test('shapeIssue: narrows to key/summary/status/issueType/changelog', () => {
   assert.deepEqual(
-    jc.shapeIssue({ key: 'ENG-1', fields: { summary: 'S', status: { name: 'In Progress' } }, changelog: { total: 1, histories: [] } }),
-    { key: 'ENG-1', summary: 'S', status: 'In Progress', changelog: { total: 1, histories: [] } },
+    jc.shapeIssue({ key: 'ENG-1', fields: { summary: 'S', status: { name: 'In Progress' }, issuetype: { name: 'Bug' } }, changelog: { total: 1, histories: [] } }),
+    { key: 'ENG-1', summary: 'S', status: 'In Progress', issueType: 'Bug', changelog: { total: 1, histories: [] } },
   );
+  assert.equal(jc.shapeIssue({ key: 'ENG-2', fields: { summary: 'S' } }).issueType, null);
   assert.equal(jc.shapeIssue(null), null);
 });
 
@@ -155,14 +156,14 @@ test('listProjectIssues: project-scoped JQL, optional status filter, narrow rows
     assert.match(url, /\/rest\/api\/3\/search\/jql/);
     const body = JSON.parse(opts.body);
     assert.equal(body.jql, 'project = "KAN" AND status = "Ready for Dev" ORDER BY updated DESC');
-    assert.deepEqual(body.fields, ['summary', 'status', 'assignee', 'updated']);
+    assert.deepEqual(body.fields, ['summary', 'status', 'assignee', 'updated', 'issuetype']);
     return { ok: true, status: 200, text: async () => JSON.stringify({ issues: [
-      { key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, updated: '2026-09-09T10:00:00Z' } },
+      { key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, updated: '2026-09-09T10:00:00Z', issuetype: { name: 'Story' } } },
     ] }) };
   }, async () => {
     const rows = await jc.listProjectIssues({ siteUrl: 'acme', email: 'e', apiToken: 't' }, { projectKey: 'KAN', status: 'Ready for Dev', env: CRED.env });
     assert.deepEqual(rows, [{
-      key: 'KAN-6', summary: 'Login', status: 'Ready for Dev', assignee: 'Jane',
+      key: 'KAN-6', summary: 'Login', status: 'Ready for Dev', issueType: 'Story', assignee: 'Jane',
       updated: '2026-09-09T10:00:00Z', url: 'https://acme.atlassian.net/browse/KAN-6',
     }]);
   });
@@ -236,12 +237,13 @@ test('transitionIssue: no transition to the target → a 409 naming the options'
   });
 });
 
-test('getIssue: reads summary/status/assignee and builds a browse URL from the real site', async () => {
+test('getIssue: reads summary/status/issueType/assignee and builds a browse URL from the real site', async () => {
   await withFetch(() => ({ ok: true, status: 200, text: async () => JSON.stringify({
-    key: 'ENG-5', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' } },
+    key: 'ENG-5', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, issuetype: { name: 'Task' } },
   }) }), async () => {
     const issue = await jc.getIssue({ siteUrl: 'acme', email: 'e', apiToken: 't' }, 'ENG-5', { env: CRED.env });
     assert.equal(issue.status, 'Ready for Dev');
+    assert.equal(issue.issueType, 'Task');
     assert.equal(issue.assignee, 'Jane');
     assert.equal(issue.url, 'https://acme.atlassian.net/browse/ENG-5'); // browse URL uses the real site, not the seam
   });

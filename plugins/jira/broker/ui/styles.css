@@ -109,6 +109,11 @@
 html { font-size: 16px; }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
+/* This iframe is a bare document with no UA-reset — and several component
+ * classes set `display`, which beats the UA `[hidden] { display: none }`.
+ * Re-assert it so `el.hidden = true` actually hides (the team selector, the
+ * roll-up pills, the admin link). */
+[hidden] { display: none !important; }
 body {
   font-family: var(--eb-font-sans); color: var(--eb-text-primary); background: var(--eb-bg-app);
   display: flex; flex-direction: column; height: 100vh; font-size: var(--eb-text-base);
@@ -123,10 +128,15 @@ body {
 .toolbar .title .sub { color: var(--eb-text-secondary); font-size: var(--eb-text-sm); }
 .spacer { flex: 1; }
 .field { display: flex; flex-direction: column; gap: 3px; font-size: var(--eb-text-xs); color: var(--eb-text-secondary); }
-.field select {
+/* the toolbar controls ARE the `.field` element (a bare <select>/<input>), not a
+ * wrapper, so style them directly too */
+.field select, select.field,
+.field input, input.field {
   font: inherit; font-size: var(--eb-text-base); color: var(--eb-text-primary); background: var(--eb-bg-elevated);
-  border: 1px solid var(--eb-border-hover); border-radius: var(--eb-radius-md); padding: 6px 8px; min-width: 150px;
+  border: 1px solid var(--eb-border-hover); border-radius: var(--eb-radius-md); padding: 6px 8px;
 }
+select.field { min-width: 150px; }
+input.list-search { display: block; width: 100%; }
 .btn {
   font: inherit; font-size: var(--eb-text-base); cursor: pointer; border-radius: var(--eb-radius-md);
   border: 1px solid transparent; background: var(--eb-accent-primary); color: var(--eb-text-inverted);
@@ -143,7 +153,7 @@ body {
 }
 
 .layout { flex: 1; display: grid; grid-template-columns: minmax(280px, 380px) 1fr; gap: 0; min-height: 0; }
-.list-pane { border-right: 1px solid var(--eb-border-default); overflow: auto; padding: 8px; }
+.list-pane { border-right: 1px solid var(--eb-border-default); overflow: auto; padding: 12px; }
 .detail-pane { overflow: auto; padding: 18px 22px; }
 
 .issue-list { list-style: none; margin: 0; padding: 0; }
@@ -290,3 +300,216 @@ body {
 }
 a { color: var(--eb-accent-primary); }
 .hidden { display: none !important; }
+
+/* ─── §6.4 redesign: tabs, watch health, activity view ──────────────────────── */
+
+.btn.sm { padding: 4px 9px; font-size: var(--eb-text-xs); display: inline-flex; align-items: center; gap: 6px; }
+.btn.sm svg { flex: 0 0 auto; }
+
+.toolbar.sub { padding: 8px 12px; gap: 10px; border-bottom: 1px solid var(--eb-border-default); }
+
+.view-tabs {
+  display: flex; gap: 2px; padding: 0 16px; background: var(--eb-bg-surface);
+  border-bottom: 1px solid var(--eb-border-default); flex-shrink: 0;
+}
+.view-tab {
+  font: inherit; font-size: var(--eb-text-base); cursor: pointer; background: none; border: none;
+  color: var(--eb-text-secondary); padding: 9px 12px; border-bottom: 2px solid transparent;
+}
+.view-tab:hover { color: var(--eb-text-primary); }
+.view-tab.is-active { color: var(--eb-text-primary); font-weight: var(--eb-font-medium); border-bottom-color: var(--eb-accent-primary); }
+
+.view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.view[hidden] { display: none; }
+
+.watch-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+
+/* health pill — the roll-up badge (top of "Watching") and the compact
+ * Activity-view strip rows */
+.health-pill {
+  display: inline-flex; align-items: center; gap: 6px; font-size: var(--eb-text-xs);
+  padding: 3px 10px; border-radius: 9999px; border: 1px solid var(--eb-border-hover);
+  background: var(--eb-bg-elevated); color: var(--eb-text-secondary); white-space: nowrap;
+}
+.health-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.health-pill.ok   { color: var(--eb-status-success); }
+.health-pill.warn { color: var(--eb-status-warning); border-color: var(--eb-status-warning); }
+.health-pill.err  { color: var(--eb-status-error); border-color: var(--eb-status-error); }
+
+/* one status pill: coloured dot + label — shared by the issue list and the
+ * watch card's "Wakes on" row */
+.status-pill {
+  display: inline-flex; align-items: center; gap: 6px; font-size: var(--eb-text-xs);
+  padding: 2px 9px; border-radius: 9999px; border: 1px solid var(--eb-border-hover);
+  background: var(--eb-bg-elevated); color: var(--eb-text-primary);
+  white-space: nowrap; flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+}
+.status-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+
+/* issue list — a two-line card (line 1: key + title · line 2: status pill + assignee) */
+.issue-card {
+  display: flex; flex-direction: column; gap: 6px; padding: 11px 12px; margin-bottom: 8px;
+  border: 1px solid var(--eb-border-default); border-radius: var(--eb-radius-lg);
+  background: var(--eb-bg-surface); text-decoration: none; color: inherit;
+}
+.issue-card:hover { border-color: var(--eb-border-hover); }
+.ic-line1, .ic-line2 { display: flex; align-items: center; gap: 8px; }
+.ic-num { font-family: var(--eb-font-mono); font-size: var(--eb-text-xs); color: var(--eb-text-muted); flex: 0 0 auto; }
+.ic-title { font-weight: var(--eb-font-medium); font-size: var(--eb-text-base); color: var(--eb-text-primary); flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ic-assignee { font-size: var(--eb-text-xs); color: var(--eb-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* watch cards (Board view right column) */
+.watch-cards { display: flex; flex-direction: column; gap: 10px; }
+.watch-card {
+  border: 1px solid var(--eb-border-default); border-radius: var(--eb-radius-lg);
+  background: var(--eb-bg-surface); overflow: hidden;
+}
+.watch-card.failing { border-color: var(--eb-status-error); }
+.wc-head {
+  width: 100%; display: flex; flex-direction: column; gap: 10px; padding: 13px 15px;
+  background: none; border: none; font: inherit; color: var(--eb-text-primary); cursor: pointer; text-align: left;
+}
+.wc-head:hover { background: var(--eb-bg-hover); }
+.wc-row { display: flex; align-items: center; gap: 11px; }
+.proj-badge {
+  font-family: var(--eb-font-mono); font-size: var(--eb-text-xs); font-weight: var(--eb-font-semibold);
+  background: var(--eb-bg-elevated); border: 1px solid var(--eb-border-default);
+  border-radius: var(--eb-radius-sm); padding: 2px 7px; flex: 0 0 auto;
+}
+.proj-badge.sm { font-size: 10px; padding: 1px 5px; }
+.wc-name { color: var(--eb-text-secondary); font-size: var(--eb-text-base); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc-health { display: inline-flex; align-items: center; gap: 6px; font-size: var(--eb-text-sm); flex: 0 0 auto; white-space: nowrap; }
+.wc-health .hi { flex: 0 0 auto; }
+.wc-health.ok   { color: var(--eb-status-success); }
+.wc-health.warn { color: var(--eb-status-warning); }
+.wc-health.err  { color: var(--eb-status-error); }
+.wc-wakes { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.wc-wakes-label { font-size: var(--eb-text-xs); color: var(--eb-text-muted); flex: 0 0 auto; }
+.wc-any { font-size: var(--eb-text-xs); color: var(--eb-text-secondary); }
+.wc-more { font-size: var(--eb-text-xs); color: var(--eb-text-muted); }
+.wc-agents { font-size: var(--eb-text-xs); color: var(--eb-text-muted); margin-left: auto; flex: 0 0 auto; }
+
+/* the admin watch-config chip editor still uses .mini-chip */
+.mini-chip {
+  display: inline-flex; align-items: center; gap: 5px; font-size: var(--eb-text-xs);
+  padding: 1px 8px; border-radius: 9999px; border: 1px solid var(--eb-border-hover); background: var(--eb-bg-elevated);
+}
+.mini-chip.removable button {
+  border: none; background: none; color: var(--eb-text-secondary); cursor: pointer;
+  font-size: var(--eb-text-sm); line-height: 1; padding: 0;
+}
+.mini-chip.removable button:hover { color: var(--eb-status-error); }
+.chev { color: var(--eb-text-muted); display: inline-flex; flex: 0 0 auto; transition: transform .12s; }
+.chev.up { transform: rotate(180deg); }
+
+.watch-detail {
+  border-top: 1px solid var(--eb-border-default); background: var(--eb-bg-app);
+  padding: 12px 15px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 18px;
+}
+.watch-detail > div { display: flex; flex-direction: column; gap: 3px; font-size: var(--eb-text-sm); min-width: 0; }
+.watch-detail .wd-span { grid-column: 1 / -1; }
+.wd-agent-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.wd-chip {
+  font-family: var(--eb-font-mono); font-size: var(--eb-text-xs); color: var(--eb-text-secondary);
+  background: var(--eb-bg-elevated); border: 1px solid var(--eb-border-default);
+  border-radius: var(--eb-radius-sm); padding: 1px 6px;
+}
+.dt-label { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--eb-text-muted); }
+
+/* failure panel */
+.failure { border-top: 1px solid var(--eb-status-error); background: var(--eb-status-warning-bg); }
+:root[data-theme="admin-dark"] .failure,
+:root:not([data-theme]) .failure { background: oklch(0.22 0.04 25); }
+.failure-summary { display: flex; align-items: center; gap: 12px; padding: 11px 14px; }
+.fs-count { font-size: var(--eb-text-base); font-weight: var(--eb-font-semibold); color: var(--eb-text-primary); }
+.err-log { border-top: 1px solid var(--eb-border-default); max-height: 170px; overflow: auto; }
+.err-row {
+  display: flex; gap: 12px; padding: 7px 14px; align-items: baseline;
+  border-bottom: 1px solid var(--eb-border-default); font-family: var(--eb-font-mono); font-size: var(--eb-text-xs);
+}
+.err-row:last-child { border-bottom: none; }
+.err-ts { color: var(--eb-text-muted); flex: 0 0 52px; }
+.err-msg { color: var(--eb-text-primary); flex: 1; word-break: break-word; }
+.failure-hint { padding: 9px 14px; font-size: var(--eb-text-xs); color: var(--eb-text-secondary); border-top: 1px solid var(--eb-border-default); }
+
+/* issue-type glyph */
+.type-glyph { display: inline-flex; flex: 0 0 auto; color: var(--eb-text-muted); }
+.type-glyph.tg-bug { color: var(--eb-status-error); }
+.type-glyph.tg-story { color: var(--eb-status-success); }
+.type-glyph.tg-task { color: var(--eb-status-info); }
+.type-glyph.tg-epic { color: var(--eb-accent-primary); }
+.type-glyph.tg-subtask { color: var(--eb-text-secondary); }
+
+/* activity view */
+.activity-layout { grid-template-columns: minmax(240px, 320px) 1fr; }
+.watch-strip { display: flex; flex-direction: column; gap: 6px; }
+.strip-row {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border: 1px solid var(--eb-border-default); border-radius: var(--eb-radius-md); background: var(--eb-bg-surface);
+}
+.strip-row.failing { border-color: var(--eb-status-error); }
+
+.activity-controls { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.chip-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  font: inherit; font-size: var(--eb-text-xs); cursor: pointer; padding: 3px 10px; border-radius: 9999px;
+  border: 1px solid var(--eb-border-hover); background: var(--eb-bg-elevated); color: var(--eb-text-secondary);
+}
+.chip:hover { color: var(--eb-text-primary); }
+.chip.is-active { background: var(--eb-accent-primary); border-color: transparent; color: var(--eb-text-inverted); }
+
+.seg { display: inline-flex; border: 1px solid var(--eb-border-hover); border-radius: var(--eb-radius-md); overflow: hidden; }
+.seg-btn {
+  font: inherit; font-size: var(--eb-text-xs); cursor: pointer; padding: 4px 11px; border: none;
+  background: var(--eb-bg-elevated); color: var(--eb-text-secondary);
+}
+.seg-btn + .seg-btn { border-left: 1px solid var(--eb-border-hover); }
+.seg-btn.is-active { background: var(--eb-bg-hover); color: var(--eb-text-primary); }
+
+.activity-list { display: flex; flex-direction: column; }
+.day-sep {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--eb-text-muted);
+  padding: 12px 0 6px; border-bottom: 1px solid var(--eb-border-default); margin-bottom: 4px;
+}
+.day-sep:first-child { padding-top: 0; }
+.ac-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 2px;
+  border-bottom: 1px solid var(--eb-border-default); font-size: var(--eb-text-sm);
+}
+.ac-row:last-child { border-bottom: none; }
+.ac-main { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 0 1 46%; }
+.ac-key { font-family: var(--eb-font-mono); font-size: var(--eb-text-xs); color: var(--eb-accent-primary); flex: 0 0 auto; }
+.ac-summary { color: var(--eb-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-transition { color: var(--eb-text-secondary); flex: 0 1 auto; font-size: var(--eb-text-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.arr { color: var(--eb-text-muted); }
+.ac-time { color: var(--eb-text-muted); font-size: var(--eb-text-xs); flex: 0 0 auto; text-align: right; margin-left: auto; }
+.oc {
+  font-size: 10px; padding: 1px 8px; border-radius: 9999px; border: 1px solid var(--eb-border-hover);
+  color: var(--eb-text-secondary); flex: 0 0 auto; white-space: nowrap;
+}
+.oc.oc-ok    { color: var(--eb-status-success); border-color: var(--eb-status-success); }
+.oc.oc-info  { color: var(--eb-status-info); }
+.oc.oc-warn  { color: var(--eb-status-warning); border-color: var(--eb-status-warning); }
+.oc.oc-muted { color: var(--eb-text-muted); }
+
+/* admin watch-config editor rows */
+.watch-editor-row { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 8px; }
+.pk-input {
+  font: inherit; font-size: var(--eb-text-base); padding: 6px 9px; border-radius: var(--eb-radius-md);
+  border: 1px solid var(--eb-border-hover); background: var(--eb-bg-elevated); color: var(--eb-text-primary);
+  flex: 0 0 120px;
+}
+.chip-editor {
+  flex: 1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 34px;
+  padding: 4px 6px; border: 1px solid var(--eb-border-hover); border-radius: var(--eb-radius-md); background: var(--eb-bg-elevated);
+}
+.chip-add {
+  font: inherit; font-size: var(--eb-text-sm); border: none; background: none; color: var(--eb-text-primary);
+  flex: 1; min-width: 120px; outline: none; padding: 2px;
+}
+.chip-add::placeholder { color: var(--eb-text-muted); }
+
+@media (max-width: 720px) {
+  .layout, .activity-layout { grid-template-columns: 1fr; }
+  .watch-detail { grid-template-columns: 1fr 1fr; }
+}

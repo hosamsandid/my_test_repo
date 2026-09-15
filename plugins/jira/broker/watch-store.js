@@ -14,13 +14,19 @@
 // `PUT /internal/spike-config` endpoint or the `JIRA_SPIKE_CONFIG` env var.
 //
 // A watch is:
-//   { projectKey, statusFilter?, jql?, wake: { agentIds? | "all-granted" } }
+//   { projectKey, statusFilters?: string[], jql?, wake: { agentIds? | "all-granted" } }
+//
+// `statusFilters` is a SET of target statuses — the watch fires on a transition
+// into any of them (an empty / absent set = fire on any status change). A legacy
+// singular `statusFilter` string is migrated to a one-element `statusFilters` on
+// read, so a config written before multi-status support keeps working.
 //
 // The poll cursor is kept beside the config, sub-keyed by
 // `<siteUrl>::<projectKey>` (the per-site scoping from #1539: a Jira project key
 // is only unique per site, so the same key on two sites must never be
-// conflated). It carries the seen-id set, lastPolledAt and the failure/backoff
-// state.
+// conflated). It carries the seen-id set, lastPolledAt, the failure/backoff
+// state and a short ring of recent poll errors (watch-health.js) surfaced on the
+// `/watches` route.
 //
 // Writes are atomic (temp file + rename). Decisions that are pure live in
 // event-extract.js / event-cursor.js; this file is I/O.
@@ -49,7 +55,20 @@ function normalizeWatch(w) {
   const projectKey = typeof w.projectKey === 'string' ? w.projectKey.trim() : '';
   if (!projectKey) return null;
   const out = { projectKey };
-  if (typeof w.statusFilter === 'string' && w.statusFilter.trim()) out.statusFilter = w.statusFilter.trim();
+  // `statusFilters` (a set) is canonical; a legacy singular `statusFilter`
+  // string is folded into it so an older config keeps working. Trimmed,
+  // de-duplicated, order preserved; an all-blank set collapses to "no filter"
+  // (the key is omitted).
+  const rawFilters = Array.isArray(w.statusFilters)
+    ? w.statusFilters
+    : (typeof w.statusFilter === 'string' ? [w.statusFilter] : []);
+  const statusFilters = [];
+  for (const s of rawFilters) {
+    if (typeof s !== 'string') continue;
+    const t = s.trim();
+    if (t && !statusFilters.includes(t)) statusFilters.push(t);
+  }
+  if (statusFilters.length) out.statusFilters = statusFilters;
   if (typeof w.jql === 'string' && w.jql.trim()) out.jql = w.jql.trim();
   const wake = w.wake && typeof w.wake === 'object' ? w.wake : {};
   if (Array.isArray(wake.agentIds) && wake.agentIds.length) {

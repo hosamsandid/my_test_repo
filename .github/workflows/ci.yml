@@ -101,8 +101,9 @@ jobs:
           node-version: '22'
       # Dependency-free: the broker uses Node's built-in http + global fetch, and
       # its pure modules (event-extract / jira-client / watch-store / inbox-store
-      # / poller) require ../../../broker-sdk, which is checked out alongside. No
-      # install step — same shape as the broker-sdk and netzplan-broker jobs.
+      # / watch-health / activity-store / poller) require ../../../broker-sdk,
+      # which is checked out alongside. No install step — same shape as the
+      # broker-sdk and netzplan-broker jobs.
       - name: Run unit tests
         working-directory: plugins/jira/broker
         run: node --test

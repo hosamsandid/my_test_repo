@@ -15,11 +15,26 @@ function tmpStore() {
 
 test('normalizeWatch: needs a projectKey; defaults wake to all-granted', () => {
   assert.equal(normalizeWatch({}), null);
-  assert.equal(normalizeWatch({ statusFilter: 'Done' }), null);
+  assert.equal(normalizeWatch({ statusFilters: ['Done'] }), null);
   assert.deepEqual(normalizeWatch({ projectKey: ' ENG ' }), { projectKey: 'ENG', wake: { agentIds: 'all-granted' } });
-  assert.deepEqual(normalizeWatch({ projectKey: 'ENG', statusFilter: 'Ready', wake: { agentIds: ['a', 'b'] } }), {
-    projectKey: 'ENG', statusFilter: 'Ready', wake: { agentIds: ['a', 'b'] },
+  assert.deepEqual(normalizeWatch({ projectKey: 'ENG', statusFilters: ['Ready'], wake: { agentIds: ['a', 'b'] } }), {
+    projectKey: 'ENG', statusFilters: ['Ready'], wake: { agentIds: ['a', 'b'] },
   });
+});
+
+test('normalizeWatch: statusFilters set is trimmed, de-duplicated, order preserved; all-blank collapses out', () => {
+  assert.deepEqual(
+    normalizeWatch({ projectKey: 'ENG', statusFilters: [' Ready for Dev ', 'In Review', 'Ready for Dev', ''] }).statusFilters,
+    ['Ready for Dev', 'In Review'],
+  );
+  assert.equal(normalizeWatch({ projectKey: 'ENG', statusFilters: ['', '  '] }).statusFilters, undefined);
+});
+
+test('normalizeWatch: a legacy singular statusFilter migrates to a one-element statusFilters', () => {
+  assert.deepEqual(
+    normalizeWatch({ projectKey: 'ENG', statusFilter: 'Ready for Dev' }),
+    { projectKey: 'ENG', statusFilters: ['Ready for Dev'], wake: { agentIds: 'all-granted' } },
+  );
 });
 
 test('loadConfig: an untouched scope is an empty config, never a 404', () => {

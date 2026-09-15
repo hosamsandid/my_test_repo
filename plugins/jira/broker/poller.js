@@ -36,8 +36,13 @@ const {
   saveThrottleState,
   checkAndIncThrottle,
 } = require('../../../broker-sdk');
-const { resolveJiraApiBase, isChangelogTruncated, extractStatusChangeEvents, matchesStatusFilter, computeQueryWindowMinutes } = require('./event-extract');
+const { resolveJiraApiBase, isChangelogTruncated, extractStatusChangeEvents, matchesStatusFilters, computeQueryWindowMinutes } = require('./event-extract');
+const { recordPollError, clearPollFailure } = require('./watch-health');
 const jira = require('./jira-client');
+
+// How many baseline events to record in the activity log on a project's first
+// poll — enough to show "nothing was missed", not the whole JQL window.
+const BASELINE_ACTIVITY_CAP = 20;
 
 const DEFAULT_INTERVAL_MS = 60_000;
 const DEFAULT_BASE_WINDOW_MINUTES = 10;
@@ -45,13 +50,14 @@ const DEFAULT_BASE_WINDOW_MINUTES = 10;
 class JiraPoller {
   // deps:
   //   watchStore, inboxStore                         — the two state stores
+  //   activityStore                                  — optional retained event log
   //   resolveCredential(scopeId) -> {siteUrl,email,apiToken} | null
   //   deliver({ scopeId, kind, agentIds, convKey, events, cap }) -> Promise
   //       kind: 'events' | 'digest' | 'throttle-warning'
   //   log(msg)                                        — optional
   //   env                                            — JIRA_API_BASE seam passthrough
   constructor({
-    watchStore, inboxStore, resolveCredential, deliver,
+    watchStore, inboxStore, activityStore, resolveCredential, deliver,
     intervalMs, baseWindowMinutes, throttleStatePath, log, env, now = () => Date.now(),
   } = {}) {
     if (!watchStore || !inboxStore) throw new Error('JiraPoller requires watchStore and inboxStore');
@@ -59,6 +65,7 @@ class JiraPoller {
     if (typeof deliver !== 'function') throw new Error('JiraPoller requires deliver');
     this.watchStore = watchStore;
     this.inboxStore = inboxStore;
+    this.activityStore = activityStore || null;
     this.resolveCredential = resolveCredential;
     this.deliver = deliver;
     this.intervalMs = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : DEFAULT_INTERVAL_MS;
@@ -112,6 +119,7 @@ class JiraPoller {
       return out;
     }
     this.inboxStore.reap(scopeId);
+    if (this.activityStore) { try { this.activityStore.reap(scopeId); } catch { /* best effort */ } }
     if (!cfg.watches.length) return out;
 
     const cred = this.resolveCredential(scopeId);
@@ -149,9 +157,11 @@ class JiraPoller {
     } catch (err) {
       const failures = (cursor.consecutiveFailures || 0) + 1;
       const skipUntil = new Date(this.now() + computeBackoffDelayMs(failures)).toISOString();
-      this.watchStore.saveCursor(scopeId, projectRef, { ...cursor, consecutiveFailures: failures, skipUntil });
+      const withError = recordPollError(cursor, { message: err.message }, this.now());
+      this.watchStore.saveCursor(scopeId, projectRef, { ...withError, consecutiveFailures: failures, skipUntil });
       this.log(`[jira-poller] ${projectRef}: ${err.message} (failures=${failures}, next ~${skipUntil})`);
       res.backoff = skipUntil;
+      res.error = err.message;
       return res;
     }
 
@@ -175,13 +185,20 @@ class JiraPoller {
       events.push(...extractStatusChangeEvents({ ...issue, changelog }, { projectKey: watch.projectKey, siteBase }));
     }
 
-    const nextCursor = { lastPolledAt: new Date(this.now()).toISOString() };
+    // A poll succeeded — clear the active-failure fields (keeping the error ring
+    // so the UI can still show a "recovered recently" state), stamp the time.
+    const nextCursor = clearPollFailure(cursor, this.now());
+    nextCursor.lastPolledAt = new Date(this.now()).toISOString();
 
     // First poll for this project — baseline, don't fire.
     if (!Array.isArray(cursor.seen)) {
       nextCursor.seen = selectFreshEvents(events, [], SEEN_MAX).nextSeen;
       this.watchStore.saveCursor(scopeId, projectRef, nextCursor);
       res.baseline = true;
+      this._recordActivity(
+        scopeId,
+        events.slice(-BASELINE_ACTIVITY_CAP).map((ev) => ({ event: ev, outcome: 'baseline' })),
+      );
       this.log(`[jira-poller] ${projectRef}: baseline (${nextCursor.seen.length} seen)`);
       return res;
     }
@@ -192,11 +209,33 @@ class JiraPoller {
 
     if (!fresh.length) return res;
     fresh.sort((a, b) => String(a.created || '').localeCompare(String(b.created || '')));
-    const gated = fresh.filter((ev) => matchesStatusFilter(ev.toStatus, watch.statusFilter));
+
+    // Split fresh events by the watch's status set. A transition into a status
+    // nobody asked for is still recorded (outcome `filtered`) so the Activity
+    // view can show "the poller saw it, and did nothing" — the "All activity"
+    // toggle in the UI.
+    const gated = [];
+    const filteredRows = [];
+    for (const ev of fresh) {
+      if (matchesStatusFilters(ev.toStatus, watch.statusFilters)) gated.push(ev);
+      else filteredRows.push({ event: ev, outcome: 'filtered', detail: `${ev.toStatus || '?'} is not a watched status` });
+    }
+    this._recordActivity(scopeId, filteredRows);
     if (!gated.length) return res;
 
-    res.fired = await this._fanOut(scopeId, watch, gated);
+    const { fired, rows } = await this._fanOut(scopeId, watch, gated);
+    this._recordActivity(scopeId, rows);
+    res.fired = fired;
     return res;
+  }
+
+  // Best-effort append to the retained activity log; a store failure never
+  // interferes with delivery.
+  _recordActivity(scopeId, rows) {
+    if (!this.activityStore || !rows || rows.length === 0) return;
+    try { this.activityStore.append(scopeId, rows); } catch (err) {
+      this.log(`[jira-poller] activity-store append failed for ${scopeId}: ${err.message}`);
+    }
   }
 
   async _fanOut(scopeId, watch, events) {
@@ -204,11 +243,15 @@ class JiraPoller {
     const deliverables = events.map((ev) => ({ agentId: '_', convKey: `issue:${ev.issueKey}`, event: ev }));
     const plans = planBurstHandoffs(deliverables, BURST_CAP);
     let fired = 0;
+    const rows = []; // per-event activity rows: { event, outcome, detail? }
     let throttleDirty = false;
 
     for (const plan of plans) {
       if (plan.mode === 'digest') {
-        for (const it of plan.items) this.inboxStore.append(scopeId, it.event, { convKey: plan.convKey, digest: true });
+        for (const it of plan.items) {
+          this.inboxStore.append(scopeId, it.event, { convKey: plan.convKey, digest: true });
+          rows.push({ event: it.event, outcome: 'digested' });
+        }
         await this.deliver({ scopeId, kind: 'digest', agentIds, convKey: plan.convKey, events: plan.items.map((i) => i.event), cap: BURST_CAP });
         this.log(`[jira-poller] burst-digest: ${plan.items.length} events → ${scopeId} (${plan.convKey})`);
         fired += 1;
@@ -220,6 +263,7 @@ class JiraPoller {
         throttleDirty = true;
         if (t.drop) {
           this.log(`[jira-poller] throttle: ${it.event.id} → ${scopeId} dropped (${t.count}/${t.threshold}/h)`);
+          rows.push({ event: it.event, outcome: 'throttled', detail: `${t.count}/${t.threshold} per hour` });
           if (t.justWarned) {
             await this.deliver({ scopeId, kind: 'throttle-warning', agentIds, convKey: plan.convKey, events: [], count: t.count, threshold: t.threshold, windowEndsAt: t.windowEndsAt });
           }
@@ -228,6 +272,7 @@ class JiraPoller {
         this.inboxStore.append(scopeId, it.event, { convKey: plan.convKey });
         await this.deliver({ scopeId, kind: 'events', agentIds, convKey: plan.convKey, events: [it.event] });
         this.log(`[jira-poller] queued status_changed (${it.event.id}) ${it.event.fromStatus} → ${it.event.toStatus} → ${scopeId}`);
+        rows.push({ event: it.event, outcome: 'delivered' });
         fired += 1;
       }
     }
@@ -238,7 +283,7 @@ class JiraPoller {
       this.throttleBuckets = pruneThrottleState(this.throttleBuckets);
       if (this.throttleStatePath) saveThrottleState(this.throttleStatePath, this.throttleBuckets);
     }
-    return fired;
+    return { fired, rows };
   }
 }
 

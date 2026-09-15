@@ -2,8 +2,10 @@
  *
  * team-admin only (the broker re-enforces the role from the signed viewer
  * headers). Replaces #1539's `env.jiraProjects[]` and the `jira-event` trigger
- * fields: a list of `{ projectKey, statusFilter? }` rows. Which agents a change
- * wakes is decided per-agent by a `plugin-event` trigger, not here.
+ * fields: a list of `{ projectKey, statusFilters: string[] }` rows. Each project
+ * holds a SET of target statuses (chips) and fires on a transition into any of
+ * them; an empty set fires on any status change. Which agents a change wakes is
+ * decided per-agent by a `plugin-event` trigger, not here.
  */
 (function () {
   'use strict';
@@ -42,17 +44,41 @@
 
   function render() {
     $('rows').innerHTML = state.watches.map(function (w, i) {
-      return '<div class="field" style="display:flex; gap:.5rem; margin-bottom:.4rem;">'
-        + '<input data-i="' + i + '" data-k="projectKey" class="field" style="flex:0 0 130px;" placeholder="KAN" value="' + esc(w.projectKey || '') + '" />'
-        + '<input data-i="' + i + '" data-k="statusFilter" class="field" style="flex:1;" placeholder="status (blank = any)" value="' + esc(w.statusFilter || '') + '" />'
-        + '<button data-del="' + i + '" class="btn">✕</button>'
+      var chips = (w.statusFilters || []).map(function (s, j) {
+        return '<span class="mini-chip removable">' + esc(s)
+          + '<button data-rm="' + i + ':' + j + '" aria-label="remove">✕</button></span>';
+      }).join('');
+      return '<div class="watch-editor-row">'
+        + '<input data-i="' + i + '" data-k="projectKey" class="pk-input" placeholder="KAN" value="' + esc(w.projectKey || '') + '" />'
+        + '<div class="chip-editor">'
+        + chips
+        + '<input data-add="' + i + '" class="chip-add" placeholder="' + (chips ? 'add status…' : 'status (blank = any)') + '" />'
+        + '</div>'
+        + '<button data-del="' + i + '" class="btn ghost sm" aria-label="remove project">Remove</button>'
         + '</div>';
     }).join('') || '<div class="empty">No projects watched.</div>';
 
-    Array.prototype.forEach.call($('rows').querySelectorAll('input'), function (inp) {
-      inp.oninput = function () {
-        var i = Number(inp.dataset.i);
-        state.watches[i][inp.dataset.k] = inp.value;
+    Array.prototype.forEach.call($('rows').querySelectorAll('input[data-k]'), function (inp) {
+      inp.oninput = function () { state.watches[Number(inp.dataset.i)][inp.dataset.k] = inp.value; };
+    });
+    Array.prototype.forEach.call($('rows').querySelectorAll('input[data-add]'), function (inp) {
+      inp.onkeydown = function (e) {
+        if (e.key !== 'Enter' && e.key !== ',') return;
+        e.preventDefault();
+        var i = Number(inp.dataset.add);
+        var v = inp.value.trim();
+        if (v && state.watches[i].statusFilters.indexOf(v) < 0) state.watches[i].statusFilters.push(v);
+        inp.value = '';
+        render();
+        var next = $('rows').querySelector('input[data-add="' + i + '"]');
+        if (next) next.focus();
+      };
+    });
+    Array.prototype.forEach.call($('rows').querySelectorAll('button[data-rm]'), function (b) {
+      b.onclick = function () {
+        var parts = b.dataset.rm.split(':');
+        state.watches[Number(parts[0])].statusFilters.splice(Number(parts[1]), 1);
+        render();
       };
     });
     Array.prototype.forEach.call($('rows').querySelectorAll('button[data-del]'), function (b) {
@@ -64,21 +90,22 @@
     err(null); msg('');
     api('/admin/watch?' + teamQS()).then(function (r) {
       state.watches = (r.watches || []).map(function (w) {
-        return { projectKey: w.projectKey || '', statusFilter: w.statusFilter || '' };
+        return { projectKey: w.projectKey || '', statusFilters: (w.statusFilters || []).slice() };
       });
       $('meta').textContent = r.setBy ? ('Last saved by ' + r.setBy + (r.setAt ? ' on ' + r.setAt : '')) : '';
       render();
     }).catch(function (e) { err(e.message); });
   }
 
-  $('add').onclick = function () { state.watches.push({ projectKey: '', statusFilter: '' }); render(); };
+  $('add').onclick = function () { state.watches.push({ projectKey: '', statusFilters: [] }); render(); };
 
   $('save').onclick = function () {
     msg('Saving…');
     var watches = state.watches
       .map(function (w) {
         var out = { projectKey: (w.projectKey || '').trim() };
-        if ((w.statusFilter || '').trim()) out.statusFilter = w.statusFilter.trim();
+        var sf = (w.statusFilters || []).map(function (s) { return String(s).trim(); }).filter(Boolean);
+        if (sf.length) out.statusFilters = sf;
         return out;
       })
       .filter(function (w) { return w.projectKey; });

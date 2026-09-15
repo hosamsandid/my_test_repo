@@ -87,7 +87,7 @@ if (cmd === 'scopes') {
   const doorbellUrl = opt('doorbell');
   const secret = opt('secret');
   const conf = watchStore.setConfig(scope, {
-    watches: [{ projectKey: project, ...(status ? { statusFilter: status } : {}) }],
+    watches: [{ projectKey: project, ...(status ? { statusFilters: [status] } : {}) }],
     doorbell: doorbellUrl ? { url: doorbellUrl, secret: secret || null } : null,
     setBy: 'spike',
   });

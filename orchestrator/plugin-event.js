@@ -13,6 +13,7 @@
 //   { "event": "status_changed",                      ← the broker's vocabulary,
 //     "summary": "PROJ-42: Login flow — In Progress → Ready for Dev",
 //     "payload": { … }, "eventId": "PROJ-42:10431" }
+//   The consumer's trigger may also carry `payloadFilter: { key: value }` — see below.
 //
 // The token is the authorisation: pluginId and scopeId are read from it, never
 // from the body, so a plugin can only ever fire events for its own id in its
@@ -93,17 +94,55 @@ function validatePluginEventRequest(body) {
   };
 }
 
+// ── payloadFilter ──────────────────────────────────────────────────────────
+// An optional `{ key: value }` on the trigger, matched against the delivered
+// payload's TOP-LEVEL STRING fields — all keys must match, exactly and
+// case-sensitively (the `labelFilter` rule). Absent / empty / malformed = no
+// filter. Deliberately generic: the platform does not know that a Jira payload
+// carries `toStatus`; the plugin's docs say which keys exist (§D5). Only string
+// fields compare, because JS and Python stringify booleans and numbers
+// differently and the agent runtime mirrors this rule.
+function normalizePayloadFilter(filter) {
+  if (!filter || typeof filter !== 'object' || Array.isArray(filter)) return null;
+  const out = {};
+  for (const [k, v] of Object.entries(filter)) {
+    const key = String(k).trim();
+    if (!key || typeof v !== 'string' || !v.trim()) continue;
+    out[key] = v.trim();
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function payloadFieldsMatch(filter, payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  return Object.entries(filter).every(([k, v]) => typeof payload[k] === 'string' && payload[k] === v);
+}
+
+// A burst digest (`{kind:'digest', events:[…]}`, the Jira broker's shape)
+// matches when ANY of its events would have matched on its own — a digest that
+// folds one wanted transition in with four others must still wake the agent.
+function matchesPayloadFilter(filter, payload) {
+  const f = normalizePayloadFilter(filter);
+  if (!f) return true;
+  if (payload && typeof payload === 'object' && payload.kind === 'digest' && Array.isArray(payload.events)) {
+    return payload.events.some((e) => payloadFieldsMatch(f, e));
+  }
+  return payloadFieldsMatch(f, payload);
+}
+
 // Does one trigger listen for this plugin event? `plugin-event` type, matching
-// `pluginId`, enabled, and either no `eventFilter` (any event) or an exact
-// match on the event name. `eventFilter` is opaque to the platform — it is the
-// broker's vocabulary (§4B).
-function matchesPluginEventTrigger(trigger, { pluginId, event }) {
+// `pluginId`, enabled, either no `eventFilter` (any event) or an exact match on
+// the event name, and — when the trigger carries a `payloadFilter` — a payload
+// that satisfies it. `eventFilter` and the filter keys are opaque to the
+// platform — they are the broker's vocabulary (§4B).
+function matchesPluginEventTrigger(trigger, { pluginId, event, payload } = {}) {
   if (!trigger || typeof trigger !== 'object') return false;
   if (trigger.type !== PLUGIN_EVENT_TRIGGER_TYPE) return false;
   if (trigger.enabled === false) return false;
   if (trigger.pluginId !== pluginId) return false;
   const filter = typeof trigger.eventFilter === 'string' ? trigger.eventFilter.trim() : '';
-  return !filter || filter === event;
+  if (filter && filter !== event) return false;
+  return matchesPayloadFilter(trigger.payloadFilter, payload);
 }
 
 // Resolve which agents to wake. `agents` is `[{agentId, inScope, granted,
@@ -112,13 +151,13 @@ function matchesPluginEventTrigger(trigger, { pluginId, event }) {
 // this pure core does the trigger match. Returns `[{agentId, triggerId}]` (the
 // first matching trigger per agent — a producer fires one event, the consumer
 // runs once).
-function resolvePluginEventTargets({ pluginId, event }, agents) {
+function resolvePluginEventTargets({ pluginId, event, payload = null }, agents) {
   const out = [];
   for (const a of Array.isArray(agents) ? agents : []) {
     if (!a || typeof a.agentId !== 'string' || !a.agentId) continue;
     if (!a.inScope || !a.granted) continue;
     const match = (Array.isArray(a.triggers) ? a.triggers : [])
-      .find((t) => matchesPluginEventTrigger(t, { pluginId, event }));
+      .find((t) => matchesPluginEventTrigger(t, { pluginId, event, payload }));
     if (match) out.push({ agentId: a.agentId, triggerId: match.id || null });
   }
   return out;
@@ -167,4 +206,6 @@ module.exports = {
   resolvePluginEventTargets,
   buildPluginEventEntry,
   buildPluginEventLogEvent,
+  normalizePayloadFilter,
+  matchesPayloadFilter,
 };

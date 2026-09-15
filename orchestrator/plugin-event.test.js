@@ -13,6 +13,8 @@ const {
   resolvePluginEventTargets,
   buildPluginEventEntry,
   buildPluginEventLogEvent,
+  normalizePayloadFilter,
+  matchesPayloadFilter,
 } = require('./plugin-event');
 
 // ── validatePluginEventRequest ─────────────────────────────────────────────
@@ -74,6 +76,63 @@ test('resolve: only in-scope + granted agents with a matching trigger; first mat
     { agentId: 'a1', triggerId: 'x1' },
     { agentId: 'a5', triggerId: 'first' },
   ]);
+});
+
+// ── payloadFilter ──────────────────────────────────────────────────────────
+
+test('normalizePayloadFilter: trims keys/values, drops blanks and non-strings, null when empty', () => {
+  assert.equal(normalizePayloadFilter(undefined), null);
+  assert.equal(normalizePayloadFilter(null), null);
+  assert.equal(normalizePayloadFilter('x'), null);
+  assert.equal(normalizePayloadFilter([]), null);
+  assert.equal(normalizePayloadFilter({}), null);
+  assert.equal(normalizePayloadFilter({ toStatus: '  ' }), null);
+  assert.equal(normalizePayloadFilter({ toStatus: 5 }), null);            // non-string value is not a filter
+  assert.deepEqual(normalizePayloadFilter({ ' toStatus ': ' Ready for Dev ', x: '' }), { toStatus: 'Ready for Dev' });
+});
+
+test('matchesPayloadFilter: no filter matches anything; every key must equal a top-level STRING field exactly', () => {
+  assert.equal(matchesPayloadFilter(null, null), true);
+  assert.equal(matchesPayloadFilter({}, { toStatus: 'x' }), true);
+  const f = { toStatus: 'Ready for Dev' };
+  assert.equal(matchesPayloadFilter(f, { toStatus: 'Ready for Dev' }), true);
+  assert.equal(matchesPayloadFilter(f, { toStatus: 'ready for dev' }), false);   // case-sensitive, the labelFilter rule
+  assert.equal(matchesPayloadFilter(f, { toStatus: 'In Progress' }), false);
+  assert.equal(matchesPayloadFilter(f, {}), false);
+  assert.equal(matchesPayloadFilter(f, null), false);                          // a filter with no payload cannot match
+  assert.equal(matchesPayloadFilter(f, { toStatus: { name: 'Ready for Dev' } }), false); // only string fields compare
+  assert.equal(matchesPayloadFilter({ toStatus: 'Ready for Dev', projectKey: 'KAN' }, { toStatus: 'Ready for Dev', projectKey: 'OPS' }), false);
+  assert.equal(matchesPayloadFilter({ toStatus: 'Ready for Dev', projectKey: 'KAN' }, { toStatus: 'Ready for Dev', projectKey: 'KAN' }), true);
+});
+
+test('matchesPayloadFilter: a digest payload matches when ANY contained event matches', () => {
+  const f = { toStatus: 'Ready for Dev' };
+  const digest = { kind: 'digest', count: 2, events: [{ toStatus: 'In Progress' }, { toStatus: 'Ready for Dev' }] };
+  assert.equal(matchesPayloadFilter(f, digest), true);
+  assert.equal(matchesPayloadFilter(f, { kind: 'digest', count: 1, events: [{ toStatus: 'Done' }] }), false);
+  assert.equal(matchesPayloadFilter(f, { kind: 'digest', count: 0, events: [] }), false);
+});
+
+test('match: payloadFilter gates the trigger; absent filter is byte-identical to today', () => {
+  const ev = { pluginId: 'jira', event: 'status_changed', payload: { toStatus: 'Ready for Dev' } };
+  assert.equal(matchesPluginEventTrigger(T(), ev), true);
+  assert.equal(matchesPluginEventTrigger(T({ payloadFilter: { toStatus: 'Ready for Dev' } }), ev), true);
+  assert.equal(matchesPluginEventTrigger(T({ payloadFilter: { toStatus: 'Done' } }), ev), false);
+  // A filter on a trigger whose event does not match is still a miss.
+  assert.equal(matchesPluginEventTrigger(T({ eventFilter: 'commented', payloadFilter: { toStatus: 'Ready for Dev' } }), ev), false);
+  // A malformed filter (not an object) is treated as no filter, never as "match nothing".
+  assert.equal(matchesPluginEventTrigger(T({ payloadFilter: 'Ready for Dev' }), ev), true);
+});
+
+test('resolve: two agents on the same plugin are routed apart by their payloadFilter', () => {
+  const agents = [
+    { agentId: 'ba', inScope: true, granted: true, triggers: [T({ id: 'ba-t', payloadFilter: { toStatus: 'Ready for Refinement' } })] },
+    { agentId: 'dev', inScope: true, granted: true, triggers: [T({ id: 'dev-t', payloadFilter: { toStatus: 'Ready for Dev' } })] },
+    { agentId: 'any', inScope: true, granted: true, triggers: [T({ id: 'any-t' })] },
+  ];
+  const targets = resolvePluginEventTargets(
+    { pluginId: 'jira', event: 'status_changed', payload: { toStatus: 'Ready for Dev' } }, agents);
+  assert.deepEqual(targets, [{ agentId: 'dev', triggerId: 'dev-t' }, { agentId: 'any', triggerId: 'any-t' }]);
 });
 
 // ── buildPluginEventEntry ──────────────────────────────────────────────────

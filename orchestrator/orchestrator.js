@@ -13207,7 +13207,10 @@ async function main() {
             const granted = !!grant;
             return { agentId: aid, inScope, granted, triggers: (inScope && granted) ? loadTriggers(aid) : [] };
           });
-          const targets = pluginEvent.resolvePluginEventTargets({ pluginId, event }, agents);
+          // The payload takes part in target resolution: a trigger's
+          // `payloadFilter` (plugin-event.js) is matched against it, which is
+          // how two agents on one plugin are routed apart by, e.g., a status.
+          const targets = pluginEvent.resolvePluginEventTargets({ pluginId, event, payload }, agents);
           const now = new Date().toISOString();
           for (const t of targets) {
             enqueuePending(t.agentId, pluginEvent.buildPluginEventEntry({

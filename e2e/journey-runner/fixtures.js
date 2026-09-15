@@ -456,6 +456,43 @@ function removeUsageFiles() {
     'sh', ...USAGE_DAYS]);
 }
 
+// The page's Team filter is populated from GET /api/admin/teams, i.e. the
+// teams/index.json scope records (teams-store.listTeams). #2081 retired the only
+// public writer of that store (POST /api/admin/teams → 410), and a self-service
+// POST /api/teams records a membership but no scope record — so neither creates
+// a listable team. Seed the record directly on the shared /workspace volume, the
+// same mechanism the usage files use (execInConsole), idempotently merging with
+// the existing records (e.g. `default`). No agent, no clone, no delete race.
+function seedTeamRecord(teamId, teamName) {
+  execInConsole(['node', '-e', `
+    const fs = require('fs');
+    const p = '/workspace/teams/index.json';
+    let a = [];
+    try { a = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { /* first write */ }
+    if (!Array.isArray(a)) a = [];
+    const [, , id, name] = process.argv;
+    const now = new Date().toISOString();
+    const i = a.findIndex((t) => t && t.id === id);
+    if (i >= 0) a[i] = { ...a[i], name };
+    else a.push({ id, name, description: '', createdAt: now, updatedAt: now });
+    fs.mkdirSync('/workspace/teams', { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(a, null, 2));
+  `, teamId, teamName]);
+}
+
+function removeTeamRecord(teamId) {
+  execInConsole(['node', '-e', `
+    const fs = require('fs');
+    const p = '/workspace/teams/index.json';
+    let a = [];
+    try { a = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { a = []; }
+    if (Array.isArray(a)) {
+      const [, , id] = process.argv;
+      fs.writeFileSync(p, JSON.stringify(a.filter((t) => !(t && t.id === id)), null, 2));
+    }
+  `, teamId]);
+}
+
 /**
  * usageData: the Token Usage journey's precondition (#1505). Seeds deterministic
  * usage records under a dedicated human Team and creates that Team, so the page's
@@ -479,22 +516,12 @@ const usageData = {
     if (!teamId || !teamName) {
       throw new Error('usageData fixture requires { teamId, teamName }');
     }
-    // Pre-clean: drop leftover seed files and any leftover team (+ its
-    // auto-created env) from a crashed run.
+    // Pre-clean: drop leftover seed files + the scope record from a crashed run,
+    // then seed the scope record so the page's Team filter lists it (see
+    // seedTeamRecord — the standalone create endpoint is retired since #2081).
     removeUsageFiles();
-    await teardown.teardownTeam(ctx, { teamId, envId: teamId });
-    // #2081: standalone access-scope creation (POST /api/admin/teams) is retired
-    // (410 team-create-retired). An Agent Team IS the team now, so mint one the
-    // cheap way — a single stub role, no members materialised, no repo or
-    // credentials — which still records the team in teams/index.json, so the
-    // page's Team filter (GET /api/admin/teams) lists it by name.
-    const res = await ctx.request.post('/api/teams', {
-      timeout: 120_000,
-      data: { teamId, teamName, roles: ['generic'], materializeMembers: false },
-    });
-    if (!res.ok() && res.status() !== 409) {
-      throw new Error(`usageData: create team ${teamId} failed HTTP ${res.status()}: ${await res.text()}`);
-    }
+    removeTeamRecord(teamId);
+    seedTeamRecord(teamId, teamName);
     for (const [day, content] of Object.entries(usageSeed(teamId))) {
       seedUsageFile(day, content);
     }
@@ -503,7 +530,7 @@ const usageData = {
   async teardown(ctx, params = {}) {
     const { teamId } = params;
     removeUsageFiles();
-    if (teamId) await teardown.teardownTeam(ctx, { teamId, envId: teamId });
+    if (teamId) removeTeamRecord(teamId);
   },
 };
 

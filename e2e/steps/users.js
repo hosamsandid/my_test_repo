@@ -14,10 +14,12 @@
 // Seeding it from a fixture would prove nothing about the mechanism under test.
 const { expect } = require('@playwright/test');
 
-// The DataTable row for a subject. Subject is rendered in a monospace span, so
-// an exact-text row filter is stable even when a display name also matches.
+// The DataTable row for a subject. Scope to `tbody` so the filter cannot also
+// match the header row: the table now carries a "System Admin" column, whose
+// header cell contains "admin" (hasText is a case-insensitive substring), which
+// would otherwise make `hasText: 'admin'` resolve to two rows (strict-mode).
 function userRow(page, subject) {
-  return page.locator('tr').filter({ hasText: subject });
+  return page.locator('tbody tr').filter({ hasText: subject });
 }
 
 /**

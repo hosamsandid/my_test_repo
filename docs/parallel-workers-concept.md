@@ -1042,3 +1042,51 @@ up until the user manually reloaded. #2311 makes that sentence true.
   there simply are no pool instances for it to reveal.
 - **Not done**: no highlight/flash animation on a newly-appeared row (D3) —
   judged not worth the added state/timer risk for a cosmetic nice-to-have.
+
+## Amendment 12 — closing the reap/teardown gaps (#2301)
+
+Phase 1 (#2246) shipped one reaper (ticket-release) and a hard-timeout
+backstop, both riding inside `admissionSweepTeam` — which early-returns for
+any team/flow with no `wipLimit`. In practice that meant a pooled role on
+such a team got reaped **never**: not on completion, not on timeout. #2301
+was filed after exactly that was observed (a developer pool sitting at
+3/3 `maxInstances` with three finished/idle instances, refusing a 4th ticket).
+
+- **Decoupled from `wipLimit`** (gap 1): the hard-timeout reaper moved out of
+  `admissionSweepTeam` into its own tick, `poolReapSweepTeam` — enumerating
+  `_teamPooledRoles(teamId)` directly, which only requires `pool.enabled`,
+  never a `wipLimit`. Wired as its own `setInterval` (`AEE_POOL_REAP_TICK_INTERVAL_MS`,
+  default 60s), not maintenance-gated — matching the existing precedent that
+  reaping finished/stuck/idle work is never "starting" new work, unlike a
+  dispatch. The ticket-release reap (`_reapPooledInstancesForTicket`) stays
+  inside `admissionSweepTeam` since it genuinely needs the lane's
+  GitHub-evidence reconcile — only the hard-timeout/idle/archive-prune axes,
+  which are instance-local, moved.
+- **`idleTimeoutMs` implemented** (gap 3): `agent-pool.js#isInstanceIdle`
+  reaps an instance whose pushed `status.json` reads `state: 'idle'` for
+  longer than `idleTimeoutMs` since `lastResponseAt` (falling back to
+  `poolSpawnedAt` if it never recorded one). Deliberately a **quiet delete** —
+  unlike the hard-timeout branch, it never stamps `needs-human`, since an
+  idle instance isn't stuck, its ticket is just still open.
+- **Sensible `pool.teardown` defaults** (the issue's own 3rd bullet):
+  `normalizePoolConfig` no longer defaults an unset `idleTimeoutMs`/
+  `maxRuntimeMs`/`retainLogsMs` to `null` (= no reaping on that axis) — it
+  defaults to `agent-pool.js#TEARDOWN_DEFAULTS` (idle 30m / hard timeout 2h,
+  the Scaling section mockup's own example values; retain 7 days, a
+  judgement call with no mockup precedent, flagged for a second opinion).
+  Defaulting happens at this runtime-consumption site rather than in
+  `process-template.js`'s bundle-round-trip `normalizePool`, so a stored
+  config keeps meaning "unset" and a future change to the defaults applies
+  retroactively rather than only to newly-authored roles.
+- **`retainLogsMs` pruning implemented** (gap 4): `gracefulPoolTeardown` now
+  stamps an `archived-at.json` next to the `pool-archive/<id>/sessions/` copy
+  it already made (Phase 1) — the pruning pass reads that stamp, not the
+  directory's mtime, which `fs.cpSync` can leave carrying the copied files'
+  own older mtimes rather than the moment of archival. `_pruneArchivedPoolLogs`
+  runs on the same `poolReapSweepTeam` tick, best-effort, walking each pooled
+  role's own `retainLogsMs` (which — per the point above — is never `null`
+  in practice, so every role's archive gets pruned even if never configured).
+- **Not done, per the issue's own "(Optional, larger)" marker**: gap 5,
+  role-stage-scoped reap (freeing an instance when ITS stage hands off rather
+  than only when the whole ticket closes) — unchanged, flagged as a
+  follow-up rather than guessed at.

@@ -17,18 +17,18 @@ test('normalizePoolConfig: absent/disabled pool reads as not pooled', () => {
   assert.equal(pool.normalizePoolConfig({ enabled: 'true' }), null); // must be the literal boolean
 });
 
-test('normalizePoolConfig: minimal enabled config gets full defaults', () => {
+test('normalizePoolConfig: minimal enabled config gets full defaults, including sensible non-null teardown (#2301)', () => {
   assert.deepEqual(pool.normalizePoolConfig({ enabled: true }), {
     enabled: true,
     maxInstances: null,
     workspace: 'git-clean-base',
     baseBranch: null,
     workSource: null,
-    teardown: { idleTimeoutMs: null, maxRuntimeMs: null, retainLogsMs: null },
+    teardown: { ...pool.TEARDOWN_DEFAULTS },
   });
 });
 
-test('normalizePoolConfig: carries through valid fields, drops invalid ones', () => {
+test('normalizePoolConfig: carries through valid teardown fields, falls back to the default on invalid ones (#2301)', () => {
   assert.deepEqual(pool.normalizePoolConfig({
     enabled: true,
     maxInstances: 3,
@@ -41,7 +41,11 @@ test('normalizePoolConfig: carries through valid fields, drops invalid ones', ()
     workspace: 'input-copy',
     baseBranch: 'develop',
     workSource: null,
-    teardown: { idleTimeoutMs: 60_000, maxRuntimeMs: null, retainLogsMs: null },
+    teardown: {
+      idleTimeoutMs: 60_000,
+      maxRuntimeMs: pool.TEARDOWN_DEFAULTS.maxRuntimeMs,
+      retainLogsMs: pool.TEARDOWN_DEFAULTS.retainLogsMs,
+    },
   });
 });
 
@@ -256,6 +260,59 @@ test('isInstanceTimedOut: within budget → false, at/after the deadline → tru
   assert.equal(pool.isInstanceTimedOut({ spawnedAt, maxRuntimeMs: 3_600_000 }, start + 3_599_999), false);
   assert.equal(pool.isInstanceTimedOut({ spawnedAt, maxRuntimeMs: 3_600_000 }, start + 3_600_000), true);
   assert.equal(pool.isInstanceTimedOut({ spawnedAt, maxRuntimeMs: 3_600_000 }, start + 10_000_000), true);
+});
+
+// ─── isInstanceIdle (#2301 gap 3 — the idle reap) ──────────────────────────────
+
+test('isInstanceIdle: no idleTimeoutMs configured → never idle-reaped', () => {
+  assert.equal(pool.isInstanceIdle({ state: 'idle', lastResponseAt: '2026-01-01T00:00:00.000Z', idleTimeoutMs: null }, Date.now()), false);
+  assert.equal(pool.isInstanceIdle({ state: 'idle', lastResponseAt: '2026-01-01T00:00:00.000Z', idleTimeoutMs: undefined }, Date.now()), false);
+});
+
+test('isInstanceIdle: a busy instance is never idle-reaped, however long it has run — that is maxRuntimeMs\'s job', () => {
+  const lastResponseAt = '2026-01-01T00:00:00.000Z';
+  assert.equal(
+    pool.isInstanceIdle({ state: 'busy', lastResponseAt, idleTimeoutMs: 1000 }, Date.parse(lastResponseAt) + 10_000_000),
+    false,
+  );
+});
+
+test('isInstanceIdle: an unresolvable reference time never reaps (fails closed)', () => {
+  assert.equal(pool.isInstanceIdle({ state: 'idle', lastResponseAt: null, spawnedAt: null, idleTimeoutMs: 1000 }, Date.now()), false);
+  assert.equal(pool.isInstanceIdle({ state: 'idle', lastResponseAt: 'not-a-date', idleTimeoutMs: 1000 }, Date.now()), false);
+  assert.equal(pool.isInstanceIdle({ state: undefined, lastResponseAt: '2026-01-01T00:00:00.000Z', idleTimeoutMs: 1000 }, Date.now()), false);
+});
+
+test('isInstanceIdle: idle within budget → false, at/after the deadline → true', () => {
+  const lastResponseAt = '2026-01-01T00:00:00.000Z';
+  const start = Date.parse(lastResponseAt);
+  assert.equal(pool.isInstanceIdle({ state: 'idle', lastResponseAt, idleTimeoutMs: 1_800_000 }, start + 1_799_999), false);
+  assert.equal(pool.isInstanceIdle({ state: 'idle', lastResponseAt, idleTimeoutMs: 1_800_000 }, start + 1_800_000), true);
+});
+
+test('isInstanceIdle: falls back to spawnedAt when an idle instance never recorded a lastResponseAt', () => {
+  const spawnedAt = '2026-01-01T00:00:00.000Z';
+  const start = Date.parse(spawnedAt);
+  assert.equal(pool.isInstanceIdle({ state: 'idle', lastResponseAt: null, spawnedAt, idleTimeoutMs: 1_800_000 }, start + 1_800_000), true);
+});
+
+// ─── isArchiveExpired (#2301 gap 4 — retainLogsMs pruning) ─────────────────────
+
+test('isArchiveExpired: no retainLogsMs configured → never expires', () => {
+  assert.equal(pool.isArchiveExpired({ archivedAt: '2026-01-01T00:00:00.000Z', retainLogsMs: null }, Date.now()), false);
+});
+
+test('isArchiveExpired: unresolvable archivedAt never expires (never guess)', () => {
+  assert.equal(pool.isArchiveExpired({ archivedAt: null, retainLogsMs: 1000 }, Date.now()), false);
+  assert.equal(pool.isArchiveExpired({ archivedAt: 'not-a-date', retainLogsMs: 1000 }, Date.now()), false);
+});
+
+test('isArchiveExpired: within retention → false, at/after the window → true', () => {
+  const archivedAt = '2026-01-01T00:00:00.000Z';
+  const start = Date.parse(archivedAt);
+  const day = 24 * 60 * 60 * 1000;
+  assert.equal(pool.isArchiveExpired({ archivedAt, retainLogsMs: 7 * day }, start + 7 * day - 1), false);
+  assert.equal(pool.isArchiveExpired({ archivedAt, retainLogsMs: 7 * day }, start + 7 * day), true);
 });
 
 // ─── reworkRefFromPayload (D3 — rework resolves to the PR head branch) ─────────

@@ -408,12 +408,6 @@ a { color: var(--eb-accent-primary); }
 }
 .watch-detail > div { display: flex; flex-direction: column; gap: 3px; font-size: var(--eb-text-sm); min-width: 0; }
 .watch-detail .wd-span { grid-column: 1 / -1; }
-.wd-agent-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.wd-chip {
-  font-family: var(--eb-font-mono); font-size: var(--eb-text-xs); color: var(--eb-text-secondary);
-  background: var(--eb-bg-elevated); border: 1px solid var(--eb-border-default);
-  border-radius: var(--eb-radius-sm); padding: 1px 6px;
-}
 .dt-label { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--eb-text-muted); }
 
 /* failure panel */

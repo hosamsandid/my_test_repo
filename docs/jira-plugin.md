@@ -182,10 +182,12 @@ member of a granted team), two tabs:
   - **Watching** — one card per watched project with a health pill
     (**Watching** / **Degraded** / **Failing**) and a roll-up badge
     (`1 watch failing`). Click a card to expand it: a healthy card shows the
-    last poll, the cursor and which agents it wakes; a failing one opens the
-    failure detail — the consecutive-failure count, the next retry time, a short
-    log of the actual errors with timestamps, a **Retry now** button
-    (team-admin), and a pointer to *Plugins → Jira → Credentials*.
+    last poll and the cursor — which agents a transition wakes is decided per
+    agent by its own `plugin-event` trigger (see §5), not shown on the card;
+    a failing one opens the failure detail — the consecutive-failure count,
+    the next retry time, a short log of the actual errors with timestamps,
+    a **Retry now** button (team-admin), and a pointer to
+    *Plugins → Jira → Credentials*.
   - **Inbox** — the status changes queued for this team's agents.
 - **Activity** — the retained event log (see below).
 

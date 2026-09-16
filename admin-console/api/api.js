@@ -97,6 +97,7 @@ const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
 const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
 const { checkGithubTokenRequirement } = require('./env-token-requirement');
+const { pairRepositorySshKeyChanges } = require('./repo-sshkey-pairing');
 // Process-draft access model (#2068) — one predicate for every draft route.
 const draftAccess = require('./draft-access');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
@@ -14515,6 +14516,30 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
       return res.status(400).json({ error: err.message });
     }
     delete env.repository;
+  }
+  // #2325 (SSH side of the #2326 data-loss fix): a repository's `sshKeyId` the
+  // caller cannot see must not be blind-overwritten either. Guard each repo whose
+  // sshKeyId changed, matched to the previous list by URL — the same
+  // non-destructive rule the token uses (replace-only with a key you can see,
+  // never a blind clear, never a swap to another invisible key). A no-op save
+  // pairs nothing, so this is inert unless a key actually changed.
+  {
+    const sshChanges = pairRepositorySshKeyChanges(prevRepositories, env.repositories);
+    if (sshChanges.length > 0) {
+      const keys = listSshKeys().map(normalizeCredential);
+      for (const ch of sshChanges) {
+        const prevCred = ch.prevSshKeyId ? keys.find((k) => k.id === ch.prevSshKeyId) : null;
+        const nextCred = ch.nextSshKeyId ? keys.find((k) => k.id === ch.nextSshKeyId) : null;
+        const guard = guardCredentialRefChange({
+          prev: ch.prevSshKeyId,
+          next: ch.nextSshKeyId,
+          prevVisible: !prevCred || visibleCredential(envScope, prevCred),
+          nextVisible: nextCred ? visibleCredential(envScope, nextCred) : false,
+          kind: 'SSH key',
+        });
+        if (!guard.ok) return res.status(guard.status).json({ error: `${ch.url}: ${guard.error}`, code: guard.code });
+      }
+    }
   }
   if (githubTokenId !== undefined) env.githubTokenId = githubTokenId || null;
   if (mcpServers !== undefined) {

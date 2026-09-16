@@ -98,6 +98,7 @@ const { guardCredentialRefChange } = require('./credential-ref-guard');
 const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
 const { checkGithubTokenRequirement } = require('./env-token-requirement');
 const { pairRepositorySshKeyChanges } = require('./repo-sshkey-pairing');
+const { buildCredentialDescriptor } = require('./credential-descriptor');
 // Process-draft access model (#2068) — one predicate for every draft route.
 const draftAccess = require('./draft-access');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
@@ -14017,7 +14018,31 @@ app.get('/api/environments/:id', (req, res) => {
       return res.status(404).json({ error: 'Environment not found' });
     }
   }
-  res.json({ ...env, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, env) });
+  // #2325 (R2 enrichment): metadata-only descriptors for the credentials this env
+  // references (its githubTokenId + each repo's sshKeyId), so the console can show
+  // the OWNER + TIER on the read-only chip for a credential the caller cannot see.
+  // No secret is exposed — only id / tier / owner label / visibility.
+  const credentialRefs = {};
+  {
+    const users = usersById();
+    const userLabel = (id) => users.get(id)?.displayName || null;
+    const teamLabel = (id) => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null)?.displayName || null;
+    const ghTokens = listGithubTokens().map(normalizeCredential);
+    const sshKeys = listSshKeys().map(normalizeCredential);
+    const addRef = (id, kind, list) => {
+      if (!id || credentialRefs[id]) return;
+      const cred = list.find((c) => c.id === id);
+      if (!cred) return; // dangling reference — nothing to describe
+      credentialRefs[id] = buildCredentialDescriptor({
+        cred, kind,
+        visibleToCaller: visibleCredential(scope, cred),
+        userLabel, teamLabel,
+      });
+    };
+    addRef(env.githubTokenId, 'github-token', ghTokens);
+    for (const r of Array.isArray(env.repositories) ? env.repositories : []) addRef(r?.sshKeyId, 'ssh-key', sshKeys);
+  }
+  res.json({ ...env, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, env), credentialRefs });
 });
 
 // Resolve and validate { llmEndpointId, defaultModelId } against the registry.

@@ -353,6 +353,7 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
               githubTokenId={form.githubTokenId || null}
               tokenTarget="environment"
               hasEnvironmentToken={!!form.githubTokenId}
+              credentialRefs={baseline.credentialRefs}
               onChange={(key, val) => updateRepo(idx, key, val)}
               onRemove={() => removeRepo(idx)}
             />
@@ -387,6 +388,9 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
                 (no clear option, only tokens the caller can see) instead. */}
             {(() => {
               const ref = describeCredentialRef({ boundId: form.githubTokenId, visibleOptions: ghTokens });
+              // #2325: owner/tier enrichment from the metadata-only descriptor the
+              // env GET carries for a referenced-but-invisible credential.
+              const desc = baseline.credentialRefs?.[form.githubTokenId] || null;
               if (ref.mode === 'readonly-invisible') {
                 return (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
@@ -395,6 +399,11 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
                       color: 'var(--eb-text-secondary)', background: 'var(--eb-bg-surface)',
                     }}>
                       <span>Set: <code>{ref.boundId}</code></span>
+                      {desc && (
+                        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                          {desc.tier} · {desc.ownerLabel}
+                        </span>
+                      )}
                       <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginLeft: 'auto' }}>
                         not visible to you
                       </span>

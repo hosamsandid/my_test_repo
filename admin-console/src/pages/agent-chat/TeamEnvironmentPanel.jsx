@@ -15,6 +15,7 @@ import { classifyRepositoryChanges, hasRepositoryChanges } from '../working-env-
 import { describeWorkingEnvSubmitState } from '../working-env-submit-state.js';
 import { providerOptionLabel } from '../provider-option-view.js';
 import { initialTeamEnvForm, teamEnvSubmitBody } from './team-environment-view.js';
+import { describeCredentialRef } from '../credential-ref-legibility.js';
 
 /**
  * Team Settings — the five environment tabs of the flat configuration row
@@ -379,12 +380,51 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
               CLI, HTTPS pushes and the GitHub poller. Only needed for a private HTTPS URL above — a private SSH
               URL uses the repository's own SSH key instead. Manage tokens on the <em>GitHub Tokens</em> page.
             </div>
-            <select value={form.githubTokenId} onChange={e => update('githubTokenId', e.target.value)} style={inputStyle}>
-              <option value="">— no token —</option>
-              {ghTokens.map(t => (
-                <option key={t.id} value={t.id}>{t.name} ({t.preview})</option>
-              ))}
-            </select>
+            {/* #2327 (R2): if the bound token is a personal one the caller can't
+                see, the scope-filtered `ghTokens` has no matching option — the plain
+                <select> would render EMPTY and a save would clear it (#2326). Show a
+                read-only "set, not visible to you" state with a replace-only picker
+                (no clear option, only tokens the caller can see) instead. */}
+            {(() => {
+              const ref = describeCredentialRef({ boundId: form.githubTokenId, visibleOptions: ghTokens });
+              if (ref.mode === 'readonly-invisible') {
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+                    <div style={{
+                      ...inputStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+                      color: 'var(--eb-text-secondary)', background: 'var(--eb-bg-surface)',
+                    }}>
+                      <span>Set: <code>{ref.boundId}</code></span>
+                      <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginLeft: 'auto' }}>
+                        not visible to you
+                      </span>
+                    </div>
+                    <div style={helpTextStyle}>
+                      This token was set by another team member and is not visible to you. It stays set — you can
+                      replace it with a token you can see, but not clear it.
+                    </div>
+                    <select
+                      value=""
+                      onChange={e => { if (e.target.value) update('githubTokenId', e.target.value); }}
+                      style={inputStyle}
+                    >
+                      <option value="">Replace with a token you can see…</option>
+                      {ghTokens.map(t => (
+                        <option key={t.id} value={t.id}>{t.name} ({t.preview})</option>
+                      ))}
+                    </select>
+                  </div>
+                );
+              }
+              return (
+                <select value={form.githubTokenId} onChange={e => update('githubTokenId', e.target.value)} style={inputStyle}>
+                  <option value="">— no token —</option>
+                  {ghTokens.map(t => (
+                    <option key={t.id} value={t.id}>{t.name} ({t.preview})</option>
+                  ))}
+                </select>
+              );
+            })()}
           </div>
         </div>
       )}

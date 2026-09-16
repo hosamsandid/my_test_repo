@@ -144,9 +144,13 @@ test('the indicator is mounted once in Shell, beside the transcription overlay',
 
 test('the indicator takes every visibility decision from the pure module', () => {
   const s = code(INDICATOR);
-  assert.match(s, /indicatorState\(\{ turn: ctx\.turn, panelScope: ctx\.panelScope \}\)/);
+  // pendingByScope is threaded in so a proposal that finished while the user was
+  // away keeps the indicator alive as a "ready to review" card (#2087 follow-up)
+  // — without it the card would vanish on completion and the proposal read as lost.
+  assert.match(s, /indicatorState\(\{ turn: ctx\.turn, panelScope: ctx\.panelScope, pendingByScope: ctx\.pendingByScope \}\)/);
   assert.match(s, /indicatorPhaseLabel\(/);
   assert.match(s, /state\.visible/, 'visibility is the pure decision, not a local condition');
+  assert.match(s, /state\.mode === 'ready'/, 'the ready hand-off is a mode of the pure state, not a local flag');
   assert.match(s, /createPortal\(/, 'portaled to body so it floats above every page');
 });
 

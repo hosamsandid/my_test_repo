@@ -85,19 +85,58 @@ export function decideCopilotAction({ scope, turnScope, flowName, stopping, hasT
  * answer to "turn finishes while the user is on the originating flow with the
  * panel closed": no indicator, and reopening the panel finds the proposal.
  */
-export function indicatorState({ turn, panelScope } = {}) {
-  if (!turn || turn.status !== 'running' || !isBindableScope(turn.scope)) {
-    return { visible: false, flowName: '', jumpTo: null, phase: null };
+export function indicatorState({ turn, panelScope, pendingByScope } = {}) {
+  const hidden = { visible: false, mode: null, scope: null, flowName: '', jumpTo: null, phase: null };
+  // A running turn is the live work and wins the single indicator slot.
+  if (turn && turn.status === 'running' && isBindableScope(turn.scope)) {
+    // AC13: hidden on the originating flow WHILE its panel is open — that
+    // surface already shows the live phase. Visible everywhere else, including
+    // the same flow with the panel closed.
+    if (isSameScope(panelScope, turn.scope)) return hidden;
+    return {
+      visible: true,
+      mode: 'running',
+      scope: turn.scope,
+      flowName: turnFlowName(turn),
+      jumpTo: jumpToFlowPath(turn.scope),
+      phase: turn.phase || null,
+    };
   }
-  if (isSameScope(panelScope, turn.scope)) {
-    return { visible: false, flowName: '', jumpTo: null, phase: null };
+  // No live turn: a turn that FINISHED while the user was away leaves a pending
+  // proposal in the provider (D4). Without surfacing it the running indicator
+  // simply vanishes on completion and the proposal sits unreviewed on a flow the
+  // user is no longer looking at — which reads as "the proposal just
+  // disappeared" (#2087 follow-up). Keep the indicator alive as a "ready to
+  // review" card until the user opens that flow, where Apply / Discard live, and
+  // resolving the proposal clears it.
+  const ready = pendingToReview(pendingByScope, panelScope);
+  if (ready) {
+    return {
+      visible: true,
+      mode: 'ready',
+      scope: ready.scope,
+      flowName: turnFlowName(ready),
+      jumpTo: jumpToFlowPath(ready.scope),
+      phase: null,
+    };
   }
-  return {
-    visible: true,
-    flowName: turnFlowName(turn),
-    jumpTo: jumpToFlowPath(turn.scope),
-    phase: turn.phase || null,
-  };
+  return hidden;
+}
+
+/**
+ * The finished-but-unreviewed proposal the user should be nudged back to: any
+ * pending proposal that is NOT on the flow whose Copilot panel is currently open
+ * (that surface shows its own card, so a second display would be the AC13
+ * defect). When more than one flow holds a proposal, the most recently finished
+ * one wins the single indicator slot.
+ */
+export function pendingToReview(pendingByScope, panelScope) {
+  if (!pendingByScope) return null;
+  const away = Object.values(pendingByScope).filter(
+    (p) => p && isBindableScope(p.scope) && !isSameScope(p.scope, panelScope),
+  );
+  if (!away.length) return null;
+  return away.reduce((best, p) => ((p.finishedAt || 0) > (best.finishedAt || 0) ? p : best));
 }
 
 /** Display name for a turn — the flow's own name, else its scope as authored. */

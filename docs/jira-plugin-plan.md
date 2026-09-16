@@ -68,7 +68,7 @@ genuinely new platform capability this plan needs (§4).
 | `jira-poller.js` in the orchestrator | a poll timer inside the **broker sidecar** (`podman-sandbox`'s reaper interval is the precedent) |
 | `event-poller-shared.js` extracted from `github-poller.js` | `broker-sdk/event-cursor.js` — **`github-poller.js` is not touched at all** |
 | `jira-digest` kind + `_execute_jira_digest` in `agent-entrypoint.py` | burst collapsing inside the broker; the agent is woken once and drains the burst through the CLI |
-| (deferred) a `JiraEventLog.jsx` page | the plugin's own UI route, plus one platform event-log row per wake |
+| (deferred) a `JiraEventLog.jsx` page | the plugin's own UI route (the `/` route's **Activity** tab — a 14-day retained log of what the poller saw and did), plus one platform event-log row per wake |
 | — | `aee-jira` CLI facade — the agent-facing surface #1539 never had |
 
 The net platform diff drops from ~6 000 lines across 51 files to **two generic
@@ -112,6 +112,9 @@ One new trigger type, **generic to plugins, not to Jira**:
 { "id": "on-jira-ready", "type": "plugin-event",
   "pluginId": "jira",             // which granted plugin may fire this
   "eventFilter": "status_changed", // opaque to the platform; the broker's vocabulary
+  "payloadFilter": { "toStatus": "Ready for Dev" }, // optional: exact match on top-level
+                                   // string fields of the delivered payload — how one
+                                   // plugin's events are routed to different agents
   "prompt": "…the wake instruction…" }
 ```
 
@@ -307,7 +310,13 @@ Built on `broker-sdk` — `verifyScopeToken`, `scopeFilter`, `auditWriter`,
 - **`watch-store.js`** — per-scope watch config + poll cursor on
   `AEE_PLUGIN_STATE_DIR`, atomic temp-file+rename writes, in the shape of
   `netzplan/plan-store.js`. A watch is
-  `{ projectKey, statusFilter?, jql?, wake: { agentIds?|"all-granted" } }`.
+  `{ projectKey, statusFilters?: string[], jql? }`
+  — the watch fires on a transition into any status in the set (empty = any); a
+  legacy singular `statusFilter` migrates on read. A watch names no agents:
+  which agent a transition wakes is decided per agent by its `plugin-event`
+  trigger (`payloadFilter`, Option B) — the pre-Phase-2 `wake.agentIds` field
+  is ignored on read and no longer shown anywhere. The cursor also carries a
+  short `recentErrors` ring (`watch-health.js`) surfaced on the `/watches` route.
 - **`inbox-store.js`** — the per-scope queue of events delivered but not yet
   consumed, TTL-reaped against the manifest quota. Backs `aee-jira inbox` and
   makes Option A viable as a fallback. **This is what `quota.maxObjects` counts**
@@ -367,12 +376,21 @@ that woke it.
 
 ### 6.4 UI
 
-- `/` (team-member) — issues in scope, the plugin's own event log ("what did the
-  poller see, and what did it wake"), the per-scope inbox. This is the
-  `JiraEventLog.jsx` #1539 deferred, at zero platform cost.
-- `/admin` (team-admin) — the watch config: project, status filter, which granted
-  agents to wake. This replaces `env.jiraProjects[]` *and* the `jira-event`
-  trigger fields *and* the eight `'jira-event'` UI branches.
+- `/` (team-member), two tabs:
+  - **Board** — issues in scope; the **Watching** panel (one expandable card per
+    watched project with a Watching / Degraded / Failing health pill + roll-up,
+    and a failure-detail panel — count, next retry, the actual error log, a
+    Retry-now button for admins); the per-scope inbox.
+  - **Activity** — the retained event log ("what did the poller see, and what did
+    it do with it"): a 14-day per-scope log with one row per fresh status change
+    tagged `delivered` / `digested` / `throttled` / `filtered` / `baseline`,
+    filterable by issue type and by watched-vs-all. This is the `JiraEventLog.jsx`
+    #1539 deferred, at zero platform cost (`activity-store.js`).
+- `/admin` (team-admin) — the watch config: project + a **set** of target
+  statuses (chips). Which agents a transition wakes is not configured here but
+  on each agent's `plugin-event` trigger (its `payloadFilter`). This replaces
+  `env.jiraProjects[]` *and* the `jira-event` trigger fields *and* the eight
+  `'jira-event'` UI branches.
 
 Follow `github-issues/ui/`: `--eb-*` design tokens re-declared for the three
 themes (the iframe is a separate document), the pre-paint `eb-theme` read plus
@@ -455,7 +473,7 @@ Each phase is independently mergeable and leaves `main` shippable.
   `addComment` (ADF body, agent-attributed paragraph), `listTransitions` +
   `transitionIssue` (resolves the transition id from the target status name,
   409 naming the options when none leads there). The `/admin` route (team-admin)
-  edits the watch config (`{ projectKey, statusFilter? }` rows) — replacing
+  edits the watch config (`{ projectKey, statusFilters? }` rows) — replacing
   #1539's `env.jiraProjects[]`, the `jira-event` trigger fields *and* the
   Phase-0 `spike-config` seam; which agents a change wakes stays a per-agent
   `plugin-event` trigger (Phase 2).
@@ -489,7 +507,7 @@ are silent if forgotten (nothing fails; the thing simply never runs).
 ## 9. Testing
 
 1. **Pure cores, `node --test`** — changelog→event flattening (including the
-   truncated-changelog fallback), `statusFilter` gating, `computeQueryWindowMinutes`
+   truncated-changelog fallback), `statusFilters` gating, `computeQueryWindowMinutes`
    catch-up widening, seen-id dedup, burst collapsing, watch-store round-trip.
    Port #1539's `jira-poller.test.js` (276 lines) — it is good and mostly reusable.
 2. **Cross-scope isolation** — the property no unit test of #1539 could express:

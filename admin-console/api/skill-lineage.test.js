@@ -175,3 +175,35 @@ test('assembleLineage: provenance must be an object or null (bad values -> null)
   const out = lineage.assembleLineage({ name: 'x', provenance: 'not-an-object' });
   assert.equal(out.provenance, null);
 });
+
+/* ─── summarizeDownstreamDrift (#2317) ──────────────────────────────────── */
+
+test('summarizeDownstreamDrift: empty/junk input yields null (no indicator)', () => {
+  for (const bad of [null, undefined, [], 'x', 42]) {
+    assert.equal(lineage.summarizeDownstreamDrift(bad), null);
+  }
+});
+
+test('summarizeDownstreamDrift: all in-sync (or falsy) yields null (AC2 — no new noise)', () => {
+  assert.equal(lineage.summarizeDownstreamDrift(['in-sync', 'in-sync']), null);
+  assert.equal(lineage.summarizeDownstreamDrift(['in-sync', null, undefined]), null);
+});
+
+test('summarizeDownstreamDrift: excludes in-sync from the count, keeps everything else', () => {
+  const out = lineage.summarizeDownstreamDrift(['outdated', 'outdated', 'diverged', 'in-sync']);
+  assert.equal(out.total, 3);
+  assert.deepEqual(out.counts, { outdated: 2, diverged: 1 });
+  assert.equal(out.worst, 'diverged');
+});
+
+test('summarizeDownstreamDrift: unknown drift is surfaced, not silently dropped (edge case)', () => {
+  const out = lineage.summarizeDownstreamDrift(['unknown']);
+  assert.equal(out.total, 1);
+  assert.deepEqual(out.counts, { unknown: 1 });
+  assert.equal(out.worst, 'unknown');
+});
+
+test('summarizeDownstreamDrift: worst state wins regardless of input order (conflict > diverged > orphaned > outdated > unknown)', () => {
+  const out = lineage.summarizeDownstreamDrift(['outdated', 'conflict', 'unknown']);
+  assert.equal(out.worst, 'conflict');
+});

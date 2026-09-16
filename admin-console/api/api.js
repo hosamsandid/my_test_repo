@@ -10515,6 +10515,24 @@ app.get('/api/skills', (req, res) => {
   const skills = [];
   const seen = new Set();
 
+  // Downstream-drift accumulators (#2317) — filled for free as a side effect of
+  // the team/agent loops below (both already hash + classify every copy's
+  // drift for their own row), so the list can show "N copies need an update"
+  // on a pool/team row WITHOUT a second per-skill lineage fetch (AC5): one pass
+  // over the same data already being walked, not one pass per skill name.
+  // `teamDriftByName`: name -> [team-copy drift states] (a pool row's
+  // downstream includes every team's drift against the pool).
+  // `agentDriftByNameTeam`: name -> teamId -> [agent-copy drift states] (a team
+  // row's downstream is only ITS OWN team's agent copies; a pool row's
+  // downstream folds in every team's).
+  const teamDriftByName = new Map();
+  const agentDriftByNameTeam = new Map();
+  const pushDrift = (map, key, drift) => {
+    if (!drift) return;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(drift);
+  };
+
   // Pool (shared / global) skills — always visible to everyone.
   const poolSkillsDir = path.join(POOL_DIR, 'skills');
   try {
@@ -10537,7 +10555,9 @@ app.get('/api/skills', (req, res) => {
       const dir = path.dirname(s.path);
       let origin = null;
       try { const man = skillManifest.readManifest(dir); origin = man && man.origin; } catch { /* none */ }
-      return { ...s, ...skillDescriptionSummary(s.path), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) };
+      const driftSummary = skillDriftSummary(dir, origin);
+      pushDrift(teamDriftByName, s.name, driftSummary.drift);
+      return { ...s, ...skillDescriptionSummary(s.path), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...driftSummary };
     }));
 
   // Agent skills — visible only when the owning agent is visible (#302), so an
@@ -10563,6 +10583,9 @@ app.get('/api/skills', (req, res) => {
             const origin = seeded && seeded.tier
               ? { tier: seeded.tier, teamId: seeded.tier === 'team' ? cfg.teamId : undefined, sourceHash: seeded.contentHash }
               : null;
+            const driftSummary = skillDriftSummary(dir, origin);
+            if (!agentDriftByNameTeam.has(name)) agentDriftByNameTeam.set(name, new Map());
+            pushDrift(agentDriftByNameTeam.get(name), cfg.teamId, driftSummary.drift);
             // Carry the owning team so the UI can deep-link the "share it" path
             // into the (team-scoped) Knowledge page for this agent (#1144).
             // `knowledgeTeamId` (#2180) is the actual skill-POOL key (the squad
@@ -10570,11 +10593,31 @@ app.get('/api/skills', (req, res) => {
             // resolves `parentTeamId` for a member) — the "publish via team
             // pool" action must land in the pool the agent's squad actually
             // reads from, not the human access-scope `teamId`.
-            skills.push({ name, source: 'agent', agentId, teamId: cfg.teamId, knowledgeTeamId: agentKnowledgeTeam({ ...cfg, id: cfg.id || agentId }), path: skillMd, ...skillDescriptionSummary(skillMd), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) });
+            skills.push({ name, source: 'agent', agentId, teamId: cfg.teamId, knowledgeTeamId: agentKnowledgeTeam({ ...cfg, id: cfg.id || agentId }), path: skillMd, ...skillDescriptionSummary(skillMd), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...driftSummary });
           }
         }
       });
     } catch { /* no agent skills dir */ }
+  }
+
+  // Attach the downstream-drift indicator (#2317 AC1-3): a pool row folds in
+  // every team's drift against it PLUS every agent's (across all teams); a
+  // team row only folds in its OWN agents' drift. Agent-tier rows are leaves —
+  // no downstream of their own (edge case). Omitted entirely (not even `null`)
+  // when there is nothing non-in-sync to report (AC2 — no new noise).
+  for (const row of skills) {
+    if (row.source === 'pool') {
+      const agentStates = [];
+      const perTeam = agentDriftByNameTeam.get(row.name);
+      if (perTeam) for (const states of perTeam.values()) agentStates.push(...states);
+      const combined = (teamDriftByName.get(row.name) || []).concat(agentStates);
+      const downstream = skillLineage.summarizeDownstreamDrift(combined);
+      if (downstream) row.downstream = downstream;
+    } else if (row.source === 'team') {
+      const states = agentDriftByNameTeam.get(row.name)?.get(row.teamId) || [];
+      const downstream = skillLineage.summarizeDownstreamDrift(states);
+      if (downstream) row.downstream = downstream;
+    }
   }
 
   res.json(skills);

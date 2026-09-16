@@ -275,6 +275,38 @@ function DriftBadge({ state }) {
   return <Chip label={m.label} color={m.color} bg={m.bg} title={`Drift vs. source: ${state}`} />;
 }
 
+// Ordered worst-first so a mixed-state label reads "2 outdated, 1 diverged",
+// never a shuffled draw order (mirrors skill-drift.js's DRIFT_SEVERITY, minus
+// in-sync — a downstream summary never carries it, #2317 AC1/AC2).
+const DOWNSTREAM_ORDER = ['conflict', 'diverged', 'orphaned', 'outdated', 'unknown'];
+
+// The Skills Registry list's per-row "N copies need an update" indicator
+// (#2317) — a pool/team row whose downstream copies aren't all in-sync. Colored
+// by the worst state present; clicking opens that skill's detail view on the
+// Usage tab (AC4), mirroring the existing deep-link tab convention.
+function DownstreamBadge({ downstream, onClick }) {
+  if (!downstream) return null;
+  const m = DRIFT_META[downstream.worst] || DRIFT_META.unknown;
+  const label = DOWNSTREAM_ORDER
+    .filter(state => downstream.counts[state])
+    .map(state => `${downstream.counts[state]} ${DRIFT_META[state]?.label || state}`)
+    .join(', ');
+  return (
+    <button
+      onClick={e => { e.stopPropagation(); onClick?.(); }}
+      title={`${downstream.total} downstream cop${downstream.total === 1 ? 'y' : 'ies'} out of sync — click to open Usage`}
+      style={{
+        padding: '1px 7px', borderRadius: 'var(--eb-radius-sm)',
+        fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)',
+        background: m.bg, color: m.color, border: `1px solid ${m.color}`,
+        cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
 // The `v4 · a1b2c3` content-version chip the list rows + detail header render.
 function VersionChip({ version, contentHash }) {
   if (!Number.isInteger(version)) return null;
@@ -1582,7 +1614,7 @@ function SourceBadge({ value: v }) {
   );
 }
 
-function makeColumns(onDeleteRow, select) {
+function makeColumns(onDeleteRow, select, onOpenUsage) {
   const cols = [];
   if (select) {
     cols.push({
@@ -1624,6 +1656,11 @@ function makeColumns(onDeleteRow, select) {
     } },
     { key: 'drift', label: 'Drift', sortable: false, render: (v) => (
       v ? <DriftBadge state={v} /> : <span style={{ color: 'var(--eb-text-muted)' }}>—</span>
+    ) },
+    { key: '_downstream', label: 'Downstream', sortable: false, render: (_, row) => (
+      row.downstream
+        ? <DownstreamBadge downstream={row.downstream} onClick={() => onOpenUsage?.(row)} />
+        : <span style={{ color: 'var(--eb-text-muted)' }}>—</span>
     ) },
     {
       key: '_del',
@@ -1844,6 +1881,8 @@ export default function SkillsRegistry() {
   const columns = makeColumns(
     row => { setRowDeleteError(null); setRowDeleteTarget(row); },
     { isSelected: isRowSelected, onToggle: toggleRow },
+    // #2317 AC4: the Downstream indicator opens straight on the Usage tab.
+    row => openSkill({ ...row, initialTab: 'usage' }),
   );
 
   if (loading) {

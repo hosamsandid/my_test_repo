@@ -94,6 +94,7 @@ const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
+const { guardCredentialRefChange } = require('./credential-ref-guard');
 // Process-draft access model (#2068) — one predicate for every draft route.
 const draftAccess = require('./draft-access');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
@@ -14281,6 +14282,28 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
     if (!tokens.some(t => t.id === githubTokenId)) {
       return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
     }
+  }
+
+  // R1 / #2326 (data loss): never let a save blind-overwrite a `githubTokenId`
+  // the caller cannot see. The token picker is scope-filtered (a personal token
+  // is visible ONLY to its owner — no `scope.all` bypass), so an admin who cannot
+  // see the bound token would submit an empty field and silently NULL the
+  // reference, killing the GitHub automation. Allow the change only when the bound
+  // token is visible to the caller, or the change REPLACES it with a token the
+  // caller can see — never a blind clear, never a swap to another invisible one.
+  if (githubTokenId !== undefined && (githubTokenId || null) !== prevGithubTokenId) {
+    const allTokens = listGithubTokens().map(normalizeCredential);
+    const prevCred = prevGithubTokenId ? allTokens.find((t) => t.id === prevGithubTokenId) : null;
+    const nextCred = githubTokenId ? allTokens.find((t) => t.id === githubTokenId) : null;
+    const guard = guardCredentialRefChange({
+      prev: prevGithubTokenId,
+      next: githubTokenId || null,
+      // a dangling prev ref (token since deleted) is not worth protecting → visible
+      prevVisible: !prevCred || visibleCredential(envScope, prevCred),
+      nextVisible: nextCred ? visibleCredential(envScope, nextCred) : false,
+      kind: 'GitHub token',
+    });
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error, code: guard.code });
   }
 
   // #2158: publish/retract the global flag (AC1/AC3/AC6/AC9) — resolved

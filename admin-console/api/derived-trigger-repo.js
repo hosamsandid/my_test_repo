@@ -15,11 +15,21 @@
 // Pure + idempotent: only github-event triggers that lack a `repo` are stamped,
 // so a trigger that already carries one (manually authored, or already fixed) is
 // left byte-identical and never causes a spurious triggers.json rewrite.
+//
+// A `transport: 'internal'` listener (#1174) is deliberately NOT stamped: it is
+// delivered by POST /internal/flow-emit, never by the GitHub poller (which
+// excludes internal triggers from its plan), so a `repo` on it is inert — and
+// stamping one would churn triggers.json for no behavioural effect. Leaving it
+// repo-less is also what keeps the repo-set fan-out (#2322) a true no-op for
+// internal channels: when an env gains its first repo, only the poller-delivered
+// github-event triggers get a repo, exactly the ones that were silently dead.
 
 function injectDerivedTriggerRepo(triggers, repoFullName) {
   if (!Array.isArray(triggers) || !repoFullName) return triggers;
   return triggers.map(t =>
-    (t && t.type === 'github-event' && !t.repo) ? { ...t, repo: repoFullName } : t,
+    (t && t.type === 'github-event' && t.transport !== 'internal' && !t.repo)
+      ? { ...t, repo: repoFullName }
+      : t,
   );
 }
 

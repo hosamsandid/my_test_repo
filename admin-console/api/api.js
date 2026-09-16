@@ -2276,6 +2276,19 @@ function notifyAgentReload(agentId) {
     .catch(() => {});
 }
 
+// The "<org>/<repo>" of an environment's PRIMARY (first) repository, or null
+// when there is none / it is unparseable. This is the single value materialise
+// time and the reconcile paths stamp into derived github-event triggers, so it
+// is also the change-detection key for the repo-set fan-out (#2322).
+function repoFullNameFromRepos(repos) {
+  try {
+    const url = Array.isArray(repos) && repos[0] && repos[0].url;
+    if (!url) return null;
+    const { org, repo } = parseGitHubUrl(url);
+    return `${org}/${repo}`;
+  } catch { return null; }
+}
+
 // Resolve the "<org>/<repo>" that a team member's github-event triggers must
 // target, from its bound environment's first repository. The pure `expand*`
 // builders (expandGithubChannels / expandDataFlowSteps) emit derived
@@ -2288,11 +2301,7 @@ function notifyAgentReload(agentId) {
 function memberRepoFullName(cfg) {
   try {
     const env = cfg && cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-    const repos = env && Array.isArray(env.repositories) ? env.repositories : [];
-    const url = repos[0] && repos[0].url;
-    if (!url) return null;
-    const { org, repo } = parseGitHubUrl(url);
-    return `${org}/${repo}`;
+    return repoFullNameFromRepos(env && env.repositories);
   } catch { return null; }
 }
 
@@ -2397,6 +2406,37 @@ async function reconcileTeamGithubChannels(teamId) {
     if (norm(next) === norm(m.triggers)) continue;
     try { await putTriggers(m.id, next); notifyAgentReload(m.id); }
     catch { /* best-effort — never break the originating request */ }
+  }
+}
+
+// #2322: back-fill the derived-trigger repo when an environment's repository set
+// changes. `injectDerivedTriggerRepo` stamps each derived github-event trigger's
+// `repo` from the env's primary repository — but only ran at materialise time and
+// on a ports write, never when the ENV's repo list changed. So a repo added to
+// (or changed on) a live team's environment cloned fine yet left every member's
+// github-event trigger `repo`-less; `pollerSubscribes` skips a repo-less trigger,
+// so the poll plan never gained the repo and no trigger ever fired — silently.
+//
+// Fan out to every OWNING team of the env and reuse the two established
+// reconcilers, which strip the derived triggers, regenerate them from the ports
+// (so they are momentarily repo-less again) and re-inject the CURRENT primary
+// repo. Re-deriving is what makes a CHANGED or REMOVED primary repo resolve
+// exactly as at materialise time (a plain re-stamp could never overwrite an old
+// repo). Both write back only members whose trigger set actually changed, so a
+// no-op save touches no triggers.json. Members are reached via `parentTeamId`
+// (covers every team-member); a bound team lead is added by its own id.
+async function reconcileEnvironmentDerivedTriggers(envId) {
+  if (!envId) return;
+  const teamIds = new Set();
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg || cfg.environmentId !== envId) continue;
+    if (cfg.parentTeamId) teamIds.add(cfg.parentTeamId);
+    else if (cfg.role === 'team') teamIds.add(id);
+  }
+  for (const teamId of teamIds) {
+    await reconcileTeamDataFlow(teamId);
+    await reconcileTeamGithubChannels(teamId);
   }
 }
 
@@ -3740,6 +3780,12 @@ app.post('/api/environments/:id/sync-agents', heavyLimiter, async (req, res) => 
       });
       for (const key of Object.keys(totals)) totals[key] += result.summary[key] || 0;
     }
+    // #2322: repo propagation is the other path that changes what an env's agents
+    // clone, so re-stamp their derived github-event triggers here too — a repo
+    // synced onto agents that already had repo-less triggers becomes poller-visible
+    // without a respawn. Idempotent; a sync with no repo delta writes no triggers.
+    try { await reconcileEnvironmentDerivedTriggers(envId); }
+    catch { /* best-effort — never abort the sync summary */ }
     stream.emit({ type: 'complete', agentCount: agents.length, totals });
   } catch (err) {
     stream.emit({ type: 'error', status: 500, error: err.message });
@@ -14197,7 +14243,7 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   res.status(201).json(env);
 });
 
-app.put('/api/environments/:id', apiLimiter, (req, res) => {
+app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   // Config-write authorization (#989): editing an environment requires team-admin
@@ -14386,6 +14432,16 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   } else if ((env.llmEndpointId || null) !== prevLlmEndpointId
           || (env.defaultModelId || null) !== prevDefaultModelId) {
     notifyEnvCredentialChange(env.id, 'llm-endpoint-changed');
+  }
+  // #2322: when the PRIMARY repo changed (added / swapped / removed), re-stamp
+  // every bound agent's derived github-event triggers so the poller starts (or
+  // stops) polling without a respawn. Gated on the primary-repo full name so an
+  // unrelated save (name, LLM, secondary-repo add) does no trigger work at all;
+  // the reconcilers are themselves idempotent, so even a redundant call writes no
+  // triggers.json. Best-effort — the save above is already committed (AC7).
+  if (repoFullNameFromRepos(prevRepositories) !== repoFullNameFromRepos(env.repositories)) {
+    try { await reconcileEnvironmentDerivedTriggers(env.id); }
+    catch { /* never roll back or fail the committed save */ }
   }
   // AC7: the save is already committed at this point. Whatever the caller does
   // with `previousRepositories` — offer, decline, crash — the environment stays

@@ -127,6 +127,10 @@ The fields a `status_changed` payload carries, all plain strings:
 | `issueKey` | e.g. `KAN-10` |
 | `issueType` | Story / Bug / Task / … |
 | `author` | who moved it (display name) |
+| `id` | `<issueKey>:<changelogId>` — the internal dedup id; not useful for routing |
+| `created` | ISO timestamp of the transition; rarely useful for routing (an exact-match filter on a timestamp never matches twice) |
+| `summary` | the issue title at the time of the transition; rarely useful for routing (exact-match on a title is brittle — it changes) |
+| `issueUrl` | the Jira browse link; not useful for routing |
 
 A burst digest (more than three transitions on one issue in a single poll)
 matches when **any** of its folded events matches.

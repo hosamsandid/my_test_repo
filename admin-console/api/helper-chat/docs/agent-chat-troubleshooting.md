@@ -118,8 +118,9 @@ creator/member (it never depends on an invite for its own DM room). The room is
 **pre-created at create/enable time** (#184), so the agent's sync loop already has
 it in context before your first message. If a message is still ignored, check:
 
-- The room has **exactly 2 members** (agent + you). The DM heuristic requires this;
-  a third member makes the agent ignore the room.
+- You (or whoever sent the message) must be a **joined member** of the room and
+  not the agent itself (`is_human_sender`, #2173) — a room with more than one
+  human is fine, so a third member no longer makes the agent ignore it.
   ```bash
   curl -s -H "Authorization: Bearer $MATRIX_ACCESS_TOKEN" \
     http://localhost:${CONDUWUIT_PORT:-8448}/_matrix/client/v3/rooms/<roomId>/joined_members

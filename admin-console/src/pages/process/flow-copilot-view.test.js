@@ -15,6 +15,8 @@ import {
   proposalNodeDiff,
   bundleSizeCharCount,
   bundleSizeLevel,
+  COPILOT_TIMEOUT_HEADLINE,
+  COPILOT_TIMEOUT_HINTS,
 } from './flow-copilot-view.js';
 
 test('starter prompts: three chips, whole-flow example first', () => {
@@ -100,6 +102,72 @@ test('copilotErrorInfo: 504 is a retryable timeout', () => {
   const e = copilotErrorInfo(504, 'LLM request failed: HTTP 504');
   assert.equal(e.kind, 'timeout');
   assert.equal(e.retryable, true);
+});
+
+// ── plain-language timeout guidance (#2131 AC1) ──────────────────────────────
+
+test('AC1: a timeout headline is plain language and the raw detail is demoted', () => {
+  const e = copilotErrorInfo(504, 'LLM request failed: HTTP 504', 'llm-timeout');
+  assert.equal(e.kind, 'timeout');
+  assert.equal(e.retryable, true);
+  // The headline is the sentence the user reads — never the transport string.
+  assert.equal(e.message, COPILOT_TIMEOUT_HEADLINE);
+  assert.doesNotMatch(e.message, /HTTP|LLM request failed/);
+  // ...and the guidance names the two things that actually help.
+  assert.deepEqual(e.hints, COPILOT_TIMEOUT_HINTS);
+  assert.match(e.hints.join(' '), /smaller parts/i);
+  assert.match(e.hints.join(' '), /Settings → Model/);
+  // The raw detail is kept, for the card's expander.
+  assert.equal(e.detail, 'LLM request failed: HTTP 504');
+});
+
+test('AC1: the whole timeout class lands on the guidance, by code or by message', () => {
+  // The server's stable code is the primary signal...
+  assert.equal(copilotErrorInfo(504, 'anything at all', 'llm-timeout').kind, 'timeout');
+  // ...and the message is the fallback for a pre-#2131 server or a client-side
+  // transport failure, which carries no code.
+  for (const [status, msg] of [
+    [502, 'LLM request failed: HTTP 504'],
+    [502, 'LLM request failed: HTTP 502'],
+    [502, 'LLM request failed: timeout'],
+    [502, 'LLM request failed: deadline'],
+    [undefined, 'Gateway Timeout'],
+    [undefined, 'Bad Gateway'],
+  ]) {
+    const e = copilotErrorInfo(status, msg);
+    assert.equal(e.kind, 'timeout', msg);
+    assert.equal(e.message, COPILOT_TIMEOUT_HEADLINE, msg);
+    assert.equal(e.detail, msg);
+  }
+});
+
+test('AC1: a junk-output 502 keeps its own message — the guidance would be wrong', () => {
+  // The route's error envelope is 502 for `no-parseable-bundle` too, so a
+  // blanket status check would tell someone whose model produced invalid JSON
+  // to pick a faster model.
+  const e = copilotErrorInfo(502, 'LLM returned no parseable bundle', 'no-parseable-bundle');
+  assert.equal(e.kind, 'transport');
+  assert.equal(e.message, 'LLM returned no parseable bundle');
+  assert.equal(e.hints, undefined);
+  assert.equal(e.detail, undefined);
+});
+
+test('AC1: a provider/bundle-size problem is not reclassified as a timeout', () => {
+  assert.equal(copilotErrorInfo(400, 'bundle-too-large').kind, 'bundle-too-large');
+  assert.equal(copilotErrorInfo(400, 'No LLM endpoint configured.').kind, 'provider');
+  // Even if a 400 message happened to contain the word, the 400 branch wins.
+  assert.equal(copilotErrorInfo(400, 'bad request: timeout must be a number').kind, 'provider');
+});
+
+test('phaseLabel counts the steps of a generate-in-parts run (#2131)', () => {
+  assert.equal(phaseLabel({ type: 'phase', phase: 'generating', part: 1, parts: 2 }),
+    'Generating in parts (1/2)…');
+  assert.equal(phaseLabel({ type: 'phase', phase: 'generating', part: 2, parts: 2, chars: 4200 }),
+    'Generating in parts (2/2)… · 4.2k chars');
+  // A plain generating event is unchanged, and a repair still reads as a repair.
+  assert.equal(phaseLabel({ type: 'phase', phase: 'generating' }), 'Generating…');
+  assert.equal(phaseLabel({ type: 'phase', phase: 'repairing', iteration: 1, part: 1, parts: 2 }),
+    'Repairing (1/2)…');
 });
 
 test('bundleSizeCharCount returns JSON.stringify length, 0 for null/undefined', () => {
@@ -260,4 +328,31 @@ test('proposalNodeDiff tolerates empty/missing bundles', () => {
   assert.deepEqual(d.added, ['a']);
   assert.deepEqual(d.removed, []);
   assert.deepEqual(proposalNodeDiff({ roles: [{ id: 'a' }] }, null).removed, [{ id: 'a', name: 'a' }]);
+});
+
+test('consumeCopilotStream carries the server failure code onto the thrown error', async () => {
+  await assert.rejects(consumeCopilotStream(streamedRes([
+    '{"type":"phase","phase":"generating"}\n',
+    '{"type":"error","status":504,"code":"llm-timeout","error":"LLM request failed: HTTP 504"}\n',
+  ]), () => {}), (err) => {
+    assert.equal(err.status, 504);
+    assert.equal(err.copilotCode, 'llm-timeout');
+    // End to end: the code the route emitted is what turns the raw transport
+    // string into the guidance card.
+    assert.equal(
+      copilotErrorInfo(err.status, err.message, err.copilotCode).message,
+      COPILOT_TIMEOUT_HEADLINE,
+    );
+    return true;
+  });
+});
+
+test('an error event without a code still classifies (pre-#2131 server)', async () => {
+  await assert.rejects(consumeCopilotStream(streamedRes([
+    '{"type":"error","status":502,"error":"LLM request failed: timeout"}\n',
+  ]), null), (err) => {
+    assert.equal(err.copilotCode, undefined);
+    assert.equal(copilotErrorInfo(err.status, err.message, err.copilotCode).kind, 'timeout');
+    return true;
+  });
 });

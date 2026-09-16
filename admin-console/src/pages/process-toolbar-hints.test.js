@@ -61,7 +61,7 @@ test('every header-row action button has a tooltip', () => {
   // The AC is "no button is left unexplained"; this is that as an assertion.
   const headerRowActions = [
     'addAgent', 'addHuman', 'stages', 'labels', 'materialize',
-    'copilot', 'export', 'editAsDraft', 'anomalies', 'improvements',
+    'copilot', 'export', 'editAsDraft', 'anomalies', 'improvements', 'parallelism',
   ];
   for (const action of headerRowActions) {
     const title = toolbarTitle(action);

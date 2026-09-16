@@ -10,17 +10,14 @@ import ConfirmDialog from '../../components/ConfirmDialog';
 import SidePanel from '../../components/SidePanel';
 import { summarizeTeamAction } from '../team-action-summary.js';
 import {
-  ImportAgentForm, CloneAgentForm, ExtractTemplateForm,
+  ImportAgentForm, CloneAgentForm, ExtractTemplateForm, CloneTeamForm,
 } from '../agent-lifecycle/AgentLifecycleForms.jsx';
 import {
   DisableWarningDialog, TeamDisableDialog, DeactivateWarningDialog,
-  ResetToStubDialog, TeamEnableDialog, TeamActionResultDialog, ConvertToTeamDialog,
+  ResetToStubDialog, TeamEnableDialog, TeamActionResultDialog,
   renderDeleteMessage,
 } from '../agent-lifecycle/AgentLifecycleDialogs.jsx';
 import { deleteDialogCopy, cascadeResidueNotice } from '../agent-lifecycle/agent-lifecycle-menu.js';
-import {
-  convertDialogCopy, convertConsequences, convertBusyNotice, convertResultNotice,
-} from '../agent-lifecycle/convert-to-team-view.js';
 import RowContextMenu from '../../components/RowContextMenu.jsx';
 import {
   deleteTargetFor,
@@ -115,7 +112,7 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   const [notice, setNotice] = useState(null);
 
   // Panels reuse the Agents page's forms verbatim.
-  const [panelMode, setPanelMode] = useState(null); // null | 'clone' | 'extract' | 'import'
+  const [panelMode, setPanelMode] = useState(null); // null | 'clone' | 'clone-team' | 'extract' | 'import'
   const [panelAgent, setPanelAgent] = useState(null);
   const [importFile, setImportFile] = useState(null);
   const [extractTemplateIds, setExtractTemplateIds] = useState(() => new Set());
@@ -132,12 +129,6 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       importInputRef.current?.click();
     },
   }), []);
-
-  // #2052 — convert into a team of one. `convertTarget.busyNotice` carries the
-  // server's own mid-run refusal, so the same dialog serves both phases: it
-  // opens empty, and re-opens with the notice when the 409 comes back.
-  const [convertTarget, setConvertTarget] = useState(null);
-  const [convertBusy, setConvertBusy] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -293,44 +284,6 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
     }
   }
 
-  // #2052 — convert this standalone agent into a team of one, in place. Raw
-  // `fetch` rather than `apiCall` for the same reason `toggleEnabled` uses one:
-  // the 409 carrying `warning` is a question for the user, not an error to
-  // throw. `force` is only sent on the second pass, after they answered it.
-  async function convertToTeam({ force = false } = {}) {
-    const agent = convertTarget?.agent;
-    if (!agent) return;
-    setConvertBusy(true);
-    markBusy(agent.id, true);
-    try {
-      const res = await fetch(`/api/agents/${encodeURIComponent(agent.id)}/convert-to-team`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ force }),
-      });
-      const data = await res.json().catch(() => ({}));
-      const busyNotice = res.status === 409 ? convertBusyNotice(data) : null;
-      if (busyNotice) {
-        setConvertTarget({ agent, busyNotice });
-        return;
-      }
-      if (!res.ok) {
-        setConvertTarget(null);
-        setActionError(data.error || `HTTP ${res.status}`);
-        return;
-      }
-      setConvertTarget(null);
-      setNotice(convertResultNotice(data));
-      refresh();
-    } catch (e) {
-      setConvertTarget(null);
-      setActionError(e.message);
-    } finally {
-      markBusy(agent.id, false);
-      setConvertBusy(false);
-    }
-  }
-
   async function confirmDelete() {
     setDeleteBusy(true);
     try {
@@ -384,6 +337,53 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
     // Deliberately left open on success: the shared form renders its own
     // "saved as <id>" confirmation, exactly as on the Agents page.
     return { ok: resp.ok, status: resp.status, data };
+  }
+
+  // Clone team (#2171, epic #2166 A5): two requests, since no single server
+  // route does both halves — the credential-stripped environment copy
+  // (`copyFromTeamId`, reusing #2170's template-copy mechanism) and the
+  // ordinary team materialize (the ticket's "existing clone path": export the
+  // source's process bundle, feed it to team-create). `materializeMembers:
+  // false` is deliberate, not a default left alone: it is what turns "a repo
+  // with no credential yet" into a stub nobody tried to clone, rather than a
+  // failed member the AC says must not happen.
+  async function submitCloneTeam({ teamId, teamName }) {
+    const source = panelAgent;
+    try {
+      const envResp = await fetch('/api/environments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: teamId, name: `${teamName} environment`, copyFromTeamId: source.id }),
+      });
+      const envData = await envResp.json().catch(() => ({}));
+      if (!envResp.ok) return { ok: false, status: envResp.status, data: envData };
+
+      const bundle = await apiCall('GET', `/api/process/template?team=${encodeURIComponent(source.id)}`);
+      // The clone can point at the SAME repository as its source (the
+      // structure copy carries the repo URL verbatim) — a fresh label suffix
+      // (#902) is what keeps the two teams' identical label vocabulary from
+      // cross-triggering each other's flow once both are materialized.
+      const { suffix: labelSuffix } = await apiCall('GET', '/api/teams/suggest-suffix');
+
+      const teamResp = await fetch('/api/teams', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          teamId,
+          teamName,
+          environmentId: envData.id,
+          processTemplate: bundle,
+          materializeMembers: false,
+          labelSuffix,
+        }),
+      });
+      const teamData = await teamResp.json().catch(() => ({}));
+      if (!teamResp.ok) return { ok: false, status: teamResp.status, data: teamData };
+      refresh();
+      return { ok: true, status: teamResp.status, data: { ...teamData, credentialsNeeded: envData.credentialsNeeded } };
+    } catch (e) {
+      return { ok: false, status: 0, data: { error: e.message } };
+    }
   }
 
   async function submitImport({ newId, parentTeamId }) {
@@ -524,7 +524,6 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         case 'clone':             setPanelAgent(agent); setPanelMode('clone'); break;
         case 'export':            window.open(`/api/agents/${encodeURIComponent(agent.id)}/export`, '_blank'); break;
         case 'extract-template':  openExtractPanel(agent); break;
-        case 'convert-to-team':   setConvertTarget({ agent, busyNotice: null }); break;
         case 'reset-to-stub':     setDeactivateTarget(agent); break;
         case 'delete':            setDeleteTarget(deleteTargetFor(agent, agents)); break;
         default: break;
@@ -542,15 +541,19 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         // whose label ends in an ellipsis.
         case 'add-member':       openAddMember(teamId); break;
         // Phase 2 (#1929) answers open question 3 the other way round: the
-        // team's own edit form now renders in the rail's Settings tab, so this
-        // opens it there instead of leaving the chat for the Agents page.
-        case 'edit-team':        if (onOpenSettings && teamId) onOpenSettings(teamId); break;
+        // team's own edit form renders in the chat, so this opens it there
+        // instead of leaving the chat for the Agents page. #2235 widened that
+        // surface to the full width right of the agent list, reached by being
+        // routed to the team like any other row selection — so this now also
+        // navigates, the same landing point as clicking the team's own row.
+        case 'edit-team':        if (onOpenSettings && teamId) onOpenSettings(teamId); if (teamId) navigate(`/chats/${encodeURIComponent(teamId)}`); break;
         case 'share':
           // Enabled for anyone who can see the team: a Team Member gets the
           // list read-only (#2041 AC9), the panel gates the controls.
           if (teamId) setShareTeam({ id: teamId, name: target.group?.displayName || teamId });
           break;
         case 'export-team':      window.open(`/api/agents/${encodeURIComponent(teamId)}/export`, '_blank'); break;
+        case 'clone-team':       if (team) { setPanelAgent(team); setPanelMode('clone-team'); } break;
         case 'open-flow-editor': navigate(`/flows?proc=${encodeURIComponent(teamId)}`); break;
         case 'delete-team':      if (team) setDeleteTarget(deleteTargetFor(team, agents)); break;
         default: break;
@@ -636,6 +639,22 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
       </SidePanel>
 
       <SidePanel
+        open={panelMode === 'clone-team' && !!panelAgent}
+        onClose={closePanel}
+        title={`Clone Team — ${panelAgent?.displayName ?? ''}`}
+        width="480px"
+      >
+        {panelMode === 'clone-team' && panelAgent && (
+          <CloneTeamForm
+            team={panelAgent}
+            existingIds={existingIds}
+            onSubmit={submitCloneTeam}
+            onCancel={closePanel}
+          />
+        )}
+      </SidePanel>
+
+      <SidePanel
         open={panelMode === 'extract' && !!panelAgent}
         onClose={closePanel}
         title={`Save as template — ${panelAgent?.displayName ?? ''}`}
@@ -668,17 +687,6 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         agent={deactivateTarget}
         onConfirm={deactivateConfirmed}
         onCancel={() => setDeactivateTarget(null)}
-      />
-
-      <ConvertToTeamDialog
-        open={!!convertTarget}
-        agent={convertTarget?.agent}
-        copy={convertDialogCopy(convertTarget?.agent)}
-        consequences={convertConsequences(convertTarget?.agent)}
-        busyNotice={convertTarget?.busyNotice}
-        busy={convertBusy}
-        onConfirm={() => convertToTeam({ force: !!convertTarget?.busyNotice })}
-        onCancel={() => setConvertTarget(null)}
       />
 
       <DisableWarningDialog

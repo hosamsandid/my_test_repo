@@ -119,6 +119,9 @@ test('buildSyntheticEvent + buildPendingEntry: issue entry satisfies the claim-p
   const entry = buildPendingEntry('t1', 'issues.labeled', ev);
   assert.equal(entry.triggerId, 't1');
   assert.equal(entry.source, 'internal');
+  // #2151: stamped from the synthesized event's own label — always correct
+  // here since the emit and the synthetic payload agree by construction.
+  assert.equal(entry.wakeLabel, 'ready');
   assert.equal(entry.github.event, 'issues.labeled');
   assert.equal(entry.github.eventId, 'int:abc123');
   assert.equal(entry.github.repo, 'org/repo');
@@ -159,4 +162,12 @@ test('buildSyntheticEvent: resolved title rides on the subject (#1897 AC8)', () 
 test('eventKeyForKind maps both target kinds', () => {
   assert.equal(eventKeyForKind('issue'), 'issues.labeled');
   assert.equal(eventKeyForKind('pr'), 'pull_request.labeled');
+});
+
+test('#2151: buildPendingEntry stamps wakeLabel null when the synthesized event carries no label', () => {
+  const entry = buildPendingEntry('t1', 'issues.labeled', {
+    id: 'int:no-label', actor: { login: 'agent:dev' }, repo: { name: 'org/repo' },
+    created_at: '2026-08-02T10:00:00Z', payload: { action: 'labeled', issue: { number: 1 } },
+  });
+  assert.equal(entry.wakeLabel, null);
 });

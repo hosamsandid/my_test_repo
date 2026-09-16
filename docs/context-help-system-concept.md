@@ -409,8 +409,55 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the `create.md` topic plus its `seeAlso` neighbours — at **315,396 — 92.8% used,
-24,604 left** (the crown moved BACK off `/chats`, which had held it at 314,511: #2085 dissolved
+the `create.md` topic plus its `seeAlso` neighbours — currently at **323,959 — 95.3% used,
+16,041 left** (#2307 unified the global-skill-pool write permission across import/merge/create/edit;
+`docs/skills-system.md` is a `CORPUS_FILES` member, landing on EVERY context, not just this crown —
+live pre-edit 323,419, already +2,327 over the 321,092 last stamped here from unrelated intervening
+merges since #2235, none of which restamped either this doc or `corpus.js`; post-edit is this
+change's own clean +540. **CLAUDE.md's mirror paragraph (formerly "#1872") no longer exists** — the
+2026-09-13 "shrink CLAUDE.md to a lean high-level map" rewrite deliberately dropped the per-ticket
+decision narratives it lived in, so `corpus.js` and this section are now the only two homes; do not
+re-add a restamp paragraph to CLAUDE.md.) (this paragraph's own chain below had lagged at 318,724 for two cycles: #2231's
+`create.md` corrections for the plain-agent/fast-lane team-of-one mint added +1,849 — 320,573 —
+and #2232's retirement of the manual "Convert into a team…" action shaved -659 off that — 319,914,
+matching CLAUDE.md's #1872 paragraph exactly, so no further drift had crept in beyond those two
+unstamped cycles; #2235, merging the team chat column and right rail into one full-width surface,
+reworded `agent-chat.md`'s *The right rail* and *Settings — configuring the agent* chapters, again a
+`create.md` `seeAlso` neighbour, for a clean +1,178 on top of the verified 319,914 baseline — taking
+it to the current 321,092). The figure below, **318,724 — 93.7% used,
+21,276 left**, is kept as the earlier history (#2216's right-rail team-narrowing addition to `agent-chat.md`, itself a `create.md`
+`seeAlso` neighbour, is a clean +314 on top of a live pre-edit 318,410 that already carried a +356 gap
+over the 318,054 last stamped here from unrelated intervening merges; #2172's terminology sweep had
+already shaved the figure to 315,387/92.8%/24,613 left
+— a word-removal pass, not new material, and this paragraph had not been restamped for it until now;
+#2177, epic #2166 B5, then corrected the corpus-vendored `docs/credentials.md` and the multi-route
+`credentials` help topic — both `create.md` `seeAlso` neighbours — for the container's spawn-time
+credential bake now preferring the team-admin's personal GitHub token/SSH key, a clean +2,667 on the
+verified 315,387 baseline) (re-measured on the real post-merge commit — #2170's own "overlaid onto main"
+estimate had read 314,890/92.6%/25,110 left, undercounting by 558 chars in a way
+`corpus.test.js`'s `< 340,000`-only assertion never catches; the lesson generalizes the
+existing "never trust a branch's self-report" rule to overlay estimates too) (#2170 SHRANK this crown, a rare direction for the number to move: removing the
+Working Environments page retired the `/environments` help topic outright (349 lines) rather than
+folding it whole into a survivor — the still-live half (repositories, credentials, MCP references,
+the propagation dialog) moved into the existing `agent-chat.md` (+61 net lines) and the
+System-Admin-only Toolchains half moved into a new, small `environment-templates.md` that is
+**not** on `/quickstart`'s `seeAlso` chain at all (only System Admins reach it, from
+Administration) — down from the previously-stamped 324,900, net of the usual small pre-existing
+drift from unstamped intervening merges. #2179 added +408 via a new `team-setup.md` bullet — "Create team" disabled with
+the guidance message when the platform has no registered model provider — landing on an
+already-stale 324,492 live on `main`: +2,019 over the 322,473 this paragraph previously stamped,
+from intervening merges (#2175/#2176's credential-resolution doc growth, #2193's undocumented
+system-event rendering) that earned a live-budget check but no restamp at the time, since neither
+touched a `/quickstart` `seeAlso` topic the way this one does. #2195 added +93 via `working-environments.md` and the `/environments`/`/mcp`
+help topics, correcting the ownership-picker-removal description, still unmerged when the
+figure below was stamped — re-measured on this merge rather than trusted, per the #1996 lesson.
+#2175/#2187 added +1,260 via `credentials.md`'s acting-sender/SSH-equivalent
+section, counted on every context, not just a seeAlso neighbourhood; the prior restamp (321,120)
+was verified exact against the immediate pre-#2187 main tip, so this delta is cleanly attributable
+to #2187 alone. #2168 added +265 via `team-setup.md`, stating that a Working Environment is now
+optional at team creation; several unrelated merges landed against this crown since the last
+restamp without one, accounting for the rest of the gap from the 318,602 figure this paragraph
+previously carried) (the crown moved BACK off `/chats`, which had held it at 314,511: #2085 dissolved
 the Access page, folding `access-users.md` into `users.md` and DROPPING the `/teams` link
 `agent-chat.md` carried rather than re-pointing it — the successor surface for what that link
 promised is the Share dialog on `/chats` itself, and Administration is System-Admin-only — so

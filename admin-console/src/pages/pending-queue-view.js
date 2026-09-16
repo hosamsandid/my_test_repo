@@ -43,6 +43,10 @@ const KIND_LABELS = {
   // KIND_TOOLTIPS and in entryDetail — the AC8 ratchet in
   // pending-queue-wiring.test.js is what fails when a live kind is missing.
   'plugin-event': 'Plugin event',
+  // #2277: the runtime's own bounded self-correction — one re-wake after a
+  // turn ends with a background task still running, so the agent redoes the
+  // work in the foreground instead of leaving it to a human re-nudge.
+  'bg-orphan-correction': 'Self-correction (background task)',
   unknown: 'Unknown',
 };
 
@@ -64,6 +68,7 @@ const KIND_TOOLTIPS = {
   'handover-dm': 'A hand-over message the console composed for this agent — queued rather than sent as a chat message so it cannot arrive before the agent has finished starting up.',
   'loop-verify': "Another agent's loop iteration, waiting for this agent to review it and return a verdict. The loop is blocked until it does.",
   'plugin-event': "An event a granted plugin's broker sent for this team (e.g. a Jira status change), waiting for the agent's plugin-event trigger. It drains within seconds unless maintenance mode is active or a loop holds the workspace.",
+  'bg-orphan-correction': 'This agent enqueued this for itself after a turn ended while a background task was still running — it resumes the same conversation and redoes the work in the foreground. At most one per originating turn.',
   unknown: 'An unrecognised queue entry.',
 };
 

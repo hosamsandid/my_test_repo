@@ -88,7 +88,9 @@ const credentialResolution = require("./credential-resolution");
 const ownershipMigration = require("./ownership-migration");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
-const { assessConversionEligibility, planTeamConversion } = require("./team-conversion");
+const { assessConversionEligibility, planTeamConversion, planTeamOfOneCreation } = require("./team-conversion");
+const teamOfOneMigration = require("./team-of-one-migration");
+const { nextAvailableAgentId, suggestFreeAgentId } = require("./agent-id-resolution");
 const { syncAgentRepoPlan, summarizeRepoResults, repoDivergence } = require("./repo-sync");
 // Agent-scoped repositories (#2067): a repository attached to ONE agent,
 // outside its Working Environment. Every decision — shape, the merged
@@ -135,11 +137,11 @@ const { buildTar } = require("./tar-single");
 // In-container exec seam (context browse/write): libpod exec on podman,
 // pods/exec on kubernetes — selected the same way as container-runtime.
 const { execInAgentContainer, putArchiveToAgentContainer } = require("./container-exec-runtime");
-const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit } = require("./skill-grants");
+const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit, planTeamSkillsUpdate } = require("./skill-grants");
 // Plugin system (#1516). The grant is the sibling of the skill grant — it lives
 // on the agent construct, never on the environment — and (de)activation is the
 // same additive live file sync, no respawn (#1547).
-const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor } = require("./plugin-grants");
+const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor, normalizeGrantList } = require("./plugin-grants");
 const { planWorkspaceSync, planCliRefresh } = require("./plugin-sync");
 const { resolveAgentStateDir } = require("./agent-state-dir");
 const { resolveScopeId } = require("./plugin-scope");
@@ -152,6 +154,7 @@ const { resolveScopeGithubCredentials, buildTeamFlowLabels } = require("./plugin
 const { PluginCredentialStore } = require("./plugin-credential-store");
 const { createPluginCredentialWiring } = require("./plugin-credential-routes");
 const { assertGranularityGrantable, defaultGranularity } = require("./plugin-manifest");
+const pluginReconcile = require("./plugin-reconcile");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
 const { isAutonomousState, autonomyChanged } = require("./agent-autonomy");
 const { isSupportedAgentRole, unsupportedRoleNote } = require("./agent-role-support");
@@ -179,6 +182,11 @@ const flowAnomalySweep = require("./flow-anomaly-sweep");
 const admissionControl = require("./admission-control");
 const { buildTicketLedger } = require("./ticket-reconciler");
 const ticketReconcileSweep = require("./ticket-reconcile-sweep");
+const agentPool = require("./agent-pool");
+const flowSupervisor = require("./flow-supervisor");
+const recurringPoolSource = require("./recurring-pool-source");
+const predictedPaths = require("./predicted-paths");
+const poolInstanceLanes = require("./pool-instance-lanes");
 
 // ── Read-write context mount helpers (writing into a mounted host folder) ──
 // A caller path is RELATIVE to /context. For a single legacy folder the mount
@@ -632,27 +640,40 @@ function startAgentProcess(config) {
   const endpointConfigured = !!(config.llmEndpointOverride || env?.llmEndpointId);
   Object.assign(childEnv, buildLlmProvenanceEnv(llm, config, { endpointConfigured }));
 
-  // If the agent's environment has a GitHub token attached, expose it as
-  // GH_TOKEN so the `gh` CLI authenticates without `gh auth login`.
-  // (Also exported as GITHUB_TOKEN for git-over-HTTPS pushes.)
-  if (env?.githubTokenId) {
-    const tokenPath = path.join(GH_TOKENS_DIR, env.githubTokenId);
+  // Expose a GitHub token as GH_TOKEN so the `gh` CLI authenticates without
+  // `gh auth login` (also GITHUB_TOKEN for git-over-HTTPS pushes). Which
+  // credential that is now goes through `resolveBaselineGithubTokenId`
+  // (#2177, epic #2166 B5) rather than the environment's raw `githubTokenId`
+  // directly: this baked-at-spawn token is what every `gh`/`git` call the
+  // agent runs DIRECTLY inside its own container authenticates with
+  // (issue/PR comments, `gh pr review`) — the one path B3/#2175 explicitly
+  // left "the container's spawn-time baked token... out of scope, pending a
+  // later block of the epic", since `resolveAttributedGithubToken` only ever
+  // covers the orchestrator-mediated commit/PR/push path. Preferring the
+  // team's current team-admin's personal credential here is what makes "no
+  // interactive action uses a shared team secret" true end to end. An env
+  // with no owner/baseline personal credential resolves to the same
+  // `env.githubTokenId` as before — nothing on disk changes, only what the
+  // binding resolves against (the "migrate existing bindings" half).
+  const resolvedGithubTokenId = resolveBaselineGithubTokenId(config, env);
+  if (resolvedGithubTokenId) {
+    const tokenPath = path.join(GH_TOKENS_DIR, resolvedGithubTokenId);
     try {
       const ghToken = fs.readFileSync(tokenPath, "utf8").trim();
       if (ghToken) {
         childEnv.GH_TOKEN = ghToken;
         childEnv.GITHUB_TOKEN = ghToken;
-        console.log(`[Orchestrator] Agent ${id} → GH_TOKEN injected (env=${env.id}, token=${env.githubTokenId})`);
+        console.log(`[Orchestrator] Agent ${id} → GH_TOKEN injected (env=${env?.id}, token=${resolvedGithubTokenId})`);
       }
     } catch (err) {
-      console.error(`[Orchestrator] Cannot read GitHub token ${env.githubTokenId} for agent ${id}: ${err.message}`);
+      console.error(`[Orchestrator] Cannot read GitHub token ${resolvedGithubTokenId} for agent ${id}: ${err.message}`);
     }
   }
 
   // Per-agent SSH identity (see materializeAgentSshKey). Always runs — even for
   // envless agents — because it also strips the orchestrator's inherited
   // GIT_SSH_COMMAND, which would otherwise dangle in every agent.
-  materializeAgentSshKey(id, env, childEnv);
+  materializeAgentSshKey(id, env, childEnv, config);
 
   // Shared Agent Learning (Phase 1): expose the team Knowledge Base to the
   // agent runtime + `knowledge` CLI. The autonomy dial is ALWAYS injected
@@ -869,6 +890,15 @@ async function startAllEnabledAgents() {
 // ============================================================
 function agentDir(id) {
   return path.join(AGENTS_DIR, id);
+}
+
+// The strictest "is this id taken" predicate in the codebase (#2217, matching
+// the team-conversion `teamIdTaken` check): a persisted config, an on-disk
+// directory, or an id whose background teardown is still in flight (its
+// config.json is already gone but its network/volume/Matrix reaping may
+// still be racing a same-id re-create, #1525/#1791).
+function isAgentIdTaken(id) {
+  return !!loadAgentConfig(id) || agentTeardownRegistry.has(id) || fs.existsSync(agentDir(id));
 }
 
 // Control-plane location for an agent's pushed state (#185).
@@ -1633,6 +1663,10 @@ function resolveImageForAgent(config) {
           toolchainId: resolved.toolchainId,
           environmentId: env ? env.id : null,
           environmentName: env ? env.name : null,
+          // #2282 Band 1: carried through so the spawners can size the
+          // container/pod's memory (and, on k8s, cpu/memory requests) off the
+          // toolchain's own declaration instead of only the fleet default.
+          resources: resolved.toolchain.resources || null,
         }
       : null,
   };
@@ -1727,6 +1761,66 @@ async function fetchWorkItemDetail(repoFullName, kind, number) {
 // Back-compat thin wrapper for the title-only callers (#1897 notices).
 async function fetchWorkItemTitle(repoFullName, kind, number) {
   return (await fetchWorkItemDetail(repoFullName, kind, number)).title;
+}
+
+// The wake half of the internal label fast-path (#1858), extracted so it has
+// TWO callers: the `POST /internal/github-label-applied` handler below (a
+// human applied the label through the console) and the Flow Supervisor's
+// auto-dispatch (#2247 — the label is already on the object; only the wake
+// needs to run again). Does NOT write the label to GitHub — same discipline
+// as the endpoint it was extracted from, "the label itself is unchanged; this
+// path does not stamp any label".
+async function wakeGithubLabelListeners({ repo, number, kind, label, actor, source = 'internal-plugin' }) {
+  const key = labelFastPath.eventKeyForKind(kind);
+  const agents = listAgentIds().map((aid) => ({
+    agentId: aid,
+    enabled: loadAgentConfig(aid)?.enabled !== false,
+    triggers: loadTriggers(aid),
+  }));
+  const listeners = labelFastPath.matchPollerListeners({ repo, label, kind }, agents);
+  const now = new Date().toISOString();
+  // #1897 AC8: resolve the title best-effort so the notice isn't blank.
+  // #2114: also carry the PR's closesIssues (from the same fetch) so the
+  // admission gate keys this hand-off to the issue's ticket, not a new one.
+  const { title, closesIssues } = await fetchWorkItemDetail(repo, kind, number);
+  const ghEvent = labelFastPath.buildSyntheticEvent({
+    repo, label, kind, number, title, closesIssues, actor,
+    eventId: `intlbl:${crypto.randomBytes(6).toString('hex')}`,
+    now,
+  });
+  for (const l of listeners) {
+    // Enqueue first (immediate wake), then arm the dedup marker so the
+    // poller's later delivery of the same label is dropped.
+    enqueuePending(l.agentId, {
+      ...flowEmit.buildPendingEntry(l.triggerId, key, ghEvent),
+      source,
+    });
+    labelDedupMarkers.add({
+      agentId: l.agentId, triggerId: l.triggerId,
+      repo, kind, number, label, appliedAt: now,
+    });
+    console.log(
+      `[Orchestrator] label-fastpath: ${repo}#${number} +${label} ` +
+      `by ${actor || 'console'} → agent=${l.agentId} trigger=${l.triggerId}`);
+  }
+  // Same transparency log the poller writes, tagged with the delivery path so
+  // operators see an honest "delivered internally"/"delivered by the
+  // supervisor" line — the AC that "who dispatched" stays clear.
+  githubEventLog.record({
+    ...githubEventLog.buildEventEntry({
+      ghEvent, repoFullName: repo, key,
+      outcomes: listeners.map((l) => ({
+        agentId: l.agentId, triggerId: l.triggerId,
+        status: 'delivered', reason: null, digest: false, wakeLabel: label,
+      })),
+    }),
+    source,
+  });
+  if (listeners.length === 0) {
+    console.log(
+      `[Orchestrator] label-fastpath: ${repo}#${number} +${label} matched no poller listener`);
+  }
+  return { listeners };
 }
 
 function _flowLiftEmits(cfgEmits, triggers) {
@@ -2154,6 +2248,181 @@ async function computeTeamTicketLedger(teamId, { now = Date.now() } = {}) {
   };
 }
 
+// ── Agent instance pools: reap (#2246, epic #2251 Phase 1) ──────────────────
+//
+// D4: a slot is held until completion; the *container* is reaped when its run
+// ends regardless. Reusing the admission tick as the reaper (concept §2's
+// "single leanest decision") means a pool instance is torn down the moment the
+// SAME reconcile pass that releases its ticket sees it — no second timer.
+//
+// Reap goes through the ordinary `DELETE /internal/agents/:id` route via a
+// loopback call rather than a hand-rolled second delete path, so a pool
+// instance gets EXACTLY the same fast/background split, plugin-scope reap and
+// (via `isGracefulDeleteRole`, widened below) graceful commit-before-delete
+// every other agent delete gets — one delete implementation, not two.
+function _internalSelfDelete(agentId) {
+  return new Promise((resolve) => {
+    const headers = {};
+    if (process.env.INTERNAL_API_TOKEN) headers.Authorization = `Bearer ${process.env.INTERNAL_API_TOKEN}`;
+    const req = http.request({
+      hostname: "127.0.0.1",
+      port: 4002,
+      path: `/internal/agents/${encodeURIComponent(agentId)}`,
+      method: "DELETE",
+      headers,
+      timeout: 15_000,
+    }, (resp) => {
+      resp.resume();
+      resp.on("end", () => resolve(resp.statusCode));
+    });
+    // Best-effort: a failed reap leaves the instance running for the next tick
+    // to retry — never a thrown error on the caller's admission sweep.
+    req.on("error", (err) => {
+      console.warn(`[AgentPool] reap request for ${agentId} failed: ${err.message}`);
+      resolve(null);
+    });
+    req.on("timeout", () => req.destroy());
+    req.end();
+  });
+}
+
+// Every pooled-role TEMPLATE of a team (not an instance — see `isPooledRole`).
+function _teamPooledRoles(teamId) {
+  const roles = [];
+  for (const id of listAgentIds()) {
+    let cfg = null;
+    try {
+      cfg = loadAgentConfig(id);
+    } catch {
+      continue;
+    }
+    if (!cfg || (cfg.parentTeamId || null) !== teamId) continue;
+    if (!agentPool.isPooledRole(cfg)) continue;
+    roles.push({ id, cfg, pool: agentPool.normalizePoolConfig(cfg.pool) });
+  }
+  return roles;
+}
+
+// Every LIVE instance of a pooled role template (any work item, not just one)
+// — "live" meaning it still has a config, the same test `_teamPooledRoles`
+// itself uses. Shared by the per-role `maxInstances` cap (`routePooledDispatch`,
+// code-review finding on #2246: the original per-item-only check could never
+// actually reach the refuse branch) and the hard-timeout reaper below, so the
+// two can't independently drift on what "an instance of this role" means.
+function _liveInstanceIdsForRole(roleFullId) {
+  const prefix = `${roleFullId}-i`;
+  const ids = [];
+  for (const id of listAgentIds()) {
+    if (!id.startsWith(prefix)) continue;
+    let cfg = null;
+    try {
+      cfg = loadAgentConfig(id);
+    } catch {
+      continue;
+    }
+    if (!cfg || !cfg.poolInstance || cfg.poolOf !== roleFullId) continue;
+    ids.push(id);
+  }
+  return ids;
+}
+
+// The lane-view's own read of "a live instance" (#2273): the same set
+// `_liveInstanceIdsForRole` walks, but carrying the fields
+// `pool-instance-lanes.js`'s pure core needs (`poolRepo`/`poolItem`/
+// `poolSpawnedAt`, stamped at spawn time by `spawnPoolInstance`) rather than
+// just the id. Kept as a SEPARATE walk (not a wrapper around
+// `_liveInstanceIdsForRole`) so a caller that only needs ids never pays for a
+// second `loadAgentConfig` per instance.
+function _liveInstancesForRole(roleFullId) {
+  const prefix = `${roleFullId}-i`;
+  const out = [];
+  for (const id of listAgentIds()) {
+    if (!id.startsWith(prefix)) continue;
+    let cfg = null;
+    try {
+      cfg = loadAgentConfig(id);
+    } catch {
+      continue;
+    }
+    if (!cfg || !cfg.poolInstance || cfg.poolOf !== roleFullId) continue;
+    out.push({
+      instanceId: id,
+      repo: cfg.poolRepo || null,
+      itemKey: cfg.poolItem != null ? Number(cfg.poolItem) : null,
+      spawnedAt: cfg.poolSpawnedAt || null,
+    });
+  }
+  return out;
+}
+
+// A released ticket's lane key is `<repo>#<number>` (`admission-control.js`
+// `objectKey`) — the item id every pooled role's instance is keyed on.
+function _ticketItemKey(laneKey) {
+  const m = /^(.*)#(\d+)$/.exec(laneKey || "");
+  return m ? Number(m[2]) : null;
+}
+
+// On release, reap every pooled role's instance for that ticket's item (a
+// ticket may have been worked by more than one pooled role — reviewer as well
+// as developer — each with its own item-keyed instance).
+async function _reapPooledInstancesForTicket(teamId, laneKey) {
+  const itemKey = _ticketItemKey(laneKey);
+  if (itemKey == null) return;
+  for (const role of _teamPooledRoles(teamId)) {
+    const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
+    const instanceId = agentPool.poolInstanceId(teamId, roleId, itemKey);
+    if (!loadAgentConfig(instanceId)) continue;
+    console.log(`[AgentPool] ${teamId}: reaping ${instanceId} — its ticket was released`);
+    await _internalSelfDelete(instanceId);
+  }
+}
+
+// D8's hard timeout: a stuck/crashed instance must never hold its slot
+// forever. Checked on the same tick, independent of ticket release — a
+// deadlocked run may sit on an issue GitHub still shows fully open.
+async function _reapTimedOutPoolInstances(teamId, now = Date.now()) {
+  for (const role of _teamPooledRoles(teamId)) {
+    const maxRuntimeMs = role.pool.teardown.maxRuntimeMs;
+    if (!maxRuntimeMs) continue;
+    const prefix = `${role.id}-i`;
+    for (const id of listAgentIds()) {
+      if (!id.startsWith(prefix)) continue;
+      let cfg = null;
+      try {
+        cfg = loadAgentConfig(id);
+      } catch {
+        continue;
+      }
+      if (!cfg || !cfg.poolInstance || cfg.poolOf !== role.id) continue;
+      if (!agentPool.isInstanceTimedOut({ spawnedAt: cfg.poolSpawnedAt, maxRuntimeMs }, now)) continue;
+      console.warn(`[AgentPool] ${teamId}: ${id} exceeded its ${maxRuntimeMs}ms runtime budget — reaping`);
+      // Code-review finding on #2246: this used to only console.warn "marking
+      // item X needs-human" without ever actually doing it — a timed-out
+      // ticket silently lost its worker with no trace outside the server log.
+      // `poolRepo` is stamped on the instance at spawn time (`spawnPoolInstance`)
+      // precisely so the reaper never has to re-derive which repo the item's
+      // issue lives in. Best-effort, mirroring every other GitHub-write in this
+      // file: a failed stamp is logged and never blocks the reap itself — the
+      // instance must not linger just because GitHub was unreachable.
+      if (cfg.poolRepo && cfg.poolItem != null) {
+        const labelWarnings = [];
+        const stamped = await stampMirrorLabel(cfg.poolRepo, cfg.poolItem, "needs-human", labelWarnings);
+        if (stamped) {
+          console.log(`[AgentPool] ${teamId}: marked ${cfg.poolRepo}#${cfg.poolItem} needs-human (hard timeout)`);
+        } else {
+          console.warn(
+            `[AgentPool] ${teamId}: could not mark ${cfg.poolRepo}#${cfg.poolItem} needs-human: ` +
+            (labelWarnings.join("; ") || "unknown error"),
+          );
+        }
+      } else {
+        console.warn(`[AgentPool] ${teamId}: ${id} has no poolRepo/poolItem recorded — cannot mark needs-human`);
+      }
+      await _internalSelfDelete(id);
+    }
+  }
+}
+
 // Admission-control reconcile tick (#2114, flow-control concept §4.0).
 //
 // The half of AC2 that makes the in-flight count verifiable independently of any
@@ -2251,8 +2520,14 @@ async function admissionSweepTeam(teamId) {
   }
   for (const rel of reconciled.released) {
     console.log(`[Admission] ${teamId}: released ${rel.key} (${rel.reason})`);
+    // #2246 D4: reap this ticket's pooled instance(s). Fire-and-forget.
+    _reapPooledInstancesForTicket(teamId, rel.key).catch((err) =>
+      console.error(`[AgentPool] reap for ${teamId}/${rel.key} failed: ${err.message}`));
   }
   saveAdmissionLane(teamId, promoted.lane);
+  // #2246 D8 hard timeout, independent of ticket release.
+  _reapTimedOutPoolInstances(teamId).catch((err) =>
+    console.error(`[AgentPool] timeout sweep for ${teamId} failed: ${err.message}`));
 
   return {
     teamId,
@@ -2263,6 +2538,459 @@ async function admissionSweepTeam(teamId) {
     inFlight: promoted.lane.inFlight.length,
     held: promoted.lane.held.length,
   };
+}
+
+// ============================================================
+// Agent Pools — Phase 2: the Flow Supervisor (#2247, epic #2251; design of
+// record `docs/parallel-workers-concept.md` §7 + `docs/flow-control-concept.md`
+// §4.3a). Deterministic core in `flow-supervisor.js`; this is its fs/GitHub
+// half — reusing the ticket ledger (#2115), the admission lane (#2114) and the
+// two existing audited hands: the label fast-path's wake half (#1858, above)
+// and `wake-agent` (#2030). No LLM anywhere in this path (§4.3b is unbuilt).
+//
+// Opt-in per team (`autoDispatch.enabled`), and piggybacks on the flow's own
+// `wipLimit` exactly like pooling itself (§9 of the concept: "a pool with no
+// wipLimit would spawn unboundedly and never be swept") — so a team with no
+// pooled role, or no wipLimit, costs one config read and returns.
+// ============================================================
+const FLOW_SUPERVISOR_DEFAULT_WINDOW_MS = 60 * 60 * 1000; // 1h: a stuck item is nudged at most hourly
+
+function flowSupervisorBudgetPath(teamId) {
+  return controlOrPoolPath(teamId, "flow-supervisor-budget.json");
+}
+
+// A flat `{ "<ticketId>::<blocker>": "<iso timestamp>" }` map — the ≤1-action-
+// per-(item,blocker)-per-window budget the design (§7) requires. Missing or
+// corrupt degrades to "nothing has fired yet", never to a throw on the sweep.
+function loadFlowSupervisorBudget(teamId) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(flowSupervisorBudgetPath(teamId), "utf8"));
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveFlowSupervisorBudget(teamId, budget) {
+  const p = flowSupervisorBudgetPath(teamId);
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(budget, null, 2));
+  } catch (err) {
+    console.error(`[FlowSupervisor] cannot persist budget for ${teamId}: ${err.message}`);
+  }
+}
+
+// ============================================================
+// Agent Pools — Phase 4: LLM conflict prediction (#2249, epic #2251; design of
+// record `docs/parallel-workers-concept.md` D6, §7). Fully gated behind
+// `autoDispatch.contentionPolicy === 'predicted-paths'` (off by default) — a
+// team that never opts in never triggers a single fetch or LLM call here. The
+// pure shape (sanitizing/overlap/prompt/parse) lives in `predicted-paths.js`;
+// this is its fs/GitHub/LLM half, mirroring the flow-supervisor split above.
+// ============================================================
+
+function predictedPathsCachePath(teamId) {
+  return controlOrPoolPath(teamId, "predicted-paths-cache.json");
+}
+
+// A flat `{ "<ticketId>": { paths: string[], source, predictedAt } }` map. A
+// prediction is computed ONCE per ticket and kept forever (no TTL/invalidation
+// — an issue's scope rarely changes after it's marked ready, and re-predicting
+// every tick would turn an advisory pre-flight into a recurring LLM bill for no
+// behavioural gain). Missing/corrupt degrades to "nothing predicted yet",
+// never to a throw on the sweep.
+function loadPredictedPathsCache(teamId) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(predictedPathsCachePath(teamId), "utf8"));
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePredictedPathsCache(teamId, cache) {
+  const p = predictedPathsCachePath(teamId);
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(cache, null, 2));
+  } catch (err) {
+    console.error(`[PredictedPaths] cannot persist cache for ${teamId}: ${err.message}`);
+  }
+}
+
+// A capped, best-effort sample of a repo's file tree via the GitHub API — the
+// "repo structure" half of the AC. Reuses `_flowGithubGetJson`, the SAME
+// GET-JSON hand the ticket ledger/anomaly sweeps already use, rather than a new
+// fetch primitive. Any failure (rate limit, empty repo, private submodule
+// weirdness) degrades to `[]`, which just means the LLM prompt loses its repo
+// listing — the issue text alone is still a usable prediction input.
+async function _fetchRepoTreeSample(repo, token) {
+  try {
+    const meta = await _flowGithubGetJson(`repos/${repo}`, token);
+    const branch = (meta && typeof meta.default_branch === "string" && meta.default_branch) || "main";
+    const tree = await _flowGithubGetJson(`repos/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`, token);
+    const entries = Array.isArray(tree && tree.tree) ? tree.tree : [];
+    return entries
+      .filter((e) => e && e.type === "blob" && typeof e.path === "string")
+      .map((e) => e.path)
+      .slice(0, predictedPaths.MAX_REPO_TREE_SAMPLE);
+  } catch {
+    return [];
+  }
+}
+
+// Predict one ticket's likely-touched paths: LLM-over-(issue+repo-tree) when
+// the team has an assist provider configured (`resolveAssistBindingForTeam`,
+// #1213 — reused verbatim, no new billing path), else the deterministic
+// heuristic (`predicted-paths.js#extractHeuristicPaths`) — the AC's own
+// "LLM ... or a heuristic". An LLM call that fails outright (network, no
+// binding, unparseable response) falls back to the heuristic rather than
+// reporting "no prediction", since the heuristic is always available and free.
+// Returns `{ paths, source }`; `paths` may legitimately be `[]` (advisory
+// miss — `selectAutoDispatch` treats that as "no extra restriction", D6).
+async function _predictTicketPaths(teamId, ticket, repoToken, repoTreeCache) {
+  const { repo, number, title } = ticket;
+  const token = repo ? repoToken.get(repo) : null;
+  let body = "";
+  if (repo && token && Number.isInteger(number)) {
+    try {
+      const obj = await _flowGithubGetJson(`repos/${repo}/issues/${number}`, token);
+      body = typeof obj?.body === "string" ? obj.body : "";
+    } catch {
+      body = "";
+    }
+  }
+  let repoTree = [];
+  if (repo && token) {
+    if (repoTreeCache.has(repo)) {
+      repoTree = repoTreeCache.get(repo);
+    } else {
+      repoTree = await _fetchRepoTreeSample(repo, token);
+      repoTreeCache.set(repo, repoTree);
+    }
+  }
+  const binding = resolveAssistBindingForTeam(teamId);
+  if (binding) {
+    try {
+      const prompt = predictedPaths.buildPredictionPrompt({ title, body, repoTree });
+      const text = await _synthesizeSkillMd(null, { messages: [{ role: "user", content: prompt }], max_tokens: 400 }, binding);
+      const parsed = text ? predictedPaths.parsePredictedPathsResponse(text) : null;
+      if (parsed !== null) return { paths: parsed, source: "llm" };
+    } catch (err) {
+      console.warn(`[PredictedPaths] ${teamId}: LLM prediction for ${ticket.ticketId} failed: ${err.message}`);
+    }
+  }
+  const heuristicPaths = predictedPaths.extractHeuristicPaths(`${title || ""}\n${body || ""}`);
+  return { paths: heuristicPaths, source: "heuristic" };
+}
+
+// Fill in any missing cache entry for the given (already-narrowed) candidates,
+// mutating `cache` in place and returning it. Bounded to `limit` NEW
+// predictions per sweep (oldest-first, matching dispatch order) so a large
+// backlog cannot turn one tick into an unbounded burst of LLM/GitHub calls —
+// once cached, a ticket never needs predicting again (see
+// `loadPredictedPathsCache`).
+const PREDICTED_PATHS_MAX_NEW_PER_TICK = 50;
+async function _ensurePredictedPaths(teamId, candidates, cache) {
+  const pending = candidates
+    .filter((t) => !cache[t.ticketId])
+    .sort((a, b) => (b.ageInStateMs || 0) - (a.ageInStateMs || 0))
+    .slice(0, PREDICTED_PATHS_MAX_NEW_PER_TICK);
+  if (pending.length === 0) return cache;
+  const { envIds } = _flowTeamMembers(teamId);
+  const repoToken = _flowRepoTokens(envIds);
+  const repoTreeCache = new Map();
+  for (const t of pending) {
+    try {
+      const { paths, source } = await _predictTicketPaths(teamId, t, repoToken, repoTreeCache);
+      cache[t.ticketId] = { paths, source, predictedAt: new Date().toISOString() };
+    } catch (err) {
+      console.warn(`[PredictedPaths] ${teamId}: prediction for ${t.ticketId} failed: ${err.message}`);
+      cache[t.ticketId] = { paths: [], source: "error", predictedAt: new Date().toISOString() };
+    }
+  }
+  return cache;
+}
+
+// Lifecycle states counted as "this epic already has active work" for
+// epic-serialization (D6/D10) — everything past `backlog` and short of `done`.
+// A ticket merely `backlog` has not been dispatched at all, so it cannot make
+// its own epic busy; `done` work no longer occupies anything.
+const FLOW_SUPERVISOR_ACTIVE_STATES = new Set(['ready', 'in-dev', 'in-review', 'rework', 'doc', 'mergeable']);
+
+/**
+ * One team's Flow Supervisor tick: auto-dispatch ready-but-undispatched pooled
+ * items up to the limit, oldest-first, epic-serialized, then run the two named
+ * remediation-ladder rows (re-fire an unclaimed dispatch — the same operation
+ * — and hand a `stale-base` PR back to its owner), each bounded to at most one
+ * action per (ticket, blocker) per window. Returns `null` when there is
+ * nothing this team opted into or nothing to do.
+ */
+async function flowSupervisorSweepTeam(teamId, { now = Date.now() } = {}) {
+  let teamCfg = null;
+  try {
+    teamCfg = loadAgentConfig(teamId);
+  } catch {
+    return null;
+  }
+  if (!teamCfg) return null;
+  const autoDispatch = teamCfg.autoDispatch && typeof teamCfg.autoDispatch === "object" ? teamCfg.autoDispatch : null;
+  if (!autoDispatch || autoDispatch.enabled !== true) return null;
+
+  const wipLimit = admissionControl.limitInForce(teamCfg.wipLimit);
+  if (wipLimit === null) return null; // §9: pooling (and its supervisor) piggyback on the flow's own wipLimit
+
+  // #2250 Phase 5: a role an operator paused/drained from the Flow Control
+  // board is excluded from AUTO-dispatch here — its ready-but-undispatched
+  // tickets simply sit, exactly as if `autoDispatch` never selected them.
+  // (A human can still force one through; see `forceDispatchHeld` below. The
+  // SDLC label path gets the same hold independently, in `routePooledDispatch`.)
+  const poolControl = loadPoolControl(teamId);
+  const pooledRoleIds = new Set(
+    _teamPooledRoles(teamId)
+      .filter((r) => agentPool.poolControlState(poolControl, agentPool.roleIdFromMemberId(r.id, teamId)) === 'running')
+      .map((r) => r.id),
+  );
+  if (pooledRoleIds.size === 0) return null; // nothing pooled (or running) — nothing for the supervisor to time
+
+  const windowMs = Number.isFinite(autoDispatch.actionWindowMs) && autoDispatch.actionWindowMs > 0
+    ? autoDispatch.actionWindowMs : FLOW_SUPERVISOR_DEFAULT_WINDOW_MS;
+
+  let ledger;
+  try {
+    ledger = await computeTeamTicketLedger(teamId, { now });
+  } catch (err) {
+    console.warn(`[FlowSupervisor] ${teamId}: ledger read failed: ${err.message}`);
+    return null;
+  }
+  const tickets = ledger.tickets || [];
+
+  // Every epic with active (non-backlog, non-done) work anywhere in the team —
+  // reserved BEFORE this pass picks anything, so a backlog ticket never fires
+  // alongside work already underway on the same epic (D6).
+  const busyEpicIds = tickets
+    .filter((t) => FLOW_SUPERVISOR_ACTIVE_STATES.has(t.state) && t.epicId != null)
+    .map((t) => t.epicId);
+
+  const pooledCandidates = tickets.filter((t) => t.ownerAgentId && pooledRoleIds.has(t.ownerAgentId));
+
+  // Phase 4 (#2249, D6): layered ON TOP of epic-serialization above, and ONLY
+  // when the team opted in — an unset/`'epic-serial'` policy never reads or
+  // writes the predicted-paths cache, never fetches an issue body, never calls
+  // an LLM (§9: "gated behind config; off by default").
+  const usePathContention = autoDispatch.contentionPolicy === flowSupervisor.CONTENTION_PREDICTED_PATHS;
+  let pathsCache = null;
+  let busyPathSets = [];
+  if (usePathContention) {
+    pathsCache = loadPredictedPathsCache(teamId);
+    const unclaimedCandidates = pooledCandidates.filter((t) => t.blocker === flowSupervisor.AUTO_DISPATCH_BLOCKER);
+    await _ensurePredictedPaths(teamId, unclaimedCandidates, pathsCache);
+    for (const t of unclaimedCandidates) {
+      t.predictedPaths = pathsCache[t.ticketId] ? pathsCache[t.ticketId].paths : [];
+    }
+    // Every ACTIVE ticket's already-cached prediction is "busy" — mirroring
+    // busyEpicIds above, but never itself triggers a new prediction: an active
+    // ticket was a candidate on some earlier tick (or predates this policy
+    // being turned on, in which case it simply imposes no path restriction).
+    busyPathSets = tickets
+      .filter((t) => FLOW_SUPERVISOR_ACTIVE_STATES.has(t.state) && pathsCache[t.ticketId])
+      .map((t) => pathsCache[t.ticketId].paths)
+      .filter((p) => Array.isArray(p) && p.length);
+  }
+
+  let budget = loadFlowSupervisorBudget(teamId);
+  const toDispatch = flowSupervisor.selectAutoDispatch({
+    candidates: pooledCandidates, busyEpicIds, budget, now, windowMs, limit: wipLimit,
+    contentionPolicy: autoDispatch.contentionPolicy, busyPathSets,
+  });
+  const toRework = flowSupervisor.selectStaleBaseRework({ candidates: pooledCandidates, budget, now, windowMs });
+
+  const firedKeys = [];
+  const dispatched = [];
+  for (const t of toDispatch) {
+    try {
+      const { listeners } = await wakeGithubLabelListeners({
+        repo: t.repo, number: t.number, kind: 'issue', label: t.lane,
+        actor: 'flow-supervisor', source: 'supervisor',
+      });
+      firedKeys.push(flowSupervisor.budgetKey(t.ticketId, flowSupervisor.AUTO_DISPATCH_BLOCKER));
+      dispatched.push({ ticketId: t.ticketId, listeners: listeners.length });
+      console.log(`[FlowSupervisor] ${teamId}: auto-dispatched ${t.ticketId} (+${t.lane}) → ${listeners.length} listener(s)`);
+    } catch (err) {
+      console.warn(`[FlowSupervisor] ${teamId}: auto-dispatch of ${t.ticketId} failed: ${err.message}`);
+    }
+  }
+
+  const reworked = [];
+  for (const t of toRework) {
+    try {
+      const note = `Flow Supervisor: ${t.ticketId} is stale-base (its PR text-merges cleanly but the base has moved since it branched) — please rebase.`;
+      const enqueued = enqueuePending(t.ownerAgentId, wakeAgent.buildWakeEntry({ from: 'flow-supervisor', note, teamId }));
+      if (enqueued !== false) {
+        const eventId = `flowsup:${crypto.randomBytes(6).toString('hex')}`;
+        const ghEvent = wakeAgent.buildWakeLogEvent({
+          producerId: 'flow-supervisor', targetId: t.ownerAgentId, note, eventId, now: new Date(now).toISOString(),
+        });
+        githubEventLog.record({
+          ...githubEventLog.buildEventEntry({
+            ghEvent, repoFullName: t.repo, key: wakeAgent.WAKE_EVENT_KEY,
+            outcomes: [{ agentId: t.ownerAgentId, triggerId: null, status: 'delivered', reason: null, digest: false }],
+          }),
+          source: 'supervisor',
+          emittedBy: 'flow-supervisor',
+          ...wakeAgent.buildWakeLogFields({ producerId: 'flow-supervisor', targetId: t.ownerAgentId, note }),
+        });
+        firedKeys.push(flowSupervisor.budgetKey(t.ticketId, flowSupervisor.REMEDIATION_STALE_BASE));
+        reworked.push(t.ticketId);
+        console.log(`[FlowSupervisor] ${teamId}: nudged ${t.ownerAgentId} to rework stale-base ${t.ticketId}`);
+      }
+    } catch (err) {
+      console.warn(`[FlowSupervisor] ${teamId}: stale-base nudge for ${t.ticketId} failed: ${err.message}`);
+    }
+  }
+
+  if (firedKeys.length) budget = flowSupervisor.recordFired(budget, firedKeys, now);
+  budget = flowSupervisor.pruneBudget(budget, now, windowMs);
+  saveFlowSupervisorBudget(teamId, budget);
+  if (usePathContention) savePredictedPathsCache(teamId, pathsCache);
+
+  return { teamId, dispatched, reworked };
+}
+
+// ============================================================
+// Agent Pools — Phase 3: the recurring-analysis binding (#2248, epic #2251;
+// design of record `docs/parallel-workers-concept.md` §6). Proves the pool
+// core is domain-neutral: no GitHub, no git-merge contention, no ticket
+// ledger, no admission lane — a pooled role opts in via `pool.workSource`
+// (`recurring-pool-source.js`'s `normalizeWorkSource`) naming the current N
+// work items and where their output artifacts land. This maintenance-gated
+// tick enumerates the list directly, reaps every instance whose item already
+// produced its output artifact (D4's "held until completion", this binding's
+// own completion signal — concept §6: "the run succeeded / the output
+// artifact exists"), then spawns the rest — skipping items already done this
+// cycle or already running (D11) — up to the concurrency limit (contention =
+// none, full parallelism up to the limit). Independent of Phase 2: no
+// `autoDispatch` involved.
+// ============================================================
+
+// Where a recurring item's completion artifact is expected to land — one file
+// per item, named after the item id, directly under the role's `outputDir`.
+// The spawned instance is responsible for actually writing it; this only
+// checks for its existence — the "already done this cycle?" / release signal.
+function _recurringOutputPath(outputDir, itemId) {
+  return path.join(outputDir, `${itemId}.json`);
+}
+
+function _recurringItemComplete(outputDir, itemId) {
+  try {
+    return fs.existsSync(_recurringOutputPath(outputDir, itemId));
+  } catch {
+    return false;
+  }
+}
+
+// The `input-copy` workspace binding (concept §6): a plain recursive copy of
+// `<inputDir>/<itemId>` into the instance's own `input/` dir — no VCS, no
+// branch, the non-git counterpart of D2's pull-on-demand git base. Best-effort,
+// mirroring every other seed step: a missing/unreadable source is a warning,
+// never a thrown seed failure.
+function _seedRecurringInput(dest, inputDir, itemId, warnings) {
+  if (!inputDir) {
+    warnings.push(`recurring input: no pool.workSource.inputDir configured for item ${itemId}`);
+    return;
+  }
+  const src = path.join(inputDir, itemId);
+  try {
+    if (!fs.existsSync(src)) {
+      warnings.push(`recurring input: no source found for item ${itemId} at ${src}`);
+      return;
+    }
+    fs.cpSync(src, path.join(dest, "input"), { recursive: true });
+  } catch (err) {
+    warnings.push(`recurring input copy for item ${itemId} failed: ${err.message}`);
+  }
+}
+
+/**
+ * One team's recurring-pool tick. Returns `null` when no pooled role on the
+ * team configured a `workSource` — i.e. every pooled role here is the SDLC
+ * binding (§5), which this function never touches (no GitHub call anywhere
+ * in this path).
+ */
+async function recurringPoolSweepTeam(teamId, { now = Date.now() } = {}) {
+  let teamCfg = null;
+  try {
+    teamCfg = loadAgentConfig(teamId);
+  } catch {
+    return null;
+  }
+  if (!teamCfg) return null;
+
+  const poolControl = loadPoolControl(teamId);
+  const reaped = [];
+  const dispatched = [];
+  for (const role of _teamPooledRoles(teamId)) {
+    const workSource = role.pool.workSource;
+    if (!workSource) continue; // this pooled role is the SDLC binding, not Phase 3
+
+    const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
+    const itemOfInstance = (instanceId) => {
+      try {
+        const cfg = loadAgentConfig(instanceId);
+        return cfg && cfg.poolItem != null ? String(cfg.poolItem) : null;
+      } catch {
+        return null;
+      }
+    };
+
+    // Release (D4): an item's own output artifact IS the completion signal —
+    // no ticket, no PR, no ledger. Reap first, so a just-completed slot is
+    // free for this same tick's dispatch pass below.
+    for (const instanceId of _liveInstanceIdsForRole(role.id)) {
+      const itemId = itemOfInstance(instanceId);
+      if (itemId == null || !_recurringItemComplete(workSource.outputDir, itemId)) continue;
+      console.log(`[AgentPool] ${teamId}: reaping ${instanceId} — item ${itemId} completed this cycle`);
+      await _internalSelfDelete(instanceId);
+      reaped.push(instanceId);
+    }
+
+    // #2250 Phase 5: paused/draining stops NEW dispatch only — the reap pass
+    // just above (D4-equivalent completion release) always runs, so a drained
+    // role's in-flight items still get torn down as they finish.
+    if (agentPool.poolControlState(poolControl, roleId) !== 'running') continue;
+
+    const stillLiveItemIds = _liveInstanceIdsForRole(role.id).map(itemOfInstance).filter((v) => v != null);
+    const completedItemIds = workSource.items.filter((item) => _recurringItemComplete(workSource.outputDir, item));
+
+    // D5: one team-wide concurrency limit governs unless the role's own
+    // `maxInstances` is tighter — the same precedence the SDLC binding's own
+    // admission lane applies. No limit configured anywhere is refused, not
+    // treated as unbounded (concept §6 caps at "the resource/rate limit" —
+    // it does not mean "no limit").
+    const teamLimit = admissionControl.limitInForce(teamCfg.wipLimit);
+    const limit = role.pool.maxInstances != null ? role.pool.maxInstances : teamLimit;
+    if (limit == null) {
+      console.warn(`[AgentPool] ${teamId}: ${role.id} has no wipLimit/maxInstances configured — refusing to dispatch`);
+      continue;
+    }
+
+    const toDispatch = recurringPoolSource.selectRecurringDispatch({
+      items: workSource.items, completedItemIds, existingItemIds: stillLiveItemIds, limit,
+    });
+    for (const itemId of toDispatch) {
+      const instanceId = agentPool.poolInstanceId(teamId, roleId, itemId);
+      try {
+        await spawnPoolInstance(teamId, role.cfg, instanceId, itemId, { repoFullName: null, directReworkRef: null });
+        dispatched.push(instanceId);
+        console.log(`[AgentPool] ${teamId}: recurring-dispatched ${instanceId} (item=${itemId})`);
+      } catch (err) {
+        console.warn(`[AgentPool] ${teamId}: recurring spawn of ${instanceId} failed: ${err.message}`);
+      }
+    }
+  }
+
+  return (reaped.length || dispatched.length) ? { teamId, reaped, dispatched } : null;
 }
 
 // ============================================================
@@ -3134,6 +3862,30 @@ function writeSeededSkills(id, manifest) {
   fs.writeFileSync(p, JSON.stringify(manifest, null, 2));
 }
 
+// The plugin sibling of SEEDED_SKILLS_FILE (#2308): records which plugin ids
+// a member's WORKSPACE actually carries (bin + config on disk), keyed by
+// pluginId → { scopeGranularity, seededAt }. The grant alone (`plugins[]` /
+// `pluginsOverride`) cannot tell whether a member's files were ever written —
+// that gap is the bug this manifest closes, mirroring seeded-skills.json's
+// role exactly. Written by `_syncPluginIntoWorkspace` on every successful
+// per-plugin write/remove; read by `reconcilePendingPlugins` (missing-entry
+// detection) and by `_reconcilePluginNetworks` (never attach a sidecar network
+// for a plugin the member has no config for).
+const SEEDED_PLUGINS_FILE = "seeded-plugins.json";
+
+function readSeededPlugins(id) {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(agentStateDir(id), SEEDED_PLUGINS_FILE), "utf8"));
+    return m && typeof m === "object" ? m : {};
+  } catch { return {}; }
+}
+
+function writeSeededPlugins(id, manifest) {
+  const p = path.join(agentStateDir(id), SEEDED_PLUGINS_FILE);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(manifest, null, 2));
+}
+
 // ── Custom slash-command provisioning (#1796) ──────────────────────────────
 // A granted skill may ship a `commands/*.md` subdir; those command files are
 // projected into the agent workspace's `.claude/commands/<namespace>/` so Claude
@@ -3259,6 +4011,27 @@ function writeSkillReconcileState(id, map) {
     const clean = map && typeof map === "object" ? map : {};
     // An empty map means every skill reconciled — drop the file so it leaves no
     // trace (and the overlay never reads a stale error).
+    if (Object.keys(clean).length === 0) { try { fs.rmSync(p, { force: true }); } catch { /* noop */ } return; }
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(clean, null, 2));
+  } catch { /* best effort */ }
+}
+
+// The plugin sibling of SKILL_RECONCILE_FILE (#2308) — same bounded
+// retry/backoff bookkeeping, keyed by pluginId instead of skill name.
+const PLUGIN_RECONCILE_FILE = "plugin-reconcile.json";
+
+function readPluginReconcileState(id) {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(agentStateDir(id), PLUGIN_RECONCILE_FILE), "utf8"));
+    return m && typeof m === "object" ? m : {};
+  } catch { return {}; }
+}
+
+function writePluginReconcileState(id, map) {
+  const p = path.join(agentStateDir(id), PLUGIN_RECONCILE_FILE);
+  try {
+    const clean = map && typeof map === "object" ? map : {};
     if (Object.keys(clean).length === 0) { try { fs.rmSync(p, { force: true }); } catch { /* noop */ } return; }
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, JSON.stringify(clean, null, 2));
@@ -3399,10 +4172,33 @@ function seedAgentWorkspace(id, env, opts = {}) {
   //    re-seed (AC5/D9): reset-to-stub wipes everything but config.json, and
   //    config.json is where the attachment lives, so the next activation
   //    re-clones it rather than leaving the prompt naming a missing directory.
+  // #2246 D2/D3: a pool INSTANCE's workspace binding rides in on `opts.pool`
+  // (the template's own normalized config plus the per-dispatch `reworkBranch`/
+  // `reworkRepo` `spawnPoolInstance` resolved, passed through unchanged by
+  // whichever caller is seeding it) — only "git-clean-base" wants pull-on-demand,
+  // and `reworkBranch` is `null` for ordinary new work (D3 never applies).
+  const poolWorkspace = opts.pool && opts.pool.workspace === "git-clean-base"
+    ? {
+      pullOnDemand: true,
+      baseBranch: opts.pool.baseBranch,
+      reworkBranch: opts.pool.reworkBranch || null,
+      reworkRepo: opts.pool.reworkRepo || null,
+    }
+    : undefined;
   const clones = [
-    ...cloneEnvironmentRepositories(dest, env, warnings),
+    ...cloneEnvironmentRepositories(dest, env, warnings, poolWorkspace),
     ...cloneAgentScopedRepositories(dest, env, (loadAgentConfig(id) || {}).agentRepositories, warnings),
   ];
+
+  // #2248 Phase 3 (concept §6): the recurring-analysis binding's "input-copy"
+  // workspace — the non-git counterpart of D2's pull-on-demand git base. No
+  // repo, no branch: a plain recursive copy of THIS item's own input into the
+  // instance's workspace. `none` deliberately never reaches this (a stateless
+  // task has a trivially clean start, concept Insight B); a role with no
+  // `workSource` configured (the SDLC binding) is unaffected.
+  if (opts.pool && opts.pool.workspace === "input-copy" && opts.pool.workSource && opts.poolItem != null) {
+    _seedRecurringInput(dest, opts.pool.workSource.inputDir, String(opts.poolItem), warnings);
+  }
 
   // 6. Shared team Knowledge Base working copy (Shared Agent Learning, Phase 1).
   //    Only when the autonomy dial is on (>= 1); best-effort, never fails the seed.
@@ -3565,13 +4361,18 @@ function seedAgentMcpServers(dest, mcpRefs, warnings) {
 
 // Clone every repository attached to an environment. Errors are pushed to the
 // shared warnings list so one failed clone never aborts the rest of the seed.
-function cloneEnvironmentRepositories(targetDir, env, warnings) {
+//
+// `poolWorkspace` (#2246, D2) is the pool instance's own workspace binding —
+// `{ pullOnDemand: true, baseBranch }` for a "git-clean-base" pooled role, else
+// `undefined` for every ordinary (non-pooled) seed, whose behaviour is
+// therefore byte-identical to before this option existed.
+function cloneEnvironmentRepositories(targetDir, env, warnings, poolWorkspace) {
   const repos = Array.isArray(env?.repositories) ? env.repositories : [];
   const results = [];
   for (const repo of repos) {
     if (!repo?.url) continue;
     try {
-      const info = cloneRepository(targetDir, repo, env?.githubTokenId || null, env?.id || null);
+      const info = cloneRepository(targetDir, repo, env?.githubTokenId || null, env?.id || null, poolWorkspace);
       if (info) results.push(info);
     } catch (err) {
       warnings.push(`git clone (${repo.url}): ${err.message}`);
@@ -3618,6 +4419,74 @@ function isUsableRepoCache(cacheDir) {
     return fs.existsSync(path.join(cacheDir, ".git", "HEAD"));
   } catch {
     return false;
+  }
+}
+
+// Pull-on-demand base refresh (#2246, D2): unlike the ordinary per-env cache
+// above (a stale one-time snapshot by design — good enough for a long-running
+// team member cloned once), a pooled instance is spawned fresh per ticket and
+// wants the base as current as the network allows. Immediately before a
+// pool-instance clone, `fetch` + `reset --hard` the cache in place — a delta,
+// not a full clone — then the ordinary `cpSync` below copies from it.
+//
+// A short freshness TTL coalesces a burst of instances spawned back to back
+// (concurrency governed by the team's wipLimit, so a burst is bounded) into
+// one real `fetch`; `reset --hard` is safe here specifically because the
+// cache directory is never itself a working agent (nothing commits into it).
+//
+// NOTE: this coalescing is only race-free because the whole refresh is
+// synchronous (`execFileSync`) — the timestamp is stamped after the blocking
+// fetch/reset completes, so a concurrent caller can never observe the map
+// mid-refresh. An async refactor here would reopen that race and needs a real
+// per-repo lock instead (the mechanism §4 D2 of the concept describes).
+const POOL_BASE_REFRESH_TTL_MS = Number(process.env.AEE_POOL_BASE_REFRESH_TTL_MS) || 30_000;
+const _poolBaseRefreshedAt = new Map(); // cacheDir → ms epoch of its last refresh
+
+function refreshRepoCacheIfStale(cacheDir, repository, envGithubTokenId, baseBranch) {
+  const now = Date.now();
+  const last = _poolBaseRefreshedAt.get(cacheDir) || 0;
+  if (now - last < POOL_BASE_REFRESH_TTL_MS) return;
+  // `baseBranch` is operator-configured (the role's `pool.baseBranch`), but
+  // `repository.branch` is a Working Environment field editable by any Team
+  // Admin — neither is safe to hand `git` unvalidated (CodeQL
+  // js/second-order-command-line-injection: git's own option parser treats
+  // any argument starting with "-" as a flag regardless of position, e.g. a
+  // branch literally named "--upload-pack=<cmd>"). Refused INSIDE the try,
+  // right next to the sink it would otherwise reach, and left to the
+  // existing catch below — never a thrown error the caller sees, since a
+  // misconfigured branch name here must not break the whole pull-on-demand
+  // cache refresh.
+  const branch = baseBranch || repository.branch || null;
+  try {
+    // Defense in depth (CodeQL js/second-order-command-line-injection): git's
+    // own option parser treats any argument starting with "-" as a flag
+    // regardless of position (e.g. a branch literally named
+    // "--upload-pack=<cmd>"). Refused right next to the sink and left to the
+    // existing catch below — a misconfigured branch name must not throw out to
+    // the caller, since a delayed refresh is the whole point of a cache.
+    if (typeof branch === "string" && branch.startsWith("-")) {
+      throw new Error(`refusing unsafe-looking branch '${branch}'`);
+    }
+    const env = repoGitCredentials(repository, envGithubTokenId);
+    // Fetch ALL of origin's refs rather than passing the (user-controlled)
+    // branch as a git argument at all: the branch is only ever consumed below
+    // as the constant-prefixed `origin/<branch>` reset target, which git can
+    // never parse as an option, so no tainted value reaches a `git` argv here.
+    // This is strictly more robust than a "--" end-of-options marker (which
+    // CodeQL does not model as a barrier for `git fetch`, and which a spread of
+    // it here confused its guard→sink tracing besides), and it matches the
+    // default refspec of the `git clone` this cache is copied from anyway.
+    execFileSync("git", ["fetch", "origin"], {
+      cwd: cacheDir, env, stdio: "pipe", timeout: 60_000,
+    });
+    const ref = branch ? `origin/${branch}` : "origin/HEAD";
+    execFileSync("git", ["reset", "--hard", ref], { cwd: cacheDir, env, stdio: "pipe", timeout: 30_000 });
+    _poolBaseRefreshedAt.set(cacheDir, now);
+    console.log(`[AgentPool] refreshed base cache ${cacheDir} (${ref})`);
+  } catch (err) {
+    // Fall through to the existing (possibly stale) snapshot rather than
+    // failing the spawn — a delayed refresh is the whole point of a cache.
+    console.warn(`[AgentPool] base refresh for ${cacheDir} failed (${err.message}); using existing snapshot`);
   }
 }
 
@@ -3694,12 +4563,67 @@ function repoGitCredentials(repository, envGithubTokenId = null) {
   return env;
 }
 
-function cloneRepository(targetDir, repository, envGithubTokenId = null, envId = null) {
+// D3 (#2246): does `poolWorkspace`'s resolved rework target apply to THIS
+// repository? Unconditional (applies) when the dispatch couldn't resolve
+// which repo the PR belongs to (`reworkRepo` unset — the common single-repo
+// SDLC team), otherwise matched by full name so a multi-repo environment
+// never checks out a PR's branch in the wrong checkout.
+function _poolReworkAppliesTo(repository, poolWorkspace) {
+  if (!poolWorkspace || !poolWorkspace.reworkBranch) return false;
+  if (!poolWorkspace.reworkRepo) return true;
+  const { parseRepoFullName } = require("./github-poller");
+  const { githubApiBase, DEFAULT_GITHUB_API_BASE } = require("./github-api-base");
+  const allowNonGithubHost = githubApiBase() !== DEFAULT_GITHUB_API_BASE;
+  return parseRepoFullName(repository?.url, { allowNonGithubHost }) === poolWorkspace.reworkRepo;
+}
+
+// D3: point an already-cloned/copied working tree at the existing PR's head
+// branch instead of whatever base branch it was seeded on. Throws on failure
+// (never silently degrades to base) — a rework instance silently working
+// against clean main is precisely the bug this exists to close, and a failed
+// fetch/checkout means the caller's seed should fail loudly, not proceed on
+// the wrong branch.
+function _checkoutReworkBranch(repoDir, repository, envGithubTokenId, branch) {
+  // Defense in depth (CodeQL js/second-order-command-line-injection): both
+  // callers already validate via `agentPool.isSafeGitRef` before a branch
+  // ever becomes a "resolved rework ref", but this function is the one place
+  // that actually hands the value to `git`, so it refuses again rather than
+  // trusting every present and future caller to have checked. Inlined
+  // literally rather than delegated to `agentPool.isSafeGitRef` — CodeQL's
+  // sanitizer recognition for this query does not trace through a call into
+  // another module (see `refreshRepoCacheIfStale` for the same finding).
+  if (typeof branch !== "string" || branch.length === 0 || branch.startsWith("-")) {
+    throw new Error(`refusing to check out unsafe-looking ref '${branch}'`);
+  }
+  const env = repoGitCredentials(repository, envGithubTokenId);
+  try {
+    // The "--" end-of-options marker is safe on `fetch` (which takes no
+    // pathspec for "--" to collide with), but deliberately NOT on the checkout
+    // below: `git checkout`'s own grammar gives "--" a DIFFERENT meaning
+    // (revision-vs-pathspec disambiguation), so adding one before the
+    // start-point would make git treat it as a file to restore rather than a
+    // ref. Unlike refreshRepoCacheIfStale — which can fetch all of origin and
+    // pick the branch out via a constant-prefixed reset ref — rework must fetch
+    // this specific branch, so the value does reach the argv here; the
+    // `startsWith("-")` refusal above is what actually closes the injection
+    // vector, on both this fetch and the `-B <branch>` checkout, by rejecting
+    // any value git could parse as an option in the first place.
+    execFileSync("git", ["fetch", "origin", "--", branch], { cwd: repoDir, env, stdio: "pipe", timeout: 120_000 });
+    execFileSync("git", ["checkout", "-B", branch, `origin/${branch}`], { cwd: repoDir, env, stdio: "pipe", timeout: 60_000 });
+    console.log(`[AgentPool] ${repoDir}: checked out rework branch ${branch} (D3)`);
+  } catch (err) {
+    const stderr = (err.stderr || "").toString();
+    throw new Error(`rework checkout of '${branch}' failed: ${stderr.substring(0, 400) || err.message}`);
+  }
+}
+
+function cloneRepository(targetDir, repository, envGithubTokenId = null, envId = null, poolWorkspace = undefined) {
   const { url, branch } = repository;
   if (!url) return null;
 
   const repoName = (url.split("/").pop() || "repo").replace(/\.git$/, "");
   const repoDir = path.join(targetDir, repoName);
+  const reworkBranch = _poolReworkAppliesTo(repository, poolWorkspace) ? poolWorkspace.reworkBranch : null;
 
   if (fs.existsSync(repoDir)) {
     console.log(`[Orchestrator] Repo dir already exists: ${repoDir} — skipping clone`);
@@ -3710,15 +4634,30 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null, envId =
   // we can copy that working tree instead of running `git clone` again.
   const cacheDir = envRepoCachePath(envId, repoName);
   if (isUsableRepoCache(cacheDir)) {
+    // #2246 D2: a pool instance's "git-clean-base" binding refreshes the
+    // shared cache in place (fetch + reset --hard) before copying from it, so
+    // its clean start is as current as the network allows rather than the
+    // ordinary cache's one-time snapshot.
+    if (poolWorkspace && poolWorkspace.pullOnDemand) {
+      refreshRepoCacheIfStale(cacheDir, repository, envGithubTokenId, poolWorkspace.baseBranch);
+    }
+    let copiedFromCache = false;
     try {
       fs.cpSync(cacheDir, repoDir, { recursive: true });
+      copiedFromCache = true;
       console.log(`[Orchestrator] Copied ${repoName} from env cache → ${repoDir}`);
-      return { repoName, skipped: false, fromCache: true };
     } catch (err) {
       // Fall through to a fresh clone if the copy fails — the cache may be
       // corrupted or hit a permission edge case. Don't let the optimisation
       // fail seeding outright.
       console.warn(`[Orchestrator] Cache copy for ${repoName} failed (${err.message}); falling back to git clone`);
+    }
+    if (copiedFromCache) {
+      // Deliberately OUTSIDE the try above and left to throw uncaught: a
+      // rework-checkout failure must fail the seed, never fall through to a
+      // fresh clone that would silently reproduce the bug D3 exists to close.
+      if (reworkBranch) _checkoutReworkBranch(repoDir, repository, envGithubTokenId, reworkBranch);
+      return { repoName, skipped: false, fromCache: true };
     }
   }
 
@@ -3746,10 +4685,17 @@ function cloneRepository(targetDir, repository, envGithubTokenId = null, envId =
     throw new Error(`git clone failed: ${msg}`);
   }
 
+  if (reworkBranch) _checkoutReworkBranch(repoDir, repository, envGithubTokenId, reworkBranch);
+
   // Seed the env-level cache so the next member in the same env can skip
   // the network round-trip. Failure here is non-fatal: subsequent members
   // simply re-clone instead of copying.
-  if (cacheDir) {
+  //
+  // A rework checkout is DELIBERATELY never cached: the cache exists to give
+  // siblings a clean-base starting point, and seeding it from a PR's head
+  // branch would hand the next NEW-work dispatch someone else's in-progress
+  // branch instead of clean main.
+  if (cacheDir && !reworkBranch) {
     try {
       fs.mkdirSync(path.dirname(cacheDir), { recursive: true });
       if (!fs.existsSync(cacheDir)) {
@@ -3774,6 +4720,69 @@ function listWorkspaceClones(workspace) {
       .map((e) => e.name);
   } catch {
     return [];
+  }
+}
+
+// D8's graceful teardown (#2246, epic #2251 Phase 1): before a pooled
+// instance's workspace is wiped, commit + push whatever partial work it left
+// and archive its session transcript to a team-level, git-committed-adjacent
+// archive dir. Runs on the host filesystem exactly the way `cloneRepository`
+// itself does — the workspace is a plain directory on the shared volume,
+// no container exec needed (per-agent-volume-isolated deployments are a known
+// follow-up, flagged rather than silently unhandled: the commit/push step
+// below reads nothing that isolation would hide, since it runs host-side
+// against the SAME path `agentDir()` always resolves).
+//
+// Best-effort throughout, on purpose: a pool instance is torn down because its
+// TICKET already finished (or timed out) — a flush failure must never turn a
+// completed unit of work into a stuck delete.
+async function gracefulPoolTeardown(id, cfg) {
+  const workspace = agentDir(id);
+  const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  const declaredRepos = Array.isArray(env?.repositories) ? env.repositories : [];
+
+  for (const repoName of listWorkspaceClones(workspace)) {
+    const repoPath = path.join(workspace, repoName);
+    try {
+      const status = execFileSync("git", ["status", "--porcelain"], {
+        cwd: repoPath, stdio: ["ignore", "pipe", "pipe"], timeout: 10_000,
+      }).toString();
+      if (status.trim()) {
+        execFileSync("git", ["add", "-A"], { cwd: repoPath, stdio: "pipe", timeout: 10_000 });
+        execFileSync("git", ["commit", "-m", `chore(pool): partial work from ${id} before teardown`], {
+          cwd: repoPath, stdio: "pipe", timeout: 10_000,
+        });
+      }
+      // Only a declared repository carries the credentials a push needs — an
+      // agent-scoped repo (#2067) or a cache-copy oddity with no matching
+      // declaration is committed above but left unpushed, same as a repo whose
+      // credentials have since been rotated away would be.
+      const repoCfg = declaredRepos.find(
+        (r) => r && (r.url.split("/").pop() || "").replace(/\.git$/, "") === repoName,
+      );
+      if (!repoCfg) continue;
+      const gitEnv = repoGitCredentials(repoCfg, env?.githubTokenId || null);
+      execFileSync("git", ["push"], { cwd: repoPath, env: gitEnv, stdio: "pipe", timeout: 30_000 });
+    } catch (err) {
+      console.warn(`[AgentPool] ${id}: could not commit/push ${repoName} before teardown: ${err.message}`);
+    }
+  }
+
+  // Archive the session transcript so the work log survives the wipe even
+  // though the PR/ledger/event log already do (concept §4/§8: "otherwise the
+  // actual work log dies with the container"). Retention (pool.teardown.
+  // retainLogsMs) is a later pruning pass, same as anomaly-history's own
+  // retention job — Phase 1 just copies.
+  try {
+    const seg = knowledgeFeed.safeTeamSegment(cfg.parentTeamId || "");
+    const sessionsDir = agentStatePath(id, "sessions");
+    if (seg && fs.existsSync(sessionsDir)) {
+      const archiveDir = path.join(HILL_CLIMB_TEAMS_DIR, seg, "pool-archive", id, "sessions");
+      fs.mkdirSync(path.dirname(archiveDir), { recursive: true });
+      fs.cpSync(sessionsDir, archiveDir, { recursive: true });
+    }
+  } catch (err) {
+    console.warn(`[AgentPool] ${id}: session-log archive failed: ${err.message}`);
   }
 }
 
@@ -4241,6 +5250,106 @@ async function setDisplayName(token, userId, displayName) {
   );
 }
 
+// Eagerly provision an agent's 1:1 DM room at spawn time (#2251).
+//
+// The DM room — and its `dm-room.json` pointer — is normally created LAZILY by
+// the admin console the first time a human opens the agent's chat
+// (`ensureAgentDmRoom` in admin-console/api/matrix.js). That is fine for an
+// agent a human talks to, but an autonomously spawned pool instance has nobody
+// opening its chat: its inherited github-event kickoff trigger fires seconds
+// after boot, and the container's `_execute_inner` HARD-SKIPS any triggered run
+// when no room exists yet ("Trigger … skipped: no roomId and no DM room exists
+// yet" — agent-entrypoint.py). The instance would spawn, match its trigger, and
+// then do nothing: an empty session.
+//
+// So for a pool instance we create the room HERE, before the container boots,
+// with the AGENT's own token, inviting + joining the admin exactly as the admin
+// console does — so the pointer already on disk is the SAME room the admin
+// console reuses when a human later opens the chat (its `ensureAgentDmRoom`
+// short-circuits on an existing room the admin is still joined to). The
+// container's start() runs one `_sync()` (which pulls `dm-room.json` when
+// isolated) BEFORE it starts the pending-drain loop, so the kickoff trigger
+// posts to a real room instead of being skipped.
+//
+// Best-effort: a Matrix hiccup here must never fail the spawn — the lazy
+// admin-console path remains the fallback (the run just skips until then, i.e.
+// the pre-fix behaviour). Returns a small result object for the caller to log.
+async function provisionAgentDmRoom(agentId, agentToken, displayName) {
+  if (!agentToken) return { ok: false, reason: "no-agent-token" };
+  if (!HOMESERVER || !CONDUWUIT_ADMIN_TOKEN) return { ok: false, reason: "matrix-not-configured" };
+  // Path-injection guard for the dm-room.json write below (mirrors matrix.js).
+  if (!AGENT_ID_RE.test(agentId)) return { ok: false, reason: "invalid-agent-id" };
+
+  const dmPath = path.join(agentDir(agentId), "dm-room.json");
+  // Idempotent: never clobber an existing pointer (e.g. a reused instance).
+  if (fs.existsSync(dmPath)) return { ok: true, reused: true };
+
+  const matrixCall = async (token, apiPath, body) => {
+    const headers = { Authorization: `Bearer ${token}` };
+    let payload;
+    if (body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      payload = JSON.stringify(body);
+    }
+    const resp = await fetch(`${HOMESERVER}${apiPath}`, {
+      method: body !== undefined ? "POST" : "GET",
+      headers,
+      body: payload,
+    });
+    const text = await resp.text();
+    let data = null;
+    if (text) { try { data = JSON.parse(text); } catch { data = text; } }
+    return { status: resp.status, data };
+  };
+
+  // Resolve the admin user id (owner of CONDUWUIT_ADMIN_TOKEN) so the human is
+  // invited into the same room the admin console would reuse. Conduwuit serves
+  // whoami at the legacy r0 path; v3 may 405 — try both (mirrors matrix.js).
+  let adminUserId = process.env.ADMIN_USER_ID || "@admin:local";
+  for (const p of [
+    "/_matrix/client/v3/account/whoami",
+    "/_matrix/client/r0/account/whoami",
+  ]) {
+    try {
+      const r = await matrixCall(CONDUWUIT_ADMIN_TOKEN, p);
+      if (r.status === 200 && r.data?.user_id) { adminUserId = r.data.user_id; break; }
+    } catch { /* try next path */ }
+  }
+
+  // Create the room AS THE AGENT, inviting the admin (human) — a 1:1 direct chat.
+  let createResp;
+  try {
+    createResp = await matrixCall(agentToken, "/_matrix/client/v3/createRoom", {
+      preset: "trusted_private_chat",
+      invite: [adminUserId],
+      is_direct: true,
+      name: `DM with ${displayName || agentId}`,
+    });
+  } catch (err) {
+    return { ok: false, reason: `createRoom error: ${err.message}` };
+  }
+  const roomId = createResp.status < 400 ? createResp.data?.room_id : null;
+  if (!roomId) return { ok: false, reason: `createRoom HTTP ${createResp.status}` };
+
+  // Admin (human) accepts the invite. We hold a token, not a syncing client, so
+  // no auto-join happens — POST /join explicitly (mirrors ensureAgentDmRoom).
+  try {
+    await matrixCall(
+      CONDUWUIT_ADMIN_TOKEN,
+      `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/join`,
+      {},
+    );
+  } catch { /* non-fatal: the admin can still join on chat-open */ }
+
+  // Persist the pointer the agent reads. Atomic tmp+rename, same shape/format
+  // as matrix.setAgentDmRoom so the admin console reuses it verbatim.
+  const dm = { roomId, createdAt: new Date().toISOString(), createdBy: adminUserId };
+  const tmp = dmPath + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(dm, null, 2));
+  fs.renameSync(tmp, dmPath);
+  return { ok: true, roomId };
+}
+
 // ============================================================
 // Per-human Matrix identity (#1458, epic #2076 P1)
 // ============================================================
@@ -4387,7 +5496,7 @@ const CLAUDE_HOME_AGENT_DIR = "/root/.claude";
 // HOME=/workspace/agents/<id>, so the image-baked /root/.ssh/config is never
 // read). The config carries the github.com -> ssh.github.com:443 routing that
 // corporate networks blocking outbound TCP 22 require.
-function materializeAgentSshKey(id, env, childEnv) {
+function materializeAgentSshKey(id, env, childEnv, cfg) {
   delete childEnv.GIT_SSH_COMMAND;
 
   const orchSshDir = path.join(CLAUDE_HOME_ORCH_DIR, "homes", id, ".ssh");
@@ -4399,7 +5508,15 @@ function materializeAgentSshKey(id, env, childEnv) {
   const agentKnownHosts = path.join(agentSshDir, "known_hosts");
 
   const repos = Array.isArray(env?.repositories) ? env.repositories : [];
-  const sshKeyId = repos.find((r) => r && r.sshKeyId)?.sshKeyId;
+  const sharedSshKeyId = repos.find((r) => r && r.sshKeyId)?.sshKeyId;
+  // Baseline resolution (#2177/#2212, epic #2166 B5) — mirrors the GH_TOKEN
+  // bake above: prefer the team's current team-admin's personal SSH key over
+  // the environment's raw shared deploy key, so a directly-run `git`/`gh`
+  // SSH transport (clone, fetch, and any push that bypasses the
+  // `gh-as-agent` convention) isn't left on the shared secret the GitHub-
+  // token half was fixed for. No owner/no personal key degrades to the exact
+  // pre-existing `sharedSshKeyId` — no data migration needed.
+  const sshKeyId = resolveBaselineSshKeyId(cfg, sharedSshKeyId);
   if (!sshKeyId) {
     // No key for this env — make sure no stale identity lingers from a prior
     // spawn under a different (key-bearing) environment.
@@ -4519,17 +5636,109 @@ function loadSshKeyIndex() {
 // never refuses (which is every agent today), while an owner whose personal
 // token is present-but-unusable still refuses. See the header comment in
 // `credential-resolution.js` for why the switch had to move.
-function resolveAttributedGithubToken(id, env, operation) {
+// The live-user gate for the personal tier (#2138 AC6). Built fresh per call
+// from the user index — a credential must stop resolving the moment its owner
+// is deleted, so a cached gate would just reintroduce the window this closes.
+// `buildLiveUserGate` reports `known: false` for an empty/unreadable index and
+// every consumer then behaves exactly as it did before the gate existed.
+function loadLiveUserGate() {
+  try {
+    return credentialResolution.buildLiveUserGate(teamsStore.listUsers());
+  } catch (err) {
+    console.warn(`[Orchestrator] could not read the user index for the personal-credential owner check: ${err.message}`);
+    return credentialResolution.buildLiveUserGate(null);
+  }
+}
+
+// Resolve which platform user is "acting" for this run (#2175, epic #2166
+// B3), from the raw Matrix sender id `gh-as-agent` forwarded (via
+// AEE_ACTING_SENDER, itself set by agent-entrypoint.py only for a live chat
+// turn — see docs/multi-user-concept.md). Reuses the same lookup
+// enrichUsageRecord already does for cost attribution (#2137): a human's
+// `matrixUserId` is stamped on their user record at Matrix-identity
+// provisioning (#1458), so this is the one hop from "who sent the message"
+// to a stable account id. Returns null for an autonomous run (no sender at
+// all), for a sender that resolves to nobody (deleted/never-provisioned), and
+// — #2187 review finding — for a sender who resolves to a REAL platform user
+// with no legitimate relationship to THIS agent. All three fall through to
+// the static `resolveAgentOwnerId`, unchanged.
+//
+// WHY THE THIRD CASE IS NEEDED: `AEE_ACTING_SENDER` is set once into the
+// Claude subprocess's environment for a live chat turn, but for the rest of
+// that run it is just an ordinary env var — any Bash tool call the agent
+// makes (potentially steered by content it read, e.g. a prompt injection in
+// an issue or file) can overwrite it before calling `gh-as-agent`, which
+// forwards whatever value is currently present with no signature or binding
+// to the real triggering Matrix event. Trusting the resolved user
+// unconditionally would let a compromised or misdirected agent pick an
+// ARBITRARY platform user's personal GitHub token / SSH key for a write —
+// this codebase already treats a self-asserted identity in a request body as
+// never being authentication on its own (`wake-agent.js`'s producer-id
+// cross-check against the caller's real team, #2030, is the precedent). The
+// actual boundary check — `credentialResolution.isActingSenderTrusted` — is
+// a pure, unit-tested function (`credential-resolution.test.js`): its own team's
+// members for a team-bound agent, or its own owner for a standalone one. That
+// closes cross-team (and, for a standalone agent, cross-owner) impersonation;
+// it does not make the claim unforgeable within that boundary, which would
+// need a signed, per-run claim the container cannot re-mint — a larger,
+// separate hardening step (see the #2187 review discussion).
+function resolveActingSenderUserId(actingSenderMatrixId, cfg) {
+  if (!actingSenderMatrixId) return null;
+  let knownUsers = [];
+  try {
+    knownUsers = teamsStore.listUsers();
+  } catch {
+    knownUsers = [];
+  }
+  const userId = usageAttribution.userIdForMatrixId(knownUsers, actingSenderMatrixId);
+  if (!userId) return null;
+  const hasMembership = (teamId, uid) => {
+    try {
+      return teamsStore.listMemberships({ teamId, userId: uid }).length > 0;
+    } catch {
+      return false;
+    }
+  };
+  return credentialResolution.isActingSenderTrusted(cfg, userId, hasMembership) ? userId : null;
+}
+
+// The `{ users, memberships }` snapshot `resolveBaselineOwnerId` (#2176, epic
+// #2166 B4) needs to find a team's CURRENT `team-admin`. Loaded fresh per call
+// like `loadLiveUserGate` — a succession must be picked up on the very next
+// run, not cached — and fails open to empty arrays, which
+// `resolveBaselineOwnerId` already degrades gracefully from (falls back to the
+// static owner, exactly the pre-B4 answer).
+function loadBaselineDeps() {
+  try {
+    return { users: teamsStore.listUsers(), memberships: teamsStore.listMemberships() };
+  } catch (err) {
+    console.warn(`[Orchestrator] could not read users/memberships for the team-admin baseline: ${err.message}`);
+    return { users: [], memberships: [] };
+  }
+}
+
+function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) {
   const cfg = loadAgentConfig(id) || {};
-  const ownerId = credentialResolution.resolveAgentOwnerId(cfg, loadAgentConfig);
-  const personal = credentialResolution.findPersonalCredentialState(loadGithubTokenIndex(), ownerId);
+  const actingSenderUserId = resolveActingSenderUserId(actingSenderMatrixId, cfg);
+  // Interactive = a live chat turn whose sender resolved to a real, TRUSTED
+  // platform user (#2176 B4). An unresolvable/unprovisioned/untrusted sender —
+  // like an autonomous trigger — takes the non-refusing baseline path; we
+  // cannot justify refusing a write "in the name of" a human we cannot
+  // identify or vouch for.
+  const interactive = actingSenderUserId != null;
+  const ownerId = credentialResolution.resolveEffectiveOwnerId(
+    cfg, loadAgentConfig, actingSenderUserId, loadBaselineDeps());
+  const personal = credentialResolution.findPersonalCredentialState(
+    loadGithubTokenIndex(), ownerId, undefined, loadLiveUserGate());
   const decision = credentialResolution.resolveCredential({
     operation,
     ownerId,
     personalCredential: personal.entry,
     personalCredentialPresent: personal.present,
+    personalCredentialOrphaned: personal.orphaned,
     sharedCredentialId: env?.githubTokenId || null,
     kind: "GitHub token",
+    interactive,
   });
   if (decision.refuse) {
     const e = new Error(decision.refuse.message);
@@ -4538,6 +5747,111 @@ function resolveAttributedGithubToken(id, env, operation) {
     throw e;
   }
   return { githubTokenId: decision.credentialId };
+}
+
+// SSH-key sibling of `resolveAttributedGithubToken` (#2175 B3) — the "SSH
+// equivalent" the ticket names. `_buildAgentGitEnv`'s `overrides.sshKeyId` seam
+// has existed since #1569 but nothing ever populated it, so an attributed SSH
+// push always ran under the environment's shared deploy key regardless of who
+// triggered it. `sharedSshKeyId` is the specific repo's own key (the caller has
+// already resolved which repo this push targets) — not "any key somewhere on
+// the environment".
+function resolveAttributedSshKey(id, sharedSshKeyId, operation, actingSenderMatrixId) {
+  const cfg = loadAgentConfig(id) || {};
+  const actingSenderUserId = resolveActingSenderUserId(actingSenderMatrixId, cfg);
+  const interactive = actingSenderUserId != null;
+  const ownerId = credentialResolution.resolveEffectiveOwnerId(
+    cfg, loadAgentConfig, actingSenderUserId, loadBaselineDeps());
+  const personal = credentialResolution.findPersonalCredentialState(
+    loadSshKeyIndex(), ownerId, undefined, loadLiveUserGate());
+  const decision = credentialResolution.resolveCredential({
+    operation,
+    ownerId,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
+    personalCredentialOrphaned: personal.orphaned,
+    sharedCredentialId: sharedSshKeyId || null,
+    kind: "SSH key",
+    interactive,
+  });
+  if (decision.refuse) {
+    const e = new Error(decision.refuse.message);
+    e.personalCredentialRequired = true;
+    e.refusalCode = decision.refuse.code;
+    throw e;
+  }
+  return { sshKeyId: decision.credentialId };
+}
+
+// The BASELINE GitHub-token resolver (#2177, epic #2166 B5) — re-interprets
+// `env.githubTokenId` from "the shared team token" to a pointer at the
+// team's current team-admin's personal credential, for the one
+// non-interactive, non-attributed call site this ticket wires: the
+// container's spawn-time GH_TOKEN/GITHUB_TOKEN bake (`startAgentProcess`
+// below). Unlike `resolveAttributedGithubToken` there is no acting sender
+// (a spawn is not a chat turn) and `operation` is always OUTSIDE
+// `ATTRIBUTED_OPERATIONS`, so `resolveCredential` can never refuse — a
+// container that fails to spawn over a missing personal credential would be
+// a far worse outage than the shared secret it replaces. `cfg` may be
+// `null`/incomplete (a not-yet-persisted config at first creation): with no
+// owner to resolve, this degrades to the environment's raw `githubTokenId`,
+// byte-identical to pre-#2177 behaviour — the "migrate existing bindings"
+// half needs no data migration at all, only this resolution change.
+//
+// Deliberately NOT wired (yet) into the other ~40 direct `env.githubTokenId`
+// reads B4's own scope note named (agent-creation seeding clone, the
+// poller's per-repo token pick, `cloneRepository`, the KB checkout, the
+// repo-check probe, ticket binding, …): those are read/clone/poll-shaped
+// operations that already never refuse under `resolveCredential`'s existing
+// rules, several (the poller especially) have no per-agent/team context to
+// resolve a baseline owner from at all without a larger reverse-mapping
+// change, and rewiring all of them in one pass is exactly the "doing it
+// piecemeal risks regressing the seeding/clone paths every agent depends
+// on" risk B4's own scope note called out. Flagged here rather than
+// guessed, for a follow-up ticket to pick up.
+function resolveBaselineGithubTokenId(cfg, env) {
+  const sharedCredentialId = env?.githubTokenId || null;
+  if (!cfg) return sharedCredentialId;
+  const ownerId = credentialResolution.resolveBaselineOwnerId(cfg, { loadAgentConfig, ...loadBaselineDeps() });
+  const tokenIndex = loadGithubTokenIndex();
+  const liveUserGate = loadLiveUserGate();
+  const personal = credentialResolution.findPersonalCredentialState(tokenIndex, ownerId, undefined, liveUserGate);
+  const decision = credentialResolution.resolveCredential({
+    operation: "spawn",
+    ownerId,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
+    personalCredentialOrphaned: personal.orphaned,
+    sharedCredentialId,
+    kind: "GitHub token",
+  });
+  return decision.credentialId || null;
+}
+
+// SSH-key sibling of `resolveBaselineGithubTokenId` (#2212 review finding —
+// the issue's own AC names "`env.githubTokenId` (and per-repo `sshKeyId`)"
+// together, but the shipped PR only wired the GitHub-token half). Same
+// composition, same non-refusing `operation: "spawn"`, same graceful
+// cfg-less/unowned degradation to the environment's raw shared key — the only
+// difference is the credential kind and index. `sharedSshKeyId` is the
+// specific repo key `materializeAgentSshKey` already picked (today: the
+// first repo carrying one), not "any key somewhere on the environment".
+function resolveBaselineSshKeyId(cfg, sharedSshKeyId) {
+  if (!cfg) return sharedSshKeyId || null;
+  const ownerId = credentialResolution.resolveBaselineOwnerId(cfg, { loadAgentConfig, ...loadBaselineDeps() });
+  const keyIndex = loadSshKeyIndex();
+  const liveUserGate = loadLiveUserGate();
+  const personal = credentialResolution.findPersonalCredentialState(keyIndex, ownerId, undefined, liveUserGate);
+  const decision = credentialResolution.resolveCredential({
+    operation: "spawn",
+    ownerId,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
+    personalCredentialOrphaned: personal.orphaned,
+    sharedCredentialId: sharedSshKeyId || null,
+    kind: "SSH key",
+  });
+  return decision.credentialId || null;
 }
 
 // ── Shared team Knowledge Base (Shared Agent Learning, Phase 1) ──────────────
@@ -7382,7 +8696,8 @@ async function _execRepo(cmd, args, { cwd, env, timeout = 30_000 }) {
 }
 
 // Push the agent's committed work. `body` = { repo?, branch?, remote?,
-// setUpstream? }. Throws caller-facing Errors (safe to return over the API).
+// setUpstream?, actingSender? }. Throws caller-facing Errors (safe to return
+// over the API).
 async function agentGitPush(id, env, body = {}) {
   const repo = agentGitOps.resolveAgentRepo({
     repositories: env?.repositories,
@@ -7390,7 +8705,18 @@ async function agentGitPush(id, env, body = {}) {
     agentWorkspace: agentDir(id),
   });
   const req = agentGitOps.normalizePushRequest(body);
-  const gitEnv = _buildAgentGitEnv(id, repo, env);
+  // #1569/#2175: a push is an attributed write — resolve the owner's personal
+  // credential (personal → team → system), keyed on the acting human for an
+  // interactive run (B3) or the static config owner otherwise. Only the
+  // credential this push's transport actually uses is resolved/overridden;
+  // the other stays whatever `_buildAgentGitEnv` would already fall back to.
+  const overrides = {};
+  if (agentGitOps.isSshUrl(repo.url)) {
+    overrides.sshKeyId = resolveAttributedSshKey(id, repo.sshKeyId, "push-ssh", body.actingSender).sshKeyId;
+  } else {
+    overrides.githubTokenId = resolveAttributedGithubToken(id, env, "push-https", body.actingSender).githubTokenId;
+  }
+  const gitEnv = _buildAgentGitEnv(id, repo, env, overrides);
   return _repoGitQueue(repo.repoPath, () => _agentGitPushLocked(id, repo, req, gitEnv, body));
 }
 
@@ -7469,9 +8795,20 @@ async function agentCreatePr(id, env, body = {}) {
   // #1569: opening a PR is an attributed write — resolve the owner's personal
   // PAT (personal → team → system), refusing rather than acting under a shared
   // identity when an owner is set but has no usable personal token. No owner
-  // (AC8) ⇒ the env's shared token, unchanged.
-  const { githubTokenId } = resolveAttributedGithubToken(id, env, "pr");
-  const gitEnv = _buildAgentGitEnv(id, repo, env, { githubTokenId });
+  // (AC8) ⇒ the env's shared token, unchanged. #2175 (B3): keyed on the acting
+  // human for an interactive run, the static config owner otherwise.
+  // `gh pr create` always needs the PAT regardless of transport (it talks to
+  // the REST API, not the git remote — see `buildRepoGitEnv`'s note on why the
+  // `gh` credential is not scheme-gated), so the token is resolved
+  // unconditionally; the branch push this function does before opening the PR
+  // additionally needs the owner's personal SSH key when the repo is an SSH
+  // remote.
+  const { githubTokenId } = resolveAttributedGithubToken(id, env, "pr", body.actingSender);
+  const overrides = { githubTokenId };
+  if (agentGitOps.isSshUrl(repo.url)) {
+    overrides.sshKeyId = resolveAttributedSshKey(id, repo.sshKeyId, "push-ssh", body.actingSender).sshKeyId;
+  }
+  const gitEnv = _buildAgentGitEnv(id, repo, env, overrides);
   return _repoGitQueue(repo.repoPath, () =>
     _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body, githubTokenId));
 }
@@ -8193,6 +9530,66 @@ function saveAdmissionLane(teamId, lane) {
   }
 }
 
+// Pool runtime control (#2250 Phase 5) — pause/drain per pooled role, beside
+// the lane it gates. Deliberately its own file, not a field on the lane
+// itself: the lane is a queue of TICKETS, this is a per-ROLE operator switch,
+// and the two churn independently (a pause survives every ticket the lane
+// cycles through while it's on).
+function poolControlPath(teamId) {
+  return controlOrPoolPath(teamId, "pool-control.json");
+}
+
+function loadPoolControl(teamId) {
+  try {
+    return agentPool.normalizePoolControl(JSON.parse(fs.readFileSync(poolControlPath(teamId), "utf8")));
+  } catch {
+    return {};
+  }
+}
+
+function savePoolControl(teamId, control) {
+  const p = poolControlPath(teamId);
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(control, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`[AgentPool] cannot persist pool-control for ${teamId}: ${err.message}`);
+    return false;
+  }
+}
+
+// Paused/draining hold queue (code-review finding on #2281's review of this
+// Phase) — sibling file, same convention as `poolControlPath` above. See
+// `agentPool.normalizePausedHold`'s doc comment for why this exists and why
+// it's per-role rather than reusing the admission lane's own `held` (that one
+// is keyed by wipLimit capacity, this one by an operator's pause/drain switch;
+// conflating them would let a paused role's held count toward the team's
+// ticket-capacity math it has nothing to do with).
+function pausedHoldPath(teamId) {
+  return controlOrPoolPath(teamId, "pool-paused-hold.json");
+}
+
+function loadPausedHold(teamId) {
+  try {
+    return agentPool.normalizePausedHold(JSON.parse(fs.readFileSync(pausedHoldPath(teamId), "utf8")));
+  } catch {
+    return {};
+  }
+}
+
+function savePausedHold(teamId, held) {
+  const p = pausedHoldPath(teamId);
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(held, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`[AgentPool] cannot persist pool-paused-hold for ${teamId}: ${err.message}`);
+    return false;
+  }
+}
+
 // Which flow governs a dispatch, and with what limit. A member points at its
 // team through `parentTeamId`; a team agent hosts no run of its own but is
 // accepted for completeness. `null` means "no admission control" — the answer
@@ -8243,6 +9640,13 @@ function enqueuePending(agentId, entry, { admissionChecked = false } = {}) {
       }
     }
   }
+  // Agent instance pools (#2246): route onto the item-keyed instance.
+  const pooled = routePooledDispatch(agentId, entry); // #2281: held already durable
+  if (pooled) {
+    if (pooled.held) return true;
+    if (pooled.spawning) return true;
+    agentId = pooled.targetId;
+  }
   const p = pendingPath(agentId);
   let pending = [];
   try {
@@ -8292,6 +9696,40 @@ function resolveRepoGithubTokenId(repoFullName) {
     }
   }
   return null;
+}
+
+// D3's fallback (#2246): when the triggering event carries no PR directly
+// (`agentPool.reworkRefFromPayload` returned null — a plain `issues.*` relabel,
+// e.g. `ready` redelivered after a hard-timeout reap), ask GitHub whether an
+// open PR already exists for this item. Best-effort and fail-SAFE, mirroring
+// the admission sweep's own `openPrs` read: any failure (no token, no repo, a
+// bad response) degrades to `null` — new-work-from-clean-base — never throws,
+// because guessing "this is rework" wrongly would check out a branch that may
+// not exist; guessing "this is new work" wrongly just repeats a workspace the
+// agent's own next `git pull`/PR-push step already has to reconcile.
+async function _lookupPoolReworkRef(repoFullName, itemKey) {
+  if (!repoFullName || itemKey == null) return null;
+  try {
+    const tokenId = resolveRepoGithubTokenId(repoFullName);
+    if (!tokenId) return null;
+    const token = fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim();
+    const [owner, name] = repoFullName.split("/");
+    const seg = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+    const openPrs = await _flowGithubGetJson(`${seg}/pulls?state=open&per_page=100`, token);
+    const list = Array.isArray(openPrs) ? openPrs : [];
+    const linked = flowAnomalySweep.prsForIssue(list, itemKey);
+    if (!linked.length) return null;
+    const pr = list.find((p) => Number(p?.number) === Number(linked[0]));
+    // Refused here too (agent-pool.js `isSafeGitRef`), not just at the point
+    // of use: a branch name is GitHub-attacker-controlled data (CodeQL
+    // js/second-order-command-line-injection) and must never even LOOK like a
+    // resolved rework ref if it isn't safe to pass to `git`.
+    const branch = pr && agentPool.isSafeGitRef(pr.head && pr.head.ref) ? pr.head.ref : null;
+    return branch ? { branch, repo: repoFullName } : null;
+  } catch (err) {
+    console.warn(`[AgentPool] rework-branch lookup for ${repoFullName}#${itemKey} failed: ${err.message}`);
+    return null;
+  }
 }
 
 // #1173: mirror a label onto an issue/PR after an internal-channel delivery.
@@ -8623,6 +10061,159 @@ function drainPendingOne(agentId) {
   return head;
 }
 
+// ── Agent instance pools (#2246, epic #2251 Phase 1) ────────────────────────
+//
+// "The single leanest decision" (concept §2): reuse the admission lane as the
+// instance registry and the reconcile tick as the reaper. Everything below is
+// the fs/spawn half of that — the pure item-keyed identity and dispatch
+// decision live in `agent-pool.js`.
+//
+// A pooled ROLE is materialised exactly like any other team-member template
+// (`<teamId>-<roleId>`, carrying `pool: {...}`) — it is what the poller's
+// label listener actually matches. What differs is what happens the moment a
+// dispatch for it is ADMITTED (`routePooledDispatch`, called from
+// `enqueuePending`): instead of landing in the template's own pending queue,
+// it is redirected onto a fresh (or, on redelivery, an existing) item-keyed
+// INSTANCE — a `team-member` cloned from the template's prompt/skills/
+// triggers, materialised under `<teamId>-<roleId>-i<item>`.
+
+// Spawn (or, if one already exists, resolve) the item-keyed instance for a
+// pooled dispatch. Idempotent by construction (D11): a redelivered event
+// recomputes the SAME instance id and `addTeamMember`'s own id-collision guard
+// makes a concurrent second spawn attempt a no-op reuse, never a duplicate.
+async function spawnPoolInstance(teamId, templateCfg, instanceId, itemKey, { repoFullName = null, directReworkRef = null } = {}) {
+  if (loadAgentConfig(instanceId) || agentTeardownRegistry.has(instanceId)) {
+    return { id: instanceId, reused: true };
+  }
+  // A free (module-level) function reads the singleton, never the `orchestrator`
+  // local to `main()` (#2135) — a pool spawn can only be reached once `main()`
+  // has constructed it, but the null guard matches every other free-function
+  // call site's own discipline.
+  if (!orchestratorSingleton) throw new Error("orchestrator not yet initialised");
+  let triggers = [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(agentStatePath(templateCfg.id, "triggers.json"), "utf8"));
+    if (Array.isArray(raw)) triggers = raw;
+  } catch { /* template has no triggers yet — the instance runs with none either */ }
+  // D3: resolve rework-or-new-work BEFORE seeding, not inside the sync
+  // `routePooledDispatch` (which cannot await) — the free signal first
+  // (the triggering event's own embedded PR), a live GitHub lookup only when
+  // that comes back empty (an `issues.*` relabel with no PR in its payload).
+  const reworkRef = directReworkRef || await _lookupPoolReworkRef(repoFullName, itemKey);
+  const normalizedPool = agentPool.normalizePoolConfig(templateCfg.pool);
+  try {
+    const result = await orchestratorSingleton.addTeamMember(teamId, {
+      id: instanceId,
+      displayName: `${templateCfg.displayName || templateCfg.id} · #${itemKey}`,
+      systemPromptOverride: templateCfg.systemPrompt,
+      skillsOverride: Array.isArray(templateCfg.skillsOverride) ? templateCfg.skillsOverride : undefined,
+      mcpServersOverride: Array.isArray(templateCfg.mcpServersOverride) ? templateCfg.mcpServersOverride : undefined,
+      sessionPolicy: 'per-invocation',
+      triggers,
+      // Threaded through to `seedAgentWorkspace` for the workspace-binding
+      // decision (D2/D3) — see the addTeamMember/materialized branch above.
+      // Also lands on the instance's own config, which is harmless:
+      // `isPooledRole` checks `poolInstance` FIRST, so an instance never
+      // re-pools. `reworkBranch`/`reworkRepo` are additive fields
+      // `normalizePoolConfig` never produces itself (they are resolved per
+      // DISPATCH, not part of the role's static config) — read directly by
+      // `seedAgentWorkspace`'s `poolWorkspace` construction, not re-validated.
+      pool: normalizedPool && {
+        ...normalizedPool,
+        reworkBranch: reworkRef?.branch || null,
+        reworkRepo: reworkRef?.repo || null,
+      },
+      poolInstance: true,
+      poolOf: templateCfg.id,
+      poolItem: itemKey,
+      // #2246 finding on the hard-timeout reaper: recorded here (not derived
+      // later) because a redelivery may have resolved a DIFFERENT repo token
+      // than the one the eventual reap needs to stamp `needs-human` on —
+      // stamping at spawn time means the reaper never has to re-derive it.
+      poolRepo: repoFullName || null,
+    });
+    console.log(
+      `[AgentPool] spawned ${instanceId} (template=${templateCfg.id}, item=${itemKey}` +
+      `${reworkRef ? `, rework@${reworkRef.branch}` : ""})`,
+    );
+    return { id: instanceId, reused: false, ...result };
+  } catch (err) {
+    // Another concurrent spawn for the same item won the id — reuse it rather
+    // than treating a benign collision as a failure to redeliver into.
+    if (loadAgentConfig(instanceId)) return { id: instanceId, reused: true };
+    throw err;
+  }
+}
+
+// Does this dispatch belong to a pooled role, and if so where should it
+// actually land? Returns null for an unpooled agent (today's behaviour,
+// unchanged) or `{ targetId, spawning }` — `spawning: true` means the caller
+// should treat the dispatch as durably admitted (it will land the moment the
+// async spawn above finishes) rather than write it anywhere itself.
+function routePooledDispatch(agentId, entry) {
+  let cfg = null;
+  try {
+    cfg = loadAgentConfig(agentId);
+  } catch {
+    return null;
+  }
+  if (!agentPool.isPooledRole(cfg)) return null;
+  const teamId = cfg.parentTeamId || null;
+  if (!teamId) return null;
+  const ref = admissionControl.entryTicketRef(entry);
+  const itemKey = ref ? ref.ticket : null;
+  const pool = agentPool.normalizePoolConfig(cfg.pool);
+  const roleId = agentPool.roleIdFromMemberId(agentId, teamId);
+  const controlState = agentPool.poolControlState(loadPoolControl(teamId), roleId);
+  const decision = agentPool.planPoolDispatch({
+    teamId, roleId, pool, itemKey, controlState,
+    // Code-review finding on #2246: this used to be `[thisItem'sOwnInstanceId]`
+    // filtered down to 0-or-1 elements — a length that can never reach a real
+    // `maxInstances` cap, since the `reuse` branch always fires first on the
+    // one case (length 1) that wasn't already 0. `maxInstances` caps the ROLE
+    // across every item it is currently working, so it needs every live
+    // instance of the role, not just this one item's.
+    existingInstanceIds: itemKey == null ? [] : _liveInstanceIdsForRole(agentId),
+  });
+  if (decision.action === 'unpooled') return null;
+  if (decision.action === 'refuse') {
+    // Code-review finding on #2281: a pause/drain refusal must never look
+    // like "not pooled at all" to the caller — `enqueuePending` would then
+    // fall through and dispatch to the role TEMPLATE's own pending queue,
+    // running the ticket under the shared, unpooled identity while the
+    // operator believes the role is stopped. Held durably per role instead,
+    // replayed the moment it resumes (the pool-control POST route below).
+    // An ordinary `max-instances` refusal is unaffected — that ticket is
+    // still governed by the team's admission lane/reconcile tick, which is
+    // what already promotes it once a slot frees.
+    if (agentPool.POOL_CONTROL_STATES.includes(decision.reason)) {
+      const held = agentPool.normalizePausedHold(loadPausedHold(teamId));
+      held[roleId] = [...(held[roleId] || []), { agentId, entry, heldAt: new Date().toISOString() }];
+      savePausedHold(teamId, held);
+      console.warn(
+        `[AgentPool] ${agentId}: held dispatch for ${decision.instanceId} (${decision.reason}) — ` +
+        `will redeliver once the role resumes`,
+      );
+      return { held: true };
+    }
+    console.warn(`[AgentPool] ${agentId}: refused to spawn ${decision.instanceId} (${decision.reason})`);
+    return null;
+  }
+  if (decision.action === 'reuse') {
+    return { targetId: decision.instanceId, spawning: false };
+  }
+  // action === 'spawn' — kick it off asynchronously and redeliver the entry
+  // once the instance exists; the ticket is already admitted into the lane, so
+  // nothing here can lose the dispatch, only delay its landing by however long
+  // provisioning takes. D3: the triggering event's own embedded PR (free, when
+  // present) rides along so the async spawn need not re-derive it.
+  const directReworkRef = agentPool.reworkRefFromPayload(entry?.github?.payload);
+  spawnPoolInstance(teamId, cfg, decision.instanceId, itemKey, { repoFullName: ref?.repo || null, directReworkRef })
+    .then((r) => enqueuePending(r.id, entry, { admissionChecked: true }))
+    .catch((err) => console.error(`[AgentPool] spawn ${decision.instanceId} failed: ${err.message}`));
+  return { targetId: decision.instanceId, spawning: true };
+}
+
 // ============================================================
 // Orchestrator (backend service — no Matrix routing identity)
 //
@@ -8699,10 +10290,35 @@ class Orchestrator {
   // ===========================================================
   // Agent creation
   // ===========================================================
+  // #2217 — resolve the first free id under `isAgentIdTaken` (the strictest
+  // predicate in the codebase) and reserve it IMMEDIATELY, synchronously,
+  // before any async provisioning — the same TOCTOU guard `addTeamMember`'s
+  // auto-numbered path uses (#1525/#1791): two concurrent callers racing the
+  // same base id must not compute the same free id, because nothing else
+  // holds it in between. The placeholder is overwritten by the real config a
+  // few lines later in `createAgent`.
+  resolveAndReserveAgentId(baseId) {
+    const id = nextAvailableAgentId(baseId, isAgentIdTaken);
+    const placeholder = { id, role: 'agent', enabled: false, _provisioning: true };
+    saveAgentConfig(id, placeholder);
+    this.agentConfigs.set(id, { config: placeholder });
+    return id;
+  }
+
   async createAgent(id, displayName, role, systemPrompt, environmentId, extra = {}) {
     const env = loadEnvironment(environmentId);
     if (!env) {
-      throw new Error(`Working Environment not found: ${environmentId}`);
+      throw new Error(`Environment not found: ${environmentId}`);
+    }
+
+    // #2217 — the caller (quickstart's fast lane) hands over a BASE id and
+    // asks the platform to resolve the collision itself: `id` is reinterpreted
+    // as the base, the first free id is picked and reserved synchronously
+    // (below), and everything from here on uses the resolved id. The route
+    // handler skips its own collision refusal for this request precisely
+    // because the reservation below is what settles it.
+    if (extra.autoId) {
+      id = this.resolveAndReserveAgentId(id);
     }
 
     // team: save a template config (no Matrix user, no process) and
@@ -8899,7 +10515,7 @@ class Orchestrator {
     }
 
     const env = loadEnvironment(teamCfg.environmentId);
-    if (!env) throw new Error(`Working Environment '${teamCfg.environmentId}' not found`);
+    if (!env) throw new Error(`Environment '${teamCfg.environmentId}' not found`);
 
     let memberId, memberDisplayName;
     if (opts.id) {
@@ -8957,6 +10573,17 @@ class Orchestrator {
         // Process stage band (#362 E) — so the live graph reproduces the draft's
         // stage layout after materialisation.
         ...(typeof opts.stage === 'string' && opts.stage.trim() ? { stage: opts.stage.trim() } : {}),
+        // Agent instance pools (#2246): a role TEMPLATE carries its own opt-in
+        // `pool` config; a spawned pool INSTANCE instead carries the three
+        // `poolInstance`/`poolOf`/`poolItem` markers below (never both — an
+        // instance never re-pools, see `agent-pool.js` `isPooledRole`).
+        ...(opts.pool && typeof opts.pool === 'object' ? { pool: opts.pool } : {}),
+        ...(opts.poolInstance ? {
+          poolInstance: true,
+          poolOf: opts.poolOf,
+          poolItem: opts.poolItem,
+          poolSpawnedAt: new Date().toISOString(),
+        } : {}),
         enabled: false, // no token → isStub; UI shows it, enableAgent materializes it
         // A member created while its team is disabled is tagged so
         // enableTeam brings it back automatically later — see
@@ -8998,6 +10625,15 @@ class Orchestrator {
       skills: Array.isArray(teamCfg.skills) ? teamCfg.skills : [],
       skillsOverride: Array.isArray(opts.skillsOverride) ? opts.skillsOverride : undefined,
       mcpServersOverride: Array.isArray(opts.mcpServersOverride) ? opts.mcpServersOverride : undefined,
+      // #2246 D2: a pool instance's spawn passes the template's own normalized
+      // pool config through here purely for the workspace-binding decision
+      // (git-clean-base → pull-on-demand) — unset for every ordinary member.
+      ...(opts.pool && typeof opts.pool === 'object' ? { pool: opts.pool } : {}),
+      // #2248 Phase 3: the item this instance was spawned for, so an
+      // `input-copy` binding knows which item's input to seed — see
+      // `_seedRecurringInput` below. Harmless for every other binding, which
+      // never reads it.
+      ...(opts.poolInstance && opts.poolItem != null ? { poolItem: opts.poolItem } : {}),
     });
 
     // Resolve effective values once, here. The member's config records ONLY
@@ -9040,6 +10676,15 @@ class Orchestrator {
       // Process stage band (#362 E) — recorded so the live graph reproduces the
       // draft's stage layout after materialisation.
       ...(typeof opts.stage === 'string' && opts.stage.trim() ? { stage: opts.stage.trim() } : {}),
+      // Agent instance pools (#2246) — see the stub branch above for why these
+      // are mutually exclusive.
+      ...(opts.pool && typeof opts.pool === 'object' ? { pool: opts.pool } : {}),
+      ...(opts.poolInstance ? {
+        poolInstance: true,
+        poolOf: opts.poolOf,
+        poolItem: opts.poolItem,
+        poolSpawnedAt: new Date().toISOString(),
+      } : {}),
       // A member created while its team is disabled comes up disabled too,
       // tagged so enableTeam brings it back automatically — see
       // docs/superpowers/specs/2026-07-31-team-wide-disable-design.md.
@@ -9053,6 +10698,31 @@ class Orchestrator {
     }
 
     this.agentConfigs.set(memberId, { config: memberConfig });
+
+    // #2308: materialise the member's resolved plugin grant (team's plugins[],
+    // or its own pluginsOverride) into its workspace NOW — before the container
+    // boots — exactly like skills/MCP above. Never blocks the add (AC17); any
+    // failure comes back as a warning (AC18) merged into the response below.
+    const pluginSync = await this._materializeMemberPlugins(memberId, memberConfig);
+
+    // #2251: an autonomously spawned pool instance has nobody to open its chat,
+    // so its inherited kickoff trigger would fire against no DM room and be
+    // skipped (empty session). Pre-create the room NOW — before the container
+    // boots — so the container's initial `_sync()` has `dm-room.json` in hand
+    // before its pending loop drains that trigger. Best-effort and awaited so
+    // the write lands first; the lazy admin-console path stays the fallback.
+    if (opts.poolInstance && memberConfig.enabled !== false) {
+      const r = await provisionAgentDmRoom(memberId, token, memberDisplayName);
+      if (r.ok) {
+        console.log(
+          `[Orchestrator] Pre-created DM room for pool instance ${memberId}` +
+          `${r.reused ? " (reused existing)" : r.roomId ? ` (${r.roomId})` : ""}`,
+        );
+      } else {
+        console.warn(`[Orchestrator] DM-room pre-create skipped for ${memberId}: ${r.reason}`);
+      }
+    }
+
     if (memberConfig.enabled !== false) startAgentProcess(memberConfig);
 
     console.log(
@@ -9063,6 +10733,115 @@ class Orchestrator {
     );
     return {
       id: memberId,
+      userId,
+      seeded: seedResult.seeded,
+      warnings: [...(seedResult.warnings || []), ...pluginSync.warnings],
+      clones: seedResult.clones || [],
+    };
+  }
+
+  // ===========================================================
+  // Mint a team of one at CREATION time (#2231, Phase B of #2229)
+  // ===========================================================
+  // The from-scratch sibling of `convertAgentToTeam` above: instead of a
+  // standalone `role: 'agent'`, the three creation fast lanes (quickstart's
+  // repo path, its LLM-only sibling, and the Agents-page "+ New Agent"
+  // action with no `teamId`) call this so every agent is a team of one from
+  // the moment it exists (#2229) — one request still produces one usable,
+  // chattable agent, whose id is the returned team-member's id.
+  //
+  // Shares its target-shape decisions with `convertAgentToTeam` via the
+  // Phase-A core `planTeamOfOneCreation` (`team-conversion.js`): the derived
+  // team id, the legacy-exclusive prompt shape, and the member-shape grant
+  // are computed in exactly the same place regardless of which caller asks.
+  // Unlike a conversion there is nothing pre-existing to re-key — the team
+  // and its one member are minted together — so there is no eligibility
+  // check, no skill-pool copy, no plugin-scope teardown, and no rollback of
+  // config already on disk beyond what `resolveAndReserveAgentId` itself
+  // already risks (the same residue a failed `createAgent` can already
+  // leave behind).
+  async createTeamOfOneAgent(baseId, displayName, systemPrompt, environmentId, extra = {}) {
+    const env = loadEnvironment(environmentId);
+    if (!env) {
+      throw new Error(`Environment not found: ${environmentId}`);
+    }
+
+    // #2217 — same base/autoId contract `createAgent` honours: the quickstart
+    // fast lanes hand over a BASE id and ask the platform to resolve the
+    // first free one itself; the manual create form (no autoId) has already
+    // had its literal id checked for collision by the caller.
+    let id = baseId;
+    if (extra.autoId) {
+      id = this.resolveAndReserveAgentId(baseId);
+    }
+
+    const ownerTeamId = resolveOwnerTeamId(extra.teamId);
+    const grantedSkills = Array.isArray(extra.skills)
+      ? extra.skills.filter((s) => typeof s === "string" && s.trim()).map((s) => s.trim())
+      : [];
+
+    let plan;
+    try {
+      plan = planTeamOfOneCreation({
+        agentId: id,
+        displayName,
+        environmentId: env.id,
+        ownerTeamId,
+        ownPrompt: systemPrompt || "",
+        ownerId: extra.ownerId,
+        ownerSource: extra.ownerId
+          ? (ownershipMigration.OWNER_SOURCES.includes(extra.ownerSource)
+            ? extra.ownerSource
+            : ownershipMigration.OWNER_SOURCE_CREATOR)
+          : undefined,
+        roleId: id,
+        skills: grantedSkills,
+      }, {
+        teamIdTaken: isAgentIdTaken,
+      });
+    } catch (err) {
+      // The derived team id (`<id>-team`) collided with something already on
+      // disk — vanishingly rare for a freshly-resolved agent id, but named
+      // distinctly so the route can answer 409 rather than a generic 500.
+      err.code = err.code || "team-id-taken";
+      throw err;
+    }
+
+    // ── 1. The team metadata record — pure config, no Matrix identity, no
+    // workspace (mirrors the `role: 'team'` branch of `createAgent`).
+    saveAgentConfig(plan.teamId, plan.teamConfig);
+    this.agentConfigs.set(plan.teamId, { config: plan.teamConfig });
+
+    // ── 2. The one member — the same Matrix + workspace materialization a
+    // standalone agent gets, just filed under `role: 'team-member'`.
+    const password = `agent-${id}-${Date.now()}`;
+    const userId = `@${id}:local`;
+    if (this.adminClient) await ensureMatrixUser(this.adminClient, id, password);
+    const token = await loginMatrixUser(id, password, this.adminClient);
+    await setDisplayName(token, userId, displayName);
+
+    const seedResult = seedAgentWorkspace(id, env, { teamId: ownerTeamId, skills: grantedSkills });
+
+    const memberConfig = {
+      id,
+      displayName,
+      userId,
+      token,
+      environmentId: env.id,
+      teamId: ownerTeamId,
+      ...plan.memberPatch,
+      enabled: true,
+    };
+    saveAgentConfig(id, memberConfig);
+    saveAgentPrompt(id, plan.effectivePrompt, "team-member", env);
+
+    this.agentConfigs.set(id, { config: memberConfig });
+    startAgentProcess(memberConfig);
+
+    console.log(`[Orchestrator] Created team of one: team ${plan.teamId}, member ${id}`);
+    return {
+      id,
+      teamId: plan.teamId,
       userId,
       seeded: seedResult.seeded,
       warnings: seedResult.warnings || [],
@@ -9081,7 +10860,7 @@ class Orchestrator {
       throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
     }
     const env = loadEnvironment(teamCfg.environmentId);
-    if (!env) throw new Error(`Working Environment '${teamCfg.environmentId}' not found`);
+    if (!env) throw new Error(`Environment '${teamCfg.environmentId}' not found`);
 
     teamCfg.systemPromptTemplate = typeof newTemplate === 'string' ? newTemplate : '';
     saveAgentConfig(teamId, teamCfg);
@@ -9295,6 +11074,46 @@ class Orchestrator {
     return { teamId, skillName: name, active, members: results };
   }
 
+  // Bulk-update a team's active skill set (#2286, the Skills-tab "Save
+  // Changes" button) and eagerly push every add/remove to already-materialized
+  // members — mirrors updateTeamPrompt's diff-and-push shape for the analogous
+  // systemPromptTemplate field. Deliberately does NOT re-implement the fan-out:
+  // it diffs old vs new list, then re-runs the existing per-skill
+  // setTeamSkillActive for each changed name, so the propagation gets exactly
+  // the same guarantees (CLAUDE.md rebuild, isolated-volume mirroring, no
+  // respawn, skillsOverride members skipped) as the Knowledge page's per-skill
+  // toggle — one sync mechanism, not two. A save whose effective set doesn't
+  // change is a no-op (AC8): no config write, no per-member sync, no event.
+  async updateTeamSkills(teamId, skills) {
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg) throw new Error(`Team '${teamId}' not found`);
+    if (teamCfg.role !== "team") {
+      throw new Error(`Agent '${teamId}' is not a team (role=${teamCfg.role})`);
+    }
+    const plan = planTeamSkillsUpdate(teamCfg.skills, skills);
+    if (!plan.changed) {
+      return { teamId, skills: plan.skills, added: [], removed: [], members: {} };
+    }
+
+    teamCfg.skills = plan.skills;
+    saveAgentConfig(teamId, teamCfg);
+    this.agentConfigs.set(teamId, { config: teamCfg });
+
+    const members = {};
+    for (const name of plan.added) {
+      const res = await this.setTeamSkillActive(teamId, name, { active: true });
+      members[name] = res.members;
+    }
+    for (const name of plan.removed) {
+      const res = await this.setTeamSkillActive(teamId, name, { active: false });
+      members[name] = res.members;
+    }
+    console.log(
+      `[Orchestrator] Team ${teamId} skills bulk-updated: +${plan.added.length} -${plan.removed.length}`
+    );
+    return { teamId, skills: plan.skills, added: plan.added, removed: plan.removed, members };
+  }
+
   // Refresh an ALREADY-ACTIVE team skill's files on every member that currently
   // carries it (#553, AC10/E1): re-copy the (re-synthesised) SKILL.md into each
   // seeded member's workspace and rebuild its CLAUDE.md, WITHOUT touching the
@@ -9374,6 +11193,82 @@ class Orchestrator {
     const touched = summary.synced.length + summary.failed.length;
     if (touched) {
       console.log(`[Orchestrator] skill reconcile: ${summary.synced.length} synced, ${summary.failed.length} failed, ${summary.exhausted.length} exhausted`);
+    }
+    return summary;
+  }
+
+  // Auto-reconcile pending PLUGIN members (#2308 D2) — the plugin sibling of
+  // reconcilePendingSkills above, for the same reason: a member whose grant
+  // includes a plugin id its `seeded-plugins.json` manifest doesn't carry
+  // (created before the grant existed, created while a sync failed, or a
+  // member from before this ticket shipped) is repaired here instead of
+  // needing the "deactivate the plugin on the team, then reactivate it" dance
+  // the issue reported — which would also revoke the plugin from every
+  // WORKING member of that team in the process (D2's own reasoning). Bounded
+  // by the same max-attempt + backoff discipline; idempotent (a fully-synced
+  // team does zero work and touches no file).
+  async reconcilePendingPlugins({ now = new Date().toISOString() } = {}) {
+    const teamIds = listAgentIds()
+      .map((id) => loadAgentConfig(id))
+      .filter((c) => c && c.role === "team" && Array.isArray(c.plugins) && c.plugins.length)
+      .map((c) => c.id);
+    const summary = { synced: [], failed: [], exhausted: [] };
+    for (const teamId of teamIds) {
+      const teamCfg = loadAgentConfig(teamId);
+      const activeGrant = normalizeGrantList(teamCfg.plugins);
+      const members = listAgentIds()
+        .map((id) => loadAgentConfig(id))
+        .filter((c) => c && c.role === "team-member" && c.parentTeamId === teamId);
+      const plan = pluginReconcile.planTeamReconcile(
+        { members, activeGrant, seededOf: readSeededPlugins, stateOf: readPluginReconcileState },
+        { now },
+      );
+      summary.exhausted.push(...plan.exhausted);
+
+      // Batch every due plugin id PER MEMBER into one _syncPluginIntoWorkspace
+      // call (one CLAUDE.md rebuild instead of N), by presenting a `prev` that
+      // omits exactly the ids being reconciled — the same idempotent-diff
+      // trick `setTeamPluginActive`/`setAgentPluginActive` already rely on.
+      const dueByMember = new Map();
+      for (const t of plan.due) {
+        if (!dueByMember.has(t.agentId)) dueByMember.set(t.agentId, []);
+        dueByMember.get(t.agentId).push(t.pluginId);
+      }
+      for (const [agentId, pluginIds] of dueByMember) {
+        const cfg = members.find((m) => m.id === agentId);
+        if (!cfg) continue;
+        let next = [];
+        let errors = [];
+        try {
+          next = effectivePlugins(cfg, loadAgentConfig);
+          const prev = next.filter((g) => !pluginIds.includes(g.id));
+          const result = await this._syncPluginIntoWorkspace(agentId, cfg, prev, next);
+          errors = result.errors || [];
+        } catch (err) {
+          errors = pluginIds.map((pluginId) => ({ pluginId, error: err.message }));
+        }
+        const failedIds = new Set(errors.map((e) => e.pluginId));
+        const okIds = pluginIds.filter((pid) => !failedIds.has(pid));
+        if (okIds.length) {
+          try { await this._reconcilePluginNetworks(okIds); }
+          catch (err) { console.warn(`[Orchestrator] plugin reconcile network sync ${agentId}: ${err.message}`); }
+        }
+        const state = readPluginReconcileState(agentId);
+        for (const pluginId of pluginIds) {
+          const ok = !failedIds.has(pluginId);
+          const error = ok ? null : ((errors.find((e) => e.pluginId === pluginId) || {}).error || 'sync failed');
+          const nextEntry = pluginReconcile.recordAttempt(state[pluginId], { ok, error, now });
+          if (nextEntry === null) delete state[pluginId]; else state[pluginId] = nextEntry;
+          const target = { agentId, pluginId };
+          if (ok) { summary.synced.push(target); }
+          else { summary.failed.push(target); recordPluginSyncFailure(agentId, pluginId, error); }
+        }
+        writePluginReconcileState(agentId, state);
+      }
+    }
+    const touched = summary.synced.length + summary.failed.length;
+    if (touched) {
+      console.log(`[Orchestrator] plugin reconcile: ${summary.synced.length} synced, ${summary.failed.length} failed, ${summary.exhausted.length} exhausted`);
     }
     return summary;
   }
@@ -9552,33 +11447,59 @@ class Orchestrator {
     const written = [];
     const removed = [];
     const errors = [];
+    const failedPluginIds = new Set();
 
+    // Group by pluginId (both write.js's bin item and config item carry it) so
+    // a partial failure is treated as ONE unit (#2308 AC12): if the CLI copies
+    // but the token config write then throws, the CLI is rolled back too —
+    // never a bin with no config, or a config a broker will refuse to honour.
+    const writesByPlugin = new Map();
     for (const item of plan.write) {
-      const dest = path.join(dir, item.path);
-      try {
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
-        if (item.copyFrom) {
-          // `copyFrom` is the manifest's registry-relative cli.entrypoint.
-          // Match on entrypoint AND cli name so two plugins shipping the same
-          // relative path can't be confused for one another, and resolve the
-          // absolute source through the registry so the containment check
-          // happens in exactly one place.
-          const cliName = path.basename(item.path);
-          const manifest = Object.values(manifests).find(
-            (m) => m.cli && m.cli.entrypoint === item.copyFrom && m.cli.name === cliName,
-          );
-          const src = manifest ? pluginRegistry.cliEntrypointPath(manifest) : null;
-          if (!src) { errors.push({ path: item.path, error: 'CLI entrypoint not resolvable' }); continue; }
-          fs.copyFileSync(src, dest);
-        } else {
-          fs.writeFileSync(dest, `${JSON.stringify(item.content, null, 2)}\n`);
+      const key = item.pluginId || item.path;
+      if (!writesByPlugin.has(key)) writesByPlugin.set(key, []);
+      writesByPlugin.get(key).push(item);
+    }
+
+    for (const [pluginId, items] of writesByPlugin) {
+      const okPaths = [];
+      let failure = null;
+      for (const item of items) {
+        const dest = path.join(dir, item.path);
+        try {
+          fs.mkdirSync(path.dirname(dest), { recursive: true });
+          if (item.copyFrom) {
+            // `copyFrom` is the manifest's registry-relative cli.entrypoint.
+            // Match on entrypoint AND cli name so two plugins shipping the same
+            // relative path can't be confused for one another, and resolve the
+            // absolute source through the registry so the containment check
+            // happens in exactly one place.
+            const cliName = path.basename(item.path);
+            const manifest = Object.values(manifests).find(
+              (m) => m.cli && m.cli.entrypoint === item.copyFrom && m.cli.name === cliName,
+            );
+            const src = manifest ? pluginRegistry.cliEntrypointPath(manifest) : null;
+            if (!src) throw new Error('CLI entrypoint not resolvable');
+            fs.copyFileSync(src, dest);
+          } else {
+            fs.writeFileSync(dest, `${JSON.stringify(item.content, null, 2)}\n`);
+          }
+          // chmod AFTER write: writeFileSync's mode option is masked by umask,
+          // and the token config must be 0600 exactly.
+          fs.chmodSync(dest, item.mode);
+          okPaths.push(item.path);
+        } catch (err) {
+          failure = { pluginId, path: item.path, error: err.message };
+          break;
         }
-        // chmod AFTER write: writeFileSync's mode option is masked by umask,
-        // and the token config must be 0600 exactly.
-        fs.chmodSync(dest, item.mode);
-        written.push(item.path);
-      } catch (err) {
-        errors.push({ path: item.path, error: err.message });
+      }
+      if (failure) {
+        // Roll back whatever this ONE plugin did manage to write — a bin with
+        // no config (or a config with no bin) is a worse state than neither.
+        for (const p of okPaths) { try { fs.rmSync(path.join(dir, p), { force: true }); } catch { /* best effort */ } }
+        errors.push(failure);
+        failedPluginIds.add(pluginId);
+      } else {
+        written.push(...okPaths);
       }
     }
 
@@ -9589,6 +11510,34 @@ class Orchestrator {
       } catch (err) {
         errors.push({ path: rel, error: err.message });
       }
+    }
+
+    // Keep the seeded-plugins manifest (the one source of truth for "does this
+    // member's WORKSPACE actually carry this plugin", #2308) in lockstep with
+    // what was actually written above — never with the grant alone, which is
+    // exactly the gap that let a member look granted with no files on disk.
+    // A plugin whose write failed this round is deliberately left unrecorded
+    // (or untouched if it was already recorded from a prior success) so the
+    // next reconcile pass still sees it as missing.
+    try {
+      const seeded = readSeededPlugins(id);
+      for (const g of (nextGrant || [])) {
+        if (!g || !g.id || failedPluginIds.has(g.id)) continue;
+        // Only a file-bearing, installed plugin ever gets a workspace write
+        // (planWorkspaceSync skips an uninstalled id or a command-only
+        // manifest entirely) — mirror that gate here so neither is ever
+        // recorded as "seeded" with no file behind the claim.
+        const gm = manifests[g.id];
+        if (!gm || !gm.cli) continue;
+        if (seeded[g.id] && !writesByPlugin.has(g.id)) continue; // already recorded, untouched this round
+        seeded[g.id] = { scopeGranularity: g.scopeGranularity, seededAt: new Date().toISOString() };
+      }
+      for (const g of (prevGrant || [])) {
+        if (g && g.id && !(nextGrant || []).some((n) => n && n.id === g.id)) delete seeded[g.id];
+      }
+      writeSeededPlugins(id, seeded);
+    } catch (err) {
+      console.warn(`[Orchestrator] seeded-plugins manifest ${id}: ${err.message}`);
     }
 
     // ── Command-only plugin provisioning (#1798) ──────────────────────────
@@ -9646,6 +11595,48 @@ class Orchestrator {
     return { agentId: id, status: errors.length ? "error" : "synced", written, removed, errors };
   }
 
+  // Materialise a just-created or just-enabled member's resolved plugin grant
+  // into its workspace (#2308). The one seam `addTeamMember`'s materialize
+  // branch and `enableAgent`'s stub branch both call — mirroring how `enableAgent`
+  // already resolves `effectiveSkills` for skills (`orchestrator.js` ~11639) —
+  // so a member inherits its team's plugins at creation time exactly the way it
+  // already inherits skills, MCP servers and everything else team-owned.
+  //
+  // AC17: NEVER throws and never blocks the caller — a plugin that cannot be
+  // installed degrades the member (D5), it does not fail the add/enable. Any
+  // failure is (a) returned as a human-readable warning for the immediate
+  // caller (AC18) and (b) logged to the operator-facing GitHub Event Log so it
+  // stays discoverable afterwards even if nobody was watching (AC19).
+  async _materializeMemberPlugins(id, cfg) {
+    let next;
+    try {
+      next = effectivePlugins(cfg, loadAgentConfig);
+    } catch (err) {
+      console.warn(`[Orchestrator] plugin materialize ${id}: grant resolution failed: ${err.message}`);
+      return { warnings: [] };
+    }
+    if (!Array.isArray(next) || next.length === 0) return { warnings: [] }; // AC7: nothing granted, nothing to do
+
+    const warnings = [];
+    try {
+      const result = await this._syncPluginIntoWorkspace(id, cfg, [], next);
+      for (const e of (result.errors || [])) {
+        const pluginId = e.pluginId || '(unknown)';
+        warnings.push(`plugin '${pluginId}' could not be installed for '${id}': ${e.error}`);
+        recordPluginSyncFailure(id, pluginId, e.error);
+      }
+      const okIds = next.map((g) => g.id).filter((pid) => !(result.errors || []).some((e) => e.pluginId === pid));
+      if (okIds.length) await this._reconcilePluginNetworks(okIds);
+    } catch (err) {
+      // Should not happen (_syncPluginIntoWorkspace is itself best-effort), but
+      // AC17 is absolute: a thrown error here must still degrade, not block.
+      warnings.push(`plugin sync failed for '${id}': ${err.message}`);
+      for (const g of next) recordPluginSyncFailure(id, g.id, err.message);
+      console.warn(`[Orchestrator] plugin materialize ${id}: ${err.message}`);
+    }
+    return { warnings };
+  }
+
   // Reconnect every touched plugin's sidecar to exactly the per-agent networks
   // its current grant implies. Reconciled from truth rather than applied as a
   // delta, so a missed event or a manual disconnect self-heals on the next
@@ -9660,6 +11651,12 @@ class Orchestrator {
           try { return !!pluginGrantFor(effectivePlugins(c, loadAgentConfig), pluginId); }
           catch { return false; }
         })
+        // #2308: reconciled from the GRANT alone, this re-attached a network to
+        // a member whose workspace sync had failed or never run — "networked
+        // yet CLI-less" (the issue's own point 4). Gate on the seeded-plugins
+        // manifest too, so a member only gets the sidecar path once its
+        // config file actually exists to use it.
+        .filter((c) => !!readSeededPlugins(c.id)[pluginId])
         .map((c) => c.id);
       results.push({ pluginId, ...(await pluginRuntime.reconcilePluginAttachments(pluginId, granted)) });
     }
@@ -9719,7 +11716,9 @@ class Orchestrator {
     for (const step of plan) {
       if (step.action === "stub") {
         // Consistent by construction: the team list already carries (or no
-        // longer carries) the grant; the normal seed path applies it at enable.
+        // longer carries) the grant; enableAgent() materialises the resolved
+        // grant into the workspace when the stub is later activated (#2308 —
+        // before this ticket no path ever did, which was the bug).
         results.push({ agentId: step.agentId, status: "stub" });
         continue;
       }
@@ -9957,7 +11956,7 @@ class Orchestrator {
       throw new Error(`Agent '${id}' is a stub but has unexpected role '${cfg.role}'`);
     }
     const env = loadEnvironment(cfg.environmentId);
-    if (!env) throw new Error(`Working Environment '${cfg.environmentId}' not found`);
+    if (!env) throw new Error(`Environment '${cfg.environmentId}' not found`);
 
     const password = `agent-${id}-${Date.now()}`;
     const userId = `@${id}:local`;
@@ -9998,13 +11997,20 @@ class Orchestrator {
     console.log(`[Orchestrator] Materialized team-member ${id} (team=${cfg.parentTeamId}, prompt=${cfg.systemPrompt ? 'override' : 'inherit'})`);
 
     this.agentConfigs.set(id, { config: updated });
+
+    // #2308: mirrors the `skills: effectiveSkills(...)` resolution above —
+    // this stub's resolved plugin grant is materialised at enable time too,
+    // the seed path that never existed before this ticket (AC5). Never blocks
+    // enabling the member (AC17); a failure comes back as a warning (AC18).
+    const pluginSync = await this._materializeMemberPlugins(id, updated);
+
     startAgentProcess(updated);
     return {
       id,
       materialized: true,
       enabled: true,
       seeded: seedResult.seeded,
-      warnings: seedResult.warnings || [],
+      warnings: [...(seedResult.warnings || []), ...pluginSync.warnings],
       clones: seedResult.clones || [],
     };
   }
@@ -10339,6 +12345,85 @@ class Orchestrator {
       console.error(`[Orchestrator] offboarding: could not rewrite ${kind} index: ${err.message}`);
     }
     return ids.map(id => ({ id, kind }));
+  }
+
+  // ── Offboarding reconciliation (#2138 AC1/AC2) ────────────────────────────
+  // From 2026-08-11 (PR #1598) to the #2135 fix, `offboardOwner` was never
+  // reached: its one call site read an identifier that did not exist in scope,
+  // and the ReferenceError landed in a `catch` that only logged. Every user
+  // deleted in that window kept their agents running and their personal SSH key
+  // and GitHub PAT on disk and in active use.
+  //
+  // Fixing the call site does nothing for the deletions already done, so this
+  // replays the offboarding those users never got — at boot, on the deployed
+  // stack, which is the only place the leftovers exist. It drives
+  // `offboardOwner` itself rather than a bespoke cleanup so the remediation
+  // exercises the code path being repaired; both halves are idempotent, so a
+  // sweep that finds nothing (the steady state, and every boot after the first)
+  // costs two index reads and stops.
+  //
+  // `dryRun` returns the AC1 assessment without acting. The report names each
+  // orphaned credential's `createdAt` and `fingerprint`: the fingerprint is what
+  // an operator needs to revoke the key/token at GitHub (AC3, which no code here
+  // can do), and `createdAt` is the closest thing to an age we have — the user
+  // record is hard-deleted with no tombstone, so WHEN the owner was deleted is
+  // not recoverable from this stack at all (#2138 AC7).
+  async reconcileOrphanedOffboardings({ dryRun = false } = {}) {
+    const liveUsers = loadLiveUserGate();
+    if (!liveUsers.known) {
+      // No authoritative user list → every owner would look deleted. Refuse.
+      console.warn('[Orchestrator] offboarding reconciliation skipped: the user index could not be read');
+      return { ran: false, reason: 'live-users-unknown', owners: [], credentials: [], paused: [] };
+    }
+
+    const sshKeys = loadSshKeyIndex();
+    const ghTokens = loadGithubTokenIndex();
+    const agents = Array.from(this.agentConfigs.keys()).map(id => ({ id, cfg: loadAgentConfig(id) }));
+    const owners = credentialResolution.selectOrphanedOwnerIds({
+      credentialIndexes: [sshKeys, ghTokens],
+      agents,
+      loadAgentConfig,
+      liveUsers,
+    });
+    if (!owners.length) return { ran: true, reason: null, owners: [], credentials: [], paused: [] };
+
+    // AC1 — describe the exposure before touching it, so the log carries the
+    // assessment even when the cleanup below only partly succeeds.
+    const orphanSet = new Set(owners);
+    const credentials = [];
+    for (const [index, kind] of [[sshKeys, 'ssh-key'], [ghTokens, 'github-token']]) {
+      for (const e of Array.isArray(index) ? index : []) {
+        if (e && e.scope === 'personal' && e.userId && orphanSet.has(String(e.userId))) {
+          credentials.push({
+            id: String(e.id), kind, ownerId: String(e.userId),
+            fingerprint: e.fingerprint || null, createdAt: e.createdAt || null,
+          });
+        }
+      }
+    }
+    console.warn(
+      `[Orchestrator] offboarding reconciliation (#2138): ${owners.length} deleted owner(s) still hold `
+      + `${credentials.length} personal credential(s) or running agent(s)${dryRun ? ' [dry run]' : ''}`,
+    );
+    for (const c of credentials) {
+      console.warn(
+        `[Orchestrator]   orphaned ${c.kind} '${c.id}' of deleted user ${c.ownerId} `
+        + `(created ${c.createdAt || 'unknown'}, fingerprint ${c.fingerprint || 'unknown'}) `
+        + `— REVOKE IT AT GITHUB, deleting the local copy is not enough`,
+      );
+    }
+    if (dryRun) return { ran: true, reason: 'dry-run', owners, credentials, paused: [] };
+
+    const paused = [];
+    for (const ownerId of owners) {
+      try {
+        const result = await this.offboardOwner(ownerId);
+        paused.push(...(result.paused || []));
+      } catch (err) {
+        console.error(`[Orchestrator] offboarding reconciliation failed for ${ownerId}: ${err.message}`);
+      }
+    }
+    return { ran: true, reason: null, owners, credentials, paused };
   }
 
   // Recreate a single running agent's container so a spawn-time change (e.g. a
@@ -10825,7 +12910,7 @@ class Orchestrator {
     if (loadAgentConfig(instanceId) || agentTeardownRegistry.has(instanceId)) throw new Error(`Agent '${instanceId}' already exists`);
 
     const env = loadEnvironment(blueprint.environmentId);
-    if (!env) throw new Error(`Working Environment '${blueprint.environmentId}' not found`);
+    if (!env) throw new Error(`Environment '${blueprint.environmentId}' not found`);
 
     const password = `agent-${instanceId}-${Date.now()}`;
     const userId = `@${instanceId}:local`;
@@ -11295,6 +13380,78 @@ function teamHasOwnedResources(teamId) {
   return false;
 }
 
+// Put a degraded offboarding on the operator's timeline (#2138 AC5).
+//
+// A user deletion whose teardown did not run is a security event — a departed
+// person's PAT may still be on disk and in use — and until now its only trace
+// was a server-side console line nobody reads. The GitHub Event Log is the
+// operator-facing timeline the console already renders, so the degradation goes
+// there, alongside the response field the API caller gets.
+//
+// Repo-less by construction: this event has no repository, exactly like the
+// internal wake events the same log already carries. `outcomes` stays EMPTY on
+// purpose — the console's reader resolves an agent name per outcome and would
+// throw on an outcome with no `agentId`, and we do not know which agents failed
+// to pause (that is the failure being reported).
+//
+// Never throws: `githubEventLog.record` swallows its own I/O errors, and the
+// wrapper here covers entry construction. A deletion must not fail because its
+// audit line could not be written.
+function recordOffboardingDegradation(userId, detail) {
+  try {
+    const now = new Date().toISOString();
+    githubEventLog.record({
+      ts: now,
+      eventId: `offboarding:${userId}:${Date.now()}`,
+      repo: null,
+      event: 'user.offboarding-degraded',
+      actor: null,
+      createdAt: now,
+      label: null,
+      ref: null,
+      workItem: null,
+      outcomes: [],
+      noMatchingTrigger: false,
+      source: 'internal',
+      offboarding: { userId: String(userId), ok: false, detail: String(detail || 'unknown') },
+    });
+  } catch (err) {
+    console.error(`[Orchestrator] could not log the offboarding degradation for ${userId}: ${err.message}`);
+  }
+}
+
+// Put a failed plugin materialisation on the operator's timeline (#2308 AC18/
+// AC19). A member whose grant includes a plugin that could not be installed
+// must never fail silently — this is the "discoverable after the fact" half:
+// the immediate caller ALSO gets the error in its response `warnings[]`, but a
+// human who was not watching the add/enable call still needs a way to find
+// out later, which is what the GitHub Event Log (already the operator-facing
+// timeline the console renders) gives for free. Repo-less by construction,
+// same as `recordOffboardingDegradation`; `outcomes` stays empty for the same
+// reason (the console's reader throws on a null-agentId outcome).
+function recordPluginSyncFailure(agentId, pluginId, detail) {
+  try {
+    const now = new Date().toISOString();
+    githubEventLog.record({
+      ts: now,
+      eventId: `plugin-sync:${agentId}:${pluginId}:${Date.now()}`,
+      repo: null,
+      event: 'plugin.sync-failed',
+      actor: null,
+      createdAt: now,
+      label: null,
+      ref: null,
+      workItem: null,
+      noMatchingTrigger: false, // same-shape null-agentId hazard as recordOffboardingDegradation — outcomes stays empty below
+      outcomes: [],
+      source: 'internal',
+      pluginSync: { agentId: String(agentId), pluginId: String(pluginId), ok: false, detail: String(detail || 'unknown') },
+    });
+  } catch (err) {
+    console.error(`[Orchestrator] could not log the plugin sync failure for ${agentId}/${pluginId}: ${err.message}`);
+  }
+}
+
 // Returns true if the request was a /internal/admin/* route (handled here),
 // false otherwise so the caller can fall through to other routes.
 async function handleTeamsAdminApi(req, res) {
@@ -11426,18 +13583,48 @@ async function handleTeamsAdminApi(req, res) {
         // record, so a partial failure leaves the user recoverable rather than
         // a deleted user with lingering personal secrets (AC5). Best-effort —
         // the user removal is what the caller contracted for and still proceeds.
-        let offboarding = null;
+        //
+        // #2138 AC5 — the degradation is REPORTED, not just logged. It used to
+        // be a bare `catch` + `console.error` with `offboarding` left `null`,
+        // which is what hid a total failure of offboarding for four weeks: to
+        // the console, to the API caller and to the operator, a delete whose
+        // teardown never ran was byte-identical to one that worked.
+        //
+        // The deletion still completes (#2138 Q1). Refusing it would leave a
+        // present user whose credentials are also still present and whose
+        // offboarding the operator cannot finish by any other route — strictly
+        // worse than the failure it is reporting — and the containment for a
+        // teardown that did not happen is the owner check in
+        // `findPersonalCredentialState` (AC6), which does not need this step to
+        // have succeeded. So: complete, and say plainly what did not happen.
+        let offboarding;
         try {
           // `orchestratorSingleton`, guarded — see the create branch above
-          // (#2135). This read has been a ReferenceError since 2026-08-11, so
-          // offboarding never actually ran; the try/catch made it silent.
+          // (#2135). This read was a ReferenceError from 2026-08-11 until that
+          // fix, so offboarding never actually ran; the try/catch made it silent.
           if (orchestratorSingleton) {
-            offboarding = await orchestratorSingleton.offboardOwner(resourceId);
+            offboarding = { ok: true, ...(await orchestratorSingleton.offboardOwner(resourceId)) };
           } else {
-            console.warn(`[Orchestrator] offboarding skipped for user ${resourceId}: orchestrator not initialised`);
+            offboarding = {
+              ok: false, ownerId: resourceId, paused: [], skipped: [], deletedCredentials: [],
+              error: 'the orchestrator is not initialised — offboarding did not run',
+            };
           }
         } catch (err) {
-          console.error(`[Orchestrator] offboarding failed for user ${resourceId}: ${err.message}`);
+          offboarding = {
+            ok: false, ownerId: resourceId, paused: [], skipped: [], deletedCredentials: [],
+            error: err.message,
+          };
+        }
+        if (!offboarding.ok || (offboarding.skipped || []).length) {
+          const detail = offboarding.ok
+            ? `could not pause ${offboarding.skipped.join(', ')}`
+            : offboarding.error;
+          console.error(
+            `[Orchestrator] OFFBOARDING DEGRADED for deleted user ${resourceId}: ${detail}. `
+            + `Their personal SSH key / GitHub token may still be on disk — delete it and REVOKE `
+            + `it at GitHub, and check for agents of theirs still running.`);
+          recordOffboardingDegradation(resourceId, detail);
         }
         // Retire the departing human's Matrix account and delete their stored
         // access token (#1458), for the same reason personal credentials are
@@ -11554,6 +13741,14 @@ async function main() {
   // runs after init and must never block or break the boot.
   try { migrateUnifiedAgentsMemory(); }
   catch (err) { console.warn(`[Orchestrator] legacy-memory migration pass failed: ${err.message}`); }
+
+  // Offboarding reconciliation (#2138 AC2). Replays the offboarding every user
+  // deleted between 2026-08-11 and the #2135 fix never got. Runs after init()
+  // so `agentConfigs` is populated, and is best-effort and non-blocking for the
+  // same reason as the reconcile below — a stack must still boot. Idempotent:
+  // after the first successful sweep it finds nothing and returns immediately.
+  orchestrator.reconcileOrphanedOffboardings()
+    .catch((err) => console.error(`[Orchestrator] offboarding reconciliation at boot failed: ${err.message}`));
 
   // Plugin broker sidecars (#1547): bring the live set in line with the
   // installed registry — start what is installed, stop orphans of anything
@@ -11975,7 +14170,7 @@ async function main() {
           }
           if (!loadEnvironment(environmentId)) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: `Working Environment '${environmentId}' not found` }));
+            res.end(JSON.stringify({ error: `Environment '${environmentId}' not found` }));
             return;
           }
           const blueprint = { id, displayName, role, systemPrompt, environmentId, createdAt: new Date().toISOString() };
@@ -12214,32 +14409,6 @@ async function main() {
       return;
     }
 
-    // Convert one standalone agent into a team of one, in place (#2052).
-    const convertMatch = req.method === 'POST'
-      && req.url.match(/^\/internal\/agents\/([^/]+)\/convert-to-team$/);
-    if (convertMatch) {
-      const agentId = decodeURIComponent(convertMatch[1]);
-      let body = '';
-      req.on('data', d => body += d);
-      req.on('end', async () => {
-        try {
-          const parsed = body ? JSON.parse(body) : {};
-          const result = await orchestrator.convertAgentToTeam(agentId, { force: parsed.force === true });
-          // A busy agent is a refusal the caller can retry with `force`, not an
-          // error — the same 409-with-a-warning contract disable/enable uses.
-          sendJson(res, result && result.warning ? 409 : 200, result);
-        } catch (err) {
-          console.error(`[Orchestrator] Convert-to-team error for ${agentId}: ${err.message}`);
-          const status = /not found/i.test(err.message) ? 404
-                       : /already taken/i.test(err.message) ? 409
-                       : /cannot be converted|Cannot derive/i.test(err.message) ? 400
-                       : 500;
-          sendJson(res, status, { error: err.message, ...(err.code ? { code: err.code } : {}) });
-        }
-      });
-      return;
-    }
-
     const cloneMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/clone$/);
     if (cloneMatch) {
       const sourceId = decodeURIComponent(cloneMatch[1]);
@@ -12418,6 +14587,83 @@ async function main() {
       return;
     }
 
+    // ── Team-of-one migration — one-time sweep (#2232, Phase C of #2229) ────
+    //
+    // Phase B (#2231) stopped new standalone agents being minted; this sweep
+    // brings every agent created BEFORE that change up to the same shape,
+    // reusing #2052's own conversion mechanics (`convertAgentToTeam`) one
+    // agent at a time. It replaces the manual, per-agent "Convert into a
+    // team..." action, which is retired now that nothing needs it to be
+    // user-triggered.
+    //
+    // Same #1960 dry-run/apply discipline: GET changes nothing; POST re-plans
+    // (never trusting a stale client-side plan), logs the plan before the
+    // first conversion, and never aborts the whole sweep on one agent's
+    // failure — a busy agent is skipped (not force-converted), so an operator
+    // can re-run once it is idle.
+    if (req.method === 'GET' && req.url.split('?')[0] === '/internal/agents/team-of-one-migration') {
+      const plan = teamOfOneMigration.planTeamOfOneMigration(listAgentConfigs());
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(plan));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url.split('?')[0] === '/internal/agents/team-of-one-migration/apply') {
+      (async () => {
+        const plan = teamOfOneMigration.planTeamOfOneMigration(listAgentConfigs());
+        if (plan.candidates.length === 0) {
+          console.log('[Orchestrator] Team-of-one migration: no standalone agents left to migrate');
+        } else {
+          console.log(
+            `[Orchestrator] Team-of-one migration: ${plan.candidates.length} standalone agent(s) to migrate:\n`
+            + plan.candidates.map(c => `  - ${teamOfOneMigration.formatMigrationLine(c)}`).join('\n')
+          );
+        }
+
+        const migrated = [];
+        const skipped = [];
+        const warnings = [];
+        for (const candidate of plan.candidates) {
+          try {
+            // Never `force`: a busy agent is reported as skipped rather than
+            // interrupted mid-turn, and a re-run picks it up once idle —
+            // mirroring the orphan sweep's "never abort on one failure".
+            const result = await orchestrator.convertAgentToTeam(candidate.id, { force: false });
+            if (result && result.warning) {
+              skipped.push({ id: candidate.id, reason: 'busy' });
+            } else {
+              migrated.push({ id: candidate.id, teamId: result.teamId });
+            }
+          } catch (err) {
+            console.error(`[Orchestrator] Team-of-one migration: '${candidate.id}' failed: ${err.message}`);
+            warnings.push({ id: candidate.id, error: err.message });
+          }
+        }
+
+        if (migrated.length > 0) {
+          console.log(`[Orchestrator] Team-of-one migration: migrated ${migrated.length} agent(s): `
+            + migrated.map(m => m.id).join(', '));
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          scanned: plan.scanned,
+          planned: plan.candidates,
+          ineligible: plan.ineligible,
+          migrated,
+          skipped,
+          ...(warnings.length ? { warnings } : {}),
+        }));
+      })().catch(err => {
+        console.error(`[Orchestrator] Team-of-one migration failed: ${err.message}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
     const deleteMatch = req.method === 'DELETE' && req.url.match(/^\/internal\/agents\/([^/]+)$/);
     if (deleteMatch) {
       const id = decodeURIComponent(deleteMatch[1]);
@@ -12478,12 +14724,13 @@ async function main() {
           agentTeardownRegistry.begin(id);
           armed.push(id);
 
-          // Fast-phase teardown for one agent: stop → plugin reap → delete
-          // config → drop in-memory config. Records the agent for background
-          // reaping. `graceful` (isGracefulDeleteRole, #1791 Change 2) keeps the
-          // SIGTERM→commit→autoremove window only for a role that flushes work
-          // on shutdown — since #1962 that is no role, so every agent is
-          // force-removed. The flag stays as the seam for the next one.
+          // Fast-phase teardown for one agent: stop → plugin reap → graceful
+          // flush (pool instances only) → delete config → drop in-memory
+          // config. Records the agent for background reaping. `graceful`
+          // (isGracefulDeleteRole, #1791 Change 2) kept the SIGTERM→commit→
+          // autoremove window only for a role that flushes work on shutdown —
+          // from #1962 to #2246 that was no role, so every agent was
+          // force-removed; a pooled instance (#2246, D8) is that role again.
           //
           // NOTE for #1962 reviewers: this is deliberately still routed through
           // isGracefulDeleteRole rather than hard-coded false, so "which roles
@@ -12499,11 +14746,21 @@ async function main() {
               await orchestrator.teardownAgentPluginScopes(targetId, cfg).catch(e =>
                 console.warn(`[Orchestrator] plugin teardown ${targetId}: ${e.message}`));
             }
+            const graceful = isGracefulDeleteRole(cfg ? cfg.role : null, cfg);
+            // D8's graceful flush runs BEFORE deleteAgentFiles wipes the
+            // workspace it reads from — commit/push whatever partial work the
+            // instance leaves behind, archive its session transcript, then
+            // proceed exactly as a force-removed agent would. Best-effort: a
+            // failure here must never block the delete itself.
+            if (graceful && cfg) {
+              await gracefulPoolTeardown(targetId, cfg).catch((err) =>
+                console.warn(`[AgentPool] graceful teardown for ${targetId} failed: ${err.message}`));
+            }
             deleteAgentFiles(targetId);
             orchestrator.agentConfigs.delete(targetId);
             bgTargets.push({
               id: targetId,
-              graceful: isGracefulDeleteRole(cfg ? cfg.role : null),
+              graceful,
               deactivateMatrix,
             });
           };
@@ -12651,7 +14908,7 @@ async function main() {
           const env = loadEnvironment(environmentId);
           if (!env) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: `Working Environment not found: ${environmentId}` }));
+            res.end(JSON.stringify({ error: `Environment not found: ${environmentId}` }));
             return;
           }
 
@@ -13323,6 +15580,10 @@ async function main() {
     // poller drops the later duplicate. The label itself is unchanged on GitHub
     // (the human already applied it) — this path does NOT stamp any label. The
     // target trigger stays transport:'github' (no config change).
+    //
+    // #2247: the same wake half is reused by the Flow Supervisor's auto-dispatch
+    // — see `wakeGithubLabelListeners` below, which THIS handler is now a thin
+    // HTTP wrapper over.
     if (req.method === 'POST' && req.url === '/internal/github-label-applied') {
       let body = '';
       req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
@@ -13340,54 +15601,9 @@ async function main() {
         }
         try {
           const { repo, number, kind, label, actor } = parsed.value;
-          const key = labelFastPath.eventKeyForKind(kind);
-          const agents = listAgentIds().map((aid) => ({
-            agentId: aid,
-            enabled: loadAgentConfig(aid)?.enabled !== false,
-            triggers: loadTriggers(aid),
-          }));
-          const listeners = labelFastPath.matchPollerListeners({ repo, label, kind }, agents);
-          const now = new Date().toISOString();
-          // #1897 AC8: resolve the title best-effort so the notice isn't blank.
-          // #2114: also carry the PR's closesIssues (from the same fetch) so the
-          // admission gate keys this hand-off to the issue's ticket, not a new one.
-          const { title, closesIssues } = await fetchWorkItemDetail(repo, kind, number);
-          const ghEvent = labelFastPath.buildSyntheticEvent({
-            repo, label, kind, number, title, closesIssues, actor,
-            eventId: `intlbl:${crypto.randomBytes(6).toString('hex')}`,
-            now,
+          const { listeners } = await wakeGithubLabelListeners({
+            repo, number, kind, label, actor, source: 'internal-plugin',
           });
-          for (const l of listeners) {
-            // Enqueue first (immediate wake), then arm the dedup marker so the
-            // poller's later delivery of the same label is dropped.
-            enqueuePending(l.agentId, {
-              ...flowEmit.buildPendingEntry(l.triggerId, key, ghEvent),
-              source: 'internal-plugin',
-            });
-            labelDedupMarkers.add({
-              agentId: l.agentId, triggerId: l.triggerId,
-              repo, kind, number, label, appliedAt: now,
-            });
-            console.log(
-              `[Orchestrator] label-fastpath: ${repo}#${number} +${label} ` +
-              `by ${actor || 'console'} → agent=${l.agentId} trigger=${l.triggerId}`);
-          }
-          // Same transparency log the poller writes, tagged with the delivery
-          // path so operators see an honest "delivered internally" line.
-          githubEventLog.record({
-            ...githubEventLog.buildEventEntry({
-              ghEvent, repoFullName: repo, key,
-              outcomes: listeners.map((l) => ({
-                agentId: l.agentId, triggerId: l.triggerId,
-                status: 'delivered', reason: null, digest: false, wakeLabel: label,
-              })),
-            }),
-            source: 'internal-plugin',
-          });
-          if (listeners.length === 0) {
-            console.log(
-              `[Orchestrator] label-fastpath: ${repo}#${number} +${label} matched no poller listener`);
-          }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, matched: listeners.length, listeners }));
         } catch (err) {
@@ -15556,6 +17772,200 @@ async function main() {
       return;
     }
 
+    // GET /internal/teams/:teamId/pool-control — board data for #2250 Phase 5:
+    // every pooled role's live pause/drain state + instance count, plus the
+    // team's admission-lane `held` entries (each carrying an `id` — the same
+    // `heldIdentity` a "Force dispatch" POST names) so the Flow Control board
+    // can render pause/resume/drain and force-dispatch buttons without a
+    // second round trip. Observe-only, gated like `tickets`/`flow-anomalies`.
+    const poolControlGetMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/pool-control(?:\?.*)?$/);
+    if (poolControlGetMatch) {
+      const teamId = decodeURIComponent(poolControlGetMatch[1]);
+      try {
+        const cfg = loadAgentConfig(teamId);
+        if (!cfg || cfg.role !== 'team') {
+          return sendJson(res, 404, { error: 'agent team not found' });
+        }
+        const control = loadPoolControl(teamId);
+        const roles = _teamPooledRoles(teamId).map((role) => {
+          const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
+          return {
+            roleId,
+            agentId: role.id,
+            displayName: role.cfg.displayName || roleId,
+            maxInstances: role.pool.maxInstances,
+            liveInstanceCount: _liveInstanceIdsForRole(role.id).length,
+            state: agentPool.poolControlState(control, roleId),
+          };
+        });
+        const lane = loadAdmissionLane(teamId);
+        const held = lane.held.map((h) => ({
+          id: admissionControl.heldIdentity(h.agentId, h.entry),
+          agentId: h.agentId,
+          ticket: h.ticket,
+          heldAt: h.heldAt,
+        }));
+        return sendJson(res, 200, { teamId, roles, held });
+      } catch (err) {
+        console.error(`[AgentPool] pool-control read error for ${teamId}: ${err.message}`);
+        return sendJson(res, 500, { error: err.message });
+      }
+    }
+
+    // GET /internal/teams/:teamId/pool-lanes — the read-only "Live surface"
+    // (#2273, concept Amendment 2 A2.2): per pooled role, its live instances
+    // as lanes, tagged running / held-same-epic / timed-out. No new
+    // persistence — `pool-instance-lanes.js`'s pure core is fed each role's
+    // live instance configs (`_liveInstancesForRole`) plus the ticket ledger
+    // this endpoint already sweeps for `tickets`. Maintenance-gated for the
+    // same reason as `tickets`/`flow-anomalies`: it is a GitHub sweep via the
+    // ledger, and the window must stay quiet.
+    const poolLanesMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/pool-lanes(?:\?.*)?$/);
+    if (poolLanesMatch) {
+      const teamId = decodeURIComponent(poolLanesMatch[1]);
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') {
+            return sendJson(res, 404, { error: 'agent team not found' });
+          }
+          const maint = readMaintenanceState();
+          if (maint && maint.active) {
+            return sendJson(res, 200, {
+              teamId, maintenance: true, roles: [], generatedAt: new Date().toISOString(),
+            });
+          }
+          const ledger = await computeTeamTicketLedger(teamId);
+          const pooledRoles = _teamPooledRoles(teamId);
+          const roleInputs = pooledRoles.map((role) => ({
+            role: {
+              roleId: agentPool.roleIdFromMemberId(role.id, teamId),
+              agentId: role.id,
+              maxInstances: role.pool.maxInstances,
+              maxRuntimeMs: role.pool.teardown.maxRuntimeMs,
+            },
+            instances: _liveInstancesForRole(role.id),
+          }));
+          const roles = poolInstanceLanes.buildTeamPoolLanes(roleInputs, ledger.tickets || [])
+            .map((r, i) => ({ ...r, displayName: pooledRoles[i].cfg.displayName || r.roleId }));
+          return sendJson(res, 200, { teamId, maintenance: false, roles, generatedAt: new Date().toISOString() });
+        } catch (err) {
+          console.error(`[AgentPool] pool-lanes read error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // POST /internal/teams/:teamId/pool-control/:roleId — set/clear a pooled
+    // role's pause/drain state (#2250 Phase 5). `{ state: "paused"|"draining" }`
+    // sets it; `{ state: "running" }` (or omitted) clears it back to the
+    // implicit default. Does not touch `pool` config or respawn anything —
+    // purely gates the NEXT dispatch (`routePooledDispatch` /
+    // `flowSupervisorSweepTeam` / `recurringPoolSweepTeam`, all read-through).
+    const poolControlSetMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/pool-control\/([^/]+)$/);
+    if (poolControlSetMatch) {
+      const teamId = decodeURIComponent(poolControlSetMatch[1]);
+      const roleId = decodeURIComponent(poolControlSetMatch[2]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 10_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') {
+            return sendJson(res, 404, { error: 'agent team not found' });
+          }
+          const roleFullId = `${teamId}-${roleId}`;
+          const roleCfg = loadAgentConfig(roleFullId);
+          if (!roleCfg || !agentPool.isPooledRole(roleCfg) || (roleCfg.parentTeamId || null) !== teamId) {
+            return sendJson(res, 404, { error: 'pooled role not found on this team' });
+          }
+          const parsed = JSON.parse(body || '{}');
+          const state = parsed && parsed.state;
+          const control = loadPoolControl(teamId);
+          let resumed = false;
+          if (state === 'running' || state == null) {
+            delete control[roleId];
+            resumed = true;
+          } else if (agentPool.POOL_CONTROL_STATES.includes(state)) {
+            control[roleId] = { state, changedAt: new Date().toISOString() };
+          } else {
+            return sendJson(res, 400, { error: `state must be one of running, ${agentPool.POOL_CONTROL_STATES.join(', ')}` });
+          }
+          savePoolControl(teamId, control);
+          console.log(`[AgentPool] ${teamId}: ${roleId} set to ${agentPool.poolControlState(control, roleId)}`);
+          // Code-review finding on #2281: redeliver whatever the pause/drain
+          // fallthrough fix above held while this role was stopped — the SAME
+          // entries `routePooledDispatch` refused to hand to the template.
+          // `admissionChecked: true` because these were already admitted into
+          // the wipLimit lane (if any) on their FIRST attempt; re-checking now
+          // would double-count them.
+          if (resumed) {
+            const held = agentPool.normalizePausedHold(loadPausedHold(teamId));
+            const queued = held[roleId] || [];
+            if (queued.length) {
+              delete held[roleId];
+              savePausedHold(teamId, held);
+              for (const h of queued) enqueuePending(h.agentId, h.entry, { admissionChecked: true });
+              console.log(`[AgentPool] ${teamId}: resumed ${roleId}, redelivering ${queued.length} held dispatch(es)`);
+            }
+          }
+          return sendJson(res, 200, { teamId, roleId, state: agentPool.poolControlState(control, roleId) });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      });
+      return;
+    }
+
+    // POST /internal/teams/:teamId/force-dispatch — the board's "Force
+    // dispatch" button (#2250 Phase 5): promote ONE named held entry right
+    // now, bypassing the team's `wipLimit` for that entry alone. `{ id }` is
+    // the `heldIdentity` a `pool-control` GET already returned. A stale id
+    // (already promoted/released) is reported `found:false`, not an error —
+    // the board's own next refresh will simply no longer show it.
+    const forceDispatchMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/force-dispatch$/);
+    if (forceDispatchMatch) {
+      const teamId = decodeURIComponent(forceDispatchMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 10_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') {
+            return sendJson(res, 404, { error: 'agent team not found' });
+          }
+          const parsed = JSON.parse(body || '{}');
+          const id = typeof parsed.id === 'string' ? parsed.id : null;
+          if (!id) return sendJson(res, 400, { error: 'id is required' });
+          const lane = loadAdmissionLane(teamId);
+          const result = admissionControl.forcePromoteHeld({ lane, id });
+          if (!result.found) return sendJson(res, 200, { teamId, found: false });
+          saveAdmissionLane(teamId, result.lane);
+          if (result.entry) {
+            // Force-dispatch bypasses `wipLimit`, not pause/drain: if the
+            // target role is currently paused/draining, `enqueuePending` →
+            // `routePooledDispatch` now correctly holds this entry in the
+            // paused-hold queue (the #2281 review's noted "much smaller
+            // version" of the pause/drain fallthrough finding, resolved by
+            // the same fix rather than needing its own branch here) — it
+            // redelivers once the role resumes, same as any other dispatch
+            // that arrived while paused.
+            enqueuePending(result.agentId, result.entry, { admissionChecked: true });
+            console.log(`[AgentPool] ${teamId}: force-dispatched ${result.ticketKey} for ${result.agentId}`);
+          }
+          return sendJson(res, 200, { teamId, found: true, agentId: result.agentId, ticketKey: result.ticketKey });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      });
+      return;
+    }
+
     // GET /internal/teams/:teamId/hill-climb/metrics — the latest persisted
     // metrics snapshot (hill-climbing loop Phase 1, #1222). Read-only; returns
     // the most recent day-keyed snapshot or { snapshot: null } if the team has
@@ -15794,6 +18204,45 @@ async function main() {
           console.error(`[Orchestrator] setTeamSkillActive error for ${teamId}: ${err.message}`);
           const status = /not found/i.test(err.message) ? 404
             : /not a team|required/i.test(err.message) ? 400
+            : 500;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // POST /internal/teams/:teamId/skills — bulk set the team's active skill
+    // list (#2286, the Skills-tab "Save Changes" button) and eagerly push
+    // every add/remove to already-materialized members in the same call, the
+    // way /prompt does for systemPromptTemplate. Body: { skills: string[] }.
+    const teamSkillsBulkMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/]+)\/skills$/);
+    if (teamSkillsBulkMatch) {
+      const teamId = decodeURIComponent(teamSkillsBulkMatch[1]);
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', async () => {
+        let payload;
+        try { payload = JSON.parse(body || '{}'); }
+        catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Invalid JSON body: ${err.message}` }));
+          return;
+        }
+        if (!Array.isArray(payload?.skills)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'skills (array) required' }));
+          return;
+        }
+        try {
+          const result = await orchestrator.updateTeamSkills(teamId, payload.skills);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error(`[Orchestrator] updateTeamSkills error for ${teamId}: ${err.message}`);
+          const status = /not found/i.test(err.message) ? 404
+            : /not a team/i.test(err.message) ? 400
             : 500;
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
@@ -16191,6 +18640,19 @@ async function main() {
           // For role: 'team' — admission control (#2114, flow-control concept
           // §4.0): the declarative per-flow WIP limit the dispatch path enforces.
           wipLimit,
+          // #2231 (Phase B of #2229) — for `role: 'agent'` only: mint a team of
+          // one (a `role: 'team'` record + one `team-member`) instead of a
+          // standalone agent. `id` still names the AGENT (the member keeps it;
+          // the team id is derived as `<id>-team`), so every existing response
+          // consumer (the `id` the success card and the `/chats/:agentId`
+          // redirect use) is unaffected.
+          mintTeamOfOne,
+          // #2217 — when set, `id` is a BASE id: the orchestrator resolves the
+          // first free id itself (reserving it before this request returns)
+          // instead of refusing on collision. Used by quickstart's fast lanes,
+          // which derive the id from a repository/name the caller never chose
+          // and has no form field to change.
+          autoId,
         } = JSON.parse(body);
         if (!id || !displayName || !role || !environmentId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -16212,13 +18674,34 @@ async function main() {
           res.end(JSON.stringify({ error: 'systemPrompt required for role: agent' }));
           return;
         }
-        if (loadAgentConfig(id) || agentTeardownRegistry.has(id)) {
+        // #2217 — skipped for `autoId`: the id is a base the orchestrator
+        // resolves and reserves itself inside `createAgent`, so a collision on
+        // it is not a refusal, it is the very thing autoId exists to absorb.
+        if (!autoId && (loadAgentConfig(id) || agentTeardownRegistry.has(id))) {
+          // #2218 — name a free alternative alongside the refusal, in the
+          // same `{ code: 'id-conflict', agentId }` shape the clone/import
+          // routes already emit, so one client handler can serve all three.
+          // `id` itself is never taken here — only the SUGGESTION is resolved
+          // by the strict #2217 predicate, and only that predicate: the
+          // suggestion must be free by the same rule a submit will be
+          // re-checked against, or it could hand back an id that fails on
+          // accept (teardown-in-flight, AC4/edge case).
+          let suggestedId;
+          try {
+            suggestedId = suggestFreeAgentId(id, isAgentIdTaken);
+          } catch { /* id-sequence-exhausted — omit the suggestion, not the refusal */ }
           res.writeHead(409, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: `Agent '${id}' already exists` }));
+          res.end(JSON.stringify({
+            error: `Agent '${id}' already exists — choose a different id.`,
+            code: 'id-conflict',
+            agentId: id,
+            ...(suggestedId ? { suggestedId } : {}),
+          }));
           return;
         }
 
         const extra = { schedule, taskPrompt };
+        if (autoId) extra.autoId = true;
         // Wizard-side extras layered on top of the legacy fields.
         if (team) extra.team = team;
         if (sessionPolicy) extra.sessionPolicy = sessionPolicy;
@@ -16234,7 +18717,9 @@ async function main() {
         if (typeof labelSuffix === 'string' && labelSuffix) extra.labelSuffix = labelSuffix;
         if (hillClimb && typeof hillClimb === 'object' && !Array.isArray(hillClimb)) extra.hillClimb = hillClimb;
         if (Number.isInteger(wipLimit) && wipLimit >= 1) extra.wipLimit = wipLimit;
-        const result = await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
+        const result = (role === 'agent' && mintTeamOfOne === true)
+          ? await orchestrator.createTeamOfOneAgent(id, displayName, systemPrompt, environmentId, extra)
+          : await orchestrator.createAgent(id, displayName, role, systemPrompt, environmentId, extra);
         res.writeHead(201, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (err) {
@@ -16251,6 +18736,20 @@ async function main() {
             error: matrixLoginRetry.DEACTIVATED_USER_MESSAGE,
             code: 'matrix_user_deactivated',
           }));
+          return;
+        }
+        // #2217 — the pathological "50 ids for this base already taken" case:
+        // a real, actionable refusal rather than a generic 500.
+        if (err.code === 'id-sequence-exhausted') {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message, code: err.code }));
+          return;
+        }
+        // #2231 — the derived team id (`<id>-team`) was already taken by an
+        // unrelated agent/team; the same "actionable, not a 500" treatment.
+        if (err.code === 'team-id-taken') {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message, code: err.code }));
           return;
         }
         // 400 for caller-fixable misconfigurations (missing env / token, clone
@@ -16480,6 +18979,28 @@ async function main() {
   if (typeof reconcileTimer.unref === "function") reconcileTimer.unref();
 
   // ============================================================
+  // Plugin auto-reconcile loop (#2308 D2) — the plugin sibling of the skill
+  // loop above, same interval class and overlap guard. Heals a member whose
+  // grant includes a plugin its workspace never received: created before this
+  // ticket shipped, created while a sync failed, or any other drift between
+  // the grant and `seeded-plugins.json`.
+  // ============================================================
+  const PLUGIN_RECONCILE_INTERVAL_MS = Math.max(
+    30_000,
+    Number(process.env.PLUGIN_RECONCILE_INTERVAL_MS) || 5 * 60 * 1000,
+  );
+  let pluginReconcileBusy = false;
+  const runPluginReconcile = async () => {
+    if (pluginReconcileBusy) return; // overlap guard — a slow pass must not stack
+    pluginReconcileBusy = true;
+    try { await orchestrator.reconcilePendingPlugins(); }
+    catch (err) { console.warn(`[Orchestrator] plugin reconcile pass failed: ${err.message}`); }
+    finally { pluginReconcileBusy = false; }
+  };
+  const pluginReconcileTimer = setInterval(runPluginReconcile, PLUGIN_RECONCILE_INTERVAL_MS);
+  if (typeof pluginReconcileTimer.unref === "function") pluginReconcileTimer.unref();
+
+  // ============================================================
   // Hill-climbing loop Phase 1 (#1221): scheduled flow-anomaly-sweep persistence.
   // The live GET .../flow-anomalies endpoint computes and discards; recurrence
   // detection (the hill-climber) and the flow-reconciliation Phase-4 responder's
@@ -16582,6 +19103,88 @@ async function main() {
   };
   const admissionTimer = setInterval(runAdmissionTick, ADMISSION_TICK_INTERVAL_MS);
   if (typeof admissionTimer.unref === "function") admissionTimer.unref();
+
+  // ============================================================
+  // Agent Pools — Phase 2 (#2247): the Flow Supervisor's reconcile tick.
+  // Maintenance-gated — unlike the admission tick above, this one STARTS work
+  // (a dispatch, a rework nudge), the same distinction that gates the
+  // anomaly-history and hill-climb sweeps. Opt-in per team and a no-op for
+  // every team with no pooled role or no `wipLimit` (`flowSupervisorSweepTeam`
+  // returns before its first request in either case), so an installation that
+  // never opted into Agent Pools pays nothing beyond one config read per team.
+  // ============================================================
+  const FLOW_SUPERVISOR_TICK_INTERVAL_MS = Number(process.env.AEE_FLOW_SUPERVISOR_TICK_INTERVAL_MS || 60_000);
+  let flowSupervisorBusy = false;
+  const runFlowSupervisorTick = async () => {
+    if (flowSupervisorBusy) return; // overlap guard — a slow sweep must not stack
+    flowSupervisorBusy = true;
+    try {
+      const maint = readMaintenanceState();
+      if (maint && maint.active) return; // human owns readiness; the supervisor only owns timing, and pauses like every other scheduled dispatcher during maintenance
+      let teamIds = [];
+      try {
+        teamIds = listAgentIds().filter((id) => {
+          try { const c = loadAgentConfig(id); return c && c.role === "team"; }
+          catch { return false; }
+        });
+      } catch (err) {
+        console.warn(`[FlowSupervisor] team enumeration failed: ${err.message}`);
+        return;
+      }
+      for (const teamId of teamIds) {
+        try {
+          await flowSupervisorSweepTeam(teamId);
+        } catch (err) {
+          // Never let one team's failure stop the others or escape the timer.
+          console.warn(`[FlowSupervisor] ${teamId}: sweep failed: ${err.message}`);
+        }
+      }
+    } finally {
+      flowSupervisorBusy = false;
+    }
+  };
+  const flowSupervisorTimer = setInterval(runFlowSupervisorTick, FLOW_SUPERVISOR_TICK_INTERVAL_MS);
+  if (typeof flowSupervisorTimer.unref === "function") flowSupervisorTimer.unref();
+
+  // ============================================================
+  // Agent Pools — Phase 3 (#2248): the recurring-analysis binding's tick.
+  // Maintenance-gated for the same reason the Flow Supervisor's is — this one
+  // STARTS work (a spawn). Independent of Phase 2/`autoDispatch`: opt-in per
+  // pooled role via `pool.workSource`, a no-op (one config read per team) for
+  // every installation that never configured one.
+  // ============================================================
+  const RECURRING_POOL_TICK_INTERVAL_MS = Number(process.env.AEE_RECURRING_POOL_TICK_INTERVAL_MS || 60_000);
+  let recurringPoolBusy = false;
+  const runRecurringPoolTick = async () => {
+    if (recurringPoolBusy) return; // overlap guard — a slow sweep must not stack
+    recurringPoolBusy = true;
+    try {
+      const maint = readMaintenanceState();
+      if (maint && maint.active) return; // pauses like every other scheduled dispatcher during maintenance
+      let teamIds = [];
+      try {
+        teamIds = listAgentIds().filter((id) => {
+          try { const c = loadAgentConfig(id); return c && c.role === "team"; }
+          catch { return false; }
+        });
+      } catch (err) {
+        console.warn(`[AgentPool] recurring-pool team enumeration failed: ${err.message}`);
+        return;
+      }
+      for (const teamId of teamIds) {
+        try {
+          await recurringPoolSweepTeam(teamId);
+        } catch (err) {
+          // Never let one team's failure stop the others or escape the timer.
+          console.warn(`[AgentPool] ${teamId}: recurring-pool sweep failed: ${err.message}`);
+        }
+      }
+    } finally {
+      recurringPoolBusy = false;
+    }
+  };
+  const recurringPoolTimer = setInterval(runRecurringPoolTick, RECURRING_POOL_TICK_INTERVAL_MS);
+  if (typeof recurringPoolTimer.unref === "function") recurringPoolTimer.unref();
 
   // ============================================================
   // Hill-climbing loop Phase 1 (#1222): daily per-team metrics collector.

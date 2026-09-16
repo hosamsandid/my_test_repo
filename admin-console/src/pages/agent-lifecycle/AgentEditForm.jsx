@@ -43,11 +43,35 @@ import SkillPicker from '../../components/SkillPicker';
 import PluginGrantPicker from '../../components/PluginGrantPicker';
 import SyncReposPanel from '../../components/SyncReposPanel';
 import AgentRepositoriesPanel from '../agent-chat/AgentRepositoriesPanel';
+import TeamEnvironmentPanel from '../agent-chat/TeamEnvironmentPanel';
+import PageHelpButton from '../../components/PageHelpButton';
+import { AGENT_CHAT_HELP_SECTIONS } from '../agent-chat/agent-chat-help-sections.js';
 import { effectiveGrantFor } from '../plugin-grant-view.js';
 import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
 } from './form-kit.jsx';
 import { buildInitialForm, buildEditSubmit, hasOwnSkills } from './agent-edit-form-model.js';
+import { TEAM_CONFIG_TABS, ENV_TAB_IDS, resolveTeamConfigTab } from './team-config-tabs-view.js';
+import { parallelismSummary } from '../process/parallelism-view.js';
+import ScalingSection from '../process/ScalingSection';
+import ComingSoonBadge from '../../components/ComingSoonBadge';
+import { usePoolsEnabled } from '../../context/PoolsFeatureContext';
+
+// #2236: which help chapter each tab's "?" opens, and the tab's own label for
+// the button's title. General/Skills/Plugins point at the same field-by-field
+// chapter the ordinary (non-team) form already had; the five environment tabs
+// share the one chapter documenting them as a group.
+const TEAM_CONFIG_TAB_LABEL = Object.fromEntries(TEAM_CONFIG_TABS.map(t => [t.id, t.label]));
+const TEAM_CONFIG_TAB_HELP = {
+  general: AGENT_CHAT_HELP_SECTIONS.formFields,
+  repositories: AGENT_CHAT_HELP_SECTIONS.teamEnvironment,
+  provider: AGENT_CHAT_HELP_SECTIONS.teamEnvironment,
+  toolchain: AGENT_CHAT_HELP_SECTIONS.teamEnvironment,
+  mcp: AGENT_CHAT_HELP_SECTIONS.teamEnvironment,
+  context: AGENT_CHAT_HELP_SECTIONS.teamEnvironment,
+  skills: AGENT_CHAT_HELP_SECTIONS.formFields,
+  plugins: AGENT_CHAT_HELP_SECTIONS.formFields,
+};
 
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
 // Plugin grant (#1547). Like ContextMountControl below — and unlike the rest of
@@ -56,7 +80,7 @@ import { buildInitialForm, buildEditSubmit, hasOwnSkills } from './agent-edit-fo
 // the CLI + a scope token into the live workspace and reconnects the broker's
 // network, all without a respawn. Batching it into the form's PUT would make
 // "Save" mean two very different things.
-export function PluginGrantSection({ agent, parentTeam }) {
+export function PluginGrantSection({ agent, parentTeam, alwaysVisible = false }) {
   const { data, refetch } = useApi('/api/plugins');
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState('');
@@ -118,7 +142,24 @@ export function PluginGrantSection({ agent, parentTeam }) {
     apply(pluginId, true, granularity);
   }
 
-  if (installed.length === 0) return null;
+  // #2236 AC16: on the team configuration surface the Plugins tab must stay
+  // present and explain the situation rather than vanish — a tab that
+  // disappears depending on installation state is itself a puzzle, and a
+  // Team Admin cannot resolve "nothing installed" anyway (System-Admin-only).
+  // Every other caller keeps the pre-#2236 self-hide.
+  if (installed.length === 0) {
+    if (!alwaysVisible) return null;
+    return (
+      <div>
+        <div style={labelStyle}>Plugins</div>
+        <div style={{ ...helpTextStyle, marginTop: 0 }}>
+          No plugins are installed on this platform yet. Installing one is a
+          System Administrator's action, from the Plugins registry page — once
+          installed, it can be granted to this team here.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -353,9 +394,16 @@ export default function AgentEditForm({
   agent, onSave, onCancel, cancelLabel = 'Cancel', saving, error,
   initialForm = null, onFormChange = null,
   confirmRestart = false, onImmediateApply = null,
+  // #2236: a team's whole configuration is one flat row of tabs. The selected
+  // tab is owned by the host (`AgentSettingsPanel`/`TeamConfigSurface`, which
+  // sits above this form's own save-triggered remount) rather than by this
+  // component, so switching tabs survives a save (AC6) and is addressable by
+  // URL (AC7). Both optional and inert for every non-team role (AC13).
+  teamConfigTab = null, onTeamConfigTabChange = null,
 }) {
   // A preserved draft (#1929 AC6) wins over the config-derived defaults, so
   // returning to a half-edited form finds it exactly as it was left.
+  const poolsEnabled = usePoolsEnabled();
   const [form, setForm] = useState(() => initialForm || buildInitialForm(agent));
   const update = (key, val) => setForm(f => {
     const next = { ...f, [key]: val };
@@ -385,6 +433,25 @@ export default function AgentEditForm({
     ? (parentTeam.systemPromptTemplate || '')
     : '';
 
+  const isTeam = agent.role === 'team';
+  const activeTab = isTeam ? resolveTeamConfigTab(teamConfigTab) : null;
+  const setTeamTab = (id) => { if (onTeamConfigTabChange) onTeamConfigTabChange(id); };
+  // The outer Save/Cancel button batches exactly the fields General and
+  // Skills contribute to `buildEditSubmit` — Repositories/Model
+  // provider/Toolchain/MCP servers/Additional context save through the
+  // environment record's own button (`TeamEnvironmentPanel`) and Plugins
+  // applies immediately (`PluginGrantSection`), both unchanged (AC5).
+  //
+  // `|| !!onCancel` (code-review finding on #2236): those two tabs are only
+  // where an edit CAN be made, not the only tabs it can be VIEWED from once
+  // made. `AgentSettingsPanel` only ever passes a non-null `onCancel` while
+  // its own `dirty` flag is true — the same batched fields this row acts on —
+  // so without this a pending edit made on General/Skills would leave no
+  // Save/Discard reachable at all the moment the user switched to another
+  // tab to check something, stranding the "unsaved changes" banner with
+  // nothing on screen to resolve it.
+  const showBatchedSave = !isTeam || activeTab === 'general' || activeTab === 'skills' || !!onCancel;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       {error && (
@@ -393,20 +460,88 @@ export default function AgentEditForm({
         </div>
       )}
 
-      <div>
-        <div style={labelStyle}>ID (read-only)</div>
-        <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
-          {agent.id}
+      {/* #2236: one flat, ARIA-compliant tab row — General · Repositories ·
+          Model provider · Toolchain · MCP servers · Additional context ·
+          Skills · Plugins, always in this order and always all eight
+          (AC1/AC2/AC3/AC9/AC15) — replacing the old boxed "Environment"
+          section with its own nested sub-tab strip.
+          #2253: restyled to match the Agent Chat right-rail TabButton look
+          (RightRail.jsx) — a bottom-border underline for the active state
+          instead of a filled pill, the same active/inactive color and
+          weight rules, and a fixed-height stretch layout. Behaviour
+          (role="tablist"/"tab", aria-selected, the PageHelpButton anchored
+          right, the overflowX:auto narrow-width fallback) is unchanged. */}
+      {isTeam && (
+        <div style={{
+          display: 'flex', alignItems: 'stretch',
+          height: 'var(--eb-header-height)', flexShrink: 0,
+          overflowX: 'auto',
+          borderBottom: '1px solid var(--eb-border-default)',
+        }}>
+          <div role="tablist" aria-label="Team configuration" style={{ display: 'flex', alignItems: 'stretch', flexShrink: 0 }}>
+            {TEAM_CONFIG_TABS.map(t => {
+              const active = activeTab === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setTeamTab(t.id)}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center',
+                    flexShrink: 0,
+                    padding: '0 var(--eb-space-3)',
+                    background: 'none',
+                    border: 'none',
+                    borderBottom: `2px solid ${active ? 'var(--eb-accent-primary)' : 'transparent'}`,
+                    color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-muted)',
+                    fontSize: 'var(--eb-text-sm)', whiteSpace: 'nowrap',
+                    fontWeight: active ? 'var(--eb-font-semibold)' : 'var(--eb-font-medium)',
+                    cursor: 'pointer', fontFamily: 'inherit',
+                    transition: 'color var(--eb-transition-fast), border-color var(--eb-transition-fast)',
+                  }}
+                  onMouseEnter={e => { if (!active) e.currentTarget.style.color = 'var(--eb-text-secondary)'; }}
+                  onMouseLeave={e => { if (!active) e.currentTarget.style.color = 'var(--eb-text-muted)'; }}
+                >
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
+          <PageHelpButton
+            label={`How the ${TEAM_CONFIG_TAB_LABEL[activeTab] || 'team configuration'} tab works`}
+            size={13}
+            section={TEAM_CONFIG_TAB_HELP[activeTab] || AGENT_CHAT_HELP_SECTIONS.teamEnvironment}
+            style={{ marginLeft: 'auto', flexShrink: 0, alignSelf: 'center', padding: 2 }}
+          />
         </div>
-      </div>
+      )}
 
-      <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} />
+      {/* #2264: a readable width cap for the form body, left-anchored (no
+          auto margins) rather than centered — so dragging the sidebar's
+          resize handle grows/shrinks only the right-hand whitespace and the
+          form's left edge never shifts. The tab strip above stays full width
+          on its own (AC4). */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)', width: '100%', maxWidth: 720 }}>
+      {(!isTeam || activeTab === 'general') && (
+        <div>
+          <div style={labelStyle}>ID (read-only)</div>
+          <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
+            {agent.id}
+          </div>
+        </div>
+      )}
+
+      {(!isTeam || activeTab === 'general') && (
+        <FormInput label="Display Name *" value={form.displayName} onChange={v => update('displayName', v)} />
+      )}
 
       {/* The prompt is the most important thing in this form, so it sits
           directly under Display Name rather than below Plugins (#2026). Both
           blocks read fields that only exist for their own role, so each keeps
           the role guard it had inside the block it was lifted out of. */}
-      {agent.role === 'team' && (
+      {isTeam && activeTab === 'general' && (
         <div>
           <label style={labelStyle}>
             Team Default Prompt
@@ -425,6 +560,33 @@ export default function AgentEditForm({
         </div>
       )}
 
+      {/* #2272 AC3: a compact, read-only echo of the team-axis Parallelism
+          panel (Flow editor → Parallelism) — `wipLimit`/`autoDispatch` already
+          ride on this same `agent` config object, no separate fetch. Editing
+          happens in the Flow editor, not here — this is the "team view"
+          summary the design doc's A2.2 asks for, not a second edit surface. */}
+      {isTeam && activeTab === 'general' && (
+        <div>
+          <div style={labelStyle}>Parallelism (read-only)</div>
+          <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', lineHeight: 1.6 }}>
+            {parallelismSummary({ wipLimit: agent.wipLimit, autoDispatch: agent.autoDispatch }).map((line) => (
+              <div key={line}>{line}</div>
+            ))}
+          </div>
+          <div style={helpTextStyle}>Edit in the Flow editor's Parallelism panel.</div>
+        </div>
+      )}
+
+      {/* #2167/#2236: the team's environment fields, re-hosted as five of the
+          flat row's own top-level tabs rather than a nested sub-strip.
+          Applies immediately through its own PUT to the environment record —
+          like PluginGrantSection and ContextMountControl, this does not batch
+          into this form's Save button, because PUT /api/agents/:id has no
+          environment fields in its whitelist. */}
+      {isTeam && ENV_TAB_IDS.has(activeTab) && (
+        <TeamEnvironmentPanel agent={agent} tab={activeTab} />
+      )}
+
       {agent.role === 'team-member' && (
         <>
           <PromptModeControl
@@ -440,7 +602,7 @@ export default function AgentEditForm({
         </>
       )}
 
-      {ownSkills && (
+      {(isTeam ? activeTab === 'skills' : ownSkills) && (
         <div>
           <div style={labelStyle}>Skills</div>
           <div style={{ ...helpTextStyle, marginTop: 0, marginBottom: 'var(--eb-space-2)' }}>
@@ -454,15 +616,32 @@ export default function AgentEditForm({
         </div>
       )}
 
-      <PluginGrantSection agent={agent} parentTeam={parentTeam} />
+      {(!isTeam || activeTab === 'plugins') && (
+        <PluginGrantSection agent={agent} parentTeam={parentTeam} alwaysVisible={isTeam} />
+      )}
 
       {agent.role === 'team-member' && (
         <>
-          <div>
-            <div style={labelStyle}>Parent Team (read-only)</div>
-            <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
-              {agent.parentTeamId || '—'}
+          {/* #2271, Amendment 2 A2.2 of `docs/parallel-workers-concept.md` —
+              the role-axis config surface for agent pools, the agent's own
+              Settings-tab half of the "one model, several surfaces"
+              precedent #2272 set for the team axis. Applies immediately
+              through its own Save (like PluginGrantSection/ContextMountControl
+              above), not batched into this form's own Save button. */}
+          <div style={{ paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+              <div style={labelStyle}>Scaling</div>
+              {/* #2302: the pools feature is gated off by default — keep the
+                  section visible but inert until an operator opts in. */}
+              {!poolsEnabled && <ComingSoonBadge title="Agent-pool autoscaling is not yet enabled on this platform." />}
             </div>
+            <ScalingSection
+              agentId={agent.id}
+              pool={agent.pool}
+              parentWipLimit={parentTeam?.wipLimit}
+              disabled={!poolsEnabled}
+              onChanged={onImmediateApply ? (() => onImmediateApply({ kind: 'pool' })) : undefined}
+            />
           </div>
 
           <InheritOrCustom
@@ -523,7 +702,7 @@ export default function AgentEditForm({
           <SyncReposPanel
             endpoint={`/api/agents/${encodeURIComponent(agent.id)}/sync-repositories`}
             actionLabel="Sync repositories"
-            description={"Clone any repositories added to this agent's Working Environment that are missing from its workspace. Already-cloned repositories are left untouched."}
+            description={"Clone any repositories added to this agent's Environment that are missing from its workspace. Already-cloned repositories are left untouched."}
           />
         </div>
       )}
@@ -539,11 +718,14 @@ export default function AgentEditForm({
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-        <PrimaryBtn onClick={() => onSave(buildEditSubmit(agent, form))} saving={saving} disabled={!canSubmit}>
-          {saving ? 'Saving…' : 'Save Changes'}
-        </PrimaryBtn>
-        {onCancel && <SecondaryBtn onClick={onCancel}>{cancelLabel}</SecondaryBtn>}
+      {showBatchedSave && (
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+          <PrimaryBtn onClick={() => onSave(buildEditSubmit(agent, form))} saving={saving} disabled={!canSubmit}>
+            {saving ? 'Saving…' : 'Save Changes'}
+          </PrimaryBtn>
+          {onCancel && <SecondaryBtn onClick={onCancel}>{cancelLabel}</SecondaryBtn>}
+        </div>
+      )}
       </div>
     </div>
   );

@@ -66,13 +66,6 @@ const CLONEABLE_ROLES = new Set(['agent', 'team-member']);
 // produced a bundle whose only consumer — an import that re-creates the role —
 // the platform refuses since #1962.
 const EXPORTABLE_ROLES = new Set(['agent', 'team-member', 'team']);
-// Converting into a team of one (#2052) is offered to the standalone role
-// ALONE: a `team` already is one, a `team-member` already belongs to one, and
-// there is no reverse conversion, so a near-miss here is not a cosmetic bug.
-// `expert` is the pre-#1961 name the orchestrator normalizes to `agent` on
-// startup, listed for the same reason `findStandaloneAgentForEnv` still accepts
-// it — a list entry read before that normalization has landed.
-const CONVERTIBLE_ROLES = new Set(['agent', 'expert']);
 
 /**
  * The hint on **Share…** for someone who may see the team but not administer it
@@ -91,11 +84,6 @@ export const MEMBERS_READ_ONLY_HINT =
 /** The same entry for someone who *can* change the list — what it opens. */
 export const MEMBERS_MANAGE_HINT =
   'Add colleagues to this team, change their role, or remove them.';
-
-/** Converting is one-way — the entry says so before it is clicked, not after. */
-export const CONVERT_TO_TEAM_HINT =
-  'Turn this assistant into a team of one, keeping its prompt, skills, '
-  + 'triggers and chat history. Cannot be undone.';
 
 /**
  * Per-agent context-menu items for one chat row / agent card.
@@ -177,19 +165,6 @@ export function buildAgentMenu({ agent, canManage = true, locked = false, busy =
     });
   }
 
-  // Grow into a team (#2052). Not in the destructive tail and not marked
-  // danger: nothing is lost, the agent keeps everything it has. But it IS
-  // one-way, so it always opens a confirm (the trailing "…") and carries the
-  // hint above rather than leaving "what happens to my assistant?" to the
-  // dialog alone.
-  if (CONVERTIBLE_ROLES.has(role)) {
-    items.push({
-      key: 'convert-to-team',
-      label: 'Convert into a team…',
-      ...gate(isStub, isStub ? 'Materialize the agent before converting it.' : CONVERT_TO_TEAM_HINT),
-    });
-  }
-
   // Destructive tail. Reset-to-stub is never a one-click action (AC4): the
   // caller opens a confirm dialog, and the entry is marked danger so it reads
   // apart from the reversible ones above.
@@ -257,13 +232,15 @@ export function buildTeamMenu({
   // Flow editor — both explicit choices rather than an inferred one.
 
   // Phase 2 (#1929) replaced Phase 1's jump to the Agents page: the team's own
-  // edit form now opens in the chat's Settings tab, which is where AC5 wants
-  // team settings reachable from. Gated like the mutating entries because that
-  // tab is hidden for a caller who may not manage the team.
+  // edit form opens in the chat, which is where AC5 wants team settings
+  // reachable from. #2235 widened that surface to the full width right of the
+  // agent list rather than the narrow rail, so this entry now lands there.
+  // Gated like the mutating entries because that surface is hidden for a
+  // caller who may not manage the team.
   items.push({
     key: 'edit-team',
     label: 'Team settings…',
-    ...gate(false, 'Opens the team\'s configuration in the right rail.'),
+    ...gate(false, 'Opens the team\'s configuration.'),
   });
   // Sharing (#2082, #2041 P4): who may open, chat with and administer this
   // team. The one entry in this menu that stays live without rights, because
@@ -276,6 +253,12 @@ export function buildTeamMenu({
     title: canManageMembers ? MEMBERS_MANAGE_HINT : MEMBERS_READ_ONLY_HINT,
   });
   items.push({ key: 'export-team', label: 'Export team (ZIP)', disabled: false });
+  // Clone team (#2171, epic #2166 A5): a new, independent team with this
+  // one's structure — repositories, MCP refs, toolchain, context — and none
+  // of its credentials. Ungated like Export team: it reads the source team's
+  // structure (never a secret) and creates a wholly separate team, so it
+  // needs no more right over the source than any other visible row has.
+  items.push({ key: 'clone-team', label: 'Clone team…', disabled: busy });
   items.push({ key: 'open-flow-editor', label: 'Open in Flow Editor', disabled: false });
   items.push({ key: 'delete-team', label: 'Delete team…', danger: true, ...gate(false) });
 
@@ -286,9 +269,14 @@ export function buildTeamMenu({
  * A disabled agent cannot be chatted with — the DM-room route rejects it with a
  * 409 (`Agent disabled`). With the disabled filter on, such a row is listed but
  * must not open a chat (AC6); the row's own Enable entry is the way forward.
+ *
+ * A `role: 'team'` agent hosts no chat/session of its own either (#2213) — it
+ * has no `dmRoomId`, so selecting it must not attempt to open one against a
+ * null room. Its row instead moves the selection onto the team and opens the
+ * Settings tab (see `AgentList.jsx`'s `CollapsibleHeader`).
  */
 export function isChatOpenable(agent) {
-  return !!agent && agent.enabled !== false;
+  return !!agent && agent.enabled !== false && agent.role !== 'team';
 }
 
 /**

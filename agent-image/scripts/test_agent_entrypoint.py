@@ -31,6 +31,42 @@ _spec.loader.exec_module(entrypoint)
 fmt = entrypoint._format_ask_user_question
 github_event_detail = entrypoint.TriggerScheduler._github_event_detail
 map_stream_json_line = entrypoint._map_stream_json_line
+is_human_sender = entrypoint._is_human_sender
+
+
+class ChatTurnGate(unittest.TestCase):
+    """#2173: humans post under their own Matrix identity into the shared
+    per-agent room, so the old "exactly two room members" DM heuristic had to
+    go — a legitimate room now holds this agent plus any number of humans.
+    """
+
+    AGENT = "@my-agent:local"
+
+    def test_agent_itself_never_counts_as_a_sender(self):
+        self.assertFalse(is_human_sender(self.AGENT, self.AGENT, [self.AGENT, "@u-alice:local"]))
+
+    def test_a_joined_member_that_is_not_the_agent_is_a_human_sender(self):
+        self.assertTrue(is_human_sender(self.AGENT, "@u-alice:local", [self.AGENT, "@u-alice:local"]))
+
+    def test_a_three_member_room_still_responds_to_either_human(self):
+        # The exact scenario the ticket's runtime AC names: two humans plus the
+        # agent in one room, both humans get replies.
+        members = [self.AGENT, "@u-alice:local", "@u-bob:local"]
+        self.assertTrue(is_human_sender(self.AGENT, "@u-alice:local", members))
+        self.assertTrue(is_human_sender(self.AGENT, "@u-bob:local", members))
+
+    def test_a_sender_not_joined_to_the_room_is_refused(self):
+        # e.g. a stale/cached member list, or a sender who has since left.
+        members = [self.AGENT, "@u-alice:local"]
+        self.assertFalse(is_human_sender(self.AGENT, "@u-someone-else:local", members))
+
+    def test_room_size_alone_no_longer_matters(self):
+        # The old heuristic refused a message the instant a third member
+        # joined; a legitimate second human in the room must not be refused.
+        two_members = [self.AGENT, "@u-alice:local"]
+        three_members = [self.AGENT, "@u-alice:local", "@u-bob:local"]
+        self.assertTrue(is_human_sender(self.AGENT, "@u-alice:local", two_members))
+        self.assertTrue(is_human_sender(self.AGENT, "@u-alice:local", three_members))
 
 
 class FormatAskUserQuestion(unittest.TestCase):
@@ -480,6 +516,80 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
         body = client.room_send.call_args.kwargs["content"]["body"]
         self.assertIn("`wip`", body)
+
+    # -- #2151: the wake label — not the collapsed payload label — is shown ---
+
+    async def test_stamped_wake_label_wins_over_collapsed_payload_label(self):
+        """#2151 AC1: the reproduction case — a poller-delivered event whose
+        payload.label.name is an arbitrary co-applied label ('flow-control')
+        while the entry's stamped wakeLabel ('ready') is what actually
+        satisfied the subscriber's filter. The notice must show only 'ready'."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event", "labelFilter": "ready"}
+        ctx = {
+            "github": {
+                "event": "issues.labeled",
+                "repo": "o/r",
+                "payload": {"label": {"name": "flow-control"}, "issue": {}},
+            },
+            "wakeLabel": "ready",
+        }
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("`ready`", body)
+        self.assertNotIn("`flow-control`", body)
+
+    async def test_trigger_label_filter_used_when_no_stamp_present(self):
+        """#2151 AC5: an entry queued before the stamp existed (no `wakeLabel`
+        key in ctx at all) falls back to the trigger's own `labelFilter`,
+        which is still the correct answer for a poller-delivered entry."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event", "labelFilter": "ready-2"}
+        ctx = {"github": {
+            "event": "issues.labeled",
+            "repo": "o/r",
+            "payload": {"label": {"name": "ux"}, "issue": {}},
+        }}
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("`ready-2`", body)
+        self.assertNotIn("`ux`", body)
+
+    async def test_null_stamp_falls_through_to_payload_label_for_any_label_listener(self):
+        """#2151 AC2: a filter-less (any-label) listener's stamped wakeLabel is
+        `None` (poller/flow-emit convention) — the notice must still fall
+        through to `payload.label.name`, unchanged behaviour."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event"}
+        ctx = {
+            "github": {
+                "event": "issues.labeled",
+                "repo": "o/r",
+                "payload": {"label": {"name": "ux"}, "issue": {}},
+            },
+            "wakeLabel": None,
+        }
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("`ux`", body)
+
+    async def test_internal_delivery_stays_byte_identical_when_stamp_agrees(self):
+        """#2151 AC3: flow-emit / label-fastpath synthetic events stamp
+        wakeLabel equal to their own payload.label.name — the notice must be
+        unaffected either way."""
+        scheduler, client = self._scheduler()
+        trigger = {"id": "t-ignore", "type": "github-event", "labelFilter": "ready"}
+        ctx = {
+            "github": {
+                "event": "issues.labeled",
+                "repo": "o/r",
+                "payload": {"label": {"name": "ready"}, "issue": {}},
+            },
+            "wakeLabel": "ready",
+        }
+        await scheduler._post_trigger_notice(trigger, ctx, "!room:local")
+        body = client.room_send.call_args.kwargs["content"]["body"]
+        self.assertIn("`ready`", body)
 
     # -- AC3: graceful label fallback ------------------------------------------
 
@@ -1099,6 +1209,48 @@ class SystemInitProvenance(unittest.TestCase):
             self.assertNotIn("token", key.lower())
 
 
+class RateLimitEventMapping(unittest.TestCase):
+    """#2202: a `rate_limit_event` stream-json line must get its own event
+    type (rather than falling into the generic `unknown` branch) so the
+    Session Log can render a human-readable summary instead of a raw dump."""
+
+    def _map(self, rate_limit_info):
+        line = __import__("json").dumps({
+            "type": "rate_limit_event",
+            "rate_limit_info": rate_limit_info,
+            "uuid": "u-1",
+            "session_id": "sess-1",
+        })
+        return map_stream_json_line(line, "corr-1")
+
+    def test_type_is_rate_limit_event_not_unknown(self):
+        events = self._map({"status": "allowed"})
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "rate_limit_event")
+
+    def test_info_carries_the_rate_limit_info_object(self):
+        info = {
+            "status": "allowed",
+            "resetsAt": 1790812800,
+            "rateLimitType": "overage",
+            "overageStatus": "allowed",
+            "overageResetsAt": 1790812800,
+            "isUsingOverage": False,
+            "overageInUse": True,
+        }
+        ev = self._map(info)[0]
+        self.assertEqual(ev["info"], info)
+
+    def test_raw_carries_the_whole_parsed_line(self):
+        ev = self._map({"status": "allowed"})[0]
+        self.assertEqual(ev["raw"]["type"], "rate_limit_event")
+        self.assertEqual(ev["raw"]["session_id"], "sess-1")
+
+    def test_correlation_id_present(self):
+        ev = self._map({"status": "allowed"})[0]
+        self.assertEqual(ev["correlationId"], "corr-1")
+
+
 class BuildUsageRecord(unittest.TestCase):
     """Two-sided contract with admin-console/api/usage-summary.js: build_usage_record
     (emitter) is asserted against the SAME golden fixture the JS aggregator uses
@@ -1190,6 +1342,35 @@ class RequestedByBlock(unittest.TestCase):
         # `run_context["trigger"] = ...`) must never carry it.
         self.assertNotIn('run_context["requestedBy"]', src.replace(
             'dm_run_context["requestedBy"]', ''))
+
+
+class ActingSenderEnvValue(unittest.TestCase):
+    """#2175 (epic #2166 B3): the `AEE_ACTING_SENDER` env value `gh-as-agent`
+    forwards so the orchestrator can re-key an attributed write's personal
+    credential off the human actually chatting, instead of the agent's static
+    config owner. Built on top of `_requested_by` so the two can never
+    disagree about what counts as a known chat sender."""
+
+    def test_a_chat_turns_sender_is_carried(self):
+        self.assertEqual(
+            entrypoint._acting_sender_env_value({"requestedBy": {"matrixUserId": "@ada:local"}}),
+            "@ada:local",
+        )
+
+    def test_an_autonomous_run_carries_no_sender(self):
+        # A cron/github-event/loop run_context sets no `requestedBy` at all —
+        # this must resolve to empty, not raise, so autonomous runs are
+        # unaffected (the ticket's own AC).
+        for ctx in (None, {}, {"trigger": {"type": "cron"}}, {"requestedBy": None}):
+            with self.subTest(ctx=ctx):
+                self.assertEqual(entrypoint._acting_sender_env_value(ctx), "")
+
+    def test_matches_requested_by_normalization_exactly(self):
+        # Same whitelist/trim/reject rules as build_usage_record's own
+        # requestedBy handling — the two must never diverge on what "a known
+        # chat sender" means.
+        raw = {"requestedBy": {"matrixUserId": "  @ada:local  ", "body": "ignored"}}
+        self.assertEqual(entrypoint._acting_sender_env_value(raw), "@ada:local")
 
 
 class MaintenanceModeGating(unittest.IsolatedAsyncioTestCase):
@@ -4898,6 +5079,36 @@ class PluginEventMarkers(unittest.TestCase):
         desc = entrypoint.TriggerScheduler._describe_in_flight_marker(markers[0])
         self.assertIn("jira", desc)
         self.assertIn("status_changed", desc)
+
+
+class HandlePendingEntryWakeLabelWiring(unittest.TestCase):
+    """#2151: the drained pending entry's stamped `wakeLabel` must reach the
+    trigger notice through `ctx`, the same way `_handle_pending_entry` already
+    threads `github` through. Read off the source for the same reason
+    `WakeAgentDispatchPlacement` above does — a live drain needs a scheduler,
+    a Claude run and a Matrix client, so a silent regression here would only
+    ever surface as a wrong label in a running chat."""
+
+    SRC = _MODULE_PATH.read_text(encoding="utf-8")
+
+    def _fallthrough_body(self) -> str:
+        start = self.SRC.index("async def _handle_pending_entry")
+        end = self.SRC.index("\n    async def ", start + 1)
+        return self.SRC[start:end]
+
+    def test_ctx_carries_wake_label_from_the_entry(self):
+        body = self._fallthrough_body()
+        self.assertIn('entry.get("wakeLabel")', body)
+
+    def test_wake_label_is_only_threaded_when_ctx_exists(self):
+        # A trigger with no `github` in the entry passes ctx=None straight
+        # through — wakeLabel must never be set on a None ctx (AttributeError).
+        body = self._fallthrough_body()
+        idx = body.index('entry.get("wakeLabel")')
+        preceding = body[:idx]
+        self.assertIn("ctx is not None", preceding)
+
+
 # --- Verify-before-claim (#2113, flow-control concept §4.2) -----------------
 
 
@@ -5204,6 +5415,348 @@ class GhPostconditionFacts(unittest.TestCase):
 
         facts = self._run(run)
         self.assertEqual(len(facts["prs"]), entrypoint.CLAIM_VERIFY_MAX_LINKED)
+
+
+class OrphanedBackgroundTasks(unittest.TestCase):
+    """A run is a single headless turn: any background task still running when
+    the turn ends is stopped by the CLI and never resumes. The detector folds the
+    raw task-event payloads and reports those left unfinished so the reply can
+    say so instead of hanging on the model's "I'll wait…" promise.
+
+    Fixtures are the exact event shapes captured from a live session log
+    (`background_tasks_changed` inventory, `task_started`, `task_updated.patch`,
+    `task_notification.status`).
+    """
+
+    orphaned = staticmethod(entrypoint._orphaned_background_tasks)
+    warn = staticmethod(entrypoint._format_orphaned_bg_task_warning)
+
+    def test_no_task_events_is_empty(self):
+        self.assertEqual(self.orphaned([]), [])
+        self.assertIsNone(self.warn([]))
+
+    def test_task_joined_within_the_turn_is_not_orphaned(self):
+        # started → completed before the turn ended (the safe fan-out pattern).
+        events = [
+            {"subtype": "task_started", "task_id": "b9rov6p1s", "description": "gh run watch"},
+            {"subtype": "task_updated", "task_id": "b9rov6p1s", "patch": {"status": "completed"}},
+            {"subtype": "task_notification", "task_id": "b9rov6p1s", "status": "completed"},
+        ]
+        self.assertEqual(self.orphaned(events), [])
+        self.assertIsNone(self.warn(self.orphaned(events)))
+
+    def test_task_stopped_at_turn_end_is_orphaned(self):
+        # The reproduced bug: a Monitor/background wait the agent did NOT join —
+        # the CLI stops it after the result event (`status: stopped`).
+        events = [
+            {"subtype": "task_started", "task_id": "bynzgmmd9",
+             "description": "until CI completed; do sleep 15; done"},
+            {"subtype": "task_notification", "task_id": "bynzgmmd9", "status": "stopped",
+             "summary": "until CI completed; do sleep 15; done"},
+        ]
+        orphaned = self.orphaned(events)
+        self.assertEqual([t["task_id"] for t in orphaned], ["bynzgmmd9"])
+        self.assertEqual(orphaned[0]["status"], "stopped")
+        warning = self.warn(orphaned)
+        self.assertIsNotNone(warning)
+        self.assertIn("stopped, not finished", warning)
+        self.assertIn("until CI completed", warning)
+
+    def test_started_but_never_terminal_is_orphaned(self):
+        # Defensive: the CLI was killed by the watchdog before emitting any stop.
+        events = [{"subtype": "task_started", "task_id": "abc", "description": "long job"}]
+        self.assertEqual([t["task_id"] for t in self.orphaned(events)], ["abc"])
+
+    def test_description_recovered_from_background_tasks_changed(self):
+        # A task that only ever appears in the inventory event still carries its
+        # command text into the warning.
+        events = [
+            {"subtype": "background_tasks_changed",
+             "tasks": [{"task_id": "z1", "task_type": "local_bash",
+                        "description": "sleep forever"}]},
+        ]
+        orphaned = self.orphaned(events)
+        self.assertEqual(orphaned[0]["description"], "sleep forever")
+        self.assertIn("sleep forever", self.warn(orphaned))
+
+    def test_mixed_run_reports_only_the_unfinished_one(self):
+        events = [
+            {"subtype": "task_started", "task_id": "done1", "description": "d1"},
+            {"subtype": "task_notification", "task_id": "done1", "status": "completed"},
+            {"subtype": "task_started", "task_id": "hang1", "description": "d2"},
+            {"subtype": "task_notification", "task_id": "hang1", "status": "stopped"},
+        ]
+        self.assertEqual([t["task_id"] for t in self.orphaned(events)], ["hang1"])
+
+    def test_warning_pluralises_and_caps_the_list(self):
+        events = [{"subtype": "task_started", "task_id": f"t{i}", "description": f"cmd {i}"}
+                  for i in range(7)]
+        warning = self.warn(self.orphaned(events))
+        self.assertIn("7 background tasks", warning)
+        self.assertIn("and 2 more", warning)  # 5 shown + 2 folded
+
+    def test_failed_task_is_not_orphaned(self):
+        # `failed` is a real conclusion the agent could react to within the turn.
+        events = [
+            {"subtype": "task_started", "task_id": "f1", "description": "x"},
+            {"subtype": "task_updated", "task_id": "f1", "patch": {"status": "failed"}},
+        ]
+        self.assertEqual(self.orphaned(events), [])
+
+
+class BgOrphanCorrectionDecision(unittest.TestCase):
+    """#2277's pure core: "correct once vs. fall back to notice", mirroring the
+    `OrphanedBackgroundTasks` pure-function test style so the loop-guard rule
+    is checkable with no live scheduler."""
+
+    decide = staticmethod(entrypoint._should_self_correct_bg_orphan)
+
+    def test_nothing_orphaned_never_corrects(self):
+        self.assertFalse(self.decide([], False))
+        self.assertFalse(self.decide([], True))
+
+    def test_orphaned_and_not_yet_corrected_corrects(self):
+        self.assertTrue(self.decide([{"task_id": "a"}], False))
+
+    def test_orphaned_but_already_a_correction_does_not_chain(self):
+        # The #606 loop guard: depth=1, then honesty only.
+        self.assertFalse(self.decide([{"task_id": "a"}], True))
+
+
+class BgOrphanCorrectionEntry(unittest.TestCase):
+    """The self-enqueued pending entry + the prompt it carries."""
+
+    def test_entry_shape_and_kind(self):
+        entry = entrypoint._build_bg_orphan_correction_entry(
+            "!room:local", [{"task_id": "t1", "description": "gh run watch"}])
+        self.assertEqual(entry["kind"], entrypoint._BG_ORPHAN_CORRECTION_KIND)
+        self.assertEqual(entry["roomId"], "!room:local")
+        self.assertEqual(entry["descriptions"], ["gh run watch"])
+
+    def test_entry_falls_back_to_task_id_when_no_description(self):
+        entry = entrypoint._build_bg_orphan_correction_entry(
+            "!room:local", [{"task_id": "t1", "description": ""}])
+        self.assertEqual(entry["descriptions"], ["t1"])
+
+    def test_entry_caps_descriptions_at_five(self):
+        orphaned = [{"task_id": f"t{i}", "description": f"d{i}"} for i in range(9)]
+        entry = entrypoint._build_bg_orphan_correction_entry("!room:local", orphaned)
+        self.assertEqual(len(entry["descriptions"]), 5)
+
+    def test_prompt_names_the_tasks_and_steers_foreground_and_out_of_band(self):
+        prompt = entrypoint._format_bg_orphan_correction_prompt(["gh run watch"])
+        self.assertIn("gh run watch", prompt)
+        self.assertIn("foreground", prompt)
+        self.assertIn("block until it completes", prompt)
+        self.assertIn("github-event", prompt)
+        self.assertIn("loop", prompt)
+
+    def test_prompt_degrades_gracefully_with_no_descriptions(self):
+        prompt = entrypoint._format_bg_orphan_correction_prompt([])
+        self.assertIn("a background task", prompt)
+
+
+class BgOrphanCorrectionEnqueue(unittest.TestCase):
+    """`_enqueue_bg_orphan_correction` is a thin, never-raising wrapper over the
+    existing self-target `enqueue-pending` HTTP call — the same one
+    `_run_agent_verify` uses to hand work to ANOTHER agent (#933); here the
+    route's `{id}` is this agent's own id."""
+
+    def test_success_posts_to_this_agents_own_enqueue_route_and_returns_true(self):
+        with patch.object(entrypoint.TriggerScheduler, "_orch_post_json",
+                          return_value=(202, "{}")) as post:
+            ok = entrypoint._enqueue_bg_orphan_correction(
+                "acme-dev", "!room:local", [{"task_id": "t1", "description": "d"}])
+        self.assertTrue(ok)
+        route, entry = post.call_args.args
+        self.assertEqual(route, "/internal/agents/acme-dev/enqueue-pending")
+        self.assertEqual(entry["kind"], entrypoint._BG_ORPHAN_CORRECTION_KIND)
+        self.assertEqual(entry["roomId"], "!room:local")
+
+    def test_non_2xx_status_is_reported_as_failure_not_raised(self):
+        with patch.object(entrypoint.TriggerScheduler, "_orch_post_json",
+                          return_value=(500, "boom")):
+            ok = entrypoint._enqueue_bg_orphan_correction("acme-dev", "!room:local", [{}])
+        self.assertFalse(ok)
+
+    def test_transport_exception_is_swallowed_not_raised(self):
+        with patch.object(entrypoint.TriggerScheduler, "_orch_post_json",
+                          side_effect=OSError("unreachable")):
+            ok = entrypoint._enqueue_bg_orphan_correction("acme-dev", "!room:local", [{}])
+        self.assertFalse(ok)
+
+
+class BgOrphanCorrectionDelivery(unittest.IsolatedAsyncioTestCase):
+    """Driven through the real drain, mirroring `WakeAgentDelivery`: a
+    `kind: 'bg-orphan-correction'` entry reaches `_execute` with a SYNTHESIZED
+    trigger (no triggers.json listener to look up, unlike wake-agent) carrying
+    the depth marker."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.workdir = Path(self._tmpdir.name)
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir", return_value=self.workdir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="acme-dev",
+            user_id="@acme-dev:local",
+            send_formatted=AsyncMock(return_value="$evt"), blueprint_id=None,
+        )
+
+    def _queue(self, *entries):
+        entrypoint._atomic_write_json(
+            self.workdir / entrypoint._PENDING_FILENAME, list(entries))
+
+    async def test_the_entry_drives_execute_with_a_synthetic_trigger_and_depth_marker(self):
+        scheduler = self._scheduler()
+        self._queue({"kind": "bg-orphan-correction", "roomId": "!room:local",
+                     "descriptions": ["gh run watch"]})
+        scheduler._execute = AsyncMock()
+
+        await scheduler._process_pending()
+
+        scheduler._execute.assert_awaited_once()
+        trigger, = scheduler._execute.await_args.args
+        self.assertEqual(trigger["roomId"], "!room:local")
+        self.assertIn("gh run watch", trigger["prompt"])
+        ctx = scheduler._execute.await_args.kwargs["ctx"]
+        self.assertEqual(ctx, {entrypoint._BG_ORPHAN_CORRECTION_CTX_KEY: True})
+        # The #506 marker was attached before the run and cleared after it.
+        self.assertEqual(entrypoint._load_in_flight(), [])
+
+    async def test_no_valid_room_id_is_dropped_not_crashed(self):
+        scheduler = self._scheduler()
+        self._queue({"kind": "bg-orphan-correction", "roomId": "not-a-room-id",
+                     "descriptions": ["x"]})
+        scheduler._execute = AsyncMock()
+
+        await scheduler._process_pending()
+
+        scheduler._execute.assert_not_awaited()
+        self.assertEqual(entrypoint._load_in_flight(), [])
+
+    async def test_the_entry_is_not_logged_as_out_of_scope(self):
+        self.assertNotIn("bg-orphan-correction", entrypoint._PENDING_OUT_OF_SCOPE_KINDS)
+        scheduler = self._scheduler()
+        self._queue({"kind": "bg-orphan-correction", "roomId": "!room:local",
+                     "descriptions": ["x"]})
+        scheduler._execute = AsyncMock()
+
+        await scheduler._process_pending()
+
+        scheduler._execute.assert_awaited_once()
+
+
+class BgOrphanCorrectionExecuteInnerWiring(unittest.IsolatedAsyncioTestCase):
+    """The enqueue DECISION as `_execute_inner` (any trigger run, including a
+    dispatched correction) actually makes it, driven the same way
+    `WakeAgentDelivery.test_the_note_lands_in_the_untrusted_envelope...` drives
+    `_execute_inner` directly with `_call_claude` faked out."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.workdir = Path(self._tmpdir.name)
+        self.addCleanup(self._tmpdir.cleanup)
+        patcher = patch.object(entrypoint, "_agent_workdir", return_value=self.workdir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="acme-dev",
+            user_id="@acme-dev:local",
+            send_formatted=AsyncMock(return_value="$evt"), blueprint_id=None,
+        )
+
+    @staticmethod
+    def _fake_call_claude_orphaning(*args, **kwargs):
+        # Positional call shape from _execute_inner:
+        # _call_claude(prompt, room_id, correlation_id, blueprint_id, timeout_sec, run_context)
+        run_context = args[5] if len(args) > 5 else kwargs.get("run_context")
+        run_context["_bgOrphaned"] = [{"task_id": "t1", "description": "gh run watch",
+                                       "status": "stopped"}]
+        return "some reply\n\n> stopped, not finished"
+
+    async def test_a_fresh_orphaning_run_enqueues_exactly_one_correction(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(entrypoint, "_call_claude",
+                          side_effect=self._fake_call_claude_orphaning), \
+             patch.object(entrypoint, "_enqueue_bg_orphan_correction",
+                          return_value=True) as enqueue:
+            await scheduler._execute_inner(
+                {"id": "t1", "type": "cron", "roomId": "!room:local", "prompt": "do work"},
+                ctx=None,
+            )
+        enqueue.assert_called_once_with("acme-dev", "!room:local",
+                                        [{"task_id": "t1", "description": "gh run watch",
+                                          "status": "stopped"}])
+
+    async def test_a_run_that_is_itself_a_correction_does_not_chain(self):
+        scheduler = self._scheduler()
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(entrypoint, "_call_claude",
+                          side_effect=self._fake_call_claude_orphaning), \
+             patch.object(entrypoint, "_enqueue_bg_orphan_correction") as enqueue:
+            await scheduler._execute_inner(
+                {"id": "bg-orphan-correction", "type": "internal",
+                 "roomId": "!room:local", "prompt": "redo"},
+                ctx={entrypoint._BG_ORPHAN_CORRECTION_CTX_KEY: True},
+            )
+        enqueue.assert_not_called()
+
+    async def test_a_clean_run_never_enqueues(self):
+        scheduler = self._scheduler()
+
+        def fake_clean(*args, **kwargs):
+            run_context = args[5] if len(args) > 5 else kwargs.get("run_context")
+            run_context["_bgOrphaned"] = []
+            return "[PASS]"
+
+        with patch.object(entrypoint, "_under_test_harness", return_value=False), \
+             patch.object(entrypoint, "_call_claude", side_effect=fake_clean), \
+             patch.object(entrypoint, "_enqueue_bg_orphan_correction") as enqueue:
+            await scheduler._execute_inner(
+                {"id": "t1", "type": "cron", "roomId": "!room:local", "prompt": "do work"},
+                ctx=None,
+            )
+        enqueue.assert_not_called()
+
+
+class BgOrphanCorrectionDispatchPlacement(unittest.TestCase):
+    """Source-reading placement guards, mirroring `WakeAgentDispatchPlacement` —
+    the two async listener paths (DM handler, `_handle_pending_entry`) have no
+    dedicated test harness in this suite, so the wiring facts are read off the
+    module instead of driven."""
+
+    SRC = _MODULE_PATH.read_text(encoding="utf-8")
+
+    def test_bg_orphan_branch_sits_above_the_out_of_scope_check(self):
+        body = self.SRC[self.SRC.index("async def _handle_pending_entry"):]
+        branch = body.index('if kind == _BG_ORPHAN_CORRECTION_KIND:')
+        out_of_scope = body.index("if kind in _PENDING_OUT_OF_SCOPE_KINDS:")
+        self.assertLess(branch, out_of_scope)
+        self.assertIn("await self._execute_bg_orphan_correction(entry)", body)
+
+    def test_the_correction_run_goes_through_execute_not_call_claude_directly(self):
+        body = self.SRC[self.SRC.index("async def _execute_bg_orphan_correction"):]
+        body = body[:body.index("# -- handover DM")]
+        self.assertIn("await self._execute(", body)
+        self.assertNotIn("_call_claude", body)
+        self.assertNotIn("_gate_held", body)
+
+    def test_the_dm_handler_checks_bg_orphaned_after_the_claude_call(self):
+        # on_direct_message has no dedicated test harness (deeply nested async
+        # Matrix listener) — assert the enqueue check reads from the SAME
+        # run_context object the _call_claude invocation was given, in order.
+        body = self.SRC[self.SRC.index("async def on_message"):]
+        call_site = body.index("_call_claude, send_body, room_id, correlation_id, blueprint_id")
+        check_site = body.index('dm_run_context.get("_bgOrphaned")')
+        self.assertLess(call_site, check_site)
 
 
 if __name__ == "__main__":

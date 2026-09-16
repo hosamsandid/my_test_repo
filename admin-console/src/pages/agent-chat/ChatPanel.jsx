@@ -32,6 +32,7 @@ import { resolveContextWindowTokens, computeContextFillLevel } from './context-w
 import { headerContextIndicator } from './session-info.js';
 import SessionInfoPopover from './SessionInfoPopover.jsx';
 import { maintenanceBannerText } from './maintenance-banner';
+import { agentRemovedNoticeText } from './agent-removed-notice.js';
 import { providerWarningText } from '../provider-health-view.js';
 import { RESUME_MESSAGE } from './resume-session';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
@@ -89,6 +90,12 @@ export default function ChatPanel({
   agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost, contextFill,
   onWorkspaceChanged, onTodoBoundary, onOpenKnowledge, resumeRequest,
   insertRefRequest,
+  // #2311 D2: true once the live roster poll has confirmed this agent is no
+  // longer in `/api/matrix/agents` while its chat is still open. `agent` is
+  // then the LAST known snapshot (frozen by the caller), not live data — the
+  // banner below is the only thing that changes; the transcript, room and
+  // scroll position are untouched.
+  removedFromRoster = false,
 }) {
   const [messages, setMessages]      = useState([]);
   const [loading, setLoading]        = useState(false);
@@ -1073,6 +1080,9 @@ export default function ChatPanel({
 
   /* ─── Render ─────────────────────────────────────────────────────── */
   const disabled = agent.enabled === false;
+  // #2311 D2: a distinct banner from the "disabled" one above — this agent
+  // isn't paused, it's gone from the roster entirely, and the wording says so.
+  const removedNotice = removedFromRoster ? agentRemovedNoticeText(agent.displayName || agent.id) : null;
   const maintenance = useMaintenanceMode();
   const maintenanceBanner = maintenanceBannerText(maintenance);
   // AC5 (#1843): non-blocking warning when the agent's bound Model Provider is
@@ -1118,6 +1128,7 @@ export default function ChatPanel({
         <Message
           message={msg}
           agentUserId={agent.userId}
+          agentId={agent.id}
           onRelaunchLoop={handleRelaunchLoop}
           onAnswerQuestion={handleAnswerQuestion}
           questionAnswerable={qState?.answerable}
@@ -1278,7 +1289,20 @@ export default function ChatPanel({
         />
       </div>
 
-      {disabled && (
+      {removedNotice && (
+        <div role="status" style={{
+          padding: 'var(--eb-space-3) var(--eb-space-4)',
+          background: 'var(--eb-status-warning-bg)',
+          borderBottom: '1px solid var(--eb-status-warning)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-primary)',
+          flexShrink: 0,
+        }}>
+          {removedNotice}
+        </div>
+      )}
+
+      {disabled && !removedFromRoster && (
         <div style={{
           padding: 'var(--eb-space-3) var(--eb-space-4)',
           background: 'var(--eb-status-warning-bg)',

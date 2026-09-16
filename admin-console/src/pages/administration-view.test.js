@@ -5,7 +5,7 @@ import {
   ADMIN_TABS, DEFAULT_ADMIN_TAB, resolveAdminTab,
   allTeamRows, isUnadministered, teamDeleteImpact,
   groupAgentsForOwnership,
-  environmentTierSummary, environmentOwnershipError, environmentOwnershipPatch,
+  environmentTierSummary, mcpTierSummary, environmentOwnershipError, environmentOwnershipPatch,
   ownershipUnchanged,
 } from './administration-view.js';
 
@@ -124,10 +124,19 @@ test('groups team-members under their parent Agent Team', () => {
 test('standalone agents exclude team agents and grouped members', () => {
   const { standaloneAgents } = groupAgentsForOwnership(OWNERSHIP_AGENTS);
   const ids = standaloneAgents.map(a => a.id);
-  assert.ok(ids.includes('lonewolf'));
   assert.ok(ids.includes('orch'));
   assert.ok(!ids.includes('sdlc'));
   assert.ok(!ids.includes('sdlc-dev'));
+});
+
+test('#2234 — a bare role:"agent" (standalone, no team) never surfaces here either', () => {
+  // Every admin-console surface, including this ownership view, stopped
+  // showing standalone agents (#2234) — the only ones left post-#2229 are
+  // ephemeral one-shot workers with no UI surface at all. An unrecognised
+  // other role (like the leftover `orchestrator` fixture above) still needs
+  // to be reachable for cleanup, so only `agent` is excluded.
+  const { standaloneAgents } = groupAgentsForOwnership(OWNERSHIP_AGENTS);
+  assert.ok(!standaloneAgents.map(a => a.id).includes('lonewolf'));
 });
 
 test('orphan member (parent gone) falls back to standalone, not crashing (E2)', () => {
@@ -153,12 +162,14 @@ test('groups + standalone are sorted by label for stable rendering', () => {
   const many = [
     { id: 'b-team', role: 'team', displayName: 'Bravo' },
     { id: 'a-team', role: 'team', displayName: 'Alpha' },
-    { id: 'z-agent', role: 'agent', displayName: 'Zeta' },
-    { id: 'm-agent', role: 'agent', displayName: 'Mike' },
+    // Not `role: 'agent'` — those are excluded outright (#2234) — but an
+    // other-role leftover (#1964) is still assignable and still sorted.
+    { id: 'z-orch', role: 'orchestrator', displayName: 'Zeta' },
+    { id: 'm-orch', role: 'orchestrator', displayName: 'Mike' },
   ];
   const { agentTeams, standaloneAgents } = groupAgentsForOwnership(many);
   assert.deepEqual(agentTeams.map(g => g.team.id), ['a-team', 'b-team']);
-  assert.deepEqual(standaloneAgents.map(a => a.id), ['m-agent', 'z-agent']);
+  assert.deepEqual(standaloneAgents.map(a => a.id), ['m-orch', 'z-orch']);
 });
 
 /* ── Environment tiers (D7/D12) ────────────────────────────────────────── */
@@ -176,6 +187,48 @@ test('a shared environment assigned to nobody says so — it is reachable by no 
   const s = environmentTierSummary({ scope: 'system', assignedTeamIds: [] }, NAMES);
   assert.match(s.detail, /Not assigned to any team/);
   assert.match(s.detail, /System Admins only/);
+});
+
+// #2158 AC7 — a global record and a shared-with-nobody record carry the
+// IDENTICAL underlying shape (`scope: 'system'`, `assignedTeamIds: []`) and
+// mean the OPPOSITE thing (everyone vs. nobody). This is the actual logic the
+// #2158 review flagged as untested — the shape overlap is exactly what makes
+// getting the branch order wrong silently swap the two meanings.
+test('#2158: a global record reads "Global" — not the shared-with-nobody wording — despite the identical empty-assignment shape', () => {
+  const s = environmentTierSummary({ scope: 'system', assignedTeamIds: [], global: true }, NAMES);
+  assert.equal(s.scope, 'system');
+  assert.equal(s.global, true);
+  assert.equal(s.label, 'Global');
+  assert.match(s.detail, /every team/i);
+  assert.match(s.detail, /created later/i);
+  // The "System Admins only" shared-with-nobody sentence must NEVER appear on
+  // a global record — that sentence claims the opposite of what global means.
+  assert.doesNotMatch(s.detail, /Not assigned to any team/);
+  assert.doesNotMatch(s.detail, /System Admins only/);
+});
+
+test('#2158: global wins even when assignedTeamIds is non-empty (the broadest reach wins, mirrors #2136)', () => {
+  const s = environmentTierSummary({ scope: 'system', assignedTeamIds: ['alpha'], global: true }, NAMES);
+  assert.equal(s.label, 'Global');
+});
+
+test('#2158: a stale/hand-edited global flag on a non-system-scoped record is not honoured', () => {
+  // isGlobalRecord requires scope === 'system'; a team-tier record carrying a
+  // stray `global: true` must read as an ordinary team record, not Global.
+  const s = environmentTierSummary({ scope: 'team', teamId: 'alpha', global: true }, NAMES);
+  assert.equal(s.label, 'Team');
+  assert.equal(s.global, false);
+});
+
+test('#2158 AC7: mcpTierSummary is the SAME helper as environmentTierSummary, not a second copy', () => {
+  // The whole point of the alias (AC7 — "one shared tier-summary helper
+  // serving both kinds") is that a global MCP server and a global environment
+  // can never be labelled differently by drifting implementations.
+  assert.equal(mcpTierSummary, environmentTierSummary);
+  const mcpGlobal = mcpTierSummary({ scope: 'system', assignedTeamIds: [], global: true }, NAMES);
+  assert.equal(mcpGlobal.label, 'Global');
+  const mcpShared = mcpTierSummary({ scope: 'system', assignedTeamIds: [] }, NAMES);
+  assert.equal(mcpShared.label, 'Shared');
 });
 
 test('a team-tier and a LEGACY (scope-less) environment read identically', () => {

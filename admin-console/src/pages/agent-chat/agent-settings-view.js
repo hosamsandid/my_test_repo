@@ -24,9 +24,10 @@
  * Which agent the Settings tab is for, and whether the tab exists at all.
  *
  * An explicit override always wins and is always visible: it only ever arrives
- * from a rail menu entry that is itself gated on `canManage`, and the server
- * re-checks on the PUT regardless. Without one, the tab follows the open chat
- * and disappears for a caller who may not manage that agent.
+ * from a rail menu entry or a team header-row click (#2213), both gated on
+ * `canManage` before they set it, and the server re-checks on the PUT
+ * regardless. Without one, the tab follows the open chat and disappears for a
+ * caller who may not manage that agent.
  *
  * @param {object}  o
  * @param {?string} o.chatAgentId    the agent whose chat is open, or null
@@ -86,6 +87,14 @@ export function restartNoticeText(info) {
   if (info && info.kind === 'agent-repositories') {
     return 'Repositories updated. The workspace changed immediately; the agent is told about it '
       + 'from its next run on. The conversation above is unaffected.';
+  }
+  // Agent pools (#2271) — a Scaling-section save (`PUT .../pool`, #2270) is
+  // additive config, no respawn: without this case it fell into the generic
+  // context-mount branch below and reported "Host context folders saved",
+  // which is simply false for what was just saved (code-review finding).
+  if (info && info.kind === 'pool') {
+    return 'Scaling settings saved. They take effect on the role\'s next dispatch — no restart, '
+      + 'and the conversation above is unaffected.';
   }
   return info && info.respawned
     ? 'Host context folders applied — the agent\'s container was re-provisioned. Any run in progress ended; the next message starts a fresh session.'

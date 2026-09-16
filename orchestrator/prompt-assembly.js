@@ -192,6 +192,7 @@ const KNOWN_BASE_HEADINGS = [
 function isRelocatedHeading(heading) {
   return (
     heading === "Workspace" ||
+    heading === "Background tasks" ||
     heading.startsWith("GitHub Actions") ||
     heading.startsWith("Trigger management")
   );
@@ -263,7 +264,7 @@ function workingEnvironmentSection(env, skills = [], agentRepositories = []) {
     : [];
   if (!env && !(Array.isArray(skills) && skills.length > 0) && ownRepos.length === 0) return "";
   const parts = [];
-  if (env && env.name) parts.push(`**Working Environment:** ${env.name}`);
+  if (env && env.name) parts.push(`**Environment:** ${env.name}`);
   if (env && env.description) parts.push(env.description);
   const envRepos = env && Array.isArray(env.repositories) ? env.repositories : [];
   const repos = [...envRepos, ...ownRepos];
@@ -288,7 +289,7 @@ function workingEnvironmentSection(env, skills = [], agentRepositories = []) {
   }
   if (env && env.additionalContext) parts.push(env.additionalContext);
   if (parts.length === 0) return "";
-  return `## Working Environment\n\n${parts.join("\n\n")}`;
+  return `## Environment\n\n${parts.join("\n\n")}`;
 }
 
 // Fixed base target for the host-folder mount(s). The single/legacy folder sits
@@ -482,6 +483,36 @@ function skillsSection(baseSkillsText, skills, skillDescriptions = {}) {
   return base ? `${base}\n\n${granted}` : `## Skills\n\n${granted}`;
 }
 
+// Background-task semantics — ALWAYS emitted, because `Task(*)` (plus `Monitor`
+// and background shell commands) is in every agent's allowedTools regardless of
+// role. A run is a single headless turn: the CLI stops every still-running
+// background task the moment the turn's result is produced, and nothing
+// re-invokes the agent when one would have finished. So a background wait that
+// outlives the turn is silently killed — the "I'll wait in the background and
+// continue" dangling promise. This section tells the agent that up front. The
+// wait-for-an-external-event advice is autonomous-only, since only an autonomous
+// agent has the triggers/loops that are the real answer.
+function backgroundTasksSection(autonomous) {
+  const base =
+    '## Background tasks\n\n' +
+    'Your run is a **single turn**: it ends the moment you produce your reply, and ' +
+    'everything still running in the background is **stopped** at that moment. ' +
+    'Parallel `Task` sub-agents, `Monitor`, and background shell commands therefore ' +
+    'only work for work you **finish inside the same turn** — start them, then wait ' +
+    'for their result (for example block on `TaskOutput`) **before** you answer. ' +
+    'Never end your turn expecting a background task to keep running, finish later, ' +
+    'or notify you: it will be killed and nothing will re-invoke you, so the person ' +
+    'you are talking to just sees your last message and silence.';
+  const waitAdvice =
+    '\n\nTo wait for something that happens **outside** this turn — CI finishing, ' +
+    "another agent's pull request, a long external job — do **not** poll it in a " +
+    'background task. End your turn and let an event re-wake you: add a ' +
+    '`github-event` trigger (e.g. on `check_suite.completed` or the pull-request ' +
+    'status) or use a `loop`. That is the only reliable way to continue after an ' +
+    'external event.';
+  return autonomous ? base + waitAdvice : base;
+}
+
 // Compose the full CLAUDE.md from the base template + per-agent inputs.
 //
 // Ordering (fix: the authored role used to be buried in the middle):
@@ -496,6 +527,7 @@ function skillsSection(baseSkillsText, skills, skillDescriptions = {}) {
 //  8b. ## Plugin Capabilities   (code-owned) — only if the agent's resolved plugin grant is non-empty (#1518)
 //   9. ## GitHub Actions        (relocated) — only if the env has a repository
 //  10. ## Trigger management    (relocated) — only if the agent is autonomous
+// 10b. ## Background tasks       (code-owned) — ALWAYS (Task(*) is always allowed)
 //  11. ## Important Notes       (from base)
 //  12. any other base sections an operator added (preserved verbatim)
 //  13. ## Memory System (Shared — Blueprint Instance) (if a blueprint instance)
@@ -616,6 +648,11 @@ function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDesc
   // 10. Trigger management — only for autonomous agents
   if (autonomous) blocks.push(TRIGGER_SECTION);
 
+  // 10b. Background tasks — ALWAYS, because Task(*)/Monitor are in every agent's
+  //      allowedTools. Warns that a background wait outliving the turn is killed
+  //      (the dangling-promise bug); the external-event advice is autonomous-only.
+  blocks.push(backgroundTasksSection(autonomous));
+
   // 11. Important Notes
   const notes = take("Important Notes");
   if (notes) blocks.push(notes);
@@ -707,6 +744,7 @@ module.exports = {
   envHasRepository,
   hasSkillGrant,
   skillsSection,
+  backgroundTasksSection,
   pluginCapabilitiesSection,
   WORKSPACE_SECTION,
   GIT_SECTION,

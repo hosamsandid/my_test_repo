@@ -41,6 +41,14 @@ const MAX_REPAIR_ITERATIONS = 2;
 // call site (port-suggestion, hill-climb-analyst, …).
 const MAX_TOKENS = 16000;
 
+// Output budget for ONE part of a generate-in-parts run (#2131). A whole flow
+// asked for in a single call has to emit every role AND all of its wiring in one
+// reply, which is what pushes a slow model past the upstream gateway ceiling.
+// Split in two, neither part carries the other's bulk: part 1 emits the roles
+// and their prompts, part 2 emits only an op list that wires them, so a lower
+// per-call ceiling is a real bound on the critical call rather than a guess.
+const MAX_TOKENS_PART = 10000;
+
 // Character limit for the composed system prompt (bundle JSON + format doc +
 // conventions addendum) before the copilot call is attempted (#1404). The
 // guard fires as a plain 400 so the caller receives an actionable error rather
@@ -438,6 +446,153 @@ function buildRepairMessage(findings) {
   ].join('\n');
 }
 
+// ── generate in parts (large flows, #2131) ───────────────────────────────────
+// A whole-flow generation is ONE call emitting up to MAX_TOKENS tokens, so its
+// success depends entirely on that call finishing inside the upstream gateway's
+// timeout — a slow model tips it over and the turn fails outright. Splitting the
+// work into a bounded sequence of smaller calls removes that dependency.
+//
+// The split reuses the two contracts buildCopilotSystem already has, so no new
+// prompt vocabulary enters the product: part 1 runs against the (role-less) base
+// bundle and therefore gets the WHOLE-BUNDLE contract, part 2 runs against
+// part 1's result and therefore gets the OPS contract — which is exactly the
+// shape a wiring pass wants (patch each role, register the labels) and is
+// applied by the same applyCopilotOps a revision turn uses. The merged bundle
+// then goes through the identical sanitize → STRICT validate → lint → repair
+// gate as a single-call reply, because the parts run only produces the reply
+// text differently; nothing downstream of it knows or cares.
+//
+// It is a FALLBACK, not a heuristic: there is no reliable way to know a request
+// is "large" before generating it (the prompt length says little about how many
+// roles a model will invent), and a wrong guess would either split flows that
+// did not need it or fail to split the ones that did. Running it only after a
+// timeout-class failure of the single call means small and medium flows take a
+// byte-identical path to before, and the second attempt costs nothing on a turn
+// that would otherwise have ended in an error card.
+
+const PART_ROLES_INSTRUCTION = [
+  'Build this flow in two steps. This is STEP 1 of 2 — the ROLES only.',
+  '',
+  'Return the bundle with the flow `name`, `description`, `stages` and the complete',
+  '`roles` array, where each role carries `id`, `displayName`, `role`, `sessionPolicy`',
+  'and a real `systemPrompt`.',
+  '',
+  'Do NOT add `outcomes`, `triggers`, `channels`, `emits`, `github`, `inputs`, `outputs`,',
+  '`labels`, `gates` or `humans` yet — step 2 wires all of that. Keep every systemPrompt',
+  'focused so this reply stays comfortably inside the output limit.',
+].join('\n');
+
+const PART_WIRING_INSTRUCTION = [
+  'This is STEP 2 of 2 — the WIRING. The roles from step 1 are already in the current',
+  'bundle above.',
+  '',
+  'Return the ops that wire them together: the `labels` registry (including any human',
+  'gates), `gates`, `humans`, and each role\'s `outcomes`, `triggers`, `channels`, `emits`,',
+  '`github`, `inputs`, `outputs`, `dependsOn` and `parent` via `patchRole`.',
+  '',
+  'Do not re-add a role that already exists and do not restate a role\'s `systemPrompt` —',
+  'patch only the wiring keys, so this reply stays small.',
+].join('\n');
+
+// The ordered parts of a generate-in-parts run. `contract` is not passed to the
+// model — it records which of buildCopilotSystem's two contracts the part's own
+// bundle state selects, so a test can assert the intended one is in force.
+const GENERATION_PARTS = Object.freeze([
+  Object.freeze({ id: 'roles', contract: 'bundle', instruction: PART_ROLES_INSTRUCTION }),
+  Object.freeze({ id: 'wiring', contract: 'ops', instruction: PART_WIRING_INSTRUCTION }),
+]);
+
+/**
+ * True when this turn is a fresh whole-bundle generation — the only kind that
+ * can be split. A REVISION turn already answers with a small op list against an
+ * existing bundle, so it neither needs nor can use a roles-then-wiring split
+ * (there is nothing to generate a roles pass for).
+ */
+function canGenerateInParts(bundle) {
+  return !(isPlainObject(bundle) && Array.isArray(bundle.roles) && bundle.roles.length > 0);
+}
+
+/** The payload for one part. `bundle` is the state that part builds on. */
+function buildPartRequest({ part, bundle, messages, formatDoc, addendum }) {
+  const request = buildCopilotRequest({
+    bundle,
+    messages: [...messages, { role: 'user', content: part.instruction }],
+    formatDoc,
+    addendum,
+  });
+  return { ...request, max_tokens: MAX_TOKENS_PART };
+}
+
+// A transport failure the generate-in-parts fallback can plausibly recover from,
+// and the one class of failure whose guidance is "describe it in smaller parts /
+// pick a faster model". Both halves of #2131 key on THIS predicate, so the card
+// the user reads and the retry the server performs can never disagree about what
+// counts as a timeout. `HTTP 502`/`HTTP 504` are folded in on purpose: an
+// upstream gateway that gives up on a long request reports it as a bad gateway,
+// not as a timeout, and the remedy is the same either way.
+const TIMEOUT_FAILURE_RE = /timeout|timed out|deadline|ETIMEDOUT|ECONNRESET|socket hang up|HTTP 50[24]|Gateway Time-?out|Bad Gateway/i;
+
+/** True for a timeout-class transport failure (see TIMEOUT_FAILURE_RE). */
+function isTimeoutFailure(err) {
+  const msg = err && typeof err.message === 'string' ? err.message : String(err || '');
+  return TIMEOUT_FAILURE_RE.test(msg);
+}
+
+/**
+ * Classify a failed turn for the NDJSON error event. The `code` is the stable
+ * contract the client maps to plain-language guidance — it exists so the browser
+ * does not have to re-derive the class by matching on a transport error string
+ * (which would drift the moment a provider reworded one). The raw `detail` rides
+ * along for debugging and is shown behind an expander, never as the headline.
+ */
+function classifyTurnFailure(err) {
+  const detail = (err && typeof err.message === 'string' && err.message.trim())
+    ? err.message.trim()
+    : 'the Copilot turn failed';
+  if (isTimeoutFailure(err)) return { status: 504, code: 'llm-timeout', detail };
+  if (/no parseable bundle/i.test(detail)) return { status: 502, code: 'no-parseable-bundle', detail };
+  return { status: 502, code: 'llm-failed', detail };
+}
+
+/**
+ * Run the parts sequence and return the merged bundle as a whole-bundle reply
+ * TEXT, so `runCopilot`'s loop can treat it exactly like a single-call reply.
+ *
+ * Fail-fast: a part that does not produce a usable result throws, and the caller
+ * surfaces the original single-call failure instead — a half-generated flow is
+ * worse than a clear error, since the user would apply a bundle with roles and
+ * no wiring believing the Copilot had finished.
+ */
+async function generateBundleInParts({
+  bundle, messages, callLlm, formatDoc, addendum, progress, signal,
+}) {
+  let current = bundle;
+  let summary = '';
+  for (let i = 0; i < GENERATION_PARTS.length; i++) {
+    if (signal && signal.aborted) throw abortedError();
+    const part = GENERATION_PARTS[i];
+    progress({
+      type: 'phase', phase: 'generating', part: i + 1, parts: GENERATION_PARTS.length, partId: part.id,
+    });
+    const text = await callLlm(buildPartRequest({ part, bundle: current, messages, formatDoc, addendum }));
+    if (signal && signal.aborted) throw abortedError();
+    const parsed = parseCopilotResponse(text);
+    if (!parsed) throw new Error(`the ${part.id} step of the split generation returned no parseable reply`);
+    if (parsed.bundle) {
+      current = parsed.bundle;
+    } else if (parsed.ops) {
+      // A failed application is fatal here rather than repairable: the repair
+      // loop needs one complete candidate, and re-asking a part is a third call
+      // this turn has no budget for.
+      current = applyCopilotOps(current, parsed.ops);
+    } else {
+      throw new Error(`the ${part.id} step of the split generation returned neither a bundle nor ops`);
+    }
+    if (parsed.summary) summary = parsed.summary;
+  }
+  return { text: JSON.stringify({ summary, bundle: current }), bundle: current };
+}
+
 // ── the generate → validate → repair loop ────────────────────────────────────
 
 // A turn the caller stopped (#2087). Distinct from every transport failure so
@@ -499,6 +654,12 @@ async function runCopilot({
 
   let best = null; // { bundle, summary, lints } from the last parseable iteration
   let repairIterations = 0;
+  let generatedInParts = false;
+  // What to replay as the assistant turn on a repair. Normally the reply text
+  // itself; after a parts run the merged bundle already sits in the rebuilt
+  // request's system prompt, so echoing it a second time would double the
+  // request for no gain.
+  let echo = null;
 
   for (let attempt = 0; attempt <= maxRepairIterations; attempt++) {
     // AC9: no further LLM request is issued for a stopped turn. The check sits
@@ -516,8 +677,39 @@ async function runCopilot({
       // stopped turn must leave no proposal (AC11), so it can never take the
       // best-effort `break` below.
       if (signal && signal.aborted) throw abortedError();
-      if (!best) throw err; // nothing to fall back to — surface the transport error
-      break;                // best-effort with the previous iteration's bundle
+      // #2131: the single big generation timed out. Retry it as a bounded
+      // sequence of smaller calls before giving up — only on the FIRST call
+      // (a repair is already small, so a timeout there is not about size),
+      // only once, and only for a fresh whole-bundle generation.
+      if (attempt === 0 && !best && !generatedInParts
+        && canGenerateInParts(baseBundle) && isTimeoutFailure(err)) {
+        generatedInParts = true;
+        let parts;
+        try {
+          parts = await generateBundleInParts({
+            bundle: baseBundle, messages, callLlm, formatDoc, addendum, progress, signal,
+          });
+        } catch (partErr) {
+          if (isCopilotAborted(partErr)) throw partErr;
+          // Re-throw the ORIGINAL failure, with the fallback's own reason
+          // appended. The turn began by timing out, so "describe it in smaller
+          // parts / pick a faster model" stays the right guidance whatever went
+          // wrong on the second attempt — while the detail keeps both reasons
+          // for whoever reads the expander.
+          err.message = `${err.message} (split generation also failed: ${partErr.message})`;
+          throw err;
+        }
+        text = parts.text;
+        // Repairs now go against the MERGED bundle, which puts them on the ops
+        // contract — a fix is a small op list rather than a second full-size
+        // regeneration, which is the very call that just timed out.
+        request = buildCopilotRequest({ bundle: parts.bundle, messages, formatDoc, addendum });
+        echo = '(the flow was generated in two steps; the merged bundle is in the current-bundle section above)';
+      } else if (!best) {
+        throw err; // nothing to fall back to — surface the transport error
+      } else {
+        break;     // best-effort with the previous iteration's bundle
+      }
     }
     // The reply landed, but a stop may have won the race (edge case: "Stop
     // pressed in the same moment the result arrives"). Exactly one outcome
@@ -555,7 +747,7 @@ async function runCopilot({
       ...request,
       messages: [
         ...request.messages,
-        { role: 'assistant', content: typeof text === 'string' ? text : '' },
+        { role: 'assistant', content: echo ?? (typeof text === 'string' ? text : '') },
         { role: 'user', content: buildRepairMessage(findings) },
       ],
     };
@@ -573,15 +765,23 @@ async function runCopilot({
     changes: computeChanges(sanitizeBundle(baseBundle) || baseBundle, best.bundle),
     lints: best.lints,
     repairIterations,
+    generatedInParts,
   };
 }
 
 module.exports = {
   MAX_REPAIR_ITERATIONS,
+  MAX_TOKENS_PART,
+  GENERATION_PARTS,
   COPILOT_HISTORY_CAP,
   SYSTEM_PROMPT_CHAR_LIMIT,
   COPILOT_ABORTED,
   isCopilotAborted,
+  canGenerateInParts,
+  buildPartRequest,
+  isTimeoutFailure,
+  classifyTurnFailure,
+  generateBundleInParts,
   sanitizeBundle,
   parseCopilotResponse,
   applyCopilotOps,

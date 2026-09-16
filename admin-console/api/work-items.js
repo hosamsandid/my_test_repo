@@ -296,6 +296,13 @@ function renderWorkItem(root, comp) {
     .map(([agentId, a]) => ({ agentId, roleId: a.roleId || null, runs: a.runs }))
     .sort((x, y) => y.runs - x.runs || (x.agentId < y.agentId ? -1 : 1));
 
+  // Started = earliest run.ts in the component (#2261) — deliberately simple,
+  // no completion/merge tracking.
+  let startedAt = null;
+  for (const row of comp.runRows) {
+    if (row.ts && (startedAt === null || row.ts < startedAt)) startedAt = row.ts;
+  }
+
   return {
     id: root,
     repo,
@@ -308,6 +315,7 @@ function renderWorkItem(root, comp) {
     tiers: comp.tiers,
     shared: comp.shared,
     flowMismatch: comp.flowMismatch,
+    startedAt,
   };
 }
 

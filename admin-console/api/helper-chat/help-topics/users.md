@@ -2,10 +2,10 @@
 id: users
 routes: ["/users"]
 title: Administration
-summary: The one System-Admin surface — the human user records that can sign in, every team on the platform, and which team owns each agent and Working Environment.
+summary: The one System-Admin surface — the human user records that can sign in, every team on the platform, and which team owns each agent and environment.
 seeAlso:
   - { label: "Agent Chat", to: "/chats" }
-  - { label: "Working Environments", to: "/environments" }
+  - { label: "Environment Templates", to: "/environment-templates" }
   - { label: "My Credentials", to: "/my-credentials" }
   - { label: "SSH Keys", to: "/ssh-keys" }
 askPrompts:
@@ -16,7 +16,7 @@ askPrompts:
   - "What is the difference between System Admin and Team Admin?"
   - "Where did the Access page go, and how do I add someone to a team now?"
   - "What is the difference between a team and an access scope?"
-  - "How do I share one Working Environment with several teams?"
+  - "How do I share one environment with several teams?"
 ---
 
 ## What this page manages
@@ -28,7 +28,7 @@ three tabs:
 |---|---|
 | **Users** | The human user **records** — who can sign in, under which name, with a login password or not, and who is a global System Admin. |
 | **All Teams** | Every team on the platform, including the ones you are not a member of. A clean-up view: see them, and delete one. |
-| **Resources** | Which tenant owns each agent and Working Environment — the ownership *tiers*. |
+| **Resources** | Which tenant owns each agent and environment — the ownership *tiers*. |
 
 Nothing here is where you **add somebody to a team**. That moved to the team
 itself: **Share…** in an Agent Team's context menu in the Agent Chat, where the
@@ -216,6 +216,16 @@ offboarding itself fails the deletion **still proceeds**, so on an error check t
 person's agents, personal credentials and Matrix account by hand rather than
 assuming they were cleaned up.
 
+A failed offboarding is **no longer silent**, though. A degraded run — including
+one that only *partly* succeeded, such as an agent it could not pause — is
+recorded on the **GitHub Event Log** as a `user.offboarding-degraded` entry, so a
+teardown that did not finish shows on the operator's timeline instead of only in
+a server log nobody reads. Until you have confirmed the cleanup by hand, treat
+the departed person's personal tokens as still live and revoke them at GitHub.
+(Even so, an attributed write under a deleted owner's leftover token is refused
+rather than allowed through — see *Rotation and runtime resolution* on the
+credentials pages.)
+
 Two things this does **not** do. It does not delete anything a *team* owns —
 team resources belong to the team, not to the person, and their agents are
 paused rather than removed, so someone else can take them over. And it does not
@@ -322,7 +332,7 @@ the squad is briefly split across two tenants, and retrying is what resolves it.
 Reassigning changes **who may see and manage** the resource. It does not restart
 an agent, move a repository, or alter what the resource does.
 
-### Working Environments, and the shared tier
+### Environments, and the shared tier
 
 An environment is **tiered**, not simply owned, so its row states the tier first
 and **Change ownership** edits it as one:
@@ -348,7 +358,7 @@ platform does not create.
 
 Ownership is enforced by the API, not just hidden in the UI:
 
-- **Lists are filtered** by the owning tenant — agents, Working Environments and
+- **Lists are filtered** by the owning tenant — agents, environments and
   team-scoped credentials outside your teams are not returned at all.
 - **An agent's work plane follows its agent** — the chat transcript, the session
   log, the workspace browser and the git actions in it. Reaching one for an agent

@@ -80,8 +80,53 @@ test('validateToolchain whitelists the persisted shape and defaults platforms to
     // round-trips unchanged in meaning.
     versionSource: '',
     baseline: '',
+    // #2282 Band 1: optional and null unless declared, so a pre-#2282 entry
+    // (podman/k8s both read this as "use the fleet default") round-trips too.
+    resources: null,
   });
   assert.ok(!('secretly' in v.toolchain), 'extra keys must not reach the registry file');
+});
+
+// ── resource sizing (#2282 Band 1) ──────────────────────────────────────────
+
+test('validateToolchain accepts a resources override and whitelists its three fields', () => {
+  const v = validateToolchain({ ...JVM, resources: { memoryLimit: '4g', memoryRequest: '512Mi', cpuRequest: '500m', extra: 'dropped' } });
+  assert.ok(v.ok, JSON.stringify(v.errors));
+  assert.deepStrictEqual(v.toolchain.resources, { memoryLimit: '4g', memoryRequest: '512Mi', cpuRequest: '500m' });
+});
+
+test('validateToolchain accepts both podman-style and k8s-style memory quantities', () => {
+  for (const q of ['4g', '4G', '4gb', '4Gi', '512m', '512Mi', '1073741824']) {
+    const v = validateToolchain({ ...JVM, resources: { memoryLimit: q } });
+    assert.ok(v.ok, `${q}: ${JSON.stringify(v.errors)}`);
+    assert.strictEqual(v.toolchain.resources.memoryLimit, q);
+  }
+});
+
+test('validateToolchain rejects a malformed resources quantity', () => {
+  for (const bad of ['4 gigs', 'four', '-1g', '4g; rm -rf /']) {
+    const v = validateToolchain({ ...JVM, resources: { memoryLimit: bad } });
+    assert.strictEqual(v.ok, false, bad);
+    assert.match(v.errors.join(' '), /resources\.memoryLimit is not a valid quantity/);
+  }
+  assert.strictEqual(validateToolchain({ ...JVM, resources: { cpuRequest: 'lots' } }).ok, false);
+  assert.strictEqual(validateToolchain({ ...JVM, resources: 'nope' }).ok, false);
+  assert.strictEqual(validateToolchain({ ...JVM, resources: ['nope'] }).ok, false);
+});
+
+test('validateToolchain treats an empty resources object the same as absent (null, not {})', () => {
+  const v = validateToolchain({ ...JVM, resources: {} });
+  assert.ok(v.ok, JSON.stringify(v.errors));
+  assert.strictEqual(v.toolchain.resources, null);
+});
+
+test('validateToolchain accepts a cpu-only or memoryRequest-only override', () => {
+  assert.strictEqual(validateToolchain({ ...JVM, resources: { cpuRequest: '2' } }).toolchain.resources.cpuRequest, '2');
+  assert.strictEqual(validateToolchain({ ...JVM, resources: { cpuRequest: '0.5' } }).toolchain.resources.cpuRequest, '0.5');
+  assert.strictEqual(
+    validateToolchain({ ...JVM, resources: { memoryRequest: '256Mi' } }).toolchain.resources.memoryRequest,
+    '256Mi',
+  );
 });
 
 test('validateToolchain requires id, name and image', () => {
@@ -180,7 +225,7 @@ test('AC7/AC8: a toolchain not built for this runtime refuses by name', () => {
 
 test('the environment label degrades gracefully without a name', () => {
   const r = resolveAgentImage({ environmentId: 'build', toolchainId: 'nope', toolchains: [] });
-  assert.match(r.message, /Working Environment 'build' selects/);
+  assert.match(r.message, /Environment 'build' selects/);
   const anon = resolveAgentImage({ toolchainId: 'nope', toolchains: [] });
   assert.match(anon.message, /'<unknown>'/);
 });
@@ -244,6 +289,14 @@ test('a valid source manifest normalises to the registry shape plus its own fiel
   assert.equal(v.manifest.versionManager, 'mise');
   assert.equal(v.manifest.baseline, 'java 21, maven 3.9');
   assert.equal(v.manifest.toolchainVersion, TOOLCHAIN_MANIFEST_VERSION);
+});
+
+test('#2282 Band 1: a source manifest may declare resources, carried through toolchainFromManifest', () => {
+  const v = validateToolchainManifest({ ...JVM_MANIFEST, resources: { memoryLimit: '4g' } }, { dirId: 'jvm' });
+  assert.ok(v.ok, JSON.stringify(v.errors));
+  assert.deepStrictEqual(v.manifest.resources, { memoryLimit: '4g' });
+  const entry = toolchainFromManifest(v.manifest);
+  assert.deepStrictEqual(entry.resources, { memoryLimit: '4g' });
 });
 
 test('the manifest version is enforced, so a future shape change fails at build time', () => {

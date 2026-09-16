@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Trash2, Pencil, Plus, ChevronDown, ChevronRight, KeyRound, ClipboardPaste, Copy, Check, ExternalLink } from 'lucide-react';
+import { Trash2, Pencil, Plus, ChevronDown, ChevronRight, KeyRound, ClipboardPaste, Copy, Check, ExternalLink, RefreshCw } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import WhenCell from '../components/WhenCell';
@@ -10,6 +10,7 @@ import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
 import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
+import ModeToggle from '../components/ModeToggle';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
 import ReassignPanel from '../components/CredentialReassignPanel';
@@ -107,27 +108,6 @@ function Step({ n, children }) {
       }}>{n}</span>
       <div style={{ paddingTop: 1 }}>{children}</div>
     </div>
-  );
-}
-
-function ModeTab({ active, onClick, icon: Icon, children }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      style={{
-        display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
-        padding: 'var(--eb-space-2) var(--eb-space-3)',
-        background: active ? 'var(--eb-bg-elevated)' : 'transparent',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)',
-        color: active ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
-        fontSize: 'var(--eb-text-sm)', fontWeight: active ? 'var(--eb-font-medium)' : 'normal',
-        cursor: 'pointer', fontFamily: 'inherit',
-      }}
-    >
-      <Icon size={13} /> {children}
-    </button>
   );
 }
 
@@ -244,14 +224,15 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
         }}>{error}</div>
       )}
 
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
-        <ModeTab active={mode === 'generate'} onClick={() => setMode('generate')} icon={KeyRound}>
-          Generate new keypair
-        </ModeTab>
-        <ModeTab active={mode === 'paste'} onClick={() => setMode('paste')} icon={ClipboardPaste}>
-          Paste existing key
-        </ModeTab>
-      </div>
+      <ModeToggle
+        value={mode}
+        onChange={setMode}
+        question="Choose how you'd like to add a key:"
+        options={[
+          { id: 'generate', label: 'Generate new keypair', icon: KeyRound },
+          { id: 'paste', label: 'Paste existing key', icon: ClipboardPaste },
+        ]}
+      />
 
       {mode === 'generate' ? (
         <>
@@ -428,6 +409,10 @@ export default function SshKeys() {
   const { user } = useAuth();
   const [creating, setCreating] = useState(false);
   const [editTarget, setEditTarget] = useState(null);
+  const [rotateTarget, setRotateTarget] = useState(null);
+  const [rotateMode, setRotateMode] = useState('generate');
+  const [rotatePrivateKey, setRotatePrivateKey] = useState('');
+  const [rotateGenerated, setRotateGenerated] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -499,6 +484,7 @@ export default function SshKeys() {
         return (
           <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
             {manageable && <IconButton icon={Pencil} label="Edit" onClick={() => { setEditTarget(row); setFormError(null); }} />}
+            {manageable && <IconButton icon={RefreshCw} label="Replace key" onClick={() => { setRotateTarget(row); setRotateMode('generate'); setRotatePrivateKey(''); setRotateGenerated(null); setFormError(null); }} />}
             {manageable && <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />}
           </div>
         );
@@ -562,6 +548,30 @@ export default function SshKeys() {
     }
   }
 
+  function closeRotatePanel() {
+    setRotateTarget(null); setRotatePrivateKey(''); setRotateGenerated(null); setFormError(null);
+  }
+
+  async function handleRotate() {
+    setSaving(true); setFormError(null);
+    try {
+      const body = rotateMode === 'generate'
+        ? { generate: true }
+        : { privateKey: rotatePrivateKey.trim() };
+      const r = await apiCall('POST', `/api/ssh-keys/${rotateTarget.id}/rotate`, body);
+      refetch();
+      if (rotateMode === 'generate' && r?.publicKey) {
+        setRotateGenerated(r.publicKey); // reveal the new public key to copy to GitHub
+      } else {
+        closeRotatePanel();
+      }
+    } catch (e) {
+      setFormError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const headerAction = usePageActions(
     <button
       onClick={() => { setCreating(true); setFormError(null); setGeneratedPublicKey(null); }}
@@ -601,7 +611,7 @@ export default function SshKeys() {
       }}>
         <span>
           Shared team and platform SSH keys — the private keys that authenticate git transport
-          for the repositories your Working Environments clone.
+          for the repositories your environments clone.
         </span>
         <PageHelpButton
           label="Why both an SSH key and a GitHub token?"
@@ -667,6 +677,75 @@ export default function SshKeys() {
         )}
       </SidePanel>
 
+      <SidePanel
+        open={!!rotateTarget}
+        onClose={closeRotatePanel}
+        title="Replace SSH key"
+        width="560px"
+      >
+        {rotateTarget && (rotateGenerated
+          ? <PublicKeyReveal publicKey={rotateGenerated} onDone={closeRotatePanel} />
+          : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
+              <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+                Replacing the private key for <strong>{rotateTarget.name || rotateTarget.id}</strong>
+                <code style={{ display: 'block', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)' }}>{rotateTarget.id}</code>
+              </p>
+              <div style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-warning-bg)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
+                Keeps the same id, name and ownership. Every environment that references this key
+                has its running agents <strong>restarted</strong> so they pick up the new key — a running
+                loop or trigger is cut off, so replace at a quiet moment. Remember to add the new public
+                key as a deploy key on GitHub.
+              </div>
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+                <button
+                  onClick={() => setRotateMode('generate')}
+                  style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2)', background: rotateMode === 'generate' ? 'var(--eb-accent-primary)' : 'transparent', color: rotateMode === 'generate' ? 'var(--eb-text-inverted)' : 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit' }}
+                >
+                  <KeyRound size={14} /> Generate new keypair
+                </button>
+                <button
+                  onClick={() => setRotateMode('paste')}
+                  style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2)', background: rotateMode === 'paste' ? 'var(--eb-accent-primary)' : 'transparent', color: rotateMode === 'paste' ? 'var(--eb-text-inverted)' : 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit' }}
+                >
+                  <ClipboardPaste size={14} /> Paste a private key
+                </button>
+              </div>
+              {rotateMode === 'paste' && (
+                <label style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
+                  New private key
+                  <textarea
+                    value={rotatePrivateKey}
+                    onChange={e => setRotatePrivateKey(e.target.value)}
+                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                    rows={5}
+                    autoFocus
+                    style={{ width: '100%', marginTop: 'var(--eb-space-2)', padding: 'var(--eb-space-2)', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', resize: 'vertical', boxSizing: 'border-box' }}
+                  />
+                </label>
+              )}
+              {formError && (
+                <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{formError}</div>
+              )}
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+                <button
+                  disabled={saving || (rotateMode === 'paste' && !rotatePrivateKey.trim())}
+                  onClick={handleRotate}
+                  style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: (saving || (rotateMode === 'paste' && !rotatePrivateKey.trim())) ? 'not-allowed' : 'pointer', opacity: (saving || (rotateMode === 'paste' && !rotatePrivateKey.trim())) ? 0.6 : 1, fontFamily: 'inherit' }}
+                >
+                  {saving ? 'Replacing…' : (rotateMode === 'generate' ? 'Generate & restart agents' : 'Replace & restart agents')}
+                </button>
+                <button
+                  onClick={closeRotatePanel}
+                  style={{ padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'transparent', color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ))}
+      </SidePanel>
+
       <ConfirmDialog
         open={!!deleteTarget}
         title="Delete SSH key"
@@ -677,14 +756,14 @@ export default function SshKeys() {
             </p>
             {!envsLoaded ? (
               <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
-                Any Working Environment still referencing this key must detach it first.
+                Any environment still referencing this key must detach it first.
               </p>
             ) : deleteUsage.length > 0 ? (
               <div style={{ marginTop: 'var(--eb-space-3)' }}>
                 <p style={{ margin: '0 0 var(--eb-space-1)', fontSize: 'var(--eb-text-sm)' }}>
                   {deleteUsage.length === 1
-                    ? '1 Working Environment still uses this key — detach it there first:'
-                    : `${deleteUsage.length} Working Environments still use this key — detach it there first:`}
+                    ? '1 environment still uses this key — detach it there first:'
+                    : `${deleteUsage.length} environments still use this key — detach it there first:`}
                 </p>
                 <ul style={{ margin: 0, paddingLeft: '1.25rem', fontSize: 'var(--eb-text-sm)' }}>
                   {deleteUsage.map(e => <li key={e.id}>{e.name || e.id}</li>)}
@@ -692,7 +771,7 @@ export default function SshKeys() {
               </div>
             ) : (
               <p style={{ margin: 'var(--eb-space-3) 0 0', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
-                Not in use by any Working Environment.
+                Not in use by any environment.
               </p>
             )}
           </>

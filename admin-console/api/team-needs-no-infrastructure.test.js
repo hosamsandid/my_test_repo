@@ -33,6 +33,13 @@ const {
   computeScope, visibleTeam, visibleEnvironment, canManageEnvironment,
   visibleCredential, assistSelectableEndpoint,
 } = require('./scope');
+// #2158: a GLOBAL environment/MCP server closes the case #2083's shared tier
+// could not — a team with NO assignment at all (not even to an empty-
+// assignment shared record it happens to be listed on). Composed at the
+// api.js call sites the same way `isGlobalProvider` composes with
+// `assistSelectableEndpoint`; imported here to prove the reachability claim
+// against the SAME real predicates the rest of this file uses.
+const { isGlobalEnvironment } = require('./global-resource');
 
 const ADMIN_USERNAME = 'admin';
 
@@ -140,4 +147,54 @@ test('AC4: an operator with no teams at all can still provision the shared envir
   assert.equal(ops.all, true);
   assert.deepEqual([...ops.teamIds], [], 'a System Admin need not be a member of anything');
   assert.equal(canManageEnvironment(ops, sharedEnv), true);
+});
+
+// ── #2158: the case #2083's shared tier still cannot state ─────────────────
+//
+// `sharedEnv` above is reachable by "fresh-squad" only because it is NAMED in
+// `assignedTeamIds` — an operator still had to assign it once. A team created
+// a moment ago, with NO membership anywhere yet (the #2081 self-service
+// window between "team minted" and "creator's membership written"), reaches
+// nothing above. A GLOBAL record is the one shape that closes that gap:
+// reachable with no entry in `assignedTeamIds` at all.
+
+// A global environment: system-scoped, assigned to NOBODY, `global: true`.
+const globalEnv = {
+  id: 'global-infra',
+  name: 'Global infrastructure',
+  scope: 'system',
+  teamId: null,
+  assignedTeamIds: [],
+  global: true,
+  repositories: [],
+  githubTokenId: null,
+  llmEndpointId: null,
+};
+const globalMcp = { id: 'global-wiki', scope: 'system', teamId: null, assignedTeamIds: [], global: true };
+
+test('#2158: a team with NO assignment at all still reaches a GLOBAL environment/MCP server', () => {
+  const fresh = scopeOf('newbie@corp.com');
+  // `visibleEnvironment` alone still says no — global reachability is composed
+  // at the call site, never inside the generic predicate (AC4).
+  assert.equal(visibleEnvironment(fresh, globalEnv), false);
+  // The composition every read/list route actually performs:
+  assert.equal(visibleEnvironment(fresh, globalEnv) || isGlobalEnvironment(globalEnv), true);
+  assert.equal(visibleEnvironment(fresh, globalMcp) || isGlobalEnvironment(globalMcp), true);
+
+  // And a user in NO team whatsoever (not even "fresh-squad") reaches it too —
+  // the whole point of AC2 (a brand-new self-service user completes team
+  // creation against it without an admin touching anything).
+  const nobody = computeScope({ username: 'newbie@corp.com', adminUsername: ADMIN_USERNAME, users, memberships: [] });
+  assert.deepEqual([...nobody.teamIds], []);
+  assert.equal(visibleEnvironment(nobody, globalEnv) || isGlobalEnvironment(globalEnv), true);
+});
+
+test('#2158: management of a global record stays exactly where #2083 already put it — System-Admin-only', () => {
+  const fresh = scopeOf('newbie@corp.com');
+  // canManageEnvironment is UNCHANGED by #2158 (AC3): a global record carries
+  // no team assignment, so no team-admin route into `canManageEnvironment`
+  // exists for it — this falls out for free from the existing predicate,
+  // exactly as the ticket states.
+  assert.equal(canManageEnvironment(fresh, globalEnv), false);
+  assert.equal(canManageEnvironment(scopeOf('ops@corp.com'), globalEnv), true);
 });

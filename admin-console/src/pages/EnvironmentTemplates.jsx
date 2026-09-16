@@ -1,11 +1,10 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState } from 'react';
 import { Link } from 'react-router';
-import { Edit, Trash2, Plus, GitBranch, Key, Github, X, AlertTriangle, Cpu, Users, Info, Package, Server } from 'lucide-react';
+import { Edit, Trash2, Plus, GitBranch, Github, X, AlertTriangle, Cpu, Info, Package, Server } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import DataTable from '../components/DataTable';
 import SidePanel from '../components/SidePanel';
 import ConfirmDialog from '../components/ConfirmDialog';
-import RepoPropagationDialog from '../components/RepoPropagationDialog';
 import FormInput from '../components/FormInput';
 import IdField from '../components/IdField';
 import { ID_FORMAT_HINT } from '../components/id-field-view';
@@ -15,17 +14,14 @@ import PageHelpButton from '../components/PageHelpButton';
 // form renders this very component, so the two cannot drift in fields or copy.
 import RepositoryCard from '../components/RepositoryCard';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
-import { useAuth } from '../auth/AuthContext';
-import CredentialOwnership from '../components/CredentialOwnership';
-import { ownershipFromRecord, ownershipPayload, adminTeamIdsOf, canReassignCredentialClient } from './credential-scope-view.js';
 import { describeWorkingEnvSubmitState } from './working-env-submit-state.js';
+import { providerOptionLabel } from './provider-option-view.js';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning, availableToolchains, versionSourceLine } from './toolchain-select-view.js';
 import { initialMcpRows, mcpSubmitValue, mcpRowHint, mcpChangeNotice, mcpServerLabel } from './working-env-mcp-view.js';
-import { ENVIRONMENTS_HELP_SECTIONS } from './environments-help-sections.js';
-import { classifyRepositoryChanges, hasRepositoryChanges, outOfDateIndicator } from './working-env-repo-diff.js';
+import { ENVIRONMENT_TEMPLATES_HELP_SECTIONS } from './environment-templates-help-sections.js';
 import { usePageActions } from '../context/PageActionsContext';
 import { useHelpSubject } from '../context/HelperChatContext';
-import { OVERLAY_ENVIRONMENT_FORM, OVERLAY_TOOLCHAINS } from '../context/page-help-view.js';
+import { OVERLAY_ENVIRONMENT_TEMPLATE_FORM, OVERLAY_TOOLCHAINS } from '../context/page-help-view.js';
 
 const labelStyle = {
   fontSize: 'var(--eb-text-xs)',
@@ -77,9 +73,9 @@ function initialRepositories(initial) {
 function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
   // Rendered only while the side panel is slid out, so the subject needs no
   // `active` flag. Registering it is what lifts the help panel above this
-  // SidePanel (z-index 60/61) — without it the three "?" below would open help
-  // *behind* the form they explain (#1987, same reason as the MCP/Skills panels).
-  useHelpSubject({ overlay: OVERLAY_ENVIRONMENT_FORM });
+  // SidePanel (z-index 60/61) — without it the "?" below would open help
+  // *behind* the form it explains (#1987, same reason as the MCP/Skills panels).
+  useHelpSubject({ overlay: OVERLAY_ENVIRONMENT_TEMPLATE_FORM });
 
   const [form, setForm] = useState(() => ({
     id: initial?.id || '',
@@ -93,23 +89,6 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
     defaultModelId: initial?.defaultModelId || '',
     toolchainId: initial?.toolchainId || '',
   }));
-
-  // #2083: the ownership control. Fetched here rather than threaded from the
-  // page, matching every other list this form loads for itself.
-  const { data: teamsData } = useApi('/api/admin/teams');
-  const { user } = useAuth();
-  const isSysAdmin = !!user?.admin;
-  const adminTeamIds = adminTeamIdsOf(user);
-  const teams = Array.isArray(teamsData) ? teamsData : [];
-  // Seeded from the record on an edit, so a shared environment opens as shared
-  // and an ordinary save cannot silently un-share it; from the role defaults on
-  // a create. Only a System Admin may re-tier (canRetierEnvironment server-side),
-  // so for anyone else the control is read-only rather than a button that 403s —
-  // the `settingsSubject` convention (concept §6, implementation note 2).
-  const [ownership, setOwnership] = useState(
-    () => ownershipFromRecord(initial, { isSysAdmin, adminTeamIds }),
-  );
-  const ownershipLocked = isEdit && !canReassignCredentialClient({ isSysAdmin });
 
   const { data: keysData } = useApi('/api/ssh-keys');
   const { data: tokensData } = useApi('/api/github-tokens');
@@ -237,10 +216,10 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
       defaultModelId: form.defaultModelId || null,
       // An ID, never an image reference (#1940) — the server resolves it.
       toolchainId: form.toolchainId || null,
-      // #2083. Sent on an edit too: `isRetier` server-side means restating the
-      // record's own unchanged ownership is NOT an operator act, so this is
-      // also what finally stamps an explicit `scope` on a legacy record.
-      ...ownershipPayload(ownership),
+      // #2170 — no ownership picker and no `global` flag on this form: this
+      // whole page manages `isTemplate` records only (the caller wraps every
+      // create/edit call with `isTemplate: true`, below), and a template is a
+      // curated catalog entry, not a team-owned or live-shared record.
     });
   };
 
@@ -280,47 +259,26 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           : <>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} <strong>Cannot be changed after creation.</strong></>}
       />
 
-      {isEdit && (
-        <div style={{
-          border: '1px solid var(--eb-border-default)',
-          borderRadius: 'var(--eb-radius-md)',
-          padding: 'var(--eb-space-3)',
-          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-            <Users size={14} />
-            <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)' }}>
-              Agents using this environment
-            </span>
-            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-              ({(initial?.agents || []).length})
-            </span>
-          </div>
-          {(initial?.agents || []).length === 0 ? (
-            <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
-              No agents use this environment.
-            </div>
-          ) : (
-            <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-              {initial.agents.map(a => (
-                <li
-                  key={a.id}
-                  style={{
-                    fontSize: 'var(--eb-text-xs)',
-                    fontFamily: 'var(--eb-font-mono)',
-                    color: 'var(--eb-text-secondary)',
-                    padding: 'var(--eb-space-1) var(--eb-space-2)',
-                    background: 'var(--eb-bg-elevated)',
-                    borderRadius: 'var(--eb-radius-sm)',
-                  }}
-                >
-                  {a.displayName && a.displayName !== a.id ? `${a.displayName} (${a.id})` : a.id}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
+      {/* #2170: a template is a copy source, never a live-shared binding — no
+          agent or team is ever bound to it directly, so there is nothing to
+          list here (unlike the old "Agents using this environment" block).
+          What replaces it is this notice, since every credential field below
+          is otherwise easy to mistake for something that travels with the
+          template. */}
+      <div role="note" style={{
+        display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+        padding: 'var(--eb-space-2) var(--eb-space-3)',
+        background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-md)',
+        fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
+      }}>
+        <Info size={14} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-text-muted)' }} />
+        <span>
+          A team that starts from this template copies its repositories, MCP server pairings, model
+          provider, toolchain and additional context — <strong>never</strong> the SSH key, GitHub token
+          or MCP credential set below. Set a credential here only to verify the template itself works;
+          every team that copies it supplies its own.
+        </span>
+      </div>
 
       <div>
         <div style={labelStyle}>Description</div>
@@ -342,24 +300,10 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
         </div>
       </div>
 
-      {/* #2083 — ownership. The same control the SSH-key, GitHub-token and
-          Model-Provider forms render, because the tier shape is the same one
-          (resource-tier.js); a second, differently-worded picker for the same
-          three tiers is exactly the drift #1928's shared-component discipline
-          exists to prevent. `disabled` while a non-System-Admin edits, since
-          only an operator may re-tier. */}
-      <CredentialOwnership
-        value={ownership}
-        onChange={setOwnership}
-        teams={teams}
-        isSysAdmin={isSysAdmin}
-        adminTeamIds={adminTeamIds}
-        disabled={ownershipLocked}
-      />
-
       <div style={{ ...helpTextStyle, marginTop: 0 }}>
-        Skills are managed on the team (or agent) itself — see the Agents page, the Team-Setup wizard, or the Knowledge page.
-        Working Environments carry only infrastructure: repository, credentials, MCP servers, context.
+        Skills are managed on the team (or agent) itself — see the Agent Chat rail's Settings tab, the
+        Team-Setup wizard, or the Knowledge page. A template carries only infrastructure: repository,
+        MCP servers, model provider, toolchain, context.
       </div>
 
       <div style={{
@@ -380,10 +324,10 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
               environment — and why an added repository does not reach an agent
               that already exists. The per-field hints below stay put. */}
           <PageHelpButton
-            label="About repositories in a Working Environment"
+            label="About repositories in an environment"
             size={14}
             style={{ padding: 0, marginLeft: 'auto', flexShrink: 0 }}
-            section={ENVIRONMENTS_HELP_SECTIONS.repositories}
+            section={ENVIRONMENT_TEMPLATES_HELP_SECTIONS.repositories}
           />
         </div>
 
@@ -457,7 +401,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
             label="SSH key or GitHub token?"
             size={14}
             style={{ padding: 0, marginLeft: 'auto', flexShrink: 0 }}
-            section={ENVIRONMENTS_HELP_SECTIONS.credentials}
+            section={ENVIRONMENT_TEMPLATES_HELP_SECTIONS.credentials}
           />
         </div>
         <div style={helpTextStyle}>
@@ -503,7 +447,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
             label="About MCP server references"
             size={14}
             style={{ padding: 0, marginLeft: 'auto', flexShrink: 0 }}
-            section={ENVIRONMENTS_HELP_SECTIONS.mcp}
+            section={ENVIRONMENT_TEMPLATES_HELP_SECTIONS.mcp}
           />
         </div>
 
@@ -664,7 +608,7 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
             <option value="">— inherit from .env —</option>
             {llmEndpoints.map(ep => (
               <option key={ep.id} value={ep.id}>
-                {ep.name} ({ep.baseUrl})
+                {providerOptionLabel(ep)}
               </option>
             ))}
           </select>
@@ -910,13 +854,13 @@ function ToolchainRegistryPanel({ data, onChanged }) {
           label="About agent toolchains"
           size={14}
           style={{ padding: 0 }}
-          section={ENVIRONMENTS_HELP_SECTIONS.toolchains}
+          section={ENVIRONMENT_TEMPLATES_HELP_SECTIONS.toolchains}
         />
       </div>
 
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
         A toolchain is a container image derived from the default agent image, adding one language
-        stack. Registering it here is what makes it selectable on a Working Environment — it grants
+        stack. Registering it here is what makes it selectable on an environment — it grants
         nothing on its own. Only a System Admin can register one, because an agent container
         receives its environment's SSH key, GitHub token and model credential: whoever picks the
         image picks what runs with those secrets.
@@ -1087,8 +1031,15 @@ function ToolchainRegistryPanel({ data, onChanged }) {
   );
 }
 
-export default function WorkingEnvironments() {
-  const { data: envs, loading, error, refetch } = useApi('/api/environments');
+// #2170 (epic #2166 A4): the System-Admin Environment Template catalog —
+// successor to the general-purpose "Working Environments" list every user
+// used to see. A template is a curated copy source for team creation, never a
+// live-shared binding: no agent or team is ever bound to one directly (the
+// server refuses it), so there is no "Agents using this" concept here at all —
+// unlike the old page, this one supports CREATE as well as edit/delete, since
+// curating the catalog is the whole point.
+export default function EnvironmentTemplates() {
+  const { data: envs, loading, error, refetch } = useApi('/api/environments?isTemplate=true');
   const { data: toolchainData, refetch: refetchToolchains } = useApi('/api/toolchains');
   const [panelMode, setPanelMode] = useState(null);
   const [selected, setSelected] = useState(null);
@@ -1096,42 +1047,11 @@ export default function WorkingEnvironments() {
   const [actionError, setActionError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
-  // The save-time propagation offer (#2066 D3). Held as one object so the
-  // dialog's inputs cannot get out of step with each other; `null` = no offer.
-  const [offer, setOffer] = useState(null);
-  // D4: per-environment divergence, keyed by env id. Fetched after the list
-  // loads rather than folded into GET /api/environments, because it costs two
-  // git commands per repository per agent and the list must not wait on it.
-  const [divergence, setDivergence] = useState({});
-
-  // Re-read the indicator for every environment that has at least one agent.
-  // Deliberately fail-quiet per environment: a probe that could not run shows
-  // NO indicator rather than a green one, so the page never claims agents are
-  // up to date when it does not know (outOfDateIndicator returns null for a
-  // missing payload).
-  const refreshDivergence = useCallback(async (list) => {
-    const rows = (Array.isArray(list) ? list : []).filter(
-      (e) => (Array.isArray(e.agents) ? e.agents.length : (e.agentCount || 0)) > 0,
-    );
-    // Always write the map, even when it ends up empty: returning early here
-    // would leave a badge standing for an environment whose last agent has
-    // since been deleted.
-    if (rows.length === 0) { setDivergence({}); return; }
-    const entries = await Promise.all(rows.map(async (e) => {
-      try {
-        return [e.id, await apiCall('GET', `/api/environments/${encodeURIComponent(e.id)}/repo-divergence`)];
-      } catch {
-        return [e.id, null];
-      }
-    }));
-    setDivergence(Object.fromEntries(entries));
-  }, []);
-
-  useEffect(() => { refreshDivergence(envs); }, [envs, refreshDivergence]);
 
   const COLUMNS = [
     { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
     { key: 'name', label: 'Name' },
+    { key: 'description', label: 'Description', render: v => v || <span style={{ color: 'var(--eb-text-muted)' }}>—</span> },
     {
       key: 'repositories',
       label: 'Repositories',
@@ -1159,54 +1079,6 @@ export default function WorkingEnvironments() {
       },
     },
     {
-      key: 'agentCount',
-      label: 'Agents',
-      render: (v, row) => {
-        const count = Array.isArray(row.agents) ? row.agents.length : (v || 0);
-        // D4 (#2066): the persistent out-of-date indicator, with the catch-up
-        // behind it. It lives on the Agents cell because it is a statement
-        // about those agents, and it is derived from their workspaces — so it
-        // survives a declined offer and clears itself once nothing diverges.
-        const indicator = outOfDateIndicator(divergence[row.id]);
-        return (
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-            <span
-              title={count > 0 ? row.agents.map(a => a.displayName || a.id).join('\n') : 'No agents use this environment'}
-              style={{ fontSize: 'var(--eb-text-xs)', color: count > 0 ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)' }}
-            >
-              {count}
-            </span>
-            {indicator && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setOffer({ env: row, diff: null, catchUp: true });
-                }}
-                disabled={!indicator.canManage}
-                title={indicator.canManage
-                  ? `${indicator.title}\n\nClick to bring them up to date.`
-                  : `${indicator.title}\n\nYou may not manage this environment.`}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 4,
-                  padding: '1px var(--eb-space-2)',
-                  background: 'var(--eb-status-warning-bg)',
-                  border: '1px solid var(--eb-status-warning)',
-                  borderRadius: 'var(--eb-radius-sm)',
-                  color: 'var(--eb-status-warning)',
-                  fontSize: 'var(--eb-text-xs)', fontFamily: 'inherit',
-                  cursor: indicator.canManage ? 'pointer' : 'not-allowed',
-                  opacity: indicator.canManage ? 1 : 0.7,
-                }}
-              >
-                <AlertTriangle size={11} /> {indicator.label}
-              </button>
-            )}
-          </span>
-        );
-      },
-    },
-    {
       key: '_actions',
       label: '',
       sortable: false,
@@ -1222,25 +1094,14 @@ export default function WorkingEnvironments() {
   async function handleSave(form) {
     setSaving(true); setFormError(null);
     try {
-      if (panelMode === 'edit') {
-        const saved = await apiCall('PUT', `/api/environments/${selected.id}`, form);
-        // #2066 D3: the offer is made HERE, once the save has SUCCEEDED, and
-        // the panel still closes as it always did. The diff is computed from
-        // two server-supplied lists — the list as it was persisted a moment ago
-        // (`previousRepositories`, captured inside the PUT) and the list the
-        // server saved — so it can never be computed against a draft this
-        // browser has been holding since another admin saved the same
-        // environment, which is the exact defect this ticket removes.
-        //
-        // Scoped to an environment that already HAS agents (AC4): with none
-        // there is no workspace that could be out of date, whatever changed.
-        const agents = Array.isArray(selected.agents) ? selected.agents : [];
-        const diff = classifyRepositoryChanges(saved?.previousRepositories, saved?.repositories);
-        if (agents.length > 0 && hasRepositoryChanges(diff)) {
-          setOffer({ env: { ...selected, ...saved }, diff, catchUp: false });
-        }
+      // #2170: every create/edit through this page is a template — forced
+      // here rather than trusted from the form, so this page can never
+      // accidentally save an ordinary (non-template) environment.
+      const body = { ...form, isTemplate: true };
+      if (panelMode === 'create') {
+        await apiCall('POST', '/api/environments', body);
       } else {
-        await apiCall('POST', '/api/environments', form);
+        await apiCall('PUT', `/api/environments/${selected.id}`, body);
       }
       setPanelMode(null); setSelected(null);
       refetch();
@@ -1275,10 +1136,10 @@ export default function WorkingEnvironments() {
         </button>
       )}
       <button
-        onClick={() => { setPanelMode('create'); setSelected(null); setFormError(null); }}
+        onClick={() => { setSelected(null); setFormError(null); setPanelMode('create'); }}
         style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
       >
-        <Plus size={15} /> New Environment
+        <Plus size={15} /> New Template
       </button>
     </>
   );
@@ -1296,32 +1157,26 @@ export default function WorkingEnvironments() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
 
       {/* One-line description + the "?" that opens this page's help topic. The
-          "What is a Working Environment?" box that used to sit here — the
-          repositories / token / additional-instructions list and the
-          shared-recipe-but-own-workspace point — now lives in that topic
-          (api/helper-chat/help-topics/environments.md, #1880), together with the
-          SSH-vs-token rule, read-only repositories and the
-          repositories-are-cloned-once / Sync-all-agents caveat. Per-field help
-          inside the form stays where the decision is made.
-
-          #1987 widened that topic into seven chapters and pointed each surface
-          at its own one: this button opens chapter 1, and the repositories
-          area, the token select, the Sync action and the Toolchains panel each
-          carry their own "?" (see environments-help-sections.js). */}
+          old "What is a Working Environment?" box lived on the general-purpose
+          page every user could see; that page is gone (#2170) and its content
+          was re-homed onto the Agent Chat topic (where a team now edits its own
+          environment via the Settings tab's Environment section). This page's
+          own topic covers what a TEMPLATE is and how "start from a template"
+          works at team creation. */}
       <p style={{
         margin: 0,
         display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)',
         fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
       }}>
         <span>
-          A reusable workspace recipe — the repositories, credentials, model provider and extra
-          context every agent created from it inherits.
+          Ready-made repo / provider / MCP / toolchain / context sets a new team can copy from at
+          creation — never a live-shared binding, and never editable by anyone but a System Admin.
         </span>
         <PageHelpButton
-          label="What is a Working Environment?"
+          label="What is an Environment Template?"
           size={14}
           style={{ padding: 0, flexShrink: 0 }}
-          section={ENVIRONMENTS_HELP_SECTIONS.whatIs}
+          section={ENVIRONMENT_TEMPLATES_HELP_SECTIONS.whatIs}
         />
       </p>
 
@@ -1335,19 +1190,29 @@ export default function WorkingEnvironments() {
       <DataTable
         columns={COLUMNS}
         data={envs ?? []}
-        emptyText="No Working Environments yet. Click 'New Environment' to create the first one."
+        emptyText="No templates yet — create one so a new team can start from it instead of from scratch."
       />
 
       <SidePanel
-        open={panelMode === 'create' || panelMode === 'edit'}
+        open={panelMode === 'edit' || panelMode === 'create'}
         onClose={() => { setPanelMode(null); setSelected(null); }}
-        title={panelMode === 'edit' ? `Edit: ${selected?.name || selected?.id}` : 'New Working Environment'}
+        title={panelMode === 'create' ? 'New Template' : `Edit: ${selected?.name || selected?.id}`}
         width="560px"
       >
-        {(panelMode === 'create' || (panelMode === 'edit' && selected)) && (
+        {panelMode === 'create' && (
           <EnvironmentForm
-            initial={panelMode === 'edit' ? selected : null}
-            isEdit={panelMode === 'edit'}
+            initial={null}
+            isEdit={false}
+            onSave={handleSave}
+            onCancel={() => setPanelMode(null)}
+            saving={saving}
+            error={formError}
+          />
+        )}
+        {panelMode === 'edit' && selected && (
+          <EnvironmentForm
+            initial={selected}
+            isEdit
             onSave={handleSave}
             onCancel={() => { setPanelMode(null); setSelected(null); }}
             saving={saving}
@@ -1370,21 +1235,10 @@ export default function WorkingEnvironments() {
         )}
       </SidePanel>
 
-      <RepoPropagationDialog
-        open={!!offer}
-        envId={offer?.env?.id}
-        envName={offer?.env?.name}
-        diff={offer?.diff || null}
-        agents={offer?.env?.agents || []}
-        catchUp={!!offer?.catchUp}
-        onClose={() => setOffer(null)}
-        onFinished={() => refreshDivergence(envs)}
-      />
-
       <ConfirmDialog
         open={!!deleteTarget}
-        title="Delete Working Environment"
-        message={`Really delete "${deleteTarget?.name || deleteTarget?.id}"? Agents using this environment must be removed first.`}
+        title="Delete template"
+        message={`Really delete the template "${deleteTarget?.name || deleteTarget?.id}"? This does not affect any team that already copied from it.`}
         variant="danger"
         confirmLabel="Delete"
         onConfirm={handleDelete}

@@ -58,7 +58,6 @@ const SURFACES = {
   'agent-lifecycle/AgentCreateForm.jsx': strip(read('agent-lifecycle/AgentCreateForm.jsx')),
   'agent-lifecycle/AgentEditForm.jsx': strip(read('agent-lifecycle/AgentEditForm.jsx')),
   'agent-lifecycle/AgentLifecycleDialogs.jsx': strip(read('agent-lifecycle/AgentLifecycleDialogs.jsx')),
-  'agent-lifecycle/agent-form-fields.jsx': strip(read('agent-lifecycle/agent-form-fields.jsx')),
   'agent-lifecycle/agent-lifecycle-menu.js': strip(read('agent-lifecycle/agent-lifecycle-menu.js')),
   'agent-lifecycle/agent-edit-form-model.js': strip(read('agent-lifecycle/agent-edit-form-model.js')),
   'agent-create-submit-state.js': strip(read('agent-create-submit-state.js')),
@@ -90,12 +89,14 @@ test('every swept surface still contains its own code after the strip', () => {
     'agent-chat/ChatPanel.jsx': /HeaderOverflowMenu/,
     'agent-chat/agent-list-model.js': /export function buildGroups/,
     'agent-chat/rail-lifecycle.js': /export function deleteTargetFor/,
-    'agent-lifecycle/AgentCreateForm.jsx': /function RoleCard/,
+    // Was `function RoleCard` until #2233 removed the role picker outright
+    // (the `agent`/`team` choice is gone, not merely relabelled); `hasRepos` is
+    // the next-stablest thing this form defines that survives that removal.
+    'agent-lifecycle/AgentCreateForm.jsx': /hasRepos/,
     // Was `RoleDetailBanner` until #2026 removed the role callout from this
     // form; the sub-control it defines is a stabler canary than any field.
     'agent-lifecycle/AgentEditForm.jsx': /function PromptModeControl/,
     'agent-lifecycle/AgentLifecycleDialogs.jsx': /export function renderDeleteMessage/,
-    'agent-lifecycle/agent-form-fields.jsx': /export const ROLE_INFO/,
     'agent-lifecycle/agent-lifecycle-menu.js': /export function deleteDialogCopy/,
     'agent-lifecycle/agent-edit-form-model.js': /export function buildEditSubmit/,
     'agent-create-submit-state.js': /PROMPT_OPTIONAL_ROLES/,
@@ -140,16 +141,18 @@ test('AC1/AC2 — no in-scope surface carries BP roles, fields or vocabulary', (
   }
 });
 
-test('AC1 — the create form offers exactly the two creatable roles', () => {
+test('#2233 — the create form offers no role choice at all any more', () => {
+  // Superseded by #2233: the create form used to offer exactly `agent`/`team`
+  // via a `RoleCard` picker (this test's prior assertion); the picker and its
+  // backing catalogue (`agent-lifecycle/agent-form-fields.jsx`) are gone
+  // outright, since the action always produces a plain agent now.
   const form = SURFACES['agent-lifecycle/AgentCreateForm.jsx'];
-  const cards = [...form.matchAll(/<RoleCard\s+value="([^"]+)"/g)].map(m => m[1]);
-  assert.deepEqual(cards, ['agent', 'team']);
-});
-
-test('AC1 — the role catalogue no longer describes the retired roles', () => {
-  const fields = SURFACES['agent-lifecycle/agent-form-fields.jsx'];
-  const roles = [...fields.matchAll(/^\s{2}'([a-z-]+)':\s*\{$/gm)].map(m => m[1]);
-  assert.deepEqual(roles.sort(), ['agent', 'team', 'team-member']);
+  assert.doesNotMatch(form, /<RoleCard/);
+  assert.doesNotMatch(form, /function RoleCard/);
+  assert.equal(
+    existsSync(fileURLToPath(new URL('./agent-lifecycle/agent-form-fields.jsx', import.meta.url))),
+    false,
+  );
 });
 
 /* ── AC3: the hand-over dialog is stilled, not deleted ──────────────── */

@@ -111,6 +111,22 @@ def _handle_sigterm(signum: int, frame) -> None:
 CLAUDE_TIMEOUT_SEC = 3600
 MEMBER_CACHE_TTL_SEC = 30
 
+
+def _is_human_sender(agent_user_id: str, sender: str, members: list[str]) -> bool:
+    """The chat-turn gate (#2173): act iff the sender is a joined member of
+    the room and isn't this agent itself.
+
+    Replaces the old "exactly two room members" heuristic — humans now post
+    under their own Matrix identity into the one shared per-agent room (#2173),
+    so a legitimate room can hold this agent plus any number of humans. It is
+    still one room per agent, never per-human rooms, so the only "other"
+    account a message can arrive from is a human's own — nothing here needs to
+    tell a human account apart from a service one.
+    """
+    if sender == agent_user_id:
+        return False
+    return sender in members
+
 # Agent-form loop verifier (#933): how long to wait for a delegated verifier's
 # verdict, and how often to poll for it. Overridable for tests / slow reviewers.
 VERIFY_WAIT_SEC = int(os.environ.get("LOOP_VERIFY_WAIT_SEC", "1800"))
@@ -1068,6 +1084,19 @@ def _requested_by(raw) -> dict | None:
     return {"matrixUserId": mxid.strip()}
 
 
+def _acting_sender_env_value(run_context: dict | None) -> str:
+    """The `AEE_ACTING_SENDER` value for this invocation's Claude subprocess env
+    (#2175, epic #2166 B3). Reuses `_requested_by`'s normalization of the same
+    `requestedBy` block `build_usage_record` reads, so the two can never
+    disagree about what counts as a known chat sender. Empty for anything that
+    isn't a live chat turn — an autonomous trigger's run_context sets no
+    `requestedBy` at all."""
+    if not isinstance(run_context, dict):
+        return ""
+    requested_by = _requested_by(run_context.get("requestedBy"))
+    return requested_by["matrixUserId"] if requested_by else ""
+
+
 def build_usage_record(ctx: dict) -> dict:
     """Pure assembler for a §4.1 token-usage record (#654). Takes a run-context
     dict (identity + trigger/github/git provenance + the captured `resultEvent`
@@ -1292,6 +1321,19 @@ def _map_stream_json_line(line: str, correlation_id: str,
             result_ev["apiErrorStatus"] = parsed.get("api_error_status")
             result_ev["errors"] = parsed.get("errors")
         events.append(result_ev)
+
+    elif ptype == "rate_limit_event":
+        # #2202: previously uncaught, so it fell into the generic `unknown`
+        # branch below and rendered client-side as a raw JSON dump. Give it
+        # its own type so LogEvent.jsx can render a human-readable summary
+        # (status/overage/reset-time) instead, while still keeping the whole
+        # parsed line as `raw` for the expandable full-detail view.
+        events.append({
+            "type": "rate_limit_event",
+            "info": parsed.get("rate_limit_info"),
+            "raw": parsed,
+            "correlationId": correlation_id,
+        })
 
     else:
         events.append({"type": "unknown", "raw": parsed, "correlationId": correlation_id})
@@ -2805,6 +2847,205 @@ class _ThinkingTokenThrottle:
         return ev
 
 
+# ---- orphaned background tasks (dangling-promise detector) ----
+#
+# `Task(*)`/`Monitor`/background shell commands are always in the agent's
+# allowedTools, but a run is a single headless `claude --print` turn: the CLI
+# stops every still-running background task the instant the turn's `result`
+# event is produced (it emits `task_notification status:stopped` right after the
+# result), and nothing in this platform re-invokes the agent when one would have
+# finished. So a background task that outlives the turn is silently killed and
+# the model's "I'll wait in the background and continue" becomes a dead promise —
+# the chat freezes on that message forever. We detect it and append an honest
+# notice to the reply instead of letting the promise dangle.
+_BG_TASK_SUBTYPES = frozenset({
+    "task_started", "task_updated", "task_notification", "background_tasks_changed",
+})
+# A task that reached one of these actually finished on its own — leave it alone.
+# Anything else at turn end (`stopped`, or never a terminal status) was cut off.
+_BG_TASK_TERMINAL_STATUSES = frozenset({"completed", "failed"})
+
+
+def _orphaned_background_tasks(task_events: list[dict]) -> list[dict]:
+    """Fold the raw background-task system-event payloads seen during a run into
+    per-task final state and return those left unfinished at turn end.
+
+    Pure: takes the raw `parsed` payloads (subtype + task_id + status fields) in
+    stream order, returns ``[{task_id, description, status}]`` for every task
+    whose last known status is not terminal. Empty when nothing was orphaned —
+    which is the byte-identical common case (no background tasks, or all joined
+    within the turn)."""
+    tasks: dict[str, dict] = {}
+    order: list[str] = []
+
+    def ensure(task_id, description=None):
+        tid = str(task_id)
+        if tid not in tasks:
+            tasks[tid] = {"description": (description or "").strip(), "status": None}
+            order.append(tid)
+        elif description and not tasks[tid]["description"]:
+            tasks[tid]["description"] = str(description).strip()
+
+    for ev in task_events:
+        if not isinstance(ev, dict):
+            continue
+        sub = ev.get("subtype")
+        if sub == "background_tasks_changed":
+            for t in (ev.get("tasks") or []):
+                if isinstance(t, dict) and t.get("task_id"):
+                    ensure(t["task_id"], t.get("description"))
+        elif sub == "task_started":
+            if ev.get("task_id"):
+                ensure(ev["task_id"], ev.get("description"))
+        elif sub == "task_updated":
+            if ev.get("task_id"):
+                ensure(ev["task_id"], ev.get("description"))
+                st = (ev.get("patch") or {}).get("status")
+                if st:
+                    tasks[str(ev["task_id"])]["status"] = st
+        elif sub == "task_notification":
+            if ev.get("task_id"):
+                ensure(ev["task_id"], ev.get("description") or ev.get("summary"))
+                st = ev.get("status")
+                if st:
+                    tasks[str(ev["task_id"])]["status"] = st
+
+    orphaned = []
+    for tid in order:
+        t = tasks[tid]
+        if t["status"] not in _BG_TASK_TERMINAL_STATUSES:
+            orphaned.append({"task_id": tid, "description": t["description"],
+                             "status": t["status"]})
+    return orphaned
+
+
+def _format_orphaned_bg_task_warning(orphaned: list[dict]) -> str | None:
+    """Honest, human-facing notice for background tasks stopped at turn end.
+
+    Rendered as a Markdown blockquote so it reads as a distinct system note under
+    the agent's own reply. Returns None when nothing was orphaned (the caller
+    then leaves the reply byte-identical)."""
+    if not orphaned:
+        return None
+    n = len(orphaned)
+    noun = "background task" if n == 1 else "background tasks"
+    lines = [
+        "---",
+        f"> ⚠️ **{n} {noun} still running when this turn ended — stopped, not finished.**",
+        ">",
+        "> An agent run is a single turn: background work is stopped the moment the "
+        "turn ends and is **not** resumed or reported back. This did not complete:"
+        if n == 1 else
+        "> An agent run is a single turn: background work is stopped the moment the "
+        "turn ends and is **not** resumed or reported back. These did not complete:",
+    ]
+    for t in orphaned[:5]:
+        desc = (t.get("description") or t.get("task_id") or "background task")
+        desc = " ".join(str(desc).split())
+        if len(desc) > 140:
+            desc = desc[:139] + "…"
+        lines.append(f">   • `{desc}`")
+    if n > 5:
+        lines.append(f">   • …and {n - 5} more")
+    lines.append(">")
+    lines.append(
+        "> To wait for something outside this turn (CI, another agent, a long job), "
+        "re-wake with a trigger or loop instead of waiting in the background."
+    )
+    return "\n".join(lines)
+
+
+# ---- runtime self-correction for orphaned background tasks (#2277) ----
+#
+# #2259 (above) made an orphaned task HONEST — the reply says so — but the run
+# still ends with the work unfinished, and only a human re-sending the same
+# message continues it. This is the bounded, self-generated recovery: when a
+# turn ends with >=1 non-terminal background task, enqueue exactly ONE
+# corrective re-wake that resumes the same room/session and is told to redo
+# the work in the foreground. Delivery reuses the existing self-enqueue path
+# (`POST /internal/agents/<id>/enqueue-pending`, the same one `_run_agent_verify`
+# uses to hand a loop-verify request to another agent — here the target is
+# this agent itself) so the correction inherits, for free, everything that
+# path already guarantees: Maintenance Mode leaves it durably queued but
+# undrained (`_pending_loop`), and `_execute`/`_execute_guarded` runs it
+# through the #1157 WorkspaceGate and the #611 TriggerBackstop like any other
+# triggered spawn.
+_BG_ORPHAN_CORRECTION_KIND = "bg-orphan-correction"
+# Ctx key stamped on the correction's own run (see `_execute_bg_orphan_correction`)
+# so the loop guard below can tell "this run IS a correction" from "this run
+# orphaned for the first time" — the depth=1 cap #606 requires.
+_BG_ORPHAN_CORRECTION_CTX_KEY = "bgOrphanCorrection"
+
+
+def _should_self_correct_bg_orphan(orphaned: list[dict], already_corrected: bool) -> bool:
+    """Pure decision: does THIS turn's end warrant enqueuing one corrective
+    re-wake? Mirrors `_orphaned_background_tasks`'s pure-core style so the
+    "correct once vs. fall back to honest notice" call is unit-testable
+    without a live scheduler.
+
+    True iff the turn left >=1 background task non-terminal (`orphaned`, the
+    `_orphaned_background_tasks` result — already excludes `completed`/`failed`)
+    AND this turn is not itself already a correction (`already_corrected`) —
+    the #606 loop-guard: at most one self-correction per originating turn, then
+    honesty only."""
+    return bool(orphaned) and not already_corrected
+
+
+def _format_bg_orphan_correction_prompt(descriptions: list[str]) -> str:
+    """The corrective steering prompt carried on the re-wake — the instruction
+    the consumer run reads as its own task, not untrusted context (there is no
+    other producer here to guard against, unlike a direct hand-off note)."""
+    shown = [str(d).strip() for d in (descriptions or []) if str(d).strip()][:5]
+    items = ", ".join(f"`{d}`" for d in shown) if shown else "a background task"
+    return (
+        "Your previous turn ended while background task(s) "
+        f"{items} were still running, so the platform stopped them and they "
+        "did not finish. Re-do that work now, but run it in the foreground and "
+        "block until it completes before you answer. If you were waiting on "
+        "something outside this turn (CI, another agent's PR, a long external "
+        "job), do not wait in-band — end the turn and arm a `github-event`/"
+        "`loop` trigger instead."
+    )
+
+
+def _build_bg_orphan_correction_entry(room_id: str, orphaned: list[dict]) -> dict:
+    """The self-enqueued pending-queue entry for one corrective re-wake.
+
+    `kind` routes it to `_handle_pending_entry`'s dedicated branch (mirroring
+    `_WAKE_PENDING_KIND`'s placement, above the `_PENDING_OUT_OF_SCOPE_KINDS`
+    check). Carries only what `_execute_bg_orphan_correction` needs to rebuild
+    the prompt — no task ids, no raw event payloads."""
+    descriptions = [
+        str(t.get("description") or t.get("task_id") or "background task").strip()
+        for t in (orphaned or [])
+    ][:5]
+    return {
+        "kind": _BG_ORPHAN_CORRECTION_KIND,
+        "roomId": room_id,
+        "descriptions": descriptions,
+    }
+
+
+def _enqueue_bg_orphan_correction(agent_id: str, room_id: str,
+                                  orphaned: list[dict]) -> bool:
+    """Best-effort self-enqueue of one corrective re-wake (#2277). Blocking —
+    callers run it via `asyncio.to_thread`. Failure just means the #2259
+    honest notice stands alone; it never raises."""
+    entry = _build_bg_orphan_correction_entry(room_id, orphaned)
+    route = f"/internal/agents/{urllib.parse.quote(agent_id, safe='')}/enqueue-pending"
+    try:
+        status, body = TriggerScheduler._orch_post_json(route, entry)
+    except Exception as exc:
+        print(f"[Runner:{agent_id}] bg-orphan-correction enqueue failed: {exc}",
+              file=sys.stderr)
+        return False
+    if status not in (200, 202):
+        print(f"[Runner:{agent_id}] bg-orphan-correction enqueue HTTP {status}: {body}",
+              file=sys.stderr)
+        return False
+    return True
+
+
 def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                       resume_id: str | None, blueprint_id: str | None,
                       timeout_sec: int, run_context: dict | None = None) -> tuple[str, str | None]:
@@ -2847,6 +3088,13 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     # run that opened the PR onto the pr-created record. Empty when unknown — the
     # record then lands with correlationId:null and tier C covers attribution.
     env["AEE_CORRELATION_ID"] = correlation_id or ""
+    # Acting-sender passthrough (#2175, epic #2166 B3): `gh-as-agent push`/`pr`
+    # forwards this in its POST body so the orchestrator can re-key an
+    # attributed write's personal-credential resolution off the human actually
+    # chatting right now instead of the agent's static config owner. Empty for
+    # anything that isn't a live chat turn (cron/github-event/loop/DM-less run),
+    # which is exactly what keeps autonomous runs unaffected (the ticket's AC).
+    env["AEE_ACTING_SENDER"] = _acting_sender_env_value(run_context)
     if resume_id:
         env["KNOWLEDGE_SESSION_ID"] = resume_id
 
@@ -2893,6 +3141,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     stderr_chunks: list[str] = []
     ask_question_input: dict | None = None  # first AskUserQuestion tool input (#447)
     context_usage: dict = {}  # last assistant-message usage this invocation (#509)
+    bg_task_events: list[dict] = []  # raw background-task payloads for orphan detection
     # Coalesce the CLI's high-frequency thinking_tokens ticks into a throttled
     # subset of JSONL lines (#870) — the UI collapses them to one live row.
     tt_throttle = _ThinkingTokenThrottle()
@@ -2917,6 +3166,13 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                 # so a run that ultimately exhausts them carries the real cause
                 # (e.g. a sustained 500) rather than a bare exit code.
                 last_api_status = ev["raw"].get("error_status") or last_api_status
+            if (ev.get("type") == "system_event"
+                    and ev.get("subtype") in _BG_TASK_SUBTYPES
+                    and isinstance(ev.get("raw"), dict)):
+                # Collect the raw payload so the orphan detector can fold the
+                # whole run's task lifecycle at turn end (the `stopped` we care
+                # about arrives after the `result` but before stdout EOF).
+                bg_task_events.append(ev["raw"])
             _append_event(room_id, ev)  # log tab is unchanged (#447 AC6)
             if ev.get("type") == "system_init" and isinstance(ev.get("sessionId"), str):
                 observed_session = ev["sessionId"]
@@ -3047,6 +3303,28 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
         return ask_reply, observed_session
 
     final_text = final_result if final_result is not None else "".join(assistant_chunks)
+
+    # Dangling-promise guard: if background tasks were still running when the turn
+    # ended, the CLI has stopped them and nothing will resume them — say so in the
+    # reply instead of letting the model's "I'll wait…" hang forever.
+    orphaned = _orphaned_background_tasks(bg_task_events)
+    # Stashed onto the caller's run_context by reference (#2277) — the same
+    # channel `_loopOutputTokens`/`_askQuestion` already use to cross this
+    # function's return boundary without widening it. Always set (including the
+    # empty list) so a --resume retry's LAST invocation is what the caller sees.
+    if isinstance(run_context, dict):
+        run_context["_bgOrphaned"] = orphaned
+    warning = _format_orphaned_bg_task_warning(orphaned)
+    if warning is not None:
+        final_text = (final_text.rstrip() + "\n\n" + warning) if final_text.strip() else warning
+        _append_event(room_id, {
+            "type": "system_event",
+            "subtype": "background-tasks-orphaned",
+            "count": len(orphaned),
+            "detail": [(t.get("description") or t.get("task_id")) for t in orphaned][:10],
+            "correlationId": correlation_id,
+        })
+
     return final_text, observed_session
 
 
@@ -5489,6 +5767,17 @@ class TriggerScheduler:
                     print(f"[Runner:{self._agent_id}] plugin-event error: {exc}",
                           file=sys.stderr)
                 return
+            if kind == _BG_ORPHAN_CORRECTION_KIND:
+                # #2277: this agent's OWN prior turn self-enqueued this. Same
+                # placement requirement as wake-agent above — it names no
+                # triggers.json entry, so it MUST be handled before the
+                # out-of-scope/trigger-id fall-through.
+                try:
+                    await self._execute_bg_orphan_correction(entry)
+                except Exception as exc:
+                    print(f"[Runner:{self._agent_id}] bg-orphan-correction error: {exc}",
+                          file=sys.stderr)
+                return
             if kind in _PENDING_OUT_OF_SCOPE_KINDS:
                 print(
                     f"[Runner:{self._agent_id}] pending kind={kind} not yet ported "
@@ -5525,7 +5814,10 @@ class TriggerScheduler:
             )
             print(f"[Runner:{self._agent_id}] {label}: {entry_tid}", file=sys.stderr)
             try:
-                await self._execute(dict(match), ctx={"github": gh} if gh else None)
+                ctx = {"github": gh} if gh else None
+                if ctx is not None and "wakeLabel" in entry:
+                    ctx["wakeLabel"] = entry.get("wakeLabel")
+                await self._execute(dict(match), ctx=ctx)
             except Exception as exc:
                 print(f"[Runner:{self._agent_id}] pending _execute({entry_tid}) error: {exc}",
                       file=sys.stderr)
@@ -5659,6 +5951,45 @@ class TriggerScheduler:
             **({"eventId": entry["eventId"]} if isinstance(entry.get("eventId"), str) and entry["eventId"] else {}),
             **({"payload": entry["payload"]} if isinstance(entry.get("payload"), dict) else {}),
         }})
+
+    # -- runtime self-correction for orphaned background tasks (#2277) ------
+
+    async def _execute_bg_orphan_correction(self, entry: dict) -> None:
+        """Run one bounded, self-generated corrective re-wake.
+
+        Unlike `_execute_wake_agent` there is no producer/consumer pair and no
+        triggers.json listener to look up — this agent enqueued the entry for
+        ITSELF, so the trigger is synthesized here. Goes through the ordinary
+        `_execute` chokepoint for the same reason `_execute_wake_agent` does
+        (the AC-6 answer, not tidiness): it is the only path holding BOTH the
+        #1157 WorkspaceGate and the #611 TriggerBackstop.
+
+        `ctx={_BG_ORPHAN_CORRECTION_CTX_KEY: True}` is the depth marker
+        `_execute_inner` reads at the end of ITS run — if this corrective run
+        ALSO orphans a task, that flag is what stops a second correction from
+        chaining (the #606 loop guard: at most one self-correction per
+        originating turn)."""
+        room_id = entry.get("roomId") if isinstance(entry.get("roomId"), str) else None
+        if not room_id or not _MATRIX_ROOM_ID_RE.match(room_id):
+            print(f"[Runner:{self._agent_id}] bg-orphan-correction: no valid "
+                  f"roomId — dropping", file=sys.stderr)
+            return
+        descriptions = entry.get("descriptions") if isinstance(entry.get("descriptions"), list) else []
+        synthetic_trigger = {
+            "id": "bg-orphan-correction",
+            "type": "internal",
+            "description": "Corrective re-wake (orphaned background task)",
+            "roomId": room_id,
+            "prompt": _format_bg_orphan_correction_prompt(descriptions),
+            "timeoutSeconds": CLAUDE_TIMEOUT_SEC,
+        }
+        print(
+            f"[Runner:{self._agent_id}] bg-orphan-correction: resuming {room_id} "
+            f"({len(descriptions)} task(s))",
+            file=sys.stderr,
+        )
+        await self._execute(
+            synthetic_trigger, ctx={_BG_ORPHAN_CORRECTION_CTX_KEY: True})
 
     # -- handover DM ---------------------------------------------------------
 
@@ -5842,7 +6173,10 @@ class TriggerScheduler:
         'issues.unlabeled':                     'Issue unlabeled',
         'release.published':                    'Release published',
     }
-    # Events that carry payload.label.name — the triggering label is shown.
+    # Events for which the trigger notice shows a label chip. The label shown
+    # is the one that actually woke this subscriber (#2151) — the consumption
+    # ladder in `_post_trigger_notice` — not necessarily `payload.label.name`,
+    # which the Events API can collapse onto an arbitrary co-applied label.
     _LABEL_FILTERABLE_EVENTS: frozenset[str] = frozenset([
         'issues.labeled',
         'issues.unlabeled',
@@ -5925,13 +6259,30 @@ class TriggerScheduler:
 
             friendly = self._GITHUB_EVENT_LABELS.get(event_key) or event_key or "GitHub event"
 
-            # For label events, surface the specific label that fired.
+            # For label events, surface the label that actually woke THIS
+            # subscriber (#2151) — never necessarily `payload.label.name`,
+            # which the Events API can collapse onto an arbitrary one of
+            # several labels applied in the same action. Consumption ladder,
+            # first truthy wins: the pending entry's own stamped `wakeLabel`
+            # (set by every writer — poller, flow-emit, reassign — to the
+            # matched `labelFilter`; covers the reported bug) → the trigger's
+            # own `labelFilter` (covers an entry queued before the stamp
+            # existed, #2151 AC5) → `payload.label.name` (the only correct
+            # answer for a filter-less, any-label listener, #2151 AC2).
             label_name: str | None = None
             if event_key in self._LABEL_FILTERABLE_EVENTS:
                 try:
+                    stamped = (ctx or {}).get("wakeLabel")
+                    trigger_filter = trigger.get("labelFilter")
                     label_info = payload.get("label")
-                    if isinstance(label_info, dict):
-                        label_name = label_info.get("name") or None
+                    payload_label = (
+                        label_info.get("name") if isinstance(label_info, dict) else None
+                    )
+                    label_name = (
+                        (stamped if isinstance(stamped, str) and stamped else None)
+                        or (trigger_filter if isinstance(trigger_filter, str) and trigger_filter else None)
+                        or (payload_label or None)
+                    )
                 except Exception:
                     pass
 
@@ -6610,6 +6961,46 @@ class TriggerScheduler:
                 + int(run_context.get("_loopOutputTokens", 0) or 0)
             )
 
+        # Runtime self-correction for orphaned background tasks (#2277): this
+        # run's own turn just left >=1 background task non-terminal
+        # (stashed by _call_claude_once). `ctx` carries the depth marker THIS
+        # run was dispatched with (set only by `_execute_bg_orphan_correction`
+        # below) — if it's already a correction, the #606 loop guard says fall
+        # back to the #2259 honest notice (already appended to `result`) and
+        # stop, never chain a second one.
+        orphaned_this_run = run_context.get("_bgOrphaned") or []
+        already_corrected = bool((ctx or {}).get(_BG_ORPHAN_CORRECTION_CTX_KEY))
+        if _should_self_correct_bg_orphan(orphaned_this_run, already_corrected):
+            enqueued = await asyncio.to_thread(
+                _enqueue_bg_orphan_correction, self._agent_id, room_id,
+                orphaned_this_run,
+            )
+            try:
+                _append_event(room_id, {
+                    "type": "system_event",
+                    "subtype": "background-tasks-orphan-correction-queued"
+                              if enqueued else
+                              "background-tasks-orphan-correction-enqueue-failed",
+                    "correlationId": correlation_id,
+                    "count": len(orphaned_this_run),
+                })
+            except Exception:
+                pass
+        elif orphaned_this_run:
+            # Either depth already exhausted (this run WAS the correction and
+            # orphaned again) or nothing orphaned — the honest notice already
+            # covers it; record why no second correction was queued.
+            try:
+                _append_event(room_id, {
+                    "type": "system_event",
+                    "subtype": "background-tasks-orphan-correction-skipped",
+                    "reason": "depth-exhausted",
+                    "correlationId": correlation_id,
+                    "count": len(orphaned_this_run),
+                })
+            except Exception:
+                pass
+
         # Deterministic KB harvest (issue #602): record the structured
         # ```knowledge block the run emitted, then drop it from the reply. Only
         # per-invocation runs carry the block instruction.
@@ -6754,7 +7145,7 @@ async def run_dm_listener() -> None:
         member_cache[room_id] = (members, time.time() + MEMBER_CACHE_TTL_SEC)
         return members
 
-    async def is_dm_from_human(room_id: str, sender: str) -> bool:
+    async def is_human_sender(room_id: str, sender: str) -> bool:
         if sender == user_id:
             return False
         try:
@@ -6763,9 +7154,7 @@ async def run_dm_listener() -> None:
             print(f"[Runner:{agent_id}] joined_members({room_id}) failed: {exc}",
                   file=sys.stderr)
             return False
-        if len(members) != 2:
-            return False
-        return user_id in members and sender in members
+        return _is_human_sender(user_id, sender, members)
 
     async def send_formatted(room_id: str, text: str,
                              extra_content: dict | None = None) -> str:
@@ -6820,7 +7209,7 @@ async def run_dm_listener() -> None:
             return
         if ts < start_time_ms:
             return
-        if not await is_dm_from_human(room_id, sender):
+        if not await is_human_sender(room_id, sender):
             return
 
         # #1157: a chat turn is a workspace-touching run, so it serializes on
@@ -6913,6 +7302,28 @@ async def run_dm_listener() -> None:
                 )
             finally:
                 _bump_active(-1, session)
+
+            # Runtime self-correction for orphaned background tasks (#2277): a
+            # chat/DM turn is never itself a correction (that only ever arrives
+            # via the pending-queue `bg-orphan-correction` kind, resumed through
+            # _execute_inner), so the depth guard is trivially "not corrected".
+            orphaned_this_turn = dm_run_context.get("_bgOrphaned") or []
+            if _should_self_correct_bg_orphan(orphaned_this_turn, False):
+                enqueued = await asyncio.to_thread(
+                    _enqueue_bg_orphan_correction, agent_id, room_id,
+                    orphaned_this_turn,
+                )
+                try:
+                    _append_event(room_id, {
+                        "type": "system_event",
+                        "subtype": "background-tasks-orphan-correction-queued"
+                                  if enqueued else
+                                  "background-tasks-orphan-correction-enqueue-failed",
+                        "correlationId": correlation_id,
+                        "count": len(orphaned_this_turn),
+                    })
+                except Exception:
+                    pass
 
             # Guard empty/whitespace output: posting a blank message looks like
             # "no reply" to the user. Substitute a visible notice and log it so

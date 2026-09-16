@@ -30,7 +30,8 @@ export const ROUTE_TITLES = {
   '/github-tokens': 'GitHub Tokens',
   '/my-credentials': 'My Credentials',
   '/mcp': 'MCP Servers',
-  '/environments': 'Working Environments',
+  // No `/environments`: #2170 retired the page and made the route a redirect.
+  '/environment-templates': 'Environment Templates',
   '/github-events': 'GitHub Event Log',
   // No `/teams`: #2085 retired the Access page and made the route a redirect.
   '/users': 'Administration',

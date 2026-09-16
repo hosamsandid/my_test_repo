@@ -200,7 +200,8 @@ Create `toolchains/<id>/` with two files.
   "platforms": ["podman", "kubernetes"],
   "versionSource": "bootstrap",
   "versionManager": "mise",
-  "baseline": "java temurin-21, maven 3.9"
+  "baseline": "java temurin-21, maven 3.9",
+  "resources": { "memoryLimit": "4g" }
 }
 ```
 
@@ -214,6 +215,7 @@ Create `toolchains/<id>/` with two files.
 | `versionSource` | `bootstrap` (the project pins the version) or `baked` (fixed in the image — the airgap exception). |
 | `versionManager` | Required for `bootstrap`, forbidden for `baked`. |
 | `baseline` | The version an unpinned repository gets, if the variant ships one. |
+| `resources` | Optional `{ memoryLimit?, memoryRequest?, cpuRequest? }`. Overrides the fleet-wide `AEE_AGENT_MEM_LIMIT` (default `2g`/`2Gi`) for an agent bound to this toolchain — set it when a variant's own build tooling (a JVM + Gradle daemon, say) cannot fit the fleet default. Absent → today's fleet default, byte-identical, on both runtimes. `memoryLimit`/`memoryRequest` accept either a podman-style suffix (`4g`, `512m`) or a k8s quantity (`4Gi`, `512Mi`); `cpuRequest` is k8s-only (podman has no cpu request in this stack). |
 
 Validation is `validateToolchainManifest` in
 `orchestrator/toolchain-registry.js` (byte-identical at
@@ -295,8 +297,8 @@ either. A broker image is a few MB and any installation that installs a plugin
 needs it; a toolchain variant downloads a JDK and is only needed by
 installations that actually register one. Run it explicitly.
 
-Then, in the console, on **Working Environments → Toolchains** (System Admin
-only):
+Then, in the console, on **Environment Templates → Toolchains** (System Admin
+only — moved from the retired Working Environments page by #2170):
 
 1. **Available to install** lists the variants this repository ships, each with
    its description and its version story. **Install** registers it — the image

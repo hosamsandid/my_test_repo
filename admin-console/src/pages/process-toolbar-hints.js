@@ -63,6 +63,7 @@ export const TOOLBAR_TITLES = {
     'Make an editable copy of this team you can revise before applying — the live team is untouched until you create a team from the copy',
   anomalies: 'Review stalled hand-offs and other flow problems detected in this live team',
   improvements: 'Deterministic run metrics for this team over the measurement window',
+  parallelism: "How many tickets this flow works on at once, and how they're kept from clashing",
 };
 
 /**

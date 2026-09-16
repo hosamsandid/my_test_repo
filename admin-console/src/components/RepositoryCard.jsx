@@ -125,9 +125,13 @@ export default function RepositoryCard({
   onChange,
   onRemove = null,
   tokenTarget = 'form',
+  // #2161 follow-up: a real GitHub token is bound somewhere the reachability
+  // probe does not (and must not) reach — never sent to `useRepoCheck`/the API,
+  // only used to suppress the "add a GitHub Token" hint on a probe failure.
+  hasEnvironmentToken = false,
 }) {
   const check = useRepoCheck(repo.url, repo.sshKeyId, githubTokenId);
-  const showTokenHint = shouldShowTokenHint(check, repo.url, githubTokenId);
+  const showTokenHint = shouldShowTokenHint(check, repo.url, githubTokenId, hasEnvironmentToken);
   const elsewhere = tokenIsElsewhere(tokenTarget);
 
   return (
@@ -161,7 +165,7 @@ export default function RepositoryCard({
           ))}
         </select>
         <div style={helpTextStyle}>
-          Required for SSH-based URLs (e.g. <code>git@github.com:…</code>). Leave empty for HTTPS URLs — private HTTPS repositories authenticate with the <em>GitHub Token</em> {elsewhere ? 'on the Working Environment' : 'set below'}, not an SSH key. Manage SSH keys on the <em>SSH Keys</em> page.
+          Required for SSH-based URLs (e.g. <code>git@github.com:…</code>). Leave empty for HTTPS URLs — private HTTPS repositories authenticate with the <em>GitHub Token</em> {elsewhere ? 'on the Environment' : 'set below'}, not an SSH key. Manage SSH keys on the <em>SSH Keys</em> page.
         </div>
       </div>
 
@@ -203,7 +207,7 @@ export default function RepositoryCard({
         {showTokenHint && (
           <div style={{ ...helpTextStyle, color: 'var(--eb-text-secondary)' }}>
             {elsewhere ? (
-              <>If this is a private HTTPS repository, its <em>Working Environment</em> needs a <em>GitHub Token</em> to authenticate — SSH keys don't apply to HTTPS URLs, and an agent-scoped repository carries no credential of its own.</>
+              <>If this is a private HTTPS repository, its <em>Environment</em> needs a <em>GitHub Token</em> to authenticate — SSH keys don't apply to HTTPS URLs, and an agent-scoped repository carries no credential of its own.</>
             ) : (
               <>If this is a private HTTPS repository, select a <em>GitHub Token</em> in the section below to authenticate — SSH keys don't apply to HTTPS URLs.</>
             )}
@@ -211,7 +215,7 @@ export default function RepositoryCard({
         )}
         {check.status !== 'error' && (
           <div style={helpTextStyle}>
-            The repository is checked for reachability in real time. Use an SSH URL with an SSH key, or an HTTPS URL with the <em>GitHub Token</em> {elsewhere ? 'on the Working Environment' : 'set below'}, for private repositories.
+            The repository is checked for reachability in real time. Use an SSH URL with an SSH key, or an HTTPS URL with the <em>GitHub Token</em> {elsewhere ? 'on the Environment' : 'set below'}, for private repositories.
           </div>
         )}
       </div>

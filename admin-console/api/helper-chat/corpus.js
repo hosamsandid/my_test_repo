@@ -117,11 +117,69 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // neighbourhood", which is what measureWorstCaseSystemPrompt() below measures and
 // corpus.test.js asserts. Measured on this branch: the worst context is
 // **`/quickstart`** (the `create.md` topic plus its `seeAlso` neighbours) at
-// 315 396 of 340 000 — 92.8% used, 24 604 left — against
-// 322 243 (94.8%) for the all-topics fold route-scoping replaced. (#2136's
-// *Global providers* chapter in `models.md` — the `/models` topic, which
-// `create.md` names among its `seeAlso` — added the last +3 012 to this crown;
-// #1459's work-plane bullet in `access-users.md` had added +319 before it.)
+// 324 900 of 340 000 — 95.6% used, 15 100 left. #2179's own +408 — a new
+// `team-setup.md` bullet ("Create team" disabled with no model provider
+// registered), a `/quickstart` `seeAlso` neighbour via `create.md` — landed on
+// an already-stale 324 492 live on `origin/main` (measured directly, not
+// carried forward): +2 019 over the 322 473 last stamped here from intervening
+// merges (#2175/#2176's credential-resolution doc growth, #2193's undocumented
+// system-event rendering) that, per the #2187-cycle convention, earned a
+// live-budget check but no restamp at the time, since none of them touched a
+// `/quickstart` `seeAlso` topic the way this one does. Against
+// 322 243 (94.8%) for the all-topics fold route-scoping replaced. (#2195's own
+// +93 — the corpus-vendored `working-environments.md` plus the `/environments`
+// and `/mcp` help topics, correcting the ownership-picker-removal description —
+// was still unmerged when main's own restamp landed at 322 380; re-measured on
+// this merge rather than trusted, per the #1996 lesson. #2175's
+// growth of the corpus-vendored `credentials.md` — the SSH-equivalent /
+// acting-sender section, counted on EVERY context, not just a seeAlso
+// neighbourhood — added the last +1 260 to this crown, cleanly attributable
+// since #2168's own +265 (team-setup.md, Working Environment now optional at
+// team creation) was the only change between the last restamp (318 602) and
+// this one, verified against the immediate pre-#2187 main tip (321 120,
+// matching the prior stamp exactly). #2158's
+// `working-environments.md` growth — a CORPUS_FILES member, counted on EVERY
+// context rather than only a seeAlso neighbourhood — added the last +1 069 to
+// this crown, unstamped until now; #2146's *Inline image thumbnails* chapter
+// in `agent-chat.md` — the `/chats` topic, which `create.md` names among its
+// `seeAlso` — had added +284 before it; #2131's *When a flow is too large to
+// generate in one go* chapter in `flows.md`, the `/flows` topic on the same
+// `seeAlso` list, had added +674 before it; #2136's *Global providers* chapter
+// in `models.md`, the
+// `/models` topic on the same `seeAlso` list, had added +3 012 before it;
+// #1459's work-plane bullet in `access-users.md` had added +319 before it.
+// #2138's orphaned-credential refusal added the last +1 179, mostly through the
+// corpus-vendored `credentials.md` — which counts on every context, this crown
+// included — plus the `/my-credentials`+`/github-tokens`+`/ssh-keys` help topic.)
+//
+// **#2170 SHRANK the crown instead of growing it — a rare direction for this
+// number to move.** Removing the Working Environments page retired the
+// `/environments` help topic (`environments.md`, 349 lines) outright rather
+// than folding it whole into a survivor: the material describing a still-live
+// surface (repositories, credentials, MCP references, the propagation dialog)
+// moved into the existing `agent-chat.md` (+61 net lines, since it now also
+// hosts the Working-Environment-section chapter), and the System-Admin-only
+// half (Toolchains) moved into a new, small `environment-templates.md` (76
+// lines) — which is NOT on `/quickstart`'s `seeAlso` chain (only System Admins
+// reach it, from Administration), so it does not fold into this crown at all.
+// Net effect measured on the merge (overlaid onto post-#2204/#2206 `main`,
+// since this branch was 12 commits behind at review time): the PR's own
+// stamp read **314 890 of 340 000 — 92.6% used, 25 110 left**, but
+// `measureWorstCaseSystemPrompt()` on the actual post-merge tree
+// (commit 36aebb4d4, /quickstart) returns **315 448** — the overlay
+// estimate undercounted by 558 chars, not caught by `corpus.test.js`
+// (which only asserts `< 340 000`). Re-stamped here to the verified figure:
+// **315 448 of 340 000 — 92.8% used, 24 552 left**, down from the
+// last-stamped 324 900. Reconciled here + the CLAUDE.md #1872 paragraph +
+// `context-help-system-concept.md` §9 — the lesson: an "overlaid onto main"
+// estimate is still an estimate; re-measure on the real merge commit before
+// stamping, the same rule that already applies to a branch's own self-report.
+// #2195 (A3 of epic #2166) removed the ownership/team picker from the
+// Working Environments and MCP Servers forms — the corpus-vendored
+// `working-environments.md` table row correcting to "derived from the team,
+// not chosen here" added +93 (every context), the `/environments` help topic's
+// matching correction landing on this crown too since `create.md` names
+// `/environments` among its `seeAlso`: 321 120 → **321 213** (94.5%, 18 787 left).
 // #1930 moved
 // the crown here by removing the Agents page: `/flows` lost its `/agents`
 // `seeAlso` neighbour and fell to 258 761, the no-route Overview fold dropped
@@ -241,6 +299,63 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
 // Re-measure rather than trust this comment —
 // won, so read the `context` it hands back and never assume it is still the
 // page you edited.
+// #2172 (epic #2166 A6, terminology sweep) swept the phrase "Working
+// Environment" out of every user-facing string and help surface, replacing it
+// with the shorter "environment"/"an environment" throughout — every
+// CORPUS_FILES doc it touched got a few characters shorter, not longer, since
+// the change is a word removal, not new material. Measured on this branch:
+// `/quickstart` went 316 087 → **315 387** (92.8%, 24 613 left). No topic's
+// `seeAlso` chain changed and no chapter heading the deep-link mechanism
+// depends on was renamed (only body prose and the two H3 sub-headings under
+// `agent-chat.md`'s "Settings — configuring the agent" chapter, which the
+// `##`-only chapter guard does not read), so the crown-holding context is
+// unchanged from the prior stamp.
+//
+// #2177 (epic #2166 B5) rewired the container's own spawn-time credential bake
+// to prefer the team-admin's personal GitHub token/SSH key, correcting the
+// corpus-vendored `docs/credentials.md` (every context) and the multi-route
+// `credentials` help topic (`/ssh-keys`, `/github-tokens`, `/my-credentials` —
+// all three `create.md` `seeAlso` neighbours, so the growth lands on this crown
+// in full). Pre-edit `/quickstart` measured exactly the last-stamped 315 387 (no
+// unrelated drift this cycle); post-edit **318 054 of 340 000 — 93.5% used,
+// 21 946 left**, a clean +2 667 attributable entirely to this change.
+//
+// #2216 narrowed the Agent Chat right rail to Settings-only when a team is
+// selected, and its own `agent-chat.md` "The right rail" chapter addition is a
+// `create.md` `seeAlso` neighbour, so it lands on this crown too. Live
+// `/quickstart` measured 318 410 pre-edit — already +356 over the 318 054 last
+// stamped here, from intervening merges that never touched this crown — and
+// **318 724 of 340 000 — 93.7% used, 21 276 left** post-edit, this change's own
+// delta a clean +314.
+//
+// This comment lagged two cycles behind the other two homes (CLAUDE.md,
+// context-help-system-concept.md §9) before this entry — #2231 (`create.md`
+// corrections for the plain-agent/fast-lane team-of-one mint) added +1 849
+// (318 724 → 320 573) and #2232 (retiring the manual "Convert into a team…"
+// action) shaved -659 off that (320 573 → 319 914), neither restamped here at
+// the time.
+//
+// #2235 (merge the team chat column and right rail into one full-width
+// surface) reworded `agent-chat.md`'s "The right rail" and "Settings —
+// configuring the agent" chapters — both `create.md` `seeAlso` neighbours, so
+// it lands on this crown too. Pre-edit `/quickstart` measured exactly the
+// last-stamped 319 914 (no further unrelated drift this cycle); post-edit
+// **321 092 of 340 000 — 94.4% used, 18 908 left**, this change's own delta a
+// clean +1 178.
+//
+// CLAUDE.md's mirror of this paragraph is GONE as of the 2026-09-13 "shrink
+// CLAUDE.md to a lean high-level map" rewrite, which deliberately dropped the
+// per-ticket decision narratives it lived in — this comment and
+// context-help-system-concept.md §9 are now the only two homes; do not
+// reintroduce a restamp paragraph into CLAUDE.md.
+//
+// #2307 (skills-system.md: writing into the global pool is now one rule for
+// import/merge/create/edit too, not just promote/publish) is a CORPUS_FILES
+// member so it lands on EVERY context, not just this crown. Live `/quickstart`
+// measured 323 419 pre-edit — already +2 327 over the 321 092 last stamped
+// here, from unrelated intervening merges (none restamped since #2235) — and
+// **323 959 of 340 000 — 95.3% used, 16 041 left** post-edit, this change's
+// own delta a clean +540.
 //
 // If this ever gets tight again, the next structural step is the docs corpus
 // (route-scoped `CORPUS_FILES`, or splitting the two largest docs), NOT a fourth

@@ -15,6 +15,8 @@ import {
   AUTHOR_BADGE_CLASS,
   AUTHOR_NAME_CLASS,
 } from './message-author.js';
+import { parseMessageSegments, hasImageRef } from './chat-image-refs.js';
+import ChatImageThumbnail from './chat-image-thumbnail.jsx';
 
 /**
  * The actual react-markdown render. Memoized on `body` alone (#1676): the
@@ -112,6 +114,9 @@ export function SafeMarkdown({ body }) {
  *   schema (style + class + data-theme allowed on `span`, `code`, `pre`).
  * - Long code (>40 lines) is wrapped in <details> for cleaner reading.
  * - `thinking` mode replaces the body with an animated three-dot ellipsis.
+ * - A HUMAN message's `@<path>` image reference (upload token or user-typed)
+ *   renders as an inline thumbnail in place of the raw token (#2146); an
+ *   agent-authored message never gets this treatment (security boundary).
  *
  * Time format: 24 h hh:mm (locale `de-DE`); messages from previous days get
  * a `DD.MM., HH:MM` prefix.
@@ -120,6 +125,7 @@ export function SafeMarkdown({ body }) {
  * @param {{event_id, sender, ts, body, isOptimistic?}} props.message
  * @param {string} props.agentUserId      The agent's userId — anything else is "user".
  * @param {boolean} [props.thinking]      Show typing-dots placeholder.
+ * @param {string} [props.agentId]        This agent's id, for the inline-image-thumbnail fetch.
  */
 
 /**
@@ -340,7 +346,7 @@ function NoticeMessage({ message }) {
 function Message({
   message, agentUserId, thinking, onRelaunchLoop,
   onAnswerQuestion, questionAnswerable, questionAnswer,
-  viewer, authorDirectory,
+  viewer, authorDirectory, agentId,
 }) {
   // Quick-reply question (#1663): an agent message that paused on AskUserQuestion
   // carries a structured `io.aee.ask-question` payload — render it as clickable
@@ -399,6 +405,16 @@ function Message({
 
   const time = formatMessageTime(message.ts);
 
+  // Inline image thumbnails (#2146). HUMAN messages only — an agent-authored
+  // `@<path>` is never parsed and triggers no fetch (AC4, the security
+  // boundary: agent output must not be able to make the console fetch an
+  // arbitrary workspace path). `imageSegments` is null unless the message is
+  // both human-authored and actually carries an image reference, so the
+  // overwhelmingly common case (no reference at all) falls straight back to
+  // the original single `<SafeMarkdown>` render below, unchanged.
+  const parsedSegments = (!isAgent && !thinking) ? parseMessageSegments(message.body || '') : null;
+  const imageSegments = parsedSegments && hasImageRef(parsedSegments) ? parsedSegments : null;
+
   return (
     <div style={{
       display: 'flex',
@@ -434,6 +450,14 @@ function Message({
         }}>
           {thinking ? (
             <ThinkingDots />
+          ) : imageSegments ? (
+            <div className="agent-chat-md">
+              {imageSegments.map((seg, i) => (
+                seg.type === 'ref'
+                  ? <ChatImageThumbnail key={i} agentId={agentId} path={seg.path} raw={seg.raw} />
+                  : <SafeMarkdown key={i} body={seg.value} />
+              ))}
+            </div>
           ) : (
             <div className="agent-chat-md">
               <SafeMarkdown body={message.body || ''} />

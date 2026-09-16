@@ -42,7 +42,7 @@ function at(src, needle, label) {
 const workspace = () => stripComments(read(path.join(HERE, 'WorkspaceBrowser.jsx')));
 const settings = () => stripComments(read(path.join(SRC, 'pages/agent-lifecycle/AgentEditForm.jsx')));
 const panel = () => stripComments(read(path.join(HERE, 'AgentRepositoriesPanel.jsx')));
-const envPage = () => stripComments(read(path.join(SRC, 'pages/WorkingEnvironments.jsx')));
+const envPage = () => stripComments(read(path.join(SRC, 'pages/EnvironmentTemplates.jsx')));
 
 // ── AC20: one panel, two hosts ──────────────────────────────────────────────
 
@@ -100,9 +100,45 @@ test('AC3: the agent form gets the environment form probe, not a reimplementatio
   assert.match(card, /status: 'error'/);
   assert.match(card, /status: 'ok'/);
   // The panel must NOT hand the card a token id — D5 means the agent surface
-  // has no credential of its own; only the presence flag is passed.
-  assert.match(panel(), /githubTokenId=\{view && view\.hasGithubToken \? 'environment' : ''\}/);
+  // has no credential of its own, and `githubTokenId` is a real id the card
+  // sends to the live reachability probe (#2161): a placeholder there makes
+  // the probe 400 against the token registry, not just misdescribe the hint.
+  assert.match(panel(), /githubTokenId=""/);
   assert.match(panel(), /tokenTarget="environment"/);
+});
+
+// ── #2161 follow-up: fixing the bogus probe id must not drop hint suppression ──
+//
+// Before #2161, `githubTokenId={view && view.hasGithubToken ? 'environment' : ''}`
+// was a hack, but its truthiness ALSO suppressed the "add a GitHub Token" hint
+// whenever the agent's environment already had a real token bound. Sending an
+// honest `githubTokenId=""` (the #2161 fix above) dropped that suppression as a
+// side effect — a probe failure would tell a reader to add a token their
+// environment already has. `hasEnvironmentToken` restores it on its own
+// channel, never touching the probe/API.
+test('#2161 follow-up: hasEnvironmentToken carries the suppression signal, separately from githubTokenId', () => {
+  const src = panel();
+  assert.match(
+    src,
+    /hasEnvironmentToken=\{view && view\.hasGithubToken === true\}/,
+    'the panel must read the real hasGithubToken field the server already sends, not re-derive it',
+  );
+  // It must ride a DIFFERENT prop than githubTokenId — reusing githubTokenId for
+  // this is exactly the #2161 bug shape (a truthy placeholder reaching the probe).
+  const cardBlock = src.slice(src.indexOf('<RepositoryCard'), src.indexOf('<RepositoryCard') + 600);
+  assert.match(cardBlock, /githubTokenId=""/);
+  assert.match(cardBlock, /hasEnvironmentToken=\{/);
+
+  const card = stripComments(read(path.join(SRC, 'components/RepositoryCard.jsx')));
+  assert.match(card, /hasEnvironmentToken\s*=\s*false/, 'defaults to false so the environment form call site (no such prop) is unaffected');
+  assert.match(
+    card,
+    /shouldShowTokenHint\(check, repo\.url, githubTokenId, hasEnvironmentToken\)/,
+    'the visibility decision must actually receive the new signal',
+  );
+  // The reachability probe itself must never see it — only githubTokenId (the
+  // honest, possibly-empty value) reaches useRepoCheck/the API.
+  assert.doesNotMatch(card, /useRepoCheck\([^)]*hasEnvironmentToken/);
 });
 
 // ── AC4: the tree refreshes itself ──────────────────────────────────────────

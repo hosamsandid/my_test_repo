@@ -3,7 +3,9 @@
 //   1. SSH key: server-generate a keypair and verify the secret-handling
 //      contract — the response (and the list) expose only a fingerprint, never
 //      any private-key material, and nothing private renders in the UI.
-//   2. Working Environment: create → edit → delete through the UI, cross-checked
+//   2. Working Environment: seed via the API (#2168 A2 removed the standalone
+//      "create environment" UI entry point — team creation is the only UI path
+//      that mints one now) → edit → delete through the UI, cross-checked
 //      against the persisted API state at each step.
 //
 // Independent of the team/git-remote fixture (pure UI → API → orchestrator file
@@ -62,14 +64,14 @@ test.describe('F3: environment + credential CRUD', () => {
     });
   });
 
-  test('Working Environment create → edit → delete through the UI', async ({ page, request }) => {
+  test('Environment Template seed (API) → edit → delete through the UI', async ({ page, request }) => {
     const ctx = { page, request };
     const runId = makeRunId();
     envId = `${runId}-env`;
     const name = `${runId} env`;
     const renamed = `${runId} env renamed`;
 
-    await test.step('create persists the id, name and repository', async () => {
+    await test.step('seeded fixture persists the id, name and repository', async () => {
       await cred.createEnv(ctx, { envId, name, repoUrl: FIXTURE_REPO_URL, branch: 'main' });
       const { status, body } = await cred.getEnv(ctx, envId);
       expect(status).toBe(200);

@@ -372,12 +372,17 @@ export default function Create() {
   const [advancedOpen, setAdvancedOpen] = useState(ADVANCED_DEFAULT_OPEN);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
+  // #2218 — an `id-conflict` refusal names a free alternative; kept alongside
+  // the plain error message (rather than folded into it) so the form can
+  // offer a one-click "Use this id" without parsing prose back out of it.
+  const [idConflict, setIdConflict] = useState(null);
 
   // Closing drops the param rather than navigating, so the launcher stays put
   // and Back still leaves the page (`replace`, so an open/close pair does not
   // stack two history entries the user has to press Back through twice).
   function closeSingleAgent() {
     setSaveError(null);
+    setIdConflict(null);
     setSearchParams({}, { replace: true });
   }
 
@@ -387,11 +392,13 @@ export default function Create() {
   async function handleCreateAgent(form) {
     setSaving(true);
     setSaveError(null);
+    setIdConflict(null);
     try {
       const created = await apiCall('POST', '/api/agents', form);
       navigate(createdAgentDestination({ id: created?.id || form.id, role: form.role }));
     } catch (e) {
       setSaveError(e.message);
+      if (e.code === 'id-conflict') setIdConflict({ agentId: e.agentId, suggestedId: e.suggestedId });
     } finally {
       setSaving(false);
     }
@@ -533,6 +540,7 @@ export default function Create() {
             onCancel={closeSingleAgent}
             saving={saving}
             error={saveError}
+            idConflict={idConflict}
           />
         )}
       </SidePanel>

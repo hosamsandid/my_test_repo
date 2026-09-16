@@ -4,7 +4,7 @@ routes: ["/models"]
 title: Model Providers
 summary: The LLM endpoints Agent Studio routes model traffic to — each with a URL, a credential and a catalog of models your agents can pick from.
 seeAlso:
-  - { label: "Working Environments", to: "/environments" }
+  - { label: "Environment Templates", to: "/environment-templates" }
   - { label: "Agent Chat", to: "/chats" }
   - { label: "Token Usage", to: "/token-usage" }
 askPrompts:
@@ -21,7 +21,7 @@ askPrompts:
 A **Model Provider** is one endpoint Agent Studio sends model traffic to. It
 carries three things: a **URL**, an **auth credential**, and a **catalog of
 models** the console discovers from it. Nothing binds to a model directly: a
-[Working Environment](/environments) — or an individual agent — binds to a
+[Environment](/chats) — or an individual agent — binds to a
 *provider* and picks a default model out of its catalog. That indirection is the
 point: re-pointing one environment at a new provider moves every agent in it at
 once, without editing each agent.
@@ -77,7 +77,7 @@ Three levels, most specific wins:
 | Level | Set on | Beats |
 |---|---|---|
 | **Agent override** | Agents → Edit → Model | everything below |
-| **Environment default** | the bound Working Environment | the global fallback |
+| **Environment default** | the bound environment | the global fallback |
 | **Global fallback** | `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` in `.env` | — |
 
 So an agent that looks like it is ignoring a provider change is usually reading
@@ -176,6 +176,18 @@ since there is no Base URL to ask) — and differ in what they do with the answe
   wholesale, and **Dismiss** throws the suggestion away. Nothing is written until
   you save the provider.
 
+**A `404`/`405` from `/v1/models` doesn't end the probe.** Some Anthropic-compatible
+gateways — an Azure AI Foundry endpoint is the concrete case — serve `/v1/messages`
+but expose no model-listing route at all, which used to read as a broken provider.
+Both buttons now fall back to a `POST` of `/v1/messages/count_tokens` with a
+placeholder model name that is never actually served: a `400` (or `2xx`) means the
+endpoint is reachable and your credential works, just with no catalog to offer; a
+`401`/`403` still means a real auth failure; a `404` on that route too means the
+Base URL itself is wrong. On a successful fallback, **Test connection** reports OK
+and **Discover models** tells you to enter the model name(s) manually instead of
+showing an empty list or a raw HTTP error. A provider whose `/v1/models` already
+works is completely unaffected — the fallback only fires on a route-missing status.
+
 **A probe always names the credential it used**, in a line under the two buttons,
 because a `401` means something completely different depending on which one it
 was. There are three cases:
@@ -231,4 +243,4 @@ An agent receives its credentials **when it starts**, so a re-keyed provider onl
 reaches the already-running agents bound to it once they are restarted — the
 console offers to do that for you, and skipping it means those agents keep using
 the old credential until you disable and re-enable them. A provider that a
-Working Environment still uses cannot be deleted; detach it there first.
+environment still uses cannot be deleted; detach it there first.

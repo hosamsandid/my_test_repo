@@ -21,6 +21,18 @@ if [ -f "$_m2/settings.xml" ]; then
 fi
 export MAVEN_ARGS
 
+# #2282 Band 1 -- belt and braces on top of the container memory limit
+# (toolchains/jvm/toolchain.json `resources.memoryLimit`): the JVM does not
+# size its heap against what else lives in the cgroup unless told to.
+# `MaxRAMPercentage` reads the cgroup limit (container-aware since JDK 10) and
+# bounds the heap as a fraction of it rather than of host RAM. Applied via both
+# `MAVEN_OPTS` (read by the mvn/mvnw launcher) and `JAVA_TOOL_OPTIONS` (read by
+# every JVM this shell forks, mvn's included) so a bare `java`/`javac` picks it
+# up too. This toolchain runs one JVM at a time, so a high percentage is safe.
+MAVEN_OPTS="-XX:MaxRAMPercentage=70.0${MAVEN_OPTS:+ $MAVEN_OPTS}"
+JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=70.0${JAVA_TOOL_OPTIONS:+ $JAVA_TOOL_OPTIONS}"
+export MAVEN_OPTS JAVA_TOOL_OPTIONS
+
 GRADLE_USER_HOME="$AEE_TOOLCHAIN_ROOT/gradle"
 export GRADLE_USER_HOME
 unset _m2

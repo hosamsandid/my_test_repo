@@ -1,21 +1,23 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router';
-import { MessageCircle, Loader2, Plus, Upload, Eye, EyeOff } from 'lucide-react';
-import { useApi } from '../hooks/useApi';
+import { MessageCircle, Loader2, Plus, Upload, Eye, EyeOff, Users } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { usePageActions } from '../context/PageActionsContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
 import { computeAgentStatusMap } from '../context/agent-statuses';
+import { AgentRosterProvider, useAgentRoster } from '../context/AgentRosterContext.jsx';
 import AgentList, { buildGroups } from './agent-chat/AgentList';
 import RailLifecycleHost from './agent-chat/RailLifecycleHost.jsx';
 import { loadShowDisabled, saveShowDisabled, matrixAgentsUrl } from './agent-chat/rail-lifecycle.js';
 import { isChatOpenable } from './agent-lifecycle/agent-lifecycle-menu.js';
 import ChatPanel from './agent-chat/ChatPanel';
 import RightRail from './agent-chat/RightRail';
+import AgentSettingsPanel from './agent-chat/AgentSettingsPanel';
 import { SessionsActiveProvider } from './agent-chat/SessionsActiveContext';
 import { resolveRailWidths } from './agent-chat/rail-layout';
 import { CREATE_ROUTE, emptyStatePointer } from './agent-chat/empty-state';
 import { describeAgentCreateAccess } from './agent-lifecycle/agent-create-access.js';
+import { resolveTeamConfigTab } from './agent-lifecycle/team-config-tabs-view.js';
 import PageHelpButton from '../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat/agent-chat-help-sections.js';
 
@@ -134,7 +136,9 @@ function saveLastViewed(map) {
  *
  * Layout: [agent list 260 px] [chat panel: header / messages / input].
  * Owns:
- *   - the list of Matrix-enabled agents (fetched once)
+ *   - the list of Matrix-enabled agents (live — polled in the background every
+ *     ~5s via `AgentRosterContext`, #2311; the initial fetch still gates the
+ *     loading/error UI exactly like the one-shot fetch it replaced)
  *   - which agent is selected (from `:agentId` route param)
  *   - the live `dmRoomId` for the selected agent (created lazily on first open)
  *
@@ -143,17 +147,37 @@ function saveLastViewed(map) {
  * Shell's <main> without overflowing.
  */
 export default function AgentChat() {
-  const { agentId } = useParams();
-  const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
   // Per-user opt-in to also listing disabled agents (#1928 AC6/AC7). It widens
   // the list URL, so it is read before the fetch — with the opt-in off no paused
   // agent is asked for and the chat shows exactly what it always showed. (Since
   // #1957 the URL also carries an unconditional `includeStubs=1`, which is not a
   // preference — see `matrixAgentsUrl`.)
+  //
+  // Lifted above `AgentRosterProvider` (#2311): the provider needs to know
+  // which URL to poll, and a component cannot consume a context it renders
+  // itself — see `AgentChatInner` below for the rest of the page.
   const [showDisabled, setShowDisabled] = useState(loadShowDisabled);
   useEffect(() => { saveShowDisabled(showDisabled); }, [showDisabled]);
-  const { data: agents, loading, error, refetch } = useApi(matrixAgentsUrl(showDisabled));
+
+  return (
+    <AgentRosterProvider showDisabled={showDisabled} buildUrl={matrixAgentsUrl}>
+      <AgentChatInner showDisabled={showDisabled} setShowDisabled={setShowDisabled} />
+    </AgentRosterProvider>
+  );
+}
+
+/**
+ * The actual page body, split out from `AgentChat` so it can sit *inside*
+ * `AgentRosterProvider` and read the shared, polled roster via
+ * `useAgentRoster()` (#2311) instead of the one-shot `useApi` fetch it used
+ * before. Everything below is otherwise unchanged from the original
+ * component.
+ */
+function AgentChatInner({ showDisabled, setShowDisabled }) {
+  const { agentId } = useParams();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { agents, loading, error, refetch } = useAgentRoster();
 
   // The open lifecycle context menu: `{ target, anchor }` or null. The rail only
   // reports *that* a menu was asked for and for which row (#1928); which items
@@ -196,6 +220,13 @@ export default function AgentChat() {
   // without becoming stale (the effect has [] deps and runs once).
   const agentIdRef = useRef(agentId);
   useEffect(() => { agentIdRef.current = agentId; }, [agentId]);
+
+  // Same reason, for `handleOpenSettings` below (#2235): it needs to tell a
+  // team target apart from an ordinary agent one, but its own `[]`-deps
+  // signature (asserted by agent-settings-wiring.test.js) rules out closing
+  // over the `agents` array directly.
+  const agentsRef = useRef(agents);
+  useEffect(() => { agentsRef.current = agents; }, [agents]);
 
   // Tracks agents the user explicitly marked as unread. Prevents the poll
   // from auto-stamping them as viewed while they are still in the URL.
@@ -397,14 +428,37 @@ export default function AgentChat() {
   // (AC10). Cleared whenever the chat moves on, so the tab silently follows the
   // conversation again rather than stranding the user on a stale subject.
   const [settingsAgentId, setSettingsAgentId] = useState(null);
+  // The team-header row click (#2213) fires `onSelect` (routes to the team,
+  // changing `agentId`) and `onOpenTeamSettings` (sets this override) for the
+  // SAME target in one event handler. Without this ref the `[agentId]` reset
+  // effect below — written for the pre-#2213 menu-only override, where opening
+  // settings never changes the route — fires right after the render that set
+  // the override and unconditionally nulls it back out, so the Settings tab
+  // never actually shows (#2214 code-review finding). The ref records the
+  // target `handleOpenSettings` was JUST called for; the effect consumes it
+  // exactly once (cleared unconditionally on every fire, matched or not, so a
+  // stale value from an earlier menu-only override — set while the route was
+  // unmoving — can never suppress an unrelated later reset).
+  const explicitSettingsTargetRef = useRef(null);
   const handleOpenSettings = useCallback((id) => {
     if (!id) return;
-    setLogOpen(true);
+    // A team's settings live on their own full-width surface now (#2235),
+    // reached by being routed there — never by forcing the (retired, for a
+    // team) narrow rail open. Only an ordinary agent (the disabled-agent
+    // case, AC10) still uses the override + rail-open mechanism below.
+    const target = (agentsRef.current ?? []).find(a => a.id === id);
+    if (target?.role !== 'team') setLogOpen(true);
     setSettingsAgentId(id);
+    explicitSettingsTargetRef.current = id;
     setRailTabRequest({ tab: 'settings', ts: Date.now() });
   }, []);
   const clearSettingsAgent = useCallback(() => setSettingsAgentId(null), []);
-  useEffect(() => { setSettingsAgentId(null); }, [agentId]);
+  useEffect(() => {
+    const openedFor = explicitSettingsTargetRef.current;
+    explicitSettingsTargetRef.current = null;
+    if (openedFor === agentId) return;
+    setSettingsAgentId(null);
+  }, [agentId]);
 
   // "Reference in chat" (#1699): the workspace browser (RightRail) asks to splice
   // a `@<workspace-relative-path>` token into the composer (ChatPanel). The two are
@@ -452,11 +506,55 @@ export default function AgentChat() {
   }, [requestedSession, loading, agents, agentId, searchParams, setSearchParams]);
 
   // A disabled agent is only ever in this list because the opt-in is on (#1928
-  // AC6), and it has no chat to open — the DM route rejects it with a 409. Treat
-  // it as no selection so the panel shows the empty state rather than a
-  // dead-end error, matching what the rail does when its row is clicked.
-  const selectedAgent =
-    (agents ?? []).find(a => a.id === agentId && isChatOpenable(a)) || null;
+  // AC6), and it has no chat to open — the DM route rejects it with a 409. A
+  // `role: 'team'` agent (#2213) never has a chat to open either — it hosts no
+  // room at all. Both cases treat the route as no *chat* selection so the panel
+  // never attempts `ChatPanel` against a null room.
+  const routedAgent = (agents ?? []).find(a => a.id === agentId) || null;
+
+  // #2311 D2: the roster now refreshes in the background, so the currently
+  // open chat's agent can vanish (pool reap, deletion elsewhere) while the
+  // user is looking at it. `seenAgentIdRef`/`lastSeenAgentRef` remember the
+  // last agent object confirmed present for the CURRENT `:agentId` route, so
+  // a later disappearance can be told apart from a route that never named a
+  // real agent (a bad deep link, which the redirect effect below still bounces
+  // to /chats exactly as before #2311).
+  const seenAgentIdRef = useRef(null);
+  const lastSeenAgentRef = useRef(null);
+  useEffect(() => {
+    if (!agents) return;
+    const found = agents.find(a => a.id === agentId);
+    if (found) {
+      seenAgentIdRef.current = agentId;
+      lastSeenAgentRef.current = found;
+    }
+  }, [agents, agentId]);
+  const agentRemoved = !!agentId && !!agents && !routedAgent && seenAgentIdRef.current === agentId;
+  // D2: keep the last known snapshot on screen instead of falling back to the
+  // unrelated "pick an agent" empty state — an inline notice (rendered by
+  // `ChatPanel` via `removedFromRoster`) replaces the live data instead, and
+  // the transcript/room/scroll position are all untouched since `ChatPanel`
+  // never remounts (same `key={selectedAgent.id}` below).
+  const effectiveRoutedAgent = routedAgent || (agentRemoved ? lastSeenAgentRef.current : null);
+  const selectedAgent = effectiveRoutedAgent && isChatOpenable(effectiveRoutedAgent) ? effectiveRoutedAgent : null;
+  // #2235: a routed `role: 'team'` subject gets the whole area right of the
+  // agent list as one full-width configuration surface — see
+  // `TeamConfigSurface` below — rather than the ordinary chat + right-rail
+  // split. Derived purely from the route, so every entry point (the row
+  // click, the row menu's "Team settings…", a direct /chats/<teamId> URL)
+  // converges on it.
+  const subjectIsTeam = routedAgent?.role === 'team';
+  // #2267: a team's Settings request (handleOpenSettings below) has nowhere to
+  // be consumed — RightRail doesn't render for a team subject at all (#2235,
+  // TeamConfigSurface takes over instead) — so it sits pending in state. Left
+  // alone, selecting an unrelated individual Agent afterwards remounts
+  // RightRail fresh, and its openTabRequest effect fires on that FIRST mount
+  // with the still-pending `{tab:'settings'}` value, forcing that unrelated
+  // agent onto Settings. Clearing it the moment the subject becomes a team
+  // means there is nothing left to leak by the time any later agent mounts.
+  useEffect(() => {
+    if (subjectIsTeam) setRailTabRequest(null);
+  }, [subjectIsTeam]);
   const effectiveRoomId =
     (selectedAgent && createdRooms[selectedAgent.id]) ||
     selectedAgent?.dmRoomId ||
@@ -486,9 +584,30 @@ export default function AgentChat() {
     setCreatedRooms(prev => prev[id] === roomId ? prev : { ...prev, [id]: roomId });
   }, []);
 
-  // If the URL points at a no-longer-existing agent, reset to /chats.
+  // A stable wrapper for `ChatPanel`'s `onRoomCreated` (#2311 AC8): an inline
+  // arrow built fresh in JSX would give `ChatPanel`'s DM-room-creation effect
+  // (`[agent, roomId, onRoomCreated]`) a new callback identity on every render
+  // of this page — including a render caused only by an unrelated background
+  // roster poll tick — which defeats the point of keeping `selectedAgent`'s own
+  // reference stable across those ticks. Depends on `selectedAgent` itself
+  // (stable across a poll tick that doesn't touch this agent, thanks to
+  // `mergeRoster`'s per-row reference reuse) and the already-stable
+  // `handleRoomCreated`, so it only changes identity when the selected agent
+  // actually does.
+  const handleChatRoomCreated = useCallback((roomId) => {
+    if (selectedAgent) handleRoomCreated(selectedAgent.id, roomId);
+  }, [selectedAgent, handleRoomCreated]);
+
+  // If the URL points at a no-longer-existing agent, reset to /chats — UNLESS
+  // that agent was confirmed present earlier under this same route (#2311 D2):
+  // that case means the roster's background poll just removed the chat the
+  // user has open, and D2 wants the chat to stay put with an inline notice,
+  // not an auto-navigate away. A route that never named a real agent (bad
+  // deep link, or the initial load for one) still bounces to /chats exactly
+  // as before.
   useEffect(() => {
     if (!loading && agentId && agents && !agents.find(a => a.id === agentId)) {
+      if (seenAgentIdRef.current === agentId) return;
       navigate('/chats', { replace: true });
     }
   }, [agentId, agents, loading, navigate]);
@@ -517,6 +636,14 @@ export default function AgentChat() {
   // Keyboard shortcut: Cmd+Shift+L (Mac) / Ctrl+Shift+L (others) toggles
   // the session log panel. Skip if focus is in a text input/textarea so we
   // don't steal the platform-level "select line" shortcut.
+  //
+  // A team subject has no rail of its own to toggle (#2235 AC13/AC14) — the
+  // shortcut must have no effect while one is open and must not touch the
+  // persisted preference, which is why this reads a ref rather than gating
+  // on `subjectIsTeam` in the effect's own deps (that would tear the
+  // listener down and rebuild it on every team ⇄ member switch).
+  const subjectIsTeamRef = useRef(subjectIsTeam);
+  useEffect(() => { subjectIsTeamRef.current = subjectIsTeam; }, [subjectIsTeam]);
   useEffect(() => {
     function onKey(e) {
       if (!e.shiftKey) return;
@@ -525,6 +652,7 @@ export default function AgentChat() {
       if (e.key !== 'L' && e.key !== 'l') return;
       const tag = e.target?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
+      if (subjectIsTeamRef.current) return;
       e.preventDefault();
       setLogOpen(o => !o);
     }
@@ -696,6 +824,7 @@ export default function AgentChat() {
               showDisabled={showDisabled}
               busyIds={railBusyIds}
               onRequestMenu={handleRequestMenu}
+              onOpenTeamSettings={handleOpenSettings}
             />
           )}
         </div>
@@ -718,78 +847,90 @@ export default function AgentChat() {
           outside the provider, so any consumer not inside this tree is unharmed. */}
       <SessionsActiveProvider agentId={selectedAgent?.id || null}>
 
-      {/* Chat panel */}
-      <div style={{ flex: 1, height: '100%', minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        {selectedAgent ? (
-          <ChatPanel
-            key={selectedAgent.id}
-            agent={selectedAgent}
-            roomId={effectiveRoomId}
-            onRoomCreated={(roomId) => handleRoomCreated(selectedAgent.id, roomId)}
-            hoveredCorrelationId={hoveredCorrelationId}
-            onHoverCorrelation={setHoveredCorrelationId}
-            sessionCost={sessionCost}
-            contextFill={contextFill}
-            onWorkspaceChanged={handleWorkspaceChanged}
-            onTodoBoundary={handleTodoBoundary}
-            onOpenKnowledge={handleOpenKnowledge}
-            resumeRequest={resumeRequest}
-            insertRefRequest={composerRefRequest}
-          />
-        ) : (
-          <EmptyState />
-        )}
-      </div>
+      {subjectIsTeam ? (
+        /* #2235: a routed team gets the WHOLE area right of the agent list —
+           there is no separate chat column and no separate right rail, no
+           divider and no collapse/width control of its own (AC1/AC13). The
+           left list, its own divider and the SessionsActiveProvider above are
+           unaffected either way. */
+        <TeamConfigSurface team={routedAgent} onAgentConfigChanged={refetch} />
+      ) : (
+        <>
+          {/* Chat panel */}
+          <div style={{ flex: 1, height: '100%', minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            {selectedAgent ? (
+              <ChatPanel
+                key={selectedAgent.id}
+                agent={selectedAgent}
+                roomId={effectiveRoomId}
+                onRoomCreated={handleChatRoomCreated}
+                hoveredCorrelationId={hoveredCorrelationId}
+                onHoverCorrelation={setHoveredCorrelationId}
+                sessionCost={sessionCost}
+                contextFill={contextFill}
+                onWorkspaceChanged={handleWorkspaceChanged}
+                onTodoBoundary={handleTodoBoundary}
+                onOpenKnowledge={handleOpenKnowledge}
+                resumeRequest={resumeRequest}
+                insertRefRequest={composerRefRequest}
+                removedFromRoster={agentRemoved}
+              />
+            ) : (
+              <EmptyState />
+            )}
+          </div>
 
-      {/* Right rail: tabbed Session Log / Workspace browser.
-          Always mounted — collapsing animates its width down to the same slim
-          icon rail the left navigation sidebar uses (#905) instead of
-          unmounting it behind a floating re-open button, so the chat panel
-          reflows smoothly and the active tab survives the cycle. */}
-      <ResizeDivider onMouseDown={startDrag('right')} disabled={!logOpen} />
-      <div style={{
-        width: logOpen ? effRightWidth : 'var(--eb-sidebar-collapsed)',
-        minWidth: logOpen ? effRightWidth : 'var(--eb-sidebar-collapsed)',
-        height: '100%',
-        background: 'var(--eb-bg-app)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-        flexShrink: 0,
-        transition: resizing
-          ? 'none'
-          : 'width var(--eb-transition-normal), min-width var(--eb-transition-normal)',
-      }}>
-        <RightRail
-          agentId={selectedAgent?.id || null}
-          // Outcomes are team hand-offs, so that tab only applies to a team
-          // member (#963 AC1). `/api/matrix/agents` already carries the
-          // membership, so the rail needs no extra fetch to decide.
-          agentTeamId={selectedAgent?.parentTeamId || null}
-          roomId={effectiveRoomId}
-          hoveredCorrelationId={hoveredCorrelationId}
-          onHoverCorrelation={setHoveredCorrelationId}
-          collapsed={!logOpen}
-          onClose={() => setLogOpen(false)}
-          onOpen={() => setLogOpen(true)}
-          onCostUpdate={handleCostUpdate}
-          onContextUpdate={handleContextUpdate}
-          todoCloseSignal={todoCloseSignal}
-          workspaceRefreshKey={workspaceRefreshKey}
-          openTabRequest={railTabRequest}
-          onResumeSession={handleResumeSession}
-          sessionSelectRequest={sessionSelectRequest}
-          onReferenceInChat={handleReferenceInChat}
-          // Settings (#1929). `canManage` rides on the list payload (#1928) —
-          // the same boundary the PUT enforces — so the tab is hidden rather
-          // than offered and refused.
-          agentCanManage={selectedAgent ? selectedAgent.canManage !== false : true}
-          settingsAgentId={settingsAgentId}
-          chatAgentName={selectedAgent?.displayName || ''}
-          onClearSettingsAgent={clearSettingsAgent}
-          onAgentConfigChanged={refetch}
-        />
-      </div>
+          {/* Right rail: tabbed Session Log / Workspace browser.
+              Always mounted — collapsing animates its width down to the same slim
+              icon rail the left navigation sidebar uses (#905) instead of
+              unmounting it behind a floating re-open button, so the chat panel
+              reflows smoothly and the active tab survives the cycle. */}
+          <ResizeDivider onMouseDown={startDrag('right')} disabled={!logOpen} />
+          <div style={{
+            width: logOpen ? effRightWidth : 'var(--eb-sidebar-collapsed)',
+            minWidth: logOpen ? effRightWidth : 'var(--eb-sidebar-collapsed)',
+            height: '100%',
+            background: 'var(--eb-bg-app)',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            flexShrink: 0,
+            transition: resizing
+              ? 'none'
+              : 'width var(--eb-transition-normal), min-width var(--eb-transition-normal)',
+          }}>
+            <RightRail
+              agentId={selectedAgent?.id || null}
+              // Outcomes are team hand-offs, so that tab only applies to a team
+              // member (#963 AC1). `/api/matrix/agents` already carries the
+              // membership, so the rail needs no extra fetch to decide.
+              agentTeamId={selectedAgent?.parentTeamId || null}
+              roomId={effectiveRoomId}
+              hoveredCorrelationId={hoveredCorrelationId}
+              onHoverCorrelation={setHoveredCorrelationId}
+              collapsed={!logOpen}
+              onClose={() => setLogOpen(false)}
+              onOpen={() => setLogOpen(true)}
+              onCostUpdate={handleCostUpdate}
+              onContextUpdate={handleContextUpdate}
+              todoCloseSignal={todoCloseSignal}
+              workspaceRefreshKey={workspaceRefreshKey}
+              openTabRequest={railTabRequest}
+              onResumeSession={handleResumeSession}
+              sessionSelectRequest={sessionSelectRequest}
+              onReferenceInChat={handleReferenceInChat}
+              // Settings (#1929). `canManage` rides on the list payload (#1928) —
+              // the same boundary the PUT enforces — so the tab is hidden rather
+              // than offered and refused.
+              agentCanManage={selectedAgent ? selectedAgent.canManage !== false : true}
+              settingsAgentId={settingsAgentId}
+              chatAgentName={selectedAgent?.displayName || ''}
+              onClearSettingsAgent={clearSettingsAgent}
+              onAgentConfigChanged={refetch}
+            />
+          </div>
+        </>
+      )}
 
       </SessionsActiveProvider>
 
@@ -977,6 +1118,119 @@ function EmptyState() {
           lineHeight: 1.5,
         }}>
           Replies stream in real time as the agent thinks.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The full-width surface for a routed `role: 'team'` agent (#2235, supersedes
+ * #2213's `TeamSelectedState` placeholder). A team hosts no conversation of
+ * its own, so — unlike an ordinary agent — its whole configuration gets the
+ * entire area right of the agent list rather than sharing it with a chat
+ * column and a collapsible rail: there is nothing here for a chat pane to
+ * show, and #2216 had already reduced the rail to Settings alone for a team,
+ * so retiring the split is a layout consequence, not a new capability.
+ *
+ * Reuses `AgentSettingsPanel` unchanged (AC6 — no capability reachable
+ * before this is lost) inside a centered, width-capped column so the same
+ * form that used to live in a ~380px rail doesn't stretch into unreadably
+ * long lines on a wide monitor (AC10), and no collapse or width control is
+ * offered — the left agent list's own divider is the only way to resize this
+ * area (AC13/AC14).
+ */
+function TeamConfigSurface({ team, onAgentConfigChanged }) {
+  const canManage = team?.canManage !== false;
+  // #2236 AC7: the selected tab of the flat configuration row is addressable
+  // by `?tab=<name>` — owned here (above `AgentSettingsPanel`'s own
+  // post-save/draft remounts) so it survives a save and round-trips through a
+  // bookmark or a shared link.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const teamConfigTab = resolveTeamConfigTab(searchParams.get('tab'));
+  const setTeamConfigTab = useCallback((id) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('tab', id);
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+  return (
+    <div style={{
+      flex: 1,
+      minWidth: 0,
+      height: '100%',
+      display: 'flex',
+      overflow: 'hidden',
+      background: 'var(--eb-bg-app)',
+    }}>
+      <div style={{ width: '100%', height: '100%', minWidth: 0 }}>
+        {canManage ? (
+          <AgentSettingsPanel
+            agentId={team.id}
+            active
+            onSaved={onAgentConfigChanged}
+            teamConfigTab={teamConfigTab}
+            onTeamConfigTabChange={setTeamConfigTab}
+          />
+        ) : (
+          <TeamReadOnlyNotice team={team} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Shown in place of the edit form for a team the caller may see (it is in
+ * their agent list) but not manage (AC9) — the pre-#2235 rail hid the
+ * Settings tab entirely in this case, offering nothing at all; this keeps
+ * that same "nothing editable" guarantee while still landing on the team's
+ * own surface, the way every other entry point now does.
+ */
+function TeamReadOnlyNotice({ team }) {
+  return (
+    <div style={{
+      height: '100%',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 'var(--eb-space-6)',
+    }}>
+      <div style={{
+        background: 'var(--eb-bg-surface)',
+        border: '1px solid var(--eb-border-default)',
+        borderRadius: 'var(--eb-radius-lg)',
+        padding: 'var(--eb-space-6) var(--eb-space-8)',
+        maxWidth: 420,
+        textAlign: 'center',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 'var(--eb-space-2)',
+        boxShadow: 'var(--eb-shadow-sm)',
+      }}>
+        <div style={{
+          width: 48,
+          height: 48,
+          borderRadius: 'var(--eb-radius-full)',
+          background: 'var(--eb-accent-muted)',
+          color: 'var(--eb-accent-primary)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <Users size={22} />
+        </div>
+        <div style={{
+          fontSize: 'var(--eb-text-md)',
+          fontWeight: 'var(--eb-font-semibold)',
+          color: 'var(--eb-text-primary)',
+        }}>
+          {team?.displayName || team?.id}
+        </div>
+        <div style={{
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-muted)',
+          lineHeight: 1.5,
+        }}>
+          You can see this team but do not have rights to manage its configuration.
         </div>
       </div>
     </div>

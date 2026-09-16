@@ -34,6 +34,12 @@ export const REDIRECTS = {
   // `/teams` joined them in #2085: the Access page is dissolved (D10) and its
   // topic content lives in the Administration topic the destination owns.
   '/teams': '/users',
+  // `/environments` joined them in #2170 (epic #2166 A4): the general-purpose
+  // Working Environments page is retired and its content folded into the
+  // Agent Chat topic (a team edits its own environment from the Settings
+  // tab). The System-Admin catalog that replaced its other half is the NEW
+  // `/environment-templates` route, not a redirect target.
+  '/environments': '/chats',
 };
 
 // Dynamic routes collapse to a canonical parent for topic resolution. A null
@@ -65,7 +71,7 @@ export const CONTEXT_KEYS = {
   'wizard:setup#ssh-key': { label: 'First-run · SSH Key', alias: '/ssh-keys' },
   'wizard:setup#gh-token': { label: 'First-run · GitHub Token', alias: '/github-tokens' },
   '/team-setup#process': { label: 'Agent Team Wizard · Process' },
-  '/team-setup#environment': { label: 'Agent Team Wizard · Working Environment' },
+  '/team-setup#environment': { label: 'Agent Team Wizard · Environment' },
   '/team-setup#team': { label: 'Agent Team Wizard · Team' },
   '/team-setup#knowledge': { label: 'Agent Team Wizard · Knowledge' },
   '/team-setup#review': { label: 'Agent Team Wizard · Review' },
@@ -119,11 +125,12 @@ export const CONTEXT_KEYS = {
   // matching the `help-routes.js` mirror — a total in a comment is exactly what
   // drifts. No topic of its own — resolution falls through to `/models`.
   'modal:model-provider': { label: 'Model provider form' },
-  // The Working Environments page's create/edit form and its System-Admin
-  // toolchain registry (#1987) — same story again: no topic of their own,
+  // The Environment Templates page's create/edit form and its System-Admin
+  // toolchain registry (#1987, renamed by #2170) — same story again: no topic
+  // of their own (resolution falls through to `/environment-templates`),
   // registered so their published subject is a known key and the panel lifts
   // above them (both are z-index 60/61).
-  'modal:environment-form': { label: 'Working Environment form' },
+  'modal:environment-template-form': { label: 'Environment Template form' },
   'modal:toolchains': { label: 'Agent toolchains' },
   // The four small-page overlays (#1996) — same story once more: no topic of
   // their own (resolution falls through to `/teams`, `/users`,
@@ -134,11 +141,12 @@ export const CONTEXT_KEYS = {
   'modal:user-edit': { label: 'Administration · edit user' },
   'modal:user-delete': { label: 'Administration · delete user' },
   'modal:agent-template': { label: 'Agent Templates · editor' },
-  // The save-time propagation offer (#2066) — no topic of its own
-  // (resolution falls through to `/environments`), and a full-screen dialog
-  // at 9999, so it needs the lift for the same reason `modal:user-delete`
-  // does: help beside the decision, never behind it.
-  'modal:env-propagation': { label: 'Working Environments · bring agents up to date' },
+  // The save-time propagation offer (#2066) — no topic of its own (resolution
+  // falls through to `/chats`, since #2170 moved its only host —
+  // TeamEnvironmentPanel — off the retired Working Environments page), and a
+  // full-screen dialog at 9999, so it needs the lift for the same reason
+  // `modal:user-delete` does: help beside the decision, never behind it.
+  'modal:env-propagation': { label: 'Agent Chat · bring agents up to date' },
 };
 
 // The overlay ids the app publishes, as constants so a call site cannot typo one.
@@ -162,7 +170,10 @@ export const OVERLAY_TEAM_SHARE = 'modal:team-share';
 export const OVERLAY_PLUGIN_INSTALL = 'modal:plugin-install';
 export const OVERLAY_PLUGIN_UNINSTALL = 'modal:plugin-uninstall';
 export const OVERLAY_MODEL_PROVIDER = 'modal:model-provider';
-export const OVERLAY_ENVIRONMENT_FORM = 'modal:environment-form';
+// #2170: renamed from OVERLAY_ENVIRONMENT_FORM — the standalone Working
+// Environments page is retired; this is now the create/edit panel on the
+// System-Admin Environment Templates page.
+export const OVERLAY_ENVIRONMENT_TEMPLATE_FORM = 'modal:environment-template-form';
 export const OVERLAY_TOOLCHAINS = 'modal:toolchains';
 export const OVERLAY_TEAM_DELETE = 'modal:team-delete';
 export const OVERLAY_USER_EDIT = 'modal:user-edit';

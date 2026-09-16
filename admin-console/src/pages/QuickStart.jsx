@@ -426,11 +426,10 @@ export default function QuickStart() {
                 : <CheckCircle size={16} style={{ color: 'var(--eb-status-success)', flexShrink: 0, marginTop: 2 }} />}
               <div>
                 <div style={{ fontWeight: 'var(--eb-font-medium)' }}>
-                  {result.reused ? 'Agent reused' : 'Agent created'}: {result.agent.displayName}
+                  Agent created: {result.agent.displayName} ({result.agent.id})
                 </div>
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', marginTop: 2 }}>
-                  Working Environment: {result.environment.name}
-                  {result.environment.reused ? ' (reused)' : ' (new)'} · redirecting to chat …
+                  Environment: {result.environment.name} (new) · redirecting to chat …
                 </div>
                 {result.llmWarning && (
                   <div style={{ marginTop: 'var(--eb-space-2)', color: 'var(--eb-status-warning)' }}>

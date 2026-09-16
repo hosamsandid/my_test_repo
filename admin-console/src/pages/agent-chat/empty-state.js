@@ -9,7 +9,7 @@
 // #1956 moved the chat's create/import actions into the Shell's page-action
 // header, where every other page keeps them. That turns the button here into a
 // *second* interactive way to do the same thing, which is what the house
-// pattern forbids: `WorkingEnvironments.jsx` and `Briefings.jsx` both keep a
+// pattern forbids: `EnvironmentTemplates.jsx` and `Briefings.jsx` both keep a
 // text pointer in the empty state and the real action in the header. So this is
 // a sentence naming the header button, not a competing call to action.
 

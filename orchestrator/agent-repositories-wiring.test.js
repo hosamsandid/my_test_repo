@@ -97,7 +97,10 @@ test("AC5/D9: reset-to-stub preserves agentRepositories on the stub config", () 
 
 test("AC5/D9: every seed re-clones the agent's own repositories", () => {
   const seed = block("function seedAgentWorkspace(", "\nfunction ");
-  assert.match(seed, /cloneEnvironmentRepositories\(dest, env, warnings\)/);
+  // #2246 D2 added a 4th `poolWorkspace` argument (unset for every ordinary,
+  // non-pooled seed) — the AC5/D9 property this pins is unchanged: both scopes
+  // are re-cloned on every seed.
+  assert.match(seed, /cloneEnvironmentRepositories\(dest, env, warnings, poolWorkspace\)/);
   assert.match(seed, /cloneAgentScopedRepositories\(dest, env, [\s\S]{0,60}?agentRepositories, warnings\)/);
 });
 

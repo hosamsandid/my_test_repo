@@ -117,6 +117,25 @@ test('TaskUpdate for an unseen id creates a stub rather than dropping it', () =>
   assert.deepEqual(todos, [{ content: 'Recovered', activeForm: '', status: 'in_progress' }]);
 });
 
+test('a bare status-only TaskUpdate on an unseen id renders a placeholder, not a blank row', () => {
+  const todos = fold([
+    ['TaskUpdate', { taskId: '5', status: 'in_progress' }],
+  ]);
+  assert.deepEqual(todos, [
+    { content: '(task created earlier in this session)', activeForm: '', status: 'in_progress' },
+  ]);
+});
+
+test('a later subject on a stubbed task replaces the placeholder', () => {
+  const todos = fold([
+    ['TaskUpdate', { taskId: '5', status: 'in_progress' }],
+    ['TaskUpdate', { taskId: '5', subject: 'Recovered later' }],
+  ]);
+  assert.deepEqual(todos, [
+    { content: 'Recovered later', activeForm: '', status: 'in_progress' },
+  ]);
+});
+
 test('a stubbed high id keeps later creates from colliding', () => {
   const todos = fold([
     ['TaskUpdate', { taskId: '3', status: 'in_progress' }], // stub id 3

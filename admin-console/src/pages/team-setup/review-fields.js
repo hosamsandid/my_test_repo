@@ -37,7 +37,7 @@ export function buildReviewFields({ form, env, sshKey, ghToken, knowledgeMeta })
     ...(form.labelSuffix ? [{ key: 'labelSuffix', label: 'Label suffix', value: form.labelSuffix }] : []),
     {
       key: 'environment',
-      label: 'Working Environment',
+      label: 'Environment',
       value: env ? `${env.name} (${env.id})` : (form.environmentId || DASH),
     },
     { key: 'repository', label: 'Repository', value: `${form.repoUrl} @ ${form.branch || 'main'}` },

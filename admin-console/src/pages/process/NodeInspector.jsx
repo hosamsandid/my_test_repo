@@ -10,6 +10,10 @@ import { applyDetailsSave } from './node-inspector-save';
 import { summarizeGithubEventTrigger } from '../agent-chat/trigger-summary.js';
 import { ID_FORMAT_HINT } from '../../components/id-field-view';
 import PromptHistory from '../agent-chat/PromptHistory';
+import ScalingSection from './ScalingSection';
+import { poolBadgeText } from './scaling-view.js';
+import ComingSoonBadge from '../../components/ComingSoonBadge';
+import { usePoolsEnabled } from '../../context/PoolsFeatureContext';
 import {
   PROMPT_MODES,
   PROMPT_MODE_LABELS,
@@ -44,6 +48,7 @@ export default function NodeInspector({
   node,
   roles = [],       // draft peer list
   nodes = [],       // live peer list
+  agents = [],      // live: flat /api/agents list (#2271 Scaling — pool + parent wipLimit, no separate fetch)
   stages = [],
   lints = [],       // graph lints (Routing tab surfaces duplicate-listener for this node)
   labels = [],      // known label registry (label-name suggestions in the Add-input chooser)
@@ -62,6 +67,7 @@ export default function NodeInspector({
   // (60/61), so the subject is published here — by the component that owns the
   // panel body — to lift the help panel in front of it (#1984).
   useHelpSubject({ overlay: OVERLAY_FLOW_NODE });
+  const poolsEnabled = usePoolsEnabled();
   const isLive = mode === 'live';
   const structureFocus = focus?.section === 'structure' && (focus?.tab || 'details') === 'details';
   const [tab, setTab] = useState(focus?.tab || 'details');
@@ -89,6 +95,16 @@ export default function NodeInspector({
 
   const peers = isLive ? nodes : roles;
   const siblings = peers.filter(n => n.id !== node.id).map(n => ({ id: n.id, displayName: n.displayName || n.id }));
+
+  // Role-axis pool config (#2271, Amendment 2 A2.2): `pool` and
+  // `parentTeamId` don't live on the graph node (process-graph.js), so the
+  // already-fetched flat `/api/agents` list is the source, same discipline
+  // ParallelismPanel/`hasPooledMember` already follow for the team axis — no
+  // second fetch.
+  const memberCfg = isLive ? agents.find(a => a.id === node.id) : null;
+  const isPooledRoleNode = isLive && memberCfg?.role === 'team-member';
+  const parentCfg = isPooledRoleNode && memberCfg.parentTeamId
+    ? agents.find(a => a.id === memberCfg.parentTeamId) : null;
   const inheritedStage = isLive
     ? (!node.stage && node.effectiveStage ? node.effectiveStage : '')
     : resolveInheritedStage(roles, node);
@@ -140,6 +156,10 @@ export default function NodeInspector({
             <span style={badge}>{node.role || 'agent'}</span>
             {node.sessionPolicy === 'per-invocation' && <span style={badge}>per-invocation</span>}
             {node.isEntryPoint && <span style={badge}>DM entry point</span>}
+            {/* #2271 AC4 — read-only "at a glance" badge (A2.2: "so an
+                operator looking at one agent sees its scaling at a glance"),
+                visible regardless of which tab is active. */}
+            {isPooledRoleNode && poolBadgeText(memberCfg.pool) && <span style={badge}>{poolBadgeText(memberCfg.pool)}</span>}
           </>
         ) : (
           <span style={badge}>draft agent</span>
@@ -223,6 +243,30 @@ export default function NodeInspector({
                       {parentErr && <span style={{ ...hint, color: 'var(--eb-status-error)' }}>{parentErr}</span>}
                     </Field>
                   )}
+                </div>
+              )}
+
+              {/* Scaling (#2271, Amendment 2 A2.2 of
+                  `docs/parallel-workers-concept.md`) — the role-axis config
+                  surface for agent pools, live team-member nodes only (the
+                  live `pool` route, #2270, is gated the same way). Applies
+                  immediately through its own Save, like the live prompt
+                  editor above — not batched into the Details Save below. */}
+              {isPooledRoleNode && (
+                <div style={{ borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-3)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-2)' }}>
+                    <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)' }}>Scaling</div>
+                    {/* #2302: mirror the same disabled + "Coming Soon" treatment
+                        as the agent Settings tab so the two surfaces agree. */}
+                    {!poolsEnabled && <ComingSoonBadge title="Agent-pool autoscaling is not yet enabled on this platform." />}
+                  </div>
+                  <ScalingSection
+                    agentId={node.id}
+                    pool={memberCfg.pool}
+                    parentWipLimit={parentCfg?.wipLimit}
+                    disabled={!poolsEnabled}
+                    onChanged={onChanged}
+                  />
                 </div>
               )}
 

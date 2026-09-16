@@ -37,8 +37,10 @@ async function generateSshKey(ctx, { name, keyId }) {
   await page.getByRole('button', { name: 'New Key' }).click();
 
   // "Generate new keypair" is the default mode; click it defensively in case a
-  // prior interaction left "Paste existing key" selected.
-  await page.getByRole('button', { name: 'Generate new keypair' }).click();
+  // prior interaction left "Paste existing key" selected. Since #2165 the
+  // generate/paste selector is a radiogroup (ModeToggle), so the two options are
+  // radios, not buttons.
+  await page.getByRole('radio', { name: 'Generate new keypair' }).click();
   await page.getByPlaceholder('e.g. GitHub Deploy Key').fill(name);
   await page.getByPlaceholder('e.g. github-deploy-key').fill(keyId);
 
@@ -83,34 +85,30 @@ async function deleteSshKey(ctx, keyId) {
 
 // ── Working Environments ────────────────────────────────────────────────────
 
-// Create an environment through the UI with a single repository. The repo
-// reachability probe is advisory and does not gate submit (canSubmit only needs
-// id + name + non-empty repo URLs), so we don't wait on the status icon.
+// Seed a fixture environment via the API. #2168 A2 removed the standalone
+// "create environment" UI entry point, and #2170 (epic #2166 A4) retired the
+// general-purpose Working Environments page outright, replacing it with the
+// System-Admin Environment Templates catalog (which DOES offer a UI create
+// action, scoped to `isTemplate: true` records only) — so a fixture for the
+// rename/delete UI coverage below still comes in via the still-live
+// `POST /api/environments` route (System-Admin/Team-Admin-authorized, same as
+// before), now carrying `isTemplate: true` so the seeded record is one this
+// page's list actually shows.
 async function createEnv(ctx, { envId, name, repoUrl, branch = 'main' }) {
+  const res = await ctx.request.post('/api/environments', {
+    data: { id: envId, name, repositories: [{ url: repoUrl, branch }], isTemplate: true },
+  });
+  expect(res.ok(), `POST /api/environments expected 2xx, got HTTP ${res.status()}`).toBeTruthy();
   const { page } = ctx;
-  await page.goto('/environments');
-  await expect(page.getByRole('heading', { name: 'Working Environments' })).toBeVisible();
-  await page.getByRole('button', { name: 'New Environment' }).click();
-
-  // exact — the Project-context textarea's long placeholder also contains the
-  // words "COBOL migration", and getByPlaceholder matches substrings by default.
-  await page.getByPlaceholder('COBOL Migration', { exact: true }).fill(name);
-  await page.getByPlaceholder('e.g. cobol-migration').fill(envId);
-  await expect(page.getByPlaceholder('e.g. cobol-migration')).toHaveValue(envId);
-
-  await page.getByRole('button', { name: 'Add repository' }).click();
-  await page.getByPlaceholder('git@github.com:org/repo.git').fill(repoUrl);
-  await page.getByPlaceholder('main').fill(branch);
-
-  await page.getByRole('button', { name: 'Create environment' }).click();
-  // The side panel closes on success; the new row appears in the list.
+  await page.goto('/environment-templates');
+  await expect(page.getByRole('heading', { name: 'Environment Templates' })).toBeVisible();
   await expect(page.getByRole('row').filter({ hasText: envId })).toBeVisible();
 }
 
-// Edit an environment's display name through the UI (the id is immutable).
+// Edit a template's display name through the UI (the id is immutable).
 async function renameEnv(ctx, { envId, newName }) {
   const { page } = ctx;
-  await page.goto('/environments');
+  await page.goto('/environment-templates');
   await page.getByRole('row').filter({ hasText: envId }).getByRole('button', { name: 'Edit' }).click();
   await expect(page.getByRole('heading', { name: /^Edit:/ })).toBeVisible();
   // exact — see createEnv: the Project-context textarea placeholder also
@@ -121,13 +119,13 @@ async function renameEnv(ctx, { envId, newName }) {
   await expect(page.getByRole('row').filter({ hasText: newName })).toBeVisible();
 }
 
-// Delete an environment through the UI, confirming the dialog.
+// Delete a template through the UI, confirming the dialog.
 async function deleteEnvViaUi(ctx, { envId }) {
   const { page } = ctx;
-  await page.goto('/environments');
+  await page.goto('/environment-templates');
   await page.getByRole('row').filter({ hasText: envId }).getByRole('button', { name: 'Delete' }).click();
   const dialog = page.getByRole('dialog');
-  await expect(dialog.getByText('Delete Working Environment')).toBeVisible();
+  await expect(dialog.getByText('Delete template')).toBeVisible();
   await dialog.getByRole('button', { name: 'Delete' }).click();
   await expect(page.getByRole('row').filter({ hasText: envId })).toHaveCount(0);
 }

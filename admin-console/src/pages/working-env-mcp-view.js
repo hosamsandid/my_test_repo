@@ -7,7 +7,7 @@
 // the API, while the wizard's own Knowledge step pointed at "Working
 // Environments →" for changes — a page with no such control.
 //
-// This module is the pure half of the picker WorkingEnvironments.jsx now
+// This module is the pure half of the picker EnvironmentTemplates.jsx now
 // renders: the form ⇄ wire conversions, the "did the user actually touch it"
 // gate, the per-row hints that mirror the seeder's two silent-drop rules, and
 // the seed-time caveat. Kept React-free so it is unit-tested directly

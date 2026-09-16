@@ -266,6 +266,97 @@ function boardSummary(data) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Pool controls (#2250 Phase 5, epic #2251) — render-ready rows for the
+// board's pause/resume/drain buttons (one per pooled role) and its
+// "Force dispatch" list (one per held admission-lane entry). Input is the
+// `GET /api/teams/<id>/pool-control` response: `{ roles: [{roleId, agentId,
+// displayName, maxInstances, liveInstanceCount, state}], held: [{id, agentId,
+// ticket, heldAt}] }` (`orchestrator.js`'s pool-control route).
+// ---------------------------------------------------------------------------
+
+const POOL_STATES = Object.freeze(['running', 'paused', 'draining']);
+
+function poolRoleRow(r) {
+  return {
+    roleId: r.roleId || '',
+    agentId: r.agentId || null,
+    displayName: r.displayName || r.roleId || '',
+    maxInstances: Number.isInteger(r.maxInstances) ? r.maxInstances : null,
+    liveInstanceCount: Number.isFinite(r.liveInstanceCount) ? r.liveInstanceCount : 0,
+    state: POOL_STATES.includes(r.state) ? r.state : 'running',
+  };
+}
+
+// Alphabetical by role id so the panel's order is stable across refreshes
+// (the server has no inherent order — it walks the filesystem).
+function poolControlRows(data) {
+  const roles = data && Array.isArray(data.roles) ? data.roles : [];
+  return roles.map(poolRoleRow).sort((a, b) => a.roleId.localeCompare(b.roleId));
+}
+
+// A held entry's `ticket` is already `repo#number` (`admission-control.js`'s
+// `objectKey`); split back out only for display — `id` (`heldIdentity`)
+// remains the sole thing the Force-dispatch POST is keyed on.
+function heldRow(h) {
+  const m = /^(.*)#(\d+)$/.exec((h && h.ticket) || '');
+  return {
+    id: (h && h.id) || null,
+    agentId: (h && h.agentId) || null,
+    repo: m ? m[1] : null,
+    number: m ? Number(m[2]) : null,
+    ticket: (h && h.ticket) || null,
+    heldAt: (h && h.heldAt) || null,
+  };
+}
+
+// Oldest-held first — the entry that has been waiting longest is the one an
+// operator is most likely to want to force through.
+function heldRows(data) {
+  const held = data && Array.isArray(data.held) ? data.held : [];
+  return held.map(heldRow).sort((a, b) => String(a.heldAt || '').localeCompare(String(b.heldAt || '')));
+}
+
+// ---------------------------------------------------------------------------
+// Pool instance lanes (#2273, epic #2251) — render-ready rows for the read-
+// only "Live surface" panel: per pooled role, its live/held instances as
+// lanes. Input is the `GET /api/teams/<id>/pool-lanes` response: `{ roles: [
+// {roleId, agentId, displayName, maxInstances, lanes: [{instanceId, ticketId,
+// repo, number, epicId, status, spawnedAt, sameEpicAs}]}] }`
+// (`orchestrator.js`'s pool-lanes route, backed by the pure
+// `pool-instance-lanes.js`).
+// ---------------------------------------------------------------------------
+
+const LANE_STATUSES = Object.freeze(['running', 'held-same-epic', 'timed-out']);
+
+function laneRow(l) {
+  return {
+    instanceId: (l && l.instanceId) || null,
+    ticketId: (l && l.ticketId) || '',
+    repo: (l && l.repo) || null,
+    number: Number.isFinite(l && l.number) ? l.number : null,
+    epicId: l && l.epicId != null ? l.epicId : null,
+    status: LANE_STATUSES.includes(l && l.status) ? l.status : 'running',
+    spawnedAt: (l && l.spawnedAt) || null,
+    sameEpicAs: (l && l.sameEpicAs) || null,
+  };
+}
+
+// One row per pooled role (alphabetical, matching `poolControlRows`), each
+// carrying its own lanes in the pure module's stable ticketId order.
+function poolLaneRoleRows(data) {
+  const roles = data && Array.isArray(data.roles) ? data.roles : [];
+  return roles
+    .map((r) => ({
+      roleId: (r && r.roleId) || '',
+      agentId: (r && r.agentId) || null,
+      displayName: (r && r.displayName) || (r && r.roleId) || '',
+      maxInstances: Number.isInteger(r && r.maxInstances) ? r.maxInstances : null,
+      lanes: (r && Array.isArray(r.lanes) ? r.lanes : []).map(laneRow),
+    }))
+    .sort((a, b) => a.roleId.localeCompare(b.roleId));
+}
+
 export {
   LIFECYCLE_STAGES,
   TICKET_STATES,
@@ -281,4 +372,12 @@ export {
   epicRollups,
   rollupSummary,
   boardSummary,
+  POOL_STATES,
+  poolRoleRow,
+  poolControlRows,
+  heldRow,
+  heldRows,
+  LANE_STATUSES,
+  laneRow,
+  poolLaneRoleRows,
 };

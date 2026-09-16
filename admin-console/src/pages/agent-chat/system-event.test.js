@@ -6,6 +6,11 @@ import {
   systemEventHasDetail,
   isThinkingTokensEvent,
   mergeThinkingTokens,
+  isTaskEvent,
+  taskEventSummary,
+  taskUpdatedPatchRows,
+  taskNotificationSummary,
+  formatOutputFileRef,
 } from './system-event.js';
 
 // A realistic thinking_tokens payload: the runtime persists the full parsed CLI
@@ -27,6 +32,11 @@ test('systemEventExtras: drops null/undefined/empty-string values', () => {
   const raw = { type: 'system', subtype: 's', a: 0, b: null, c: undefined, d: '', e: false, f: 'x' };
   // 0 and false are informative and kept; null/undefined/'' are dropped.
   assert.deepEqual(systemEventExtras(raw), [['a', 0], ['e', false], ['f', 'x']]);
+});
+
+test('systemEventExtras: drops tool_use_id as noise, alongside uuid/session_id (#2191)', () => {
+  const raw = { type: 'system', subtype: 's', tool_use_id: 'abc', kept: 1 };
+  assert.deepEqual(systemEventExtras(raw), [['kept', 1]]);
 });
 
 test('systemEventExtras: [] for missing / non-object / array / label-only', () => {
@@ -157,4 +167,87 @@ test('mergeThinkingTokens: missing/null correlationId groups under one row', () 
   const out = mergeThinkingTokens([tt(undefined, 10), tt(undefined, 20)]);
   assert.equal(out.length, 1);
   assert.equal(out[0].raw.estimated_tokens, 20);
+});
+
+// ── task_updated / task_notification (#2191) ──────────────────────────────
+const taskUpdated = (patch = {}) => ({
+  type: 'system_event',
+  subtype: 'task_updated',
+  raw: { type: 'system', subtype: 'task_updated', task_id: 'task-1234567890', tool_use_id: 'tu-1', patch },
+});
+const taskNotification = ({ summary, outputFile } = {}) => ({
+  type: 'system_event',
+  subtype: 'task_notification',
+  raw: {
+    type: 'system', subtype: 'task_notification', task_id: 'task-1234567890', tool_use_id: 'tu-1',
+    ...(summary !== undefined ? { summary } : {}),
+    ...(outputFile !== undefined ? { output_file: outputFile } : {}),
+  },
+});
+
+test('isTaskEvent: matches only task_updated/task_notification system_events', () => {
+  assert.equal(isTaskEvent(taskUpdated()), true);
+  assert.equal(isTaskEvent(taskNotification()), true);
+  assert.equal(isTaskEvent({ type: 'system_event', subtype: 'thinking_tokens' }), false);
+  assert.equal(isTaskEvent({ type: 'assistant_text' }), false);
+  assert.equal(isTaskEvent(undefined), false);
+});
+
+test('taskEventSummary: task_updated surfaces the shortened task id + status', () => {
+  const out = taskEventSummary(taskUpdated({ status: 'completed', end_time: '2026-09-11T12:00:00Z' }));
+  assert.ok(out.includes('task task-1234567…'));
+  assert.ok(out.includes('completed'));
+});
+
+test('taskEventSummary: task_updated with no status still shows the task id', () => {
+  assert.equal(taskEventSummary(taskUpdated({})), 'task task-1234567…');
+});
+
+test('taskEventSummary: task_notification surfaces the first non-blank summary line', () => {
+  const out = taskEventSummary(taskNotification({ summary: '\n\nRun completed successfully.\nMore detail below.' }));
+  assert.ok(out.endsWith('Run completed successfully.'));
+});
+
+test('taskEventSummary: not a task event returns empty string', () => {
+  assert.equal(taskEventSummary({ type: 'system_event', subtype: 'other', raw: {} }), '');
+});
+
+test('taskUpdatedPatchRows: exposes the patch fields the raw JSON dump used to hide', () => {
+  assert.deepEqual(
+    taskUpdatedPatchRows(taskUpdated({ status: 'completed', end_time: '2026-09-11T12:00:00Z' })),
+    [['status', 'completed'], ['end_time', '2026-09-11T12:00:00Z']],
+  );
+});
+
+test('taskUpdatedPatchRows: [] for a missing/non-object patch, or a non-task_updated event', () => {
+  assert.deepEqual(taskUpdatedPatchRows({ subtype: 'task_updated', raw: {} }), []);
+  assert.deepEqual(taskUpdatedPatchRows(taskNotification({ summary: 'x' })), []);
+  assert.deepEqual(taskUpdatedPatchRows(undefined), []);
+});
+
+test('taskNotificationSummary: returns the markdown report body verbatim', () => {
+  const md = '## Done\n\n- did the thing\n- pushed the branch';
+  assert.equal(taskNotificationSummary(taskNotification({ summary: md })), md);
+});
+
+test('taskNotificationSummary: "" when absent, non-string, or not a task_notification', () => {
+  assert.equal(taskNotificationSummary(taskNotification({})), '');
+  assert.equal(taskNotificationSummary(taskNotification({ summary: 42 })), '');
+  assert.equal(taskNotificationSummary(taskUpdated({ status: 'x' })), '');
+});
+
+test('formatOutputFileRef: shortens a workspace path to the agent-relative reference', () => {
+  const ev = taskNotification({ outputFile: '/workspace/agents/my-agent/sessions/report.md' });
+  assert.equal(formatOutputFileRef(ev), 'sessions/report.md');
+});
+
+test('formatOutputFileRef: falls back to the last two segments outside the workspace', () => {
+  const ev = taskNotification({ outputFile: '/tmp/some/deep/nested/output.txt' });
+  assert.equal(formatOutputFileRef(ev), '…/nested/output.txt');
+});
+
+test('formatOutputFileRef: "" when absent, non-string, or not a task_notification', () => {
+  assert.equal(formatOutputFileRef(taskNotification({})), '');
+  assert.equal(formatOutputFileRef(taskUpdated({ status: 'x' })), '');
+  assert.equal(formatOutputFileRef(undefined), '');
 });

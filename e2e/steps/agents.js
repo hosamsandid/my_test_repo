@@ -52,24 +52,26 @@ async function memberRowLabels(ctx, memberIds) {
  * Chat left rail (`/chats`) — the surface that replaced the Agents page's team
  * card in #1930.
  *
- * @param {string} params.teamId - Team slug id rendered as the rail's group header.
+ * @param {string} params.teamId - Team slug id; the group's fallback header text.
+ * @param {string} [params.teamName] - Team display name shown as the group header
+ *   when the team has an agent row to name it (a materialised team always does).
  * @param {string[]} [params.roleIds] - Role ids to derive member ids (`<teamId>-<roleId>`).
  * @param {string[]} [params.memberIds] - Explicit member ids (alternative to roleIds).
  * @example
  * - assert:
  *     do: agents.expectTeamInRail
  *     teamId: agentic-demos
+ *     teamName: Agentic Demos
  *     roleIds: [business-analyst, developer]
  */
 // What the rail actually renders (admin-console/src/pages/agent-chat/
 // AgentList.jsx + agent-list-model.js) — kept out of the JSDoc summary, which
 // is what steps-catalog.json prints as the step's one-line description:
-//  - A `team` agent has no Matrix identity (orchestrator `createAgent` mints no
-//    Matrix user for role `team`), so it never appears in
-//    `GET /api/matrix/agents`. `buildGroups` still opens a group for the id its
-//    members carry in `parentTeamId`, and with no header row present the
-//    group's `displayName` falls back to that raw id — so the TEAM ID is on
-//    screen, as the group header's own text. That is what we assert.
+//  - `buildGroups` opens a group for the team and titles it with the team
+//    agent's `displayName` (its team NAME), falling back to the raw id only when
+//    no team agent row is present to name it. A wizard-materialised team has
+//    that row, so the team NAME is the group header's own text — assert on the
+//    display name (`teamName`) when the caller gives one, else the id.
 //  - Member rows are `role="option"` buttons inside the rail's `role="listbox"`,
 //    labelled `displayName || id`. Wizard-created members carry the role
 //    template's display name, so we resolve each id's label from the list
@@ -81,7 +83,7 @@ async function memberRowLabels(ctx, memberIds) {
 // this step verifies; per-member identity is covered by the two API asserts.
 async function expectTeamInRail(ctx, params) {
   const { page } = ctx;
-  const { teamId } = params;
+  const { teamId, teamName } = params;
   const memberIds = resolveMemberIds(params);
   const labels = await memberRowLabels(ctx, memberIds);
 
@@ -95,9 +97,12 @@ async function expectTeamInRail(ctx, params) {
   // composer's slash-command palette, which is mounted only while open.
   const rail = page.locator('[role="listbox"]').first();
 
-  // The group header. Its label is the raw team id (no team row to name it);
-  // the uppercasing is CSS `text-transform`, which never touches the DOM text.
-  await expect(rail.getByText(teamId, { exact: true }).first()).toBeVisible();
+  // The group header shows the team's display NAME — the team agent's
+  // displayName (agent-list-model.js buildGroups), which a materialised team
+  // always has; it only falls back to the raw id when the team has no agent row
+  // to name it. The uppercasing is CSS `text-transform`, which never touches the
+  // DOM text. Assert the display name when the caller gives one.
+  await expect(rail.getByText(teamName || teamId, { exact: true }).first()).toBeVisible();
 
   // Teams default to expanded (DEFAULT_COLLAPSED.team === false), so the member
   // rows are mounted without a click.

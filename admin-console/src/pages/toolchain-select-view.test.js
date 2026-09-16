@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning, availableToolchains, versionSourceLine } from './toolchain-select-view.js';
 
-const JVM = { id: 'jvm-21', name: 'JVM 21', image: 'localhost/as-agent-jvm:latest', platforms: ['podman'], description: 'JDK 21 + Maven' };
+const JVM = { id: 'jvm-21', name: 'JVM 21', image: 'localhost/as-agent-jvm:latest', platforms: ['podman'], description: 'JDK 21 + Maven', baseline: 'java temurin-21, maven 3.9' };
 const GO = { id: 'go-1-23', name: 'Go 1.23', image: 'ar/as-agent-go:v1', platforms: ['podman', 'kubernetes'] };
 
 test('toolchainOptions marks a runtime-mismatched toolchain unavailable but still lists it', () => {
@@ -22,10 +22,22 @@ test('toolchainOptions surfaces the description as the hint when the toolchain i
   assert.equal(jvm.image, 'localhost/as-agent-jvm:latest');
 });
 
+test('toolchainOptions carries platforms/baseline for the tile grid badges (#2279)', () => {
+  const [jvm] = toolchainOptions([JVM], 'podman');
+  assert.deepEqual(jvm.platforms, ['podman']);
+  assert.equal(jvm.baseline, 'java temurin-21, maven 3.9');
+  // GO declares no baseline in the fixture — the badge row must not invent one.
+  const [, go] = toolchainOptions([JVM, GO], 'podman');
+  assert.equal(go.baseline, '');
+  assert.deepEqual(go.platforms, ['podman', 'kubernetes']);
+});
+
 test('toolchainOptions treats a platform-less entry as available everywhere and tolerates junk', () => {
   const [any] = toolchainOptions([{ id: 'x', image: 'y:1' }], 'kubernetes');
   assert.equal(any.available, true);
   assert.equal(any.label, 'x', 'falls back to the id when no name is set');
+  assert.deepEqual(any.platforms, ['podman', 'kubernetes'], 'defaults to everywhere when the manifest names none');
+  assert.equal(any.baseline, '');
   assert.deepEqual(toolchainOptions(null, 'podman'), []);
   assert.deepEqual(toolchainOptions([null, {}], 'podman'), [], 'entries with no id are dropped');
 });

@@ -17,8 +17,6 @@ import { OVERLAY_MCP_SERVER, OVERLAY_MCP_CREDENTIAL } from '../context/page-help
 import { MCP_HELP_SECTIONS } from './mcp-help-sections.js';
 import { describeServerSubmitState, describeCredentialSubmitState } from './mcp-server-submit-state.js';
 import { useAuth } from '../auth/AuthContext';
-import CredentialOwnership from '../components/CredentialOwnership';
-import { defaultOwnership, ownershipPayload, adminTeamIdsOf } from './credential-scope-view.js';
 
 const inputStyle = {
   width: '100%',
@@ -76,16 +74,14 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
   const [id, setId] = useState('');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  // #2083 — ownership. This panel is create-only (neither table offers an edit),
-  // so the create default is the only seed it needs; `ownershipFromRecord` is
-  // the environment form's case, where the same panel also edits.
-  const { data: teamsData } = useApi('/api/admin/teams');
   const { user } = useAuth();
   const isSysAdmin = !!user?.admin;
-  const adminTeamIds = adminTeamIdsOf(user);
-  const [ownership, setOwnership] = useState(
-    () => defaultOwnership({ isSysAdmin, adminTeamIds }),
-  );
+  // Global MCP server (#2158 decision 6): set at CREATE time only — this form
+  // stays create-only (no ownership-edit path is added here, matching the
+  // environment/Model-Provider forms would be a bigger change than the
+  // ticket asks for). Publishing/retracting afterwards is still possible
+  // through `PUT /api/mcp-servers/:id`, just not from this console.
+  const [isGlobal, setIsGlobal] = useState(false);
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName,
     setId,
@@ -200,16 +196,30 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
         </div>
       </div>
 
-      {/* #2083 — the same control the credential forms render, over the same
-          tier shape. A shared server is what lets a fresh team reach an MCP
-          backend without registering its own (AC11). */}
-      <CredentialOwnership
-        value={ownership}
-        onChange={setOwnership}
-        teams={Array.isArray(teamsData) ? teamsData : []}
-        isSysAdmin={isSysAdmin}
-        adminTeamIds={adminTeamIds}
-      />
+      {/* Global MCP server (#2158 decision 6) — System-Admin-only, set at
+          CREATE time only. AC3b: state plainly that the reach can afterwards
+          be changed only by an administrator through the API, so the
+          missing edit control here is an explained limitation, not a silent
+          one. */}
+      {isSysAdmin && (
+        <label style={{
+          display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start', cursor: 'pointer',
+        }}>
+          <input
+            type="checkbox"
+            checked={isGlobal}
+            onChange={e => setIsGlobal(e.target.checked)}
+            style={{ marginTop: 3, flexShrink: 0 }}
+          />
+          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
+            <strong>Global</strong> — every team, including teams created later, can select and use it with no admin involvement.
+            <span style={{ display: 'block', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+              Anyone can select and use it; only a System Admin can manage it. Once created, the reach can be
+              changed only by an administrator through the API — this form has no edit control for it.
+            </span>
+          </span>
+        </label>
+      )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         {!saving && <SubmitBlockers label="Save server" reasons={submitBlockers} />}
@@ -227,7 +237,11 @@ function CreateServerForm({ onSave, onCancel, saving, error }) {
                   args: argsText.split('\n').map(s => s.trim()).filter(Boolean),
                   env: parseKeyValue(envText, '='),
                 }),
-            ...ownershipPayload(ownership),
+            // #2169 — no ownership picker on this form: a non-global server
+            // is created with no team assignment at all (system tier, empty
+            // assignedTeamIds) rather than defaulting to a picked team — see
+            // `resolveTieredOwnership` in api.js.
+            ...(isSysAdmin ? { global: isGlobal } : {}),
           })}
           disabled={saving || !canSave}
           style={{
@@ -274,7 +288,7 @@ function CreateCredentialForm({ servers, onSave, onCancel, saving, error }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
       <div style={panelLeadStyle}>
         <span>
-          One secret, stored under its own id and never read back. Mark where it goes with <code style={monoStyle}>{'${credential}'}</code> in a server&apos;s template, then pair the two in a Working Environment.
+          One secret, stored under its own id and never read back. Mark where it goes with <code style={monoStyle}>{'${credential}'}</code> in a server&apos;s template, then pair the two in an environment.
         </span>
         <PageHelpButton
           label="How the credential store and ${credential} substitution work"
@@ -412,6 +426,21 @@ export default function McpServers() {
   const SERVER_COLUMNS = [
     { key: 'id', label: 'ID', render: v => <span style={monoStyle}>{v}</span> },
     { key: 'name', label: 'Name' },
+    // #2158: the reach column the MCP table never had (E9's own flag).
+    // `global` is a DERIVED field on the list projection (AC8) — never an
+    // echoed raw flag — so this can never show a badge for a record that has
+    // stopped qualifying. Nothing more than the badge: no scope/team detail
+    // travels on this projection, and Administration → Resources gains no
+    // MCP section (scope-out).
+    { key: 'global', label: 'Reach', render: v => v
+      ? (
+        <span title="Available to every user and agent — no team required" style={{
+          display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)', fontSize: 'var(--eb-text-xs)',
+          background: 'var(--eb-accent-subtle, var(--eb-bg-elevated))', color: 'var(--eb-accent, var(--eb-text-secondary))',
+          fontWeight: 'var(--eb-font-medium)',
+        }}>Global</span>
+      )
+      : <span style={{ color: 'var(--eb-text-muted)' }}>—</span> },
     { key: 'transport', label: 'Transport' },
     { key: 'command', label: 'Command/URL', render: (_, r) => (
       <span style={monoStyle}>
@@ -441,7 +470,7 @@ export default function McpServers() {
         </span>
       </span>
     ), render: v => v
-      ? <span title="This server's template references ${credential} — bind a credential in the Working Environment.">required</span>
+      ? <span title="This server's template references ${credential} — bind a credential in the environment.">required</span>
       : '—' },
     { key: '_actions', label: '', sortable: false, render: (_, row) => (
       <div onClick={e => e.stopPropagation()}><IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteServer(row)} /></div>
@@ -488,7 +517,7 @@ export default function McpServers() {
       }}>
         <span>
           Runtime knowledge sources and tools agents can query through the Model Context Protocol — a
-          catalog of servers, a separate store for their secrets, and a Working Environment that pairs the two.
+          catalog of servers, a separate store for their secrets, and an environment that pairs the two.
         </span>
         <PageHelpButton
           label="How MCP servers and credentials fit together"
@@ -571,7 +600,7 @@ export default function McpServers() {
       <ConfirmDialog
         open={!!deleteServer}
         title="Delete MCP server"
-        message={`Really delete "${deleteServer?.name || deleteServer?.id}"? Working Environments using it must detach it first.`}
+        message={`Really delete "${deleteServer?.name || deleteServer?.id}"? Environments using it must detach it first.`}
         variant="danger"
         confirmLabel="Delete"
         onConfirm={doDeleteServer}
@@ -580,7 +609,7 @@ export default function McpServers() {
       <ConfirmDialog
         open={!!deleteCred}
         title="Delete MCP credential"
-        message={`Really delete "${deleteCred?.name || deleteCred?.id}"? Working Environments using it must detach it first.`}
+        message={`Really delete "${deleteCred?.name || deleteCred?.id}"? Environments using it must detach it first.`}
         variant="danger"
         confirmLabel="Delete"
         onConfirm={doDeleteCred}

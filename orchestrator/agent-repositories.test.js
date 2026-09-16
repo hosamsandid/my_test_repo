@@ -307,7 +307,7 @@ test("AC8: an inherited repository is refused with the environment named as the 
   });
   assert.strictEqual(plan.ok, false);
   assert.strictEqual(plan.code, "environment-repository");
-  assert.match(plan.message, /Working Environment/);
+  assert.match(plan.message, /environment/i);
 });
 
 test("an unknown url is a refusal, not a silent success", () => {

@@ -216,3 +216,47 @@ test('runCopilot checks the signal at the top of every iteration (AC9)', () => {
     + `found ${matches.length}`,
   );
 });
+
+// ── #2131: the failure card reads as guidance, not as a transport dump ───────
+
+test('the error card renders the guidance hints and demotes the raw detail', () => {
+  const s = code(PANEL);
+  const row = s.slice(s.indexOf('function ErrorRow'), s.indexOf('function BundleSizeHint'));
+  assert.ok(row.length > 0, 'ErrorRow not found — this guard needs re-pointing');
+  // The headline is the classifier's own message, so the plain-language copy
+  // lives in one place (flow-copilot-view.js) rather than being re-worded here.
+  assert.match(row, /\{entry\.message\}/);
+  assert.match(row, /entry\.hints/, 'the actionable hints must actually render');
+  assert.match(row, /hints\.map/);
+  // The raw transport string is available but subordinate: inside a <details>,
+  // never as the card's own headline.
+  assert.match(row, /entry\.detail/);
+  assert.match(row, /<details/);
+  // The old hardcoded timeout sentence is gone — it lived here as a second,
+  // drifting copy of guidance that now belongs to the pure module.
+  assert.doesNotMatch(row, /The LLM call timed out/);
+});
+
+test('the route emits the stable failure code the card classifies on', () => {
+  const s = code(ROUTE);
+  assert.match(s, /const failure = classifyTurnFailure\(err\);/);
+  assert.match(s, /code: failure\.code/);
+});
+
+test('the client classifies on the server code, not only on the message', () => {
+  const s = code('./flow-copilot-view.js');
+  assert.match(s, /export function copilotErrorInfo\(status, message, code\)/);
+  assert.match(s, /TIMEOUT_CODES\.has\(code\)/);
+  // ...and the provider actually forwards it off the thrown error.
+  assert.match(code(PROVIDER), /copilotErrorInfo\(e\.status, e\.message, e\.copilotCode\)/);
+});
+
+test('the split generation is a fallback, never a guess about size', () => {
+  const s = code(LOOP);
+  // It runs only after a timeout-class failure of the first call, which is what
+  // keeps small and medium flows on a byte-identical path (AC4).
+  assert.match(s, /attempt === 0 && !best && !generatedInParts/);
+  assert.match(s, /canGenerateInParts\(baseBundle\) && isTimeoutFailure\(err\)/);
+  // No prompt-length / role-count heuristic decides it.
+  assert.doesNotMatch(s, /messages[\s\S]{0,40}\.length\s*>\s*\d{3}/);
+});

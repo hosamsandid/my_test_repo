@@ -11,6 +11,9 @@ const assert = require("node:assert/strict");
 const {
   operationPrefersPersonal,
   resolveAgentOwnerId,
+  resolveEffectiveOwnerId,
+  resolveBaselineOwnerId,
+  isActingSenderTrusted,
   findPersonalCredential,
   findPersonalCredentialState,
   resolveCredential,
@@ -57,12 +60,157 @@ test("resolveAgentOwnerId: member's own ownerId wins when set; falls back to par
 // ── operation classification (AC7) ──────────────────────────────────────────
 
 test("operationPrefersPersonal: attributed writes prefer personal, reads/poll do not", () => {
-  for (const op of ["commit", "pr", "review", "push-https"]) {
+  // push-ssh joined the attributed set in #2175 (B3) once resolveAttributedSshKey
+  // existed to prefer a personal SSH key for it — see the ATTRIBUTED_OPERATIONS
+  // comment.
+  for (const op of ["commit", "pr", "review", "push-https", "push-ssh"]) {
     assert.equal(operationPrefersPersonal(op), true, op);
   }
-  for (const op of ["clone", "poll", "probe", "push-ssh", "anything"]) {
+  for (const op of ["clone", "poll", "probe", "anything"]) {
     assert.equal(operationPrefersPersonal(op), false, op);
   }
+});
+
+// ── acting-sender re-keying (#2175, epic #2166 B3) ──────────────────────────
+
+test("resolveEffectiveOwnerId: prefers the acting sender's userId when present", () => {
+  const cfg = { role: "agent", ownerId: "u-team-creator" };
+  assert.equal(resolveEffectiveOwnerId(cfg, () => null, "u-chatting-human"), "u-chatting-human");
+});
+
+test("resolveEffectiveOwnerId: falls back to the static owner with no acting sender (autonomous runs unaffected)", () => {
+  const cfg = { role: "agent", ownerId: "u-team-creator" };
+  assert.equal(resolveEffectiveOwnerId(cfg, () => null, null), "u-team-creator");
+  assert.equal(resolveEffectiveOwnerId(cfg, () => null, undefined), "u-team-creator");
+  assert.equal(resolveEffectiveOwnerId(cfg, () => null, ""), "u-team-creator");
+});
+
+test("resolveEffectiveOwnerId: a team-member without an acting sender still resolves through its parent (AC4 unchanged)", () => {
+  const load = () => ({ role: "team", ownerId: "u-parent" });
+  assert.equal(
+    resolveEffectiveOwnerId({ role: "team-member", parentTeamId: "squad" }, load, null),
+    "u-parent",
+  );
+});
+
+// ── the team-admin BASELINE (#2176, epic #2166 B4) ──────────────────────────
+
+test("resolveBaselineOwnerId: a team-bounded agent defers to the CURRENT team-admin, not the static creator ownerId", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const users = [{ id: "u-creator" }, { id: "u-newadmin" }];
+  // A D4 succession demoted the creator and promoted someone else — the
+  // creator no longer holds a `team-admin` membership at all.
+  const memberships = [
+    { userId: "u-newadmin", teamId: "squad", role: "team-admin", createdAt: "2020-02-01" },
+    { userId: "u-creator", teamId: "squad", role: "team-member", createdAt: "2020-01-01" },
+  ];
+  assert.equal(resolveBaselineOwnerId(cfg, { users, memberships }), "u-newadmin");
+});
+
+test("resolveBaselineOwnerId: a team-member resolves the admin of its PARENT team", () => {
+  const cfg = { role: "team-member", parentTeamId: "squad" };
+  const users = [{ id: "u-admin" }];
+  const memberships = [{ userId: "u-admin", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }];
+  assert.equal(resolveBaselineOwnerId(cfg, { users, memberships }), "u-admin");
+});
+
+test("resolveBaselineOwnerId: a standalone agent has no team boundary — falls back to its own static owner", () => {
+  const cfg = { role: "agent", ownerId: "u-alice" };
+  assert.equal(resolveBaselineOwnerId(cfg, {}), "u-alice");
+  assert.equal(resolveBaselineOwnerId(cfg), "u-alice");
+});
+
+test("resolveBaselineOwnerId: no membership data available degrades to the static owner (fail-open)", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  // Same fail-open direction as `buildLiveUserGate`: an unreadable/absent
+  // membership snapshot must not disable resolution, only widen it once real
+  // data is supplied.
+  assert.equal(resolveBaselineOwnerId(cfg, {}), "u-creator");
+  assert.equal(resolveBaselineOwnerId(cfg), "u-creator");
+  assert.equal(resolveBaselineOwnerId(cfg, { users: [], memberships: [] }), "u-creator");
+});
+
+test("resolveEffectiveOwnerId: with no acting sender, resolves the team-admin baseline once membership data is supplied", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const users = [{ id: "u-newadmin" }];
+  const memberships = [{ userId: "u-newadmin", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }];
+  assert.equal(
+    resolveEffectiveOwnerId(cfg, () => null, null, { users, memberships }),
+    "u-newadmin",
+  );
+  // An acting sender still wins outright — B4 only changes the AUTONOMOUS
+  // fallback, never overriding B3's interactive re-keying.
+  assert.equal(
+    resolveEffectiveOwnerId(cfg, () => null, "u-chatting-human", { users, memberships }),
+    "u-chatting-human",
+  );
+});
+
+test("resolveEffectiveOwnerId: omitting baselineDeps reproduces the pre-B4 static-owner answer exactly", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  assert.equal(resolveEffectiveOwnerId(cfg, () => null, null), "u-creator");
+});
+
+// ── acting-sender TRUST boundary (#2187 review finding) ─────────────────────
+//
+// `resolveEffectiveOwnerId` trusts `actingSenderUserId` unconditionally, so
+// the caller (orchestrator.js's `resolveActingSenderUserId`) MUST filter a
+// resolved user through `isActingSenderTrusted` first. These pin the actual
+// security boundary — not just that a sender is threaded through, but that an
+// UNRELATED platform user can never be selected.
+
+test("isActingSenderTrusted: a member of the team-agent's own team is trusted", () => {
+  const cfg = { role: "team", id: "squad" };
+  const hasMembership = (teamId, userId) => teamId === "squad" && userId === "u-alice";
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", hasMembership), true);
+});
+
+test("isActingSenderTrusted: a team-member resolves the boundary to its PARENT team, not its own id", () => {
+  const cfg = { role: "team-member", id: "squad-dev", parentTeamId: "squad" };
+  let queriedTeamId = null;
+  const hasMembership = (teamId, userId) => { queriedTeamId = teamId; return userId === "u-alice"; };
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", hasMembership), true);
+  assert.equal(queriedTeamId, "squad", "must check membership of the PARENT team, never the member's own id");
+});
+
+test("isActingSenderTrusted: THE ACTUAL FINDING — a real platform user with no relationship to this team is refused", () => {
+  const cfg = { role: "team", id: "squad" };
+  // u-mallory resolves to a real user (that is exactly the vulnerable case —
+  // an installation-wide lookup with no boundary), but is not a member of
+  // this agent's team.
+  const hasMembership = (teamId, userId) => teamId === "squad" && userId === "u-alice";
+  assert.equal(isActingSenderTrusted(cfg, "u-mallory", hasMembership), false);
+});
+
+test("isActingSenderTrusted: no membership lookup injected → fails closed, never trusts by default", () => {
+  const cfg = { role: "team", id: "squad" };
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", undefined), false);
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", null), false);
+});
+
+test("isActingSenderTrusted: a standalone agent (no team boundary, D8) trusts ONLY its own owner", () => {
+  const cfg = { role: "agent", ownerId: "u-alice" };
+  // No hasMembership call should even matter here — the standalone branch
+  // never reaches it. Passing a lookup that would say "yes to anyone" proves
+  // the owner check is what actually gates this, not an unreachable no-op.
+  const wouldTrustAnyone = () => true;
+  assert.equal(isActingSenderTrusted(cfg, "u-alice", wouldTrustAnyone), true);
+  assert.equal(isActingSenderTrusted(cfg, "u-bob", wouldTrustAnyone), false, "wrong owner must be refused even if a membership lookup would have said yes");
+});
+
+test("isActingSenderTrusted: a standalone agent with no ownerId trusts nobody (fail closed)", () => {
+  assert.equal(isActingSenderTrusted({ role: "agent" }, "u-alice", () => true), false);
+});
+
+test("isActingSenderTrusted: no userId is always refused, regardless of shape", () => {
+  assert.equal(isActingSenderTrusted({ role: "team", id: "squad" }, null, () => true), false);
+  assert.equal(isActingSenderTrusted({ role: "team", id: "squad" }, "", () => true), false);
+  assert.equal(isActingSenderTrusted(null, "u-alice", () => true), false);
+});
+
+test("isActingSenderTrusted: a broken/unresolvable config (no team, no owner) trusts nobody", () => {
+  assert.equal(isActingSenderTrusted({ role: "team-member" }, "u-alice", () => true), false);
+  assert.equal(isActingSenderTrusted({}, "u-alice", () => true), false);
 });
 
 // ── personal credential lookup ───────────────────────────────────────────────
@@ -150,7 +298,7 @@ test("resolveCredential: owner + attributed write + unusable personal → refuse
 // today. This is the branch every existing agent lands in once the D6 backfill
 // stamps its `ownerId`; refusing here would stop every agent opening a PR.
 test("resolveCredential: owner + attributed write + owner has no personal credential → shared (#2077 AC7)", () => {
-  for (const operation of ["commit", "pr", "review", "push-https"]) {
+  for (const operation of ["commit", "pr", "review", "push-https", "push-ssh"]) {
     assert.deepEqual(
       resolveCredential({
         operation,
@@ -174,9 +322,85 @@ test("resolveCredential: an omitted personalCredentialPresent never refuses (#20
   );
 });
 
+// ── #2176 (epic #2166 B4): just-in-time refusal for INTERACTIVE writes ──────
+
+test("resolveCredential: INTERACTIVE attributed write + owner has NO personal credential at all → refuse (B4 widening)", () => {
+  for (const operation of ["commit", "pr", "review", "push-https", "push-ssh"]) {
+    const r = resolveCredential({
+      operation,
+      ownerId: "u-alice",
+      personalCredential: null,
+      personalCredentialPresent: false,
+      sharedCredentialId: "team-1",
+      interactive: true,
+    });
+    assert.ok(r.refuse, operation);
+    assert.equal(r.refuse.code, "personal-credential-required", operation);
+    assert.match(r.refuse.message, /u-alice/, operation);
+  }
+});
+
+test("resolveCredential: AUTONOMOUS (non-interactive) attributed write with no personal credential is UNAFFECTED — still shared, no refusal (B4 AC)", () => {
+  for (const operation of ["commit", "pr", "review", "push-https", "push-ssh"]) {
+    assert.deepEqual(
+      resolveCredential({
+        operation,
+        ownerId: "u-alice",
+        personalCredential: null,
+        personalCredentialPresent: false,
+        sharedCredentialId: "team-1",
+        interactive: false, // the default — an explicit autonomous run
+      }),
+      { tier: "shared", credentialId: "team-1" },
+      operation,
+    );
+  }
+});
+
+test("resolveCredential: interactive does not widen an already-usable personal credential (AC1 unaffected)", () => {
+  const r = resolveCredential({
+    operation: "pr",
+    ownerId: "u-alice",
+    personalCredential: { id: "pers-alice" },
+    sharedCredentialId: "team-1",
+    interactive: true,
+  });
+  assert.deepEqual(r, { tier: "personal", credentialId: "pers-alice" });
+});
+
+test("resolveCredential: interactive read/poll still falls back to shared even with no personal credential (B4 AC — reads via baseline)", () => {
+  for (const operation of ["clone", "poll", "probe"]) {
+    assert.deepEqual(
+      resolveCredential({
+        operation,
+        ownerId: "u-alice",
+        personalCredential: null,
+        personalCredentialPresent: false,
+        sharedCredentialId: "team-1",
+        interactive: true,
+      }),
+      { tier: "shared", credentialId: "team-1" },
+      operation,
+    );
+  }
+});
+
+test("resolveCredential: interactive + present-but-unusable still refuses with the ordinary (non-orphan) message", () => {
+  const r = resolveCredential({
+    operation: "pr",
+    ownerId: "u-alice",
+    personalCredential: null,
+    personalCredentialPresent: true,
+    sharedCredentialId: "team-1",
+    interactive: true,
+  });
+  assert.ok(r.refuse);
+  assert.equal(r.refuse.code, "personal-credential-required");
+});
+
 // AC2 second half / AC7: owner, no personal, but a SHARED-eligible op → shared, no refusal.
 test("resolveCredential: owner + read/poll + no personal → shared, no refusal (AC2/AC7)", () => {
-  for (const operation of ["clone", "poll", "probe", "push-ssh"]) {
+  for (const operation of ["clone", "poll", "probe"]) {
     assert.deepEqual(
       resolveCredential({
         operation,
@@ -220,10 +444,12 @@ test("resolveCredential: refusal message names the credential kind", () => {
 
 test("findPersonalCredentialState: absent → not present, no entry", () => {
   const index = [{ id: "team-1", scope: "team", teamId: "t" }];
-  assert.deepEqual(findPersonalCredentialState(index, "u-alice"), { entry: null, present: false });
+  // `orphaned` (#2138 AC6) is a third, independent axis: "the credential is
+  // there but its owner is not a live user". It is false in every state below.
+  assert.deepEqual(findPersonalCredentialState(index, "u-alice"), { entry: null, present: false, orphaned: false });
   // No owner and a non-array index are both "not present".
-  assert.deepEqual(findPersonalCredentialState(index, null), { entry: null, present: false });
-  assert.deepEqual(findPersonalCredentialState(null, "u-alice"), { entry: null, present: false });
+  assert.deepEqual(findPersonalCredentialState(index, null), { entry: null, present: false, orphaned: false });
+  assert.deepEqual(findPersonalCredentialState(null, "u-alice"), { entry: null, present: false, orphaned: false });
 });
 
 test("findPersonalCredentialState: usable → present with the entry", () => {
@@ -237,7 +463,8 @@ test("findPersonalCredentialState: present but rejected by isUsable → present,
   const index = [{ id: "pers-alice", scope: "personal", userId: "u-alice", underscoped: true }];
   assert.deepEqual(
     findPersonalCredentialState(index, "u-alice", (e) => !e.underscoped),
-    { entry: null, present: true },
+    // Underscoped, not orphaned — the two refusals have different remedies.
+    { entry: null, present: true, orphaned: false },
   );
 });
 
@@ -321,4 +548,369 @@ test("selectPersonalCredentialIds: null/empty owner, non-array, or entry without
   assert.deepEqual(selectPersonalCredentialIds(index, ""), []);
   assert.deepEqual(selectPersonalCredentialIds(null, "u-alice"), []);
   assert.deepEqual(selectPersonalCredentialIds([{ scope: "personal", userId: "u-alice" }], "u-alice"), []);
+});
+
+// ── #2138 AC6: a credential whose owner no longer exists must not resolve ────
+//
+// The bug this closes: from 2026-08-11 to the #2135 fix, deleting a user never
+// ran `offboardOwner`, so their personal PAT stayed on disk. `scope` + `userId`
+// still matched here, the entry was usable, and the departed person's agents
+// kept pushing under it — with NO refusal, because the refusal branch needs a
+// credential that is present but UNUSABLE and this one worked fine.
+//
+// The gate is the containment layer: it does not need the offboarding path to
+// have succeeded, which is exactly why it is worth having.
+
+const {
+  buildLiveUserGate,
+  selectOrphanedOwnerIds,
+  buildOrphanRefusal,
+} = require("./credential-resolution");
+
+const LIVE = buildLiveUserGate([{ id: "u-alice" }, { id: "u-bob" }]);
+
+test("buildLiveUserGate: an empty or unreadable user list is UNKNOWN, never 'nobody is live'", () => {
+  // teams-store's readArray answers [] for a malformed file exactly as it does
+  // for an empty one, and a booted stack always has the seeded System Admin —
+  // so treating [] as authoritative would refuse every attributed write at once.
+  for (const input of [[], null, undefined, "not-an-array", [{ id: "" }, { noId: 1 }]]) {
+    const gate = buildLiveUserGate(input);
+    assert.equal(gate.known, false, JSON.stringify(input));
+    assert.equal(gate.isLive("u-anyone"), true, "an unknown gate must answer 'live' for everyone");
+  }
+  assert.equal(LIVE.known, true);
+  assert.equal(LIVE.isLive("u-alice"), true);
+  assert.equal(LIVE.isLive("u-ghost"), false);
+});
+
+test("findPersonalCredentialState: an orphaned credential is present-but-unusable", () => {
+  const orphaned = [{ id: "pers-ghost", scope: "personal", userId: "u-ghost" }];
+
+  const state = findPersonalCredentialState(orphaned, "u-ghost", undefined, LIVE);
+  assert.equal(state.entry, null, "an orphan must never be handed back as usable");
+  assert.equal(state.present, true, "…but it IS present — that is what makes the write refuse");
+  assert.equal(state.orphaned, true);
+
+  // A live owner is untouched.
+  const alive = findPersonalCredentialState(index, "u-alice", undefined, LIVE);
+  assert.equal(alive.entry.id, "pers-alice");
+  assert.equal(alive.orphaned, false);
+});
+
+test("findPersonalCredentialState: the owner's absence outranks isUsable", () => {
+  // The disqualifier is that nobody is behind the credential, not its scopes —
+  // so an `isUsable` that says yes must not resurrect it.
+  const orphaned = [{ id: "pers-ghost", scope: "personal", userId: "u-ghost", scopes: ["repo"] }];
+  const alwaysUsable = () => true;
+  const state = findPersonalCredentialState(orphaned, "u-ghost", alwaysUsable, LIVE);
+  assert.equal(state.entry, null);
+  assert.equal(state.orphaned, true);
+});
+
+test("findPersonalCredentialState: NO gate is pre-#2138 behaviour, byte for byte", () => {
+  // The fail-open direction, stated as a test: an unreadable user index must
+  // not turn every personal credential on the installation into a refusal.
+  const orphaned = [{ id: "pers-ghost", scope: "personal", userId: "u-ghost" }];
+  for (const gate of [undefined, null, buildLiveUserGate([]), { known: false }]) {
+    const state = findPersonalCredentialState(orphaned, "u-ghost", undefined, gate);
+    assert.equal(state.entry?.id, "pers-ghost", `gate=${JSON.stringify(gate)}`);
+    assert.equal(state.present, true);
+    assert.equal(state.orphaned, false);
+  }
+});
+
+test("resolveCredential: an orphaned credential REFUSES an attributed write", () => {
+  const decision = resolveCredential({
+    operation: "pr",
+    ownerId: "u-ghost",
+    personalCredential: null,
+    personalCredentialPresent: true,
+    personalCredentialOrphaned: true,
+    sharedCredentialId: "team-1",
+  });
+  assert.ok(decision.refuse, "the departed human's PAT must not silently keep working");
+  assert.equal(decision.refuse.code, "owner-not-a-live-user");
+  assert.notEqual(decision.credentialId, "team-1");
+  // The remedy differs from the ordinary refusal, so the message must too:
+  // nobody can "add a personal token" for a user record that is gone.
+  assert.doesNotMatch(decision.refuse.message, /My Credentials page/);
+  assert.match(decision.refuse.message, /revoke it at GitHub/i);
+  assert.notEqual(buildOrphanRefusal("u-ghost", "GitHub token").code, "personal-credential-required");
+});
+
+test("resolveCredential: an orphan still lets a READ take the shared credential", () => {
+  // Refuse-on-missing is per operation class. A clone/poll is shared-eligible,
+  // and refusing it would take a whole flow offline over a stale index entry.
+  for (const op of ["clone", "poll", "probe"]) {
+    const decision = resolveCredential({
+      operation: op,
+      ownerId: "u-ghost",
+      personalCredentialPresent: true,
+      personalCredentialOrphaned: true,
+      sharedCredentialId: "team-1",
+    });
+    assert.equal(decision.refuse, undefined, op);
+    assert.equal(decision.tier, "shared", op);
+    assert.equal(decision.credentialId, "team-1", op);
+  }
+});
+
+// ── #2138 AC1/AC2: which owners still need their offboarding replayed ────────
+
+test("selectOrphanedOwnerIds: finds deleted owners holding credentials or agents", () => {
+  const keys = [
+    { id: "k-alice", scope: "personal", userId: "u-alice" },   // live → not selected
+    { id: "k-ghost", scope: "personal", userId: "u-ghost" },   // orphan
+    { id: "k-team", scope: "team", teamId: "default", userId: "u-ghost" }, // not personal
+  ];
+  const tokens = [{ id: "t-ghost2", scope: "personal", userId: "u-ghost2" }];
+  const configs = { squad: { role: "team", ownerId: "u-ghost3" } };
+  const agents = [
+    { id: "squad", cfg: configs.squad },
+    { id: "squad-dev", cfg: { role: "team-member", parentTeamId: "squad" } },
+    { id: "solo", cfg: { role: "agent", ownerId: "u-alice" } },
+  ];
+
+  const ids = selectOrphanedOwnerIds({
+    credentialIndexes: [keys, tokens],
+    agents,
+    loadAgentConfig: (id) => configs[id] || null,
+    liveUsers: LIVE,
+  });
+
+  assert.deepEqual(ids, ["u-ghost", "u-ghost2", "u-ghost3"], "credential owners first, then agent owners, deduped");
+});
+
+test("selectOrphanedOwnerIds: a team/system credential is never a reason to sweep", () => {
+  const ids = selectOrphanedOwnerIds({
+    credentialIndexes: [[{ id: "sys-1", scope: "system", userId: "u-ghost" }]],
+    liveUsers: LIVE,
+  });
+  assert.deepEqual(ids, [], "shared infrastructure is not offboarded with a person (#1571 AC3)");
+});
+
+test("selectOrphanedOwnerIds: an UNKNOWN live-user gate sweeps nothing", () => {
+  // The dangerous direction. With nobody known to be live, "not a live user" is
+  // true of everyone and a sweep on that belief drains the whole installation.
+  const keys = [{ id: "k-alice", scope: "personal", userId: "u-alice" }];
+  const agents = [{ id: "solo", cfg: { role: "agent", ownerId: "u-alice" } }];
+  for (const gate of [undefined, null, buildLiveUserGate([]), { known: false, isLive: () => false }]) {
+    assert.deepEqual(
+      selectOrphanedOwnerIds({ credentialIndexes: [keys], agents, liveUsers: gate }),
+      [],
+      `gate=${JSON.stringify(gate)}`,
+    );
+  }
+});
+
+// ── #2177 (epic #2166 B5): the baseline re-interpretation of a "shared"
+// binding for a non-attributed, non-interactive operation (container spawn,
+// the first clone at team/agent creation) ──────────────────────────────────
+//
+// `orchestrator.js`'s `resolveBaselineGithubTokenId` is a thin wrapper
+// composing exactly the three pure calls exercised below (`resolveBaselineOwnerId`
+// → `findPersonalCredentialState` → `resolveCredential` with an operation
+// OUTSIDE `ATTRIBUTED_OPERATIONS`, e.g. `"spawn"`). These tests pin that
+// composition's behaviour directly, since the wrapper itself is fs-bound and
+// can only be guarded by a source-reading wiring test (see
+// `baseline-github-token-wiring.test.js`).
+//
+// This is the "migrate existing team/system credential bindings to this
+// model" AC: nothing on disk changes — an existing `env.githubTokenId` (a
+// team/system-scope token, exactly what every environment carries today)
+// keeps resolving to itself when nobody has a personal credential, and
+// AUTOMATICALLY starts resolving to the team's current team-admin's personal
+// credential the moment one exists, with no redeploy and no data migration.
+function resolveBaselineGithubTokenIdForTest({ cfg, users, memberships, tokenIndex, sharedCredentialId }) {
+  const ownerId = resolveBaselineOwnerId(cfg, { users, memberships });
+  const personal = findPersonalCredentialState(tokenIndex || [], ownerId);
+  const decision = resolveCredential({
+    operation: "spawn",
+    ownerId,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
+    personalCredentialOrphaned: personal.orphaned,
+    sharedCredentialId: sharedCredentialId || null,
+    kind: "GitHub token",
+  });
+  return decision.credentialId || null;
+}
+
+test("B5 migration: an existing shared/system binding is unchanged when nobody has a personal credential", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const resolved = resolveBaselineGithubTokenIdForTest({
+    cfg,
+    users: [{ id: "u-creator" }],
+    memberships: [{ userId: "u-creator", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }],
+    tokenIndex: [],
+    sharedCredentialId: "tok-shared-legacy",
+  });
+  assert.equal(resolved, "tok-shared-legacy", "an unmigrated binding must keep working exactly as before (AC8)");
+});
+
+test("B5 migration: the SAME binding automatically re-resolves to the team-admin's personal token once one exists", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const resolved = resolveBaselineGithubTokenIdForTest({
+    cfg,
+    users: [{ id: "u-creator" }],
+    memberships: [{ userId: "u-creator", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }],
+    tokenIndex: [{ id: "tok-personal-creator", scope: "personal", userId: "u-creator" }],
+    sharedCredentialId: "tok-shared-legacy",
+  });
+  assert.equal(resolved, "tok-personal-creator", "the field's meaning re-interprets to the baseline pointer — no data edit needed");
+});
+
+test("B5 migration: a D4 succession moves the baseline WITHOUT redeploying the agent or touching env.githubTokenId", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const users = [{ id: "u-creator" }, { id: "u-newadmin" }];
+  const memberships = [
+    { userId: "u-newadmin", teamId: "squad", role: "team-admin", createdAt: "2020-02-01" },
+    { userId: "u-creator", teamId: "squad", role: "team-member", createdAt: "2020-01-01" },
+  ];
+  const tokenIndex = [
+    { id: "tok-personal-creator", scope: "personal", userId: "u-creator" },
+    { id: "tok-personal-newadmin", scope: "personal", userId: "u-newadmin" },
+  ];
+  const resolved = resolveBaselineGithubTokenIdForTest({ cfg, users, memberships, tokenIndex, sharedCredentialId: "tok-shared-legacy" });
+  assert.equal(resolved, "tok-personal-newadmin", "the CURRENT team-admin's credential wins, not the demoted creator's");
+});
+
+test("B5 migration: a team-member resolves through its parent team's baseline, same as the container-spawn path uses", () => {
+  const users = [{ id: "u-admin" }];
+  const memberships = [{ userId: "u-admin", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }];
+  const tokenIndex = [{ id: "tok-personal-admin", scope: "personal", userId: "u-admin" }];
+  const resolved = resolveBaselineGithubTokenIdForTest({
+    cfg: { role: "team-member", parentTeamId: "squad" },
+    users,
+    memberships,
+    tokenIndex,
+    sharedCredentialId: "tok-shared-legacy",
+  });
+  assert.equal(resolved, "tok-personal-admin");
+});
+
+test("B5 migration: a standalone (unowned) agent's binding never refuses and never needs a personal credential", () => {
+  const resolved = resolveBaselineGithubTokenIdForTest({
+    cfg: { role: "agent" },
+    users: [],
+    memberships: [],
+    tokenIndex: [],
+    sharedCredentialId: "tok-shared-legacy",
+  });
+  assert.equal(resolved, "tok-shared-legacy", "no owner anywhere → shared, unchanged, never a refusal (AC8)");
+});
+
+test("B5 migration: an owner whose personal credential is present but rejected by isUsable still falls back to shared, never refuses", () => {
+  // `operation: 'spawn'` is not in ATTRIBUTED_OPERATIONS, so unlike an
+  // attributed write this can NEVER reach resolveCredential's refuse branch —
+  // a container must always have a working path to spawn.
+  const cfg = { role: "agent", ownerId: "u-alice" };
+  const decision = resolveCredential({
+    operation: "spawn",
+    ownerId: "u-alice",
+    personalCredential: null,
+    personalCredentialPresent: true, // present but the caller's isUsable check rejected it
+    sharedCredentialId: "tok-shared-legacy",
+    kind: "GitHub token",
+  });
+  assert.deepEqual(decision, { tier: "shared", credentialId: "tok-shared-legacy" });
+});
+
+// ── #2212 (review finding on #2177/#2212, epic #2166 B5): the SSH-key half
+// of the same re-interpretation. The issue's own AC names "`env.githubTokenId`
+// (and per-repo `sshKeyId`)" together; #2212 shipped only the GitHub-token
+// wrapper. `orchestrator.js`'s `resolveBaselineSshKeyId` composes the exact
+// same three pure calls as `resolveBaselineGithubTokenIdForTest` above, only
+// with `kind: "SSH key"` — these mirror that section's cases rather than
+// re-deriving new ones, since the underlying pure core is credential-kind-
+// agnostic.
+function resolveBaselineSshKeyIdForTest({ cfg, users, memberships, keyIndex, sharedSshKeyId }) {
+  if (!cfg) return sharedSshKeyId || null;
+  const ownerId = resolveBaselineOwnerId(cfg, { users, memberships });
+  const personal = findPersonalCredentialState(keyIndex || [], ownerId);
+  const decision = resolveCredential({
+    operation: "spawn",
+    ownerId,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
+    personalCredentialOrphaned: personal.orphaned,
+    sharedCredentialId: sharedSshKeyId || null,
+    kind: "SSH key",
+  });
+  return decision.credentialId || null;
+}
+
+test("B5 migration (SSH): an existing shared/env deploy key is unchanged when nobody has a personal SSH key", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const resolved = resolveBaselineSshKeyIdForTest({
+    cfg,
+    users: [{ id: "u-creator" }],
+    memberships: [{ userId: "u-creator", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }],
+    keyIndex: [],
+    sharedSshKeyId: "key-shared-legacy",
+  });
+  assert.equal(resolved, "key-shared-legacy", "an unmigrated binding must keep working exactly as before (AC8)");
+});
+
+test("B5 migration (SSH): the SAME binding automatically re-resolves to the team-admin's personal key once one exists", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const resolved = resolveBaselineSshKeyIdForTest({
+    cfg,
+    users: [{ id: "u-creator" }],
+    memberships: [{ userId: "u-creator", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }],
+    keyIndex: [{ id: "key-personal-creator", scope: "personal", userId: "u-creator" }],
+    sharedSshKeyId: "key-shared-legacy",
+  });
+  assert.equal(resolved, "key-personal-creator", "the field's meaning re-interprets to the baseline pointer — no data edit needed");
+});
+
+test("B5 migration (SSH): a D4 succession moves the baseline WITHOUT redeploying the agent or touching the env's repo sshKeyId", () => {
+  const cfg = { role: "team", id: "squad", ownerId: "u-creator" };
+  const users = [{ id: "u-creator" }, { id: "u-newadmin" }];
+  const memberships = [
+    { userId: "u-newadmin", teamId: "squad", role: "team-admin", createdAt: "2020-02-01" },
+    { userId: "u-creator", teamId: "squad", role: "team-member", createdAt: "2020-01-01" },
+  ];
+  const keyIndex = [
+    { id: "key-personal-creator", scope: "personal", userId: "u-creator" },
+    { id: "key-personal-newadmin", scope: "personal", userId: "u-newadmin" },
+  ];
+  const resolved = resolveBaselineSshKeyIdForTest({ cfg, users, memberships, keyIndex, sharedSshKeyId: "key-shared-legacy" });
+  assert.equal(resolved, "key-personal-newadmin", "the CURRENT team-admin's key wins, not the demoted creator's");
+});
+
+test("B5 migration (SSH): a team-member resolves through its parent team's baseline, same as the container-spawn path uses", () => {
+  const users = [{ id: "u-admin" }];
+  const memberships = [{ userId: "u-admin", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" }];
+  const keyIndex = [{ id: "key-personal-admin", scope: "personal", userId: "u-admin" }];
+  const resolved = resolveBaselineSshKeyIdForTest({
+    cfg: { role: "team-member", parentTeamId: "squad" },
+    users,
+    memberships,
+    keyIndex,
+    sharedSshKeyId: "key-shared-legacy",
+  });
+  assert.equal(resolved, "key-personal-admin");
+});
+
+test("B5 migration (SSH): a standalone (unowned) agent's binding never refuses and never needs a personal key", () => {
+  const resolved = resolveBaselineSshKeyIdForTest({
+    cfg: { role: "agent" },
+    users: [],
+    memberships: [],
+    keyIndex: [],
+    sharedSshKeyId: "key-shared-legacy",
+  });
+  assert.equal(resolved, "key-shared-legacy", "no owner anywhere → shared, unchanged, never a refusal (AC8)");
+});
+
+test("B5 migration (SSH): a cfg-less spawn (not-yet-persisted config) degrades byte-identically to the raw shared key", () => {
+  const resolved = resolveBaselineSshKeyIdForTest({
+    cfg: null,
+    users: [],
+    memberships: [],
+    keyIndex: [],
+    sharedSshKeyId: "key-shared-legacy",
+  });
+  assert.equal(resolved, "key-shared-legacy");
 });

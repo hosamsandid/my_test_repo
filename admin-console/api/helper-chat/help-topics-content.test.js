@@ -302,83 +302,32 @@ const TOPIC_CONTENT = [
     ],
   },
   {
-    id: 'environments',
-    routes: ['/environments'],
-    // #1880 lifted the "What is a Working Environment?" box: the reusable-recipe
-    // definition, what an agent inherits (repos / token / MCP refs / provider /
-    // additional instructions), the shared-recipe-but-own-workspace point, the
-    // SSH-vs-token rule, read-only repositories and the cloned-at-creation /
-    // Sync-all-agents caveat.
-    //
-    // #1987 (epic #1981) widened it into a per-surface reference: the seven
-    // areas below are each a chapter, and four of them are the landing target of
-    // a "?" on the matching surface, so the headings are load-bearing rather
-    // than decorative.
-    //
-    // #2066 replaced the manual **Sync all agents** action with an offer made at
-    // SAVE time plus a persistent out-of-date badge, so the chapter-2 material
-    // is rewritten around those two surfaces and gains a second `###`.
+    id: 'environment-templates',
+    routes: ['/environment-templates'],
+    // #2170 (epic #2166 A4) retired the general-purpose Working Environments
+    // page and its `environments` topic. What replaced it: an ordinary team
+    // edits its own environment from the Agent Chat Settings tab (that
+    // content folded into `agent-chat.md`); this topic is the NEW, smaller
+    // System-Admin surface — a curated catalog of copy sources for team
+    // creation, never a live-shared binding.
     chapters: [
-      'What a Working Environment is',
+      'What an Environment Template is',
       'Repositories',
       'Credentials',
       'MCP server references',
-      'Model provider binding',
-      'Additional context',
       'Toolchains',
     ],
     concepts: [
-      'reusable workspace recipe',
-      'own isolated workspace',
-      'Git repositories',
-      'GitHub token',
-      'MCP servers',
-      'Model provider',
-      'Additional instructions',
-      'no repository at all',
-      'SSH key',
-      'HTTPS',
-      'Read-only',
-      // #2066: `Sync all agents` and `never re-clones` are retired rather than
-      // reworded — the action is gone and the propagation now DOES fetch,
-      // switch a branch and repoint a remote. What replaces them are the
-      // claims a reader would be harmed by getting wrong: that the save is
-      // committed regardless of the answer, that an unsafe clone is left
-      // untouched rather than fixed, that a removal never deletes anything,
-      // and that the badge is derived from the workspaces rather than
-      // remembered from the last save.
-      'Saving asks',
-      'clean and fully pushed',
-      'left completely alone',
-      'Nothing is stashed, reset or force-checked-out',
-      'Removal never deletes anything',
-      'no pruning',
-      'manual step',
-      'actual workspaces',
-      'never counted',
-      'kept** and reported as retained',
-      // #1987 additions. The first is a CORRECTION of the page, guarded here
-      // because the form's own hint said the opposite: prompt-assembly.js writes
-      // the environment name AND description into the agent's CLAUDE.md, so the
-      // description is not console-only.
-      'read by the agent',
-      // #2051 gave the form an MCP server/credential picker, so the old
-      // "form has no MCP picker" concept is retired rather than reworded — the
-      // load-bearing claim is now the seed-time caveat, which is what stops a
-      // reader expecting an edit to reach agents that already exist.
-      'Pair them on this form',
-      'reaches only agents created afterwards',
-      // What an environment edit does and does not reach — the page's most
-      // surprising behaviour, and the reason the Sync action exists.
-      'What an edit reaches',
-      'recreates its running agents',
-      // Two honest limits of surfaces that look stricter than they are.
-      'advice, not a gate',
-      'an instruction, not a file permission',
-      'refuses the clone',
-      // The toolchain half: the panel, and the pin-file-not-image story.
-      'Toolchains panel',
-      'version manager',
+      'copy source',
+      'never a live-shared binding',
+      'template-not-bindable',
+      'global environment',
+      'own, independent environment',
+      'SSH key is never copied',
+      'never copied',
+      'Nothing you bind to a template travels with it',
+      'credential is never copied',
+      'Toolchains',
     ],
   },
   {
@@ -391,7 +340,7 @@ const TOPIC_CONTENT = [
       'Anthropic Messages API',
       'LiteLLM',
       'catalog',
-      'Working Environment',
+      'Environment default',
       'Agent override',
       'api-key',
       'Bearer header',
@@ -744,17 +693,22 @@ const TOPIC_CONTENT = [
       'one assistant',
       'draft',
       'team of one',
-      'Grow into a full team',
       'creates a new team',
-      // #2052 made "a single agent is a team of one" an operation rather than
-      // only a framing: chapter 2 used to document the dead end (growing could
-      // not convert this assistant) and now has to document the action that
-      // replaced it, plus the one-way-door warning the dialog gives.
-      'Convert into a team',
-      'one-way door',
+      // #2232 (Phase C of epic #2229) retired the manual "Convert into a
+      // team…" action #2052 introduced: every agent is minted as a team of
+      // one from creation since Phase B, and a one-time sweep brought every
+      // agent that predated it up to the same shape. The chapter now
+      // documents growing via Add member instead of a conversion action, plus
+      // the honest Clone/Import edge case and the re-runnable migration sweep
+      // that covers it.
+      'Add member',
+      'team-of-one migration sweep',
       'default branch',
-      'reuses',
-      'Agent reused',
+      // #2071 removed the ungated QuickStart reuse: the fast lane now always
+      // creates a fresh, owner-stamped environment and a fresh agent, so the
+      // chapter documents that instead of "Agent reused"/"Environment reuse".
+      'A fresh environment',
+      'silently reused',
       'not used',
       'Model Provider',
       'SSH key',
@@ -799,7 +753,7 @@ const TOPIC_CONTENT = [
       'Agent Team',
       'access scope',
       'Process',
-      'Working Environment',
+      'Environment',
       'Team ID',
       'Knowledge',
       'Review',
@@ -1008,7 +962,7 @@ const TOPIC_CONTENT = [
       // directory-name collision is refused rather than renamed, that the
       // attachment survives a re-seed, and what removal costs. Each is a
       // question a reader asks BEFORE clicking, so a reword must not lose them.
-      'From Working Environment',
+      'From Environment',
       'This agent only',
       'no credential of its own',
       'refused',

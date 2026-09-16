@@ -7,13 +7,13 @@ The **Model Providers** page (`/models`) manages the LLM endpoints Agent Studio 
 - **Register multiple providers** — e.g. a LiteLLM proxy, an Azure AI Foundry gateway, or the public Anthropic API
 - **Test connection** before saving to verify the provider is reachable and the credentials are valid
 - **Monitor provider health continuously** — a background poller probes each provider on a schedule (default every ~5 minutes) and the **Health** column shows the last-known status (OK, or Error with the reason, or Unknown when never probed) and when it was last checked, so a broken endpoint is visible before an agent runs against it. Saving a provider re-probes it immediately, and an agent whose bound provider is currently unreachable shows a non-blocking warning in its chat.
-- **Discover models** — the console probes the provider's `/v1/models` route and populates the model catalog automatically
+- **Discover models** — the console probes the provider's `/v1/models` route and populates the model catalog automatically. If that route doesn't exist (404/405 — some Anthropic-compatible gateways, e.g. Azure AI Foundry, expose `/v1/messages` but no model-listing route), **Test connection** and **Discover models** both fall back to a free `/v1/messages/count_tokens` probe to confirm the endpoint is reachable and authenticated; Discover models then tells you to enter the model name(s) manually instead of reporting a raw failure
 - **Set a default model** per provider; agents can override this on a per-agent basis from the model selector in the agent's chat header (Agent Chat, `/chats`)
-- **Re-point a group of agents** — Working Environments bind to a provider, so editing one environment redirects all agents in it to a new model without touching each agent individually
+- **Re-point a group of agents** — environments bind to a provider, so editing one environment redirects all agents in it to a new model without touching each agent individually
 
 ## Configuration
 
-The global fallback provider is set via `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` in `.env`. The Model Providers page overrides these at the Working Environment or individual agent level — but an `api-key` provider overrides only the values it actually carries. The agent container inherits the platform's `.env` environment, so a provider saved **without a token of its own repoints the Base URL and leaves the shared `ANTHROPIC_AUTH_TOKEN` in place**: the agent still sends a credential, the platform-wide one, to whatever endpoint you named. Only `oauth-token` providers clear the inherited variables (see below).
+The global fallback provider is set via `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` in `.env`. The Model Providers page overrides these at the environment or individual agent level — but an `api-key` provider overrides only the values it actually carries. The agent container inherits the platform's `.env` environment, so a provider saved **without a token of its own repoints the Base URL and leaves the shared `ANTHROPIC_AUTH_TOKEN` in place**: the agent still sends a credential, the platform-wide one, to whatever endpoint you named. Only `oauth-token` providers clear the inherited variables (see below).
 
 Any endpoint that speaks the Anthropic Messages API is supported. This includes:
 - Direct Anthropic API (`https://api.anthropic.com`)
@@ -57,4 +57,4 @@ For `oauth-token` providers the orchestrator:
 
 ## Model overrides
 
-An individual agent's model can be overridden from the model/provider selector in that agent's chat header in **Agent Chat** (`/chats`) — it is a runtime control, not a form field, so the change applies live rather than on save (switching the *provider* restarts the agent container; switching only the model does not). The Agents page that used to host this was removed in #1930. The per-agent override takes precedence over the Working Environment's default, which in turn takes precedence over the global `.env` setting.
+An individual agent's model can be overridden from the model/provider selector in that agent's chat header in **Agent Chat** (`/chats`) — it is a runtime control, not a form field, so the change applies live rather than on save (switching the *provider* restarts the agent container; switching only the model does not). The Agents page that used to host this was removed in #1930. The per-agent override takes precedence over the environment's default, which in turn takes precedence over the global `.env` setting.

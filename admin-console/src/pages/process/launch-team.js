@@ -33,6 +33,13 @@ export const SUFFIX_HINT = 'Up to 8 lowercase letters, digits and single inner d
 export const TEAM_ID_ERROR = `Team id: ${TEAM_ID_HINT}`;
 export const SUFFIX_ERROR = `Label suffix: ${SUFFIX_HINT}`;
 
+// #2179: a platform with no registered model provider cannot bind ANY new
+// team to a working one — team creation would proceed and 500 on first run.
+// Mirrors the server-side message (admin-console/api/team-provider-check.js)
+// so the client-blocked reason and the 400 a caller would otherwise get read
+// the same.
+export const NO_PROVIDER_ERROR = 'No model provider is set up yet — ask a Team or System Administrator to add one before creating a team.';
+
 // Slug rules shared by both entry points (was duplicated in MaterializeDialog,
 // TeamSetup and LaunchStep's own `slugifyLocal`, all collapsed onto this one —
 // #1934): lowercase, dashes for runs of non-[a-z0-9], no leading/trailing
@@ -120,13 +127,41 @@ export function isRepoLessEnv(env) {
 
 // Final, entry-point-agnostic validation of the launch inputs. Deliberately does
 // NOT require a repository — a repo-less environment is a valid launch target
-// (AC6). Returns the first error string, or null when the inputs are launchable.
-export function validateLaunch({ teamId, teamName, environmentId, labelSuffix } = {}) {
+// (AC6) — and, since #2168 A2, does NOT require an environment at all: leaving
+// `environmentId` empty falls through to `POST /api/teams`'s own repo-less
+// auto-create path (env id = team id), which is what makes "no UI path forces
+// naming or picking an environment" hold for every launch surface, not just the
+// wizard. Returns the first error string, or null when the inputs are launchable.
+// `hasProvider` defaults to `true` (not blocking) so a caller that doesn't
+// yet know the provider-registry state — or an older test fixture — is
+// unaffected; only an explicit `false` (the platform-has-zero-providers case)
+// blocks the launch (#2179).
+export function validateLaunch({ teamId, teamName, labelSuffix, hasProvider = true } = {}) {
   if (!TEAM_ID_RE.test(String(teamId || ''))) return TEAM_ID_ERROR;
   if (!String(teamName || '').trim()) return 'Team name required.';
-  if (!environmentId) return 'Pick a working environment.';
   if (labelSuffix && !SUFFIX_RE.test(labelSuffix)) return SUFFIX_ERROR;
+  if (!hasProvider) return NO_PROVIDER_ERROR;
   return null;
+}
+
+// The SINGLE source for whether the primary Launch button is disabled and WHY
+// (#2157 AC4). Before this, `LaunchStep` computed its own `envBlocking` boolean
+// (`has('environment') && !values.environmentId`) independently of
+// `validateLaunch`'s explanation — so the disabled state and the reason a
+// caller might show could disagree, and the button gave a silent, unexplained
+// dead click on the no-environment path (#2157).
+//
+// Settles the team id FIRST (`normalizeTeamId`, the same step `submit()` takes
+// before validating) rather than calling `validateLaunch(values)` directly on
+// the raw value — the trap #2157 calls out explicitly: `TEAM_ID_RE` rejects a
+// value with a trailing dash, which is legal WHILE TYPING (the id field keeps a
+// trailing dash until blur, #1934 AC1). Without settling first, the reported
+// reason would flap between "team id" and "pick a working environment" on
+// every dash keystroke, even though the disabled boolean stayed true
+// throughout — settling removes that flicker in the SHOWN reason, not just the
+// boolean. Returns `null` when the inputs are launchable.
+export function launchBlockReason(values) {
+  return validateLaunch({ ...values, teamId: normalizeTeamId(values?.teamId) });
 }
 
 // The canonical POST body for /api/teams (and /api/teams/stream). `extra` carries

@@ -245,9 +245,130 @@ Copy should make the tier and its identity consequence explicit (a personal cred
 
 1. **Data model** — add `scope: 'personal'` + `userId` to credential entries; extend `normalizeCredential` (personal passthrough; legacy untouched) and `resolveCredentialOwnership`. *(shipped — #1576)*
 2. **RBAC** — extend `canCreateCredential` (self-scoped personal create for any human), `canManageCredential` and `visibleCredential` (owner-only, **no `scope.all`** for personal), and reject reassignment of personal credentials. *(shipped — #1576)*
-3. **Runtime resolution** — implement the personal → team → system order per operation class in the orchestrator, with the refuse-on-missing/underscoped behaviour (D5). *(pure decision core + attributed-write wiring shipped — #1569; the live end-to-end path activates once `config.ownerId` population lands, and the present-but-underscoped scope probe is the completion step)*
+3. **Runtime resolution** — implement the personal → team → system order per operation class in the orchestrator, with the refuse-on-missing/underscoped behaviour (D5). *(pure decision core + attributed-write wiring shipped — #1569; the live end-to-end path activates once `config.ownerId` population lands, and the present-but-underscoped scope probe is the completion step. The interactive-run half of §5/§6 — "the acting human is obvious" for a chat turn — shipped as its own follow-up, see Amendment 1 below. SSH-transport attributed writes shipped in the same follow-up.)*
 4. **Respawn propagation** — scope the existing credential-change → respawn path to an owner's agents on personal-credential set/rotate (D3). *(shipped — #1570)*
 5. **Offboarding hook** — on user deactivation, auto-delete the person's personal credentials and pause their affected agents (D6). *(shipped — #1571)*
 6. **UI** — the self-service personal-credential surface on `/ssh-keys` and `/github-tokens` (§11).
 
 Depends on #1456 (trustworthy `req.user`) landing first.
+
+---
+
+## 13 — Amendment 1 (#2175, epic #2166 block B3): interactive runs key off the acting sender
+
+§5's "the agent's owner is `config.ownerId`" and §6's "for a chat turn the acting human is obvious"
+were both true of the *design* from the start but not of the *implementation*: #1569 resolved every
+operation — chat-triggered or autonomous — through the one static `resolveAgentOwnerId`, so a shared
+agent's commit/PR/push was always attributed to the team's creator, never to whichever human was
+actually chatting. That gap is now closed for **interactive** runs, keeping §6's D4 default
+(autonomous runs use the owner's identity, unchanged) exactly as specified.
+
+- `orchestrator/credential-resolution.js` gains `resolveEffectiveOwnerId(cfg, loadAgentConfig,
+  actingSenderUserId)` — a pure fallback: prefer the acting sender's resolved platform-user id, else
+  fall through to the existing `resolveAgentOwnerId`. A `null` sender (no acting-sender identity, or
+  an autonomous trigger's run context) reproduces the pre-amendment answer byte for byte.
+- The sender travels **orchestrator-side only**, matching this concept's own credential-boundary
+  discipline (the secret never enters the container, only the identity CLAIM does): the acting
+  human's Matrix id (available since #2173/B1) rides from `agent-entrypoint.py` → `AEE_ACTING_SENDER`
+  env var → `gh-as-agent push`/`pr`'s POST body → `orchestrator.js`, which resolves it to a platform
+  user id via the same `usageAttribution.userIdForMatrixId` lookup `enrichUsageRecord` (#2137) already
+  uses for cost attribution — one hop, reused, so a run's credential and its cost can never disagree
+  about who is asking.
+- **The SSH equivalent §5's table always named is built for the first time**: `resolveAttributedSshKey`
+  mirrors `resolveAttributedGithubToken` against the SSH-key credential index, and `push-ssh` joins
+  `ATTRIBUTED_OPERATIONS` now that a resolver exists to prefer a personal key for it (previously it sat
+  classified as shared-eligible only for lack of that resolver — see the code comment on
+  `ATTRIBUTED_OPERATIONS`). Both resolvers are wired into `agentGitPush` (previously unwired for any
+  personal-credential preference) and the branch-push `agentCreatePr` performs before opening the PR.
+- **Deliberately unchanged:** the in-container `gh` calls an agent runs directly (issue/PR comments,
+  `gh pr review`) still use the container's spawn-time baked token, and the poller/claim-swap path
+  stays on the baseline credential (both explicitly named as out of scope by the ticket) — a later
+  block of epic #2166 (B4) is where the team-admin baseline for non-interactive work is decided
+  (see Amendment 2 below).
+- **The claim is bounded, not trusted outright (#2187 review hardening).** `AEE_ACTING_SENDER` is set
+  once into the container's environment for a live chat turn, but for the rest of that run it is an
+  ordinary env var — any Bash call the agent makes (potentially steered by content it read, e.g. a
+  prompt injection) can overwrite it before `gh-as-agent` forwards whatever value is currently
+  present, with no signature or binding to the real triggering Matrix event. Trusting the resolved
+  user unconditionally would let a compromised or misdirected agent pick an *arbitrary* platform
+  user's personal credential for a write — a strictly worse trust model than the pre-B3 static,
+  config-only owner. `isActingSenderTrusted(cfg, userId, hasMembership)` closes this: it bounds the
+  claim to whoever could plausibly *be* the real sender for this specific agent — its own team's
+  members for a `team`/`team-member` agent (boundary resolved the same way `scope.js` does), or its
+  own `ownerId` for a standalone agent (D8, no team boundary) — and `resolveActingSenderUserId`
+  filters every resolved id through it before `resolveEffectiveOwnerId` ever sees it; a sender
+  outside that boundary degrades to `null`, the same safe path autonomous runs already take. This
+  closes cross-team (and, for a standalone agent, cross-owner) impersonation; it does **not** make
+  the claim unforgeable *within* that boundary (e.g. one member impersonating another on the same
+  team), which would need a signed, per-run claim the container cannot re-mint — left as a separate,
+  larger hardening step.
+
+## 14 — Amendment 2 (#2176, epic #2166 block B4): the team-admin baseline, and interactive refusal on a missing credential
+
+Amendment 1 named this block as still open: "a later block of epic #2166 (B4) is where the
+team-admin baseline for non-interactive work is decided." B4 has landed and decides it as follows —
+refining §6's D4 for team-bounded agents, and drawing the line §5's refusal rule always intended but
+the shipped implementation never did.
+
+- **The baseline owner is no longer a static `ownerId` for a team-bounded agent (narrows D4).** §6's
+  D4 said an autonomous run acts under the agent's `config.ownerId`, unchanged since #1569.
+  `resolveBaselineOwnerId` (`orchestrator/credential-resolution.js`) now resolves a **team-bounded**
+  agent's non-interactive owner to that team's **current** `team-admin` (`resolveScopeOwner`,
+  `ownership-migration.js` — earliest-promoted admin when several exist, falling further to the
+  earliest member if the team currently has none) rather than the immutable id it was created with,
+  so a D4 admin succession (already the intra-app source of truth since #2077's D6) is honoured
+  without redeploying the agent. A **standalone** agent has no team to defer to and keeps resolving
+  to its own static `ownerId`, exactly as D4 specified — the amendment narrows D4's scope to
+  standalone agents rather than replacing it.
+- **An interactive write can now refuse on a missing (not just underscoped) credential, exactly for
+  the case a human is actually chatting (refines §5's refusal rule).** §5 specified refusal on *any*
+  missing-or-underscoped personal credential, but what actually shipped (#2077 AC7/AC8) never
+  refuses on *absent* — only on present-but-unusable — because refusing every team member who simply
+  never added a token would take their agents offline for no protective benefit; that reading stands
+  unchanged for an **autonomous** run (no acting sender), which must always have a working path. B4
+  draws the line §5 always intended at the one place it matters: an **interactive** attributed write
+  — a chat turn with a resolved, *trusted* acting sender (the #2187 boundary above) — whose owner has
+  no usable personal credential at all now refuses with the same 424 `personal-credential-required`
+  message, because a human chatting right now can be told to add one instead of having the write
+  silently re-attributed to the team's shared identity. `resolveCredential`'s new `interactive` flag
+  (`actingSenderUserId != null`) is what `resolveAttributedGithubToken`/`resolveAttributedSshKey`
+  compute and pass through.
+- **Deliberately still out of scope**, named by B4 itself: the read/clone/poll call sites that read
+  `env.githubTokenId` directly (~40 sites — seeding, the poller's per-repo token pick,
+  `cloneRepository`) are not rewired to prefer the baseline credential; that is the field-semantics
+  migration a later epic block, **B5**, owns (see Amendment 3 below).
+
+## 15 — Amendment 3 (#2177, epic #2166 block B5): the container's spawn-time bake, and what is still not migrated
+
+B4 named B5 as the owner of the field-semantics migration over `env.githubTokenId`/per-repo
+`sshKeyId`. B5 has landed, but as a **narrower slice** of that charter than "migrate every read
+site" — it closes the one gap that is actually interactive-adjacent, and leaves the rest flagged
+for a further ticket rather than silently declaring the migration complete.
+
+- **What shipped.** The container's own spawn-time bake — `GH_TOKEN`/`GITHUB_TOKEN` injected by
+  `startAgentProcess`, and the per-repo SSH identity `materializeAgentSshKey` selects — is what every
+  `gh`/`git` call the agent runs **directly** inside its own container authenticates with (issue/PR
+  comments, `gh pr review`). Amendment 1 named this exact path as "explicitly out of scope, pending a
+  later block of the epic" precisely because it is not orchestrator-mediated and so was never reached
+  by `resolveAttributedGithubToken`/`SshKey`. Two new resolvers, `resolveBaselineGithubTokenId` and
+  `resolveBaselineSshKeyId` (`orchestrator/orchestrator.js`), compose the *same* pure core the
+  attributed resolvers do (`resolveBaselineOwnerId` → `findPersonalCredentialState` →
+  `resolveCredential`), with `operation: "spawn"` — outside `ATTRIBUTED_OPERATIONS`, so it can never
+  refuse a container's own start-up. `resolveBaselineSshKeyId` arrived one commit later than
+  `resolveBaselineGithubTokenId`, added against a code-review finding that the issue's own AC named
+  `sshKeyId` alongside `githubTokenId` but the first commit had only wired the token half.
+- **No data migration needed**, exactly as B3/B4 needed none: an env with no owner, or an owner (the
+  team's current team-admin) with no personal credential of that kind, resolves to the identical
+  `env.githubTokenId`/shared `sshKeyId` as before — the moment the team-admin adds a personal
+  credential, every team-bound agent's *next spawn* starts using it automatically.
+- **What is still NOT wired, on purpose.** B4's scope note named ~40 other direct
+  `env.githubTokenId` reads as B5's charter — agent-creation seeding clone, the GitHub poller's
+  per-repo token pick, the catch-up/propagation sync path, the KB checkout, the repo-check probe,
+  ticket binding, the GitHub-Issues plugin's credential push — and none of them are rewired by this
+  block. They are read/clone/poll-shaped, where `resolveCredential` already never refuses regardless
+  of whether the baseline is wired in, so B5's own AC ("no interactive action uses a shared team
+  secret") does not actually require touching them, unlike the spawn-time bake this block does close.
+  The poller in particular has no per-agent/team context to resolve a baseline owner from without a
+  new env→Agent-Team reverse-mapping step — a materially larger, separately riskier change. Flagged
+  in the implementing PR for a dedicated follow-up ticket rather than guessed at or silently declared
+  done.

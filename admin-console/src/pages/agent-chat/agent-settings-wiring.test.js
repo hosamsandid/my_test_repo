@@ -71,29 +71,6 @@ test('the form and its sub-controls live in exactly one place', () => {
   }
 });
 
-test('the shared field controls are imported back, not re-typed', () => {
-  // #1929 asserted this on the Agents page, because the create form that
-  // renders these controls was still defined there. #1956 moved that form into
-  // `agent-lifecycle/AgentCreateForm.jsx`, so the importer moved with it — the
-  // invariant is unchanged (one definition, imported by whoever renders it),
-  // only its address is.
-  assert.match(createForm, /from '\.\/agent-form-fields\.jsx'/);
-  // `MissionDirectoryField` / `repoDirName` left this list with the field
-  // itself (#1964) — see the removal guard in `bp-removal-ui.test.js`, which
-  // asserts neither is re-typed anywhere rather than merely not duplicated here.
-  // `RoleDetailBanner` left it in #2026: the big blue box is gone, and its
-  // successor `RoleHelpTip` is rendered by the create form alone (the edit form
-  // dropped the read-only Role field and its explanation), so what is asserted
-  // here is that the create form imports it instead of re-typing the tip.
-  for (const symbol of ['ROLE_INFO', 'RoleHelpTip']) {
-    assert.doesNotMatch(
-      createForm, new RegExp(`(function|const) ${symbol}\\b\\s*[({=]`),
-      `${symbol} must not be redefined in the create form`,
-    );
-  }
-  assert.match(createForm, /<RoleHelpTip role=\{form\.role\}/);
-});
-
 /* ── #2026: the settings form's field set and its ordering ───────── */
 
 test('the read-only Role and Working Environment fields are gone', () => {
@@ -106,18 +83,31 @@ test('the read-only Role and Working Environment fields are gone', () => {
   // …while the fields that stay are still here (so the assertions above cannot
   // pass because the whole form vanished).
   assert.match(editForm, /ID \(read-only\)/);
-  assert.match(editForm, /Parent Team \(read-only\)/);
   assert.match(editForm, /label="Display Name \*"/);
 });
 
-test('the big-box role banner is not left behind as an orphan', () => {
-  const fields = code(read('../agent-lifecycle/agent-form-fields.jsx'));
-  assert.doesNotMatch(fields, /RoleDetailBanner/);
-  // The compact successor renders the shared InfoTip rather than a second
-  // hand-rolled popover, and still reads its copy from the one catalogue.
-  assert.match(fields, /import InfoTip from '\.\.\/\.\.\/components\/InfoTip'/);
-  assert.match(fields, /export function RoleHelpTip/);
-  assert.match(fields, /export const ROLE_INFO/);
+/* ── #2296: the read-only Parent Team field is gone ───────────────── */
+
+test('the read-only Parent Team field is gone', () => {
+  // Dead weight for the same reason as #2026's Role/Working Environment:
+  // not editable here, and the left rail already shows the team via its
+  // group header (displayName), making this box a redundant, id-vs-name
+  // mismatched echo.
+  assert.doesNotMatch(editForm, /Parent Team/);
+  // …while the parentTeam fetch and its other consumers stay (this removal
+  // is display-only) — asserted so the check above cannot pass because the
+  // whole form vanished.
+  assert.match(editForm, /ID \(read-only\)/);
+  assert.match(editForm, /label="Display Name \*"/);
+});
+
+test('the role catalogue is gone with the last picker that used it (#2233)', () => {
+  // `agent-form-fields.jsx` carried `ROLE_INFO`/`RoleHelpTip` for the create
+  // form's role picker alone (the edit form dropped its own role explanation
+  // in #2026) — once #2233 removed that picker, the module has no reader left
+  // and is deleted rather than kept as dead weight.
+  assert.equal(fs.existsSync(path.join(HERE, '../agent-lifecycle/agent-form-fields.jsx')), false);
+  assert.doesNotMatch(createForm, /agent-form-fields/);
 });
 
 test('the system prompt renders after Display Name and before Plugins', () => {
@@ -138,10 +128,12 @@ test('the system prompt renders after Display Name and before Plugins', () => {
     assert.ok(displayName < pos, `${name} must render after Display Name`);
     assert.ok(pos < plugins, `${name} must render before Plugins`);
   }
-  // Each block still carries its role guard, immediately before it.
+  // Each block still carries its role guard, immediately before it. The team
+  // prompt's guard is now "isTeam && activeTab === 'general'" (#2236 — it is
+  // one of the flat row's own tabs, not an unconditional team-role block).
   assert.match(
     editForm.slice(displayName, teamPrompt),
-    /agent\.role === 'team' &&\s*\(\s*$/m,
+    /isTeam && activeTab === 'general' &&\s*\(\s*$/m,
   );
   assert.match(
     editForm.slice(displayName, memberPrompt),
@@ -192,6 +184,18 @@ test('a stale persisted Settings tab falls back like the Outcomes one does', () 
   assert.match(rail, /if \(!showSettings && tab === 'settings'\) setTab\('sessions'\)/);
 });
 
+/* ── #2235: a team subject never reaches the rail at all any more ── */
+
+test('the rail no longer knows about a team subject — that surface moved out of it', () => {
+  // #2216 narrowed the rail's tabs for a routed team; #2235 replaced the
+  // whole chat+rail split with a dedicated full-width surface for one, so the
+  // rail itself goes back to being agent-only. A resurrected `subjectIsTeam`
+  // prop here would mean the narrowing logic came back alongside the new
+  // surface — two ways to special-case a team instead of one.
+  assert.doesNotMatch(rail, /subjectIsTeam/);
+  assert.doesNotMatch(agentChat.match(/<RightRail[\s\S]*?\/>/)[0], /subjectIsTeam/);
+});
+
 /* ── AC8: role gating parity ─────────────────────────────────────── */
 
 test('the chat feeds the server-shipped canManage into the tab decision', () => {
@@ -215,7 +219,72 @@ test('the chat lifts the settings subject and hands it to both sides', () => {
 });
 
 test('the override clears when the conversation moves on', () => {
-  assert.match(agentChat, /useEffect\(\(\) => \{ setSettingsAgentId\(null\); \}, \[agentId\]\)/);
+  assert.match(agentChat, /useEffect\(\(\) => \{[\s\S]{0,400}setSettingsAgentId\(null\);[\s\S]{0,50}\}, \[agentId\]\)/);
+});
+
+// #2214 code-review finding: the team-header row click (#2213) fires
+// `onSelect` (routes to the team, changing `agentId`) and
+// `onOpenTeamSettings` (sets the override) for the SAME target in one event
+// handler — so the reset effect above, written for the pre-#2213 menu-only
+// override where opening settings never moved the route, fired right after
+// the render that set the override and unconditionally clobbered it back to
+// null, and the Settings tab never actually showed. `handleOpenSettings` now
+// also stamps a ref with the target it was just called for, and the reset
+// effect consumes (and unconditionally clears) that ref before deciding
+// whether to null the override.
+test('an override set for the SAME target the route is about to become is not immediately clobbered (#2214)', () => {
+  assert.match(agentChat, /const explicitSettingsTargetRef = useRef\(null\);/);
+  const handler = code(agentChat).match(/const handleOpenSettings = useCallback\(\(id\) => \{[\s\S]*?\}, \[\]\);/)[0];
+  assert.match(handler, /explicitSettingsTargetRef\.current = id;/);
+  const resetEffect = code(agentChat).match(/useEffect\(\(\) => \{\s*const openedFor = explicitSettingsTargetRef\.current;[\s\S]*?\}, \[agentId\]\);/)[0];
+  assert.match(resetEffect, /explicitSettingsTargetRef\.current = null;/);
+  assert.match(resetEffect, /if \(openedFor === agentId\) return;/);
+  assert.match(resetEffect, /setSettingsAgentId\(null\);/);
+});
+
+/* ── #2267: a team's settings request must not leak onto a later agent ──── */
+
+// A team subject never mounts RightRail (#2235), so a railTabRequest fired for
+// a team's settings (handleOpenSettings above) is never consumed there — left
+// alone it survives in state until an unrelated agent is selected next, at
+// which point RightRail mounts fresh and applies the stale request on that
+// very first mount, forcing that unrelated agent onto Settings. Clearing the
+// request the moment the routed subject becomes a team means there is nothing
+// left to apply by the time any later agent's RightRail mounts.
+test('a pending rail tab request is dropped once the routed subject is a team', () => {
+  const effect = agentChat.match(/useEffect\(\(\) => \{\s*if \(subjectIsTeam\) setRailTabRequest\(null\);\s*\}, \[subjectIsTeam\]\);/);
+  assert.ok(effect, 'expected a useEffect clearing railTabRequest keyed on subjectIsTeam');
+});
+
+test('a pending rail tab request is not cleared just because some other state changed', () => {
+  // The guard must be `subjectIsTeam` specifically — clearing on every render
+  // (e.g. a bare `useEffect` with no deps, or deps unrelated to the team
+  // subject) would also erase a legitimate, still-pending request for the
+  // currently open agent (e.g. the Knowledge-badge click) before RightRail
+  // ever gets to consume it.
+  assert.doesNotMatch(agentChat, /useEffect\(\(\) => \{\s*setRailTabRequest\(null\);\s*\}, \[\]\);/);
+});
+
+/* ── #2267: per-agent tab memory replaces one global "last tab" ─────────── */
+
+test('the rail persists and restores the active tab per agent, not globally', () => {
+  assert.match(rail, /from '\.\/rail-tab-memory'/);
+  assert.doesNotMatch(rail, /const TAB_KEY = 'agentChat\.rightRailTab';/);
+  assert.match(rail, /tabForAgent\(loadTabMap\(\), agentId, TAB_KEYS\)/);
+  assert.match(rail, /withAgentTab\(loadTabMap\(\), agentId, tab\)/);
+});
+
+test('a subject change restores that agent\'s own tab before anything persists', () => {
+  // Restore-then-persist must be ONE effect (not persist-on-[agentId,tab] +
+  // restore-on-[agentId] as two separate effects): with two effects, the
+  // persistence one fires on the same agentId change and would write the
+  // OUTGOING agent's still-current tab into the NEW agent's slot before the
+  // restore effect corrects `tab` — permanently seeding it with a tab that
+  // was never active for it.
+  const combined = code(rail).match(/useEffect\(\(\) => \{\s*if \(agentId !== prevAgentIdRef\.current\) \{[\s\S]*?\}, \[agentId, tab\]\);/);
+  assert.ok(combined, 'expected one combined restore+persist effect keyed on [agentId, tab]');
+  assert.match(combined[0], /setTab\(tabForAgent\(loadTabMap\(\), agentId, TAB_KEYS\) \|\| 'sessions'\)/);
+  assert.match(combined[0], /localStorage\.setItem\(TAB_MAP_KEY, JSON\.stringify\(withAgentTab\(loadTabMap\(\), agentId, tab\)\)\)/);
 });
 
 /* ── AC4: a restart is confirmed and reported ────────────────────── */

@@ -1,6 +1,8 @@
 import React, { useMemo } from 'react';
 import { Link } from 'react-router';
-import { buildRows, driftLineageHref } from './skill-picker-rows.js';
+import { buildRows, driftLineageHref, rowDetailLines } from './skill-picker-rows.js';
+import OptionList from './OptionList';
+import OptionRow from './OptionRow';
 
 // SkillPicker v2 (#633): a grant-aware picker over the two-tier skill pool.
 // `skills` are the objects from GET /api/skills[?teamId=] — each carries
@@ -13,6 +15,10 @@ import { buildRows, driftLineageHref } from './skill-picker-rows.js';
 //
 // Row-building, the shadow/unknown/drift flags and the drift → Lineage deep-link
 // target live in the pure ./skill-picker-rows.js module (node:test-covered).
+//
+// #2269: rows render on the shared OptionList/OptionRow shell (also used by
+// PluginGrantPicker and the MCP servers list) — a one-line description by
+// default, full detail behind a per-row expand toggle.
 
 function Chip({ children, title, bg, fg, border, to }) {
   const style = {
@@ -72,85 +78,74 @@ export default function SkillPicker({ skills, selected, onChange, emptyHint }) {
         shadows the global one. A <em>drift</em> chip means a copy no longer matches
         its source — click it to open the Lineage view.
       </p>
-      <div style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 'var(--eb-space-1)',
-        maxHeight: 260,
-        overflowY: 'auto',
-        border: '1px solid var(--eb-border-default)',
-        borderRadius: 'var(--eb-radius-md)',
-        padding: 'var(--eb-space-2)',
-        background: 'var(--eb-bg-elevated)',
-      }}>
-        {rows.map(row => (
-        <label
-          key={row.name}
-          title={row.description || undefined}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 'var(--eb-space-2)',
-            padding: 'var(--eb-space-1) var(--eb-space-2)',
-            borderRadius: 'var(--eb-radius-sm)',
-            cursor: 'pointer',
-            fontSize: 'var(--eb-text-sm)',
-          }}
-          onMouseEnter={e => e.currentTarget.style.background = 'var(--eb-bg-hover)'}
-          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-        >
-          <input
-            type="checkbox"
-            checked={sel.includes(row.name)}
-            onChange={() => toggle(row.name)}
-            style={{ flex: '0 0 auto' }}
-          />
-          <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', flex: '0 0 auto' }}>
-            {row.name}
-          </span>
-          {row.unknown ? (
-            <Chip
-              title="This granted skill matches no skill in the current pool. It is kept and flagged, not dropped — uncheck it to remove it from the grant."
-              bg="var(--eb-status-warning-bg, #fff7ed)"
-              fg="var(--eb-status-warning, #b45309)"
-              border="1px solid var(--eb-status-warning, #b45309)"
-            >not found</Chip>
-          ) : (
+      <OptionList>
+        {rows.map(row => {
+          const detailLines = rowDetailLines(row);
+          const expandedContent = (row.description || detailLines.length > 0) ? (
             <>
-              <Chip
-                bg={row.tier === 'team' ? 'var(--eb-accent-subtle, #eef2ff)' : 'var(--eb-bg-app)'}
-                fg={row.tier === 'team' ? 'var(--eb-accent, #4f46e5)' : 'var(--eb-text-muted)'}
-              >{row.tier === 'team' ? 'Team' : 'Global'}</Chip>
-              {row.shadowsGlobal && (
-                <Chip title="A team skill of this name shadows the global skill — team-first resolution means the team version is the one granted.">
-                  shadows global
-                </Chip>
-              )}
-              {row.version != null && <Chip title="Skill manifest version">{`v${row.version}`}</Chip>}
-              {row.drift && (
-                <Chip
-                  to={driftLineageHref(row)}
-                  title="This copy has drifted from its source skill — open the Lineage/Drift view."
-                  bg="var(--eb-status-warning-bg, #fff7ed)"
-                  fg="var(--eb-status-warning, #b45309)"
-                >{`drift: ${row.drift}`}</Chip>
-              )}
-              {row.description && (
-                <span style={{
-                  color: 'var(--eb-text-muted)',
-                  fontSize: 'var(--eb-text-xs)',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  flex: '1 1 auto',
-                  minWidth: 0,
-                }}>{row.description}</span>
-              )}
+              {row.description && <div>{row.description}</div>}
+              {detailLines.map((line, i) => <div key={i}>{line}</div>)}
             </>
-          )}
-        </label>
-        ))}
-      </div>
+          ) : null;
+          return (
+            <OptionRow
+              key={row.name}
+              summary={row.description || ''}
+              expandedContent={expandedContent}
+              header={
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 'var(--eb-space-2)',
+                    cursor: 'pointer',
+                    fontSize: 'var(--eb-text-sm)',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={sel.includes(row.name)}
+                    onChange={() => toggle(row.name)}
+                    style={{ flex: '0 0 auto' }}
+                  />
+                  <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', flex: '0 0 auto' }}>
+                    {row.name}
+                  </span>
+                  {row.unknown ? (
+                    <Chip
+                      title="This granted skill matches no skill in the current pool. It is kept and flagged, not dropped — uncheck it to remove it from the grant."
+                      bg="var(--eb-status-warning-bg, #fff7ed)"
+                      fg="var(--eb-status-warning, #b45309)"
+                      border="1px solid var(--eb-status-warning, #b45309)"
+                    >not found</Chip>
+                  ) : (
+                    <>
+                      <Chip
+                        bg={row.tier === 'team' ? 'var(--eb-accent-subtle, #eef2ff)' : 'var(--eb-bg-app)'}
+                        fg={row.tier === 'team' ? 'var(--eb-accent, #4f46e5)' : 'var(--eb-text-muted)'}
+                      >{row.tier === 'team' ? 'Team' : 'Global'}</Chip>
+                      {row.shadowsGlobal && (
+                        <Chip title="A team skill of this name shadows the global skill — team-first resolution means the team version is the one granted.">
+                          shadows global
+                        </Chip>
+                      )}
+                      {row.version != null && <Chip title="Skill manifest version">{`v${row.version}`}</Chip>}
+                      {row.drift && (
+                        <Chip
+                          to={driftLineageHref(row)}
+                          title="This copy has drifted from its source skill — open the Lineage/Drift view."
+                          bg="var(--eb-status-warning-bg, #fff7ed)"
+                          fg="var(--eb-status-warning, #b45309)"
+                        >{`drift: ${row.drift}`}</Chip>
+                      )}
+                    </>
+                  )}
+                </label>
+              }
+            />
+          );
+        })}
+      </OptionList>
     </div>
   );
 }

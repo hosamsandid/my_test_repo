@@ -56,6 +56,6 @@ export function usageCountLabel(envs) {
 // friendly note for the zero case.
 export function usageTooltip(envs) {
   const list = Array.isArray(envs) ? envs : [];
-  if (list.length === 0) return 'Not used by any Working Environment';
+  if (list.length === 0) return 'Not used by any environment';
   return list.map(e => e.name || e.id).join('\n');
 }

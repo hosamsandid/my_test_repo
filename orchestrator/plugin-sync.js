@@ -110,11 +110,15 @@ function planWorkspaceSync({
 
     if (!prev) {
       // Fresh grant: seed the CLI facade + config, connect the network path.
-      write.push({ path: binPath, mode: BIN_MODE, copyFrom: manifest.cli.entrypoint });
+      // Both items carry `pluginId` so an impure caller can group them and
+      // treat a partial failure (e.g. bin copied, config write fails) as one
+      // unit — never stranding a CLI with no config or vice versa.
+      write.push({ path: binPath, mode: BIN_MODE, copyFrom: manifest.cli.entrypoint, pluginId: id });
       write.push({
         path: configPath,
         mode: CONFIG_MODE,
         content: pluginConfigFile({ pluginId: id, scopeId, endpoint: sidecarEndpoint(manifest), token, cliName: manifest.cli.name }),
+        pluginId: id,
       });
       if (network) connect.push({ pluginId: id, network });
     } else if (prev.scopeGranularity !== grant.scopeGranularity) {
@@ -125,6 +129,7 @@ function planWorkspaceSync({
         path: configPath,
         mode: CONFIG_MODE,
         content: pluginConfigFile({ pluginId: id, scopeId, endpoint: sidecarEndpoint(manifest), token, cliName: manifest.cli.name }),
+        pluginId: id,
       });
     }
     // else: same id + same granularity → already synced, no action.

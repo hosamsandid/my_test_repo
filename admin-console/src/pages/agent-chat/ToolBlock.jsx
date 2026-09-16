@@ -1,6 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Loader2, Check, X, ChevronRight, Circle, CircleDot } from 'lucide-react';
 import { isTaskTool, formatTodoSummary } from './task-todo.js';
+import { computeLineDiff } from './edit-diff.js';
+import { renderableRows } from './tool-value-view.js';
+import { SafeMarkdown } from './Message';
 
 /**
  * Collapsible tool-use / tool-result block, ported from
@@ -41,6 +44,12 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
     ? formatTodoSummary(todosForDisplay)
     : formatToolSummary(tool, input);
 
+  // Edit/Write tool calls render a red/green line diff instead of the raw
+  // input JSON (#2189) — same red/green language as the Workspace tab's
+  // DiffView, computed from old_string/new_string (Edit) or the whole new
+  // file against nothing (Write, a new-file creation).
+  const diffStrings = editDiffStrings(tool, input);
+
   let StatusIcon = Loader2;
   let statusColor = 'var(--eb-accent-primary)';
   let statusAnimate = true;
@@ -59,14 +68,8 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
     ? 'var(--eb-accent-muted)'
     : (ok ? 'var(--eb-border-default)' : 'var(--eb-status-error)');
 
-  const resultText = toolResult?.content == null
-    ? ''
-    : (typeof toolResult.content === 'string'
-        ? toolResult.content
-        : JSON.stringify(toolResult.content, null, 2));
-  const RESULT_MAX = 2000;
-  const resultTruncated = resultText.length > RESULT_MAX;
-  const resultDisplay = resultTruncated ? resultText.slice(0, RESULT_MAX) : resultText;
+  const resultContent = toolResult?.content;
+  const hasResultContent = resultContent !== null && resultContent !== undefined && resultContent !== '';
 
   return (
     <div style={{
@@ -152,6 +155,8 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
         }}>
           {todosForDisplay ? (
             <TodoList todos={todosForDisplay} />
+          ) : diffStrings ? (
+            <EditDiff oldString={diffStrings.oldString} newString={diffStrings.newString} />
           ) : input !== undefined && (
             <>
               <div style={{
@@ -162,14 +167,7 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
                 textTransform: 'uppercase',
                 letterSpacing: 0.4,
               }}>Input</div>
-              <pre style={{
-                margin: '0 0 8px',
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                color: 'var(--eb-text-primary)',
-              }}>
-                {typeof input === 'string' ? input : JSON.stringify(input, null, 2)}
-              </pre>
+              <ValueRows value={input} isInput />
             </>
           )}
 
@@ -183,15 +181,15 @@ export default function ToolBlock({ toolUse, toolResult, taskSnapshot }) {
                 textTransform: 'uppercase',
                 letterSpacing: 0.4,
               }}>Result{ok ? '' : ' (error)'}</div>
-              <pre style={{
-                margin: 0,
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                color: ok ? 'var(--eb-text-primary)' : 'var(--eb-status-error)',
-              }}>
-                {resultDisplay}
-                {resultTruncated && '\n… (truncated)'}
-              </pre>
+              {hasResultContent ? (
+                <div style={{ color: ok ? 'var(--eb-text-primary)' : 'var(--eb-status-error)' }}>
+                  <ValueRows value={resultContent} />
+                </div>
+              ) : (
+                <div style={{ color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>
+                  (empty result)
+                </div>
+              )}
             </>
           ) : (
             <div style={{
@@ -234,6 +232,151 @@ function formatToolSummary(tool, input) {
 function truncate(s, n) {
   if (typeof s !== 'string') return '';
   return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+/** Which two strings to diff for a given tool call, or `null` when the tool
+ *  isn't a diffable file edit / creation. */
+function editDiffStrings(tool, input) {
+  if (!input || typeof input !== 'object') return null;
+  if (tool === 'Edit' && typeof input.old_string === 'string' && typeof input.new_string === 'string') {
+    return { oldString: input.old_string, newString: input.new_string };
+  }
+  if (tool === 'Write' && typeof input.content === 'string') {
+    return { oldString: '', newString: input.content };
+  }
+  return null;
+}
+
+const DIFF_GUTTER_WIDTH = 34;
+
+function diffRowStyle(type) {
+  const base = {
+    display: 'flex',
+    whiteSpace: 'pre',
+    lineHeight: 1.45,
+  };
+  if (type === 'add') {
+    return { ...base, background: 'var(--eb-status-success-bg)', color: 'var(--eb-status-success)' };
+  }
+  if (type === 'del') {
+    return { ...base, background: 'var(--eb-status-error-bg)', color: 'var(--eb-status-error)' };
+  }
+  return { ...base, color: 'var(--eb-text-primary)' };
+}
+
+const diffGutterStyle = {
+  flexShrink: 0,
+  width: DIFF_GUTTER_WIDTH,
+  textAlign: 'right',
+  paddingRight: 6,
+  color: 'var(--eb-text-muted)',
+  userSelect: 'none',
+};
+
+const diffMarkerStyle = {
+  flexShrink: 0,
+  width: 14,
+  textAlign: 'center',
+  userSelect: 'none',
+};
+
+/** Red/green line diff for an Edit/Write tool call, with an old/new
+ *  line-number gutter — the same visual language as the Workspace tab's
+ *  `DiffView` (#2189). Always renders the full diff; the surrounding
+ *  ToolBlock collapse/expand is what keeps a long one out of view by default. */
+function EditDiff({ oldString, newString }) {
+  const { rows } = useMemo(() => computeLineDiff(oldString, newString), [oldString, newString]);
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <pre style={{
+        margin: 0,
+        padding: 0,
+        fontFamily: 'var(--eb-font-mono)',
+        fontSize: 'var(--eb-text-xs)',
+        tabSize: 2,
+      }}>
+        {rows.map((row, i) => (
+          <div key={i} style={diffRowStyle(row.type)}>
+            <span style={diffGutterStyle}>{row.oldLineNo ?? ''}</span>
+            <span style={diffGutterStyle}>{row.newLineNo ?? ''}</span>
+            <span style={diffMarkerStyle}>{row.type === 'add' ? '+' : row.type === 'del' ? '-' : ''}</span>
+            <span>{row.text}</span>
+          </div>
+        ))}
+      </pre>
+    </div>
+  );
+}
+
+const VALUE_ROW_INDENT = 14;
+
+function formatScalar(v) {
+  if (v === null) return 'null';
+  if (v === undefined) return '';
+  return String(v);
+}
+
+/** Generic pretty-printed key/value renderer for a tool's `input` or
+ *  `toolResult.content` (#2197) — the fallback every tool hits unless it has
+ *  its own bespoke render (task list, Edit/Write diff, task_updated/
+ *  task_notification). No raw JSON punctuation: unquoted `key:` labels, one
+ *  field per line, nested objects/arrays indented recursively, multi-line
+ *  strings shown as real line breaks and markdown-like strings rendered via
+ *  the same `SafeMarkdown` chat messages use. */
+export function ValueRows({ value, isInput }) {
+  const rows = useMemo(() => renderableRows(value, { isInput }), [value, isInput]);
+  return (
+    <div>
+      {rows.map((row) => (
+        <ValueRow key={row.path || 'root'} row={row} />
+      ))}
+    </div>
+  );
+}
+
+function ValueRow({ row }) {
+  const indent = row.depth * VALUE_ROW_INDENT;
+  const keyLabel = row.key == null ? null : row.key;
+  const keyPrefix = keyLabel != null ? `${keyLabel}: ` : '';
+
+  if (row.kind === 'object' || row.kind === 'array') {
+    return (
+      <div style={{ marginLeft: indent, color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-semibold)' }}>
+        {keyLabel}:
+      </div>
+    );
+  }
+  if (row.kind === 'empty-object' || row.kind === 'empty-array') {
+    return (
+      <div style={{ marginLeft: indent }}>
+        {keyPrefix}<span style={{ color: 'var(--eb-text-muted)', fontStyle: 'italic' }}>(empty)</span>
+      </div>
+    );
+  }
+  if (row.kind === 'multiline') {
+    return (
+      <div style={{ marginLeft: indent }}>
+        {keyLabel != null && <div style={{ color: 'var(--eb-text-muted)' }}>{keyLabel}:</div>}
+        <pre style={{ margin: '0 0 4px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+          {row.value}{row.truncated ? '\n… (truncated)' : ''}
+        </pre>
+      </div>
+    );
+  }
+  if (row.kind === 'markdown') {
+    return (
+      <div style={{ marginLeft: indent }}>
+        {keyLabel != null && <div style={{ color: 'var(--eb-text-muted)' }}>{keyLabel}:</div>}
+        <SafeMarkdown body={row.truncated ? row.value + '\n\n… (truncated)' : row.value} />
+      </div>
+    );
+  }
+  // 'scalar'
+  return (
+    <div style={{ marginLeft: indent, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+      {keyPrefix}{formatScalar(row.value)}{row.truncated ? ' …' : ''}
+    </div>
+  );
 }
 
 export function TodoList({ todos }) {

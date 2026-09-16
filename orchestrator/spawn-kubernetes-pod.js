@@ -458,8 +458,28 @@ function buildContextHostPathVolumes(contextMounts) {
   return { volumes, volumeMounts };
 }
 
-function buildPodManifest(id, env, podName, contextMounts, image) {
-  const memory = parseMemoryQuantity(AGENT_MEM_LIMIT);
+function buildPodManifest(id, env, podName, contextMounts, image, toolchain = null) {
+  // #2282 Band 1: a toolchain may declare `resources` to override the
+  // fleet-wide default for agents bound to it (e.g. a JVM/Gradle build that
+  // would otherwise OOM at AEE_AGENT_MEM_LIMIT). No override -> AGENT_MEM_LIMIT
+  // and the same '256Mi'/'100m' requests as before this field existed (AC2).
+  //
+  // Code-review finding: the registry's shared `MEMORY_QUANTITY_RE` accepts a
+  // shape k8s's own quantity grammar does not (e.g. a bare-byte "1024b", no
+  // magnitude letter) — an override that parses at validation time but not
+  // here must fall back to the fleet default, mirroring
+  // spawn-container.js's `resolveMemLimitBytes`, rather than letting the
+  // WHOLE `resources` object (limits *and* requests) silently disappear.
+  // `memoryRequest` is now run through the same parser `memoryLimit` always
+  // was: unlike `memoryLimit`, it used to reach the pod spec RAW, so a
+  // podman-style shorthand like "512m" (which `parseMemoryQuantity` converts
+  // to the unambiguous "512Mi") hit the k8s API verbatim — where a bare "m"
+  // suffix means MILLI, not mega, silently requesting ~0 memory instead of
+  // 512 megabytes.
+  const resources = toolchain && toolchain.resources ? toolchain.resources : null;
+  const memory = parseMemoryQuantity(resources && resources.memoryLimit) || parseMemoryQuantity(AGENT_MEM_LIMIT);
+  const memoryRequest = parseMemoryQuantity(resources && resources.memoryRequest) || '256Mi';
+  const cpuRequest = (resources && resources.cpuRequest) || '100m';
   // Seam #3 equivalent: the agent sees ONLY its own slice of the shared
   // workspace PVC via subPath, mounted at the same /workspace/agents/<id>
   // destination as the Podman path (cwd + absolute paths in seeded memory are
@@ -505,7 +525,7 @@ function buildPodManifest(id, env, podName, contextMounts, image) {
           allowPrivilegeEscalation: false,
           capabilities: { drop: ['ALL'] },
         },
-        resources: memory ? { limits: { memory }, requests: { memory: '256Mi', cpu: '100m' } } : undefined,
+        resources: memory ? { limits: { memory }, requests: { memory: memoryRequest, cpu: cpuRequest } } : undefined,
       }],
       volumes: [{ name: 'workspace', persistentVolumeClaim: { claimName: WORKSPACE_PVC } }, ...ctx.volumes],
     },
@@ -517,8 +537,10 @@ function buildPodManifest(id, env, podName, contextMounts, image) {
 // `image` (#1940) is the container image for THIS agent, resolved per Working
 // Environment by the caller (orchestrator.js → resolveAgentImage) — the same
 // seam contract as spawn-container.js. `toolchain` is the
-// {toolchainId, environmentId, environmentName} context of a NON-default image,
-// carried only so an image-pull failure can be worded as AC7 requires.
+// {toolchainId, environmentId, environmentName, resources} context of a
+// NON-default image: an image-pull failure is worded from it as AC7 requires,
+// and `resources` (#2282 Band 1) is passed into buildPodManifest to size the
+// pod's memory/cpu.
 function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
   const handle = new EventEmitter();
   handle._toolchain = toolchain;
@@ -576,7 +598,7 @@ function spawnContainer({ id, env, contextMounts, image, toolchain = null }) {
           'seam requires spawnContainer({ image }) (#1940) — see resolveAgentImage.',
         );
       }
-      const manifest = buildPodManifest(id, env, podName, contextMounts, image);
+      const manifest = buildPodManifest(id, env, podName, contextMounts, image, toolchain);
       for (const vm of manifest.spec.containers[0].volumeMounts) {
         if (!vm.name.startsWith('ctx-')) continue;
         const vol = manifest.spec.volumes.find((v) => v.name === vm.name);

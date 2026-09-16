@@ -8,7 +8,7 @@
 // gates is invisible when it goes missing: a route that stops calling the
 // predicate returns the right data to the caller who is allowed, and to
 // everyone else too. Same reasoning and same mechanism as
-// `draft-routes-access.test.js` / `convert-to-team-route.test.js`.
+// `draft-routes-access.test.js`.
 //
 // The scan runs in BOTH directions, and the second one is the point:
 //

@@ -699,6 +699,359 @@ test("_fanOutBatch: wakeLabel on outcome = subscriber's labelFilter, not collaps
   }
 });
 
+// ── #2151: the pending entry itself carries the stamp, not just the event-log
+// outcome — this is what the trigger-fired notice and the Pending queue read.
+test("_fanOutBatch: the pending entry is stamped with the matched wakeLabel, not the collapsed payload.label.name (#2151)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ghEvent = {
+      id: "2151-collapsed-1",
+      actor: { login: "thorsten" },
+      created_at: new Date().toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "flow-control" },
+        labels: [{ name: "flow-control" }, { name: "ready" }],
+        issue: { number: 2151, title: "Test", html_url: "https://github.com/org/repo/issues/2151" },
+      },
+    };
+
+    const subscribers = [{
+      agentId: "developer",
+      triggerId: "trigger-ready",
+      events: new Set(["issues.labeled"]),
+      labelFilter: "ready",
+      horizon: null,
+    }];
+
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+
+    assert.equal(enqueued.length, 1);
+    assert.equal(enqueued[0].agentId, "developer");
+    assert.equal(enqueued[0].entry.wakeLabel, "ready",
+      "the queued entry's wakeLabel must be the matched labelFilter, not payload.label.name ('flow-control')");
+    assert.equal(enqueued[0].entry.github.payload.label.name, "flow-control",
+      "the raw payload is carried unchanged alongside the stamp");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+// ── #2152: edge-triggered wake dedup — a full-set match fires only on the
+// rising edge, so unrelated label churn and the agent's own claim swap don't
+// re-wake it while the wake label merely persists.
+
+function labeledIssueEvent(id, attributedLabel, fullSet, number = 2152) {
+  return {
+    id,
+    actor: { login: "thorsten" },
+    created_at: new Date().toISOString(),
+    type: "IssuesEvent",
+    repo: { name: "org/repo" },
+    payload: {
+      action: "labeled",
+      label: { name: attributedLabel },
+      labels: fullSet.map((name) => ({ name })),
+      issue: { number, title: "Repo attach dialog", html_url: `https://github.com/org/repo/issues/${number}` },
+    },
+  };
+}
+
+function unlabeledIssueEvent(id, removedLabel, fullSet, number = 2152) {
+  return {
+    id,
+    actor: { login: "thorsten" },
+    created_at: new Date().toISOString(),
+    type: "IssuesEvent",
+    repo: { name: "org/repo" },
+    payload: {
+      action: "unlabeled",
+      label: { name: removedLabel },
+      labels: fullSet.map((name) => ({ name })),
+      issue: { number, title: "Repo attach dialog", html_url: `https://github.com/org/repo/issues/${number}` },
+    },
+  };
+}
+
+const readyDeveloperSub = () => [{
+  agentId: "developer",
+  triggerId: "t1785499525109689",
+  events: new Set(["issues.labeled"]),
+  labelFilter: "ready",
+  horizon: null,
+}];
+
+test("_fanOutBatch (#2152): the agent's own claim swap does not re-wake it — second labeled event dropped 'wake-already-armed'", async () => {
+  const origRecord = githubEventLog.record;
+  const recorded = [];
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    // Event 1: the genuine human wake. `ready` present in the full set.
+    const ev1 = labeledIssueEvent("2152-a", "ready", ["next-wave", "ready"]);
+    // Event 2: the developer's OWN claim swap adds `ready:wip`; the event-time
+    // snapshot still carries `ready`, and the Events API mis-attributes the
+    // event's own label as `next-wave` (so the self-claim-label guard, which
+    // keys on payload.label.name, cannot catch it — the real #2152 signature).
+    const ev2 = labeledIssueEvent("2152-b", "next-wave", ["next-wave", "ready", "ready:wip"]);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2], readyDeveloperSub(), "tok");
+
+    assert.equal(enqueued.length, 1, "only the first (rising-edge) wake is delivered");
+    assert.equal(enqueued[0].entry.github.eventId, "2152-a");
+
+    const outcomes = recorded.flatMap((e) => e.outcomes || []).filter((o) => o.agentId === "developer");
+    const delivered = outcomes.filter((o) => o.status === "delivered");
+    const dropped = outcomes.filter((o) => o.status === "dropped");
+    assert.equal(delivered.length, 1);
+    assert.equal(dropped.length, 1);
+    assert.equal(dropped[0].reason, "wake-already-armed");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch (#2152): a genuine remove -> re-add re-fires (disarm reopens the edge)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ev1 = labeledIssueEvent("2152-x1", "ready", ["ready"]);          // deliver + arm
+    const ev2 = unlabeledIssueEvent("2152-x2", "ready", []);               // human removes `ready` -> disarm
+    const ev3 = labeledIssueEvent("2152-x3", "ready", ["ready"]);          // human re-adds -> fires again
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], readyDeveloperSub(), "tok");
+
+    assert.equal(enqueued.length, 2, "the re-add after a real removal must fire again");
+    assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["2152-x1", "2152-x3"]);
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+const reviewerSub = () => [{
+  agentId: "code-reviewer",
+  triggerId: "code-reviewer-on-pr-ready-for-review",
+  events: new Set(["issues.labeled"]),
+  labelFilter: "ready-for-review",
+  claimAdd: "ready-for-review:wip",
+  horizon: null,
+}];
+
+test("_fanOutBatch (#2152 follow-up): the collapsed claim swap disarms the wake, so a later re-hand-off re-fires", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    // 1. the genuine upstream wake — arm + fire.
+    const ev1 = labeledIssueEvent("csw-1", "ready-for-review", ["ready-for-review"], 2187);
+    // 2. the agent's OWN claim swap: `gh issue edit --remove ready-for-review
+    //    --add ready-for-review:wip` is ONE action, which the Events API
+    //    collapses to a single labeled(ready-for-review:wip). No standalone
+    //    unlabeled(ready-for-review) ever arrives, so this claim-label add is the
+    //    only disarm signal there is. Its event-time snapshot still carries
+    //    `ready-for-review` (the paired remove is not atomic).
+    const ev2 = labeledIssueEvent(
+      "csw-2", "ready-for-review:wip",
+      ["ready-for-review", "ready-for-review:wip"], 2187,
+    );
+    // 3. the reworker delegates back by re-adding `ready-for-review` (a bare
+    //    --add-label; on GitHub the label has been absent since the swap). Before
+    //    this fix the stale arm dropped it as 'wake-already-armed'; now it fires.
+    const ev3 = labeledIssueEvent("csw-3", "ready-for-review", ["ready-for-review"], 2187);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], reviewerSub(), "tok");
+
+    assert.deepEqual(
+      enqueued.map((e) => e.entry.github.eventId),
+      ["csw-1", "csw-3"],
+      "the rising-edge wake AND the post-swap re-hand-off both fire",
+    );
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch (#2152 follow-up): the disarm does not re-open the double-fire (unrelated churn after the swap stays dropped)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ev1 = labeledIssueEvent("csw2-1", "ready-for-review", ["ready-for-review"], 2190);
+    // claim swap disarms `ready-for-review`; on GitHub the label is now gone.
+    const ev2 = labeledIssueEvent(
+      "csw2-2", "ready-for-review:wip",
+      ["ready-for-review", "ready-for-review:wip"], 2190,
+    );
+    // unrelated churn AFTER the swap — a current snapshot no longer carries
+    // `ready-for-review`, so full-set matching must not re-fire the reviewer.
+    const ev3 = labeledIssueEvent("csw2-3", "bug", ["ready-for-review:wip", "bug"], 2190);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], reviewerSub(), "tok");
+
+    assert.deepEqual(
+      enqueued.map((e) => e.entry.github.eventId),
+      ["csw2-1"],
+      "only the rising-edge wake fires; post-swap churn without the wake label does not",
+    );
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch (#2152 follow-up): presence-based disarm re-opens the edge with NO unlabeled and NO claim swap (human web-UI removal)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    // 1. wake — arm `ready`.
+    const ev1 = labeledIssueEvent("pd-1", "ready", ["ready"], 2153);
+    // 2. `ready` is gone from the object's full set (a human removed it in the
+    //    web UI — no unlabeled event ever reaches the poller). An unrelated label
+    //    add is the next thing the poller sees; its snapshot no longer lists
+    //    `ready`, so the presence-based disarm clears the stale arm.
+    const ev2 = labeledIssueEvent("pd-2", "other", ["other"], 2153);
+    // 3. `ready` re-added → not armed → fires again.
+    const ev3 = labeledIssueEvent("pd-3", "ready", ["ready", "other"], 2153);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2, ev3], readyDeveloperSub(), "tok");
+
+    assert.deepEqual(
+      enqueued.map((e) => e.entry.github.eventId),
+      ["pd-1", "pd-3"],
+      "the wake re-fires once the label is observed absent, without any removal event",
+    );
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch (#2152 follow-up): presence-based disarm does NOT fire while the wake label persists", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ev1 = labeledIssueEvent("pp-1", "ready", ["next-wave", "ready"], 2154);
+    // unrelated churn while `ready` is STILL on the object — the snapshot lists
+    // it, so presence-based disarm must keep the arm and the churn stays dropped.
+    const ev2 = labeledIssueEvent("pp-2", "next-wave", ["next-wave", "ready"], 2154);
+
+    await poller._fanOutBatch("org/repo", [ev1, ev2], readyDeveloperSub(), "tok");
+
+    assert.deepEqual(
+      enqueued.map((e) => e.entry.github.eventId),
+      ["pp-1"],
+      "only the rising-edge wake fires; churn while the label persists does not",
+    );
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch (#2152): the #1376 collapsed multi-add still fires (rising edge, not a regression)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    // One action adds `bug`+`ready`; the Events API surfaces it attributed to
+    // `bug`. The full-set recovery must still fire the `ready` listener.
+    const ev = labeledIssueEvent("2152-collapse", "bug", ["bug", "ready"], 2160);
+    await poller._fanOutBatch("org/repo", [ev], readyDeveloperSub(), "tok");
+    assert.equal(enqueued.length, 1);
+    assert.equal(enqueued[0].entry.wakeLabel, "ready");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("_fanOutBatch (#2152): kill-switch AEE_WAKE_EDGE_DEDUP=0 restores the double-fire", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  const prev = process.env.AEE_WAKE_EDGE_DEDUP;
+  process.env.AEE_WAKE_EDGE_DEDUP = "0";
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ev1 = labeledIssueEvent("2152-k1", "ready", ["next-wave", "ready"]);
+    const ev2 = labeledIssueEvent("2152-k2", "next-wave", ["next-wave", "ready", "ready:wip"]);
+    await poller._fanOutBatch("org/repo", [ev1, ev2], readyDeveloperSub(), "tok");
+
+    assert.equal(enqueued.length, 2, "with the kill-switch off, the pre-#2152 full-set match still double-fires");
+  } finally {
+    githubEventLog.record = origRecord;
+    if (prev === undefined) delete process.env.AEE_WAKE_EDGE_DEDUP;
+    else process.env.AEE_WAKE_EDGE_DEDUP = prev;
+  }
+});
+
+// ── #2151: an any-label listener's pending entry stamps wakeLabel null —
+// matching the event-log outcome convention, so the entrypoint's ladder
+// falls through to payload.label.name for exactly the case that is correct.
+test("_fanOutBatch: an any-label listener's pending entry stamps wakeLabel null (#2151)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const ghEvent = {
+      id: "2151-any-label-1",
+      actor: { login: "user" },
+      created_at: new Date().toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "ux" },
+        labels: [{ name: "ux" }],
+        issue: { number: 5, title: "Any-label", html_url: "https://github.com/org/repo/issues/5" },
+      },
+    };
+
+    const subscribers = [
+      { agentId: "any-listener", triggerId: "t-any", events: new Set(["issues.labeled"]), labelFilter: null, horizon: null },
+    ];
+
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+
+    assert.equal(enqueued.length, 1);
+    assert.equal(enqueued[0].entry.wakeLabel, null);
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
 test("_fanOutBatch: each of two subscribers on different labelFilters gets its own wakeLabel (AC2)", async () => {
   const recorded = [];
   const origRecord = githubEventLog.record;

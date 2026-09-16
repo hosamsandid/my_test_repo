@@ -72,8 +72,8 @@ test('the four areas are top-level chapters, not sub-headings', () => {
     );
   }
   // The empty/degraded-board material is deliberately a `###` inside chapter 1 —
-  // this catches a fifth top-level chapter splitting a deep-link target in two.
-  assert.equal(h2.length, 4, `expected exactly the four chapters, got ${h2.join(' · ')}`);
+  // this catches a stray top-level chapter splitting a deep-link target in two.
+  assert.equal(h2.length, 6, `expected exactly the six chapters, got ${h2.join(' · ')}`);
 });
 
 test('each board surface mounts a "?" pointed at its own chapter', () => {
@@ -85,7 +85,7 @@ test('each board surface mounts a "?" pointed at its own chapter', () => {
     /import \{ FLOW_CONTROL_HELP_SECTIONS \} from '\.\/flow-control-help-sections'/.test(page),
     'the slugs must come from the shared registry, never be written out inline',
   );
-  for (const key of ['page', 'states', 'epics']) {
+  for (const key of ['page', 'states', 'epics', 'poolControls', 'poolLanes']) {
     assert.ok(
       page.includes(`FLOW_CONTROL_HELP_SECTIONS.${key}`),
       `the ${key} surface must deep-link to its chapter (never a hand-written slug)`,
@@ -118,15 +118,24 @@ test('the page renders no raw label of its own', () => {
   }
 });
 
-test('the board states its read-only nature rather than offering a repair', () => {
-  // The ledger is observe-only; a mutating call from this page would be the
-  // first thing to contradict that, and #2115's guard cannot see the console.
-  assert.ok(
-    !/apiCall\('(POST|PUT|PATCH|DELETE)'/.test(page),
-    'the Flow Control board must issue no mutating request — §4.1 is observe-only',
-  );
+test('the ticket ledger itself stays observe-only, even though the board now mutates pool state (#2250)', () => {
+  // §4.1's guarantee is about the LEDGER — a ticket's derived state must never
+  // be set by a mutating call from this page. #2250 Phase 5 adds a legitimate,
+  // ADJACENT mutation surface (pause/resume/drain a pooled role; force-dispatch
+  // a held ticket past the WIP limit) that acts on the admission lane / pool
+  // runtime state, never on a ticket's own lifecycle field — so the ledger
+  // fetch itself must stay GET-only, and every POST must target one of the
+  // two named pool-control endpoints, never `/tickets`.
   assert.ok(
     /apiCall\('GET', `\/api\/teams\/\$\{encodeURIComponent\(teamId\)\}\/tickets`\)/.test(page),
     'the board must read the ledger endpoint',
   );
+  const mutations = page.match(/apiCall\('(POST|PUT|PATCH|DELETE)', `[^`]*`/g) || [];
+  assert.ok(mutations.length > 0, 'expected the pool-control/force-dispatch mutations to be present');
+  for (const call of mutations) {
+    assert.ok(
+      /\/pool-control\/\$\{encodeURIComponent\(roleId\)\}`$/.test(call) || /\/force-dispatch`$/.test(call),
+      `unexpected mutating call in the Flow Control board: ${call} — the ticket ledger must stay observe-only`,
+    );
+  }
 });

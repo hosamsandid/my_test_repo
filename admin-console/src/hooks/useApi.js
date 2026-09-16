@@ -91,6 +91,11 @@ export async function apiCall(method, url, body) {
       console.error(`[api] ${method} ${url} → ${res.status}: ${technicalMessage}`);
     }
     if (err && err.code) e.code = err.code;
+    // Carried through for the `id-conflict` shape (#2218) so a caller using
+    // apiCall's throw-based contract can still offer an inline re-suggestion,
+    // the way the clone/import forms already do over their own raw fetch.
+    if (err && err.agentId) e.agentId = err.agentId;
+    if (err && err.suggestedId) e.suggestedId = err.suggestedId;
     throw e;
   }
   return res.status === 204 ? null : res.json();

@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil, Loader2, Tag, User, Activity, TrendingUp } from 'lucide-react';
+import { AlertTriangle, Download, Boxes, X, Plus, Layers, Sparkles, Pencil, Loader2, Tag, User, Activity, TrendingUp, Gauge } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { initFlowGraph } from './process/flow-graph-render';
 import NodeInspector from './process/NodeInspector';
@@ -8,6 +8,9 @@ import LabelRegistryPanel from './process/LabelRegistryPanel';
 import HumanRegistryPanel from './process/HumanRegistryPanel';
 import FlowAnomaliesPanel from './process/FlowAnomaliesPanel';
 import ImprovementsPanel from './process/ImprovementsPanel';
+import ParallelismPanel from './process/ParallelismPanel';
+import { hasPooledMember } from './process/parallelism-view.js';
+import { usePoolsEnabled } from '../context/PoolsFeatureContext';
 import FlowCopilotPanel from './process/FlowCopilotPanel';
 import { useFlowCopilot } from '../context/FlowCopilotContext.jsx';
 import { proposalNodeDiff } from './process/flow-copilot-view';
@@ -177,8 +180,9 @@ function ModePill({ tone, icon: Icon, title, children }) {
 //                        team → draft bridge) can carry the flag.
 export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingImport, onImportConsumed, onImportClosed, pendingFocus = null, onFocusConsumed, autoOpenCopilot = false, pendingIntent = null, onIntentConsumed, draftReloadToken = 0 }) {
   const navigate = useCallback((s, opts) => { if (onNavigate) onNavigate(s, opts); }, [onNavigate]);
+  const poolsEnabled = usePoolsEnabled();
 
-  const { data: agents } = useApi('/api/agents');
+  const { data: agents, refetch: refetchAgents } = useApi('/api/agents');
   const teams = useMemo(
     () => (Array.isArray(agents) ? agents.filter(a => a.role === 'team') : []),
     [agents],
@@ -195,6 +199,15 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     () => Array.isArray(teams) && teams.some(t => t.id === scope),
     [teams, scope],
   );
+  // The team agent's own `wipLimit`/`autoDispatch` (#2272 Parallelism panel) —
+  // already present on every `/api/agents` entry (GET /api/agents/:id spreads
+  // the full config), so no separate fetch. `hasPooledMember` answers the
+  // panel's auto-dispatch prerequisite from the SAME list.
+  const parallelismTeamCfg = useMemo(
+    () => (isTeamScope && Array.isArray(agents) ? agents.find(a => a.id === scope) : null),
+    [agents, scope, isTeamScope],
+  );
+  const hasPooledRole = useMemo(() => hasPooledMember(agents, scope), [agents, scope]);
 
   // Scope is always one of: a team id (live graph), 'draft:<id>' (derived
   // client-side from the bundle, so no fetch), or 'import' (derived
@@ -238,6 +251,8 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   );
   // Improvements panel (#1223, hill-climbing loop Phase 1) — run-metric tiles.
   const [improvementsOpen, setImprovementsOpen] = useState(false);
+  // Parallelism panel (#2272, Amendment 2 A2.2) — team-axis pool config.
+  const [parallelismOpen, setParallelismOpen] = useState(false);
 
   // Flow Copilot (#1069): a docked chat rail; each turn yields a PROPOSAL
   // { bundle, graph, ok } rendered exactly like the import preview — read-only
@@ -778,6 +793,14 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
               title={toolbarTitle('improvements')}>
               Improvements
             </ToolbarButton>
+            {/* #2302: agent pools still need teardown/reaping polish — the whole
+                surface is hidden (not just disabled) while the flag is off. */}
+            {poolsEnabled && (
+              <ToolbarButton onClick={() => setParallelismOpen(true)} icon={Gauge}
+                title={toolbarTitle('parallelism')}>
+                Parallelism
+              </ToolbarButton>
+            )}
             <ToolbarButton onClick={() => setCopilotOpen(o => !o)} icon={Sparkles}
               title={toolbarTitle('copilot')}>Copilot</ToolbarButton>
             <ToolbarButton onClick={editAsDraft} icon={Boxes}
@@ -1009,6 +1032,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           mode="live"
           node={selectedNode}
           nodes={displayGraph?.nodes || []}
+          agents={agents || []}
           stages={displayGraph?.stages || []}
           lints={displayGraph?.lints || []}
           labels={displayGraph?.labels || []}
@@ -1161,6 +1185,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         <ImprovementsPanel
           teamId={scope}
           onClose={() => setImprovementsOpen(false)}
+        />
+      )}
+
+      {parallelismOpen && poolsEnabled && isTeamScope && !imported && (
+        <ParallelismPanel
+          teamId={scope}
+          wipLimit={Number.isInteger(parallelismTeamCfg?.wipLimit) ? parallelismTeamCfg.wipLimit : null}
+          autoDispatch={parallelismTeamCfg?.autoDispatch || null}
+          hasPooledRole={hasPooledRole}
+          onClose={() => setParallelismOpen(false)}
+          onChanged={() => { refetchAgents(); refetch(); }}
         />
       )}
 

@@ -136,6 +136,42 @@ test('summarizeEntry degrades gracefully on a malformed payload.label', () => {
   assert.equal('label' in s, false);
 });
 
+// ── #2151: the stamped wakeLabel wins over the collapsed payload label ─────
+
+test('#2151: summarizeEntry prefers the stamped wakeLabel over a collapsed payload.label.name', () => {
+  const s = summarizeEntry({
+    id: 'x', receivedAt: '2026-09-10T00:00:00Z', wakeLabel: 'ready',
+    github: {
+      event: 'issues.labeled', repo: 'o/r', actor: 'alice', eventId: '9',
+      payload: { label: { name: 'flow-control' }, issue: { number: 1 } },
+    },
+  });
+  assert.equal(s.label, 'ready',
+    "the label shown must be the one that woke this subscriber, not the collapsed attributed label");
+});
+
+test('#2151: summarizeEntry falls back to payload.label.name when wakeLabel is null (any-label listener)', () => {
+  const s = summarizeEntry({
+    id: 'x', wakeLabel: null,
+    github: {
+      event: 'issues.labeled', repo: 'o/r', eventId: '9',
+      payload: { label: { name: 'ux' }, issue: { number: 1 } },
+    },
+  });
+  assert.equal(s.label, 'ux');
+});
+
+test('#2151: summarizeEntry falls back to payload.label.name when the entry carries no wakeLabel stamp at all (pre-deploy entries)', () => {
+  const s = summarizeEntry({
+    id: 'x',
+    github: {
+      event: 'issues.labeled', repo: 'o/r', eventId: '9',
+      payload: { label: { name: 'ready-2' }, issue: { number: 1 } },
+    },
+  });
+  assert.equal(s.label, 'ready-2');
+});
+
 test('summarizeEntry surfaces per-kind hints for non-GitHub entries', () => {
   assert.equal(summarizeEntry({ id: 'd', kind: 'github-digest', count: 5, convKey: 'pr:1' }).count, 5);
   assert.equal(summarizeEntry({ id: 'd', kind: 'github-digest', events: [1, 2] }).count, 2);

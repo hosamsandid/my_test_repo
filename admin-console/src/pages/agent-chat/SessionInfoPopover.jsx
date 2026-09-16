@@ -50,7 +50,7 @@ export default function SessionInfoPopover({
   sessionCost,               // { usd, breakdown } | null
   contextWindowTokens,       // number | null — selected model's real window
   maxOutputTokens,           // number | null — only when discovery provided it
-  environmentName,           // string | null — Working Environment name (#1807)
+  environmentName,           // string | null — environment name (#1807)
   gitInfo,                   // array | null — repo/branch data (#1807)
 }) {
   const [open, setOpen] = useState(false);

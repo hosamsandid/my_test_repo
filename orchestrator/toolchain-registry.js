@@ -7,7 +7,7 @@
 // #1940 that was a single process-wide value (`AGENT_IMAGE`, default
 // `as-agent:latest`) read inside both spawn implementations, so giving one team
 // a JVM toolchain meant moving EVERY agent of the installation onto that image.
-// A Working Environment may now name a **toolchain**; agents bound to it are
+// An environment may now name a **toolchain**; agents bound to it are
 // spawned from that toolchain's image and everything else keeps using
 // `AGENT_IMAGE` byte-identically.
 //
@@ -65,6 +65,18 @@ const MAX_DESCRIPTION_LEN = 600;
 const MAX_STACK_LEN = 60;
 const MAX_IMAGE_LEN = 512;
 const MAX_BASELINE_LEN = 200;
+
+// #2282 Band 1: optional per-toolchain resource sizing. A memory quantity
+// accepts either podman's human suffix (spawn-container.js `parseBytes`:
+// digits + optional k/m/g + optional b) or a k8s quantity
+// (spawn-kubernetes-pod.js `parseMemoryQuantity`: digits + optional
+// Ei/Pi/Ti/Gi/Mi/Ki or a single-letter suffix) — the union of both, since the
+// same string is read by both spawners. A cpu quantity is k8s-only (podman has
+// no cpu request in this codebase) but validated the same way regardless of
+// which runtime an installation happens to run.
+const MEMORY_QUANTITY_RE = /^\d+(?:[EPTGMK]i|[kKmMgG])?[bB]?$/;
+const CPU_QUANTITY_RE = /^\d+(?:\.\d+)?m?$/;
+const MAX_QUANTITY_LEN = 20;
 
 // How a toolchain's RUNTIME VERSION is decided (#1941 AC1, concept §5). This is
 // the field that keeps the version axis out of the image set:
@@ -153,6 +165,37 @@ function optionalText(raw, field, max, errors) {
   return v;
 }
 
+function optionalQuantity(raw, field, re, errors) {
+  if (raw === undefined || raw === null) return '';
+  if (typeof raw !== 'string') { errors.push(`resources.${field} must be a string`); return ''; }
+  const v = raw.trim();
+  if (!v) return '';
+  if (v.length > MAX_QUANTITY_LEN) {
+    errors.push(`resources.${field} must be at most ${MAX_QUANTITY_LEN} characters`);
+    return '';
+  }
+  if (!re.test(v)) { errors.push(`resources.${field} is not a valid quantity ('${v}')`); return ''; }
+  return v;
+}
+
+// #2282 Band 1: `resources` overrides the fleet-wide AEE_AGENT_MEM_LIMIT for
+// agents bound to THIS toolchain (e.g. a JVM/Gradle build that needs more room
+// than every other agent). Absent -> null, which both spawners read as "use
+// the fleet default", byte-identical to before this field existed (AC2).
+function validateResources(raw, errors) {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'object' || Array.isArray(raw)) { errors.push('resources must be an object'); return null; }
+  const memoryLimit = optionalQuantity(raw.memoryLimit, 'memoryLimit', MEMORY_QUANTITY_RE, errors);
+  const memoryRequest = optionalQuantity(raw.memoryRequest, 'memoryRequest', MEMORY_QUANTITY_RE, errors);
+  const cpuRequest = optionalQuantity(raw.cpuRequest, 'cpuRequest', CPU_QUANTITY_RE, errors);
+  if (!memoryLimit && !memoryRequest && !cpuRequest) return null;
+  const out = {};
+  if (memoryLimit) out.memoryLimit = memoryLimit;
+  if (memoryRequest) out.memoryRequest = memoryRequest;
+  if (cpuRequest) out.cpuRequest = cpuRequest;
+  return out;
+}
+
 // Validate + normalize one registry entry. Returns the whitelisted shape — a
 // caller cannot smuggle extra keys onto a persisted toolchain, so the registry
 // file stays a small, reviewable list of exactly what the resolver reads.
@@ -187,6 +230,7 @@ function validateToolchain(raw) {
     errors.push(`versionSource must be ${VERSION_SOURCES.join(' or ')}`);
   }
   const baseline = optionalText(src.baseline, 'baseline', MAX_BASELINE_LEN, errors);
+  const resources = validateResources(src.resources, errors);
 
   if (errors.length) return { ok: false, errors };
   return {
@@ -200,6 +244,7 @@ function validateToolchain(raw) {
       platforms: plat.platforms,
       versionSource,
       baseline,
+      resources,
     },
   };
 }
@@ -276,6 +321,7 @@ function toolchainFromManifest(manifest) {
     platforms: Array.isArray(m.platforms) ? [...m.platforms] : [...KNOWN_PLATFORMS],
     versionSource: m.versionSource || '',
     baseline: m.baseline || '',
+    resources: m.resources || null,
   };
 }
 
@@ -408,9 +454,9 @@ function resolveAgentImage(opts) {
     return {
       error: 'toolchain-not-registered',
       message:
-        `Working Environment ${envLabel(environmentId, environmentName)} selects toolchain '${wanted}', ` +
+        `Environment ${envLabel(environmentId, environmentName)} selects toolchain '${wanted}', ` +
         'which is not in the operator toolchain registry. A System Admin must register it ' +
-        '(Working Environments → Toolchains), or clear the toolchain on the environment to ' +
+        '(Environment Templates → Toolchains), or clear the toolchain on the environment to ' +
         `fall back to the default image '${fallback}'.`,
     };
   }
@@ -419,7 +465,7 @@ function resolveAgentImage(opts) {
     return {
       error: 'toolchain-platform-mismatch',
       message:
-        `Working Environment ${envLabel(environmentId, environmentName)} selects toolchain '${toolchain.id}' ` +
+        `Environment ${envLabel(environmentId, environmentName)} selects toolchain '${toolchain.id}' ` +
         `(${toolchain.name}), which declares platforms [${toolchain.platforms.join(', ')}] and so is not ` +
         `available on the '${rt}' runtime this installation uses.`,
     };
@@ -443,7 +489,7 @@ function missingImageMessage(opts) {
     : 'is not present in the local image store (build it with `make toolchain-images`, or pull it)';
   const tc = String(toolchainId || '').trim();
   return (
-    `Working Environment ${envLabel(environmentId, environmentName)} selects toolchain ` +
+    `Environment ${envLabel(environmentId, environmentName)} selects toolchain ` +
     `'${tc || '<unknown>'}', whose image '${image}' ${where}. ` +
     'Refusing to spawn the agent — falling back to the default image would start it without ' +
     'its toolchain and fail later at the first build command.'
@@ -488,4 +534,6 @@ module.exports = {
   resolveAgentImage,
   missingImageMessage,
   isMissingImageFailure,
+  MEMORY_QUANTITY_RE,
+  CPU_QUANTITY_RE,
 };

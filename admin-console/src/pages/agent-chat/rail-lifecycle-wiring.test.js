@@ -39,10 +39,14 @@ const menu = code(read('../../components/RowContextMenu.jsx'));
 const sharePanel = code(read('./ShareTeamPanel.jsx'));
 
 test('the chat page derives its list URL from the opt-in, never a literal', () => {
-  assert.match(agentChat, /useApi\(matrixAgentsUrl\(showDisabled\)\)/);
+  // #2311: the one-shot `useApi(matrixAgentsUrl(showDisabled))` fetch became a
+  // shared background poll (`AgentRosterProvider`), which is handed the SAME
+  // url-builder + opt-in rather than a literal — the toggle still drives which
+  // URL gets polled, just on every tick instead of once.
+  assert.match(agentChat, /AgentRosterProvider showDisabled=\{showDisabled\} buildUrl=\{matrixAgentsUrl\}/);
   // A hard-coded list URL would freeze the chat on the enabled-only payload and
   // make the toggle a no-op that still *looks* live.
-  assert.doesNotMatch(agentChat, /useApi\(\s*['"]\/api\/matrix\/agents/);
+  assert.doesNotMatch(agentChat, /buildUrl=\{\s*\(\)?\s*=>?\s*['"]\/api\/matrix\/agents/);
 });
 
 test('the opt-in is persisted per user, not per session', () => {
@@ -56,7 +60,12 @@ test('the chat page passes the opt-in and the menu request down to the rail', ()
 });
 
 test('a disabled agent is never resolved as the open chat (AC6)', () => {
-  assert.match(agentChat, /isChatOpenable\(a\)/);
+  // #2311 D2: the openable check now runs against `effectiveRoutedAgent`
+  // (the live routed agent, or its frozen last-known snapshot once it has
+  // vanished from a background roster refresh) rather than `routedAgent`
+  // directly — `effectiveRoutedAgent` is `routedAgent` whenever the agent is
+  // still present, so this is the same check, widened to also cover D2.
+  assert.match(agentChat, /isChatOpenable\(effectiveRoutedAgent\)/);
 });
 
 test('the lifecycle host is mounted with the list and a way to refresh it', () => {
@@ -372,44 +381,90 @@ test('#2082 — a write re-reads the list rather than trusting its own response'
   assert.match(sharePanel, /await apiCall\(req\.method, req\.url[\s\S]{0,200}?await load\(\)/);
 });
 
-/* ── #2052 convert into a team of one ───────────────────────────────── */
+test('#2232 — the retired convert-to-team entry, dialog and request are gone', () => {
+  // Phase C of epic #2229 retires the manual conversion action (#2052); its
+  // menu case, dialog and request must not linger in the host that used to
+  // route them.
+  assert.doesNotMatch(host, /case 'convert-to-team':/);
+  assert.doesNotMatch(host, /ConvertToTeamDialog/);
+  assert.doesNotMatch(host, /\/convert-to-team`/);
+});
 
-test('#2052 AC1 — the convert entry is routed, not just described', () => {
-  // The item comes from `buildAgentMenu`; without a case in `choose()` it would
+/* ── #2171 clone team ───────────────────────────────────────────────── */
+
+test('#2171 — the clone-team entry is routed to the form, not just described', () => {
+  // The item comes from `buildTeamMenu`; without a case in `choose()` it would
   // render, be clickable, and do nothing at all.
-  assert.match(host, /case 'convert-to-team':\s*setConvertTarget\(/);
-  assert.match(host, /<ConvertToTeamDialog/);
+  assert.match(host, /case 'clone-team':\s*if \(team\) \{ setPanelAgent\(team\); setPanelMode\('clone-team'\); \}/);
+  assert.match(host, /<CloneTeamForm/);
 });
 
-test('#2052 AC2 — the dialog copy comes from the pure module, not inline JSX', () => {
-  assert.match(host, /copy=\{convertDialogCopy\(/);
-  assert.match(host, /consequences=\{convertConsequences\(/);
-  // A literal confirmation body here would be the copy that drifts.
-  assert.doesNotMatch(host, /cannot be undone/i);
+test('#2171 — the clone never sends a credential, and stubs the new members', () => {
+  // The literal AC: "no credential id from X appears on Y's environment" —
+  // enforced server-side by `copyFromTeamId` (see team-clone-routes.test.js),
+  // but the client must actually ASK for that mechanism rather than resolving
+  // and forwarding the source's own repositories/mcpServers/githubTokenId.
+  assert.match(host, /copyFromTeamId: source\.id/);
+  assert.doesNotMatch(host, /githubTokenId/);
+  // Deferred materialization (#1955) is what turns "no credential yet" into a
+  // stub nobody tried to clone with, rather than a failed member.
+  assert.match(host, /materializeMembers: false/);
 });
 
-test('#2052 — the request hits the convert route and only forces on the retry', () => {
-  assert.match(host, /\/convert-to-team`/);
-  // `force` is the answer to the server's mid-run question, so it may only ever
-  // be derived from the warning the server sent back.
-  assert.match(host, /force: !!convertTarget\?\.busyNotice/);
-  assert.doesNotMatch(host, /force: true/);
+test('#2171 — the clone requests a fresh label suffix, so a clone pointed at the same repo cannot cross-trigger its source', () => {
+  assert.match(host, /suggest-suffix/);
+  assert.match(host, /labelSuffix,?\s*\}\)/);
 });
 
-test('#2052 — the mid-run 409 re-opens the same dialog instead of throwing', () => {
-  // Raw fetch, like `toggleEnabled`: `apiCall` turns a 409 into an exception,
-  // which would surface the refusal as an error toast rather than a question.
-  assert.match(
-    host,
-    /convert-to-team`[\s\S]{0,600}?res\.status === 409[\s\S]{0,200}?convertBusyNotice\(data\)/,
-  );
-  assert.match(host, /setConvertTarget\(\{ agent, busyNotice \}\)/);
+/* ── #2213 — the team header row selects + opens Settings; the chevron
+   alone toggles expand/collapse ────────────────────────────────────── */
+
+test('#2213 — the chevron is its own click target and is the only thing that toggles', () => {
+  const header = agentList.match(/function CollapsibleHeader\([\s\S]*?\n\}/)[0];
+  // The outer row activates (selects + opens settings), not the collapse.
+  assert.match(header, /onClick=\{onActivate\}/);
+  assert.doesNotMatch(header, /onClick=\{onToggle\}/);
+  // The chevron is a distinct `role="button"` element carrying `aria-expanded`
+  // and its own stopPropagation'd handler — the outer row's onClick must never
+  // call `onToggle` directly any more.
+  assert.match(header, /role="button"[\s\S]{0,200}aria-expanded=\{!collapsed\}/);
+  assert.match(header, /onClick=\{e => \{ e\.stopPropagation\(\); onToggle\(\); \}\}/);
 });
 
-test('#2052 — a failed conversion closes the dialog so its error is readable', () => {
-  // Same stacking-context reason as the Add member sibling above.
-  assert.match(
-    host,
-    /convert-to-team`[\s\S]{0,1200}?catch \(e\) \{\s*setConvertTarget\(null\)/,
-  );
+test('#2213 — a team header click moves the real selection and opens Settings, gated on canManage', () => {
+  const section = agentList.match(/const GroupSection = React\.memo\(function GroupSection\([\s\S]*?\n\}\);/)[0];
+  assert.match(section, /onSelect\(group\.id\)/);
+  assert.match(section, /if \(onOpenTeamSettings && canManageTeam\) onOpenTeamSettings\(group\.id\)/);
+  assert.match(section, /group\.header\.canManage !== false/);
+});
+
+test('#2213 — the chat wires the header-row activation to the same Settings mechanism as the rail menu', () => {
+  assert.match(agentChat.match(/<AgentList[\s\S]*?\/>/)[0], /onOpenTeamSettings=\{handleOpenSettings\}/);
+});
+
+test('#2213 — a role:team agent is never resolved as the open chat', () => {
+  assert.match(agentChat, /const routedAgent = \(agents \?\? \[\]\)\.find\(a => a\.id === agentId\)/);
+});
+
+/* ── #2235: the team surface replaces the chat+rail split entirely ── */
+
+test('a routed team gets the merged full-width surface, not the chat+rail split', () => {
+  assert.match(agentChat, /const subjectIsTeam = routedAgent\?\.role === 'team';/);
+  assert.match(agentChat, /\{subjectIsTeam \? \(/);
+  assert.match(agentChat, /<TeamConfigSurface team=\{routedAgent\} onAgentConfigChanged=\{refetch\} \/>/);
+  // The old placeholder — and the narrow, Settings-only rail it sat beside —
+  // are retired, not merely unreached.
+  assert.doesNotMatch(agentChat, /TeamSelectedState/);
+  assert.doesNotMatch(agentChat, /subjectIsTeam=\{routedAgent\?\.role === 'team'\}\s*\n\s*roomId=\{effectiveRoomId\}/);
+});
+
+test('the team surface renders the shared Settings form, not a second implementation', () => {
+  assert.match(agentChat, /function TeamConfigSurface\(/);
+  assert.match(agentChat, /<AgentSettingsPanel\s*\n\s*agentId=\{team\.id\}/);
+});
+
+test('a team the caller may see but not manage gets a read-only notice, never an editable form', () => {
+  assert.match(agentChat, /const canManage = team\?\.canManage !== false;/);
+  assert.match(agentChat, /canManage \? \(\s*<AgentSettingsPanel/);
+  assert.match(agentChat, /<TeamReadOnlyNotice team=\{team\} \/>/);
 });

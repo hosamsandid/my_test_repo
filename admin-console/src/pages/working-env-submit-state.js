@@ -1,5 +1,5 @@
 // Pure submit-gate helper for the Working Environment create/edit form
-// (WorkingEnvironments.jsx).
+// (EnvironmentTemplates.jsx).
 //
 // Before this module the gate lived inline as a single boolean:
 //

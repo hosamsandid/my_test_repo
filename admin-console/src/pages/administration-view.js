@@ -17,7 +17,7 @@
 //     verbatim (it was already pure and covered); `agentTeamTenant` came with
 //     the page and collapsed with it — nothing read it but its own test.
 
-import { credentialScopeLabel, normalizeCredential, ownershipPayload } from './credential-scope-view.js';
+import { credentialScopeLabel, normalizeCredential, ownershipPayload, isGlobalRecord } from './credential-scope-view.js';
 
 /* ── Tabs ──────────────────────────────────────────────────────────────── */
 
@@ -141,10 +141,13 @@ export function teamDeleteImpact(row) {
 //   - `agentTeams` is `[{ team, members }]` — one entry per `role: "team"`
 //     agent, `members` being its `team-member` agents (sorted). This is the
 //     unit of assignment: the whole group moves together.
-//   - `standaloneAgents` is every other agent — a `role: "agent"` with no
-//     parent, still assignable individually. The grouping is role-agnostic
-//     rather than an allow-list, so a leftover config from a retired role
-//     (#1964) lands here and stays assignable instead of vanishing.
+//   - `standaloneAgents` is every OTHER-role agent that is still individually
+//     assignable — an orphan `team-member` (E2) or a leftover config from a
+//     retired role (#1964). A bare `role: "agent"` (standalone, no team —
+//     always an ephemeral worker post-#2229) is deliberately EXCLUDED: #2234
+//     decided that no admin-console surface shows a standalone agent any
+//     more, not even this ownership-management one, so an ephemeral agent's
+//     owner/tier can no longer be changed from the UI at all.
 //
 // Edge cases:
 //   - E1: a team with no members yields `members: []` (still assignable).
@@ -163,8 +166,9 @@ export function groupAgentsForOwnership(agents) {
     if (a.role === MEMBER_ROLE && a.parentTeamId && teamIds.has(a.parentTeamId)) {
       if (!membersByParent.has(a.parentTeamId)) membersByParent.set(a.parentTeamId, []);
       membersByParent.get(a.parentTeamId).push(a);
-    } else {
-      // Standalone, or an orphan team-member (E2) whose parent is gone.
+    } else if (a.role !== 'agent') {
+      // An orphan team-member (E2) or an unrecognised/retired role — surfaced
+      // for cleanup. A plain standalone `agent` is never surfaced (#2234).
       standaloneAgents.push(a);
     }
   }
@@ -194,17 +198,37 @@ export function groupAgentsForOwnership(agents) {
 // on environments and MCP servers, and the word the Working Environments form
 // already shows. The `scope` value stays the wire value (`system`) so nothing
 // downstream has to translate back.
+// #2158: this is the ONE shared tier-summary helper for BOTH Working
+// Environments and MCP servers — a global record and a shared-with-nobody
+// record have the identical underlying shape (`scope: 'system'`,
+// `assignedTeamIds: []`) and currently mean the OPPOSITE thing (everyone vs.
+// nobody), so the distinction has to be made here rather than left for a
+// reader to infer from an empty team list.
 export function environmentTierSummary(env, teamNames = {}) {
   const tier = credentialScopeLabel(env, teamNames);
   if (tier.scope === 'system') {
+    if (isGlobalRecord(env)) {
+      // Wording matches the Model Providers page (#2136) so the two read as
+      // one concept; the detail spells out the actual decision an operator is
+      // taking, not just the label.
+      return {
+        scope: 'system',
+        global: true,
+        label: 'Global',
+        detail: 'Every team, including teams created later',
+      };
+    }
     return {
       scope: 'system',
+      global: false,
       label: 'Shared',
       detail: tier.teams.length
         ? tier.teams.join(', ')
         // Not a hypothetical: an unassigned shared record is reachable by no
         // team at all, only by a System Admin — worth saying plainly on the one
-        // page that can fix it.
+        // page that can fix it. Deliberately NEVER shown for a global record
+        // (checked above), which has the identical empty-assignment shape but
+        // means the opposite.
         : 'Not assigned to any team — System Admins only',
     };
   }
@@ -212,10 +236,17 @@ export function environmentTierSummary(env, teamNames = {}) {
     // A3.2 refuses the personal tier for environments, so this is a record in a
     // state the platform does not create. Report it rather than rendering it as
     // a team the reader could then reassign.
-    return { scope: 'personal', label: 'Personal', detail: 'Unsupported tier for an environment' };
+    return { scope: 'personal', global: false, label: 'Personal', detail: 'Unsupported tier for an environment' };
   }
-  return { scope: 'team', label: 'Team', detail: tier.detail };
+  return { scope: 'team', global: false, label: 'Team', detail: tier.detail };
 }
+
+// Alias for MCP servers (#2158 AC7 — "one shared tier-summary helper serving
+// both kinds"): an environment and an MCP server carry the identical
+// ownership shape (D12), so a second copy of this function is exactly how a
+// shared/global record would get silently mislabeled on one page and not the
+// other.
+export const mcpTierSummary = environmentTierSummary;
 
 // Why Save is refused, or null when the pending ownership is submittable. A
 // team-tier record with no team selected would 400 server-side; saying so on

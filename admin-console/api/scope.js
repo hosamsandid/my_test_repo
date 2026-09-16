@@ -171,6 +171,13 @@ function ownedByCaller(scope, resource) {
 //     standalone agent, not an opt-in: the pre-#2078 `visibility === 'private'`
 //     condition is retired unread (nothing ever wrote the field, verified in
 //     concept §3.5), so a standalone agent is private to its creator full stop.
+//
+// Post-#2229 (epic; #2234 decision), "a standalone agent" reaching this branch
+// means an **ephemeral** agent or a malformed config, not an ordinary
+// user-created one — Phase C's team-of-one migration converts every ordinary
+// standalone agent into a team of one, and the ephemeral-agent route is a
+// permanent exception the migration does not touch. The rule itself is
+// unchanged: docs/decentralised-access-concept.md Amendment 10.
 function visibleAgent(scope, agent) {
   if (!scope) return false;
   if (scope.all) return true;
@@ -237,6 +244,18 @@ function canManageTeam(scope, teamId) {
   if (scope.all) return true;
   if (!teamId) return false;
   return scope.roles instanceof Map && scope.roles.get(teamId) === 'team-admin';
+}
+
+// Is the caller Team Admin of AT LEAST ONE team (any team, unnamed)? Distinct
+// from `canManageTeam`, which answers for one specific named team. This is the
+// floor permission for writing into the GLOBAL skill pool (#2178/#2180/#2307):
+// entering the global pool is a Team-Admin act, not System-Admin-only, and
+// unlike a transfer/promote there is no single "content's own team" to name —
+// any team the caller administers clears the bar.
+function isTeamAdminOfAny(scope) {
+  if (!scope) return false;
+  if (scope.all) return true;
+  return scope.roles instanceof Map && [...scope.roles.values()].includes('team-admin');
 }
 
 // Is this user visible to the caller? A non-admin sees only users who share at
@@ -451,6 +470,8 @@ function credentialVisibleToTeam(cred, teamId) {
 // no team, so its creator is the only non-admin who may change it. Without this
 // the owner could see their own private agent and not edit it — and nobody but a
 // System Admin could, since no membership can name a standalone agent's id.
+// Post-#2229, that standalone agent is an ephemeral one or a malformed config
+// (see the note above `visibleAgent`) — the rule is unchanged.
 function canManageAgent(scope, agent) {
   if (!scope) return false;
   if (scope.all) return true;
@@ -496,11 +517,25 @@ function canManageAgent(scope, agent) {
 // The tier order is the same everywhere: personal before `scope.all` (§2.2),
 // then the admin bypass, then shared, then team.
 
+// An environment created for a standalone agent by a user with no team carries
+// an `ownerId` (the creator) instead of a team tier — the D8 owner branch, the
+// same rule that makes a standalone `role: 'agent'` visible to its creator. The
+// QuickStart repository fast lane (#2071) writes it: a teamless user's own
+// environment has no team to be scoped to, and the shared/system tiers would
+// either hide it from its creator or require an admin to manage it. Checked
+// BEFORE `scope.all` in both predicates below so it is a genuine ownership
+// grant, not merely an admin bypass — mirroring how `ownsPersonalTier` sits
+// ahead of the admin shortcut for the personal credential tier.
+function ownsEnvironment(scope, env) {
+  return !!(scope && scope.userId && env && env.ownerId && env.ownerId === scope.userId);
+}
+
 // Is this environment / MCP server visible to the caller? (list + read-one)
 function visibleEnvironment(scope, env) {
   if (!scope) return false;
   const r = normalizeTier(env);
   if (r && r.scope === TIER_PERSONAL) return ownsPersonalTier(scope, r);
+  if (ownsEnvironment(scope, env)) return true;
   if (scope.all) return true;
   if (!r) return false;
   if (r.scope === TIER_SYSTEM) return r.assignedTeamIds.some(t => visibleTeam(scope, t));
@@ -515,6 +550,7 @@ function canManageEnvironment(scope, env) {
   if (!scope) return false;
   const r = normalizeTier(env);
   if (r && r.scope === TIER_PERSONAL) return ownsPersonalTier(scope, r);
+  if (ownsEnvironment(scope, env)) return true;
   if (scope.all) return true;
   if (!r) return false;
   if (r.scope === TIER_SYSTEM) return r.assignedTeamIds.some(t => canManageTeam(scope, t));
@@ -613,7 +649,9 @@ module.exports = {
   visibleAgent,
   resolveAgentTenant,
   canManageTeam,
+  isTeamAdminOfAny,
   canManageAgent,
+  ownsEnvironment,
   visibleEnvironment,
   canManageEnvironment,
   canCreateEnvironment,

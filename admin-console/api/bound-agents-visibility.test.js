@@ -23,6 +23,13 @@
 //
 // api.js cannot be `require`d in a unit test (it boots two listeners), so this
 // reads the routes' source — the drift-guard technique #651 uses for JSX.
+//
+// #2234 (epic #2229 Phase E, docs/decentralised-access-concept.md Amendment
+// 10) asked the tests that fixture a standalone `role: 'agent'` as a distinct
+// case to gain an `ephemeral: true` sibling. This file has no such fixture to
+// extend — it is a pure source-text drift guard over route wiring and never
+// constructs an agent config at all — so nothing here needed a change; noted
+// explicitly rather than silently skipped.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

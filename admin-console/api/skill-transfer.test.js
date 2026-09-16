@@ -17,10 +17,11 @@ function caps({ systemAdmin = false, teams = [] } = {}) {
 
 /* ─── transferAction / the transition matrix ─────────────────────────────── */
 
-test('transferAction: the four valid copy cells carry their semantic verb', () => {
+test('transferAction: the five valid copy cells carry their semantic verb', () => {
   assert.equal(T.transferAction('agent', 'team', 'copy'), 'lifted');
   assert.equal(T.transferAction('team', 'team', 'copy'), 'shared');
   assert.equal(T.transferAction('team', 'global', 'copy'), 'promoted');
+  assert.equal(T.transferAction('agent', 'global', 'copy'), 'promoted'); // #2180: re-enabled
   assert.equal(T.transferAction('global', 'team', 'copy'), 'adopted');
 });
 
@@ -30,8 +31,7 @@ test('transferAction: a move is always stamped "moved" regardless of cell', () =
   assert.equal(T.transferAction('global', 'team', 'move'), 'moved');
 });
 
-test('transferAction: retired / non-transfer cells are null', () => {
-  assert.equal(T.transferAction('agent', 'global', 'copy'), null); // retired, go via team
+test('transferAction: non-transfer cells are null', () => {
   assert.equal(T.transferAction('global', 'global', 'copy'), null); // edit, not transfer
   assert.equal(T.transferAction('agent', 'agent', 'copy'), null); // author, not transfer
   assert.equal(T.transferAction('team', 'agent', 'copy'), null); // activation, separate path
@@ -89,9 +89,16 @@ test('planTransfer: onCollision defaults to reject and validates the enum', () =
 });
 
 test('planTransfer: an invalid tier transition is rejected as such', () => {
-  const p = T.planTransfer({ name: 'x', from: { tier: 'agent', agentId: 'a' }, to: { tier: 'global' } });
+  const p = T.planTransfer({ name: 'x', from: { tier: 'global' }, to: { tier: 'global' } });
   assert.equal(p.ok, false);
   assert.match(p.error, /not a valid tier transition/);
+});
+
+test('planTransfer: agent→global is a valid direct publish (#2180)', () => {
+  const p = T.planTransfer({ name: 'x', from: { tier: 'agent', agentId: 'a' }, to: { tier: 'global' } });
+  assert.equal(p.ok, true);
+  assert.equal(p.action, 'promoted');
+  assert.equal(p.semanticAction, 'promoted');
 });
 
 test('planTransfer: team→team to the SAME team is a no-op error', () => {
@@ -149,10 +156,18 @@ test('requiredPermission: team target needs Team Admin of the target team', () =
   assert.deepEqual(perm.teamAdminOf, ['alpha']);
 });
 
-test('requiredPermission: global target needs System Admin', () => {
+test('requiredPermission: a team→global target needs System Admin OR Team Admin of the source team (#2180)', () => {
   const perm = T.requiredPermission({ tier: 'team', teamId: 'alpha' }, { tier: 'global' }, 'copy');
+  assert.equal(perm.needsSystemAdmin, false);
+  assert.deepEqual(perm.teamAdminOf, []);
+  assert.deepEqual(perm.orTeamAdminOf, ['alpha']);
+});
+
+test('requiredPermission: an agent→global target defaults to System Admin (the caller relaxes it once it resolves the agent\'s real team)', () => {
+  const perm = T.requiredPermission({ tier: 'agent', agentId: 'a' }, { tier: 'global' }, 'copy');
   assert.equal(perm.needsSystemAdmin, true);
   assert.deepEqual(perm.teamAdminOf, []);
+  assert.deepEqual(perm.orTeamAdminOf, []);
 });
 
 test('requiredPermission: move out of global needs System Admin for the source too', () => {
@@ -185,8 +200,21 @@ test('permitTransfer: Team Admin of the target team passes a plain team adopt', 
   assert.equal(T.permitTransfer(perm, caps({ teams: ['alpha'] })).ok, true);
 });
 
-test('permitTransfer: a non-admin is forbidden from a global target', () => {
+test('permitTransfer: Team Admin of the SOURCE team may publish team→global (#2180)', () => {
   const perm = T.requiredPermission({ tier: 'team', teamId: 'alpha' }, { tier: 'global' }, 'copy');
+  const r = T.permitTransfer(perm, caps({ teams: ['alpha'] }));
+  assert.equal(r.ok, true);
+});
+
+test('permitTransfer: Team Admin of a DIFFERENT team is forbidden from a team→global publish', () => {
+  const perm = T.requiredPermission({ tier: 'team', teamId: 'alpha' }, { tier: 'global' }, 'copy');
+  const r = T.permitTransfer(perm, caps({ teams: ['beta'] }));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /System Admin or Team Admin/);
+});
+
+test('permitTransfer: a non-admin is forbidden from an agent→global publish unless the caller has relaxed the permission', () => {
+  const perm = T.requiredPermission({ tier: 'agent', agentId: 'a' }, { tier: 'global' }, 'copy');
   const r = T.permitTransfer(perm, caps({ teams: ['alpha'] }));
   assert.equal(r.ok, false);
   assert.match(r.error, /System Admin/);
@@ -204,13 +232,54 @@ test('permitTransfer: Team Admin of both sides can move team→team', () => {
   assert.equal(T.permitTransfer(perm, caps({ teams: ['alpha', 'beta'] })).ok, true);
 });
 
+/* ─── #2307: requiredPoolWritePermission + the anyTeamAdmin branch of
+ * permitTransfer (import/create/edit reuse both) ─────────────────────────── */
+
+test('requiredPoolWritePermission: team tier needs Team Admin of that team, unchanged shape', () => {
+  assert.deepEqual(T.requiredPoolWritePermission('team', 'alpha'), { needsSystemAdmin: false, teamAdminOf: ['alpha'] });
+});
+
+test('requiredPoolWritePermission: global tier needs System Admin OR Team Admin of ANY team, not System-Admin-only', () => {
+  assert.deepEqual(T.requiredPoolWritePermission('global'), { needsSystemAdmin: false, teamAdminOf: [], anyTeamAdmin: true });
+});
+
+test('permitTransfer: anyTeamAdmin passes for a caller who is Team Admin of at least one (unnamed) team', () => {
+  const perm = T.requiredPoolWritePermission('global');
+  const r = T.permitTransfer(perm, { systemAdmin: false, isTeamAdminOfAny: () => true });
+  assert.deepEqual(r, { ok: true });
+});
+
+test('permitTransfer: anyTeamAdmin refuses a caller who is Team Admin of no team, naming the actual authority (#2307 AC2)', () => {
+  const perm = T.requiredPoolWritePermission('global');
+  const r = T.permitTransfer(perm, { systemAdmin: false, isTeamAdminOfAny: () => false });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /System Admin or Team Admin/);
+});
+
+test('permitTransfer: a missing isTeamAdminOfAny capability fails closed rather than granting silently', () => {
+  const perm = T.requiredPoolWritePermission('global');
+  assert.equal(T.permitTransfer(perm, { systemAdmin: false }).ok, false);
+});
+
+test('permitTransfer: the action parameter names the refused act, not a hardcoded "transfer" (#2307 AC2/AC10)', () => {
+  const perm = T.requiredPermission({ tier: 'agent', agentId: 'a' }, { tier: 'global' }, 'copy'); // needsSystemAdmin: true
+  const r = T.permitTransfer(perm, { systemAdmin: false }, 'import');
+  assert.equal(r.ok, false);
+  assert.match(r.error, /this import requires System Admin/);
+  assert.doesNotMatch(r.error, /transfer/);
+});
+
 /* ─── the end-to-end plan carries a correct permission block ─────────────── */
 
 test('planTransfer: the plan embeds the required permission', () => {
   const p = T.planTransfer({ name: 'x', mode: 'move', from: { tier: 'team', teamId: 'alpha' }, to: { tier: 'global' } });
   assert.equal(p.ok, true);
-  assert.equal(p.permission.needsSystemAdmin, true);
+  // #2180: a move team→global no longer hard-requires System Admin — the
+  // retiring team's own admin satisfies both the source-retirement AND the
+  // (now-relaxed) global-target requirement.
+  assert.equal(p.permission.needsSystemAdmin, false);
   assert.deepEqual(p.permission.teamAdminOf, ['alpha']);
+  assert.deepEqual(p.permission.orTeamAdminOf, ['alpha']);
 });
 
 /* ─── buildTransferOrigin ────────────────────────────────────────────────── */

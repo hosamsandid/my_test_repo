@@ -66,7 +66,7 @@ drafting and summary helpers, the skill-merge draft, the improvement analyst,
 and the **Ask** tab of this help panel.
 
 **It is not the model your agents run on.** An agent's model comes from its
-Working Environment's provider, or from the per-agent override in the Agent Chat
+environment's provider, or from the per-agent override in the Agent Chat
 header — changing the Assist model never restarts an agent or alters a running
 one. The two selectors deliberately look alike (they are the same popover
 component) but they answer different questions, and they are stored in different

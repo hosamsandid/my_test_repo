@@ -358,6 +358,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
         ok: r.ok,
         text: r.ok
           ? `OK (HTTP ${r.status}) — ${r.url}`
+            + (r.noModelList ? ' — this endpoint does not expose a model list; enter the model name(s) manually.' : '')
           : `Failed: ${r.error || 'HTTP ' + r.status} (${r.url})`,
       });
     } catch (e) {
@@ -376,8 +377,13 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
     try {
       const { path, body } = probeRequest(probeForm, 'discover');
       const r = await apiCall('POST', path, body);
-      setDiscovered(r.models || []);
-      setProbeMsg({ ok: true, text: `Found ${r.count ?? r.models?.length ?? 0} model(s) at ${r.url}` });
+      if (r.noModelList) {
+        setDiscovered(null);
+        setProbeMsg({ ok: true, text: r.message });
+      } else {
+        setDiscovered(r.models || []);
+        setProbeMsg({ ok: true, text: `Found ${r.count ?? r.models?.length ?? 0} model(s) at ${r.url}` });
+      }
     } catch (e) {
       setProbeMsg({ ok: false, text: e.message });
     } finally {
@@ -987,7 +993,7 @@ function EnvProviderPanel({ provider, onClose }) {
       }}>
         <Lock size={14} style={{ flexShrink: 0, marginTop: 2 }} />
         <span>
-          Read-only mirror of the <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ANTHROPIC_*</code> variables in <code style={{ fontFamily: 'var(--eb-font-mono)' }}>.env</code>. Working Environments that pick <em>“inherit from .env”</em> resolve to these values. To change them, edit <code style={{ fontFamily: 'var(--eb-font-mono)' }}>.env</code> and restart the stack (<code style={{ fontFamily: 'var(--eb-font-mono)' }}>make restart</code>).
+          Read-only mirror of the <code style={{ fontFamily: 'var(--eb-font-mono)' }}>ANTHROPIC_*</code> variables in <code style={{ fontFamily: 'var(--eb-font-mono)' }}>.env</code>. Environments that pick <em>“inherit from .env”</em> resolve to these values. To change them, edit <code style={{ fontFamily: 'var(--eb-font-mono)' }}>.env</code> and restart the stack (<code style={{ fontFamily: 'var(--eb-font-mono)' }}>make restart</code>).
         </span>
       </div>
 
@@ -1543,7 +1549,7 @@ export default function ModelRegistry() {
       <ConfirmDialog
         open={!!deleteTarget}
         title="Delete model provider"
-        message={`Really delete "${deleteTarget?.name || deleteTarget?.id}"? Working Environments using this provider must detach it first.`}
+        message={`Really delete "${deleteTarget?.name || deleteTarget?.id}"? Environments using this provider must detach it first.`}
         variant="danger"
         confirmLabel="Delete"
         onConfirm={handleDelete}

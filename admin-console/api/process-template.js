@@ -141,6 +141,165 @@ function normalizeWipLimit(v) {
   return Number.isInteger(v) && v >= 1 ? v : null;
 }
 
+// Agent instance pools (#2246, epic #2251 Phase 1; design of record
+// `docs/parallel-workers-concept.md` §9). Opt-in `pool` config on a ROLE — a
+// non-pooled role (the default, no `pool` field) is byte-identical to today.
+// Round-tripped through export → materialise → Edit-as-draft like `wipLimit`/
+// `hillClimb`. Normalized here (bundle round-trip time) so a saved role always
+// carries a clean shape; the orchestrator's own `agent-pool.js` re-derives the
+// identical defaults when reading a materialised member's config at dispatch
+// time — the two are kept in sync by hand, the same duplication `wipLimit`'s
+// own `limitInForce` already lives with.
+const POOL_WORKSPACES = ['git-clean-base', 'input-copy', 'none'];
+
+// Agent Pools — Phase 3 (#2248, epic #2251 §6): the recurring-analysis
+// binding's own config, a sibling of `baseBranch` (the git binding's own
+// field) on this same `pool` surface. Kept in sync by hand with
+// `orchestrator/recurring-pool-source.js`'s `normalizeWorkSource`, the same
+// duplication discipline `normalizePool` below already follows against
+// `agent-pool.js`.
+function normalizeWorkSource(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const items = Array.isArray(raw.items)
+    ? [...new Set(raw.items.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim()))]
+    : [];
+  if (!items.length) return null;
+  const outputDir = typeof raw.outputDir === 'string' && raw.outputDir.trim() ? raw.outputDir.trim() : null;
+  if (!outputDir) return null;
+  const inputDir = typeof raw.inputDir === 'string' && raw.inputDir.trim() ? raw.inputDir.trim() : null;
+  return { items, outputDir, ...(inputDir ? { inputDir } : {}) };
+}
+
+function normalizePool(raw) {
+  if (!raw || typeof raw !== 'object' || raw.enabled !== true) return null;
+  const maxInstances = Number.isInteger(raw.maxInstances) && raw.maxInstances >= 1 ? raw.maxInstances : null;
+  const workspace = POOL_WORKSPACES.includes(raw.workspace) ? raw.workspace : 'git-clean-base';
+  const baseBranch = typeof raw.baseBranch === 'string' && raw.baseBranch.trim() ? raw.baseBranch.trim() : null;
+  const workSource = normalizeWorkSource(raw.workSource);
+  const t = raw.teardown && typeof raw.teardown === 'object' ? raw.teardown : {};
+  const positiveMs = (v) => (Number.isFinite(v) && v > 0 ? v : null);
+  return {
+    enabled: true,
+    ...(maxInstances != null ? { maxInstances } : {}),
+    workspace,
+    ...(baseBranch ? { baseBranch } : {}),
+    ...(workSource ? { workSource } : {}),
+    ...((positiveMs(t.idleTimeoutMs) || positiveMs(t.maxRuntimeMs) || positiveMs(t.retainLogsMs)) ? {
+      teardown: {
+        ...(positiveMs(t.idleTimeoutMs) ? { idleTimeoutMs: positiveMs(t.idleTimeoutMs) } : {}),
+        ...(positiveMs(t.maxRuntimeMs) ? { maxRuntimeMs: positiveMs(t.maxRuntimeMs) } : {}),
+        ...(positiveMs(t.retainLogsMs) ? { retainLogsMs: positiveMs(t.retainLogsMs) } : {}),
+      },
+    } : {}),
+  };
+}
+
+// Strict shape check for a `pool` config — checked, not silently coerced (a
+// typo'd `workspace`/`enabled` value refuses the save rather than quietly
+// materialising as an unpooled role, the same discipline `wipLimit`'s own "0
+// is refused, not tolerated" rule follows). Returns an error string, or null
+// when `pool` is absent/null or well-formed. Shared by the bundle validator
+// (`validateProcessTemplate`, one error per role) and the live per-member
+// write route (`PUT /api/agents/:memberId`, #2270) — the two write paths for
+// the same config surface, so the check lives once rather than drifting.
+// `wipLimitSet` is the caller's own answer to "is the governing wipLimit
+// configured" (the bundle's own `wipLimit` field for a draft/materialise, the
+// parent team's live `wipLimit` for a member write) — this function has no
+// view of either.
+function poolConfigError(pool, { wipLimitSet } = {}) {
+  if (pool === undefined || pool === null) return null;
+  if (typeof pool !== 'object' || Array.isArray(pool)) return 'pool must be an object';
+  if (pool.enabled !== undefined && typeof pool.enabled !== 'boolean') {
+    return 'pool.enabled must be a boolean';
+  }
+  if (pool.maxInstances !== undefined && pool.maxInstances !== null
+      && !(Number.isInteger(pool.maxInstances) && pool.maxInstances >= 1)) {
+    return 'pool.maxInstances must be a positive integer (omit it for no per-role cap)';
+  }
+  if (pool.workspace !== undefined && !POOL_WORKSPACES.includes(pool.workspace)) {
+    return `pool.workspace must be one of ${POOL_WORKSPACES.join(', ')}`;
+  }
+  if (pool.baseBranch !== undefined && pool.baseBranch !== null && typeof pool.baseBranch !== 'string') {
+    return 'pool.baseBranch must be a string';
+  }
+  // Agent Pools — Phase 3 (#2248, concept §6): the recurring-analysis binding's
+  // work source. Refused on a malformed shape, not silently dropped — same
+  // discipline as every other `pool.*` field above.
+  if (pool.workSource !== undefined && pool.workSource !== null) {
+    if (typeof pool.workSource !== 'object' || Array.isArray(pool.workSource)) {
+      return 'pool.workSource must be an object';
+    }
+    if (pool.workspace === 'git-clean-base') {
+      return 'pool.workSource requires pool.workspace to be "input-copy" or "none" (it has no meaning for git-clean-base)';
+    }
+    if (!Array.isArray(pool.workSource.items) || pool.workSource.items.length === 0
+        || !pool.workSource.items.every((v) => typeof v === 'string' && v.trim())) {
+      return 'pool.workSource.items must be a non-empty array of non-empty strings';
+    }
+    if (typeof pool.workSource.outputDir !== 'string' || !pool.workSource.outputDir.trim()) {
+      return 'pool.workSource.outputDir must be a non-empty string (the completion signal)';
+    }
+    if (pool.workSource.inputDir !== undefined && pool.workSource.inputDir !== null
+        && (typeof pool.workSource.inputDir !== 'string' || !pool.workSource.inputDir.trim())) {
+      return 'pool.workSource.inputDir must be a non-empty string';
+    }
+  }
+  if (pool.teardown !== undefined && pool.teardown !== null) {
+    if (typeof pool.teardown !== 'object' || Array.isArray(pool.teardown)) {
+      return 'pool.teardown must be an object';
+    }
+    for (const key of ['idleTimeoutMs', 'maxRuntimeMs', 'retainLogsMs']) {
+      const v = pool.teardown[key];
+      if (v !== undefined && v !== null && !(Number.isFinite(v) && v > 0)) {
+        return `pool.teardown.${key} must be a positive number`;
+      }
+    }
+  }
+  // A pooled role's concurrency and reap tick both piggyback on the governing
+  // wipLimit (concept §12 Phase 1: "conflict protection = WIP count … only") —
+  // a pool with no wipLimit would spawn unboundedly and never be swept for
+  // release, since the reconcile tick that reaps a finished ticket's instance
+  // is itself gated on a configured limit.
+  if (pool.enabled === true && !wipLimitSet) {
+    return "pool.enabled requires the flow's own wipLimit to be set (it governs and reaps pooled instances)";
+  }
+  return null;
+}
+
+// Agent Pools — Phase 2 (#2247, epic #2251 §9): the Flow Supervisor's opt-in.
+// Team-level, sibling of `wipLimit`/`hillClimb` — round-tripped the same way.
+// `enabled: true` piggybacks on the SAME `wipLimit`/pooled-role prerequisites
+// pooling itself has (checked in `validateProcessTemplate`, not here, since
+// this function has no view of the rest of the bundle).
+//
+// `selection`/`contentionPolicy` are named in the design's config surface
+// (`docs/parallel-workers-concept.md` §9) for forward-compatibility, but only
+// a subset of each is actually implemented — `oldest-first`, and `epic-serial`
+// (the AC's own "never two in-flight items sharing epicId" is not optional —
+// it is always on, `contentionPolicy` never turns it off) plus, as of Phase 4
+// (#2249), `predicted-paths` (a read-only LLM/heuristic pre-flight, layered ON
+// TOP of epic-serial, opt-in and off by default). An unimplemented value is
+// still refused by `validateProcessTemplate` rather than silently accepted and
+// ignored, which would misrepresent what the author asked for.
+const AUTO_DISPATCH_SELECTIONS = ['oldest-first'];
+const AUTO_DISPATCH_CONTENTION_POLICIES = ['epic-serial', 'predicted-paths'];
+
+function normalizeAutoDispatch(raw) {
+  if (!raw || typeof raw !== 'object' || raw.enabled !== true) return null;
+  const out = { enabled: true };
+  if (typeof raw.selection === 'string' && AUTO_DISPATCH_SELECTIONS.includes(raw.selection)) {
+    out.selection = raw.selection;
+  }
+  if (typeof raw.contentionPolicy === 'string' && AUTO_DISPATCH_CONTENTION_POLICIES.includes(raw.contentionPolicy)) {
+    out.contentionPolicy = raw.contentionPolicy;
+  }
+  // How often the remediation ladder may re-fire the SAME (ticket, blocker) —
+  // the ≤1-action-per-(item,blocker)-per-window budget the design requires.
+  // Unset uses the orchestrator's own default (1h).
+  if (Number.isFinite(raw.actionWindowMs) && raw.actionWindowMs > 0) out.actionWindowMs = raw.actionWindowMs;
+  return out;
+}
+
 // Strip a leading `<teamId>-` so an exported member id becomes a reusable role
 // key (e.g. `acme-developer` → `developer`). Idempotent for ids without it.
 function roleKeyOf(id, teamId) {
@@ -464,10 +623,11 @@ function bundleTrigger(t) {
  * @param {Array} [opts.gates]
  * @param {Array} [opts.labels]
  */
-function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stages, humans, hillClimb, wipLimit }) {
+function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stages, humans, hillClimb, wipLimit, autoDispatch }) {
   const normHumans = normalizeHumans(humans);
   const normHillClimb = normalizeHillClimb(hillClimb);
   const normWipLimit = normalizeWipLimit(wipLimit);
+  const normAutoDispatch = normalizeAutoDispatch(autoDispatch);
   return {
     processTemplateVersion: VERSION,
     name: name || 'process-template',
@@ -488,6 +648,9 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
     // enforces; omitted when unset so a flow that never configured it stays
     // byte-identical.
     ...(normWipLimit ? { wipLimit: normWipLimit } : {}),
+    // The Flow Supervisor's opt-in (#2247) — omitted when unset so a flow that
+    // never configured it stays byte-identical.
+    ...(normAutoDispatch ? { autoDispatch: normAutoDispatch } : {}),
     roles: (roles || []).map(r => ({
       id: roleKeyOf(r.id, teamId),
       displayName: r.displayName || r.id,
@@ -520,6 +683,10 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
       // Process stage band — portable so an exported team round-trips its stage
       // layout back into a draft (Edit as draft) and re-materialises unchanged.
       ...(typeof r.stage === 'string' && r.stage ? { stage: r.stage } : {}),
+      // Agent instance pools (#2246) — opt-in pooling config, round-tripped like
+      // every other declarative port; omitted entirely for a non-pooled role so
+      // it stays byte-identical to a bundle that never heard of pooling.
+      ...((() => { const p = normalizePool(r.pool); return p ? { pool: p } : {}; })()),
       // GitHub artifact ports (#380): what this role produces (PR/issue) and the
       // PR/issue channels it consumes. Declarative source of truth — the runtime
       // github-event triggers are re-derived from these (expandGithubChannels),
@@ -609,6 +776,11 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
       // "may not target its own role" and the same-team check both need it.
       const vo = validateOutcomes(r.outcomes, { labels: b.labels, agents: b.roles, roleId: r.id });
       if (!vo.ok) return { ok: false, error: `role ${r.id}: ${vo.error}` };
+    }
+    // Agent instance pools (#2246) — shared shape check, see `poolConfigError`.
+    if (r.pool !== undefined) {
+      const perr = poolConfigError(r.pool, { wipLimitSet: b.wipLimit !== undefined && b.wipLimit !== null });
+      if (perr) return { ok: false, error: `role ${r.id}: ${perr}` };
     }
     if (r.channels !== undefined) {
       if (!Array.isArray(r.channels)) return { ok: false, error: `role ${r.id}: channels must be an array` };
@@ -707,6 +879,39 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
   if (b.wipLimit !== undefined && b.wipLimit !== null) {
     if (!Number.isInteger(b.wipLimit) || b.wipLimit < 1) {
       return { ok: false, error: 'wipLimit must be a positive integer (omit it for no limit)' };
+    }
+  }
+  // The Flow Supervisor's opt-in (#2247, §9). Checked, not tolerated — the same
+  // discipline `pool`/`wipLimit` follow: a typo'd `selection`/`contentionPolicy`
+  // must refuse the save rather than quietly running with a default the author
+  // never asked for.
+  if (b.autoDispatch !== undefined && b.autoDispatch !== null) {
+    const ad = b.autoDispatch;
+    if (typeof ad !== 'object' || Array.isArray(ad)) return { ok: false, error: 'autoDispatch must be an object' };
+    if (ad.enabled !== undefined && typeof ad.enabled !== 'boolean') {
+      return { ok: false, error: 'autoDispatch.enabled must be a boolean' };
+    }
+    if (ad.selection !== undefined && !AUTO_DISPATCH_SELECTIONS.includes(ad.selection)) {
+      return { ok: false, error: `autoDispatch.selection must be one of ${AUTO_DISPATCH_SELECTIONS.join(', ')}` };
+    }
+    if (ad.contentionPolicy !== undefined && !AUTO_DISPATCH_CONTENTION_POLICIES.includes(ad.contentionPolicy)) {
+      return { ok: false, error: `autoDispatch.contentionPolicy must be one of ${AUTO_DISPATCH_CONTENTION_POLICIES.join(', ')}` };
+    }
+    if (ad.actionWindowMs !== undefined && !(Number.isFinite(ad.actionWindowMs) && ad.actionWindowMs > 0)) {
+      return { ok: false, error: 'autoDispatch.actionWindowMs must be a positive number' };
+    }
+    // The supervisor times pooled roles only, and pooling itself already
+    // requires `wipLimit` (checked per-role above) — enabling it on a flow with
+    // no pooled role at all would be a no-op the author should be told about
+    // rather than a silent no-op.
+    if (ad.enabled === true) {
+      if (b.wipLimit === undefined || b.wipLimit === null) {
+        return { ok: false, error: 'autoDispatch.enabled requires the flow\'s own wipLimit to be set (pooling and the supervisor both piggyback on it)' };
+      }
+      const hasPooledRole = (b.roles || []).some(r => r && r.pool && typeof r.pool === 'object' && r.pool.enabled === true);
+      if (!hasPooledRole) {
+        return { ok: false, error: 'autoDispatch.enabled requires at least one role with pool.enabled (the supervisor only times pooled roles)' };
+      }
     }
   }
   // Named human roles (#987): unique slug ids, non-empty names, well-formed
@@ -811,6 +1016,11 @@ function templateToCustomRoles(bundle) {
     // live graph reproduces the draft's stage layout instead of collapsing to
     // the auto-layered columns.
     ...(typeof r.stage === 'string' && r.stage ? { stage: r.stage } : {}),
+    // Agent instance pools (#2246) — carried onto the materialised role
+    // TEMPLATE's own member config, where the orchestrator's dispatch path
+    // reads it (an ephemeral instance never carries this field — it opts out
+    // of further nested pooling by construction).
+    ...(normalizePool(r.pool) ? { pool: normalizePool(r.pool) } : {}),
     // Agent-level OUTCOMES port (#827) — recorded on member config; supersedes
     // `emits` when present (the two never coexist on a materialised member).
     ...(isAuthoredOutcomes(r.outcomes) ? { outcomes: normalizeOutcomes(r.outcomes) } : {}),
@@ -1810,7 +2020,10 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
       id: tr.id,
       type: tr.type,
       enabled: tr.enabled !== false,
-      description: tr.description || `${t.displayName} — ${tr.id}`,
+      // #2151 D1: no trigger id in the generated fallback — #1818 already
+      // removed the auto-generated id from the notice body, and appending it
+      // here just re-introduced it (the notice appends `description` verbatim).
+      description: tr.description || t.displayName,
       prompt: subst(tr.promptTemplate || ''),
     };
     if (tr.type === 'github-event') {
@@ -1908,6 +2121,11 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
           (to) => `${teamId}-${to}`) }
       : (Array.isArray(t.emits) && t.emits.length ? { emits: t.emits } : {})),
     ...(typeof t.stage === 'string' && t.stage ? { stage: t.stage } : {}),
+    // Agent instance pools (#2246) — carried verbatim onto the materialised
+    // role-template member; already normalized by `templateToCustomRoles`
+    // (a customRole) or `buildProcessTemplate` (a catalog role re-imported via
+    // a bundle), so no `{{var}}` substitution applies to it.
+    ...(t.pool && typeof t.pool === 'object' ? { pool: t.pool } : {}),
     ...(t.github && (t.github.producesPr || t.github.producesIssue) ? { github: t.github } : {}),
     ...(Array.isArray(t.channels) && t.channels.length
       ? { channels: t.channels.map((c) => ({ ...c, from: `${teamId}-${c.from}` })) }
@@ -1930,6 +2148,11 @@ module.exports = {
   emptyDraftBundle, roleKeyOf, VERSION, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb,
   // Admission control (#2114)
   normalizeWipLimit,
+  // Agent instance pools (#2246); poolConfigError also backs the live
+  // per-member write route (PUT /api/agents/:memberId, #2270)
+  normalizePool, POOL_WORKSPACES, poolConfigError,
+  // Agent Pools — Phase 2: the Flow Supervisor (#2247)
+  normalizeAutoDispatch, AUTO_DISPATCH_SELECTIONS, AUTO_DISPATCH_CONTENTION_POLICIES,
   artifactKey, artifactHint, artifactIsNamed,
   slugifyDraft, deriveUniqueDraftId, cleanWakePrompt,
   // Claim labels (#958) + success mirror (#1163)

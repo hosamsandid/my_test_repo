@@ -17,6 +17,10 @@ export const FLOW_CONTROL_HELP_SECTIONS = {
   blockers: 'blockers-and-what-to-do-about-them',
   // 4 — the four mutually exclusive buckets and why they always sum to the total
   epics: 'the-epic-roll-up',
+  // 5 — pause/drain a pooled role, force-dispatch a held ticket (#2250 Phase 5)
+  poolControls: 'pool-controls',
+  // 6 — the read-only running/held-same-epic/timed-out lane view (#2273)
+  poolLanes: 'pool-instance-lanes',
 };
 
 export default FLOW_CONTROL_HELP_SECTIONS;

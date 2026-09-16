@@ -123,6 +123,70 @@ test('buildPodManifest keeps the pull policy alongside a toolchain image (AC8)',
   );
 });
 
+// #2282 Band 1 — a toolchain may override the fleet-wide default memory (and,
+// on k8s, the requests) for agents bound to it.
+test('buildPodManifest uses the fleet default memory/requests when the toolchain declares no resources (AC2)', () => {
+  const dflt = buildPodManifest('a1', {}, 'p', [], 'as-agent:latest');
+  const noOverride = buildPodManifest('a1', {}, 'p', [], 'as-agent:latest', { toolchainId: 'jvm' });
+  const nullResources = buildPodManifest('a1', {}, 'p', [], 'as-agent:latest', { toolchainId: 'jvm', resources: null });
+  assert.deepEqual(noOverride.spec.containers[0].resources, dflt.spec.containers[0].resources);
+  assert.deepEqual(nullResources.spec.containers[0].resources, dflt.spec.containers[0].resources);
+  assert.deepEqual(dflt.spec.containers[0].resources, {
+    limits: { memory: parseMemoryQuantity(process.env.AEE_AGENT_MEM_LIMIT || '2Gi') },
+    requests: { memory: '256Mi', cpu: '100m' },
+  });
+});
+
+test('buildPodManifest sizes the pod from the toolchain\'s memoryLimit override (AC1)', () => {
+  const pod = buildPodManifest('a1', {}, 'p', [], 'as-agent-jvm:latest', {
+    toolchainId: 'jvm',
+    resources: { memoryLimit: '4g' },
+  });
+  assert.equal(pod.spec.containers[0].resources.limits.memory, '4Gi');
+  // Requests keep their defaults when the toolchain names no override.
+  assert.deepEqual(pod.spec.containers[0].resources.requests, { memory: '256Mi', cpu: '100m' });
+});
+
+test('buildPodManifest honours a full toolchain resources override (limit + both requests)', () => {
+  const pod = buildPodManifest('a1', {}, 'p', [], 'as-agent-jvm:latest', {
+    toolchainId: 'jvm',
+    resources: { memoryLimit: '4g', memoryRequest: '512Mi', cpuRequest: '500m' },
+  });
+  assert.deepEqual(pod.spec.containers[0].resources, {
+    limits: { memory: '4Gi' },
+    requests: { memory: '512Mi', cpu: '500m' },
+  });
+});
+
+// Code-review finding on #2291: the registry's shared MEMORY_QUANTITY_RE
+// accepts a shape k8s's own quantity grammar does not (a bare-byte suffix
+// with no magnitude letter) — this must fall back to the fleet default, not
+// silently drop the whole `resources` object (limits AND requests).
+test('buildPodManifest falls back to the fleet default when memoryLimit is registry-valid but k8s-unparseable', () => {
+  const dflt = buildPodManifest('a1', {}, 'p', [], 'as-agent:latest');
+  const pod = buildPodManifest('a1', {}, 'p', [], 'as-agent-jvm:latest', {
+    toolchainId: 'jvm',
+    resources: { memoryLimit: '1024b' },
+  });
+  assert.deepEqual(pod.spec.containers[0].resources, dflt.spec.containers[0].resources);
+});
+
+// Code-review finding on #2291: memoryRequest used to reach the pod spec RAW
+// (never run through parseMemoryQuantity, unlike memoryLimit) — a
+// podman-style shorthand like "512m" hit the k8s API verbatim, where a bare
+// "m" suffix means MILLI, not mega: a silent near-zero request instead of
+// the 512 megabytes the operator wrote (matching memoryLimit's own examples).
+test('buildPodManifest normalizes a podman-style memoryRequest through the same k8s-quantity conversion memoryLimit gets', () => {
+  const pod = buildPodManifest('a1', {}, 'p', [], 'as-agent-jvm:latest', {
+    toolchainId: 'jvm',
+    resources: { memoryLimit: '4g', memoryRequest: '512m' },
+  });
+  assert.deepEqual(pod.spec.containers[0].resources, {
+    limits: { memory: '4Gi' },
+    requests: { memory: '512Mi', cpu: '100m' },
+  });
+});
+
 test('buildContextHostPathVolumes renders hostPath volumes with per-folder read-only semantics', () => {
   withContextGate('1', () => {
     const { volumes, volumeMounts } = buildContextHostPathVolumes([

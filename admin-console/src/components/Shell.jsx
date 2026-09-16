@@ -5,7 +5,6 @@ import {
   ChevronLeft, ChevronRight, ChevronDown,
   Boxes, Key, KeyRound, MessageCircle, Github, GitBranch,
   Rocket, Users2, Wand2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle,
-  LayoutDashboard,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
@@ -137,17 +136,19 @@ const NAV_GROUPS = [
     // "build a team, then fill it in" reading order — Flows first, then the
     // templates, skills and knowledge a team draws on.
     { path: '/flows',        label: 'Flows',               Icon: GitBranch },
-    // Flows is where a process is AUTHORED; Flow Control (#2116) is where the
-    // same flow is WATCHED running, so it reads directly after it.
-    { path: '/flow-control', label: 'Flow Control',        Icon: LayoutDashboard },
+    // Flow Control's nav entry is removed here (#2147, step 1 of 2) — the page,
+    // route, help and backend all stay; only the sidebar entry goes. #2145 is
+    // step 2, re-shipping the board as an installable, team-grantable plugin.
     { path: '/role-templates', label: 'Agent Templates',   Icon: UserCog, adminOnly: true },
     { path: '/skills',       label: 'Skills',              Icon: Zap },
     { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },
   ]},
   // Ordered by a typical setup flow: pick a Model Provider first, then the
   // credentials (SSH keys / GitHub tokens / personal), then MCP servers (an env
-  // may reference them), then build a Working Environment — and finally the
-  // GitHub Event Log, which only makes sense once an environment exists.
+  // may reference them) — and finally the GitHub Event Log, which only makes
+  // sense once an environment exists. The general-purpose "Working
+  // Environments" entry is gone (#2170): a team edits its own environment from
+  // the Agent Chat Settings tab now, which needs no sidebar entry of its own.
   { key: 'connections', section: 'Connections', items: [
     { path: '/models',        label: 'Model Providers',      Icon: Sparkles, credAdmin: true },
     { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,      credAdmin: true },
@@ -156,7 +157,6 @@ const NAV_GROUPS = [
     // authenticated human (no credAdmin gate).
     { path: '/my-credentials', label: 'My Credentials',      Icon: KeyRound },
     { path: '/mcp',           label: 'MCP Servers',          Icon: Server,   adminOnly: true },
-    { path: '/environments',  label: 'Working Environments', Icon: Boxes },
     { path: '/github-events', label: 'GitHub Event Log',     Icon: History },
   ]},
   { key: 'administration', section: 'Administration', items: [
@@ -169,6 +169,10 @@ const NAV_GROUPS = [
     // tabs System-Admin-only without a second gate.
     { path: '/users',            label: 'Administration',   Icon: UserCog,   adminOnly: true, subtitle: 'Users, teams & resource ownership' },
     { path: '/token-usage',      label: 'Token Usage',      Icon: BarChart3, adminOnly: true },
+    // Environment Templates (#2170, epic #2166 A4) — successor to the removed
+    // Working Environments page's System-Admin half: a curated catalog of
+    // copy sources for team creation, never a live-shared binding.
+    { path: '/environment-templates', label: 'Environment Templates', Icon: Boxes, adminOnly: true },
     { path: '/plugins',          label: 'Plugins',          Icon: Puzzle,    adminOnly: true },
     { path: '/maintenance-mode', label: 'Maintenance Mode', Icon: Wrench,    adminOnly: true },
   ]},

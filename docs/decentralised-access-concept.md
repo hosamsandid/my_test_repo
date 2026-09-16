@@ -1818,3 +1818,114 @@ Ada's browser, Bea's tab keeps rendering the read-only panel until it navigates.
 That is correct product behaviour, not a bug, but it is a trap for anyone
 extending this journey: the beats that assert a *changed* role always navigate
 first, and the YAML says why at each one.
+
+---
+
+## Amendment 9 (#2158) — Global: a fourth reach, above the three tiers
+
+D7/§5.2 defines exactly three tiers a configuration resource can carry:
+**personal**, **team**, and **shared** (`system` + `assignedTeamIds`) — visible
+to zero or more *named* teams, and to `assignedTeamIds: []` reachable by System
+Admins only. #2136 (global model providers) and #2158 (global Working
+Environments + MCP servers) both needed a fourth answer this model has no room
+for: reachable by **every** team, **including teams created after the record
+was published** — which no `assignedTeamIds` list, however long, can ever
+express, since a team minted tomorrow cannot be named in a list saved today.
+
+**Global is additive, not a fourth tier.** It is a boolean flag layered on top
+of the shared tier (`global: true` requires `scope: 'system'`, re-read on every
+call — never trusted from the stored flag alone, so a hand-edited or stale
+`{scope:'team', global:true}` record is not global), not a new value the
+`scope` field can take. That is a deliberate, load-bearing distinction:
+
+- **Reach widens; authority does not.** A global record is visible to and
+  usable by everyone with no team assignment at all, but publishing, retracting,
+  editing and deleting stay exactly where D12 already put the shared tier —
+  System-Admin-only for the ownership axis, self-service for content where the
+  resource kind allows it (an environment's content; not a model provider's
+  credential, not an MCP server's registration in this ticket's decision 6).
+  Global is the one exception to "assigned teams administer a shared record":
+  it names *no* team, so there is nobody to hand that content-editing right to.
+- **It lives in its own module per resource family, never in the generic
+  tiered/credential predicates.** `admin-console/api/llm-endpoint-global.js`
+  (providers) and `admin-console/api/global-resource.js` (environments + MCP
+  servers) are composed **only** at each family's own read/visibility call
+  sites — never inside `resource-tier.js`, `resolveTieredOwnership`,
+  `resolveCredentialOwnership`, or the generic `scope.js` predicates that also
+  gate SSH keys and GitHub tokens. A `global` key on one of *those* must stay
+  inert: the blast radius of a mistake there is a secret, not a shareable
+  configuration record. One module per family rather than a shared "global"
+  helper, because a credential's `global` would open a secret to the whole
+  installation with nobody to blame it on.
+- **The wording is uniform.** Both the Model Providers page and the Working
+  Environments / MCP Servers forms call it **"Global"**, with the same detail
+  line — *"every team, including teams created later"* — because that clause
+  names the actual decision an operator is taking, and a reader should not have
+  to learn two words for the same concept.
+
+**Two instances exist today, and the pattern is meant to be reused, not
+special-cased per resource:**
+
+| Resource | Module | Extra precondition | Decided by |
+|---|---|---|---|
+| Model provider | `llm-endpoint-global.js` | `authType !== 'oauth-token'` — a subscription seat is single-user by Anthropic's Consumer Terms and can never be shared | #2136 |
+| Working Environment | `global-resource.js` | Publishing refuses a bound model provider that is not itself global/system-scoped (a reachable environment whose agents cannot get a model is worse than none) | #2158 |
+| MCP server | `global-resource.js` (same module — D12: an environment and an MCP server are the same kind of thing) | None — set at create time only in the console; `PUT` still honours retraction, so a global MCP server is never a one-way door | #2158 |
+
+A future resource that needs the same reach is a fourth row in this table, not
+a re-argument of the questions Amendment 9 already answered: whether reach and
+authority may diverge (yes), where the rule lives (its own small module,
+composed at the family's own call sites), and what it is called in the UI
+(**Global**).
+
+## Amendment 10 (#2229 epic, #2232/#2234) — the standalone-agent case D8 introduced is now exceptional, not general
+
+Everywhere above, "a standalone `role: 'agent'`" is written as the ordinary,
+expected shape of an agent with no team — the ONLY kind D8 (§3.5/§7.4) and its
+owner branch (`visibleAgent`/`canManageAgent` in `scope.js`,
+`resolveAgentOwnerId`/`resolveBaselineOwnerId`/`isActingSenderTrusted` in
+`credential-resolution.js`, `resolveAgentTeam` in `agent-team.js`) were written
+to handle. Epic **#2229** (the team-of-one migration) changes that premise: its
+Phase C (**#2232**) converts every existing standalone agent into a team of
+one and the earlier phases close off the UI paths that used to mint a fresh
+one, so after that migration has run, an ordinary user can no longer create or
+be left holding a bare `role: 'agent'` config.
+
+**#2234** — the phase that was supposed to sweep the now-dead branch away —
+found a real exception before touching any code: the **ephemeral agent** route
+(`orchestrator/orchestrator.js`'s internal `POST /internal/agents/ephemeral`)
+persists `role: 'agent', ephemeral: true` as a permanent, by-design write path,
+and `team-of-one-migration.js` explicitly refuses to convert it
+(`{ eligible: false, code: 'ephemeral' }`). So `resolveAgentTeam → null` is
+*not* only reachable via a genuinely malformed/legacy config post-#2229 — an
+ephemeral agent reaches it too, by design, and still needs D8's owner-private
+visibility exactly as before.
+
+**Decision (recorded on issue #2234, superseding the two options it raised):**
+keep the owner-branch code in every function named above completely
+unchanged — ephemeral agents still need it — and correct only the PROSE, here
+and at each call site, to say the `null`/owner-branch case is now reached by
+**an ephemeral agent or a malformed config**, not "a standalone agent a user
+could still create." This is a documentation correction, not a behavior
+change: AC1 of #2234 ("no production code path branches on 'is this a
+standalone agent with no team' as a case distinct from 'is this a team
+member'") is satisfied by the *fact* that no new standalone agent can be
+created, not by deleting code a real, ongoing case still depends on — deleting
+it would have been re-opening Phase C's own exception, which #2234's Scope
+explicitly puts out of bounds ("No re-opening of #2077/#2078/#2041's actual
+decisions").
+
+**What actually shipped for #2234**, split across two PRs since the first
+under-scoped its own "Closes" claim: a UI-only sweep (three client-side list
+surfaces — the Agent Chat left rail, the SkillsRegistry "Install into agent"
+picker, and Administration → Resources' ownership grouping — now filter out a
+bare `role: 'agent'` row; server responses are unchanged, and the Flows →
+Import-packs picker is deliberately left showing standalone agents since it
+exists specifically to recover a leftover pack tree that may sit on one) plus
+this prose correction and three `ephemeral: true` regression fixtures
+(`ownership-no-lockout.test.js`, `scope.test.js`; `bound-agents-visibility.
+test.js` carries no agent-config fixture at all, so nothing there needed
+extending — noted in place rather than silently skipped). **Consequence
+recorded, not silently accepted:** there is now no admin-console UI path at
+all to inspect, re-own or delete a standalone/ephemeral agent — that requires
+direct API/CLI access.

@@ -1294,7 +1294,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                 fontSize: 'var(--eb-text-xs)',
                 color: 'var(--eb-status-warning)',
               }}>
-                The agent's working environment has no GitHub repositories with a parsable URL. Add one in <strong>Working Environments</strong> first.
+                The agent's environment has no GitHub repositories with a parsable URL. Add one on the team's <strong>Settings</strong> tab first.
               </div>
             ) : (
               <select

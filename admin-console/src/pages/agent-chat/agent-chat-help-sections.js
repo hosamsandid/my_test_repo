@@ -34,6 +34,15 @@ export const AGENT_CHAT_HELP_SECTIONS = {
   settings: 'settings-configuring-the-agent',
   // 7 — sharing a team (#2082): who may open it, and who may change it
   shareTeam: 'sharing-a-team-who-can-open-it-and-who-can-change-it',
+  // 8 — the team's configuration tabs, and the save-time propagation offer
+  // (#2170/#2236, folded in from the retired environments.md/Working
+  // Environments page). Sub-sections of Settings — configuring the agent.
+  teamEnvironment: 'the-team-s-configuration-tabs-in-detail',
+  bringingAgentsUpToDate: 'bringing-existing-agents-up-to-date',
+  // 9 — General/Skills/Plugins tabs of a team's flat configuration row
+  // (#2236) point at the same field-by-field chapter the ordinary (non-team)
+  // Settings form already had.
+  formFields: 'what-the-form-fields-control',
 };
 
 export default AGENT_CHAT_HELP_SECTIONS;

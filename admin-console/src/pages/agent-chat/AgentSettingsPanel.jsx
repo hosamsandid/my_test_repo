@@ -36,6 +36,12 @@ import {
  */
 export default function AgentSettingsPanel({
   agentId, active, chatAgentId = null, chatAgentName = '', onBackToChatAgent = null, onSaved = null,
+  // #2236: the selected tab of a team's flat configuration row. Owned by the
+  // host (`TeamConfigSurface`, via `?tab=`) rather than by this panel or by
+  // `AgentEditForm`, so it survives both the post-save remount below
+  // (`formEpoch`) and this panel's own per-agent draft remount. `null` for
+  // every non-team host (RightRail's ordinary Settings tab) — inert there.
+  teamConfigTab = null, onTeamConfigTabChange = null,
 }) {
   const [agent, setAgent] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -132,13 +138,15 @@ export default function AgentSettingsPanel({
 
   const toolbar = (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
-      padding: 'var(--eb-space-2) var(--eb-space-4)',
+      height: 'var(--eb-header-height)',
+      display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
+      padding: '0 var(--eb-space-4)',
       borderBottom: '1px solid var(--eb-border-default)',
-      flexShrink: 0, background: 'var(--eb-bg-surface)', minHeight: 36,
+      flexShrink: 0, background: 'var(--eb-bg-surface)',
     }}>
       <span style={{
-        flex: 1, minWidth: 0, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)',
+        flex: 1, minWidth: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)',
+        color: 'var(--eb-text-primary)',
         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
       }}>
         {loading && !agent
@@ -254,6 +262,8 @@ export default function AgentSettingsPanel({
               error={saveError}
               confirmRestart
               onImmediateApply={handleImmediateApply}
+              teamConfigTab={teamConfigTab}
+              onTeamConfigTabChange={onTeamConfigTabChange}
             />
           </div>
         )}

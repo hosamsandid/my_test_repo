@@ -154,7 +154,7 @@ stored state that can rot.
 
 | From \ To | Agent | Team | Global |
 |---|---|---|---|
-| **Agent** | *(agent authors)* | **lift** ✅ exists | *(via team — direct path retired)* |
+| **Agent** | *(agent authors)* | **lift** ✅ exists | **publish** ✅ direct (#2180 — offered alongside the staged lift-then-promote path) |
 | **Team** | activate/seed ✅ | **share** (cross-team) ✅ | **promote** ✅ |
 | **Global** | activate/seed ✅ | **adopt** 🆕 first-class (copy) / **move** 🆕 (copy + retire global) | *(edit in place)* |
 | **External** | — | **import** 🆕 | **import** ✅ |
@@ -177,14 +177,18 @@ skill a global skill" are thereby both one-click, in both copy and move flavors.
 ```
 
 One pure validator + planner (`skill-transfer.js`): containment-guarded paths, permission
-check per tier (Team Admin for team targets, System Admin for global targets and any
-`move` out of global), provenance carried forward (share/lift semantics preserved),
+check per tier (Team Admin for team targets; for a global target, System Admin **or**
+Team Admin of the content's own team — #2180 — the agent's real owning team resolved
+server-side, never client-supplied; any `move` OUT of global or an agent's own workspace
+stays System-Admin-only, since retiring someone else's content is a separate,
+still-governance-level act), provenance carried forward (share/lift semantics preserved),
 `skill.json` stamped on the target, history entry on both ends. Activation reuses
 `setTeamSkillActive` — transfers end active by default, never in the historic
 "promoted-but-invisible" dead-end.
 
 The legacy endpoints become thin delegating wrappers and are removed from the UI:
-`/api/skills/promote` (agent→global bypassing the team tier and provenance),
+`/api/skills/promote` (agent→global bypassing the team tier and provenance — now
+superseded by the engine's own first-class agent→global cell, #2180),
 `/api/skills/promote-to-global`, and the Share/adopt special cases all route through the
 engine. `/api/knowledge/promote` keeps its KB-specific work (draft synthesis, entryIds,
 candidate lifecycle) and calls the engine for the file write.
@@ -232,17 +236,25 @@ heuristic concat fallback), the operator edits it in the dialog, then the merge 
 - retired sources go through the §3.3 archive path.
 
 Merge is operator-only (never the curator) and works cross-tier (two team skills, a team
-+ an adopted global copy, …) with target-tier permissions.
++ an adopted global copy, …) with target-tier permissions: Team Admin of the target team
+for a team target; for a **global** target, System Admin **or** Team Admin of *any* team
+(#2307 — a merge has no single "content's own team" to name the way a transfer does, so
+the floor is any team the caller administers, not System-Admin-only).
 
 ### 3.5 Export / import — round-trip with identity
 
 - **Export** (exists) now includes `skill.json` + `provenance.json` in the ZIP.
-- **Import** gains a target selector (`global` | `team`+teamId — same permission rules as
-  transfer), validates `SKILL.md` (parseable frontmatter with `name` + `description`,
-  size caps), and honors an embedded `skill.json`: version chain continues,
-  `origin: {tier: "external"}` + `action: "imported"` appended. Skills can thus travel
-  between installations without losing their history — the enterprise "skills from
-  outside / to the outside" path.
+- **Import** gains a target selector (`global` | `team`+teamId), validates `SKILL.md`
+  (parseable frontmatter with `name` + `description`, size caps), and honors an embedded
+  `skill.json`: version chain continues, `origin: {tier: "external"}` + `action:
+  "imported"` appended. Skills can thus travel between installations without losing
+  their history — the enterprise "skills from outside / to the outside" path.
+  **Permission** (#2307): Team Admin for a team target; for a **global** target, System
+  Admin **or** Team Admin of *any* team — an external archive has no resolvable owning
+  team the way a transfer's source does, so the floor is any team the caller
+  administers. `+ New Skill` (`POST /api/skills`) and editing an existing skill's
+  content (`PUT /api/skills/:name`, `PUT /api/skills/:name/file`) apply the identical
+  per-tier rule — before #2307 those two routes had no permission check at all.
 
 ### 3.6 Edit propagation & resync
 

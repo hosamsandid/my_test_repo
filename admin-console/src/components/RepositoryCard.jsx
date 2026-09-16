@@ -134,6 +134,9 @@ export default function RepositoryCard({
   // probe does not (and must not) reach — never sent to `useRepoCheck`/the API,
   // only used to suppress the "add a GitHub Token" hint on a probe failure.
   hasEnvironmentToken = false,
+  // #2325: metadata-only credential descriptors (id → { tier, ownerLabel, … })
+  // from the env GET, so an invisible SSH key's read-only chip can name its owner.
+  credentialRefs = null,
 }) {
   const check = useRepoCheck(repo.url, repo.sshKeyId, githubTokenId);
   const showTokenHint = shouldShowTokenHint(check, repo.url, githubTokenId, hasEnvironmentToken);
@@ -166,6 +169,8 @@ export default function RepositoryCard({
             with a replace-only picker (only keys the caller can see) instead. */}
         {(() => {
           const ref = describeCredentialRef({ boundId: repo.sshKeyId, visibleOptions: sshKeys });
+          // #2325: owner/tier from the metadata-only descriptor carried by the env GET.
+          const desc = credentialRefs?.[repo.sshKeyId] || null;
           if (ref.mode === 'readonly-invisible') {
             return (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
@@ -174,6 +179,11 @@ export default function RepositoryCard({
                   color: 'var(--eb-text-secondary)',
                 }}>
                   <span>Set: <code>{ref.boundId}</code></span>
+                  {desc && (
+                    <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                      {desc.tier} · {desc.ownerLabel}
+                    </span>
+                  )}
                   <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginLeft: 'auto' }}>
                     not visible to you
                   </span>

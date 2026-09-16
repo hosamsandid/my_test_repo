@@ -106,9 +106,30 @@ per-agent trigger: Agent Chat → **Triggers** → add → type **Plugin event**
 
 | Field | |
 |---|---|
-| Plugin | pick **Jira** from the list. Only installed plugins are offered; one that is not granted to this agent is shown greyed-out with the reason, because a listener on an ungranted plugin never fires (§*How it works*) |
+| Plugin | `jira` (picked from the installed plugins) |
 | Event filter | blank = any event from jira; or `status_changed` |
-| Wake instruction | what the agent should do — e.g. *"Read the Jira inbox with `aee-jira inbox --consume` and refine the ticket."* |
+| Payload filter | **which status wakes this agent** — one `key=value` per line, e.g. `toStatus=Ready for Dev`. Blank = every watched transition wakes this agent. |
+| Wake instruction | what the agent should do — e.g. *"Run `aee-jira inbox --consume`, read the issue with `aee-jira show`, refine the description and write it back with `aee-jira update`, then move it on with `aee-jira transition`."* |
+
+The payload filter is what routes a flow: give the Business Analyst
+`toStatus=Ready for Refinement`, the Developer `toStatus=Ready for Dev`, the
+Reviewer `toStatus=In Review`. Every key must equal the event's field **exactly**
+(case-sensitive — copy the status name verbatim from Jira). Without a filter
+*every* granted agent with a `plugin-event` trigger wakes on *every* watched
+transition — including the one an agent just made itself.
+
+The fields a `status_changed` payload carries, all plain strings:
+
+| Key | |
+|---|---|
+| `toStatus` / `fromStatus` | the status names of the transition |
+| `projectKey` | e.g. `KAN` |
+| `issueKey` | e.g. `KAN-10` |
+| `issueType` | Story / Bug / Task / … |
+| `author` | who moved it (display name) |
+
+A burst digest (more than three transitions on one issue in a single poll)
+matches when **any** of its folded events matches.
 
 The wake instruction is the agent's own prompt; the Jira payload rides in as
 context, never as an instruction.
@@ -128,9 +149,16 @@ broker; the agent never sees the token.
 | `aee-jira show KAN-6` | one issue (summary, status, assignee, URL) |
 | `aee-jira comment KAN-6 --body "…"` | add a comment (attributed to *"an agent on team …"*) |
 | `aee-jira transition KAN-6 --to "In Progress"` | move the issue to that **target status** — the broker resolves the Jira transition and, if none leads there from the issue's current status, reports the available options |
+| `aee-jira update KAN-6 --description "…"` | **replace** the issue description (plain text; blank lines become paragraphs; an italic *rewritten by an agent…* line is appended). The previous text stays in Jira's issue history |
 
 `--json` on every subcommand; exit codes 0 ok / 1 domain error / 2 usage / 3
 broker unreachable.
+
+A transition an agent makes is an ordinary status change: the poller sees it on
+its next tick and wakes whichever teammate's trigger names that target status —
+that is how a BA → Developer → Reviewer chain runs with no other wiring. The
+per-issue throttle (5 transitions per hour per issue) still applies to the whole
+chain.
 
 **Writes are role-gated, not confirmation-gated** (D3). The broker checks the
 manifest's `policy` before touching the credential, and every write is audited —
@@ -203,8 +231,10 @@ Two records, for two audiences:
 | `projects` returns nothing but the account sees projects in a browser | a **scoped** API token missing `read:jira-work` | use a classic (unscoped) token |
 | a transition "no transition to X" | X isn't reachable from the issue's current status, or the name doesn't match | the error lists the available transitions; use one of those target names |
 | the poll log shows `fetch failed` once then recovers | a stale keep-alive socket in the long-running broker | expected — the client retries transport failures once |
-| a fresh transition doesn't wake the agent | no status in the watch's `statusFilters` set exactly matches the Jira status name, or the agent has no `plugin-event` trigger, or the poll already baselined the change | check the Activity tab (a `not a watched status` row means the set is wrong); copy the status name verbatim from Jira; add the trigger |
+| a fresh transition doesn't wake the agent | no status in the watch's `statusFilters` set exactly matches the Jira status name, or the agent has no `plugin-event` trigger, or the poll already baselined the change, or the trigger's payload filter names a status that is not the one the issue moved into | check the Activity tab (a `not a watched status` row means the set is wrong); copy the status name verbatim from Jira; add the trigger |
 | a watch card shows **Failing** | consecutive poll failures — expand it for the error log | usually a bad or expired API token: a Team Admin re-sets it on the Plugins page, then hits **Retry now** |
+| the agent says `aee-jira` is read-only / only knows `whoami` and `inbox` | its workspace holds a CLI copy from an older plugin version (the grant sync copies the file only when the grant changes) | since this version the copy is refreshed on every plugin reconcile — restart the orchestrator or `POST /internal/plugins/reconcile`; re-run `make seed-plugins` + reinstall first if `/workspace/plugins/jira/bin/aee-jira.py` is itself old |
+| the wrong agent wakes, or an agent wakes on its own transition | the agents' `plugin-event` triggers carry no payload filter, so every watched transition wakes all of them | set `toStatus=<status>` on each agent's trigger (§5) |
 
 For a hands-on debug session the broker ships `spike.js` (run inside the
 sidecar): `podman exec aee-plugin-jira node spike.js probe --project KAN

@@ -94,6 +94,7 @@ const WORK_PLANE_ROUTES = Object.freeze([
   { method: 'get', path: '/api/agents/:agentId/workspace/file', cls: MUTATION_CLASS.READ },
   { method: 'get', path: '/api/agents/:agentId/workspace/image', cls: MUTATION_CLASS.READ },
   { method: 'get', path: '/api/agents/:agentId/workspace/download', cls: MUTATION_CLASS.READ },
+  { method: 'get', path: '/api/agents/:agentId/workspace/zip', cls: MUTATION_CLASS.READ },
   { method: 'get', path: '/api/agents/:agentId/workspace/git-status', cls: MUTATION_CLASS.READ },
   { method: 'get', path: '/api/agents/:agentId/workspace/git-diff', cls: MUTATION_CLASS.READ },
 

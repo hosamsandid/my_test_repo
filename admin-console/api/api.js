@@ -10,6 +10,13 @@ const http = require('http');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { runArchiveTool, streamArchiveTool, describeArchiveFailure } = require('./archive');
+const {
+  WORKSPACE_ZIP_MAX_BYTES,
+  WORKSPACE_ZIP_MAX_FILES,
+  EMPTY_ZIP,
+  measureWorkspaceDir,
+  describeOversizeDir,
+} = require('./workspace-zip');
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
@@ -18707,6 +18714,142 @@ app.get('/api/agents/:agentId/workspace/download', apiLimiter, (req, res) => {
   const stream = fs.createReadStream(target);
   stream.on('error', () => res.end());
   stream.pipe(res);
+});
+
+// Directory download (#2318) — streams a ZIP of ONE workspace subdirectory,
+// with paths preserved relative to that directory. Read-class like the per-file
+// download (§6 / team-member-boundary.js): the same bytes are already reachable
+// file-by-file, so nothing new becomes reachable. It follows the whole-agent
+// export's cancel/failure choreography (streamArchiveTool + res.destroy).
+//
+// Two shapes on one route, so a single boundary entry covers both:
+//   • `?probe=1` — run only the pre-flight size/count check and answer JSON
+//     ({ ok, sizeBytes, fileCount } or 413). The browser asks this FIRST so an
+//     oversize refusal arrives as an in-app message, never as raw JSON in a new
+//     tab or a completed-but-empty download (AC10).
+//   • no probe — stream the archive as an attachment.
+// The check runs on BOTH shapes, so hitting the URL directly is still refused.
+app.get('/api/agents/:agentId/workspace/zip', heavyLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+
+  // Refuse the workspace ROOT (D3/AC14): the toolbar's whole-agent export is the
+  // only root-level download. safeAgentPath('') resolves to the root, so this
+  // must be rejected before it, not by it.
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  const normalized = path.normalize(relPath.replace(/^\/+/, ''));
+  if (!normalized || normalized === '.' || normalized === path.sep) {
+    return res.status(400).json({ error: 'Refusing to zip the workspace root; use the workspace export instead' });
+  }
+
+  // Traversal / absolute-path / outward-symlink containment (AC19).
+  const target = safeAgentPath(agentId, relPath);
+  if (!target) return res.status(400).json({ error: 'invalid path' });
+
+  let st;
+  try {
+    st = fs.statSync(target);
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'not found' });
+    return res.status(500).json({ error: err.message });
+  }
+  if (!st.isDirectory()) return res.status(400).json({ error: 'not a directory' });
+
+  const probe = req.query.probe === '1' || req.query.probe === 'true';
+
+  // Pre-flight (AC7): total size + file count BEFORE any archive byte. Skips
+  // symlinks so nothing outside the workspace is measured or later archived
+  // (D5/AC6).
+  let measured;
+  try {
+    measured = await measureWorkspaceDir(target, {
+      maxBytes: WORKSPACE_ZIP_MAX_BYTES,
+      maxFiles: WORKSPACE_ZIP_MAX_FILES,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: `Could not size the directory: ${err.message}` });
+  }
+  if (measured.over) {
+    // No archive is produced (AC8). 413 with the actual numbers + an alternative.
+    return res.status(413).json({
+      error: describeOversizeDir(measured),
+      sizeBytes: measured.bytes,
+      fileCount: measured.files,
+      limitBytes: WORKSPACE_ZIP_MAX_BYTES,
+      limitFiles: WORKSPACE_ZIP_MAX_FILES,
+    });
+  }
+  if (probe) {
+    return res.json({ ok: true, sizeBytes: measured.bytes, fileCount: measured.files });
+  }
+
+  // Attachment filename derived from the directory name; same UTF-8 encoding as
+  // the per-file download so spaces / umlauts stay readable (AC18).
+  const zipName = `${path.basename(target)}.zip`;
+  const encoded = encodeURIComponent(zipName).replace(/'/g, '%27');
+  res.setHeader('Content-Disposition', `attachment; filename="${encoded}"; filename*=UTF-8''${encoded}`);
+  res.setHeader('Content-Type', 'application/zip');
+  // No Content-Length: a streamed archive's size isn't known up front.
+
+  // Empty directory → a valid empty ZIP, not a `zip` "nothing to do" error or a
+  // zero-byte file (AC13).
+  if (measured.entries === 0) {
+    res.setHeader('Content-Length', EMPTY_ZIP.length);
+    return res.end(EMPTY_ZIP);
+  }
+
+  // Stage a hard-link farm of the directory's contents (no byte copy, symlinks
+  // skipped for containment — same helper the export uses), then zip it from
+  // its root so the archive paths are relative to the chosen directory (AC3).
+  // No path segment below carries request-derived data (a UUID), keeping the
+  // filesystem sinks clear for CodeQL.
+  const stagingDir = path.join(WORKSPACE, '.zip-staging', crypto.randomUUID());
+  let cleanedUp = false;
+  const cleanupStaging = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    // Only the links go — the agent's own files are untouched.
+    try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch { /* noop */ }
+  };
+  try {
+    // No skipTop: every regular file and subdirectory is included, .git and
+    // node_modules and dotfiles and all (D1/AC4). linkDirRecursiveAsync skips
+    // symlinks and carries its own inline containment gate.
+    await linkDirRecursiveAsync(target, stagingDir);
+
+    const { child, done } = streamArchiveTool('zip', ['-r', '-q', '-', '.'], { cwd: stagingDir });
+
+    // `end: false`: terminate the response here, not when zip's stdout closes —
+    // a response ended by the pipe would look complete even if zip died mid-way.
+    child.stdout.pipe(res, { end: false });
+
+    // Client cancelled the download — kill zip instead of building the rest of a
+    // ZIP nobody is reading (AC12), and leave no orphaned process.
+    let clientGone = false;
+    res.on('close', () => {
+      if (res.writableFinished) return;
+      clientGone = true;
+      child.kill('SIGKILL');
+    });
+
+    const zipResult = await done;
+    cleanupStaging();
+    if (clientGone) {
+      console.log(`[API] Directory zip of ${agentId}:${normalized} cancelled by the client`);
+    } else if (zipResult.code === 0) {
+      res.end();
+    } else {
+      console.error(`[API] Directory zip failed for ${agentId}:${normalized}: ${describeArchiveFailure('zip', zipResult)}`);
+      // Headers are long gone: destroy the response so the client registers a
+      // failed download rather than a silently truncated ZIP (AC11).
+      res.destroy();
+    }
+  } catch (err) {
+    cleanupStaging();
+    console.error(`[API] Directory zip failed for ${agentId}:${normalized}: ${err.message}`);
+    if (res.headersSent) res.destroy();
+    else res.status(500).json({ error: `Directory download failed: ${err.message}` });
+  }
 });
 
 // Delete a file or directory in the agent workspace. Directories are removed

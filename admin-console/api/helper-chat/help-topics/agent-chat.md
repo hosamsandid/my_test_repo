@@ -381,7 +381,9 @@ end. Dismiss it and it comes back on the next change.
 
 The **Workspace** tab is a read-only view of the agent's own workspace: its
 repository clones, its `memory/` files, everything it has written. You can open a
-file, download it, and see images inline. Each file row also offers
+file, download it, and see images inline — and download a whole **directory** as
+a single ZIP from its own row (paths kept relative to that directory; not offered
+on the workspace root or on a `/context` folder). Each file row also offers
 **reference in chat** (**@**), which is the fastest way to say "look at this one".
 The **Git** mode next to *Tree* switches the same tab to the repository view —
 which files the agent has changed, and the diff for each.

@@ -104,7 +104,9 @@ export function apiRelOf(key) {
 }
 
 // Endpoint for a tree key. `kind` is one of 'tree' | 'file' | 'download' |
-// 'image'; the two sources expose the same four, so callers never branch.
+// 'image' | 'zip'; the sources expose the same set, so callers never branch.
+// ('zip' is the per-directory ZIP download, #2318 — only ever called for a
+// real workspace directory, never a `/context` mount, per D3.)
 export function workspaceUrl(agentId, key, kind) {
   if (!agentId) return null;
   const ctx = isContextKey(key);

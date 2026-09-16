@@ -110,6 +110,14 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
   const [dragOverDir, setDragOverDir] = useState(null);
   const [moveError, setMoveError] = useState('');
 
+  // Per-directory ZIP download (#2318).
+  //   dirDownloadError = message shown in an alert dialog when a download is
+  //                      refused (too large) or fails to start | ''
+  //   downloadingDir   = rel path of the directory whose pre-flight check is in
+  //                      progress (shows a spinner in place of its icon) | null
+  const [dirDownloadError, setDirDownloadError] = useState('');
+  const [downloadingDir, setDownloadingDir] = useState(null);
+
   // Read-only host context folder (#1283/#1286). When the agent has one, the
   // tree grows a virtual `context` root next to the real workspace entries; its
   // contents are read through the agent's container, never from this container.
@@ -283,6 +291,45 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
     setUploadStatus('idle');
     setUploadMessage('');
   }, []);
+
+  // Download one workspace directory as a ZIP (#2318). Two steps on purpose:
+  //  1. A pre-flight fetch (`?probe=1`) asks the server to size the directory
+  //     WITHOUT producing any archive. An oversize refusal comes back as JSON
+  //     and is shown as an in-app alert — never as raw JSON in a new tab or a
+  //     completed-but-empty download (AC8/AC10).
+  //  2. Only once the server has said yes do we trigger the browser's native
+  //     streamed download via a synthetic anchor (same mechanism as the per-file
+  //     download). The native download UI is the "download started" indicator
+  //     the streamed-archive case needs — there is no Content-Length, so no
+  //     progress bar — and its Cancel closes the connection, which the server
+  //     turns into killing the zip process; a mid-stream failure is destroyed
+  //     server-side so the browser marks the download failed (AC11/AC12).
+  const downloadDir = useCallback(async (relPath, name) => {
+    // Workspace directories only — never the root and never a `/context` mount
+    // (D3). The rows already hide the control there; this refuses defensively.
+    if (!agentId || !relPath || isContextKey(relPath)) return;
+    const url = workspaceUrl(agentId, relPath, 'zip');
+    if (!url) return;
+    setDirDownloadError('');
+    setDownloadingDir(relPath);
+    try {
+      const probe = await fetch(`${url}&probe=1`);
+      if (!probe.ok) {
+        const j = await probe.json().catch(() => ({}));
+        setDirDownloadError(j?.error || `Could not download this directory (HTTP ${probe.status}).`);
+        return;
+      }
+    } catch (err) {
+      setDirDownloadError(err?.message || 'Could not start the download.');
+      return;
+    } finally {
+      setDownloadingDir(prev => (prev === relPath ? null : prev));
+    }
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${name}.zip`;
+    a.click();
+  }, [agentId]);
 
   // Opens the delete-confirmation dialog for one file or directory. A key under
   // a read-only context mount is never deletable — the rows don't offer the
@@ -675,6 +722,8 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
             onSelectFile={(p) => setSelectedFile({ path: p })}
             selectedFilePath={selectedFile?.path || null}
             onUploadToDir={handleUploadToDir}
+            onDownloadDir={downloadDir}
+            downloadingDir={downloadingDir}
             onRequestDelete={requestDelete}
             onReference={onReference}
             dnd={dnd}
@@ -731,6 +780,18 @@ export default function WorkspaceBrowser({ agentId, active, refreshKey = 0, onRe
         onConfirm={() => setMoveError('')}
         onCancel={() => setMoveError('')}
       />
+
+      {/* Directory-download refusal (#2318 AC10): an oversize directory or a
+          failed pre-flight surfaces here as an in-app message, not raw JSON. */}
+      <ConfirmDialog
+        open={!!dirDownloadError}
+        alertOnly
+        variant="danger"
+        title="Download failed"
+        message={dirDownloadError}
+        onConfirm={() => setDirDownloadError('')}
+        onCancel={() => setDirDownloadError('')}
+      />
     </div>
   );
 }
@@ -766,7 +827,7 @@ function ModeButton({ icon, label, active, onClick }) {
 
 /* ─── Tree node ───────────────────────────────────────────────────── */
 
-function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch, onUploadToDir, onRequestDelete, onReference, dnd, agentId, contextStatus, chip }) {
+function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, gitBranch, onUploadToDir, onDownloadDir, downloadingDir, onRequestDelete, onReference, dnd, agentId, contextStatus, chip }) {
   const isRoot = relPath === '';
   const isOpen = expanded.has(relPath);
   const cache  = dirCache.get(relPath);
@@ -865,6 +926,36 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
               </span>
             )}
           </button>
+          {/* Per-directory download icon — visible on hover, same placement and
+              style as the per-file download (#2318 AC1). Real workspace
+              directories only: never a `/context` mount root or a directory
+              inside one (D3/AC15); the root row is never rendered here, so it
+              never gets one either (AC14). While the pre-flight size check runs
+              a spinner replaces the icon (there is no Content-Length, so this is
+              the only "download starting" feedback). */}
+          {onDownloadDir && !isContextKey(relPath) && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onDownloadDir(relPath, name); }}
+            disabled={downloadingDir === relPath}
+            title={`Download ${name}/ as ZIP`}
+            style={{
+              ...iconBtnStyle,
+              flexShrink: 0,
+              padding: '3px 6px',
+              marginRight: 2,
+              opacity: hovered || downloadingDir === relPath ? 1 : 0,
+              pointerEvents: hovered ? 'auto' : 'none',
+              color: 'var(--eb-text-muted)',
+              background: hovered ? 'var(--eb-bg-hover)' : 'none',
+              transition: 'opacity 0.1s',
+            }}
+          >
+            {downloadingDir === relPath
+              ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+              : <Download size={11} />}
+          </button>
+          )}
           {/* Per-directory upload icon — visible on hover. Absent under the
               read-only context mount: there is no route that could write there. */}
           {!readOnly && (
@@ -924,6 +1015,8 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
           onSelectFile={onSelectFile}
           selectedFilePath={selectedFilePath}
           onUploadToDir={onUploadToDir}
+          onDownloadDir={onDownloadDir}
+          downloadingDir={downloadingDir}
           onRequestDelete={onRequestDelete}
           onReference={onReference}
           dnd={dnd}
@@ -935,7 +1028,7 @@ function DirNode({ relPath, name, depth, dirCache, expanded, onToggleDir, onSele
   );
 }
 
-function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, onUploadToDir, onRequestDelete, onReference, dnd, agentId, contextStatus }) {
+function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, onSelectFile, selectedFilePath, onUploadToDir, onDownloadDir, downloadingDir, onRequestDelete, onReference, dnd, agentId, contextStatus }) {
   if (!cache) {
     return null; // not yet fetched (open root state pre-fetch)
   }
@@ -1011,6 +1104,8 @@ function DirContents({ relPath, depth, cache, dirCache, expanded, onToggleDir, o
               selectedFilePath={selectedFilePath}
               gitBranch={item.gitBranch || null}
               onUploadToDir={onUploadToDir}
+              onDownloadDir={onDownloadDir}
+              downloadingDir={downloadingDir}
               onRequestDelete={onRequestDelete}
               onReference={onReference}
               dnd={readOnly ? null : dnd}

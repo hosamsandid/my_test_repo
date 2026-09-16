@@ -86,3 +86,31 @@ export function computeWindow({ heights, scrollTop, viewportHeight, overscan = 4
     totalHeight,
   };
 }
+
+/**
+ * Scroll-position math for "jump to an arbitrary row" (#2310 deep-linking).
+ *
+ * Centers row `index` in the viewport where possible, clamped to the valid
+ * scroll range — the same clamp `computeWindow` implicitly relies on via
+ * `scrollTop`. DOM-free so the convergence math (VirtualList re-runs this each
+ * commit as off-screen rows are measured and `heights[index]` firms up from an
+ * estimate to a real value) is unit-testable without mounting anything.
+ *
+ * @param {object} p
+ * @param {number[]} p.offsets        prefix-sum from `prefixOffsets(heights)`
+ * @param {number[]} p.heights        per-row heights (same array `offsets` was built from)
+ * @param {number}   p.index          target row index
+ * @param {number}   p.viewportHeight visible height of the scroller
+ * @param {number}   p.scrollHeight   total scrollable height (>= offsets[last])
+ * @returns {number} the scrollTop that centers the row, clamped to
+ *   `[0, max(0, scrollHeight - viewportHeight)]`
+ */
+export function computeCenteredScrollTop({ offsets, heights, index, viewportHeight, scrollHeight }) {
+  const n = heights.length;
+  if (n === 0 || index < 0 || index >= n) return 0;
+  const rowTop = offsets[index];
+  const rowHeight = heights[index] > 0 ? heights[index] : 0;
+  const maxTop = Math.max(0, scrollHeight - viewportHeight);
+  const raw = rowTop - Math.max(0, (viewportHeight - rowHeight) / 2);
+  return Math.min(maxTop, Math.max(0, raw));
+}

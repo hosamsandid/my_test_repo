@@ -463,10 +463,16 @@ uncovered). Key pieces:
   pool-instance sub-grouping (#2297), lifecycle context menu via
   `RailLifecycleHost`).
 - `ChatPanel` — backfill/pagination/optimistic-send/SSE tail; transcript
-  **windowed** (`VirtualList`/`virtual-window.js`), stick-to-bottom.
+  **windowed** (`VirtualList`/`virtual-window.js`), stick-to-bottom. A
+  `?msg=<event_id>` deep-link (#2310) bounded-backfills, scrolls to (via
+  `VirtualList`'s `scrollToKey`/`onScrolledToKey`) and briefly highlights one
+  message, falling back to the normal default position with a notice if the
+  id can't be found.
 - `Message` — sanitised markdown (`react-markdown` + gfm + pretty-code +
   `rehype-sanitize`); quick-reply cards for `AskUserQuestion`
-  (`ask-user-mcp.py` re-supplies it in headless mode); inline image thumbnails.
+  (`ask-user-mcp.py` re-supplies it in headless mode); inline image
+  thumbnails; hover-revealed "Copy link" builds the `?msg=` deep-link above
+  (#2310, plain text bubbles only).
 - `MessageInput` — composer, send-keybinding preset, per-agent drafts,
   slash-command palette, unified Send/Stop.
 - `RightRail` — tabs (Sessions, session log, Workspace, Triggers, Outcomes,

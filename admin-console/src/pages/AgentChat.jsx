@@ -505,6 +505,31 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
     setSearchParams(next, { replace: true });
   }, [requestedSession, loading, agents, agentId, searchParams, setSearchParams]);
 
+  // Deep-link to one chat message (#2310): a `?msg=<event_id>` query param
+  // means "scroll the transcript to this message and briefly highlight it".
+  // Mirrors `?session=` above exactly — same cold-nav-safe wait, same
+  // read-once-then-strip via `replace` (AC3), same "unknown agent → the
+  // redirect effect handles it, don't consume" guard (AC6) — but the actual
+  // locate/backfill/scroll/highlight work needs `messages` and the scroller,
+  // which only ChatPanel has, so this effect just hands off a request object
+  // (the same pattern as `resumeRequest`/`composerRefRequest`) rather than
+  // doing anything itself. Independent of the session/tab handling above, so
+  // a URL carrying `?msg=` together with `?session=`/`?tab=` honors all of
+  // them (AC8, Q4).
+  const [msgTargetRequest, setMsgTargetRequest] = useState(null);
+  const consumedMsgRef = useRef(null);
+  const requestedMsg = searchParams.get('msg');
+  useEffect(() => {
+    if (!requestedMsg || loading || !agents) return;
+    if (!agents.find(a => a.id === agentId)) return;
+    if (consumedMsgRef.current === requestedMsg) return;
+    consumedMsgRef.current = requestedMsg;
+    setMsgTargetRequest({ eventId: requestedMsg, ts: Date.now() });
+    const next = new URLSearchParams(searchParams);
+    next.delete('msg');
+    setSearchParams(next, { replace: true });
+  }, [requestedMsg, loading, agents, agentId, searchParams, setSearchParams]);
+
   // A disabled agent is only ever in this list because the opt-in is on (#1928
   // AC6), and it has no chat to open — the DM route rejects it with a 409. A
   // `role: 'team'` agent (#2213) never has a chat to open either — it hosts no
@@ -872,6 +897,7 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
                 onTodoBoundary={handleTodoBoundary}
                 onOpenKnowledge={handleOpenKnowledge}
                 resumeRequest={resumeRequest}
+                msgTargetRequest={msgTargetRequest}
                 insertRefRequest={composerRefRequest}
                 removedFromRoster={agentRemoved}
               />

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { prefixOffsets, itemAtOffset, computeWindow } from './virtual-window.js';
+import { prefixOffsets, itemAtOffset, computeWindow, computeCenteredScrollTop } from './virtual-window.js';
 
 test('prefixOffsets builds a monotonic prefix sum and clamps negatives to 0', () => {
   assert.deepEqual(prefixOffsets([]), [0]);
@@ -78,4 +78,34 @@ test('computeWindow with a zero-height viewport still yields a valid slice', () 
   assert.ok(w.endIndex >= 1 && w.endIndex <= 10);
   assert.equal(w.totalHeight, 400);
   assert.equal(w.topPad + w.bottomPad + (w.totalHeight - w.topPad - w.bottomPad), 400);
+});
+
+test('computeCenteredScrollTop centers a mid-list row in the viewport', () => {
+  const heights = new Array(100).fill(50); // total 5000
+  const offsets = prefixOffsets(heights);
+  // row 50 top = 2500; viewport 200 -> center offset = 2500 - (200-50)/2 = 2425
+  const top = computeCenteredScrollTop({ offsets, heights, index: 50, viewportHeight: 200, scrollHeight: 5000 });
+  assert.equal(top, 2425);
+});
+
+test('computeCenteredScrollTop clamps to 0 for a row near the top', () => {
+  const heights = new Array(20).fill(50); // total 1000
+  const offsets = prefixOffsets(heights);
+  const top = computeCenteredScrollTop({ offsets, heights, index: 0, viewportHeight: 300, scrollHeight: 1000 });
+  assert.equal(top, 0);
+});
+
+test('computeCenteredScrollTop clamps to the max scrollTop for the last row', () => {
+  const heights = new Array(20).fill(50); // total 1000
+  const offsets = prefixOffsets(heights);
+  const top = computeCenteredScrollTop({ offsets, heights, index: 19, viewportHeight: 300, scrollHeight: 1000 });
+  assert.equal(top, 700); // 1000 - 300
+});
+
+test('computeCenteredScrollTop is a no-op for an out-of-range index or empty list', () => {
+  assert.equal(computeCenteredScrollTop({ offsets: [0], heights: [], index: 0, viewportHeight: 200, scrollHeight: 0 }), 0);
+  const heights = [50, 50];
+  const offsets = prefixOffsets(heights);
+  assert.equal(computeCenteredScrollTop({ offsets, heights, index: -1, viewportHeight: 200, scrollHeight: 100 }), 0);
+  assert.equal(computeCenteredScrollTop({ offsets, heights, index: 5, viewportHeight: 200, scrollHeight: 100 }), 0);
 });

@@ -284,6 +284,12 @@ every authenticated user; *actions* are role-gated, not the page:
 - **Skill card/table row:** name, description, tier badge, `v4 · a1b2c3` version chip,
   activation state (`active · 4/6`), drift badge (`outdated` / `diverged` / `conflict` /
   `orphaned`), provenance chips (`auto` for curator, `shared from payments`, `imported`).
+  A pool or team row additionally gets a **Downstream** badge ("2 outdated, 1 diverged")
+  whenever any of ITS OWN downstream copies aren't `in-sync` — a pool row's downstream is
+  every team + agent copy of the name, a team row's is only that team's own agent copies
+  (agent rows are leaves, no badge); it reuses the same per-copy drift already computed
+  for the row's own Drift badge, so it can never disagree with the Lineage/Usage tabs,
+  and clicking it opens the Usage tab directly (#2317).
 - **Detail panel tabs:** *Content* (file browser/editor — today's Registry viewer),
   *Versions* (history timeline with per-version diff of `SKILL.md`, from the bounded
   history + archive snapshots), *Lineage* (rendered `provenance.json` + `origin` chain +

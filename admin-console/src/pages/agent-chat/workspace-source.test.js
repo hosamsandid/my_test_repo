@@ -58,6 +58,19 @@ test('URLs route to the matching source and encode their path', () => {
   assert.equal(workspaceUrl(null, '/context', 'tree'), null);
 });
 
+test('the zip kind builds a per-directory workspace download URL (#2318)', () => {
+  assert.equal(
+    workspaceUrl('a1', 'repo/src', 'zip'),
+    '/api/agents/a1/workspace/zip?path=repo%2Fsrc',
+  );
+  // A directory name with spaces / non-ASCII stays encoded in the path (AC18).
+  assert.equal(
+    workspaceUrl('a1', 'Ordner Ümläute', 'zip'),
+    '/api/agents/a1/workspace/zip?path=Ordner%20%C3%9Cml%C3%A4ute',
+  );
+  assert.equal(workspaceUrl(null, 'repo/src', 'zip'), null);
+});
+
 test('the virtual root is prepended only when a mount exists', () => {
   const items = [{ name: 'memory', type: 'dir' }];
   assert.deepEqual(withContextRoot(items, { enabled: false }), items);

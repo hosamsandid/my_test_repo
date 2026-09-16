@@ -95,6 +95,7 @@ const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
+const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
 // Process-draft access model (#2068) — one predicate for every draft route.
 const draftAccess = require('./draft-access');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
@@ -14055,6 +14056,84 @@ function refuseGlobalEnvironmentUnusableProvider(llmEndpointId) {
   if (!ep || isGlobalProvider(ep)) return null;
   return `Cannot publish this environment as global: its model provider '${ep.name || ep.id}' is not itself global or system-scoped`;
 }
+
+// #2324: read the raw value of a stored GitHub token for a SERVER-SIDE probe.
+// Never returned to a client — only used to call GitHub and classify the result.
+function readGithubTokenValue(tokenId) {
+  if (!tokenId || !GH_TOKEN_ID_RE.test(tokenId)) return null;
+  try { return fs.readFileSync(path.join(GH_TOKENS_DIR, path.basename(tokenId)), 'utf8').trim() || null; }
+  catch { return null; }
+}
+
+// #2324: does any ENABLED agent bound to this env carry an ENABLED github-event
+// trigger for `fullName`? Polled and internal listeners both gate on the repo, so
+// both count. Mirrors the poller's subscriber test without importing it.
+function envHasRepoSubscriber(envId, fullName) {
+  let dirs = [];
+  try { dirs = listAgentDirs(); } catch { return false; }
+  for (const id of dirs) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg || cfg.environmentId !== envId || cfg.enabled === false) continue;
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    if (!Array.isArray(triggers)) continue;
+    if (triggers.some(t => t && t.type === 'github-event' && t.enabled !== false && t.repo === fullName)) return true;
+  }
+  return false;
+}
+
+// #2324: a cheap authenticated probe of one repo. Returns { status, rateLimited }.
+// Any network/timeout error → status undefined (classifier → 'unknown'), never a throw.
+async function probeGithubRepo(fullName, token) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const r = await fetch(`https://api.github.com/repos/${fullName}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'agent-studio-health',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      signal: ctrl.signal,
+    });
+    const remaining = r.headers.get('x-ratelimit-remaining');
+    return { status: r.status, rateLimited: r.status === 403 && remaining === '0' };
+  } catch {
+    return { status: undefined, rateLimited: false };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// #2324 (epic #2325): the GitHub-integration health of an environment's repos —
+// token present? valid? a subscriber? — so the console can show WHY events aren't
+// arriving instead of the operator having to read the poller log. Same visibility
+// as reading the environment; the token value never leaves the server.
+app.get('/api/environments/:id/github-health', apiLimiter, async (req, res) => {
+  const env = loadEnvironment(req.params.id);
+  if (!env) return res.status(404).json({ error: 'Environment not found' });
+  const scope = getScope(req);
+  const agents = agentsUsingEnvironment(env.id, scope);
+  if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env) && agents.length === 0) {
+    return res.status(404).json({ error: 'Environment not found' });
+  }
+  const repos = Array.isArray(env.repositories) ? env.repositories.filter((r) => r && r.url) : [];
+  const hasToken = !!env.githubTokenId;
+  const token = hasToken ? readGithubTokenValue(env.githubTokenId) : null;
+  const out = [];
+  for (const r of repos) {
+    let fullName = null;
+    try { const p = parseGitHubUrl(r.url); fullName = `${p.org}/${p.repo}`; } catch { /* unparseable url */ }
+    const hasSubscriber = fullName ? envHasRepoSubscriber(env.id, fullName) : null;
+    let probeStatus; let rateLimited = false;
+    if (hasToken && token && fullName) {
+      const probe = await probeGithubRepo(fullName, token);
+      probeStatus = probe.status; rateLimited = probe.rateLimited;
+    }
+    out.push({ url: r.url, fullName, ...classifyGithubHealth({ hasToken, hasSubscriber, probeStatus, rateLimited }) });
+  }
+  res.json({ envId: env.id, tokenId: env.githubTokenId || null, repos: out, rollUp: rollUpGithubHealth(out) });
+});
 
 app.post('/api/environments', heavyLimiter, (req, res) => {
   // `skills` is accepted-and-discarded: the skill grant is team-owned

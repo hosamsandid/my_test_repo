@@ -98,9 +98,13 @@ export function RepoStatusIcon({ status, error, empty }) {
     );
   }
   if (status === 'ok') {
+    // #2324: be explicit that this is CLONE reachability only. It does not verify
+    // the GitHub Token used for the event poller / gh / PRs — a repo can be
+    // "reachable" here while the token is invalid and no events arrive. The
+    // GitHub-integration health badge on the Repositories tab checks the token.
     const title = empty
-      ? 'Repository reachable — but empty (no commits yet). Add an initial commit before agents can clone it.'
-      : 'Repository reachable';
+      ? 'Repository reachable (clone access) — but empty (no commits yet). Add an initial commit before agents can clone it.'
+      : 'Repository reachable (clone access only — this does not verify the GitHub Token used for events/PRs; see the GitHub integration status)';
     return (
       <span title={title} style={{ display: 'inline-flex', color: 'var(--eb-status-success, #16a34a)' }}>
         <Check size={14} />

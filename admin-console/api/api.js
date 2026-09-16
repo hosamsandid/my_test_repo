@@ -96,6 +96,7 @@ const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, bu
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
 const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
+const { checkGithubTokenRequirement } = require('./env-token-requirement');
 // Process-draft access model (#2068) — one predicate for every draft route.
 const draftAccess = require('./draft-access');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
@@ -14264,6 +14265,18 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
     }
   }
 
+  // #2323: a repo-backed environment with no GitHub token silently breaks the
+  // whole GitHub automation. Block it unless the caller explicitly acknowledges a
+  // reference-only environment (`acknowledgeNoToken`).
+  {
+    const need = checkGithubTokenRequirement({
+      repositories: normalizedRepos,
+      githubTokenId,
+      acknowledgeNoToken: req.body?.acknowledgeNoToken,
+    });
+    if (!need.ok) return res.status(need.status).json({ error: need.error, code: need.code });
+  }
+
   let normalizedMcp;
   try {
     normalizedMcp = (mcpServers === undefined && templateSeed?.mcpServers?.length)
@@ -14520,6 +14533,19 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
     // to a pre-#1940 environment on disk (AC1).
     if (toolchain.toolchainId) env.toolchainId = toolchain.toolchainId;
     else delete env.toolchainId;
+  }
+  // #2323: block a repo-backed environment left without a GitHub token (the whole
+  // GitHub automation depends on it) unless the caller acknowledges a
+  // reference-only env. Checked on the EFFECTIVE post-merge state, so adding a
+  // repo to a token-less env — or clearing the token off a repo-backed one — is
+  // caught here too, not only on a fresh create.
+  {
+    const need = checkGithubTokenRequirement({
+      repositories: env.repositories,
+      githubTokenId: env.githubTokenId,
+      acknowledgeNoToken: req.body?.acknowledgeNoToken,
+    });
+    if (!need.ok) return res.status(need.status).json({ error: need.error, code: need.code });
   }
   env.updatedAt = new Date().toISOString();
   saveEnvironment(env.id, env);
@@ -15441,6 +15467,18 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
     ? repository.branch
     : 'main';
 
+  // #2323: don't materialise a team onto a repo-backed environment with no GitHub
+  // token — the poller, gh, pushes and attributed writes would all be dead from
+  // the start. Blocked unless the caller acknowledges a reference-only setup.
+  {
+    const need = checkGithubTokenRequirement({
+      repositories: repoLess ? [] : [{ url: repository.url }],
+      githubTokenId,
+      acknowledgeNoToken: body.acknowledgeNoToken,
+    });
+    if (!need.ok) return res.status(need.status).json({ error: need.error, code: need.code });
+  }
+
   // ── 2. Credentials must already exist (Pre-Flight) ────────────────
   if (repository?.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
     return res.status(400).json({ error: `SSH key '${repository.sshKeyId}' not found` });
@@ -16156,6 +16194,16 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
 
   if (repository?.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
     return fail(400, `SSH key '${repository.sshKeyId}' not found`);
+  }
+  // #2323: same guard as POST /api/teams — a repo-backed team with no GitHub token
+  // starts with the whole GitHub automation dead. Blocked unless acknowledged.
+  {
+    const need = checkGithubTokenRequirement({
+      repositories: repoLess ? [] : [{ url: repository.url }],
+      githubTokenId,
+      acknowledgeNoToken: body.acknowledgeNoToken,
+    });
+    if (!need.ok) return fail(need.status, need.error);
   }
   // Repo-less needs no PAT — mirror of the non-streaming handler (#2081 AC6).
   if (!environmentId && !repoLess) {

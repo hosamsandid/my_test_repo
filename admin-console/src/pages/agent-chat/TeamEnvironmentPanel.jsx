@@ -176,6 +176,9 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [notice, setNotice] = useState('');
+  // #2323: set when a save is blocked for a repo-backed env with no GitHub token;
+  // holds the server message and drives the reference-only opt-out prompt.
+  const [tokenWarn, setTokenWarn] = useState(null);
   // The save-time propagation offer (#2066), same shape as the Working
   // Environments page's own.
   const [offer, setOffer] = useState(null);
@@ -264,11 +267,18 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
     mcpServers: form.mcpServers,
   });
 
-  async function save() {
+  async function save(acknowledgeNoToken = false) {
+    // #2323: `acknowledgeNoToken` is only ever passed explicitly by the
+    // reference-only opt-out below — strict-check it so an `onClick={() => save()}`
+    // (event) or any truthy leak can never silently acknowledge.
+    const ack = acknowledgeNoToken === true;
     setSaving(true); setSaveError(null); setNotice('');
+    if (!ack) setTokenWarn(null);
     try {
       const body = teamEnvSubmitBody(baseline, form);
+      if (ack) body.acknowledgeNoToken = true;
       const saved = await apiCall('PUT', `/api/environments/${encodeURIComponent(baseline.id)}`, body);
+      setTokenWarn(null);
       setBaseline(saved);
       setForm(initialTeamEnvForm(saved));
       setNotice('Saved.');
@@ -279,7 +289,13 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
       }
       if (onSaved) onSaved();
     } catch (e) {
-      setSaveError(e.message);
+      // #2323: a repo-backed environment with no GitHub token is blocked server-side.
+      // Offer the explicit reference-only opt-out instead of a dead-end error.
+      if (e.code === 'github_token_required') {
+        setTokenWarn(e.serverMessage || e.message);
+      } else {
+        setSaveError(e.message);
+      }
     } finally {
       setSaving(false);
     }
@@ -294,6 +310,24 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
           background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)',
         }}>
           {saveError}
+        </div>
+      )}
+      {tokenWarn && (
+        <div role="alert" style={{
+          color: 'var(--eb-status-warning, var(--eb-status-error))', fontSize: 'var(--eb-text-sm)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          background: 'var(--eb-status-warning-bg, var(--eb-status-error-bg))', borderRadius: 'var(--eb-radius-md)',
+          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+        }}>
+          <div>{tokenWarn}</div>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+            <button type="button" onClick={() => save(true)} disabled={saving} style={buttonStyle}>
+              Save anyway (reference-only)
+            </button>
+            <button type="button" onClick={() => setTokenWarn(null)} disabled={saving} style={secondaryButtonStyle}>
+              Cancel
+            </button>
+          </div>
         </div>
       )}
       {notice && !saveError && (
@@ -539,7 +573,7 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button
-          onClick={save}
+          onClick={() => save()}
           disabled={saving || !canSubmit}
           style={{
             padding: 'var(--eb-space-2) var(--eb-space-4)',
@@ -723,6 +757,21 @@ function GithubHealthBadge({ envId }) {
     </div>
   );
 }
+
+// #2323: the reference-only opt-out prompt's two buttons.
+const buttonStyle = {
+  padding: 'var(--eb-space-1) var(--eb-space-3)',
+  background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+  border: 'none', borderRadius: 'var(--eb-radius-md)',
+  fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+  cursor: 'pointer', fontFamily: 'inherit',
+};
+const secondaryButtonStyle = {
+  padding: 'var(--eb-space-1) var(--eb-space-3)',
+  background: 'transparent', color: 'var(--eb-text-primary)',
+  border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+  fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit',
+};
 
 const dashedButtonStyle = {
   display: 'flex', alignItems: 'center', justifyContent: 'center',

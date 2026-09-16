@@ -306,6 +306,9 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
             Repositories are cloned into a member's workspace when it is first created. Editing
             the list here offers to bring already-materialized members up to date.
           </div>
+          {/* #2324: live GitHub-integration health — is the token valid for each
+              repo, and is anything listening? Reflects the SAVED state. */}
+          <GithubHealthBadge envId={baseline.id} />
           {form.repositories.map((repo, idx) => (
             <RepositoryCard
               key={idx}
@@ -663,6 +666,63 @@ const inputStyle = {
   outline: 'none',
   boxSizing: 'border-box',
 };
+
+// #2324: a compact live health readout for the environment's GitHub integration.
+// Fetches GET /api/environments/:id/github-health (which probes each repo's token
+// server-side) and shows the worst-case status plus a line per unhealthy repo —
+// so "why aren't events arriving?" is answered in the UI, not the poller log.
+// Reflects the SAVED environment; a probe failure never blocks the tab.
+function GithubHealthBadge({ envId }) {
+  const { data, loading, error, refetch } = useApi(
+    envId ? `/api/environments/${encodeURIComponent(envId)}/github-health` : null,
+  );
+  if (!envId || error) return null;
+  if (loading && !data) {
+    return (
+      <div style={{ ...helpTextStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+        <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> Checking GitHub integration…
+      </div>
+    );
+  }
+  const repos = Array.isArray(data?.repos) ? data.repos : [];
+  if (repos.length === 0) return null; // repo-less (LLM-only) env: nothing to report
+  const roll = data?.rollUp || {};
+  const tone = roll.ok ? 'var(--eb-status-success)' : 'var(--eb-status-warning, var(--eb-status-error))';
+  const bg = roll.ok
+    ? 'var(--eb-status-success-bg, var(--eb-bg-elevated))'
+    : 'var(--eb-status-warning-bg, var(--eb-status-error-bg))';
+  const unhealthy = repos.filter((r) => !r.ok);
+  return (
+    <div role="status" style={{
+      display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
+      padding: 'var(--eb-space-2) var(--eb-space-3)', borderRadius: 'var(--eb-radius-md)',
+      background: bg, fontSize: 'var(--eb-text-sm)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', color: tone, fontWeight: 'var(--eb-font-medium)' }}>
+        <Github size={13} />
+        <span>GitHub integration: {roll.ok ? 'OK' : (roll.label || 'Problem')}</span>
+        <button
+          type="button"
+          onClick={refetch}
+          disabled={loading}
+          style={{
+            marginLeft: 'auto', padding: 'var(--eb-space-0-5) var(--eb-space-2)',
+            background: 'transparent', color: 'var(--eb-text-secondary)',
+            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+            fontSize: 'var(--eb-text-xs)', cursor: loading ? 'wait' : 'pointer', fontFamily: 'inherit',
+          }}
+        >
+          {loading ? 'Checking…' : 'Recheck'}
+        </button>
+      </div>
+      {unhealthy.map((r, i) => (
+        <div key={i} style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' }}>
+          <code>{r.fullName || r.url}</code>: {r.label}{r.detail ? ` — ${r.detail}` : ''}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 const dashedButtonStyle = {
   display: 'flex', alignItems: 'center', justifyContent: 'center',

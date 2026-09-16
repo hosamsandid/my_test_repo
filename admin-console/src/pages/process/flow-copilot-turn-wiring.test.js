@@ -180,6 +180,25 @@ test('the provider refuses a second concurrent turn (AC4)', () => {
   assert.match(code(PROVIDER), /if \(turnRef\.current\) return;/);
 });
 
+test('the finished-turn proposal captures flowName before clearTurn nulls the ref', () => {
+  // Regression: the `setPendingByScope` updater runs LATER (React processes it
+  // during the next render), but `clearTurn(id)` on the following line sets
+  // `turnRef.current = null` synchronously. Reading `turnRef.current.flowName`
+  // from inside the updater therefore dereferenced null on completion — the
+  // "Cannot read properties of null (reading 'flowName')" crash. The value must
+  // be captured into a local while the ref is still live, before scheduling.
+  const s = code(PROVIDER);
+  const start = s.indexOf('setPendingByScope((m) => putPending(m, {');
+  const end = s.indexOf('clearTurn(id);', start);
+  assert.ok(start !== -1 && end !== -1, 'putPending/clearTurn wiring not found — re-point this guard');
+  const updater = s.slice(start, end);
+  assert.doesNotMatch(
+    updater,
+    /turnRef\.current\.flowName/,
+    'the pending updater must not dereference turnRef.current after clearTurn nulls it',
+  );
+});
+
 // ── the server-side cancellation path (AC9, AC14) ────────────────────────────
 
 test('the copilot route aborts the work, not just its delivery', () => {

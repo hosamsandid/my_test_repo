@@ -107,11 +107,11 @@ per-agent trigger: Agent Chat → **Triggers** → add → type **Plugin event**
 | Field | |
 |---|---|
 | Plugin | `jira` (picked from the installed plugins) |
-| Event filter | blank = any event from jira; or `status_changed` |
-| Payload filter | **which status wakes this agent** — one `key=value` per line, e.g. `toStatus=Ready for Dev`. Blank = every watched transition wakes this agent. |
+| Which event | *Any event* or `status_changed` (the only event the plugin sends). Offered as a select from the manifest's `events[]`. A status name is **not** an event — the form flags one as *not an event this plugin declares*. |
+| Only when… | **which status wakes this agent** — condition rows `field = value`, e.g. `toStatus = Ready for Dev`; the field picker lists the payload keys below with an example. No conditions = every watched transition wakes this agent. Stored as `payloadFilter: { toStatus: "Ready for Dev" }`. |
 | Wake instruction | what the agent should do — e.g. *"Run `aee-jira inbox --consume`, read the issue with `aee-jira show`, refine the description and write it back with `aee-jira update`, then move it on with `aee-jira transition`."* |
 
-The payload filter is what routes a flow: give the Business Analyst
+The **Only when…** condition (the trigger's `payloadFilter`) is what routes a flow: give the Business Analyst
 `toStatus=Ready for Refinement`, the Developer `toStatus=Ready for Dev`, the
 Reviewer `toStatus=In Review`. Every key must equal the event's field **exactly**
 (case-sensitive — copy the status name verbatim from Jira). Without a filter
@@ -194,6 +194,15 @@ member of a granted team), two tabs:
 The **Watch config** link (team-admin only) opens `/admin` — the
 project + status-set rows from step 4.
 
+**Help.** The plugin ships its own console help topic (`plugins/jira/help/jira.md`,
+installed to `/workspace/plugins/jira/help/`): on Agent Chat and on the Plugins
+pages the "?" Helper Chat can answer "how does a Jira status change wake my
+agent", "which fields can I filter on", "why did my agent not wake" from it —
+folded only on those pages, never into the platform's own corpus
+(`docs/plugin-system-concept.md` §4.1, *help/*). The trigger form's own "?"
+deep-links the *Plugin event — Which event vs. Only when* chapter of the Agent
+Chat help.
+
 ---
 
 ## The event log
@@ -241,6 +250,7 @@ Two records, for two audiences:
 | a watch card shows **Failing** | consecutive poll failures — expand it for the error log | usually a bad or expired API token: a Team Admin re-sets it on the Plugins page, then hits **Retry now** |
 | the agent says `aee-jira` is read-only / only knows `whoami` and `inbox` | its workspace holds a CLI copy from an older plugin version (the grant sync copies the file only when the grant changes) | since this version the copy is refreshed on every plugin reconcile — restart the orchestrator or `POST /internal/plugins/reconcile`; re-run `make seed-plugins` + reinstall first if `/workspace/plugins/jira/bin/aee-jira.py` is itself old |
 | the wrong agent wakes, or an agent wakes on its own transition | the agents' `plugin-event` triggers carry no payload filter, so every watched transition wakes all of them | set `toStatus=<status>` on each agent's trigger (§5) |
+| a trigger whose *Which event* is a status name (`Ready for Dev`) never fires | `eventFilter` is compared with the event **name** (`status_changed`), not with the payload; the status belongs in *Only when…* (`toStatus`) | blank *Which event*, add the condition `toStatus = Ready for Dev` — the form now offers both from the manifest and flags the mistake |
 
 For a hands-on debug session the broker ships `spike.js` (run inside the
 sidecar): `podman exec aee-plugin-jira node spike.js probe --project KAN

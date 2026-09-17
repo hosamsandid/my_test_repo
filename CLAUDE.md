@@ -227,7 +227,11 @@ Concept: `docs/plugin-system-concept.md`, `docs/cli-contract.md`.
 - **Manifest** (`pluginVersion: 1`, `plugin-manifest.js`): closed `capabilities`
   enum (`podman-socket`, `egress`, `host-mount:<path>`), `scopes`
   (`team`/`agent`), optional `quota`, `ui.routes[].minRole`, optional
-  command-only (`commands`) / install-time `fetch`.
+  command-only (`commands`) / install-time `fetch`, optional `events[]` (an
+  event-source plugin's declared vocabulary — event names + payload keys —
+  rendered by the plugin-event trigger form, never interpreted), and an
+  optional `help/*.md` dir of console help topics folded into the Helper Chat
+  only on the routes they name (`help-registry.js` `loadPluginTopics`).
 - **Scope tokens**: HMAC `{pluginId, scopeId}` (`plugin-scope-token.js`); broker
   verifies every call; ownership label `aee.plugin.owner`.
 - **Broker SDK** (`broker-sdk/`): the per-call obligations (verify, scope-filter,

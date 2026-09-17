@@ -104,8 +104,8 @@ keeps its own JSONL audit for compliance questions.
 ### 4.1 Plugin anatomy and manifest
 
 A plugin is a directory in the registry: `/workspace/plugins/<id>/` with
-`plugin.json`, the CLI script(s) under `bin/`, and (referenced, not stored)
-the sidecar image.
+`plugin.json`, the CLI script(s) under `bin/`, optional console help topics
+under `help/` (below), and (referenced, not stored) the sidecar image.
 
 ```json
 {
@@ -132,6 +132,10 @@ the sidecar image.
       { "path": "/admin", "minRole": "team-admin" }
     ]
   },
+  "events": [
+    { "name": "status_changed", "description": "A watched issue moved to another status",
+      "payload": [ { "key": "toStatus", "description": "the status the issue moved into", "example": "Ready for Dev" } ] }
+  ],
   "companionSkill": "batch-parity-testing",
   "promptLine": "You can spawn containers with `aee-podman` — run `aee-podman --help`."
 }
@@ -161,6 +165,30 @@ the sidecar image.
   broker enforces it via `broker-sdk/authz.js`; the console validates the field.
 - `credentials` are bound at install/bind time from the existing credential
   store; secrets go into the **sidecar's** environment, never into agents.
+- `events` (optional) is an **event-source** plugin's own vocabulary: the
+  events its broker may send to `POST /internal/plugin-event` and the
+  top-level string fields each payload carries (`{name, description?,
+  payload: [{key, description?, example?}]}`). Purely descriptive — the
+  platform never interprets a name or a key (the wake stays generic,
+  `docs/jira-plugin-plan.md` D5); the trigger form renders it so a
+  `plugin-event` listener's **Which event** is a select and its **Only when…**
+  conditions a key picker with the example as placeholder, instead of two
+  free-text fields whose vocabulary lived only in the plugin's docs. A plugin
+  that declares none degrades to free text with the same wire shape.
+- `help/*.md` (optional directory, not a manifest field) — console help topics
+  in the built-in format (`admin-console/api/helper-chat/help-topics/`,
+  front-matter `id, routes[], title, summary, seeAlso[], askPrompts[]`). The
+  Helper Chat folds an installed plugin's topics into its grounding **only on
+  the contexts the topic's `routes` name**, as neighbours after the page's own
+  topic — never as a route's primary topic, so the "This page" face, the
+  coverage ratchet and every other page's prompt budget are untouched
+  (`help-registry.js` `loadPluginTopics`; read per request from
+  `/workspace/plugins/<id>/help/`, so install/uninstall shows up without a
+  restart). This is how the "?" on Agent Chat can answer "how does the Jira
+  plugin wake my agent" without the platform corpus learning anything about
+  Jira. The budget guard in `corpus.test.js` sweeps the reference plugins'
+  help dirs, so a shipped topic that would blow a page's neighbourhood fails
+  CI.
 - `companionSkill` (optional) names a skill shipped alongside the plugin:
   the CLI delivers the *capability*, the skill delivers the *domain
   knowledge* about using it well (e.g. how to design batch-parity tests

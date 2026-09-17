@@ -16,6 +16,8 @@ const {
   TIER_PERSONAL, TIER_TEAM, TIER_SYSTEM, TIERS,
   normalizeTier, ownsPersonalTier, isSharedTier,
   tierTeamIds, tierUsableByTeam, tierOwnershipFields, isRetier,
+  IDENTITY_HUMAN, IDENTITY_SERVICE, IDENTITIES,
+  normalizeIdentity, isServiceIdentity, isHumanIdentity, isAllowedTierCombo,
 } = require('./resource-tier');
 
 const TWIN = path.join(__dirname, '..', 'admin-console', 'api', 'resource-tier.js');
@@ -201,4 +203,55 @@ test('editing the CONTENT of a record is not a re-tier — that is the whole poi
 test('TIERS names all three and nothing else', () => {
   assert.deepEqual(TIERS, [TIER_PERSONAL, TIER_TEAM, TIER_SYSTEM]);
   assert.deepEqual([...new Set(TIERS)], TIERS, 'no duplicates');
+});
+
+// ── identity class: human vs service (unified access model §2) ──────────────
+
+test('normalizeIdentity reads human/service and treats everything else as unclassified', () => {
+  assert.equal(normalizeIdentity({ identity: IDENTITY_HUMAN }), 'human');
+  assert.equal(normalizeIdentity({ identity: IDENTITY_SERVICE }), 'service');
+  assert.equal(normalizeIdentity({ identity: 'robot' }), null);
+  assert.equal(normalizeIdentity({}), null, 'a legacy record with no identity is unclassified');
+  assert.equal(normalizeIdentity(null), null);
+  assert.equal(normalizeIdentity('human'), null, 'only reads the field off an object, never a bare string');
+});
+
+test('isServiceIdentity / isHumanIdentity are exclusive and null-safe', () => {
+  assert.equal(isHumanIdentity({ identity: IDENTITY_HUMAN }), true);
+  assert.equal(isServiceIdentity({ identity: IDENTITY_HUMAN }), false);
+  assert.equal(isServiceIdentity({ identity: IDENTITY_SERVICE }), true);
+  assert.equal(isHumanIdentity({ identity: IDENTITY_SERVICE }), false);
+  // an unclassified (legacy) record is neither
+  assert.equal(isHumanIdentity({}), false);
+  assert.equal(isServiceIdentity({}), false);
+});
+
+test('normalizeTier carries an existing identity through untouched and invents none when absent', () => {
+  // identity rides along like any other field (id, name, …); normalizeIdentity
+  // is the canonical reader, but a normalized record keeps whatever it had.
+  assert.equal(normalizeTier({ scope: TIER_PERSONAL, userId: 'u-ada', identity: IDENTITY_HUMAN }).identity, 'human');
+  // absent stays absent — no default is invented here (that is the migration's job)
+  assert.equal('identity' in normalizeTier({ scope: TIER_TEAM, teamId: 'sdlc' }), false);
+});
+
+test('isAllowedTierCombo: a human secret is personal-only, a service secret goes anywhere', () => {
+  // human — only personal is legal (identity-bound, never team/global)
+  assert.equal(isAllowedTierCombo({ identity: IDENTITY_HUMAN, scope: TIER_PERSONAL, userId: 'u-ada' }), true);
+  assert.equal(isAllowedTierCombo({ identity: IDENTITY_HUMAN, scope: TIER_TEAM, teamId: 'sdlc' }), false);
+  assert.equal(isAllowedTierCombo({ identity: IDENTITY_HUMAN, scope: TIER_SYSTEM, assignedTeamIds: ['sdlc'] }), false);
+  // the oauth-global subscription escape hatch is NOT granted here — that is a
+  // provider-specific rule that lives with isGlobalProvider, never generically.
+  assert.equal(isAllowedTierCombo({ identity: IDENTITY_HUMAN, scope: TIER_SYSTEM, global: true }), false);
+  // service — every tier is legal
+  assert.equal(isAllowedTierCombo({ identity: IDENTITY_SERVICE, scope: TIER_PERSONAL, userId: 'u-ada' }), true);
+  assert.equal(isAllowedTierCombo({ identity: IDENTITY_SERVICE, scope: TIER_TEAM, teamId: 'sdlc' }), true);
+  assert.equal(isAllowedTierCombo({ identity: IDENTITY_SERVICE, scope: TIER_SYSTEM, assignedTeamIds: ['sdlc'] }), true);
+  // unclassified (legacy) is unconstrained until the one-time migration stamps it
+  assert.equal(isAllowedTierCombo({ scope: TIER_TEAM, teamId: 'sdlc' }), true);
+  assert.equal(isAllowedTierCombo({ scope: TIER_SYSTEM, assignedTeamIds: [] }), true);
+});
+
+test('IDENTITIES names both classes and nothing else', () => {
+  assert.deepEqual(IDENTITIES, [IDENTITY_HUMAN, IDENTITY_SERVICE]);
+  assert.deepEqual([...new Set(IDENTITIES)], IDENTITIES, 'no duplicates');
 });

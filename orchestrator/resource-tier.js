@@ -42,6 +42,15 @@ const TIER_SYSTEM = 'system';
 // Every tier a record may legally carry, in widening order of reach.
 const TIERS = [TIER_PERSONAL, TIER_TEAM, TIER_SYSTEM];
 
+// Identity class of a secret-bearing record — the load-bearing distinction of
+// the unified access model (docs/unified-resource-access-concept.md §2),
+// ORTHOGONAL to the tier. `human` acts as one specific person; `service` does
+// not. Absent on every record written before that model — reads as null
+// (unclassified). See normalizeIdentity / isAllowedTierCombo below.
+const IDENTITY_HUMAN = 'human';
+const IDENTITY_SERVICE = 'service';
+const IDENTITIES = [IDENTITY_HUMAN, IDENTITY_SERVICE];
+
 // Backward-compatible view of a stored record. Returns a normalized COPY with an
 // explicit `scope`, `teamId` and `assignedTeamIds`, so a predicate never has to
 // ask "which of the three shapes is this".
@@ -85,6 +94,54 @@ function ownsPersonalTier(scope, entry) {
 // into the default team.
 function isSharedTier(entry) {
   return !!(entry && entry.scope === TIER_SYSTEM);
+}
+
+// ── Identity class: human vs service (unified access model §2) ──────────────
+//
+// A secret either acts as ONE specific person or it does not, and that — not
+// the tier — decides whether it can be shared:
+//
+//   • human   — a personal GitHub PAT (attributes every commit to that
+//               account), a user SSH key, an Anthropic subscription (oauth)
+//               seat. Identity-bound, so Personal-only; a team consumes it only
+//               as a membership-scoped LEND, never owns it (§2/§4).
+//   • service — a machine-user PAT, a repo deploy key, an api-key model
+//               provider. No personal identity; may sit at any tier and
+//               survives personnel changes.
+//
+// The canonical reader. normalizeTier preserves an existing `identity` field by
+// spread but derives none, so the tier shape every existing caller reads is
+// unchanged; the only values this admits are the two classes — anything else,
+// including a bare non-object, reads as null (unclassified).
+function normalizeIdentity(entry) {
+  const v = entry && typeof entry === 'object' ? entry.identity : null;
+  return v === IDENTITY_HUMAN || v === IDENTITY_SERVICE ? v : null;
+}
+
+function isServiceIdentity(entry) {
+  return normalizeIdentity(entry) === IDENTITY_SERVICE;
+}
+
+function isHumanIdentity(entry) {
+  return normalizeIdentity(entry) === IDENTITY_HUMAN;
+}
+
+// The model's core invariant: a `human` secret may ONLY sit at the personal
+// tier — an "acts-as-me for everyone" secret is nonsensical and dangerous. A
+// `service` secret may sit anywhere; an unclassified (legacy, identity: null)
+// record is NOT constrained here, so a pre-migration record keeps working until
+// the one-time migration stamps it.
+//
+// The ONE exception — a `human` oauth subscription published GLOBAL for a
+// single-user instance — is deliberately NOT expressed here: it is a
+// model-provider-specific escape hatch that lives with `isGlobalProvider`
+// (llm-endpoint-global.js), because this shared invariant also governs SSH keys
+// and GitHub tokens, where no such hatch exists and a global human secret must
+// always be refused.
+function isAllowedTierCombo(entry) {
+  if (normalizeIdentity(entry) !== IDENTITY_HUMAN) return true;
+  const r = normalizeTier(entry);
+  return !!(r && r.scope === TIER_PERSONAL);
 }
 
 // The GLOBAL model-provider rule (#2136) is DELIBERATELY NOT here. It once lived
@@ -159,6 +216,13 @@ module.exports = {
   normalizeTier,
   ownsPersonalTier,
   isSharedTier,
+  IDENTITY_HUMAN,
+  IDENTITY_SERVICE,
+  IDENTITIES,
+  normalizeIdentity,
+  isServiceIdentity,
+  isHumanIdentity,
+  isAllowedTierCombo,
   tierTeamIds,
   tierUsableByTeam,
   tierOwnershipFields,

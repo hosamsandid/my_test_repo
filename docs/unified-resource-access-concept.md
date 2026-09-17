@@ -197,8 +197,9 @@ their subscription globally, uses it for everything). Keep all five sites in ste
 - **E1 — Owner leaves a team (stays an instance user).** The lend ends: sweep all
   team bindings (env default provider, env GitHub token, per-repo SSH key, member
   overrides) that reference a **personal** resource whose owner is no longer a
-  member → invalidate the binding (reset to inherit / null) → respawn affected
-  agents → record in the GitHub Event Log. The **resource is kept** (still the
+  member → reset the binding to **inherit-from-`.env` / the global default** (else
+  empty with a warning badge, never "set but dead") → respawn affected agents →
+  record in the GitHub Event Log. The **resource is kept** (still the
   owner's; usable in their other teams). "Throw it out" means the *binding*, not
   the resource.
 - **E2 — Owner is deleted (offboarding).** Extend `offboardOwner` to also delete
@@ -243,16 +244,44 @@ Existing records must move off the removed axes:
   provider / deploy key / machine token → `service`; oauth / obviously-personal
   PAT / user key → `human`) and let the review step correct it.
 
-## 12. Open decisions / to confirm
+## 12. Resolved decisions
 
-1. **Assist + subscription feasibility (§9).** Spike the raw `/v1/messages` +
-   OAuth-token question before enabling; may force a CLI-style assist path.
-2. **`identity` inference on migration.** How aggressively to auto-classify vs
-   force per-record admin review.
-3. **UI naming.** Surface `human` vs `service` as, e.g., "Personal identity —
-   acts as you" vs "Service credential — a shared machine/deploy identity", and
-   replace the "System / Assigned to teams / Team owns" controls with the
-   `identity` + `scope` pair.
+These are settled for the build. Only item 1 carries a residual technical
+unknown (a spike gates activation, not the decision).
+
+1. **Assist + subscription — spike-gated.** Build the policy hook, but keep the
+   oauth-in-assist path **disabled until a spike proves** a subscription
+   OAuth-seat token authenticates a server-side `/v1/messages` call (see the §9
+   caveat); the spike may force a CLI-style assist path.
+2. **`service` may be `personal`.** A `service` credential can sit at any tier
+   (personal / team / global); it is not restricted to admin tiers. A privately
+   owned bot token is valid.
+3. **Global secrets — audit only.** A global SSH key / GitHub token is allowed
+   like any other resource; the mitigation is the mutation **audit log**, no
+   extra create-time confirmation and no forced read-only scope.
+4. **Single-user oauth-global — `complianceAck` only.** Publishing a subscription
+   as global requires just the existing single-user `complianceAck`, even in a
+   multi-user instance (deliberate, logged, "owner's responsibility"). No extra
+   multi-user gate.
+5. **`identity` is immutable.** Chosen once when the field is first set;
+   correcting it means delete + recreate. (During migration the field is set for
+   the first time — that is not a re-classify.)
+6. **Invalidated-binding fallback (E1).** A binding whose lend has ended resets
+   to **inherit-from-`.env` / the global default**; if none applies it goes
+   empty with a warning badge until re-selected. It is never left "set but dead".
+7. **Delete break-glass view.** The System-Admin governance view shows a foreign
+   personal resource as name / owner / created / fingerprint (secret masked) and
+   allows deletion **without** a required reason (the mutation is audited anyway).
+8. **Migration classification.** Auto-suggest an `identity` + tier per legacy
+   record, but require **per-record System-Admin review** before it is applied.
+9. **`system` + many `assignedTeamIds`.** Migrate as a **Global candidate**,
+   flagged for the admin to confirm — not auto-split into per-team duplicates.
+10. **UI naming.** Surface `human` vs `service` as "Personal identity — acts as
+    you" vs "Service credential — a shared machine / deploy identity", and
+    replace the "System / Assigned to teams / Team owns" controls with the
+    `identity` + `scope` pair.
+11. **Build sequence.** Spike (item 1) → tier core + predicates → provider routes
+    → credential routes → migration → UI. See §13 for the file-level touchpoints.
 
 ## 13. Implementation touchpoints (for the build)
 

@@ -55,20 +55,31 @@ test('the single-choice auto-pick is wired', () => {
   assert.match(triggers, /defaultPluginId\(pluginPick\.options\)/);
 });
 
-test('eventFilter stays free text (the manifest declares no event names)', () => {
-  assert.match(triggers, /label="Event filter \(optional\)"/);
+test('"Which event" is a select over the plugin\'s declared vocabulary, free text when it declares none', () => {
+  assert.match(triggers, /pluginEvents\(pluginInputs\.installed, form\.pluginId\)/);
+  assert.match(triggers, /eventChoices\(vocabulary, form\.eventFilter\)/);
+  // The select is gated on the vocabulary; the free-text input is the fallback.
+  assert.match(triggers, /\{vocabulary\.length \? \(\s*<select\s+value=\{form\.eventFilter\}/);
+  assert.match(triggers, /placeholder="the plugin's event name, e\.g\. status_changed/);
+  // The label names the question, and the "?" deep-links the chapter that tells the two filters apart.
+  assert.match(triggers, /Which event\s*<\/div>/);
+  assert.match(triggers, /section=\{AGENT_CHAT_HELP_SECTIONS\.pluginEvent\}/);
 });
 
-test('the payload filter is authored through the pure plugin-event-filter module', () => {
-  assert.match(triggers, /import \{ parsePayloadFilter, formatPayloadFilter, payloadFilterSummary \} from '\.\/plugin-event-filter\.js'/);
-  // Initial value comes from the stored object, the wire value from the parser…
-  assert.match(triggers, /payloadFilter:\s*formatPayloadFilter\(initialValues\?\.payloadFilter\)/);
+test('"Only when…" conditions are authored as rows through the pure plugin-event-filter module', () => {
+  assert.match(triggers, /import \{\s*pluginEvents, eventChoices, payloadKeyChoices,\s*conditionsFromFilter, conditionsToFilter, payloadFilterSummary,\s*\} from '\.\/plugin-event-filter\.js'/);
+  // Initial rows come from the stored object, the wire value from the folder…
+  assert.match(triggers, /conditions:\s*conditionsFromFilter\(initialValues\?\.payloadFilter\)/);
+  assert.match(triggers, /conditionsToFilter\(form\.conditions\)/);
   assert.match(triggers, /body\.payloadFilter = parsedPayloadFilter\.value/);
-  // …and a parse error blocks the save with its own message, before the prompt check.
+  // …and a half-filled row blocks the save with its own message, before the prompt check.
   const err = triggers.indexOf("setFormError(parsedPayloadFilter.error)");
   const prompt = triggers.indexOf("setFormError('Prompt is required.')");
-  assert.ok(err !== -1 && prompt !== -1 && err < prompt, 'payload-filter validation must precede the prompt check');
-  // The field itself, and the row summary.
-  assert.match(triggers, /label="Payload filter \(optional\)"/);
+  assert.ok(err !== -1 && prompt !== -1 && err < prompt, 'condition validation must precede the prompt check');
+  // The key picker follows the chosen event; free text when the plugin declares no fields.
+  assert.match(triggers, /payloadKeyChoices\(vocabulary, form\.eventFilter\)/);
+  assert.match(triggers, /\{keyRows\.length \? \(\s*<select\s+value=\{c\.key\}/);
+  assert.match(triggers, /placeholder=\{known && known\.example \? `e\.g\. \$\{known\.example\}` : 'exact value'\}/);
+  // The row summary is unchanged.
   assert.match(triggers, /payloadFilterSummary\(trigger\.payloadFilter\)/);
 });

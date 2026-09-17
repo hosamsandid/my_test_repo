@@ -456,6 +456,7 @@ same question, "what wakes this agent", and every one of them delivers a
 | **HTTP webhook** | something outside the platform sends `POST /hooks/<agentId>/<triggerId>` with the trigger's own `X-Hook-Secret`. Each trigger carries its own generated secret; there is no open mode. Used by CI pipelines, monitoring, GitHub webhooks. |
 | **GitHub event** | the built-in poller sees a matching event on a repository of the agent's environment (about every 30 seconds). The full event payload is appended to the prompt as JSON. Needs a GitHub token on that environment. |
 | **Data flow (agent dependency)** | a teammate pushes to the team repository — the committed work *is* the hand-off. Under the hood this is a GitHub `push` subscription with a marker. |
+| **Plugin event** | a granted plugin's broker reports something (a Jira status change, say). Two filters narrow it — see *Which event vs. Only when* below. |
 | **Loop (re-run until done)** | you start it. It is not a subscription (see below). |
 
 ### Cron and once fire on the container clock
@@ -480,6 +481,28 @@ automatically if the run fails.
 
 Hand-offs between several agents are much easier to wire and read as a graph in
 the **Flow Editor** than as individual triggers here.
+
+### Plugin event — Which event vs. Only when
+
+A plugin-event trigger has two filters that are easy to confuse, because both
+look like "when does this fire":
+
+| Field | Answers | Comes from |
+|---|---|---|
+| **Which event** | *what kind of change* happened — the plugin's own event **name**, e.g. `status_changed`. Blank = every event this plugin sends. | the list the plugin declares; the form offers it as a drop-down |
+| **Only when…** | *which of those changes* should wake this agent — conditions on the event's **fields**, e.g. `toStatus = Ready for Dev`. Every condition must equal the field exactly (case-sensitive). No conditions = every event above wakes the agent. | the fields of the chosen event; the form offers them with an example |
+
+The mistake to avoid: a **value** (a Jira status, a project key, an author) is
+never an event name. Typing `Ready for Dev` into *Which event* creates a listener
+that silently never fires, because no plugin sends an event called that — the
+form flags such a value as *not an event this plugin declares*. The status
+belongs in *Only when…* as `toStatus = Ready for Dev`.
+
+Which events and fields exist is the plugin's business, not the platform's:
+each plugin declares them, and its own help topic (ask the "?" on this page
+about the plugin by name) explains what each one means and when it fires. A
+plugin that declares nothing falls back to free-text fields — its help topic
+then names the events and fields.
 
 ### A loop is a run, not a subscription
 

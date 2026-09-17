@@ -9,7 +9,10 @@ import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 import { effectiveGrantFor } from '../plugin-grant-view.js';
 import { pluginEventOptions, defaultPluginId } from './plugin-event-options.js';
-import { parsePayloadFilter, formatPayloadFilter, payloadFilterSummary } from './plugin-event-filter.js';
+import {
+  pluginEvents, eventChoices, payloadKeyChoices,
+  conditionsFromFilter, conditionsToFilter, payloadFilterSummary,
+} from './plugin-event-filter.js';
 import { liveOps } from '../process/edit-adapters';
 import { isGateLabel, isBrakeLabel } from '../process/label-flags';
 import {
@@ -640,8 +643,9 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     eventFilter: initialValues?.eventFilter ?? '',
     // Optional `{ key: value }` matched against the delivered payload's
     // top-level string fields (plugin-event.js `matchesPayloadFilter`); edited
-    // as key=value lines, parsed back on save. Blank = no filter.
-    payloadFilter: formatPayloadFilter(initialValues?.payloadFilter),
+    // as condition rows (`{key, value}`), folded back on save. No rows = no
+    // filter. The keys on offer come from the plugin's declared vocabulary.
+    conditions:  conditionsFromFilter(initialValues?.payloadFilter),
   }));
   const isDataFlow = form.type === 'data-flow';
   const showLabelFilter = form.type === 'github-event'
@@ -746,6 +750,21 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     ? null
     : pluginEventOptions({ ...pluginInputs, currentId: form.pluginId, draft: isDraftMode });
 
+  // The chosen plugin's declared vocabulary (manifest `events[]`): drives the
+  // "Which event" select and the "Only when…" key picker. Empty for a plugin
+  // that declares none — both fields then fall back to free text.
+  const vocabulary = pluginInputs === null ? [] : pluginEvents(pluginInputs.installed, form.pluginId);
+  const eventRows = eventChoices(vocabulary, form.eventFilter);
+  const keyRows = payloadKeyChoices(vocabulary, form.eventFilter);
+  const setCondition = (i, patch) => setForm(f => ({
+    ...f, conditions: f.conditions.map((c, j) => (j === i ? { ...c, ...patch } : c)),
+  }));
+  const removeCondition = (i) => setForm(f => {
+    const next = f.conditions.filter((_, j) => j !== i);
+    return { ...f, conditions: next.length ? next : [{ key: '', value: '' }] };
+  });
+  const addCondition = () => setForm(f => ({ ...f, conditions: [...f.conditions, { key: '', value: '' }] }));
+
   // Auto-pick when there is exactly one plugin that could fire this listener
   // and nothing is chosen yet — mirrors the single-repo auto-pick above.
   useEffect(() => {
@@ -830,7 +849,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     }
     if (form.type === 'http' && !form.secret.trim()) { setFormError('Secret is required for HTTP triggers.'); return; }
     if (form.type === 'plugin-event' && !form.pluginId.trim()) { setFormError('Select the plugin that may fire this listener.'); return; }
-    const parsedPayloadFilter = form.type === 'plugin-event' ? parsePayloadFilter(form.payloadFilter) : { ok: true, value: null };
+    const parsedPayloadFilter = form.type === 'plugin-event' ? conditionsToFilter(form.conditions) : { ok: true, value: null };
     if (!parsedPayloadFilter.ok) { setFormError(parsedPayloadFilter.error); return; }
     if (form.type === 'loop') {
       if (!isValidMaxIterations(form.maxIterations)) { setFormError('Max iterations is required and must be a positive whole number.'); return; }
@@ -1004,24 +1023,112 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               </>
             )}
           </div>
-          <FormInput
-            label="Event filter (optional)"
-            value={form.eventFilter}
-            onChange={v => set('eventFilter', v)}
-            placeholder="blank = any event from this plugin"
-          />
-          <FormInput
-            label="Payload filter (optional)"
-            value={form.payloadFilter}
-            onChange={v => set('payloadFilter', v)}
-            multiline
-            rows={2}
-            placeholder={'one key=value per line, e.g.\ntoStatus=Ready for Dev'}
-          />
-          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
-            Wake only when every listed field of the event&rsquo;s payload equals the value
-            exactly (case-sensitive). The field names are the plugin&rsquo;s own &mdash; its help
-            topic lists them. Blank = wake on every matching event.
+          {/* WHICH EVENT vs. ONLY WHEN — the two are easy to confuse (a status
+              is not an event name), so both are rendered from the vocabulary
+              the plugin declares in its manifest (`events[]`), with the
+              distinction spelled out and a "?" into the help chapter. */}
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--eb-space-1)' }}>
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)' }}>
+                Which event
+              </div>
+              <PageHelpButton
+                label="Which event vs. Only when — what goes where"
+                size={12}
+                section={AGENT_CHAT_HELP_SECTIONS.pluginEvent}
+                style={{ padding: 2 }}
+              />
+            </div>
+            {vocabulary.length ? (
+              <select
+                value={form.eventFilter}
+                onChange={e => set('eventFilter', e.target.value)}
+                style={{ ...FIELD_STYLE, width: '100%' }}
+              >
+                {eventRows.map(o => <option key={o.value || '__any'} value={o.value}>{o.label}</option>)}
+              </select>
+            ) : (
+              <input
+                value={form.eventFilter}
+                onChange={e => set('eventFilter', e.target.value)}
+                placeholder="the plugin's event name, e.g. status_changed — blank = any event"
+                style={{ ...FIELD_STYLE, width: '100%' }}
+              />
+            )}
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+              <strong>What kind of change</strong> wakes this agent &mdash; the plugin&rsquo;s own event name,
+              not a value inside it (a Jira status is not an event; it goes below).
+              {vocabulary.length === 0 && ' This plugin declares no event list — its help topic names the events it sends.'}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Only when&hellip; (optional)
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+              {form.conditions.map((c, i) => {
+                const known = keyRows.find(k => k.key === c.key);
+                const keyIsDeclared = !!known;
+                return (
+                  <div key={i} style={{ display: 'flex', gap: 'var(--eb-space-1)', alignItems: 'center' }}>
+                    {keyRows.length ? (
+                      <select
+                        value={c.key}
+                        onChange={e => setCondition(i, { key: e.target.value })}
+                        title={known && known.description ? known.description : undefined}
+                        style={{ ...FIELD_STYLE, flex: '1 1 40%', minWidth: 0 }}
+                      >
+                        <option value="">— field —</option>
+                        {keyRows.map(k => (
+                          <option key={k.key} value={k.key}>{k.description ? `${k.key} — ${k.description}` : k.key}</option>
+                        ))}
+                        {c.key && !keyIsDeclared && <option value={c.key}>{c.key} — not a field this event carries</option>}
+                      </select>
+                    ) : (
+                      <input
+                        value={c.key}
+                        onChange={e => setCondition(i, { key: e.target.value })}
+                        placeholder="field, e.g. toStatus"
+                        style={{ ...FIELD_STYLE, flex: '1 1 40%', minWidth: 0 }}
+                      />
+                    )}
+                    <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>=</span>
+                    <input
+                      value={c.value}
+                      onChange={e => setCondition(i, { value: e.target.value })}
+                      placeholder={known && known.example ? `e.g. ${known.example}` : 'exact value'}
+                      style={{ ...FIELD_STYLE, flex: '1 1 60%', minWidth: 0 }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => removeCondition(i)}
+                      title="Remove condition"
+                      aria-label="Remove condition"
+                      style={{ background: 'none', border: 'none', color: 'var(--eb-text-muted)', cursor: 'pointer', padding: 2, display: 'inline-flex' }}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                type="button"
+                onClick={addCondition}
+                style={{
+                  alignSelf: 'flex-start', display: 'inline-flex', alignItems: 'center', gap: 3,
+                  padding: '2px 8px', fontSize: 'var(--eb-text-xs)', background: 'none',
+                  border: '1px dashed var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+                  color: 'var(--eb-text-secondary)', cursor: 'pointer',
+                }}
+              >
+                <Plus size={11} /> Add condition
+              </button>
+            </div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+              <strong>Which of those changes</strong> wake this agent: every condition must equal the
+              event&rsquo;s field exactly (case-sensitive). No conditions = every event above wakes it.
+              {keyRows.length === 0 && ' The field names are the plugin\u2019s own \u2014 its help topic lists them.'}
+            </div>
           </div>
         </div>
       )}

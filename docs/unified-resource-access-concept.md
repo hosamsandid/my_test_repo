@@ -71,7 +71,7 @@ authored concept. Reach is fully described by `scope` + (for `team`) a single
 | `identity` \ `scope` | `personal` | `team` (durable) | `global` |
 |---|---|---|---|
 | **human** — user PAT / user SSH key | ✅ owner-only | ❌ | ❌ |
-| **human** — subscription (oauth) | ✅ owner-only | ❌ | ⚠️ **only** with single-user `complianceAck` (System-Admin, deliberate "single-user instance" escape hatch) |
+| **human** — subscription (oauth) | ✅ owner-only | ❌ | ⚠️ **only** with single-user `complianceAck` (System-Admin escape hatch); **runtime-only** — usable for agent runtime, never assist/helper (§9) |
 | **service** — machine PAT / deploy key / api-key provider | ✅ private to owner | ✅ this team, survives membership changes | ✅ everyone, everywhere |
 
 Rules that fall out of the table:
@@ -92,8 +92,9 @@ Rules that fall out of the table:
 - **Model Provider — api-key:** `service`. Personal (I pay for my own gateway
   key), durable Team, or Global. No identity attribution concerns.
 - **Model Provider — subscription (oauth):** `human`. Personal by default;
-  Global only via the single-user escape hatch. **Never** durable-team (that would
-  silently share one person's seat with the team).
+  Global only via the single-user escape hatch, and then **runtime-only** (agent
+  runtime, never assist/helper — §9). **Never** durable-team (that would silently
+  share one person's seat with the team).
 - **GitHub PAT — personal:** `human`, Personal only. Team use = lend.
 - **GitHub PAT — machine-user:** `service`. Personal / Team / Global.
 - **SSH — user key:** `human`, Personal only. Team use = lend.
@@ -176,21 +177,31 @@ today exclude `oauth-token` at five sites (`scope.js:assistSelectableEndpoint`,
 `assist-model-options.js`, the `assistLlmEndpointId` setter,
 `orchestrator/assist-binding.js` ×2).
 
-New rule: the exclusion changes from *"authType === oauth-token"* to *"oauth AND
-not a single-user global provider."* A subscription published **global with the
-single-user `complianceAck`** becomes usable everywhere, including assist/helper —
-exactly the local single-user scenario (the operator is System Admin, registers
-their subscription globally, uses it for everything). Keep all five sites in step.
+**Spike result (2026-09-17): the assist/helper subscription path is NOT viable —
+keep the five exclusions.** The proposed relaxation was to allow a global
+single-user subscription in assist. A spike (Claude API reference + current
+Anthropic sources) settled it against us on two independent grounds:
 
-> **⚠️ Open technical/ToS risk (must be verified before enabling).** Assist/helper
-> issue **raw `/v1/messages`** from the admin-console container. A subscription
-> `CLAUDE_CODE_OAUTH_TOKEN` is a CLI-seat token; whether it authenticates raw
-> Messages API calls (and whether the Anthropic terms permit server-side use)
-> is **unconfirmed** — this is the original reason for the exclusion. Build the
-> policy hook, but gate activation on a spike: test the token against
-> `/v1/messages` (likely needs an `anthropic-beta: oauth-*` header), or route
-> assist through a CLI-style invocation instead of raw HTTP. Do not promise this
-> path works until proven.
+- **Technical.** The Messages API **rejects** a subscription seat token
+  (`sk-ant-oat01-…` from `claude setup-token`) — "OAuth authentication is
+  currently not supported" / "only works with Claude Code". Anthropic
+  server-side-validates the genuine Claude Code identity; a differing system
+  prompt (which every assist/helper call sends) returns a 400. The provider
+  record also carries no `baseUrl`, so `buildMessagesUrl('')` has no endpoint.
+- **Policy.** Anthropic (Feb 2026) **explicitly bans** using subscription OAuth
+  auth outside Claude Code / Claude.ai for third-party tools. The single-user
+  `complianceAck` does not cure a ToS-prohibited server-side use.
+
+Therefore the `oauth-token` exclusion **stays** at all five sites. A subscription
+provider is a **runtime-only** provider: the agent runs the real `claude` CLI
+with `CLAUDE_CODE_OAUTH_TOKEN` (that IS Claude Code — the sanctioned path), so a
+global single-user subscription is usable for **agent runtime everywhere**, but
+**not** for assist / helper / synthesis.
+
+> **The only way to ever feed a subscription into assist/helper** is to route
+> those calls through a genuine Claude Code invocation (the CLI or the Claude
+> Agent SDK) instead of raw `/v1/messages` — a larger change, defensible only in
+> a truly single-user instance. Out of scope here; recorded as a future option.
 
 ## 10. Lifecycle & edge cases
 
@@ -249,10 +260,13 @@ Existing records must move off the removed axes:
 These are settled for the build. Only item 1 carries a residual technical
 unknown (a spike gates activation, not the decision).
 
-1. **Assist + subscription — spike-gated.** Build the policy hook, but keep the
-   oauth-in-assist path **disabled until a spike proves** a subscription
-   OAuth-seat token authenticates a server-side `/v1/messages` call (see the §9
-   caveat); the spike may force a CLI-style assist path.
+1. **Assist + subscription — spike done, path rejected.** The spike (2026-09-17,
+   see §9) settled this: a subscription seat token is both **rejected by the
+   Messages API** and **banned by Anthropic ToS** for non-Claude-Code use. The
+   five `oauth-token` exclusions **stay**. A subscription is runtime-only (usable
+   for agent runtime everywhere via the real CLI, never for assist/helper). No
+   policy hook is built. Routing assist through a genuine Claude Code invocation
+   is the only future option, out of scope here.
 2. **`service` may be `personal`.** A `service` credential can sit at any tier
    (personal / team / global); it is not restricted to admin tiers. A privately
    owned bot token is valid.

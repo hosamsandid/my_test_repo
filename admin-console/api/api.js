@@ -12256,15 +12256,21 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
   // only team-scoped providers for a team they administer.
   const scope = getScope(req);
   let ownership;
-  try { ownership = resolveCredentialOwnership(req.body); }
+  try { ownership = resolveCredentialOwnership(req.body, scope.userId); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   // Global provider (#2136): a System-Admin-only publish flag. A global provider
   // carries no team assignment at all, so it is always system-scoped-with-no-
   // teams — override the resolved ownership before the create gate so the two
-  // agree. `resolveGlobalFlag` refuses a non-admin (403) or an oauth seat (400).
-  const globalGate = resolveGlobalFlag({ wantGlobal: req.body?.global, currentGlobal: false, scopeAll: scope.all, isOauth });
+  // agree. `resolveGlobalFlag` refuses a non-admin (403), or an oauth seat with no
+  // single-user ack (400); a confirmed single-user subscription MAY go global.
+  const globalGate = resolveGlobalFlag({ wantGlobal: req.body?.global, currentGlobal: false, scopeAll: scope.all, isOauth, hasSingleUserAck: complianceAck === true });
   if (globalGate.error) return res.status(globalGate.status).json({ error: globalGate.error, code: globalGate.code });
   if (globalGate.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };
+  // NOTE: enforcing "a subscription (oauth) seat must be personal or global, never
+  // team-shared" is deferred to the UI-aligned PR — until the create form offers
+  // personal/global for oauth, refusing team/system oauth here would break the
+  // current subscription-create flow. The `identity` stamp below already records
+  // the human class the migration will re-home.
   if (!canCreateCredential(scope, ownership)) {
     return res.status(403).json({ error: 'forbidden: you may not create this provider', code: 'forbidden' });
   }
@@ -12322,6 +12328,9 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
     ...(globalGate.global ? { global: true } : {}),
     baseUrl: isOauth ? '' : baseUrl,
     authType,
+    // Identity class (unified access model §2): a subscription seat acts as one
+    // person (human); an api-key gateway is infrastructure (service).
+    identity: isOauth ? 'human' : 'service',
     ...(isOauth ? { complianceAck: buildComplianceAck(req) } : {}),
     authTokenId,
     models: normalizedModels,
@@ -12413,11 +12422,16 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   // (idempotent: re-saving a global provider re-asserts the same shape). A no-op
   // (flag unchanged) is not gated, so a Team Admin editing an already-global
   // provider's models is not refused for a change they did not make.
+  // The single-user ack the escape hatch needs: freshly confirmed in this
+  // request, or already stamped on the existing subscription provider.
+  const hasSingleUserAck = isOauth
+    && (complianceAck === true || (current.complianceAck && current.complianceAck.singleUser === true));
   const globalGate = resolveGlobalFlag({
     wantGlobal: ('global' in b) ? b.global : undefined,
     currentGlobal: current.global === true,
     scopeAll: scope.all,
     isOauth,
+    hasSingleUserAck,
   });
   if (globalGate.error) return res.status(globalGate.status).json({ error: globalGate.error, code: globalGate.code });
   if (globalGate.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };
@@ -12431,6 +12445,8 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   // non-global record is byte-clean (no dangling `global: false`).
   if (globalGate.global) next.global = true; else delete next.global;
   next.authType = nextAuthType;
+  // Keep the identity class in sync with the (possibly changed) auth type.
+  next.identity = isOauth ? 'human' : 'service';
   if (isOauth) {
     if (normalizeAuthType(current.authType) !== 'oauth-token' || complianceAck === true) {
       next.complianceAck = buildComplianceAck(req);

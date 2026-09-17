@@ -44,11 +44,13 @@ function xpathLiteral(s) {
 }
 
 // The Share panel. SidePanel renders `role="dialog"` with `aria-label={title}`
-// and RailLifecycleHost sets that title to `Share: <group displayName || id>`.
-// A `role: 'team'` agent carries no Matrix token, so it never reaches the chat
-// list and the group label IS the raw team id — see the note in the journey.
-function sharePanel(ctx, teamId) {
-  return ctx.page.getByRole('dialog', { name: `Share: ${teamId}` });
+// and RailLifecycleHost sets that title to `Share: <group displayName || id>` —
+// the team's DISPLAY NAME once it has an agent row (a materialised/stub team
+// always does), not the raw id. Only one Share panel is open at a time, so match
+// the stable `Share: ` prefix rather than couple to the display name. `teamId`
+// is kept in the signature for call-site readability; the match does not use it.
+function sharePanel(ctx, _teamId) {
+  return ctx.page.getByRole('dialog', { name: /^Share: / });
 }
 
 // A member row is `<div>(row) > <div>(names) > <div>(display name [+ ' (you)'])`,
@@ -161,12 +163,15 @@ async function createTeam(ctx, { teamId, teamName, roleTemplate = 'generic' }) {
  * Agent Chat rail.
  *
  * @param {string} params.teamId - Team slug id that must be reachable.
+ * @param {string} [params.teamName] - Team display name shown as the rail's
+ *   group header (the team agent's displayName); defaults to the id.
  * @example
  * - assert:
  *     do: access.expectTeamVisible
  *     teamId: share-demo
+ *     teamName: Share Demo
  */
-async function expectTeamVisible(ctx, { teamId }) {
+async function expectTeamVisible(ctx, { teamId, teamName }) {
   const who = identity.activeName(ctx);
   await expect
     .poll(async () => reachesTeam(await chatAgents(ctx), teamId), {
@@ -176,7 +181,9 @@ async function expectTeamVisible(ctx, { teamId }) {
     .toBe(true);
   await ctx.page.reload();
   const rail = ctx.page.locator('[role="listbox"]').first();
-  await expect(rail.getByText(teamId, { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+  // The rail group header shows the team's display NAME (the team agent's
+  // displayName), not the raw slug — assert on it when the caller gives one.
+  await expect(rail.getByText(teamName || teamId, { exact: true }).first()).toBeVisible({ timeout: 30_000 });
 }
 
 /**
@@ -185,12 +192,15 @@ async function expectTeamVisible(ctx, { teamId }) {
  * rail, so a filtered API with a leaky UI, or the reverse, both fail.
  *
  * @param {string} params.teamId - Team slug id that must NOT be reachable.
+ * @param {string} [params.teamName] - Team display name that must not appear in
+ *   the rail (the header text when present); defaults to the id.
  * @example
  * - assert:
  *     do: access.expectTeamHidden
  *     teamId: share-demo
+ *     teamName: Share Demo
  */
-async function expectTeamHidden(ctx, { teamId }) {
+async function expectTeamHidden(ctx, { teamId, teamName }) {
   const who = identity.activeName(ctx);
   const rows = await chatAgents(ctx);
   expect(
@@ -210,16 +220,21 @@ async function expectTeamHidden(ctx, { teamId }) {
   const rail = ctx.page.locator('[role="listbox"]').first();
   const noAgents = ctx.page.getByText(EMPTY_RAIL_LEAD, { exact: true });
   await expect(rail.or(noAgents).first()).toBeVisible({ timeout: 30_000 });
-  // Page-wide rather than rail-scoped, so it holds in both renderings.
-  await expect(ctx.page.getByText(teamId, { exact: true })).toHaveCount(0);
+  // Page-wide rather than rail-scoped, so it holds in both renderings. The rail
+  // header would show the display NAME if the team were present, so assert that
+  // (falling back to the id) is absent.
+  await expect(ctx.page.getByText(teamName || teamId, { exact: true })).toHaveCount(0);
 }
 
 /**
  * Open the team's Share… panel from the rail's group context menu.
  *
- * The kebab is a `<span role="button">` labelled `Team actions for <label>`; the
- * portaled menu carries the same accessible name, so both are matched by role
- * to disambiguate. The menu closes on any scroll, so nothing scrolls in between.
+ * The kebab is a `<span role="button">` labelled `Team actions for <label>`,
+ * where <label> is the team's DISPLAY NAME (rail-lifecycle.js: `displayName ||
+ * id`), and the portaled menu carries the same accessible name. The acting
+ * identity sees only the one shared team in its rail here, so match the stable
+ * `Team actions for ` prefix rather than the display name. The menu closes on
+ * any scroll, so nothing scrolls in between.
  *
  * @param {string} params.teamId - Team whose group header carries the menu.
  * @example
@@ -228,7 +243,7 @@ async function expectTeamHidden(ctx, { teamId }) {
  *     teamId: share-demo
  */
 async function openShare(ctx, { teamId }) {
-  const menuName = `Team actions for ${teamId}`;
+  const menuName = /^Team actions for /;
   await ctx.page.getByRole('button', { name: menuName }).first().click();
   const menu = ctx.page.getByRole('menu', { name: menuName });
   await expect(menu).toBeVisible({ timeout: 15_000 });

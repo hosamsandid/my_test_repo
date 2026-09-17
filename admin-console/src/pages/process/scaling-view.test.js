@@ -154,8 +154,10 @@ test('scalingSaveDecision: a valid enabled draft produces buildPoolPayload\'s sh
   const draft = { enabled: true, maxInstancesText: '4', workspace: 'input-copy', idleText: '30', hardText: '', retainText: '' };
   const decision = scalingSaveDecision(draft, 3);
   assert.equal(decision.error, null);
+  // #2294: the save forces git-clean-base — a rehydrated draft.workspace
+  // (here 'input-copy') must never sneak back into the payload.
   assert.deepEqual(decision.payload, {
-    enabled: true, maxInstances: 4, workspace: 'input-copy', teardown: { idleTimeoutMs: 1800000 },
+    enabled: true, maxInstances: 4, workspace: 'git-clean-base', teardown: { idleTimeoutMs: 1800000 },
   });
 });
 

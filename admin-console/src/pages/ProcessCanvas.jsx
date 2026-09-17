@@ -10,6 +10,7 @@ import FlowAnomaliesPanel from './process/FlowAnomaliesPanel';
 import ImprovementsPanel from './process/ImprovementsPanel';
 import ParallelismPanel from './process/ParallelismPanel';
 import { hasPooledMember } from './process/parallelism-view.js';
+import { usePoolsEnabled } from '../context/PoolsFeatureContext';
 import FlowCopilotPanel from './process/FlowCopilotPanel';
 import { useFlowCopilot } from '../context/FlowCopilotContext.jsx';
 import { proposalNodeDiff } from './process/flow-copilot-view';
@@ -179,6 +180,7 @@ function ModePill({ tone, icon: Icon, title, children }) {
 //                        team → draft bridge) can carry the flag.
 export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingImport, onImportConsumed, onImportClosed, pendingFocus = null, onFocusConsumed, autoOpenCopilot = false, pendingIntent = null, onIntentConsumed, draftReloadToken = 0 }) {
   const navigate = useCallback((s, opts) => { if (onNavigate) onNavigate(s, opts); }, [onNavigate]);
+  const poolsEnabled = usePoolsEnabled();
 
   const { data: agents, refetch: refetchAgents } = useApi('/api/agents');
   const teams = useMemo(
@@ -791,10 +793,14 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
               title={toolbarTitle('improvements')}>
               Improvements
             </ToolbarButton>
-            <ToolbarButton onClick={() => setParallelismOpen(true)} icon={Gauge}
-              title={toolbarTitle('parallelism')}>
-              Parallelism
-            </ToolbarButton>
+            {/* #2302: agent pools still need teardown/reaping polish — the whole
+                surface is hidden (not just disabled) while the flag is off. */}
+            {poolsEnabled && (
+              <ToolbarButton onClick={() => setParallelismOpen(true)} icon={Gauge}
+                title={toolbarTitle('parallelism')}>
+                Parallelism
+              </ToolbarButton>
+            )}
             <ToolbarButton onClick={() => setCopilotOpen(o => !o)} icon={Sparkles}
               title={toolbarTitle('copilot')}>Copilot</ToolbarButton>
             <ToolbarButton onClick={editAsDraft} icon={Boxes}
@@ -1182,7 +1188,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         />
       )}
 
-      {parallelismOpen && isTeamScope && !imported && (
+      {parallelismOpen && poolsEnabled && isTeamScope && !imported && (
         <ParallelismPanel
           teamId={scope}
           wipLimit={Number.isInteger(parallelismTeamCfg?.wipLimit) ? parallelismTeamCfg.wipLimit : null}

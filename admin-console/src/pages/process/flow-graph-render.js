@@ -1934,6 +1934,12 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
     const OUTCOME_EDGE_COLOR = '#eab308';  // amber — matches the ◇ switch badge (#828)
 
     function drawRoutedProcessEdges() {
+      // `layout()` only builds `state.layeredInfo` when there is at least one
+      // visible node (it early-returns on an empty graph), so on a flow with no
+      // agents yet — a blank draft, or a Copilot proposal that produced none —
+      // it is still null here. There is nothing laid out to connect, so skip the
+      // routed pass rather than dereference `state.layeredInfo.colOf` and crash.
+      if (!state.layeredInfo) return;
       const nodes = [];
       visible.forEach(n => {
         const p = state.positions[n.id];

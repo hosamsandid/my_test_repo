@@ -409,8 +409,15 @@ absorbs the growth of every page's help at once. What the number means changed w
 "docs corpus + the biggest single page neighbourhood", measured by `measureWorstCaseSystemPrompt()`
 over every context a topic claims *and* the no-route fallback, and asserted by `corpus.test.js`.
 `SYSTEM_PROMPT_CHAR_LIMIT` is **unchanged at 340,000**; the worst context is **`/quickstart`** —
-the `create.md` topic plus its `seeAlso` neighbours — currently at **321,092 — 94.4% used,
-18,908 left** (this paragraph's own chain below had lagged at 318,724 for two cycles: #2231's
+the `create.md` topic plus its `seeAlso` neighbours — currently at **323,959 — 95.3% used,
+16,041 left** (#2307 unified the global-skill-pool write permission across import/merge/create/edit;
+`docs/skills-system.md` is a `CORPUS_FILES` member, landing on EVERY context, not just this crown —
+live pre-edit 323,419, already +2,327 over the 321,092 last stamped here from unrelated intervening
+merges since #2235, none of which restamped either this doc or `corpus.js`; post-edit is this
+change's own clean +540. **CLAUDE.md's mirror paragraph (formerly "#1872") no longer exists** — the
+2026-09-13 "shrink CLAUDE.md to a lean high-level map" rewrite deliberately dropped the per-ticket
+decision narratives it lived in, so `corpus.js` and this section are now the only two homes; do not
+re-add a restamp paragraph to CLAUDE.md.) (this paragraph's own chain below had lagged at 318,724 for two cycles: #2231's
 `create.md` corrections for the plain-agent/fast-lane team-of-one mint added +1,849 — 320,573 —
 and #2232's retirement of the manual "Convert into a team…" action shaved -659 off that — 319,914,
 matching CLAUDE.md's #1872 paragraph exactly, so no further drift had crept in beyond those two

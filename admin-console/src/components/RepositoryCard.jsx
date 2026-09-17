@@ -3,6 +3,7 @@ import { X, Check, AlertTriangle, Loader2 } from 'lucide-react';
 import { apiCall } from '../hooks/useApi';
 import IconButton from './IconButton';
 import { tokenIsElsewhere, shouldShowTokenHint } from './repository-fields-view.js';
+import { describeCredentialRef } from '../pages/credential-ref-legibility.js';
 
 // RepositoryCard — the ONE repository configuration card in this console.
 //
@@ -98,9 +99,13 @@ export function RepoStatusIcon({ status, error, empty }) {
     );
   }
   if (status === 'ok') {
+    // #2324: be explicit that this is CLONE reachability only. It does not verify
+    // the GitHub Token used for the event poller / gh / PRs — a repo can be
+    // "reachable" here while the token is invalid and no events arrive. The
+    // GitHub-integration health badge on the Repositories tab checks the token.
     const title = empty
-      ? 'Repository reachable — but empty (no commits yet). Add an initial commit before agents can clone it.'
-      : 'Repository reachable';
+      ? 'Repository reachable (clone access) — but empty (no commits yet). Add an initial commit before agents can clone it.'
+      : 'Repository reachable (clone access only — this does not verify the GitHub Token used for events/PRs; see the GitHub integration status)';
     return (
       <span title={title} style={{ display: 'inline-flex', color: 'var(--eb-status-success, #16a34a)' }}>
         <Check size={14} />
@@ -129,6 +134,9 @@ export default function RepositoryCard({
   // probe does not (and must not) reach — never sent to `useRepoCheck`/the API,
   // only used to suppress the "add a GitHub Token" hint on a probe failure.
   hasEnvironmentToken = false,
+  // #2325: metadata-only credential descriptors (id → { tier, ownerLabel, … })
+  // from the env GET, so an invisible SSH key's read-only chip can name its owner.
+  credentialRefs = null,
 }) {
   const check = useRepoCheck(repo.url, repo.sshKeyId, githubTokenId);
   const showTokenHint = shouldShowTokenHint(check, repo.url, githubTokenId, hasEnvironmentToken);
@@ -154,16 +162,58 @@ export default function RepositoryCard({
 
       <div>
         <div style={labelStyle}>SSH key</div>
-        <select
-          value={repo.sshKeyId}
-          onChange={e => onChange('sshKeyId', e.target.value)}
-          style={inputStyle}
-        >
-          <option value="">— no key (HTTPS only) —</option>
-          {sshKeys.map(k => (
-            <option key={k.id} value={k.id}>{k.name} ({k.id})</option>
-          ))}
-        </select>
+        {/* #2325/#2327 (R2): if the bound key is a personal one the caller can't
+            see, the scope-filtered `sshKeys` has no matching option — the plain
+            <select> would render EMPTY and a save would clear it (guarded server-
+            side by #2325/#2326). Show a read-only "set, not visible to you" state
+            with a replace-only picker (only keys the caller can see) instead. */}
+        {(() => {
+          const ref = describeCredentialRef({ boundId: repo.sshKeyId, visibleOptions: sshKeys });
+          // #2325: owner/tier from the metadata-only descriptor carried by the env GET.
+          const desc = credentialRefs?.[repo.sshKeyId] || null;
+          if (ref.mode === 'readonly-invisible') {
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+                <div style={{
+                  ...inputStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+                  color: 'var(--eb-text-secondary)',
+                }}>
+                  <span>Set: <code>{ref.boundId}</code></span>
+                  {desc && (
+                    <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                      {desc.tier} · {desc.ownerLabel}
+                    </span>
+                  )}
+                  <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginLeft: 'auto' }}>
+                    not visible to you
+                  </span>
+                </div>
+                <select
+                  value=""
+                  onChange={e => { if (e.target.value) onChange('sshKeyId', e.target.value); }}
+                  style={inputStyle}
+                >
+                  <option value="">Replace with a key you can see…</option>
+                  {sshKeys.map(k => (
+                    <option key={k.id} value={k.id}>{k.name} ({k.id})</option>
+                  ))}
+                </select>
+              </div>
+            );
+          }
+          return (
+            <select
+              value={repo.sshKeyId}
+              onChange={e => onChange('sshKeyId', e.target.value)}
+              style={inputStyle}
+            >
+              <option value="">— no key (HTTPS only) —</option>
+              {sshKeys.map(k => (
+                <option key={k.id} value={k.id}>{k.name} ({k.id})</option>
+              ))}
+            </select>
+          );
+        })()}
         <div style={helpTextStyle}>
           Required for SSH-based URLs (e.g. <code>git@github.com:…</code>). Leave empty for HTTPS URLs — private HTTPS repositories authenticate with the <em>GitHub Token</em> {elsewhere ? 'on the Environment' : 'set below'}, not an SSH key. Manage SSH keys on the <em>SSH Keys</em> page.
         </div>

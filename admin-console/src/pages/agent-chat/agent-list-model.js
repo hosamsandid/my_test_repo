@@ -47,6 +47,22 @@ export function stubSectionLabel(count) {
 }
 
 /**
+ * A **pool instance** (#2273/#2297): an ephemeral `<team>-<role>-i<item>`
+ * member spawned from a pooled role template, carrying `poolOf` back to the
+ * template's own agent id. Unlike a stub it is a perfectly ordinary,
+ * chat-openable team member — the marker is only used to nest it under its
+ * role in the rail instead of listing it as a flat sibling.
+ */
+export function isPoolInstance(agent) {
+  return !!(agent && agent.poolInstance);
+}
+
+/** The collapsible sub-list label, mirrors `stubSectionLabel`'s role (AC1). */
+export function poolInstancesLabel(count) {
+  return `Instances (${count})`;
+}
+
+/**
  * Build the grouped structure used by both the list and the filter dropdown.
  * Exported so AgentChat can populate the filter without duplicating the
  * grouping logic.
@@ -65,14 +81,28 @@ export function stubSectionLabel(count) {
  *    them out of `children` means every existing consumer of that array (the
  *    stored member order, the member drag scope, the group's own count) keeps
  *    describing exactly the rows it used to.
+ *  - Each entry in `children` carries its own `instances` array (#2297): the
+ *    live pool instances spawned from that role (`poolOf === role.id`), sorted
+ *    by `poolItem`, empty when the role is not pooled or has none live. An
+ *    instance whose `poolOf` names a role not present in this team's children
+ *    (template filtered/removed) is never dropped silently — it lands back in
+ *    `children` itself, flat, like an ordinary member.
  */
 export function buildGroups(agents) {
   const byName = (a, b) =>
     (a.displayName || a.id).localeCompare(b.displayName || b.id);
+  const byPoolItem = (a, b) => {
+    const ai = Number(a.poolItem);
+    const bi = Number(b.poolItem);
+    if (Number.isFinite(ai) && Number.isFinite(bi) && ai !== bi) return ai - bi;
+    return byName(a, b);
+  };
 
-  const teamRows   = agents.filter(a => a.role === 'team');
-  const memberRows = agents.filter(a => a.role === 'team-member' && !isStub(a));
-  const stubRows   = agents.filter(a => a.role === 'team-member' && isStub(a));
+  const teamRows       = agents.filter(a => a.role === 'team');
+  const activeMembers  = agents.filter(a => a.role === 'team-member' && !isStub(a));
+  const memberRows     = activeMembers.filter(a => !isPoolInstance(a));
+  const instanceRows   = activeMembers.filter(isPoolInstance);
+  const stubRows       = agents.filter(a => a.role === 'team-member' && isStub(a));
   // A standalone `role: 'agent'` (no team) is never listed here (#2234): every
   // agent created since #2229 Phase B is minted as a team of one, so the only
   // standalone agents left are ephemeral one-shot workers — which have no UI
@@ -94,12 +124,24 @@ export function buildGroups(agents) {
     ...teamRows.map(t => t.id),
     ...memberRows.map(m => m.parentTeamId).filter(Boolean),
     ...stubRows.map(m => m.parentTeamId).filter(Boolean),
+    ...instanceRows.map(m => m.parentTeamId).filter(Boolean),
   ]);
 
   const groups = [...teamIds].map(id => {
-    const header   = teamRows.find(t => t.id === id) || null;
-    const children = memberRows.filter(m => m.parentTeamId === id).sort(byName);
-    const stubs    = stubRows.filter(m => m.parentTeamId === id).sort(byName);
+    const header    = teamRows.find(t => t.id === id) || null;
+    const roleRows  = memberRows.filter(m => m.parentTeamId === id);
+    const stubs     = stubRows.filter(m => m.parentTeamId === id).sort(byName);
+    const teamInstances = instanceRows.filter(m => m.parentTeamId === id);
+    const roleIds = new Set(roleRows.map(r => r.id));
+    // Nest each role's live instances onto it; an instance whose `poolOf`
+    // names no role in this team's set (template hidden/filtered/removed)
+    // stays flat rather than vanishing (never drop a row silently).
+    const nested  = roleRows.map(role => ({
+      ...role,
+      instances: teamInstances.filter(i => i.poolOf === role.id).sort(byPoolItem),
+    }));
+    const orphanInstances = teamInstances.filter(i => !roleIds.has(i.poolOf));
+    const children = [...nested, ...orphanInstances].sort(byName);
     return {
       kind: 'team',
       id,
@@ -205,7 +247,14 @@ export function filterModel(orderedGroups, orderedSingles, filter, showDisabled 
   const visibleGroups = orderedGroups
     .map(group => {
       const header   = group.header && keep(group.header) ? group.header : null;
-      const children = group.children.filter(keep);
+      // A role's `instances` are filtered by the same predicate (e.g. a
+      // disabled/timed-out instance drops out unless `showDisabled` is on) —
+      // narrowing the sub-list exactly like the member list itself narrows.
+      const children = group.children
+        .filter(keep)
+        .map(child => (child.instances
+          ? { ...child, instances: child.instances.filter(keep) }
+          : child));
       // The team filter narrows the stub section exactly like the member list;
       // a group whose only surviving rows are stubs still belongs in the list
       // (a fully-deferred team is the whole point of #1957).

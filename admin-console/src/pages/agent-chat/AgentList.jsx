@@ -3,7 +3,7 @@ import { MessageCircle, Bot, Server, Users, ChevronDown, ChevronRight, GripVerti
 
 import { computeReorder, dropPosition } from './agent-list-dnd.js';
 import { groupEnvironmentName, rowEnvironmentName } from './agent-list-env.js';
-import { buildGroups, groupKey, orderModel, filterModel, stubSectionLabel } from './agent-list-model.js';
+import { buildGroups, groupKey, orderModel, filterModel, stubSectionLabel, poolInstancesLabel } from './agent-list-model.js';
 import { agentState, isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
 
 // Re-exported so `AgentChat` can populate the filter dropdown without importing
@@ -21,13 +21,14 @@ const ORDER_KEY = 'agentChat.sidebarOrder';
 const EMPTY_BUSY = new Set();
 
 /**
- * Per-group collapse-state defaults — matches the Agents overview page so the
- * chat sidebar behaves consistently: teams default open. Teams are the only
- * group kind since #1964; the map is kept so a future kind states its default
- * here rather than inheriting one by accident.
+ * Per-entity collapse-state defaults, keyed by `kind` in the same `<kind>:<id>`
+ * namespace `groupKey` uses for teams — matches the Agents overview page so the
+ * chat sidebar behaves consistently: teams (and, since #2297, a role's pool
+ * instances) default open.
  */
 const DEFAULT_COLLAPSED = {
   team: false,
+  pool: false,
 };
 
 function loadCollapsed() {
@@ -233,24 +234,30 @@ export default function AgentList({
     [dragHandlers, dragging, dropHint],
   );
 
-  // Persisted per-group collapse state. Keyed by `<kind>:<id>` — the namespace
-  // `groupKey` uses everywhere, so a stored key stays readable across kinds.
+  // Persisted collapse state for any `{kind, id}` entity — teams, and since
+  // #2297 a role's pool-instances sub-list (`{kind:'pool', id:<roleId>}`).
+  // Keyed by `<kind>:<id>` — the namespace `groupKey` uses everywhere, so a
+  // stored key stays readable across kinds.
   const [collapsedMap, setCollapsedMap] = useState(loadCollapsed);
   useEffect(() => { saveCollapsed(collapsedMap); }, [collapsedMap]);
 
-  function isCollapsed(group) {
-    const key = `${group.kind}:${group.id}`;
+  // A stable identity matters here too (#2297): it is now passed down as
+  // `isEntityCollapsed` for a memoized `GroupSection` to compute a pool
+  // sub-list's own collapse state, and a fresh function on every render would
+  // defeat that row's memoization on every status poll, same as `toggleCollapsed`.
+  const isCollapsed = useCallback((entity) => {
+    const key = `${entity.kind}:${entity.id}`;
     if (Object.prototype.hasOwnProperty.call(collapsedMap, key)) return collapsedMap[key];
-    return DEFAULT_COLLAPSED[group.kind] ?? false;
-  }
+    return DEFAULT_COLLAPSED[entity.kind] ?? false;
+  }, [collapsedMap]);
   // Stable so a memoized GroupSection is not forced to re-render every time the
   // parent re-renders; the previous value is read from the functional updater.
-  const toggleCollapsed = useCallback((group) => {
-    const key = `${group.kind}:${group.id}`;
+  const toggleCollapsed = useCallback((entity) => {
+    const key = `${entity.kind}:${entity.id}`;
     setCollapsedMap(prev => {
       const cur = Object.prototype.hasOwnProperty.call(prev, key)
         ? prev[key]
-        : (DEFAULT_COLLAPSED[group.kind] ?? false);
+        : (DEFAULT_COLLAPSED[entity.kind] ?? false);
       return { ...prev, [key]: !cur };
     });
   }, []);
@@ -274,6 +281,7 @@ export default function AgentList({
           busyIds={busyIds}
           onRequestMenu={onRequestMenu}
           onOpenTeamSettings={onOpenTeamSettings}
+          isEntityCollapsed={isCollapsed}
         />
       ))}
 
@@ -327,6 +335,7 @@ const GroupSection = React.memo(function GroupSection({
   drag,
   groupDragKey,
   dragEnabled,
+  isEntityCollapsed,
   busyIds,
   onRequestMenu,
   onOpenTeamSettings,
@@ -389,21 +398,42 @@ const GroupSection = React.memo(function GroupSection({
        * pre-#1964 model where a group header was a chat-openable orchestrator.
        */}
       {!collapsed && group.children.map((agent) => (
-        <AgentRow
-          key={agent.id}
-          agent={agent}
-          selected={agent.id === selectedAgentId}
-          onSelect={onSelect}
-          activityState={statuses[agent.id] || 'idle'}
-          environmentName={rowEnvironmentName(agent, groupEnv)}
-          indent
-          onReorder={onReorder}
-          drag={drag}
-          dragScope={memberScope}
-          dragKey={agent.id}
-          dragEnabled={memberDragEnabled}
-          onRequestMenu={onRequestMenu}
-        />
+        <React.Fragment key={agent.id}>
+          <AgentRow
+            agent={agent}
+            selected={agent.id === selectedAgentId}
+            onSelect={onSelect}
+            activityState={statuses[agent.id] || 'idle'}
+            environmentName={rowEnvironmentName(agent, groupEnv)}
+            indent
+            onReorder={onReorder}
+            drag={drag}
+            dragScope={memberScope}
+            dragKey={agent.id}
+            dragEnabled={memberDragEnabled}
+            onRequestMenu={onRequestMenu}
+          />
+          {/*
+           * A pooled role's live instances (#2297), nested directly under it —
+           * collapsible and persisted like a team group (`{kind:'pool', id}`),
+           * unlike the stub section's own always-collapsed, unpersisted default.
+           * Empty when the role is not pooled or has no live instances (AC1).
+           */}
+          {agent.instances && agent.instances.length > 0 && (
+            <PoolInstancesSection
+              roleAgent={agent}
+              instances={agent.instances}
+              groupEnv={groupEnv}
+              collapsed={isEntityCollapsed({ kind: 'pool', id: agent.id })}
+              onToggle={onToggle}
+              selectedAgentId={selectedAgentId}
+              onSelect={onSelect}
+              statuses={statuses}
+              busyIds={busyIds}
+              onRequestMenu={onRequestMenu}
+            />
+          )}
+        </React.Fragment>
       ))}
       {/*
        * The team's not-yet-materialized members (#1957), below the active ones
@@ -490,6 +520,79 @@ function StubSection({ stubs, groupEnv, selectedAgentId, onSelect, busyIds, onRe
           activityState="idle"
           environmentName={rowEnvironmentName(agent, groupEnv)}
           indent
+          busy={busyIds.has(agent.id)}
+          onRequestMenu={onRequestMenu}
+        />
+      ))}
+    </>
+  );
+}
+
+/**
+ * "Instances (N)" — a pooled role's live `<team>-<role>-i<item>` instances,
+ * nested directly under the role that spawned them (#2297).
+ *
+ * Unlike `StubSection`, collapse state is **persisted** like a team group
+ * (`{kind:'pool', id:<roleId>}` in the same `collapsedMap`, owned by the
+ * parent `AgentList`) rather than local always-collapsed state: an instance
+ * list is live pool activity an operator wants to keep an eye on, not a to-do
+ * list that empties itself.
+ *
+ * Rows are ordinary `AgentRow`s at one indent level deeper than the role
+ * itself — same status dot (fed by the same `statuses` poll every other
+ * enabled row uses) and the same click-to-select/session-log path, so an
+ * instance is inspectable exactly like any other agent.
+ */
+function PoolInstancesSection({ roleAgent, instances, groupEnv, collapsed, onToggle, selectedAgentId, onSelect, statuses, busyIds, onRequestMenu }) {
+  const [hovered, setHovered] = useState(false);
+  const label = poolInstancesLabel(instances.length);
+  const handleToggle = useCallback(
+    () => onToggle({ kind: 'pool', id: roleAgent.id }),
+    [onToggle, roleAgent.id],
+  );
+  return (
+    <>
+      <button
+        type="button"
+        onClick={handleToggle}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        aria-expanded={!collapsed}
+        title={`Live pool instances of ${roleAgent.displayName || roleAgent.id}`}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--eb-space-2)',
+          width: '100%',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          paddingLeft: 'calc(var(--eb-space-3) + var(--eb-space-4) * 2)',
+          background: hovered ? 'var(--eb-bg-hover)' : 'transparent',
+          border: 'none',
+          fontSize: 'var(--eb-text-xs)',
+          fontWeight: 'var(--eb-font-medium)',
+          color: 'var(--eb-text-muted)',
+          cursor: 'pointer',
+          fontFamily: 'inherit',
+          textAlign: 'left',
+          transition: 'background var(--eb-transition-fast)',
+        }}
+      >
+        {collapsed
+          ? <ChevronRight size={12} style={{ flexShrink: 0 }} />
+          : <ChevronDown  size={12} style={{ flexShrink: 0 }} />}
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {label}
+        </span>
+      </button>
+      {!collapsed && instances.map((agent) => (
+        <AgentRow
+          key={agent.id}
+          agent={agent}
+          selected={agent.id === selectedAgentId}
+          onSelect={onSelect}
+          activityState={statuses[agent.id] || 'idle'}
+          environmentName={rowEnvironmentName(agent, groupEnv)}
+          indent={2}
           busy={busyIds.has(agent.id)}
           onRequestMenu={onRequestMenu}
         />
@@ -768,7 +871,9 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
         gap: 'var(--eb-space-3)',
         width: '100%',
         padding: 'var(--eb-space-2) var(--eb-space-3)',
-        paddingLeft: indent ? 'calc(var(--eb-space-3) + var(--eb-space-4))' : 'var(--eb-space-3)',
+        paddingLeft: indent
+          ? `calc(var(--eb-space-3) + var(--eb-space-4) * ${typeof indent === 'number' ? indent : 1})`
+          : 'var(--eb-space-3)',
         background: selected ? 'var(--eb-bg-selected)' : hovered ? 'var(--eb-bg-hover)' : 'transparent',
         borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
         borderTop: 'none',

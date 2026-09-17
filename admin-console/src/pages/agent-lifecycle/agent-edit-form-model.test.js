@@ -194,10 +194,14 @@ test('a role never sends a Scaling section it does not have', () => {
   assert.ok(!('pool' in body));
 });
 
-test('an untouched member round-trips its existing pool unchanged', () => {
+test('an untouched member round-trips its existing pool, workspace forced to git-clean-base (#2294)', () => {
+  // The member's persisted workspace ('none') has no UI to set it and needs a
+  // `workSource` that also has none — #2294 forces every save to git-clean-base
+  // rather than re-persist it. Everything else (maxInstances, teardown) is
+  // round-tripped unchanged when the pool folds into the one Save (#2295).
   const pooled = { ...member, pool: { enabled: true, maxInstances: 4, workspace: 'none' } };
   const body = buildEditSubmit(pooled, buildInitialForm(pooled), { parentWipLimit: 3 });
-  assert.deepEqual(body.pool, { enabled: true, maxInstances: 4, workspace: 'none' });
+  assert.deepEqual(body.pool, { enabled: true, maxInstances: 4, workspace: 'git-clean-base' });
 });
 
 test('a member with no pool sends pool: null, not an absent key (clears it if stale)', () => {

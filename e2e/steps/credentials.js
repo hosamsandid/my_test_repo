@@ -37,8 +37,10 @@ async function generateSshKey(ctx, { name, keyId }) {
   await page.getByRole('button', { name: 'New Key' }).click();
 
   // "Generate new keypair" is the default mode; click it defensively in case a
-  // prior interaction left "Paste existing key" selected.
-  await page.getByRole('button', { name: 'Generate new keypair' }).click();
+  // prior interaction left "Paste existing key" selected. Since #2165 the
+  // generate/paste selector is a radiogroup (ModeToggle), so the two options are
+  // radios, not buttons.
+  await page.getByRole('radio', { name: 'Generate new keypair' }).click();
   await page.getByPlaceholder('e.g. GitHub Deploy Key').fill(name);
   await page.getByPlaceholder('e.g. github-deploy-key').fill(keyId);
 

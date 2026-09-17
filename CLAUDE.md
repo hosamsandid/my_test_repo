@@ -214,6 +214,16 @@ Concept: `docs/plugin-system-concept.md`, `docs/cli-contract.md`.
 - **Grant**: team-owned like skills (`plugins[]` on team agents, `pluginsOverride`
   on members; `orchestrator/plugin-grants.js`). Grant → additive workspace sync
   (CLI + 0600 scope-token config + network attach), no respawn.
+- **Materialisation & reconcile** (#2308): a member's resolved grant is
+  seeded into its workspace at creation (`addTeamMember`) and at stub-enable
+  time (`enableAgent`), mirroring `effectiveSkills` — never only on the next
+  grant toggle. Written files are tracked in a per-member
+  `.agent-studio/seeded-plugins.json` (the plugin sibling of
+  `seeded-skills.json`); a background loop (`reconcilePendingPlugins`,
+  `orchestrator/plugin-reconcile.js`) auto-repairs a member whose grant and
+  manifest disagree, bounded by the same backoff as the skill reconciler. A
+  sync failure never blocks the add — it degrades the member and surfaces as a
+  warning (add-member response + GitHub Event Log), never silently.
 - **Manifest** (`pluginVersion: 1`, `plugin-manifest.js`): closed `capabilities`
   enum (`podman-socket`, `egress`, `host-mount:<path>`), `scopes`
   (`team`/`agent`), optional `quota`, `ui.routes[].minRole`, optional
@@ -315,8 +325,11 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
 - **Agent Pools** (epic #2251, `docs/parallel-workers-concept.md`): a role opts
   into `pool: {enabled: true, …}` (bundle field, sibling of `wipLimit`) to become
   a template — one wake spawns an item-keyed ephemeral instance
-  (`<team>-<role>-i<item>`), reusing the admission lane as the instance registry
-  and its reconcile tick as the reaper (`agent-pool.js`, Phase 1 #2246). The
+  (`<team>-<role>-i<item>`), reusing the admission lane as the instance registry;
+  ticket-release reap piggybacks on the lane's own reconcile tick, while the
+  hard-timeout/idle/archive-prune axes run on their own `wipLimit`-independent
+  tick so a pooled role with no `wipLimit` still gets reaped (`agent-pool.js`,
+  Phase 1 #2246, gaps closed by #2301). The
   **Flow Supervisor** (`autoDispatch: {enabled: true}`, sibling field, requires
   `wipLimit` + a pooled role — `flow-supervisor.js`, Phase 2 #2247) is a
   maintenance-gated timer that auto-dispatches ready-but-undispatched pooled
@@ -349,8 +362,24 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   that one entry). **Pool instance lanes** (#2273): a read-only third board
   panel, per pooled role's live instances tagged running / held-same-epic /
   timed-out (`pool-instance-lanes.js`, pure, no new persistence — derived
-  from live instance configs + the ticket ledger). A headless runtime (D7)
-  and provider-health-aware admission (D9) remain undesigned.
+  from live instance configs + the ticket ledger). **Agent Chat rail
+  sub-grouping** (#2297): the same live instances, nested under their role as a
+  collapsible **Instances (N)** sub-list in the left rail instead of scattered
+  flat among the team's members — `poolInstance`/`poolOf`/`poolItem` surfaced on
+  `GET /api/matrix/agents`, nested by `agent-list-model.js` `buildGroups`. **The
+  rail live-refreshes** (#2311): `AgentRosterContext` polls the same endpoint on
+  its own ~5s beat (a shared singleton poll, mirroring `AgentStatusesContext`'s
+  #1677 pattern; paused while the tab is hidden), diffed by `roster-diff.js` so
+  only actually-changed rows re-render — a spawned/reaped/renamed instance (or
+  any other roster change) now appears/disappears/updates within ~5s with no
+  manual reload, instead of only at the next navigation or filter toggle.
+  **`AEE_POOLS_ENABLED`** (#2302, default off — `pools-mode.js`, mirrors
+  `AUTH_ENABLED`): hides the Parallelism button/panel entirely and renders the
+  per-role Scaling section disabled with a "Coming Soon" badge until an
+  operator opts in; not yet wired into `docker-compose.yml`'s env passthrough
+  (see Amendment 10). A headless runtime (D7) and provider-health-aware
+  admission (D9) remain undesigned. Detail: `docs/parallel-workers-concept.md`
+  Amendment 10.
 
 ### GitHub poller
 
@@ -431,12 +460,19 @@ The console embeds a Matrix client at `/chats` (+ `/chats/:agentId`), under
 in pure, unit-tested `*-view.js`/model modules per the #651 convention (JSX
 uncovered). Key pieces:
 - `AgentList` — left rail (drag-reorder, grouping, disabled/stub opt-ins,
-  lifecycle context menu via `RailLifecycleHost`).
+  pool-instance sub-grouping (#2297), lifecycle context menu via
+  `RailLifecycleHost`).
 - `ChatPanel` — backfill/pagination/optimistic-send/SSE tail; transcript
-  **windowed** (`VirtualList`/`virtual-window.js`), stick-to-bottom.
+  **windowed** (`VirtualList`/`virtual-window.js`), stick-to-bottom. A
+  `?msg=<event_id>` deep-link (#2310) bounded-backfills, scrolls to (via
+  `VirtualList`'s `scrollToKey`/`onScrolledToKey`) and briefly highlights one
+  message, falling back to the normal default position with a notice if the
+  id can't be found.
 - `Message` — sanitised markdown (`react-markdown` + gfm + pretty-code +
   `rehype-sanitize`); quick-reply cards for `AskUserQuestion`
-  (`ask-user-mcp.py` re-supplies it in headless mode); inline image thumbnails.
+  (`ask-user-mcp.py` re-supplies it in headless mode); inline image
+  thumbnails; hover-revealed "Copy link" builds the `?msg=` deep-link above
+  (#2310, plain text bubbles only).
 - `MessageInput` — composer, send-keybinding preset, per-agent drafts,
   slash-command palette, unified Send/Stop.
 - `RightRail` — tabs (Sessions, session log, Workspace, Triggers, Outcomes,
@@ -558,10 +594,13 @@ Migration (COBOL, JCL, DB2, IMS/VSAM).
 ### Two-tier skill pool
 
 Resolved **team-first then global** at seeding (`orchestrator/skill-source.js`).
-**Global**: `/template-workspace/skills/` (RO) = `/pool/skills/` (RW),
-System-Admin-managed. **Team**: `/workspace/teams/<teamId>/skills/` (RW),
-Team-Admin-managed. `/api/skills` tags `source` = `pool`/`team`/`agent`;
-`POST /api/skills/promote-to-global` lifts a team skill into the global pool.
+**Global**: `/template-workspace/skills/` (RO) = `/pool/skills/` (RW), writable by
+System Admin or Team Admin of any team — promote, publish, import, merge,
+create and edit all apply that one rule (#2178/#2180/#2307;
+`skill-transfer.js`'s `requiredPoolWritePermission`). **Team**:
+`/workspace/teams/<teamId>/skills/` (RW), Team-Admin-of-that-team-managed.
+`/api/skills` tags `source` = `pool`/`team`/`agent`; `POST
+/api/skills/promote-to-global` lifts a team skill into the global pool.
 
 ### Skill seeding & activation
 

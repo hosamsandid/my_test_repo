@@ -12,6 +12,8 @@ import {
   groupKey,
   isStub,
   stubSectionLabel,
+  isPoolInstance,
+  poolInstancesLabel,
 } from './agent-list-model.js';
 
 const EMPTY_ORDER = { groups: [], singles: [], members: {} };
@@ -29,6 +31,11 @@ const standalone = (id, displayName) => ({ id, role: 'agent', displayName });
 // bare `standalone` — they still land in `singles`.
 const orch = (id, displayName) => ({ id, role: 'orchestrator', displayName });
 const bp   = (id, parentOrchestratorId, displayName) => ({ id, role: 'bp-instance', parentOrchestratorId, displayName });
+
+// A live pool instance (#2273/#2297): an ordinary, chat-openable team member
+// carrying the marker fields the endpoint ships only on such a row.
+const instance = (id, parentTeamId, poolOf, poolItem, displayName) =>
+  ({ id, role: 'team-member', parentTeamId, poolInstance: true, poolOf, poolItem, displayName: displayName || id });
 
 // ── buildGroups ──────────────────────────────────────────────────────────
 
@@ -431,4 +438,85 @@ test('a parentless stub is listed as a single rather than dropped silently', () 
   const { groups, singles } = buildGroups([team('t1', 'Alpha'), stub('lost', undefined, 'Lost')]);
   assert.deepEqual(groups.map(g => g.id), ['t1']);
   assert.deepEqual(singles.map(s => s.id), ['lost']);
+});
+
+// ── pool instance sub-grouping (#2273/#2297) ─────────────────────────────────
+
+test('isPoolInstance tells a spawned instance from an ordinary member', () => {
+  assert.equal(isPoolInstance(instance('t1-dev-i1', 't1', 't1-dev', 1)), true);
+  assert.equal(isPoolInstance(member('t1-dev', 't1', 'Dev')), false);
+});
+
+test('poolInstancesLabel carries the count, mirrors stubSectionLabel (AC1)', () => {
+  assert.equal(poolInstancesLabel(2), 'Instances (2)');
+  assert.equal(poolInstancesLabel(1), 'Instances (1)');
+});
+
+test('AC1 — a pooled role nests its live instances, sorted by poolItem', () => {
+  const agents = [
+    team('t1', 'Alpha'),
+    member('t1-dev', 't1', 'Dev'),
+    instance('t1-dev-i2', 't1', 't1-dev', 2),
+    instance('t1-dev-i1', 't1', 't1-dev', 1),
+  ];
+  const { groups } = buildGroups(agents);
+  assert.deepEqual(groups[0].children.map(c => c.id), ['t1-dev']);
+  assert.deepEqual(groups[0].children[0].instances.map(i => i.id), ['t1-dev-i1', 't1-dev-i2']);
+});
+
+test('AC1 — a role with no live instances gets an empty instances list, never a placeholder', () => {
+  const { groups } = buildGroups([team('t1', 'Alpha'), member('t1-dev', 't1', 'Dev')]);
+  assert.deepEqual(groups[0].children[0].instances, []);
+});
+
+test('an instance is not counted twice — it never also appears flat among the children', () => {
+  const agents = [
+    team('t1', 'Alpha'),
+    member('t1-dev', 't1', 'Dev'),
+    member('t1-qa', 't1', 'QA'),
+    instance('t1-dev-i1', 't1', 't1-dev', 1),
+  ];
+  const { groups } = buildGroups(agents);
+  assert.deepEqual(groups[0].children.map(c => c.id), ['t1-dev', 't1-qa']);
+});
+
+test('an orphaned instance (its role template is gone) lists flat rather than vanishing', () => {
+  const agents = [
+    team('t1', 'Alpha'),
+    member('t1-qa', 't1', 'QA'),
+    instance('t1-dev-i1', 't1', 't1-dev', 1, 'Orphan'),
+  ];
+  const { groups } = buildGroups(agents);
+  assert.deepEqual(groups[0].children.map(c => c.id), ['t1-dev-i1', 't1-qa']);
+});
+
+test('ordinary members are unaffected — a team with no pooled role behaves exactly as before', () => {
+  const agents = [team('t1', 'Alpha'), member('t1-dev', 't1', 'Dev'), member('t1-qa', 't1', 'QA')];
+  const model = buildAgentListModel(agents, EMPTY_ORDER, ALL);
+  assert.deepEqual(model.visibleGroups[0].children.map(c => c.id), ['t1-dev', 't1-qa']);
+  assert.deepEqual(model.visibleGroups[0].children.map(c => c.instances), [[], []]);
+});
+
+test('filterModel narrows a role instances list by the same disabled-agents opt-in', () => {
+  const agents = [
+    team('t1', 'Alpha'),
+    member('t1-dev', 't1', 'Dev'),
+    instance('t1-dev-i1', 't1', 't1-dev', 1),
+    off(instance('t1-dev-i2', 't1', 't1-dev', 2)),
+  ];
+  const hidden = buildAgentListModel(agents, EMPTY_ORDER, ALL, false);
+  assert.deepEqual(hidden.visibleGroups[0].children[0].instances.map(i => i.id), ['t1-dev-i1']);
+
+  const shown = buildAgentListModel(agents, EMPTY_ORDER, ALL, true);
+  assert.deepEqual(shown.visibleGroups[0].children[0].instances.map(i => i.id), ['t1-dev-i1', 't1-dev-i2']);
+});
+
+test('the team filter narrows the instances list like the member list', () => {
+  const agents = [
+    team('t1', 'Alpha'), member('t1-dev', 't1', 'Dev'), instance('t1-dev-i1', 't1', 't1-dev', 1),
+    team('t2', 'Beta'),  member('t2-dev', 't2', 'Dev2'), instance('t2-dev-i1', 't2', 't2-dev', 1),
+  ];
+  const model = buildAgentListModel(agents, EMPTY_ORDER, { kind: 'team', id: 't1' });
+  assert.deepEqual(model.visibleGroups.map(g => g.id), ['t1']);
+  assert.deepEqual(model.visibleGroups[0].children[0].instances.map(i => i.id), ['t1-dev-i1']);
 });

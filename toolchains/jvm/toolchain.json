@@ -11,5 +11,8 @@
   ],
   "versionSource": "bootstrap",
   "versionManager": "mise",
-  "baseline": "java temurin-21, maven 3.9"
+  "baseline": "java temurin-21, maven 3.9",
+  "resources": {
+    "memoryLimit": "4g"
+  }
 }

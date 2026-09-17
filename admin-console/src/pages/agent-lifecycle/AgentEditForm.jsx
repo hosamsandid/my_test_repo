@@ -56,6 +56,8 @@ import {
 import { TEAM_CONFIG_TABS, ENV_TAB_IDS, resolveTeamConfigTab } from './team-config-tabs-view.js';
 import { parallelismSummary } from '../process/parallelism-view.js';
 import ScalingSection from '../process/ScalingSection';
+import ComingSoonBadge from '../../components/ComingSoonBadge';
+import { usePoolsEnabled } from '../../context/PoolsFeatureContext';
 
 // #2236: which help chapter each tab's "?" opens, and the tab's own label for
 // the button's title. General/Skills/Plugins point at the same field-by-field
@@ -403,6 +405,7 @@ export default function AgentEditForm({
 }) {
   // A preserved draft (#1929 AC6) wins over the config-derived defaults, so
   // returning to a half-edited form finds it exactly as it was left.
+  const poolsEnabled = usePoolsEnabled();
   const [form, setForm] = useState(() => initialForm || buildInitialForm(agent));
   const update = (key, val) => setForm(f => {
     const next = { ...f, [key]: val };
@@ -625,13 +628,6 @@ export default function AgentEditForm({
 
       {agent.role === 'team-member' && (
         <>
-          <div>
-            <div style={labelStyle}>Parent Team (read-only)</div>
-            <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', fontFamily: 'var(--eb-font-mono)' }}>
-              {agent.parentTeamId || '—'}
-            </div>
-          </div>
-
           {/* #2271, Amendment 2 A2.2 of `docs/parallel-workers-concept.md` —
               the role-axis config surface for agent pools, the agent's own
               Settings-tab half of the "one model, several surfaces"
@@ -639,12 +635,18 @@ export default function AgentEditForm({
               into this form's own single Save (no more second Save button —
               ScalingSection is now a controlled draft). */}
           <div style={{ paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-            <div style={labelStyle}>Scaling</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+              <div style={labelStyle}>Scaling</div>
+              {/* #2302: the pools feature is gated off by default — keep the
+                  section visible but inert until an operator opts in. */}
+              {!poolsEnabled && <ComingSoonBadge title="Agent-pool autoscaling is not yet enabled on this platform." />}
+            </div>
             <ScalingSection
               draft={form.poolDraft}
               onChange={v => update('poolDraft', v)}
               parentWipLimit={parentTeam?.wipLimit}
               error={scalingError}
+              disabled={!poolsEnabled}
             />
           </div>
 

@@ -1,22 +1,28 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router';
-import { Sparkles, Loader2, Square, ArrowRight } from 'lucide-react';
+import { Sparkles, Loader2, Square, ArrowRight, Check } from 'lucide-react';
 import { useFlowCopilot } from '../context/FlowCopilotContext.jsx';
 import { indicatorState, indicatorPhaseLabel } from '../pages/process/flow-copilot-turn.js';
 
-// Global running-turn indicator for the Flow Copilot (#2087, D5).
+// Global Flow Copilot indicator (#2087, D5).
 //
 // Rendered once inside Shell (so it is inside the router and can navigate back
 // to the originating flow) and portaled to document.body so it floats above
 // every page — the TranscriptionOverlay precedent, and it sits below that card
 // so the two never overlap when both are up.
 //
-// A turn takes 20–60 s and now survives navigation, so without this the user
-// has no way to tell that one is still running once they leave /flows. Every
-// visibility decision is the pure `indicatorState` — including AC13's rule that
-// it stays hidden while the Copilot panel is open on the originating flow,
-// which already shows the live phase.
+// Two states, one card, both from the pure `indicatorState`:
+//   • running — a turn takes 20–60 s and survives navigation, so without this the
+//     user cannot tell one is still running once they leave /flows.
+//   • ready — a turn that FINISHES while the user is away leaves an unreviewed
+//     proposal in the provider (D4). The running indicator vanishes on
+//     completion, so without a hand-off the proposal reads as lost: the user is
+//     on another page and nothing says it is ready to Apply/Discard. The card
+//     stays as a "review" nudge until they open that flow and resolve it.
+//
+// AC13's rule holds for both: hidden while the Copilot panel is open on the
+// originating flow, which already shows the phase (running) or the card (ready).
 
 const CARD_STYLE = {
   position: 'fixed',
@@ -51,38 +57,56 @@ export default function FlowCopilotIndicator() {
   const navigate = useNavigate();
 
   if (!ctx) return null;
-  const state = indicatorState({ turn: ctx.turn, panelScope: ctx.panelScope });
+  const state = indicatorState({ turn: ctx.turn, panelScope: ctx.panelScope, pendingByScope: ctx.pendingByScope });
   if (!state.visible) return null;
+
+  const ready = state.mode === 'ready';
 
   return createPortal(
     <div style={CARD_STYLE} role="status" aria-live="polite">
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
         <Sparkles size={15} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
         <span style={{ fontWeight: 'var(--eb-font-semibold)', flex: 1, minWidth: 0 }}>Flow Copilot</span>
-        <Loader2 size={14} style={{ color: 'var(--eb-text-muted)', animation: 'eb-copilot-ind-spin 1s linear infinite' }} />
+        {ready
+          ? <Check size={15} style={{ color: 'var(--eb-status-success, #16a34a)', flexShrink: 0 }} />
+          : <Loader2 size={14} style={{ color: 'var(--eb-text-muted)', animation: 'eb-copilot-ind-spin 1s linear infinite' }} />}
       </div>
-      {/* Name the flow (AC12) — a turn that outlives its panel is otherwise an
-          unattributed spinner on a page that has nothing to do with it. */}
+      {/* Name the flow — a turn (or a finished proposal) that outlives its panel
+          is otherwise an unattributed card on a page that has nothing to do with
+          it. The ready copy states the action (Apply/Discard) so the user knows
+          the proposal is waiting, not lost. */}
       <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5, marginBottom: 8 }}>
-        {indicatorPhaseLabel(state.phase)}{' '}
-        <strong style={{ color: 'var(--eb-text-primary)' }}>{state.flowName}</strong>
+        {ready ? (
+          <>Proposal ready for{' '}
+            <strong style={{ color: 'var(--eb-text-primary)' }}>{state.flowName}</strong>
+            {' '}— review to apply or discard it.</>
+        ) : (
+          <>{indicatorPhaseLabel(state.phase)}{' '}
+            <strong style={{ color: 'var(--eb-text-primary)' }}>{state.flowName}</strong></>
+        )}
       </div>
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
         <button
           onClick={() => { if (state.jumpTo) navigate(state.jumpTo); }}
-          title={`Open ${state.flowName} and its Copilot`}
-          style={{ ...BTN_STYLE, background: 'none', color: 'var(--eb-accent-primary)', borderColor: 'var(--eb-accent-primary)' }}
-        >Go to flow <ArrowRight size={12} /></button>
-        <button
-          onClick={ctx.stopTurn}
-          disabled={ctx.stopping}
-          title="Stop this Copilot turn"
+          title={ready ? `Review the proposal for ${state.flowName}` : `Open ${state.flowName} and its Copilot`}
           style={{
-            ...BTN_STYLE, background: 'none', color: 'var(--eb-status-error)',
-            borderColor: 'var(--eb-status-error)',
-            cursor: ctx.stopping ? 'not-allowed' : 'pointer', opacity: ctx.stopping ? 0.5 : 1,
+            ...BTN_STYLE, borderColor: 'var(--eb-accent-primary)',
+            background: ready ? 'var(--eb-accent-primary)' : 'none',
+            color: ready ? 'var(--eb-text-inverted)' : 'var(--eb-accent-primary)',
           }}
-        ><Square size={11} /> Stop</button>
+        >{ready ? 'Review proposal' : 'Go to flow'} <ArrowRight size={12} /></button>
+        {!ready && (
+          <button
+            onClick={ctx.stopTurn}
+            disabled={ctx.stopping}
+            title="Stop this Copilot turn"
+            style={{
+              ...BTN_STYLE, background: 'none', color: 'var(--eb-status-error)',
+              borderColor: 'var(--eb-status-error)',
+              cursor: ctx.stopping ? 'not-allowed' : 'pointer', opacity: ctx.stopping ? 0.5 : 1,
+            }}
+          ><Square size={11} /> Stop</button>
+        )}
       </div>
       <style>{'@keyframes eb-copilot-ind-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }'}</style>
     </div>,

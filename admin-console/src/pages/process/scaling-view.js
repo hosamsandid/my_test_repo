@@ -151,11 +151,15 @@ export function scalingSaveDecision(draft, parentWipLimit) {
     const prereq = scalingPrerequisite({ parentWipLimit });
     if (!prereq.ok) return { payload: undefined, error: prereq.reason };
   }
+  // #2294: never thread a variable `workspace` into the save — the Workspace
+  // dropdown is gone from both hosts (`input-copy`/`none` have no UI to
+  // configure the `pool.workSource` they'd need), so a rehydrated
+  // `draft.workspace` must not sneak back into a PUT. `buildPoolPayload`
+  // defaults an omitted workspace to `git-clean-base` (`normalizePool` parity).
   return {
     payload: buildPoolPayload({
       enabled: draft.enabled,
       maxInstances: maxInstances.value,
-      workspace: draft.workspace,
       idleTimeoutMs: idle.value,
       maxRuntimeMs: hard.value,
       retainLogsMs: retain.value,

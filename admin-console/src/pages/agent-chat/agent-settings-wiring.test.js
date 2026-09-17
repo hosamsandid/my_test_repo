@@ -83,7 +83,21 @@ test('the read-only Role and Working Environment fields are gone', () => {
   // …while the fields that stay are still here (so the assertions above cannot
   // pass because the whole form vanished).
   assert.match(editForm, /ID \(read-only\)/);
-  assert.match(editForm, /Parent Team \(read-only\)/);
+  assert.match(editForm, /label="Display Name \*"/);
+});
+
+/* ── #2296: the read-only Parent Team field is gone ───────────────── */
+
+test('the read-only Parent Team field is gone', () => {
+  // Dead weight for the same reason as #2026's Role/Working Environment:
+  // not editable here, and the left rail already shows the team via its
+  // group header (displayName), making this box a redundant, id-vs-name
+  // mismatched echo.
+  assert.doesNotMatch(editForm, /Parent Team/);
+  // …while the parentTeam fetch and its other consumers stay (this removal
+  // is display-only) — asserted so the check above cannot pass because the
+  // whole form vanished.
+  assert.match(editForm, /ID \(read-only\)/);
   assert.match(editForm, /label="Display Name \*"/);
 });
 

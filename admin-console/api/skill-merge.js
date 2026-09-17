@@ -20,6 +20,11 @@
 // as skill-transfer.js / skill-deletion.js.
 // ---------------------------------------------------------------------------
 
+// #2307: the write-into-a-pool-tier rule is shared with skill-transfer.js
+// (import/create/edit reuse it too) so it cannot drift between paths again —
+// see requiredPermission below.
+const { requiredPoolWritePermission } = require('./skill-transfer');
+
 const SOURCE_TIERS = ['agent', 'team', 'global'];
 const TARGET_TIERS = ['team', 'global'];
 
@@ -125,21 +130,23 @@ function planMerge(input, opts = {}) {
 }
 
 // The permission the caller must hold — the TARGET tier's (concept §3.4:
-// "cross-tier merges allowed with target-tier permissions"): Team Admin for a
-// team target, System Admin for a global target. Same shape skill-transfer /
-// skill-deletion use, so the endpoint reuses one permit helper.
+// "cross-tier merges allowed with target-tier permissions"), now the one
+// global-entry rule (#2307): Team Admin for a team target, System Admin OR
+// Team Admin of ANY team for a global target (entering global is a Team-Admin
+// act, not System-Admin-only — #2178/#2180). Same shape skill-transfer's
+// permitTransfer reads, so the endpoint reuses one permit helper.
 function requiredPermission(target) {
-  if (target.tier === 'team') return { needsSystemAdmin: false, teamAdminOf: [target.teamId] };
-  return { needsSystemAdmin: true, teamAdminOf: [] };
+  return requiredPoolWritePermission(target.tier, target.teamId);
 }
 
 // Check a plan's permission against the caller's capabilities. `caps` is
-// { systemAdmin: bool, isTeamAdmin: (teamId) => bool }. Returns { ok } or
-// { ok:false, error }.
+// { systemAdmin: bool, isTeamAdmin: (teamId) => bool, isTeamAdminOfAny?: () =>
+// bool }. Returns { ok } or { ok:false, error }.
 function permitMerge(permission, caps = {}) {
   const p = permission && typeof permission === 'object' ? permission : {};
   const systemAdmin = !!caps.systemAdmin;
   const isTeamAdmin = typeof caps.isTeamAdmin === 'function' ? caps.isTeamAdmin : () => false;
+  const isTeamAdminOfAny = typeof caps.isTeamAdminOfAny === 'function' ? caps.isTeamAdminOfAny : () => false;
   if (p.needsSystemAdmin && !systemAdmin) {
     return { ok: false, error: 'forbidden: this merge requires System Admin' };
   }
@@ -147,6 +154,11 @@ function permitMerge(permission, caps = {}) {
     if (!systemAdmin && !isTeamAdmin(teamId)) {
       return { ok: false, error: `forbidden: requires Team Admin of '${teamId}'` };
     }
+  }
+  // #2307: the unnamed-team floor for a global target — System Admin, or Team
+  // Admin of ANY team (no single team is "the content's own" for a merge).
+  if (p.anyTeamAdmin && !systemAdmin && !isTeamAdminOfAny()) {
+    return { ok: false, error: 'forbidden: this merge requires System Admin or Team Admin of a team' };
   }
   return { ok: true };
 }

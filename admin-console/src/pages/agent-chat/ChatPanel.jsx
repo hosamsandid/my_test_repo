@@ -32,6 +32,7 @@ import { resolveContextWindowTokens, computeContextFillLevel } from './context-w
 import { headerContextIndicator } from './session-info.js';
 import SessionInfoPopover from './SessionInfoPopover.jsx';
 import { maintenanceBannerText } from './maintenance-banner';
+import { agentRemovedNoticeText } from './agent-removed-notice.js';
 import { providerWarningText } from '../provider-health-view.js';
 import { RESUME_MESSAGE } from './resume-session';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
@@ -39,6 +40,14 @@ import { AUTHOR_FIELD, authorStampFor, buildAuthorDirectory } from './message-au
 import {
   resolveInitialFontSize, loadStoredFontSize, FONT_SIZE_CHANGED_EVENT,
 } from './chat-font-size.js';
+
+// #2310: bound on how many older-history chunks a `?msg=` deep-link backfills
+// while searching for its target — 20 × 50 messages is generous for any real
+// link while still refusing to fetch history forever for a stale/bad id (Q3).
+const MAX_MSG_BACKFILL_ATTEMPTS = 20;
+// How long the one-shot highlight flash and the "not found" notice stay up.
+const MSG_HIGHLIGHT_DURATION_MS = 1700;
+const MSG_NOT_FOUND_NOTICE_MS = 4000;
 
 // #1922: the manual "Save & Learn" button and its canned LEARN_PROMPT were
 // removed. The instruction they sent is one the runtime already gives the agent
@@ -84,11 +93,24 @@ import {
  *        splice a `@<ref>` file reference into the composer draft, forwarded
  *        straight to MessageInput (#1699 — the workspace browser's "Reference in
  *        chat" button).
+ * @param {?{eventId:string, ts:number}} [msgTargetRequest] Deep-link from a
+ *        `?msg=<event_id>` URL (#2310), forwarded from AgentChat.jsx once the
+ *        param has been read and stripped. Backfills older history if the
+ *        target isn't in the currently loaded window (bounded — see
+ *        `MAX_MSG_BACKFILL_ATTEMPTS`), scrolls it into view via VirtualList's
+ *        `scrollToKey`, then briefly highlights it. Falls back to the normal
+ *        default position with a transient notice if the id can't be found.
  */
 export default function ChatPanel({
   agent, roomId, onRoomCreated, hoveredCorrelationId, onHoverCorrelation, sessionCost, contextFill,
   onWorkspaceChanged, onTodoBoundary, onOpenKnowledge, resumeRequest,
-  insertRefRequest,
+  insertRefRequest, msgTargetRequest,
+  // #2311 D2: true once the live roster poll has confirmed this agent is no
+  // longer in `/api/matrix/agents` while its chat is still open. `agent` is
+  // then the LAST known snapshot (frozen by the caller), not live data — the
+  // banner below is the only thing that changes; the transcript, room and
+  // scroll position are untouched.
+  removedFromRoster = false,
 }) {
   const [messages, setMessages]      = useState([]);
   const [loading, setLoading]        = useState(false);
@@ -103,6 +125,17 @@ export default function ChatPanel({
   const [endToken, setEndToken] = useState(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [olderExhausted, setOlderExhausted] = useState(false);
+
+  // `?msg=<event_id>` deep-link (#2310): the event_id currently being sought —
+  // set once a request comes in, cleared once found-and-scrolled or given up
+  // on. `highlightEventId` is the (usually different, briefly overlapping)
+  // event_id currently showing the one-shot flash. `msgNotFound` drives the
+  // transient "Linked message not found" notice (AC5/Q2).
+  const [targetEventId, setTargetEventId] = useState(null);
+  const [highlightEventId, setHighlightEventId] = useState(null);
+  const [msgNotFound, setMsgNotFound] = useState(false);
+  const lastMsgTsRef = useRef(0);
+  const msgBackfillAttemptsRef = useRef(0);
 
   // Stick-to-bottom: only auto-scroll when the user is within 100 px of the
   // bottom; otherwise show a "↓ N new messages" pill.
@@ -403,6 +436,75 @@ export default function ChatPanel({
       setLoadingOlder(false);
     }
   }, [roomId, endToken, loadingOlder, olderExhausted]);
+
+  /* ─── 2c. `?msg=` deep-link: locate, backfill, scroll, highlight (#2310) ─
+   * `msgTargetRequest` arrives once per distinct `ts` from AgentChat.jsx
+   * (mirrors `resumeRequest`'s dedup pattern). Consuming it starts a search:
+   * if the target isn't already in `messages`, keep calling `loadOlder()`
+   * (bounded by MAX_MSG_BACKFILL_ATTEMPTS, AC4/Q3) until it turns up or
+   * history is exhausted. `atBottom` is dropped to false up front so
+   * VirtualList's stick-to-bottom re-pin doesn't fight the programmatic
+   * backfill/scroll while a search is in flight (scope: this is the one
+   * "?msg= is allowed to change the default scroll position" case).
+   */
+  useEffect(() => {
+    if (!msgTargetRequest || !msgTargetRequest.ts) return;
+    if (msgTargetRequest.ts === lastMsgTsRef.current) return;
+    lastMsgTsRef.current = msgTargetRequest.ts;
+    msgBackfillAttemptsRef.current = 0;
+    setMsgNotFound(false);
+    setAtBottom(false);
+    setTargetEventId(msgTargetRequest.eventId || null);
+  }, [msgTargetRequest]);
+
+  // Fall back to the normal default position (AC5): no error, no blank state,
+  // just the chat as it would have opened with no `?msg=` at all.
+  const giveUpOnMsgTarget = useCallback(() => {
+    setTargetEventId(null);
+    setMsgNotFound(true);
+    setAtBottom(true);
+    requestAnimationFrame(() => scrollToBottom());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!targetEventId) return;
+    if (messages.some(m => m.event_id === targetEventId)) return; // found — the scroll/highlight effect below takes over
+    if (loading || loadingOlder) return; // an existing fetch may still turn it up
+    if (olderExhausted || !endToken) { giveUpOnMsgTarget(); return; }
+    if (msgBackfillAttemptsRef.current >= MAX_MSG_BACKFILL_ATTEMPTS) { giveUpOnMsgTarget(); return; }
+    msgBackfillAttemptsRef.current += 1;
+    loadOlder();
+  }, [targetEventId, messages, loading, loadingOlder, olderExhausted, endToken, loadOlder, giveUpOnMsgTarget]);
+
+  // Only hand VirtualList a live scroll target once the message is actually
+  // loaded — this is also what tells the effect above "found it, stop backfilling".
+  const msgScrollKey = (targetEventId && messages.some(m => m.event_id === targetEventId))
+    ? targetEventId
+    : null;
+
+  const handleScrolledToMsgTarget = useCallback((key) => {
+    setHighlightEventId(key);
+    setTargetEventId(null);
+  }, []);
+
+  // One-shot flash (AC2): clear the highlight after a fixed duration so it
+  // never becomes a lasting visual state — and so a later re-mount of the same
+  // row (e.g. it scrolls out of the virtualized window and back in) can't find
+  // a stale "active" attribute still set and replay the animation.
+  useEffect(() => {
+    if (!highlightEventId) return undefined;
+    const t = setTimeout(() => setHighlightEventId(null), MSG_HIGHLIGHT_DURATION_MS);
+    return () => clearTimeout(t);
+  }, [highlightEventId]);
+
+  // Transient "not found" notice (Q2): auto-dismisses so it never lingers as a
+  // permanent fixture of the header area.
+  useEffect(() => {
+    if (!msgNotFound) return undefined;
+    const t = setTimeout(() => setMsgNotFound(false), MSG_NOT_FOUND_NOTICE_MS);
+    return () => clearTimeout(t);
+  }, [msgNotFound]);
 
   /* ─── 3. Live stream ─────────────────────────────────────────────── */
   const handleEvent = useCallback((ev) => {
@@ -1073,6 +1175,9 @@ export default function ChatPanel({
 
   /* ─── Render ─────────────────────────────────────────────────────── */
   const disabled = agent.enabled === false;
+  // #2311 D2: a distinct banner from the "disabled" one above — this agent
+  // isn't paused, it's gone from the roster entirely, and the wording says so.
+  const removedNotice = removedFromRoster ? agentRemovedNoticeText(agent.displayName || agent.id) : null;
   const maintenance = useMaintenanceMode();
   const maintenanceBanner = maintenanceBannerText(maintenance);
   // AC5 (#1843): non-blocking warning when the agent's bound Model Provider is
@@ -1109,9 +1214,15 @@ export default function ChatPanel({
           disabled: disabled || !roomId || sending || maintenance.active,
         })
       : null;
+    // `?msg=` deep-link flash (#2310 AC2): a plain data attribute, matched by
+    // the one-shot `@keyframes` rule below — mirrors the `data-cid` hover dim
+    // (#1676) in staying CSS-driven rather than threading highlight state into
+    // the memoized `Message` itself.
+    const isMsgTarget = !!highlightEventId && msg.event_id === highlightEventId;
     return (
       <div
         data-cid={cid || ''}
+        data-msg-highlight={isMsgTarget ? 'active' : undefined}
         onMouseEnter={() => onHoverCorrelation && onHoverCorrelation(cid)}
         onMouseLeave={() => onHoverCorrelation && onHoverCorrelation(null)}
       >
@@ -1279,7 +1390,20 @@ export default function ChatPanel({
         />
       </div>
 
-      {disabled && (
+      {removedNotice && (
+        <div role="status" style={{
+          padding: 'var(--eb-space-3) var(--eb-space-4)',
+          background: 'var(--eb-status-warning-bg)',
+          borderBottom: '1px solid var(--eb-status-warning)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-primary)',
+          flexShrink: 0,
+        }}>
+          {removedNotice}
+        </div>
+      )}
+
+      {disabled && !removedFromRoster && (
         <div style={{
           padding: 'var(--eb-space-3) var(--eb-space-4)',
           background: 'var(--eb-status-warning-bg)',
@@ -1315,6 +1439,23 @@ export default function ChatPanel({
           flexShrink: 0,
         }}>
           {providerWarning}
+        </div>
+      )}
+
+      {/* `?msg=` deep-link couldn't be resolved (#2310 AC5/Q2) — a brief,
+          non-blocking notice rather than a silent no-op (which could look like
+          the link just did nothing) or an error banner (nothing actually
+          failed: the chat opened fine, just not at that message). Auto-dismisses. */}
+      {msgNotFound && (
+        <div role="status" style={{
+          padding: 'var(--eb-space-2) var(--eb-space-4)',
+          background: 'var(--eb-bg-elevated)',
+          borderBottom: '1px solid var(--eb-border-default)',
+          fontSize: 'var(--eb-text-xs)',
+          color: 'var(--eb-text-muted)',
+          flexShrink: 0,
+        }}>
+          Linked message not found.
         </div>
       )}
 
@@ -1458,6 +1599,8 @@ export default function ChatPanel({
           overscan={8}
           gap={12}
           stickToBottom={atBottom}
+          scrollToKey={msgScrollKey}
+          onScrolledToKey={handleScrolledToMsgTarget}
           renderItem={(msg, i) => (
             <EventErrorBoundary agentId={agent.id} eventId={msg.event_id}>
               {renderTranscriptRow(msg, i)}
@@ -1528,6 +1671,16 @@ export default function ChatPanel({
         @keyframes dotPulse { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
         ${hoverBaseCss('chat')}
         ${hoverDimCss('chat', hoveredCorrelationId)}
+        /* #2310: one-shot flash for a ?msg= deep-link target, distinct from
+           the infinite eb-status-pulse (status dots) — plays once and leaves no
+           lasting state (AC2); the JS side also clears the triggering
+           data-msg-highlight attribute after the same ~1.7s window so a later
+           remount of the same row (virtualization) can't replay it. */
+        @keyframes msgHighlightFlash {
+          0% { background-color: var(--eb-accent-muted); box-shadow: 0 0 0 2px var(--eb-accent-primary); }
+          100% { background-color: transparent; box-shadow: 0 0 0 0 transparent; }
+        }
+        [data-msg-highlight="active"] { animation: msgHighlightFlash 1.6s ease-out; border-radius: var(--eb-radius-lg); }
       `}</style>
 
       <ConfirmDialog

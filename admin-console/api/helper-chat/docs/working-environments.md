@@ -158,6 +158,17 @@ actual workspaces, and clicking it runs the same propagation. For one agent the
 same job is **Sync repositories** on its Settings tab; both surfaces drive the
 same propagation, so they cannot disagree about what a change would do.
 
+Changing the environment's **primary repository** (the first in the list) also
+re-stamps the bound agents' derived `github-event` triggers (#2322). The label
+listeners a Flow generates carry the repo the GitHub poller must watch, and that
+repo was previously resolved only at materialise time — so a repo added to, swapped
+on, or removed from a live environment left those triggers pointing at the old
+repo (or at none, in which case the poller silently skipped them). Adding, swapping
+or removing the primary repo now re-resolves it on the live agents, so the poller
+starts (or stops) polling within ~30s with no respawn; `transport: 'internal'`
+listeners are left untouched. This runs on the save itself — independent of the
+propagation offer above, and never failing it.
+
 ## Editing from a team's Settings tab
 
 The general-purpose environments page described above is **retired**

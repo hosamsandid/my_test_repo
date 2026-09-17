@@ -14,6 +14,7 @@ askPrompts:
   - "What is the difference between a loop trigger and a cron trigger?"
   - "Why is my trigger not firing while a loop is running?"
   - "What is the difference between Reset Session and Clear History?"
+  - "How do I share a link to one specific chat message?"
   - "Where do I author outcomes — I can't edit them here?"
   - "What exactly happens when I retire a learning?"
   - "Why does switching the model provider restart the agent?"
@@ -98,6 +99,22 @@ login name is no longer recoverable.
 Trigger notices, finished-loop cards and any other automated entry are unchanged:
 they carry no human badge and are not realigned.
 
+## Linking to one message
+
+Hovering a plain text message reveals a small **link** icon next to its
+timestamp — click it to copy a URL that opens straight to that message,
+scrolled into view and briefly highlighted, so you can point a colleague (or
+your own future self) at exactly the line that matters instead of "scroll up
+a bit." The icon only appears on ordinary messages; a quick-reply question, a
+finished-loop card and a trigger notice don't offer one.
+
+Opening the link jumps to the right agent's chat, fetches older history if the
+message isn't in the currently loaded window, and scrolls to it — all bounded,
+so a stale or made-up link can't make the chat fetch history forever. If the
+message can't be found (deleted, or the link is wrong), the chat opens
+normally and a brief "Linked message not found" notice appears instead of
+failing silently or showing an error.
+
 ## The agent roles
 
 An **Agent** is a **long-running Claude Code instance** with its own workspace
@@ -108,7 +125,7 @@ where its prompt and skills come from:
 |---|---|---|
 | **Agent** (standalone) | A single chat agent with its own system prompt. The prompt shapes its persona — a COBOL specialist, a code-review buddy, a release manager. Add cron / GitHub triggers later to make it run autonomously as well as answer messages. | One-of-a-kind agents that act on their own. |
 | **Agent Team** | A squad of agents working a repository. It stores a system-prompt template and hosts no agent itself — **Add member…** on the team's group header spawns agents that share the prompt and environment but each get their own workspace and their own conversation. | Several copies of the same kind of agent — e.g. three reviewer agents in parallel. Start one from the **Create** launcher rather than by hand. |
-| **Team Member** | One agent spawned from an Agent Team. Its system prompt, skills and MCP servers **inherit** from the parent team unless you flip a field from *Inherit* to *Custom*. Role, environment and parent team are fixed at creation; of those, only the parent team is shown in the Settings form. | You do not pick this role — it is assigned when you add a member to a team. |
+| **Team Member** | One agent spawned from an Agent Team. Its system prompt, skills and MCP servers **inherit** from the parent team unless you flip a field from *Inherit* to *Custom*. Role, environment and parent team are fixed at creation. | You do not pick this role — it is assigned when you add a member to a team. |
 
 > An **Agent Team** is *not* the same thing as an **access scope**. The scope is
 > the older, coarser tenant every agent, environment and credential is stamped
@@ -215,6 +232,17 @@ disabled agents* opt-in has no effect on this section, and why the two carry
 different marks. If the team itself is disabled, **Materialize** is offered but
 inert with *enable the team first* — a member cannot be started while its team
 is off.
+
+**A pooled role's live instances.** A role that spawns ephemeral
+`<team>-<role>-i<item>` workers (an Agent Pool, configured on the Flows editor)
+shows them nested directly under that role, in a collapsible **Instances (N)**
+sub-list — instead of scattering them through the team as flat, indistinguishable
+rows. It expands/collapses and remembers your choice the same way a team group
+does, and stays empty (no sub-list at all) while the role has nothing live. Each
+instance row is an ordinary agent: its status dot follows the same activity poll,
+and clicking it opens its own chat/session log exactly like any other member —
+they are just as ephemeral as the role that spawned them, so a row can disappear
+once its instance is torn down.
 
 **Adding an agent** is done from the page header, not the list. **New Agent**
 (top right) hands over to the create launcher, where *Configure an agent
@@ -370,7 +398,9 @@ end. Dismiss it and it comes back on the next change.
 
 The **Workspace** tab is a read-only view of the agent's own workspace: its
 repository clones, its `memory/` files, everything it has written. You can open a
-file, download it, and see images inline. Each file row also offers
+file, download it, and see images inline — and download a whole **directory** as
+a single ZIP from its own row (paths kept relative to that directory; not offered
+on the workspace root or on a `/context` folder). Each file row also offers
 **reference in chat** (**@**), which is the fastest way to say "look at this one".
 The **Git** mode next to *Tree* switches the same tab to the repository view —
 which files the agent has changed, and the diff for each.

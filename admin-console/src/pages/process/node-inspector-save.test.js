@@ -164,9 +164,11 @@ test('never touches the live prompt in draft mode', async () => {
 });
 
 // ── scaling (#2295 AC11: batched via ops.setPool, pre-flighted before anything writes) ─
-test('applies a dirty, valid scaling draft', async () => {
+test('applies a dirty, valid scaling draft (#2294: workspace forced to git-clean-base)', async () => {
   const ops = mockOps();
   const pool = {
+    // A stale/rehydrated `workspace: 'none'` — there is no UI to set it (#2294),
+    // so the save must not thread it back; it lands as git-clean-base.
     draft: { enabled: true, maxInstancesText: '4', workspace: 'none', idleText: '', hardText: '', retainText: '' },
     parentWipLimit: 3,
     initialPool: null,
@@ -174,7 +176,7 @@ test('applies a dirty, valid scaling draft', async () => {
   await applyDetailsSave(ops, { id: 'a', displayName: 'a', stage: '' },
     { name: 'a', id: 'a', stage: '', pool }, { mode: 'live' });
   assert.deepEqual(ops.calls.find(c => c[0] === 'setPool'),
-    ['setPool', 'a', { enabled: true, maxInstances: 4, workspace: 'none' }]);
+    ['setPool', 'a', { enabled: true, maxInstances: 4, workspace: 'git-clean-base' }]);
 });
 
 test('a clean scaling draft never calls setPool', async () => {

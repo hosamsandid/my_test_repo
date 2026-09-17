@@ -192,19 +192,24 @@ test('planMerge: cross-tier merge is allowed, permission is target-tier', () => 
 // requiredPermission + permitMerge
 // ---------------------------------------------------------------------------
 
-test('requiredPermission: team target needs Team Admin; global needs System Admin', () => {
+test('requiredPermission: team target needs Team Admin of that team; global needs System Admin OR Team Admin of ANY team (#2307, not System-Admin-only)', () => {
   assert.deepStrictEqual(requiredPermission({ tier: 'team', teamId: 'squad-a' }), { needsSystemAdmin: false, teamAdminOf: ['squad-a'] });
-  assert.deepStrictEqual(requiredPermission({ tier: 'global' }), { needsSystemAdmin: true, teamAdminOf: [] });
+  assert.deepStrictEqual(requiredPermission({ tier: 'global' }), { needsSystemAdmin: false, teamAdminOf: [], anyTeamAdmin: true });
 });
 
 test('permitMerge: System Admin passes everything', () => {
   assert.deepStrictEqual(permitMerge({ needsSystemAdmin: true, teamAdminOf: ['x'] }, { systemAdmin: true }), { ok: true });
 });
 
-test('permitMerge: global target refused without System Admin', () => {
-  const r = permitMerge({ needsSystemAdmin: true, teamAdminOf: [] }, { systemAdmin: false });
+test('permitMerge: a global target is refused for a caller who is Team Admin of no team', () => {
+  const r = permitMerge({ needsSystemAdmin: false, teamAdminOf: [], anyTeamAdmin: true }, { systemAdmin: false, isTeamAdminOfAny: () => false });
   assert.strictEqual(r.ok, false);
-  assert.match(r.error, /System Admin/);
+  assert.match(r.error, /System Admin or Team Admin/);
+});
+
+test('permitMerge: a global target passes for a caller who is Team Admin of at least one team (#2307 AC4)', () => {
+  const r = permitMerge({ needsSystemAdmin: false, teamAdminOf: [], anyTeamAdmin: true }, { systemAdmin: false, isTeamAdminOfAny: () => true });
+  assert.deepStrictEqual(r, { ok: true });
 });
 
 test('permitMerge: team target passes with matching Team Admin', () => {

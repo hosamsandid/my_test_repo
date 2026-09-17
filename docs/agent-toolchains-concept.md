@@ -307,6 +307,7 @@ most of the benefit for a fraction of the machinery. Not pursued.
 |---|---|---|
 | 1 | #1940 | Mechanism: image selectable per Working Environment, curated registry, System-Admin gated, label-based eviction, respawn on change |
 | 2 | #1941 | Registry (`toolchains/<id>/`), `make toolchain-images`, base-contract smoke test, JVM bootstrap variant, demonstrated version-update path |
+| 3 | #2282 Band 1 | Optional `resources: {memoryLimit, memoryRequest, cpuRequest}` on the manifest, sized at spawn time into both spawners' memory limit/requests (podman `resource_limits`, k8s pod `resources`); `fullstack`/`jvm` raised to `4g` and given JVM/Gradle/Maven `MaxRAMPercentage`/`workers.max` caps, since neither JVM-based variant fit the `2g`/`2Gi` fleet default under a Gradle build (docs/agent-toolchains.md field table) |
 | later | — | Further stacks (one Dockerfile each), the airgap variant when an airgapped installation demands it, a build-runner plugin if untrusted builds ever become a requirement |
 
 #1940 lands first: #1941 has nothing to be selected *by* without it.

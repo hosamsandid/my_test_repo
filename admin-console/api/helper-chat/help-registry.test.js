@@ -21,8 +21,12 @@ const {
   baselineProblems,
   loadTopics,
   loadRegistry,
+  loadPluginTopics,
+  pluginTopicsForContext,
   OVERVIEW_ID,
 } = require('./help-registry');
+const fs = require('fs');
+const os = require('os');
 
 // ── front-matter parsing ──────────────────────────────────────────────────────
 
@@ -356,4 +360,58 @@ test('the Overview topic carries the former Getting Started concepts and CTAs', 
 
 test('loadTopics is fail-soft on a missing dir', () => {
   assert.deepEqual(loadTopics(path.join(__dirname, 'does-not-exist')), []);
+});
+
+// ── plugin-contributed topics ────────────────────────────────────────────────
+//
+// An installed plugin may ship `help/*.md` topics in the same format. They are
+// folded into the grounding of the contexts they name as NEIGHBOURS — after the
+// page's own topic and its seeAlso — and never claim a route as its primary
+// topic, so the "This page" face and the corpus budget of every page stay
+// exactly what the built-in topics make them.
+
+const JIRA_TOPIC = { id: 'jira', routes: ['/a', '/plugins/jira/view'], title: 'Jira plugin', summary: 'j', body: 'body jira', askPrompts: ['q'], seeAlso: [] };
+
+test('pluginTopicsForContext: a plugin topic is picked for the routes it names, canonical/alias-aware', () => {
+  const list = [JIRA_TOPIC, { ...JIRA_TOPIC, id: 'other', routes: ['/c'] }];
+  assert.deepEqual(pluginTopicsForContext(list, '/a').map((t) => t.id), ['jira']);
+  // a dynamic child route resolves to its canonical route
+  assert.deepEqual(pluginTopicsForContext(list, '/plugins/jira/view').map((t) => t.id), ['jira']);
+  assert.deepEqual(pluginTopicsForContext(list, '/b'), []);
+  assert.deepEqual(pluginTopicsForContext([], '/a'), []);
+  assert.deepEqual(pluginTopicsForContext(null, '/a'), []);
+});
+
+test('a plugin topic never becomes the primary topic of a route it names', () => {
+  const reg = buildRegistry(scopedRegistry().all, [JIRA_TOPIC]);
+  assert.equal(reg.topicForRoute('/a').id, 'a');
+  // …even for a route no built-in topic claims: the panel keeps its Overview fallback
+  assert.equal(reg.topicForRoute('/plugins/jira/view'), null);
+});
+
+test('contextTopics appends the matching plugin topics after the page topic and its neighbours', () => {
+  const reg = buildRegistry(scopedRegistry().all, [JIRA_TOPIC]);
+  assert.deepEqual(contextTopics(reg, '/a').map((t) => t.id), ['a', 'b', 'jira']);
+  assert.deepEqual(contextTopics(reg, '/c').map((t) => t.id), ['c']);
+  assert.match(foldTopicsForContext(reg, '/a'), /body jira/);
+  assert.doesNotMatch(foldTopicsForContext(reg, '/c'), /body jira/);
+});
+
+test('groundingContexts covers the routes only a plugin topic names, so the budget sweep sees them', () => {
+  const reg = buildRegistry(scopedRegistry().all, [JIRA_TOPIC]);
+  assert.ok(groundingContexts(reg).includes('/plugins/jira/view'));
+});
+
+test('loadPluginTopics reads <dir>/<plugin>/help/*.md, tags the plugin id, and is fail-soft', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-plugin-help-'));
+  fs.mkdirSync(path.join(dir, 'jira', 'help'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'echo'), { recursive: true }); // no help dir → nothing
+  fs.mkdirSync(path.join(dir, '_credentials'), { recursive: true }); // not a plugin
+  fs.writeFileSync(path.join(dir, 'jira', 'help', 'jira.md'), SAMPLE.replace('id: agents', 'id: jira'));
+  fs.writeFileSync(path.join(dir, 'jira', 'help', 'broken.md'), 'no front-matter here');
+  fs.writeFileSync(path.join(dir, 'jira', 'help', 'notes.txt'), 'ignored');
+  const topics = loadPluginTopics(dir);
+  assert.deepEqual(topics.map((t) => [t.id, t.pluginId]), [['jira', 'jira']]);
+  assert.deepEqual(topics[0].routes, ['/agents', '/agents/new']);
+  assert.deepEqual(loadPluginTopics(path.join(dir, 'missing')), []);
 });

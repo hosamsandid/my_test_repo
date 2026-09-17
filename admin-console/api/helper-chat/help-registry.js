@@ -145,8 +145,9 @@ function parseTopic(raw, fallbackId) {
 
 // Build the resolver surface from a list of parsed topics. Pure — the same
 // object powers the endpoint (real topics) and the unit tests (fixture topics).
-function buildRegistry(topics) {
+function buildRegistry(topics, pluginTopics = []) {
   const list = (topics || []).filter(Boolean);
+  const plugins = (pluginTopics || []).filter(Boolean);
   const byId = new Map(list.map((t) => [t.id, t]));
   const byRoute = new Map();
   for (const t of list) {
@@ -192,6 +193,9 @@ function buildRegistry(topics) {
 
   const registry = {
     all: list,
+    // Plugin-contributed topics (see loadPluginTopics): grounding neighbours
+    // only — deliberately NOT in byRoute, so they never answer a page.
+    pluginTopics: plugins,
     byId,
     overview,
     topicForRoute,
@@ -251,7 +255,59 @@ function contextTopics(registry, context) {
     const neighbour = registry.topicForRoute(to);
     if (neighbour && !picked.includes(neighbour)) picked.push(neighbour);
   }
+  for (const t of pluginTopicsForContext(registry.pluginTopics, context)) {
+    if (!picked.includes(t)) picked.push(t);
+  }
   return picked;
+}
+
+// ── plugin-contributed topics ────────────────────────────────────────────────
+//
+// An installed plugin may ship `help/*.md` topics in the built-in format (the
+// Jira plugin explains its events and payload fields there). The platform's own
+// corpus cannot carry them: it is vocabulary-blind by design (jira-plugin-plan
+// D5) and budget-bound (SYSTEM_PROMPT_CHAR_LIMIT — every always-on doc costs on
+// every page). So a plugin topic rides along ONLY on the contexts it names, as a
+// neighbour folded after the page's own topic and its seeAlso, and never claims
+// a route as its primary topic — the "This page" face, the coverage ratchet and
+// every other page's budget stay exactly what the built-in topics make them.
+// Uninstalling the plugin removes its directory, and with it the topic.
+
+// The plugin topics that name this context, matched with the same
+// overlay → route → canonical-route walk the primary resolution uses.
+function pluginTopicsForContext(pluginTopics, context) {
+  const list = (pluginTopics || []).filter(Boolean);
+  if (!list.length) return [];
+  const wanted = new Set();
+  for (const key of helpContextKeys(context)) {
+    wanted.add(key);
+    const alias = contextAlias(key);
+    if (alias) wanted.add(alias);
+    const canon = canonicalRoute(key);
+    if (canon) wanted.add(canon);
+  }
+  return list.filter((t) => (t.routes || []).some((r) => wanted.has(r)));
+}
+
+// Read every installed plugin's `help/*.md` under the operator registry
+// (`/workspace/plugins/<id>/help/`). Fail-soft like loadTopics: a missing
+// registry, a plugin without help, or one broken file never takes the chat down.
+// `_`-prefixed entries are registry bookkeeping (`_secret`, `_credentials`),
+// not plugins. Each topic is tagged with its `pluginId`.
+function loadPluginTopics(pluginsDir) {
+  let ids;
+  try {
+    ids = fs.readdirSync(pluginsDir).filter((d) => !d.startsWith('_') && !d.startsWith('.'));
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const pluginId of ids.sort()) {
+    for (const t of loadTopics(path.join(pluginsDir, pluginId, 'help'))) {
+      out.push({ ...t, pluginId });
+    }
+  }
+  return out;
 }
 
 // The grounding block for one help context (the string corpus.js splices in).
@@ -265,7 +321,7 @@ function foldTopicsForContext(registry, context) {
 // instead of the hypothetical all-topics fold nothing sends any more.
 function groundingContexts(registry) {
   const out = [null];
-  for (const t of registry.all || []) {
+  for (const t of [...(registry.all || []), ...(registry.pluginTopics || [])]) {
     for (const key of t.routes || []) if (!out.includes(key)) out.push(key);
   }
   return out;
@@ -377,4 +433,6 @@ module.exports = {
   baselineProblems,
   loadTopics,
   loadRegistry,
+  loadPluginTopics,
+  pluginTopicsForContext,
 };

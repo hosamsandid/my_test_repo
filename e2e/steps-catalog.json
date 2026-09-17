@@ -2200,26 +2200,6 @@
       "example": "- action:\n    do: team-config.openTeamByUrl\n    teamId: team-config-demo"
     },
     {
-      "name": "team-config.openTeamFromMenu",
-      "module": "team-config",
-      "description": "Entry point 2: the team row's context menu's \"Team settings…\" entry (`agent-lifecycle-menu.js` `buildTeamMenu`, key `edit-team`) — opened via the always-present (dimmed until hover) kebab, which `RailLifecycleHost.jsx` routes to the same `/chats/<teamId>` navigation as the row click.",
-      "params": [
-        {
-          "name": "teamId",
-          "required": true,
-          "type": "string",
-          "description": "The team's own agent id."
-        },
-        {
-          "name": "label",
-          "required": true,
-          "type": "string",
-          "description": "The team row's rendered label (its display name)."
-        }
-      ],
-      "example": "- action:\n    do: team-config.openTeamFromMenu\n    teamId: team-config-demo\n    label: Team Config Demo"
-    },
-    {
       "name": "team-config.openTeamFromRow",
       "module": "team-config",
       "description": "Entry point 1: click the team's row in the Agent Chat left rail. Clicking it anywhere but its chevron selects the team and opens Settings (AgentList.jsx `handleActivate`), landing on `/chats/<teamId>`.",

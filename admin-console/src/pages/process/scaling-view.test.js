@@ -9,6 +9,9 @@ import {
   msToMinutesText,
   poolBadgeText,
   buildPoolPayload,
+  scalingDraftFromPool,
+  scalingSaveDecision,
+  scalingDraftDirty,
 } from './scaling-view.js';
 
 test('POOL_WORKSPACE_OPTIONS: exactly the three normalizePool workspaces, each with a label', () => {
@@ -106,4 +109,61 @@ test('buildPoolPayload: carries maxInstances, workspace and every set teardown f
 test('buildPoolPayload: omits teardown entirely when no timeout is set', () => {
   const p = buildPoolPayload({ enabled: true, maxInstances: null, workspace: 'none', idleTimeoutMs: null, maxRuntimeMs: null, retainLogsMs: null });
   assert.equal('teardown' in p, false);
+});
+
+/* ── #2295: controlled-draft helpers (no more section-local Save) ────── */
+
+test('scalingDraftFromPool: an absent pool is the disabled/blank draft', () => {
+  assert.deepEqual(scalingDraftFromPool(null), {
+    enabled: false, maxInstancesText: '', workspace: 'git-clean-base',
+    idleText: '', hardText: '', retainText: '',
+  });
+});
+
+test('scalingDraftFromPool: round-trips a persisted pool into editable text fields', () => {
+  const draft = scalingDraftFromPool({
+    enabled: true, maxInstances: 4, workspace: 'input-copy',
+    teardown: { idleTimeoutMs: 1800000, maxRuntimeMs: 7200000, retainLogsMs: 3600000 },
+  });
+  assert.deepEqual(draft, {
+    enabled: true, maxInstancesText: '4', workspace: 'input-copy',
+    idleText: '30', hardText: '120', retainText: '60',
+  });
+});
+
+test('scalingSaveDecision: a parse error blocks the save with no payload', () => {
+  const draft = scalingDraftFromPool(null);
+  const decision = scalingSaveDecision({ ...draft, maxInstancesText: '-1' }, 3);
+  assert.equal(decision.payload, undefined);
+  assert.ok(decision.error);
+});
+
+test('scalingSaveDecision: enabling without a parent wipLimit is blocked with the prerequisite reason', () => {
+  const decision = scalingSaveDecision({ ...scalingDraftFromPool(null), enabled: true }, null);
+  assert.equal(decision.payload, undefined);
+  assert.match(decision.error, /ticket limit/);
+});
+
+test('scalingSaveDecision: a disabled draft never needs the parent wipLimit and clears the field', () => {
+  const decision = scalingSaveDecision(scalingDraftFromPool(null), null);
+  assert.equal(decision.error, null);
+  assert.equal(decision.payload, null);
+});
+
+test('scalingSaveDecision: a valid enabled draft produces buildPoolPayload\'s shape', () => {
+  const draft = { enabled: true, maxInstancesText: '4', workspace: 'input-copy', idleText: '30', hardText: '', retainText: '' };
+  const decision = scalingSaveDecision(draft, 3);
+  assert.equal(decision.error, null);
+  // #2294: the save forces git-clean-base — a rehydrated draft.workspace
+  // (here 'input-copy') must never sneak back into the payload.
+  assert.deepEqual(decision.payload, {
+    enabled: true, maxInstances: 4, workspace: 'git-clean-base', teardown: { idleTimeoutMs: 1800000 },
+  });
+});
+
+test('scalingDraftDirty: false right after deriving the draft from the pool, true after any edit', () => {
+  const pool = { enabled: true, maxInstances: 4, workspace: 'none' };
+  const draft = scalingDraftFromPool(pool);
+  assert.equal(scalingDraftDirty(draft, pool), false);
+  assert.equal(scalingDraftDirty({ ...draft, maxInstancesText: '5' }, pool), true);
 });

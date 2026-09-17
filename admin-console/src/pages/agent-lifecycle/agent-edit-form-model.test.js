@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  hasOwnSkills, buildInitialForm, buildEditSubmit, isFormDirty,
+  hasOwnSkills, buildInitialForm, buildEditSubmit, isFormDirty, poolSectionError,
 } from './agent-edit-form-model.js';
 import { PROMPT_MODES } from '../prompt-mode-view.js';
 
@@ -177,6 +177,53 @@ test('a round trip through the form changes nothing (AC2)', () => {
   assert.deepEqual(body.mcpServersOverride, [{ serverId: 'wiki', credentialId: 'c1' }]);
 });
 
+/* ── Scaling (#2271, folded in by #2295 AC11/AC12) ───────────────────── */
+
+test('poolDraft is derived from the member\'s pool, blank/disabled off-role', () => {
+  const pooled = { ...member, pool: { enabled: true, maxInstances: 4 } };
+  assert.equal(buildInitialForm(pooled).poolDraft.enabled, true);
+  assert.equal(buildInitialForm(pooled).poolDraft.maxInstancesText, '4');
+
+  const standalone = { id: 'a1', role: 'agent', displayName: 'A', pool: { enabled: true } };
+  assert.equal(buildInitialForm(standalone).poolDraft.enabled, false, 'a non-member never reads its pool');
+});
+
+test('a role never sends a Scaling section it does not have', () => {
+  const agent = { id: 'a1', role: 'agent', displayName: 'A' };
+  const body = buildEditSubmit(agent, buildInitialForm(agent));
+  assert.ok(!('pool' in body));
+});
+
+test('an untouched member round-trips its existing pool, workspace forced to git-clean-base (#2294)', () => {
+  // The member's persisted workspace ('none') has no UI to set it and needs a
+  // `workSource` that also has none — #2294 forces every save to git-clean-base
+  // rather than re-persist it. Everything else (maxInstances, teardown) is
+  // round-tripped unchanged when the pool folds into the one Save (#2295).
+  const pooled = { ...member, pool: { enabled: true, maxInstances: 4, workspace: 'none' } };
+  const body = buildEditSubmit(pooled, buildInitialForm(pooled), { parentWipLimit: 3 });
+  assert.deepEqual(body.pool, { enabled: true, maxInstances: 4, workspace: 'git-clean-base' });
+});
+
+test('a member with no pool sends pool: null, not an absent key (clears it if stale)', () => {
+  const body = buildEditSubmit(member, buildInitialForm(member));
+  assert.equal(body.pool, null);
+});
+
+test('poolSectionError is null off-role, and mirrors scalingSaveDecision on a member', () => {
+  const agent = { id: 'a1', role: 'agent', displayName: 'A' };
+  assert.equal(poolSectionError(agent, buildInitialForm(agent)), null);
+
+  const form = { ...buildInitialForm(member), poolDraft: { ...buildInitialForm(member).poolDraft, enabled: true } };
+  assert.match(poolSectionError(member, form, { parentWipLimit: null }), /ticket limit/);
+  assert.equal(poolSectionError(member, form, { parentWipLimit: 3 }), null);
+});
+
+test('buildEditSubmit omits pool (rather than sending garbage) when the draft is invalid', () => {
+  const form = { ...buildInitialForm(member), poolDraft: { ...buildInitialForm(member).poolDraft, enabled: true } };
+  const body = buildEditSubmit(member, form, { parentWipLimit: null });
+  assert.ok(!('pool' in body), 'the real gate is poolSectionError, checked before this is ever called');
+});
+
 /* ── isFormDirty ──────────────────────────────────────────────────── */
 
 test('a freshly derived form is not dirty, and no draft is not dirty', () => {
@@ -197,6 +244,7 @@ test('every batched field is watched — none can be edited unnoticed', () => {
     skillsOverride: ['jcl'],
     inheritMcp: false,
     mcpOverrideText: 'wiki',
+    poolDraft: { ...base.poolDraft, enabled: true },
   };
   for (const [key, value] of Object.entries(edits)) {
     assert.equal(

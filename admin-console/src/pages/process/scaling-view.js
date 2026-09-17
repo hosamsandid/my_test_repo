@@ -109,3 +109,67 @@ export function buildPoolPayload({ enabled, maxInstances, workspace, idleTimeout
     ...(Object.keys(teardown).length ? { teardown } : {}),
   };
 }
+
+/* ── #2295: a controlled draft, so ScalingSection can be embedded without its
+   own Save button — the host (NodeInspector's Details Save / AgentEditForm's
+   Save) owns the moment the PUT actually happens, this module owns the
+   decisions (initial values, validation, dirtiness). One component, two
+   hosts, per #2272 — this is the half of that precedent that used to live
+   inline in ScalingSection's own useState/save(). */
+
+/** The section's editable draft, derived from the persisted `pool` field. */
+export function scalingDraftFromPool(pool) {
+  return {
+    enabled: !!(pool && pool.enabled === true),
+    maxInstancesText: pool && Number.isInteger(pool.maxInstances) ? String(pool.maxInstances) : '',
+    workspace: workspaceValue(pool),
+    idleText: msToMinutesText(pool?.teardown?.idleTimeoutMs),
+    hardText: msToMinutesText(pool?.teardown?.maxRuntimeMs),
+    retainText: msToMinutesText(pool?.teardown?.retainLogsMs),
+  };
+}
+
+/**
+ * Whether a Save may proceed, and with what `pool` body — the exact
+ * validation `ScalingSection`'s own `save()` used to run, extracted so a host
+ * can pre-flight it (block the WHOLE batched save with a stated reason
+ * rather than half-applying, per #2295's edge case) instead of only being
+ * able to disable its own button.
+ *
+ * @returns {{payload: (object|null|undefined), error: (string|null)}}
+ *   `error` set → nothing should be written. Otherwise `payload` is the
+ *   `pool` PUT body (`buildPoolPayload`'s shape, possibly `null` to clear it).
+ */
+export function scalingSaveDecision(draft, parentWipLimit) {
+  const maxInstances = parseMaxInstancesInput(draft.maxInstancesText);
+  const idle = parseMinutesInput(draft.idleText);
+  const hard = parseMinutesInput(draft.hardText);
+  const retain = parseMinutesInput(draft.retainText);
+  const parseError = maxInstances.error || idle.error || hard.error || retain.error;
+  if (parseError) return { payload: undefined, error: parseError };
+  if (draft.enabled) {
+    const prereq = scalingPrerequisite({ parentWipLimit });
+    if (!prereq.ok) return { payload: undefined, error: prereq.reason };
+  }
+  // #2294: never thread a variable `workspace` into the save — the Workspace
+  // dropdown is gone from both hosts (`input-copy`/`none` have no UI to
+  // configure the `pool.workSource` they'd need), so a rehydrated
+  // `draft.workspace` must not sneak back into a PUT. `buildPoolPayload`
+  // defaults an omitted workspace to `git-clean-base` (`normalizePool` parity).
+  return {
+    payload: buildPoolPayload({
+      enabled: draft.enabled,
+      maxInstances: maxInstances.value,
+      idleTimeoutMs: idle.value,
+      maxRuntimeMs: hard.value,
+      retainLogsMs: retain.value,
+    }),
+    error: null,
+  };
+}
+
+/** Has the draft changed from what the persisted `pool` field would produce? */
+export function scalingDraftDirty(draft, pool) {
+  const initial = scalingDraftFromPool(pool);
+  return Object.keys(initial).some((k) => initial[k] !== draft[k]);
+}

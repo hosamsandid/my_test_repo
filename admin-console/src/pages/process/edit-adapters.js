@@ -7,6 +7,7 @@
 // same surface so the UI doesn't branch on mode.
 
 import { apiCall } from '../../hooks/useApi';
+import { PROMPT_MODES } from '../prompt-mode-view.js';
 import { wouldCreateCycle } from './hierarchy-utils';
 import { upsertChannel, removeChannelFrom } from './channel-ops';
 import {
@@ -194,6 +195,23 @@ export const liveOps = {
     apiCall('PUT', `/api/agents/${roleId}`, { parentMemberId: parentId || null }),
   // Process stage band — empty clears (inherits from parent).
   setStage: (roleId, stage) => apiCall('PUT', `/api/agents/${roleId}`, { stage: stage || '' }),
+  // Live agent prompt (#2295) — batched into the Details Save instead of the
+  // live prompt editor's own "Save prompt" button. Two write paths, driven by
+  // one call: a team-member's prompt lives on the agent config itself
+  // (PUT /api/agents/:id), a non-member's in its prompt file
+  // (PUT /api/agents/:id/prompt) — never both for the same agent.
+  setLivePrompt: (roleId, { role, promptMode, text }) => (
+    role === 'member'
+      ? apiCall('PUT', `/api/agents/${roleId}`, {
+        promptMode,
+        systemPrompt: promptMode === PROMPT_MODES.INHERIT ? null : text,
+      })
+      : apiCall('PUT', `/api/agents/${roleId}/prompt`, { content: text })
+  ),
+  // Agent pools (#2271/#2295) — batched into the host's single Save instead
+  // of ScalingSection's own. `pool` is the already-built PUT body
+  // (`scalingSaveDecision`'s payload — `null` clears it).
+  setPool: (roleId, pool) => apiCall('PUT', `/api/agents/${roleId}`, { pool }),
 
   // ── stages (live, #674): the ordered list drives the layered-DAG layout. It
   // lives on the TEAM agent config (role 'team'); members carry a per-agent

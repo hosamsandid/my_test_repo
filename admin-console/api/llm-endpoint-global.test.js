@@ -34,10 +34,25 @@ test('a non-System-Admin is refused publishing OR retracting (AC5, fail closed 4
   assert.equal(ret.status, 403);
 });
 
-test('a subscription (oauth-token) provider can never be made global (edge case, 400)', () => {
+test('a subscription provider is refused global WITHOUT the single-user ack (400)', () => {
   const r = resolveGlobalFlag({ wantGlobal: true, currentGlobal: false, scopeAll: true, isOauth: true });
   assert.equal(r.status, 400);
   assert.equal(r.code, 'global-oauth-unsupported');
+  // hasSingleUserAck: false is the same refusal, made explicit.
+  const r2 = resolveGlobalFlag({ wantGlobal: true, currentGlobal: false, scopeAll: true, isOauth: true, hasSingleUserAck: false });
+  assert.equal(r2.status, 400);
+});
+
+test('the single-user escape hatch: a confirmed subscription MAY be published global', () => {
+  assert.deepEqual(
+    resolveGlobalFlag({ wantGlobal: true, currentGlobal: false, scopeAll: true, isOauth: true, hasSingleUserAck: true }),
+    { global: true },
+  );
+  // Still System-Admin-only — the single-user ack does not grant a non-admin the
+  // publish right, it only lifts the oauth-specific refusal for an admin.
+  const nonAdmin = resolveGlobalFlag({ wantGlobal: true, currentGlobal: false, scopeAll: false, isOauth: true, hasSingleUserAck: true });
+  assert.equal(nonAdmin.status, 403);
+  assert.equal(nonAdmin.code, 'global-system-admin-only');
 });
 
 test('no transition → no gate: a non-admin re-saving an already-global provider is not refused', () => {
@@ -73,6 +88,12 @@ test('switching an already-global provider to oauth (without mentioning global) 
     resolveGlobalFlag({ wantGlobal: undefined, currentGlobal: false, scopeAll: false, isOauth: true }),
     { global: false },
   );
+  // But WITH the single-user ack, an oauth-global record KEEPS the flag on a
+  // no-op save — the escape hatch record stays honest, not auto-dropped.
+  assert.deepEqual(
+    resolveGlobalFlag({ wantGlobal: undefined, currentGlobal: true, scopeAll: false, isOauth: true, hasSingleUserAck: true }),
+    { global: true },
+  );
 });
 
 test('isGlobalProvider requires global === true AND scope === system AND non-oauth (finding 1 — reads the record, not a route invariant)', () => {
@@ -84,6 +105,13 @@ test('isGlobalProvider requires global === true AND scope === system AND non-oau
   // mutable auth-type transition) is NOT global — re-read on every call, so the
   // predicate fails closed even if the stored flag was never cleared.
   assert.equal(isGlobalProvider({ global: true, scope: 'system', authType: 'oauth-token' }), false);
+
+  // The single-user escape hatch: a subscription seat WITH the single-user ack IS
+  // global (runtime-only — assist excludes oauth upstream, not here)...
+  assert.equal(isGlobalProvider({ global: true, scope: 'system', authType: 'oauth-token', complianceAck: { singleUser: true } }), true);
+  // ...but a present-yet-not-single-user ack does not qualify.
+  assert.equal(isGlobalProvider({ global: true, scope: 'system', authType: 'oauth-token', complianceAck: {} }), false);
+  assert.equal(isGlobalProvider({ global: true, scope: 'system', authType: 'oauth-token', complianceAck: { singleUser: false } }), false);
 
   // Finding 1 (related): a { scope: 'team', global: true } record is NOT global —
   // the answer depends on the record, never on the route invariant that publishing

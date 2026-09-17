@@ -258,6 +258,26 @@ function planSkillWrite({ onCollision = 'reject', exists = false, allowExisting 
   return { ok: false, conflict: true };
 }
 
+// Pure decision for how a transfer stamps the destination's manifest (#2315,
+// concept §3.6). A `copy` that OVERWRITES a destination which already carries
+// its OWN version chain must CONTINUE that chain (prev+1) — the same way a plain
+// edit does — never reset to v1, and must snapshot the pre-overwrite state to the
+// archive first (recoverable). A fresh landing, a rename, a reject-to-new-dir, or
+// a destination whose skill.json is corrupt/unreadable all stay on the historic
+// fresh-v1 path. `destExists` = the destination already has content on disk;
+// `destManifestReadable` = its skill.json parsed into a manifest the caller can
+// continue. Returns { archive, continueChain }:
+//   - archive:       snapshot the destination before it is overwritten.
+//   - continueChain: stamp by continuing the destination's own chain (else v1).
+// A corrupt-manifest overwrite still archives (the content is recoverable) but
+// falls back to a fresh v1, exactly as stampManifest already does for a null
+// existing manifest — the transfer never fails on an unparseable destination.
+function planTransferStamp({ onCollision = 'reject', destExists = false, destManifestReadable = false } = {}) {
+  const overwriting = onCollision === 'overwrite' && !!destExists;
+  if (!overwriting) return { archive: false, continueChain: false };
+  return { archive: true, continueChain: !!destManifestReadable };
+}
+
 module.exports = {
   TIERS,
   MODES,
@@ -274,4 +294,5 @@ module.exports = {
   buildTransferOrigin,
   resolveCollisionName,
   planSkillWrite,
+  planTransferStamp,
 };

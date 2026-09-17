@@ -186,6 +186,19 @@ still-governance-level act), provenance carried forward (share/lift semantics pr
 `setTeamSkillActive` — transfers end active by default, never in the historic
 "promoted-but-invisible" dead-end.
 
+**Overwrite onto an existing destination (#2315).** `onCollision: "overwrite"` landing
+on a destination that already carries its OWN version chain (e.g. a "Publish to global"
+onto a global skill already at v5) **continues that chain** — `version = prev + 1`, the
+transfer action appended to the destination's existing bounded history — exactly the way
+a plain edit does (§3.6), never a reset to v1. Before the content is overwritten the
+destination's pre-overwrite state (content + `skill.json` + `provenance.json`) is
+snapshotted to `/workspace/skill-archive/` via the *same* mechanism guarded deletion uses
+(§3.3), so the overwritten version is listed/restorable like any archived deletion. A
+fresh landing (no prior `skill.json`), a `rename`, or a corrupt/unparseable destination
+manifest all keep the historic fresh-v1 stamp (the corrupt case still snapshots first).
+A `move` that also overwrites gets both this destination-side snapshot and the existing
+source-side archive — independent, both land in the archive.
+
 The legacy endpoints become thin delegating wrappers and are removed from the UI:
 `/api/skills/promote` (agent→global bypassing the team tier and provenance — now
 superseded by the engine's own first-class agent→global cell, #2180),

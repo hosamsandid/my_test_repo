@@ -163,6 +163,45 @@ test('import round-trip: forceHistory continues the chain + appends `imported` (
   }
 });
 
+test('transfer overwrite (#2315): re-seeding the destination manifest continues ITS chain, records the action, adopts the new origin', () => {
+  // Reproduce what the transfer endpoint does on an overwrite of an existing
+  // destination: the pre-overwrite manifest is preserved, re-seeded over the
+  // copied-in content, then chain-stamped (forceHistory) with the transfer's
+  // action + origin — never reset to v1.
+  const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-xfer-dest-'));
+  try {
+    // Build the destination's own history up to v5.
+    fs.writeFileSync(path.join(dest, 'SKILL.md'), '---\nname: d\ndescription: d\n---\nbody v1\n');
+    m.stampSkillDir(dest, { by: 'operator:t', action: 'created', now: '2026-01-01T00:00:00Z' });
+    for (const v of [2, 3, 4, 5]) {
+      fs.writeFileSync(path.join(dest, 'SKILL.md'), `---\nname: d\ndescription: d\n---\nbody v${v}\n`);
+      m.stampSkillDir(dest, { by: 'operator:t', action: 'edited', now: `2026-01-0${v}T00:00:00Z` });
+    }
+    const before = m.readManifest(dest);
+    assert.equal(before.version, 5);
+    const histLenBefore = before.history.length;
+
+    // A publisher overwrites the destination content, then the endpoint re-seeds
+    // the preserved manifest and chain-stamps with the transfer action + origin.
+    fs.writeFileSync(path.join(dest, 'SKILL.md'), '---\nname: d\ndescription: d\n---\nincoming publish\n');
+    m.writeManifest(dest, before); // re-seed the preserved destination chain
+    const after = m.stampSkillDir(dest, {
+      by: 'operator:ines', action: 'promoted',
+      origin: { tier: 'agent', agentId: 'cobol-1', sourceVersion: 2, sourceHash: 'abc123' },
+      forceHistory: true, now: '2026-02-01T00:00:00Z',
+    });
+
+    assert.equal(after.version, 6, 'version continues the destination chain (prev+1), never a reset to 1');
+    assert.equal(after.history[0].action, 'promoted', 'newest entry records the transfer action');
+    assert.equal(after.history[0].version, 6);
+    assert.equal(after.history.length, histLenBefore + 1, 'the new entry is APPENDED to the existing history, not replacing it');
+    assert.equal(after.history[after.history.length - 1].version, 1, 'the original v1 entry is still present');
+    assert.deepEqual(after.origin, { tier: 'agent', agentId: 'cobol-1', sourceVersion: 2, sourceHash: 'abc123' });
+  } finally {
+    fs.rmSync(dest, { recursive: true, force: true });
+  }
+});
+
 test('ACTIONS is the closed set from the concept', () => {
   assert.deepEqual(m.ACTIONS, [
     'created', 'edited', 'imported', 'adopted', 'promoted',

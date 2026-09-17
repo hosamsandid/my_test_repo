@@ -10262,9 +10262,14 @@ function stampSkillCopy(dstDir, opts) {
 //   skillMd     optional SKILL.md content (a trailing newline is ensured).
 //   provenance  optional provenance.json object — written AFTER any copyFrom, so
 //               it overrides the copied-along provenance (share/lift/promote).
-//   stamp       optional { mode:'copy'|'chain', name, by, action, origin?, note? }:
+//   stamp       optional { mode:'copy'|'chain', name, by, action, origin?, note?,
+//               continueFrom? }:
 //               'copy' → stampSkillCopy (fresh v1 chain, discards dragged manifest);
 //               'chain' → stampSkill (continues the target's chain — the extend case).
+//               continueFrom (a manifest object, #2315): a 'copy' that OVERWRITES a
+//               destination which already had its own version chain re-seeds THAT
+//               manifest and chain-continues it (prev+1) instead of resetting to v1,
+//               so the destination's history is never clobbered by an inbound copy.
 // Returns { ok: true } or { error } (the content write failed — the caller 500s;
 // stamping is best-effort and never surfaced as an error).
 function commitSkillWrite({ destDir, overwrite, copyFrom, skillMd, provenance, stamp }) {
@@ -10303,8 +10308,24 @@ function commitSkillWrite({ destDir, overwrite, copyFrom, skillMd, provenance, s
     const s = { name: stamp.name, by: stamp.by, action: stamp.action };
     if (stamp.origin !== undefined) s.origin = stamp.origin;
     if (stamp.note !== undefined) s.note = stamp.note;
-    if (stamp.mode === 'chain') stampSkill(destDir, s);
-    else stampSkillCopy(destDir, s);
+    if (stamp.mode === 'chain') {
+      stampSkill(destDir, s);
+    } else if (stamp.continueFrom && typeof stamp.continueFrom === 'object') {
+      // #2315: this 'copy' overwrote a destination that already carried its own
+      // version chain. Re-seed the preserved destination manifest over the
+      // source's copied-along skill.json, then chain-stamp exactly as an edit
+      // does so the version continues (prev+1) rather than resetting to v1.
+      // forceHistory records the transfer action even when the incoming content
+      // is byte-identical (nothing to bump, but the event is still logged). If
+      // re-seeding fails, fall back to a fresh v1 copy stamp — never leave the
+      // source's dragged-along manifest in place.
+      let seeded = false;
+      try { skillManifest.writeManifest(destDir, stamp.continueFrom); seeded = true; } catch { /* seeding failed */ }
+      if (seeded) stampSkill(destDir, { ...s, forceHistory: true });
+      else stampSkillCopy(destDir, s);
+    } else {
+      stampSkillCopy(destDir, s);
+    }
   }
   return { ok: true };
 }
@@ -11801,10 +11822,32 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
   // 6. Capture source identity BEFORE the copy (for the origin stamp).
   const srcId = skillSourceIdentity(src.dir);
 
+  // 6b. Overwrite-continuation (#2315). When this transfer OVERWRITES a
+  //     destination that already carries its OWN version history — e.g. a
+  //     "Publish to global" landing on a global skill already at v5 — snapshot
+  //     that pre-overwrite state to the shared skill-archive (the SAME mechanism
+  //     guarded deletion uses, so it is discoverable/restorable the same way) and
+  //     continue the destination's own chain (prev+1) instead of resetting to v1.
+  //     A fresh landing (no prior skill.json), a rename, or a corrupt/unparseable
+  //     destination manifest all fall back to the historic fresh-v1 stamp — the
+  //     corrupt case still snapshots (its content is recoverable), same as
+  //     stampManifest already does for a null/unreadable existing manifest.
+  const destExists = fs.existsSync(path.join(dst.dir, 'SKILL.md'));
+  const destManifest = destExists ? skillManifest.readManifest(dst.dir) : null;
+  const stampPlan = skillTransfer.planTransferStamp({
+    onCollision: plan.onCollision, destExists, destManifestReadable: !!destManifest,
+  });
+  let destArchived = null;
+  if (stampPlan.archive) {
+    destArchived = archiveDeletedSkill(dst.dir, plan.to, destName, skillSourceIdentity(dst.dir), req);
+  }
+  const continueFrom = stampPlan.continueChain ? destManifest : null;
+
   // 7+8. Copy the whole dir (provenance.json rides along via cpSync) and stamp
   //      the target's skill.json — a fresh v1 chain recording the transfer action
-  //      (adopted|promoted|lifted|shared|moved) and where it came from. Both go
-  //      through the shared file-write core (#639).
+  //      (adopted|promoted|lifted|shared|moved) and where it came from, or (on an
+  //      overwrite of existing content) a continuation of the destination's own
+  //      chain (#2315). Both go through the shared file-write core (#639).
   const wrote = commitSkillWrite({
     destDir: dst.dir,
     overwrite: plan.onCollision === 'overwrite',
@@ -11817,6 +11860,7 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
         agentId: plan.from.tier === 'agent' ? plan.from.agentId : undefined,
         sourceVersion: srcId.sourceVersion, sourceHash: srcId.sourceHash,
       }),
+      continueFrom: continueFrom || undefined,
     },
   });
   if (wrote.error) return res.status(500).json({ error: `Failed to copy skill: ${wrote.error}` });
@@ -11861,6 +11905,8 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
     renamed: destName !== plan.name,
     retiredSource: plan.retireSource,
     archived: archived || undefined,
+    overwrote: destExists && plan.onCollision === 'overwrite' ? true : undefined,
+    destArchived: destArchived ? destArchived.id : undefined,
     activate: plan.activate,
     activation: activation || undefined,
   });

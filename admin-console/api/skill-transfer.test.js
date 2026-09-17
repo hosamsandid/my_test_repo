@@ -343,3 +343,40 @@ test('planSkillWrite: allowExisting (extend) always writes in place, never a con
 test('planSkillWrite: defaults (no args) treat the destination as free + reject-mode', () => {
   assert.deepEqual(T.planSkillWrite(), { ok: true, overwrite: false });
 });
+
+/* ─── planTransferStamp (#2315 overwrite-continuation) ───────────────────── */
+
+test('planTransferStamp: overwriting an existing destination with a readable manifest continues its chain + archives', () => {
+  assert.deepEqual(
+    T.planTransferStamp({ onCollision: 'overwrite', destExists: true, destManifestReadable: true }),
+    { archive: true, continueChain: true },
+  );
+});
+
+test('planTransferStamp: a fresh landing (no prior content) stays on the fresh-v1 path, no archive', () => {
+  assert.deepEqual(
+    T.planTransferStamp({ onCollision: 'overwrite', destExists: false, destManifestReadable: false }),
+    { archive: false, continueChain: false },
+  );
+});
+
+test('planTransferStamp: reject / rename never overwrite — always fresh v1, no archive', () => {
+  for (const onCollision of ['reject', 'rename']) {
+    assert.deepEqual(
+      T.planTransferStamp({ onCollision, destExists: true, destManifestReadable: true }),
+      { archive: false, continueChain: false },
+      `${onCollision} must not archive or continue a chain`,
+    );
+  }
+});
+
+test('planTransferStamp: a corrupt/unreadable destination manifest still archives but falls back to fresh v1', () => {
+  assert.deepEqual(
+    T.planTransferStamp({ onCollision: 'overwrite', destExists: true, destManifestReadable: false }),
+    { archive: true, continueChain: false },
+  );
+});
+
+test('planTransferStamp: defaults (no args) treat the destination as free — no archive, no continuation', () => {
+  assert.deepEqual(T.planTransferStamp(), { archive: false, continueChain: false });
+});

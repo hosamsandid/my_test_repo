@@ -23,7 +23,10 @@ async function materializeTeam(ctx, { teamId, teamName, envId, roles }) {
     // member) legitimately takes longer than the default request timeout on a
     // cold stack; the per-test timeout remains the real ceiling.
     timeout: 120_000,
-    data: { teamId, teamName: teamName || teamId, environmentId: envId, roles },
+    // acknowledgeNoToken: POST /api/teams re-runs the #2323 repo-backed-env
+    // token guard even for a reused env, and the fixture env is token-less by
+    // design (reference-only). Ignored when the env carries a token.
+    data: { teamId, teamName: teamName || teamId, environmentId: envId, roles, acknowledgeNoToken: true },
   });
   expect(
     res.ok(),
@@ -53,7 +56,9 @@ async function materializeTeam(ctx, { teamId, teamName, envId, roles }) {
 async function materializeBundleTeam(ctx, { teamId, teamName, envId, bundle }) {
   const res = await ctx.request.post('/api/teams', {
     timeout: 180_000,
-    data: { teamId, teamName: teamName || teamId, environmentId: envId, processTemplate: bundle },
+    // acknowledgeNoToken: see materializeTeam — the #2323 guard re-fires on
+    // POST /api/teams; the fixture env is reference-only. No-op with a token.
+    data: { teamId, teamName: teamName || teamId, environmentId: envId, processTemplate: bundle, acknowledgeNoToken: true },
   });
   expect(
     res.ok(),
@@ -76,7 +81,9 @@ async function materializeCoreSdlcTeam(ctx, { teamId, teamName, envId, templateI
   const bundle = await tmpl.json();
   const res = await ctx.request.post('/api/teams', {
     timeout: 180_000,
-    data: { teamId, teamName: teamName || teamId, environmentId: envId, processTemplate: bundle },
+    // acknowledgeNoToken: see materializeTeam — the #2323 guard re-fires on
+    // POST /api/teams; the fixture env is reference-only. No-op with a token.
+    data: { teamId, teamName: teamName || teamId, environmentId: envId, processTemplate: bundle, acknowledgeNoToken: true },
   });
   expect(
     res.ok(),

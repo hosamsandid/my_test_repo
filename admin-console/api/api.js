@@ -16253,8 +16253,11 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       res.write(JSON.stringify(ev) + '\n');
     } catch { /* socket gone */ }
   }
-  function fail(status, errorMsg) {
-    emit({ type: 'error', status, error: errorMsg });
+  function fail(status, errorMsg, code) {
+    // `code` (optional) lets the client branch on a structured failure rather
+    // than string-matching the message — e.g. #2323's github_token_required, to
+    // offer the reference-only opt-out instead of a dead-end error card.
+    emit({ type: 'error', status, error: errorMsg, ...(code ? { code } : {}) });
     if (!aborted) res.end();
   }
 
@@ -16406,7 +16409,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       githubTokenId,
       acknowledgeNoToken: body.acknowledgeNoToken,
     });
-    if (!need.ok) return fail(need.status, need.error);
+    if (!need.ok) return fail(need.status, need.error, need.code);
   }
   // Repo-less needs no PAT — mirror of the non-streaming handler (#2081 AC6).
   if (!environmentId && !repoLess) {

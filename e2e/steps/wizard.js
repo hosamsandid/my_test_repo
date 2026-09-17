@@ -233,7 +233,7 @@ async function expectReviewStep(ctx, { teamName, teamId }) {
 // network layer, buffer the full NDJSON body exactly once, forward the identical
 // bytes to the wizard, and keep our own copy to parse. This is pure test-harness
 // plumbing — no product code changes.
-async function submitAndCaptureProgress(ctx) {
+async function submitAndCaptureProgress(ctx, { referenceOnly = false } = {}) {
   const { page } = ctx;
 
   let streamBody = null;
@@ -245,12 +245,25 @@ async function submitAndCaptureProgress(ctx) {
     // timeout:0 → no per-fetch cap; the per-test timeout (playwright.config.js)
     // is the real ceiling for how long materialisation may take.
     const response = await route.fetch({ timeout: 0 });
+    // With a reference-only env the FIRST POST returns a 409 (no NDJSON); the
+    // opt-out click below re-POSTs with acknowledgeNoToken and THAT streams. We
+    // buffer whichever body arrives, so `streamBody` ends up holding the final
+    // (successful) NDJSON regardless of the leading 409.
     streamBody = await response.text();
     await route.fulfill({ response, body: streamBody });
   });
 
   try {
     await page.getByRole('button', CREATE).click();
+
+    // #2323: a repo-backed env with no GitHub token is blocked; the wizard
+    // offers a reference-only opt-out instead of a dead-end error. Confirm it so
+    // the team materialises (a token-bearing env never shows it — hence opt-in).
+    if (referenceOnly) {
+      const optOut = page.getByRole('button', { name: 'Save anyway (reference-only)', exact: true });
+      await expect(optOut).toBeVisible({ timeout: 30_000 });
+      await optOut.click();
+    }
 
     // Because the interception buffers the whole stream, the wizard receives
     // `plan` and `complete` in one React batch, so the transient "Materializing
@@ -285,16 +298,19 @@ async function submitAndCaptureProgress(ctx) {
  * @param {string} params.teamId - Team slug id the complete event must carry.
  * @param {string[]} [params.roleIds] - Role ids to derive member ids (`<teamId>-<roleId>`).
  * @param {string[]} [params.memberIds] - Explicit member ids (alternative to roleIds).
+ * @param {boolean} [params.referenceOnly=false] - When the env is repo-backed but
+ *   token-less (#2323), confirm the wizard's reference-only opt-out on submit.
  * @example
  * - action:
  *     do: wizard.createTeamAndExpectProgress
  *     teamId: agentic-demos
  *     roleIds: [business-analyst, developer, code-reviewer, reworker]
+ *     referenceOnly: true
  */
 async function createTeamAndExpectProgress(ctx, params) {
   const { teamId } = params;
   const memberIds = resolveMemberIds(params);
-  const events = await submitAndCaptureProgress(ctx);
+  const events = await submitAndCaptureProgress(ctx, { referenceOnly: params.referenceOnly === true });
   const byType = (t) => events.filter((e) => e.type === t);
 
   const plan = byType('plan');

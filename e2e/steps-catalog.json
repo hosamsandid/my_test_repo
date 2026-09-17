@@ -90,7 +90,7 @@
     {
       "name": "access.closeShare",
       "module": "access",
-      "description": "Close the Share panel.",
+      "description": "Leave the Share panel. There is no SidePanel to dismiss anymore — the panel is a configuration tab — so this returns to the chat root and confirms the panel is gone, which is the same observable end state the old Close button produced.",
       "params": [
         {
           "name": "teamId",
@@ -332,7 +332,7 @@
     {
       "name": "access.openShare",
       "module": "access",
-      "description": "Open the team's Share… panel from the rail's group context menu. The kebab is a `<span role=\"button\">` labelled `Team actions for <label>`, where <label> is the team's DISPLAY NAME (rail-lifecycle.js: `displayName || id`), and the portaled menu carries the same accessible name. The acting identity sees only the one shared team in its rail here, so match the stable `Team actions for ` prefix rather than the display name. The menu closes on any scroll, so nothing scrolls in between.",
+      "description": "Open the team's Share panel from the rail's group context menu. The kebab is a `<span role=\"button\">` labelled `Team actions for <label>`, where <label> is the team's DISPLAY NAME (rail-lifecycle.js: `displayName || id`), and the portaled menu carries the same accessible name. The acting identity sees only the one shared team in its rail here, so match the stable `Team actions for ` prefix rather than the display name. The menu closes on any scroll, so nothing scrolls in between. \"Share…\" now ROUTES to the team's Sharing configuration tab rather than opening a SidePanel, so this waits for that tab's list heading to appear (which only happens after the navigation and the panel's own fetch).",
       "params": [
         {
           "name": "teamId",
@@ -2200,26 +2200,6 @@
       "example": "- action:\n    do: team-config.openTeamByUrl\n    teamId: team-config-demo"
     },
     {
-      "name": "team-config.openTeamFromMenu",
-      "module": "team-config",
-      "description": "Entry point 2: the team row's context menu's \"Team settings…\" entry (`agent-lifecycle-menu.js` `buildTeamMenu`, key `edit-team`) — opened via the always-present (dimmed until hover) kebab, which `RailLifecycleHost.jsx` routes to the same `/chats/<teamId>` navigation as the row click.",
-      "params": [
-        {
-          "name": "teamId",
-          "required": true,
-          "type": "string",
-          "description": "The team's own agent id."
-        },
-        {
-          "name": "label",
-          "required": true,
-          "type": "string",
-          "description": "The team row's rendered label (its display name)."
-        }
-      ],
-      "example": "- action:\n    do: team-config.openTeamFromMenu\n    teamId: team-config-demo\n    label: Team Config Demo"
-    },
-    {
       "name": "team-config.openTeamFromRow",
       "module": "team-config",
       "description": "Entry point 1: click the team's row in the Agent Chat left rail. Clicking it anywhere but its chevron selects the team and opens Settings (AgentList.jsx `handleActivate`), landing on `/chats/<teamId>`.",
@@ -2750,9 +2730,16 @@
           "required": false,
           "type": "string[]",
           "description": "Explicit member ids (alternative to roleIds)."
+        },
+        {
+          "name": "referenceOnly",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "description": "When the env is repo-backed but"
         }
       ],
-      "example": "- action:\n    do: wizard.createTeamAndExpectProgress\n    teamId: agentic-demos\n    roleIds: [business-analyst, developer, code-reviewer, reworker]"
+      "example": "- action:\n    do: wizard.createTeamAndExpectProgress\n    teamId: agentic-demos\n    roleIds: [business-analyst, developer, code-reviewer, reworker]\n    referenceOnly: true"
     },
     {
       "name": "wizard.expectEnvironmentStep",
@@ -3123,7 +3110,7 @@
     },
     {
       "name": "teamEnv",
-      "description": "teamEnv: the Team-Setup pilot's precondition. Seeds a credential-less Working Environment pointing at the in-stack git remote, so the wizard can materialise a team with zero external dependencies. Because the journey uses FIXED ids (for screenshot determinism, §7), setup first tears down any leftover team+env from a crashed prior run, and teardown removes the team this journey creates plus the fixture env — one deterministic, idempotent surface.",
+      "description": "teamEnv: the Team-Setup pilot's precondition. Seeds a credential-less Working Environment pointing at the in-stack git remote, so the wizard can materialise a team with zero external dependencies. The env is token-less on purpose: the journey drives the REAL wizard UI (POST /api/teams/stream), which enforces the #2323 repo-backed-env token guard, and the journey's submit step confirms the reference-only opt-out the wizard now offers (referenceOnly). Because the journey uses FIXED ids (for screenshot determinism, §7), setup first tears down any leftover team+env from a crashed prior run, and teardown removes the team this journey creates plus the fixture env — one deterministic, idempotent surface.",
       "params": [
         {
           "name": "teamId",

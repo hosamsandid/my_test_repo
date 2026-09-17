@@ -18,10 +18,14 @@ const identity = require('../steps/identity');
 /**
  * teamEnv: the Team-Setup pilot's precondition. Seeds a credential-less Working
  * Environment pointing at the in-stack git remote, so the wizard can materialise
- * a team with zero external dependencies. Because the journey uses FIXED ids
- * (for screenshot determinism, §7), setup first tears down any leftover team+env
- * from a crashed prior run, and teardown removes the team this journey creates
- * plus the fixture env — one deterministic, idempotent surface.
+ * a team with zero external dependencies. The env is token-less on purpose: the
+ * journey drives the REAL wizard UI (POST /api/teams/stream), which enforces the
+ * #2323 repo-backed-env token guard, and the journey's submit step confirms the
+ * reference-only opt-out the wizard now offers (referenceOnly). Because the
+ * journey uses FIXED ids (for screenshot determinism, §7), setup first tears
+ * down any leftover team+env from a crashed prior run, and teardown removes the
+ * team this journey creates plus the fixture env — one deterministic, idempotent
+ * surface.
  *
  * @param {string} params.teamId - Team slug id the journey will create (pre-cleaned).
  * @param {string} params.envId - Fixture environment id to create.

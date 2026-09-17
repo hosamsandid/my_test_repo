@@ -488,8 +488,16 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
             aria-label="Agent toolchain"
             style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 'var(--eb-space-3)' }}
           >
+            {/* The default card carries the same title + description + badge
+                shape as a registry row so it doesn't read as an empty/disabled
+                option next to the fleshed-out toolchains. Its facts are
+                hard-coded (there is no registry entry): baseline versions track
+                the FROM line of agent-image/Dockerfile — keep them in sync. */}
             <ToolchainCard
-              label={`— default agent image${toolchainData?.defaultImage ? ` (${toolchainData.defaultImage})` : ''} —`}
+              label="Default agent image — Python + Node"
+              hint={`The baseline every environment starts from unless it needs a language build stack. Carries Python and Node plus git, the GitHub CLI and the Claude Code CLI — enough for scripting, web/JS work and any repository that doesn't compile a JVM or other language. No JDK or Maven: pick a toolchain here if an agent has to build one.${toolchainData?.defaultImage ? ` Image: ${toolchainData.defaultImage}.` : ''}`}
+              platforms={['podman', 'kubernetes']}
+              baseline="python 3.12, node 20"
               selected={!form.toolchainId}
               available
               onSelect={() => update('toolchainId', '')}

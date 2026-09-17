@@ -364,19 +364,39 @@ function assistSelectableEndpoint(scope, ep) {
   return c.assignedTeamIds.some(t => scope.teamIds.has(t));
 }
 
-// May the caller edit/delete THIS existing credential? A Team Admin may manage
-// team-scoped credentials of a team they administer, never system-scoped ones
-// (AC5); System Admins may manage all.
+// May the caller edit (rename / rotate / reassign) THIS existing credential? A
+// Team Admin may manage team-scoped credentials of a team they administer, never
+// system-scoped ones (AC5); System Admins may manage all. DELETION is a separate
+// gate (canDeleteCredential) — it alone carries a personal-tier admin break-glass.
 function canManageCredential(scope, cred) {
   if (!scope) return false;
   const c = normalizeCredential(cred);
   // Personal tier first, ahead of the `scope.all` shortcut: only the owner may
-  // rename/rotate/delete their own personal credential; `scope.all` grants no
-  // access to it (#1567 AC4 / D2).
+  // rename/rotate their own personal credential; `scope.all` grants no access to
+  // it (#1567 AC4 / D2).
   if (c.scope === 'personal') return ownsPersonalCredential(scope, c);
   if (scope.all) return true;
   if (c.scope === 'system') return false;
   return canManageTeam(scope, c.teamId);
+}
+
+// May the caller DELETE this credential? The ONE break-glass a System Admin has
+// over a PERSONAL resource: they may delete it (offboarding / governance hygiene)
+// but still never SEE its secret or USE it — visibleCredential and
+// canManageCredential stay owner-only on the personal tier (#1567 D2 / §2.2). For
+// every non-personal tier this is exactly canManageCredential.
+//
+// The `scope.all` here sits ON the personal branch (owner OR admin), unlike the
+// other personal predicates the D5 census pins as bypass-free — this is the
+// deliberate, decided exception (unified access model §6 / §12.7). It grants no
+// DISCOVERY: an admin still cannot list a foreign personal credential to find its
+// id (visibleCredential is unchanged), only remove one whose id they already hold
+// (via the governance Resources view, a later PR).
+function canDeleteCredential(scope, cred) {
+  if (!scope) return false;
+  const c = normalizeCredential(cred);
+  if (c.scope === 'personal') return ownsPersonalCredential(scope, c) || !!scope.all;
+  return canManageCredential(scope, c);
 }
 
 // May the caller create a credential with the requested ownership? System-scoped
@@ -663,6 +683,7 @@ module.exports = {
   visibleCredential,
   assistSelectableEndpoint,
   canManageCredential,
+  canDeleteCredential,
   canCreateCredential,
   canReassignCredential,
   credentialVisibleToTeam,

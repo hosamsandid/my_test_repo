@@ -268,6 +268,10 @@ the floor is any team the caller administers, not System-Admin-only).
   `knowledgePromotionGates`): `auto` = a pool edit fans out to member workspaces
   immediately; `review` = the Skills surface shows "update available" until confirmed.
   Conservative default keeps teams in control of what enters their agents' context.
+  A **transfer** (Publish / Promote / Lift / Share / Adopt via `POST /api/skills/transfer`)
+  changes a pool skill's effective content through the same write path as a plain
+  edit, so it fans out identically for its `team`/`global` destination tier — a
+  `move`'s source retirement is unrelated to the destination-side resync (#2316).
 - Consistency fixes folded in: `install` also writes the grant (so a re-seed keeps the
   skill); `extend` offers the same "Activate immediately" default as promotion.
 

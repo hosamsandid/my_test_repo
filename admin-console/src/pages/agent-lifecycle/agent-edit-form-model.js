@@ -17,6 +17,7 @@
  * Nothing about the derivation changed in the move.
  */
 import { PROMPT_MODES, resolvePromptMode } from '../prompt-mode-view.js';
+import { scalingDraftFromPool, scalingSaveDecision } from '../process/scaling-view.js';
 
 /**
  * Roles whose skills live on the agent construct itself, rather than being
@@ -74,6 +75,11 @@ export function buildInitialForm(agent) {
     skillsOverride: Array.isArray(a.skillsOverride) ? a.skillsOverride : [],
     inheritMcp: isMember && !Array.isArray(a.mcpServersOverride),
     mcpOverrideText,
+    // Scaling (#2271, folded into this form's one Save by #2295 AC11/AC12 —
+    // ScalingSection is now a controlled draft, not a second Save button).
+    // Only a team-member carries `pool`; a blank/disabled draft off-role is
+    // harmless (never submitted — see `buildEditSubmit`).
+    poolDraft: scalingDraftFromPool(isMember ? a.pool : null),
   };
 }
 
@@ -87,9 +93,16 @@ export function buildInitialForm(agent) {
  *
  * @param {object} agent  the agent config the form was opened on
  * @param {object} form   current form state
+ * @param {object} [opts]
+ * @param {?number} opts.parentWipLimit  the parent team's wipLimit, needed to
+ *   validate an enabled `poolDraft` (`scalingSaveDecision`'s one gate) —
+ *   callers must check `poolSectionError` first and never call this with an
+ *   invalid draft (#2295 AC11: Scaling folds into this one Save, so an
+ *   invalid Scaling input has to block the save the same way it used to
+ *   block ScalingSection's own button).
  * @returns {object} request body
  */
-export function buildEditSubmit(agent, form) {
+export function buildEditSubmit(agent, form, opts = {}) {
   const a = agent || {};
   // `briefingsPath` is deliberately absent since #1964: the field is gone from
   // the form and #1962 removed it from the config, so sending it would be this
@@ -126,13 +139,43 @@ export function buildEditSubmit(agent, form) {
             const [serverId, credentialId] = line.split(':').map(p => p.trim());
             return { serverId, credentialId: credentialId || null };
           });
+    // Scaling (#2271/#2295 AC11) — the section's own component no longer PUTs
+    // for itself; its draft folds into this same body. A caller that skipped
+    // `poolSectionError` and calls this with an invalid draft gets `pool`
+    // omitted rather than a half-formed value (defensive; the real gate is
+    // `poolSectionError`, checked before this is ever called).
+    const decision = scalingSaveDecision(form.poolDraft, opts.parentWipLimit);
+    if (!decision.error) submit.pool = decision.payload;
   }
   return submit;
+}
+
+/**
+ * Whether the form's Scaling draft may be saved right now, and why not if
+ * not — the same gate `ScalingSection`'s own button used to enforce, now
+ * checked by the host before it calls `buildEditSubmit` (#2295 AC11: an
+ * invalid Scaling input blocks the WHOLE Save, not just its own section).
+ *
+ * @returns {?string} a reason, or `null` when the draft may be saved.
+ */
+export function poolSectionError(agent, form, opts = {}) {
+  if ((agent && agent.role) !== 'team-member') return null;
+  return scalingSaveDecision(form.poolDraft, opts.parentWipLimit).error;
 }
 
 function sameList(a, b) {
   if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
   return a.every((v, i) => v === b[i]);
+}
+
+function samePoolDraft(a, b) {
+  if (!a || !b) return a === b;
+  return a.enabled === b.enabled
+    && a.maxInstancesText === b.maxInstancesText
+    && a.workspace === b.workspace
+    && a.idleText === b.idleText
+    && a.hardText === b.hardText
+    && a.retainText === b.retainText;
 }
 
 /**
@@ -164,5 +207,6 @@ export function isFormDirty(agent, form) {
     || !sameList(base.skillsOverride, form.skillsOverride)
     || base.inheritMcp !== form.inheritMcp
     || base.mcpOverrideText !== form.mcpOverrideText
+    || !samePoolDraft(base.poolDraft, form.poolDraft)
   );
 }

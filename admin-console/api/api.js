@@ -10,6 +10,13 @@ const http = require('http');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { runArchiveTool, streamArchiveTool, describeArchiveFailure } = require('./archive');
+const {
+  WORKSPACE_ZIP_MAX_BYTES,
+  WORKSPACE_ZIP_MAX_FILES,
+  EMPTY_ZIP,
+  measureWorkspaceDir,
+  describeOversizeDir,
+} = require('./workspace-zip');
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
@@ -87,6 +94,11 @@ const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
+const { guardCredentialRefChange } = require('./credential-ref-guard');
+const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
+const { checkGithubTokenRequirement } = require('./env-token-requirement');
+const { pairRepositorySshKeyChanges } = require('./repo-sshkey-pairing');
+const { buildCredentialDescriptor } = require('./credential-descriptor');
 // Process-draft access model (#2068) — one predicate for every draft route.
 const draftAccess = require('./draft-access');
 // Team-member system-prompt modes (#1511): inherit / additional / exclusive.
@@ -2277,6 +2289,19 @@ function notifyAgentReload(agentId) {
     .catch(() => {});
 }
 
+// The "<org>/<repo>" of an environment's PRIMARY (first) repository, or null
+// when there is none / it is unparseable. This is the single value materialise
+// time and the reconcile paths stamp into derived github-event triggers, so it
+// is also the change-detection key for the repo-set fan-out (#2322).
+function repoFullNameFromRepos(repos) {
+  try {
+    const url = Array.isArray(repos) && repos[0] && repos[0].url;
+    if (!url) return null;
+    const { org, repo } = parseGitHubUrl(url);
+    return `${org}/${repo}`;
+  } catch { return null; }
+}
+
 // Resolve the "<org>/<repo>" that a team member's github-event triggers must
 // target, from its bound environment's first repository. The pure `expand*`
 // builders (expandGithubChannels / expandDataFlowSteps) emit derived
@@ -2289,11 +2314,7 @@ function notifyAgentReload(agentId) {
 function memberRepoFullName(cfg) {
   try {
     const env = cfg && cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
-    const repos = env && Array.isArray(env.repositories) ? env.repositories : [];
-    const url = repos[0] && repos[0].url;
-    if (!url) return null;
-    const { org, repo } = parseGitHubUrl(url);
-    return `${org}/${repo}`;
+    return repoFullNameFromRepos(env && env.repositories);
   } catch { return null; }
 }
 
@@ -2398,6 +2419,37 @@ async function reconcileTeamGithubChannels(teamId) {
     if (norm(next) === norm(m.triggers)) continue;
     try { await putTriggers(m.id, next); notifyAgentReload(m.id); }
     catch { /* best-effort — never break the originating request */ }
+  }
+}
+
+// #2322: back-fill the derived-trigger repo when an environment's repository set
+// changes. `injectDerivedTriggerRepo` stamps each derived github-event trigger's
+// `repo` from the env's primary repository — but only ran at materialise time and
+// on a ports write, never when the ENV's repo list changed. So a repo added to
+// (or changed on) a live team's environment cloned fine yet left every member's
+// github-event trigger `repo`-less; `pollerSubscribes` skips a repo-less trigger,
+// so the poll plan never gained the repo and no trigger ever fired — silently.
+//
+// Fan out to every OWNING team of the env and reuse the two established
+// reconcilers, which strip the derived triggers, regenerate them from the ports
+// (so they are momentarily repo-less again) and re-inject the CURRENT primary
+// repo. Re-deriving is what makes a CHANGED or REMOVED primary repo resolve
+// exactly as at materialise time (a plain re-stamp could never overwrite an old
+// repo). Both write back only members whose trigger set actually changed, so a
+// no-op save touches no triggers.json. Members are reached via `parentTeamId`
+// (covers every team-member); a bound team lead is added by its own id.
+async function reconcileEnvironmentDerivedTriggers(envId) {
+  if (!envId) return;
+  const teamIds = new Set();
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg || cfg.environmentId !== envId) continue;
+    if (cfg.parentTeamId) teamIds.add(cfg.parentTeamId);
+    else if (cfg.role === 'team') teamIds.add(id);
+  }
+  for (const teamId of teamIds) {
+    await reconcileTeamDataFlow(teamId);
+    await reconcileTeamGithubChannels(teamId);
   }
 }
 
@@ -3741,6 +3793,12 @@ app.post('/api/environments/:id/sync-agents', heavyLimiter, async (req, res) => 
       });
       for (const key of Object.keys(totals)) totals[key] += result.summary[key] || 0;
     }
+    // #2322: repo propagation is the other path that changes what an env's agents
+    // clone, so re-stamp their derived github-event triggers here too — a repo
+    // synced onto agents that already had repo-less triggers becomes poller-visible
+    // without a respawn. Idempotent; a sync with no repo delta writes no triggers.
+    try { await reconcileEnvironmentDerivedTriggers(envId); }
+    catch { /* best-effort — never abort the sync summary */ }
     stream.emit({ type: 'complete', agentCount: agents.length, totals });
   } catch (err) {
     stream.emit({ type: 'error', status: 500, error: err.message });
@@ -10542,6 +10600,24 @@ app.get('/api/skills', (req, res) => {
   const skills = [];
   const seen = new Set();
 
+  // Downstream-drift accumulators (#2317) — filled for free as a side effect of
+  // the team/agent loops below (both already hash + classify every copy's
+  // drift for their own row), so the list can show "N copies need an update"
+  // on a pool/team row WITHOUT a second per-skill lineage fetch (AC5): one pass
+  // over the same data already being walked, not one pass per skill name.
+  // `teamDriftByName`: name -> [team-copy drift states] (a pool row's
+  // downstream includes every team's drift against the pool).
+  // `agentDriftByNameTeam`: name -> teamId -> [agent-copy drift states] (a team
+  // row's downstream is only ITS OWN team's agent copies; a pool row's
+  // downstream folds in every team's).
+  const teamDriftByName = new Map();
+  const agentDriftByNameTeam = new Map();
+  const pushDrift = (map, key, drift) => {
+    if (!drift) return;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(drift);
+  };
+
   // Pool (shared / global) skills — always visible to everyone.
   const poolSkillsDir = path.join(POOL_DIR, 'skills');
   try {
@@ -10564,7 +10640,9 @@ app.get('/api/skills', (req, res) => {
       const dir = path.dirname(s.path);
       let origin = null;
       try { const man = skillManifest.readManifest(dir); origin = man && man.origin; } catch { /* none */ }
-      return { ...s, ...skillDescriptionSummary(s.path), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) };
+      const driftSummary = skillDriftSummary(dir, origin);
+      pushDrift(teamDriftByName, s.name, driftSummary.drift);
+      return { ...s, ...skillDescriptionSummary(s.path), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...driftSummary };
     }));
 
   // Agent skills — visible only when the owning agent is visible (#302), so an
@@ -10590,6 +10668,9 @@ app.get('/api/skills', (req, res) => {
             const origin = seeded && seeded.tier
               ? { tier: seeded.tier, teamId: seeded.tier === 'team' ? cfg.teamId : undefined, sourceHash: seeded.contentHash }
               : null;
+            const driftSummary = skillDriftSummary(dir, origin);
+            if (!agentDriftByNameTeam.has(name)) agentDriftByNameTeam.set(name, new Map());
+            pushDrift(agentDriftByNameTeam.get(name), cfg.teamId, driftSummary.drift);
             // Carry the owning team so the UI can deep-link the "share it" path
             // into the (team-scoped) Knowledge page for this agent (#1144).
             // `knowledgeTeamId` (#2180) is the actual skill-POOL key (the squad
@@ -10597,11 +10678,31 @@ app.get('/api/skills', (req, res) => {
             // resolves `parentTeamId` for a member) — the "publish via team
             // pool" action must land in the pool the agent's squad actually
             // reads from, not the human access-scope `teamId`.
-            skills.push({ name, source: 'agent', agentId, teamId: cfg.teamId, knowledgeTeamId: agentKnowledgeTeam({ ...cfg, id: cfg.id || agentId }), path: skillMd, ...skillDescriptionSummary(skillMd), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...skillDriftSummary(dir, origin) });
+            skills.push({ name, source: 'agent', agentId, teamId: cfg.teamId, knowledgeTeamId: agentKnowledgeTeam({ ...cfg, id: cfg.id || agentId }), path: skillMd, ...skillDescriptionSummary(skillMd), ...skillManifestSummary(dir), ...skillProvenanceSummary(dir), ...driftSummary });
           }
         }
       });
     } catch { /* no agent skills dir */ }
+  }
+
+  // Attach the downstream-drift indicator (#2317 AC1-3): a pool row folds in
+  // every team's drift against it PLUS every agent's (across all teams); a
+  // team row only folds in its OWN agents' drift. Agent-tier rows are leaves —
+  // no downstream of their own (edge case). Omitted entirely (not even `null`)
+  // when there is nothing non-in-sync to report (AC2 — no new noise).
+  for (const row of skills) {
+    if (row.source === 'pool') {
+      const agentStates = [];
+      const perTeam = agentDriftByNameTeam.get(row.name);
+      if (perTeam) for (const states of perTeam.values()) agentStates.push(...states);
+      const combined = (teamDriftByName.get(row.name) || []).concat(agentStates);
+      const downstream = skillLineage.summarizeDownstreamDrift(combined);
+      if (downstream) row.downstream = downstream;
+    } else if (row.source === 'team') {
+      const states = agentDriftByNameTeam.get(row.name)?.get(row.teamId) || [];
+      const downstream = skillLineage.summarizeDownstreamDrift(states);
+      if (downstream) row.downstream = downstream;
+    }
   }
 
   res.json(skills);
@@ -11833,6 +11934,21 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
       by: skillActor(req),
     }) + '\n');
   } catch { /* best effort */ }
+
+  // 11. Auto-resync fan-out (#2316): a transfer changes the destination's
+  //     effective content exactly as a plain edit does, so honour each affected
+  //     team's `auto` resync mode identically to PUT /api/skills/:name (which
+  //     calls autoResyncOnEdit for a team-tier and a global-tier edit). Only the
+  //     destination tier matters — a `move`'s source retirement is unrelated, and
+  //     `agent` is never a transfer destination (planTransfer). Pass `destName`
+  //     (not `plan.name`): a `rename` collision lands the content under the new
+  //     name, so that is the name whose seeded copies could be outdated.
+  //     Best-effort / fire-and-forget, so it never fails or delays this response.
+  if (plan.to.tier === 'team') {
+    autoResyncOnEdit(destName, { tier: 'team', teamId: plan.to.teamId });
+  } else if (plan.to.tier === 'global') {
+    autoResyncOnEdit(destName, { tier: 'global' });
+  }
 
   res.status(201).json({
     name: destName,
@@ -14045,7 +14161,31 @@ app.get('/api/environments/:id', (req, res) => {
       return res.status(404).json({ error: 'Environment not found' });
     }
   }
-  res.json({ ...env, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, env) });
+  // #2325 (R2 enrichment): metadata-only descriptors for the credentials this env
+  // references (its githubTokenId + each repo's sshKeyId), so the console can show
+  // the OWNER + TIER on the read-only chip for a credential the caller cannot see.
+  // No secret is exposed — only id / tier / owner label / visibility.
+  const credentialRefs = {};
+  {
+    const users = usersById();
+    const userLabel = (id) => users.get(id)?.displayName || null;
+    const teamLabel = (id) => readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null)?.displayName || null;
+    const ghTokens = listGithubTokens().map(normalizeCredential);
+    const sshKeys = listSshKeys().map(normalizeCredential);
+    const addRef = (id, kind, list) => {
+      if (!id || credentialRefs[id]) return;
+      const cred = list.find((c) => c.id === id);
+      if (!cred) return; // dangling reference — nothing to describe
+      credentialRefs[id] = buildCredentialDescriptor({
+        cred, kind,
+        visibleToCaller: visibleCredential(scope, cred),
+        userLabel, teamLabel,
+      });
+    };
+    addRef(env.githubTokenId, 'github-token', ghTokens);
+    for (const r of Array.isArray(env.repositories) ? env.repositories : []) addRef(r?.sshKeyId, 'ssh-key', sshKeys);
+  }
+  res.json({ ...env, agents, agentCount: agents.length, canManage: canManageEnvironment(scope, env), credentialRefs });
 });
 
 // Resolve and validate { llmEndpointId, defaultModelId } against the registry.
@@ -14086,6 +14226,84 @@ function refuseGlobalEnvironmentUnusableProvider(llmEndpointId) {
   if (!ep || isGlobalProvider(ep)) return null;
   return `Cannot publish this environment as global: its model provider '${ep.name || ep.id}' is not itself global or system-scoped`;
 }
+
+// #2324: read the raw value of a stored GitHub token for a SERVER-SIDE probe.
+// Never returned to a client — only used to call GitHub and classify the result.
+function readGithubTokenValue(tokenId) {
+  if (!tokenId || !GH_TOKEN_ID_RE.test(tokenId)) return null;
+  try { return fs.readFileSync(path.join(GH_TOKENS_DIR, path.basename(tokenId)), 'utf8').trim() || null; }
+  catch { return null; }
+}
+
+// #2324: does any ENABLED agent bound to this env carry an ENABLED github-event
+// trigger for `fullName`? Polled and internal listeners both gate on the repo, so
+// both count. Mirrors the poller's subscriber test without importing it.
+function envHasRepoSubscriber(envId, fullName) {
+  let dirs = [];
+  try { dirs = listAgentDirs(); } catch { return false; }
+  for (const id of dirs) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    if (!cfg || cfg.environmentId !== envId || cfg.enabled === false) continue;
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    if (!Array.isArray(triggers)) continue;
+    if (triggers.some(t => t && t.type === 'github-event' && t.enabled !== false && t.repo === fullName)) return true;
+  }
+  return false;
+}
+
+// #2324: a cheap authenticated probe of one repo. Returns { status, rateLimited }.
+// Any network/timeout error → status undefined (classifier → 'unknown'), never a throw.
+async function probeGithubRepo(fullName, token) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const r = await fetch(`https://api.github.com/repos/${fullName}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'agent-studio-health',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      signal: ctrl.signal,
+    });
+    const remaining = r.headers.get('x-ratelimit-remaining');
+    return { status: r.status, rateLimited: r.status === 403 && remaining === '0' };
+  } catch {
+    return { status: undefined, rateLimited: false };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// #2324 (epic #2325): the GitHub-integration health of an environment's repos —
+// token present? valid? a subscriber? — so the console can show WHY events aren't
+// arriving instead of the operator having to read the poller log. Same visibility
+// as reading the environment; the token value never leaves the server.
+app.get('/api/environments/:id/github-health', apiLimiter, async (req, res) => {
+  const env = loadEnvironment(req.params.id);
+  if (!env) return res.status(404).json({ error: 'Environment not found' });
+  const scope = getScope(req);
+  const agents = agentsUsingEnvironment(env.id, scope);
+  if (!visibleEnvironment(scope, env) && !isGlobalEnvironment(env) && agents.length === 0) {
+    return res.status(404).json({ error: 'Environment not found' });
+  }
+  const repos = Array.isArray(env.repositories) ? env.repositories.filter((r) => r && r.url) : [];
+  const hasToken = !!env.githubTokenId;
+  const token = hasToken ? readGithubTokenValue(env.githubTokenId) : null;
+  const out = [];
+  for (const r of repos) {
+    let fullName = null;
+    try { const p = parseGitHubUrl(r.url); fullName = `${p.org}/${p.repo}`; } catch { /* unparseable url */ }
+    const hasSubscriber = fullName ? envHasRepoSubscriber(env.id, fullName) : null;
+    let probeStatus; let rateLimited = false;
+    if (hasToken && token && fullName) {
+      const probe = await probeGithubRepo(fullName, token);
+      probeStatus = probe.status; rateLimited = probe.rateLimited;
+    }
+    out.push({ url: r.url, fullName, ...classifyGithubHealth({ hasToken, hasSubscriber, probeStatus, rateLimited }) });
+  }
+  res.json({ envId: env.id, tokenId: env.githubTokenId || null, repos: out, rollUp: rollUpGithubHealth(out) });
+});
 
 app.post('/api/environments', heavyLimiter, (req, res) => {
   // `skills` is accepted-and-discarded: the skill grant is team-owned
@@ -14216,6 +14434,18 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
     }
   }
 
+  // #2323: a repo-backed environment with no GitHub token silently breaks the
+  // whole GitHub automation. Block it unless the caller explicitly acknowledges a
+  // reference-only environment (`acknowledgeNoToken`).
+  {
+    const need = checkGithubTokenRequirement({
+      repositories: normalizedRepos,
+      githubTokenId,
+      acknowledgeNoToken: req.body?.acknowledgeNoToken,
+    });
+    if (!need.ok) return res.status(need.status).json({ error: need.error, code: need.code });
+  }
+
   let normalizedMcp;
   try {
     normalizedMcp = (mcpServers === undefined && templateSeed?.mcpServers?.length)
@@ -14282,7 +14512,7 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   res.status(201).json(env);
 });
 
-app.put('/api/environments/:id', apiLimiter, (req, res) => {
+app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   const env = loadEnvironment(req.params.id);
   if (!env) return res.status(404).json({ error: 'Environment not found' });
   // Config-write authorization (#989): editing an environment requires team-admin
@@ -14313,6 +14543,28 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
     if (!tokens.some(t => t.id === githubTokenId)) {
       return res.status(400).json({ error: `GitHub token '${githubTokenId}' not found` });
     }
+  }
+
+  // R1 / #2326 (data loss): never let a save blind-overwrite a `githubTokenId`
+  // the caller cannot see. The token picker is scope-filtered (a personal token
+  // is visible ONLY to its owner — no `scope.all` bypass), so an admin who cannot
+  // see the bound token would submit an empty field and silently NULL the
+  // reference, killing the GitHub automation. Allow the change only when the bound
+  // token is visible to the caller, or the change REPLACES it with a token the
+  // caller can see — never a blind clear, never a swap to another invisible one.
+  if (githubTokenId !== undefined && (githubTokenId || null) !== prevGithubTokenId) {
+    const allTokens = listGithubTokens().map(normalizeCredential);
+    const prevCred = prevGithubTokenId ? allTokens.find((t) => t.id === prevGithubTokenId) : null;
+    const nextCred = githubTokenId ? allTokens.find((t) => t.id === githubTokenId) : null;
+    const guard = guardCredentialRefChange({
+      prev: prevGithubTokenId,
+      next: githubTokenId || null,
+      // a dangling prev ref (token since deleted) is not worth protecting → visible
+      prevVisible: !prevCred || visibleCredential(envScope, prevCred),
+      nextVisible: nextCred ? visibleCredential(envScope, nextCred) : false,
+      kind: 'GitHub token',
+    });
+    if (!guard.ok) return res.status(guard.status).json({ error: guard.error, code: guard.code });
   }
 
   // #2158: publish/retract the global flag (AC1/AC3/AC6/AC9) — resolved
@@ -14433,6 +14685,30 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
     }
     delete env.repository;
   }
+  // #2325 (SSH side of the #2326 data-loss fix): a repository's `sshKeyId` the
+  // caller cannot see must not be blind-overwritten either. Guard each repo whose
+  // sshKeyId changed, matched to the previous list by URL — the same
+  // non-destructive rule the token uses (replace-only with a key you can see,
+  // never a blind clear, never a swap to another invisible key). A no-op save
+  // pairs nothing, so this is inert unless a key actually changed.
+  {
+    const sshChanges = pairRepositorySshKeyChanges(prevRepositories, env.repositories);
+    if (sshChanges.length > 0) {
+      const keys = listSshKeys().map(normalizeCredential);
+      for (const ch of sshChanges) {
+        const prevCred = ch.prevSshKeyId ? keys.find((k) => k.id === ch.prevSshKeyId) : null;
+        const nextCred = ch.nextSshKeyId ? keys.find((k) => k.id === ch.nextSshKeyId) : null;
+        const guard = guardCredentialRefChange({
+          prev: ch.prevSshKeyId,
+          next: ch.nextSshKeyId,
+          prevVisible: !prevCred || visibleCredential(envScope, prevCred),
+          nextVisible: nextCred ? visibleCredential(envScope, nextCred) : false,
+          kind: 'SSH key',
+        });
+        if (!guard.ok) return res.status(guard.status).json({ error: `${ch.url}: ${guard.error}`, code: guard.code });
+      }
+    }
+  }
   if (githubTokenId !== undefined) env.githubTokenId = githubTokenId || null;
   if (mcpServers !== undefined) {
     try {
@@ -14450,6 +14726,19 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
     // to a pre-#1940 environment on disk (AC1).
     if (toolchain.toolchainId) env.toolchainId = toolchain.toolchainId;
     else delete env.toolchainId;
+  }
+  // #2323: block a repo-backed environment left without a GitHub token (the whole
+  // GitHub automation depends on it) unless the caller acknowledges a
+  // reference-only env. Checked on the EFFECTIVE post-merge state, so adding a
+  // repo to a token-less env — or clearing the token off a repo-backed one — is
+  // caught here too, not only on a fresh create.
+  {
+    const need = checkGithubTokenRequirement({
+      repositories: env.repositories,
+      githubTokenId: env.githubTokenId,
+      acknowledgeNoToken: req.body?.acknowledgeNoToken,
+    });
+    if (!need.ok) return res.status(need.status).json({ error: need.error, code: need.code });
   }
   env.updatedAt = new Date().toISOString();
   saveEnvironment(env.id, env);
@@ -14471,6 +14760,16 @@ app.put('/api/environments/:id', apiLimiter, (req, res) => {
   } else if ((env.llmEndpointId || null) !== prevLlmEndpointId
           || (env.defaultModelId || null) !== prevDefaultModelId) {
     notifyEnvCredentialChange(env.id, 'llm-endpoint-changed');
+  }
+  // #2322: when the PRIMARY repo changed (added / swapped / removed), re-stamp
+  // every bound agent's derived github-event triggers so the poller starts (or
+  // stops) polling without a respawn. Gated on the primary-repo full name so an
+  // unrelated save (name, LLM, secondary-repo add) does no trigger work at all;
+  // the reconcilers are themselves idempotent, so even a redundant call writes no
+  // triggers.json. Best-effort — the save above is already committed (AC7).
+  if (repoFullNameFromRepos(prevRepositories) !== repoFullNameFromRepos(env.repositories)) {
+    try { await reconcileEnvironmentDerivedTriggers(env.id); }
+    catch { /* never roll back or fail the committed save */ }
   }
   // AC7: the save is already committed at this point. Whatever the caller does
   // with `previousRepositories` — offer, decline, crash — the environment stays
@@ -14739,6 +15038,18 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
     }
   }
 
+  // Team-tier the freshly-created environment to the new team of one so any
+  // team-admin (not only the original creator) can SEE and MANAGE it after the
+  // team is shared — the 1:1 team↔environment model. This env already carries
+  // the creator as `ownerId` above (the #2071/#2078 owner branch, kept as a
+  // fallback so a failed membership grant still leaves the creator able to see
+  // it), and adding the team tier makes it team-owned rather than owner-only.
+  // Same rule as the LLM sibling and the wizard: only ever the env this request
+  // just created, and only once the mint has resolved `agentResp.teamId`.
+  if (agentResp.teamId) {
+    saveEnvironment(env.id, { ...env, ...creatorEnvironmentOwnership(agentResp.teamId) });
+  }
+
   res.status(201).json({
     reused: false,
     environment: { id: env.id, name: env.name, reused: false },
@@ -14838,6 +15149,21 @@ app.post('/api/quickstart/llm', heavyLimiter, async (req, res) => {
         console.error(`[api] quickstart/llm: team-admin membership for ${agentResp.teamId} error: ${err.message}`);
       }
     }
+  }
+
+  // Team-tier the freshly-created environment to the new team of one so the
+  // creator — granted team-admin just above — can SEE and MANAGE it
+  // (repositories, provider, credentials) rather than hitting the read-only
+  // "shared environment managed by another team" banner an UNTIERED env shows
+  // every non-System-Admin (`canManageEnvironment` → false; #2078 dropped the
+  // `|| 'default'` fallback). This path used to write no tier at all — the
+  // repo-first sibling above already stamped ownership, but this one was missed.
+  // Mirrors the wizard, which team-tiers its own auto-created env
+  // (`creatorEnvironmentOwnership`, creator-membership.js). Only ever the env
+  // this request just created — never a reused one. The team id is known only
+  // now, after the mint resolved it (`agentResp.teamId`).
+  if (agentResp.teamId) {
+    saveEnvironment(envId, { ...env, ...creatorEnvironmentOwnership(agentResp.teamId) });
   }
 
   res.status(201).json({
@@ -15360,6 +15686,18 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   const branch = !repoLess && typeof repository.branch === 'string' && /^[A-Za-z0-9._/-]+$/.test(repository.branch)
     ? repository.branch
     : 'main';
+
+  // #2323: don't materialise a team onto a repo-backed environment with no GitHub
+  // token — the poller, gh, pushes and attributed writes would all be dead from
+  // the start. Blocked unless the caller acknowledges a reference-only setup.
+  {
+    const need = checkGithubTokenRequirement({
+      repositories: repoLess ? [] : [{ url: repository.url }],
+      githubTokenId,
+      acknowledgeNoToken: body.acknowledgeNoToken,
+    });
+    if (!need.ok) return res.status(need.status).json({ error: need.error, code: need.code });
+  }
 
   // ── 2. Credentials must already exist (Pre-Flight) ────────────────
   if (repository?.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
@@ -16076,6 +16414,16 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
 
   if (repository?.sshKeyId && !listSshKeys().some(k => k.id === repository.sshKeyId)) {
     return fail(400, `SSH key '${repository.sshKeyId}' not found`);
+  }
+  // #2323: same guard as POST /api/teams — a repo-backed team with no GitHub token
+  // starts with the whole GitHub automation dead. Blocked unless acknowledged.
+  {
+    const need = checkGithubTokenRequirement({
+      repositories: repoLess ? [] : [{ url: repository.url }],
+      githubTokenId,
+      acknowledgeNoToken: body.acknowledgeNoToken,
+    });
+    if (!need.ok) return fail(need.status, need.error);
   }
   // Repo-less needs no PAT — mirror of the non-streaming handler (#2081 AC6).
   if (!environmentId && !repoLess) {
@@ -18792,6 +19140,142 @@ app.get('/api/agents/:agentId/workspace/download', apiLimiter, (req, res) => {
   const stream = fs.createReadStream(target);
   stream.on('error', () => res.end());
   stream.pipe(res);
+});
+
+// Directory download (#2318) — streams a ZIP of ONE workspace subdirectory,
+// with paths preserved relative to that directory. Read-class like the per-file
+// download (§6 / team-member-boundary.js): the same bytes are already reachable
+// file-by-file, so nothing new becomes reachable. It follows the whole-agent
+// export's cancel/failure choreography (streamArchiveTool + res.destroy).
+//
+// Two shapes on one route, so a single boundary entry covers both:
+//   • `?probe=1` — run only the pre-flight size/count check and answer JSON
+//     ({ ok, sizeBytes, fileCount } or 413). The browser asks this FIRST so an
+//     oversize refusal arrives as an in-app message, never as raw JSON in a new
+//     tab or a completed-but-empty download (AC10).
+//   • no probe — stream the archive as an attachment.
+// The check runs on BOTH shapes, so hitting the URL directly is still refused.
+app.get('/api/agents/:agentId/workspace/zip', heavyLimiter, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+
+  // Refuse the workspace ROOT (D3/AC14): the toolbar's whole-agent export is the
+  // only root-level download. safeAgentPath('') resolves to the root, so this
+  // must be rejected before it, not by it.
+  const relPath = typeof req.query.path === 'string' ? req.query.path : '';
+  const normalized = path.normalize(relPath.replace(/^\/+/, ''));
+  if (!normalized || normalized === '.' || normalized === path.sep) {
+    return res.status(400).json({ error: 'Refusing to zip the workspace root; use the workspace export instead' });
+  }
+
+  // Traversal / absolute-path / outward-symlink containment (AC19).
+  const target = safeAgentPath(agentId, relPath);
+  if (!target) return res.status(400).json({ error: 'invalid path' });
+
+  let st;
+  try {
+    st = fs.statSync(target);
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.status(404).json({ error: 'not found' });
+    return res.status(500).json({ error: err.message });
+  }
+  if (!st.isDirectory()) return res.status(400).json({ error: 'not a directory' });
+
+  const probe = req.query.probe === '1' || req.query.probe === 'true';
+
+  // Pre-flight (AC7): total size + file count BEFORE any archive byte. Skips
+  // symlinks so nothing outside the workspace is measured or later archived
+  // (D5/AC6).
+  let measured;
+  try {
+    measured = await measureWorkspaceDir(target, {
+      maxBytes: WORKSPACE_ZIP_MAX_BYTES,
+      maxFiles: WORKSPACE_ZIP_MAX_FILES,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: `Could not size the directory: ${err.message}` });
+  }
+  if (measured.over) {
+    // No archive is produced (AC8). 413 with the actual numbers + an alternative.
+    return res.status(413).json({
+      error: describeOversizeDir(measured),
+      sizeBytes: measured.bytes,
+      fileCount: measured.files,
+      limitBytes: WORKSPACE_ZIP_MAX_BYTES,
+      limitFiles: WORKSPACE_ZIP_MAX_FILES,
+    });
+  }
+  if (probe) {
+    return res.json({ ok: true, sizeBytes: measured.bytes, fileCount: measured.files });
+  }
+
+  // Attachment filename derived from the directory name; same UTF-8 encoding as
+  // the per-file download so spaces / umlauts stay readable (AC18).
+  const zipName = `${path.basename(target)}.zip`;
+  const encoded = encodeURIComponent(zipName).replace(/'/g, '%27');
+  res.setHeader('Content-Disposition', `attachment; filename="${encoded}"; filename*=UTF-8''${encoded}`);
+  res.setHeader('Content-Type', 'application/zip');
+  // No Content-Length: a streamed archive's size isn't known up front.
+
+  // Empty directory → a valid empty ZIP, not a `zip` "nothing to do" error or a
+  // zero-byte file (AC13).
+  if (measured.entries === 0) {
+    res.setHeader('Content-Length', EMPTY_ZIP.length);
+    return res.end(EMPTY_ZIP);
+  }
+
+  // Stage a hard-link farm of the directory's contents (no byte copy, symlinks
+  // skipped for containment — same helper the export uses), then zip it from
+  // its root so the archive paths are relative to the chosen directory (AC3).
+  // No path segment below carries request-derived data (a UUID), keeping the
+  // filesystem sinks clear for CodeQL.
+  const stagingDir = path.join(WORKSPACE, '.zip-staging', crypto.randomUUID());
+  let cleanedUp = false;
+  const cleanupStaging = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    // Only the links go — the agent's own files are untouched.
+    try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch { /* noop */ }
+  };
+  try {
+    // No skipTop: every regular file and subdirectory is included, .git and
+    // node_modules and dotfiles and all (D1/AC4). linkDirRecursiveAsync skips
+    // symlinks and carries its own inline containment gate.
+    await linkDirRecursiveAsync(target, stagingDir);
+
+    const { child, done } = streamArchiveTool('zip', ['-r', '-q', '-', '.'], { cwd: stagingDir });
+
+    // `end: false`: terminate the response here, not when zip's stdout closes —
+    // a response ended by the pipe would look complete even if zip died mid-way.
+    child.stdout.pipe(res, { end: false });
+
+    // Client cancelled the download — kill zip instead of building the rest of a
+    // ZIP nobody is reading (AC12), and leave no orphaned process.
+    let clientGone = false;
+    res.on('close', () => {
+      if (res.writableFinished) return;
+      clientGone = true;
+      child.kill('SIGKILL');
+    });
+
+    const zipResult = await done;
+    cleanupStaging();
+    if (clientGone) {
+      console.log(`[API] Directory zip of ${agentId}:${normalized} cancelled by the client`);
+    } else if (zipResult.code === 0) {
+      res.end();
+    } else {
+      console.error(`[API] Directory zip failed for ${agentId}:${normalized}: ${describeArchiveFailure('zip', zipResult)}`);
+      // Headers are long gone: destroy the response so the client registers a
+      // failed download rather than a silently truncated ZIP (AC11).
+      res.destroy();
+    }
+  } catch (err) {
+    cleanupStaging();
+    console.error(`[API] Directory zip failed for ${agentId}:${normalized}: ${err.message}`);
+    if (res.headersSent) res.destroy();
+    else res.status(500).json({ error: `Directory download failed: ${err.message}` });
+  }
 });
 
 // Delete a file or directory in the agent workspace. Directories are removed

@@ -88,14 +88,10 @@ export function restartNoticeText(info) {
     return 'Repositories updated. The workspace changed immediately; the agent is told about it '
       + 'from its next run on. The conversation above is unaffected.';
   }
-  // Agent pools (#2271) — a Scaling-section save (`PUT .../pool`, #2270) is
-  // additive config, no respawn: without this case it fell into the generic
-  // context-mount branch below and reported "Host context folders saved",
-  // which is simply false for what was just saved (code-review finding).
-  if (info && info.kind === 'pool') {
-    return 'Scaling settings saved. They take effect on the role\'s next dispatch — no restart, '
-      + 'and the conversation above is unaffected.';
-  }
+  // Agent pools (#2271) used to apply immediately through ScalingSection's own
+  // Save and reported here as `kind: 'pool'`; #2295 folded Scaling into this
+  // form's one batched Save, so it is covered by `savedNoticeText` now, not
+  // this immediate-apply path.
   return info && info.respawned
     ? 'Host context folders applied — the agent\'s container was re-provisioned. Any run in progress ended; the next message starts a fresh session.'
     : 'Host context folders saved. They are attached the next time the agent starts.';

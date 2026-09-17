@@ -27,7 +27,6 @@ import {
   railMenuItems,
   teamOptions,
 } from './rail-lifecycle.js';
-import ShareTeamPanel from './ShareTeamPanel.jsx';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 import {
   ADD_MEMBER_TITLE, MATERIALIZE_NOW_DEFAULT, MATERIALIZE_NOW_HINT, MATERIALIZE_NOW_LABEL,
@@ -142,12 +141,6 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
   // only" cannot be inferred, and getting it wrong costs a clone either way.
   const [addMemberTeamId, setAddMemberTeamId] = useState(null);
   const [addMemberMaterialize, setAddMemberMaterialize] = useState(MATERIALIZE_NOW_DEFAULT);
-
-  // Share (#2082): which team's member list is open. A `SidePanel` rather than
-  // a `ConfirmDialog` because this is a manage-a-list surface, not a decision
-  // (the `ManageTeamPanel` precedent) — and because it stays open across
-  // several writes, each of which re-reads the list.
-  const [shareTeam, setShareTeam] = useState(null); // { id, name }
 
   const [teamActionPrompt, setTeamActionPrompt] = useState(null);
   const [teamActionBusy, setTeamActionBusy] = useState(false);
@@ -540,17 +533,17 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         // materialize-now choice, so this opens it like every other entry
         // whose label ends in an ellipsis.
         case 'add-member':       openAddMember(teamId); break;
-        // Phase 2 (#1929) answers open question 3 the other way round: the
-        // team's own edit form renders in the chat, so this opens it there
-        // instead of leaving the chat for the Agents page. #2235 widened that
-        // surface to the full width right of the agent list, reached by being
-        // routed to the team like any other row selection — so this now also
-        // navigates, the same landing point as clicking the team's own row.
-        case 'edit-team':        if (onOpenSettings && teamId) onOpenSettings(teamId); if (teamId) navigate(`/chats/${encodeURIComponent(teamId)}`); break;
+        // No `edit-team` case: the menu no longer carries "Team settings…"
+        // (redundant with clicking the team's own header row, which already
+        // routes to the team and opens its configuration surface).
         case 'share':
-          // Enabled for anyone who can see the team: a Team Member gets the
-          // list read-only (#2041 AC9), the panel gates the controls.
-          if (teamId) setShareTeam({ id: teamId, name: target.group?.displayName || teamId });
+          // The Share panel is now the team's own "Sharing" configuration tab
+          // rather than a SidePanel — so this routes to the team surface with
+          // that tab selected, the same landing point as the team's header row
+          // click (+ `?tab=sharing`). Enabled for anyone who can see the team:
+          // a Team Member gets the list read-only (#2041 AC9) via
+          // `TeamSharingReadOnlySurface`, the panel gates the controls.
+          if (teamId) navigate(`/chats/${encodeURIComponent(teamId)}?tab=sharing`);
           break;
         case 'export-team':      window.open(`/api/agents/${encodeURIComponent(teamId)}/export`, '_blank'); break;
         case 'clone-team':       if (team) { setPanelAgent(team); setPanelMode('clone-team'); } break;
@@ -587,24 +580,9 @@ const RailLifecycleHost = forwardRef(function RailLifecycleHost({
         onChange={onImportFilePicked}
       />
 
-      {/* #2082 — the team Share panel. `onError` mirrors the message into the
-          rail toast as well, because the panel can be scrolled past its own
-          inline error while a write is being retried. */}
-      <SidePanel
-        open={!!shareTeam}
-        onClose={() => setShareTeam(null)}
-        title={shareTeam ? `Share: ${shareTeam.name}` : ''}
-        width="520px"
-      >
-        {shareTeam && (
-          <ShareTeamPanel
-            teamId={shareTeam.id}
-            teamName={shareTeam.name}
-            onError={setActionError}
-          />
-        )}
-      </SidePanel>
-
+      {/* #2082 — the team Share panel is no longer a SidePanel: it moved to
+          the team's own "Sharing" configuration tab (`TEAM_CONFIG_TABS`), and
+          the menu's Share entry routes there. */}
       <SidePanel
         open={panelMode === 'import'}
         onClose={() => { setImportFile(null); closePanel(); }}

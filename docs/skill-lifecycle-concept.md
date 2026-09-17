@@ -268,6 +268,10 @@ the floor is any team the caller administers, not System-Admin-only).
   `knowledgePromotionGates`): `auto` = a pool edit fans out to member workspaces
   immediately; `review` = the Skills surface shows "update available" until confirmed.
   Conservative default keeps teams in control of what enters their agents' context.
+  A **transfer** (Publish / Promote / Lift / Share / Adopt via `POST /api/skills/transfer`)
+  changes a pool skill's effective content through the same write path as a plain
+  edit, so it fans out identically for its `team`/`global` destination tier — a
+  `move`'s source retirement is unrelated to the destination-side resync (#2316).
 - Consistency fixes folded in: `install` also writes the grant (so a re-seed keeps the
   skill); `extend` offers the same "Activate immediately" default as promotion.
 
@@ -284,6 +288,12 @@ every authenticated user; *actions* are role-gated, not the page:
 - **Skill card/table row:** name, description, tier badge, `v4 · a1b2c3` version chip,
   activation state (`active · 4/6`), drift badge (`outdated` / `diverged` / `conflict` /
   `orphaned`), provenance chips (`auto` for curator, `shared from payments`, `imported`).
+  A pool or team row additionally gets a **Downstream** badge ("2 outdated, 1 diverged")
+  whenever any of ITS OWN downstream copies aren't `in-sync` — a pool row's downstream is
+  every team + agent copy of the name, a team row's is only that team's own agent copies
+  (agent rows are leaves, no badge); it reuses the same per-copy drift already computed
+  for the row's own Drift badge, so it can never disagree with the Lineage/Usage tabs,
+  and clicking it opens the Usage tab directly (#2317).
 - **Detail panel tabs:** *Content* (file browser/editor — today's Registry viewer),
   *Versions* (history timeline with per-version diff of `SKILL.md`, from the bounded
   history + archive snapshots), *Lineage* (rendered `provenance.json` + `origin` chain +

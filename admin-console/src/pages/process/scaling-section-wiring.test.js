@@ -19,6 +19,9 @@ import { dirname, join } from 'node:path';
 //     `git-clean-base`, so the save call site must not thread a variable
 //     `workspace` value into it — that is the only way a stale/rehydrated
 //     `pool.workspace` (`input-copy`/`none`) could sneak back into a save.
+//     Since #2295 made ScalingSection a controlled draft, that save call site
+//     is now `scaling-view.js`'s `scalingSaveDecision`, not the component's
+//     own (removed) `save()`.
 //
 // Source-text guard, not a render test.
 
@@ -38,10 +41,12 @@ test('ScalingSection.jsx: no Workspace select, no POOL_WORKSPACE_OPTIONS/workspa
   assert.equal(/\bsetWorkspace\b/.test(src), false);
 });
 
-test('ScalingSection.jsx: the save() -> buildPoolPayload call never threads a workspace value', () => {
-  const src = sourceOf('./ScalingSection.jsx');
-  const call = src.match(/buildPoolPayload\(\{[\s\S]*?\}\)/);
-  assert.ok(call, 'expected exactly one buildPoolPayload({...}) call site');
+test('scaling-view.js: scalingSaveDecision -> buildPoolPayload never threads a workspace value', () => {
+  const src = sourceOf('./scaling-view.js');
+  const fn = src.match(/export function scalingSaveDecision[\s\S]*?\n\}/);
+  assert.ok(fn, 'expected a scalingSaveDecision function (the host-owned save call site since #2295)');
+  const call = fn[0].match(/buildPoolPayload\(\{[\s\S]*?\}\)/);
+  assert.ok(call, 'expected exactly one buildPoolPayload({...}) call site in scalingSaveDecision');
   assert.equal(/workspace/.test(call[0]), false,
     'buildPoolPayload is called with a workspace key — it must rely on the pure default (git-clean-base) instead');
 });

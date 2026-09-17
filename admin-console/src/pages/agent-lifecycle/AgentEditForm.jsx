@@ -44,13 +44,16 @@ import PluginGrantPicker from '../../components/PluginGrantPicker';
 import SyncReposPanel from '../../components/SyncReposPanel';
 import AgentRepositoriesPanel from '../agent-chat/AgentRepositoriesPanel';
 import TeamEnvironmentPanel from '../agent-chat/TeamEnvironmentPanel';
+import ShareTeamPanel from '../agent-chat/ShareTeamPanel.jsx';
 import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from '../agent-chat/agent-chat-help-sections.js';
 import { effectiveGrantFor } from '../plugin-grant-view.js';
 import {
   labelStyle, inputStyle, helpTextStyle, PrimaryBtn, SecondaryBtn,
 } from './form-kit.jsx';
-import { buildInitialForm, buildEditSubmit, hasOwnSkills } from './agent-edit-form-model.js';
+import {
+  buildInitialForm, buildEditSubmit, hasOwnSkills, poolSectionError,
+} from './agent-edit-form-model.js';
 import { TEAM_CONFIG_TABS, ENV_TAB_IDS, resolveTeamConfigTab } from './team-config-tabs-view.js';
 import { parallelismSummary } from '../process/parallelism-view.js';
 import ScalingSection from '../process/ScalingSection';
@@ -71,6 +74,7 @@ const TEAM_CONFIG_TAB_HELP = {
   context: AGENT_CHAT_HELP_SECTIONS.teamEnvironment,
   skills: AGENT_CHAT_HELP_SECTIONS.formFields,
   plugins: AGENT_CHAT_HELP_SECTIONS.formFields,
+  sharing: AGENT_CHAT_HELP_SECTIONS.shareTeam,
 };
 
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
@@ -411,6 +415,10 @@ export default function AgentEditForm({
     return next;
   });
   const canSubmit = !!form.displayName;
+  // #2295 AC11: Scaling's own validation (mirrors ScalingSection's old
+  // save()) now blocks this form's ONE Save button rather than a second one
+  // of its own — set on click, cleared on the next edit anywhere in the form.
+  const [scalingError, setScalingError] = useState(null);
 
   // Skills live on the agent construct itself for non-member roles.
   const ownSkills = hasOwnSkills(agent.role);
@@ -462,9 +470,10 @@ export default function AgentEditForm({
 
       {/* #2236: one flat, ARIA-compliant tab row — General · Repositories ·
           Model provider · Toolchain · MCP servers · Additional context ·
-          Skills · Plugins, always in this order and always all eight
+          Skills · Plugins · Sharing, always in this order and always all nine
           (AC1/AC2/AC3/AC9/AC15) — replacing the old boxed "Environment"
-          section with its own nested sub-tab strip.
+          section with its own nested sub-tab strip. (Sharing is the relocated
+          "Share…" SidePanel, added as the trailing tab.)
           #2253: restyled to match the Agent Chat right-rail TabButton look
           (RightRail.jsx) — a bottom-border underline for the active state
           instead of a filled pill, the same active/inactive color and
@@ -620,14 +629,25 @@ export default function AgentEditForm({
         <PluginGrantSection agent={agent} parentTeam={parentTeam} alwaysVisible={isTeam} />
       )}
 
+      {/* Sharing (formerly the rail's "Share…" SidePanel, relocated here as a
+          tab): who may open the team and chat with it, and who may administer
+          it. Self-contained — it reads the membership list and applies each
+          add/role-change/remove immediately through its own endpoints, so it
+          never batches into this form's Save (like the environment and plugin
+          tabs). The panel itself gates its controls on `canManageMembers`, so a
+          Team Member routed here sees the list read-only (D9/AC9). */}
+      {isTeam && activeTab === 'sharing' && (
+        <ShareTeamPanel teamId={agent.id} teamName={agent.displayName || agent.id} />
+      )}
+
       {agent.role === 'team-member' && (
         <>
           {/* #2271, Amendment 2 A2.2 of `docs/parallel-workers-concept.md` —
               the role-axis config surface for agent pools, the agent's own
               Settings-tab half of the "one model, several surfaces"
-              precedent #2272 set for the team axis. Applies immediately
-              through its own Save (like PluginGrantSection/ContextMountControl
-              above), not batched into this form's own Save button. */}
+              precedent #2272 set for the team axis. #2295 AC11/AC12: folded
+              into this form's own single Save (no more second Save button —
+              ScalingSection is now a controlled draft). */}
           <div style={{ paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
               <div style={labelStyle}>Scaling</div>
@@ -636,11 +656,11 @@ export default function AgentEditForm({
               {!poolsEnabled && <ComingSoonBadge title="Agent-pool autoscaling is not yet enabled on this platform." />}
             </div>
             <ScalingSection
-              agentId={agent.id}
-              pool={agent.pool}
+              draft={form.poolDraft}
+              onChange={v => update('poolDraft', v)}
               parentWipLimit={parentTeam?.wipLimit}
+              error={scalingError}
               disabled={!poolsEnabled}
-              onChanged={onImmediateApply ? (() => onImmediateApply({ kind: 'pool' })) : undefined}
             />
           </div>
 
@@ -719,11 +739,27 @@ export default function AgentEditForm({
       )}
 
       {showBatchedSave && (
-        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
-          <PrimaryBtn onClick={() => onSave(buildEditSubmit(agent, form))} saving={saving} disabled={!canSubmit}>
-            {saving ? 'Saving…' : 'Save Changes'}
-          </PrimaryBtn>
-          {onCancel && <SecondaryBtn onClick={onCancel}>{cancelLabel}</SecondaryBtn>}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
+          {scalingError && (
+            <div role="alert" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
+              Scaling: {scalingError}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+            <PrimaryBtn
+              onClick={() => {
+                const err = poolSectionError(agent, form, { parentWipLimit: parentTeam?.wipLimit });
+                if (err) { setScalingError(err); return; }
+                setScalingError(null);
+                onSave(buildEditSubmit(agent, form, { parentWipLimit: parentTeam?.wipLimit }));
+              }}
+              saving={saving}
+              disabled={!canSubmit}
+            >
+              {saving ? 'Saving…' : 'Save Changes'}
+            </PrimaryBtn>
+            {onCancel && <SecondaryBtn onClick={onCancel}>{cancelLabel}</SecondaryBtn>}
+          </div>
         </div>
       )}
       </div>

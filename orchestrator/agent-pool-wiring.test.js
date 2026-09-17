@@ -16,7 +16,7 @@
 //   by tracing the caller by hand; the pure `planPoolDispatch` tests hand-
 //   construct a correct multi-element array and could never have caught it.
 //
-//   Hard-timeout needs-human (D8) — `_reapTimedOutPoolInstances` must actually
+//   Hard-timeout needs-human (D8) — `poolReapSweepTeam` must actually
 //   stamp the GitHub label, not merely log that it "is marking" the item.
 //
 // orchestrator.js cannot be `require`d in a unit test (it boots the container
@@ -55,7 +55,7 @@ function fn(name) {
 }
 
 test("the guard is not vacuous: both functions survive the comment strip with their bodies intact", () => {
-  for (const name of ["routePooledDispatch", "_reapTimedOutPoolInstances", "_liveInstanceIdsForRole"]) {
+  for (const name of ["routePooledDispatch", "poolReapSweepTeam", "_liveInstanceIdsForRole"]) {
     assert.ok(fn(name).length > 100, `${name} came back empty — the comment strip or slice ran away`);
   }
 });
@@ -88,7 +88,7 @@ test("_liveInstanceIdsForRole scans by role prefix and poolOf, not by a single i
 });
 
 test("the hard-timeout reaper actually stamps needs-human, not just a console.warn claiming to", () => {
-  const src = fn("_reapTimedOutPoolInstances");
+  const src = fn("poolReapSweepTeam");
   assert.match(
     src,
     /stampMirrorLabel\(cfg\.poolRepo, cfg\.poolItem, "needs-human", labelWarnings\)/,
@@ -97,11 +97,30 @@ test("the hard-timeout reaper actually stamps needs-human, not just a console.wa
 });
 
 test("mutation-proved: a reaper that only logs (the pre-fix shape) would fail the check above", () => {
-  const buggy = fn("_reapTimedOutPoolInstances").replace(
+  const buggy = fn("poolReapSweepTeam").replace(
     /if \(cfg\.poolRepo[\s\S]*?await _internalSelfDelete\(id\);/,
     'console.warn(`marking item ${cfg.poolItem} needs-human`);\n      await _internalSelfDelete(id);',
   );
   assert.doesNotMatch(buggy, /stampMirrorLabel\(/);
+});
+
+test("#2301: poolReapSweepTeam runs independent of wipLimit — it does not gate on admission-lane state", () => {
+  const src = fn("poolReapSweepTeam");
+  assert.doesNotMatch(
+    src,
+    /wipLimit|limitInForce|loadAdmissionLane/,
+    "the whole point of #2301 gap 1 is that this sweep must reap a pooled role's finished/idle/stuck instances even when the team has no wipLimit at all — it must never touch the admission lane",
+  );
+});
+
+test("#2301: the idle reap is a quiet delete — it never stamps needs-human like the hard-timeout branch does", () => {
+  const src = fn("poolReapSweepTeam");
+  const idleBranch = src.slice(src.indexOf("isInstanceIdle"));
+  assert.doesNotMatch(
+    idleBranch,
+    /stampMirrorLabel/,
+    "an idle instance is not stuck — it must be deleted quietly, not flagged needs-human",
+  );
 });
 
 test("spawnPoolInstance stamps poolRepo on the instance at spawn time, so the reaper never has to re-derive it", () => {
@@ -140,4 +159,52 @@ test("mutation-proved: an unvalidated branch/rawBranch would fail the check abov
   const checkoutBody = SRC.slice(checkoutStart, SRC.indexOf("\nfunction cloneRepository("));
   const buggyCheckout = checkoutBody.replace(/if \(typeof branch !== "string" \|\| branch\.length === 0 \|\| branch\.startsWith\("-"\)\) \{[\s\S]*?\}\n/, "");
   assert.doesNotMatch(buggyCheckout, /branch\.startsWith\("-"\)/);
+});
+
+// ─── #2301: pool-reap gap fixes ─────────────────────────────────────────────
+//
+// These use FULL_SRC (comments intact), not the comment-stripped SRC `fn()`
+// reads from — the boundary markers below are the section-header comments
+// themselves, which `stripComments` would otherwise erase.
+
+test("#2301: admissionSweepTeam no longer runs the hard-timeout reaper itself — it moved to its own wipLimit-independent tick", () => {
+  const start = FULL_SRC.indexOf("async function admissionSweepTeam(");
+  assert.ok(start > 0, "admissionSweepTeam not found");
+  const end = FULL_SRC.indexOf("// Agent Pools — Phase 2: the Flow Supervisor", start);
+  assert.ok(end > start, "expected the Phase 2 section header to follow admissionSweepTeam");
+  const body = FULL_SRC.slice(start, end);
+  assert.doesNotMatch(
+    body,
+    /_reapTimedOutPoolInstances\(|poolReapSweepTeam\(/,
+    "the whole point of gap 1 is that hard-timeout/idle reaping must not live behind admissionSweepTeam's wipLimit early-return",
+  );
+  // The ticket-release reap (D4) is a DIFFERENT mechanism (needs the lane's
+  // GitHub-evidence reconcile) and stays here on purpose.
+  assert.match(body, /_reapPooledInstancesForTicket\(/);
+});
+
+test("#2301: gracefulPoolTeardown stamps archived-at.json so the prune pass never relies on directory mtime", () => {
+  const start = FULL_SRC.indexOf("async function gracefulPoolTeardown(");
+  assert.ok(start > 0, "gracefulPoolTeardown not found");
+  const end = FULL_SRC.indexOf("function inspectAgentRepoDivergence(", start);
+  assert.ok(end > start, "expected inspectAgentRepoDivergence to follow gracefulPoolTeardown");
+  const body = FULL_SRC.slice(start, end);
+  assert.match(body, /archived-at\.json/);
+  assert.match(body, /archivedAt:\s*new Date\(\)\.toISOString\(\)/);
+});
+
+test("#2301: poolReapSweepTeam invokes the archive-prune pass every tick, best-effort", () => {
+  const src = fn("poolReapSweepTeam");
+  assert.match(src, /_pruneArchivedPoolLogs\(teamId, now\)/);
+});
+
+test("#2301: _pruneArchivedPoolLogs reads the archived-at.json stamp, not fs.statSync mtime", () => {
+  const start = FULL_SRC.indexOf("function _pruneArchivedPoolLogs(");
+  assert.ok(start > 0, "_pruneArchivedPoolLogs not found");
+  const end = FULL_SRC.indexOf("// Admission-control reconcile tick", start);
+  assert.ok(end > start, "expected the admission-control section header to follow _pruneArchivedPoolLogs");
+  const body = FULL_SRC.slice(start, end);
+  assert.match(body, /archived-at\.json/);
+  assert.doesNotMatch(body, /statSync/);
+  assert.match(body, /agentPool\.isArchiveExpired\(/);
 });

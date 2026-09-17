@@ -5,29 +5,32 @@ import {
   TEAM_CONFIG_TABS, DEFAULT_TEAM_CONFIG_TAB, ENV_TAB_IDS, resolveTeamConfigTab,
 } from './team-config-tabs-view.js';
 
-test('the eight tabs are exactly the ones AC2 names, in reading order (#2236)', () => {
+test('the nine tabs are exactly the ones AC2 names plus Sharing, in reading order (#2236)', () => {
   assert.deepEqual(TEAM_CONFIG_TABS.map(t => t.id), [
     'general', 'repositories', 'provider', 'toolchain', 'mcp', 'context', 'skills', 'plugins',
+    'sharing',
   ]);
   assert.deepEqual(TEAM_CONFIG_TABS.map(t => t.label), [
     'General', 'Repositories', 'Model provider', 'Toolchain', 'MCP servers', 'Additional context',
-    'Skills', 'Plugins',
+    'Skills', 'Plugins', 'Sharing',
   ]);
 });
 
 test('the five environment tabs are re-hosted verbatim, not re-invented', () => {
   // team-config-tabs-view.js imports TEAM_ENV_TABS rather than declaring its
   // own copy of the ids/labels — this pins that the set in the middle of
-  // TEAM_CONFIG_TABS is exactly ENV_TAB_IDS, in the same order.
-  const envIds = TEAM_CONFIG_TABS.slice(1, -2).map(t => t.id);
+  // TEAM_CONFIG_TABS is exactly ENV_TAB_IDS, in the same order. The trailing
+  // three (skills, plugins, sharing) are agent-construct/membership tabs.
+  const envIds = TEAM_CONFIG_TABS.slice(1, -3).map(t => t.id);
   assert.deepEqual(envIds, ['repositories', 'provider', 'toolchain', 'mcp', 'context']);
   assert.deepEqual([...ENV_TAB_IDS].sort(), [...envIds].sort());
 });
 
-test('ENV_TAB_IDS excludes General, Skills and Plugins', () => {
+test('ENV_TAB_IDS excludes General, Skills, Plugins and Sharing', () => {
   assert.equal(ENV_TAB_IDS.has('general'), false);
   assert.equal(ENV_TAB_IDS.has('skills'), false);
   assert.equal(ENV_TAB_IDS.has('plugins'), false);
+  assert.equal(ENV_TAB_IDS.has('sharing'), false);
 });
 
 test('DEFAULT_TEAM_CONFIG_TAB is General', () => {

@@ -179,8 +179,18 @@ export function FlowCopilotProvider({ children }) {
       }
       if (!isCurrent(id)) return;
 
+      // Capture the turn's identity NOW, synchronously, while `turnRef.current`
+      // is still the live turn. The `setPendingByScope` updater below runs
+      // LATER (React processes it during the next render), by which point the
+      // `clearTurn(id)` on the line after has already set `turnRef.current` to
+      // null — so reading the ref from inside the updater dereferences null.
+      // `boundScope` already tolerates that (it returns null and we fall back to
+      // `scope`); `flowName` did not, which crashed the turn on completion.
+      const boundTo = boundScope(id) || scope;
+      const finishedFlowName = (turnRef.current && turnRef.current.flowName) || flowName || '';
+
       setPendingByScope((m) => putPending(m, {
-        id, scope: boundScope(id) || scope, flowName: turnRef.current.flowName,
+        id, scope: boundTo, flowName: finishedFlowName,
         userText: userText || '',
         summary: body.summary || '',
         changes: Array.isArray(body.changes) ? body.changes : [],

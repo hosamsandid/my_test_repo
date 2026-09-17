@@ -119,10 +119,27 @@ function assembleLineage({ name, viewed, manifest, provenance, copies } = {}) {
   };
 }
 
+// Summarize the DOWNSTREAM drift for one list row (#2317) — the count/worst
+// state of the copies that descend from THIS row (a pool row's downstream is
+// every team+agent copy of the name; a team row's downstream is only that
+// team's own agent copies), so the Skills Registry list can show "N copies
+// need an update" without opening the row. `in-sync` copies are excluded from
+// the count (AC1/AC2 — only non-in-sync copies are noise-worthy); an empty
+// result after filtering returns null (no indicator). Reuses `rollupDrift`
+// rather than re-deriving severity, so it can never disagree with the
+// detail-view Usage/Copies tabs computed from the same per-copy states (AC3).
+function summarizeDownstreamDrift(states) {
+  const filtered = (Array.isArray(states) ? states : []).filter(s => s && s !== 'in-sync');
+  if (!filtered.length) return null;
+  const rollup = skillDrift.rollupDrift(filtered);
+  return { total: filtered.length, counts: rollup.counts, worst: rollup.worst };
+}
+
 module.exports = {
   normalizeVersionHistory,
   summarizeCopies,
   sortCopies,
   copyKey,
   assembleLineage,
+  summarizeDownstreamDrift,
 };

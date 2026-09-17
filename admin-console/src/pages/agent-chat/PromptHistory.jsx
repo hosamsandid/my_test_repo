@@ -4,27 +4,35 @@ import { apiCall } from '../../hooks/useApi';
 import ConfirmDialog from '../../components/ConfirmDialog';
 
 /**
- * Authored-prompt version history + rollback (#990).
+ * Authored-prompt version history + revert (#990, #2295).
  *
  * Renders the bounded, newest-first history of an agent's authored system prompt
  * (standalone `agent`/`team-member` override, or a `team`'s systemPromptTemplate)
- * and offers "revert to this version". A revert re-applies the stored content
- * through the same write path a normal edit uses, so the seeded prompt stays
- * byte-identical to what the Prompt preview shows; the rollback is itself
- * recorded as a new version (never destructive).
+ * and offers "revert to this version".
+ *
+ * #2295 (D2): a revert is no longer an immediate server write — the Details
+ * tab's live prompt editor batches into the tab's one Save now, so reverting
+ * loads that version's text into the editor as an unsaved change instead,
+ * committed by the tab's Save like any other edit. Nothing in the history is
+ * lost either way: a commit still records a new version, only the server-side
+ * "this was a revert to vN" provenance is gone.
  *
  * Props:
  *   - agentId       Selected agent (required).
- *   - onReverted    Called after a successful revert (parent can refresh preview).
- *   - reloadKey     Change this to force a re-fetch (e.g. after an external edit).
+ *   - dirty         Whether the editor already holds unsaved text — gates the
+ *                    confirm (AC8: replacing unsaved work needs a confirm,
+ *                    loading into a clean editor does not).
+ *   - onLoadVersion  Called with (content, version) once a version is chosen.
+ *   - reloadKey      Change this to force a re-fetch (e.g. after a save records
+ *                    a new version).
  */
-export default function PromptHistory({ agentId, onReverted, reloadKey }) {
+export default function PromptHistory({ agentId, dirty = false, onLoadVersion, reloadKey }) {
   const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState(null);
   const [expanded, setExpanded] = useState({});   // version -> full content
-  const [busy, setBusy]       = useState(null);   // version currently reverting
-  const [confirmVersion, setConfirmVersion] = useState(null); // version pending revert-confirm
+  const [busy, setBusy]       = useState(null);   // version currently being fetched to load
+  const [confirmVersion, setConfirmVersion] = useState(null); // version pending overwrite-confirm
 
   const load = useCallback(async () => {
     if (!agentId) { setData(null); return; }
@@ -61,19 +69,33 @@ export default function PromptHistory({ agentId, onReverted, reloadKey }) {
     }
   }
 
-  async function revert(version) {
+  // Content for `toggle`'s preview and a revert's load are the same fetch —
+  // reuse whatever is already expanded rather than fetching twice.
+  async function contentFor(version) {
+    if (expanded[version] !== undefined) return expanded[version];
+    const entry = await apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}/prompt-history/${version}`);
+    return entry.content || '';
+  }
+
+  async function doLoad(version) {
     setConfirmVersion(null);
     setBusy(version);
     setError(null);
     try {
-      await apiCall('POST', `/api/agents/${encodeURIComponent(agentId)}/prompt-history/${version}/revert`);
-      await load();
-      onReverted?.();
+      const content = await contentFor(version);
+      onLoadVersion?.(content, version);
     } catch (e) {
-      setError(e.message || 'Revert failed');
+      setError(e.message || 'Failed to load that version');
     } finally {
       setBusy(null);
     }
+  }
+
+  // AC8: replacing unsaved typed text needs a confirm; loading into a clean
+  // editor does not — there is nothing to silently destroy.
+  function requestRevert(version) {
+    if (dirty) setConfirmVersion(version);
+    else doLoad(version);
   }
 
   if (!agentId) return null;
@@ -139,9 +161,9 @@ export default function PromptHistory({ agentId, onReverted, reloadKey }) {
               {!isCurrent && (
                 <button
                   type="button"
-                  onClick={() => setConfirmVersion(v.version)}
+                  onClick={() => requestRevert(v.version)}
                   disabled={busy !== null}
-                  title={`Revert to v${v.version}`}
+                  title={`Load v${v.version} into the editor as an unsaved change`}
                   style={{ ...revertBtn, cursor: busy !== null ? 'wait' : 'pointer' }}
                 >
                   {busy === v.version
@@ -176,12 +198,12 @@ export default function PromptHistory({ agentId, onReverted, reloadKey }) {
 
       <ConfirmDialog
         open={confirmVersion !== null}
-        title={`Revert to v${confirmVersion}`}
-        message={`Revert the prompt to version ${confirmVersion}? This records a new version and re-seeds the agent. Your current prompt stays in the history and can be restored the same way.`}
+        title={`Load v${confirmVersion}`}
+        message={`Load version ${confirmVersion} into the editor? It replaces the unsaved text you've typed since — that text is not kept. Save the tab afterwards to commit it as a new version.`}
         variant="warning"
-        confirmLabel="Revert"
+        confirmLabel="Load"
         busy={busy !== null}
-        onConfirm={() => revert(confirmVersion)}
+        onConfirm={() => doLoad(confirmVersion)}
         onCancel={() => setConfirmVersion(null)}
       />
     </div>

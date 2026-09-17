@@ -13,6 +13,7 @@ import {
   turnFlowName,
   jumpToFlowPath,
   pendingForScope,
+  pendingToReview,
   putPending,
   dropPending,
   dropPendingById,
@@ -127,6 +128,56 @@ test('the indicator disappears on completion, stop and error (AC12)', () => {
   for (const status of ['done', 'stopped', 'error']) {
     assert.equal(indicatorState({ turn: { ...runningTurn, status }, panelScope: null }).visible, false, status);
   }
+});
+
+test('a running turn reports mode:running', () => {
+  assert.equal(indicatorState({ turn: runningTurn, panelScope: null }).mode, 'running');
+});
+
+// ── #2087 follow-up: a proposal that finished while the user was away ─────────
+
+const readyStore = { 'draft:a': { scope: 'draft:a', flowName: 'Intake flow', finishedAt: 10 } };
+
+test('a finished proposal keeps the indicator alive so it is not lost', () => {
+  // The running turn is gone (turn: null, the provider clears it on completion),
+  // but the proposal survives in pendingByScope and the user is on another page.
+  const s = indicatorState({ turn: null, panelScope: null, pendingByScope: readyStore });
+  assert.equal(s.visible, true);
+  assert.equal(s.mode, 'ready');
+  assert.equal(s.flowName, 'Intake flow');
+  assert.equal(s.jumpTo, '/flows?proc=draft%3Aa&copilot=1');
+  assert.equal(s.phase, null);
+});
+
+test('the ready indicator hides on the flow whose panel is already open (AC13)', () => {
+  assert.equal(indicatorState({ turn: null, panelScope: 'draft:a', pendingByScope: readyStore }).visible, false);
+});
+
+test('a live turn wins the slot over a pending proposal on another flow', () => {
+  const s = indicatorState({
+    turn: runningTurn, panelScope: null,
+    pendingByScope: { 'draft:b': { scope: 'draft:b', flowName: 'Other', finishedAt: 99 } },
+  });
+  assert.equal(s.mode, 'running');
+  assert.equal(s.scope, 'draft:a');
+});
+
+test('pendingToReview returns the away proposal, skipping the open panel scope', () => {
+  assert.equal(pendingToReview(readyStore, null).scope, 'draft:a');
+  assert.equal(pendingToReview(readyStore, 'draft:a'), null, 'the flow being viewed shows its own card');
+  assert.equal(pendingToReview(null, null), null);
+  assert.equal(pendingToReview({}, null), null);
+});
+
+test('pendingToReview surfaces the most recently finished of several proposals', () => {
+  const store = {
+    'draft:a': { scope: 'draft:a', finishedAt: 10 },
+    'draft:b': { scope: 'draft:b', finishedAt: 40 },
+    'draft:c': { scope: 'draft:c', finishedAt: 25 },
+  };
+  assert.equal(pendingToReview(store, null).scope, 'draft:b');
+  // With draft:b's panel open, the next-newest away proposal wins.
+  assert.equal(pendingToReview(store, 'draft:b').scope, 'draft:c');
 });
 
 test('the indicator is never armed by a scope-less or absent turn', () => {

@@ -1,5 +1,5 @@
 import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
-import { computeWindow } from './virtual-window.js';
+import { computeWindow, prefixOffsets, computeCenteredScrollTop } from './virtual-window.js';
 
 /**
  * Dependency-free list virtualization (#1685).
@@ -36,6 +36,22 @@ import { computeWindow } from './virtual-window.js';
  *                  (#1710). The caller drives this from its own `atBottom`
  *                  intent, so scrolling up (atBottom → false) stops the re-pin
  *                  and older-history restore is never fought.
+ *   scrollToKey    (#2310) when set to a key present in `items`, scroll that
+ *                  row to the vertical center of the viewport. Off-screen rows
+ *                  only have an estimated height until mounted, so this is a
+ *                  converge-over-several-commits loop mirroring `stickToBottom`
+ *                  above: each commit re-centers on the (possibly still
+ *                  estimated) row, which pulls it into the rendered window,
+ *                  where it gets measured — narrowing the estimate until the
+ *                  scrollTop settles. Suppresses the `stickToBottom` re-pin
+ *                  while active so the two never fight. A key not (yet) present
+ *                  in `items` is a no-op — the caller is expected to backfill
+ *                  and retry with the same key. `onScrolledToKey(key)` fires
+ *                  once convergence is reached (or a bounded number of commits
+ *                  have passed without settling, so a pathological layout can't
+ *                  spin forever).
+ *   onScrolledToKey(key) called once per distinct `scrollToKey` value, when the
+ *                  row has been centered (see above).
  */
 export default function VirtualList({
   items,
@@ -47,6 +63,8 @@ export default function VirtualList({
   gap = 0,
   rowStyle,
   stickToBottom = false,
+  scrollToKey = null,
+  onScrolledToKey,
 }) {
   const innerRef = useRef(null);
   const heightsRef = useRef(new Map());   // key -> measured outer height (px, incl. gap)
@@ -56,6 +74,9 @@ export default function VirtualList({
   const [metrics, setMetrics] = useState({ scrollTop: 0, viewportHeight: 0 });
   // measureTick only exists to force a recompute when the height cache changes.
   const [, setMeasureTick] = useState(0);
+  // #2310: tracks the in-progress scrollToKey seek across commits — reset
+  // whenever the caller asks for a different key (or clears the request).
+  const seekRef = useRef({ key: null, attempts: 0, notified: false });
 
   // Read the list-relative scroll offset + viewport height straight off the
   // DOM (getBoundingClientRect works regardless of the scroller's positioning
@@ -161,7 +182,7 @@ export default function VirtualList({
     // a streamed reply grows — without reintroducing full-list rendering. The
     // caller only sets `stickToBottom` while the user is at the bottom, so a
     // deliberate scroll-up (or older-history restore) is never overridden.
-    if (stickToBottom) {
+    if (stickToBottom && !scrollToKey) {
       const scroller = scrollerRef.current;
       if (scroller) {
         // Only re-pin while we are still measurably short of the bottom. The
@@ -178,6 +199,53 @@ export default function VirtualList({
         }
       }
     }
+
+    // #2310: center `scrollToKey` in the viewport, converging over commits as
+    // its (initially estimated) row is pulled into the window and measured.
+    // See the prop doc above for why this mirrors the stickToBottom loop.
+    if (scrollToKey) {
+      if (seekRef.current.key !== scrollToKey) {
+        seekRef.current = { key: scrollToKey, attempts: 0, notified: false };
+      }
+      const seek = seekRef.current;
+      const scroller = scrollerRef.current;
+      if (!seek.notified && scroller) {
+        const idx = items.findIndex((it, i) => keyOf(it, i) === scrollToKey);
+        if (idx >= 0) {
+          const heightsNow = items.map((it, i) => {
+            const h = heightsRef.current.get(keyOf(it, i));
+            return typeof h === 'number' ? h : estimateHeight + gap;
+          });
+          const offsetsNow = prefixOffsets(heightsNow);
+          const desired = computeCenteredScrollTop({
+            offsets: offsetsNow,
+            heights: heightsNow,
+            index: idx,
+            viewportHeight: scroller.clientHeight,
+            scrollHeight: scroller.scrollHeight,
+          });
+          const isMeasured = heightsRef.current.has(keyOf(items[idx], idx));
+          const closeEnough = Math.abs(scroller.scrollTop - desired) <= 1;
+          seek.attempts += 1;
+          // Bounded so a layout that never quite settles (fractional heights,
+          // a row that keeps resizing) still resolves the request rather than
+          // holding the caller's highlight in limbo forever.
+          if ((isMeasured && closeEnough) || seek.attempts > 40) {
+            seek.notified = true;
+            onScrolledToKey && onScrolledToKey(scrollToKey);
+          } else if (!closeEnough) {
+            scroller.scrollTop = desired;
+            measureViewport();
+          }
+        }
+        // idx < 0: the target isn't in `items` yet (still backfilling) — leave
+        // the seek pending; it re-evaluates on the next commit once `items`
+        // includes it, or the caller drops `scrollToKey` and gives up.
+      }
+    } else if (seekRef.current.key !== null) {
+      seekRef.current = { key: null, attempts: 0, notified: false };
+    }
+
     if (changed) setMeasureTick(t => t + 1);
   });
 

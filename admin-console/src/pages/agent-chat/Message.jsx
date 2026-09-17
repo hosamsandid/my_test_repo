@@ -1,9 +1,10 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { rehypeShikiSync } from '../../components/shiki-rehype';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { Bot, User, Zap } from 'lucide-react';
+import { Link as LinkIcon } from 'lucide-react';
 import LoopRecordCard from './LoopRecordCard';
 import AskQuestionCard from './AskQuestionCard';
 import { normalizeAskQuestion } from './ask-question-view.js';
@@ -348,6 +349,26 @@ function Message({
   onAnswerQuestion, questionAnswerable, questionAnswer,
   viewer, authorDirectory, agentId,
 }) {
+  // "Copy link" (#2310 AC7, nice-to-have): builds a `/chats/:agentId?msg=<event_id>`
+  // deep-link and copies it, reusing the copy → clipboard → brief "Copied" idiom
+  // already used elsewhere in Agent Chat (SessionInfoPopover). Declared before
+  // any early return below so the hook order stays identical across renders
+  // regardless of which message-kind branch a given row takes (rules-of-hooks) —
+  // even though in practice a given `event_id`'s branch never changes between
+  // renders of the same row.
+  const [hovering, setHovering] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
+  const copyMessageLink = useCallback(() => {
+    if (!agentId || !message?.event_id || !navigator.clipboard) return;
+    const url = `${window.location.origin}/chats/${encodeURIComponent(agentId)}?msg=${encodeURIComponent(message.event_id)}`;
+    navigator.clipboard.writeText(url)
+      .then(() => {
+        setLinkCopied(true);
+        setTimeout(() => setLinkCopied(false), 1500);
+      })
+      .catch(() => { /* clipboard unavailable — no-op */ });
+  }, [agentId, message?.event_id]);
+
   // Quick-reply question (#1663): an agent message that paused on AskUserQuestion
   // carries a structured `io.aee.ask-question` payload — render it as clickable
   // option controls beneath the question. The plain Markdown `body` is what
@@ -416,13 +437,16 @@ function Message({
   const imageSegments = parsedSegments && hasImageRef(parsedSegments) ? parsedSegments : null;
 
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: onRight ? 'row-reverse' : 'row',
-      alignItems: 'flex-end',
-      gap: 'var(--eb-space-2)',
-      maxWidth: '100%',
-    }}>
+    <div
+      onMouseEnter={() => setHovering(true)}
+      onMouseLeave={() => setHovering(false)}
+      style={{
+        display: 'flex',
+        flexDirection: onRight ? 'row-reverse' : 'row',
+        alignItems: 'flex-end',
+        gap: 'var(--eb-space-2)',
+        maxWidth: '100%',
+      }}>
       <Avatar badge={badge} />
 
       <div style={{
@@ -466,12 +490,44 @@ function Message({
         </div>
 
         <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
           fontSize: 'var(--eb-text-xs)',
           color: 'var(--eb-text-muted)',
           marginTop: 'var(--eb-space-0-5)',
           padding: '0 var(--eb-space-1)',
         }}>
-          {thinking ? 'thinking…' : (message.isOptimistic ? `${time} · sending…` : time)}
+          <span>{thinking ? 'thinking…' : (message.isOptimistic ? `${time} · sending…` : time)}</span>
+          {/* #2310 AC7: only a confirmed (non-optimistic, non-thinking) message
+              has a stable event_id worth sharing. Fades in on hover so the
+              timestamp row stays uncluttered otherwise; "Copied" pins it
+              visible until the confirmation itself fades. */}
+          {!thinking && !message.isOptimistic && (
+            <button
+              type="button"
+              onClick={copyMessageLink}
+              title="Copy link to this message"
+              aria-label="Copy link to this message"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 2,
+                padding: 0,
+                border: 'none',
+                background: 'none',
+                color: 'inherit',
+                fontSize: 'inherit',
+                fontFamily: 'inherit',
+                cursor: 'pointer',
+                opacity: hovering || linkCopied ? 1 : 0,
+                transition: 'opacity 0.1s',
+              }}
+            >
+              <LinkIcon size={10} />
+              {linkCopied ? 'Copied' : ''}
+            </button>
+          )}
         </div>
       </div>
     </div>

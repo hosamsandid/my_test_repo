@@ -14,6 +14,7 @@ askPrompts:
   - "What is the difference between a loop trigger and a cron trigger?"
   - "Why is my trigger not firing while a loop is running?"
   - "What is the difference between Reset Session and Clear History?"
+  - "How do I share a link to one specific chat message?"
   - "Where do I author outcomes — I can't edit them here?"
   - "What exactly happens when I retire a learning?"
   - "Why does switching the model provider restart the agent?"
@@ -97,6 +98,22 @@ login name is no longer recoverable.
 
 Trigger notices, finished-loop cards and any other automated entry are unchanged:
 they carry no human badge and are not realigned.
+
+## Linking to one message
+
+Hovering a plain text message reveals a small **link** icon next to its
+timestamp — click it to copy a URL that opens straight to that message,
+scrolled into view and briefly highlighted, so you can point a colleague (or
+your own future self) at exactly the line that matters instead of "scroll up
+a bit." The icon only appears on ordinary messages; a quick-reply question, a
+finished-loop card and a trigger notice don't offer one.
+
+Opening the link jumps to the right agent's chat, fetches older history if the
+message isn't in the currently loaded window, and scrolls to it — all bounded,
+so a stale or made-up link can't make the chat fetch history forever. If the
+message can't be found (deleted, or the link is wrong), the chat opens
+normally and a brief "Linked message not found" notice appears instead of
+failing silently or showing an error.
 
 ## The agent roles
 
@@ -381,7 +398,9 @@ end. Dismiss it and it comes back on the next change.
 
 The **Workspace** tab is a read-only view of the agent's own workspace: its
 repository clones, its `memory/` files, everything it has written. You can open a
-file, download it, and see images inline. Each file row also offers
+file, download it, and see images inline — and download a whole **directory** as
+a single ZIP from its own row (paths kept relative to that directory; not offered
+on the workspace root or on a `/context` folder). Each file row also offers
 **reference in chat** (**@**), which is the fastest way to say "look at this one".
 The **Git** mode next to *Tree* switches the same tab to the repository view —
 which files the agent has changed, and the diff for each.

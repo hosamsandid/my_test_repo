@@ -15,6 +15,7 @@ import { classifyRepositoryChanges, hasRepositoryChanges } from '../working-env-
 import { describeWorkingEnvSubmitState } from '../working-env-submit-state.js';
 import { providerOptionLabel } from '../provider-option-view.js';
 import { initialTeamEnvForm, teamEnvSubmitBody } from './team-environment-view.js';
+import { describeCredentialRef } from '../credential-ref-legibility.js';
 
 /**
  * Team Settings — the five environment tabs of the flat configuration row
@@ -176,6 +177,9 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [notice, setNotice] = useState('');
+  // #2323: set when a save is blocked for a repo-backed env with no GitHub token;
+  // holds the server message and drives the reference-only opt-out prompt.
+  const [tokenWarn, setTokenWarn] = useState(null);
   // The save-time propagation offer (#2066), same shape as the Working
   // Environments page's own.
   const [offer, setOffer] = useState(null);
@@ -264,11 +268,18 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
     mcpServers: form.mcpServers,
   });
 
-  async function save() {
+  async function save(acknowledgeNoToken = false) {
+    // #2323: `acknowledgeNoToken` is only ever passed explicitly by the
+    // reference-only opt-out below — strict-check it so an `onClick={() => save()}`
+    // (event) or any truthy leak can never silently acknowledge.
+    const ack = acknowledgeNoToken === true;
     setSaving(true); setSaveError(null); setNotice('');
+    if (!ack) setTokenWarn(null);
     try {
       const body = teamEnvSubmitBody(baseline, form);
+      if (ack) body.acknowledgeNoToken = true;
       const saved = await apiCall('PUT', `/api/environments/${encodeURIComponent(baseline.id)}`, body);
+      setTokenWarn(null);
       setBaseline(saved);
       setForm(initialTeamEnvForm(saved));
       setNotice('Saved.');
@@ -279,7 +290,13 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
       }
       if (onSaved) onSaved();
     } catch (e) {
-      setSaveError(e.message);
+      // #2323: a repo-backed environment with no GitHub token is blocked server-side.
+      // Offer the explicit reference-only opt-out instead of a dead-end error.
+      if (e.code === 'github_token_required') {
+        setTokenWarn(e.serverMessage || e.message);
+      } else {
+        setSaveError(e.message);
+      }
     } finally {
       setSaving(false);
     }
@@ -296,6 +313,24 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
           {saveError}
         </div>
       )}
+      {tokenWarn && (
+        <div role="alert" style={{
+          color: 'var(--eb-status-warning, var(--eb-status-error))', fontSize: 'var(--eb-text-sm)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          background: 'var(--eb-status-warning-bg, var(--eb-status-error-bg))', borderRadius: 'var(--eb-radius-md)',
+          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+        }}>
+          <div>{tokenWarn}</div>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+            <button type="button" onClick={() => save(true)} disabled={saving} style={buttonStyle}>
+              Save anyway (reference-only)
+            </button>
+            <button type="button" onClick={() => setTokenWarn(null)} disabled={saving} style={secondaryButtonStyle}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
       {notice && !saveError && (
         <div style={{ ...helpTextStyle, color: 'var(--eb-status-success)' }}>{notice}</div>
       )}
@@ -306,6 +341,9 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
             Repositories are cloned into a member's workspace when it is first created. Editing
             the list here offers to bring already-materialized members up to date.
           </div>
+          {/* #2324: live GitHub-integration health — is the token valid for each
+              repo, and is anything listening? Reflects the SAVED state. */}
+          <GithubHealthBadge envId={baseline.id} />
           {form.repositories.map((repo, idx) => (
             <RepositoryCard
               key={idx}
@@ -315,6 +353,7 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
               githubTokenId={form.githubTokenId || null}
               tokenTarget="environment"
               hasEnvironmentToken={!!form.githubTokenId}
+              credentialRefs={baseline.credentialRefs}
               onChange={(key, val) => updateRepo(idx, key, val)}
               onRemove={() => removeRepo(idx)}
             />
@@ -342,12 +381,59 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
               CLI, HTTPS pushes and the GitHub poller. Only needed for a private HTTPS URL above — a private SSH
               URL uses the repository's own SSH key instead. Manage tokens on the <em>GitHub Tokens</em> page.
             </div>
-            <select value={form.githubTokenId} onChange={e => update('githubTokenId', e.target.value)} style={inputStyle}>
-              <option value="">— no token —</option>
-              {ghTokens.map(t => (
-                <option key={t.id} value={t.id}>{t.name} ({t.preview})</option>
-              ))}
-            </select>
+            {/* #2327 (R2): if the bound token is a personal one the caller can't
+                see, the scope-filtered `ghTokens` has no matching option — the plain
+                <select> would render EMPTY and a save would clear it (#2326). Show a
+                read-only "set, not visible to you" state with a replace-only picker
+                (no clear option, only tokens the caller can see) instead. */}
+            {(() => {
+              const ref = describeCredentialRef({ boundId: form.githubTokenId, visibleOptions: ghTokens });
+              // #2325: owner/tier enrichment from the metadata-only descriptor the
+              // env GET carries for a referenced-but-invisible credential.
+              const desc = baseline.credentialRefs?.[form.githubTokenId] || null;
+              if (ref.mode === 'readonly-invisible') {
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+                    <div style={{
+                      ...inputStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+                      color: 'var(--eb-text-secondary)', background: 'var(--eb-bg-surface)',
+                    }}>
+                      <span>Set: <code>{ref.boundId}</code></span>
+                      {desc && (
+                        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+                          {desc.tier} · {desc.ownerLabel}
+                        </span>
+                      )}
+                      <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginLeft: 'auto' }}>
+                        not visible to you
+                      </span>
+                    </div>
+                    <div style={helpTextStyle}>
+                      This token was set by another team member and is not visible to you. It stays set — you can
+                      replace it with a token you can see, but not clear it.
+                    </div>
+                    <select
+                      value=""
+                      onChange={e => { if (e.target.value) update('githubTokenId', e.target.value); }}
+                      style={inputStyle}
+                    >
+                      <option value="">Replace with a token you can see…</option>
+                      {ghTokens.map(t => (
+                        <option key={t.id} value={t.id}>{t.name} ({t.preview})</option>
+                      ))}
+                    </select>
+                  </div>
+                );
+              }
+              return (
+                <select value={form.githubTokenId} onChange={e => update('githubTokenId', e.target.value)} style={inputStyle}>
+                  <option value="">— no token —</option>
+                  {ghTokens.map(t => (
+                    <option key={t.id} value={t.id}>{t.name} ({t.preview})</option>
+                  ))}
+                </select>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -402,8 +488,16 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
             aria-label="Agent toolchain"
             style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 'var(--eb-space-3)' }}
           >
+            {/* The default card carries the same title + description + badge
+                shape as a registry row so it doesn't read as an empty/disabled
+                option next to the fleshed-out toolchains. Its facts are
+                hard-coded (there is no registry entry): baseline versions track
+                the FROM line of agent-image/Dockerfile — keep them in sync. */}
             <ToolchainCard
-              label={`— default agent image${toolchainData?.defaultImage ? ` (${toolchainData.defaultImage})` : ''} —`}
+              label="Default agent image — Python + Node"
+              hint={`The baseline every environment starts from unless it needs a language build stack. Carries Python and Node plus git, the GitHub CLI and the Claude Code CLI — enough for scripting, web/JS work and any repository that doesn't compile a JVM or other language. No JDK or Maven: pick a toolchain here if an agent has to build one.${toolchainData?.defaultImage ? ` Image: ${toolchainData.defaultImage}.` : ''}`}
+              platforms={['podman', 'kubernetes']}
+              baseline="python 3.12, node 20"
               selected={!form.toolchainId}
               available
               onSelect={() => update('toolchainId', '')}
@@ -536,7 +630,7 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button
-          onClick={save}
+          onClick={() => save()}
           disabled={saving || !canSubmit}
           style={{
             padding: 'var(--eb-space-2) var(--eb-space-4)',
@@ -662,6 +756,78 @@ const inputStyle = {
   fontFamily: 'inherit',
   outline: 'none',
   boxSizing: 'border-box',
+};
+
+// #2324: a compact live health readout for the environment's GitHub integration.
+// Fetches GET /api/environments/:id/github-health (which probes each repo's token
+// server-side) and shows the worst-case status plus a line per unhealthy repo —
+// so "why aren't events arriving?" is answered in the UI, not the poller log.
+// Reflects the SAVED environment; a probe failure never blocks the tab.
+function GithubHealthBadge({ envId }) {
+  const { data, loading, error, refetch } = useApi(
+    envId ? `/api/environments/${encodeURIComponent(envId)}/github-health` : null,
+  );
+  if (!envId || error) return null;
+  if (loading && !data) {
+    return (
+      <div style={{ ...helpTextStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
+        <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> Checking GitHub integration…
+      </div>
+    );
+  }
+  const repos = Array.isArray(data?.repos) ? data.repos : [];
+  if (repos.length === 0) return null; // repo-less (LLM-only) env: nothing to report
+  const roll = data?.rollUp || {};
+  const tone = roll.ok ? 'var(--eb-status-success)' : 'var(--eb-status-warning, var(--eb-status-error))';
+  const bg = roll.ok
+    ? 'var(--eb-status-success-bg, var(--eb-bg-elevated))'
+    : 'var(--eb-status-warning-bg, var(--eb-status-error-bg))';
+  const unhealthy = repos.filter((r) => !r.ok);
+  return (
+    <div role="status" style={{
+      display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)',
+      padding: 'var(--eb-space-2) var(--eb-space-3)', borderRadius: 'var(--eb-radius-md)',
+      background: bg, fontSize: 'var(--eb-text-sm)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', color: tone, fontWeight: 'var(--eb-font-medium)' }}>
+        <Github size={13} />
+        <span>GitHub integration: {roll.ok ? 'OK' : (roll.label || 'Problem')}</span>
+        <button
+          type="button"
+          onClick={refetch}
+          disabled={loading}
+          style={{
+            marginLeft: 'auto', padding: 'var(--eb-space-0-5) var(--eb-space-2)',
+            background: 'transparent', color: 'var(--eb-text-secondary)',
+            border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+            fontSize: 'var(--eb-text-xs)', cursor: loading ? 'wait' : 'pointer', fontFamily: 'inherit',
+          }}
+        >
+          {loading ? 'Checking…' : 'Recheck'}
+        </button>
+      </div>
+      {unhealthy.map((r, i) => (
+        <div key={i} style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' }}>
+          <code>{r.fullName || r.url}</code>: {r.label}{r.detail ? ` — ${r.detail}` : ''}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// #2323: the reference-only opt-out prompt's two buttons.
+const buttonStyle = {
+  padding: 'var(--eb-space-1) var(--eb-space-3)',
+  background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+  border: 'none', borderRadius: 'var(--eb-radius-md)',
+  fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+  cursor: 'pointer', fontFamily: 'inherit',
+};
+const secondaryButtonStyle = {
+  padding: 'var(--eb-space-1) var(--eb-space-3)',
+  background: 'transparent', color: 'var(--eb-text-primary)',
+  border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+  fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit',
 };
 
 const dashedButtonStyle = {

@@ -144,9 +144,13 @@ test('the indicator is mounted once in Shell, beside the transcription overlay',
 
 test('the indicator takes every visibility decision from the pure module', () => {
   const s = code(INDICATOR);
-  assert.match(s, /indicatorState\(\{ turn: ctx\.turn, panelScope: ctx\.panelScope \}\)/);
+  // pendingByScope is threaded in so a proposal that finished while the user was
+  // away keeps the indicator alive as a "ready to review" card (#2087 follow-up)
+  // — without it the card would vanish on completion and the proposal read as lost.
+  assert.match(s, /indicatorState\(\{ turn: ctx\.turn, panelScope: ctx\.panelScope, pendingByScope: ctx\.pendingByScope \}\)/);
   assert.match(s, /indicatorPhaseLabel\(/);
   assert.match(s, /state\.visible/, 'visibility is the pure decision, not a local condition');
+  assert.match(s, /state\.mode === 'ready'/, 'the ready hand-off is a mode of the pure state, not a local flag');
   assert.match(s, /createPortal\(/, 'portaled to body so it floats above every page');
 });
 
@@ -178,6 +182,25 @@ test('the provider keeps the assist-model header on the stream (AC16)', () => {
 
 test('the provider refuses a second concurrent turn (AC4)', () => {
   assert.match(code(PROVIDER), /if \(turnRef\.current\) return;/);
+});
+
+test('the finished-turn proposal captures flowName before clearTurn nulls the ref', () => {
+  // Regression: the `setPendingByScope` updater runs LATER (React processes it
+  // during the next render), but `clearTurn(id)` on the following line sets
+  // `turnRef.current = null` synchronously. Reading `turnRef.current.flowName`
+  // from inside the updater therefore dereferenced null on completion — the
+  // "Cannot read properties of null (reading 'flowName')" crash. The value must
+  // be captured into a local while the ref is still live, before scheduling.
+  const s = code(PROVIDER);
+  const start = s.indexOf('setPendingByScope((m) => putPending(m, {');
+  const end = s.indexOf('clearTurn(id);', start);
+  assert.ok(start !== -1 && end !== -1, 'putPending/clearTurn wiring not found — re-point this guard');
+  const updater = s.slice(start, end);
+  assert.doesNotMatch(
+    updater,
+    /turnRef\.current\.flowName/,
+    'the pending updater must not dereference turnRef.current after clearTurn nulls it',
+  );
 });
 
 // ── the server-side cancellation path (AC9, AC14) ────────────────────────────

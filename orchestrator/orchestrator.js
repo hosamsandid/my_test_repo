@@ -2377,13 +2377,33 @@ async function _reapPooledInstancesForTicket(teamId, laneKey) {
   }
 }
 
-// D8's hard timeout: a stuck/crashed instance must never hold its slot
-// forever. Checked on the same tick, independent of ticket release — a
-// deadlocked run may sit on an issue GitHub still shows fully open.
-async function _reapTimedOutPoolInstances(teamId, now = Date.now()) {
+// Read an instance's pushed status (#185) the same way the admin console's
+// status reads do — control-plane copy preferred, agent's own workspace copy
+// as fallback (`agentStatePath`). Missing/corrupt reads as "no status yet"
+// (a just-spawned instance that hasn't pushed its first `idle`/`busy` write),
+// never a throw — the idle reaper's own "never guess" stance.
+function _readInstanceStatus(id) {
+  try {
+    return JSON.parse(fs.readFileSync(agentStatePath(id, "status.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// #2301 gap 1 + 2 + 3: the hard-timeout AND idle reapers, run as a DEDICATED
+// sweep independent of the admission lane / `wipLimit` — `admissionSweepTeam`
+// early-returns for a `wipLimit`-less team (`limitInForce(...) === null`),
+// which used to mean a pooled role on a team/flow with no `wipLimit` got
+// neither reaper at all (the issue's "Observed impact": 3/3 `maxInstances`
+// with nothing to reap them). `_teamPooledRoles` itself only requires
+// `pool.enabled`, never `wipLimit`, so this sweep costs nothing extra to
+// decouple. Deliberately NOT maintenance-gated, matching the existing
+// pool-reap precedent inside `admissionSweepTeam` (`_reapPooledInstancesForTicket`)
+// — clearing out finished/stuck/idle work is safe regardless of maintenance
+// mode, unlike STARTING a new dispatch.
+async function poolReapSweepTeam(teamId, now = Date.now()) {
   for (const role of _teamPooledRoles(teamId)) {
-    const maxRuntimeMs = role.pool.teardown.maxRuntimeMs;
-    if (!maxRuntimeMs) continue;
+    const { maxRuntimeMs, idleTimeoutMs } = role.pool.teardown;
     const prefix = `${role.id}-i`;
     for (const id of listAgentIds()) {
       if (!id.startsWith(prefix)) continue;
@@ -2394,31 +2414,95 @@ async function _reapTimedOutPoolInstances(teamId, now = Date.now()) {
         continue;
       }
       if (!cfg || !cfg.poolInstance || cfg.poolOf !== role.id) continue;
-      if (!agentPool.isInstanceTimedOut({ spawnedAt: cfg.poolSpawnedAt, maxRuntimeMs }, now)) continue;
-      console.warn(`[AgentPool] ${teamId}: ${id} exceeded its ${maxRuntimeMs}ms runtime budget — reaping`);
-      // Code-review finding on #2246: this used to only console.warn "marking
-      // item X needs-human" without ever actually doing it — a timed-out
-      // ticket silently lost its worker with no trace outside the server log.
-      // `poolRepo` is stamped on the instance at spawn time (`spawnPoolInstance`)
-      // precisely so the reaper never has to re-derive which repo the item's
-      // issue lives in. Best-effort, mirroring every other GitHub-write in this
-      // file: a failed stamp is logged and never blocks the reap itself — the
-      // instance must not linger just because GitHub was unreachable.
-      if (cfg.poolRepo && cfg.poolItem != null) {
-        const labelWarnings = [];
-        const stamped = await stampMirrorLabel(cfg.poolRepo, cfg.poolItem, "needs-human", labelWarnings);
-        if (stamped) {
-          console.log(`[AgentPool] ${teamId}: marked ${cfg.poolRepo}#${cfg.poolItem} needs-human (hard timeout)`);
+
+      if (agentPool.isInstanceTimedOut({ spawnedAt: cfg.poolSpawnedAt, maxRuntimeMs }, now)) {
+        console.warn(`[AgentPool] ${teamId}: ${id} exceeded its ${maxRuntimeMs}ms runtime budget — reaping`);
+        // Code-review finding on #2246: this used to only console.warn "marking
+        // item X needs-human" without ever actually doing it — a timed-out
+        // ticket silently lost its worker with no trace outside the server log.
+        // `poolRepo` is stamped on the instance at spawn time (`spawnPoolInstance`)
+        // precisely so the reaper never has to re-derive which repo the item's
+        // issue lives in. Best-effort, mirroring every other GitHub-write in this
+        // file: a failed stamp is logged and never blocks the reap itself — the
+        // instance must not linger just because GitHub was unreachable.
+        if (cfg.poolRepo && cfg.poolItem != null) {
+          const labelWarnings = [];
+          const stamped = await stampMirrorLabel(cfg.poolRepo, cfg.poolItem, "needs-human", labelWarnings);
+          if (stamped) {
+            console.log(`[AgentPool] ${teamId}: marked ${cfg.poolRepo}#${cfg.poolItem} needs-human (hard timeout)`);
+          } else {
+            console.warn(
+              `[AgentPool] ${teamId}: could not mark ${cfg.poolRepo}#${cfg.poolItem} needs-human: ` +
+              (labelWarnings.join("; ") || "unknown error"),
+            );
+          }
         } else {
-          console.warn(
-            `[AgentPool] ${teamId}: could not mark ${cfg.poolRepo}#${cfg.poolItem} needs-human: ` +
-            (labelWarnings.join("; ") || "unknown error"),
-          );
+          console.warn(`[AgentPool] ${teamId}: ${id} has no poolRepo/poolItem recorded — cannot mark needs-human`);
         }
-      } else {
-        console.warn(`[AgentPool] ${teamId}: ${id} has no poolRepo/poolItem recorded — cannot mark needs-human`);
+        await _internalSelfDelete(id);
+        continue;
       }
-      await _internalSelfDelete(id);
+
+      // Gap 3: idle reap — instance-local, no GitHub call. Unlike the hard
+      // timeout above, a quiet delete: an idle instance isn't stuck, its
+      // ticket is just still open, so there is nothing for a human to see.
+      const status = _readInstanceStatus(id);
+      if (status && agentPool.isInstanceIdle({
+        state: status.state,
+        lastResponseAt: status.lastResponseAt,
+        spawnedAt: cfg.poolSpawnedAt,
+        idleTimeoutMs,
+      }, now)) {
+        console.log(`[AgentPool] ${teamId}: ${id} idle for over its ${idleTimeoutMs}ms budget — reaping`);
+        await _internalSelfDelete(id);
+      }
+    }
+  }
+  // Gap 4: prune archived pool session logs past retainLogsMs. Best-effort,
+  // same tick — a failure here never blocks the reap above.
+  try {
+    _pruneArchivedPoolLogs(teamId, now);
+  } catch (err) {
+    console.warn(`[AgentPool] ${teamId}: archive prune failed: ${err.message}`);
+  }
+}
+
+// #2301 gap 4: `retainLogsMs` was normalized (`agent-pool.js`) but never
+// consumed — the pruning pass was a TODO and archived pool session logs
+// (`gracefulPoolTeardown`'s `pool-archive/<id>/` copy) lived forever. Reads
+// the `archived-at.json` stamp `gracefulPoolTeardown` writes at archive time
+// (never the directory's mtime — `fs.cpSync` can leave it carrying the
+// copied files' own, older mtimes). Best-effort per entry: one unreadable
+// stamp or failed `rmSync` never blocks the rest.
+function _pruneArchivedPoolLogs(teamId, now = Date.now()) {
+  const seg = knowledgeFeed.safeTeamSegment(teamId || "");
+  if (!seg) return;
+  const archiveRoot = path.join(HILL_CLIMB_TEAMS_DIR, seg, "pool-archive");
+  let entries;
+  try {
+    entries = fs.readdirSync(archiveRoot, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const role of _teamPooledRoles(teamId)) {
+    const retainLogsMs = role.pool.teardown.retainLogsMs;
+    const prefix = `${role.id}-i`;
+    for (const e of entries) {
+      if (!e.isDirectory() || !e.name.startsWith(prefix)) continue;
+      const dir = path.join(archiveRoot, e.name);
+      let archivedAt = null;
+      try {
+        archivedAt = JSON.parse(fs.readFileSync(path.join(dir, "archived-at.json"), "utf8")).archivedAt;
+      } catch {
+        continue; // no stamp yet (still archiving, or a pre-#2301 archive) — never guess
+      }
+      if (!agentPool.isArchiveExpired({ archivedAt, retainLogsMs }, now)) continue;
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+        console.log(`[AgentPool] ${teamId}: pruned expired pool-archive/${e.name} (retainLogsMs=${retainLogsMs})`);
+      } catch (err) {
+        console.warn(`[AgentPool] ${teamId}: could not prune pool-archive/${e.name}: ${err.message}`);
+      }
     }
   }
 }
@@ -2525,9 +2609,10 @@ async function admissionSweepTeam(teamId) {
       console.error(`[AgentPool] reap for ${teamId}/${rel.key} failed: ${err.message}`));
   }
   saveAdmissionLane(teamId, promoted.lane);
-  // #2246 D8 hard timeout, independent of ticket release.
-  _reapTimedOutPoolInstances(teamId).catch((err) =>
-    console.error(`[AgentPool] timeout sweep for ${teamId} failed: ${err.message}`));
+  // The hard-timeout/idle/archive-prune axes run on their own dedicated,
+  // wipLimit-independent tick (`poolReapSweepTeam`, #2301) — not here, since
+  // this whole function already returned above for a wipLimit-less team,
+  // which was exactly the gap that ticket closes.
 
   return {
     teamId,
@@ -4771,15 +4856,23 @@ async function gracefulPoolTeardown(id, cfg) {
   // Archive the session transcript so the work log survives the wipe even
   // though the PR/ledger/event log already do (concept §4/§8: "otherwise the
   // actual work log dies with the container"). Retention (pool.teardown.
-  // retainLogsMs) is a later pruning pass, same as anomaly-history's own
-  // retention job — Phase 1 just copies.
+  // retainLogsMs) is `_pruneArchivedPoolLogs` (#2301), its own sweep on
+  // `poolReapSweepTeam`'s tick — this just copies and stamps WHEN it copied,
+  // in an `archived-at.json` sibling of the `sessions/` copy: the prune pass
+  // reads that stamp rather than the directory's mtime, which `fs.cpSync`
+  // can leave carrying the copied files' own (older) mtimes.
   try {
     const seg = knowledgeFeed.safeTeamSegment(cfg.parentTeamId || "");
     const sessionsDir = agentStatePath(id, "sessions");
     if (seg && fs.existsSync(sessionsDir)) {
-      const archiveDir = path.join(HILL_CLIMB_TEAMS_DIR, seg, "pool-archive", id, "sessions");
+      const archiveRoot = path.join(HILL_CLIMB_TEAMS_DIR, seg, "pool-archive", id);
+      const archiveDir = path.join(archiveRoot, "sessions");
       fs.mkdirSync(path.dirname(archiveDir), { recursive: true });
       fs.cpSync(sessionsDir, archiveDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(archiveRoot, "archived-at.json"),
+        JSON.stringify({ archivedAt: new Date().toISOString() }),
+      );
     }
   } catch (err) {
     console.warn(`[AgentPool] ${id}: session-log archive failed: ${err.message}`);
@@ -19103,6 +19196,49 @@ async function main() {
   };
   const admissionTimer = setInterval(runAdmissionTick, ADMISSION_TICK_INTERVAL_MS);
   if (typeof admissionTimer.unref === "function") admissionTimer.unref();
+
+  // ============================================================
+  // Agent Pools — the hard-timeout/idle/archive-prune reap tick (#2301).
+  // Deliberately its OWN tick, independent of `admissionSweepTeam` — that
+  // function early-returns for a team with no `wipLimit`, which used to mean
+  // a pooled role on such a team got neither reaper at all (issue #2301's
+  // gap 1: "no wipLimit ⇒ no reaping at all"). `_teamPooledRoles` only
+  // requires `pool.enabled`, so `poolReapSweepTeam` costs one directory scan
+  // per team for an installation that never opted into pooling. Not
+  // maintenance-gated, mirroring the admission tick above and the existing
+  // ticket-release reap inside `admissionSweepTeam` — reaping finished/stuck/
+  // idle work is never "starting" new work.
+  // ============================================================
+  const POOL_REAP_TICK_INTERVAL_MS = Number(process.env.AEE_POOL_REAP_TICK_INTERVAL_MS || 60_000);
+  let poolReapBusy = false;
+  const runPoolReapTick = async () => {
+    if (poolReapBusy) return; // overlap guard — a slow sweep must not stack
+    poolReapBusy = true;
+    try {
+      let teamIds = [];
+      try {
+        teamIds = listAgentIds().filter((id) => {
+          try { const c = loadAgentConfig(id); return c && c.role === "team"; }
+          catch { return false; }
+        });
+      } catch (err) {
+        console.warn(`[AgentPool] reap team enumeration failed: ${err.message}`);
+        return;
+      }
+      for (const teamId of teamIds) {
+        try {
+          await poolReapSweepTeam(teamId);
+        } catch (err) {
+          // Never let one team's failure stop the others or escape the timer.
+          console.warn(`[AgentPool] ${teamId}: reap sweep failed: ${err.message}`);
+        }
+      }
+    } finally {
+      poolReapBusy = false;
+    }
+  };
+  const poolReapTimer = setInterval(runPoolReapTick, POOL_REAP_TICK_INTERVAL_MS);
+  if (typeof poolReapTimer.unref === "function") poolReapTimer.unref();
 
   // ============================================================
   // Agent Pools — Phase 2 (#2247): the Flow Supervisor's reconcile tick.

@@ -167,7 +167,7 @@ test('a visible team header offers the full AC2 action set', () => {
     team: { id: 't1', role: 'team', enabled: true },
   });
   assert.deepEqual(keys(items), [
-    'toggle-team', 'add-member', 'edit-team', 'share', 'export-team', 'clone-team', 'open-flow-editor',
+    'toggle-team', 'add-member', 'share', 'export-team', 'clone-team', 'open-flow-editor',
     'delete-team',
   ]);
 });
@@ -185,7 +185,7 @@ test('without a visible team row the fan-out toggle is omitted, not guessed', ()
   const items = buildTeamMenu({ teamId: 't1', team: null });
   assert.ok(!keys(items).includes('toggle-team'));
   assert.deepEqual(keys(items), [
-    'add-member', 'edit-team', 'share', 'export-team', 'clone-team', 'open-flow-editor', 'delete-team',
+    'add-member', 'share', 'export-team', 'clone-team', 'open-flow-editor', 'delete-team',
   ]);
 });
 
@@ -216,11 +216,6 @@ test('AC8 — team mutations are inert without rights; navigation stays live', (
     assert.equal(byKey(items, key).disabled, true, `${key} should be inert`);
     assert.equal(byKey(items, key).title, NO_RIGHTS_HINT);
   }
-  // `edit-team` joined the gated set in #1929: it no longer navigates to a
-  // page that re-applies its own rules, it opens the chat's Settings tab —
-  // which is hidden for exactly this caller, so a live entry would open nothing.
-  assert.equal(byKey(items, 'edit-team').disabled, true, 'edit-team should be inert');
-  assert.equal(byKey(items, 'edit-team').title, NO_RIGHTS_HINT);
   for (const key of ['export-team', 'clone-team', 'open-flow-editor']) {
     assert.equal(byKey(items, key).disabled, false, `${key} should stay live`);
   }

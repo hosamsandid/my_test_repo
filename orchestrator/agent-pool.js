@@ -26,15 +26,35 @@ const POOL_WORKSPACES = ['git-clean-base', 'input-copy', 'none'];
 // Config
 // ---------------------------------------------------------------------------
 
+// Sensible out-of-the-box teardown timeouts (#2301 gap "sensible pool.teardown
+// defaults... so cleanup works out of the box") — an unconfigured pooled role
+// used to reap NOTHING on these three axes (`positiveMs` defaulted straight to
+// `null`), even though the Scaling section's own UI copy ("blank = default")
+// already promised a default existed. `idleTimeoutMs`/`maxRuntimeMs` mirror the
+// concept doc's own mockup values (`docs/parallel-workers-concept.md`'s Scaling
+// panel: "Idle timeout [ 30m ]  Hard timeout [ 2h ]"); `retainLogsMs` has no
+// mockup precedent — 7 days, a judgement call, flagged in the PR.
+const TEARDOWN_DEFAULTS = Object.freeze({
+  idleTimeoutMs: 30 * 60 * 1000,
+  maxRuntimeMs: 2 * 60 * 60 * 1000,
+  retainLogsMs: 7 * 24 * 60 * 60 * 1000,
+});
+
 /**
  * Normalize a role's `pool` config (process-template.js §9). `null` means "not
  * pooled" — a role with no `pool` field, or `pool.enabled` anything but the
  * literal `true`, is byte-identical to a role that never heard of pooling.
  *
+ * Defaulting happens HERE, at the runtime-consumption site, rather than in
+ * `process-template.js`'s own `normalizePool` (bundle round-trip) — a bundle
+ * should keep storing exactly what was authored (`null` = "unset"), so a
+ * future change to `TEARDOWN_DEFAULTS` takes effect for every already-saved
+ * config instead of only newly-authored ones.
+ *
  * @returns {{enabled:true, maxInstances:number|null, workspace:string,
  *            baseBranch:string|null,
  *            workSource:{items:string[],outputDir:string,inputDir:string|null}|null,
- *            teardown:{idleTimeoutMs:number|null,maxRuntimeMs:number|null,retainLogsMs:number|null}}|null}
+ *            teardown:{idleTimeoutMs:number,maxRuntimeMs:number,retainLogsMs:number}}|null}
  */
 function normalizePoolConfig(raw) {
   if (!raw || typeof raw !== 'object' || raw.enabled !== true) return null;
@@ -49,7 +69,7 @@ function normalizePoolConfig(raw) {
   // typo/shape refusal lives in `process-template.js`'s `validateProcessTemplate`.
   const workSource = normalizeWorkSource(raw.workSource);
   const t = raw.teardown && typeof raw.teardown === 'object' ? raw.teardown : {};
-  const positiveMs = (v) => (Number.isFinite(v) && v > 0 ? v : null);
+  const positiveMsOr = (v, dflt) => (Number.isFinite(v) && v > 0 ? v : dflt);
   return {
     enabled: true,
     maxInstances,
@@ -57,9 +77,9 @@ function normalizePoolConfig(raw) {
     baseBranch,
     workSource,
     teardown: {
-      idleTimeoutMs: positiveMs(t.idleTimeoutMs),
-      maxRuntimeMs: positiveMs(t.maxRuntimeMs),
-      retainLogsMs: positiveMs(t.retainLogsMs),
+      idleTimeoutMs: positiveMsOr(t.idleTimeoutMs, TEARDOWN_DEFAULTS.idleTimeoutMs),
+      maxRuntimeMs: positiveMsOr(t.maxRuntimeMs, TEARDOWN_DEFAULTS.maxRuntimeMs),
+      retainLogsMs: positiveMsOr(t.retainLogsMs, TEARDOWN_DEFAULTS.retainLogsMs),
     },
   };
 }
@@ -263,9 +283,51 @@ function isInstanceTimedOut({ spawnedAt, maxRuntimeMs }, now = Date.now()) {
   return (now - start) >= maxRuntimeMs;
 }
 
+/**
+ * #2301 gap 3: `idleTimeoutMs` was normalized but consumed nowhere — an
+ * instance that finished its work and went idle was never reaped just because
+ * it went quiet, only ever via the (ticket-release or hard-timeout) reapers.
+ * This is the quiet-delete axis the issue asks for: "work done, ticket still
+ * open". Deliberately gated on `state === 'idle'` (the same field
+ * `_write_status` in `agent-entrypoint.py` maintains) so a run that is still
+ * actively BUSY, however long, is never caught here — that is `maxRuntimeMs`
+ * / `isInstanceTimedOut`'s job, and it stamps `needs-human` rather than
+ * quietly deleting, because a stuck run is a signal a human should see.
+ *
+ * The reference point is `lastResponseAt` (the last time this instance
+ * actually produced output) — falling back to `spawnedAt` only for the edge
+ * case of an instance that went idle without ever recording a response
+ * (`_write_status` sets `state` before the first `lastResponseAt` write).
+ * An unresolvable/missing `state` or reference time never reaps — fails
+ * closed, matching `isInstanceTimedOut`'s own "never guess" stance.
+ */
+function isInstanceIdle({ state, lastResponseAt, spawnedAt, idleTimeoutMs }, now = Date.now()) {
+  if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs <= 0) return false;
+  if (state !== 'idle') return false;
+  const refRaw = lastResponseAt || spawnedAt;
+  const ref = typeof refRaw === 'string' ? Date.parse(refRaw) : NaN;
+  if (!Number.isFinite(ref)) return false;
+  return (now - ref) >= idleTimeoutMs;
+}
+
+/**
+ * #2301 gap 4: `retainLogsMs` was normalized but the pruning pass was a TODO —
+ * archived pool session logs (`gracefulPoolTeardown`'s `pool-archive/…` copy)
+ * lived forever. `archivedAt` is the ISO stamp written at archive time, not
+ * the directory's mtime (`fs.cpSync` can leave a freshly-archived directory
+ * carrying its SOURCE files' older mtimes rather than the moment of archival).
+ */
+function isArchiveExpired({ archivedAt, retainLogsMs }, now = Date.now()) {
+  if (!Number.isFinite(retainLogsMs) || retainLogsMs <= 0) return false;
+  const ts = typeof archivedAt === 'string' ? Date.parse(archivedAt) : NaN;
+  if (!Number.isFinite(ts)) return false;
+  return (now - ts) >= retainLogsMs;
+}
+
 module.exports = {
   POOL_WORKSPACES,
   POOL_CONTROL_STATES,
+  TEARDOWN_DEFAULTS,
   normalizePoolConfig,
   isPooledRole,
   isSafeGitRef,
@@ -277,4 +339,6 @@ module.exports = {
   normalizePausedHold,
   planPoolDispatch,
   isInstanceTimedOut,
+  isInstanceIdle,
+  isArchiveExpired,
 };

@@ -13,6 +13,7 @@ import { isChatOpenable } from './agent-lifecycle/agent-lifecycle-menu.js';
 import ChatPanel from './agent-chat/ChatPanel';
 import RightRail from './agent-chat/RightRail';
 import AgentSettingsPanel from './agent-chat/AgentSettingsPanel';
+import ShareTeamPanel from './agent-chat/ShareTeamPanel.jsx';
 import { SessionsActiveProvider } from './agent-chat/SessionsActiveContext';
 import { resolveRailWidths } from './agent-chat/rail-layout';
 import { CREATE_ROUTE, emptyStatePointer } from './agent-chat/empty-state';
@@ -423,10 +424,11 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   }, []);
 
   // Which agent the rail's Settings tab (#1929) is for, when it is NOT the open
-  // chat's. A rail menu sets it — "Team settings…" on a group header (AC5), or
-  // "Settings…" on a row whose agent has no chat to open, e.g. a disabled one
-  // (AC10). Cleared whenever the chat moves on, so the tab silently follows the
-  // conversation again rather than stranding the user on a stale subject.
+  // chat's. It is set by the team-header row click (#2213, routes to the team
+  // and opens its configuration surface) or by "Settings…" on a row whose agent
+  // has no chat to open, e.g. a disabled one (AC10). Cleared whenever the chat
+  // moves on, so the tab silently follows the conversation again rather than
+  // stranding the user on a stale subject.
   const [settingsAgentId, setSettingsAgentId] = useState(null);
   // The team-header row click (#2213) fires `onSelect` (routes to the team,
   // changing `agentId`) and `onOpenTeamSettings` (sets this override) for the
@@ -505,6 +507,31 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
     setSearchParams(next, { replace: true });
   }, [requestedSession, loading, agents, agentId, searchParams, setSearchParams]);
 
+  // Deep-link to one chat message (#2310): a `?msg=<event_id>` query param
+  // means "scroll the transcript to this message and briefly highlight it".
+  // Mirrors `?session=` above exactly — same cold-nav-safe wait, same
+  // read-once-then-strip via `replace` (AC3), same "unknown agent → the
+  // redirect effect handles it, don't consume" guard (AC6) — but the actual
+  // locate/backfill/scroll/highlight work needs `messages` and the scroller,
+  // which only ChatPanel has, so this effect just hands off a request object
+  // (the same pattern as `resumeRequest`/`composerRefRequest`) rather than
+  // doing anything itself. Independent of the session/tab handling above, so
+  // a URL carrying `?msg=` together with `?session=`/`?tab=` honors all of
+  // them (AC8, Q4).
+  const [msgTargetRequest, setMsgTargetRequest] = useState(null);
+  const consumedMsgRef = useRef(null);
+  const requestedMsg = searchParams.get('msg');
+  useEffect(() => {
+    if (!requestedMsg || loading || !agents) return;
+    if (!agents.find(a => a.id === agentId)) return;
+    if (consumedMsgRef.current === requestedMsg) return;
+    consumedMsgRef.current = requestedMsg;
+    setMsgTargetRequest({ eventId: requestedMsg, ts: Date.now() });
+    const next = new URLSearchParams(searchParams);
+    next.delete('msg');
+    setSearchParams(next, { replace: true });
+  }, [requestedMsg, loading, agents, agentId, searchParams, setSearchParams]);
+
   // A disabled agent is only ever in this list because the opt-in is on (#1928
   // AC6), and it has no chat to open — the DM route rejects it with a 409. A
   // `role: 'team'` agent (#2213) never has a chat to open either — it hosts no
@@ -541,8 +568,7 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   // agent list as one full-width configuration surface — see
   // `TeamConfigSurface` below — rather than the ordinary chat + right-rail
   // split. Derived purely from the route, so every entry point (the row
-  // click, the row menu's "Team settings…", a direct /chats/<teamId> URL)
-  // converges on it.
+  // click, a direct /chats/<teamId> URL) converges on it.
   const subjectIsTeam = routedAgent?.role === 'team';
   // #2267: a team's Settings request (handleOpenSettings below) has nowhere to
   // be consumed — RightRail doesn't render for a team subject at all (#2235,
@@ -872,6 +898,7 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
                 onTodoBoundary={handleTodoBoundary}
                 onOpenKnowledge={handleOpenKnowledge}
                 resumeRequest={resumeRequest}
+                msgTargetRequest={msgTargetRequest}
                 insertRefRequest={composerRefRequest}
                 removedFromRoster={agentRemoved}
               />
@@ -1171,9 +1198,52 @@ function TeamConfigSurface({ team, onAgentConfigChanged }) {
             teamConfigTab={teamConfigTab}
             onTeamConfigTabChange={setTeamConfigTab}
           />
+        ) : teamConfigTab === 'sharing' ? (
+          // A caller who may see but not manage the team still has the D9/AC9
+          // right to read WHO has access. The config tabs are hidden for them
+          // (TeamReadOnlyNotice), but the "Share…" menu entry stays live and
+          // routes here with `?tab=sharing` — so surface the sharing panel on
+          // its own (it renders read-only for a non-manager itself), rather
+          // than the blanket "nothing editable" notice.
+          <TeamSharingReadOnlySurface team={team} />
         ) : (
           <TeamReadOnlyNotice team={team} />
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The Sharing tab on its own, for a caller who may see but not manage the team.
+ * The tabbed config surface is hidden for them, but reading the membership list
+ * is a Team-Member right (D9/AC9) that the rail's "Share…" entry still offers —
+ * it routes here with `?tab=sharing`. `ShareTeamPanel` renders itself read-only
+ * for a non-manager, so this only has to frame it with a header.
+ */
+function TeamSharingReadOnlySurface({ team }) {
+  return (
+    <div style={{
+      height: '100%', display: 'flex', flexDirection: 'column',
+      background: 'var(--eb-bg-app)', minHeight: 0,
+    }}>
+      <div style={{
+        height: 'var(--eb-header-height)',
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+        padding: '0 var(--eb-space-4)',
+        borderBottom: '1px solid var(--eb-border-default)',
+        flexShrink: 0, background: 'var(--eb-bg-surface)',
+      }}>
+        <span style={{
+          fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)',
+          color: 'var(--eb-text-primary)',
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>
+          {(team?.displayName || team?.id)} · Sharing
+        </span>
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-4)' }}>
+        <ShareTeamPanel teamId={team.id} teamName={team.displayName || team.id} />
       </div>
     </div>
   );

@@ -327,16 +327,17 @@ test('#2082 AC1 — the share entry is routed, not just described', () => {
   // The item comes from `buildTeamMenu`; without a case in `choose()` it would
   // render, be clickable, and do nothing at all.
   assert.match(host, /case 'share':/);
-  assert.match(host, /setShareTeam\(\{ id: teamId/);
-  assert.match(host, /<ShareTeamPanel/);
+  // The Share panel is now the team's own "Sharing" configuration tab, so the
+  // entry routes to that surface (`?tab=sharing`) rather than opening a
+  // rail-local SidePanel.
+  assert.match(host, /navigate\(`\/chats\/\$\{encodeURIComponent\(teamId\)\}\?tab=sharing`\)/);
 });
 
-test('#2082 — the member list is a SidePanel, not a ConfirmDialog', () => {
-  // A manage-a-list surface stays open across several writes (the
-  // `ManageTeamPanel` precedent); a ConfirmDialog closes on confirm, which
-  // would shut the panel on the first role change.
-  assert.match(host, /<SidePanel\s+open=\{!!shareTeam\}/);
-  assert.match(host, /onClose=\{\(\) => setShareTeam\(null\)\}/);
+test('#2082 — the Share panel is a config tab, not a rail SidePanel', () => {
+  // Relocated to `TEAM_CONFIG_TABS` (the flat team-configuration row), so the
+  // rail no longer mounts the panel or keeps `shareTeam` open/close state.
+  assert.doesNotMatch(host, /shareTeam/);
+  assert.doesNotMatch(host, /<ShareTeamPanel/);
 });
 
 test('#2082 AC2 — the panel gates on canManageTeam, not on the fetch succeeding', () => {

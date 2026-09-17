@@ -1,26 +1,56 @@
 # Deployment & hosting
 
-Where can you actually run Agent Studio? This page gives you three concrete options, what
-each one costs you, and — just as important — **what is not supported yet**, so you do not
-plan into a dead end.
+Where can you actually run Agent Studio? This page gives you the concrete options, what
+each one costs you, and — just as honestly — **what is still missing**, so you do not plan
+into a dead end.
 
-The product is designed to be self-hosted: the whole stack, including the chat backbone,
-runs inside your network. What varies is *whose* machine it runs on.
+The product is self-hosted: the whole stack, including the chat backbone, runs inside your
+network. What varies is *whose* machine it runs on, and on which runtime.
+
+> **This page was rewritten.** Several limitations the earlier revision called out as
+> blockers have since shipped and no longer apply:
+>
+> - **Per-user chat identity** — each human now chats under their own Matrix account, not one
+>   shared console token (#1458, #2173).
+> - **Authorization on every mutation** — writes are gated per team role, and the whole
+>   `:agentId` work plane (chat, workspace, git, session log) is behind a tenant gate that
+>   returns a uniform 404 for agents you can't see (#1459).
+> - **Google SSO** — the hosted stack signs you in from your Google identity via Cloud IAP;
+>   no second login form (#276, #1415).
+> - **A Kubernetes backend** — agent spawning is no longer tied to a local Podman socket; a
+>   runtime seam selects Podman *or* Kubernetes, and a GKE deployment is running (#1348 and
+>   the `deploy/k8s/` tree).
+>
+> Central, multi-team hosting is therefore no longer "not possible" — it is a **running
+> pilot** with a shrinking list of documented gaps (see option C).
+
+Two container runtimes are supported behind one seam (`orchestrator/container-runtime.js`,
+selected by `AEE_CONTAINER_RUNTIME`, default `podman`):
+
+- **Podman + compose** — the default local dev path (`make up`) and the single-VM server.
+- **Kubernetes** — locally on **kind**, hosted on **GKE**.
 
 ---
 
 ## Choose your option
 
-| | **A. Local** | **B. Shared server** | **C. Enterprise multi-tenant** |
+| | **A. Local** | **B. Single shared VM** | **C. Hosted Kubernetes (GKE)** |
 |---|---|---|---|
-| Runs on | one developer's laptop | one Linux VM your team reaches over the network | central platform, many teams |
-| Users | 1 | a small team, **trusted with each other's chats** | many, isolated |
-| Status | ✅ **fully supported** | ⚠️ **works, with real caveats** | ❌ **not supported yet** |
-| Effort | 45–60 min | half a day plus a reverse proxy | a development project |
-| Best for | evaluating, developing, demos | a pilot team, a shared demo instance | the long-term target |
+| Runs on | one developer's laptop (compose or kind) | one Linux VM your team reaches over the network (Podman compose) | a GKE cluster, kustomize overlays |
+| Users | 1 (or a few, single-user mode) | a team — **now with per-user chat identity** | many, isolated per team |
+| Status | ✅ **fully supported** | ✅ **supported** — read the hardening steps | ✅ **pilot** (test + preprod live), with documented gaps |
+| Identity | local password | local password (per-user once `AUTH_ENABLED=true`) | Google SSO via Cloud IAP |
+| Effort | 45–60 min | half a day plus a reverse proxy | a `terraform apply` + a bootstrap script, then a CI deploy |
+| Best for | evaluating, developing, demos | a pilot team, a shared demo instance | the multi-team target |
 
-Most readers want **A** today and are planning for **B**. Read the caveats in B before you
-promise it to anyone — one of them (shared chat identity) is a genuine surprise.
+Most readers still want **A** today. **B** is a solid single-team server. **C** is real now,
+not a plan — but read its gap table before you promise enterprise multi-tenancy.
+
+Operational runbooks (canonical, step-by-step, symptom-keyed troubleshooting):
+
+- [`deploy/k8s/README.md`](../deploy/k8s/README.md) — kind + GKE, overlay model, release policy, port map.
+- [`docs/hosting/gcp/gke-runbook.md`](hosting/gcp/gke-runbook.md) — GKE deploy & incident runbook.
+- [`docs/hosting/gcp/vm-podman-runbook.md`](hosting/gcp/vm-podman-runbook.md) — the single-VM Podman pilot on GCP.
 
 ---
 
@@ -39,14 +69,23 @@ Podman, ensure `/run/user/$(id -u)/podman/podman.sock` exists
 follow the macOS guide from "Configure the .env file" onward — there is no Podman machine
 VM to initialize.
 
-**What you get:** every feature. **What you don't:** anybody else using it.
+**Want the Kubernetes runtime locally?** `./deploy/k8s/kind-up.sh` builds the images, spins
+up a kind cluster, deploys the kustomize `kind` overlay, and seeds it — agents then spawn as
+real k8s pods. It is idempotent (re-run after any failure). See
+[`deploy/k8s/README.md`](../deploy/k8s/README.md). The compose stack is unaffected and
+remains the default.
+
+**What you get:** every feature. **What you don't:** anybody else using it (unless you turn
+on the multi-user model below).
 
 ---
 
-## B. Shared server hosting (works today — read the caveats)
+## B. Single shared VM (Podman compose)
 
 One Linux VM, the same compose stack, reachable by your team over the network. This is the
-realistic "central hosting" answer right now.
+realistic single-team "central hosting" answer, and there is a hardened GCP recipe for it:
+[`docs/hosting/gcp/vm-podman-runbook.md`](hosting/gcp/vm-podman-runbook.md) plus the
+provisioning scripts under `deploy/gcp/` (`provision.sh`, `deploy.sh`, `vm-*.sh`).
 
 ### Why this works without code changes
 
@@ -57,8 +96,29 @@ realistic "central hosting" answer right now.
   through the console's own API, so only one port has to be reachable.
 - **Ports and names are already environment-driven** — `ADMIN_PORT`, `CONDUWUIT_PORT`,
   `COMPOSE_PROJECT_NAME`, `AEE_INSTANCE_ID`.
-- **Rootless Podman on Linux is an anticipated target.** The compose file already carries
-  the `label=disable` workaround needed on SELinux-enforcing hosts.
+- **Rootless Podman on Linux is a first-class target.** The compose file already carries the
+  `label=disable` workaround needed on SELinux-enforcing hosts.
+
+### Turn on the multi-user model
+
+Two independent switches move you from "single operator" to "a team, each with their own
+identity":
+
+1. **Create real user records** (Administration → Users). Creating a user provisions that
+   human their own reserved Matrix account `@u-<16 hex of sha256(subject)>:local`
+   (`orchestrator/human-matrix-identity.js`); interactive chat then sends under *their* token,
+   not the shared console token. This happens at user-record creation — there is no flag to
+   toggle it on.
+2. **Set `AUTH_ENABLED=true`.** The default is single-user compatibility mode, in which
+   whoever signs in is the implicit System Admin and every scoping/authorization check is a
+   no-op. With it on, list endpoints are filtered by team membership, per-mutation
+   management gates apply, and the work-plane gate isolates each agent's chat/workspace/git.
+
+> **These two go together.** With `AUTH_ENABLED` off, the single operator has no user record,
+> so per-user Matrix identity never provisions and chat falls back to the shared
+> `MATRIX_ACCESS_TOKEN`. Turn it on **before** you invite a second person, or they inherit
+> the operator's view. Flipping it back off on a stack that already has named users grants
+> every one of them full visibility — the console logs a boot warning when that is the case.
 
 ### What you have to add yourself
 
@@ -69,23 +129,27 @@ terminator (nginx, Caddy, Traefik) in front of port `4000` and then:
 
 ```bash
 # in .env
+AUTH_ENABLED=true              # per-membership scoping + the work-plane gate (see above)
 AUTH_COOKIE_SECURE=true        # session cookie gets the Secure attribute
 AUTH_SESSION_SECRET=<random>   # otherwise a random key is persisted on the workspace volume
-ADMIN_PASSWORD=<something real>  # seeds the first admin's password at FIRST boot only
+ADMIN_PASSWORD=<something real> # seeds the first System-Admin record at FIRST boot only
 ```
 
 > **Do not skip `AUTH_COOKIE_SECURE`.** Without it the session cookie is sent over plain
 > HTTP too.
 
-> **Set `ADMIN_PASSWORD` before the first boot.** It seeds the first
-> System-Admin *record* and is never read again; on a stack that already has a
-> user, change the password on the Users page instead.
+> **`ADMIN_USERNAME`/`ADMIN_PASSWORD` are a one-time seed, not the login.** They create the
+> first System-Admin *record* on a zero-users store and are never read again; they are no
+> longer even passed to the admin-console container. On a stack that already has a user,
+> change the password on the Users page instead. (`BOOTSTRAP_SYSTEM_ADMIN_SUBJECT/_EMAIL/_NAME`
+> is the SSO-flavoured alternative seed: a passwordless System Admin.)
 
-Two rough edges to know about behind a proxy:
+One rough edge behind a proxy:
 
-- The API does **not** set Express's `trust proxy`. The login rate limiter (20 attempts per
-  15 minutes) therefore keys on the *proxy's* IP, so all users share one bucket. Rate-limit
-  at the proxy instead.
+- The API now sets Express's `trust proxy` to **1** (one hop), so with **exactly one** reverse
+  proxy in front the login rate limiter (20 attempts / 15 min) keys on the real client IP
+  from `X-Forwarded-For`. If you chain **two or more** proxies, `req.ip` becomes the nearest
+  proxy's address again and all clients share one bucket — rate-limit at the edge in that case.
 - CORS is configured wide open (`cors()` with no origin restriction). Cookies are not sent
   cross-origin, so this is not an authentication bypass, but restrict it at the proxy if
   your security review asks.
@@ -98,6 +162,10 @@ Two rough edges to know about behind a proxy:
 | `4003` | Orchestrator webhook (`http` triggers) | only if external systems must fire triggers; it authenticates per-trigger via `X-Hook-Secret` |
 | `8448` | Matrix homeserver | **no** — keep internal; nothing outside needs it |
 | `4002` | Orchestrator internal API | already unpublished; **leave it that way** — and arm the internal-auth gate below, because unpublished is not the same as unreachable |
+
+The compose stack now runs **four services**: `conduwuit`, `orchestrator` (which *is* the
+webhook/hook server on `HOOK_PORT` — there is no separate webhook container), `admin-console`,
+and `stt` (speech-to-text for the meeting Note-Taker; internal-only, no host port).
 
 ##### 2a. Arm the internal-API gate (`:4002`)
 
@@ -168,35 +236,36 @@ Create it for the service account that runs the stack, or edit the mount in
 The orchestrator holds a **read-write** Podman socket — that is how it spawns agent
 containers. Within that user's namespace this is effectively root-equivalent: anything that
 compromises the orchestrator can create containers with arbitrary mounts. Give the stack
-its own Linux user, and do not share that user with anything else.
+its own Linux user, and do not share that user with anything else. (The GCP VM runbook does
+exactly this — a dedicated `aee` service user with linger enabled.)
 
-### ⚠️ The caveats you must tell your users about
+### ⚠️ The caveats you must still tell your users about
 
 These are properties of the current implementation, not configuration mistakes.
 
 | Caveat | What it means in practice |
 |---|---|
-| **All console users share one chat identity** | The console authenticates to Matrix with a single access token. Every logged-in person acts as the *same* Matrix user and sees the *same* DM rooms — so **everyone can read everyone's agent conversations.** Acceptable inside one trusted team; not acceptable across teams. |
+| **One shared room per agent** | Per-user *identity* shipped, but the room model is still one room per agent. Everyone **explicitly authorized on the same agent** posts into that agent's room and sees each other's messages there (senders are distinguishable — this is by design, not per-human privacy from co-owners). Cross-agent / cross-team snooping *is* blocked by the work-plane gate. Per-human private rooms are not implemented. |
 | **Signing in requires the orchestrator** | A password is checked against the user store and nothing else — there is no env-credential fallback (#2059). While the orchestrator is unreachable, login answers `503` and **nobody can sign in**. Recovering a lost identity is a host-level action on `/workspace/users/index.json`, not a console login. |
-| **The seeded admin's password lives in its record** | `ADMIN_USERNAME`/`ADMIN_PASSWORD` are only the *seed* for the first System-Admin record, consumed once on a stack with no users. Changing them in `.env` and restarting does **not** revoke the account — only the Users page can change that password. |
-| **No SSO** | There is a clean, documented swap-point for OIDC/SAML, but no implementation. |
-| **Authorization is coarse** | The API gate is binary: authenticated or not. Team roles scope *lists*, not every mutation. **And they only scope anything at all once `AUTH_ENABLED=true`** — the default is single-user compatibility mode, in which every principal who can sign in is the implicit System Admin (#1457, see [teams-data-model.md](./teams-data-model.md#single-user-compatibility-mode-auth_enabled-1457)). |
+| **No generic OIDC/SAML** | Google Cloud IAP SSO is implemented, but it is GKE-only (option C) and needs `IAP_AUDIENCE`. On a VM there is password login. A clean, documented swap-point for OIDC/SAML exists, but no implementation. |
+| **Single-user mode is all-or-nothing** | With `AUTH_ENABLED` unset (the default), everyone who can sign in is the implicit System Admin — team roles scope nothing. Turn it on for a real team (see above, and [teams-data-model.md](./teams-data-model.md#single-user-compatibility-mode-auth_enabled-1457)). |
 | **No backup tooling** | Five stateful volumes and no dump/restore script — see below. |
-
-If your deployment needs per-user chat privacy, treat B as a **pilot**, not a rollout.
 
 ### Backup: what is actually stateful
 
-There is no backup tooling in the repository. You must handle these five named volumes
+There is still no backup tooling in the repository. You must handle these five named volumes
 (all prefixed with your `COMPOSE_PROJECT_NAME`) yourself:
 
-| Volume | Holds | If you lose it |
+| Volume (compose key → actual name) | Holds | If you lose it |
 |---|---|---|
-| `conduwuit-db` | all users, rooms and **chat history**, access tokens | catastrophic: tokens invalid, admin room ID changes, all conversations gone |
-| `agent-pool-workspace` | agent workspaces, the **secret stores** (SSH keys, GitHub tokens, MCP credentials), the audit log | catastrophic and secret-bearing |
-| `claude-home` | Claude session snapshots used by `--resume` | agents lose conversation continuity |
-| `agent-control-plane` | live status and session logs | monitoring history lost |
-| `skills-pool` | the curated skill pool | recoverable via `make seed-pool`, minus local edits |
+| `conduwuit-db` → `<project>_conduwuit-db` | all users, rooms and **chat history**, access tokens | catastrophic: tokens invalid, admin room ID changes, all conversations gone |
+| `agent-pool-workspace` → `<project>_agent-pool-workspace` | agent workspaces, the **secret stores** (SSH keys, GitHub tokens, MCP credentials), the audit log | catastrophic and secret-bearing |
+| `claude-home` → `<project>_claude-home` | Claude session snapshots used by `--resume` | agents lose conversation continuity |
+| `agent-control-plane` → `<project>_agent-control-plane` | live status and session logs | monitoring history lost |
+| `skills-pool` → `<project>_claude-workspace` | the curated skill pool | recoverable via `make seed-pool`, minus local edits |
+
+> Note the skill pool's compose key is `skills-pool` but its **volume name** is
+> `<project>_claude-workspace` — enumerate by name, not by key, when you snapshot.
 
 Plus per-agent volumes named `<project>_agent-<id>` when `AEE_PER_AGENT_VOLUME=1` — those
 are created dynamically, so enumerate Podman volumes rather than reading the compose file.
@@ -212,10 +281,13 @@ each other, and a half-restored pair leaves agents pointing at rooms that no lon
 
 ### Sizing
 
-Agent containers are started **eagerly** — every enabled agent has a container running,
-whether or not anyone is talking to it. There is no spawn-on-first-message path.
+Agent containers are started **eagerly** — every enabled *persistent* agent has a container
+running, whether or not anyone is talking to it. There is no spawn-on-first-message path for
+them. (Two exceptions are on-demand: **agent-pool instances** — one ephemeral instance per
+work item, reaped on release — and **ephemeral agents**; see
+`docs/parallel-workers-concept.md`.)
 
-Steady state = **4 service containers + one container per enabled agent**, and:
+Steady state = **4 service containers + one container per enabled persistent agent**, and:
 
 - each agent container is capped at **2 GiB** (`AEE_AGENT_MEM_LIMIT`, default `2g`) and 512
   PIDs (`AEE_AGENT_PIDS_LIMIT`) — neither is in `.env.example`, both are settable;
@@ -226,35 +298,71 @@ Steady state = **4 service containers + one container per enabled agent**, and:
   thing likely to strain.
 
 A practical starting point for a pilot of ~10 agents: 8 vCPU, 32 GiB RAM, 100 GiB disk —
-then measure, because real usage depends entirely on how busy the agents are.
+then measure, because real usage depends entirely on how busy the agents are. (The GCP VM
+runbook pilots ~5 concurrent agents on an `e2-standard-4` — 4 vCPU / 16 GB / 64 GB disk.)
 
 ---
 
-## C. Enterprise multi-tenant hosting (not supported yet)
+## C. Hosted Kubernetes / GKE (pilot)
 
-The long-term target: one central platform, many teams, each isolated from the others.
-**Nothing in the repository implements this today.** Being explicit about the gap:
+The multi-team target: one central platform, many teams, each isolated. **This is now
+implemented and running** — not a plan. The mechanics live in `deploy/k8s/` and are driven
+by two runbooks: [`deploy/k8s/README.md`](../deploy/k8s/README.md) (overlay model, release
+policy, kind, port map) and [`docs/hosting/gcp/gke-runbook.md`](hosting/gcp/gke-runbook.md)
+(bootstrap + incident runbook).
+
+### What exists
+
+- **A container-runtime seam.** `orchestrator/container-runtime.js` selects Podman or
+  Kubernetes on `AEE_CONTAINER_RUNTIME` (set to `kubernetes` in the k8s manifests). On k8s the
+  orchestrator runs as a pod and creates **one agent Pod per agent** through the Kubernetes
+  API with a projected service-account token (`orchestrator/spawn-kubernetes-pod.js`) — no
+  host Podman socket. UI-bearing plugins run as **Deployment + Service + state PVC**
+  (`spawn-kubernetes-plugin.js`). Filesystem isolation is a subPath on a shared workspace PVC.
+- **One manifest source, per-environment overlays.** A kustomize **base** (`deploy/k8s/base/`)
+  specialised by thin overlays: `kind` (local), `kind-e2e`, `test`, `preprod`. CI's
+  `k8s-render` job asserts the overlay invariants; `set-images.sh` pins the image tag at
+  deploy time.
+- **Two live GKE environments** on cluster `agent-studio` (`acn-projectroots`,
+  `europe-west3-b`): **test** (`agent-studio.projectroots-acn.com`) and **preprod**
+  (`agent-studio-preprod.projectroots-acn.com`), each behind an HTTPS ManagedCertificate + IAP.
+- **Google SSO via Cloud IAP.** With `IAP_AUDIENCE` set, an IAP-signed JWT (verified ES256
+  against Google's keys, `iss`/`aud`/`exp` checked) logs you in as your Google identity — no
+  console login form (`admin-console/api/iap-auth.js`). Auto-login applies only to registered
+  Agent Studio users; any other IAP account still sees the password form. Sign in with your
+  `@accenture.com` account; access is granted via `roles/iap.httpsResourceAccessor`.
+- **Deployment automation.** The **deploy-gke** GitHub Actions workflow builds amd64 images,
+  pushes an **immutable tag** to Artifact Registry, pins the overlay, and applies the manifests
+  (core → Secret check → app). One-time environment bootstrap (Matrix admin, the
+  `agent-studio-env` Secret, skill-pool seeding) is `deploy/k8s/gke-up.sh`. The Terraform
+  layer (`infra/gcp/`) provisions the cluster, Artifact Registry, static IPs + DNS, and the
+  IAP backend.
+
+### Remaining gaps (why it is a "pilot", not "GA multi-tenant")
 
 | Needed | Status today |
 |---|---|
-| Per-user identity in chat | ❌ one shared Matrix token for all console users — the core blocker |
-| SSO / OIDC | ❌ not implemented; a documented swap-point exists |
-| Per-request authorization by team role | ⚠️ partial — list endpoints are scoped, mutations are not |
-| TLS as part of the deployment | ❌ external concern today |
-| Kubernetes | ❌ **not possible without new code.** Agent spawning talks the Podman-specific libpod API over a Unix socket, with no abstraction seam and no alternative backend. A Docker socket would not work either |
-| A real Matrix `server_name` | ⚠️ currently the literal `local`. Fine while Matrix stays internal — but changing it is a destructive migration: it means wiping the homeserver database, re-bootstrapping, and touching every hardcoded `:local` reference |
-| Backup / restore | ❌ no tooling |
-| Deployment automation | ❌ CI builds and tests only; no image publishing, no deploy job |
+| Per-user identity in chat | ✅ each human has their own `@u-…:local` account |
+| SSO | ✅ Google Cloud IAP (GKE) — but ❌ no generic OIDC/SAML yet (documented swap-point) |
+| Per-request authorization by team role | ✅ management gates on mutations + a uniform-404 work-plane gate; a personal resource tier even a System Admin cannot break-glass into |
+| TLS | ✅ ManagedCertificate on GKE ingress (still your own concern on a VM) |
+| Kubernetes backend | ✅ agent Pods via the K8s API — no host socket |
+| Per-agent network segmentation on k8s | ❌ agent pods share the cluster network; no NetworkPolicy ships |
+| Broker plugins on k8s | ❌ per-agent broker reachability is **Podman-only**; UI-only plugins work. `podman-socket` plugins (e.g. `podman-sandbox`) are Podman-only and gated out on k8s |
+| Horizontal scaling / multi-node | ⚠️ blocked on RWX storage (#1316); effectively single-node today (adding nodes is not yet the lever) |
+| Context host-folder mounts on k8s | ⚠️ node-local, single-node, opt-in (`AEE_K8S_CONTEXT_HOSTPATH=1`); off on GKE |
+| Backup / restore | ❌ no tooling — same as the VM path |
+| A real Matrix `server_name` | ⚠️ still the literal `local` (compose **and** k8s). Fine while Matrix stays internal — but changing it is a destructive migration: wipe the homeserver DB, re-bootstrap, touch every hardcoded `:local` reference |
 
-**The honest summary:** the architecture does not prevent central hosting — the UI is
-origin-relative, the services are already network-separated, and rootless Podman on Linux
-is an anticipated target. What is missing is the *multi-tenancy layer*: real per-user
-identity, authorization on every mutation, and an orchestration backend that is not tied to
-a local Podman socket.
+**The honest summary:** central hosting is no longer blocked on architecture — the runtime
+seam, per-user identity, per-mutation authorization, and IAP SSO are all in. What remains for
+true enterprise multi-tenancy is mostly **isolation depth and scale**: per-agent network
+policy on k8s, broker plugins on k8s, RWX storage for horizontal scaling, generic OIDC/SAML,
+and backup/restore tooling.
 
 Design intent for the identity part is written up in
-[multi-user-concept.md](multi-user-concept.md) — read it as a plan, not as a description of
-what exists.
+[multi-user-concept.md](multi-user-concept.md) (read the "Amendments" for what actually
+shipped vs. what is still planned).
 
 ---
 
@@ -265,10 +373,10 @@ Anthropic API, a LiteLLM proxy, Azure AI Foundry, or an internal corporate gatew
 anything speaking the Anthropic Messages API. Configure it in `.env`, or register it in the
 console under **Model Providers**.
 
-For a hosted deployment, prefer an **API-key** provider. Claude *subscription* (OAuth)
-tokens are licensed for the subscription owner's own single-user use, which does not fit a
-shared server — the console requires you to confirm this explicitly before creating such a
-provider.
+For a hosted deployment (B or C), prefer an **API-key** provider. Claude *subscription*
+(OAuth) tokens are licensed for the subscription owner's own single-user use, which does not
+fit a shared server — the console requires you to confirm this explicitly before creating
+such a provider, and server-side one-shot assist calls skip OAuth providers.
 
 See [model-providers.md](model-providers.md).
 
@@ -277,9 +385,11 @@ See [model-providers.md](model-providers.md).
 ## Related
 
 - [macOS setup](guides/mac-setup.md) · [Windows setup](guides/windows-setup.md) — local install
+- [`deploy/k8s/README.md`](../deploy/k8s/README.md) — kind + GKE deployment
+- [`docs/hosting/gcp/gke-runbook.md`](hosting/gcp/gke-runbook.md) · [`docs/hosting/gcp/vm-podman-runbook.md`](hosting/gcp/vm-podman-runbook.md) — hosted runbooks
 - [credentials.md](credentials.md) — SSH keys and GitHub tokens
 - [triggers.md](triggers.md) — the webhook endpoint on port 4003
 - [admin-console.md](admin-console.md) — authentication and the audit trail
+- [agent-chat-troubleshooting.md](agent-chat-troubleshooting.md) — when an agent stays silent
 
 ← Back to the [documentation index](README.md).
-- [agent-chat-troubleshooting.md](agent-chat-troubleshooting.md) — when an agent stays silent

@@ -210,9 +210,9 @@ test('the chat feeds the server-shipped canManage into the tab decision', () => 
 test('the rail menus open the tab instead of leaving the chat', () => {
   const host = code(read('./RailLifecycleHost.jsx'));
   assert.match(host, /case 'settings':\s*if \(onOpenSettings\) onOpenSettings\(agent\.id\)/);
-  assert.match(host, /case 'edit-team':\s*if \(onOpenSettings && teamId\) onOpenSettings\(teamId\)/);
-  // Phase 1's jump to the Agents page is what this replaced.
-  assert.doesNotMatch(host, /case 'edit-team':\s*navigate\('\/agents'\)/);
+  // The team's own header row click reaches Settings now; the menu carries no
+  // `edit-team` / "Team settings…" entry (redundant), so there is no such case.
+  assert.doesNotMatch(host, /case 'edit-team':/);
 });
 
 test('the chat lifts the settings subject and hands it to both sides', () => {

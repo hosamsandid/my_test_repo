@@ -44,6 +44,7 @@ import PluginGrantPicker from '../../components/PluginGrantPicker';
 import SyncReposPanel from '../../components/SyncReposPanel';
 import AgentRepositoriesPanel from '../agent-chat/AgentRepositoriesPanel';
 import TeamEnvironmentPanel from '../agent-chat/TeamEnvironmentPanel';
+import ShareTeamPanel from '../agent-chat/ShareTeamPanel.jsx';
 import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from '../agent-chat/agent-chat-help-sections.js';
 import { effectiveGrantFor } from '../plugin-grant-view.js';
@@ -73,6 +74,7 @@ const TEAM_CONFIG_TAB_HELP = {
   context: AGENT_CHAT_HELP_SECTIONS.teamEnvironment,
   skills: AGENT_CHAT_HELP_SECTIONS.formFields,
   plugins: AGENT_CHAT_HELP_SECTIONS.formFields,
+  sharing: AGENT_CHAT_HELP_SECTIONS.shareTeam,
 };
 
 /* ── Agent Edit Form ────────────────────────────────────────────────── */
@@ -468,9 +470,10 @@ export default function AgentEditForm({
 
       {/* #2236: one flat, ARIA-compliant tab row — General · Repositories ·
           Model provider · Toolchain · MCP servers · Additional context ·
-          Skills · Plugins, always in this order and always all eight
+          Skills · Plugins · Sharing, always in this order and always all nine
           (AC1/AC2/AC3/AC9/AC15) — replacing the old boxed "Environment"
-          section with its own nested sub-tab strip.
+          section with its own nested sub-tab strip. (Sharing is the relocated
+          "Share…" SidePanel, added as the trailing tab.)
           #2253: restyled to match the Agent Chat right-rail TabButton look
           (RightRail.jsx) — a bottom-border underline for the active state
           instead of a filled pill, the same active/inactive color and
@@ -624,6 +627,17 @@ export default function AgentEditForm({
 
       {(!isTeam || activeTab === 'plugins') && (
         <PluginGrantSection agent={agent} parentTeam={parentTeam} alwaysVisible={isTeam} />
+      )}
+
+      {/* Sharing (formerly the rail's "Share…" SidePanel, relocated here as a
+          tab): who may open the team and chat with it, and who may administer
+          it. Self-contained — it reads the membership list and applies each
+          add/role-change/remove immediately through its own endpoints, so it
+          never batches into this form's Save (like the environment and plugin
+          tabs). The panel itself gates its controls on `canManageMembers`, so a
+          Team Member routed here sees the list read-only (D9/AC9). */}
+      {isTeam && activeTab === 'sharing' && (
+        <ShareTeamPanel teamId={agent.id} teamName={agent.displayName || agent.id} />
       )}
 
       {agent.role === 'team-member' && (

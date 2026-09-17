@@ -231,17 +231,10 @@ export function buildTeamMenu({
   // (see docs/admin-console.md). Growing a team is **Add member** above, or the
   // Flow editor — both explicit choices rather than an inferred one.
 
-  // Phase 2 (#1929) replaced Phase 1's jump to the Agents page: the team's own
-  // edit form opens in the chat, which is where AC5 wants team settings
-  // reachable from. #2235 widened that surface to the full width right of the
-  // agent list rather than the narrow rail, so this entry now lands there.
-  // Gated like the mutating entries because that surface is hidden for a
-  // caller who may not manage the team.
-  items.push({
-    key: 'edit-team',
-    label: 'Team settings…',
-    ...gate(false, 'Opens the team\'s configuration.'),
-  });
+  // No `edit-team` / "Team settings…" entry: clicking the team's own header row
+  // already routes to it and opens its full-width configuration surface (#2213,
+  // #2235 — see `AgentList.jsx`'s `handleActivate`), so a menu entry landing on
+  // the exact same place was redundant and was removed.
   // Sharing (#2082, #2041 P4): who may open, chat with and administer this
   // team. The one entry in this menu that stays live without rights, because
   // reading the member list is a Team-Member right (D9) — see

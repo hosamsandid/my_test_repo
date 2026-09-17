@@ -43,7 +43,7 @@ steps:
     narrative: |
       Up to now every one of these journeys has run as a single operator who could see everything. This one is different: it runs as two separate people, each signed in in their own browser, and what it proves is the part of the platform you only notice when it is missing — who can see what, and who is allowed to change it.
 
-      Three rules are on trial here. The first is that a team is private by default: when Ada creates a team, Bea does not see it, and there is no step Ada has to remember to take for that to be true. The second is that sharing is decentralised: Ada does not file a ticket with an administrator, she opens the team's own Share dialog on the page she already works on, and adds Bea herself. The third is the quiet one that saves you later — a team can never be left without an admin. If Ada is the last Team Admin and tries to step down, the platform refuses and asks her, in the same step, who takes over.
+      Three rules are on trial here. The first is that a team is private by default: when Ada creates a team, Bea does not see it, and there is no step Ada has to remember to take for that to be true. The second is that sharing is decentralised: Ada does not file a ticket with an administrator, she opens the team's own Share panel on the page she already works on, and adds Bea herself. The third is the quiet one that saves you later — a team can never be left without an admin. If Ada is the last Team Admin and tries to step down, the platform refuses and asks her, in the same step, who takes over.
 
       Everything below is checked twice on purpose. Each time we say Bea "cannot" do something, we check both that the control is absent from her screen and that the server refuses the request when it is made directly. A hidden button is a courtesy; the refusal is the security boundary, and they are not the same claim.
 
@@ -97,7 +97,7 @@ steps:
   # ── Slide 4: Ada shares the team with Bea, as a Team Member ─────────────────
   - id: owner-shares
     voiceover: |
-      Ada opens the team's own Share dialog — right there in the Agent Chat, no admin console — finds Bea in the directory, and adds her as a Team Member.
+      Ada opens the team's own Share panel — right there in the Agent Chat, no admin console — finds Bea in the directory, and adds her as a Team Member.
     narrative: |
       Ada shares the team. This is the decentralised half of the design: she does it from the team's own context menu in the Agent Chat, on the page she already lives on, with no visit to an administration screen and no administrator in the loop.
 
@@ -135,9 +135,9 @@ steps:
   # ── Slide 5: Bea can see it, and can change nothing ─────────────────────────
   - id: colleague-read-only
     voiceover: |
-      Bea's screen changes immediately: the team is there, and she can open the same Share dialog — read-only. She can see who has access; she can change nothing. And when the request is made directly to the server, it is refused there too.
+      Bea's screen changes immediately: the team is there, and she can open the same Share panel — read-only. She can see who has access; she can change nothing. And when the request is made directly to the server, it is refused there too.
     narrative: |
-      Bea reloads and the team has appeared. She can open it, chat with its agents, and open the very same Share dialog Ada used — but for her it is a read-only view. She sees exactly who has access and at what role, which is deliberate: knowing who your collaborators are is not a privilege, and a member who cannot see the list has no way to find out who to ask.
+      Bea reloads and the team has appeared. She can open it, chat with its agents, and open the very same Share panel Ada used — but for her it is a read-only view. She sees exactly who has access and at what role, which is deliberate: knowing who your collaborators are is not a privilege, and a member who cannot see the list has no way to find out who to ask.
 
       What she does not get is a single control. No role dropdown, no remove button, no way to add anybody, and the panel says so in plain language rather than leaving her to work it out from an absence.
 
@@ -230,9 +230,9 @@ steps:
   # ── Slide 8: Bea can now manage members ─────────────────────────────────────
   - id: colleague-can-manage
     voiceover: |
-      Bea reopens the same dialog and it is a different screen: the controls are there, the read-only notice is gone, and the server now accepts the very request it refused two minutes ago.
+      Bea reopens the same panel and it is a different screen: the controls are there, the read-only notice is gone, and the server now accepts the very request it refused two minutes ago.
     narrative: |
-      Bea reopens the same Share dialog she saw a moment ago read-only. It is now the full surface: every member has a role dropdown, there is a remove control, and the add-a-colleague section is back. The read-only notice is gone.
+      Bea reopens the same Share panel she saw a moment ago read-only. It is now the full surface: every member has a role dropdown, there is a remove control, and the add-a-colleague section is back. The read-only notice is gone.
 
       And we check the other half again, in the other direction. The exact membership write the server refused from Bea earlier — the same route, the same body, the same session — now succeeds. The gate moved because her role moved, not because a button appeared.
     # `goto` forces a full navigation, which is REQUIRED here and not tidiness:
@@ -266,11 +266,11 @@ steps:
     voiceover: |
       Now Ada steps down to an ordinary Team Member — and this time it simply works, with no prompt at all. Same control, same screen, different answer: the rule was never about Ada, it is about the team never being left without an admin.
     narrative: |
-      Ada gives up her Team Admin role and stays on as an ordinary member. The control is the same dropdown that raised a hand-over prompt a few slides ago, on the same row of the same dialog — and this time the change just happens, with nothing to confirm and no successor to name, because Bea is already an admin.
+      Ada gives up her Team Admin role and stays on as an ordinary member. The control is the same dropdown that raised a hand-over prompt a few slides ago, on the same row of the same panel — and this time the change just happens, with nothing to confirm and no successor to name, because Bea is already an admin.
 
       That contrast is the whole point. The platform was never blocking Ada personally; it was protecting an invariant, and the moment the invariant was safe the block disappeared on its own.
 
-      Her own view changes with her role: on reload, the dialog she has been managing all journey is now the read-only one Bea started with. Nothing was taken away by an administrator — she handed it over herself.
+      Her own view changes with her role: on reload, the panel she has been managing all journey is now the read-only one Bea started with. Nothing was taken away by an administrator — she handed it over herself.
     action:
       do: access.actAs
       as: owner

@@ -423,10 +423,11 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   }, []);
 
   // Which agent the rail's Settings tab (#1929) is for, when it is NOT the open
-  // chat's. A rail menu sets it — "Team settings…" on a group header (AC5), or
-  // "Settings…" on a row whose agent has no chat to open, e.g. a disabled one
-  // (AC10). Cleared whenever the chat moves on, so the tab silently follows the
-  // conversation again rather than stranding the user on a stale subject.
+  // chat's. It is set by the team-header row click (#2213, routes to the team
+  // and opens its configuration surface) or by "Settings…" on a row whose agent
+  // has no chat to open, e.g. a disabled one (AC10). Cleared whenever the chat
+  // moves on, so the tab silently follows the conversation again rather than
+  // stranding the user on a stale subject.
   const [settingsAgentId, setSettingsAgentId] = useState(null);
   // The team-header row click (#2213) fires `onSelect` (routes to the team,
   // changing `agentId`) and `onOpenTeamSettings` (sets this override) for the
@@ -566,8 +567,7 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   // agent list as one full-width configuration surface — see
   // `TeamConfigSurface` below — rather than the ordinary chat + right-rail
   // split. Derived purely from the route, so every entry point (the row
-  // click, the row menu's "Team settings…", a direct /chats/<teamId> URL)
-  // converges on it.
+  // click, a direct /chats/<teamId> URL) converges on it.
   const subjectIsTeam = routedAgent?.role === 'team';
   // #2267: a team's Settings request (handleOpenSettings below) has nowhere to
   // be consumed — RightRail doesn't render for a team subject at all (#2235,

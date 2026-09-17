@@ -106,6 +106,14 @@ export default function LaunchStep({
     } else if (ev.type === 'warning') {
       setMatWarnings(prev => [...prev, ev.message]);
     } else if (ev.type === 'error') {
+      // #2323: the streaming endpoint reports a repo-backed-env-with-no-token
+      // block as an error EVENT (it has already flushed 200 headers, so it can't
+      // answer 409). Branch on the structured code to offer the reference-only
+      // opt-out rather than the dead-end "Team creation failed" card.
+      if (ev.code === 'github_token_required') {
+        setTokenWarn(ev.error || 'This environment has a repository but no GitHub token.');
+        return;
+      }
       const msg = ev.error || `HTTP ${ev.status || 500}`;
       setProgressError(msg);
       setError(msg);

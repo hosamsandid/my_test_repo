@@ -564,3 +564,8 @@ just the outcome.
   happen to contain the same secret value — so revoking one never silently
   breaks the other. Nothing in this plan depends on the answer; settle it when
   Confluence starts, not now.
+- **More event kinds than `status_changed`** (`issue_created`, `comment_added`
+  with an `origin` stamp against the self-comment loop, a generic
+  `field_changed`, …) — assessed and planned in
+  `docs/jira-plugin-events-plan.md`. All broker-side plus manifest `events[]`
+  entries; the trigger form and help follow from the manifest.

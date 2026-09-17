@@ -242,7 +242,7 @@ Concept: `docs/plugin-system-concept.md`, `docs/cli-contract.md`.
   `spec-kit` (command-only), `jira` (the first **event-source** plugin — see
   below). `make seed-plugins`.
 - **Event-source plugins — the Jira plugin** (`plugins/jira/`, docs
-  `docs/jira-plugin.md` / `docs/jira-plugin-plan.md`): wakes granted agents on
+  `docs/jira-plugin.md` / `docs/jira-plugin-plan.md`; further event kinds planned in `docs/jira-plugin-events-plan.md`): wakes granted agents on
   Jira Cloud status changes. Two generic additions it needed are reusable: the
   **per-scope plugin credential store** (`orchestrator/plugin-credential-store.js`
   — makes the manifest's `credentials[]` real, 0600 under

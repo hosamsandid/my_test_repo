@@ -86,3 +86,23 @@ test('planCreatorMembership is imported, not reimplemented inline', () => {
   assert.match(SRC, /require\('\.\/creator-membership'\)/);
   assert.equal(CODE.split('function planCreatorMembership(').length, 1, 'planCreatorMembership must not be redefined in api.js');
 });
+
+// Both quickstart fast lanes create a FRESH environment for the new team of one.
+// It must be team-tiered to that team once the mint resolves the team id, or a
+// non-System-Admin creator gets the read-only "shared environment" banner
+// (`canManageEnvironment` is false for an untiered env). Guards the fix that
+// team-tiers the auto-created env — the LLM path previously wrote no tier at all.
+test('both quickstart routes team-tier their freshly-created env to the new team', () => {
+  for (const src of [quickstartRoute(), quickstartLlmRoute()]) {
+    assert.match(
+      src,
+      /if \(agentResp\.teamId\) \{\s*saveEnvironment\([^,]+,\s*\{ \.\.\.env, \.\.\.creatorEnvironmentOwnership\(agentResp\.teamId\) \}\);/,
+      'the auto-created env must be re-saved with creatorEnvironmentOwnership(agentResp.teamId) after the mint',
+    );
+  }
+});
+
+test('creatorEnvironmentOwnership is imported, not reimplemented inline', () => {
+  assert.match(SRC, /creatorEnvironmentOwnership \} = require\('\.\/creator-membership'\)/);
+  assert.equal(CODE.split('function creatorEnvironmentOwnership(').length, 1, 'creatorEnvironmentOwnership must not be redefined in api.js');
+});

@@ -14938,6 +14938,18 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
     }
   }
 
+  // Team-tier the freshly-created environment to the new team of one so any
+  // team-admin (not only the original creator) can SEE and MANAGE it after the
+  // team is shared — the 1:1 team↔environment model. This env already carries
+  // the creator as `ownerId` above (the #2071/#2078 owner branch, kept as a
+  // fallback so a failed membership grant still leaves the creator able to see
+  // it), and adding the team tier makes it team-owned rather than owner-only.
+  // Same rule as the LLM sibling and the wizard: only ever the env this request
+  // just created, and only once the mint has resolved `agentResp.teamId`.
+  if (agentResp.teamId) {
+    saveEnvironment(env.id, { ...env, ...creatorEnvironmentOwnership(agentResp.teamId) });
+  }
+
   res.status(201).json({
     reused: false,
     environment: { id: env.id, name: env.name, reused: false },
@@ -15037,6 +15049,21 @@ app.post('/api/quickstart/llm', heavyLimiter, async (req, res) => {
         console.error(`[api] quickstart/llm: team-admin membership for ${agentResp.teamId} error: ${err.message}`);
       }
     }
+  }
+
+  // Team-tier the freshly-created environment to the new team of one so the
+  // creator — granted team-admin just above — can SEE and MANAGE it
+  // (repositories, provider, credentials) rather than hitting the read-only
+  // "shared environment managed by another team" banner an UNTIERED env shows
+  // every non-System-Admin (`canManageEnvironment` → false; #2078 dropped the
+  // `|| 'default'` fallback). This path used to write no tier at all — the
+  // repo-first sibling above already stamped ownership, but this one was missed.
+  // Mirrors the wizard, which team-tiers its own auto-created env
+  // (`creatorEnvironmentOwnership`, creator-membership.js). Only ever the env
+  // this request just created — never a reused one. The team id is known only
+  // now, after the mint resolved it (`agentResp.teamId`).
+  if (agentResp.teamId) {
+    saveEnvironment(envId, { ...env, ...creatorEnvironmentOwnership(agentResp.teamId) });
   }
 
   res.status(201).json({

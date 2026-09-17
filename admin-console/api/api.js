@@ -11850,6 +11850,21 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
     }) + '\n');
   } catch { /* best effort */ }
 
+  // 11. Auto-resync fan-out (#2316): a transfer changes the destination's
+  //     effective content exactly as a plain edit does, so honour each affected
+  //     team's `auto` resync mode identically to PUT /api/skills/:name (which
+  //     calls autoResyncOnEdit for a team-tier and a global-tier edit). Only the
+  //     destination tier matters — a `move`'s source retirement is unrelated, and
+  //     `agent` is never a transfer destination (planTransfer). Pass `destName`
+  //     (not `plan.name`): a `rename` collision lands the content under the new
+  //     name, so that is the name whose seeded copies could be outdated.
+  //     Best-effort / fire-and-forget, so it never fails or delays this response.
+  if (plan.to.tier === 'team') {
+    autoResyncOnEdit(destName, { tier: 'team', teamId: plan.to.teamId });
+  } else if (plan.to.tier === 'global') {
+    autoResyncOnEdit(destName, { tier: 'global' });
+  }
+
   res.status(201).json({
     name: destName,
     requestedName: plan.name,

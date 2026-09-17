@@ -110,6 +110,15 @@ export function conditionsToFilter(rows) {
   return { ok: true, value: Object.keys(out).length ? out : null };
 }
 
+// The "Only when…" sub-heading: names the event whose fields the conditions
+// apply to, so the nesting (conditions live INSIDE the chosen event) is
+// visible — with "any event" the picker offers the union, and a condition on a
+// field an event does not carry simply never matches that event.
+export function conditionsHeading(eventName) {
+  const name = str(eventName);
+  return name ? `fields of ${name}` : `fields of any event this plugin sends`;
+}
+
 // The trigger row's one-line copy for a filtered listener.
 export function payloadFilterSummary(filter) {
   return entries(filter).map(([k, v]) => `${k}=${v}`).join(' · ');

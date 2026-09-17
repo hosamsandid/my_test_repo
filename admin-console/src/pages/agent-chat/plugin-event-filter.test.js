@@ -9,6 +9,7 @@ import {
   conditionsFromFilter,
   conditionsToFilter,
   payloadFilterSummary,
+  conditionsHeading,
 } from './plugin-event-filter.js';
 
 const JIRA = {
@@ -100,4 +101,11 @@ test('payloadFilterSummary: the trigger row copy — "key=value" pairs joined by
   assert.equal(payloadFilterSummary({ toStatus: 'Ready for Dev', projectKey: 'KAN' }), 'toStatus=Ready for Dev · projectKey=KAN');
   assert.equal(payloadFilterSummary(null), '');
   assert.equal(payloadFilterSummary({}), '');
+});
+
+test('conditionsHeading: names the event whose fields the conditions apply to', () => {
+  assert.equal(conditionsHeading('status_changed'), 'fields of status_changed');
+  assert.equal(conditionsHeading(' comment_added '), 'fields of comment_added');
+  assert.equal(conditionsHeading(''), 'fields of any event this plugin sends');
+  assert.equal(conditionsHeading(undefined), 'fields of any event this plugin sends');
 });

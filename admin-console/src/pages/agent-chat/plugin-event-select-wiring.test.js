@@ -67,7 +67,7 @@ test('"Which event" is a select over the plugin\'s declared vocabulary, free tex
 });
 
 test('"Only when…" conditions are authored as rows through the pure plugin-event-filter module', () => {
-  assert.match(triggers, /import \{\s*pluginEvents, eventChoices, payloadKeyChoices,\s*conditionsFromFilter, conditionsToFilter, payloadFilterSummary,\s*\} from '\.\/plugin-event-filter\.js'/);
+  assert.match(triggers, /import \{\s*pluginEvents, eventChoices, payloadKeyChoices,\s*conditionsFromFilter, conditionsToFilter, payloadFilterSummary, conditionsHeading,\s*\} from '\.\/plugin-event-filter\.js'/);
   // Initial rows come from the stored object, the wire value from the folder…
   assert.match(triggers, /conditions:\s*conditionsFromFilter\(initialValues\?\.payloadFilter\)/);
   assert.match(triggers, /conditionsToFilter\(form\.conditions\)/);
@@ -80,6 +80,8 @@ test('"Only when…" conditions are authored as rows through the pure plugin-eve
   assert.match(triggers, /payloadKeyChoices\(vocabulary, form\.eventFilter\)/);
   assert.match(triggers, /\{keyRows\.length \? \(\s*<select\s+value=\{c\.key\}/);
   assert.match(triggers, /placeholder=\{known && known\.example \? `e\.g\. \$\{known\.example\}` : 'exact value'\}/);
+  // The sub-heading names the event whose fields the conditions apply to.
+  assert.match(triggers, /conditionsHeading\(form\.eventFilter\)/);
   // The row summary is unchanged.
   assert.match(triggers, /payloadFilterSummary\(trigger\.payloadFilter\)/);
 });

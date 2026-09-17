@@ -490,7 +490,15 @@ look like "when does this fire":
 | Field | Answers | Comes from |
 |---|---|---|
 | **Which event** | *what kind of change* happened — the plugin's own event **name**, e.g. `status_changed`. Blank = every event this plugin sends. | the list the plugin declares; the form offers it as a drop-down |
-| **Only when…** | *which of those changes* should wake this agent — conditions on the event's **fields**, e.g. `toStatus = Ready for Dev`. Every condition must equal the field exactly (case-sensitive). No conditions = every event above wakes the agent. | the fields of the chosen event; the form offers them with an example |
+| **Only when…** | *which of those changes* should wake this agent — conditions on the **fields of the event chosen above**, e.g. `toStatus = Ready for Dev`. Every condition must equal the field exactly (case-sensitive). No conditions = every event above wakes the agent. | the fields of the chosen event (the sub-heading names it: *fields of `status_changed`*); the form offers them with an example |
+
+The two are nested, not separate: an event is the category ("an issue moved to
+another status"), a condition picks *within* it ("…and the status it moved into
+is `Ready for Dev`"). With *Any event* chosen the picker offers the fields of
+every event the plugin declares; a condition on a field a given event does not
+carry simply never matches that event — so *Any event* + `toStatus = …` behaves
+exactly like `status_changed` + `toStatus = …` until the plugin sends a second
+kind of event.
 
 The mistake to avoid: a **value** (a Jira status, a project key, an author) is
 never an event name. Typing `Ready for Dev` into *Which event* creates a listener

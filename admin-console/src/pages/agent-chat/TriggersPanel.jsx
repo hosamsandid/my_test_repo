@@ -11,7 +11,7 @@ import { effectiveGrantFor } from '../plugin-grant-view.js';
 import { pluginEventOptions, defaultPluginId } from './plugin-event-options.js';
 import {
   pluginEvents, eventChoices, payloadKeyChoices,
-  conditionsFromFilter, conditionsToFilter, payloadFilterSummary,
+  conditionsFromFilter, conditionsToFilter, payloadFilterSummary, conditionsHeading,
 } from './plugin-event-filter.js';
 import { liveOps } from '../process/edit-adapters';
 import { isGateLabel, isBrakeLabel } from '../process/label-flags';
@@ -1064,6 +1064,9 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
           <div>
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
               Only when&hellip; (optional)
+              <span style={{ fontWeight: 'var(--eb-font-normal)' }}>
+                {' \u2014 '}<code style={{ fontFamily: 'var(--eb-font-mono)' }}>{conditionsHeading(form.eventFilter)}</code>
+              </span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
               {form.conditions.map((c, i) => {
@@ -1125,8 +1128,10 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               </button>
             </div>
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
-              <strong>Which of those changes</strong> wake this agent: every condition must equal the
-              event&rsquo;s field exactly (case-sensitive). No conditions = every event above wakes it.
+              <strong>Which of those changes</strong> wake this agent: conditions on the fields of the event
+              chosen above; every one must equal the event&rsquo;s field exactly (case-sensitive), and a
+              condition on a field the event does not carry never matches. No conditions = every event
+              above wakes it.
               {keyRows.length === 0 && ' The field names are the plugin\u2019s own \u2014 its help topic lists them.'}
             </div>
           </div>

@@ -31,8 +31,8 @@ and the agent's **trigger** (this page, Triggers tab).
 
 | Field | What to put there for Jira |
 |---|---|
-| **Which event** | `status_changed` — the only event the Jira plugin sends today. *Any event* is equivalent. A status name is **not** an event. |
-| **Only when…** | the condition that picks *which* status changes wake this agent, almost always `toStatus = <the status the issue moved into>`, e.g. `toStatus = Ready for Dev`. |
+| **Which event** | `status_changed` — the only event the Jira plugin sends today, so *Any event* is equivalent. A status name is **not** an event. |
+| **Only when…** | a condition on the **fields of that event** (the form's sub-heading reads *fields of `status_changed`*) that picks *which* status changes wake this agent — almost always `toStatus = <the status the issue moved into>`, e.g. `toStatus = Ready for Dev`. |
 
 The **Only when…** condition is what routes a flow through several agents: give
 the Business Analyst `toStatus = Ready for Refinement`, the Developer

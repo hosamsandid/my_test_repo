@@ -38,6 +38,7 @@
 //     ui?: { title?, global?, routes?: [ { path, minRole } ] },
 //     commands?: { namespace?: string },       // command-only plugin (#1798): no sidecar/cli needed
 //     fetch?: { source: "github", repo: string, ref: string, commandsDir?: string },
+//     events?: [ { name, description?, payload?: [ { key, description?, example? } ] } ],
 //     companionSkill?, promptLine?, version?,
 //   }
 
@@ -82,6 +83,12 @@ function isPlainObject(v) {
 function isNonEmptyString(v) {
   return typeof v === 'string' && v.trim().length > 0;
 }
+// An event name in a plugin's vocabulary (`events[].name`): the broker's own
+// identifier, matched exactly by a `plugin-event` trigger's `eventFilter`.
+// Underscore and dot are allowed (`status_changed`, `issue.created`) — the
+// GitHub-style `<type>.<action>` shape is a natural fit for event sources.
+const EVENT_NAME_RE = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
+
 // A safe registry/workspace-relative path: non-empty, no absolute prefix, no
 // parent-traversal, no backslash (the discipline cli.entrypoint uses inline).
 function isSafeRelPath(v) {
@@ -311,6 +318,64 @@ function validatePluginManifest(input) {
     }
   }
 
+  // ── events (optional) ────────────────────────────────────────────────────
+  // The plugin's event vocabulary — what an event-source plugin may send to
+  // `POST /internal/plugin-event` and which top-level string fields its
+  // payload carries. Purely descriptive: the trigger form renders it so a
+  // `plugin-event` listener can be authored without reading the plugin's
+  // docs (a `<select>` of event names, a key picker for `payloadFilter`).
+  // The platform never interprets a name or key — D5 (jira-plugin-plan §10)
+  // stays intact, the plugin merely declares what the docs used to hold.
+  const events = [];
+  if (input.events !== undefined) {
+    if (!Array.isArray(input.events)) {
+      errors.push('events must be an array');
+    } else {
+      const seenEvents = new Set();
+      input.events.forEach((ev, i) => {
+        if (!isPlainObject(ev) || !isNonEmptyString(ev.name)) {
+          errors.push('each event must be an object with a non-empty name');
+          return;
+        }
+        const name = ev.name.trim();
+        if (!EVENT_NAME_RE.test(name)) {
+          errors.push(`events[${i}].name must be a slug matching ${EVENT_NAME_RE}`);
+          return;
+        }
+        if (seenEvents.has(name)) { errors.push(`duplicate event name: ${name}`); return; }
+        seenEvents.add(name);
+        const entry = { name };
+        if (isNonEmptyString(ev.description)) entry.description = ev.description.trim();
+        const payload = [];
+        if (ev.payload !== undefined) {
+          if (!Array.isArray(ev.payload)) {
+            errors.push(`events[${i}].payload must be an array`);
+          } else {
+            const seenKeys = new Set();
+            ev.payload.forEach((p, j) => {
+              if (!isPlainObject(p) || !isNonEmptyString(p.key)) {
+                errors.push('each payload field must be an object with a non-empty key');
+                return;
+              }
+              const key = p.key.trim();
+              if (seenKeys.has(key)) { errors.push(`duplicate payload key: ${key}`); return; }
+              seenKeys.add(key);
+              const field = { key };
+              if (isNonEmptyString(p.description)) field.description = p.description.trim();
+              if (p.example !== undefined) {
+                if (typeof p.example !== 'string') errors.push(`events[${i}].payload[${j}].example must be a string`);
+                else if (p.example.trim()) field.example = p.example.trim();
+              }
+              payload.push(field);
+            });
+          }
+        }
+        entry.payload = payload;
+        events.push(entry);
+      });
+    }
+  }
+
   // ── platforms (optional, default ["any"]) ────────────────────────────────
   let platforms = ['any'];
   if (input.platforms !== undefined) {
@@ -520,6 +585,7 @@ function validatePluginManifest(input) {
     name: input.name.trim(),
     description: input.description.trim(),
     credentials,
+    events,
     platforms,
     scopes,
     requiresApproval,

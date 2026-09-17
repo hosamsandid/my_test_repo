@@ -18,6 +18,20 @@
     { "key": "email", "description": "Atlassian account e-mail — the Basic-Auth username for the API token", "required": true },
     { "key": "api-token", "description": "Jira API token — held only by the broker sidecar, never returned after it is set", "required": true }
   ],
+  "events": [
+    {
+      "name": "status_changed",
+      "description": "A watched issue moved to another status",
+      "payload": [
+        { "key": "toStatus", "description": "the status the issue moved into", "example": "Ready for Dev" },
+        { "key": "fromStatus", "description": "the status it came from", "example": "In Progress" },
+        { "key": "projectKey", "description": "the Jira project", "example": "KAN" },
+        { "key": "issueType", "description": "Story, Bug, Task, …", "example": "Bug" },
+        { "key": "author", "description": "who moved it (display name)" },
+        { "key": "issueKey", "description": "one specific issue", "example": "KAN-10" }
+      ]
+    }
+  ],
   "platforms": ["podman"],
   "scopes": ["team"],
   "defaultScopeGranularity": "team",

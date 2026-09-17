@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { agentRowEqual, mergeRoster } from './roster-diff.js';
+import { agentRowEqual, mergeRoster, nextRosterState } from './roster-diff.js';
 
 const agent = (id, extra = {}) => ({
   id,
@@ -129,4 +129,45 @@ test('mergeRoster: empty -> empty is unchanged', () => {
   const { list, changed } = mergeRoster([], []);
   assert.equal(changed, false);
   assert.deepEqual(list, []);
+});
+
+// ── nextRosterState (the AgentRosterContext reducer) ──────────────────────
+
+test('nextRosterState: first successful load of an EMPTY roster adopts [] (never stays null)', () => {
+  // The blank-rail regression: null prev + empty payload must become [], so the
+  // rail can render its "No agents yet." empty state for a zero-agent user.
+  const out = nextRosterState(null, []);
+  assert.notEqual(out, null);
+  assert.deepEqual(out, []);
+});
+
+test('nextRosterState: first load of a null/absent payload also adopts []', () => {
+  assert.deepEqual(nextRosterState(null, null), []);
+  assert.deepEqual(nextRosterState(null, undefined), []);
+});
+
+test('nextRosterState: first load of a populated roster adopts it', () => {
+  const next = [agent('a1'), agent('a2')];
+  const out = nextRosterState(null, next);
+  assert.equal(out, next);
+});
+
+test('nextRosterState: a stable later tick keeps the SAME array reference (AC7 no-op skip)', () => {
+  const prev = [agent('a1'), agent('a2')];
+  const next = [{ ...prev[0] }, { ...prev[1] }]; // fresh objects, same content
+  const out = nextRosterState(prev, next);
+  assert.equal(out, prev); // exact reference — no re-render
+});
+
+test('nextRosterState: an empty later tick keeps the previous empty array (no churn)', () => {
+  const prev = [];
+  assert.equal(nextRosterState(prev, []), prev);
+});
+
+test('nextRosterState: a changed later tick returns the merged list', () => {
+  const prev = [agent('a1')];
+  const out = nextRosterState(prev, [agent('a1'), agent('a2')]);
+  assert.notEqual(out, prev);
+  assert.deepEqual(out.map(a => a.id), ['a1', 'a2']);
+  assert.equal(out[0], prev[0]); // unchanged row keeps its reference
 });

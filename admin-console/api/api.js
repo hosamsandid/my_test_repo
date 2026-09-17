@@ -36,7 +36,7 @@ const { createTtlCache } = require('./ttl-cache');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, isTeamAdminOfAny, canManageAgent,
         visibleEnvironment, canManageEnvironment, canCreateEnvironment, canRetierEnvironment,
         visibleUser, describeAuthz,
-        normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
+        normalizeCredential, visibleCredential, canManageCredential, canDeleteCredential, canCreateCredential,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
         resolveAgentTenant } = require('./scope');
 const { resolveAgentTeam } = require('./agent-team');
@@ -12625,8 +12625,8 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   // Manage gate (#800): a Team Admin may delete only team-scoped providers of a
   // team they administer, never a system-scoped one.
   const scope = getScope(req);
-  if (!canManageCredential(scope, ep)) {
-    return res.status(403).json({ error: 'forbidden: you may not manage this provider', code: 'forbidden' });
+  if (!canDeleteCredential(scope, ep)) {
+    return res.status(403).json({ error: 'forbidden: you may not delete this provider', code: 'forbidden' });
   }
   const usedBy = llmEndpointInUse(ep.id);
   if (usedBy) {
@@ -17154,6 +17154,10 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
     ...(ownership.userId ? { userId: ownership.userId } : {}),
+    // Identity class (unified access model §2): a personal key is one person's
+    // identity (human); a team/system key is a shared service credential. The UI
+    // may later let a personal key be marked service (a private bot key).
+    identity: ownership.scope === 'personal' ? 'human' : 'service',
     fingerprint: sshKeyFingerprint(trimmed),
     createdAt: new Date().toISOString(),
   };
@@ -17209,6 +17213,8 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
     ...(ownership.userId ? { userId: ownership.userId } : {}),
+    // Identity class (unified access model §2): personal → human, else service.
+    identity: ownership.scope === 'personal' ? 'human' : 'service',
     fingerprint: sshFingerprintFromPubBlob(pubBlob),
     createdAt: new Date().toISOString(),
   };
@@ -17246,8 +17252,8 @@ app.delete('/api/ssh-keys/:id', apiLimiter, (req, res) => {
   const keys = listSshKeys();
   const cred = keys.find(k => k.id === id);
   if (!cred) return res.status(404).json({ error: 'SSH key not found' });
-  if (!canManageCredential(scope, cred)) {
-    return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
+  if (!canDeleteCredential(scope, cred)) {
+    return res.status(403).json({ error: 'forbidden: you may not delete this credential', code: 'forbidden' });
   }
   const usedBy = sshKeyInUse(id);
   if (usedBy) {
@@ -17373,6 +17379,10 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
     ...(ownership.userId ? { userId: ownership.userId } : {}),
+    // Identity class (unified access model §2): a personal token is one person's
+    // identity (human); a team/system token is a shared service credential (e.g. a
+    // machine-user PAT). The UI may later let a personal token be marked service.
+    identity: ownership.scope === 'personal' ? 'human' : 'service',
     preview: githubTokenPreview(trimmed),
     fingerprint: githubTokenFingerprint(trimmed),
     createdAt: new Date().toISOString(),
@@ -17408,8 +17418,8 @@ app.delete('/api/github-tokens/:id', apiLimiter, (req, res) => {
   const tokens = listGithubTokens();
   const cred = tokens.find(t => t.id === id);
   if (!cred) return res.status(404).json({ error: 'GitHub token not found' });
-  if (!canManageCredential(scope, cred)) {
-    return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
+  if (!canDeleteCredential(scope, cred)) {
+    return res.status(403).json({ error: 'forbidden: you may not delete this credential', code: 'forbidden' });
   }
   const usedBy = githubTokenInUse(id);
   if (usedBy) {

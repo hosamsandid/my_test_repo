@@ -96,7 +96,15 @@ async function deleteSshKey(ctx, keyId) {
 // page's list actually shows.
 async function createEnv(ctx, { envId, name, repoUrl, branch = 'main' }) {
   const res = await ctx.request.post('/api/environments', {
-    data: { id: envId, name, repositories: [{ url: repoUrl, branch }], isTemplate: true },
+    // Token-less, reference-only template fixture: #2323 blocks a repo-backed env
+    // with no GitHub token unless the reference-only intent is acknowledged.
+    data: {
+      id: envId,
+      name,
+      repositories: [{ url: repoUrl, branch }],
+      isTemplate: true,
+      acknowledgeNoToken: true,
+    },
   });
   expect(res.ok(), `POST /api/environments expected 2xx, got HTTP ${res.status()}`).toBeTruthy();
   const { page } = ctx;

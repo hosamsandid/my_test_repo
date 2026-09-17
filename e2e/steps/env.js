@@ -28,11 +28,14 @@ async function createFixtureEnv(ctx, { id, name, repoUrl, branch = 'main', githu
     // githubTokenId is optional: the F1 team-setup fixture omits it (poller
     // ignores a token-less env); the #711 IBAN-story fixture supplies one so the
     // poller actually polls the fixture repo and the label chain can fire.
+    // When token-less, this env is reference-only ON PURPOSE (see above): #2323
+    // blocks a repo-backed env with no GitHub token unless the caller confirms
+    // the reference-only intent, so opt in explicitly with acknowledgeNoToken.
     data: {
       id,
       name,
       repositories: [{ url: repoUrl, branch }],
-      ...(githubTokenId ? { githubTokenId } : {}),
+      ...(githubTokenId ? { githubTokenId } : { acknowledgeNoToken: true }),
     },
   });
   expect(

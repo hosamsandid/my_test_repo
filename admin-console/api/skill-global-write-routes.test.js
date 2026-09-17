@@ -49,6 +49,22 @@ test('POST /api/skills/import: gated through the shared permission model, action
   assert.match(src, /'import'\s*\)/, 'the action must be named "import" so a refusal never says "transfer"');
 });
 
+/* ─── A flat archive (SKILL.md at the ZIP root, no wrapping folder) imports ─
+ * The route infers the name from a single top-level folder, but a hand-built
+ * archive lays the files flat at the root — no folder to infer from — and the
+ * upload form sends no `name`. Without a final fallback to the archive's own
+ * validated frontmatter name, such an import failed with "invalid skill name".
+ * `md` is the validated SKILL.md, so `md.name` is the right non-empty source. */
+
+test('POST /api/skills/import: a flat archive falls back to the SKILL.md frontmatter name', () => {
+  const src = route("app.post('/api/skills/import',");
+  assert.match(
+    src,
+    /const rawName = [^\n]*\|\|\s*inferredName\s*\|\|\s*md\.name/,
+    'rawName must fall back to md.name so a flat, folder-less archive still imports',
+  );
+});
+
 /* ─── POST /api/skills — previously had NO permission check at all ───────── */
 
 test('POST /api/skills (create): gated on the shared pool-write permission, both tiers', () => {

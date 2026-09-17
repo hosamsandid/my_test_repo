@@ -10965,7 +10965,13 @@ app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), 
     if (!md.ok) return res.status(400).json({ error: md.error });
 
     // Validate + plan the import target (tier / name / collision + permission).
-    const rawName = (typeof req.body?.name === 'string' && req.body.name.trim()) || inferredName;
+    // Name precedence: an explicit form `name` overrides, then a single
+    // top-level folder name (an /export round-trip), then the archive's own
+    // SKILL.md frontmatter `name` (`md.name`, already validated non-empty). The
+    // last fallback is what lets a *flat* archive — SKILL.md and its files at the
+    // ZIP root, with no wrapping folder — import at all; without it such an
+    // upload failed with "invalid skill name".
+    const rawName = (typeof req.body?.name === 'string' && req.body.name.trim()) || inferredName || md.name;
     const plan = skillImport.planImport(
       { tier: req.body?.tier, teamId: req.body?.teamId, onCollision: req.body?.onCollision, name: rawName },
       { skillNameRe: SKILL_NAME_RE, teamIdRe: POOL_TEAM_ID_RE },

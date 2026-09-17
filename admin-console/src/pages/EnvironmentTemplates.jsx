@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Link } from 'react-router';
 import { Edit, Trash2, Plus, GitBranch, Github, X, AlertTriangle, Cpu, Info, Package, Server } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
@@ -70,7 +70,7 @@ function initialRepositories(initial) {
   return [];
 }
 
-function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
+function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit, tokenWarn, onSaveAnyway, onDismissTokenWarn }) {
   // Rendered only while the side panel is slid out, so the subject needs no
   // `active` flag. Registering it is what lifts the help panel above this
   // SidePanel (z-index 60/61) — without it the "?" below would open help
@@ -233,6 +233,50 @@ function EnvironmentForm({ initial, onSave, onCancel, saving, error, isEdit }) {
           padding: 'var(--eb-space-2) var(--eb-space-3)',
           background: 'var(--eb-status-error-bg)', borderRadius: 'var(--eb-radius-md)',
         }}>{error}</div>
+      )}
+
+      {/* #2323: a repo-backed environment with no GitHub token is blocked
+          server-side. Rather than a dead-end error, offer the explicit
+          reference-only opt-out — the same two-button prompt TeamEnvironmentPanel
+          shows, so both env-editing surfaces behave identically. */}
+      {tokenWarn && (
+        <div role="alert" style={{
+          color: 'var(--eb-status-warning, var(--eb-status-error))', fontSize: 'var(--eb-text-sm)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)',
+          background: 'var(--eb-status-warning-bg, var(--eb-status-error-bg))', borderRadius: 'var(--eb-radius-md)',
+          display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+        }}>
+          <div>{tokenWarn}</div>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
+            <button
+              type="button"
+              onClick={onSaveAnyway}
+              disabled={saving}
+              style={{
+                padding: 'var(--eb-space-2) var(--eb-space-4)',
+                background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
+                border: 'none', borderRadius: 'var(--eb-radius-md)',
+                fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
+                cursor: saving ? 'wait' : 'pointer', fontFamily: 'inherit',
+              }}
+            >
+              Save anyway (reference-only)
+            </button>
+            <button
+              type="button"
+              onClick={onDismissTokenWarn}
+              disabled={saving}
+              style={{
+                padding: 'var(--eb-space-2) var(--eb-space-4)',
+                background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+                borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-secondary)',
+                cursor: 'pointer', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
       )}
 
       <div>
@@ -1047,6 +1091,11 @@ export default function EnvironmentTemplates() {
   const [actionError, setActionError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
+  // #2323 reference-only opt-out: the server message when a repo-backed env is
+  // saved with no GitHub token, plus the last-submitted form so "Save anyway"
+  // can resubmit it with acknowledgeNoToken (mirrors TeamEnvironmentPanel).
+  const [tokenWarn, setTokenWarn] = useState(null);
+  const lastFormRef = useRef(null);
 
   const COLUMNS = [
     { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
@@ -1084,29 +1133,43 @@ export default function EnvironmentTemplates() {
       sortable: false,
       render: (_, row) => (
         <div className="eb-wrap-md" style={{ display: 'flex', gap: 'var(--eb-space-1)' }} onClick={e => e.stopPropagation()}>
-          <IconButton icon={Edit} label="Edit" onClick={() => { setSelected(row); setPanelMode('edit'); setFormError(null); }} />
+          <IconButton icon={Edit} label="Edit" onClick={() => { setSelected(row); setPanelMode('edit'); setFormError(null); setTokenWarn(null); }} />
           <IconButton icon={Trash2} label="Delete" danger onClick={() => setDeleteTarget(row)} />
         </div>
       ),
     },
   ];
 
-  async function handleSave(form) {
+  async function handleSave(form, acknowledgeNoToken = false) {
+    // Strict-check so an onClick event or any truthy leak can never silently
+    // acknowledge — only the "Save anyway (reference-only)" button passes true.
+    const ack = acknowledgeNoToken === true;
     setSaving(true); setFormError(null);
+    if (!ack) setTokenWarn(null);
+    lastFormRef.current = form;
     try {
       // #2170: every create/edit through this page is a template — forced
       // here rather than trusted from the form, so this page can never
       // accidentally save an ordinary (non-template) environment.
       const body = { ...form, isTemplate: true };
+      if (ack) body.acknowledgeNoToken = true;
       if (panelMode === 'create') {
         await apiCall('POST', '/api/environments', body);
       } else {
         await apiCall('PUT', `/api/environments/${selected.id}`, body);
       }
+      setTokenWarn(null);
       setPanelMode(null); setSelected(null);
       refetch();
     } catch (e) {
-      setFormError(e.message);
+      // #2323: a repo-backed environment with no GitHub token is blocked
+      // server-side. Offer the explicit reference-only opt-out rather than a
+      // dead-end error, exactly as TeamEnvironmentPanel's save() does.
+      if (e.code === 'github_token_required') {
+        setTokenWarn(e.serverMessage || e.message);
+      } else {
+        setFormError(e.message);
+      }
     } finally {
       setSaving(false);
     }
@@ -1136,7 +1199,7 @@ export default function EnvironmentTemplates() {
         </button>
       )}
       <button
-        onClick={() => { setSelected(null); setFormError(null); setPanelMode('create'); }}
+        onClick={() => { setSelected(null); setFormError(null); setTokenWarn(null); setPanelMode('create'); }}
         style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer', fontFamily: 'inherit' }}
       >
         <Plus size={15} /> New Template
@@ -1195,7 +1258,7 @@ export default function EnvironmentTemplates() {
 
       <SidePanel
         open={panelMode === 'edit' || panelMode === 'create'}
-        onClose={() => { setPanelMode(null); setSelected(null); }}
+        onClose={() => { setPanelMode(null); setSelected(null); setTokenWarn(null); }}
         title={panelMode === 'create' ? 'New Template' : `Edit: ${selected?.name || selected?.id}`}
         width="560px"
       >
@@ -1204,9 +1267,12 @@ export default function EnvironmentTemplates() {
             initial={null}
             isEdit={false}
             onSave={handleSave}
-            onCancel={() => setPanelMode(null)}
+            onCancel={() => { setPanelMode(null); setTokenWarn(null); }}
             saving={saving}
             error={formError}
+            tokenWarn={tokenWarn}
+            onSaveAnyway={() => handleSave(lastFormRef.current, true)}
+            onDismissTokenWarn={() => setTokenWarn(null)}
           />
         )}
         {panelMode === 'edit' && selected && (
@@ -1214,9 +1280,12 @@ export default function EnvironmentTemplates() {
             initial={selected}
             isEdit
             onSave={handleSave}
-            onCancel={() => { setPanelMode(null); setSelected(null); }}
+            onCancel={() => { setPanelMode(null); setSelected(null); setTokenWarn(null); }}
             saving={saving}
             error={formError}
+            tokenWarn={tokenWarn}
+            onSaveAnyway={() => handleSave(lastFormRef.current, true)}
+            onDismissTokenWarn={() => setTokenWarn(null)}
           />
         )}
       </SidePanel>

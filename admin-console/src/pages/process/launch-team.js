@@ -179,6 +179,7 @@ export function buildLaunchBody({
   labelSuffix,
   materializeNow,
   processTemplate,
+  acknowledgeNoToken,
   extra = {},
 } = {}) {
   const name = String(teamName || '').trim();
@@ -190,6 +191,10 @@ export function buildLaunchBody({
   if (environmentId) body.environmentId = environmentId;
   if (labelSuffix) body.labelSuffix = labelSuffix;
   else delete body.labelSuffix;
+  // #2323: only ever set by the reference-only opt-out re-submit (strict true),
+  // so a repo-backed env with no GitHub token can be launched deliberately.
+  if (acknowledgeNoToken === true) body.acknowledgeNoToken = true;
+  else delete body.acknowledgeNoToken;
   // Bind the bundle name to the team name at submit time (the wizard picks the
   // process before the team is named, #428) so both surfaces agree.
   if (processTemplate) body.processTemplate = { ...processTemplate, name: name || processTemplate.name };
@@ -254,14 +259,23 @@ export async function runLaunchStream({ body, onEvent, url = '/api/teams/stream'
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok && !res.body) {
+  // A non-OK response is always a pre-stream failure the server answered as a
+  // buffered JSON error ({ error, code }) — validation, a collision, or #2323's
+  // github_token_required. It is NOT a stream, even though `res.body` is a
+  // (non-null) ReadableStream for any response carrying a body: reading it as
+  // NDJSON would silently swallow the error (the wizard would just hang). So key
+  // off `!res.ok` alone and surface the structured error to the caller.
+  if (!res.ok) {
     let data = {};
     try { data = await res.json(); } catch { /* non-JSON error body */ }
     const err = new Error(data.error || `HTTP ${res.status}`);
     err.status = res.status;
     // Mirror apiCall's shape so describeMaterializeError can prefer the
-    // structured server message over a generic status line.
+    // structured server message over a generic status line — and so a caller
+    // can branch on a structured `code` (e.g. #2323's github_token_required, to
+    // offer the reference-only opt-out) rather than string-matching the message.
     if (data.error) err.serverMessage = data.error;
+    if (data.code) err.code = data.code;
     throw err;
   }
   const reader = res.body.getReader();

@@ -124,6 +124,12 @@ async function renameEnv(ctx, { envId, newName }) {
   const nameInput = page.getByPlaceholder('COBOL Migration', { exact: true });
   await nameInput.fill(newName);
   await page.getByRole('button', { name: 'Save changes' }).click();
+  // #2323: this template is a repo-backed, token-less env, so the save is blocked
+  // and the form offers the reference-only opt-out (the env-panel twin of the
+  // wizard flow F1 covers). Confirm it, then the renamed row lands.
+  const optOut = page.getByRole('button', { name: 'Save anyway (reference-only)', exact: true });
+  await expect(optOut).toBeVisible({ timeout: 15_000 });
+  await optOut.click();
   await expect(page.getByRole('row').filter({ hasText: newName })).toBeVisible();
 }
 

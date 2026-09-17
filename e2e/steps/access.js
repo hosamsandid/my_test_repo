@@ -10,7 +10,8 @@
 //   - admin-console/src/pages/agent-chat/ShareTeamPanel.jsx
 //   - admin-console/src/pages/agent-chat/team-share-view.js  (the literal copy)
 //   - admin-console/src/pages/agent-lifecycle/agent-lifecycle-menu.js (menu labels)
-//   - admin-console/src/components/{SidePanel,RowContextMenu}.jsx
+//   - admin-console/src/pages/agent-lifecycle/team-config-tabs-view.js (the Sharing tab)
+//   - admin-console/src/components/RowContextMenu.jsx
 //
 // TWO ASSERTIONS, NOT ONE. Every authorization beat is checked twice on purpose:
 // once in the UI (the control is absent / read-only) and once against the API
@@ -43,14 +44,17 @@ function xpathLiteral(s) {
   return `"${s}"`;
 }
 
-// The Share panel. SidePanel renders `role="dialog"` with `aria-label={title}`
-// and RailLifecycleHost sets that title to `Share: <group displayName || id>` —
-// the team's DISPLAY NAME once it has an agent row (a materialised/stub team
-// always does), not the raw id. Only one Share panel is open at a time, so match
-// the stable `Share: ` prefix rather than couple to the display name. `teamId`
-// is kept in the signature for call-site readability; the match does not use it.
+// The Share panel. It is no longer a SidePanel `role="dialog"` — it moved to the
+// team's own "Sharing" configuration tab (team-config-tabs-view.js), reached by
+// the rail's "Share…" entry routing to `/chats/<teamId>?tab=sharing`. Only one
+// `ShareTeamPanel` is mounted at a time; anchor on its stable intro sentence and
+// climb to the panel root (`<p>` → intro row → root), so the member-row and
+// add-cluster locators below scope exactly as they did against the old dialog.
+// `teamId` is kept in the signature for call-site readability; unused here.
 function sharePanel(ctx, _teamId) {
-  return ctx.page.getByRole('dialog', { name: /^Share: / });
+  return ctx.page
+    .locator('p', { hasText: 'Everyone listed here can open' })
+    .locator('xpath=../..');
 }
 
 // A member row is `<div>(row) > <div>(names) > <div>(display name [+ ' (you)'])`,
@@ -227,7 +231,7 @@ async function expectTeamHidden(ctx, { teamId, teamName }) {
 }
 
 /**
- * Open the team's Share… panel from the rail's group context menu.
+ * Open the team's Share panel from the rail's group context menu.
  *
  * The kebab is a `<span role="button">` labelled `Team actions for <label>`,
  * where <label> is the team's DISPLAY NAME (rail-lifecycle.js: `displayName ||
@@ -235,6 +239,10 @@ async function expectTeamHidden(ctx, { teamId, teamName }) {
  * identity sees only the one shared team in its rail here, so match the stable
  * `Team actions for ` prefix rather than the display name. The menu closes on
  * any scroll, so nothing scrolls in between.
+ *
+ * "Share…" now ROUTES to the team's Sharing configuration tab rather than
+ * opening a SidePanel, so this waits for that tab's list heading to appear
+ * (which only happens after the navigation and the panel's own fetch).
  *
  * @param {string} params.teamId - Team whose group header carries the menu.
  * @example
@@ -248,16 +256,18 @@ async function openShare(ctx, { teamId }) {
   const menu = ctx.page.getByRole('menu', { name: menuName });
   await expect(menu).toBeVisible({ timeout: 15_000 });
   await menu.getByRole('menuitem', { name: 'Share…' }).click();
-  await expect(sharePanel(ctx, teamId)).toBeVisible({ timeout: 15_000 });
-  // The panel loads memberships + directory on mount; wait for the list heading
-  // so a later row assertion is not racing the fetch.
+  // The Sharing tab loads memberships + directory on mount; wait for the list
+  // heading — its presence proves the route change and mount both landed, so a
+  // later row assertion is not racing either.
   await expect(
     sharePanel(ctx, teamId).getByRole('heading', { level: 3, name: /^Has access/ }),
   ).toBeVisible({ timeout: 15_000 });
 }
 
 /**
- * Close the Share panel.
+ * Leave the Share panel. There is no SidePanel to dismiss anymore — the panel is
+ * a configuration tab — so this returns to the chat root and confirms the panel
+ * is gone, which is the same observable end state the old Close button produced.
  *
  * @param {string} params.teamId - Team whose Share panel is open.
  * @example
@@ -266,9 +276,9 @@ async function openShare(ctx, { teamId }) {
  *     teamId: share-demo
  */
 async function closeShare(ctx, { teamId }) {
-  const panel = sharePanel(ctx, teamId);
-  await panel.getByRole('button', { name: 'Close panel' }).click();
-  await expect(panel).toHaveCount(0);
+  await ctx.page.goto('/chats');
+  await ctx.page.waitForLoadState('domcontentloaded');
+  await expect(sharePanel(ctx, teamId)).toHaveCount(0);
 }
 
 /**

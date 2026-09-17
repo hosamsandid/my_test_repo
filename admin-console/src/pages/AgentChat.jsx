@@ -13,6 +13,7 @@ import { isChatOpenable } from './agent-lifecycle/agent-lifecycle-menu.js';
 import ChatPanel from './agent-chat/ChatPanel';
 import RightRail from './agent-chat/RightRail';
 import AgentSettingsPanel from './agent-chat/AgentSettingsPanel';
+import ShareTeamPanel from './agent-chat/ShareTeamPanel.jsx';
 import { SessionsActiveProvider } from './agent-chat/SessionsActiveContext';
 import { resolveRailWidths } from './agent-chat/rail-layout';
 import { CREATE_ROUTE, emptyStatePointer } from './agent-chat/empty-state';
@@ -1197,9 +1198,52 @@ function TeamConfigSurface({ team, onAgentConfigChanged }) {
             teamConfigTab={teamConfigTab}
             onTeamConfigTabChange={setTeamConfigTab}
           />
+        ) : teamConfigTab === 'sharing' ? (
+          // A caller who may see but not manage the team still has the D9/AC9
+          // right to read WHO has access. The config tabs are hidden for them
+          // (TeamReadOnlyNotice), but the "Share…" menu entry stays live and
+          // routes here with `?tab=sharing` — so surface the sharing panel on
+          // its own (it renders read-only for a non-manager itself), rather
+          // than the blanket "nothing editable" notice.
+          <TeamSharingReadOnlySurface team={team} />
         ) : (
           <TeamReadOnlyNotice team={team} />
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The Sharing tab on its own, for a caller who may see but not manage the team.
+ * The tabbed config surface is hidden for them, but reading the membership list
+ * is a Team-Member right (D9/AC9) that the rail's "Share…" entry still offers —
+ * it routes here with `?tab=sharing`. `ShareTeamPanel` renders itself read-only
+ * for a non-manager, so this only has to frame it with a header.
+ */
+function TeamSharingReadOnlySurface({ team }) {
+  return (
+    <div style={{
+      height: '100%', display: 'flex', flexDirection: 'column',
+      background: 'var(--eb-bg-app)', minHeight: 0,
+    }}>
+      <div style={{
+        height: 'var(--eb-header-height)',
+        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
+        padding: '0 var(--eb-space-4)',
+        borderBottom: '1px solid var(--eb-border-default)',
+        flexShrink: 0, background: 'var(--eb-bg-surface)',
+      }}>
+        <span style={{
+          fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)',
+          color: 'var(--eb-text-primary)',
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>
+          {(team?.displayName || team?.id)} · Sharing
+        </span>
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--eb-space-4)' }}>
+        <ShareTeamPanel teamId={team.id} teamName={team.displayName || team.id} />
       </div>
     </div>
   );

@@ -15640,11 +15640,15 @@ async function main() {
           // The payload takes part in target resolution: a trigger's
           // `payloadFilter` (plugin-event.js) is matched against it, which is
           // how two agents on one plugin are routed apart by, e.g., a status.
-          const targets = pluginEvent.resolvePluginEventTargets({ pluginId, event, payload }, agents);
+          // Each target gets ITS payload: a digest is projected down to the
+          // events that trigger's `payloadFilter` matches (plugin-event.js),
+          // so an agent listening for one status is never handed a
+          // teammate's transitions to sort out.
+          const targets = pluginEvent.resolvePluginEventDeliveries({ pluginId, event, payload, summary }, agents);
           const now = new Date().toISOString();
           for (const t of targets) {
             enqueuePending(t.agentId, pluginEvent.buildPluginEventEntry({
-              pluginId, event, summary, payload, eventId, triggerId: t.triggerId,
+              pluginId, event, summary: t.summary, payload: t.payload, eventId, triggerId: t.triggerId,
             }));
             console.log(
               `[Orchestrator] plugin-event: ${pluginId}/${scopeId} "${event}" → agent=${t.agentId} trigger=${t.triggerId}`);
@@ -15670,7 +15674,10 @@ async function main() {
             console.warn(`[Orchestrator] plugin-event log write failed: ${err.message}`);
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, delivered: targets.length, targets }));
+          res.end(JSON.stringify({
+            ok: true, delivered: targets.length,
+            targets: targets.map((t) => ({ agentId: t.agentId, triggerId: t.triggerId })),
+          }));
         } catch (err) {
           console.error(`[Orchestrator] plugin-event error: ${err.message}`);
           res.writeHead(500, { 'Content-Type': 'application/json' });

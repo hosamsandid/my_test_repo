@@ -44,7 +44,7 @@ function between(start, end) {
   return SRC.slice(i, j === -1 ? undefined : j);
 }
 
-test("AC1: the plugin-event route resolves targets WITH the payload", () => {
+test("AC1: the plugin-event route resolves per-target deliveries WITH the payload and enqueues the projected payload/summary", () => {
   // The brief's own end marker, "Internal label fast-path", is the text of a
   // `//` comment header — the comment-stripping pass above removes it before
   // SRC is built, so it can never be found. Substituted with the next
@@ -52,7 +52,11 @@ test("AC1: the plugin-event route resolves targets WITH the payload", () => {
   // (`/internal/github-label-applied`), which still bounds the search to the
   // plugin-event handler's own body.
   const route = between("req.url === '/internal/plugin-event'", "req.url === '/internal/github-label-applied'");
-  assert.match(route, /resolvePluginEventTargets\(\{ pluginId, event, payload \}, agents\)/);
+  // Per-target deliveries carry the projected payload + summary; both must be
+  // what is enqueued, or a filtered agent gets the whole digest again.
+  assert.match(route, /resolvePluginEventDeliveries\(\{ pluginId, event, payload, summary \}, agents\)/);
+  assert.match(route, /payload: t\.payload/);
+  assert.match(route, /summary: t\.summary/);
 });
 
 test("AC2: reconcilePluginsAndAttachments refreshes granted CLI copies after the credential pushes", () => {

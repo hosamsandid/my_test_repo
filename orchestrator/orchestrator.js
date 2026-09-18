@@ -11304,10 +11304,14 @@ class Orchestrator {
   // call touches nothing); `diverged`/`conflict`/`orphaned`/`unknown` are
   // REFUSED and surfaced with a manual-path hint, never auto-overwritten (AC4).
   //
+  // `force: true` is the explicit operator opt-in that ALSO overwrites
+  // `diverged`/`conflict`/`unknown` copies (discarding their local edits, tallied
+  // as `overwritten`); `orphaned` (no source to push) stays refused even forced.
+  //
   // Scope: { name, teamId } fans out to every materialized member of the team
   // that carries the skill seeded; { name, agentId } targets one copy. Emits one
   // `skill-resynced` feed event with the member fan-out results.
-  async resyncSkill({ name, teamId = null, agentId = null } = {}) {
+  async resyncSkill({ name, teamId = null, agentId = null, force = false } = {}) {
     const skillName = typeof name === "string" ? name.trim() : "";
     if (!skillName) throw new Error("skillName required");
     if (!teamId && !agentId) throw new Error("scope required: teamId or agentId");
@@ -11347,17 +11351,28 @@ class Orchestrator {
         members.push({ agentId: id, state, action: "resynced", status: r.status, sourceVersion });
       } else if (state === "in-sync") {
         members.push({ agentId: id, state, action: "skipped" });
+      } else if (force && state !== "orphaned") {
+        // Explicit operator-forced overwrite. A `diverged`/`conflict`/`unknown`
+        // copy carries local edits (or an unprovable anchor) the drift-gated
+        // resync above refuses to clobber — but the operator asked to overwrite it
+        // with the current source content, DISCARDING those local edits. The same
+        // additive sync re-copies the source in and re-stamps the anchor, so a
+        // subsequent drift read reports `in-sync`. `orphaned` (source deleted) has
+        // no content to push, so it stays refused even under force.
+        const r = await this._syncSkillIntoWorkspace(id, cfg, skillName, { remove: false });
+        members.push({ agentId: id, state, action: "overwritten", status: r.status, sourceVersion });
       } else {
         members.push({ agentId: id, state, action: "refused", reason: REFUSAL_HINT[state] || "cannot resync automatically" });
       }
     }
 
     const resynced = members.filter((m) => m.action === "resynced").length;
+    const overwritten = members.filter((m) => m.action === "overwritten").length;
     const skipped = members.filter((m) => m.action === "skipped").length;
     const refused = members.filter((m) => m.action === "refused").length;
     console.log(
-      `[Orchestrator] resync skill '${skillName}' (${agentId ? `agent ${agentId}` : `team ${teamId}`}): ` +
-      `${resynced} resynced, ${skipped} in-sync, ${refused} refused`
+      `[Orchestrator] resync skill '${skillName}' (${agentId ? `agent ${agentId}` : `team ${teamId}`}` +
+      `${force ? ", force" : ""}): ${resynced} resynced, ${overwritten} overwritten, ${skipped} in-sync, ${refused} refused`
     );
     appendKnowledgeEvents([{
       type: "skill-resynced",
@@ -11365,12 +11380,14 @@ class Orchestrator {
       teamId: teamId || (targetIds.length ? agentKnowledgeTeamId(loadAgentConfig(targetIds[0])) : null),
       ...(agentId ? { agentId } : {}),
       skillName,
+      ...(force ? { force: true } : {}),
       resynced,
+      overwritten,
       skipped,
       refused,
       total: members.length,
     }]);
-    return { skillName, teamId, agentId, resynced, skipped, refused, total: members.length, members };
+    return { skillName, teamId, agentId, resynced, overwritten, skipped, refused, total: members.length, members };
   }
 
   // (De)activate a skill on a single agent (standalone / team-member):
@@ -18382,9 +18399,11 @@ async function main() {
     }
 
     // POST /internal/skills/resync — drift-gated resync (#629 AC3/AC4). Body:
-    // { skillName, teamId?, agentId? }. Delivers the current source content to
-    // every seeded copy in scope through the additive sync, refusing
-    // diverged/conflict/orphaned/unknown copies (never auto-overwritten).
+    // { skillName, teamId?, agentId?, force? }. Delivers the current source
+    // content to every seeded copy in scope through the additive sync, refusing
+    // diverged/conflict/orphaned/unknown copies (never auto-overwritten) UNLESS
+    // `force: true`, which overwrites diverged/conflict/unknown copies too
+    // (discarding their local edits); `orphaned` stays refused (no source).
     const skillResyncMatch = req.method === 'POST' && req.url === '/internal/skills/resync';
     if (skillResyncMatch) {
       let body = '';
@@ -18402,6 +18421,7 @@ async function main() {
             name: payload?.skillName,
             teamId: typeof payload?.teamId === 'string' ? payload.teamId : null,
             agentId: typeof payload?.agentId === 'string' ? payload.agentId : null,
+            force: payload?.force === true,
           });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));

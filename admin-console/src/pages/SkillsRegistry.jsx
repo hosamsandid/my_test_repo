@@ -18,6 +18,7 @@ import { isPublishEligible } from './skill-publish-view.js';
 import { useAuth } from '../auth/AuthContext';
 import { adminTeamIdsOf } from './credential-scope-view.js';
 import { writableSkillTargets, defaultSkillTarget } from './skill-target-view.js';
+import { planLineageResync, copyResyncKind, summarizeResyncResults } from './skill-lineage-resync.js';
 
 /* ─── Skill name validation (mirrors SKILL_NAME_RE in api.js) ─────────── */
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
@@ -375,7 +376,85 @@ function VersionsTab({ lineage, loading, error }) {
 }
 
 /* ─── Lineage tab — provenance + origin + every known copy (#632, AC2) ── */
-function LineageTab({ lineage, loading, error, name, onOpenCopy }) {
+
+// Compact per-copy resync action button (Update / Overwrite…) + the bulk
+// variants. Transparent, accent-outlined; the destructive overwrite is error-
+// coloured so a force reads as such before it is clicked.
+const resyncActionBtn = (disabled, danger) => ({
+  padding: '2px 8px', borderRadius: 'var(--eb-radius-sm)', fontSize: 'var(--eb-text-xs)',
+  fontWeight: 'var(--eb-font-medium)', fontFamily: 'inherit', whiteSpace: 'nowrap',
+  cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1,
+  border: `1px solid ${danger ? 'var(--eb-status-error)' : 'var(--eb-accent-primary)'}`,
+  background: 'transparent', color: danger ? 'var(--eb-status-error)' : 'var(--eb-accent-primary)',
+});
+
+// One agent copy's resync control (shared by the Lineage + Usage tabs). Only
+// agent copies are pushed into — the global/team rows are sources. `update` is
+// the safe drift-gated resync; `overwrite` force-discards local edits (the caller
+// confirms first); `blocked` (orphaned source — nothing to push) offers nothing.
+function CopyResyncAction({ copy, busy, resyncBusy, onUpdate, onRequestOverwrite }) {
+  if (!copy || copy.tier !== 'agent') return null;
+  const kind = copyResyncKind(copy.drift);
+  if (kind === 'update') {
+    const key = `update:${copy.agentId}`;
+    return (
+      <button disabled={busy} onClick={() => onUpdate?.([copy.agentId], key)} style={resyncActionBtn(busy, false)}
+        title="Resync this copy to the current source content">
+        {resyncBusy === key ? 'Updating…' : 'Update'}
+      </button>
+    );
+  }
+  if (kind === 'overwrite') {
+    return (
+      <button disabled={busy} onClick={() => onRequestOverwrite?.([copy.agentId])} style={resyncActionBtn(busy, true)}
+        title="Overwrite this locally-edited copy with the current source content — the copy's local edits are discarded">
+        Overwrite…
+      </button>
+    );
+  }
+  if (kind === 'blocked') {
+    return (
+      <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontStyle: 'italic', whiteSpace: 'nowrap' }}
+        title="The source skill was deleted — restore it from the archive before this copy can be updated.">
+        source gone
+      </span>
+    );
+  }
+  return null;
+}
+
+// The bulk "update all outdated" / "overwrite all edited" pair + the last-run
+// status line, shared by the Lineage + Usage tabs. `plan` is planLineageResync's
+// result over the tab's copies.
+function BulkResyncActions({ plan, busy, resyncBusy, resyncMsg, onUpdate, onRequestOverwrite }) {
+  return (
+    <>
+      {(plan.updatable.length > 0 || plan.overwritable.length > 0) && (
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap', marginTop: 'var(--eb-space-2)' }}>
+          {plan.updatable.length > 0 && (
+            <button disabled={busy} onClick={() => onUpdate?.(plan.updatable, 'update-all')} style={resyncActionBtn(busy, false)}
+              title="Resync every outdated agent copy to the current source content (copies with local edits are left untouched)">
+              {resyncBusy === 'update-all' ? 'Updating…' : `Update all outdated (${plan.updatable.length})`}
+            </button>
+          )}
+          {plan.overwritable.length > 0 && (
+            <button disabled={busy} onClick={() => onRequestOverwrite?.(plan.overwritable)} style={resyncActionBtn(busy, true)}
+              title="Overwrite every locally-edited agent copy with the current source content — their local edits are discarded">
+              {`Overwrite all edited (${plan.overwritable.length})…`}
+            </button>
+          )}
+        </div>
+      )}
+      {resyncMsg && (
+        <div role="status" style={{ marginTop: 'var(--eb-space-1)', fontSize: 'var(--eb-text-xs)', color: resyncMsg.ok ? 'var(--eb-status-success)' : 'var(--eb-status-error)' }}>
+          {resyncMsg.text}
+        </div>
+      )}
+    </>
+  );
+}
+
+function LineageTab({ lineage, loading, error, name, onOpenCopy, resyncBusy, resyncMsg, onUpdate, onRequestOverwrite }) {
   if (loading) return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading lineage…</div>;
   if (error) return <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load lineage: {error}</div>;
   if (!lineage) return null;
@@ -383,6 +462,8 @@ function LineageTab({ lineage, loading, error, name, onOpenCopy }) {
   const origin = lineage.origin;
   const prov = lineage.provenance;
   const copies = Array.isArray(lineage.copies) ? lineage.copies : [];
+  const plan = planLineageResync(copies);
+  const busy = !!resyncBusy;
   const entryIds = Array.isArray(prov?.entryIds) ? prov.entryIds : [];
   const knowledgeHref = prov?.originTeamId ? `/knowledge?team=${encodeURIComponent(prov.originTeamId)}` : '/knowledge';
 
@@ -433,7 +514,7 @@ function LineageTab({ lineage, loading, error, name, onOpenCopy }) {
         )}
       </div>
 
-      {/* All known copies across tiers with drift */}
+      {/* All known copies across tiers with drift + per-copy / bulk resync */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
         <span style={sectionTitle}>Copies ({copies.length})</span>
         {copies.length === 0 ? (
@@ -443,40 +524,56 @@ function LineageTab({ lineage, loading, error, name, onOpenCopy }) {
             {copies.map((c, i) => {
               const scopeLabel = c.tier === 'global' ? 'global pool' : c.tier === 'team' ? `team ${c.teamId}` : `agent ${c.agentId}`;
               return (
-                <button
+                <div
                   key={`${c.tier}:${c.teamId ?? ''}:${c.agentId ?? ''}:${i}`}
-                  onClick={() => onOpenCopy?.(copyToRow(c, name))}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap',
-                    padding: 'var(--eb-space-2) var(--eb-space-3)', textAlign: 'left', width: '100%',
+                    padding: 'var(--eb-space-2) var(--eb-space-3)',
                     border: `1px solid ${c.viewed ? 'var(--eb-accent-primary)' : 'var(--eb-border-default)'}`,
                     background: c.viewed ? 'var(--eb-accent-muted)' : 'var(--eb-bg-surface)',
-                    borderRadius: 'var(--eb-radius-sm)', cursor: 'pointer', fontFamily: 'inherit',
+                    borderRadius: 'var(--eb-radius-sm)',
                   }}
-                  title={`Open the ${scopeLabel} copy`}
                 >
-                  <SourceBadge value={c.tier === 'global' ? 'pool' : c.tier} />
-                  <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', fontFamily: 'var(--eb-font-mono)' }}>{scopeLabel}</span>
-                  {Number.isInteger(c.version) && <VersionChip version={c.version} contentHash={c.contentHash} />}
-                  {c.drift && <DriftBadge state={c.drift} />}
-                  {c.viewed && <Chip label="viewing" color="var(--eb-accent-primary)" bg="var(--eb-accent-muted)" />}
-                </button>
+                  <button
+                    onClick={() => onOpenCopy?.(copyToRow(c, name))}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap',
+                      flex: 1, minWidth: 0, textAlign: 'left',
+                      background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'inherit',
+                    }}
+                    title={`Open the ${scopeLabel} copy`}
+                  >
+                    <SourceBadge value={c.tier === 'global' ? 'pool' : c.tier} />
+                    <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', fontFamily: 'var(--eb-font-mono)' }}>{scopeLabel}</span>
+                    {Number.isInteger(c.version) && <VersionChip version={c.version} contentHash={c.contentHash} />}
+                    {c.drift && <DriftBadge state={c.drift} />}
+                    {c.viewed && <Chip label="viewing" color="var(--eb-accent-primary)" bg="var(--eb-accent-muted)" />}
+                  </button>
+                  <CopyResyncAction copy={c} busy={busy} resyncBusy={resyncBusy} onUpdate={onUpdate} onRequestOverwrite={onRequestOverwrite} />
+                </div>
               );
             })}
           </div>
         )}
+
+        {/* Bulk resync — update all outdated (safe) / overwrite all edited (forced). */}
+        <BulkResyncActions plan={plan} busy={busy} resyncBusy={resyncBusy} resyncMsg={resyncMsg} onUpdate={onUpdate} onRequestOverwrite={onRequestOverwrite} />
       </div>
     </div>
   );
 }
 
 /* ─── Usage tab — where the skill is actually seeded (#632, AC2/AC3) ───── */
-function UsageTab({ lineage, loading, error }) {
+function UsageTab({ lineage, loading, error, resyncBusy, resyncMsg, onUpdate, onRequestOverwrite }) {
   if (loading) return <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Loading usage…</div>;
   if (error) return <div role="alert" style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load lineage: {error}</div>;
   const copies = Array.isArray(lineage?.copies) ? lineage.copies : [];
   const agentCopies = copies.filter(c => c.tier === 'agent');
   const summary = lineage?.summary;
+  // Same bulk plan as the Lineage tab — only agent copies are actionable, and
+  // this list IS the agent copies, so the two tabs act on an identical set.
+  const plan = planLineageResync(copies);
+  const busy = !!resyncBusy;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
       {summary && (
@@ -501,12 +598,15 @@ function UsageTab({ lineage, loading, error }) {
               border: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-surface)',
               borderRadius: 'var(--eb-radius-sm)',
             }}>
-              <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', fontFamily: 'var(--eb-font-mono)' }}>{c.agentId}</span>
+              <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', fontFamily: 'var(--eb-font-mono)', flex: 1, minWidth: 0 }}>{c.agentId}</span>
               {c.teamId && <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>({c.teamId})</span>}
               {c.drift && <DriftBadge state={c.drift} />}
+              <CopyResyncAction copy={c} busy={busy} resyncBusy={resyncBusy} onUpdate={onUpdate} onRequestOverwrite={onRequestOverwrite} />
             </div>
           ))
         )}
+        {/* Bulk resync — same actions as the Lineage tab (identical agent set). */}
+        <BulkResyncActions plan={plan} busy={busy} resyncBusy={resyncBusy} resyncMsg={resyncMsg} onUpdate={onUpdate} onRequestOverwrite={onRequestOverwrite} />
       </div>
     </div>
   );
@@ -582,6 +682,13 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
   const [lineage, setLineage] = useState(null);
   const [lineageLoading, setLineageLoading] = useState(false);
   const [lineageError, setLineageError] = useState(null);
+  // Lineage-tab resync (Update / Overwrite). `resyncBusy` is the busy button key
+  // (`update:<agentId>` | `update-all` | `overwrite`); `resyncMsg` is the last
+  // outcome; `overwriteConfirm` holds the agentIds a pending destructive force
+  // targets until the operator confirms it.
+  const [resyncBusy, setResyncBusy] = useState(null);
+  const [resyncMsg, setResyncMsg] = useState(null);
+  const [overwriteConfirm, setOverwriteConfirm] = useState(null);
 
   useEffect(() => {
     // Reset when the selected skill changes; the fetch effect below refills it
@@ -590,6 +697,9 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
     setLineage(null);
     setLineageError(null);
     setLineageLoading(false);
+    setResyncBusy(null);
+    setResyncMsg(null);
+    setOverwriteConfirm(null);
   }, [skillKey]);
 
   useEffect(() => {
@@ -611,6 +721,49 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       .finally(() => { if (!cancelled) setLineageLoading(false); });
     return () => { cancelled = true; };
   }, [tab, skillKey, lineage, lineageError]);
+
+  // Re-fetch the lineage after a resync so the copy drift badges reflect the new
+  // state. Unlike the lazy effect above this always refetches (no guard) — the
+  // whole point is to refresh already-loaded data.
+  const reloadLineage = useCallback(() => {
+    setLineageLoading(true);
+    setLineageError(null);
+    const params = withScope(new URLSearchParams({ source: skill.source }));
+    return fetch(`/api/skills/${encodeURIComponent(skill.name)}/lineage?${params}`)
+      .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d; })
+      .then(d => setLineage(d))
+      .catch(e => setLineageError(e.message))
+      .finally(() => setLineageLoading(false));
+    // skillKey encodes source/agentId/teamId/name — the only inputs to the fetch.
+  }, [skillKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fan a resync out over the given agent copies, one call each (a global skill's
+  // copies span many teams, so there is no single team scope). `force` overwrites
+  // locally-edited copies (the backend re-copies + re-anchors). Reports the
+  // aggregated outcome and refreshes the lineage.
+  const runResync = useCallback(async (agentIds, { force = false, busyKey } = {}) => {
+    const ids = Array.isArray(agentIds) ? agentIds : [agentIds];
+    if (!ids.length) return;
+    setResyncBusy(busyKey || (force ? 'overwrite' : 'update-all'));
+    setResyncMsg(null);
+    const results = [];
+    for (const aid of ids) {
+      try {
+        const res = await fetch('/api/skills/resync', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: skill.name, scope: { agentId: aid }, ...(force ? { force: true } : {}) }),
+        });
+        const d = await res.json().catch(() => ({}));
+        results.push(res.ok ? d : { error: d.error || `HTTP ${res.status}` });
+      } catch (e) {
+        results.push({ error: e.message });
+      }
+    }
+    const summary = summarizeResyncResults(results);
+    setResyncMsg({ ok: summary.ok, text: summary.text });
+    setResyncBusy(null);
+    await reloadLineage();
+  }, [skill.name, reloadLineage]);
 
   // Load the file list whenever the selected skill changes.
   useEffect(() => {
@@ -842,8 +995,23 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       </div>
 
       {tab === 'versions' && <VersionsTab lineage={lineage} loading={lineageLoading} error={lineageError} />}
-      {tab === 'lineage' && <LineageTab lineage={lineage} loading={lineageLoading} error={lineageError} name={skill.name} onOpenCopy={onOpenCopy} />}
-      {tab === 'usage' && <UsageTab lineage={lineage} loading={lineageLoading} error={lineageError} />}
+      {tab === 'lineage' && (
+        <LineageTab
+          lineage={lineage} loading={lineageLoading} error={lineageError}
+          name={skill.name} onOpenCopy={onOpenCopy}
+          resyncBusy={resyncBusy} resyncMsg={resyncMsg}
+          onUpdate={(agentIds, busyKey) => runResync(agentIds, { force: false, busyKey })}
+          onRequestOverwrite={(agentIds) => { setResyncMsg(null); setOverwriteConfirm({ agentIds }); }}
+        />
+      )}
+      {tab === 'usage' && (
+        <UsageTab
+          lineage={lineage} loading={lineageLoading} error={lineageError}
+          resyncBusy={resyncBusy} resyncMsg={resyncMsg}
+          onUpdate={(agentIds, busyKey) => runResync(agentIds, { force: false, busyKey })}
+          onRequestOverwrite={(agentIds) => { setResyncMsg(null); setOverwriteConfirm({ agentIds }); }}
+        />
+      )}
 
       {tab === 'content' && (<>
       {/* toolbar */}
@@ -1252,6 +1420,29 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
         </div>
       )}
       </>)}
+
+      {/* Force-overwrite confirmation (Lineage tab). Resyncing a locally-edited
+          copy discards its local edits, so a force is gated behind an explicit
+          confirm — rendered at viewer top level so it also shows on the Lineage
+          tab (the content-tab dialogs above are inside the Content block). */}
+      <ConfirmDialog
+        open={!!overwriteConfirm}
+        title={overwriteConfirm && overwriteConfirm.agentIds.length > 1 ? 'Overwrite edited copies' : 'Overwrite edited copy'}
+        variant="danger"
+        message={
+          overwriteConfirm
+            ? `This overwrites ${overwriteConfirm.agentIds.length === 1 ? `agent "${overwriteConfirm.agentIds[0]}"` : `${overwriteConfirm.agentIds.length} agent copies`} with the current source content of "${skill.name}". Any local edits in ${overwriteConfirm.agentIds.length === 1 ? 'that copy' : 'those copies'} are discarded — this cannot be undone.`
+            : ''
+        }
+        confirmLabel={resyncBusy === 'overwrite' ? 'Overwriting…' : 'Overwrite'}
+        busy={resyncBusy === 'overwrite'}
+        onConfirm={async () => {
+          if (!overwriteConfirm) return;
+          await runResync(overwriteConfirm.agentIds, { force: true, busyKey: 'overwrite' });
+          setOverwriteConfirm(null);
+        }}
+        onCancel={() => setOverwriteConfirm(null)}
+      />
     </div>
   );
 }

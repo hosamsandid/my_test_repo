@@ -42,6 +42,18 @@
   }
   function teamQS() { return 'team=' + encodeURIComponent(state.team || ''); }
 
+  // A status is committed to state on Enter / comma. Whatever is still typed
+  // in a chip box when the user clicks Save (or Add/Remove, which re-render)
+  // must not be silently dropped — adopt it first, exactly as Enter would.
+  function commitPending() {
+    Array.prototype.forEach.call($('rows').querySelectorAll('input[data-add]'), function (inp) {
+      var i = Number(inp.dataset.add);
+      var v = inp.value.trim();
+      if (v && state.watches[i] && state.watches[i].statusFilters.indexOf(v) < 0) state.watches[i].statusFilters.push(v);
+      inp.value = '';
+    });
+  }
+
   function render() {
     $('rows').innerHTML = state.watches.map(function (w, i) {
       var chips = (w.statusFilters || []).map(function (s, j) {
@@ -52,7 +64,7 @@
         + '<input data-i="' + i + '" data-k="projectKey" class="pk-input" placeholder="KAN" value="' + esc(w.projectKey || '') + '" />'
         + '<div class="chip-editor">'
         + chips
-        + '<input data-add="' + i + '" class="chip-add" placeholder="' + (chips ? 'add status…' : 'status (blank = any)') + '" />'
+        + '<input data-add="' + i + '" class="chip-add" placeholder="' + (chips ? 'add status, Enter' : 'status + Enter (blank = any)') + '" />'
         + '</div>'
         + '<button data-del="' + i + '" class="btn ghost sm" aria-label="remove project">Remove</button>'
         + '</div>';
@@ -77,12 +89,13 @@
     Array.prototype.forEach.call($('rows').querySelectorAll('button[data-rm]'), function (b) {
       b.onclick = function () {
         var parts = b.dataset.rm.split(':');
+        commitPending();
         state.watches[Number(parts[0])].statusFilters.splice(Number(parts[1]), 1);
         render();
       };
     });
     Array.prototype.forEach.call($('rows').querySelectorAll('button[data-del]'), function (b) {
-      b.onclick = function () { state.watches.splice(Number(b.dataset.del), 1); render(); };
+      b.onclick = function () { commitPending(); state.watches.splice(Number(b.dataset.del), 1); render(); };
     });
   }
 
@@ -97,9 +110,11 @@
     }).catch(function (e) { err(e.message); });
   }
 
-  $('add').onclick = function () { state.watches.push({ projectKey: '', statusFilters: [] }); render(); };
+  $('add').onclick = function () { commitPending(); state.watches.push({ projectKey: '', statusFilters: [] }); render(); };
 
   $('save').onclick = function () {
+    commitPending();
+    render();
     msg('Saving…');
     var watches = state.watches
       .map(function (w) {

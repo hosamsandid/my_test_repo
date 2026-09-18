@@ -83,8 +83,10 @@ A good wake instruction says exactly that sequence: *"Take the issue key(s) and
 event id(s) from the event payload, run `aee-jira inbox --consume <id>…` for
 those ids, read each issue with `aee-jira show`, do the work, write it back with
 `aee-jira update`, then `aee-jira transition` it to the next status."* The inbox
-is shared by every agent on the team — an agent drains only what it was woken
-for, so a teammate's queued events stay queued for the teammate.
+is shared by every agent on the team. Consume only the ids from your own wake:
+the broker cannot tell agents apart (one scope token per team), so a
+teammate's queued events stay queued only as long as each agent drains just
+what it was woken for.
 
 ## When a transition does not wake the agent
 

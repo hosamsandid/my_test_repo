@@ -156,7 +156,7 @@ broker; the agent never sees the token.
 
 | Command | |
 |---|---|
-| `aee-jira inbox [--consume <id>…]` | the team's queued status changes (peek). `--consume` drains **exactly the ids named** — the ids from the agent's own wake (`payload.id`, or `payload.events[].id` in a digest). The inbox is per team and shared by every agent on it; a bare `--consume` is refused (CLI exit 2 / broker 400 `consume-requires-ids`), so no agent can drain a teammate's events. Unclaimed entries age out on the 7-day TTL |
+| `aee-jira inbox [--consume <id>…]` | the team's queued status changes (peek). `--consume` drains **exactly the ids named** — the ids from the agent's own wake (`payload.id`, or `payload.events[].id` in a digest). The inbox is per team and shared by every agent on it; a bare `--consume` is refused (CLI exit 2 / broker 400 `consume-requires-ids`). An agent that consumes only the ids in its own wake never touches a teammate's entries — this is a convention the CLI enforces on itself (it drains nothing it was not told to), not an authentication boundary: every agent on the team holds the same scope token, so the broker cannot tell agents apart. Unclaimed entries age out on the 7-day TTL |
 | `aee-jira projects` | the Jira projects in the team's scope |
 | `aee-jira list --project KAN [--status "Ready for Dev"]` | a project's issues, most-recently-updated first |
 | `aee-jira show KAN-6` | one issue (summary, status, assignee, URL) |

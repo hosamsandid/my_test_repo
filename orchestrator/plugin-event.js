@@ -152,30 +152,45 @@ function matchesPluginEventTrigger(trigger, { pluginId, event, payload } = {}) {
 // Generic: the platform knows only the `{kind:'digest', events[], count?}`
 // shape it already matches on, and reuses the same field matcher.
 //
+// The inline cap lives HERE, after the filter, not in the broker before it: a
+// broker that inlined only the first N of a bulk move would hide every event
+// past N from the match, and an agent whose transitions all sit there would
+// never be woken. The broker sends the whole folded set; the platform decides
+// what fits in a prompt — per target, from that target's own events.
+//
 // Returns `{ payload, projected }`:
-//   • no filter, or not a digest, or nothing to remove → the input payload
-//     (same reference) and `projected: null`. "Nothing to remove" matters: a
-//     broker may inline only the first N of `count` events, and that `count`
-//     must survive when the projection would change nothing.
-//   • otherwise a NEW digest with `events` = the matching ones, `count` =
-//     their number, every other top-level field copied through, and
-//     `projected: { kept, total }` where `total` is the source's `count` when
-//     it is an integer ≥ the inline length (the honest "how many really"),
-//     else the inline length.
+//   • not a digest → the input payload (same reference), `projected: null`.
+//   • a digest nothing was filtered out of AND that fits inline → the same
+//     reference (a broker's own `count`/`truncated`, if any, survive).
+//   • otherwise a NEW digest: `events` = the matching ones, capped at
+//     DIGEST_INLINE_MAX; `count` = how many matched in all; `truncated: true`
+//     when the cap cut some; every other top-level field copied through.
+//     `projected` is `{ kept, total }` only when the FILTER removed something
+//     (that is what the summary suffix reports — the cap alone is not a
+//     projection), `total` being the source's `count` when it is an integer ≥
+//     the inline length, else the inline length.
+const DIGEST_INLINE_MAX = 20;
+
 function projectPayloadForTrigger(trigger, payload) {
   const passthrough = { payload, projected: null };
-  const f = normalizePayloadFilter(trigger && trigger.payloadFilter);
-  if (!f) return passthrough;
   if (!payload || typeof payload !== 'object' || payload.kind !== 'digest' || !Array.isArray(payload.events)) {
     return passthrough;
   }
-  const kept = payload.events.filter((e) => payloadFieldsMatch(f, e));
-  if (kept.length === payload.events.length) return passthrough;
+  const f = normalizePayloadFilter(trigger && trigger.payloadFilter);
+  const matched = f ? payload.events.filter((e) => payloadFieldsMatch(f, e)) : payload.events;
+  const narrowed = matched.length !== payload.events.length;
+  const cut = matched.length > DIGEST_INLINE_MAX;
+  if (!narrowed && !cut) return passthrough;
   const inline = payload.events.length;
   const total = Number.isInteger(payload.count) && payload.count >= inline ? payload.count : inline;
   return {
-    payload: { ...payload, count: kept.length, events: kept },
-    projected: { kept: kept.length, total },
+    payload: {
+      ...payload,
+      count: matched.length,
+      events: cut ? matched.slice(0, DIGEST_INLINE_MAX) : matched,
+      ...(cut ? { truncated: true } : {}),
+    },
+    projected: narrowed ? { kept: matched.length, total } : null,
   };
 }
 
@@ -272,6 +287,7 @@ module.exports = {
   PLUGIN_EVENT_EVENT_KEY,
   PLUGIN_EVENT_REFUSALS,
   SUMMARY_MAX,
+  DIGEST_INLINE_MAX,
   clampSummary,
   validatePluginEventRequest,
   matchesPluginEventTrigger,

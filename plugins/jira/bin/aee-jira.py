@@ -31,7 +31,8 @@ drains exactly those — the inbox is shared by every agent on the team, each
 woken for its own subset, so there is no whole-inbox drain. The ids you may
 consume are the ones in your own wake payload: `id` for a single event,
 `events[].id` for a digest (a digest with `truncated: true` inlines only the
-first 20 — peek, take the rest that carry your status, consume those too).
+first 20 of YOUR events — peek, take the rest that carry your status, consume
+those too).
 `transition` names the TARGET status; the broker resolves the
 Jira transition from where the issue currently is and reports the available
 options if none leads there.

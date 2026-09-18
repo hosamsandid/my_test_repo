@@ -130,10 +130,14 @@ function summariseEvents(kind, events, { projectKey } = {}) {
 // connection would otherwise stall polling for undici's multi-minute default.
 const DELIVER_TIMEOUT_MS = 15_000;
 
-// A digest inlines at most this many events (the wake body stays small; the
-// inbox holds every one). Past it, `truncated: true` tells the agent that
-// `payload.events` is not the whole set.
-const DIGEST_INLINE_MAX = 20;
+// A digest carries the WHOLE folded set — the orchestrator matches every
+// agent's payloadFilter against all of it and only then caps what goes into
+// that agent's prompt (its `DIGEST_INLINE_MAX`). Cutting here, before the
+// filter, would hide every event past the cut from the match and leave an
+// agent whose transitions all sit there un-woken. This is only a hard safety
+// bound on the wake body (~350 B/event → ~350 KB, under the orchestrator's
+// 1 MB body cap); past it, `truncated: true` says the set is incomplete.
+const DIGEST_MAX_EVENTS = 1000;
 
 // `projectKey` is set on a project-level (bulk) digest — F8; a per-issue
 // digest has none. Both carry the same `{kind:'digest', count, events}` shape
@@ -154,15 +158,15 @@ async function deliver({ scopeId, kind, events, projectKey }) {
     // Omit rather than send an explicit null for a digest (the validator
     // accepts either, but the entry shape prefers omission).
     ...(eventId ? { eventId } : {}),
-    // A digest carries the first DIGEST_INLINE_MAX events inline (`count` says how many
-    // really); the agent's `aee-jira inbox` holds every one of them. `truncated: true` when cut.
+    // A digest carries every folded event (`count` = their number); the
+    // agent's `aee-jira inbox` holds them too. Only DIGEST_MAX_EVENTS cuts.
     payload: kind === 'digest'
       ? {
         kind: 'digest',
         ...(projectKey ? { projectKey } : {}),
         count: events.length,
-        events: events.slice(0, DIGEST_INLINE_MAX),
-        ...(events.length > DIGEST_INLINE_MAX ? { truncated: true } : {}),
+        events: events.slice(0, DIGEST_MAX_EVENTS),
+        ...(events.length > DIGEST_MAX_EVENTS ? { truncated: true } : {}),
       }
       : first,
   };
@@ -604,4 +608,4 @@ if (require.main === module) {
   poller.start();
 }
 
-module.exports = { handleRequest, httpServer, watchStore, inboxStore, activityStore, poller, resolveCredential, deliver, scopeCredentials, PLUGIN_ID, SIGNING_SECRET };
+module.exports = { handleRequest, httpServer, watchStore, inboxStore, activityStore, poller, resolveCredential, deliver, scopeCredentials, PLUGIN_ID, SIGNING_SECRET, DIGEST_MAX_EVENTS };

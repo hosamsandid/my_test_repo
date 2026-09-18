@@ -62,8 +62,9 @@ When more than three transitions land in a single poll — on one issue, or
 across one project (a bulk move such as sprint planning) — they arrive as one
 **digest**, one wake rather than one per ticket. Each agent receives the digest
 **narrowed to its own conditions**: a *Ready for Dev* agent sees only the
-*Ready for Dev* transitions of that bulk move, never a teammate's. A digest
-inlines at most 20 transitions; when there were more it carries
+*Ready for Dev* transitions of that bulk move, never a teammate's — however
+large the move and wherever its transitions sit in it. An agent's digest
+inlines at most 20 of *its own* transitions; when it had more it carries
 `truncated: true` and `aee-jira inbox` (peek) shows the rest.
 
 ## What the woken agent can do — `aee-jira`

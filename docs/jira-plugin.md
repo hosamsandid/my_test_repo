@@ -138,14 +138,16 @@ events its `payloadFilter` matches, `count` recomputed, the summary suffixed
 *"— 3 of 40 match this trigger"*. Two things produce a digest: more than three
 transitions on **one issue** in a single poll, and — the bulk case — more than
 three watched transitions in **one project** in a single poll (sprint planning
-moving 40 tickets to *Ready for Dev* is **one** wake, not 40). A digest inlines
-the first 20 transitions plus `count`; when cut it carries `truncated: true`,
-and `aee-jira inbox` holds every one of them. The projection is generic
-platform behaviour (`orchestrator/plugin-event.js` `projectPayloadForTrigger`),
-not Jira-specific. Known limit: the inline sample is the first 20 transitions
-across *all* watched statuses, so in a very large bulk move an agent whose
-transitions all fall beyond the 20th receives no wake for it — `aee-jira inbox`
-(peek) still shows every entry.
+moving 40 tickets to *Ready for Dev* is **one** wake, not 40). The broker
+sends the **whole** folded set (safety bound 1000 events); the orchestrator
+matches every agent's filter against all of it and only then caps what enters
+that agent's prompt at 20 of *its own* transitions (`DIGEST_INLINE_MAX`) —
+`count` is the full number, `truncated: true` says the inline list was cut,
+and `aee-jira inbox` holds every one of them. The cap sits *after* the filter
+on purpose: an agent whose transitions all fall late in a large bulk move is
+still woken with them. The projection and the cap are generic platform
+behaviour (`orchestrator/plugin-event.js` `projectPayloadForTrigger`), not
+Jira-specific.
 
 The wake instruction is the agent's own prompt; the Jira payload rides in as
 context, never as an instruction.

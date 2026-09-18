@@ -74,9 +74,11 @@ scope to its team, and wakes every granted agent carrying a matching
 agent's own `prompt` is the wake instruction; the payload rides in as untrusted
 context in an `<external-event source="plugin:jira">` envelope. A `digest` burst
 (per issue, or the per-project bulk case) becomes one wake carrying the collapsed
-set — the first 20 events inline plus `count` (`truncated: true` when cut); the
-orchestrator projects it per target trigger before enqueuing, so each agent sees
-only its own folded events; the inbox holds all of them.
+set — every event (safety bound `DIGEST_MAX_EVENTS` = 1000) plus `count`; the
+orchestrator projects it per target trigger before enqueuing and only then caps
+the inline list at 20 of that agent's own events (`truncated: true` when cut),
+so each agent sees only its own folded events and none are hidden from the
+match; the inbox holds all of them.
 
 ## Writes — role-gated, not confirmation-gated (D3)
 

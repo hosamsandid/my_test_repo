@@ -7,6 +7,7 @@ const {
   PLUGIN_EVENT_TRIGGER_TYPE,
   PLUGIN_EVENT_PENDING_KIND,
   SUMMARY_MAX,
+  DIGEST_INLINE_MAX,
   clampSummary,
   validatePluginEventRequest,
   matchesPluginEventTrigger,
@@ -197,6 +198,60 @@ test('project: when every inline event matches, the payload passes through byte-
   const r = projectPayloadForTrigger(T({ payloadFilter: { toStatus: 'Ready for Dev' } }), d);
   assert.equal(r.payload, d);
   assert.equal(r.projected, null);
+});
+
+// ── inline cap AFTER projection (the 21–40 gap) ───────────────────────────
+// The broker sends the whole folded set; the platform decides what fits in a
+// prompt — per target, after that trigger's filter has been applied. Capping
+// before filtering would let an agent whose events all sit past the cap go
+// un-woken; capping after cannot.
+
+const many = (n, toStatus, from = 0) => Array.from({ length: n }, (_, i) => ev(`KAN-${from + i}`, toStatus));
+
+test('inline cap: DIGEST_INLINE_MAX is 20 and an unfiltered trigger is capped too (count = all, truncated)', () => {
+  assert.equal(DIGEST_INLINE_MAX, 20);
+  const d = DIGEST(many(25, 'Ready for Dev'));
+  const r = projectPayloadForTrigger(T(), d);
+  assert.equal(r.payload.events.length, 20);
+  assert.equal(r.payload.count, 25);
+  assert.equal(r.payload.truncated, true);
+  assert.equal(r.projected, null);                // nothing was FILTERED out — no "N of M" suffix
+  assert.equal(d.events.length, 25);              // source untouched
+});
+
+test('inline cap: an agent whose events all sit past the 20th is still matched and gets ITS events', () => {
+  // 20× Ready for Dev first, then 20× Ready for Refinement — the old
+  // broker-side cut would have hidden every Refinement event from the match.
+  const d = DIGEST([...many(20, 'Ready for Dev'), ...many(20, 'Ready for Refinement', 100)]);
+  const agents = [
+    { agentId: 'dev', inScope: true, granted: true, triggers: [T({ id: 'dev-t', payloadFilter: { toStatus: 'Ready for Dev' } })] },
+    { agentId: 'ba',  inScope: true, granted: true, triggers: [T({ id: 'ba-t',  payloadFilter: { toStatus: 'Ready for Refinement' } })] },
+  ];
+  const out = resolvePluginEventDeliveries({ pluginId: 'jira', event: 'e', payload: d, summary: '40 status changes in KAN' }, agents);
+  assert.deepEqual(out.map((o) => o.agentId), ['dev', 'ba']);
+  const ba = out[1];
+  assert.equal(ba.payload.events.length, 20);
+  assert.ok(ba.payload.events.every((e) => e.toStatus === 'Ready for Refinement'));
+  assert.equal(ba.payload.count, 20);
+  assert.equal('truncated' in ba.payload, false);  // exactly 20 kept → nothing cut
+  assert.equal(ba.summary, '40 status changes in KAN — 20 of 40 match this trigger');
+});
+
+test('inline cap: filtered AND cut → first 20 of the kept events, count = kept, truncated, suffix says kept of total', () => {
+  const d = DIGEST([...many(30, 'Ready for Dev'), ...many(10, 'Done', 100)]);
+  const r = projectPayloadForTrigger(T({ payloadFilter: { toStatus: 'Ready for Dev' } }), d);
+  assert.equal(r.payload.events.length, 20);
+  assert.ok(r.payload.events.every((e) => e.toStatus === 'Ready for Dev'));
+  assert.deepEqual(r.payload.events.map((e) => e.issueKey).slice(0, 3), ['KAN-0', 'KAN-1', 'KAN-2']);
+  assert.equal(r.payload.count, 30);
+  assert.equal(r.payload.truncated, true);
+  assert.deepEqual(r.projected, { kept: 30, total: 40 });
+});
+
+test('inline cap: a digest that fits and matches whole still passes through by reference', () => {
+  const d = DIGEST(many(20, 'Ready for Dev'));
+  assert.equal(projectPayloadForTrigger(T(), d).payload, d);
+  assert.equal(projectPayloadForTrigger(T({ payloadFilter: { toStatus: 'Ready for Dev' } }), d).payload, d);
 });
 
 test('project: total is the digest count when it is an integer ≥ inline length, else the inline length', () => {

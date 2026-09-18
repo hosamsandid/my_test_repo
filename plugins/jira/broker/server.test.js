@@ -518,16 +518,19 @@ test('deliver: POSTs /internal/plugin-event to the orchestrator with a minted ji
     assert.equal(dg.payload.kind, 'digest');
     assert.equal(dg.payload.projectKey, 'KAN');
     assert.equal(dg.payload.count, 25);
-    assert.equal(dg.payload.events.length, 20);
+    // The WHOLE folded set travels: the orchestrator filters per target and
+    // only then caps what goes into a prompt. A broker-side cut would hide
+    // events past the cut from every agent's payloadFilter match.
+    assert.equal(dg.payload.events.length, 25);
+    assert.equal('truncated' in dg.payload, false);
 
-    // A cut digest says so — the agent knows to peek the inbox for the rest.
-    assert.equal(dg.payload.truncated, true);
-
-    // A digest that fits inline carries no `truncated` key at all.
-    await broker.deliver({ scopeId: 'team-1', kind: 'digest', convKey: 'issue:KAN-1', events: events.slice(0, 4) });
+    // Only the hard safety cap (DIGEST_MAX_EVENTS) cuts, and then says so.
+    const huge = Array.from({ length: broker.DIGEST_MAX_EVENTS + 1 }, (_, i) => ({ id: `KAN-${i}:${i}`, event: 'status_changed', issueKey: `KAN-${i}`, projectKey: 'KAN', toStatus: 'Ready for Dev' }));
+    await broker.deliver({ scopeId: 'team-1', kind: 'digest', convKey: 'project:KAN', projectKey: 'KAN', events: huge });
     assert.equal(captured.length, 3);
-    assert.equal(captured[2].body.payload.count, 4);
-    assert.equal('truncated' in captured[2].body.payload, false);
+    assert.equal(captured[2].body.payload.count, broker.DIGEST_MAX_EVENTS + 1);
+    assert.equal(captured[2].body.payload.events.length, broker.DIGEST_MAX_EVENTS);
+    assert.equal(captured[2].body.payload.truncated, true);
   } finally {
     if (prev === undefined) delete process.env.AEE_ORCHESTRATOR_URL; else process.env.AEE_ORCHESTRATOR_URL = prev;
     orch.close();

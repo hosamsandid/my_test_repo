@@ -235,8 +235,13 @@ function query(req) {
 // digest). The whole-inbox drain is gone: the inbox is per team and every
 // agent on it is woken for its own subset, so a bare consume would take a
 // teammate's events. A stale CLI copy sending `consume=1` gets a 400 that
-// names the fix instead of a silent team-wide drain.
+// names the fix instead of a silent team-wide drain. An agent may only ever
+// drain the ids its own wake named (a convention the CLI keeps — the broker
+// cannot tell agents apart, one scope token per team).
 const EVENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[A-Za-z0-9._-]{1,64}$/;
+// Ids travel in the GET query string; 200 ids at the regex's maximum length
+// would exceed Node's 16 KB header limit (431, fails closed) — realistic ids
+// (`KAN-6:10312`) fit ~1000×.
 const CONSUME_MAX_IDS = 200;
 const CONSUME_USAGE = 'consume takes the event ids you were woken for: aee-jira inbox --consume <event-id> [<event-id> ...] '
   + '(each id is in your wake payload as `id`, or `events[].id` in a digest)';

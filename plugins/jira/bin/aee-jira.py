@@ -116,7 +116,8 @@ def _call(cfg, path, method="GET", body=None):
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
         try:
-            msg = json.loads(body).get("error", body[:400])
+            d = json.loads(body)
+            msg = d.get("message") or d.get("error") or body[:400]
         except ValueError:
             msg = body[:400]
         raise BrokerDomainError("broker HTTP %s: %s" % (e.code, msg)) from e

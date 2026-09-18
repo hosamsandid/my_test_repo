@@ -181,12 +181,18 @@ function projectPayloadForTrigger(trigger, payload) {
 
 // The summary a projected target sees. The broker's text is its own vocabulary
 // (the platform cannot rewrite it), but the platform CAN say how many of the
-// folded events are this agent's. Re-clamped: the suffix may push a
-// SUMMARY_MAX-long summary over the limit.
+// folded events are this agent's. The tail ("N of M match this trigger") is
+// the one signal a projected agent needs, so it is never dropped: an
+// already-long summary is trimmed at the HEAD to make room, not re-clamped
+// from the tail.
 function projectedSummary(summary, projected) {
   if (!projected) return summary;
   const tail = `${projected.kept} of ${projected.total} match this trigger`;
-  return clampSummary(summary ? `${summary} — ${tail}` : `${projected.kept} of ${projected.total} events match this trigger`);
+  if (!summary) return clampSummary(`${projected.kept} of ${projected.total} events match this trigger`);
+  const sep = ' — ';
+  const room = SUMMARY_MAX - Array.from(tail).length - Array.from(sep).length;
+  const head = Array.from(summary).length <= room ? summary : Array.from(summary).slice(0, room - 1).join('') + '…';
+  return `${head}${sep}${tail}`;
 }
 
 // The shared core of the two resolvers below: `[{agentId, trigger}]` for every
@@ -214,8 +220,9 @@ function resolvePluginEventTargets(req, agents) {
 
 // The same targets, each with the payload + summary IT should be handed: a
 // digest narrowed to that trigger's own events (`projectPayloadForTrigger`),
-// the summary suffixed when narrowed. This is what the handler enqueues; the
-// id-only `resolvePluginEventTargets` remains for the response/log rows.
+// the summary suffixed when narrowed. This is what the handler enqueues;
+// the id-only `resolvePluginEventTargets` is kept as the spec of the matching
+// core (its tests pin the shape).
 function resolvePluginEventDeliveries({ pluginId, event, payload = null, summary = '' }, agents) {
   return matchTargets({ pluginId, event, payload }, agents).map(({ agentId, trigger }) => {
     const p = projectPayloadForTrigger(trigger, payload);

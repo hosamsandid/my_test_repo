@@ -614,3 +614,43 @@ test('aee-jira: inbox --consume <ids> is wired to a broker call (unreachable →
   assert.match(h.stdout, /EVENT_ID/);
   assert.match(h.stdout, /events\[\]\.id/);
 });
+
+function runJiraAsync(args, workspace) {
+  const { spawn } = require('node:child_process');
+  return new Promise((resolve) => {
+    const child = spawn('python3', [JIRA_CLI, ...args], {
+      env: { ...process.env, AEE_WORKSPACE: workspace },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+test('aee-jira: a broker 4xx surfaces its `message`, not just the bare `error` code', async () => {
+  // A stub broker in-process; spawnSync would block the event loop and the
+  // CLI's request could never be answered (see captureBroker() above) — spawn
+  // asynchronously instead.
+  const http = require('node:http');
+  const server = http.createServer((req, res) => {
+    res.statusCode = 400;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({
+      error: 'consume-requires-ids',
+      message: 'consume takes the event ids you were woken for: aee-jira inbox --consume <event-id>',
+    }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const r = await runJiraAsync(['inbox', '--consume', 'KAN-1:1', '--json'], grantedJiraWorkspace(`http://127.0.0.1:${port}/`));
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    const obj = JSON.parse(r.stdout.trim());
+    assert.equal(obj.ok, false);
+    assert.match(obj.message, /--consume <event-id>/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

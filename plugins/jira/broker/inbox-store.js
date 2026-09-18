@@ -116,7 +116,8 @@ class InboxStore {
   // and several agents share it, each woken for its own subset (the
   // orchestrator's payloadFilter/projection decide which). An agent may only
   // ever drain the ids its own wake named — a team-wide drain would take a
-  // teammate's events with it.
+  // teammate's events with it (a convention the CLI keeps — the broker cannot
+  // tell agents apart, one scope token per team).
   consumeIds(scopeId, ids) {
     assertScope(scopeId);
     const wanted = new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === 'string' && id));

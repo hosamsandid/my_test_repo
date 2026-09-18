@@ -102,7 +102,8 @@ if (cmd === 'scopes') {
   });
 } else if (cmd === 'inbox') {
   const scope = opt('scope') || die('need --scope <id>');
-  const raw = opt('consume');
+  let raw = opt('consume');
+  if (typeof raw === 'string' && raw.startsWith('--')) raw = undefined; // e.g. `--consume --scope t`: don't swallow the next flag as an id
   if (flag('consume') && !raw) die('--consume takes the event ids to drain: --consume <id>[,<id>…] (a bare --consume no longer drains the whole inbox)');
   if (raw) {
     const ids = String(raw).split(',').map((s) => s.trim()).filter(Boolean);

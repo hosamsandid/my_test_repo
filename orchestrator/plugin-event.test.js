@@ -245,7 +245,7 @@ test('deliveries: a single (non-digest) event keeps payload + summary as sent', 
   assert.equal(o.summary, 'KAN-2: To Do → Ready for Dev');
 });
 
-test('deliveries: an empty broker summary gets a standalone projected line; the suffix is re-clamped', () => {
+test('deliveries: an empty broker summary gets a standalone projected line; a long summary is trimmed at the head so the suffix survives', () => {
   const d = DIGEST([ev('KAN-1', 'Ready for Dev'), ev('KAN-2', 'Done')]);
   const agents = [{ agentId: 'dev', inScope: true, granted: true, triggers: [T({ payloadFilter: { toStatus: 'Ready for Dev' } })] }];
   assert.equal(resolvePluginEventDeliveries({ pluginId: 'jira', event: 'e', payload: d, summary: '' }, agents)[0].summary,
@@ -253,5 +253,6 @@ test('deliveries: an empty broker summary gets a standalone projected line; the 
   const long = 'x'.repeat(SUMMARY_MAX);
   const s = resolvePluginEventDeliveries({ pluginId: 'jira', event: 'e', payload: d, summary: long }, agents)[0].summary;
   assert.equal(Array.from(s).length, SUMMARY_MAX);
-  assert.ok(s.endsWith('…'));
+  assert.ok(s.endsWith(' — 1 of 2 match this trigger'));
+  assert.ok(s.includes('…'));
 });

@@ -142,7 +142,10 @@ moving 40 tickets to *Ready for Dev* is **one** wake, not 40). A digest inlines
 the first 20 transitions plus `count`; when cut it carries `truncated: true`,
 and `aee-jira inbox` holds every one of them. The projection is generic
 platform behaviour (`orchestrator/plugin-event.js` `projectPayloadForTrigger`),
-not Jira-specific.
+not Jira-specific. Known limit: the inline sample is the first 20 transitions
+across *all* watched statuses, so in a very large bulk move an agent whose
+transitions all fall beyond the 20th receives no wake for it — `aee-jira inbox`
+(peek) still shows every entry.
 
 The wake instruction is the agent's own prompt; the Jira payload rides in as
 context, never as an instruction.
@@ -258,7 +261,7 @@ Two records, for two audiences:
 | a fresh transition doesn't wake the agent | no status in the watch's `statusFilters` set exactly matches the Jira status name, or the agent has no `plugin-event` trigger, or the poll already baselined the change, or the trigger's payload filter names a status that is not the one the issue moved into | check the Activity tab (a `not a watched status` row means the set is wrong); copy the status name verbatim from Jira; add the trigger |
 | a watch card shows **Failing** | consecutive poll failures — expand it for the error log | usually a bad or expired API token: a Team Admin re-sets it on the Plugins page, then hits **Retry now** |
 | the agent says `aee-jira` is read-only / only knows `whoami` and `inbox` | its workspace holds a CLI copy from an older plugin version (the grant sync copies the file only when the grant changes) | since this version the copy is refreshed on every plugin reconcile — restart the orchestrator or `POST /internal/plugins/reconcile`; re-run `make seed-plugins` + reinstall first if `/workspace/plugins/jira/bin/aee-jira.py` is itself old |
-| `aee-jira inbox --consume` fails with *consume takes the event ids you were woken for* | the wake instruction still uses the pre-2026-09 team-wide drain | change it to `aee-jira inbox --consume <id>…` with the ids from the event payload (`id` / `events[].id`); the agent's own trigger filter already decided which events it received |
+| `aee-jira inbox --consume` fails with `broker HTTP 400: consume takes the event ids you were woken for…` (or, from a stale CLI copy, just `consume-requires-ids`) | the wake instruction still uses the pre-2026-09 team-wide drain | change it to `aee-jira inbox --consume <id>…` with the ids from the event payload (`id` / `events[].id`); the agent's own trigger filter already decided which events it received; a stale copy is refreshed on the next plugin reconcile (`planCliRefresh`) |
 | the wrong agent wakes, or an agent wakes on its own transition | the agents' `plugin-event` triggers carry no payload filter, so every watched transition wakes all of them | set `toStatus=<status>` on each agent's trigger (§5) |
 | a trigger whose *Which event* is a status name (`Ready for Dev`) never fires | `eventFilter` is compared with the event **name** (`status_changed`), not with the payload; the status belongs in *Only when…* (`toStatus`) | blank *Which event*, add the condition `toStatus = Ready for Dev` — the form now offers both from the manifest and flags the mistake |
 

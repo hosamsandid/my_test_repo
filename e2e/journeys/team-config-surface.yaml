@@ -32,9 +32,10 @@ steps:
       A `role: 'team'` agent hosts no conversation of its own, so routing to
       one no longer shares a chat column and a tabbed right rail the way an
       ordinary agent does — its whole configuration is the surface. This
-      journey drives all three ways of getting there (a rail row click, the
-      row's "Team settings…" menu entry, and a direct URL) and proves
-      switching to a member and back leaves the right rail exactly as it was.
+      journey drives both ways of getting there (a rail row click and a direct
+      URL — the redundant "Team settings…" kebab entry was retired in #1929,
+      the row click already lands on the same surface) and proves switching to
+      a member and back leaves the right rail exactly as it was.
 
   # ── Entry point 1: the team row in the rail ─────────────────────────────────
   - id: open-from-row
@@ -47,17 +48,7 @@ steps:
       teamId: team-config-demo
     screenshot: team-config-full-width-surface
 
-  # ── Entry point 2: the row context menu's "Team settings…" entry ───────────
-  - id: open-from-menu
-    action:
-      do: team-config.openTeamFromMenu
-      teamId: team-config-demo
-      label: Team Config Demo
-    assert:
-      do: team-config.expectFullWidthSurface
-      teamId: team-config-demo
-
-  # ── Entry point 3: a direct /chats/<teamId> URL ─────────────────────────────
+  # ── Entry point 2: a direct /chats/<teamId> URL ─────────────────────────────
   - id: open-by-url
     action:
       do: team-config.openTeamByUrl

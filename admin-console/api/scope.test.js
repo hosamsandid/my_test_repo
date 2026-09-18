@@ -9,7 +9,7 @@ const path = require('path');
 const {
   computeScope, visibleTeam, visibleAgent,
   canManageTeam, isTeamAdminOfAny, canManageAgent, canManageEnvironment, visibleUser, describeAuthz, isKnownPrincipal,
-  normalizeCredential, visibleCredential, canManageCredential,
+  normalizeCredential, visibleCredential, canManageCredential, canDeleteCredential,
   canCreateCredential, canReassignCredential, credentialVisibleToTeam,
   canViewUsageStatistics, assistSelectableEndpoint, resolveAgentTenant,
   visibleEnvironment, canCreateEnvironment, canRetierEnvironment, ownsEnvironment,
@@ -633,6 +633,38 @@ test('canManageCredential: only the owner manages a personal credential; scope.a
   assert.equal(canManageCredential(bob, aliceCred), false);
   assert.equal(canManageCredential(sys, aliceCred), false);  // System Admin cannot manage a foreign personal cred
   assert.equal(canManageCredential(env, aliceCred), false);  // nor can the seeded administrator
+});
+
+test('canDeleteCredential: a System Admin MAY delete a foreign personal credential (break-glass), but SEE/MANAGE stay owner-only', () => {
+  const alice = computeScope({ username: 'alice@corp.com', users, memberships });
+  const bob = computeScope({ username: 'bob@corp.com', users, memberships });
+  const sys = computeScope({ username: 'sys@corp.com', users, memberships });
+  const aliceCred = { scope: 'personal', userId: 'u-a' };
+  assert.equal(canDeleteCredential(alice, aliceCred), true);   // owner may always delete
+  assert.equal(canDeleteCredential(bob, aliceCred), false);    // a non-owner, non-admin may not
+  // THE decided exception (unified access model §6/§12.7): a System Admin MAY
+  // delete it for governance / offboarding hygiene...
+  assert.equal(canDeleteCredential(sys, aliceCred), true);
+  // ...while SEE and MANAGE remain owner-only — the break-glass is delete-only.
+  assert.equal(visibleCredential(sys, aliceCred), false);
+  assert.equal(canManageCredential(sys, aliceCred), false);
+});
+
+test('canDeleteCredential: for non-personal tiers it is exactly canManageCredential', () => {
+  const alice = computeScope({ username: 'alice@corp.com', users, memberships }); // team-admin of payments
+  const bob = computeScope({ username: 'bob@corp.com', users, memberships });      // member of risk
+  const sys = computeScope({ username: 'sys@corp.com', users, memberships });      // System Admin
+  const teamCred = { scope: 'team', teamId: 'payments' };
+  const sysCred = { scope: 'system', assignedTeamIds: ['payments'] };
+  for (const [who, cred] of [[alice, teamCred], [bob, teamCred], [sys, teamCred], [alice, sysCred], [sys, sysCred]]) {
+    assert.equal(canDeleteCredential(who, cred), canManageCredential(who, cred));
+  }
+  // Concretely: the owning team's admin deletes a team cred; a member cannot;
+  // only a System Admin deletes a system cred.
+  assert.equal(canDeleteCredential(alice, teamCred), true);
+  assert.equal(canDeleteCredential(bob, teamCred), false);
+  assert.equal(canDeleteCredential(alice, sysCred), false);
+  assert.equal(canDeleteCredential(sys, sysCred), true);
 });
 
 test('canCreateCredential: any authenticated human creates a personal credential owned by self (AC3)', () => {

@@ -10,9 +10,13 @@
 //   • Only a System Admin (`scope.all`) may CHANGE a provider's global flag —
 //     publish one or retract one (AC5). Access opens to everyone; the authority
 //     to publish stays centralised (cost & governance, D7).
-//   • A subscription (`oauth-token`) seat can NEVER be global — Anthropic's
-//     Consumer Terms make it single-user, so it must not be offered to a whole
-//     installation (edge case / Open Question 2).
+//   • A subscription (`oauth-token`) seat may be global ONLY as the single-user
+//     escape hatch: an instance whose operator has confirmed single-user use
+//     (complianceAck) may publish their subscription so every agent RUNTIME can
+//     use it. It stays RUNTIME-only — assist/helper exclude oauth upstream, and
+//     Anthropic rejects a subscription token on server-side /v1/messages anyway
+//     (docs/unified-resource-access-concept.md §9). Without that ack, an oauth
+//     provider can never be global.
 //
 // Deliberately a NO-OP when the flag does not change: a Team Admin editing an
 // already-global provider's model list (they can see it, `canManageCredential`
@@ -29,8 +33,11 @@
 //
 // Returns { global } with the resolved flag to persist, or
 // { error, status, code } to refuse.
-function resolveGlobalFlag({ wantGlobal, currentGlobal = false, scopeAll, isOauth } = {}) {
+function resolveGlobalFlag({ wantGlobal, currentGlobal = false, scopeAll, isOauth, hasSingleUserAck = false } = {}) {
   const cur = currentGlobal === true;
+  // A subscription (oauth) seat may be global ONLY as the single-user escape
+  // hatch (runtime-only — see the header note and isGlobalProvider below).
+  const oauthGlobalOk = hasSingleUserAck === true;
   // Body did not mention `global` → leave whatever the record already carries,
   // EXCEPT when this request makes the flag unholdable: switching a global
   // provider to a subscription (`oauth-token`) seat must drop the flag, because a
@@ -41,7 +48,7 @@ function resolveGlobalFlag({ wantGlobal, currentGlobal = false, scopeAll, isOaut
   // regardless of the stored flag, so this only keeps the stored shape honest —
   // but keeping the two in step is what stops the flag rotting into a lie.
   if (wantGlobal === undefined || wantGlobal === null) {
-    if (cur && isOauth) return { global: false };
+    if (cur && isOauth && !oauthGlobalOk) return { global: false };
     return { global: cur };
   }
   // Only a literal boolean `true` publishes; anything else reads as "not global"
@@ -55,9 +62,9 @@ function resolveGlobalFlag({ wantGlobal, currentGlobal = false, scopeAll, isOaut
       code: 'global-system-admin-only',
     };
   }
-  if (want && isOauth) {
+  if (want && isOauth && !oauthGlobalOk) {
     return {
-      error: 'A subscription (oauth-token) provider cannot be made global — a subscription seat is single-user only',
+      error: 'A subscription (oauth-token) provider can be global only in a confirmed single-user instance (complianceAck)',
       status: 400,
       code: 'global-oauth-unsupported',
     };
@@ -76,13 +83,15 @@ function resolveGlobalFlag({ wantGlobal, currentGlobal = false, scopeAll, isOaut
 //                              record (only reachable by a hand edit / stale write)
 //                              is NOT global — the predicate answers on the record,
 //                              never on a route invariant.
-//   • `authType !== 'oauth-token'` — a subscription seat is single-user
-//                              (Consumer Terms) and can never be offered to a whole
-//                              installation. Because the auth type is MUTABLE, this
-//                              must be re-checked here and not only at the write
-//                              route: a provider published api-key-global and later
-//                              switched to oauth would otherwise stay reachable
-//                              (#2136 finding 1).
+//   • auth type — an api-key provider is global outright; a subscription
+//                              (`oauth-token`) seat is global ONLY with the
+//                              single-user `complianceAck` (the escape hatch),
+//                              and even then RUNTIME-only (assistSelectableEndpoint
+//                              excludes oauth before it consults this). Because the
+//                              auth type is MUTABLE, this is re-checked here and not
+//                              only at the write route: a provider published
+//                              api-key-global and later switched to oauth WITHOUT
+//                              the ack stops being global (#2136 finding 1).
 //
 // DELIBERATELY provider-specific and OUTSIDE scope.js / resource-tier.js: those
 // generic credential predicates (`visibleCredential`, `credentialVisibleToTeam`)
@@ -91,10 +100,12 @@ function resolveGlobalFlag({ wantGlobal, currentGlobal = false, scopeAll, isOaut
 // endpoint (#2136 finding 2). Callers compose this with the generic predicate at
 // the provider call sites only (see api.js `providerVisible` / `providerUsableByTeam`).
 function isGlobalProvider(ep) {
-  return !!(ep
-    && ep.global === true
-    && ep.scope === 'system'
-    && ep.authType !== 'oauth-token');
+  if (!ep || ep.global !== true || ep.scope !== 'system') return false;
+  if (ep.authType !== 'oauth-token') return true;
+  // Single-user escape hatch: a subscription seat is global ONLY when the record
+  // carries the single-user compliance acknowledgement. RUNTIME-only —
+  // assistSelectableEndpoint excludes oauth before it ever consults this.
+  return !!(ep.complianceAck && ep.complianceAck.singleUser === true);
 }
 
 module.exports = { resolveGlobalFlag, isGlobalProvider };

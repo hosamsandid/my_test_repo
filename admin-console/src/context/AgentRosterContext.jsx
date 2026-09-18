@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { UNAUTHORIZED_EVENT } from '../auth/AuthContext';
-import { mergeRoster } from '../pages/agent-chat/roster-diff.js';
+import { nextRosterState } from '../pages/agent-chat/roster-diff.js';
 import { shouldTickPoll, shouldRefreshOnVisible } from './agent-roster-poll.js';
 
 // Live-roster poll for the Agent Chat left rail (#2311).
@@ -84,13 +84,13 @@ export function AgentRosterProvider({ showDisabled, buildUrl, children }) {
       }
       const fetched = await res.json();
       hasDataRef.current = true;
-      setAgents(prev => {
-        const { list, changed } = mergeRoster(prev, Array.isArray(fetched) ? fetched : []);
-        // AC7: bail out of the state update entirely when nothing diffable
-        // changed, so a poll tick over a stable roster never re-triggers the
-        // grouping memo chain or any effect keyed on the `agents` reference.
-        return changed ? list : prev;
-      });
+      // `nextRosterState` adopts the first successful payload outright — even an
+      // empty one, so `agents` leaves its initial `null` and the rail can render
+      // its "No agents yet." empty state (blank-rail bug otherwise) — and on
+      // every later tick defers to mergeRoster's AC7 no-op skip, so a poll over a
+      // stable roster never re-triggers the grouping memo chain or any effect
+      // keyed on the `agents` reference.
+      setAgents(prev => nextRosterState(prev, fetched));
       setError(null);
     } catch (e) {
       if (!silent) setError(e.message);

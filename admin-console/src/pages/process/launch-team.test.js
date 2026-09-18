@@ -301,6 +301,49 @@ test('buildLaunchBody: shared keys win over extra; blank suffix dropped; env omi
   assert.equal(body.mode, 'extend');
 });
 
+test('buildLaunchBody: acknowledgeNoToken set only on strict true, dropped otherwise', () => {
+  // #2323 reference-only opt-out — the flag must not leak from a truthy non-true
+  // value or an `extra` carry-over, only from an explicit true.
+  assert.equal(
+    buildLaunchBody({ teamId: 't', teamName: 'T', acknowledgeNoToken: true }).acknowledgeNoToken,
+    true,
+  );
+  assert.equal(
+    'acknowledgeNoToken' in buildLaunchBody({ teamId: 't', teamName: 'T' }),
+    false,
+  );
+  assert.equal(
+    'acknowledgeNoToken' in buildLaunchBody({ teamId: 't', teamName: 'T', acknowledgeNoToken: 'yes' }),
+    false,
+  );
+  assert.equal(
+    'acknowledgeNoToken' in buildLaunchBody({ teamId: 't', teamName: 'T', extra: { acknowledgeNoToken: true } }),
+    false,
+  );
+});
+
+test('runLaunchStream: a non-ok response WITH a body is an error, not a stream (carries its code)', async () => {
+  // #2323 answers /api/teams/stream's guard with `res.status(409).json(...)`, a
+  // buffered JSON error whose `res.body` is a (non-null) ReadableStream. It must
+  // be surfaced as an error, never read as NDJSON — so the body's reader must
+  // never be touched on a non-ok response.
+  const fetchImpl = async () => ({
+    ok: false,
+    status: 409,
+    body: { getReader: () => { throw new Error('must not read the body of a non-ok response'); } },
+    json: async () => ({ error: 'repo needs a token', code: 'github_token_required' }),
+  });
+  await assert.rejects(
+    () => runLaunchStream({ body: {}, onEvent: () => {}, fetchImpl }),
+    (e) => {
+      assert.equal(e.code, 'github_token_required');
+      assert.equal(e.serverMessage, 'repo needs a token');
+      assert.equal(e.status, 409);
+      return true;
+    },
+  );
+});
+
 test('launchSubmitLabel: extend > materialize-now > create', () => {
   assert.equal(launchSubmitLabel({ extend: true }), 'Extend team');
   assert.equal(launchSubmitLabel({ extend: true, saving: true }), 'Extending…');

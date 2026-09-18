@@ -36,7 +36,7 @@ const { createTtlCache } = require('./ttl-cache');
 const { computeScope, visibleTeam, visibleAgent, canManageTeam, isTeamAdminOfAny, canManageAgent,
         visibleEnvironment, canManageEnvironment, canCreateEnvironment, canRetierEnvironment,
         visibleUser, describeAuthz,
-        normalizeCredential, visibleCredential, canManageCredential, canCreateCredential,
+        normalizeCredential, visibleCredential, canManageCredential, canDeleteCredential, canCreateCredential,
         canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
         resolveAgentTenant } = require('./scope');
 const { resolveAgentTeam } = require('./agent-team');
@@ -10347,9 +10347,14 @@ function stampSkillCopy(dstDir, opts) {
 //   skillMd     optional SKILL.md content (a trailing newline is ensured).
 //   provenance  optional provenance.json object — written AFTER any copyFrom, so
 //               it overrides the copied-along provenance (share/lift/promote).
-//   stamp       optional { mode:'copy'|'chain', name, by, action, origin?, note? }:
+//   stamp       optional { mode:'copy'|'chain', name, by, action, origin?, note?,
+//               continueFrom? }:
 //               'copy' → stampSkillCopy (fresh v1 chain, discards dragged manifest);
 //               'chain' → stampSkill (continues the target's chain — the extend case).
+//               continueFrom (a manifest object, #2315): a 'copy' that OVERWRITES a
+//               destination which already had its own version chain re-seeds THAT
+//               manifest and chain-continues it (prev+1) instead of resetting to v1,
+//               so the destination's history is never clobbered by an inbound copy.
 // Returns { ok: true } or { error } (the content write failed — the caller 500s;
 // stamping is best-effort and never surfaced as an error).
 function commitSkillWrite({ destDir, overwrite, copyFrom, skillMd, provenance, stamp }) {
@@ -10388,8 +10393,24 @@ function commitSkillWrite({ destDir, overwrite, copyFrom, skillMd, provenance, s
     const s = { name: stamp.name, by: stamp.by, action: stamp.action };
     if (stamp.origin !== undefined) s.origin = stamp.origin;
     if (stamp.note !== undefined) s.note = stamp.note;
-    if (stamp.mode === 'chain') stampSkill(destDir, s);
-    else stampSkillCopy(destDir, s);
+    if (stamp.mode === 'chain') {
+      stampSkill(destDir, s);
+    } else if (stamp.continueFrom && typeof stamp.continueFrom === 'object') {
+      // #2315: this 'copy' overwrote a destination that already carried its own
+      // version chain. Re-seed the preserved destination manifest over the
+      // source's copied-along skill.json, then chain-stamp exactly as an edit
+      // does so the version continues (prev+1) rather than resetting to v1.
+      // forceHistory records the transfer action even when the incoming content
+      // is byte-identical (nothing to bump, but the event is still logged). If
+      // re-seeding fails, fall back to a fresh v1 copy stamp — never leave the
+      // source's dragged-along manifest in place.
+      let seeded = false;
+      try { skillManifest.writeManifest(destDir, stamp.continueFrom); seeded = true; } catch { /* seeding failed */ }
+      if (seeded) stampSkill(destDir, { ...s, forceHistory: true });
+      else stampSkillCopy(destDir, s);
+    } else {
+      stampSkillCopy(destDir, s);
+    }
   }
   return { ok: true };
 }
@@ -11050,7 +11071,13 @@ app.post('/api/skills/import', heavyLimiter, _skillImportUpload.single('file'), 
     if (!md.ok) return res.status(400).json({ error: md.error });
 
     // Validate + plan the import target (tier / name / collision + permission).
-    const rawName = (typeof req.body?.name === 'string' && req.body.name.trim()) || inferredName;
+    // Name precedence: an explicit form `name` overrides, then a single
+    // top-level folder name (an /export round-trip), then the archive's own
+    // SKILL.md frontmatter `name` (`md.name`, already validated non-empty). The
+    // last fallback is what lets a *flat* archive — SKILL.md and its files at the
+    // ZIP root, with no wrapping folder — import at all; without it such an
+    // upload failed with "invalid skill name".
+    const rawName = (typeof req.body?.name === 'string' && req.body.name.trim()) || inferredName || md.name;
     const plan = skillImport.planImport(
       { tier: req.body?.tier, teamId: req.body?.teamId, onCollision: req.body?.onCollision, name: rawName },
       { skillNameRe: SKILL_NAME_RE, teamIdRe: POOL_TEAM_ID_RE },
@@ -11886,10 +11913,32 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
   // 6. Capture source identity BEFORE the copy (for the origin stamp).
   const srcId = skillSourceIdentity(src.dir);
 
+  // 6b. Overwrite-continuation (#2315). When this transfer OVERWRITES a
+  //     destination that already carries its OWN version history — e.g. a
+  //     "Publish to global" landing on a global skill already at v5 — snapshot
+  //     that pre-overwrite state to the shared skill-archive (the SAME mechanism
+  //     guarded deletion uses, so it is discoverable/restorable the same way) and
+  //     continue the destination's own chain (prev+1) instead of resetting to v1.
+  //     A fresh landing (no prior skill.json), a rename, or a corrupt/unparseable
+  //     destination manifest all fall back to the historic fresh-v1 stamp — the
+  //     corrupt case still snapshots (its content is recoverable), same as
+  //     stampManifest already does for a null/unreadable existing manifest.
+  const destExists = fs.existsSync(path.join(dst.dir, 'SKILL.md'));
+  const destManifest = destExists ? skillManifest.readManifest(dst.dir) : null;
+  const stampPlan = skillTransfer.planTransferStamp({
+    onCollision: plan.onCollision, destExists, destManifestReadable: !!destManifest,
+  });
+  let destArchived = null;
+  if (stampPlan.archive) {
+    destArchived = archiveDeletedSkill(dst.dir, plan.to, destName, skillSourceIdentity(dst.dir), req);
+  }
+  const continueFrom = stampPlan.continueChain ? destManifest : null;
+
   // 7+8. Copy the whole dir (provenance.json rides along via cpSync) and stamp
   //      the target's skill.json — a fresh v1 chain recording the transfer action
-  //      (adopted|promoted|lifted|shared|moved) and where it came from. Both go
-  //      through the shared file-write core (#639).
+  //      (adopted|promoted|lifted|shared|moved) and where it came from, or (on an
+  //      overwrite of existing content) a continuation of the destination's own
+  //      chain (#2315). Both go through the shared file-write core (#639).
   const wrote = commitSkillWrite({
     destDir: dst.dir,
     overwrite: plan.onCollision === 'overwrite',
@@ -11902,6 +11951,7 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
         agentId: plan.from.tier === 'agent' ? plan.from.agentId : undefined,
         sourceVersion: srcId.sourceVersion, sourceHash: srcId.sourceHash,
       }),
+      continueFrom: continueFrom || undefined,
     },
   });
   if (wrote.error) return res.status(500).json({ error: `Failed to copy skill: ${wrote.error}` });
@@ -11961,6 +12011,8 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
     renamed: destName !== plan.name,
     retiredSource: plan.retireSource,
     archived: archived || undefined,
+    overwrote: destExists && plan.onCollision === 'overwrite' ? true : undefined,
+    destArchived: destArchived ? destArchived.id : undefined,
     activate: plan.activate,
     activation: activation || undefined,
   });
@@ -12356,15 +12408,21 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
   // only team-scoped providers for a team they administer.
   const scope = getScope(req);
   let ownership;
-  try { ownership = resolveCredentialOwnership(req.body); }
+  try { ownership = resolveCredentialOwnership(req.body, scope.userId); }
   catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
   // Global provider (#2136): a System-Admin-only publish flag. A global provider
   // carries no team assignment at all, so it is always system-scoped-with-no-
   // teams — override the resolved ownership before the create gate so the two
-  // agree. `resolveGlobalFlag` refuses a non-admin (403) or an oauth seat (400).
-  const globalGate = resolveGlobalFlag({ wantGlobal: req.body?.global, currentGlobal: false, scopeAll: scope.all, isOauth });
+  // agree. `resolveGlobalFlag` refuses a non-admin (403), or an oauth seat with no
+  // single-user ack (400); a confirmed single-user subscription MAY go global.
+  const globalGate = resolveGlobalFlag({ wantGlobal: req.body?.global, currentGlobal: false, scopeAll: scope.all, isOauth, hasSingleUserAck: complianceAck === true });
   if (globalGate.error) return res.status(globalGate.status).json({ error: globalGate.error, code: globalGate.code });
   if (globalGate.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };
+  // NOTE: enforcing "a subscription (oauth) seat must be personal or global, never
+  // team-shared" is deferred to the UI-aligned PR — until the create form offers
+  // personal/global for oauth, refusing team/system oauth here would break the
+  // current subscription-create flow. The `identity` stamp below already records
+  // the human class the migration will re-home.
   if (!canCreateCredential(scope, ownership)) {
     return res.status(403).json({ error: 'forbidden: you may not create this provider', code: 'forbidden' });
   }
@@ -12422,6 +12480,9 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
     ...(globalGate.global ? { global: true } : {}),
     baseUrl: isOauth ? '' : baseUrl,
     authType,
+    // Identity class (unified access model §2): a subscription seat acts as one
+    // person (human); an api-key gateway is infrastructure (service).
+    identity: isOauth ? 'human' : 'service',
     ...(isOauth ? { complianceAck: buildComplianceAck(req) } : {}),
     authTokenId,
     models: normalizedModels,
@@ -12513,11 +12574,16 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   // (idempotent: re-saving a global provider re-asserts the same shape). A no-op
   // (flag unchanged) is not gated, so a Team Admin editing an already-global
   // provider's models is not refused for a change they did not make.
+  // The single-user ack the escape hatch needs: freshly confirmed in this
+  // request, or already stamped on the existing subscription provider.
+  const hasSingleUserAck = isOauth
+    && (complianceAck === true || (current.complianceAck && current.complianceAck.singleUser === true));
   const globalGate = resolveGlobalFlag({
     wantGlobal: ('global' in b) ? b.global : undefined,
     currentGlobal: current.global === true,
     scopeAll: scope.all,
     isOauth,
+    hasSingleUserAck,
   });
   if (globalGate.error) return res.status(globalGate.status).json({ error: globalGate.error, code: globalGate.code });
   if (globalGate.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };
@@ -12531,6 +12597,8 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   // non-global record is byte-clean (no dangling `global: false`).
   if (globalGate.global) next.global = true; else delete next.global;
   next.authType = nextAuthType;
+  // Keep the identity class in sync with the (possibly changed) auth type.
+  next.identity = isOauth ? 'human' : 'service';
   if (isOauth) {
     if (normalizeAuthType(current.authType) !== 'oauth-token' || complianceAck === true) {
       next.complianceAck = buildComplianceAck(req);
@@ -12642,8 +12710,8 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   // Manage gate (#800): a Team Admin may delete only team-scoped providers of a
   // team they administer, never a system-scoped one.
   const scope = getScope(req);
-  if (!canManageCredential(scope, ep)) {
-    return res.status(403).json({ error: 'forbidden: you may not manage this provider', code: 'forbidden' });
+  if (!canDeleteCredential(scope, ep)) {
+    return res.status(403).json({ error: 'forbidden: you may not delete this provider', code: 'forbidden' });
   }
   const usedBy = llmEndpointInUse(ep.id);
   if (usedBy) {
@@ -16270,8 +16338,11 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       res.write(JSON.stringify(ev) + '\n');
     } catch { /* socket gone */ }
   }
-  function fail(status, errorMsg) {
-    emit({ type: 'error', status, error: errorMsg });
+  function fail(status, errorMsg, code) {
+    // `code` (optional) lets the client branch on a structured failure rather
+    // than string-matching the message — e.g. #2323's github_token_required, to
+    // offer the reference-only opt-out instead of a dead-end error card.
+    emit({ type: 'error', status, error: errorMsg, ...(code ? { code } : {}) });
     if (!aborted) res.end();
   }
 
@@ -16423,7 +16494,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
       githubTokenId,
       acknowledgeNoToken: body.acknowledgeNoToken,
     });
-    if (!need.ok) return fail(need.status, need.error);
+    if (!need.ok) return fail(need.status, need.error, need.code);
   }
   // Repo-less needs no PAT — mirror of the non-streaming handler (#2081 AC6).
   if (!environmentId && !repoLess) {
@@ -17171,6 +17242,10 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
     ...(ownership.userId ? { userId: ownership.userId } : {}),
+    // Identity class (unified access model §2): a personal key is one person's
+    // identity (human); a team/system key is a shared service credential. The UI
+    // may later let a personal key be marked service (a private bot key).
+    identity: ownership.scope === 'personal' ? 'human' : 'service',
     fingerprint: sshKeyFingerprint(trimmed),
     createdAt: new Date().toISOString(),
   };
@@ -17226,6 +17301,8 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
     ...(ownership.userId ? { userId: ownership.userId } : {}),
+    // Identity class (unified access model §2): personal → human, else service.
+    identity: ownership.scope === 'personal' ? 'human' : 'service',
     fingerprint: sshFingerprintFromPubBlob(pubBlob),
     createdAt: new Date().toISOString(),
   };
@@ -17263,8 +17340,8 @@ app.delete('/api/ssh-keys/:id', apiLimiter, (req, res) => {
   const keys = listSshKeys();
   const cred = keys.find(k => k.id === id);
   if (!cred) return res.status(404).json({ error: 'SSH key not found' });
-  if (!canManageCredential(scope, cred)) {
-    return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
+  if (!canDeleteCredential(scope, cred)) {
+    return res.status(403).json({ error: 'forbidden: you may not delete this credential', code: 'forbidden' });
   }
   const usedBy = sshKeyInUse(id);
   if (usedBy) {
@@ -17390,6 +17467,10 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
     ...(ownership.userId ? { userId: ownership.userId } : {}),
+    // Identity class (unified access model §2): a personal token is one person's
+    // identity (human); a team/system token is a shared service credential (e.g. a
+    // machine-user PAT). The UI may later let a personal token be marked service.
+    identity: ownership.scope === 'personal' ? 'human' : 'service',
     preview: githubTokenPreview(trimmed),
     fingerprint: githubTokenFingerprint(trimmed),
     createdAt: new Date().toISOString(),
@@ -17425,8 +17506,8 @@ app.delete('/api/github-tokens/:id', apiLimiter, (req, res) => {
   const tokens = listGithubTokens();
   const cred = tokens.find(t => t.id === id);
   if (!cred) return res.status(404).json({ error: 'GitHub token not found' });
-  if (!canManageCredential(scope, cred)) {
-    return res.status(403).json({ error: 'forbidden: you may not manage this credential', code: 'forbidden' });
+  if (!canDeleteCredential(scope, cred)) {
+    return res.status(403).json({ error: 'forbidden: you may not delete this credential', code: 'forbidden' });
   }
   const usedBy = githubTokenInUse(id);
   if (usedBy) {

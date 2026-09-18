@@ -1,8 +1,11 @@
 // F1 — Create a team through the Team-Setup wizard (docs/e2e-testing-concept.md
 // §2 v1.1, #667). Drives the real wizard UI end-to-end with ZERO external
 // dependencies: the fixture Working Environment points at the in-stack
-// `git-remote` service (http://git-remote/e2e/fixture.git), so team creation
-// clones credential-less and no GitHub is involved.
+// `git-remote` service (http://git-remote/e2e/fixture.git), cloned credential-
+// less and no GitHub is involved. Because the env is token-less, #2323 blocks
+// the wizard's team materialisation until the reference-only opt-out is
+// confirmed — this spec exercises that opt-out (submitAndCaptureProgress with
+// referenceOnly), the wizard-side twin of F3's env-panel coverage.
 //
 // Thin spec over the step library (e2e/steps/*, docs/journey-spec-concept.md
 // §2.2): all selectors / waits / NDJSON timing live in the modules; the journey
@@ -44,6 +47,10 @@ test.describe('F1: create a team through the wizard', () => {
     const memberIds = ROLE_IDS.map((r) => `${teamId}-${r}`);
 
     await test.step('seed a credential-less fixture environment (API)', async () => {
+      // Token-less on purpose: the wizard submit below then exercises #2323's
+      // reference-only opt-out (createFixtureEnv acknowledges it at the API for
+      // its own POST; the wizard's /api/teams/stream re-checks and the opt-out
+      // click confirms it).
       await env.createFixtureEnv(ctx, {
         id: envId,
         name: `${teamId} fixture env`,
@@ -65,7 +72,7 @@ test.describe('F1: create a team through the wizard', () => {
     });
 
     await test.step('submit and assert the per-step NDJSON progress', async () => {
-      const events = await wizard.submitAndCaptureProgress(ctx);
+      const events = await wizard.submitAndCaptureProgress(ctx, { referenceOnly: true });
       const byType = (t) => events.filter((e) => e.type === t);
 
       // plan: one planning event listing the steps the wizard will run.

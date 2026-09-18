@@ -75,3 +75,33 @@ export function mergeRoster(prevList, nextList) {
   if (!changed) return { list: prev, changed: false };
   return { list: merged, changed: true };
 }
+
+/**
+ * Reduce a freshly-fetched `/api/matrix/agents` payload against the roster state
+ * AgentRosterContext currently holds, returning the next `agents` state value.
+ *
+ * The context seeds `agents` at `null` — the "never loaded yet" sentinel the
+ * rail renders as its loading spinner. The FIRST successful fetch has to move
+ * that to a concrete array EVEN WHEN THE ROSTER IS EMPTY: a caller with no
+ * agents at all (a brand-new account, or one whose only teams are
+ * private-by-default and unshared) gets `[]`, which is exactly what makes the
+ * rail render its "No agents yet." empty state instead of a permanent blank
+ * column. `mergeRoster` can't decide this alone — it normalises a null prev to
+ * an empty roster, so an empty first payload diffs as `changed: false` and a
+ * caller doing `changed ? list : prev` would keep `null` forever (the blank-rail
+ * regression #2311 shipped).
+ *
+ * On every later tick `prevState` is already an array, so this defers to
+ * `mergeRoster` and preserves its reference-reuse / no-op-skip guarantees
+ * (AC6/AC7): a stable roster returns the exact same array reference.
+ *
+ * @param {object[]|null} prevState - current `agents` state (null = unloaded).
+ * @param {object[]|null} fetched - the just-fetched roster payload.
+ * @returns {object[]} the next `agents` state (always an array once called).
+ */
+export function nextRosterState(prevState, fetched) {
+  const next = Array.isArray(fetched) ? fetched : [];
+  if (prevState === null) return next; // first load adopts the roster, empty or not
+  const { list, changed } = mergeRoster(prevState, next);
+  return changed ? list : prevState;
+}

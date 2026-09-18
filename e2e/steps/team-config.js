@@ -27,22 +27,6 @@ function teamHeaderButton(page, label) {
   return rail(page).locator('button[aria-selected]:not([role="option"])').filter({ hasText: label });
 }
 
-// CSS attribute selector matching the literal `aria-label` DOM attribute —
-// deliberately NOT `getByRole('button', {name})`, whose match is against the
-// COMPUTED accessible name: the kebab (`KebabButton`, a `role="button"` span
-// with its own `aria-label="Team actions for <label>"`) sits INSIDE the
-// header `<button>`, so "name from contents" folds the kebab's aria-label
-// into the header's own accessible name too — `getByRole` then resolves BOTH
-// elements and throws a strict-mode violation (found live in CI on this exact
-// journey). An attribute selector matches the DOM attribute directly, so it
-// can only ever hit the one element that actually carries it.
-function cssAttrValue(value) {
-  return value.replace(/["\\]/g, '\\$&');
-}
-function teamKebabButton(page, label) {
-  return rail(page).locator(`[aria-label="Team actions for ${cssAttrValue(label)}"]`);
-}
-
 /**
  * Entry point 1: click the team's row in the Agent Chat left rail. Clicking it
  * anywhere but its chevron selects the team and opens Settings (AgentList.jsx
@@ -62,32 +46,6 @@ async function openTeamFromRow(ctx, { teamId, label }) {
   const header = teamHeaderButton(page, label);
   await expect(header).toBeVisible();
   await header.click();
-  await expect(page).toHaveURL(new RegExp(`/chats/${teamId}$`));
-}
-
-/**
- * Entry point 2: the team row's context menu's "Team settings…" entry
- * (`agent-lifecycle-menu.js` `buildTeamMenu`, key `edit-team`) — opened via the
- * always-present (dimmed until hover) kebab, which `RailLifecycleHost.jsx`
- * routes to the same `/chats/<teamId>` navigation as the row click.
- *
- * @param {string} params.teamId - The team's own agent id.
- * @param {string} params.label - The team row's rendered label (its display name).
- * @example
- * - action:
- *     do: team-config.openTeamFromMenu
- *     teamId: team-config-demo
- *     label: Team Config Demo
- */
-async function openTeamFromMenu(ctx, { teamId, label }) {
-  const { page } = ctx;
-  await page.goto('/chats');
-  const kebab = teamKebabButton(page, label);
-  await expect(kebab).toBeVisible();
-  await kebab.click();
-  const menuItem = page.getByRole('menuitem', { name: 'Team settings…' });
-  await expect(menuItem).toBeVisible();
-  await menuItem.click();
   await expect(page).toHaveURL(new RegExp(`/chats/${teamId}$`));
 }
 
@@ -231,7 +189,6 @@ async function openMemberFromRow(ctx, { agentId, label }) {
 
 module.exports = {
   openTeamFromRow,
-  openTeamFromMenu,
   openTeamByUrl,
   expectFullWidthSurface,
   toggleRailPanel,

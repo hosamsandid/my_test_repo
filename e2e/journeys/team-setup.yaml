@@ -159,10 +159,13 @@ steps:
     screenshot: review-step
 
   # Submit and verify the per-step NDJSON progress (plumbing — navigates away).
+  # referenceOnly: the fixture env is repo-backed but token-less, so #2323 blocks
+  # the launch until the wizard's reference-only opt-out is confirmed.
   - action:
       do: wizard.createTeamAndExpectProgress
       teamId: agentic-demos
       roleIds: [business-analyst, developer, code-reviewer, reworker]
+      referenceOnly: true
 
   # Verify the materialised team is real (UI + API) — no capture, pure assertion.
   - assert:

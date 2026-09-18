@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Loader2, RefreshCw, AlertTriangle, CheckCircle, Circle, Check, XCircle } from 'lucide-react';
 import {
   reposForEnv,
@@ -69,6 +69,11 @@ export default function LaunchStep({
   const [error, setError] = useState(null);
   const [errorDetail, setErrorDetail] = useState(null);
   const [suggestingLabel, setSuggestingLabel] = useState(false);
+  // #2323 reference-only opt-out: the server message when a repo-backed env is
+  // launched with no GitHub token, plus the mode of that blocked submit so the
+  // opt-out can re-run it with acknowledgeNoToken (mirrors TeamEnvironmentPanel).
+  const [tokenWarn, setTokenWarn] = useState(null);
+  const lastModeRef = useRef('create');
 
   const has = (f) => fields.includes(f);
   const set = (patch) => onChange?.(patch);
@@ -101,6 +106,14 @@ export default function LaunchStep({
     } else if (ev.type === 'warning') {
       setMatWarnings(prev => [...prev, ev.message]);
     } else if (ev.type === 'error') {
+      // #2323: the streaming endpoint reports a repo-backed-env-with-no-token
+      // block as an error EVENT (it has already flushed 200 headers, so it can't
+      // answer 409). Branch on the structured code to offer the reference-only
+      // opt-out rather than the dead-end "Team creation failed" card.
+      if (ev.code === 'github_token_required') {
+        setTokenWarn(ev.error || 'This environment has a repository but no GitHub token.');
+        return;
+      }
       const msg = ev.error || `HTTP ${ev.status || 500}`;
       setProgressError(msg);
       setError(msg);
@@ -108,7 +121,11 @@ export default function LaunchStep({
     }
   }
 
-  async function submit(mode) {
+  async function submit(mode, acknowledgeNoToken = false) {
+    // Strict-check so an onClick event or any truthy leak can never silently
+    // acknowledge — only "Save anyway (reference-only)" passes true (#2323).
+    const ack = acknowledgeNoToken === true;
+    lastModeRef.current = mode;
     // Settle a mid-edit team id first: a dash typed last is legal while typing
     // but not at submit position (#1934 AC1). `normalizeTeamId` is idempotent,
     // so this is a no-op for a value that is already fine (the wizard, which
@@ -119,6 +136,7 @@ export default function LaunchStep({
     const err = validateLaunch({ ...settled, hasProvider });
     if (err) { setError(err); setErrorDetail(null); return; }
     setError(null); setErrorDetail(null);
+    if (!ack) setTokenWarn(null);
     setCollisionInfo(null); setProgressError(null); setProgressSteps(null); setMatWarnings([]);
     setSubmitting(true); onBusyChange?.(true);
     const body = buildLaunchBody({
@@ -129,15 +147,23 @@ export default function LaunchStep({
       labelSuffix: settled.labelSuffix,
       materializeNow: settled.materializeNow,
       processTemplate: bundle,
+      acknowledgeNoToken: ack,
       extra: extraBody,
     });
     try {
       await runLaunchStream({ body, onEvent: handleEvent });
     } catch (e) {
-      const { message, detail } = describeError(e, {
-        action: mode === 'extend' ? 'extend the team' : 'create the team',
-      });
-      setError(message); setErrorDetail(detail);
+      // #2323: a repo-backed environment with no GitHub token is blocked
+      // server-side. Offer the explicit reference-only opt-out rather than a
+      // dead-end error, exactly as TeamEnvironmentPanel's save() does.
+      if (e.code === 'github_token_required') {
+        setTokenWarn(e.serverMessage || e.message);
+      } else {
+        const { message, detail } = describeError(e, {
+          action: mode === 'extend' ? 'extend the team' : 'create the team',
+        });
+        setError(message); setErrorDetail(detail);
+      }
     } finally {
       setSubmitting(false); onBusyChange?.(false);
     }
@@ -375,6 +401,26 @@ export default function LaunchStep({
           {errorDetail && (
             <span style={{ marginLeft: 6, color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>({errorDetail})</span>
           )}
+        </div>
+      )}
+
+      {/* #2323 reference-only opt-out: a repo-backed env with no GitHub token is
+          blocked server-side. Offer the explicit "save anyway" rather than a
+          dead-end error, the same two-button prompt TeamEnvironmentPanel shows. */}
+      {tokenWarn && !result && (
+        <div style={{ ...cardBox, borderColor: 'var(--eb-status-warning)' }}>
+          <div style={{ display: 'flex', gap: 'var(--eb-space-3)', alignItems: 'flex-start' }}>
+            <AlertTriangle size={18} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>{tokenWarn}</div>
+              <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-3)' }}>
+                <button type="button" onClick={() => submit(lastModeRef.current, true)} disabled={submitting} style={primaryStyle(submitting)}>
+                  Save anyway (reference-only)
+                </button>
+                <button type="button" onClick={() => setTokenWarn(null)} disabled={submitting} style={ghost}>Cancel</button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

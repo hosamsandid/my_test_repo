@@ -17,8 +17,8 @@
 //   node spike.js status --scope <id>
 //       the watches, cursors (seen ids), inbox depth
 //
-//   node spike.js inbox --scope <id> [--consume]
-//       peek / drain a scope's event inbox
+//   node spike.js inbox --scope <id> [--consume <id,…>]
+//       peek / drain the named event ids from a scope's inbox
 //
 //   node spike.js probe --project KAN [--window 60] [--status "Ready for Dev"]
 //       one-off: run the JQL search + changelog extraction against Jira RIGHT
@@ -102,8 +102,16 @@ if (cmd === 'scopes') {
   });
 } else if (cmd === 'inbox') {
   const scope = opt('scope') || die('need --scope <id>');
-  const entries = flag('consume') ? inboxStore.consume(scope) : inboxStore.list(scope);
-  out({ scope, consumed: flag('consume'), count: entries.length, entries });
+  const raw = opt('consume');
+  if (flag('consume') && !raw) die('--consume takes the event ids to drain: --consume <id>[,<id>…] (a bare --consume no longer drains the whole inbox)');
+  if (raw) {
+    const ids = String(raw).split(',').map((s) => s.trim()).filter(Boolean);
+    const { entries, missing } = inboxStore.consumeIds(scope, ids);
+    out({ scope, consumed: true, count: entries.length, entries, missing });
+  } else {
+    const entries = inboxStore.list(scope);
+    out({ scope, consumed: false, count: entries.length, entries });
+  }
 } else if (cmd === 'raw') {
   // Raw passthrough: hit any Jira path with the sidecar's OWN credential and
   // print the HTTP status + body verbatim. The definitive "is it the token, the

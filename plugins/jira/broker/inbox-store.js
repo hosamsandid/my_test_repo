@@ -3,7 +3,8 @@
 // ─── jira broker: per-scope event inbox ─────────────────────────────────────
 //
 // The queue of status-change events delivered (a wake was fired) but not yet
-// consumed by the agent. It is the source of truth for "what happened" — the
+// consumed by the agent it woke (`consumeIds` — by event id, never the whole
+// team queue). It is the source of truth for "what happened" — the
 // agent pulls it with `aee-jira inbox` after a wake, rather than trusting a
 // prompt that may be stale by the time the run starts (docs/jira-plugin-plan.md
 // §4A). The wake itself carries only a summary + the triggering event; the
@@ -106,13 +107,30 @@ class InboxStore {
     return this._fresh(this._read(scopeId));
   }
 
-  // Drain: return every unconsumed entry and clear the inbox. This is
-  // `aee-jira inbox --consume`.
-  consume(scopeId) {
+  // Drain BY ID: remove exactly the entries whose `event.id` is in `ids` and
+  // return them (inbox order) plus the ids that were not there (already
+  // drained, TTL-reaped, or mistyped — reported, never an error, so a re-run
+  // of the same wake is idempotent). This is `aee-jira inbox --consume <id>…`.
+  //
+  // There is deliberately no whole-inbox drain: the inbox is per SCOPE (team)
+  // and several agents share it, each woken for its own subset (the
+  // orchestrator's payloadFilter/projection decide which). An agent may only
+  // ever drain the ids its own wake named — a team-wide drain would take a
+  // teammate's events with it.
+  consumeIds(scopeId, ids) {
     assertScope(scopeId);
-    const entries = this._fresh(this._read(scopeId));
-    this._write(scopeId, []);
-    return entries;
+    const wanted = new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === 'string' && id));
+    if (wanted.size === 0) return { entries: [], missing: [] };
+    const fresh = this._fresh(this._read(scopeId));
+    const removed = [];
+    const kept = [];
+    for (const e of fresh) {
+      const id = e && e.event && typeof e.event.id === 'string' ? e.event.id : null;
+      if (id && wanted.has(id)) removed.push(e); else kept.push(e);
+    }
+    this._write(scopeId, kept);
+    const found = new Set(removed.map((e) => e.event.id));
+    return { entries: removed, missing: [...wanted].filter((id) => !found.has(id)) };
   }
 
   count(scopeId) {

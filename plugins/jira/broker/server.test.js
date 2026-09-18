@@ -74,22 +74,67 @@ test('the Phase-0 spike-config seam is gone — a scope token cannot reconfigure
   } finally { srv.close(); }
 });
 
-test('inbox: peek then consume, scoped to the token', async () => {
-  broker.inboxStore.append('team-1', { id: 'ENG-1:1', issueKey: 'ENG-1', toStatus: 'Done' }, { triggerId: 't' });
+const INBOX_EV = (id, toStatus = 'Done') => ({ id, issueKey: id.split(':')[0], toStatus });
+
+test('inbox: peek is unchanged and scoped to the token', async () => {
+  broker.inboxStore.append('team-1', INBOX_EV('ENG-1:1'), { triggerId: 't' });
   const srv = await listen();
   try {
     const peek = await call(srv, 'GET', '/cli/inbox', { token: TOKEN });
+    assert.equal(peek.status, 200);
     assert.equal(peek.body.entries.length, 1);
     assert.equal(peek.body.consumed, false);
-
-    const drain = await call(srv, 'GET', '/cli/inbox?consume=1', { token: TOKEN });
-    assert.equal(drain.body.entries.length, 1);
-    assert.equal(drain.body.consumed, true);
-
-    // team-2 sees nothing of team-1's inbox
     assert.equal((await call(srv, 'GET', '/cli/inbox', { token: OTHER })).body.entries.length, 0);
-    // and team-1's inbox is now empty
-    assert.equal((await call(srv, 'GET', '/cli/inbox', { token: TOKEN })).body.entries.length, 0);
+    // a peek never writes
+    assert.equal(broker.inboxStore.count('team-1'), 1);
+  } finally { srv.close(); broker.inboxStore.teardown('team-1'); }
+});
+
+test('inbox: consume by id drains exactly those ids, leaves a teammate\'s entries, reports missing', async () => {
+  broker.inboxStore.append('team-1', INBOX_EV('KAN-1:11', 'Ready for Refinement'));
+  broker.inboxStore.append('team-1', INBOX_EV('KAN-2:12', 'Ready for Dev'));
+  broker.inboxStore.append('team-1', INBOX_EV('KAN-3:13', 'Ready for Dev'));
+  const srv = await listen();
+  try {
+    const r = await call(srv, 'GET', `/cli/inbox?consume=${encodeURIComponent('KAN-2:12,KAN-3:13,KAN-9:99')}`, { token: TOKEN });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.consumed, true);
+    assert.deepEqual(r.body.entries.map((e) => e.event.id), ['KAN-2:12', 'KAN-3:13']);
+    assert.deepEqual(r.body.missing, ['KAN-9:99']);
+    // the Refinement agent's entry is still there
+    assert.deepEqual(broker.inboxStore.list('team-1').map((e) => e.event.id), ['KAN-1:11']);
+    // team-2's token cannot reach team-1's ids
+    const other = await call(srv, 'GET', `/cli/inbox?consume=${encodeURIComponent('KAN-1:11')}`, { token: OTHER });
+    assert.deepEqual(other.body, { entries: [], consumed: true, missing: ['KAN-1:11'] });
+    assert.equal(broker.inboxStore.count('team-1'), 1);
+  } finally { srv.close(); broker.inboxStore.teardown('team-1'); }
+});
+
+test('inbox: a bare / legacy consume (consume=1, consume=, consume=true) is refused with 400 and drains nothing', async () => {
+  broker.inboxStore.append('team-1', INBOX_EV('KAN-1:11'));
+  const srv = await listen();
+  try {
+    for (const q of ['consume=1', 'consume=', 'consume=true', 'consume=all']) {
+      const r = await call(srv, 'GET', `/cli/inbox?${q}`, { token: TOKEN });
+      assert.equal(r.status, 400, q);
+      assert.equal(r.body.error, 'consume-requires-ids', q);
+      assert.match(r.body.message, /--consume <event-id>/);
+    }
+    // a list with one malformed id is refused as a whole — nothing is half-drained
+    const mixed = await call(srv, 'GET', `/cli/inbox?consume=${encodeURIComponent('KAN-1:11,not an id')}`, { token: TOKEN });
+    assert.equal(mixed.status, 400);
+    assert.equal(mixed.body.error, 'consume-requires-ids');
+    assert.equal(broker.inboxStore.count('team-1'), 1);
+  } finally { srv.close(); broker.inboxStore.teardown('team-1'); }
+});
+
+test('inbox: more than 200 ids in one consume is refused', async () => {
+  const srv = await listen();
+  try {
+    const ids = Array.from({ length: 201 }, (_, i) => `KAN-${i}:${i}`).join(',');
+    const r = await call(srv, 'GET', `/cli/inbox?consume=${encodeURIComponent(ids)}`, { token: TOKEN });
+    assert.equal(r.status, 400);
+    assert.equal(r.body.error, 'too-many-ids');
   } finally { srv.close(); }
 });
 

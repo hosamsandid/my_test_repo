@@ -24,13 +24,57 @@ test('append / list / count: entries accumulate in insertion order', () => {
   assert.equal(s.list('team-1')[0].triggerId, 't1');
 });
 
-test('consume: drains and clears', () => {
+test('consumeIds: removes exactly the named entries, keeps the rest, reports missing ids', () => {
   const s = tmpStore();
   s.append('team-1', EV('ENG-1:1'));
-  const drained = s.consume('team-1');
-  assert.equal(drained.length, 1);
+  s.append('team-1', EV('ENG-2:2'));
+  s.append('team-1', EV('ENG-3:3'));
+  const r = s.consumeIds('team-1', ['ENG-3:3', 'ENG-1:1', 'ENG-9:9']);
+  // removed entries come back in inbox (insertion) order, not request order
+  assert.deepEqual(r.entries.map((e) => e.event.id), ['ENG-1:1', 'ENG-3:3']);
+  assert.deepEqual(r.missing, ['ENG-9:9']);
+  assert.deepEqual(s.list('team-1').map((e) => e.event.id), ['ENG-2:2']);
+});
+
+test('consumeIds: idempotent — a second call for the same ids removes nothing and reports them missing', () => {
+  const s = tmpStore();
+  s.append('team-1', EV('ENG-1:1'));
+  s.consumeIds('team-1', ['ENG-1:1']);
+  const again = s.consumeIds('team-1', ['ENG-1:1']);
+  assert.deepEqual(again, { entries: [], missing: ['ENG-1:1'] });
   assert.equal(s.count('team-1'), 0);
-  assert.deepEqual(s.consume('team-1'), []);
+});
+
+test('consumeIds: an empty id list is a no-op read (nothing written, nothing removed)', () => {
+  const s = tmpStore();
+  s.append('team-1', EV('ENG-1:1'));
+  assert.deepEqual(s.consumeIds('team-1', []), { entries: [], missing: [] });
+  assert.equal(s.count('team-1'), 1);
+});
+
+test('consumeIds: entries whose event has no id are never matched or removed', () => {
+  const s = tmpStore();
+  s.append('team-1', { issueKey: 'ENG-1', toStatus: 'Done' }); // no id
+  s.append('team-1', EV('ENG-2:2'));
+  const r = s.consumeIds('team-1', ['ENG-2:2', 'undefined']);
+  assert.deepEqual(r.entries.map((e) => e.event.id), ['ENG-2:2']);
+  assert.deepEqual(r.missing, ['undefined']);
+  assert.equal(s.count('team-1'), 1);
+});
+
+test('consumeIds: TTL-expired entries are dropped on the way, like every other write', () => {
+  let t = 1_000_000;
+  const s = tmpStore({ ttlSeconds: 10, now: () => t });
+  s.append('team-1', EV('ENG-1:1'));
+  t += 11_000;
+  s.append('team-1', EV('ENG-2:2'));
+  const r = s.consumeIds('team-1', ['ENG-1:1']);
+  assert.deepEqual(r, { entries: [], missing: ['ENG-1:1'] });
+  assert.deepEqual(s.list('team-1').map((e) => e.event.id), ['ENG-2:2']);
+});
+
+test('the team-wide drain is gone — there is no consume(scopeId)', () => {
+  assert.equal(typeof tmpStore().consume, 'undefined');
 });
 
 test('count cap: appending past maxObjects drops the oldest (ring)', () => {

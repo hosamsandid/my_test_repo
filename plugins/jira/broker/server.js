@@ -11,7 +11,8 @@
 //     change it appends the event to the per-scope inbox and wakes the granted
 //     agents through the generic `POST /internal/plugin-event` channel (Jira
 //     plan §4B) — `deliver()` below. The agent can also PULL: `aee-jira inbox`
-//     drains the per-scope queue the broker holds.
+//     (peek) / `aee-jira inbox --consume <id>…` (drain by id) reads the
+//     per-scope queue the broker holds.
 //   • Credentials are the orchestrator-pushed per-scope map (`PUT /internal/
 //     scope-credentials`, §5) — never env, never a file in the image.
 //   • Watch config (which projects / which transitions wake whom) is set by a
@@ -229,6 +230,30 @@ function query(req) {
   return new URLSearchParams((req.url || '').split('?')[1] || '');
 }
 
+// `aee-jira inbox --consume <id>…` — the ids an agent may drain are the ones
+// its OWN wake payload carried (`payload.id`, or `payload.events[].id` in a
+// digest). The whole-inbox drain is gone: the inbox is per team and every
+// agent on it is woken for its own subset, so a bare consume would take a
+// teammate's events. A stale CLI copy sending `consume=1` gets a 400 that
+// names the fix instead of a silent team-wide drain.
+const EVENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[A-Za-z0-9._-]{1,64}$/;
+const CONSUME_MAX_IDS = 200;
+const CONSUME_USAGE = 'consume takes the event ids you were woken for: aee-jira inbox --consume <event-id> [<event-id> ...] '
+  + '(each id is in your wake payload as `id`, or `events[].id` in a digest)';
+
+// → { ok: true, ids } | { ok: false, status, error, message }. `raw` is the
+// `consume` query value; absent = peek, handled by the caller.
+function parseConsumeIds(raw) {
+  const ids = String(raw).split(',').map((s) => s.trim()).filter(Boolean);
+  if (ids.length === 0 || !ids.every((id) => EVENT_ID_RE.test(id))) {
+    return { ok: false, status: 400, error: 'consume-requires-ids', message: CONSUME_USAGE };
+  }
+  if (ids.length > CONSUME_MAX_IDS) {
+    return { ok: false, status: 400, error: 'too-many-ids', message: `at most ${CONSUME_MAX_IDS} ids per consume` };
+  }
+  return { ok: true, ids: [...new Set(ids)] };
+}
+
 // ── the agent CLI surface (scope-token authed) ─────────────────────────────
 async function handleCli(req, res, cliPath) {
   const v = verifyScopeToken(req, SIGNING_SECRET);
@@ -241,10 +266,19 @@ async function handleCli(req, res, cliPath) {
   }
 
   if (cliPath === '/inbox' && req.method === 'GET') {
-    const consume = params.get('consume') === '1';
-    const entries = consume ? inboxStore.consume(scopeId) : inboxStore.list(scopeId);
-    writeAudit(scopeId, scopeId, 'inbox', 'ok', consume ? `consumed:${entries.length}` : `peeked:${entries.length}`);
-    return sendJson(res, 200, { entries, consumed: consume });
+    if (!params.has('consume')) {
+      const entries = inboxStore.list(scopeId);
+      writeAudit(scopeId, scopeId, 'inbox', 'ok', `peeked:${entries.length}`);
+      return sendJson(res, 200, { entries, consumed: false });
+    }
+    const parsed = parseConsumeIds(params.get('consume'));
+    if (!parsed.ok) {
+      writeAudit(scopeId, scopeId, 'inbox', 'refused', parsed.error);
+      return sendJson(res, parsed.status, { error: parsed.error, message: parsed.message });
+    }
+    const { entries, missing } = inboxStore.consumeIds(scopeId, parsed.ids);
+    writeAudit(scopeId, scopeId, 'inbox', 'ok', `consumed:${entries.length}${missing.length ? ` missing:${missing.length}` : ''}`);
+    return sendJson(res, 200, { entries, consumed: true, missing });
   }
 
   // ── reads that need the per-scope Jira credential (Phase 3) ───────────────

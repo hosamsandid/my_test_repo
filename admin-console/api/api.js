@@ -92,7 +92,7 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
 const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
@@ -9098,6 +9098,15 @@ app.get('/api/process/template', (req, res) => {
       ...(Array.isArray(df.outputs) && df.outputs.length ? { outputs: df.outputs } : {}),
       ...(Array.isArray(df.dependsOn) && df.dependsOn.length ? { dependsOn: df.dependsOn } : {}),
       ...(typeof cfg.parentMemberId === 'string' && cfg.parentMemberId ? { parent: cfg.parentMemberId } : {}),
+      // GitHub PR/issue channels (#380): the consumer's declarative source of
+      // truth for which producer's PR/issue wakes it. It MUST ride the exported
+      // ROLE (not only the `graphAgents` copy below, which feeds gate/label
+      // derivation and never reaches the bundle) — otherwise buildProcessTemplate
+      // has no `r.channels` to remap, the bundle carries none, and an
+      // Edit-as-draft silently drops every producer→consumer channel edge
+      // (e.g. Developer → Code Reviewer "PR"). buildProcessTemplate reduces the
+      // member-id `from` to a portable role key via remapChannel.
+      ...(Array.isArray(cfg.channels) && cfg.channels.length ? { channels: cfg.channels } : {}),
     });
     // `channels` rides along so a channel's `gate: 'human'` classifies its routing
     // label as a gate in the exported registry too (#928).
@@ -15750,7 +15759,16 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // Named human roles (#987) — normalized to the persisted shape and stored on
   // the team agent (like `stages`/`labels`) so the live graph binds the #981
   // touchpoints to the named nodes. Never materialise into an agent.
-  const bundleHumans = normalizeHumans(body.processTemplate?.humans);
+  // Expand each human's PR/issue consume `from` from a portable role key back to
+  // the materialised member id (`${teamId}-role`) — the inverse of the export's
+  // roleKeyOf reduction and the mirror of buildMemberFromTemplate's channel
+  // expansion (#987). Without it the stored humans registry keeps role keys while
+  // the live graph's producer nodes are member ids, so the producer → human
+  // reviewer touchpoint edge is orphaned on the newly materialised team.
+  const bundleHumans = remapHumanConsumesFrom(
+    normalizeHumans(body.processTemplate?.humans),
+    (f) => `${teamId}-${f}`,
+  );
   // Hill-climb collector config (#1222) — normalized to the known config keys and
   // stored on the team agent (like `stages`/`labels`) so an imported bundle keeps
   // its collector config. null when the bundle never configured it.
@@ -16457,7 +16475,16 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // Named human roles (#987) — normalized to the persisted shape and stored on
   // the team agent (like `stages`/`labels`) so the live graph binds the #981
   // touchpoints to the named nodes. Never materialise into an agent.
-  const bundleHumans = normalizeHumans(body.processTemplate?.humans);
+  // Expand each human's PR/issue consume `from` from a portable role key back to
+  // the materialised member id (`${teamId}-role`) — the inverse of the export's
+  // roleKeyOf reduction and the mirror of buildMemberFromTemplate's channel
+  // expansion (#987). Without it the stored humans registry keeps role keys while
+  // the live graph's producer nodes are member ids, so the producer → human
+  // reviewer touchpoint edge is orphaned on the newly materialised team.
+  const bundleHumans = remapHumanConsumesFrom(
+    normalizeHumans(body.processTemplate?.humans),
+    (f) => `${teamId}-${f}`,
+  );
   // Hill-climb collector config (#1222) — normalized to the known config keys and
   // stored on the team agent (like `stages`/`labels`) so an imported bundle keeps
   // its collector config. null when the bundle never configured it.

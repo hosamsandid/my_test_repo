@@ -21,7 +21,9 @@ per watched project:
    into any listed status);
 5. dedups against a per-`<siteUrl>::<projectKey>` seen-id cursor (first poll only
    baselines — no wake);
-6. collapses a per-issue burst into one digest, applies the hour-scoped throttle;
+6. folds a bulk transition (more than `PROJECT_BURST_CAP` = 3 watched events in one
+   poll of one project) into ONE lossless digest — otherwise collapses a per-issue
+   burst into one digest and applies the hour-scoped throttle;
 7. hands survivors to `deliver()` — the transport seam;
 8. records every fresh event to the 14-day `activity-store.js` log with an
    outcome tag (`delivered` / `digested` / `throttled` / `filtered` / `stale` / `baseline`)
@@ -71,7 +73,8 @@ scope to its team, and wakes every granted agent carrying a matching
 `plugin-event` trigger (`{ pluginId: "jira", eventFilter?, prompt }`). The
 agent's own `prompt` is the wake instruction; the payload rides in as untrusted
 context in an `<external-event source="plugin:jira">` envelope. A `digest` burst
-becomes one wake carrying the collapsed set.
+(per issue, or the per-project bulk case) becomes one wake carrying the collapsed
+set — the first 20 events inline plus `count`; the inbox holds all of them.
 
 ## Writes — role-gated, not confirmation-gated (D3)
 

@@ -58,9 +58,10 @@ All plain strings, usable in **Only when…**:
 Several conditions combine with AND: `toStatus = Ready for Dev` plus
 `issueType = Bug` wakes the agent only for bugs entering that status.
 
-When more than three transitions on one issue land in a single poll they arrive
-as one **digest**; a condition matches the digest when any folded transition
-matches on its own.
+When more than three transitions land in a single poll — on one issue, or
+across one project (a bulk move such as sprint planning) — they arrive as one
+**digest**, one wake rather than one per ticket; a condition matches the digest
+when any folded transition matches on its own.
 
 ## What the woken agent can do — `aee-jira`
 

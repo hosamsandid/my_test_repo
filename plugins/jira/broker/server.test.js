@@ -460,6 +460,20 @@ test('deliver: POSTs /internal/plugin-event to the orchestrator with a minted ji
     assert.equal(captured[0].body.event, 'status_changed');
     assert.equal(captured[0].body.eventId, 'KAN-6:10312');
     assert.match(captured[0].body.summary, /KAN-6.*Ready for Dev/);
+
+    // A project digest (F8): one wake, no eventId, the collapsed set in the
+    // payload (capped at 20, `count` says how many really), projectKey on top.
+    const events = Array.from({ length: 25 }, (_, i) => ({ id: `KAN-${i}:${i}`, event: 'status_changed', issueKey: `KAN-${i}`, projectKey: 'KAN', fromStatus: 'To Do', toStatus: 'Ready for Dev' }));
+    await broker.deliver({ scopeId: 'team-1', kind: 'digest', convKey: 'project:KAN', projectKey: 'KAN', events });
+    assert.equal(captured.length, 2);
+    const dg = captured[1].body;
+    assert.equal(dg.event, 'status_changed');
+    assert.equal('eventId' in dg, false);
+    assert.equal(dg.summary, '25 status changes in KAN');
+    assert.equal(dg.payload.kind, 'digest');
+    assert.equal(dg.payload.projectKey, 'KAN');
+    assert.equal(dg.payload.count, 25);
+    assert.equal(dg.payload.events.length, 20);
   } finally {
     if (prev === undefined) delete process.env.AEE_ORCHESTRATOR_URL; else process.env.AEE_ORCHESTRATOR_URL = prev;
     orch.close();

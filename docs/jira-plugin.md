@@ -132,8 +132,12 @@ The fields a `status_changed` payload carries, all plain strings:
 | `summary` | the issue title at the time of the transition; rarely useful for routing (exact-match on a title is brittle — it changes) |
 | `issueUrl` | the Jira browse link; not useful for routing |
 
-A burst digest (more than three transitions on one issue in a single poll)
-matches when **any** of its folded events matches.
+A burst digest matches when **any** of its folded events matches. Two things
+produce one: more than three transitions on **one issue** in a single poll, and
+— the bulk case — more than three watched transitions in **one project** in a
+single poll (sprint planning moving 40 tickets to *Ready for Dev* is **one**
+wake, not 40). A digest carries the first 20 transitions inline plus a `count`;
+`aee-jira inbox` holds every one of them.
 
 The wake instruction is the agent's own prompt; the Jira payload rides in as
 context, never as an instruction.

@@ -22,7 +22,9 @@
 //      fire), drop anything created before the previous poll's horizon (an
 //      issue re-entering the `updated` window carries its WHOLE changelog —
 //      seen-ids alone cannot tell an old transition from a new one), gate by
-//      the watch's `statusFilter`, collapse per-issue bursts, apply the
+//      the watches' `statusFilters`, fold a BULK transition (more than
+//      PROJECT_BURST_CAP gated events in one poll of one project) into one
+//      lossless digest, else collapse per-issue bursts and apply the
 //      hour-scoped throttle.
 //   6. hand every surviving event to `deliver()` — the transport seam. The
 //      broker passes the `POST /internal/plugin-event` wake (server.js); the
@@ -55,6 +57,18 @@ const BASELINE_ACTIVITY_CAP = 20;
 
 const DEFAULT_INTERVAL_MS = 60_000;
 const DEFAULT_BASE_WINDOW_MINUTES = 10;
+
+// F8: the per-(scope, project) cap on ONE poll's fan-out. Every issue is its
+// own conversation key, so a sprint-planning bulk move of 40 tickets never
+// trips the per-issue burst digest and never counts past 1 on the per-issue
+// hour throttle — it became 40 wakes and 40 serial agent runs. When MORE than
+// this many gated events land in one poll of one project they are delivered
+// as ONE digest (the same lossless shape as the per-issue digest: every event
+// in the inbox, `{kind:'digest', events}` in the wake). Same value as the
+// per-issue cap so "more than three in one poll" is the one rule to remember.
+// Like every digest it is NOT throttled — the digest is the anti-flood
+// response, and it is bounded to one per poll per project by construction.
+const PROJECT_BURST_CAP = BURST_CAP;
 
 class JiraPoller {
   // deps:
@@ -285,10 +299,28 @@ class JiraPoller {
   // `plugin-event` triggers, and server.js `deliver()` does not read it.
   async _fanOut(scopeId, gated) {
     const agentIds = gated[0].watch.wake.agentIds; // 'all-granted' | string[]
+    const rows = []; // per-event activity rows: { event, outcome, detail? }
+
+    // Bulk transition → one project digest (F8). Decided on the GATED count —
+    // transitions no watch asked for were already split off as `filtered`
+    // and must not tip watched ones into a digest. Checked BEFORE the
+    // per-issue plan so a bulk move never reaches the per-issue throttle.
+    if (gated.length > PROJECT_BURST_CAP) {
+      const projectKey = gated[0].event.projectKey || gated[0].watch.projectKey;
+      const convKey = `project:${projectKey}`;
+      const events = gated.map(({ event }) => event);
+      for (const event of events) {
+        this.inboxStore.append(scopeId, event, { convKey, digest: true });
+        rows.push({ event, outcome: 'digested', detail: `${events.length} transitions in ${projectKey} in one poll` });
+      }
+      await this.deliver({ scopeId, kind: 'digest', agentIds, convKey, projectKey, events, cap: PROJECT_BURST_CAP });
+      this.log(`[jira-poller] bulk-digest: ${events.length} events in ${projectKey} → ${scopeId} (one wake)`);
+      return { fired: 1, rows };
+    }
+
     const deliverables = gated.map(({ event: ev }) => ({ agentId: '_', convKey: `issue:${ev.issueKey}`, event: ev }));
     const plans = planBurstHandoffs(deliverables, BURST_CAP);
     let fired = 0;
-    const rows = []; // per-event activity rows: { event, outcome, detail? }
     let throttleDirty = false;
 
     for (const plan of plans) {
@@ -332,4 +364,4 @@ class JiraPoller {
   }
 }
 
-module.exports = { JiraPoller, DEFAULT_INTERVAL_MS, DEFAULT_BASE_WINDOW_MINUTES };
+module.exports = { JiraPoller, DEFAULT_INTERVAL_MS, DEFAULT_BASE_WINDOW_MINUTES, PROJECT_BURST_CAP };

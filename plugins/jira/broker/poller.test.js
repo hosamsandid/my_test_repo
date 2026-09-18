@@ -335,3 +335,98 @@ test('an event matching TWO watches on the same project fires once, not twice', 
   assert.deepEqual(h.inboxStore.list('team-1').map((e) => e.event.id), ['KAN-1:1']);
   assert.equal(h.activityStore.list('team-1').filter((r) => r.outcome === 'delivered').length, 1);
 });
+
+// ── F8: a bulk transition is ONE wake, not N ────────────────────────────────
+//
+// Sprint planning moves 40 tickets to "Ready for Dev" in one go. Each issue is
+// its own conversation key, so the per-issue burst digest never trips and the
+// per-issue hour throttle never counts past 1 — 40 wakes, 40 serial agent
+// runs. A per-(scope, project) cap on one poll's fan-out folds that into one
+// lossless digest, the same shape the per-issue digest already delivers.
+
+const bulk = (n, status = 'Ready for Dev') => Array.from({ length: n }, (_, i) =>
+  issue(`KAN-${i + 1}`, [statusHistory(`${100 + i}`, 'To Do', status, `2026-01-01T11:58:${String(i).padStart(2, '0')}Z`)]));
+
+test('more than PROJECT_BURST_CAP tickets moved in one poll → one project digest, lossless, un-throttled', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'KAN', statusFilters: ['Ready for Dev'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::KAN', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: bulk(5) } }));
+  let summary;
+  try { summary = await h.poller._tick(); } finally { restore(); }
+
+  assert.equal(h.delivered.length, 1, 'one wake, not five');
+  const d = h.delivered[0];
+  assert.equal(d.kind, 'digest');
+  assert.equal(d.convKey, 'project:KAN');
+  assert.equal(d.projectKey, 'KAN');
+  assert.deepEqual(d.events.map((e) => e.id), ['KAN-1:100', 'KAN-2:101', 'KAN-3:102', 'KAN-4:103', 'KAN-5:104']);
+  assert.equal(summary.scopes[0].projects[0].fired, 1);
+  // lossless: every transition is in the inbox, tagged as digested
+  const inbox = h.inboxStore.list('team-1');
+  assert.equal(inbox.length, 5);
+  assert.ok(inbox.every((e) => e.digest === true && e.convKey === 'project:KAN'));
+  // …and in the activity log
+  const rows = h.activityStore.list('team-1');
+  assert.equal(rows.filter((r) => r.outcome === 'digested').length, 5);
+  // the per-issue throttle was never touched — a digest is not a wake per issue
+  assert.deepEqual(Object.keys(h.poller.throttleBuckets), []);
+});
+
+test('exactly PROJECT_BURST_CAP tickets in one poll stay individual wakes (boundary)', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'KAN' }] });
+  h.watchStore.saveCursor('team-1', 'acme::KAN', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: bulk(3) } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => d.kind), ['events', 'events', 'events']);
+  assert.deepEqual(h.delivered.map((d) => d.convKey), ['issue:KAN-1', 'issue:KAN-2', 'issue:KAN-3']);
+});
+
+test('a project digest does not poison later individual delivery for one of its tickets', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'KAN' }] });
+  h.watchStore.saveCursor('team-1', 'acme::KAN', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  let restore = fakeFetch(() => ({ body: { isLast: true, issues: bulk(6) } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 1);
+  // next poll: KAN-2 alone moves again
+  restore = fakeFetch(() => ({ body: { isLast: true, issues: [
+    issue('KAN-2', [statusHistory('101', 'To Do', 'Ready for Dev', '2026-01-01T11:58:01Z'), statusHistory('900', 'Ready for Dev', 'In Review', '2026-01-01T12:00:30Z')]),
+  ] } }));
+  h.poller.now = () => Date.parse('2026-01-01T12:01:00Z');
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 2);
+  assert.equal(h.delivered[1].kind, 'events');
+  assert.equal(h.delivered[1].events[0].id, 'KAN-2:900');
+});
+
+test('the project cap counts GATED events across every watch on the project (F7 interplay), not unwatched ones', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [
+    { projectKey: 'KAN', statusFilters: ['Ready for Dev'] },
+    { projectKey: 'KAN', statusFilters: ['In Review'] },
+  ] });
+  h.watchStore.saveCursor('team-1', 'acme::KAN', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [
+    ...bulk(2, 'Ready for Dev'),
+    issue('KAN-8', [statusHistory('108', 'To Do', 'In Review', '2026-01-01T11:58:08Z')]),
+    // three unwatched transitions must not push the watched ones into a digest
+    issue('KAN-9', [statusHistory('109', 'To Do', 'Done', '2026-01-01T11:58:09Z')]),
+    issue('KAN-10', [statusHistory('110', 'To Do', 'Done', '2026-01-01T11:58:10Z')]),
+    issue('KAN-11', [statusHistory('111', 'To Do', 'Done', '2026-01-01T11:58:11Z')]),
+  ] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 3, 'three gated → three individual wakes');
+  // one more gated one would tip it
+  h.delivered.length = 0;
+  h.watchStore.saveCursor('team-1', 'acme::KAN', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore2 = fakeFetch(() => ({ body: { isLast: true, issues: [
+    ...bulk(2, 'Ready for Dev'),
+    issue('KAN-8', [statusHistory('108', 'To Do', 'In Review', '2026-01-01T11:58:08Z')]),
+    issue('KAN-12', [statusHistory('112', 'To Do', 'In Review', '2026-01-01T11:58:12Z')]),
+  ] } }));
+  try { await h.poller._tick(); } finally { restore2(); }
+  assert.deepEqual(h.delivered.map((d) => d.kind), ['digest']);
+  assert.equal(h.delivered[0].events.length, 4);
+});

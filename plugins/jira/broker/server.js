@@ -117,8 +117,8 @@ function orchestratorUrl() {
   return (process.env.AEE_ORCHESTRATOR_URL || 'http://orchestrator:4002').replace(/\/+$/, '');
 }
 
-function summariseEvents(kind, events) {
-  if (kind === 'digest') return `${events.length} status changes`;
+function summariseEvents(kind, events, { projectKey } = {}) {
+  if (kind === 'digest') return `${events.length} status changes${projectKey ? ` in ${projectKey}` : ''}`;
   const e = events[0] || {};
   const issue = e.issueKey || e.projectKey || '';
   return `${issue}${e.fromStatus && e.toStatus ? `: ${e.fromStatus} → ${e.toStatus}` : ''}`.trim() || 'status change';
@@ -129,7 +129,10 @@ function summariseEvents(kind, events) {
 // connection would otherwise stall polling for undici's multi-minute default.
 const DELIVER_TIMEOUT_MS = 15_000;
 
-async function deliver({ scopeId, kind, events }) {
+// `projectKey` is set on a project-level (bulk) digest — F8; a per-issue
+// digest has none. Both carry the same `{kind:'digest', count, events}` shape
+// the orchestrator's payloadFilter any-matches and the agent runtime envelopes.
+async function deliver({ scopeId, kind, events, projectKey }) {
   if (kind === 'throttle-warning') {
     // Nothing to wake an agent about — the throttle already suppressed the
     // events. Record it and move on.
@@ -141,12 +144,14 @@ async function deliver({ scopeId, kind, events }) {
   const eventId = kind === 'digest' ? null : (first.id || null);
   const body = {
     event: first.event || 'status_changed',
-    summary: summariseEvents(kind, events),
+    summary: summariseEvents(kind, events, { projectKey }),
     // Omit rather than send an explicit null for a digest (the validator
     // accepts either, but the entry shape prefers omission).
     ...(eventId ? { eventId } : {}),
+    // A digest carries the first 20 events inline (`count` says how many
+    // really); the agent's `aee-jira inbox` holds every one of them.
     payload: kind === 'digest'
-      ? { kind: 'digest', count: events.length, events: events.slice(0, 20) }
+      ? { kind: 'digest', ...(projectKey ? { projectKey } : {}), count: events.length, events: events.slice(0, 20) }
       : first,
   };
   const ctrl = new AbortController();

@@ -7,11 +7,15 @@
 // in the orchestrator: `jira-poller.js` from the reverted PR #1539 is gone, and
 // `github-poller.js` is untouched.
 //
-// One tick, per scope with a watch config, per watch:
+// One tick, per scope with a watch config, per PROJECT (not per watch):
 //   1. resolve the scope's credential ({siteUrl, email, apiToken}).
-//   2. bucket by `<siteUrl>::<projectKey>` — the per-site scoping from #1539: a
-//      Jira project key is only unique per site, so the same key on two sites
-//      must never share a cursor.
+//   2. bucket the watches by `<siteUrl>::<projectKey>` — the per-site scoping
+//      from #1539: a Jira project key is only unique per site, so the same key
+//      on two sites must never share a cursor. Conversely every watch on ONE
+//      project shares one cursor, so the project is polled ONCE and every
+//      watch's `statusFilters` is evaluated against the same fresh set (F7:
+//      polled per watch, the first row consumed the fresh ids and the second
+//      row never fired).
 //   3. widen the JQL window to cover any gap since the last poll (capped 24h).
 //   4. search, backfill truncated changelogs, flatten to status-change events.
 //   5. dedup against the cursor's seen-id set (first poll only baselines — no
@@ -134,10 +138,17 @@ class JiraPoller {
     }
     const siteBase = resolveJiraApiBase(cred.siteUrl);
 
+    // Group the watches by project so each project is searched once. Order of
+    // first appearance is kept, so the summary lines up with the config.
+    const byProject = new Map();
     for (const watch of cfg.watches) {
       const projectRef = `${cred.siteUrl}::${watch.projectKey}`;
+      if (!byProject.has(projectRef)) byProject.set(projectRef, []);
+      byProject.get(projectRef).push(watch);
+    }
+    for (const [projectRef, watches] of byProject) {
       try {
-        out.projects.push(await this._pollProject(scopeId, cred, siteBase, projectRef, watch));
+        out.projects.push(await this._pollProject(scopeId, cred, siteBase, projectRef, watches));
       } catch (err) {
         out.errors.push(`${projectRef}: ${err.message}`);
       }
@@ -145,8 +156,11 @@ class JiraPoller {
     return out;
   }
 
-  async _pollProject(scopeId, cred, siteBase, projectRef, watch) {
-    const res = { projectRef, fired: 0, baseline: false, backoff: null };
+  // `watches`: every watch of this scope that names this project (≥ 1); they
+  // share the project's cursor and are evaluated over the same fresh events.
+  async _pollProject(scopeId, cred, siteBase, projectRef, watches) {
+    const projectKey = watches[0].projectKey;
+    const res = { projectRef, watches: watches.length, fired: 0, baseline: false, backoff: null };
     const cursor = this.watchStore.getCursor(scopeId, projectRef) || {};
 
     if (cursor.skipUntil && Date.parse(cursor.skipUntil) > this.now()) {
@@ -158,7 +172,7 @@ class JiraPoller {
 
     let issues;
     try {
-      issues = await jira.searchProjectIssues(cred, { projectKey: watch.projectKey, windowMinutes, env: this.env });
+      issues = await jira.searchProjectIssues(cred, { projectKey, windowMinutes, env: this.env });
     } catch (err) {
       const failures = (cursor.consecutiveFailures || 0) + 1;
       const skipUntil = new Date(this.now() + computeBackoffDelayMs(failures)).toISOString();
@@ -187,7 +201,7 @@ class JiraPoller {
           this.log(`[jira-poller] ${issue.key}: changelog backfill failed (${err.message}) — using what the search returned`);
         }
       }
-      events.push(...extractStatusChangeEvents({ ...issue, changelog }, { projectKey: watch.projectKey, siteBase }));
+      events.push(...extractStatusChangeEvents({ ...issue, changelog }, { projectKey, siteBase }));
     }
 
     // A poll succeeded — clear the active-failure fields (keeping the error ring
@@ -235,20 +249,22 @@ class JiraPoller {
     if (!fresh.length) return res;
     fresh.sort((a, b) => String(a.created || '').localeCompare(String(b.created || '')));
 
-    // Split fresh events by the watch's status set. A transition into a status
-    // nobody asked for is still recorded (outcome `filtered`) so the Activity
-    // view can show "the poller saw it, and did nothing" — the "All activity"
-    // toggle in the UI.
+    // Split fresh events by the watches' status sets. An event fires at most
+    // ONCE however many watches on this project match it (the first matching
+    // watch claims it). A transition into a status no watch asked for is still
+    // recorded (outcome `filtered`) so the Activity view can show "the poller
+    // saw it, and did nothing" — the "All activity" toggle in the UI.
     const gated = [];
     const filteredRows = [];
     for (const ev of fresh) {
-      if (matchesStatusFilters(ev.toStatus, watch.statusFilters)) gated.push(ev);
+      const watch = watches.find((w) => matchesStatusFilters(ev.toStatus, w.statusFilters));
+      if (watch) gated.push({ watch, event: ev });
       else filteredRows.push({ event: ev, outcome: 'filtered', detail: `${ev.toStatus || '?'} is not a watched status` });
     }
     this._recordActivity(scopeId, filteredRows);
     if (!gated.length) return res;
 
-    const { fired, rows } = await this._fanOut(scopeId, watch, gated);
+    const { fired, rows } = await this._fanOut(scopeId, gated);
     this._recordActivity(scopeId, rows);
     res.fired = fired;
     return res;
@@ -263,9 +279,13 @@ class JiraPoller {
     }
   }
 
-  async _fanOut(scopeId, watch, events) {
-    const agentIds = watch.wake.agentIds; // 'all-granted' | string[]
-    const deliverables = events.map((ev) => ({ agentId: '_', convKey: `issue:${ev.issueKey}`, event: ev }));
+  // `gated`: [{ watch, event }] — each event tagged with the watch that
+  // claimed it. `wake.agentIds` is carried through on the deliver payload for
+  // shape compatibility; since Phase 2 the targets are the agents' own
+  // `plugin-event` triggers, and server.js `deliver()` does not read it.
+  async _fanOut(scopeId, gated) {
+    const agentIds = gated[0].watch.wake.agentIds; // 'all-granted' | string[]
+    const deliverables = gated.map(({ event: ev }) => ({ agentId: '_', convKey: `issue:${ev.issueKey}`, event: ev }));
     const plans = planBurstHandoffs(deliverables, BURST_CAP);
     let fired = 0;
     const rows = []; // per-event activity rows: { event, outcome, detail? }

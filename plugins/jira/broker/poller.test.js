@@ -285,3 +285,53 @@ test('a history with no `created` stamp fails open (delivered), never silently d
   } finally { restore(); }
   assert.deepEqual(h.delivered.map((d) => d.events[0].id), ['KAN-30:700']);
 });
+
+// ── F7: several watches on one project share ONE poll, not one cursor ───────
+//
+// Rows "KAN → Ready for Dev" and "KAN → In Review" name the same projectRef.
+// Polled per watch, the first row's poll marked every fresh id seen; the
+// second row's poll saw nothing fresh and never fired — silently.
+
+test('two watches on the same project: one Jira search, every watch evaluated against the same fresh set', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [
+    { projectKey: 'KAN', statusFilters: ['Ready for Dev'] },
+    { projectKey: 'KAN', statusFilters: ['In Review'] },
+  ] });
+  h.watchStore.saveCursor('team-1', 'acme::KAN', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  let searches = 0;
+  const restore = fakeFetch((url) => {
+    if (String(url).includes('/search/jql')) searches += 1;
+    return { body: { isLast: true, issues: [
+      issue('KAN-1', [statusHistory('1', 'To Do', 'Ready for Dev', '2026-01-01T11:58:00Z')]),
+      issue('KAN-2', [statusHistory('2', 'To Do', 'In Review', '2026-01-01T11:58:30Z')]),
+      issue('KAN-3', [statusHistory('3', 'To Do', 'Done', '2026-01-01T11:59:00Z')]),
+    ] } };
+  });
+  try {
+    const summary = await h.poller._tick();
+    assert.equal(searches, 1, 'one search per projectRef, not per watch');
+    assert.equal(summary.scopes[0].projects.length, 1);
+    assert.equal(summary.scopes[0].projects[0].watches, 2);
+  } finally { restore(); }
+  // both watches fired; the unwatched status is recorded filtered once
+  assert.deepEqual(h.delivered.map((d) => d.events[0].id).sort(), ['KAN-1:1', 'KAN-2:2']);
+  const rows = h.activityStore.list('team-1');
+  assert.deepEqual(rows.filter((r) => r.outcome === 'filtered').map((r) => r.event.id), ['KAN-3:3']);
+});
+
+test('an event matching TWO watches on the same project fires once, not twice', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [
+    { projectKey: 'KAN', statusFilters: ['Ready for Dev'] },
+    { projectKey: 'KAN' }, // no filter — matches everything
+  ] });
+  h.watchStore.saveCursor('team-1', 'acme::KAN', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [
+    issue('KAN-1', [statusHistory('1', 'To Do', 'Ready for Dev', '2026-01-01T11:58:00Z')]),
+  ] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => d.events[0].id), ['KAN-1:1']);
+  assert.deepEqual(h.inboxStore.list('team-1').map((e) => e.event.id), ['KAN-1:1']);
+  assert.equal(h.activityStore.list('team-1').filter((r) => r.outcome === 'delivered').length, 1);
+});

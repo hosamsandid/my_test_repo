@@ -10908,7 +10908,13 @@ class Orchestrator {
   // Copy the resolved skill into one agent's workspace, update its manifest,
   // rebuild its CLAUDE.md (the Skills gate may have flipped), and mirror the
   // touched files into an isolated agent's dedicated volume.
-  async _syncSkillIntoWorkspace(id, cfg, skillName, { remove = false } = {}) {
+  // `preferUpstream` (resync only): resolve the source from the team/global pool
+  // EXCLUDING the agent tier. The agent's own `skills/<name>` dir IS `dst`, and
+  // `resolveSkillSourceDir` is agent-first, so the default resolution would find
+  // `dst` itself as the source (src === dst → the cpSync below is skipped) and a
+  // resync could never pull an upstream change in. Only the drift-gated resync
+  // path passes this; activation/deactivation keep the shadow-preserving default.
+  async _syncSkillIntoWorkspace(id, cfg, skillName, { remove = false, preferUpstream = false } = {}) {
     const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
     const dst = path.join(agentDir(id), "skills", skillName);
     const manifest = readSeededSkills(id);
@@ -10925,7 +10931,9 @@ class Orchestrator {
       // #750: resolve the team pool by the AGENT team (parentTeamId), the key
       // the curator/overlay/seed all use — NOT the member's human tenant teamId,
       // which pointed at /workspace/teams/default and made every sync miss.
-      const src = resolveSkillSourceDir(skillName, agentKnowledgeTeamId(cfg), { agentId: id });
+      // `preferUpstream` (resync) drops the agent tier so the source is the
+      // team/global pool the copy descends from, never the copy dir itself.
+      const src = resolveSkillSourceDir(skillName, agentKnowledgeTeamId(cfg), preferUpstream ? {} : { agentId: id });
       // Machine-readable `reason` so the UI can distinguish the "pool file gone"
       // condition (recoverable via restore/re-promote, not a retry) from a
       // generic copy failure (#739 AC4).
@@ -11283,7 +11291,17 @@ class Orchestrator {
     const copyDir = path.join(agentDir(id), "skills", skillName);
     // #750: same agent-team keyspace as seed/sync so a seeded team skill's drift
     // is compared against the source it was actually copied from.
-    const srcDir = resolveSkillSourceDir(skillName, agentKnowledgeTeamId(cfg), { agentId: id });
+    //
+    // NOTE: resolve WITHOUT `{ agentId }`. `resolveSkillSourceDir` is agent-first,
+    // and `copyDir` IS the agent's own `skills/<name>` dir — passing the agentId
+    // would resolve the source back to the copy itself (sourceCurrentHash ===
+    // copyHash), so drift could only ever read `in-sync`/`diverged`, never
+    // `outdated`, and the resync would no-op on every stale copy the UI flags
+    // (the drift here must key off the UPSTREAM team/global source, exactly like
+    // the admin-console lineage view's skillDriftSummary). Only seeded copies
+    // reach this method (resyncSkill skips unseeded ones), and a seeded copy
+    // always descends from a team/global source — never the agent tier.
+    const srcDir = resolveSkillSourceDir(skillName, agentKnowledgeTeamId(cfg));
     const anchor = seeded && seeded.contentHash ? seeded.contentHash : null;
     let copyHash = null;
     try { if (fs.existsSync(path.join(copyDir, "SKILL.md"))) copyHash = skillManifest.hashSkillDir(copyDir); } catch { copyHash = null; }
@@ -11347,7 +11365,7 @@ class Orchestrator {
       }
       const { state, sourceVersion } = this._copyDriftState(id, cfg, skillName, seeded);
       if (skillManifest.isResyncable(state)) {
-        const r = await this._syncSkillIntoWorkspace(id, cfg, skillName, { remove: false });
+        const r = await this._syncSkillIntoWorkspace(id, cfg, skillName, { remove: false, preferUpstream: true });
         members.push({ agentId: id, state, action: "resynced", status: r.status, sourceVersion });
       } else if (state === "in-sync") {
         members.push({ agentId: id, state, action: "skipped" });
@@ -11359,7 +11377,7 @@ class Orchestrator {
         // additive sync re-copies the source in and re-stamps the anchor, so a
         // subsequent drift read reports `in-sync`. `orphaned` (source deleted) has
         // no content to push, so it stays refused even under force.
-        const r = await this._syncSkillIntoWorkspace(id, cfg, skillName, { remove: false });
+        const r = await this._syncSkillIntoWorkspace(id, cfg, skillName, { remove: false, preferUpstream: true });
         members.push({ agentId: id, state, action: "overwritten", status: r.status, sourceVersion });
       } else {
         members.push({ agentId: id, state, action: "refused", reason: REFUSAL_HINT[state] || "cannot resync automatically" });

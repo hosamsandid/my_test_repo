@@ -222,3 +222,66 @@ test('the two scopes with the same project key on the same site stay isolated cu
   assert.equal(h.delivered[0].scopeId, 'team-1');
   assert.equal(h.watchStore.getCursor('team-2', 'acme::ENG').seen.length, 1); // baselined, no fire
 });
+
+// ── F3: a touched issue must not re-fire its OLD transitions ────────────────
+//
+// The JQL window selects issues by `updated`, but every returned issue carries
+// its WHOLE changelog. Seen-id dedup alone cannot tell "new transition" from
+// "old transition on an issue that just re-entered the window" — the old
+// history id was never in `seen` if the issue last appeared before the
+// SEEN_MAX eviction, or never appeared at all.
+
+test('an old transition on an issue that merely re-entered the window is stale — recorded, seen, never fired', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'KAN', statusFilters: ['Ready for Dev'] }] });
+  // Post-baseline cursor; KAN-12 was never in the seen set.
+  h.watchStore.saveCursor('team-1', 'acme::KAN', { seen: ['KAN-1:1'], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [
+    // Moved to "Ready for Dev" three weeks ago; someone commented today so
+    // `updated` bumped it into the window.
+    issue('KAN-12', [statusHistory('500', 'To Do', 'Ready for Dev', '2025-12-11T09:00:00Z')]),
+    // A genuinely new transition in the same poll still fires.
+    issue('KAN-13', [statusHistory('501', 'To Do', 'Ready for Dev', '2026-01-01T11:58:00Z')]),
+  ] } }));
+  try {
+    await h.poller._tick();
+  } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => d.events[0].id), ['KAN-13:501']);
+  assert.deepEqual(h.inboxStore.list('team-1').map((e) => e.event.id), ['KAN-13:501']);
+  // The stale id is still remembered, so a later eviction can't resurrect it either.
+  const seen = h.watchStore.getCursor('team-1', 'acme::KAN').seen;
+  assert.ok(seen.includes('KAN-12:500'));
+  assert.ok(seen.includes('KAN-13:501'));
+  // …and the Activity view can show "the poller saw it, and did nothing".
+  const rows = h.activityStore.list('team-1');
+  const stale = rows.find((r) => r.event.id === 'KAN-12:500');
+  assert.equal(stale.outcome, 'stale');
+  assert.equal(rows.find((r) => r.event.id === 'KAN-13:501').outcome, 'delivered');
+});
+
+test('the horizon carries a grace: a transition slightly BEFORE the last poll still fires (clock skew / late index)', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'KAN' }] });
+  h.watchStore.saveCursor('team-1', 'acme::KAN', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [
+    issue('KAN-20', [statusHistory('600', 'To Do', 'In Progress', '2026-01-01T11:52:00Z')]), // 3 min before last poll — inside grace
+    issue('KAN-21', [statusHistory('601', 'To Do', 'In Progress', '2026-01-01T11:40:00Z')]), // 15 min before — stale
+  ] } }));
+  try {
+    await h.poller._tick();
+  } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => d.events[0].id), ['KAN-20:600']);
+});
+
+test('a history with no `created` stamp fails open (delivered), never silently dropped', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'KAN' }] });
+  h.watchStore.saveCursor('team-1', 'acme::KAN', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [
+    issue('KAN-30', [statusHistory('700', 'To Do', 'In Progress', undefined)]),
+  ] } }));
+  try {
+    await h.poller._tick();
+  } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => d.events[0].id), ['KAN-30:700']);
+});

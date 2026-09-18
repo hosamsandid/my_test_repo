@@ -383,7 +383,7 @@ that woke it.
     Retry-now button for admins); the per-scope inbox.
   - **Activity** — the retained event log ("what did the poller see, and what did
     it do with it"): a 14-day per-scope log with one row per fresh status change
-    tagged `delivered` / `digested` / `throttled` / `filtered` / `baseline`,
+    tagged `delivered` / `digested` / `throttled` / `filtered` / `stale` / `baseline`,
     filterable by issue type and by watched-vs-all. This is the `JiraEventLog.jsx`
     #1539 deferred, at zero platform cost (`activity-store.js`).
 - `/admin` (team-admin) — the watch config: project + a **set** of target

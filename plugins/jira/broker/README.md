@@ -24,7 +24,7 @@ per watched project:
 6. collapses a per-issue burst into one digest, applies the hour-scoped throttle;
 7. hands survivors to `deliver()` — the transport seam;
 8. records every fresh event to the 14-day `activity-store.js` log with an
-   outcome tag (`delivered` / `digested` / `throttled` / `filtered` / `baseline`)
+   outcome tag (`delivered` / `digested` / `throttled` / `filtered` / `stale` / `baseline`)
    and folds a poll failure into the cursor's `recentErrors` ring
    (`watch-health.js`).
 

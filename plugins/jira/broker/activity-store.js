@@ -12,6 +12,8 @@
 //   digested   — folded into a burst digest (still a wake, lossless)
 //   throttled  — dropped by the hour-scoped conversation throttle
 //   filtered   — fresh, but its target status matched no `statusFilters` entry
+//   stale      — unseen, but created before the previous poll: an old transition
+//                on an issue that merely re-entered the `updated` window
 //   baseline   — seen on the very first poll for this project (never fires)
 //
 // This is the `JiraEventLog.jsx` that #1539 deferred (docs/jira-plugin-plan.md
@@ -32,7 +34,7 @@ const path = require('path');
 const SCOPE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const RETENTION_MS = 14 * 24 * 3600 * 1000;
 const ACTIVITY_MAX = 2000;
-const OUTCOMES = new Set(['delivered', 'digested', 'throttled', 'filtered', 'baseline']);
+const OUTCOMES = new Set(['delivered', 'digested', 'throttled', 'filtered', 'stale', 'baseline']);
 
 function assertScope(scopeId) {
   if (typeof scopeId !== 'string' || !SCOPE_RE.test(scopeId)) {

@@ -390,6 +390,7 @@
     digested: { label: 'folded into digest', cls: 'oc-info' },
     throttled: { label: 'throttled', cls: 'oc-warn' },
     filtered: { label: 'not a watched status', cls: 'oc-muted' },
+    stale: { label: 'old transition, issue re-touched', cls: 'oc-muted' },
     baseline: { label: 'baseline', cls: 'oc-muted' },
   };
   var ACTED = { delivered: 1, digested: 1, throttled: 1 };

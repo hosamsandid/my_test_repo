@@ -14,9 +14,12 @@
 //      must never share a cursor.
 //   3. widen the JQL window to cover any gap since the last poll (capped 24h).
 //   4. search, backfill truncated changelogs, flatten to status-change events.
-//   5. gate by the watch's `statusFilter`, dedup against the cursor's seen-id
-//      set (first poll only baselines — no fire), collapse per-issue bursts,
-//      apply the hour-scoped throttle.
+//   5. dedup against the cursor's seen-id set (first poll only baselines — no
+//      fire), drop anything created before the previous poll's horizon (an
+//      issue re-entering the `updated` window carries its WHOLE changelog —
+//      seen-ids alone cannot tell an old transition from a new one), gate by
+//      the watch's `statusFilter`, collapse per-issue bursts, apply the
+//      hour-scoped throttle.
 //   6. hand every surviving event to `deliver()` — the transport seam. Phase 0
 //      passes a doorbell+inbox deliver; Phase 2 swaps in `POST /internal/
 //      plugin-event`. The poller does not know or care which.
@@ -28,7 +31,9 @@
 const {
   SEEN_MAX,
   BURST_CAP,
+  GRACE_MS,
   computeBackoffDelayMs,
+  passesHorizon,
   selectFreshEvents,
   planBurstHandoffs,
   pruneThrottleState,
@@ -203,10 +208,30 @@ class JiraPoller {
       return res;
     }
 
-    const { fresh, nextSeen } = selectFreshEvents(events, cursor.seen, SEEN_MAX);
+    const { fresh: unseen, nextSeen } = selectFreshEvents(events, cursor.seen, SEEN_MAX);
     nextCursor.seen = nextSeen;
     this.watchStore.saveCursor(scopeId, projectRef, nextCursor);
 
+    if (!unseen.length) return res;
+
+    // Horizon gate (the GitHub poller's `passesHorizon`, same grace). The JQL
+    // window selects issues by `updated`, so a ticket moved to "Ready for Dev"
+    // weeks ago re-enters the window the moment someone comments on it — and
+    // its old history id was never in `seen` (or was evicted by SEEN_MAX). An
+    // unseen event is therefore fresh only if it was created since the
+    // previous successful poll; `lastPolledAt` advances on success alone, so a
+    // failed poll widens both the JQL window and this horizon together. Grace
+    // absorbs Jira-vs-broker clock skew and late indexing. The stale ids stay
+    // in `seen` (above), so an eviction cannot resurrect them later either.
+    const horizon = cursor.lastPolledAt || null;
+    const fresh = [];
+    const staleRows = [];
+    for (const ev of unseen) {
+      if (passesHorizon(ev.created, horizon, GRACE_MS)) fresh.push(ev);
+      else staleRows.push({ event: ev, outcome: 'stale', detail: `created ${ev.created} — before the last poll (${horizon})` });
+    }
+    this._recordActivity(scopeId, staleRows);
+    if (staleRows.length) this.log(`[jira-poller] ${projectRef}: ${staleRows.length} stale transition(s) on re-touched issue(s) — not fired`);
     if (!fresh.length) return res;
     fresh.sort((a, b) => String(a.created || '').localeCompare(String(b.created || '')));
 

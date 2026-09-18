@@ -9578,8 +9578,14 @@ app.delete('/api/plugins/:id', heavyLimiter, async (req, res) => {
   // Per-scope plugin credentials (Jira plan §5) are platform state beside the
   // registry, not inside the plugin dir — reap them here too, best-effort, so a
   // reinstall does not silently resurrect a team's old vendor token.
+  // PLUGIN_ID_RE already excludes every path separator; the resolve-guard
+  // mirrors the one on `dest` above (defense in depth, CodeQL js/path-injection).
   try {
-    fs.rmSync(path.join(REGISTRY_PLUGINS_DIR, '_credentials', id), { recursive: true, force: true });
+    const credRoot = path.resolve(REGISTRY_PLUGINS_DIR, '_credentials');
+    const credDest = path.resolve(credRoot, id);
+    if (credDest.startsWith(credRoot + path.sep)) {
+      fs.rmSync(credDest, { recursive: true, force: true });
+    }
   } catch { /* best effort */ }
   // Existing grants are deliberately LEFT ALONE: uninstalling is an operator
   // action on the registry, not a mass revoke. The orchestrator's reconcile

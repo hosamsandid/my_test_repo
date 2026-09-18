@@ -17,6 +17,15 @@ test('buildProjectJql: quoted key, escaped quotes, minutes window, oldest-first'
   assert.equal(jc.buildProjectJql('ENG', 0), 'project = "ENG" AND updated >= -10m ORDER BY updated ASC'); // fallback
 });
 
+test('jqlQuote: backslash is escaped BEFORE the quote, so `\\"` cannot close the string', () => {
+  // In a JQL quoted string `\` is the escape char: a bare `\"` → `\\"` would be
+  // a literal backslash followed by an UNESCAPED quote — a clause breakout.
+  assert.equal(jc.jqlQuote('A\\"B'), '"A\\\\\\"B"');
+  assert.equal(jc.jqlQuote('plain'), '"plain"');
+  assert.equal(jc.jqlQuote('back\\slash'), '"back\\\\slash"');
+  assert.equal(jc.buildProjectJql('A\\"B', 5), 'project = "A\\\\\\"B" AND updated >= -5m ORDER BY updated ASC');
+});
+
 test('buildJqlSearchBody: fields + changelog expansion; expand is a STRING on /search/jql; nextPageToken only when given', () => {
   assert.deepEqual(jc.buildJqlSearchBody('jql'), { jql: 'jql', fields: ['summary', 'status', 'issuetype'], expand: 'changelog', maxResults: 100 });
   assert.equal(typeof jc.buildJqlSearchBody('jql').expand, 'string'); // array form is a 400 on this endpoint
@@ -201,6 +210,15 @@ test('listProjectIssues: project-scoped JQL, optional status filter, narrow rows
       key: 'KAN-6', summary: 'Login', status: 'Ready for Dev', issueType: 'Story', assignee: 'Jane',
       updated: '2026-09-09T10:00:00Z', url: 'https://acme.atlassian.net/browse/KAN-6',
     }]);
+  });
+});
+
+test('listProjectIssues: status with a backslash-quote cannot break out of the clause', async () => {
+  await withFetch((url, opts) => {
+    assert.equal(JSON.parse(opts.body).jql, 'project = "KAN" AND status = "x\\\\\\" OR 1=1 --" ORDER BY updated DESC');
+    return { ok: true, status: 200, text: async () => JSON.stringify({ issues: [] }) };
+  }, async () => {
+    await jc.listProjectIssues(CRED, { projectKey: 'KAN', status: 'x\\" OR 1=1 --', env: CRED.env });
   });
 });
 

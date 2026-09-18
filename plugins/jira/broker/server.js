@@ -596,10 +596,17 @@ async function handleRequest(req, res) {
   return void sendJson(res, 404, { error: 'not found' });
 }
 
+// Last-resort catch: every route already maps upstream/validation failures to
+// a status + message above, so anything landing here is a broker bug. The stack
+// goes to stderr (podman logs); the client gets a generic body — an internal
+// message/stack is not the agent's to read (CodeQL js/stack-trace-exposure).
 const httpServer = http.createServer((req, res) => {
   handleRequest(req, res).catch((err) => {
+    try {
+      process.stderr.write(`[jira-broker] unhandled request error: ${(err && err.stack) || String(err)}\n`);
+    } catch { /* ignore */ }
     if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
-    try { res.end(JSON.stringify({ error: (err && err.message) || String(err) })); } catch { /* ignore */ }
+    try { res.end(JSON.stringify({ error: 'internal server error' })); } catch { /* ignore */ }
   });
 });
 

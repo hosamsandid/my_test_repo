@@ -30,13 +30,20 @@ function basicAuthHeader(email, apiToken) {
   return `Basic ${Buffer.from(`${email}:${apiToken}`).toString('base64')}`;
 }
 
+// Quote a value for a JQL string literal. Inside JQL quotes `\` is the escape
+// character, so backslashes MUST be doubled before the quotes are escaped —
+// otherwise a bare `\"` becomes `\\"` (a literal backslash + an unescaped quote)
+// and the caller-supplied value breaks out of the clause.
+function jqlQuote(value) {
+  return `"${String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
 // The `updated >= -Nm` JQL for one project, oldest-first so fan-out order is
-// chronological. `projectKey` is quoted and its embedded quotes escaped so it
-// can never break out of the clause.
+// chronological. `projectKey` goes through `jqlQuote` so it can never break out
+// of the clause.
 function buildProjectJql(projectKey, windowMinutes) {
-  const key = String(projectKey || '').replace(/"/g, '\\"');
   const mins = Number.isFinite(windowMinutes) && windowMinutes > 0 ? Math.ceil(windowMinutes) : 10;
-  return `project = "${key}" AND updated >= -${mins}m ORDER BY updated ASC`;
+  return `project = ${jqlQuote(projectKey)} AND updated >= -${mins}m ORDER BY updated ASC`;
 }
 
 // Body for POST /rest/api/3/search/jql (the "enhanced JQL search" that replaced
@@ -278,10 +285,9 @@ async function listProjects(cred, { env } = {}) {
 async function listProjectIssues(cred, { projectKey, status, env } = {}) {
   const base = apiBaseFor(cred.siteUrl, env);
   const auth = basicAuthHeader(cred.email, cred.apiToken);
-  const key = String(projectKey || '').replace(/"/g, '\\"');
-  let jql = `project = "${key}"`;
+  let jql = `project = ${jqlQuote(projectKey)}`;
   if (typeof status === 'string' && status.trim()) {
-    jql += ` AND status = "${status.trim().replace(/"/g, '\\"')}"`;
+    jql += ` AND status = ${jqlQuote(status.trim())}`;
   }
   jql += ' ORDER BY updated DESC';
   const result = await requestJson({
@@ -446,6 +452,7 @@ module.exports = {
   MAX_PAGES,
   PAGE_SIZE,
   basicAuthHeader,
+  jqlQuote,
   buildProjectJql,
   buildJqlSearchBody,
   changelogPath,

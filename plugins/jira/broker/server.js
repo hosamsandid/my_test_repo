@@ -41,7 +41,7 @@ const { JiraPoller } = require('./poller');
 const { deriveWatchHealth, summariseWatchHealth } = require('./watch-health');
 const jira = require('./jira-client');
 const brokerPolicy = require('./broker-policy');
-const { verifyViewerHeaders, requiredRoleForPath, roleAllows } = require('./viewer-headers');
+const { verifyViewerHeaders, requiredRoleForPath, roleAllows, roleForTeam } = require('./viewer-headers');
 
 const PLUGIN_ID = 'jira';
 
@@ -334,6 +334,9 @@ async function handleUiApi(req, res, apiPath, viewer) {
       const health = watchHealthFor(id);
       return {
         teamId: id,
+        // Per team, from the signed map — the admin page offers only the
+        // teams the viewer actually administers.
+        isAdmin: roleAllows(roleForTeam(viewer, id), 'team-admin'),
         hasCredential: !!resolveCredential(id),
         watches: health.watches.map((w) => w.projectKey),
         watchHealth: health.summary,
@@ -341,11 +344,26 @@ async function handleUiApi(req, res, apiPath, viewer) {
         activity: activityStore.count(id),
       };
     });
-    return sendJson(res, 200, { user: viewer.sub, role: viewer.role, isAdmin: roleAllows(viewer.role, 'team-admin'), teams });
+    // `isAdmin` at the top level means "admin of at least one team here" —
+    // whether to show the admin link at all, never which team it applies to.
+    return sendJson(res, 200, { user: viewer.sub, role: viewer.role, isAdmin: teams.some((t) => t.isAdmin), teams });
   }
 
   const team = pickTeam(viewer, params.get('team'));
   if (!team) return sendJson(res, 400, { error: 'select a team you are a member of' });
+
+  // The elevated-route gate, on the SELECTED team's role (F4 of the Jira
+  // review). `handleUi` already checked the flat role — the caller's max
+  // across their teams — which is the right pre-filter but the wrong gate
+  // here: admin of A + member of B must not reach B's /admin via `?team=B`.
+  // `roleForTeam` never elevates (an in-scope team missing from the signed
+  // map is a plain team-member), so a header from an older proxy that signed
+  // no map cannot open /admin for any team.
+  const needForTeam = requiredRoleForPath(`/api${apiPath}`);
+  const roleHere = roleForTeam(viewer, team);
+  if (!roleAllows(roleHere, needForTeam)) {
+    return sendJson(res, 403, { error: `${apiPath} requires ${needForTeam} in ${team}; viewer is ${roleHere || 'not a member'}` });
+  }
 
   if (apiPath === '/inbox' && req.method === 'GET') {
     return sendJson(res, 200, { entries: inboxStore.list(team) });
@@ -366,7 +384,7 @@ async function handleUiApi(req, res, apiPath, viewer) {
     });
   }
 
-  // ── /admin — the watch config (team-admin; role checked in handleUi) ─────
+  // ── /admin — the watch config (team-admin IN THE SELECTED TEAM; gated above) ─
   // Replaces #1539's `env.jiraProjects[]` + the `jira-event` trigger fields.
   // Which AGENTS a transition wakes is now decided per-agent by a `plugin-event`
   // trigger (Phase 2) — this route configures only which projects/statuses the
@@ -422,6 +440,10 @@ async function handleUiApi(req, res, apiPath, viewer) {
 async function handleUi(req, res, uiPath) {
   const viewer = verifyViewerHeaders(req, SIGNING_SECRET);
   if (!viewer) return sendJson(res, 401, { error: 'unsigned viewer' });
+  // Coarse gate on the flat role (the caller's best team): enough for page
+  // loads and assets, and a cheap refusal for a viewer who is admin nowhere.
+  // A team-selecting API route is gated AGAIN on the chosen team's role in
+  // handleUiApi — that is the real check.
   const need = requiredRoleForPath(uiPath);
   if (!roleAllows(viewer.role, need)) {
     return sendJson(res, 403, { error: `route ${uiPath} requires ${need}; viewer is ${viewer.role}` });
@@ -443,7 +465,6 @@ async function handleUi(req, res, uiPath) {
   });
 }
 
-    // events. Record it and move on.
 const handleHealth = healthEndpoint(async () => ({
   scopes: watchStore.listScopes().length,
   scopesWithCredential: [...scopeCredentials.keys()].filter((sid) => !!resolveCredential(sid)).length,

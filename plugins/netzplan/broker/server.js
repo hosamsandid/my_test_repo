@@ -53,7 +53,7 @@ const {
 const { PlanStore } = require('./plan-store');
 const { requiredAutonomy } = require('./plan-doc');
 const { exportPlanDoc } = require('./plan-import');
-const { verifyViewerHeaders, requiredRoleForPath, roleAllows } = require('./viewer-headers');
+const { verifyViewerHeaders, requiredRoleForPath, roleAllows, roleForTeam } = require('./viewer-headers');
 
 const PLUGIN_ID = 'netzplan';
 
@@ -195,11 +195,22 @@ async function handleUi(req, res, uiPath) {
   const viewer = verifyViewerHeaders(req, SIGNING_SECRET);
   if (!viewer) return sendJson(res, 401, { error: 'unsigned viewer' });
   const need = requiredRoleForPath(uiPath);
+  // Coarse pre-check on the flat role (the viewer's max across their teams):
+  // a cheap refusal for someone who is admin nowhere.
   if (!roleAllows(viewer.role, need)) {
     return sendJson(res, 403, { error: `route ${uiPath} requires ${need}; viewer is ${viewer.role}` });
   }
   const scopeId = scopeForViewer(viewer);
   if (!scopeId) return sendJson(res, 400, { error: 'no team in scope for this viewer' });
+  // The real gate: the viewer's role IN THE SERVED SCOPE, from the signed
+  // per-team map (F4 of the Jira review). `scopeForViewer` takes the first
+  // in-scope team, so a viewer who is admin of some OTHER team must not get
+  // this board's /admin, settings or import on the strength of the flat role.
+  // `roleForTeam` never elevates (no map entry ⇒ team-member).
+  const roleHere = roleForTeam(viewer, scopeId);
+  if (!roleAllows(roleHere, need)) {
+    return sendJson(res, 403, { error: `route ${uiPath} requires ${need} in ${scopeId}; viewer is ${roleHere || 'not a member'}` });
+  }
 
   // data API
   if (uiPath === '/api/board' && req.method === 'GET') {
@@ -354,4 +365,4 @@ if (require.main === module) {
   httpServer.listen(PORT, () => process.stdout.write(`[netzplan-broker] listening on :${PORT}\n`));
 }
 
-module.exports = { runTool, scopeFromAuth, scopeRegistry, store, TOOLS };
+module.exports = { runTool, scopeFromAuth, scopeRegistry, store, TOOLS, handleRequest };

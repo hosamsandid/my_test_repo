@@ -226,7 +226,10 @@ Concept: `docs/plugin-system-concept.md`, `docs/cli-contract.md`.
   warning (add-member response + GitHub Event Log), never silently.
 - **Manifest** (`pluginVersion: 1`, `plugin-manifest.js`): closed `capabilities`
   enum (`podman-socket`, `egress`, `host-mount:<path>`), `scopes`
-  (`team`/`agent`), optional `quota`, `ui.routes[].minRole`, optional
+  (`team`/`agent`), optional `quota`, `ui.routes[].minRole` (the console proxy
+  pre-checks it on the viewer's flat max role and signs a per-team role map;
+  a team-selecting broker gates elevated routes on `roleForTeam` — the
+  verifier block is byte-identical across brokers, parity-tested), optional
   command-only (`commands`) / install-time `fetch`, optional `events[]` (an
   event-source plugin's declared vocabulary — event names + payload keys —
   rendered by the plugin-event trigger form, never interpreted), and an

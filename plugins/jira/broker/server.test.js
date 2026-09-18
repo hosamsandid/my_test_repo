@@ -259,7 +259,7 @@ test('ui /admin: team-admin only; PUT replaces the watch config', async () => {
     return { status: res.status, body: await res.json().catch(() => ({})) };
   }
   const member = signViewerHeaders({ sub: 'm', role: 'team-member', teamIds: ['team-1'] }, 'test-secret');
-  const admin = signViewerHeaders({ sub: 'a', role: 'team-admin', teamIds: ['team-1'] }, 'test-secret');
+  const admin = signViewerHeaders({ sub: 'a', role: 'team-admin', teamIds: ['team-1'], teamRoles: { 'team-1': 'team-admin' } }, 'test-secret');
   try {
     // a team-member is refused /admin
     assert.equal((await ui('/ui/api/admin/watch?team=team-1', { headers: member })).status, 403);
@@ -332,7 +332,7 @@ test('ui /admin/retry: team-admin clears the backoff on one watch', async () => 
   broker.watchStore.saveCursor('team-1', 'acme::OPS', { seen: [], consecutiveFailures: 4, skipUntil: '2099-01-01T00:00:00Z' });
   const srv = await listen();
   const { port } = srv.address();
-  const admin = signViewerHeaders({ sub: 'a', role: 'team-admin', teamIds: ['team-1'] }, 'test-secret');
+  const admin = signViewerHeaders({ sub: 'a', role: 'team-admin', teamIds: ['team-1'], teamRoles: { 'team-1': 'team-admin' } }, 'test-secret');
   const member = signViewerHeaders({ sub: 'm', role: 'team-member', teamIds: ['team-1'] }, 'test-secret');
   const post = async (headers, body) => {
     const res = await fetch(`http://127.0.0.1:${port}/ui/api/admin/retry?team=team-1`, {
@@ -389,6 +389,49 @@ test('ui: requires signed viewer headers; /ui/api/context lists the viewer\'s te
   } finally {
     broker.scopeCredentials.delete('team-1');
     broker.watchStore.teardown('team-1');
+    srv.close();
+  }
+});
+
+test('ui /admin: the gate is the SELECTED team\'s role — admin of A, member of B cannot reconfigure B (F4)', async () => {
+  // The proxy signs a flat `role` (the caller's MAX across granted teams) AND
+  // a per-team map. `?team=` lets the request choose the team; gating /admin
+  // on the flat role would let U (admin of A, member of B) rewrite which
+  // projects / transitions wake B's agents, under B's Jira credential.
+  const srv = await listen();
+  const { port } = srv.address();
+  async function ui(pathname, opts) {
+    const res = await fetch(`http://127.0.0.1:${port}${pathname}`, opts || {});
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  }
+  const u = signViewerHeaders({
+    sub: 'u', role: 'team-admin', teamIds: ['team-1', 'team-2'],
+    teamRoles: { 'team-1': 'team-admin', 'team-2': 'team-member' },
+  }, 'test-secret');
+  const json = { ...u, 'Content-Type': 'application/json' };
+  const body = JSON.stringify({ watches: [{ projectKey: 'EVIL' }] });
+  try {
+    // B: every elevated route refuses, and nothing was written
+    assert.equal((await ui('/ui/api/admin/watch?team=team-2', { headers: u })).status, 403);
+    assert.equal((await ui('/ui/api/admin/watch?team=team-2', { method: 'PUT', headers: json, body })).status, 403);
+    assert.equal((await ui('/ui/api/admin/retry?team=team-2', { method: 'POST', headers: json, body: JSON.stringify({ projectKey: 'KAN' }) })).status, 403);
+    assert.deepEqual(broker.watchStore.loadConfig('team-2').watches, []);
+    // …while B's team-member routes still work for U
+    assert.equal((await ui('/ui/api/watches?team=team-2', { headers: u })).status, 200);
+    // A: U really is admin there
+    assert.equal((await ui('/ui/api/admin/watch?team=team-1', { method: 'PUT', headers: json, body })).status, 200);
+    assert.equal(broker.watchStore.loadConfig('team-1').watches[0].projectKey, 'EVIL');
+    // /context tells the UI per team, so the admin page only offers A
+    const ctx = await ui('/ui/api/context', { headers: u });
+    assert.equal(ctx.body.isAdmin, true);
+    assert.deepEqual(ctx.body.teams.map((t) => [t.teamId, t.isAdmin]), [['team-1', true], ['team-2', false]]);
+    // A header from an OLDER proxy (no per-team map) can never elevate: the
+    // flat role alone does not open /admin for any team.
+    const legacy = signViewerHeaders({ sub: 'u', role: 'team-admin', teamIds: ['team-1'] }, 'test-secret');
+    assert.equal((await ui('/ui/api/admin/watch?team=team-1', { headers: legacy })).status, 403);
+  } finally {
+    broker.watchStore.teardown('team-1');
+    broker.watchStore.teardown('team-2');
     srv.close();
   }
 });

@@ -157,7 +157,7 @@ const {
 } = require('./toolchain-registry');
 const { resolveSpecKitCommand, hasUnresolvedPlaceholders } = require('./speckit-content');
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
-const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole } = require('./plugin-ui-viewer');
+const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole, viewerTeamRoles } = require('./plugin-ui-viewer');
 const pluginCredView = require('./plugin-credential-view');
 
 const WORKSPACE = '/workspace';
@@ -9800,10 +9800,16 @@ function pluginUiProxy(req, res) {
 
     const secret = readPluginSigningSecret();
     if (!secret) return res.status(503).json({ error: 'plugin signing secret unavailable' });
+    const viewerTeamIds = scope.all ? grantedTeamIds : grantedTeamIds.filter((t) => scope.teamIds.has(t));
     const viewer = {
       sub: (req.user && req.user.username) || '',
+      // The flat role is the caller's MAX across their granted teams — right
+      // for the proxy's route pre-check and for team-agnostic UIs, wrong as
+      // the gate for a team-SELECTING elevated route; that is what the signed
+      // per-team map below is for (plugin-ui-proxy.js `roleForTeam`).
       role: viewerRole,
-      teamIds: scope.all ? grantedTeamIds : grantedTeamIds.filter((t) => scope.teamIds.has(t)),
+      teamIds: viewerTeamIds,
+      teamRoles: viewerTeamRoles(scope, viewerTeamIds),
     };
     const signed = signViewerHeaders(viewer, secret);
 

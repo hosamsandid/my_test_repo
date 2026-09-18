@@ -132,3 +132,56 @@ test('verifyViewerHeaders accepts a request-like object and is teamId-order-inde
   const v = verifyViewerHeaders({ headers }, secret);
   assert.deepEqual(v.teamIds, ['a', 'b']);   // sorted + deduped
 });
+
+// ── per-team roles (F4 of the Jira review) ──────────────────────────────────
+//
+// A flattened `role` (the caller's MAX across granted teams) plus a team list
+// cannot express "Team Admin of A, Team Member of B". A broker that lets the
+// request choose the team (`?team=B`) and gates `/admin` on the flat role hands
+// U admin rights over B. The proxy therefore also signs a per-team role map;
+// `role` stays the max for team-agnostic routes and page loads.
+
+const { roleForTeam } = require('./plugin-ui-proxy');
+
+test('per-team roles round-trip and are part of the signature', () => {
+  const secret = 's3cr3t';
+  const headers = signViewerHeaders({
+    sub: 'u', role: 'team-admin', teamIds: ['B', 'A'],
+    teamRoles: { A: 'team-admin', B: 'team-member' },
+  }, secret);
+  assert.equal(headers[HEADER_NAMES.teamRoles], 'A=team-admin,B=team-member'); // sorted by team
+  const v = verifyViewerHeaders(headers, secret);
+  assert.deepEqual(v.teamRoles, { A: 'team-admin', B: 'team-member' });
+  assert.equal(roleForTeam(v, 'A'), 'team-admin');
+  assert.equal(roleForTeam(v, 'B'), 'team-member');
+  assert.equal(roleForTeam(v, 'C'), null); // not in scope at all
+});
+
+test('tampering the per-team role map fails verification (the escalation this closes)', () => {
+  const secret = 's3cr3t';
+  const headers = signViewerHeaders({
+    sub: 'u', role: 'team-admin', teamIds: ['A', 'B'],
+    teamRoles: { A: 'team-admin', B: 'team-member' },
+  }, secret);
+  headers[HEADER_NAMES.teamRoles] = 'A=team-admin,B=team-admin';
+  assert.equal(verifyViewerHeaders(headers, secret), null);
+  // …and dropping the header entirely is not a way back to the flat role.
+  const stripped = { ...headers };
+  delete stripped[HEADER_NAMES.teamRoles];
+  assert.equal(verifyViewerHeaders(stripped, secret), null);
+});
+
+test('roleForTeam never elevates: an in-scope team with no map entry is a plain team-member', () => {
+  const v = { sub: 'u', role: 'system-admin', teamIds: ['A'], teamRoles: {} };
+  assert.equal(roleForTeam(v, 'A'), 'team-member');
+  assert.equal(roleForTeam({ sub: 'u', role: 'team-admin', teamIds: ['A'] }, 'A'), 'team-member');
+  assert.equal(roleForTeam(null, 'A'), null);
+});
+
+test('the map is canonical: order-independent, unknown roles and out-of-scope teams dropped', () => {
+  const secret = 'k';
+  const a = signViewerHeaders({ sub: 'u', role: 'team-member', teamIds: ['A', 'B'], teamRoles: { B: 'team-member', A: 'team-member', Z: 'team-admin', A2: 'bogus' } }, secret);
+  const b = signViewerHeaders({ sub: 'u', role: 'team-member', teamIds: ['B', 'A'], teamRoles: { A: 'team-member', B: 'team-member' } }, secret);
+  assert.equal(a[HEADER_NAMES.sig], b[HEADER_NAMES.sig]);
+  assert.equal(a[HEADER_NAMES.teamRoles], 'A=team-member,B=team-member');
+});

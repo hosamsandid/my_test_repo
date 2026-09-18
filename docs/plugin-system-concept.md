@@ -394,6 +394,23 @@ UI plugins. The sidecar address comes from the orchestrator
 `AEE_PLUGIN_STATE_DIR` volume beside its audit volume. test-mgmt's manifest
 declares three routes at two roles to exercise the contract end-to-end.
 
+**Per-team roles in the signed identity** (Jira review, F4). The flat
+`x-aee-plugin-role` is the viewer's *maximum* role across the granted teams they
+belong to — right for the proxy's own `minRole` pre-check and for team-agnostic
+UIs, but it cannot express "Team Admin of A, Team Member of B". A broker that
+lets the request choose the team (Jira's `?team=`, netzplan's first-in-scope
+board) and gated `/admin` on the flat role handed U admin rights over B. The
+proxy therefore also signs `x-aee-plugin-team-roles` (`A=team-admin,B=team-member`,
+part of the HMAC canonical string; `plugin-ui-viewer.js` `viewerTeamRoles`), and
+the verifier exposes `roleForTeam(viewer, teamId)` — which never elevates: a team
+outside the viewer's scope is `null`, an in-scope team missing from the map (an
+older proxy) is a plain `team-member`. **Rule for brokers:** a team-selecting
+elevated route is gated on `roleForTeam(viewer, selectedTeam)` *after* the team
+is chosen; the flat role stays a coarse pre-filter. The sign/verify block is
+copied into every UI-bearing broker's `viewer-headers.js` and pinned
+byte-identical by `admin-console/api/viewer-headers-parity.test.js` — changing it
+means changing every copy and rebuilding the plugin images together.
+
 **Global UI visibility (opt-in, #1599).** By default a UI-bearing plugin's nav
 entry and UI are gated on the plugin being *granted* to a team the caller can
 see — the same team activation that gives that team's agents the plugin's CLI.

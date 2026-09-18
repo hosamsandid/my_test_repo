@@ -118,8 +118,10 @@
   };
 
   api('/context').then(function (ctx) {
-    state.teams = ctx.teams || [];
-    if (!ctx.isAdmin) { err('Watch config is team-admin only.'); return; }
+    // Only the teams this viewer administers — `isAdmin` is per team, and
+    // the broker refuses /admin/* for any other team regardless.
+    state.teams = (ctx.teams || []).filter(function (t) { return t.isAdmin; });
+    if (!ctx.isAdmin || !state.teams.length) { err('Watch config is team-admin only.'); return; }
     var sel = $('team');
     if (state.teams.length > 1) {
       sel.hidden = false;

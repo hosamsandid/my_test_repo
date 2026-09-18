@@ -7879,12 +7879,16 @@ app.post('/api/agents/:id/plugins/deactivate', apiLimiter, (req, res) => {
 
 // ── Skill drift resync (#629 AC3/AC4) ───────────────────────────────────────
 // Deliver the current source content to seeded copies through the orchestrator's
-// drift-gated additive sync. Body: { name, scope: { teamId?, agentId? } }.
+// drift-gated additive sync. Body: { name, scope: { teamId?, agentId? }, force? }.
 // A per-copy `outdated` is resynced; `diverged`/`conflict`/`orphaned`/`unknown`
-// is refused (never auto-overwritten) and surfaced with a manual-path hint.
-// Bulk "Sync all outdated" for a team is the { name, scope: { teamId } } form.
+// is refused (never auto-overwritten) and surfaced with a manual-path hint —
+// UNLESS `force: true`, the operator opt-in that also overwrites the locally-
+// edited copies (`diverged`/`conflict`/`unknown`), discarding their edits.
+// Bulk "Sync all outdated" for a team is the { name, scope: { teamId } } form;
+// the Skills Registry Lineage tab fans a per-`agentId` call out over the copies
+// it displays (a global skill's copies span teams — no single team scope).
 app.post('/api/skills/resync', apiLimiter, async (req, res) => {
-  const { name, scope } = req.body || {};
+  const { name, scope, force } = req.body || {};
   const skillName = typeof name === 'string' ? name : (req.body || {}).skillName;
   if (typeof skillName !== 'string' || !SKILL_NAME_RE.test(skillName)) {
     return res.status(400).json({ error: 'name required (letters, digits, -, _)' });
@@ -7908,7 +7912,7 @@ app.post('/api/skills/resync', apiLimiter, async (req, res) => {
     const resp = await fetch(`${orchestratorUrl}/internal/skills/resync`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ skillName, ...(teamId ? { teamId } : {}), ...(agentId ? { agentId } : {}) }),
+      body: JSON.stringify({ skillName, ...(teamId ? { teamId } : {}), ...(agentId ? { agentId } : {}), ...(force === true ? { force: true } : {}) }),
     });
     const data = await resp.json().catch(() => ({}));
     return res.status(resp.status).json(data);

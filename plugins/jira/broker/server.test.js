@@ -474,6 +474,15 @@ test('deliver: POSTs /internal/plugin-event to the orchestrator with a minted ji
     assert.equal(dg.payload.projectKey, 'KAN');
     assert.equal(dg.payload.count, 25);
     assert.equal(dg.payload.events.length, 20);
+
+    // A cut digest says so — the agent knows to peek the inbox for the rest.
+    assert.equal(dg.payload.truncated, true);
+
+    // A digest that fits inline carries no `truncated` key at all.
+    await broker.deliver({ scopeId: 'team-1', kind: 'digest', convKey: 'issue:KAN-1', events: events.slice(0, 4) });
+    assert.equal(captured.length, 3);
+    assert.equal(captured[2].body.payload.count, 4);
+    assert.equal('truncated' in captured[2].body.payload, false);
   } finally {
     if (prev === undefined) delete process.env.AEE_ORCHESTRATOR_URL; else process.env.AEE_ORCHESTRATOR_URL = prev;
     orch.close();

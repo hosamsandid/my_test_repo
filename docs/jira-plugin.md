@@ -109,7 +109,7 @@ per-agent trigger: Agent Chat → **Triggers** → add → type **Plugin event**
 | Plugin | `jira` (picked from the installed plugins) |
 | Which event | *Any event* or `status_changed` (the only event the plugin sends). Offered as a select from the manifest's `events[]`. A status name is **not** an event — the form flags one as *not an event this plugin declares*. |
 | Only when… | **which status wakes this agent** — condition rows `field = value`, e.g. `toStatus = Ready for Dev`; the field picker lists the payload keys below with an example. No conditions = every watched transition wakes this agent. Stored as `payloadFilter: { toStatus: "Ready for Dev" }`. |
-| Wake instruction | what the agent should do — e.g. *"Run `aee-jira inbox --consume`, read the issue with `aee-jira show`, refine the description and write it back with `aee-jira update`, then move it on with `aee-jira transition`."* |
+| Wake instruction | what the agent should do — e.g. *"Take the event id(s) from the event payload, run `aee-jira inbox --consume <id>…`, read the issue with `aee-jira show`, refine the description and write it back with `aee-jira update`, then move it on with `aee-jira transition`."* |
 
 The **Only when…** condition (the trigger's `payloadFilter`) is what routes a flow: give the Business Analyst
 `toStatus=Ready for Refinement`, the Developer `toStatus=Ready for Dev`, the
@@ -127,17 +127,22 @@ The fields a `status_changed` payload carries, all plain strings:
 | `issueKey` | e.g. `KAN-10` |
 | `issueType` | Story / Bug / Task / … |
 | `author` | who moved it (display name) |
-| `id` | `<issueKey>:<changelogId>` — the internal dedup id; not useful for routing |
+| `id` | `<issueKey>:<changelogId>` — the dedup id; not useful for routing, but it is the handle `aee-jira inbox --consume <id>` takes |
 | `created` | ISO timestamp of the transition; rarely useful for routing (an exact-match filter on a timestamp never matches twice) |
 | `summary` | the issue title at the time of the transition; rarely useful for routing (exact-match on a title is brittle — it changes) |
 | `issueUrl` | the Jira browse link; not useful for routing |
 
-A burst digest matches when **any** of its folded events matches. Two things
-produce one: more than three transitions on **one issue** in a single poll, and
-— the bulk case — more than three watched transitions in **one project** in a
-single poll (sprint planning moving 40 tickets to *Ready for Dev* is **one**
-wake, not 40). A digest carries the first 20 transitions inline plus a `count`;
-`aee-jira inbox` holds every one of them.
+A burst digest matches when **any** of its folded events matches, and the woken
+agent receives the digest **projected to its own filter**: only the folded
+events its `payloadFilter` matches, `count` recomputed, the summary suffixed
+*"— 3 of 40 match this trigger"*. Two things produce a digest: more than three
+transitions on **one issue** in a single poll, and — the bulk case — more than
+three watched transitions in **one project** in a single poll (sprint planning
+moving 40 tickets to *Ready for Dev* is **one** wake, not 40). A digest inlines
+the first 20 transitions plus `count`; when cut it carries `truncated: true`,
+and `aee-jira inbox` holds every one of them. The projection is generic
+platform behaviour (`orchestrator/plugin-event.js` `projectPayloadForTrigger`),
+not Jira-specific.
 
 The wake instruction is the agent's own prompt; the Jira payload rides in as
 context, never as an instruction.
@@ -151,7 +156,7 @@ broker; the agent never sees the token.
 
 | Command | |
 |---|---|
-| `aee-jira inbox [--consume]` | the queued status changes that woke it. `--consume` drains the queue — use once per wake |
+| `aee-jira inbox [--consume <id>…]` | the team's queued status changes (peek). `--consume` drains **exactly the ids named** — the ids from the agent's own wake (`payload.id`, or `payload.events[].id` in a digest). The inbox is per team and shared by every agent on it; a bare `--consume` is refused (CLI exit 2 / broker 400 `consume-requires-ids`), so no agent can drain a teammate's events. Unclaimed entries age out on the 7-day TTL |
 | `aee-jira projects` | the Jira projects in the team's scope |
 | `aee-jira list --project KAN [--status "Ready for Dev"]` | a project's issues, most-recently-updated first |
 | `aee-jira show KAN-6` | one issue (summary, status, assignee, URL) |
@@ -253,6 +258,7 @@ Two records, for two audiences:
 | a fresh transition doesn't wake the agent | no status in the watch's `statusFilters` set exactly matches the Jira status name, or the agent has no `plugin-event` trigger, or the poll already baselined the change, or the trigger's payload filter names a status that is not the one the issue moved into | check the Activity tab (a `not a watched status` row means the set is wrong); copy the status name verbatim from Jira; add the trigger |
 | a watch card shows **Failing** | consecutive poll failures — expand it for the error log | usually a bad or expired API token: a Team Admin re-sets it on the Plugins page, then hits **Retry now** |
 | the agent says `aee-jira` is read-only / only knows `whoami` and `inbox` | its workspace holds a CLI copy from an older plugin version (the grant sync copies the file only when the grant changes) | since this version the copy is refreshed on every plugin reconcile — restart the orchestrator or `POST /internal/plugins/reconcile`; re-run `make seed-plugins` + reinstall first if `/workspace/plugins/jira/bin/aee-jira.py` is itself old |
+| `aee-jira inbox --consume` fails with *consume takes the event ids you were woken for* | the wake instruction still uses the pre-2026-09 team-wide drain | change it to `aee-jira inbox --consume <id>…` with the ids from the event payload (`id` / `events[].id`); the agent's own trigger filter already decided which events it received |
 | the wrong agent wakes, or an agent wakes on its own transition | the agents' `plugin-event` triggers carry no payload filter, so every watched transition wakes all of them | set `toStatus=<status>` on each agent's trigger (§5) |
 | a trigger whose *Which event* is a status name (`Ready for Dev`) never fires | `eventFilter` is compared with the event **name** (`status_changed`), not with the payload; the status belongs in *Only when…* (`toStatus`) | blank *Which event*, add the condition `toStatus = Ready for Dev` — the form now offers both from the manifest and flags the mistake |
 

@@ -60,8 +60,11 @@ Several conditions combine with AND: `toStatus = Ready for Dev` plus
 
 When more than three transitions land in a single poll — on one issue, or
 across one project (a bulk move such as sprint planning) — they arrive as one
-**digest**, one wake rather than one per ticket; a condition matches the digest
-when any folded transition matches on its own.
+**digest**, one wake rather than one per ticket. Each agent receives the digest
+**narrowed to its own conditions**: a *Ready for Dev* agent sees only the
+*Ready for Dev* transitions of that bulk move, never a teammate's. A digest
+inlines at most 20 transitions; when there were more it carries
+`truncated: true` and `aee-jira inbox` (peek) shows the rest.
 
 ## What the woken agent can do — `aee-jira`
 
@@ -70,15 +73,18 @@ All Jira access stays server-side in the broker; the agent never sees the token.
 
 | Command | |
 |---|---|
-| `aee-jira inbox --consume` | the queued status changes that woke it; `--consume` drains the queue — once per wake |
+| `aee-jira inbox` / `aee-jira inbox --consume <id>…` | the queued status changes of the whole team (peek); `--consume` drains exactly the ids named — use the ids from your own wake (`id`, or `events[].id` in a digest), never a teammate's |
 | `aee-jira list --project KAN [--status "Ready for Dev"]`, `aee-jira show KAN-6` | read issues |
 | `aee-jira comment KAN-6 --body "…"` | add a comment |
 | `aee-jira update KAN-6 --description "…"` | replace the description (keep what the human wrote and add a section — the old text stays in Jira's history) |
 | `aee-jira transition KAN-6 --to "In Progress"` | move the issue on — this is itself a status change and wakes whichever teammate's trigger names that target status |
 
-A good wake instruction says exactly that sequence: *"Run `aee-jira inbox
---consume`, read the issue with `aee-jira show`, do the work, write it back with
-`aee-jira update`, then `aee-jira transition` it to the next status."*
+A good wake instruction says exactly that sequence: *"Take the issue key(s) and
+event id(s) from the event payload, run `aee-jira inbox --consume <id>…` for
+those ids, read each issue with `aee-jira show`, do the work, write it back with
+`aee-jira update`, then `aee-jira transition` it to the next status."* The inbox
+is shared by every agent on the team — an agent drains only what it was woken
+for, so a teammate's queued events stay queued for the teammate.
 
 ## When a transition does not wake the agent
 
@@ -96,3 +102,7 @@ Check in this order:
    transition it delivered; move the issue again to test.
 5. **A watch card shows Failing** — usually an expired API token; a Team Admin
    re-sets it on the Plugins page and hits *Retry now*.
+6. **`aee-jira inbox --consume` exits with a usage error.** Since this version
+   `--consume` needs the event ids from the wake payload (`id`, or
+   `events[].id`); a bare `--consume` no longer drains the team's inbox. Update
+   the wake instruction as in the example above.

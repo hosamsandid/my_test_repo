@@ -41,13 +41,13 @@ poller's, in `broker-sdk/event-cursor.js` (`github-poller.js` is untouched).
 | `jira-client.js` | Jira REST v3 surface (Basic auth); pure builders + thin `fetch` adapters; `JIRA_API_BASE` test seam; `searchProjectIssues` (poll — now requests `issuetype`), `listProjectIssues` / `getIssue` / `listProjects` (CLI + UI reads) |
 | `watch-store.js` | per-scope watch config (`{ projectKey, statusFilters?: string[] }`, legacy `statusFilter` migrated on read) + poll cursor on `AEE_PLUGIN_STATE_DIR`, atomic writes |
 | `watch-health.js` | pure: the cursor `recentErrors` ring (`recordPollError` / `clearPollFailure`) + the 3-state `deriveWatchHealth` (Watching / Degraded / Failing) + `summariseWatchHealth` roll-up, surfaced on `/watches` |
-| `inbox-store.js` | per-scope queue of delivered-but-unconsumed events; TTL + `quota.maxObjects` ring — **this is what the manifest quota counts** |
+| `inbox-store.js` | per-scope queue of delivered-but-unconsumed events; TTL + `quota.maxObjects` ring — **this is what the manifest quota counts**; drained by event id only (`consumeIds`), never team-wide |
 | `activity-store.js` | per-scope retained event log ("what did the poller see, and what did it do"); own 14-day retention + row cap, **not** the manifest quota |
 | `poller.js` | the poll loop; transport-agnostic (`deliver()` callback); records activity rows + folds poll errors into the cursor |
 | `viewer-headers.js` | §4.8 signed-viewer verify (byte-identical copy) + the `/admin` → team-admin role gate |
 | `broker-policy.js` | write authorisation (D3): `authorizeWrite` → SDK `authorizeAction` against the manifest `policy`; `requiresApproval` wired-but-empty |
 | `ui/` | the served `/` route (Board tab: issues / watch-health cards / inbox; Activity tab: the retained log) + `/admin` route (watch config with per-project status chips, team-admin). Dependency-free vanilla JS, `--eb-*` tokens, follows the console theme |
-| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials}`, `/cli/*` (`whoami`/`inbox`/`projects`/`list`/`show` + `comment`/`transition` POST), `/ui/*` (incl. `/ui/api/{watches,activity,admin/watch,admin/retry}`) |
+| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials}`, `/cli/*` (`whoami`/`inbox` (peek / `?consume=<id,…>`)/`projects`/`list`/`show` + `comment`/`transition` POST), `/ui/*` (incl. `/ui/api/{watches,activity,admin/watch,admin/retry}`) |
 
 
 ## Credentials
@@ -74,7 +74,9 @@ scope to its team, and wakes every granted agent carrying a matching
 agent's own `prompt` is the wake instruction; the payload rides in as untrusted
 context in an `<external-event source="plugin:jira">` envelope. A `digest` burst
 (per issue, or the per-project bulk case) becomes one wake carrying the collapsed
-set — the first 20 events inline plus `count`; the inbox holds all of them.
+set — the first 20 events inline plus `count` (`truncated: true` when cut); the
+orchestrator projects it per target trigger before enqueuing, so each agent sees
+only its own folded events; the inbox holds all of them.
 
 ## Writes — role-gated, not confirmation-gated (D3)
 

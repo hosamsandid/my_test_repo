@@ -349,13 +349,13 @@ test('no user-visible surface still points at the removed toolbar label', () => 
 // component just never rendered it). These are source-reading assertions in
 // the same spirit as the rest of this file.
 
-test('AC1/AC2 — the shared primary style greys out when disabled, and all three buttons use it', () => {
+test('AC1/AC2 — the shared primary style greys out when disabled, and all four buttons use it', () => {
   // The house pattern (opacity/cursor), not a bespoke treatment, and it must
   // live in the SHARED style object/helper — a per-call-site override would not
   // satisfy AC2, so this greps for exactly one definition of each.
   assert.match(launch, /opacity:\s*disabled\s*\?\s*0\.5\s*:\s*1/);
   assert.match(launch, /cursor:\s*disabled\s*\?\s*'not-allowed'\s*:\s*'pointer'/);
-  assert.equal((launch.match(/primaryStyle\(/g) || []).length, 3, 'submit, Retry and Add missing agents must all call primaryStyle(...)');
+  assert.equal((launch.match(/primaryStyle\(/g) || []).length, 4, 'submit, Retry, Add missing agents and Save anyway (reference-only, #2323) must all call primaryStyle(...)');
 });
 
 test('AC4 — the disabled state and its reason come from launchBlockReason, not a separate envBlocking boolean', () => {

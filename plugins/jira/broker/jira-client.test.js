@@ -117,6 +117,41 @@ test('requestJson: a transport failure that persists surfaces the cause in the m
   } finally { global.fetch = orig; }
 });
 
+test('requestJson: a NON-idempotent write is never retried — a slow Jira that already accepted it must not get a second copy (F6)', async () => {
+  // A transport error (incl. the 20s abort) after Jira accepted a POST would,
+  // retried, post the attribution comment twice / re-run the transition.
+  const calls = [];
+  const orig = global.fetch;
+  global.fetch = async (url, opts) => {
+    calls.push(`${opts.method || 'GET'} ${new URL(url).pathname}`);
+    const e = new TypeError('fetch failed');
+    e.cause = { code: 'UND_ERR_HEADERS_TIMEOUT' };
+    throw e;
+  };
+  try {
+    await assert.rejects(() => jc.addComment(CRED, 'KAN-6', { body: 'hi', attribution: 'x', env: CRED.env }), /fetch failed/);
+    await assert.rejects(() => jc.updateDescription(CRED, 'KAN-6', { description: 'd', attribution: 'x', env: CRED.env }), /fetch failed/);
+    assert.deepEqual(calls, [
+      'POST /rest/api/3/issue/KAN-6/comment',
+      'PUT /rest/api/3/issue/KAN-6',
+    ]); // exactly one attempt each
+  } finally { global.fetch = orig; }
+});
+
+test('requestJson: the POST-but-read issue search IS retried (the stale-socket case the retry exists for)', async () => {
+  const calls = [];
+  const orig = global.fetch;
+  global.fetch = async (url, opts) => {
+    calls.push(`${opts.method || 'GET'} ${new URL(url).pathname}`);
+    if (calls.length === 1) { const e = new TypeError('fetch failed'); e.cause = { code: 'UND_ERR_SOCKET' }; throw e; }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, issues: [] }) };
+  };
+  try {
+    await jc.listProjectIssues(CRED, { projectKey: 'KAN', env: CRED.env });
+    assert.deepEqual(calls, ['POST /rest/api/3/search/jql', 'POST /rest/api/3/search/jql']);
+  } finally { global.fetch = orig; }
+});
+
 test('searchProjectIssues: a 401 throws a mapped error carrying the status', async () => {
   await withFetch(() => ({ ok: false, status: 401, text: async () => 'nope' }), async () => {
     await assert.rejects(

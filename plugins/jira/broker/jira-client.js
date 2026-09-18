@@ -140,18 +140,25 @@ async function attempt({ base, path: reqPath, method, headers, payload }) {
   return text ? safeJson(text) : {};
 }
 
-async function requestJson({ base, path: reqPath, method = 'GET', authHeader, body }) {
+// `idempotent` decides whether a transport failure is retried. Default: GET
+// only. A POST that is really a read (Jira's `/search/jql`) opts in; a write
+// (comment, description, transition) must NOT — a transport error, including
+// the 20 s abort, can arrive AFTER Jira accepted the request, and a retry then
+// posts the attribution comment twice or re-runs the transition (F6).
+async function requestJson({ base, path: reqPath, method = 'GET', authHeader, body, idempotent }) {
   const headers = { Accept: 'application/json', 'User-Agent': 'agent-studio-jira-plugin' };
   if (authHeader) headers.Authorization = authHeader;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   const payload = body !== undefined ? JSON.stringify(body) : undefined;
   const args = { base, path: reqPath, method, headers, payload };
+  const retryable = idempotent !== undefined ? !!idempotent : method === 'GET';
   try {
     return await attempt(args);
   } catch (err) {
     // Retry ONCE on a transport failure — a stale keep-alive socket is gone on
-    // the second try. An HTTP error (has .status) is not retried.
-    if (err.transport) return attempt(args);
+    // the second try. An HTTP error (has .status) is not retried, and neither
+    // is a non-idempotent request.
+    if (err.transport && retryable) return attempt(args);
     throw err;
   }
 }
@@ -176,6 +183,7 @@ async function searchProjectIssues(cred, { projectKey, windowMinutes, env } = {}
       base,
       path: '/rest/api/3/search/jql',
       method: 'POST',
+      idempotent: true, // a read that happens to be a POST — safe to retry
       authHeader: auth,
       body: buildJqlSearchBody(jql, nextPageToken),
     });
@@ -280,6 +288,7 @@ async function listProjectIssues(cred, { projectKey, status, env } = {}) {
     base,
     path: '/rest/api/3/search/jql',
     method: 'POST',
+    idempotent: true, // a read that happens to be a POST — safe to retry
     authHeader: auth,
     body: { jql, fields: ['summary', 'status', 'assignee', 'updated', 'issuetype'], maxResults: PAGE_SIZE },
   });
@@ -310,6 +319,7 @@ async function searchJql(cred, jql, { env } = {}) {
       base,
       path: '/rest/api/3/search/jql',
       method: 'POST',
+      idempotent: true, // a read that happens to be a POST — safe to retry
       authHeader: auth,
       body: buildJqlSearchBody(jql, nextPageToken),
     });

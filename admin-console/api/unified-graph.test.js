@@ -889,3 +889,55 @@ test('#2031: a wakeAgent alongside a setLabel in ONE option draws both edges', (
   assert.ok(g.edges.some(e => e.on === 'wake' && e.from === 'dev' && e.to === 'rev'));
   assert.ok(g.edges.some(e => e.on === 'label' && e.from === 'dev' && e.to === 'rev'));
 });
+
+test('Edit-as-draft parity: a live team → bundle → draft graph keeps every channel/human edge', () => {
+  // The reported bug (My Assistant Team): an Edit-as-draft of a live team dropped
+  // the GitHub-channel edges (Business Analyst → Human Reviewer "issue", Developer
+  // → Code Reviewer "PR") while keeping the label edge. Root causes: the export
+  // dropped the `channels` port entirely, and never reduced a human's consume
+  // `from` to a role key. This drives BOTH graphs from the SAME builder and
+  // asserts they are topologically identical (member ids ↔ role keys aside).
+  const { buildProcessTemplate } = require('./process-template');
+  const TEAM = 'acme';
+  const humans = [{ id: 'human-reviewer', name: 'Human Reviewer', stage: 'Requirements',
+    emits: ['ready'], consumes: [{ artifact: 'issue', from: 'acme-analyst' }] }];
+
+  // Member-shaped live nodes (mirror /api/flows/graph).
+  const members = [
+    { id: 'acme-analyst', role: 'team-member', displayName: 'Analyst', stage: 'Requirements',
+      triggers: [], channels: [],
+      outcomes: { mode: 'anyOf', options: [{ id: 'i', actions: [{ type: 'openIssue' }] }] } },
+    { id: 'acme-dev', role: 'team-member', displayName: 'Developer', stage: 'Build',
+      channels: [],
+      triggers: [{ id: 'r', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', enabled: true }],
+      outcomes: { mode: 'anyOf', options: [{ id: 'p', actions: [{ type: 'openPr' }] }] } },
+    { id: 'acme-reviewer', role: 'team-member', displayName: 'Code Reviewer', stage: 'Build',
+      triggers: [], channels: [{ artifact: 'pr', from: 'acme-dev' }] },
+  ];
+  const live = buildUnifiedGraph(members.map(m => ({
+    ...m, emits: [], inputs: [], outputs: [], dependsOn: [], parent: null, github: null,
+  })), undefined, { humans });
+
+  // Export → draft (mirror /api/process/template roleEntries + POST /api/flows/graph).
+  const bundle = buildProcessTemplate({
+    name: 'acme', level: 'live', teamId: TEAM, humans,
+    roles: members.map(m => ({
+      id: m.id, displayName: m.displayName, role: m.role, stage: m.stage,
+      triggers: m.triggers, systemPrompt: '',
+      ...(m.outcomes ? { outcomes: m.outcomes } : {}),
+      ...(m.channels.length ? { channels: m.channels } : {}),
+    })),
+  });
+  const flow = processTemplateToUnified(bundle);
+  const draft = buildUnifiedGraph(flow.nodes, flow.edges, { humans: bundle.humans });
+
+  // Compare in one id space (member id → role key). Topology must be identical.
+  const norm = (g) => new Set(g.edges
+    .map(e => `${e.on}|${String(e.from).replace('acme-', '')}->${String(e.to).replace('acme-', '')}|${e.label || e.artifact || ''}`));
+  const L = norm(live), D = norm(draft);
+  assert.deepEqual([...L].filter(e => !D.has(e)), [], 'no live edge is lost in the draft');
+  assert.deepEqual([...D].filter(e => !L.has(e)), [], 'the draft introduces no phantom edge');
+  // And the two channel edges the bug dropped are actually present.
+  assert.ok([...D].some(e => e === 'github|analyst->human-reviewer|issue'), 'issue edge present');
+  assert.ok([...D].some(e => e === 'github|dev->reviewer|pr'), 'PR channel edge present');
+});

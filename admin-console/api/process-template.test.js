@@ -435,6 +435,65 @@ test('a port-less role exports byte-identically (no empty data-flow keys)', () =
   }
 });
 
+test('GitHub channel `from` round-trips losslessly (draft-from-team parity)', () => {
+  // The bug: a live team stores a consumer's `channels[].from` as a member id,
+  // and the export dropped the whole `channels` port — so an Edit-as-draft lost
+  // the producer→consumer channel edge (e.g. Developer → Code Reviewer "PR").
+  // buildProcessTemplate must carry channels, reducing `from` to a role key; the
+  // materialiser expands it back so team → bundle → team is a fixed point.
+  const b = buildProcessTemplate({
+    name: 'ch', level: 'live', teamId: 'acme',
+    roles: [{
+      id: 'acme-code-reviewer', displayName: 'Code Reviewer', role: 'team-member',
+      channels: [{ artifact: 'pr', from: 'acme-developer' }], // member id → 'developer'
+    }],
+  });
+  const role = b.roles[0];
+  assert.ok(Array.isArray(role.channels) && role.channels.length === 1, 'channels must be exported');
+  assert.equal(role.channels[0].artifact, 'pr');
+  assert.equal(role.channels[0].from, 'developer', 'channel from reduced to portable role key');
+  const member = buildMemberFromTemplate({ ...templateToCustomRoles(b)[0], promptTemplate: '' }, {
+    teamId: 'acme', repoFullName: 'o/r', repoOwner: 'o', repoName: 'r',
+  });
+  assert.equal(member.channels[0].from, 'acme-developer', 'materialiser expands from back to the member id');
+});
+
+test('remapHumanConsumesFrom maps only PR/issue `from`, leaves label/file/nothing untouched', () => {
+  const { remapHumanConsumesFrom } = require('./process-template');
+  const humans = [
+    { id: 'rev', name: 'Reviewer', consumes: [
+      { artifact: 'issue', from: 'acme-analyst' },
+      { artifact: 'file', name: 'report' },
+      { label: 'ready' },
+    ] },
+    { id: 'noconsume', name: 'Watcher' },
+  ];
+  const out = remapHumanConsumesFrom(humans, (f) => `X-${f}`);
+  assert.equal(out[0].consumes[0].from, 'X-acme-analyst', 'PR/issue from is mapped');
+  assert.deepEqual(out[0].consumes[1], { artifact: 'file', name: 'report' }, 'file consume untouched');
+  assert.deepEqual(out[0].consumes[2], { label: 'ready' }, 'label consume untouched');
+  assert.equal(out[1], humans[1], 'a human with no consumes is returned by reference (byte-identical)');
+  // Idempotent identity mapper leaves the whole array by reference.
+  assert.equal(remapHumanConsumesFrom(humans, (f) => f), humans);
+});
+
+test('humans consume `from` round-trips: buildProcessTemplate reduces it to a role key', () => {
+  // The other half of the Edit-as-draft edge loss: the team humans registry
+  // stores `consumes[].from` as a member id, but the export never reduced it —
+  // so in the role-key draft graph the producer → human-reviewer edge orphaned.
+  const { remapHumanConsumesFrom, roleKeyOf } = require('./process-template');
+  const b = buildProcessTemplate({
+    name: 'h', level: 'live', teamId: 'acme',
+    roles: [{ id: 'acme-analyst', displayName: 'Analyst', role: 'team-member' }],
+    humans: [{ id: 'reviewer', name: 'Reviewer',
+      consumes: [{ artifact: 'issue', from: 'acme-analyst' }] }],
+  });
+  assert.equal(b.humans[0].consumes[0].from, 'analyst', 'export reduces human consume from to a role key');
+  // Materialise expands it back to the member id (the api.js `${teamId}-` step).
+  const back = remapHumanConsumesFrom(b.humans, (f) => `acme-${f}`);
+  assert.equal(back[0].consumes[0].from, 'acme-analyst', 'materialise expands it back to the member id');
+});
+
 test('emptyDraftBundle is a valid draft (empty roles) but not a materialisable template', () => {
   const d = emptyDraftBundle('My Process');
   assert.equal(d.processTemplateVersion, 1);

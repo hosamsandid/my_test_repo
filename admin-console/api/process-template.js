@@ -96,6 +96,37 @@ function pruneOrphanHumanConsumes(humans, existingAgentIds) {
   });
 }
 
+// Remap the producer `from` reference on a humans registry's PR/issue consumes
+// through `mapFrom` (#987 round-trip parity). A `{ artifact:'pr'|'issue', from }`
+// consume addresses a producer that is a ROLE key (`developer`) in a portable
+// bundle and a MEMBER id (`acme-developer`) on a live team — exactly like a
+// channel's `from`, `dependsOn`, `parent` and a wakeAgent target — so it needs
+// the same two-way mapping: `roleKeyOf(from, teamId)` on export, `${teamId}-from`
+// on materialise. Miss either and the human touchpoint edge (producer → human
+// reviewer) is silently orphaned, because the producer node and the un-remapped
+// `from` are then in different id spaces and never match. `{ label }` and
+// `{ artifact:'file', name }` consumes carry no agent ref and pass through
+// untouched. Returns a new array only where something changed (byte-identical
+// otherwise), so a flow with no wired human consumes stays untouched.
+function remapHumanConsumesFrom(humans, mapFrom) {
+  if (!Array.isArray(humans) || typeof mapFrom !== 'function') return humans;
+  let anyTouched = false;
+  const out = humans.map((h) => {
+    if (!h || typeof h !== 'object' || !Array.isArray(h.consumes)) return h;
+    let touched = false;
+    const consumes = h.consumes.map((c) => {
+      if (c && (c.artifact === 'pr' || c.artifact === 'issue')
+        && typeof c.from === 'string' && c.from) {
+        const from = mapFrom(c.from);
+        if (from !== c.from) { touched = true; anyTouched = true; return { ...c, from }; }
+      }
+      return c;
+    });
+    return touched ? { ...h, consumes } : h;
+  });
+  return anyTouched ? out : humans;
+}
+
 // Optional top-level `hillClimb` on the bundle (hill-climbing loop, #1222 +
 // #1224): the team's loop config `{ autonomy?, cron?, windowDays?,
 // minRunsPerWindow?, maxCardsPerPass?, excludeAgents? }` on the team agent.
@@ -624,7 +655,13 @@ function bundleTrigger(t) {
  * @param {Array} [opts.labels]
  */
 function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stages, humans, hillClimb, wipLimit, autoDispatch }) {
-  const normHumans = normalizeHumans(humans);
+  // Reduce each human's PR/issue consume `from` from a live member id to a
+  // portable role key (#987), the exact inverse of the materialiser's
+  // `${teamId}-` prefixing — the same remap `id`/`channels.from`/`dependsOn`/
+  // `parent`/wake-targets already get. Without it an Edit-as-draft's human
+  // touchpoint edge (producer → human reviewer) is orphaned. Idempotent for a
+  // bundle that already carries role keys (roleKeyOf strips nothing).
+  const normHumans = remapHumanConsumesFrom(normalizeHumans(humans), (f) => roleKeyOf(f, teamId));
   const normHillClimb = normalizeHillClimb(hillClimb);
   const normWipLimit = normalizeWipLimit(wipLimit);
   const normAutoDispatch = normalizeAutoDispatch(autoDispatch);
@@ -2145,7 +2182,7 @@ module.exports = {
   outcomesWiringContext,
   // Direct agent hand-off (#2030)
   remapOutcomeWakeTargets,
-  emptyDraftBundle, roleKeyOf, VERSION, normalizeHumans, pruneOrphanHumanConsumes, normalizeHillClimb,
+  emptyDraftBundle, roleKeyOf, VERSION, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb,
   // Admission control (#2114)
   normalizeWipLimit,
   // Agent instance pools (#2246); poolConfigError also backs the live

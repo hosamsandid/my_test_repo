@@ -51,7 +51,15 @@ const internalAuth = require("./internal-auth");
 // `configured: false` (the default for a stack that has not opted in) keeps the
 // gate inert, so this release is behaviourally identical until an operator sets
 // INTERNAL_API_TOKEN.
-const internalAuthConfig = internalAuth.resolveInternalAuthConfig(process.env);
+//
+// The plugin-scope class (a broker's `POST /internal/plugin-event`) verifies
+// against the plugin registry's shared signing secret — a file created on first
+// use, not an env var — so it goes in as a LAZY getter: nothing is read at module
+// load, and a control-plane or agent caller never triggers the read at all.
+// (`pluginRuntime` is required further down; the getter runs at request time.)
+const internalAuthConfig = internalAuth.resolveInternalAuthConfig(process.env, {
+  pluginScopeSecret: () => pluginRuntime.signingSecret(),
+});
 
 // Shared in-memory dedup markers for the internal label fast-path (#1858). The
 // POST /internal/github-label-applied handler writes a marker per woken

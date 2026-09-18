@@ -26,6 +26,13 @@
 //        the first request, the symptom is a platform that 401s everything and a
 //        cause three env vars away.
 //
+//   AC5  The plugin-scope class (a broker's `POST /internal/plugin-event`) is
+//        verified against the plugin registry's signing secret — a FILE created
+//        on first use. It must reach the config as a lazy getter: evaluated at
+//        module load it would create `/workspace/plugins/_secret` as a side
+//        effect of `require`, and left out entirely the route is dead under
+//        `enforce` (the review finding that added the class).
+//
 // orchestrator.js cannot be `require`d in a unit test (it boots the container
 // runtime and reaches for Matrix), so this reads its source — the technique
 // `bp-removal-guard.test.js` and `agent-repositories-wiring.test.js` use.
@@ -145,10 +152,19 @@ const CHECKS = {
   // The config is a deployment property, read once — not per request, where a
   // half-applied env change could flip the gate mid-flight.
   "config-resolved-once": (code) => {
-    assert.match(code, /^const internalAuthConfig = internalAuth\.resolveInternalAuthConfig\(process\.env\);$/m,
+    assert.match(code, /^const internalAuthConfig = internalAuth\.resolveInternalAuthConfig\(process\.env, \{$/m,
       "the internal-auth config must be resolved once at module level");
     const occurrences = code.split("resolveInternalAuthConfig(").length - 1;
     assert.equal(occurrences, 1, "exactly one resolution site");
+  },
+
+  // AC5 — the plugin-scope secret is handed in as a getter, not a value.
+  "plugin-secret-lazy": (code) => {
+    const site = sliceFrom(code, "const internalAuthConfig = internalAuth.resolveInternalAuthConfig(", 300);
+    assert.match(site, /pluginScopeSecret: \(\) => pluginRuntime\.signingSecret\(\)/,
+      "the plugin-scope signing secret must be wired as a LAZY getter — a broker's "
+      + "POST /internal/plugin-event is anonymous (dead under enforce) without it, "
+      + "and reading the secret file at module load is a require-time side effect");
   },
 };
 
@@ -225,6 +241,19 @@ const MUTATIONS = [
       const tail = code.slice(at, at + 400).replace("process.exit(1);", "void 0;");
       return head + tail + code.slice(at + 400);
     },
+  },
+  {
+    name: "dropping the plugin-scope secret from the config",
+    check: "plugin-secret-lazy",
+    apply: (code) => code.replace(
+      "  pluginScopeSecret: () => pluginRuntime.signingSecret(),\n", ""),
+  },
+  {
+    name: "reading the plugin-scope secret eagerly at module load",
+    check: "plugin-secret-lazy",
+    apply: (code) => code.replace(
+      "pluginScopeSecret: () => pluginRuntime.signingSecret()",
+      "pluginScopeSecret: pluginRuntime.signingSecret()"),
   },
   {
     name: "re-resolving the config per request",

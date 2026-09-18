@@ -10,9 +10,9 @@
 //   node spike.js scopes
 //       list every scope that has a watch config (and its inbox depth)
 //
-//   node spike.js watch --scope <id> --project KAN [--status "Ready for Dev"] \
-//        --doorbell http://orchestrator:4003/hooks/<agentId>/<hookId> --secret <s>
-//       set (replace) a scope's watch list + doorbell
+//   node spike.js watch --scope <id> --project KAN [--status "Ready for Dev"]
+//       set (replace) a scope's watch list — the on-disk equivalent of the
+//       Team Admin's /admin UI action, for a session without a console
 //
 //   node spike.js status --scope <id>
 //       the watches, cursors (seen ids), inbox depth
@@ -84,14 +84,11 @@ if (cmd === 'scopes') {
   const scope = opt('scope') || die('need --scope <id>');
   const project = opt('project') || die('need --project <KEY>');
   const status = opt('status');
-  const doorbellUrl = opt('doorbell');
-  const secret = opt('secret');
   const conf = watchStore.setConfig(scope, {
     watches: [{ projectKey: project, ...(status ? { statusFilters: [status] } : {}) }],
-    doorbell: doorbellUrl ? { url: doorbellUrl, secret: secret || null } : null,
     setBy: 'spike',
   });
-  out({ ok: true, scope, watches: conf.watches, doorbell: conf.doorbell ? { url: conf.doorbell.url, hasSecret: !!conf.doorbell.secret } : null });
+  out({ ok: true, scope, watches: conf.watches });
 } else if (cmd === 'status') {
   const scope = opt('scope') || die('need --scope <id>');
   const conf = watchStore.loadConfig(scope);
@@ -100,7 +97,6 @@ if (cmd === 'scopes') {
     setBy: conf.setBy,
     setAt: conf.setAt,
     watches: conf.watches,
-    doorbell: conf.doorbell ? { url: conf.doorbell.url, hasSecret: !!conf.doorbell.secret } : null,
     cursors: conf.cursors,
     inbox: inboxStore.count(scope),
   });
@@ -139,7 +135,7 @@ if (cmd === 'scopes') {
   if (flag('reset')) {
     const conf = watchStore.loadConfig(scope);
     for (const k of Object.keys(conf.cursors)) delete conf.cursors[k];
-    watchStore.setConfig(scope, { watches: conf.watches, doorbell: conf.doorbell, setBy: conf.setBy });
+    watchStore.setConfig(scope, { watches: conf.watches, setBy: conf.setBy });
     process.stderr.write(`(reset cursors for ${scope})\n`);
   }
   const delivered = [];
@@ -246,5 +242,5 @@ if (cmd === 'scopes') {
     out(report);
   })().catch((e) => die(`probe failed: ${e.message}`));
 } else {
-  die('usage: node spike.js {scopes|watch|status|inbox|whoami-jira|projects|probe|raw|poke|debug-search} [--scope <id>] [--project KEY] [--jql "<query>"] [--status "..."] [--window MIN] [--doorbell URL] [--secret S] [--consume]');
+  die('usage: node spike.js {scopes|watch|status|inbox|whoami-jira|projects|probe|raw|poke|debug-search} [--scope <id>] [--project KEY] [--jql "<query>"] [--status "..."] [--window MIN] [--consume]');
 }

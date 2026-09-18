@@ -6,8 +6,8 @@
 // consumed by the agent. It is the source of truth for "what happened" — the
 // agent pulls it with `aee-jira inbox` after a wake, rather than trusting a
 // prompt that may be stale by the time the run starts (docs/jira-plugin-plan.md
-// §4A). It also makes the Phase-0 Option-A doorbell viable: the doorbell wake
-// carries no payload, so the inbox is where the payload lives.
+// §4A). The wake itself carries only a summary + the triggering event; the
+// inbox is where the full, ordered payload lives.
 //
 // One inbox per scope on `AEE_PLUGIN_STATE_DIR`. Bounded two ways:
 //   • TTL   — entries older than `ttlSeconds` (manifest `quota.ttlSeconds`, or a

@@ -45,7 +45,7 @@ poller's, in `broker-sdk/event-cursor.js` (`github-poller.js` is untouched).
 | `viewer-headers.js` | §4.8 signed-viewer verify (byte-identical copy) + the `/admin` → team-admin role gate |
 | `broker-policy.js` | write authorisation (D3): `authorizeWrite` → SDK `authorizeAction` against the manifest `policy`; `requiresApproval` wired-but-empty |
 | `ui/` | the served `/` route (Board tab: issues / watch-health cards / inbox; Activity tab: the retained log) + `/admin` route (watch config with per-project status chips, team-admin). Dependency-free vanilla JS, `--eb-*` tokens, follows the console theme |
-| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials}`, `/cli/*` (`whoami`/`inbox`/`projects`/`list`/`show` + `comment`/`transition` POST), `/ui/*` (incl. `/ui/api/{watches,activity,admin/watch,admin/retry}`), the Phase-0 `/internal/spike-config` seam |
+| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials}`, `/cli/*` (`whoami`/`inbox`/`projects`/`list`/`show` + `comment`/`transition` POST), `/ui/*` (incl. `/ui/api/{watches,activity,admin/watch,admin/retry}`) |
 
 
 ## Credentials
@@ -104,6 +104,9 @@ These read the Jira credential from a gitignored `broker/.env.local`
 (`KEY=VALUE`) — `server.js` itself no longer reads that file, only the pushed
 per-scope map.
 
-The Phase-0 `doorbell` field and `PUT /internal/spike-config` remain wired so
-`spike.js watch` can still stand up an end-to-end path without a real grant, but
-the real delivery path is the `plugin-event` wake above.
+`spike.js watch --scope <teamId> --project KAN [--status …]` sets a scope's
+watch list directly in the sidecar's state — the on-disk equivalent of the Team
+Admin's `/admin` action. There is no HTTP route for it: the Phase-0
+`PUT /internal/spike-config` seam (any scope token could reconfigure its own
+team's watches, bypassing the Team-Admin gate) and its `doorbell` field are
+gone; delivery is only ever the `plugin-event` wake above.

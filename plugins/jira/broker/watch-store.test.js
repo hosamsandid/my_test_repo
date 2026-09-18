@@ -41,21 +41,22 @@ test('loadConfig: an untouched scope is an empty config, never a 404', () => {
   const s = tmpStore();
   const cfg = s.loadConfig('team-1');
   assert.deepEqual(cfg.watches, []);
-  assert.equal(cfg.doorbell, null);
+  assert.equal('doorbell' in cfg, false); // the Phase-0 doorbell field is gone
 });
 
-test('setConfig: records setBy/setAt and round-trips watches + doorbell; preserves cursors', () => {
+test('setConfig: records setBy/setAt and round-trips watches; preserves cursors; ignores a legacy doorbell', () => {
   const s = tmpStore();
   s.saveCursor('team-1', 'https://acme.atlassian.net::ENG', { seen: ['ENG-1:1'], lastPolledAt: 'x' });
   const cfg = s.setConfig('team-1', {
     watches: [{ projectKey: 'ENG', statusFilter: 'Ready for Dev' }],
-    doorbell: { url: 'http://host:4003/hooks/a/h', secret: 's3cr3t' },
+    doorbell: { url: 'http://host:4003/hooks/a/h', secret: 's3cr3t' }, // Phase-0 leftover — dropped, never persisted
     setBy: 'alice@example.com',
   });
   assert.equal(cfg.setBy, 'alice@example.com');
   assert.ok(cfg.setAt);
   assert.equal(cfg.watches.length, 1);
-  assert.equal(cfg.doorbell.url, 'http://host:4003/hooks/a/h');
+  assert.equal('doorbell' in cfg, false);
+  assert.equal('doorbell' in s.loadConfig('team-1'), false);
   // cursor survived the config rewrite
   assert.deepEqual(s.getCursor('team-1', 'https://acme.atlassian.net::ENG').seen, ['ENG-1:1']);
 });

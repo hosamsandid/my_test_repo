@@ -1,29 +1,25 @@
 'use strict';
 
-// ─── jira broker sidecar (plugin) — Phase 0 spike ───────────────────────────
+// ─── jira broker sidecar (plugin) ───────────────────────────────────────────
 //
 // Built ON the Broker SDK (broker-sdk/), like every reference plugin broker.
 // This file is wiring; every decision that is pure lives in a sibling module
 // (jira-client.js, event-extract.js, watch-store.js, inbox-store.js, poller.js)
 // and the shared primitives come from the SDK.
 //
-// PHASE 0 (docs/jira-plugin-plan.md §8) proves the JQL/changelog/dedup core
-// against a real Jira Cloud sandbox with ZERO platform change, via Option A —
-// the "content-free doorbell":
-//
-//   • The poll loop runs inside this sidecar. On a fresh status change it
-//     appends the event to the per-scope inbox and rings a doorbell: an HTTP
-//     POST to the agent's existing `http` webhook trigger
-//     (`POST /hooks/:agentId/:hookId`, `X-Hook-Secret`), which the operator
-//     wires by hand and registers here with `PUT /internal/spike-config`.
-//   • The wake carries no Jira payload. The agent PULLS it: `aee-jira inbox`
+//   • The poll loop runs inside this sidecar (poller.js). On a fresh status
+//     change it appends the event to the per-scope inbox and wakes the granted
+//     agents through the generic `POST /internal/plugin-event` channel (Jira
+//     plan §4B) — `deliver()` below. The agent can also PULL: `aee-jira inbox`
 //     drains the per-scope queue the broker holds.
-//
-// Credentials in Phase 0 come from the sidecar env (JIRA_SITE_URL / JIRA_EMAIL
-// / JIRA_API_TOKEN, or a gitignored broker/.env.local) — one install-wide
-// credential, exactly as test-mgmt-broker reads TESTMGMT_API_TOKEN today. Phase
-// 1 replaces this with the real generic per-scope credential store (§5); Phase
-// 2 replaces the doorbell with a generic `plugin-event` wake (§4B).
+//   • Credentials are the orchestrator-pushed per-scope map (`PUT /internal/
+//     scope-credentials`, §5) — never env, never a file in the image.
+//   • Watch config (which projects / which transitions wake whom) is set by a
+//     Team Admin through the `/admin` UI route (`PUT /ui/api/admin/watch`),
+//     role-gated on the signed viewer identity. There is deliberately NO
+//     scope-token-authed route for it: a granted agent's token must not be
+//     able to reconfigure its own team's watches (the Phase-0 `spike-config`
+//     seam that once allowed exactly that is gone).
 
 const http = require('http');
 const fs = require('fs');
@@ -116,8 +112,7 @@ function resolveCredential(scopeId) {
 // The broker→orchestrator wake channel. A minted scope token carries
 // {pluginId: 'jira', scopeId}; the orchestrator verifies it, resolves the scope
 // to its team, and fans out to every granted agent with a matching
-// `plugin-event` trigger. No doorbell, no `http` trigger to hand-wire — the
-// Phase-0 doorbell config is left in place only for the spike (`spike-config`).
+// `plugin-event` trigger. No `http` trigger to hand-wire.
 function orchestratorUrl() {
   return (process.env.AEE_ORCHESTRATOR_URL || 'http://orchestrator:4002').replace(/\/+$/, '');
 }
@@ -137,7 +132,7 @@ const DELIVER_TIMEOUT_MS = 15_000;
 async function deliver({ scopeId, kind, events }) {
   if (kind === 'throttle-warning') {
     // Nothing to wake an agent about — the throttle already suppressed the
-    // events. Record it and move on (the doorbell path posted these too).
+    // events. Record it and move on.
     writeAudit(scopeId, scopeId, 'wake', 'throttled', kind);
     return;
   }
@@ -448,22 +443,7 @@ async function handleUi(req, res, uiPath) {
   });
 }
 
-// ── Phase-0 spike seam: set a scope's watch + doorbell by hand ──────────────
-// Bearer-authed with a minted scope token (the same auth the orchestrator's
-// pushes use). Phase 4 replaces this with the /admin UI route + /api/mutate.
-async function handleSpikeConfig(req, res) {
-  const v = verifyScopeToken(req, SIGNING_SECRET);
-  if (!v || v.pluginId !== PLUGIN_ID) return sendJson(res, 401, { error: 'unauthorized' });
-  const body = parseJson(await readBody(req));
-  const conf = watchStore.setConfig(v.scopeId, {
-    watches: body.watches,
-    doorbell: body.doorbell,
-    setBy: body.setBy || 'spike',
-  });
-  writeAudit(v.scopeId, body.setBy || 'spike', 'spike-config', 'ok', `watches:${conf.watches.length}`);
-  return sendJson(res, 200, { ok: true, scopeId: v.scopeId, watches: conf.watches, doorbell: conf.doorbell });
-}
-
+    // events. Record it and move on.
 const handleHealth = healthEndpoint(async () => ({
   scopes: watchStore.listScopes().length,
   scopesWithCredential: [...scopeCredentials.keys()].filter((sid) => !!resolveCredential(sid)).length,
@@ -500,9 +480,9 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && urlPath === '/healthz') return void (await handleHealth(req, res));
   if (req.method === 'POST' && urlPath === '/internal/teardown-scope') return void (await handleTeardown(req, res));
   if (req.method === 'PUT' && urlPath === '/internal/scope-credentials') return void (await handleScopeCredentials(req, res));
-  if (req.method === 'PUT' && urlPath === '/internal/spike-config') return void (await handleSpikeConfig(req, res));
 
-  // A read-only status endpoint for the spike operator: what the poller sees.
+  // A read-only status endpoint for an operator: what the poller sees for the
+  // token's own scope.
   if (req.method === 'GET' && urlPath === '/internal/status') {
     const v = verifyScopeToken(req, SIGNING_SECRET);
     if (!v || v.pluginId !== PLUGIN_ID) return void sendJson(res, 401, { error: 'unauthorized' });
@@ -512,7 +492,6 @@ async function handleRequest(req, res) {
       scopeId: v.scopeId,
       watches: health.watches,
       health: health.summary,
-      doorbell: conf.doorbell ? { url: conf.doorbell.url, hasSecret: !!conf.doorbell.secret } : null,
       cursors: conf.cursors,
       inbox: inboxStore.count(v.scopeId),
       activity: activityStore.count(v.scopeId),

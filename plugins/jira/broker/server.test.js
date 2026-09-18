@@ -59,19 +59,18 @@ test('cli endpoints require a valid jira scope token', async () => {
   } finally { srv.close(); }
 });
 
-test('spike-config sets a watch + doorbell for the token\'s scope only', async () => {
+test('the Phase-0 spike-config seam is gone — a scope token cannot reconfigure watches over HTTP', async () => {
+  // Watch config is a Team-Admin action through the signed /admin UI route. A
+  // granted agent's token (or a prompt-injected run holding it) must not be
+  // able to rewrite which projects / transitions wake its team.
   const srv = await listen();
   try {
     const r = await call(srv, 'PUT', '/internal/spike-config', {
       token: TOKEN,
-      body: { watches: [{ projectKey: 'ENG', statusFilter: 'Ready for Dev' }], doorbell: { url: 'http://host:4003/hooks/a/h', secret: 's' }, setBy: 'alice' },
+      body: { watches: [{ projectKey: 'ENG', statusFilter: 'Ready for Dev' }] },
     });
-    assert.equal(r.status, 200);
-    assert.equal(r.body.watches[0].projectKey, 'ENG');
-    // team-2's config is untouched
-    assert.deepEqual(broker.watchStore.loadConfig('team-2').watches, []);
-    // and team-1's is persisted with attribution
-    assert.equal(broker.watchStore.loadConfig('team-1').setBy, 'alice');
+    assert.equal(r.status, 404);
+    assert.deepEqual(broker.watchStore.loadConfig('team-1').watches, []);
   } finally { srv.close(); }
 });
 

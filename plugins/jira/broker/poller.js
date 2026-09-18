@@ -20,9 +20,9 @@
 //      seen-ids alone cannot tell an old transition from a new one), gate by
 //      the watch's `statusFilter`, collapse per-issue bursts, apply the
 //      hour-scoped throttle.
-//   6. hand every surviving event to `deliver()` — the transport seam. Phase 0
-//      passes a doorbell+inbox deliver; Phase 2 swaps in `POST /internal/
-//      plugin-event`. The poller does not know or care which.
+//   6. hand every surviving event to `deliver()` — the transport seam. The
+//      broker passes the `POST /internal/plugin-event` wake (server.js); the
+//      poller does not know or care what the transport is.
 //
 // The SDK primitives (`selectFreshEvents`, `planBurstHandoffs`,
 // `checkAndIncThrottle`, `computeBackoffDelayMs`) are a copy of the GitHub

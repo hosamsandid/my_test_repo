@@ -10,8 +10,8 @@
 // This replaces #1539's `env.jiraProjects[]` on the Working Environment *and*
 // the `jira-event` trigger's project/status fields (docs/jira-plugin-plan.md
 // §3, §6.2). The config is edited by a Team Admin in the plugin's `/admin` UI
-// route (Phase 4); for the Phase-0 spike it is seeded through the broker's
-// `PUT /internal/spike-config` endpoint or the `JIRA_SPIKE_CONFIG` env var.
+// route (role-gated on the signed viewer identity) — or, for a hands-on debug
+// session inside the sidecar, by `spike.js watch` editing this store directly.
 //
 // A watch is:
 //   { projectKey, statusFilters?: string[], jql?, wake: { agentIds? | "all-granted" } }
@@ -46,7 +46,7 @@ function assertScope(scopeId) {
 }
 
 function emptyConfig(scopeId) {
-  return { scopeId, watches: [], doorbell: null, cursors: {}, setBy: null, setAt: null };
+  return { scopeId, watches: [], cursors: {}, setBy: null, setAt: null };
 }
 
 // Normalise one watch entry; drop anything without a projectKey.
@@ -114,7 +114,6 @@ class WatchStore {
     }
     const cfg = emptyConfig(scopeId);
     cfg.watches = Array.isArray(parsed.watches) ? parsed.watches.map(normalizeWatch).filter(Boolean) : [];
-    cfg.doorbell = parsed.doorbell && parsed.doorbell.url ? { url: String(parsed.doorbell.url), secret: parsed.doorbell.secret ? String(parsed.doorbell.secret) : null } : null;
     cfg.cursors = parsed.cursors && typeof parsed.cursors === 'object' ? parsed.cursors : {};
     cfg.setBy = parsed.setBy ? String(parsed.setBy) : null;
     cfg.setAt = parsed.setAt ? String(parsed.setAt) : null;
@@ -128,7 +127,7 @@ class WatchStore {
     fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, file);
     // `mode:` on writeFileSync is subject to umask; re-assert 0600 (the file
-    // holds the poll cursor and, for a doorbell, a secret).
+    // holds the poll cursor).
     try { fs.chmodSync(file, 0o600); } catch { /* best effort */ }
   }
 
@@ -137,19 +136,14 @@ class WatchStore {
     return this._read(scopeId);
   }
 
-  // Replace a scope's watch list + doorbell target, recording who set it and
-  // when (a Jira token carries a named human's site-wide permissions — §D2).
-  // `setBy` is the console viewer's subject (or "spike" for the Phase-0 seam).
+  // Replace a scope's watch list, recording who set it and when (a Jira token
+  // carries a named human's site-wide permissions — §D2). `setBy` is the
+  // console viewer's subject (or "spike" for the in-sidecar debug helper).
   // The cursor map is preserved so re-saving the config never re-baselines.
-  setConfig(scopeId, { watches, doorbell, setBy } = {}) {
+  setConfig(scopeId, { watches, setBy } = {}) {
     assertScope(scopeId);
     const cfg = this._read(scopeId);
     if (watches !== undefined) cfg.watches = (Array.isArray(watches) ? watches : []).map(normalizeWatch).filter(Boolean);
-    if (doorbell !== undefined) {
-      cfg.doorbell = doorbell && doorbell.url
-        ? { url: String(doorbell.url), secret: doorbell.secret ? String(doorbell.secret) : null }
-        : null;
-    }
     cfg.setBy = setBy ? String(setBy) : cfg.setBy;
     cfg.setAt = this.now();
     this._writeAtomic(scopeId, cfg);

@@ -11,6 +11,22 @@
 //
 //   AC2/AC3 (Task 7): granted plugin CLIs are refreshed from the registry on
 //        every reconcile, by comparing a digest of both files.
+//
+//   AC4  `refreshGrantedPluginClis` must resolve the agent state dir
+//        (`resolveAgentStateDir`) BEFORE joining the plan's relative
+//        `.agent-studio/...` paths onto the agent dir. Without it, an upgraded
+//        agent still on the legacy `.aee/` sees its CLI as "missing", the
+//        refresh creates a bare `.agent-studio/bin/`, and from then on every
+//        reader resolves the NEW dir — orphaning `.aee/` (token config,
+//        seeded-skills.json, seeded-plugins.json, artifacts) with no error.
+//
+//   AC5  The plugin-event fan-out scans every agent config. `loadAgentConfig`
+//        throws on invalid JSON, so one malformed `config.json` anywhere must
+//        be SKIPPED — unguarded, it 500s every plugin event for every team,
+//        and the broker's cursor has already advanced, so the events are lost.
+//
+// AC4/AC5 are written as named predicates with mutation proofs (the
+// internal-auth-wiring.test.js technique), so each is demonstrably load-bearing.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -58,3 +74,79 @@ test("AC3: the refresh decides by digest on BOTH files and reseeds .agent-studio
   assert.match(fn, /reseedAgent\(id, \["\.agent-studio"\]\)/);
   assert.match(SRC, /planCliRefresh \} = require\("\.\/plugin-sync"\)/);
 });
+
+// ── AC4 / AC5 — predicates + mutation proofs ─────────────────────────────────
+
+function runCheck(check, code) {
+  try { check(code); return null; } catch (err) { return err.message; }
+}
+
+function sliceFrom(code, needle, length) {
+  const at = code.indexOf(needle);
+  assert.notEqual(at, -1, `anchor not found: ${needle}`);
+  return code.slice(at, at + length);
+}
+
+const CHECKS = {
+  "AC4: cli-refresh-resolves-state-dir": (code) => {
+    const fn = sliceFrom(code, "async function refreshGrantedPluginClis() {", 3000);
+    const dirAt = fn.indexOf("const dir = agentDir(id);");
+    assert.notEqual(dirAt, -1, "the per-agent dir assignment moved — re-anchor this guard");
+    const resolveAt = fn.indexOf("resolveAgentStateDir(dir);", dirAt);
+    const planAt = fn.indexOf("planCliRefresh({", dirAt);
+    assert.notEqual(resolveAt, -1,
+      "refreshGrantedPluginClis must call resolveAgentStateDir(dir) — writing "
+      + ".agent-studio/bin directly orphans an upgraded agent's legacy .aee/ state");
+    assert.ok(resolveAt < planAt, "resolveAgentStateDir must run BEFORE the plan reads the workspace digest");
+  },
+
+  "AC5: plugin-event-skips-malformed-config": (code) => {
+    const handler = sliceFrom(code, "req.url === '/internal/plugin-event'", 4000);
+    const mapAt = handler.indexOf("const agents = listAgentIds().map(");
+    assert.notEqual(mapAt, -1, "the plugin-event agent scan moved — re-anchor this guard");
+    const scan = handler.slice(mapAt, mapAt + 700);
+    assert.match(scan, /try \{ cfg = loadAgentConfig\(aid\); \} catch \{ cfg = null; \}/,
+      "the plugin-event fan-out must guard loadAgentConfig — one malformed config.json "
+      + "must not 500 every plugin event for every team");
+  },
+};
+
+for (const [name, check] of Object.entries(CHECKS)) {
+  test(`wiring: ${name}`, () => {
+    const failure = runCheck(check, SRC);
+    assert.equal(failure, null, failure || "");
+  });
+}
+
+const MUTATIONS = [
+  {
+    name: "dropping resolveAgentStateDir from the CLI refresh",
+    check: "AC4: cli-refresh-resolves-state-dir",
+    apply: (code) => {
+      const at = code.indexOf("async function refreshGrantedPluginClis() {");
+      const head = code.slice(0, at);
+      const tail = code.slice(at, at + 3000).replace(/^\s*resolveAgentStateDir\(dir\);\n/m, "");
+      return head + tail + code.slice(at + 3000);
+    },
+  },
+  {
+    name: "un-guarding loadAgentConfig in the plugin-event scan",
+    check: "AC5: plugin-event-skips-malformed-config",
+    apply: (code) => {
+      const at = code.indexOf("req.url === '/internal/plugin-event'");
+      const head = code.slice(0, at);
+      const tail = code.slice(at, at + 4000).replace(
+        "try { cfg = loadAgentConfig(aid); } catch { cfg = null; }", "cfg = loadAgentConfig(aid);");
+      return head + tail + code.slice(at + 4000);
+    },
+  },
+];
+
+for (const mutation of MUTATIONS) {
+  test(`mutation proof: ${mutation.name} trips ${mutation.check}`, () => {
+    const mutated = mutation.apply(SRC);
+    assert.notEqual(mutated, SRC, "the sabotage matched nothing — this proof would be vacuous");
+    const failure = runCheck(CHECKS[mutation.check], mutated);
+    assert.ok(failure, `${mutation.check} did NOT fire on: ${mutation.name}`);
+  });
+}

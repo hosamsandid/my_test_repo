@@ -52,6 +52,30 @@ test('grantedTeamScopeIds: only teams with the grant; tokenless stub excluded', 
   assert.deepEqual(wiring.grantedTeamScopeIds('jira'), ['team-1']);
 });
 
+test('grantedTeamScopeIds: one malformed agent config is skipped, not a throw for every caller', () => {
+  // `loadAgentConfig` throws on invalid JSON. Unguarded, one corrupt
+  // `config.json` anywhere in the installation 500s the credential routes AND
+  // every plugin-event delivery (the same scan) — with the broker's cursor
+  // already advanced, those events are lost.
+  const h = harness();
+  const configs = {
+    'team-1': { id: 'team-1', role: 'team', token: 't', plugins: [{ id: 'jira', scopeGranularity: 'team' }] },
+    'broken': null,
+    'team-3': { id: 'team-3', role: 'team', token: 't', plugins: [{ id: 'jira', scopeGranularity: 'team' }] },
+  };
+  const wiring = createPluginCredentialWiring({
+    listAgentIds: () => Object.keys(configs),
+    loadAgentConfig: (id) => { if (id === 'broken') throw new SyntaxError('Unexpected token } in JSON'); return configs[id]; },
+    pluginRegistry: { installedManifests: () => ({}), readPluginManifest: () => ({ ok: false }) },
+    pluginRuntime: { pushScopeCredentials: async () => {} },
+    effectivePlugins: (cfg) => cfg.plugins || [],
+    pluginGrantFor: (grants, pid) => (grants || []).find((g) => g.id === pid) || null,
+    resolveScopeId: (cfg) => cfg.id,
+    credentialStore: h.credentialStore,
+  });
+  assert.deepEqual(wiring.grantedTeamScopeIds('jira'), ['team-1', 'team-3']);
+});
+
 test('pushDeclaredScopeCredentials: pushes jira only (github-issues skipped); every granted scope gets an entry', async () => {
   const { wiring, credentialStore, pushes } = harness();
   credentialStore.write('jira', 'team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' }, JIRA_CREDS, { setBy: 'x' });

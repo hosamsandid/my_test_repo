@@ -3713,6 +3713,12 @@ async function refreshGrantedPluginClis() {
     try { grant = effectivePlugins(cfg, loadAgentConfig); } catch { grant = []; }
     if (!grant.length) continue;
     const dir = agentDir(id);
+    // Migrate a legacy `.aee/` to `.agent-studio/` BEFORE the plan's relative
+    // paths are read or written (the `_syncPluginIntoWorkspace` precedent,
+    // #1549): on an un-migrated agent the digest would see the CLI as
+    // "missing", create a bare `.agent-studio/bin/`, and every later reader
+    // would resolve the new dir — orphaning the legacy state silently.
+    resolveAgentStateDir(dir);
     const plan = planCliRefresh({
       grant, manifests,
       registryDigest: registryDigest,
@@ -15621,7 +15627,10 @@ async function main() {
           // touching `.triggers`), so defer the `triggers.json` read — one fs
           // hit per agent — to those, not every agent in the installation.
           const agents = listAgentIds().map((aid) => {
-            const cfg = loadAgentConfig(aid);
+            // A malformed config.json must skip THAT agent, not 500 this event
+            // for every team — the broker's cursor has already advanced.
+            let cfg = null;
+            try { cfg = loadAgentConfig(aid); } catch { cfg = null; }
             let grant = null;
             try { grant = cfg && cfg.token ? pluginGrantFor(effectivePlugins(cfg, loadAgentConfig), pluginId) : null; } catch { grant = null; }
             const inScope = !!(grant && resolveScopeId(cfg, grant.scopeGranularity) === scopeId);

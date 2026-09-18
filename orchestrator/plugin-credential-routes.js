@@ -38,7 +38,8 @@ function createPluginCredentialWiring(deps) {
     let ids = [];
     try { ids = listAgentIds(); } catch { ids = []; }
     for (const id of ids) {
-      const cfg = loadAgentConfig(id);
+      let cfg = null;
+      try { cfg = loadAgentConfig(id); } catch { cfg = null; } // malformed config.json → skip, never 500
       if (!cfg || !cfg.token) continue; // a stub has no running surface
       let grant = null;
       try { grant = pluginGrantFor(effectivePlugins(cfg, loadAgentConfig), pluginId); } catch { grant = null; }

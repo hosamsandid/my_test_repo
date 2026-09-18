@@ -145,22 +145,87 @@ function matchesPluginEventTrigger(trigger, { pluginId, event, payload } = {}) {
   return matchesPayloadFilter(trigger.payloadFilter, payload);
 }
 
-// Resolve which agents to wake. `agents` is `[{agentId, inScope, granted,
-// triggers}]` — the orchestrator resolves `inScope` (resolveScopeId ===
-// scopeId) and `granted` (effectivePlugins includes pluginId) per agent, and
-// this pure core does the trigger match. Returns `[{agentId, triggerId}]` (the
-// first matching trigger per agent — a producer fires one event, the consumer
-// runs once).
-function resolvePluginEventTargets({ pluginId, event, payload = null }, agents) {
+// ── per-trigger digest projection ─────────────────────────────────────────
+// A burst digest matches a trigger when ANY folded event matches — but an agent
+// whose filter selects 3 of 40 transitions must not be handed the other 37 to
+// sort. Narrow the digest to the events THIS trigger matches before enqueuing.
+// Generic: the platform knows only the `{kind:'digest', events[], count?}`
+// shape it already matches on, and reuses the same field matcher.
+//
+// Returns `{ payload, projected }`:
+//   • no filter, or not a digest, or nothing to remove → the input payload
+//     (same reference) and `projected: null`. "Nothing to remove" matters: a
+//     broker may inline only the first N of `count` events, and that `count`
+//     must survive when the projection would change nothing.
+//   • otherwise a NEW digest with `events` = the matching ones, `count` =
+//     their number, every other top-level field copied through, and
+//     `projected: { kept, total }` where `total` is the source's `count` when
+//     it is an integer ≥ the inline length (the honest "how many really"),
+//     else the inline length.
+function projectPayloadForTrigger(trigger, payload) {
+  const passthrough = { payload, projected: null };
+  const f = normalizePayloadFilter(trigger && trigger.payloadFilter);
+  if (!f) return passthrough;
+  if (!payload || typeof payload !== 'object' || payload.kind !== 'digest' || !Array.isArray(payload.events)) {
+    return passthrough;
+  }
+  const kept = payload.events.filter((e) => payloadFieldsMatch(f, e));
+  if (kept.length === payload.events.length) return passthrough;
+  const inline = payload.events.length;
+  const total = Number.isInteger(payload.count) && payload.count >= inline ? payload.count : inline;
+  return {
+    payload: { ...payload, count: kept.length, events: kept },
+    projected: { kept: kept.length, total },
+  };
+}
+
+// The summary a projected target sees. The broker's text is its own vocabulary
+// (the platform cannot rewrite it), but the platform CAN say how many of the
+// folded events are this agent's. Re-clamped: the suffix may push a
+// SUMMARY_MAX-long summary over the limit.
+function projectedSummary(summary, projected) {
+  if (!projected) return summary;
+  const tail = `${projected.kept} of ${projected.total} match this trigger`;
+  return clampSummary(summary ? `${summary} — ${tail}` : `${projected.kept} of ${projected.total} events match this trigger`);
+}
+
+// The shared core of the two resolvers below: `[{agentId, trigger}]` for every
+// in-scope granted agent whose first matching `plugin-event` trigger listens
+// for this event (a producer fires one event, the consumer runs once).
+function matchTargets({ pluginId, event, payload = null }, agents) {
   const out = [];
   for (const a of Array.isArray(agents) ? agents : []) {
     if (!a || typeof a.agentId !== 'string' || !a.agentId) continue;
     if (!a.inScope || !a.granted) continue;
     const match = (Array.isArray(a.triggers) ? a.triggers : [])
       .find((t) => matchesPluginEventTrigger(t, { pluginId, event, payload }));
-    if (match) out.push({ agentId: a.agentId, triggerId: match.id || null });
+    if (match) out.push({ agentId: a.agentId, trigger: match });
   }
   return out;
+}
+
+// Resolve which agents to wake. `agents` is `[{agentId, inScope, granted,
+// triggers}]` — the orchestrator resolves `inScope` (resolveScopeId ===
+// scopeId) and `granted` (effectivePlugins includes pluginId) per agent, and
+// this pure core does the trigger match. Returns `[{agentId, triggerId}]`.
+function resolvePluginEventTargets(req, agents) {
+  return matchTargets(req, agents).map(({ agentId, trigger }) => ({ agentId, triggerId: trigger.id || null }));
+}
+
+// The same targets, each with the payload + summary IT should be handed: a
+// digest narrowed to that trigger's own events (`projectPayloadForTrigger`),
+// the summary suffixed when narrowed. This is what the handler enqueues; the
+// id-only `resolvePluginEventTargets` remains for the response/log rows.
+function resolvePluginEventDeliveries({ pluginId, event, payload = null, summary = '' }, agents) {
+  return matchTargets({ pluginId, event, payload }, agents).map(({ agentId, trigger }) => {
+    const p = projectPayloadForTrigger(trigger, payload);
+    return {
+      agentId,
+      triggerId: trigger.id || null,
+      payload: p.payload,
+      summary: projectedSummary(summary, p.projected),
+    };
+  });
 }
 
 // The pending-queue entry. `receivedAt`/`id` are stamped by `enqueuePending`.
@@ -208,4 +273,6 @@ module.exports = {
   buildPluginEventLogEvent,
   normalizePayloadFilter,
   matchesPayloadFilter,
+  projectPayloadForTrigger,
+  resolvePluginEventDeliveries,
 };

@@ -15,6 +15,8 @@ const {
   buildPluginEventLogEvent,
   normalizePayloadFilter,
   matchesPayloadFilter,
+  projectPayloadForTrigger,
+  resolvePluginEventDeliveries,
 } = require('./plugin-event');
 
 // ── validatePluginEventRequest ─────────────────────────────────────────────
@@ -154,4 +156,102 @@ test('log event: plugin actor, no repo, event in the action slot', () => {
   assert.equal(e.repo.name, null);
   assert.equal(e.payload.action, 'status_changed');
   assert.equal(e.id, 'E-1');
+});
+
+// ── projectPayloadForTrigger ───────────────────────────────────────────────
+
+const DIGEST = (events, extra = {}) => ({ kind: 'digest', count: events.length, events, ...extra });
+const ev = (issueKey, toStatus) => ({ id: `${issueKey}:1`, issueKey, toStatus });
+
+test('project: no payloadFilter → payload passes through untouched (same reference), projected null', () => {
+  const d = DIGEST([ev('KAN-1', 'Ready for Dev'), ev('KAN-2', 'Done')]);
+  const r = projectPayloadForTrigger(T(), d);
+  assert.equal(r.payload, d);
+  assert.equal(r.projected, null);
+  // a non-digest payload is never projected either, filter or not
+  const single = { id: 'KAN-9:1', toStatus: 'Ready for Dev' };
+  assert.equal(projectPayloadForTrigger(T({ payloadFilter: { toStatus: 'Ready for Dev' } }), single).payload, single);
+  assert.equal(projectPayloadForTrigger(T(), null).payload, null);
+});
+
+test('project: a digest is narrowed to the events matching THIS trigger; count recomputed; other fields copied', () => {
+  const d = DIGEST(
+    [ev('KAN-1', 'Ready for Refinement'), ev('KAN-2', 'Ready for Dev'), ev('KAN-3', 'Ready for Dev'), ev('KAN-4', 'Done')],
+    { projectKey: 'KAN', truncated: true },
+  );
+  const r = projectPayloadForTrigger(T({ payloadFilter: { toStatus: 'Ready for Dev' } }), d);
+  assert.deepEqual(r.payload, {
+    kind: 'digest', projectKey: 'KAN', truncated: true, count: 2,
+    events: [ev('KAN-2', 'Ready for Dev'), ev('KAN-3', 'Ready for Dev')],
+  });
+  assert.deepEqual(r.projected, { kept: 2, total: 4 });
+  // the source digest is not mutated
+  assert.equal(d.events.length, 4);
+  assert.equal(d.count, 4);
+});
+
+test('project: when every inline event matches, the payload passes through byte-identical (count untouched)', () => {
+  // The broker inlines the first 20 of 25 — `count: 25` must survive so the
+  // "there are more" signal is not destroyed by a projection that removed nothing.
+  const d = DIGEST(Array.from({ length: 20 }, (_, i) => ev(`KAN-${i}`, 'Ready for Dev')), { count: 25, truncated: true });
+  const r = projectPayloadForTrigger(T({ payloadFilter: { toStatus: 'Ready for Dev' } }), d);
+  assert.equal(r.payload, d);
+  assert.equal(r.projected, null);
+});
+
+test('project: total is the digest count when it is an integer ≥ inline length, else the inline length', () => {
+  const events = [ev('KAN-1', 'Ready for Dev'), ev('KAN-2', 'Done')];
+  const t = T({ payloadFilter: { toStatus: 'Ready for Dev' } });
+  assert.deepEqual(projectPayloadForTrigger(t, DIGEST(events, { count: 40 })).projected, { kept: 1, total: 40 });
+  assert.deepEqual(projectPayloadForTrigger(t, DIGEST(events, { count: 'x' })).projected, { kept: 1, total: 2 });
+  assert.deepEqual(projectPayloadForTrigger(t, DIGEST(events, { count: 1 })).projected, { kept: 1, total: 2 });
+});
+
+// ── resolvePluginEventDeliveries ───────────────────────────────────────────
+
+test('deliveries: same targets as resolvePluginEventTargets, each with its own projected payload + summary', () => {
+  const d = DIGEST(
+    [ev('KAN-1', 'Ready for Refinement'), ev('KAN-2', 'Ready for Dev'), ev('KAN-3', 'Ready for Dev'), ev('KAN-4', 'Ready for Dev')],
+    { projectKey: 'KAN' },
+  );
+  const agents = [
+    { agentId: 'ba', inScope: true, granted: true, triggers: [T({ id: 'ba-t', payloadFilter: { toStatus: 'Ready for Refinement' } })] },
+    { agentId: 'dev', inScope: true, granted: true, triggers: [T({ id: 'dev-t', payloadFilter: { toStatus: 'Ready for Dev' } })] },
+    { agentId: 'any', inScope: true, granted: true, triggers: [T({ id: 'any-t' })] },
+    { agentId: 'qa', inScope: true, granted: true, triggers: [T({ id: 'qa-t', payloadFilter: { toStatus: 'In Review' } })] },
+    { agentId: 'other-team', inScope: false, granted: true, triggers: [T({ id: 'x' })] },
+  ];
+  const req = { pluginId: 'jira', event: 'status_changed', payload: d, summary: '4 status changes in KAN' };
+  const out = resolvePluginEventDeliveries(req, agents);
+  assert.deepEqual(out.map(({ agentId, triggerId }) => ({ agentId, triggerId })), resolvePluginEventTargets(req, agents));
+  assert.deepEqual(out.map((o) => o.agentId), ['ba', 'dev', 'any']);
+
+  const ba = out[0], dev = out[1], any = out[2];
+  assert.deepEqual(ba.payload.events.map((e) => e.issueKey), ['KAN-1']);
+  assert.equal(ba.payload.count, 1);
+  assert.equal(ba.summary, '4 status changes in KAN — 1 of 4 match this trigger');
+  assert.deepEqual(dev.payload.events.map((e) => e.issueKey), ['KAN-2', 'KAN-3', 'KAN-4']);
+  assert.equal(dev.summary, '4 status changes in KAN — 3 of 4 match this trigger');
+  // no filter → whole digest, original summary, same reference
+  assert.equal(any.payload, d);
+  assert.equal(any.summary, '4 status changes in KAN');
+});
+
+test('deliveries: a single (non-digest) event keeps payload + summary as sent', () => {
+  const payload = { id: 'KAN-2:1', toStatus: 'Ready for Dev' };
+  const agents = [{ agentId: 'dev', inScope: true, granted: true, triggers: [T({ id: 'dev-t', payloadFilter: { toStatus: 'Ready for Dev' } })] }];
+  const [o] = resolvePluginEventDeliveries({ pluginId: 'jira', event: 'status_changed', payload, summary: 'KAN-2: To Do → Ready for Dev' }, agents);
+  assert.equal(o.payload, payload);
+  assert.equal(o.summary, 'KAN-2: To Do → Ready for Dev');
+});
+
+test('deliveries: an empty broker summary gets a standalone projected line; the suffix is re-clamped', () => {
+  const d = DIGEST([ev('KAN-1', 'Ready for Dev'), ev('KAN-2', 'Done')]);
+  const agents = [{ agentId: 'dev', inScope: true, granted: true, triggers: [T({ payloadFilter: { toStatus: 'Ready for Dev' } })] }];
+  assert.equal(resolvePluginEventDeliveries({ pluginId: 'jira', event: 'e', payload: d, summary: '' }, agents)[0].summary,
+    '1 of 2 events match this trigger');
+  const long = 'x'.repeat(SUMMARY_MAX);
+  const s = resolvePluginEventDeliveries({ pluginId: 'jira', event: 'e', payload: d, summary: long }, agents)[0].summary;
+  assert.equal(Array.from(s).length, SUMMARY_MAX);
+  assert.ok(s.endsWith('…'));
 });

@@ -35,6 +35,7 @@ const {
   auditWriter,
   healthEndpoint,
   teardownScopeEndpoint,
+  internalPushEndpoint,
   brokerConfig,
 } = require('../../../broker-sdk');
 const { WatchStore } = require('./watch-store');
@@ -473,11 +474,13 @@ const handleTeardown = teardownScopeEndpoint((scopeId) => {
 }, { secret: SIGNING_SECRET });
 
 // PUT /internal/scope-credentials — the orchestrator's per-scope credential push
-// (Jira plan §5). Bearer-authed with any valid jira scope token, like every
-// other internal push. Replaces the whole map so a revoked team disappears.
-async function handleScopeCredentials(req, res) {
-  const v = verifyScopeToken(req, SIGNING_SECRET);
-  if (!v || v.pluginId !== PLUGIN_ID) return sendJson(res, 401, { error: 'unauthorized' });
+// (Jira plan §5). Accepts the orchestrator's `_internal` token ONLY (SDK
+// `internalPushEndpoint`): every granted team holds a jira token minted with
+// the same secret, and the map carries each team's api-token AND the site the
+// poller will talk to — "any valid token" here would let one team wipe every
+// other team's credential or repoint its poller at an attacker-controlled
+// site. Replaces the whole map so a revoked team disappears.
+const handleScopeCredentials = internalPushEndpoint(async (req, res) => {
   const body = parseJson(await readBody(req));
   const scopes = body && body.scopes && typeof body.scopes === 'object' ? body.scopes : {};
   scopeCredentials.clear();
@@ -489,7 +492,7 @@ async function handleScopeCredentials(req, res) {
     scopes: scopeCredentials.size,
     usable: [...scopeCredentials.keys()].filter((sid) => !!resolveCredential(sid)).length,
   });
-}
+}, { secret: SIGNING_SECRET, pluginId: PLUGIN_ID });
 
 async function handleRequest(req, res) {
   const urlPath = (req.url || '').split('?')[0];

@@ -235,7 +235,8 @@ Concept: `docs/plugin-system-concept.md`, `docs/cli-contract.md`.
 - **Scope tokens**: HMAC `{pluginId, scopeId}` (`plugin-scope-token.js`); broker
   verifies every call; ownership label `aee.plugin.owner`.
 - **Broker SDK** (`broker-sdk/`): the per-call obligations (verify, scope-filter,
-  audit, mask-secrets, health/teardown, approval pen) a broker imports.
+  audit, mask-secrets, health/teardown, approval pen, `internalPushEndpoint` for
+  orchestrator-only pushes — `_internal` scope token only) a broker imports.
 - **Reference plugins**: `dummy-echo` (smoke test), `podman-sandbox` (#1, podman
   socket), `test-mgmt` (#2, credential broker), `netzplan` (#3, UI planning
   board), `github-issues` (UI + credential), `patterns-catalog` (UI-only),

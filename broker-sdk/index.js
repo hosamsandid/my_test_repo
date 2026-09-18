@@ -34,7 +34,7 @@ const {
   maskSecrets,
   maskSecretsOrDefault,
 } = require('./mask-secrets');
-const { healthEndpoint, teardownScopeEndpoint } = require('./endpoints');
+const { healthEndpoint, teardownScopeEndpoint, internalPushEndpoint, INTERNAL_SCOPE_ID } = require('./endpoints');
 const { needsApproval, approvalHoldingPen, parkForApproval } = require('./approval');
 const { authorizeAction, isActionPermitted } = require('./authz');
 const { brokerConfig, quotaExceeded, positiveInt } = require('./broker-config');
@@ -84,6 +84,8 @@ module.exports = {
   // platform routes (§4.9)
   healthEndpoint,
   teardownScopeEndpoint,
+  internalPushEndpoint,
+  INTERNAL_SCOPE_ID,
   // approval holding pen (§4.9)
   needsApproval,
   approvalHoldingPen,

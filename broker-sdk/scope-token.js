@@ -24,6 +24,13 @@
 
 const crypto = require('crypto');
 
+// The scopeId the orchestrator mints its OWN tokens under (credential pushes,
+// registry pushes). Reserved: the platform never derives it for an agent or a
+// team (`orchestrator/plugin-scope.js` isReservedScopeId), so a token carrying
+// it can only have come from the orchestrator. Brokers gate their
+// orchestrator-only routes on it via `internalPushEndpoint` (endpoints.js).
+const INTERNAL_SCOPE_ID = '_internal';
+
 function sign(pluginId, scopeId, secret) {
   return crypto
     .createHmac('sha256', secret)
@@ -84,4 +91,4 @@ function verifyScopeToken(headerOrReq, secret) {
   return verify(token, secret);
 }
 
-module.exports = { mint, verify, verifyScopeToken };
+module.exports = { mint, verify, verifyScopeToken, INTERNAL_SCOPE_ID };

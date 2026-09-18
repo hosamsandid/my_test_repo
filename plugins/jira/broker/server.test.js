@@ -19,6 +19,9 @@ const { signViewerHeaders } = require('./viewer-headers');
 
 const TOKEN = mint('jira', 'team-1', 'test-secret');
 const OTHER = mint('jira', 'team-2', 'test-secret');
+// The orchestrator's own push credential — the ONLY token the credential push
+// accepts. A granted team's token must not be able to rewrite the map.
+const INTERNAL = mint('jira', '_internal', 'test-secret');
 
 function listen() {
   return new Promise((resolve) => {
@@ -96,7 +99,7 @@ test('scope-credentials: the orchestrator push populates the per-scope map; reso
   try {
     assert.equal((await call(srv, 'PUT', '/internal/scope-credentials')).status, 401); // bearer required
     const r = await call(srv, 'PUT', '/internal/scope-credentials', {
-      token: TOKEN,
+      token: INTERNAL,
       body: { scopes: {
         'team-1': { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' },
         'team-2': { 'site-url': 'acme' }, // incomplete
@@ -110,8 +113,29 @@ test('scope-credentials: the orchestrator push populates the per-scope map; reso
     assert.equal(broker.resolveCredential('team-9'), null); // unknown scope
 
     // a re-push replaces the whole map (a revoked team disappears)
-    await call(srv, 'PUT', '/internal/scope-credentials', { token: OTHER, body: { scopes: {} } });
+    await call(srv, 'PUT', '/internal/scope-credentials', { token: INTERNAL, body: { scopes: {} } });
     assert.equal(broker.resolveCredential('team-1'), null);
+  } finally { srv.close(); }
+});
+
+test('scope-credentials: a granted TEAM token cannot rewrite the map (cross-tenant credential tamper)', async () => {
+  const srv = await listen();
+  try {
+    await call(srv, 'PUT', '/internal/scope-credentials', {
+      token: INTERNAL,
+      body: { scopes: { 'team-2': { 'site-url': 'https://b.example', email: 'b@b.c', 'api-token': 'tokB' } } },
+    });
+    // Team 1 tries to (a) wipe every other team and (b) repoint team 2 at its own site.
+    for (const token of [TOKEN, OTHER, mint('github-issues', '_internal', 'test-secret')]) {
+      const r = await call(srv, 'PUT', '/internal/scope-credentials', {
+        token,
+        body: { scopes: { 'team-2': { 'site-url': 'https://attacker.example', email: 'x', 'api-token': 'y' } } },
+      });
+      assert.equal(r.status, 401);
+    }
+    assert.deepEqual(broker.resolveCredential('team-2'), { siteUrl: 'https://b.example', email: 'b@b.c', apiToken: 'tokB' });
+    // leave the map as the later tests expect it (empty)
+    await call(srv, 'PUT', '/internal/scope-credentials', { token: INTERNAL, body: { scopes: {} } });
   } finally { srv.close(); }
 });
 

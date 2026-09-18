@@ -96,3 +96,57 @@ test('teardown: a scope only ever reaps ITS OWN scopeId (token-derived, not arg-
 test('teardownScopeEndpoint requires a reap handler', () => {
   assert.throws(() => teardownScopeEndpoint(null, { secret: SECRET }), /requires a reap/);
 });
+
+// ── internalPushEndpoint: the orchestrator→broker push is `_internal`-only ──
+
+const { internalPushEndpoint, INTERNAL_SCOPE_ID } = require('./endpoints');
+const INTERNAL = mint('jira', INTERNAL_SCOPE_ID, SECRET);
+const TEAM = mint('jira', 'team-a', SECRET);
+
+test('internal push: the reserved scope id is `_internal`', () => {
+  assert.equal(INTERNAL_SCOPE_ID, '_internal');
+});
+
+test('internal push: a granted TEAM token is refused — the handler never runs', async () => {
+  let ran = 0;
+  const h = internalPushEndpoint(async () => { ran += 1; }, { secret: SECRET, pluginId: 'jira' });
+  for (const token of [TEAM, undefined, 'garbage', mint('jira', 'team-a', 'other-secret')]) {
+    const res = fakeRes();
+    await h(reqWith(token), res);
+    assert.equal(res.statusCode, 401, `token=${token}`);
+    assert.deepEqual(res.body, { error: 'unauthorized' });
+  }
+  assert.equal(ran, 0);
+});
+
+test('internal push: an `_internal` token of ANOTHER plugin is refused', async () => {
+  let ran = 0;
+  const h = internalPushEndpoint(async () => { ran += 1; }, { secret: SECRET, pluginId: 'jira' });
+  const res = fakeRes();
+  await h(reqWith(mint('github-issues', INTERNAL_SCOPE_ID, SECRET)), res);
+  assert.equal(res.statusCode, 401);
+  assert.equal(ran, 0);
+});
+
+test('internal push: the `_internal` token of this plugin reaches the handler with the verified identity', async () => {
+  let seen = null;
+  const h = internalPushEndpoint(async (req, res, v) => { seen = v; res.writeHead(200, {}); res.end('{"ok":true}'); },
+    { secret: SECRET, pluginId: 'jira' });
+  const res = fakeRes();
+  await h(reqWith(INTERNAL), res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(seen, { pluginId: 'jira', scopeId: INTERNAL_SCOPE_ID });
+});
+
+test('internal push: a throwing handler is a 500, not a crash', async () => {
+  const h = internalPushEndpoint(async () => { throw new Error('boom'); }, { secret: SECRET, pluginId: 'jira' });
+  const res = fakeRes();
+  await h(reqWith(INTERNAL), res);
+  assert.equal(res.statusCode, 500);
+});
+
+test('internalPushEndpoint requires a handler, a secret and a pluginId', () => {
+  assert.throws(() => internalPushEndpoint(null, { secret: SECRET, pluginId: 'jira' }));
+  assert.throws(() => internalPushEndpoint(async () => {}, { pluginId: 'jira' }));
+  assert.throws(() => internalPushEndpoint(async () => {}, { secret: SECRET }));
+});

@@ -23,6 +23,18 @@
 const GRANULARITIES = Object.freeze(['team', 'agent']);
 const DEFAULT_GRANULARITY = 'team';
 
+// The scopeId the orchestrator mints its OWN tokens under (the credential push,
+// `plugin-runtime.pushScopeCredentials`). A broker accepts that push from this
+// scope ONLY (broker-sdk `internalPushEndpoint`), so it must never be derivable
+// for an agent: AGENT_ID_RE permits a leading underscore, and an agent or team
+// of one literally named `_internal` would otherwise be granted the push
+// credential. `resolveScopeId` returns null for it; `mintScopeToken` refuses it.
+const INTERNAL_SCOPE_ID = '_internal';
+
+function isReservedScopeId(scopeId) {
+  return scopeId === INTERNAL_SCOPE_ID;
+}
+
 // Container/network labels the orchestrator stamps on a plugin's sidecar and a
 // broker stamps on resources it creates.
 const PLUGIN_ID_LABEL = 'aee.plugin.id';
@@ -37,9 +49,11 @@ function isMember(agentCfg) {
 function resolveScopeId(agentCfg, granularity = DEFAULT_GRANULARITY) {
   if (!agentCfg) return null;
   const g = GRANULARITIES.includes(granularity) ? granularity : DEFAULT_GRANULARITY;
-  if (g === 'agent') return agentCfg.id || null;
-  // 'team': team for members, self for standalone.
-  return isMember(agentCfg) ? agentCfg.parentTeamId : (agentCfg.id || null);
+  // 'agent': self. 'team': team for members, self for standalone.
+  const scopeId = g === 'agent'
+    ? (agentCfg.id || null)
+    : (isMember(agentCfg) ? agentCfg.parentTeamId : (agentCfg.id || null));
+  return isReservedScopeId(scopeId) ? null : scopeId;
 }
 
 // ── ownership label helpers (broker + orchestrator side) ────────────────────
@@ -60,6 +74,8 @@ function filterOwned(resources, scopeId) {
 module.exports = {
   GRANULARITIES,
   DEFAULT_GRANULARITY,
+  INTERNAL_SCOPE_ID,
+  isReservedScopeId,
   PLUGIN_ID_LABEL,
   OWNER_LABEL_KEY,
   isMember,

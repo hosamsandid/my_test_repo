@@ -55,8 +55,9 @@ by a **Team Admin** on the **Plugins** page (the Credentials section on the Jira
 card). Values are written `0600` server-side
 (`/workspace/plugins/_credentials/jira/<teamId>.json`), never read back (preview
 + set-by/-at only), and the orchestrator pushes the per-scope map here
-(`PUT /internal/scope-credentials`) on boot, on grant change and on save — no
-restart, no secret in code or env. `resolveCredential(scopeId)` reads only that
+(`PUT /internal/scope-credentials`, accepted from the orchestrator's `_internal`
+token only — SDK `internalPushEndpoint`; a granted team's token is refused) on
+boot, on grant change and on save — no restart, no secret in code or env. `resolveCredential(scopeId)` reads only that
 pushed map; a granted-but-unconfigured team simply isn't polled. Use a **classic
 (unscoped)** Jira API token — a scoped one missing `read:jira-work` sees zero
 projects.

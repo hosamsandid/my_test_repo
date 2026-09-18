@@ -60,7 +60,7 @@ const {
   brokerEnvContract,
 } = require('./plugin-sidecar');
 
-const { PLUGIN_ID_LABEL } = require('./plugin-scope');
+const { PLUGIN_ID_LABEL, INTERNAL_SCOPE_ID, isReservedScopeId } = require('./plugin-scope');
 const { mint } = require('./plugin-scope-token');
 const { installedManifests, readOrCreateSigningSecret, REGISTRY_DIR } = require('./plugin-registry');
 
@@ -121,9 +121,20 @@ function signingSecret(dir = REGISTRY_DIR) {
   return secretCache;
 }
 
+// A GRANT token, for an agent's workspace or a teardown. Refuses the reserved
+// `_internal` scope: that token authenticates the credential push below, and a
+// granted agent must never hold it (plugin-scope.js INTERNAL_SCOPE_ID).
 function mintScopeToken(pluginId, scopeId, dir = REGISTRY_DIR) {
-  if (!pluginId || !scopeId) return null;
+  if (!pluginId || !scopeId || isReservedScopeId(scopeId)) return null;
   return mint(pluginId, scopeId, signingSecret(dir));
+}
+
+// The orchestrator's OWN token for a plugin's broker — the only minter of the
+// `_internal` scope. Brokers gate their orchestrator-only routes on it
+// (broker-sdk `internalPushEndpoint`).
+function mintInternalToken(pluginId, dir = REGISTRY_DIR) {
+  if (!pluginId) return null;
+  return mint(pluginId, INTERNAL_SCOPE_ID, signingSecret(dir));
 }
 
 // The URL the ORCHESTRATOR reaches a broker on. Identical to the endpoint an
@@ -472,10 +483,10 @@ async function teardownScope(manifest, scopeId, dir = REGISTRY_DIR) {
 // best-effort: an unreachable broker never blocks a reconcile.
 async function pushScopeCredentials(manifest, scopesMap, dir = REGISTRY_DIR) {
   if (!PLUGIN_SIDECARS_SUPPORTED) return { pluginId: manifest.id, ok: false, ...UNSUPPORTED };
-  // Any valid scope token authenticates the internal push (the broker checks the
-  // signature only, like PUT /internal/scope-registry). Mint one under a fixed
-  // internal scope id.
-  const token = mintScopeToken(manifest.id, '_internal', dir);
+  // Authenticated with the orchestrator's OWN `_internal` token — the broker
+  // accepts the push from that scope only (broker-sdk `internalPushEndpoint`),
+  // never from a granted agent's team token, which shares the signing secret.
+  const token = mintInternalToken(manifest.id, dir);
   if (!token) return { pluginId: manifest.id, ok: false, error: 'no token' };
   const res = await postJson(
     `${brokerBaseUrl(manifest)}/internal/scope-credentials`,
@@ -498,6 +509,7 @@ module.exports = {
   PODMAN_HOST_SOCKET,
   signingSecret,
   mintScopeToken,
+  mintInternalToken,
   brokerBaseUrl,
   sidecarCreateBody,
   listSidecarContainers,

@@ -13,6 +13,14 @@
 //                implementation serves both team deletion and single-member
 //                deletion at agent granularity (§4.9, granularity-agnostic).
 //
+// …plus the wrapper for a broker's ORCHESTRATOR-ONLY pushes (`internalPush
+// Endpoint`, below): routes like `PUT /internal/scope-credentials` carry every
+// scope's backend credential — and, for an event-source plugin, the host the
+// poller will talk to — so they must accept the orchestrator's `_internal`
+// token ONLY. Every granted agent holds a token minted with the same secret;
+// "any valid token" on such a route lets one team wipe or repoint every other
+// team's credential.
+//
 // TEARDOWN ORDERING (§5 "plugin uninstalled with live owned resources"):
 // resources are reaped BEFORE the token is invalidated. The orchestrator's
 // delete cascade is: call this endpoint → on success, stop the sidecar and
@@ -26,7 +34,7 @@
 // podman-mcp broker's `http.createServer` style, and are unit-testable with
 // plain fake req/res objects.
 
-const { verifyScopeToken } = require('./scope-token');
+const { verifyScopeToken, INTERNAL_SCOPE_ID } = require('./scope-token');
 
 function sendJson(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -81,4 +89,34 @@ function teardownScopeEndpoint(reap, { secret } = {}) {
   };
 }
 
-module.exports = { healthEndpoint, teardownScopeEndpoint };
+// Wrap a handler for a route only the ORCHESTRATOR may call (a credential or
+// registry push). The request must carry a token for THIS plugin whose scopeId
+// is the reserved `_internal` sentinel — the orchestrator mints exactly that
+// (`plugin-runtime.mintInternalToken`) and `resolveScopeId` refuses to derive it
+// for any agent or team, so no granted workspace ever holds one.
+//
+// Contract:
+//   • 401 if the token is missing/forged, names another plugin, or carries any
+//     scopeId but `_internal` (handler never runs).
+//   • otherwise `handler(req, res, { pluginId, scopeId })` — the handler writes
+//     its own response; if it throws, a 500 is sent so the sidecar never crashes
+//     on a push.
+function internalPushEndpoint(handler, { secret, pluginId } = {}) {
+  if (typeof handler !== 'function') throw new Error('internalPushEndpoint requires a handler(req, res, identity)');
+  if (!secret) throw new Error('internalPushEndpoint requires the signing secret');
+  if (!pluginId) throw new Error('internalPushEndpoint requires the broker\'s own pluginId');
+  return async function handleInternalPush(req, res) {
+    const v = verifyScopeToken(req, secret);
+    if (!v || v.pluginId !== pluginId || v.scopeId !== INTERNAL_SCOPE_ID) {
+      sendJson(res, 401, { error: 'unauthorized' });
+      return;
+    }
+    try {
+      await handler(req, res, v);
+    } catch (err) {
+      if (!res.headersSent) sendJson(res, 500, { error: (err && err.message) || String(err) });
+    }
+  };
+}
+
+module.exports = { healthEndpoint, teardownScopeEndpoint, internalPushEndpoint, INTERNAL_SCOPE_ID };

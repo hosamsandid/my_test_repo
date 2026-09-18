@@ -12,11 +12,12 @@ privilege-less client that just carries the scope token.
 
 Reads:
 
-    aee-jira whoami                              # the resolved plugin scope
-    aee-jira inbox [--consume]                   # what woke me: queued status-change events
-    aee-jira projects                            # the projects in this team's scope
+    aee-jira whoami                               # the resolved plugin scope
+    aee-jira inbox                                # peek: every queued status-change event in the team's inbox
+    aee-jira inbox --consume KAN-6:10312 [ID…]   # drain exactly the events YOUR wake named (payload `id` / `events[].id`)
+    aee-jira projects                             # the projects in this team's scope
     aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
-    aee-jira show KAN-6                          # one issue (summary, status, type, assignee, URL)
+    aee-jira show KAN-6                           # one issue (summary, status, type, assignee, URL)
 
 Writes (attributed, role-gated server-side, no human confirmation — moving a
 ticket is routine and reversible):
@@ -25,8 +26,13 @@ ticket is routine and reversible):
     aee-jira transition KAN-6 --to "In Progress"
     aee-jira update KAN-6 --description "…"   # replace the issue description (the old one stays in Jira's history)
 
-`inbox` without `--consume` peeks; with `--consume` it drains the queue (use it
-once per wake). `transition` names the TARGET status; the broker resolves the
+`inbox` without `--consume` peeks. `--consume` takes one or more event ids and
+drains exactly those — the inbox is shared by every agent on the team, each
+woken for its own subset, so there is no whole-inbox drain. The ids you may
+consume are the ones in your own wake payload: `id` for a single event,
+`events[].id` for a digest (a digest with `truncated: true` inlines only the
+first 20 — peek, take the rest that carry your status, consume those too).
+`transition` names the TARGET status; the broker resolves the
 Jira transition from where the issue currently is and reports the available
 options if none leads there.
 
@@ -130,7 +136,11 @@ def build_parser():
     sub.add_parser("whoami", parents=[common], help="show the resolved plugin scope")
 
     p_inbox = sub.add_parser("inbox", parents=[common], help="the queued status-change events that woke you")
-    p_inbox.add_argument("--consume", action="store_true", help="drain the queue (use once per wake) instead of peeking")
+    p_inbox.add_argument(
+        "--consume", nargs="+", metavar="EVENT_ID", default=None,
+        help="drain exactly these event ids (from your wake payload: `id`, or `events[].id` in a digest); "
+             "without --consume the inbox is only peeked",
+    )
 
     sub.add_parser("projects", parents=[common], help="list the Jira projects in this team's scope")
 
@@ -182,7 +192,9 @@ def main(argv=None):
 
     method, body = "GET", None
     if args.cmd == "inbox":
-        path = "/inbox?consume=1" if args.consume else "/inbox"
+        path = "/inbox"
+        if args.consume:
+            path += "?" + urllib.parse.urlencode({"consume": ",".join(args.consume)})
     elif args.cmd == "projects":
         path = "/projects"
     elif args.cmd == "list":

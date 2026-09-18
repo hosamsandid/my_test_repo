@@ -597,3 +597,20 @@ test('aee-jira: update against an unreachable broker → exit 3 (the verb is wir
   assert.equal(r.status, 3);
   assert.equal(JSON.parse(r.stdout).error, 'broker-unreachable');
 });
+
+test('aee-jira: inbox --consume without ids → exit 2 (usage), never a broker call', () => {
+  const r = runJira(['inbox', '--consume', '--json'], grantedJiraWorkspace());
+  assert.equal(r.status, 2);
+  // argparse's own message names the argument; the help text says where the ids come from
+  assert.match(r.stderr, /--consume/);
+});
+
+test('aee-jira: inbox --consume <ids> is wired to a broker call (unreachable → exit 3) and inbox --help names the id source', () => {
+  const r = runJira(['inbox', '--consume', 'KAN-1:10', 'KAN-2:11', '--json'], grantedJiraWorkspace());
+  assert.equal(r.status, 3);
+  assert.equal(JSON.parse(r.stdout).error, 'broker-unreachable');
+  const h = runJira(['inbox', '--help'], grantedJiraWorkspace());
+  assert.equal(h.status, 0);
+  assert.match(h.stdout, /EVENT_ID/);
+  assert.match(h.stdout, /events\[\]\.id/);
+});

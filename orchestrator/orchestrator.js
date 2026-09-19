@@ -18992,20 +18992,35 @@ async function main() {
   // exists. Every agent container already resolves `orchestrator` by name
   // (it's connected into every per-agent network for the internal API), so
   // pointing ANTHROPIC_BASE_URL here needs no new networking.
+  //
+  // OPT-IN, default OFF: with ANTHROPIC_PROXY_ENABLED unset nothing binds
+  // :4004 and the stack behaves exactly as before this was added. Set it to
+  // "1" only in a deployment that points an api-key provider's baseUrl here.
   // ============================================================
-  const ANTHROPIC_PROXY_PORT = parseInt(
-    process.env.ANTHROPIC_PROXY_PORT || "4004",
-    10,
-  );
-  const anthropicProxy = createAnthropicProxyServer({
-    upstreamBase:
-      process.env.ANTHROPIC_PROXY_UPSTREAM || "https://api.anthropic.com",
-  });
-  anthropicProxy.listen(ANTHROPIC_PROXY_PORT, "0.0.0.0", () =>
+  if (process.env.ANTHROPIC_PROXY_ENABLED === "1") {
+    const ANTHROPIC_PROXY_PORT = parseInt(
+      process.env.ANTHROPIC_PROXY_PORT || "4004",
+      10,
+    );
+    const anthropicProxy = createAnthropicProxyServer({
+      upstreamBase:
+        process.env.ANTHROPIC_PROXY_UPSTREAM || "https://api.anthropic.com",
+    });
+    // A bind failure (e.g. the port is taken) must not take the orchestrator
+    // down — log it and carry on, like the other optional listeners.
+    anthropicProxy.on("error", (err) =>
+      console.error(`[Orchestrator] Anthropic proxy error: ${err.message}`),
+    );
+    anthropicProxy.listen(ANTHROPIC_PROXY_PORT, "0.0.0.0", () =>
+      console.log(
+        `[Orchestrator] Anthropic proxy listening on :${ANTHROPIC_PROXY_PORT}`,
+      ),
+    );
+  } else {
     console.log(
-      `[Orchestrator] Anthropic proxy listening on :${ANTHROPIC_PROXY_PORT}`,
-    ),
-  );
+      "[Orchestrator] Anthropic proxy disabled (set ANTHROPIC_PROXY_ENABLED=1 to enable)",
+    );
+  }
 
   // ============================================================
   // GitHub event poller — translates GitHub Events API activity into

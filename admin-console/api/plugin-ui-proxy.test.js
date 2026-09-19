@@ -132,3 +132,96 @@ test('verifyViewerHeaders accepts a request-like object and is teamId-order-inde
   const v = verifyViewerHeaders({ headers }, secret);
   assert.deepEqual(v.teamIds, ['a', 'b']);   // sorted + deduped
 });
+
+// ── per-team roles (F4 of the Jira review) ──────────────────────────────────
+//
+// A flattened `role` (the caller's MAX across granted teams) plus a team list
+// cannot express "Team Admin of A, Team Member of B". A broker that lets the
+// request choose the team (`?team=B`) and gates `/admin` on the flat role hands
+// U admin rights over B. The proxy therefore also signs a per-team role map;
+// `role` stays the max for team-agnostic routes and page loads.
+
+const { roleForTeam } = require('./plugin-ui-proxy');
+
+test('per-team roles round-trip and are part of the signature', () => {
+  const secret = 's3cr3t';
+  const headers = signViewerHeaders({
+    sub: 'u', role: 'team-admin', teamIds: ['B', 'A'],
+    teamRoles: { A: 'team-admin', B: 'team-member' },
+  }, secret);
+  assert.equal(headers[HEADER_NAMES.teamRoles], 'A=team-admin,B=team-member'); // sorted by team
+  const v = verifyViewerHeaders(headers, secret);
+  assert.deepEqual(v.teamRoles, { A: 'team-admin', B: 'team-member' });
+  assert.equal(roleForTeam(v, 'A'), 'team-admin');
+  assert.equal(roleForTeam(v, 'B'), 'team-member');
+  assert.equal(roleForTeam(v, 'C'), null); // not in scope at all
+});
+
+test('tampering the per-team role map fails verification (the escalation this closes)', () => {
+  const secret = 's3cr3t';
+  const headers = signViewerHeaders({
+    sub: 'u', role: 'team-admin', teamIds: ['A', 'B'],
+    teamRoles: { A: 'team-admin', B: 'team-member' },
+  }, secret);
+  headers[HEADER_NAMES.teamRoles] = 'A=team-admin,B=team-admin';
+  assert.equal(verifyViewerHeaders(headers, secret), null);
+  // …and dropping the header entirely is not a way back to the flat role.
+  const stripped = { ...headers };
+  delete stripped[HEADER_NAMES.teamRoles];
+  assert.equal(verifyViewerHeaders(stripped, secret), null);
+});
+
+test('roleForTeam never elevates: an in-scope team with no map entry is a plain team-member', () => {
+  const v = { sub: 'u', role: 'system-admin', teamIds: ['A'], teamRoles: {} };
+  assert.equal(roleForTeam(v, 'A'), 'team-member');
+  assert.equal(roleForTeam({ sub: 'u', role: 'team-admin', teamIds: ['A'] }, 'A'), 'team-member');
+  assert.equal(roleForTeam(null, 'A'), null);
+});
+
+test('the map is canonical: order-independent, unknown roles and out-of-scope teams dropped', () => {
+  const secret = 'k';
+  const a = signViewerHeaders({ sub: 'u', role: 'team-member', teamIds: ['A', 'B'], teamRoles: { B: 'team-member', A: 'team-member', Z: 'team-admin', A2: 'bogus' } }, secret);
+  const b = signViewerHeaders({ sub: 'u', role: 'team-member', teamIds: ['B', 'A'], teamRoles: { A: 'team-member', B: 'team-member' } }, secret);
+  assert.equal(a[HEADER_NAMES.sig], b[HEADER_NAMES.sig]);
+  assert.equal(a[HEADER_NAMES.teamRoles], 'A=team-member,B=team-member');
+});
+
+// ── versioned signature / grace period (regression guard) ───────────────────
+//
+// Adding the per-team map changed what is signed. A broker whose image predates
+// the change verifies the OLD three-field HMAC. If the proxy stopped emitting a
+// signature that broker accepts, every proxied request to an un-rebuilt UI
+// plugin (github-issues, netzplan, patterns-catalog, gke) would 401 until its
+// sidecar is recreated. These pin the two-signature grace period that avoids it.
+
+const crypto = require('node:crypto');
+
+test('the v1 sig is byte-identical to the pre-map three-field HMAC (un-rebuilt brokers keep verifying it)', () => {
+  const secret = 's3cr3t';
+  const headers = signViewerHeaders(
+    { sub: 'u', role: 'team-admin', teamIds: ['b', 'a'], teamRoles: { a: 'team-admin' } },
+    secret,
+  );
+  // Exactly what a broker built before the role map existed computes.
+  const legacySig = crypto.createHmac('sha256', secret).update('u\nteam-admin\na,b').digest('base64url');
+  assert.equal(headers[HEADER_NAMES.sig], legacySig);
+  // v2 is present, distinct, and covers the map — new brokers prefer it.
+  assert.ok(headers[HEADER_NAMES.sigV2]);
+  assert.notEqual(headers[HEADER_NAMES.sig], headers[HEADER_NAMES.sigV2]);
+});
+
+test('a legacy v1-only request (no v2, no role-map header) still verifies, with an empty map', () => {
+  const secret = 'k';
+  const sub = 'u';
+  const role = 'team-admin';
+  const teams = ['a', 'b'];
+  const sig = crypto.createHmac('sha256', secret).update(`${sub}\n${role}\n${teams.join(',')}`).digest('base64url');
+  const legacy = {
+    [HEADER_NAMES.user]: sub,
+    [HEADER_NAMES.role]: role,
+    [HEADER_NAMES.teams]: teams.join(','),
+    [HEADER_NAMES.sig]: sig, // no x-aee-plugin-sig-v2, no x-aee-plugin-team-roles
+  };
+  const v = verifyViewerHeaders(legacy, secret);
+  assert.deepEqual(v, { sub, role, teamIds: ['a', 'b'], teamRoles: {} });
+});

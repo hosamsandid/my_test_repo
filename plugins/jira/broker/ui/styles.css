@@ -1,0 +1,509 @@
+/* Jira plugin UI (Jira plan §6.4).
+ *
+ * Adopts the admin-console design system (docs: admin-console/src/theme/tokens.css)
+ * rather than a bespoke palette, so the plugin reads as a native page. The console
+ * is a separate document from this iframe and does not share its stylesheet, so
+ * the `--eb-*` tokens are re-declared here with the SAME names + values, keyed on
+ * `:root[data-theme=...]`. The console tells us which theme is active (it writes
+ * `localStorage['eb-theme']`, same origin as this proxied iframe); app.js mirrors
+ * it onto <html data-theme> and follows live toggles — so we follow the console's
+ * light/dark appearance, not merely the OS `prefers-color-scheme`. */
+
+/* ─── Design tokens: dark (default) ─────────────────────────────────────────── */
+:root,
+:root[data-theme="admin-dark"] {
+  color-scheme: dark;
+
+  --eb-bg-app:         oklch(0.13 0.006 293);
+  --eb-bg-surface:     oklch(0.17 0.008 293);
+  --eb-bg-elevated:    oklch(0.21 0.010 293);
+  --eb-bg-hover:       oklch(0.25 0.012 293);
+
+  --eb-border-default: oklch(0.30 0.010 293);
+  --eb-border-hover:   oklch(0.38 0.012 293);
+
+  --eb-text-primary:   oklch(0.93 0.005 293);
+  --eb-text-secondary: oklch(0.70 0.010 293);
+  --eb-text-muted:     oklch(0.55 0.008 293);
+  --eb-text-inverted:  oklch(0.13 0.006 293);
+
+  --eb-accent-primary: oklch(0.65 0.28 293);
+  --eb-accent-hover:   oklch(0.58 0.26 293);
+
+  --eb-status-success: oklch(0.72 0.18 155);
+  --eb-status-warning: oklch(0.80 0.16 85);
+  --eb-status-error:   oklch(0.63 0.22 25);
+  --eb-status-info:    oklch(0.72 0.15 230);
+  --eb-status-warning-bg: oklch(0.25 0.04 85);
+
+  --eb-font-sans: 'Inter', 'Inter var', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --eb-font-mono: 'JetBrains Mono', 'Geist Mono', 'Fira Code',
+    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --eb-text-xs:   0.6875rem; /* 11px */
+  --eb-text-sm:   0.75rem;   /* 12px */
+  --eb-text-base: 0.8125rem; /* 13px */
+  --eb-text-md:   0.875rem;  /* 14px */
+  --eb-text-lg:   1rem;      /* 16px */
+  --eb-text-xl:   1.25rem;   /* 20px */
+
+  --eb-font-medium:   500;
+  --eb-font-semibold: 600;
+
+  --eb-radius-sm: 4px;
+  --eb-radius-md: 6px;
+  --eb-radius-lg: 8px;
+
+  --eb-shadow: 0 1px 2px rgba(0, 0, 0, .18), 0 6px 20px rgba(0, 0, 0, .28);
+}
+
+/* ─── Light ──────────────────────────────────────────────────────────────────── */
+:root[data-theme="admin-light"] {
+  color-scheme: light;
+
+  --eb-bg-app:         oklch(0.985 0.003 293);
+  --eb-bg-surface:     oklch(1.0 0 0);
+  --eb-bg-elevated:    oklch(1.0 0 0);
+  --eb-bg-hover:       oklch(0.96 0.004 293);
+
+  --eb-border-default: oklch(0.88 0.006 293);
+  --eb-border-hover:   oklch(0.80 0.008 293);
+
+  --eb-text-primary:   oklch(0.15 0.006 293);
+  --eb-text-secondary: oklch(0.45 0.010 293);
+  --eb-text-muted:     oklch(0.60 0.008 293);
+  --eb-text-inverted:  oklch(0.98 0.003 293);
+
+  --eb-accent-primary: oklch(0.52 0.30 293);
+  --eb-accent-hover:   oklch(0.46 0.28 293);
+
+  --eb-status-info:    oklch(0.50 0.22 230);
+  --eb-status-warning-bg: oklch(0.95 0.03 85);
+
+  --eb-shadow: 0 1px 2px rgba(15, 23, 42, .06), 0 6px 20px rgba(15, 23, 42, .08);
+}
+
+/* ─── High contrast ────────────────────────────────────────────────────────────── */
+:root[data-theme="high-contrast"] {
+  color-scheme: dark;
+
+  --eb-bg-app:         oklch(0 0 0);
+  --eb-bg-surface:     oklch(0.10 0 0);
+  --eb-bg-elevated:    oklch(0.15 0 0);
+  --eb-bg-hover:       oklch(0.20 0 0);
+
+  --eb-text-primary:   oklch(1.0 0 0);
+  --eb-text-secondary: oklch(0.85 0 0);
+  --eb-text-muted:     oklch(0.70 0 0);
+
+  --eb-border-default: oklch(0.60 0 0);
+  --eb-border-hover:   oklch(0.75 0 0);
+
+  --eb-accent-primary: oklch(0.75 0.30 293);
+  --eb-accent-hover:   oklch(0.70 0.28 293);
+}
+
+/* The rem-based --eb-text-* scale is defined against a 16px root, exactly as the
+ * console (tokens.css → `html { font-size: 16px }`). */
+html { font-size: 16px; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+/* This iframe is a bare document with no UA-reset — and several component
+ * classes set `display`, which beats the UA `[hidden] { display: none }`.
+ * Re-assert it so `el.hidden = true` actually hides (the team selector, the
+ * roll-up pills, the admin link). */
+[hidden] { display: none !important; }
+body {
+  font-family: var(--eb-font-sans); color: var(--eb-text-primary); background: var(--eb-bg-app);
+  display: flex; flex-direction: column; height: 100vh; font-size: var(--eb-text-base);
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+
+.toolbar {
+  display: flex; align-items: flex-end; gap: 14px; padding: 12px 16px;
+  background: var(--eb-bg-surface); border-bottom: 1px solid var(--eb-border-default); flex-wrap: wrap;
+}
+.toolbar .title h1 { font-size: var(--eb-text-lg); font-weight: var(--eb-font-semibold); margin: 0; }
+.toolbar .title .sub { color: var(--eb-text-secondary); font-size: var(--eb-text-sm); }
+.spacer { flex: 1; }
+.field { display: flex; flex-direction: column; gap: 3px; font-size: var(--eb-text-xs); color: var(--eb-text-secondary); }
+/* the toolbar controls ARE the `.field` element (a bare <select>/<input>), not a
+ * wrapper, so style them directly too */
+.field select, select.field,
+.field input, input.field {
+  font: inherit; font-size: var(--eb-text-base); color: var(--eb-text-primary); background: var(--eb-bg-elevated);
+  border: 1px solid var(--eb-border-hover); border-radius: var(--eb-radius-md); padding: 6px 8px;
+}
+select.field { min-width: 150px; }
+input.list-search { display: block; width: 100%; }
+.btn {
+  font: inherit; font-size: var(--eb-text-base); cursor: pointer; border-radius: var(--eb-radius-md);
+  border: 1px solid transparent; background: var(--eb-accent-primary); color: var(--eb-text-inverted);
+  padding: 7px 12px; font-weight: var(--eb-font-semibold);
+}
+.btn:hover { background: var(--eb-accent-hover); }
+.btn.ghost { background: var(--eb-bg-elevated); color: var(--eb-text-primary); border-color: var(--eb-border-hover); }
+.btn:disabled { opacity: .5; cursor: default; }
+
+.banner {
+  margin: 10px 16px 0; padding: 10px 12px; border-radius: var(--eb-radius-md);
+  background: var(--eb-status-warning-bg); color: var(--eb-status-warning);
+  border: 1px solid var(--eb-border-default); font-size: var(--eb-text-base);
+}
+
+.layout { flex: 1; display: grid; grid-template-columns: minmax(280px, 380px) 1fr; gap: 0; min-height: 0; }
+.list-pane { border-right: 1px solid var(--eb-border-default); overflow: auto; padding: 12px; }
+.detail-pane { overflow: auto; padding: 18px 22px; }
+
+.issue-list { list-style: none; margin: 0; padding: 0; }
+.issue-item {
+  padding: 10px 12px; border: 1px solid var(--eb-border-default); border-radius: var(--eb-radius-lg); margin-bottom: 8px;
+  background: var(--eb-bg-surface); cursor: pointer;
+}
+.issue-item:hover { border-color: var(--eb-border-hover); }
+.issue-item.active { border-color: var(--eb-accent-primary); box-shadow: var(--eb-shadow); }
+.issue-row { display: flex; align-items: baseline; gap: 8px; }
+.issue-num { color: var(--eb-text-muted); font-family: var(--eb-font-mono); font-size: var(--eb-text-sm); }
+.issue-title { font-weight: var(--eb-font-semibold); }
+.state { font-size: var(--eb-text-xs); padding: 1px 7px; border-radius: 999px; border: 1px solid var(--eb-border-hover); text-transform: capitalize; }
+.state.open { color: var(--eb-status-success); }
+.state.closed { color: var(--eb-accent-primary); }
+.labels { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.label-chip {
+  font-size: var(--eb-text-xs); padding: 1px 8px; border-radius: 999px; border: 1px solid var(--eb-border-hover);
+  background: var(--eb-bg-elevated); color: var(--eb-text-primary); display: inline-flex; align-items: center; gap: 5px;
+}
+.label-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--eb-border-hover); display: inline-block; }
+.label-chip button { border: none; background: none; color: var(--eb-text-secondary); cursor: pointer; font-size: var(--eb-text-md); line-height: 1; padding: 0; }
+.label-chip button:hover { color: var(--eb-status-error); }
+
+.skeleton { height: 220px; background: var(--eb-bg-elevated); border-radius: var(--eb-radius-lg); }
+.empty, .detail-empty { color: var(--eb-text-secondary); padding: 24px 12px; text-align: center; }
+
+/* Title filter (#1658): a search box at the top of the issue list. */
+.list-search { padding: 2px 4px 8px; }
+.list-search input {
+  width: 100%; font: inherit; font-size: var(--eb-text-base); padding: 7px 10px;
+  border-radius: var(--eb-radius-md); border: 1px solid var(--eb-border-hover);
+  background: var(--eb-bg-elevated); color: var(--eb-text-primary);
+}
+.list-search input::placeholder { color: var(--eb-text-muted); }
+.list-search input:focus { outline: none; border-color: var(--eb-accent-primary); }
+
+/* Previous / Next pager (#1658), replacing the old "Load more" append. */
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 4px 2px; }
+.pager-info { font-size: var(--eb-text-sm); color: var(--eb-text-muted); }
+
+.detail h2 { margin: 0 0 4px; font-size: var(--eb-text-xl); font-weight: var(--eb-font-semibold); }
+.detail .meta { color: var(--eb-text-secondary); font-size: var(--eb-text-sm); margin-bottom: 12px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+/* Workflow-trigger action bar (#1730): prominent buttons above the description,
+ * one per flow label that wakes an agent. Visually distinct from the routine
+ * label editing below — these read as "start this workflow", not "add a tag". */
+.action-bar { margin: 0 0 14px; }
+.action-bar-title {
+  font-size: var(--eb-text-xs); text-transform: uppercase; letter-spacing: .05em;
+  color: var(--eb-text-secondary); font-weight: var(--eb-font-semibold); margin-bottom: 8px;
+}
+.trigger-btns { display: flex; flex-wrap: wrap; gap: 10px; }
+.trigger-btn {
+  font: inherit; cursor: pointer; text-align: left;
+  display: inline-flex; flex-direction: column; gap: 3px;
+  padding: 8px 12px; min-width: 150px;
+  background: var(--eb-bg-elevated); color: var(--eb-text-primary);
+  border: 1px solid var(--eb-border-hover); border-left-width: 4px;
+  border-radius: var(--eb-radius-md);
+}
+.trigger-btn:hover { border-color: var(--eb-border-hover); background: var(--eb-bg-hover); }
+.trigger-btn:focus-visible { outline: 2px solid var(--eb-accent-primary); outline-offset: 2px; }
+/* Colour coding by usage (AC4) — reinforced by the glyph + text tag on every
+ * button, so the distinction never rests on colour alone. */
+.trigger-btn.gate    { border-left-color: var(--eb-accent-primary); }
+.trigger-btn.gate:hover { border-color: var(--eb-accent-primary); }
+.trigger-btn.agent   { border-left-color: var(--eb-status-info); }
+.trigger-btn.agent:hover { border-color: var(--eb-status-info); }
+.trigger-btn.neutral { border-left-color: var(--eb-border-hover); }
+.trigger-btn:disabled, .trigger-btn.applied { opacity: .55; cursor: default; }
+.trigger-btn:disabled:hover, .trigger-btn.applied:hover { background: var(--eb-bg-elevated); }
+.trigger-btn .tb-main {
+  font-weight: var(--eb-font-semibold); font-size: var(--eb-text-base);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.trigger-btn .tb-glyph { color: var(--eb-text-secondary); font-size: var(--eb-text-md); }
+.trigger-btn.gate  .tb-glyph { color: var(--eb-accent-primary); }
+.trigger-btn.agent .tb-glyph { color: var(--eb-status-info); }
+.trigger-btn .tb-sub { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.trigger-btn .tb-usage { font-size: var(--eb-text-xs); color: var(--eb-text-secondary); }
+.trigger-btn .tb-label {
+  font-family: var(--eb-font-mono); font-size: var(--eb-text-xs); color: var(--eb-text-primary);
+  background: var(--eb-bg-app); border: 1px solid var(--eb-border-default);
+  border-radius: var(--eb-radius-sm); padding: 0 5px;
+}
+.trigger-btn .tb-hint { font-size: var(--eb-text-xs); color: var(--eb-status-success); }
+.action-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; }
+.legend-item { font-size: var(--eb-text-xs); color: var(--eb-text-muted); display: inline-flex; align-items: center; gap: 5px; }
+.legend-swatch { font-size: var(--eb-text-sm); }
+.legend-item.gate  .legend-swatch { color: var(--eb-accent-primary); }
+.legend-item.agent .legend-swatch { color: var(--eb-status-info); }
+
+.detail .body {
+  background: var(--eb-bg-surface); border: 1px solid var(--eb-border-default); border-radius: var(--eb-radius-lg); padding: 14px;
+  word-break: break-word; font-size: var(--eb-text-base); line-height: 1.5; max-height: 46vh; overflow: auto;
+}
+.detail .body.empty-body { color: var(--eb-text-muted); font-style: italic; }
+
+/* Rendered Markdown (#1642, Item 3). Compact, console-toned; the renderer emits
+ * only this whitelisted element set. */
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1em 0 .5em; font-weight: var(--eb-font-semibold); line-height: 1.3; }
+.md h1 { font-size: var(--eb-text-lg); } .md h2 { font-size: var(--eb-text-md); }
+.md h3, .md h4, .md h5, .md h6 { font-size: var(--eb-text-base); }
+.md h1, .md h2 { padding-bottom: .3em; border-bottom: 1px solid var(--eb-border-default); }
+.md p { margin: .5em 0; }
+.md a { color: var(--eb-accent-primary); }
+.md ul, .md ol { margin: .5em 0; padding-left: 1.5em; }
+.md li { margin: .2em 0; }
+.md code {
+  font-family: var(--eb-font-mono); font-size: .9em; background: var(--eb-bg-elevated);
+  border: 1px solid var(--eb-border-default); border-radius: var(--eb-radius-sm); padding: .1em .35em;
+}
+.md pre {
+  background: var(--eb-bg-elevated); border: 1px solid var(--eb-border-default); border-radius: var(--eb-radius-md);
+  padding: 10px 12px; overflow: auto;
+}
+.md pre code { background: none; border: none; padding: 0; font-size: var(--eb-text-sm); }
+.md blockquote { margin: .5em 0; padding: 0 12px; border-left: 3px solid var(--eb-border-hover); color: var(--eb-text-secondary); }
+.md hr { border: none; border-top: 1px solid var(--eb-border-default); margin: 1em 0; }
+.md table { border-collapse: collapse; margin: .5em 0; font-size: var(--eb-text-sm); }
+.md th, .md td { border: 1px solid var(--eb-border-default); padding: 5px 9px; text-align: left; }
+.md th { background: var(--eb-bg-elevated); font-weight: var(--eb-font-semibold); }
+.md img { max-width: 100%; }
+.md del { opacity: .7; }
+
+.section-title { font-size: var(--eb-text-sm); text-transform: uppercase; letter-spacing: .04em; color: var(--eb-text-secondary); margin: 16px 0 8px; }
+.add-label { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+.add-label input {
+  font: inherit; font-size: var(--eb-text-base); padding: 6px 9px; border-radius: var(--eb-radius-md);
+  border: 1px solid var(--eb-border-hover); background: var(--eb-bg-elevated); color: var(--eb-text-primary); min-width: 200px;
+}
+.suggest { display: flex; flex-wrap: wrap; gap: 8px 10px; margin-top: 8px; align-items: flex-start; }
+.suggest-item { display: inline-flex; flex-direction: column; gap: 2px; }
+.suggest .label-chip { cursor: pointer; }
+.suggest .label-chip:hover { border-color: var(--eb-accent-primary); }
+.trigger-hint { font-size: var(--eb-text-xs); color: var(--eb-text-muted); padding-left: 2px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hint { color: var(--eb-text-muted); font-size: var(--eb-text-sm); margin-top: 4px; }
+
+.err {
+  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+  background: var(--eb-status-error); color: #fff; padding: 9px 14px; border-radius: var(--eb-radius-md); font-size: var(--eb-text-base); box-shadow: var(--eb-shadow); max-width: 80%;
+}
+a { color: var(--eb-accent-primary); }
+.hidden { display: none !important; }
+
+/* ─── §6.4 redesign: tabs, watch health, activity view ──────────────────────── */
+
+.btn.sm { padding: 4px 9px; font-size: var(--eb-text-xs); display: inline-flex; align-items: center; gap: 6px; }
+.btn.sm svg { flex: 0 0 auto; }
+
+.toolbar.sub { padding: 8px 12px; gap: 10px; border-bottom: 1px solid var(--eb-border-default); }
+
+.view-tabs {
+  display: flex; gap: 2px; padding: 0 16px; background: var(--eb-bg-surface);
+  border-bottom: 1px solid var(--eb-border-default); flex-shrink: 0;
+}
+.view-tab {
+  font: inherit; font-size: var(--eb-text-base); cursor: pointer; background: none; border: none;
+  color: var(--eb-text-secondary); padding: 9px 12px; border-bottom: 2px solid transparent;
+}
+.view-tab:hover { color: var(--eb-text-primary); }
+.view-tab.is-active { color: var(--eb-text-primary); font-weight: var(--eb-font-medium); border-bottom-color: var(--eb-accent-primary); }
+
+.view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.view[hidden] { display: none; }
+
+.watch-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+
+/* health pill — the roll-up badge (top of "Watching") and the compact
+ * Activity-view strip rows */
+.health-pill {
+  display: inline-flex; align-items: center; gap: 6px; font-size: var(--eb-text-xs);
+  padding: 3px 10px; border-radius: 9999px; border: 1px solid var(--eb-border-hover);
+  background: var(--eb-bg-elevated); color: var(--eb-text-secondary); white-space: nowrap;
+}
+.health-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.health-pill.ok   { color: var(--eb-status-success); }
+.health-pill.warn { color: var(--eb-status-warning); border-color: var(--eb-status-warning); }
+.health-pill.err  { color: var(--eb-status-error); border-color: var(--eb-status-error); }
+
+/* one status pill: coloured dot + label — shared by the issue list and the
+ * watch card's "Wakes on" row */
+.status-pill {
+  display: inline-flex; align-items: center; gap: 6px; font-size: var(--eb-text-xs);
+  padding: 2px 9px; border-radius: 9999px; border: 1px solid var(--eb-border-hover);
+  background: var(--eb-bg-elevated); color: var(--eb-text-primary);
+  white-space: nowrap; flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+}
+.status-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+
+/* issue list — a two-line card (line 1: key + title · line 2: status pill + assignee) */
+.issue-card {
+  display: flex; flex-direction: column; gap: 6px; padding: 11px 12px; margin-bottom: 8px;
+  border: 1px solid var(--eb-border-default); border-radius: var(--eb-radius-lg);
+  background: var(--eb-bg-surface); text-decoration: none; color: inherit;
+}
+.issue-card:hover { border-color: var(--eb-border-hover); }
+.ic-line1, .ic-line2 { display: flex; align-items: center; gap: 8px; }
+.ic-num { font-family: var(--eb-font-mono); font-size: var(--eb-text-xs); color: var(--eb-text-muted); flex: 0 0 auto; }
+.ic-title { font-weight: var(--eb-font-medium); font-size: var(--eb-text-base); color: var(--eb-text-primary); flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ic-assignee { font-size: var(--eb-text-xs); color: var(--eb-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* watch cards (Board view right column) */
+.watch-cards { display: flex; flex-direction: column; gap: 10px; }
+.watch-card {
+  border: 1px solid var(--eb-border-default); border-radius: var(--eb-radius-lg);
+  background: var(--eb-bg-surface); overflow: hidden;
+}
+.watch-card.failing { border-color: var(--eb-status-error); }
+.wc-head {
+  width: 100%; display: flex; flex-direction: column; gap: 10px; padding: 13px 15px;
+  background: none; border: none; font: inherit; color: var(--eb-text-primary); cursor: pointer; text-align: left;
+}
+.wc-head:hover { background: var(--eb-bg-hover); }
+.wc-row { display: flex; align-items: center; gap: 11px; }
+.proj-badge {
+  font-family: var(--eb-font-mono); font-size: var(--eb-text-xs); font-weight: var(--eb-font-semibold);
+  background: var(--eb-bg-elevated); border: 1px solid var(--eb-border-default);
+  border-radius: var(--eb-radius-sm); padding: 2px 7px; flex: 0 0 auto;
+}
+.proj-badge.sm { font-size: 10px; padding: 1px 5px; }
+.wc-name { color: var(--eb-text-secondary); font-size: var(--eb-text-base); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc-health { display: inline-flex; align-items: center; gap: 6px; font-size: var(--eb-text-sm); flex: 0 0 auto; white-space: nowrap; }
+.wc-health .hi { flex: 0 0 auto; }
+.wc-health.ok   { color: var(--eb-status-success); }
+.wc-health.warn { color: var(--eb-status-warning); }
+.wc-health.err  { color: var(--eb-status-error); }
+.wc-wakes { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.wc-wakes-label { font-size: var(--eb-text-xs); color: var(--eb-text-muted); flex: 0 0 auto; }
+.wc-any { font-size: var(--eb-text-xs); color: var(--eb-text-secondary); }
+.wc-more { font-size: var(--eb-text-xs); color: var(--eb-text-muted); }
+.wc-agents { font-size: var(--eb-text-xs); color: var(--eb-text-muted); margin-left: auto; flex: 0 0 auto; }
+
+/* the admin watch-config chip editor still uses .mini-chip */
+.mini-chip {
+  display: inline-flex; align-items: center; gap: 5px; font-size: var(--eb-text-xs);
+  padding: 1px 8px; border-radius: 9999px; border: 1px solid var(--eb-border-hover); background: var(--eb-bg-elevated);
+}
+.mini-chip.removable button {
+  border: none; background: none; color: var(--eb-text-secondary); cursor: pointer;
+  font-size: var(--eb-text-sm); line-height: 1; padding: 0;
+}
+.mini-chip.removable button:hover { color: var(--eb-status-error); }
+.chev { color: var(--eb-text-muted); display: inline-flex; flex: 0 0 auto; transition: transform .12s; }
+.chev.up { transform: rotate(180deg); }
+
+.watch-detail {
+  border-top: 1px solid var(--eb-border-default); background: var(--eb-bg-app);
+  padding: 12px 15px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 18px;
+}
+.watch-detail > div { display: flex; flex-direction: column; gap: 3px; font-size: var(--eb-text-sm); min-width: 0; }
+.watch-detail .wd-span { grid-column: 1 / -1; }
+.dt-label { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--eb-text-muted); }
+
+/* failure panel */
+.failure { border-top: 1px solid var(--eb-status-error); background: var(--eb-status-warning-bg); }
+:root[data-theme="admin-dark"] .failure,
+:root:not([data-theme]) .failure { background: oklch(0.22 0.04 25); }
+.failure-summary { display: flex; align-items: center; gap: 12px; padding: 11px 14px; }
+.fs-count { font-size: var(--eb-text-base); font-weight: var(--eb-font-semibold); color: var(--eb-text-primary); }
+.err-log { border-top: 1px solid var(--eb-border-default); max-height: 170px; overflow: auto; }
+.err-row {
+  display: flex; gap: 12px; padding: 7px 14px; align-items: baseline;
+  border-bottom: 1px solid var(--eb-border-default); font-family: var(--eb-font-mono); font-size: var(--eb-text-xs);
+}
+.err-row:last-child { border-bottom: none; }
+.err-ts { color: var(--eb-text-muted); flex: 0 0 52px; }
+.err-msg { color: var(--eb-text-primary); flex: 1; word-break: break-word; }
+.failure-hint { padding: 9px 14px; font-size: var(--eb-text-xs); color: var(--eb-text-secondary); border-top: 1px solid var(--eb-border-default); }
+
+/* issue-type glyph */
+.type-glyph { display: inline-flex; flex: 0 0 auto; color: var(--eb-text-muted); }
+.type-glyph.tg-bug { color: var(--eb-status-error); }
+.type-glyph.tg-story { color: var(--eb-status-success); }
+.type-glyph.tg-task { color: var(--eb-status-info); }
+.type-glyph.tg-epic { color: var(--eb-accent-primary); }
+.type-glyph.tg-subtask { color: var(--eb-text-secondary); }
+
+/* activity view */
+.activity-layout { grid-template-columns: minmax(240px, 320px) 1fr; }
+.watch-strip { display: flex; flex-direction: column; gap: 6px; }
+.strip-row {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border: 1px solid var(--eb-border-default); border-radius: var(--eb-radius-md); background: var(--eb-bg-surface);
+}
+.strip-row.failing { border-color: var(--eb-status-error); }
+
+.activity-controls { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.chip-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  font: inherit; font-size: var(--eb-text-xs); cursor: pointer; padding: 3px 10px; border-radius: 9999px;
+  border: 1px solid var(--eb-border-hover); background: var(--eb-bg-elevated); color: var(--eb-text-secondary);
+}
+.chip:hover { color: var(--eb-text-primary); }
+.chip.is-active { background: var(--eb-accent-primary); border-color: transparent; color: var(--eb-text-inverted); }
+
+.seg { display: inline-flex; border: 1px solid var(--eb-border-hover); border-radius: var(--eb-radius-md); overflow: hidden; }
+.seg-btn {
+  font: inherit; font-size: var(--eb-text-xs); cursor: pointer; padding: 4px 11px; border: none;
+  background: var(--eb-bg-elevated); color: var(--eb-text-secondary);
+}
+.seg-btn + .seg-btn { border-left: 1px solid var(--eb-border-hover); }
+.seg-btn.is-active { background: var(--eb-bg-hover); color: var(--eb-text-primary); }
+
+.activity-list { display: flex; flex-direction: column; }
+.day-sep {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--eb-text-muted);
+  padding: 12px 0 6px; border-bottom: 1px solid var(--eb-border-default); margin-bottom: 4px;
+}
+.day-sep:first-child { padding-top: 0; }
+.ac-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 2px;
+  border-bottom: 1px solid var(--eb-border-default); font-size: var(--eb-text-sm);
+}
+.ac-row:last-child { border-bottom: none; }
+.ac-main { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 0 1 46%; }
+.ac-key { font-family: var(--eb-font-mono); font-size: var(--eb-text-xs); color: var(--eb-accent-primary); flex: 0 0 auto; }
+.ac-summary { color: var(--eb-text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-transition { color: var(--eb-text-secondary); flex: 0 1 auto; font-size: var(--eb-text-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.arr { color: var(--eb-text-muted); }
+.ac-time { color: var(--eb-text-muted); font-size: var(--eb-text-xs); flex: 0 0 auto; text-align: right; margin-left: auto; }
+.oc {
+  font-size: 10px; padding: 1px 8px; border-radius: 9999px; border: 1px solid var(--eb-border-hover);
+  color: var(--eb-text-secondary); flex: 0 0 auto; white-space: nowrap;
+}
+.oc.oc-ok    { color: var(--eb-status-success); border-color: var(--eb-status-success); }
+.oc.oc-info  { color: var(--eb-status-info); }
+.oc.oc-warn  { color: var(--eb-status-warning); border-color: var(--eb-status-warning); }
+.oc.oc-muted { color: var(--eb-text-muted); }
+
+/* admin watch-config editor rows */
+.watch-editor-row { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 8px; }
+.pk-input {
+  font: inherit; font-size: var(--eb-text-base); padding: 6px 9px; border-radius: var(--eb-radius-md);
+  border: 1px solid var(--eb-border-hover); background: var(--eb-bg-elevated); color: var(--eb-text-primary);
+  flex: 0 0 120px;
+}
+.chip-editor {
+  flex: 1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 34px;
+  padding: 4px 6px; border: 1px solid var(--eb-border-hover); border-radius: var(--eb-radius-md); background: var(--eb-bg-elevated);
+}
+.chip-add {
+  font: inherit; font-size: var(--eb-text-sm); border: none; background: none; color: var(--eb-text-primary);
+  flex: 1; min-width: 120px; outline: none; padding: 2px;
+}
+.chip-add::placeholder { color: var(--eb-text-muted); }
+
+@media (max-width: 720px) {
+  .layout, .activity-layout { grid-template-columns: 1fr; }
+  .watch-detail { grid-template-columns: 1fr 1fr; }
+}

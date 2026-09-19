@@ -529,3 +529,90 @@ test('the shipped github-issues manifest (plugins/github-issues) is valid', () =
   const board = manifest.ui.routes.find((r) => r.path === '/');
   assert.equal(board && board.minRole, 'team-member');
 });
+
+// ── ACCEPTANCE: the shipped jira manifest validates end to end ───────────────
+test('the shipped jira manifest (plugins/jira) is valid', () => {
+  const p = path.join(__dirname, '..', 'plugins', 'jira', 'plugin.json');
+  const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const { ok, errors, manifest } = validatePluginManifest(raw);
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  // A credential-holding, egress broker — the Jira {site-url, email, api-token}
+  // is a per-scope plugin credential (§5), so unlike github-issues the declared
+  // credentials are NOT empty:
+  assert.deepEqual(manifest.sidecar.capabilities, ['egress']);
+  assert.deepEqual(manifest.credentials.map((c) => c.key), ['site-url', 'email', 'api-token']);
+  assert.ok(manifest.credentials.every((c) => c.required === true));
+  // Team scope only — a Jira site binding is a team-level fact (§6.1). Podman
+  // only for v1 — the agent→broker network path is Podman-only, so a k8s stack
+  // would wake agents that then cannot read the ticket (§6.1 corrected):
+  assert.deepEqual(manifest.scopes, ['team']);
+  assert.equal(defaultGranularity(manifest), 'team');
+  assert.deepEqual(manifest.platforms, ['podman']);
+  assert.equal(manifest.cli.name, 'aee-jira');
+  assert.equal(manifest.quota.maxObjects, 500);
+  // Phase 3 read UI (`/` @ team-member) + Phase 4 write config (`/admin` @
+  // team-admin); `policy` declares the three writes as governed subcommands
+  // (D3 — role-gated, no confirmation pen, so `requiresApproval` stays empty).
+  assert.deepEqual(manifest.ui.routes, [
+    { path: '/', minRole: 'team-member' },
+    { path: '/admin', minRole: 'team-admin' },
+  ]);
+  assert.notEqual(manifest.ui.global, true);
+  assert.deepEqual(Object.keys(manifest.policy).sort(), ['comment', 'transition', 'update']);
+  assert.deepEqual(manifest.requiresApproval, []);
+});
+
+// ── events (optional): the plugin's own event vocabulary, surfaced by the
+// trigger form so a `plugin-event` listener can be authored without reading
+// the plugin's docs. The platform carries it and never interprets it (D5).
+test('events: accepts a declared vocabulary and normalizes it', () => {
+  const { ok, errors, manifest } = validatePluginManifest({
+    ...base(),
+    events: [{
+      name: ' status_changed ',
+      description: ' A watched issue moved to another status ',
+      payload: [
+        { key: ' toStatus ', description: 'status the issue moved into', example: ' Ready for Dev ' },
+        { key: 'author', description: 'who moved it' },
+      ],
+    }],
+  });
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  assert.deepEqual(manifest.events, [{
+    name: 'status_changed',
+    description: 'A watched issue moved to another status',
+    payload: [
+      { key: 'toStatus', description: 'status the issue moved into', example: 'Ready for Dev' },
+      { key: 'author', description: 'who moved it' },
+    ],
+  }]);
+});
+
+test('events: absent → empty list; an event without payload gets an empty payload', () => {
+  assert.deepEqual(validatePluginManifest(base()).manifest.events, []);
+  const { manifest } = validatePluginManifest({ ...base(), events: [{ name: 'ping' }] });
+  assert.deepEqual(manifest.events, [{ name: 'ping', payload: [] }]);
+});
+
+test('events: rejects malformed vocabularies', () => {
+  const errs = (events) => validatePluginManifest({ ...base(), events }).errors;
+  assert.ok(errs('status_changed').some((e) => /events must be an array/.test(e)));
+  assert.ok(errs([{ description: 'no name' }]).some((e) => /each event must be an object with a non-empty name/.test(e)));
+  assert.ok(errs([{ name: 'Status Changed' }]).some((e) => /events\[0\]\.name must be a slug/.test(e)));
+  assert.ok(errs([{ name: 'a' }, { name: 'a' }]).some((e) => /duplicate event name: a/.test(e)));
+  assert.ok(errs([{ name: 'a', payload: 'toStatus' }]).some((e) => /events\[0\]\.payload must be an array/.test(e)));
+  assert.ok(errs([{ name: 'a', payload: [{ description: 'no key' }] }]).some((e) => /each payload field must be an object with a non-empty key/.test(e)));
+  assert.ok(errs([{ name: 'a', payload: [{ key: 'k' }, { key: 'k' }] }]).some((e) => /duplicate payload key: k/.test(e)));
+  assert.ok(errs([{ name: 'a', payload: [{ key: 'k', example: 42 }] }]).some((e) => /events\[0\]\.payload\[0\]\.example must be a string/.test(e)));
+});
+
+test('events: the jira reference manifest declares status_changed with toStatus', () => {
+  const raw = JSON.parse(require('fs').readFileSync(require('path').join(__dirname, '..', 'plugins', 'jira', 'plugin.json'), 'utf8'));
+  const { ok, manifest } = validatePluginManifest(raw);
+  assert.equal(ok, true);
+  const ev = manifest.events.find((e) => e.name === 'status_changed');
+  assert.ok(ev, 'jira declares status_changed');
+  assert.ok(ev.payload.some((p) => p.key === 'toStatus' && p.example), 'toStatus with an example');
+});

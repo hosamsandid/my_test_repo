@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Clock, CalendarClock, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch, Repeat } from 'lucide-react';
+import { RefreshCw, Clock, CalendarClock, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch, Repeat, Puzzle } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
 import ScriptViewerPanel from '../../components/ScriptViewerPanel';
@@ -7,6 +7,12 @@ import ConfirmDialog from '../../components/ConfirmDialog';
 import FormInput from '../../components/FormInput';
 import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
+import { effectiveGrantFor } from '../plugin-grant-view.js';
+import { pluginEventOptions, defaultPluginId } from './plugin-event-options.js';
+import {
+  pluginEvents, eventChoices, payloadKeyChoices,
+  conditionsFromFilter, conditionsToFilter, payloadFilterSummary, conditionsHeading,
+} from './plugin-event-filter.js';
 import { liveOps } from '../process/edit-adapters';
 import { isGateLabel, isBrakeLabel } from '../process/label-flags';
 import {
@@ -101,9 +107,12 @@ function TypeBadge({ type, dataFlow }) {
   const isHttp   = type === 'http';
   const isGithub = type === 'github-event';
   const isLoop   = type === 'loop';
+  const isPlugin = type === 'plugin-event';
   let bg, color, label, Icon;
   if (dataFlow) {
     bg = 'var(--eb-accent-muted)'; color = 'var(--eb-accent-primary)'; label = 'data flow'; Icon = GitBranch;
+  } else if (isPlugin) {
+    bg = 'var(--eb-status-info-bg, var(--eb-accent-muted))'; color = 'var(--eb-status-info, var(--eb-accent-primary))'; label = 'plugin'; Icon = Puzzle;
   } else if (isLoop) {
     bg = 'var(--eb-status-warning-bg)'; color = 'var(--eb-status-warning)'; label = 'loop'; Icon = Repeat;
   } else if (isCron) {
@@ -321,6 +330,9 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
     schedule = summarizeLoopTrigger(trigger);
   } else if (trigger.type === 'http') {
     schedule = `/hooks/${agentId}/${trigger.id}`;
+  } else if (trigger.type === 'plugin-event') {
+    const filterCopy = payloadFilterSummary(trigger.payloadFilter);
+    schedule = `${trigger.pluginId || 'plugin'}${trigger.eventFilter ? ` · ${trigger.eventFilter}` : ' · any event'}${filterCopy ? ` · ${filterCopy}` : ''}`;
   } else if (ghSummary) {
     schedule = trigger.repo || 'any repo';
   } else if (trigger.cron) {
@@ -569,7 +581,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   // Draft mode (process-canvas drafts): there is no live agent/environment yet,
   // so the repo is unknown by design — it is applied at materialise time.
   const isDraftMode = ops.mode === 'draft';
-  const knownTypes = new Set(['cron', 'once', 'http', 'github-event', 'loop']);
+  const knownTypes = new Set(['cron', 'once', 'http', 'github-event', 'loop', 'plugin-event']);
   const startedAsDataFlow = isDataFlowTrigger(initialValues);
   // 'data-flow' is a UI-only type that serializes to github-event / push / from.
   const initialType = lockType
@@ -623,6 +635,17 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     // orchestrator queue (label mirrored to GitHub); 'github' is poller
     // delivery. Only meaningful for a label listener — see `showTransport`.
     transport:     initialValues?.transport === 'internal' ? 'internal' : 'github',
+    // ── plugin-event fields (Jira plan §4B) ──────────────────────────────
+    // `pluginId` names which granted plugin may fire this listener; the
+    // optional `eventFilter` is the broker's own event name (opaque to the
+    // platform) — blank = fire on any event from that plugin.
+    pluginId:    initialValues?.pluginId    ?? '',
+    eventFilter: initialValues?.eventFilter ?? '',
+    // Optional `{ key: value }` matched against the delivered payload's
+    // top-level string fields (plugin-event.js `matchesPayloadFilter`); edited
+    // as condition rows (`{key, value}`), folded back on save. No rows = no
+    // filter. The keys on offer come from the plugin's declared vocabulary.
+    conditions:  conditionsFromFilter(initialValues?.payloadFilter),
   }));
   const isDataFlow = form.type === 'data-flow';
   const showLabelFilter = form.type === 'github-event'
@@ -689,6 +712,66 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       setForm(f => (f.repo ? f : { ...f, repo: availableRepos[0].fullName }));
     }
   }, [availableRepos, form.repo]);
+
+  // Plugin-event picker inputs — the installed registry plus this agent's
+  // effective plugin grant, fetched once, only while plugin-event is the
+  // active type (the `availableRepos` pattern). `grant: null` means "cannot
+  // know" — draft mode, or the parent team's config was unreadable — and the
+  // pure module then offers everything un-marked rather than marking every
+  // plugin "not granted" on a read failure. `null` state = not loaded.
+  const [pluginInputs, setPluginInputs] = useState(null);
+  useEffect(() => {
+    if (form.type !== 'plugin-event' || pluginInputs !== null) return undefined;
+    let cancelled = false;
+    (async () => {
+      let installed = [];
+      let grant = null;
+      try {
+        const reg = await apiCall('GET', '/api/plugins');
+        installed = Array.isArray(reg?.installed) ? reg.installed : [];
+      } catch { /* registry unreadable → empty list → NO_PLUGINS_NOTICE */ }
+      if (!isDraftMode) {
+        try {
+          const agent = await apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}`);
+          let parentTeam = null;
+          if (agent?.role === 'team-member' && agent.parentTeamId && !Array.isArray(agent.pluginsOverride)) {
+            // Only the inherit case needs the parent; an override is self-contained.
+            parentTeam = await apiCall('GET', `/api/agents/${encodeURIComponent(agent.parentTeamId)}`);
+          }
+          grant = effectiveGrantFor(agent, parentTeam);
+        } catch { grant = null; }
+      }
+      if (!cancelled) setPluginInputs({ installed, grant });
+    })();
+    return () => { cancelled = true; };
+  }, [form.type, agentId, pluginInputs, isDraftMode]);
+
+  const pluginPick = pluginInputs === null
+    ? null
+    : pluginEventOptions({ ...pluginInputs, currentId: form.pluginId, draft: isDraftMode });
+
+  // The chosen plugin's declared vocabulary (manifest `events[]`): drives the
+  // "Which event" select and the "Only when…" key picker. Empty for a plugin
+  // that declares none — both fields then fall back to free text.
+  const vocabulary = pluginInputs === null ? [] : pluginEvents(pluginInputs.installed, form.pluginId);
+  const eventRows = eventChoices(vocabulary, form.eventFilter);
+  const keyRows = payloadKeyChoices(vocabulary, form.eventFilter);
+  const setCondition = (i, patch) => setForm(f => ({
+    ...f, conditions: f.conditions.map((c, j) => (j === i ? { ...c, ...patch } : c)),
+  }));
+  const removeCondition = (i) => setForm(f => {
+    const next = f.conditions.filter((_, j) => j !== i);
+    return { ...f, conditions: next.length ? next : [{ key: '', value: '' }] };
+  });
+  const addCondition = () => setForm(f => ({ ...f, conditions: [...f.conditions, { key: '', value: '' }] }));
+
+  // Auto-pick when there is exactly one plugin that could fire this listener
+  // and nothing is chosen yet — mirrors the single-repo auto-pick above.
+  useEffect(() => {
+    if (!pluginPick || form.pluginId) return;
+    const only = defaultPluginId(pluginPick.options);
+    if (only) setForm(f => (f.pluginId ? f : { ...f, pluginId: only }));
+  }, [pluginPick, form.pluginId]);
 
   // Loop verifier roster — for a team agent, the "separate verifier" default is
   // enforced by the backend (concept §4.6), so the UI must reflect it: pre-fill
@@ -765,6 +848,9 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
     }
     if (form.type === 'http' && !form.secret.trim()) { setFormError('Secret is required for HTTP triggers.'); return; }
+    if (form.type === 'plugin-event' && !form.pluginId.trim()) { setFormError('Select the plugin that may fire this listener.'); return; }
+    const parsedPayloadFilter = form.type === 'plugin-event' ? conditionsToFilter(form.conditions) : { ok: true, value: null };
+    if (!parsedPayloadFilter.ok) { setFormError(parsedPayloadFilter.error); return; }
     if (form.type === 'loop') {
       if (!isValidMaxIterations(form.maxIterations)) { setFormError('Max iterations is required and must be a positive whole number.'); return; }
       if (form.verifyMode === 'command' && !form.verifyCommand.trim()) { setFormError('Enter the verifier command, or choose a different verifier mode.'); return; }
@@ -814,6 +900,13 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       if (mg != null) body.minGapSeconds = mg;
     }
     else if (form.type === 'http')         body.secret = form.secret.trim();
+    else if (form.type === 'plugin-event') {
+      body.pluginId = form.pluginId.trim();
+      // `null` (not omitted) so a PUT clears an existing filter when blanked.
+      body.eventFilter = form.eventFilter.trim() || null;
+      // `null` (not omitted) clears a stored filter when the field is blanked.
+      body.payloadFilter = parsedPayloadFilter.value;
+    }
     else if (form.type === 'github-event') {
       if (form.repo) body.repo = form.repo; // a draft's repo lands at materialise
       body.events = form.events.slice(0, 1); // one event per trigger
@@ -879,6 +972,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             <option value="http">HTTP webhook</option>
             <option value="github-event">GitHub event</option>
             <option value="data-flow">Data flow (agent dependency)</option>
+            <option value="plugin-event">Plugin event</option>
           </select>
         </div>
       )}
@@ -889,6 +983,159 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
       {form.type === 'once' && (
         <DateTimePicker value={form.at} onChange={v => set('at', v)} />
+      )}
+
+      {form.type === 'plugin-event' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+          <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+            Fires when a granted plugin&rsquo;s broker sends an event for this team.
+            The plugin is granted on the Plugins page; the event name is the broker&rsquo;s
+            own (e.g. <code style={{ fontFamily: 'var(--eb-font-mono)' }}>status_changed</code>).
+          </div>
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Plugin
+            </div>
+            {pluginPick === null ? (
+              <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2)' }}>
+                <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', marginRight: 6, verticalAlign: 'middle' }} />
+                Loading plugins…
+              </div>
+            ) : (
+              <>
+                {/* A select, not free text: pluginId is a foreign key the orchestrator
+                    matches exactly and only fires for a granted plugin — see
+                    plugin-event-options.js for the option rules. */}
+                <select
+                  value={form.pluginId}
+                  onChange={e => set('pluginId', e.target.value)}
+                  style={{ ...FIELD_STYLE, width: '100%' }}
+                >
+                  {pluginPick.options.map(o => (
+                    <option key={o.value || '__placeholder'} value={o.value} disabled={o.disabled}>{o.label}</option>
+                  ))}
+                </select>
+                {pluginPick.notice && (
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                    {pluginPick.notice}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          {/* WHICH EVENT vs. ONLY WHEN — the two are easy to confuse (a status
+              is not an event name), so both are rendered from the vocabulary
+              the plugin declares in its manifest (`events[]`), with the
+              distinction spelled out and a "?" into the help chapter. */}
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--eb-space-1)' }}>
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)' }}>
+                Which event
+              </div>
+              <PageHelpButton
+                label="Which event vs. Only when — what goes where"
+                size={12}
+                section={AGENT_CHAT_HELP_SECTIONS.pluginEvent}
+                style={{ padding: 2 }}
+              />
+            </div>
+            {vocabulary.length ? (
+              <select
+                value={form.eventFilter}
+                onChange={e => set('eventFilter', e.target.value)}
+                style={{ ...FIELD_STYLE, width: '100%' }}
+              >
+                {eventRows.map(o => <option key={o.value || '__any'} value={o.value}>{o.label}</option>)}
+              </select>
+            ) : (
+              <input
+                value={form.eventFilter}
+                onChange={e => set('eventFilter', e.target.value)}
+                placeholder="the plugin's event name, e.g. status_changed — blank = any event"
+                style={{ ...FIELD_STYLE, width: '100%' }}
+              />
+            )}
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+              <strong>What kind of change</strong> wakes this agent &mdash; the plugin&rsquo;s own event name,
+              not a value inside it (a Jira status is not an event; it goes below).
+              {vocabulary.length === 0 && ' This plugin declares no event list — its help topic names the events it sends.'}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+              Only when&hellip; (optional)
+              <span style={{ fontWeight: 'var(--eb-font-normal)' }}>
+                {' \u2014 '}<code style={{ fontFamily: 'var(--eb-font-mono)' }}>{conditionsHeading(form.eventFilter)}</code>
+              </span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+              {form.conditions.map((c, i) => {
+                const known = keyRows.find(k => k.key === c.key);
+                const keyIsDeclared = !!known;
+                return (
+                  <div key={i} style={{ display: 'flex', gap: 'var(--eb-space-1)', alignItems: 'center' }}>
+                    {keyRows.length ? (
+                      <select
+                        value={c.key}
+                        onChange={e => setCondition(i, { key: e.target.value })}
+                        title={known && known.description ? known.description : undefined}
+                        style={{ ...FIELD_STYLE, flex: '1 1 40%', minWidth: 0 }}
+                      >
+                        <option value="">— field —</option>
+                        {keyRows.map(k => (
+                          <option key={k.key} value={k.key}>{k.description ? `${k.key} — ${k.description}` : k.key}</option>
+                        ))}
+                        {c.key && !keyIsDeclared && <option value={c.key}>{c.key} — not a field this event carries</option>}
+                      </select>
+                    ) : (
+                      <input
+                        value={c.key}
+                        onChange={e => setCondition(i, { key: e.target.value })}
+                        placeholder="field, e.g. toStatus"
+                        style={{ ...FIELD_STYLE, flex: '1 1 40%', minWidth: 0 }}
+                      />
+                    )}
+                    <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>=</span>
+                    <input
+                      value={c.value}
+                      onChange={e => setCondition(i, { value: e.target.value })}
+                      placeholder={known && known.example ? `e.g. ${known.example}` : 'exact value'}
+                      style={{ ...FIELD_STYLE, flex: '1 1 60%', minWidth: 0 }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => removeCondition(i)}
+                      title="Remove condition"
+                      aria-label="Remove condition"
+                      style={{ background: 'none', border: 'none', color: 'var(--eb-text-muted)', cursor: 'pointer', padding: 2, display: 'inline-flex' }}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                type="button"
+                onClick={addCondition}
+                style={{
+                  alignSelf: 'flex-start', display: 'inline-flex', alignItems: 'center', gap: 3,
+                  padding: '2px 8px', fontSize: 'var(--eb-text-xs)', background: 'none',
+                  border: '1px dashed var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+                  color: 'var(--eb-text-secondary)', cursor: 'pointer',
+                }}
+              >
+                <Plus size={11} /> Add condition
+              </button>
+            </div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+              <strong>Which of those changes</strong> wake this agent: conditions on the fields of the event
+              chosen above; every one must equal the event&rsquo;s field exactly (case-sensitive), and a
+              condition on a field the event does not carry never matches. No conditions = every event
+              above wakes it.
+              {keyRows.length === 0 && ' The field names are the plugin\u2019s own \u2014 its help topic lists them.'}
+            </div>
+          </div>
+        </div>
       )}
 
       {form.type === 'loop' && (

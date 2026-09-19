@@ -240,3 +240,40 @@ Google OAuth credential and runs kubectl (`capabilities: ["egress"]`,
 `scopes: ["team","agent"]`, `platforms: ["podman","kubernetes"]`). The page also
 carries an always-visible **"What this plugin does"** block above the sign-in
 options so a team admin sees the capability before signing in (#1716).
+
+## `jira`
+
+**Wakes a granted agent when a Jira Cloud issue changes status, and lets it read
+and update the issue.** A poll loop inside the broker runs a narrow JQL search
+per watched project (`updated >= -Nm`, `expand=changelog`), flattens each issue's
+changelog into `<issueKey>:<historyId>` status events, gates by an exact
+`statusFilter`, dedups against a per-`<siteUrl>::<projectKey>` seen-id cursor,
+collapses bursts into one digest, and calls `POST /internal/plugin-event` — the
+generic broker→orchestrator wake channel this plugin introduced (§4B of the
+plan). The orchestrator fans out to every granted agent carrying a matching
+`plugin-event` trigger; the agent runs its own wake instruction with the Jira
+payload as untrusted context.
+
+The broker (`jira/broker/`, on the Broker SDK) holds the per-team Jira
+credential (`{site-url, email, api-token}`, set by a Team Admin on the Plugins
+page, pushed per-scope by the orchestrator — never in the browser or an agent).
+`capabilities: ["egress"]`, `credentials: [site-url, email, api-token]`,
+`scopes: ["team"]`, `platforms: ["podman"]` (the agent→broker path is
+Podman-only, so a k8s stack would wake agents that cannot then read the ticket).
+
+- **CLI** `aee-jira`: `inbox` / `projects` / `list` / `show` (reads, any granted
+  agent) + `comment` / `transition` (attributed writes — role-gated server-side
+  via the manifest `policy`, **not** confirmation-gated: moving a ticket is
+  routine and reversible; D3).
+- **UI**: `/` (team-member) — issues, the inbox, the poller's cursor state; and
+  `/admin` (team-admin) — the watch config (`{ projectKey, statusFilter? }`
+  rows), which replaced #1539's `env.jiraProjects[]` and the `jira-event`
+  trigger fields.
+
+This **replaces the reverted built-in Jira integration** (PR #1539): its design
+work — JQL/changelog polling, the composite event id, the truncated-changelog
+backfill, per-site project scoping — is reused, rehomed from ~6 000 lines across
+51 platform files into a plugin plus two generic platform additions every future
+event-source plugin reuses: the per-scope plugin **credential store** (§5) and
+the **`plugin-event`** wake (§4B). Full design + rollout: `docs/jira-plugin-plan
+.md`; operator guide: `docs/jira-plugin.md`.

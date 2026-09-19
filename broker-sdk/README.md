@@ -20,7 +20,9 @@ const sdk = require('broker-sdk');
 | `maskSecrets(output, secrets)` | Response redaction — masks explicit secret values plus the `-e/--env KEY=VALUE` values backends echo verbatim. |
 | `healthEndpoint(extra?)` → `(req,res)` | The registry card's health probe (no auth). |
 | `teardownScopeEndpoint(reap, {secret})` → `(req,res)` | Scope teardown on team/agent deletion, per `scopeId` (one implementation serves both). Resources are **reaped before the orchestrator invalidates the token**. |
+| `internalPushEndpoint(handler, {secret, pluginId})` → `(req,res)` | Wraps a route only the **orchestrator** may call (a credential/registry push such as `PUT /internal/scope-credentials`): 401 unless the token names this plugin **and** the reserved `INTERNAL_SCOPE_ID` (`_internal`). Every granted agent's token shares the signing secret — without this, one team could wipe or repoint every other team's credential. The platform never derives `_internal` for an agent or team (`plugin-scope.js`), so only `plugin-runtime.mintInternalToken` produces it. |
 | `parkForApproval(op)` / `approvalHoldingPen({requiresApproval})` | The `requiresApproval` holding pen (v1: DM confirm). |
+| `selectFreshEvents` / `planBurstHandoffs` / `checkAndIncThrottle` / `computeBackoffDelayMs` / `passesHorizon` / `effectiveHorizon` (+ `loadThrottleState` / `saveThrottleState`) | Event-source polling primitives for a broker that polls an external system (`event-cursor.js`). A **copy** of `orchestrator/github-poller.js`'s seen-id cursor / burst collapse / hour-scoped throttle / exponential backoff — `github-poller.js` is untouched. First consumer: the Jira plugin broker. |
 
 ## Granularity opacity
 

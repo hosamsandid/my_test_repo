@@ -104,8 +104,8 @@ keeps its own JSONL audit for compliance questions.
 ### 4.1 Plugin anatomy and manifest
 
 A plugin is a directory in the registry: `/workspace/plugins/<id>/` with
-`plugin.json`, the CLI script(s) under `bin/`, and (referenced, not stored)
-the sidecar image.
+`plugin.json`, the CLI script(s) under `bin/`, optional console help topics
+under `help/` (below), and (referenced, not stored) the sidecar image.
 
 ```json
 {
@@ -132,6 +132,10 @@ the sidecar image.
       { "path": "/admin", "minRole": "team-admin" }
     ]
   },
+  "events": [
+    { "name": "status_changed", "description": "A watched issue moved to another status",
+      "payload": [ { "key": "toStatus", "description": "the status the issue moved into", "example": "Ready for Dev" } ] }
+  ],
   "companionSkill": "batch-parity-testing",
   "promptLine": "You can spawn containers with `aee-podman` — run `aee-podman --help`."
 }
@@ -161,6 +165,30 @@ the sidecar image.
   broker enforces it via `broker-sdk/authz.js`; the console validates the field.
 - `credentials` are bound at install/bind time from the existing credential
   store; secrets go into the **sidecar's** environment, never into agents.
+- `events` (optional) is an **event-source** plugin's own vocabulary: the
+  events its broker may send to `POST /internal/plugin-event` and the
+  top-level string fields each payload carries (`{name, description?,
+  payload: [{key, description?, example?}]}`). Purely descriptive — the
+  platform never interprets a name or a key (the wake stays generic,
+  `docs/jira-plugin-plan.md` D5); the trigger form renders it so a
+  `plugin-event` listener's **Which event** is a select and its **Only when…**
+  conditions a key picker with the example as placeholder, instead of two
+  free-text fields whose vocabulary lived only in the plugin's docs. A plugin
+  that declares none degrades to free text with the same wire shape.
+- `help/*.md` (optional directory, not a manifest field) — console help topics
+  in the built-in format (`admin-console/api/helper-chat/help-topics/`,
+  front-matter `id, routes[], title, summary, seeAlso[], askPrompts[]`). The
+  Helper Chat folds an installed plugin's topics into its grounding **only on
+  the contexts the topic's `routes` name**, as neighbours after the page's own
+  topic — never as a route's primary topic, so the "This page" face, the
+  coverage ratchet and every other page's prompt budget are untouched
+  (`help-registry.js` `loadPluginTopics`; read per request from
+  `/workspace/plugins/<id>/help/`, so install/uninstall shows up without a
+  restart). This is how the "?" on Agent Chat can answer "how does the Jira
+  plugin wake my agent" without the platform corpus learning anything about
+  Jira. The budget guard in `corpus.test.js` sweeps the reference plugins'
+  help dirs, so a shipped topic that would blow a page's neighbourhood fails
+  CI.
 - `companionSkill` (optional) names a skill shipped alongside the plugin:
   the CLI delivers the *capability*, the skill delivers the *domain
   knowledge* about using it well (e.g. how to design batch-parity tests
@@ -365,6 +393,23 @@ UI plugins. The sidecar address comes from the orchestrator
 (`GET /internal/plugins/:id/ui-endpoint`), and each sidecar gets a generic
 `AEE_PLUGIN_STATE_DIR` volume beside its audit volume. test-mgmt's manifest
 declares three routes at two roles to exercise the contract end-to-end.
+
+**Per-team roles in the signed identity** (Jira review, F4). The flat
+`x-aee-plugin-role` is the viewer's *maximum* role across the granted teams they
+belong to — right for the proxy's own `minRole` pre-check and for team-agnostic
+UIs, but it cannot express "Team Admin of A, Team Member of B". A broker that
+lets the request choose the team (Jira's `?team=`, netzplan's first-in-scope
+board) and gated `/admin` on the flat role handed U admin rights over B. The
+proxy therefore also signs `x-aee-plugin-team-roles` (`A=team-admin,B=team-member`,
+part of the HMAC canonical string; `plugin-ui-viewer.js` `viewerTeamRoles`), and
+the verifier exposes `roleForTeam(viewer, teamId)` — which never elevates: a team
+outside the viewer's scope is `null`, an in-scope team missing from the map (an
+older proxy) is a plain `team-member`. **Rule for brokers:** a team-selecting
+elevated route is gated on `roleForTeam(viewer, selectedTeam)` *after* the team
+is chosen; the flat role stays a coarse pre-filter. The sign/verify block is
+copied into every UI-bearing broker's `viewer-headers.js` and pinned
+byte-identical by `admin-console/api/viewer-headers-parity.test.js` — changing it
+means changing every copy and rebuilding the plugin images together.
 
 **Global UI visibility (opt-in, #1599).** By default a UI-bearing plugin's nav
 entry and UI are gated on the plugin being *granted* to a team the caller can
@@ -607,7 +652,10 @@ before it moves from catalog to roadmap.
 **Enterprise integration & ops**
 
 22. **Ticketing/ALM** (Jira/ServiceNow) — create/update work items from agent
-    findings; broker enforces project scoping.
+    findings; broker enforces project scoping. **Shipped: `plugins/jira/`** —
+    wakes agents on status changes (via the broker→orchestrator `plugin-event`
+    wake this plugin introduced), `aee-jira` read/write CLI, `/` + `/admin` UI.
+    See `docs/jira-plugin.md`.
 23. **Documentation publishing** — push generated docs to
     Confluence/SharePoint spaces per team.
 24. **Notification bridge** — outbound Teams/Slack/e-mail summaries beyond

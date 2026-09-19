@@ -113,3 +113,21 @@ test('a viewer with no grant role is admitted as team-member ONLY when globally 
   // A global plugin with no grants at all still admits any authenticated user.
   assert.equal(effectiveViewerRole(scope(), [], { globalVisible: true }), 'team-member');
 });
+
+// ── viewerTeamRoles ─────────────────────────────────────────────────────────
+
+const { viewerTeamRoles } = require('./plugin-ui-viewer');
+
+test('viewerTeamRoles: one entry per in-scope granted team, the caller\'s role in THAT team', () => {
+  const s = scope({ teamIds: ['A', 'B', 'C'], roles: [['A', 'team-admin'], ['B', 'team-member'], ['C', 'team-admin']] });
+  // C is not granted → absent; A/B keep their own role, not the max.
+  assert.deepEqual(viewerTeamRoles(s, ['A', 'B']), { A: 'team-admin', B: 'team-member' });
+});
+
+test('viewerTeamRoles: a System Admin is system-admin in every granted team', () => {
+  assert.deepEqual(viewerTeamRoles(scope({ all: true }), ['A', 'B']), { A: 'system-admin', B: 'system-admin' });
+});
+
+test('viewerTeamRoles: a purely-global viewer (no grant membership) gets an empty map', () => {
+  assert.deepEqual(viewerTeamRoles(scope({ teamIds: ['Z'], roles: [['Z', 'team-admin']] }), ['A']), {});
+});

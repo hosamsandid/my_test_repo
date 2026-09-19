@@ -38,6 +38,11 @@ const KIND_LABELS = {
   // sibling agent for a verdict (agent-entrypoint.py).
   'handover-dm': 'Hand-over message',
   'loop-verify': 'Loop verification',
+  // A plugin broker's wake (the Jira plugin's status change, for one):
+  // orchestrator/plugin-event.js `buildPluginEventEntry`. Registered here, in
+  // KIND_TOOLTIPS and in entryDetail — the AC8 ratchet in
+  // pending-queue-wiring.test.js is what fails when a live kind is missing.
+  'plugin-event': 'Plugin event',
   // #2277: the runtime's own bounded self-correction — one re-wake after a
   // turn ends with a background task still running, so the agent redoes the
   // work in the foreground instead of leaving it to a human re-nudge.
@@ -62,6 +67,7 @@ const KIND_TOOLTIPS = {
   'wake-agent': 'Another agent on this team handed work over directly — no label, no issue or PR. It drains within seconds unless maintenance mode is active or a loop holds the workspace.',
   'handover-dm': 'A hand-over message the console composed for this agent — queued rather than sent as a chat message so it cannot arrive before the agent has finished starting up.',
   'loop-verify': "Another agent's loop iteration, waiting for this agent to review it and return a verdict. The loop is blocked until it does.",
+  'plugin-event': "An event a granted plugin's broker sent for this team (e.g. a Jira status change), waiting for the agent's plugin-event trigger. It drains within seconds unless maintenance mode is active or a loop holds the workspace.",
   'bg-orphan-correction': 'This agent enqueued this for itself after a turn ended while a background task was still running — it resumes the same conversation and redoes the work in the foreground. At most one per originating turn.',
   unknown: 'An unrecognised queue entry.',
 };
@@ -146,6 +152,15 @@ export function entryDetail(entry) {
       return [
         entry.from ? `from ${entry.from}` : null,
         entry.note ? `“${entry.note}”` : null,
+      ].filter(Boolean).join(' · ');
+    // Plugin first ("which integration woke me"), then the broker's own event
+    // name, then its one-line summary when it sent one. The payload never
+    // reaches the client (summarizeEntry omits it).
+    case 'plugin-event':
+      return [
+        entry.pluginId || null,
+        entry.event || null,
+        entry.summary || null,
       ].filter(Boolean).join(' · ');
     default:
       return '';

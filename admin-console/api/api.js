@@ -157,7 +157,8 @@ const {
 } = require('./toolchain-registry');
 const { resolveSpecKitCommand, hasUnresolvedPlaceholders } = require('./speckit-content');
 const { deriveScopeList, enforceUiRoute, signViewerHeaders } = require('./plugin-ui-proxy');
-const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole } = require('./plugin-ui-viewer');
+const { uiSubPath, visibleScopes, isGloballyVisibleUi, effectiveViewerRole, viewerTeamRoles } = require('./plugin-ui-viewer');
+const pluginCredView = require('./plugin-credential-view');
 
 const WORKSPACE = '/workspace';
 const POOL_DIR = '/pool';
@@ -9587,6 +9588,18 @@ app.delete('/api/plugins/:id', heavyLimiter, async (req, res) => {
   } catch (err) {
     return res.status(500).json({ error: `uninstall failed: ${err.message}` });
   }
+  // Per-scope plugin credentials (Jira plan §5) are platform state beside the
+  // registry, not inside the plugin dir — reap them here too, best-effort, so a
+  // reinstall does not silently resurrect a team's old vendor token.
+  // PLUGIN_ID_RE already excludes every path separator; the resolve-guard
+  // mirrors the one on `dest` above (defense in depth, CodeQL js/path-injection).
+  try {
+    const credRoot = path.resolve(REGISTRY_PLUGINS_DIR, '_credentials');
+    const credDest = path.resolve(credRoot, id);
+    if (credDest.startsWith(credRoot + path.sep)) {
+      fs.rmSync(credDest, { recursive: true, force: true });
+    }
+  } catch { /* best effort */ }
   // Existing grants are deliberately LEFT ALONE: uninstalling is an operator
   // action on the registry, not a mass revoke. The orchestrator's reconcile
   // stops the orphaned sidecar, and a grant with no installed manifest seeds
@@ -9661,6 +9674,84 @@ app.get('/api/plugins/:id/scopes', apiLimiter, async (req, res) => {
   res.json({ pluginId: id, scopes: visibleScopes(getScope(req), all) });
 });
 
+// ─── per-scope plugin credentials (Jira plan §5, D1/D2) ─────────────────────
+// GET  /api/plugins/:id/credentials              — metadata (never raw values) for
+//       every granted team the CALLER can see. Any authenticated user.
+// PUT  /api/plugins/:id/credentials/:scopeId      — { values } → set. Team Admin of
+//       that team (scopeId IS the team id for a `scopes:["team"]` plugin).
+// DELETE /api/plugins/:id/credentials/:scopeId    — clear. Same gate.
+// `setBy` is forced to the caller server-side (a vendor token carries that human's
+// permissions, so the record must name them — never trust a client value).
+app.get('/api/plugins/:id/credentials', apiLimiter, async (req, res) => {
+  const id = req.params.id;
+  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+  let r;
+  try {
+    r = await orchestratorGetJson(`/internal/plugins/${encodeURIComponent(id)}/credentials`);
+  } catch (err) {
+    return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+  if (r.status === 404) return res.status(404).json({ error: `plugin '${id}' is not installed` });
+  if (r.status === 400) return res.status(400).json(r.body || { error: 'bad request' });
+  if (!r.ok || !r.body) return res.status(502).json({ error: 'could not resolve plugin credentials' });
+  const scope = getScope(req);
+  const scopes = pluginCredView.visibleScopes(r.body.scopes, (t) => visibleTeam(scope, t))
+    .map((s) => {
+      const canManage = canManageTeam(scope, s.scopeId);
+      return { ...pluginCredView.redactScopeForViewer(s, canManage), canManage };
+    });
+  res.json({ pluginId: id, credentials: r.body.credentials || [], scopes });
+});
+
+async function proxyPluginCredentialWrite(req, res, method) {
+  const id = req.params.id;
+  const scopeId = req.params.scopeId;
+  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+  const gate = pluginCredView.assertCanWriteScope(scopeId, (t) => canManageTeam(getScope(req), t));
+  if (!gate.ok) return res.status(gate.status).json({ error: gate.error });
+
+  // Only declared keys reach the orchestrator; it re-validates and re-enforces
+  // the grant. `setBy` is the caller's subject, always. For a PUT the
+  // declared-key list is load-bearing — `shapePutBody` drops every value not on
+  // it — so a failed pre-fetch must ABORT, not fall through to an empty list
+  // (which would silently strip the whole submission and still 200). DELETE
+  // needs no body, so it does not fetch.
+  let outBody = {};
+  if (method === 'PUT') {
+    let declaredKeys = null;
+    try {
+      const meta = await orchestratorGetJson(`/internal/plugins/${encodeURIComponent(id)}/credentials`);
+      if (meta.ok && meta.body && Array.isArray(meta.body.credentials)) {
+        declaredKeys = meta.body.credentials.map((c) => c.key);
+      }
+    } catch { /* handled below */ }
+    if (!declaredKeys) {
+      return res.status(502).json({ error: 'could not resolve the plugin\'s declared credential keys — not saving' });
+    }
+    // `req.user` from a session/IAP login is `{ username }` (auth.js), where
+    // `username` IS the subject for a real user and ADMIN_USERNAME for the env
+    // admin — the codebase-wide actor pattern. `.sub` was never populated here,
+    // so every save recorded "unknown".
+    const setBy = (req.user && (req.user.sub || req.user.username)) || 'unknown';
+    outBody = { ...pluginCredView.shapePutBody(req.body, declaredKeys), setBy };
+  }
+
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  let resp;
+  try {
+    resp = await fetch(
+      `${orchestratorUrl}/internal/plugins/${encodeURIComponent(id)}/credentials/${encodeURIComponent(scopeId)}`,
+      { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(outBody) },
+    );
+  } catch (err) {
+    return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+  const body = await resp.json().catch(() => ({}));
+  return res.status(resp.status).json(body);
+}
+app.put('/api/plugins/:id/credentials/:scopeId', apiLimiter, (req, res) => proxyPluginCredentialWrite(req, res, 'PUT'));
+app.delete('/api/plugins/:id/credentials/:scopeId', apiLimiter, (req, res) => proxyPluginCredentialWrite(req, res, 'DELETE'));
+
 // ALL /plugins/:id/ui and /plugins/:id/ui/* — the UI proxy. NOT under /api, so
 // the session gate is applied explicitly (a session-less request is refused
 // here, before anything plugin-specific runs). Streamed rather than buffered so
@@ -9728,10 +9819,16 @@ function pluginUiProxy(req, res) {
 
     const secret = readPluginSigningSecret();
     if (!secret) return res.status(503).json({ error: 'plugin signing secret unavailable' });
+    const viewerTeamIds = scope.all ? grantedTeamIds : grantedTeamIds.filter((t) => scope.teamIds.has(t));
     const viewer = {
       sub: (req.user && req.user.username) || '',
+      // The flat role is the caller's MAX across their granted teams — right
+      // for the proxy's route pre-check and for team-agnostic UIs, wrong as
+      // the gate for a team-SELECTING elevated route; that is what the signed
+      // per-team map below is for (plugin-ui-proxy.js `roleForTeam`).
       role: viewerRole,
-      teamIds: scope.all ? grantedTeamIds : grantedTeamIds.filter((t) => scope.teamIds.has(t)),
+      teamIds: viewerTeamIds,
+      teamRoles: viewerTeamRoles(scope, viewerTeamIds),
     };
     const signed = signViewerHeaders(viewer, secret);
 

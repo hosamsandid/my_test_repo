@@ -157,6 +157,12 @@ export function pluginRegistryRow(entry, { canManage = false, stackRuntime = nul
       ? manifest.platforms
       : ['any'],
     defaultScopeGranularity: (manifest && manifest.defaultScopeGranularity) || null,
+    // The credential keys the plugin declares (Jira plan §5). Non-empty → the
+    // card renders a per-team Credentials section. Raw manifest never leaks past
+    // this pure view.
+    credentialKeys: (manifest && Array.isArray(manifest.credentials))
+      ? manifest.credentials.map((c) => c && c.key).filter(Boolean)
+      : [],
     capabilities: describeCapabilities(manifest),
     quota: quotaSummary(manifest),
     ok: !!(entry && entry.ok),

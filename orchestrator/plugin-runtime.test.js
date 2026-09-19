@@ -199,3 +199,18 @@ test('the sidecar disables SELinux relabelling via the libpod field, not the doc
   assert.equal(body.security_opt, undefined, 'the ignored docker-compat field must not be relied on');
   assert.equal(body.no_new_privileges, true, 'still no privilege escalation');
 });
+
+// ── `_internal` is the push credential, never a grant token ─────────────────
+
+const runtime = require("./plugin-runtime");
+
+test('mintScopeToken refuses the reserved `_internal` scope; mintInternalToken is the only minter', () => {
+  const tmp = require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'plugin-rt-'));
+  const { verify } = require('./plugin-scope-token');
+  assert.equal(runtime.mintScopeToken('jira', '_internal', tmp), null);
+  const tok = runtime.mintInternalToken('jira', tmp);
+  assert.ok(tok);
+  assert.deepEqual(verify(tok, runtime.signingSecret(tmp)), { pluginId: 'jira', scopeId: '_internal' });
+  // an ordinary scope still mints
+  assert.ok(runtime.mintScopeToken('jira', 'team-1', tmp));
+});

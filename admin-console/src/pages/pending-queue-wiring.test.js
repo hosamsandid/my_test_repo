@@ -82,6 +82,11 @@ const PRODUCERS = [
     pattern: /"kind": "loop-verify"/,
   },
   {
+    kind: 'plugin-event',
+    where: ['orchestrator', 'plugin-event.js'],
+    pattern: /PLUGIN_EVENT_PENDING_KIND = 'plugin-event'/,
+  },
+  {
     // #2277: the runtime's own bounded self-correction for a turn that
     // orphans a background task — built via a module constant rather than a
     // literal, unlike loop-verify above.

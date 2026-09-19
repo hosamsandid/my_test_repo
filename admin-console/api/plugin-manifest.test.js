@@ -419,6 +419,38 @@ test('the shipped github-issues manifest (plugins/github-issues) is valid', () =
   assert.equal(board && board.minRole, 'team-member');
 });
 
+// ── ACCEPTANCE: the shipped jira manifest validates end to end ───────────────
+test('the shipped jira manifest (plugins/jira) is valid', () => {
+  const p = path.join(__dirname, '..', '..', 'plugins', 'jira', 'plugin.json');
+  const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const { ok, errors, manifest } = validatePluginManifest(raw);
+  assert.deepEqual(errors, []);
+  assert.equal(ok, true);
+  // A credential-holding, egress broker — the Jira {site-url, email, api-token}
+  // is a per-scope plugin credential (§5), so unlike github-issues the declared
+  // credentials are NOT empty:
+  assert.deepEqual(manifest.sidecar.capabilities, ['egress']);
+  assert.deepEqual(manifest.credentials.map((c) => c.key), ['site-url', 'email', 'api-token']);
+  assert.ok(manifest.credentials.every((c) => c.required === true));
+  // Team scope only; Podman only for v1 (the agent→broker path is Podman-only,
+  // §6.1 corrected):
+  assert.deepEqual(manifest.scopes, ['team']);
+  assert.equal(defaultGranularity(manifest), 'team');
+  assert.deepEqual(manifest.platforms, ['podman']);
+  assert.equal(manifest.cli.name, 'aee-jira');
+  assert.equal(manifest.quota.maxObjects, 500);
+  // Phase 3 read UI (`/` @ team-member) + Phase 4 write config (`/admin` @
+  // team-admin); `policy` declares the three writes as governed subcommands
+  // (D3 — role-gated, no confirmation pen, so `requiresApproval` stays empty).
+  assert.deepEqual(manifest.ui.routes, [
+    { path: '/', minRole: 'team-member' },
+    { path: '/admin', minRole: 'team-admin' },
+  ]);
+  assert.notEqual(manifest.ui.global, true);
+  assert.deepEqual(Object.keys(manifest.policy).sort(), ['comment', 'transition', 'update']);
+  assert.deepEqual(manifest.requiresApproval, []);
+});
+
 // ── fetch scaffold (command-only plugin content, #1865) ─────────────────────
 function commandOnlyFetchBase() {
   return {

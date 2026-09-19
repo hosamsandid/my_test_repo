@@ -15,6 +15,7 @@ const teamAdminSuccession = require("./team-admin-succession");
 const { resolveAgentTenant, planTenantBackfill } = require("./agent-tenant");
 const { needsAdoption, planAdoption, planBootstrapMembership } = require("./default-team-adoption");
 const { makeSkillSourceResolver, parseSkillDescription } = require("./skill-source");
+const {createAnthropicProxyServer} = require('./anthropic-proxy')
 const {
   normalizeKnowledgeStore,
   knowledgeAutonomyLevel,
@@ -37,6 +38,8 @@ const knowledgeSync = require("./knowledge-sync");
 const { createKeyedMutex } = require("./keyed-mutex");
 const flowEmit = require("./flow-emit");
 const wakeAgent = require("./wake-agent");
+const pluginEvent = require("./plugin-event");
+const pluginScopeToken = require("./plugin-scope-token");
 const labelFastPath = require("./github-label-fastpath");
 const { LabelDedupMarkers } = require("./label-dedup-markers");
 const githubEventLog = require("./github-event-log");
@@ -48,7 +51,15 @@ const internalAuth = require("./internal-auth");
 // `configured: false` (the default for a stack that has not opted in) keeps the
 // gate inert, so this release is behaviourally identical until an operator sets
 // INTERNAL_API_TOKEN.
-const internalAuthConfig = internalAuth.resolveInternalAuthConfig(process.env);
+//
+// The plugin-scope class (a broker's `POST /internal/plugin-event`) verifies
+// against the plugin registry's shared signing secret — a file created on first
+// use, not an env var — so it goes in as a LAZY getter: nothing is read at module
+// load, and a control-plane or agent caller never triggers the read at all.
+// (`pluginRuntime` is required further down; the getter runs at request time.)
+const internalAuthConfig = internalAuth.resolveInternalAuthConfig(process.env, {
+  pluginScopeSecret: () => pluginRuntime.signingSecret(),
+});
 
 // Shared in-memory dedup markers for the internal label fast-path (#1858). The
 // POST /internal/github-label-applied handler writes a marker per woken
@@ -139,12 +150,17 @@ const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit, p
 // on the agent construct, never on the environment — and (de)activation is the
 // same additive live file sync, no respawn (#1547).
 const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor, normalizeGrantList } = require("./plugin-grants");
-const { planWorkspaceSync } = require("./plugin-sync");
+const { planWorkspaceSync, planCliRefresh } = require("./plugin-sync");
 const { resolveAgentStateDir } = require("./agent-state-dir");
 const { resolveScopeId } = require("./plugin-scope");
 const pluginRegistry = require("./plugin-registry");
 const pluginRuntime = require("./plugin-runtime");
 const { resolveScopeGithubCredentials, buildTeamFlowLabels } = require("./plugin-github-creds");
+// Generic per-scope plugin credential store + wiring (Jira plan §5). Makes the
+// manifest's `credentials[]` real: a Team Admin sets values in the console,
+// stored 0600, pushed to the broker server-side — no secret in code or env.
+const { PluginCredentialStore } = require("./plugin-credential-store");
+const { createPluginCredentialWiring } = require("./plugin-credential-routes");
 const { assertGranularityGrantable, defaultGranularity } = require("./plugin-manifest");
 const pluginReconcile = require("./plugin-reconcile");
 const { isTeamDisabled, newMemberFieldsForTeam, planTeamDisable, planTeamEnable, isMemberLockedByTeam, deriveBusyState, httpStatusForAgentActionError, httpStatusForTeamActionError } = require('./team-disable');
@@ -3656,6 +3672,88 @@ function agentPluginDisplays(cfg) {
     .filter(Boolean);
 }
 
+// Generic per-scope plugin credential wiring (Jira plan §5). `listAgentIds` /
+// `loadAgentConfig` are hoisted function declarations, so this is safe at module
+// scope. `pushDeclaredScopeCredentials` / `handleCredentialRoute` are the only
+// things orchestrator.js calls.
+const pluginCredentialStore = new PluginCredentialStore();
+const pluginCredentialWiring = createPluginCredentialWiring({
+  listAgentIds: () => listAgentIds(),
+  loadAgentConfig: (id) => loadAgentConfig(id),
+  pluginRegistry,
+  pluginRuntime,
+  effectivePlugins,
+  pluginGrantFor,
+  resolveScopeId,
+  credentialStore: pluginCredentialStore,
+  log: (m) => console.warn(m),
+});
+const { pushDeclaredScopeCredentials } = pluginCredentialWiring;
+
+// Re-seed any granted plugin CLI whose workspace copy no longer matches the
+// registry (plugin-sync.js `planCliRefresh`). The grant sync copies the CLI
+// only on a grant change, so a re-installed plugin with a newer CLI would leave
+// every existing agent on the old file. Runs on every reconcile; best-effort
+// per agent; an additive file sync like the grant itself — never a respawn.
+async function refreshGrantedPluginClis() {
+  const manifests = pluginRegistry.installedManifests();
+  const digestOf = (file) => {
+    try { return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"); } catch { return null; }
+  };
+  const registryDigest = (manifest) => {
+    try { return digestOf(pluginRegistry.cliEntrypointPath(manifest)); } catch { return null; }
+  };
+  let ids = [];
+  try { ids = listAgentIds(); } catch { ids = []; }
+  for (const id of ids) {
+    let cfg = null;
+    try { cfg = loadAgentConfig(id); } catch { cfg = null; }
+    if (!cfg || !cfg.token) continue; // a stub has no workspace to refresh
+    let grant = [];
+    try { grant = effectivePlugins(cfg, loadAgentConfig); } catch { grant = []; }
+    if (!grant.length) continue;
+    const dir = agentDir(id);
+    // Migrate a legacy `.aee/` to `.agent-studio/` BEFORE the plan's relative
+    // paths are read or written (the `_syncPluginIntoWorkspace` precedent,
+    // #1549): on an un-migrated agent the digest would see the CLI as
+    // "missing", create a bare `.agent-studio/bin/`, and every later reader
+    // would resolve the new dir — orphaning the legacy state silently.
+    resolveAgentStateDir(dir);
+    const plan = planCliRefresh({
+      grant, manifests,
+      registryDigest: registryDigest,
+      workspaceDigest: (binPath) => digestOf(path.join(dir, binPath)),
+    });
+    if (!plan.length) continue;
+    let written = 0;
+    for (const item of plan) {
+      // Same entrypoint+name lookup `_syncPluginIntoWorkspace` uses, so the
+      // containment check stays in pluginRegistry.cliEntrypointPath alone.
+      const cliName = path.basename(item.path);
+      const manifest = Object.values(manifests).find(
+        (m) => m.cli && m.cli.entrypoint === item.copyFrom && m.cli.name === cliName,
+      );
+      const src = manifest ? pluginRegistry.cliEntrypointPath(manifest) : null;
+      if (!src) continue;
+      const dest = path.join(dir, item.path);
+      try {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.copyFileSync(src, dest);
+        fs.chmodSync(dest, item.mode);
+        written += 1;
+        console.log(`[Orchestrator] plugin CLI refreshed for ${id}: ${item.path} (${item.reason})`);
+      } catch (err) {
+        console.warn(`[Orchestrator] plugin CLI refresh ${id} ${item.path}: ${err.message}`);
+      }
+    }
+    if (written) {
+      try { await reseedAgent(id, [".agent-studio"]); } catch (err) {
+        console.warn(`[Orchestrator] plugin CLI refresh ${id}: reseed failed: ${err.message}`);
+      }
+    }
+  }
+}
+
 // Full plugin reconcile (#1547): sidecars first (so a newly-installed plugin
 // has something to attach), then grant-driven network attachment for every
 // installed plugin. Used at boot and after an install/uninstall — idempotent,
@@ -3677,6 +3775,16 @@ async function reconcilePluginsAndAttachments() {
   // to its broker (best-effort — the token never reaches a browser or an agent).
   try { await pushGithubIssueScopeCredentials(); } catch (err) {
     console.warn(`[Orchestrator] github-issues credential push failed: ${err.message}`);
+  }
+  // Generic per-scope plugin credentials (Jira plan §5): every OTHER installed
+  // plugin that declares `credentials[]` (jira today).
+  try { await pushDeclaredScopeCredentials(); } catch (err) {
+    console.warn(`[Orchestrator] declared plugin credential push failed: ${err.message}`);
+  }
+  // Bring every granted agent's CLI copy up to the registry (a re-install with
+  // a newer CLI would otherwise never reach an existing workspace).
+  try { await refreshGrantedPluginClis(); } catch (err) {
+    console.warn(`[Orchestrator] plugin CLI refresh failed: ${err.message}`);
   }
   return { sidecars, networks };
 }
@@ -11694,11 +11802,18 @@ class Orchestrator {
         .map((c) => c.id);
       results.push({ pluginId, ...(await pluginRuntime.reconcilePluginAttachments(pluginId, granted)) });
     }
-    // A github-issues grant/revoke changes which teams the broker must hold a
-    // token for — re-push its per-scope credential map (best-effort, #1633).
-    if (new Set(pluginIds).has("github-issues")) {
+    // A grant/revoke changes which teams a broker must hold a credential for —
+    // re-push the affected plugin's per-scope map (best-effort).
+    const changedPlugins = new Set(pluginIds);
+    if (changedPlugins.has("github-issues")) {
       try { await pushGithubIssueScopeCredentials(); } catch (err) {
         console.warn(`[Orchestrator] github-issues credential push failed: ${err.message}`);
+      }
+    }
+    for (const pid of changedPlugins) {
+      if (pid === "github-issues") continue;
+      try { await pushDeclaredScopeCredentials(pid); } catch (err) {
+        console.warn(`[Orchestrator] ${pid} credential push failed: ${err.message}`);
       }
     }
     return results;
@@ -15512,6 +15627,101 @@ async function main() {
       return;
     }
 
+    // ── a plugin broker wakes an agent (Jira plan §4B) ───────────────────
+    // POST /internal/plugin-event, Authorization: Bearer <plugin scope token>.
+    // The token carries {pluginId, scopeId} — never the body — so a plugin can
+    // only fire events for its own id in its own scope. The grant is the second
+    // gate. GENERIC to plugins, not to Jira (§D5). Pure logic in plugin-event.js.
+    if (req.method === 'POST' && req.url === '/internal/plugin-event') {
+      const auth = req.headers['authorization'] || req.headers['Authorization'] || '';
+      const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7) : '';
+      let scope = null;
+      try { scope = pluginScopeToken.verify(token, pluginRuntime.signingSecret()); } catch { scope = null; }
+      if (!scope || !scope.pluginId || !scope.scopeId) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, reason: 'bad-token' }));
+        return;
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
+      req.on('end', () => {
+        let parsed;
+        try { parsed = pluginEvent.validatePluginEventRequest(JSON.parse(body || '{}')); }
+        catch (err) { parsed = { ok: false, error: err.message }; }
+        if (!parsed.ok) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: parsed.error }));
+          return;
+        }
+        try {
+          const { pluginId, scopeId } = scope;
+          const { event, summary, payload, eventId } = parsed.value;
+          // Per agent: is it in this scope, is the plugin granted, does it have
+          // a matching `plugin-event` trigger? Only an in-scope granted agent
+          // can be a target (`resolvePluginEventTargets` skips the rest before
+          // touching `.triggers`), so defer the `triggers.json` read — one fs
+          // hit per agent — to those, not every agent in the installation.
+          const agents = listAgentIds().map((aid) => {
+            // A malformed config.json must skip THAT agent, not 500 this event
+            // for every team — the broker's cursor has already advanced.
+            let cfg = null;
+            try { cfg = loadAgentConfig(aid); } catch { cfg = null; }
+            let grant = null;
+            try { grant = cfg && cfg.token ? pluginGrantFor(effectivePlugins(cfg, loadAgentConfig), pluginId) : null; } catch { grant = null; }
+            const inScope = !!(grant && resolveScopeId(cfg, grant.scopeGranularity) === scopeId);
+            const granted = !!grant;
+            return { agentId: aid, inScope, granted, triggers: (inScope && granted) ? loadTriggers(aid) : [] };
+          });
+          // The payload takes part in target resolution: a trigger's
+          // `payloadFilter` (plugin-event.js) is matched against it, which is
+          // how two agents on one plugin are routed apart by, e.g., a status.
+          // Each target gets ITS payload: a digest is projected down to the
+          // events that trigger's `payloadFilter` matches (plugin-event.js),
+          // so an agent listening for one status is never handed a
+          // teammate's transitions to sort out.
+          const targets = pluginEvent.resolvePluginEventDeliveries({ pluginId, event, payload, summary }, agents);
+          const now = new Date().toISOString();
+          for (const t of targets) {
+            enqueuePending(t.agentId, pluginEvent.buildPluginEventEntry({
+              pluginId, event, summary: t.summary, payload: t.payload, eventId, triggerId: t.triggerId,
+            }));
+            console.log(
+              `[Orchestrator] plugin-event: ${pluginId}/${scopeId} "${event}" → agent=${t.agentId} trigger=${t.triggerId}`);
+          }
+          if (targets.length === 0) {
+            console.log(`[Orchestrator] plugin-event: ${pluginId}/${scopeId} "${event}" matched no granted agent with a plugin-event trigger`);
+          }
+          // One transparency-log row per wake — a plugin event leaves no GitHub
+          // trace, so this is the whole audit trail (like the #1858 fast-path).
+          try {
+            const ghEvent = pluginEvent.buildPluginEventLogEvent({ pluginId, event, summary, eventId, now });
+            githubEventLog.record({
+              ...githubEventLog.buildEventEntry({
+                ghEvent, repoFullName: null, key: pluginEvent.PLUGIN_EVENT_EVENT_KEY,
+                outcomes: targets.length
+                  ? targets.map((t) => ({ agentId: t.agentId, triggerId: t.triggerId, status: 'delivered', reason: null, digest: false }))
+                  : [],
+              }),
+              source: 'internal-plugin',
+              emittedBy: `plugin:${pluginId}`,
+            });
+          } catch (err) {
+            console.warn(`[Orchestrator] plugin-event log write failed: ${err.message}`);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ok: true, delivered: targets.length,
+            targets: targets.map((t) => ({ agentId: t.agentId, triggerId: t.triggerId })),
+          }));
+        } catch (err) {
+          console.error(`[Orchestrator] plugin-event error: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
     // ── Internal label fast-path (#1858) ──────────────────────────────────
     // POST /internal/github-label-applied { repo, number, kind, label, actor }.
     // The Admin Console calls this right after a human-applied label write
@@ -18355,6 +18565,17 @@ async function main() {
       return;
     }
 
+    // GET/PUT/DELETE /internal/plugins/:id/credentials[/:scopeId] — the generic
+    // per-scope plugin credential store (Jira plan §5). The console proxy applies
+    // the Team-Admin-of-that-scope gate (§D2); this layer enforces only that the
+    // scope is one the plugin is actually granted to. All logic in the module.
+    if (/^\/internal\/plugins\/[^/]+\/credentials(?:\/[^/]+)?$/.test((req.url || '').split('?')[0])) {
+      pluginCredentialWiring
+        .handleCredentialRoute(req, res, { sendJson, readBody })
+        .catch((err) => { if (!res.headersSent) sendJson(res, 500, { error: err.message }); });
+      return;
+    }
+
     // POST /internal/teams/:teamId/plugins/{activate,deactivate}
     // Body: { pluginId, scopeGranularity?, includeMembers? }
     const teamPluginMatch = req.method === 'POST' &&
@@ -18800,6 +19021,44 @@ async function main() {
   hookServer.listen(HOOK_PORT, '0.0.0.0', () =>
     console.log(`[Orchestrator] Hook server listening on :${HOOK_PORT}`)
   );
+
+
+  // ============================================================
+  // Anthropic proxy — lets the `claude` CLI (Bearer-only auth via
+  // ANTHROPIC_AUTH_TOKEN) reach the real api.anthropic.com with a plain
+  // API key (x-api-key-only auth). See anthropic-proxy.js for why this
+  // exists. Every agent container already resolves `orchestrator` by name
+  // (it's connected into every per-agent network for the internal API), so
+  // pointing ANTHROPIC_BASE_URL here needs no new networking.
+  //
+  // OPT-IN, default OFF: with ANTHROPIC_PROXY_ENABLED unset nothing binds
+  // :4004 and the stack behaves exactly as before this was added. Set it to
+  // "1" only in a deployment that points an api-key provider's baseUrl here.
+  // ============================================================
+  if (process.env.ANTHROPIC_PROXY_ENABLED === "1") {
+    const ANTHROPIC_PROXY_PORT = parseInt(
+      process.env.ANTHROPIC_PROXY_PORT || "4004",
+      10,
+    );
+    const anthropicProxy = createAnthropicProxyServer({
+      upstreamBase:
+        process.env.ANTHROPIC_PROXY_UPSTREAM || "https://api.anthropic.com",
+    });
+    // A bind failure (e.g. the port is taken) must not take the orchestrator
+    // down — log it and carry on, like the other optional listeners.
+    anthropicProxy.on("error", (err) =>
+      console.error(`[Orchestrator] Anthropic proxy error: ${err.message}`),
+    );
+    anthropicProxy.listen(ANTHROPIC_PROXY_PORT, "0.0.0.0", () =>
+      console.log(
+        `[Orchestrator] Anthropic proxy listening on :${ANTHROPIC_PROXY_PORT}`,
+      ),
+    );
+  } else {
+    console.log(
+      "[Orchestrator] Anthropic proxy disabled (set ANTHROPIC_PROXY_ENABLED=1 to enable)",
+    );
+  }
 
   // ============================================================
   // GitHub event poller — translates GitHub Events API activity into

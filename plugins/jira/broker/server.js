@@ -1,0 +1,618 @@
+'use strict';
+
+// ─── jira broker sidecar (plugin) ───────────────────────────────────────────
+//
+// Built ON the Broker SDK (broker-sdk/), like every reference plugin broker.
+// This file is wiring; every decision that is pure lives in a sibling module
+// (jira-client.js, event-extract.js, watch-store.js, inbox-store.js, poller.js)
+// and the shared primitives come from the SDK.
+//
+//   • The poll loop runs inside this sidecar (poller.js). On a fresh status
+//     change it appends the event to the per-scope inbox and wakes the granted
+//     agents through the generic `POST /internal/plugin-event` channel (Jira
+//     plan §4B) — `deliver()` below. The agent can also PULL: `aee-jira inbox`
+//     (peek) / `aee-jira inbox --consume <id>…` (drain by id) reads the
+//     per-scope queue the broker holds.
+//   • Credentials are the orchestrator-pushed per-scope map (`PUT /internal/
+//     scope-credentials`, §5) — never env, never a file in the image.
+//   • Watch config (which projects / which transitions wake whom) is set by a
+//     Team Admin through the `/admin` UI route (`PUT /ui/api/admin/watch`),
+//     role-gated on the signed viewer identity. There is deliberately NO
+//     scope-token-authed route for it: a granted agent's token must not be
+//     able to reconfigure its own team's watches (the Phase-0 `spike-config`
+//     seam that once allowed exactly that is gone).
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+
+const {
+  verifyScopeToken,
+  mint,
+  auditWriter,
+  healthEndpoint,
+  teardownScopeEndpoint,
+  internalPushEndpoint,
+  brokerConfig,
+} = require('../../../broker-sdk');
+const { WatchStore } = require('./watch-store');
+const { InboxStore } = require('./inbox-store');
+const { ActivityStore } = require('./activity-store');
+const { JiraPoller } = require('./poller');
+const { deriveWatchHealth, summariseWatchHealth } = require('./watch-health');
+const jira = require('./jira-client');
+const brokerPolicy = require('./broker-policy');
+const { verifyViewerHeaders, requiredRoleForPath, roleAllows, roleForTeam } = require('./viewer-headers');
+
+const PLUGIN_ID = 'jira';
+
+const cfg = brokerConfig({
+  fallbacks: {
+    port: ['JIRA_BROKER_PORT'],
+    signingSecret: ['JIRA_BROKER_SIGNING_SECRET'],
+    stateDir: ['JIRA_STATE_DIR'],
+    auditDir: ['JIRA_AUDIT_DIR'],
+  },
+});
+const PORT = cfg.port || 4009;
+const SIGNING_SECRET = cfg.signingSecret;
+const STATE_DIR = cfg.stateDir || '/state/jira';
+const AUDIT_DIR = cfg.auditDir || '/audit';
+
+const watchStore = new WatchStore({ stateDir: STATE_DIR });
+const inboxStore = new InboxStore({ stateDir: STATE_DIR, ttlSeconds: cfg.quota.ttlSeconds, maxObjects: cfg.quota.maxObjects });
+// The retained event log ("what did the poller see, and what did it wake").
+// Its own 14-day retention + row cap — deliberately NOT the manifest quota,
+// which counts inbox objects (see activity-store.js).
+const activityStore = new ActivityStore({ stateDir: STATE_DIR });
+const audit = auditWriter(AUDIT_DIR, { retentionMs: 30 * 24 * 3600 * 1000 });
+
+// Per-watch health from the poll cursors, keyed by the watch's projectKey. When
+// a scope has a credential the cursor key is `<siteUrl>::<projectKey>`; without
+// one there is no cursor yet and every watch reads as not-yet-baselined.
+function watchHealthFor(scopeId) {
+  const conf = watchStore.loadConfig(scopeId);
+  const cred = resolveCredential(scopeId);
+  const now = Date.now();
+  const watches = (conf.watches || []).map((w) => {
+    const ref = cred ? `${cred.siteUrl}::${w.projectKey}` : null;
+    const cursor = ref ? conf.cursors[ref] : null;
+    return { ...w, health: deriveWatchHealth(cursor, now) };
+  });
+  return { watches, summary: summariseWatchHealth(watches.map((w) => w.health)), setBy: conf.setBy, setAt: conf.setAt };
+}
+
+// Per-scope Jira credential, pushed by the orchestrator (Phase 1, Jira plan §5):
+// `PUT /internal/scope-credentials` with `{ scopes: { <scopeId>: { "site-url",
+// "email", "api-token" } } }`. In-memory only (the pattern github-issues uses);
+// the orchestrator re-pushes on boot / grant change / credential save. The token
+// never touches disk here and never reaches an agent.
+const scopeCredentials = new Map(); // scopeId -> { site-url, email, api-token }
+
+function writeAudit(scopeId, actor, subcommand, outcome, detail) {
+  try {
+    audit.write({ ts: new Date().toISOString(), pluginId: PLUGIN_ID, scopeId, agentId: actor || scopeId, subcommand, outcome, detail });
+  } catch { /* best-effort */ }
+}
+
+// Resolve a scope's Jira credential from the orchestrator-pushed per-scope map.
+// Returns null when the scope has no entry or an incomplete one (the poller
+// then logs "no usable credential" and skips it — a granted-but-unconfigured
+// team is a normal transient state, not an error).
+function resolveCredential(scopeId) {
+  const v = scopeCredentials.get(String(scopeId));
+  if (!v) return null;
+  const siteUrl = (v['site-url'] || '').trim();
+  const email = (v.email || '').trim();
+  const apiToken = (v['api-token'] || '').trim();
+  if (!siteUrl || !email || !apiToken) return null;
+  return { siteUrl, email, apiToken };
+}
+
+// ── delivery: POST /internal/plugin-event (Jira plan §4B) ───────────────────
+// The broker→orchestrator wake channel. A minted scope token carries
+// {pluginId: 'jira', scopeId}; the orchestrator verifies it, resolves the scope
+// to its team, and fans out to every granted agent with a matching
+// `plugin-event` trigger. No `http` trigger to hand-wire.
+function orchestratorUrl() {
+  return (process.env.AEE_ORCHESTRATOR_URL || 'http://orchestrator:4002').replace(/\/+$/, '');
+}
+
+function summariseEvents(kind, events, { projectKey } = {}) {
+  if (kind === 'digest') return `${events.length} status changes${projectKey ? ` in ${projectKey}` : ''}`;
+  const e = events[0] || {};
+  const issue = e.issueKey || e.projectKey || '';
+  return `${issue}${e.fromStatus && e.toStatus ? `: ${e.fromStatus} → ${e.toStatus}` : ''}`.trim() || 'status change';
+}
+
+// A wake POST must settle fast — the poll loop holds `running` across it (one
+// `_tick` fans out every scope sequentially), so a black-holed orchestrator
+// connection would otherwise stall polling for undici's multi-minute default.
+const DELIVER_TIMEOUT_MS = 15_000;
+
+// A digest carries the WHOLE folded set — the orchestrator matches every
+// agent's payloadFilter against all of it and only then caps what goes into
+// that agent's prompt (its `DIGEST_INLINE_MAX`). Cutting here, before the
+// filter, would hide every event past the cut from the match and leave an
+// agent whose transitions all sit there un-woken. This is only a hard safety
+// bound on the wake body (~350 B/event → ~350 KB, under the orchestrator's
+// 1 MB body cap); past it, `truncated: true` says the set is incomplete.
+const DIGEST_MAX_EVENTS = 1000;
+
+// `projectKey` is set on a project-level (bulk) digest — F8; a per-issue
+// digest has none. Both carry the same `{kind:'digest', count, events}` shape
+// the orchestrator's payloadFilter any-matches and the agent runtime envelopes.
+async function deliver({ scopeId, kind, events, projectKey }) {
+  if (kind === 'throttle-warning') {
+    // Nothing to wake an agent about — the throttle already suppressed the
+    // events. Record it and move on.
+    writeAudit(scopeId, scopeId, 'wake', 'throttled', kind);
+    return;
+  }
+  const token = mint(PLUGIN_ID, scopeId, SIGNING_SECRET);
+  const first = events[0] || {};
+  const eventId = kind === 'digest' ? null : (first.id || null);
+  const body = {
+    event: first.event || 'status_changed',
+    summary: summariseEvents(kind, events, { projectKey }),
+    // Omit rather than send an explicit null for a digest (the validator
+    // accepts either, but the entry shape prefers omission).
+    ...(eventId ? { eventId } : {}),
+    // A digest carries every folded event (`count` = their number); the
+    // agent's `aee-jira inbox` holds them too. Only DIGEST_MAX_EVENTS cuts.
+    payload: kind === 'digest'
+      ? {
+        kind: 'digest',
+        ...(projectKey ? { projectKey } : {}),
+        count: events.length,
+        events: events.slice(0, DIGEST_MAX_EVENTS),
+        ...(events.length > DIGEST_MAX_EVENTS ? { truncated: true } : {}),
+      }
+      : first,
+  };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), DELIVER_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${orchestratorUrl()}/internal/plugin-event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    const out = await res.json().catch(() => ({}));
+    writeAudit(scopeId, scopeId, 'wake', res.ok ? 'ok' : `http-${res.status}`, `${kind}:${out.delivered ?? '?'}`);
+    process.stdout.write(
+      `[jira-broker] plugin-event ${res.ok ? `ok (${out.delivered ?? '?'} agent(s))` : `HTTP ${res.status}`} `
+      + `→ ${scopeId} (${kind}, ${events.length} event(s))\n`,
+    );
+  } catch (err) {
+    const reason = err && err.name === 'AbortError' ? `timeout after ${DELIVER_TIMEOUT_MS}ms` : err.message;
+    writeAudit(scopeId, scopeId, 'wake', 'error', reason);
+    process.stdout.write(`[jira-broker] plugin-event FAILED → ${scopeId}: ${reason}\n`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const poller = new JiraPoller({
+  watchStore,
+  inboxStore,
+  activityStore,
+  resolveCredential,
+  deliver,
+  intervalMs: Number(process.env.JIRA_POLL_INTERVAL_MS) || undefined,
+  baseWindowMinutes: Number(process.env.JIRA_POLL_WINDOW_MINUTES) || undefined,
+  throttleStatePath: path.join(STATE_DIR, 'throttle-state.json'),
+  log: (m) => process.stdout.write(`${m}\n`),
+});
+
+// ── small http helpers ─────────────────────────────────────────────────────
+// Every body this broker reads is a small JSON control message (a CLI arg set,
+// a watch-config list, the per-scope credential push). Cap it so a malformed or
+// hostile request cannot buffer unbounded memory; an over-cap body resolves
+// empty and parseJson turns it into `{}` (a 4xx from the handler).
+const MAX_BODY_BYTES = 1_000_000;
+function readBody(req) {
+  return new Promise((resolve) => {
+    let s = '';
+    let over = false;
+    req.on('data', (c) => {
+      if (over) return;
+      s += c;
+      if (s.length > MAX_BODY_BYTES) { over = true; s = ''; req.destroy(); }
+    });
+    req.on('end', () => resolve(s));
+    req.on('error', () => resolve(s));
+  });
+}
+function parseJson(s) { try { return JSON.parse(s || '{}'); } catch { return {}; } }
+function sendJson(res, status, obj) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(obj));
+}
+function query(req) {
+  return new URLSearchParams((req.url || '').split('?')[1] || '');
+}
+
+// `aee-jira inbox --consume <id>…` — the ids an agent may drain are the ones
+// its OWN wake payload carried (`payload.id`, or `payload.events[].id` in a
+// digest). The whole-inbox drain is gone: the inbox is per team and every
+// agent on it is woken for its own subset, so a bare consume would take a
+// teammate's events. A stale CLI copy sending `consume=1` gets a 400 that
+// names the fix instead of a silent team-wide drain. An agent may only ever
+// drain the ids its own wake named (a convention the CLI keeps — the broker
+// cannot tell agents apart, one scope token per team).
+const EVENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[A-Za-z0-9._-]{1,64}$/;
+// Ids travel in the GET query string; 200 ids at the regex's maximum length
+// would exceed Node's 16 KB header limit (431, fails closed) — realistic ids
+// (`KAN-6:10312`) fit ~1000×.
+const CONSUME_MAX_IDS = 200;
+const CONSUME_USAGE = 'consume takes the event ids you were woken for: aee-jira inbox --consume <event-id> [<event-id> ...] '
+  + '(each id is in your wake payload as `id`, or `events[].id` in a digest)';
+
+// → { ok: true, ids } | { ok: false, status, error, message }. `raw` is the
+// `consume` query value; absent = peek, handled by the caller.
+function parseConsumeIds(raw) {
+  const ids = String(raw).split(',').map((s) => s.trim()).filter(Boolean);
+  if (ids.length === 0 || !ids.every((id) => EVENT_ID_RE.test(id))) {
+    return { ok: false, status: 400, error: 'consume-requires-ids', message: CONSUME_USAGE };
+  }
+  if (ids.length > CONSUME_MAX_IDS) {
+    return { ok: false, status: 400, error: 'too-many-ids', message: `at most ${CONSUME_MAX_IDS} ids per consume` };
+  }
+  return { ok: true, ids: [...new Set(ids)] };
+}
+
+// ── the agent CLI surface (scope-token authed) ─────────────────────────────
+async function handleCli(req, res, cliPath) {
+  const v = verifyScopeToken(req, SIGNING_SECRET);
+  if (!v || v.pluginId !== PLUGIN_ID) return sendJson(res, 401, { error: 'unauthorized' });
+  const scopeId = v.scopeId;
+  const params = query(req);
+
+  if (cliPath === '/whoami' && req.method === 'GET') {
+    return sendJson(res, 200, { scopeId, plugin: PLUGIN_ID });
+  }
+
+  if (cliPath === '/inbox' && req.method === 'GET') {
+    if (!params.has('consume')) {
+      const entries = inboxStore.list(scopeId);
+      writeAudit(scopeId, scopeId, 'inbox', 'ok', `peeked:${entries.length}`);
+      return sendJson(res, 200, { entries, consumed: false });
+    }
+    const parsed = parseConsumeIds(params.get('consume'));
+    if (!parsed.ok) {
+      writeAudit(scopeId, scopeId, 'inbox', 'refused', parsed.error);
+      return sendJson(res, parsed.status, { error: parsed.error, message: parsed.message });
+    }
+    const { entries, missing } = inboxStore.consumeIds(scopeId, parsed.ids);
+    writeAudit(scopeId, scopeId, 'inbox', 'ok', `consumed:${entries.length}${missing.length ? ` missing:${missing.length}` : ''}`);
+    return sendJson(res, 200, { entries, consumed: true, missing });
+  }
+
+  // ── reads that need the per-scope Jira credential (Phase 3) ───────────────
+  const readOps = { '/projects': 'projects', '/list': 'list', '/show': 'show' };
+  if (readOps[cliPath] && req.method === 'GET') {
+    const op = readOps[cliPath];
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, op, 'no-credential');
+      return sendJson(res, 400, {
+        error: 'This team has no Jira credential configured. A Team Admin sets it on the Plugins page.',
+        code: 'no-credential',
+      });
+    }
+    try {
+      let result;
+      if (op === 'projects') {
+        result = { projects: await jira.listProjects(cred) };
+      } else if (op === 'list') {
+        const project = (params.get('project') || '').trim();
+        if (!project) return sendJson(res, 400, { error: 'a --project key is required' });
+        result = { project, issues: await jira.listProjectIssues(cred, { projectKey: project, status: params.get('status') || undefined }) };
+      } else {
+        const issue = (params.get('issue') || '').trim();
+        if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
+        result = { issue: await jira.getIssue(cred, issue) };
+      }
+      writeAudit(scopeId, scopeId, op, 'ok', params.get('project') || params.get('issue') || '');
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, op, 'error', err.message);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
+  // ── attributed writes (Phase 4, D3 — role-gated server-side, no confirm) ──
+  const writeOps = { '/comment': 'comment', '/transition': 'transition', '/update': 'update' };
+  if (writeOps[cliPath] && req.method === 'POST') {
+    const op = writeOps[cliPath];
+    const authz = brokerPolicy.authorizeWrite(op);
+    if (!authz.allow) {
+      writeAudit(scopeId, scopeId, op, 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, op, 'no-credential');
+      return sendJson(res, 400, { error: 'This team has no Jira credential configured.', code: 'no-credential' });
+    }
+    const body = parseJson(await readBody(req));
+    const issue = String(body.issue || '').trim();
+    if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
+    const attribution = `Posted by an agent on team "${scopeId}" via Agent Studio.`;
+    try {
+      let result;
+      if (op === 'comment') {
+        const text = String(body.body || '').trim();
+        if (!text) return sendJson(res, 400, { error: 'a comment body is required' });
+        result = await jira.addComment(cred, issue, { body: text, attribution });
+      } else if (op === 'update') {
+        const text = String(body.description || '').trim();
+        if (!text) return sendJson(res, 400, { error: 'a description is required' });
+        result = await jira.updateDescription(cred, issue, {
+          description: text,
+          attribution: `Description rewritten by an agent on team "${scopeId}" via Agent Studio.`,
+        });
+      } else {
+        result = await jira.transitionIssue(cred, issue, { toStatus: body.to });
+      }
+      writeAudit(scopeId, scopeId, op, 'ok', `${issue}${op === 'transition' ? `→${body.to || ''}` : ''}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, op, 'error', `${issue}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
+  return sendJson(res, 404, { error: 'not found' });
+}
+
+// ── the served UI (Jira plan §6.4) — console-proxied, viewer-header authed ───
+// The `/` route (team-member): the issues in a team's scope, the per-scope
+// event inbox, and what the poller is watching. Phase 4 adds `/admin`.
+function contentType(p) {
+  if (p.endsWith('.html')) return 'text/html; charset=utf-8';
+  if (p.endsWith('.js')) return 'text/javascript; charset=utf-8';
+  if (p.endsWith('.css')) return 'text/css; charset=utf-8';
+  return 'application/octet-stream';
+}
+
+function pickTeam(viewer, requested) {
+  const allowed = Array.isArray(viewer.teamIds) ? viewer.teamIds : [];
+  if (requested && allowed.includes(requested)) return requested;
+  if (!requested && allowed.length === 1) return allowed[0];
+  return null;
+}
+
+async function handleUiApi(req, res, apiPath, viewer) {
+  const params = query(req);
+
+  if (apiPath === '/context' && req.method === 'GET') {
+    const teams = (viewer.teamIds || []).map((id) => {
+      const health = watchHealthFor(id);
+      return {
+        teamId: id,
+        // Per team, from the signed map — the admin page offers only the
+        // teams the viewer actually administers.
+        isAdmin: roleAllows(roleForTeam(viewer, id), 'team-admin'),
+        hasCredential: !!resolveCredential(id),
+        watches: health.watches.map((w) => w.projectKey),
+        watchHealth: health.summary,
+        inbox: inboxStore.count(id),
+        activity: activityStore.count(id),
+      };
+    });
+    // `isAdmin` at the top level means "admin of at least one team here" —
+    // whether to show the admin link at all, never which team it applies to.
+    return sendJson(res, 200, { user: viewer.sub, role: viewer.role, isAdmin: teams.some((t) => t.isAdmin), teams });
+  }
+
+  const team = pickTeam(viewer, params.get('team'));
+  if (!team) return sendJson(res, 400, { error: 'select a team you are a member of' });
+
+  // The elevated-route gate, on the SELECTED team's role (F4 of the Jira
+  // review). `handleUi` already checked the flat role — the caller's max
+  // across their teams — which is the right pre-filter but the wrong gate
+  // here: admin of A + member of B must not reach B's /admin via `?team=B`.
+  // `roleForTeam` never elevates (an in-scope team missing from the signed
+  // map is a plain team-member), so a header from an older proxy that signed
+  // no map cannot open /admin for any team.
+  const needForTeam = requiredRoleForPath(`/api${apiPath}`);
+  const roleHere = roleForTeam(viewer, team);
+  if (!roleAllows(roleHere, needForTeam)) {
+    return sendJson(res, 403, { error: `${apiPath} requires ${needForTeam} in ${team}; viewer is ${roleHere || 'not a member'}` });
+  }
+
+  if (apiPath === '/inbox' && req.method === 'GET') {
+    return sendJson(res, 200, { entries: inboxStore.list(team) });
+  }
+  if (apiPath === '/activity' && req.method === 'GET') {
+    const limit = Math.min(Math.max(Number(params.get('limit')) || 200, 1), 1000);
+    return sendJson(res, 200, { rows: activityStore.list(team, { limit }) });
+  }
+  if (apiPath === '/watches' && req.method === 'GET') {
+    const health = watchHealthFor(team);
+    const conf = watchStore.loadConfig(team);
+    return sendJson(res, 200, {
+      watches: health.watches,
+      health: health.summary,
+      cursors: conf.cursors,
+      setBy: conf.setBy,
+      setAt: conf.setAt,
+    });
+  }
+
+  // ── /admin — the watch config (team-admin IN THE SELECTED TEAM; gated above) ─
+  // Replaces #1539's `env.jiraProjects[]` + the `jira-event` trigger fields.
+  // Which AGENTS a transition wakes is now decided per-agent by a `plugin-event`
+  // trigger (Phase 2) — this route configures only which projects/statuses the
+  // broker watches.
+  if (apiPath === '/admin/watch' && req.method === 'GET') {
+    const conf = watchStore.loadConfig(team);
+    return sendJson(res, 200, { watches: conf.watches, setBy: conf.setBy, setAt: conf.setAt });
+  }
+  if (apiPath === '/admin/watch' && req.method === 'PUT') {
+    const body = parseJson(await readBody(req));
+    const conf = watchStore.setConfig(team, {
+      watches: Array.isArray(body.watches) ? body.watches : [],
+      setBy: viewer.sub || 'admin',
+    });
+    return sendJson(res, 200, { ok: true, watches: conf.watches });
+  }
+
+  // Clear the exponential backoff on one failing watch so the next poll tick
+  // (≤ the poll interval) re-attempts it — after a Team Admin has fixed the
+  // credential. Does not force an immediate poll.
+  if (apiPath === '/admin/retry' && req.method === 'POST') {
+    const body = parseJson(await readBody(req));
+    const projectKey = String(body.projectKey || '').trim();
+    if (!projectKey) return sendJson(res, 400, { error: 'a projectKey is required' });
+    const cred = resolveCredential(team);
+    if (!cred) return sendJson(res, 400, { error: 'This team has no Jira credential configured.', code: 'no-credential' });
+    const ref = `${cred.siteUrl}::${projectKey}`;
+    const cursor = watchStore.getCursor(team, ref) || {};
+    const cleared = { ...cursor, consecutiveFailures: 0 };
+    delete cleared.skipUntil;
+    watchStore.saveCursor(team, ref, cleared);
+    writeAudit(team, viewer.sub || 'admin', 'watch-retry', 'ok', projectKey);
+    return sendJson(res, 200, { ok: true, projectKey });
+  }
+
+  const cred = resolveCredential(team);
+  if (!cred) return sendJson(res, 400, { error: 'This team has no Jira credential configured.', code: 'no-credential' });
+  try {
+    if (apiPath === '/projects' && req.method === 'GET') {
+      return sendJson(res, 200, { projects: await jira.listProjects(cred) });
+    }
+    if (apiPath === '/issues' && req.method === 'GET') {
+      const project = (params.get('project') || '').trim();
+      if (!project) return sendJson(res, 400, { error: 'a project is required' });
+      return sendJson(res, 200, { issues: await jira.listProjectIssues(cred, { projectKey: project, status: params.get('status') || undefined }) });
+    }
+  } catch (err) {
+    return sendJson(res, err.status && err.status < 500 ? err.status : 502, { error: err.message });
+  }
+  return sendJson(res, 404, { error: 'not found' });
+}
+
+async function handleUi(req, res, uiPath) {
+  const viewer = verifyViewerHeaders(req, SIGNING_SECRET);
+  if (!viewer) return sendJson(res, 401, { error: 'unsigned viewer' });
+  // Coarse gate on the flat role (the caller's best team): enough for page
+  // loads and assets, and a cheap refusal for a viewer who is admin nowhere.
+  // A team-selecting API route is gated AGAIN on the chosen team's role in
+  // handleUiApi — that is the real check.
+  const need = requiredRoleForPath(uiPath);
+  if (!roleAllows(viewer.role, need)) {
+    return sendJson(res, 403, { error: `route ${uiPath} requires ${need}; viewer is ${viewer.role}` });
+  }
+  if (uiPath === '/api' || uiPath.startsWith('/api/')) {
+    return handleUiApi(req, res, uiPath.slice('/api'.length) || '/', viewer);
+  }
+  // Route paths (no file extension) map to their page; assets keep their name.
+  const ROUTE_PAGE = { '/': 'index.html', '': 'index.html', '/admin': 'admin.html' };
+  const file = Object.prototype.hasOwnProperty.call(ROUTE_PAGE, uiPath)
+    ? ROUTE_PAGE[uiPath]
+    : uiPath.replace(/^\/+/, '');
+  const abs = path.join(__dirname, 'ui', file);
+  if (!abs.startsWith(path.join(__dirname, 'ui') + path.sep)) return sendJson(res, 404, { error: 'not found' });
+  fs.readFile(abs, (err, data) => {
+    if (err) return sendJson(res, 404, { error: 'not found' });
+    res.writeHead(200, { 'Content-Type': contentType(abs) });
+    res.end(data);
+  });
+}
+
+const handleHealth = healthEndpoint(async () => ({
+  scopes: watchStore.listScopes().length,
+  scopesWithCredential: [...scopeCredentials.keys()].filter((sid) => !!resolveCredential(sid)).length,
+}));
+const handleTeardown = teardownScopeEndpoint((scopeId) => {
+  scopeCredentials.delete(String(scopeId));
+  return { reaped: watchStore.teardown(scopeId) + inboxStore.teardown(scopeId) + activityStore.teardown(scopeId) };
+}, { secret: SIGNING_SECRET });
+
+// PUT /internal/scope-credentials — the orchestrator's per-scope credential push
+// (Jira plan §5). Accepts the orchestrator's `_internal` token ONLY (SDK
+// `internalPushEndpoint`): every granted team holds a jira token minted with
+// the same secret, and the map carries each team's api-token AND the site the
+// poller will talk to — "any valid token" here would let one team wipe every
+// other team's credential or repoint its poller at an attacker-controlled
+// site. Replaces the whole map so a revoked team disappears.
+const handleScopeCredentials = internalPushEndpoint(async (req, res) => {
+  const body = parseJson(await readBody(req));
+  const scopes = body && body.scopes && typeof body.scopes === 'object' ? body.scopes : {};
+  scopeCredentials.clear();
+  for (const [scopeId, values] of Object.entries(scopes)) {
+    if (values && typeof values === 'object') scopeCredentials.set(String(scopeId), values);
+  }
+  return sendJson(res, 200, {
+    ok: true,
+    scopes: scopeCredentials.size,
+    usable: [...scopeCredentials.keys()].filter((sid) => !!resolveCredential(sid)).length,
+  });
+}, { secret: SIGNING_SECRET, pluginId: PLUGIN_ID });
+
+async function handleRequest(req, res) {
+  const urlPath = (req.url || '').split('?')[0];
+
+  if (req.method === 'GET' && urlPath === '/healthz') return void (await handleHealth(req, res));
+  if (req.method === 'POST' && urlPath === '/internal/teardown-scope') return void (await handleTeardown(req, res));
+  if (req.method === 'PUT' && urlPath === '/internal/scope-credentials') return void (await handleScopeCredentials(req, res));
+
+  // A read-only status endpoint for an operator: what the poller sees for the
+  // token's own scope.
+  if (req.method === 'GET' && urlPath === '/internal/status') {
+    const v = verifyScopeToken(req, SIGNING_SECRET);
+    if (!v || v.pluginId !== PLUGIN_ID) return void sendJson(res, 401, { error: 'unauthorized' });
+    const conf = watchStore.loadConfig(v.scopeId);
+    const health = watchHealthFor(v.scopeId);
+    return void sendJson(res, 200, {
+      scopeId: v.scopeId,
+      watches: health.watches,
+      health: health.summary,
+      cursors: conf.cursors,
+      inbox: inboxStore.count(v.scopeId),
+      activity: activityStore.count(v.scopeId),
+      setBy: conf.setBy,
+      setAt: conf.setAt,
+      credential: resolveCredential(v.scopeId)
+        ? { configured: true, site: resolveCredential(v.scopeId).siteUrl }
+        : { configured: false },
+    });
+  }
+
+  if (urlPath === '/cli' || urlPath.startsWith('/cli/')) {
+    const cliPath = urlPath === '/cli' ? '/' : urlPath.slice('/cli'.length) || '/';
+    return void (await handleCli(req, res, cliPath));
+  }
+
+  if (urlPath === '/ui' || urlPath.startsWith('/ui/')) {
+    const uiPath = urlPath === '/ui' ? '/' : urlPath.slice('/ui'.length) || '/';
+    return void (await handleUi(req, res, uiPath));
+  }
+
+  return void sendJson(res, 404, { error: 'not found' });
+}
+
+// Last-resort catch: every route already maps upstream/validation failures to
+// a status + message above, so anything landing here is a broker bug. The stack
+// goes to stderr (podman logs); the client gets a generic body — an internal
+// message/stack is not the agent's to read (CodeQL js/stack-trace-exposure).
+const httpServer = http.createServer((req, res) => {
+  handleRequest(req, res).catch((err) => {
+    try {
+      process.stderr.write(`[jira-broker] unhandled request error: ${(err && err.stack) || String(err)}\n`);
+    } catch { /* ignore */ }
+    if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
+    try { res.end(JSON.stringify({ error: 'internal server error' })); } catch { /* ignore */ }
+  });
+});
+
+if (require.main === module) {
+  httpServer.listen(PORT, () => process.stdout.write(`[jira-broker] listening on :${PORT}\n`));
+  poller.start();
+}
+
+module.exports = { handleRequest, httpServer, watchStore, inboxStore, activityStore, poller, resolveCredential, deliver, scopeCredentials, PLUGIN_ID, SIGNING_SECRET, DIGEST_MAX_EVENTS };

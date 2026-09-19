@@ -28,13 +28,18 @@
 //                  allowlist below, and (with one documented exception) only for
 //                  the agent's own `:id`.
 //
-//   signaler       §3.5 also names a class for external event sources, whose one
-//                  named consumer was `POST /internal/bp-events`. That route was
-//                  DELETED by the BriefingPack removal (#1961/#2005) and
-//                  `bp-removal-guard.test.js` asserts it stays gone, so the class
-//                  has no caller and is deliberately NOT implemented here — a
-//                  token class nothing can present is not a control, it is a hole
-//                  with a name. See the PR body / issue comment for the details.
+//   plugin-scope   §3.5's "signaler" class for external event sources, which had
+//                  no subject after `POST /internal/bp-events` was deleted
+//                  (#1961/#2005) and was therefore left unimplemented — a token
+//                  class nothing can present is a hole with a name. The plugin
+//                  system's first broker→orchestrator channel (`POST
+//                  /internal/plugin-event`, Jira plan §4B) is that subject: a
+//                  broker presents the HMAC scope token `plugin-scope-token.js`
+//                  mints for it, signed with the plugin registry's shared secret
+//                  (`/workspace/plugins/_secret`), and is allowlisted to EXACTLY
+//                  that one route. The secret is a file, not an env var, so the
+//                  adapter hands it in as a lazy getter (`pluginScopeSecret`)
+//                  and this module stays fs-free.
 //
 // ── The enforcement ladder (§3.2) ───────────────────────────────────────────
 //
@@ -49,6 +54,7 @@
 // will later reject, so the census cannot disagree with the enforcement.
 
 const crypto = require("crypto");
+const pluginScopeToken = require("./plugin-scope-token");
 
 const AUTH_MODES = ["observe", "warn", "enforce"];
 
@@ -75,7 +81,13 @@ function parseAuthMode(raw) {
 // The control-plane token is the single operator knob; the agent signing secret
 // is derived from it unless one is set explicitly. Returns a frozen descriptor so
 // a caller cannot mutate the live config by accident.
-function resolveInternalAuthConfig(env = {}) {
+//
+// `pluginScopeSecret` (second arg) is the plugin registry's scope-token signing
+// secret — a string, or a getter returning one. A getter is what the adapter
+// passes, because the secret lives in a file that is created on first use:
+// resolving the config at module load must not touch the fs, and a control-plane
+// or agent caller must never need it (they are classified first).
+function resolveInternalAuthConfig(env = {}, { pluginScopeSecret = null } = {}) {
   const controlPlaneToken = String(env.INTERNAL_API_TOKEN || "").trim();
   const explicitAgentSecret = String(env.INTERNAL_AGENT_TOKEN_SECRET || "").trim();
   const mode = parseAuthMode(env.INTERNAL_AUTH_MODE);
@@ -87,6 +99,7 @@ function resolveInternalAuthConfig(env = {}) {
     mode,
     controlPlaneToken,
     agentTokenSecret,
+    pluginScopeSecret,
     // With no control-plane token there is nothing to present and nothing to
     // mint, so the gate has to stay inert whatever the mode says. `configured`
     // is what the boot check reads to refuse an `enforce` that would lock every
@@ -227,6 +240,18 @@ const AGENT_ROUTES = [
   { method: "GET", pattern: /^\/internal\/maintenance-mode$/, scope: "any" },
 ];
 
+// ── The plugin-facing allowlist ─────────────────────────────────────────────
+//
+// A broker sidecar holds a scope token for ONE (pluginId, scopeId) and may use
+// it for exactly one thing on this surface: waking the agents that plugin is
+// granted to in that scope. The route re-verifies the token itself to derive
+// {pluginId, scopeId} for the fan-out, so this gate is the first line and the
+// handler the second. Everything else — the credential push, the team roster,
+// wake-agent — is a control-plane concern and stays refused.
+const PLUGIN_SCOPE_ROUTES = [
+  { method: "POST", pattern: /^\/internal\/plugin-event$/ },
+];
+
 // Strip the query string and decode each path segment, so an allowlist entry
 // cannot be side-stepped with `%2f`-style encoding or a trailing `?x=1`.
 function normalizePath(url) {
@@ -258,6 +283,30 @@ function agentRouteRule(method, pathname) {
   return null;
 }
 
+function pluginRouteRule(method, pathname) {
+  const m = String(method || "").toUpperCase();
+  for (const route of PLUGIN_SCOPE_ROUTES) {
+    if (route.method !== m) continue;
+    if (pathname.match(route.pattern)) return route;
+  }
+  return null;
+}
+
+// The plugin secret is resolved on demand and only after the control-plane and
+// agent classes have been ruled out. A getter that throws (registry dir not
+// mounted, fs error) yields "no secret" — the token is then anonymous, never
+// allowed by accident.
+function resolvePluginScopeSecret(config) {
+  const src = config.pluginScopeSecret;
+  if (!src) return "";
+  try {
+    const value = typeof src === "function" ? src() : src;
+    return typeof value === "string" ? value.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
 // ── The decision ────────────────────────────────────────────────────────────
 
 function classifyCaller(headers = {}, config) {
@@ -271,6 +320,14 @@ function classifyCaller(headers = {}, config) {
   }
   const agentId = verifyAgentToken(presented, config.agentTokenSecret);
   if (agentId) return { kind: "agent", agentId };
+  const pluginSecret = resolvePluginScopeSecret(config);
+  if (pluginSecret) {
+    let scope = null;
+    try { scope = pluginScopeToken.verify(presented, pluginSecret); } catch { scope = null; }
+    if (scope && scope.pluginId && scope.scopeId) {
+      return { kind: "plugin-scope", agentId: null, pluginId: scope.pluginId, scopeId: scope.scopeId };
+    }
+  }
   return { kind: "anonymous", agentId: null };
 }
 
@@ -313,6 +370,21 @@ function decideInternalAuth({ method, url, headers = {}, config }) {
     };
   }
 
+  // A plugin broker presented a valid scope token — one route, nothing else.
+  if (caller.kind === "plugin-scope") {
+    const base = {
+      callerKind: "plugin-scope", agentId: null,
+      pluginId: caller.pluginId, scopeId: caller.scopeId, mode, pathname,
+    };
+    if (pathname === null) {
+      return { ...base, allowed: false, denied: enforcing, status: 403, reason: "unparseable-path" };
+    }
+    if (!pluginRouteRule(method, pathname)) {
+      return { ...base, allowed: false, denied: enforcing, status: 403, reason: "route-not-plugin-facing" };
+    }
+    return { ...base, allowed: true, denied: false, status: 0, reason: "plugin-allowlist" };
+  }
+
   // An agent presented a valid token — now the allowlist decides.
   if (pathname === null) {
     return {
@@ -342,8 +414,10 @@ function decideInternalAuth({ method, url, headers = {}, config }) {
 // One line per would-be violation, so the observe week produces a grep-able
 // census. Shape mirrors the audit fields GOV-PLATFORM-3 will persist.
 function describeDecision(decision, { method } = {}) {
+  const subject = decision.agentId
+    || (decision.pluginId ? `${decision.pluginId}/${decision.scopeId}` : "");
   return `[internal-auth] mode=${decision.mode} caller=${decision.callerKind}`
-    + `${decision.agentId ? `(${decision.agentId})` : ""}`
+    + `${subject ? `(${subject})` : ""}`
     + ` ${String(method || "").toUpperCase()} ${decision.pathname || "?"}`
     + ` verdict=${decision.allowed ? "allow" : (decision.denied ? "deny" : "would-deny")}`
     + ` reason=${decision.reason}`;
@@ -352,6 +426,7 @@ function describeDecision(decision, { method } = {}) {
 module.exports = {
   AUTH_MODES,
   AGENT_ROUTES,
+  PLUGIN_SCOPE_ROUTES,
   AGENT_TOKEN_PREFIX,
   parseAuthMode,
   resolveInternalAuthConfig,

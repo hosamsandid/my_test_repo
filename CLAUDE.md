@@ -226,16 +226,44 @@ Concept: `docs/plugin-system-concept.md`, `docs/cli-contract.md`.
   warning (add-member response + GitHub Event Log), never silently.
 - **Manifest** (`pluginVersion: 1`, `plugin-manifest.js`): closed `capabilities`
   enum (`podman-socket`, `egress`, `host-mount:<path>`), `scopes`
-  (`team`/`agent`), optional `quota`, `ui.routes[].minRole`, optional
-  command-only (`commands`) / install-time `fetch`.
+  (`team`/`agent`), optional `quota`, `ui.routes[].minRole` (the console proxy
+  pre-checks it on the viewer's flat max role and signs a per-team role map;
+  a team-selecting broker gates elevated routes on `roleForTeam` — the
+  verifier block is byte-identical across brokers, parity-tested), optional
+  command-only (`commands`) / install-time `fetch`, optional `events[]` (an
+  event-source plugin's declared vocabulary — event names + payload keys —
+  rendered by the plugin-event trigger form, never interpreted), and an
+  optional `help/*.md` dir of console help topics folded into the Helper Chat
+  only on the routes they name (`help-registry.js` `loadPluginTopics`).
 - **Scope tokens**: HMAC `{pluginId, scopeId}` (`plugin-scope-token.js`); broker
   verifies every call; ownership label `aee.plugin.owner`.
 - **Broker SDK** (`broker-sdk/`): the per-call obligations (verify, scope-filter,
-  audit, mask-secrets, health/teardown, approval pen) a broker imports.
+  audit, mask-secrets, health/teardown, approval pen, `internalPushEndpoint` for
+  orchestrator-only pushes — `_internal` scope token only) a broker imports.
 - **Reference plugins**: `dummy-echo` (smoke test), `podman-sandbox` (#1, podman
   socket), `test-mgmt` (#2, credential broker), `netzplan` (#3, UI planning
   board), `github-issues` (UI + credential), `patterns-catalog` (UI-only),
-  `spec-kit` (command-only). `make seed-plugins`.
+  `spec-kit` (command-only), `jira` (the first **event-source** plugin — see
+  below). `make seed-plugins`.
+- **Event-source plugins — the Jira plugin** (`plugins/jira/`, docs
+  `docs/jira-plugin.md` / `docs/jira-plugin-plan.md`; further event kinds planned in `docs/jira-plugin-events-plan.md`): wakes granted agents on
+  Jira Cloud status changes. Two generic additions it needed are reusable: the
+  **per-scope plugin credential store** (`orchestrator/plugin-credential-store.js`
+  — makes the manifest's `credentials[]` real, 0600 under
+  `/workspace/plugins/_credentials/<id>/<scopeId>.json`, set by a Team Admin on
+  the Plugins page, pushed to the broker server-side) and the **`plugin-event`
+  wake** (`orchestrator/plugin-event.js` + `POST /internal/plugin-event`,
+  scope-token authed — the first broker→orchestrator channel). The consumer's
+  `plugin-event` trigger `{ pluginId, eventFilter?, payloadFilter?, prompt }` is
+  queue-fired like `wake-agent`; `payloadFilter` (`{ key: value }`, exact,
+  case-sensitive, top-level string fields, a digest matches on any event) routes
+  one plugin's events to different agents (Jira: `toStatus=Ready for Dev`) and is
+  mirrored in the agent drain. The broker polls JQL/changelog per
+  `<siteUrl>::<projectKey>`; `aee-jira` does `inbox`/`projects`/`list`/`show`
+  (reads) + `comment`/`transition`/`update` (attributed, role-gated writes — D3,
+  no confirmation pen); `/` + `/admin` UI routes, `ui.global: true`. Granted plugin
+  CLI copies are refreshed on every plugin reconcile (`planCliRefresh` in
+  `plugin-sync.js`), since the grant sync copies them only on a grant change.
 - **Runtime**: `plugin-registry.js` (re-validates on read, owns the signing
   secret `/workspace/plugins/_secret`), `plugin-runtime.js` (libpod sidecar
   lifecycle). On Kubernetes (`AEE_CONTAINER_RUNTIME=kubernetes`) UI-bearing
@@ -421,7 +449,9 @@ an env with a `githubTokenId` (replaces webhooks for local stacks).
 - **Internal-API auth** (`:4002`, `orchestrator/internal-auth.js`): one gate at
   the top of the `internalApi` handler. `INTERNAL_API_TOKEN` = control-plane
   (admin console); each agent gets a derived per-agent `AEE_INTERNAL_TOKEN` (HMAC
-  over the agent id) allowlisted to its own routes (`AGENT_ROUTES`). Rollout ladder
+  over the agent id) allowlisted to its own routes (`AGENT_ROUTES`); a plugin
+  broker's scope token is the `plugin-scope` class, allowlisted to exactly
+  `POST /internal/plugin-event` (`PLUGIN_SCOPE_ROUTES`). Rollout ladder
   `INTERNAL_AUTH_MODE=observe|warn|enforce` (default `observe`). Concept:
   `docs/governance-concept.md` §3.5.
 

@@ -345,3 +345,131 @@ test("the allowlist is not accidentally empty or accidentally universal", () => 
     assert.ok(["own", "any", "peer"].includes(route.scope), `known scope: ${route.scope}`);
   }
 });
+
+// ── 9. The plugin-scope class (the signaler with a subject) ─────────────────
+//
+// A plugin broker wakes agents via `POST /internal/plugin-event` with its HMAC
+// scope token (`plugin-scope-token.js`). Before this class existed that token
+// was "anonymous" and the route was dead under `enforce` — the first
+// broker→orchestrator channel silently 401'd once the ladder was finished.
+
+const scopeToken = require("./plugin-scope-token");
+const PLUGIN_SECRET = "plugin-signing-secret-value";
+const PLUGIN_CONFIG = ia.resolveInternalAuthConfig(
+  { INTERNAL_API_TOKEN: CP_TOKEN, INTERNAL_AUTH_MODE: "enforce" },
+  { pluginScopeSecret: () => PLUGIN_SECRET },
+);
+const SCOPE_TOKEN = scopeToken.mint("jira", "team-a", PLUGIN_SECRET);
+
+function asPlugin(token = SCOPE_TOKEN) {
+  return { authorization: `Bearer ${token}` };
+}
+
+test("a plugin scope token reaches POST /internal/plugin-event in enforce mode", () => {
+  const d = decide("POST", "/internal/plugin-event", asPlugin(), PLUGIN_CONFIG);
+  assert.equal(d.allowed, true);
+  assert.equal(d.denied, false);
+  assert.equal(d.callerKind, "plugin-scope");
+  assert.equal(d.pluginId, "jira");
+  assert.equal(d.scopeId, "team-a");
+  assert.equal(d.agentId, null);
+});
+
+test("a plugin scope token is refused on EVERY other route — agent-facing or control-plane", () => {
+  for (const [method, url] of [
+    ["GET", "/internal/plugin-event"],
+    ["POST", "/internal/wake-agent"],
+    ["POST", "/internal/flow-emit"],
+    ["GET", "/internal/maintenance-mode"],
+    ["POST", "/internal/agents/team-x-developer/enqueue-pending"],
+    ["DELETE", "/internal/agents/team-x-developer"],
+    ["POST", "/internal/admin/users"],
+    ["PUT", "/internal/plugins/jira/credentials"],
+  ]) {
+    const d = decide(method, url, asPlugin(), PLUGIN_CONFIG);
+    assert.equal(d.allowed, false, `${method} ${url}`);
+    assert.equal(d.denied, true, `${method} ${url}`);
+    assert.equal(d.status, 403, `${method} ${url}`);
+    assert.equal(d.callerKind, "plugin-scope", `${method} ${url}`);
+    assert.equal(d.reason, "route-not-plugin-facing", `${method} ${url}`);
+  }
+});
+
+test("a scope token under a different plugin secret, or garbage, is anonymous", () => {
+  const foreign = scopeToken.mint("jira", "team-a", "some-other-secret");
+  for (const token of [foreign, "jira.team-a.nonsense", "jira.team-a", "..."]) {
+    const d = decide("POST", "/internal/plugin-event", asPlugin(token), PLUGIN_CONFIG);
+    assert.equal(d.callerKind, "anonymous", token);
+    assert.equal(d.allowed, false, token);
+    assert.equal(d.status, 401, token);
+  }
+});
+
+test("without a plugin secret wired in, a scope token is anonymous (no accidental class)", () => {
+  const d = decide("POST", "/internal/plugin-event", asPlugin(), CONFIG);
+  assert.equal(d.callerKind, "anonymous");
+  assert.equal(d.allowed, false);
+});
+
+test("the plugin secret getter is called lazily, not at config time", () => {
+  let calls = 0;
+  const cfg = ia.resolveInternalAuthConfig(
+    { INTERNAL_API_TOKEN: CP_TOKEN, INTERNAL_AUTH_MODE: "enforce" },
+    { pluginScopeSecret: () => { calls += 1; return PLUGIN_SECRET; } },
+  );
+  assert.equal(calls, 0, "resolving the config must not touch the secret");
+  // The control-plane and agent classes are tried first — a console call never
+  // needs the plugin secret at all.
+  decide("POST", "/internal/plugin-event", asConsole(), cfg);
+  assert.equal(calls, 0, "a control-plane caller never reads the plugin secret");
+  decide("POST", "/internal/plugin-event", asPlugin(), cfg);
+  assert.equal(calls, 1);
+});
+
+test("a throwing plugin secret getter degrades to anonymous, never to allowed", () => {
+  const cfg = ia.resolveInternalAuthConfig(
+    { INTERNAL_API_TOKEN: CP_TOKEN, INTERNAL_AUTH_MODE: "enforce" },
+    { pluginScopeSecret: () => { throw new Error("fs down"); } },
+  );
+  const d = decide("POST", "/internal/plugin-event", asPlugin(), cfg);
+  assert.equal(d.callerKind, "anonymous");
+  assert.equal(d.allowed, false);
+});
+
+test("the plugin-scope class cannot be used as an agent or the control plane, and vice versa", () => {
+  // agent token on the plugin route
+  const a = decide("POST", "/internal/plugin-event", asAgent(), PLUGIN_CONFIG);
+  assert.equal(a.callerKind, "agent");
+  assert.equal(a.allowed, false);
+  // a scope token minted so its wire shape mimics an agent token prefix
+  const mimic = scopeToken.mint(ia.AGENT_TOKEN_PREFIX, "team-a", PLUGIN_SECRET);
+  const m = decide("POST", "/internal/plugin-event", asPlugin(mimic), PLUGIN_CONFIG);
+  assert.equal(m.callerKind, "plugin-scope");
+  assert.equal(m.pluginId, ia.AGENT_TOKEN_PREFIX);
+  assert.equal(m.allowed, true);
+  const g = decide("GET", "/internal/agents/team-a/config", asPlugin(mimic), PLUGIN_CONFIG);
+  assert.equal(g.allowed, false);
+});
+
+test("observe mode tags a plugin-scope violation without acting on it", () => {
+  const cfg = ia.resolveInternalAuthConfig(
+    { INTERNAL_API_TOKEN: CP_TOKEN, INTERNAL_AUTH_MODE: "observe" },
+    { pluginScopeSecret: PLUGIN_SECRET },
+  );
+  const d = decide("POST", "/internal/wake-agent", asPlugin(), cfg);
+  assert.equal(d.allowed, false);
+  assert.equal(d.denied, false);
+  const line = ia.describeDecision(d, { method: "POST" });
+  assert.match(line, /caller=plugin-scope\(jira\/team-a\)/);
+  assert.match(line, /verdict=would-deny/);
+});
+
+test("the plugin allowlist is exactly one route", () => {
+  assert.equal(ia.PLUGIN_SCOPE_ROUTES.length, 1);
+  for (const route of ia.PLUGIN_SCOPE_ROUTES) {
+    const src = route.pattern.source;
+    assert.ok(src.startsWith("^\\/internal\\/"), `anchored at /internal/: ${src}`);
+    assert.ok(src.endsWith("$"), `anchored at the end: ${src}`);
+    assert.ok(!src.includes(".*"), `no wildcard segment: ${src}`);
+  }
+});

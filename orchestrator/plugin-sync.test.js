@@ -8,6 +8,7 @@ const {
   sidecarEndpoint,
   pluginConfigFile,
   planWorkspaceSync,
+  planCliRefresh,
   CONFIG_MODE,
   BIN_MODE,
 } = require('./plugin-sync');
@@ -201,4 +202,35 @@ test('granularity flip re-mints the token + rewrites ONLY the config — additiv
   assert.equal(cfg.path, '.agent-studio/plugins/dummy-echo.json');
   assert.equal(cfg.content.scopeId, 't1-dev');           // now the agent id
   assert.equal(cfg.content.token, 'dummy-echo.t1-dev.SIG'); // re-minted for the new scope
+});
+
+// ── planCliRefresh ──────────────────────────────────────────────────────────
+
+test('planCliRefresh: a missing or byte-different CLI copy is re-seeded; an identical one is untouched', () => {
+  const grant = [{ id: 'dummy-echo', scopeGranularity: 'team' }];
+  const registryDigest = () => 'sha-new';
+  const missing = planCliRefresh({ grant, manifests: MANIFESTS, workspaceDigest: () => null, registryDigest });
+  assert.deepEqual(missing, [{ path: '.agent-studio/bin/aee-echo', mode: BIN_MODE, copyFrom: 'bin/aee-echo.py', reason: 'missing' }]);
+
+  const stale = planCliRefresh({ grant, manifests: MANIFESTS, workspaceDigest: () => 'sha-old', registryDigest });
+  assert.equal(stale[0].reason, 'stale');
+
+  const same = planCliRefresh({ grant, manifests: MANIFESTS, workspaceDigest: () => 'sha-new', registryDigest });
+  assert.deepEqual(same, []);
+});
+
+test('planCliRefresh: skips uninstalled, command-only and registry-unreadable plugins; never removes anything', () => {
+  const manifests = {
+    ...MANIFESTS,
+    'cmd-only': { id: 'cmd-only', commands: { namespace: 'x' } },
+  };
+  const grant = [
+    { id: 'dummy-echo', scopeGranularity: 'team' },
+    { id: 'cmd-only', scopeGranularity: 'team' },
+    { id: 'gone', scopeGranularity: 'team' },
+  ];
+  const plan = planCliRefresh({ grant, manifests, workspaceDigest: () => 'old', registryDigest: (m) => (m.id === 'dummy-echo' ? null : 'x') });
+  // dummy-echo's registry file is unreadable (null) → not planned; the other two have no CLI at all.
+  assert.deepEqual(plan, []);
+  assert.deepEqual(planCliRefresh({ grant: [], manifests, workspaceDigest: () => null, registryDigest: () => 'x' }), []);
 });

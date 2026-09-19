@@ -21,7 +21,21 @@ const SECRET = 'shared-signing-secret';
 test('sign → verify round-trips the viewer identity', () => {
   const headers = signViewerHeaders({ sub: 'alice', role: 'team-admin', teamIds: ['t2', 't1'] }, SECRET);
   const v = verifyViewerHeaders(headers, SECRET);
-  assert.deepEqual(v, { sub: 'alice', role: 'team-admin', teamIds: ['t1', 't2'] });
+  assert.deepEqual(v, { sub: 'alice', role: 'team-admin', teamIds: ['t1', 't2'], teamRoles: {} });
+});
+
+test('the per-team role map is signed; roleForTeam answers per team and never elevates', () => {
+  const { roleForTeam } = require('./viewer-headers');
+  const headers = signViewerHeaders({
+    sub: 'alice', role: 'team-admin', teamIds: ['t1', 't2'],
+    teamRoles: { t1: 'team-admin', t2: 'team-member' },
+  }, SECRET);
+  const v = verifyViewerHeaders(headers, SECRET);
+  assert.equal(roleForTeam(v, 't1'), 'team-admin');
+  assert.equal(roleForTeam(v, 't2'), 'team-member'); // flat role is team-admin, but not HERE
+  assert.equal(roleForTeam(v, 't3'), null);
+  headers['x-aee-plugin-team-roles'] = 't1=team-admin,t2=team-admin';
+  assert.equal(verifyViewerHeaders(headers, SECRET), null);
 });
 
 test('a forged / tampered signature is rejected', () => {

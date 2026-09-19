@@ -303,3 +303,9 @@ test('handoff.wake is NOT offered as a subscribable trigger event', () => {
   assert.equal(LABEL_FILTERABLE_EVENTS.has('handoff.wake'), false);
   assert.equal(INTERNAL_EVENT_LABELS.has('handoff.wake'), true);
 });
+
+test('plugin.event reads in plain language and is not a subscribable github event (Jira plan §4B)', () => {
+  assert.equal(eventLabel('plugin.event'), 'plugin event');
+  assert.equal(GITHUB_EVENT_OPTIONS.some(o => o.value === 'plugin.event'), false);
+  assert.equal(INTERNAL_EVENT_LABELS.has('plugin.event'), true);
+});

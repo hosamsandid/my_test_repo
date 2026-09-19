@@ -82,9 +82,32 @@ function effectiveViewerRole(scope, grantedTeamIds, { globalVisible = false } = 
   return globalVisible ? 'team-member' : null;
 }
 
+// The caller's role in EACH in-scope granted team — the map the proxy signs
+// alongside the flat `role` so a broker can gate a team-selecting elevated
+// route on the chosen team, not on the caller's best team (F4 of the Jira
+// review). A System Admin is system-admin everywhere; otherwise each granted
+// team the caller belongs to maps to their role in THAT team, and a team they
+// do not belong to is simply absent. `teamIds` is the viewer's in-scope list
+// as the proxy computes it.
+function viewerTeamRoles(scope, teamIds) {
+  const out = {};
+  const ids = Array.isArray(teamIds) ? teamIds : [];
+  if (scope && scope.all) {
+    for (const t of ids) out[t] = 'system-admin';
+    return out;
+  }
+  const roles = scope && scope.roles instanceof Map ? scope.roles : new Map();
+  for (const t of ids) {
+    const r = roles.get(t);
+    if (r === 'team-admin' || r === 'team-member') out[t] = r;
+  }
+  return out;
+}
+
 module.exports = {
   ROLE_RANK,
   resolveViewerRole,
+  viewerTeamRoles,
   uiSubPath,
   visibleScopes,
   isGloballyVisibleUi,

@@ -47,6 +47,10 @@ export const LABEL_FILTERABLE_EVENTS = new Set([
 // `wake-agent` trigger, not a `github-event` one.
 export const INTERNAL_EVENT_LABELS = new Map([
   ['handoff.wake', 'direct hand-off'],
+  // Jira plan §4B: a plugin broker woke an agent. Written by
+  // `POST /internal/plugin-event`; the consumer's listener is a `plugin-event`
+  // trigger, not a `github-event` one, so it is never a GITHUB_EVENT_OPTIONS key.
+  ['plugin.event', 'plugin event'],
 ]);
 
 const EVENT_LABELS = new Map(GITHUB_EVENT_OPTIONS.map(o => [o.value, o.label]));

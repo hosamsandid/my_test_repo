@@ -34,6 +34,19 @@ const PROMPT_FILE = path.join(__dirname, 'system-prompt.md');
 // help-registry.js `foldTopicsForContext` for the scoping rule.
 const _helpRegistry = helpRegistry.loadRegistry();
 
+// Plugin-contributed help (help-registry.js `loadPluginTopics`): an installed
+// plugin's `/workspace/plugins/<id>/help/*.md`, folded ONLY on the contexts it
+// names, as neighbours. Read per request (a directory listing and a few small
+// files — cheaper than the LLM call it precedes) so an install/uninstall shows
+// up without a restart. `null` disables it (tests measure the built-in set).
+const PLUGINS_DIR = process.env.AEE_PLUGINS_DIR || '/workspace/plugins';
+
+function registryFor(pluginsDir) {
+  if (!pluginsDir) return _helpRegistry;
+  const pluginTopics = helpRegistry.loadPluginTopics(pluginsDir);
+  return pluginTopics.length ? helpRegistry.buildRegistry(_helpRegistry.all, pluginTopics) : _helpRegistry;
+}
+
 // List of files in the order they are concatenated (importance-ordered)
 const CORPUS_FILES = [
   'glossary.md',               // concept disambiguation first
@@ -60,8 +73,9 @@ const CORPUS_FILES = [
 // forbids inventing UI, this tells it when it is short of material).
 const HELP_FOLD_NOTE = ' (the current page and the pages it links to — other pages\' topics are not included; say so rather than guessing)';
 
-function buildSystemPrompt(currentRouteLabel, currentRoute) {
+function buildSystemPrompt(currentRouteLabel, currentRoute, { pluginsDir = PLUGINS_DIR } = {}) {
   const promptTemplate = fs.readFileSync(PROMPT_FILE, 'utf8');
+  const registry = registryFor(pluginsDir);
   const docsCorpus = CORPUS_FILES
     .map(f => {
       const full = path.join(DOCS_DIR, f);
@@ -75,7 +89,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
   // current context (#2006): this page's topic plus its `seeAlso` neighbours,
   // and the Overview topic plus its neighbours when no route resolves. Empty
   // when no topics exist yet — the docs corpus is then unchanged.
-  const helpFold = _helpRegistry.foldForContext(currentRoute);
+  const helpFold = registry.foldForContext(currentRoute);
   const corpus = helpFold
     ? `${docsCorpus}\n\n---\n\n### page-help topics${HELP_FOLD_NOTE}\n\n${helpFold}`
     : docsCorpus;
@@ -84,7 +98,7 @@ function buildSystemPrompt(currentRouteLabel, currentRoute) {
     ? `\n\nThe user is currently on the **${currentRouteLabel}** page.\n`
     : '';
   // Point the model at the current page's help topic when one resolves.
-  const routePointer = helpRegistry.routeGroundingPointer(_helpRegistry, currentRoute);
+  const routePointer = helpRegistry.routeGroundingPointer(registry, currentRoute);
 
   return promptTemplate.replace('[corpus is appended here at runtime]', corpus) + routeContext + routePointer;
 }
@@ -370,8 +384,8 @@ const SYSTEM_PROMPT_CHAR_LIMIT = 340_000;
 
 // The assembled prompt for one context (default: the no-route fallback). Kept
 // arg-compatible with its pre-#2006 no-argument form.
-function measureSystemPrompt(currentRoute = null) {
-  return buildSystemPrompt(null, currentRoute).length;
+function measureSystemPrompt(currentRoute = null, { pluginsDir = null } = {}) {
+  return buildSystemPrompt(null, currentRoute, { pluginsDir }).length;
 }
 
 // The largest prompt the route-scoped mechanism can actually assemble, as
@@ -384,10 +398,14 @@ function measureSystemPrompt(currentRoute = null) {
 // The context key doubles as the route label so the "currently on the …" sentence
 // is included; that sentence is a bounded few dozen characters, so the reported
 // worst case is the assembled prompt to within a rounding error of the real label.
-function measureWorstCaseSystemPrompt() {
+//
+// `pluginsDir` (default: none — the built-in set) adds the plugin-contributed
+// topics under that registry to the sweep; corpus.test.js passes the repo's
+// reference plugins so a shipped plugin topic is budget-checked in CI.
+function measureWorstCaseSystemPrompt({ pluginsDir = null } = {}) {
   let worst = { context: null, length: -1 };
-  for (const context of helpRegistry.groundingContexts(_helpRegistry)) {
-    const length = buildSystemPrompt(context || null, context).length;
+  for (const context of helpRegistry.groundingContexts(registryFor(pluginsDir))) {
+    const length = buildSystemPrompt(context || null, context, { pluginsDir }).length;
     if (length > worst.length) worst = { context, length };
   }
   return worst;

@@ -1,0 +1,12 @@
+# Build-context excludes for the images built FROM THE REPO ROOT — every plugin
+# broker (`make build-plugins`: `podman build -f plugins/<id>/broker/Dockerfile .`).
+# Their Dockerfiles `COPY plugins/<id>/broker/ ./` wholesale, so a developer's
+# gitignored sandbox credential would otherwise be baked into an image layer.
+# Nothing at runtime reads these files: broker credentials are the
+# orchestrator-pushed per-scope map, and only the in-sidecar `spike.js` debug
+# helper reads a `.env.local` — from the live container, not the image.
+.env
+.env.*
+**/.env
+**/.env.local
+plugins/*/broker/.env.local

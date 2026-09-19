@@ -1,5 +1,6 @@
 .env
 .env.e2e
+plugins/*/broker/.env.local
 .env.k8s
 .env.k8s-e2e
 .env.gke

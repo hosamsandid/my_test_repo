@@ -503,3 +503,154 @@ test('aee-plan: edit with an op missing a type → exit 2 (usage), never a broke
   const obj = JSON.parse(r.stdout.trim());
   assert.equal(obj.error, 'usage');
 });
+
+// ─── jira: aee-jira (Jira plan §6.3, Phase 3) ────────────────────────────────
+// The same §4.5 contract against the real `aee-jira` CLI. Broker-free: `whoami`
+// reads only the seeded config; every broker-touching verb points at an
+// unroutable endpoint so a call attempt deterministically returns exit 3.
+const JIRA_CLI = path.join(__dirname, '..', 'plugins', 'jira', 'bin', 'aee-jira.py');
+
+function runJira(args, workspace) {
+  return spawnSync('python3', [JIRA_CLI, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, AEE_WORKSPACE: workspace },
+  });
+}
+
+function grantedJiraWorkspace(endpoint) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aee-jira-'));
+  fs.mkdirSync(path.join(dir, '.agent-studio', 'plugins'), { recursive: true });
+  const cfg = pluginConfigFile({
+    pluginId: 'jira', scopeId: 'team-x',
+    endpoint: endpoint || 'http://127.0.0.1:59374/',   // reserved, unroutable
+    token: 'jira.team-x.SIG', cliName: 'aee-jira',
+  });
+  fs.writeFileSync(path.join(dir, '.agent-studio', 'plugins', 'jira.json'), JSON.stringify(cfg), { mode: 0o600 });
+  return dir;
+}
+
+test('aee-jira is a dependency-free single file (stdlib imports only)', () => {
+  const src = fs.readFileSync(JIRA_CLI, 'utf8');
+  const imports = src.split('\n').filter((l) => /^\s*(import|from)\s+/.test(l));
+  assert.ok(imports.length > 0);
+  const STDLIB = new Set(['argparse', 'json', 'os', 'sys', 'urllib']);
+  for (const line of imports) {
+    const m = line.match(/^\s*(?:import|from)\s+([a-zA-Z0-9_]+)/);
+    assert.ok(m && STDLIB.has(m[1]), `non-stdlib import: ${line.trim()}`);
+  }
+});
+
+test('aee-jira: no subcommand → exit 2, --help → 0 with domain verbs', () => {
+  assert.equal(runJira([], grantedJiraWorkspace()).status, 2);
+  const help = runJira(['--help'], grantedJiraWorkspace());
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /projects/);
+  assert.match(help.stdout, /inbox/);
+  assert.match(help.stdout, /show/);
+  assert.match(help.stdout, /comment/);
+  assert.match(help.stdout, /transition/);
+  assert.match(help.stdout, /update/);
+});
+
+test('aee-jira: unknown subcommand → exit 2 (usage)', () => {
+  assert.equal(runJira(['frobnicate'], grantedJiraWorkspace()).status, 2);
+});
+
+test('aee-jira: whoami --json resolves the seeded scope (no broker needed)', () => {
+  const r = runJira(['whoami', '--json'], grantedJiraWorkspace());
+  assert.equal(r.status, 0);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, true);
+  assert.equal(obj.scopeId, 'team-x');
+});
+
+test('aee-jira: ungranted → exit 3 with not-granted error', () => {
+  const r = runJira(['projects', '--json'], ungrantedWorkspace());
+  assert.equal(r.status, 3);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'not-granted');
+});
+
+test('aee-jira: a granted verb against an unreachable broker → exit 3', () => {
+  const verbs = [
+    ['projects'], ['list', '--project', 'KAN'], ['show', 'KAN-1'], ['inbox'],
+    ['comment', 'KAN-1', '--body', 'x'], ['transition', 'KAN-1', '--to', 'Done'],
+  ];
+  for (const args of verbs) {
+    const r = runJira([...args, '--json'], grantedJiraWorkspace());
+    assert.equal(r.status, 3, args.join(' '));
+    const obj = JSON.parse(r.stdout.trim());
+    assert.equal(obj.error, 'broker-unreachable');
+  }
+});
+
+test('aee-jira: list without --project / comment without --body → exit 2 (usage), never a broker call', () => {
+  assert.equal(runJira(['list', '--json'], grantedJiraWorkspace()).status, 2);
+  assert.equal(runJira(['comment', 'KAN-1', '--json'], grantedJiraWorkspace()).status, 2);
+  assert.equal(runJira(['transition', 'KAN-1', '--json'], grantedJiraWorkspace()).status, 2);
+  assert.equal(runJira(['update', 'KAN-1', '--json'], grantedJiraWorkspace()).status, 2);
+});
+
+test('aee-jira: update against an unreachable broker → exit 3 (the verb is wired to a broker call)', () => {
+  const r = runJira(['update', 'KAN-1', '--description', 'x', '--json'], grantedJiraWorkspace());
+  assert.equal(r.status, 3);
+  assert.equal(JSON.parse(r.stdout).error, 'broker-unreachable');
+});
+
+test('aee-jira: inbox --consume without ids → exit 2 (usage), never a broker call', () => {
+  const r = runJira(['inbox', '--consume', '--json'], grantedJiraWorkspace());
+  assert.equal(r.status, 2);
+  // argparse's own message names the argument; the help text says where the ids come from
+  assert.match(r.stderr, /--consume/);
+});
+
+test('aee-jira: inbox --consume <ids> is wired to a broker call (unreachable → exit 3) and inbox --help names the id source', () => {
+  const r = runJira(['inbox', '--consume', 'KAN-1:10', 'KAN-2:11', '--json'], grantedJiraWorkspace());
+  assert.equal(r.status, 3);
+  assert.equal(JSON.parse(r.stdout).error, 'broker-unreachable');
+  const h = runJira(['inbox', '--help'], grantedJiraWorkspace());
+  assert.equal(h.status, 0);
+  assert.match(h.stdout, /EVENT_ID/);
+  assert.match(h.stdout, /events\[\]\.id/);
+});
+
+function runJiraAsync(args, workspace) {
+  const { spawn } = require('node:child_process');
+  return new Promise((resolve) => {
+    const child = spawn('python3', [JIRA_CLI, ...args], {
+      env: { ...process.env, AEE_WORKSPACE: workspace },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+test('aee-jira: a broker 4xx surfaces its `message`, not just the bare `error` code', async () => {
+  // A stub broker in-process; spawnSync would block the event loop and the
+  // CLI's request could never be answered (see captureBroker() above) — spawn
+  // asynchronously instead.
+  const http = require('node:http');
+  const server = http.createServer((req, res) => {
+    res.statusCode = 400;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({
+      error: 'consume-requires-ids',
+      message: 'consume takes the event ids you were woken for: aee-jira inbox --consume <event-id>',
+    }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const r = await runJiraAsync(['inbox', '--consume', 'KAN-1:1', '--json'], grantedJiraWorkspace(`http://127.0.0.1:${port}/`));
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    const obj = JSON.parse(r.stdout.trim());
+    assert.equal(obj.ok, false);
+    assert.match(obj.message, /--consume <event-id>/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

@@ -181,3 +181,37 @@ test('one more page topic of typical size does not move the worst case by its si
   const foldAfter = helpRegistry.foldTopics([...topics, newTopic]).length;
   assert.ok(foldAfter - foldBefore >= 10_000, 'the old mechanism grew by the topic\'s full size');
 });
+
+// ── plugin-contributed help topics ───────────────────────────────────────────
+//
+// An installed plugin's `help/*.md` is folded into the grounding of the contexts
+// it names (help-registry.js `loadPluginTopics`). The reference plugins under
+// the repo root are the ones an operator can install, so the budget guard sweeps
+// them too — a plugin topic that would blow a page's neighbourhood fails here,
+// not in production.
+const REPO_PLUGINS = path.join(__dirname, '..', '..', '..', 'plugins');
+
+test('the reference Jira plugin ships a help topic that grounds the Agent Chat page', () => {
+  const prompt = buildSystemPrompt('Agent Chat', '/chats/jira-test-business-analyst', { pluginsDir: REPO_PLUGINS });
+  // `aee-jira` is the plugin's own CLI — no built-in topic or doc mentions it.
+  assert.match(prompt, /aee-jira inbox/);
+  assert.match(prompt, /## Jira plugin \(routes: \/chats/);
+  // …and only there: an unrelated page does not pay for it.
+  assert.doesNotMatch(buildSystemPrompt('Skills', '/skills', { pluginsDir: REPO_PLUGINS }), /aee-jira/);
+});
+
+test('an unreadable plugins dir changes nothing (fail-soft)', () => {
+  const withMissing = buildSystemPrompt('Agent Chat', '/chats', { pluginsDir: path.join(REPO_PLUGINS, 'does-not-exist') });
+  const withPlugins = buildSystemPrompt('Agent Chat', '/chats', { pluginsDir: REPO_PLUGINS });
+  assert.doesNotMatch(withMissing, /aee-jira/);
+  assert.ok(withPlugins.length > withMissing.length, 'the installed topic is the only difference');
+});
+
+test('the WORST assembled prompt with every reference plugin help topic installed is below the char limit', () => {
+  const worst = measureWorstCaseSystemPrompt({ pluginsDir: REPO_PLUGINS });
+  assert.ok(
+    worst.length < SYSTEM_PROMPT_CHAR_LIMIT,
+    `worst assembled prompt with plugin help (context ${String(worst.context)}) is ${worst.length} chars, `
+    + `over the ${SYSTEM_PROMPT_CHAR_LIMIT} limit`,
+  );
+});

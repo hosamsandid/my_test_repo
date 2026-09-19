@@ -96,3 +96,28 @@ test('agent granularity: teardown of A removes only A-owned resources', () => {
   assert.deepEqual(world.map((r) => r.Names[0]), ['b1']);
   assert.equal(filterOwned(world, scopeB).length, 1); // B untouched
 });
+
+// ── the `_internal` sentinel is reserved for the orchestrator's own pushes ──
+//
+// `pushScopeCredentials` mints its token under scopeId `_internal`, and a broker
+// accepts the credential push ONLY from that scope. AGENT_ID_RE allows a leading
+// underscore, so an agent (or team of one) literally named `_internal` would
+// otherwise be handed the push credential at grant time.
+
+const { INTERNAL_SCOPE_ID, isReservedScopeId } = require('./plugin-scope');
+
+test('the internal scope id is `_internal` and is reserved', () => {
+  assert.equal(INTERNAL_SCOPE_ID, '_internal');
+  assert.equal(isReservedScopeId('_internal'), true);
+  assert.equal(isReservedScopeId('team-1'), false);
+  assert.equal(isReservedScopeId(''), false);
+  assert.equal(isReservedScopeId(null), false);
+});
+
+test('resolveScopeId never yields the reserved id — under either granularity, member or standalone', () => {
+  assert.equal(resolveScopeId({ id: '_internal' }, 'team'), null);
+  assert.equal(resolveScopeId({ id: '_internal' }, 'agent'), null);
+  assert.equal(resolveScopeId({ id: 'agent-x', parentTeamId: '_internal' }, 'team'), null);
+  // …but the member's own id is still fine at agent granularity
+  assert.equal(resolveScopeId({ id: 'agent-x', parentTeamId: '_internal' }, 'agent'), 'agent-x');
+});

@@ -30,6 +30,11 @@ function sharedBlock(src, file) {
 test('every broker viewer-headers.js carries the proxy\'s sign/verify block byte-identical', () => {
   const expected = sharedBlock(fs.readFileSync(PROXY, 'utf8'), 'plugin-ui-proxy.js');
   assert.ok(expected.includes('x-aee-plugin-team-roles'), 'the proxy block signs the per-team role map');
+  // The two-signature grace period (v1 kept for un-rebuilt brokers, v2 adds the
+  // map) must be present in every copy, or a rebuilt broker drifts back to a
+  // flag-day break. Pin both the header and the derivation.
+  assert.ok(expected.includes('x-aee-plugin-sig-v2'), 'the block emits the versioned v2 signature');
+  assert.ok(expected.includes('v1String') && expected.includes('v2String'), 'the block derives both canonical strings');
   const copies = fs.readdirSync(PLUGINS)
     .map((id) => path.join(PLUGINS, id, 'broker', 'viewer-headers.js'))
     .filter((p) => fs.existsSync(p));

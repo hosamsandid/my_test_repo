@@ -159,7 +159,8 @@ const HDR = Object.freeze({
   role: 'x-aee-plugin-role',
   teams: 'x-aee-plugin-teams',
   teamRoles: 'x-aee-plugin-team-roles',
-  sig: 'x-aee-plugin-sig',
+  sig: 'x-aee-plugin-sig',        // v1: signs sub + role + teams only (pre-map)
+  sigV2: 'x-aee-plugin-sig-v2',   // v2: also signs the per-team role map
 });
 
 const VIEWER_ROLES = Object.freeze(['team-member', 'team-admin', 'system-admin']);
@@ -167,6 +168,15 @@ const VIEWER_ROLES = Object.freeze(['team-member', 'team-admin', 'system-admin']
 // `teamRoles` is serialised as `teamId=role` pairs sorted by teamId; only
 // in-scope teams with a known role are kept, so the map can never name a team
 // the `teams` list does not.
+//
+// Two canonical strings are derived so the signature can be VERSIONED without a
+// flag-day rebuild of every broker (the F4 grace period):
+//   * `v1String` is byte-identical to the pre-map form — the string a broker
+//     built before the role map existed still computes. The proxy keeps signing
+//     it into `sig`, so an un-rebuilt broker verifies exactly as before and
+//     never 401s against a newer proxy.
+//   * `v2String` extends it with the role map and is signed into `sigV2`; a
+//     rebuilt broker prefers it, so the map is signed wherever it is consulted.
 function canonical(viewer) {
   const sub = String(viewer && viewer.sub != null ? viewer.sub : '');
   const role = String(viewer && viewer.role != null ? viewer.role : '');
@@ -177,22 +187,28 @@ function canonical(viewer) {
   const teamRoles = teams
     .filter((t) => VIEWER_ROLES.includes(rawRoles[t]))
     .map((t) => `${t}=${rawRoles[t]}`);
+  const v1String = `${sub}\n${role}\n${teams.join(',')}`;
   return {
     sub, role, teams, teamRoles,
-    canonicalString: `${sub}\n${role}\n${teams.join(',')}\n${teamRoles.join(',')}`,
+    v1String,
+    v2String: `${v1String}\n${teamRoles.join(',')}`,
   };
+}
+
+function hmac(str, secret) {
+  return crypto.createHmac('sha256', secret).update(str).digest('base64url');
 }
 
 function signViewerHeaders(viewer, secret) {
   if (!secret) throw new Error('signViewerHeaders requires a secret');
   const c = canonical(viewer);
-  const sig = crypto.createHmac('sha256', secret).update(c.canonicalString).digest('base64url');
   return {
     [HDR.user]: c.sub,
     [HDR.role]: c.role,
     [HDR.teams]: c.teams.join(','),
     [HDR.teamRoles]: c.teamRoles.join(','),
-    [HDR.sig]: sig,
+    [HDR.sig]: hmac(c.v1String, secret),    // un-rebuilt brokers verify THIS
+    [HDR.sigV2]: hmac(c.v2String, secret),  // rebuilt brokers prefer THIS
   };
 }
 
@@ -207,9 +223,21 @@ function parseTeamRoles(raw) {
   return out;
 }
 
+function timingEqual(a, b) {
+  const x = Buffer.from(String(a || ''));
+  const y = Buffer.from(String(b || ''));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+
 // Verify signed viewer headers → { sub, role, teamIds, teamRoles } or null.
 // Accepts a raw headers map or a request-like object with `.headers`.
 // Constant-time compare + strict length check, matching scope-token.js.
+//
+// v2 is preferred: it signs the per-team role map, so a team-selecting elevated
+// route may trust it. When v2 is absent (a proxy older than the map) the v1
+// signature is verified and the map is treated as empty — `roleForTeam` then
+// degrades every team to team-member, so a missing or stripped v2 can only LOSE
+// privilege, never gain it.
 function verifyViewerHeaders(headersOrReq, secret) {
   if (!secret) return null;
   const h = headersOrReq && headersOrReq.headers ? headersOrReq.headers : headersOrReq;
@@ -220,18 +248,21 @@ function verifyViewerHeaders(headersOrReq, secret) {
   const teamsRaw = get(HDR.teams);
   const teamRolesRaw = get(HDR.teamRoles);
   const sig = get(HDR.sig);
-  if (typeof sig !== 'string' || !sig) return null;
+  const sigV2 = get(HDR.sigV2);
   const teamIds = typeof teamsRaw === 'string' && teamsRaw.length ? teamsRaw.split(',') : [];
   const teamRoles = parseTeamRoles(teamRolesRaw);
-  const signed = signViewerHeaders({ sub, role, teamIds, teamRoles }, secret);
-  // The presented map must be exactly what canonicalisation would emit —
-  // otherwise a pair the canonical form drops could ride along unsigned.
-  if (String(teamRolesRaw || '') !== signed[HDR.teamRoles]) return null;
-  const a = Buffer.from(sig);
-  const b = Buffer.from(signed[HDR.sig]);
-  if (a.length !== b.length) return null;
-  if (!crypto.timingSafeEqual(a, b)) return null;
-  return { sub: String(sub || ''), role: String(role || ''), teamIds, teamRoles };
+  const c = canonical({ sub, role, teamIds, teamRoles });
+  if (typeof sigV2 === 'string' && sigV2) {
+    // The presented map must be exactly what canonicalisation would emit —
+    // otherwise a pair the canonical form drops could ride along unsigned.
+    if (String(teamRolesRaw || '') !== c.teamRoles.join(',')) return null;
+    if (!timingEqual(sigV2, hmac(c.v2String, secret))) return null;
+    return { sub: String(sub || ''), role: String(role || ''), teamIds, teamRoles };
+  }
+  if (typeof sig === 'string' && sig && timingEqual(sig, hmac(c.v1String, secret))) {
+    return { sub: String(sub || ''), role: String(role || ''), teamIds, teamRoles: {} };
+  }
+  return null;
 }
 
 // The viewer's role in ONE team — what an elevated, team-selecting route must

@@ -185,3 +185,43 @@ test('the map is canonical: order-independent, unknown roles and out-of-scope te
   assert.equal(a[HEADER_NAMES.sig], b[HEADER_NAMES.sig]);
   assert.equal(a[HEADER_NAMES.teamRoles], 'A=team-member,B=team-member');
 });
+
+// ── versioned signature / grace period (regression guard) ───────────────────
+//
+// Adding the per-team map changed what is signed. A broker whose image predates
+// the change verifies the OLD three-field HMAC. If the proxy stopped emitting a
+// signature that broker accepts, every proxied request to an un-rebuilt UI
+// plugin (github-issues, netzplan, patterns-catalog, gke) would 401 until its
+// sidecar is recreated. These pin the two-signature grace period that avoids it.
+
+const crypto = require('node:crypto');
+
+test('the v1 sig is byte-identical to the pre-map three-field HMAC (un-rebuilt brokers keep verifying it)', () => {
+  const secret = 's3cr3t';
+  const headers = signViewerHeaders(
+    { sub: 'u', role: 'team-admin', teamIds: ['b', 'a'], teamRoles: { a: 'team-admin' } },
+    secret,
+  );
+  // Exactly what a broker built before the role map existed computes.
+  const legacySig = crypto.createHmac('sha256', secret).update('u\nteam-admin\na,b').digest('base64url');
+  assert.equal(headers[HEADER_NAMES.sig], legacySig);
+  // v2 is present, distinct, and covers the map — new brokers prefer it.
+  assert.ok(headers[HEADER_NAMES.sigV2]);
+  assert.notEqual(headers[HEADER_NAMES.sig], headers[HEADER_NAMES.sigV2]);
+});
+
+test('a legacy v1-only request (no v2, no role-map header) still verifies, with an empty map', () => {
+  const secret = 'k';
+  const sub = 'u';
+  const role = 'team-admin';
+  const teams = ['a', 'b'];
+  const sig = crypto.createHmac('sha256', secret).update(`${sub}\n${role}\n${teams.join(',')}`).digest('base64url');
+  const legacy = {
+    [HEADER_NAMES.user]: sub,
+    [HEADER_NAMES.role]: role,
+    [HEADER_NAMES.teams]: teams.join(','),
+    [HEADER_NAMES.sig]: sig, // no x-aee-plugin-sig-v2, no x-aee-plugin-team-roles
+  };
+  const v = verifyViewerHeaders(legacy, secret);
+  assert.deepEqual(v, { sub, role, teamIds: ['a', 'b'], teamRoles: {} });
+});

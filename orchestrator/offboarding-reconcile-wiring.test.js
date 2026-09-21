@@ -44,8 +44,14 @@ const CHECKS = {
   // AC6. The gate must reach the resolver, or the pure orphan check is dead
   // code and a departed human's PAT keeps signing pushes exactly as before.
   'attributed-write-consults-the-live-user-gate'(src) {
-    const body = slice(src, 'function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId)', '  return { githubTokenId:', 1400);
-    return /findPersonalCredentialState\(\s*loadGithubTokenIndex\(\), ownerId, undefined, loadLiveUserGate\(\)\)/.test(body)
+    // maxSpan bumped 1400→2000 in #2357: the block legitimately grew (the
+    // tokenIndex const + the global-service fallback fields), still comfortably
+    // short of swallowing the next function.
+    const body = slice(src, 'function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId)', '  return { githubTokenId:', 2000);
+    // #2357 lifted the index read into a `tokenIndex` const (reused for the
+    // global-service fallback scan); the live-user gate still reaches the
+    // resolver via that same array — the wiring this guards is unchanged.
+    return /findPersonalCredentialState\(\s*tokenIndex, ownerId, undefined, loadLiveUserGate\(\)\)/.test(body)
       && /personalCredentialOrphaned: personal\.orphaned,/.test(body);
   },
 
@@ -179,8 +185,8 @@ test('#2138: the offboarding safety net is wired into orchestrator.js', () => {
 // the harness reports "fired the wrong check".
 const MUTATIONS = [
   ['attributed-write-consults-the-live-user-gate',
-    'loadGithubTokenIndex(), ownerId, undefined, loadLiveUserGate());',
-    'loadGithubTokenIndex(), ownerId);'],
+    'tokenIndex, ownerId, undefined, loadLiveUserGate());',
+    'tokenIndex, ownerId);'],
   ['live-user-gate-is-not-cached',
     'return credentialResolution.buildLiveUserGate(teamsStore.listUsers());',
     'return cached || (cached = credentialResolution.buildLiveUserGate(teamsStore.listUsers()));'],

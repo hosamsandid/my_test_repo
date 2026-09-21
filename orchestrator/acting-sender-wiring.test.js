@@ -160,7 +160,11 @@ test('resolveAttributedGithubToken threads the team-admin baseline snapshot and 
     /const interactive = actingSenderUserId != null;/,
     'interactive must be derived from the resolved (trusted) sender, not the raw actingSenderMatrixId',
   );
-  assert.match(src, /interactive,?\s*\}\);/, 'the computed interactive flag must reach resolveCredential');
+  // The computed `interactive` flag must reach resolveCredential as a shorthand
+  // field. (#2357 added further fields after it — globalServiceCredentialId /
+  // resourceAccessV2 — so it is no longer necessarily the LAST field; assert it
+  // is passed, not that it is last.)
+  assert.match(src, /\n\s+interactive,\n/, 'the computed interactive flag must reach resolveCredential');
 });
 
 test('resolveAttributedSshKey threads the team-admin baseline snapshot and the interactive flag', () => {
@@ -170,7 +174,7 @@ test('resolveAttributedSshKey threads the team-admin baseline snapshot and the i
     /resolveEffectiveOwnerId\(\s*cfg, loadAgentConfig, actingSenderUserId, loadBaselineDeps\(\)\)/,
   );
   assert.match(src, /const interactive = actingSenderUserId != null;/);
-  assert.match(src, /interactive,?\s*\}\);/);
+  assert.match(src, /\n\s+interactive,\n/);
 });
 
 test('loadBaselineDeps reads live users/memberships, not a cached or hardcoded snapshot', () => {

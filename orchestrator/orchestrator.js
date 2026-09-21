@@ -93,6 +93,13 @@ const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require("./prom
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const credentialResolution = require("./credential-resolution");
+// Unified resource-access model switch (#2356, epic #2361, concept #2349).
+// Off by default: the redesign's runtime resolution (the global service
+// credential fallback below) and lifecycle sweeps (PR5) stay dark until an
+// operator opts in — an upgraded stack keeps today's behaviour byte-identical.
+// See resource-access-mode.js (byte-mirrored in admin-console/api).
+const { resolveResourceAccessV2, resourceAccessModeLogLine } = require("./resource-access-mode");
+const RESOURCE_ACCESS_V2 = resolveResourceAccessV2(process.env);
 const ownershipMigration = require("./ownership-migration");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
@@ -5835,8 +5842,9 @@ function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) 
   const interactive = actingSenderUserId != null;
   const ownerId = credentialResolution.resolveEffectiveOwnerId(
     cfg, loadAgentConfig, actingSenderUserId, loadBaselineDeps());
+  const tokenIndex = loadGithubTokenIndex();
   const personal = credentialResolution.findPersonalCredentialState(
-    loadGithubTokenIndex(), ownerId, undefined, loadLiveUserGate());
+    tokenIndex, ownerId, undefined, loadLiveUserGate());
   const decision = credentialResolution.resolveCredential({
     operation,
     ownerId,
@@ -5846,6 +5854,13 @@ function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) 
     sharedCredentialId: env?.githubTokenId || null,
     kind: "GitHub token",
     interactive,
+    // Unified model §8 (#2357, behind AEE_RESOURCE_ACCESS_V2): a global service
+    // token is the last-resort service fallback when the env has no binding.
+    // Never rescues an attributed write that must 424 — it only fills a "shared"
+    // slot that was already reachable.
+    globalServiceCredentialId: RESOURCE_ACCESS_V2
+      ? credentialResolution.selectGlobalServiceCredentialId(tokenIndex) : null,
+    resourceAccessV2: RESOURCE_ACCESS_V2,
   });
   if (decision.refuse) {
     const e = new Error(decision.refuse.message);
@@ -5869,8 +5884,9 @@ function resolveAttributedSshKey(id, sharedSshKeyId, operation, actingSenderMatr
   const interactive = actingSenderUserId != null;
   const ownerId = credentialResolution.resolveEffectiveOwnerId(
     cfg, loadAgentConfig, actingSenderUserId, loadBaselineDeps());
+  const keyIndex = loadSshKeyIndex();
   const personal = credentialResolution.findPersonalCredentialState(
-    loadSshKeyIndex(), ownerId, undefined, loadLiveUserGate());
+    keyIndex, ownerId, undefined, loadLiveUserGate());
   const decision = credentialResolution.resolveCredential({
     operation,
     ownerId,
@@ -5880,6 +5896,11 @@ function resolveAttributedSshKey(id, sharedSshKeyId, operation, actingSenderMatr
     sharedCredentialId: sharedSshKeyId || null,
     kind: "SSH key",
     interactive,
+    // Unified model §8 (#2357): a global service deploy key is the last-resort
+    // service fallback when the repo/env carries no key (behind the flag).
+    globalServiceCredentialId: RESOURCE_ACCESS_V2
+      ? credentialResolution.selectGlobalServiceCredentialId(keyIndex) : null,
+    resourceAccessV2: RESOURCE_ACCESS_V2,
   });
   if (decision.refuse) {
     const e = new Error(decision.refuse.message);
@@ -5931,6 +5952,9 @@ function resolveBaselineGithubTokenId(cfg, env) {
     personalCredentialOrphaned: personal.orphaned,
     sharedCredentialId,
     kind: "GitHub token",
+    globalServiceCredentialId: RESOURCE_ACCESS_V2
+      ? credentialResolution.selectGlobalServiceCredentialId(tokenIndex) : null,
+    resourceAccessV2: RESOURCE_ACCESS_V2,
   });
   return decision.credentialId || null;
 }
@@ -5957,6 +5981,9 @@ function resolveBaselineSshKeyId(cfg, sharedSshKeyId) {
     personalCredentialOrphaned: personal.orphaned,
     sharedCredentialId: sharedSshKeyId || null,
     kind: "SSH key",
+    globalServiceCredentialId: RESOURCE_ACCESS_V2
+      ? credentialResolution.selectGlobalServiceCredentialId(keyIndex) : null,
+    resourceAccessV2: RESOURCE_ACCESS_V2,
   });
   return decision.credentialId || null;
 }
@@ -18920,6 +18947,9 @@ async function main() {
   internalApi.listen(4002, '0.0.0.0', () =>
     console.log('[Orchestrator] Internal API listening on :4002')
   );
+  // Surface the unified resource-access mode at boot so it is never a guess
+  // (mirrors the admin-console boot log; #2356/#2357).
+  console.log(`[Orchestrator] ${resourceAccessModeLogLine(process.env)}`);
 
   // ============================================================
   // Webhook server — receives HTTP triggers from external systems

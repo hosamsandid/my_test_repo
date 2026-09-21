@@ -657,7 +657,9 @@ before it moves from catalog to roadmap.
     wake this plugin introduced), `aee-jira` read/write CLI, `/` + `/admin` UI.
     See `docs/jira-plugin.md`.
 23. **Documentation publishing** — push generated docs to
-    Confluence/SharePoint spaces per team.
+    Confluence/SharePoint spaces per team. Confluence is planned as the
+    second Atlassian plugin (read/search, ownership-tiered writes, page and
+    comment events): `docs/confluence-plugin-plan.md`.
 24. **Notification bridge** — outbound Teams/Slack/e-mail summaries beyond
     Matrix; broker rate-limits and templates.
 25. **Observability query** — read-only Grafana/Prometheus/Loki queries so an

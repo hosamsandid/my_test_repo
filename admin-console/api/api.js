@@ -37,7 +37,7 @@ const { computeScope, visibleTeam, visibleAgent, canManageTeam, isTeamAdminOfAny
         visibleEnvironment, canManageEnvironment, canCreateEnvironment, canRetierEnvironment,
         visibleUser, describeAuthz,
         normalizeCredential, visibleCredential, canManageCredential, canDeleteCredential, canCreateCredential,
-        canReassignCredential, credentialVisibleToTeam, canViewUsageStatistics,
+        canReassignCredential, credentialVisibleToTeam, personalLendToTeam, canViewUsageStatistics,
         resolveAgentTenant } = require('./scope');
 const { resolveAgentTeam } = require('./agent-team');
 const { createAgentManageGate } = require('./team-member-boundary');
@@ -55,7 +55,7 @@ const { resolveGlobalFlag, isGlobalProvider } = require('./llm-endpoint-global')
 // is composed with `visibleEnvironment` ONLY at the environment/MCP-server call
 // sites below — never inside scope.js or resource-tier.js (AC4), for the same
 // reason `isGlobalProvider` stays out of the generic credential predicates.
-const { resolveGlobalFlag: resolveEnvGlobalFlag, isGlobalEnvironment } = require('./global-resource');
+const { resolveGlobalFlag: resolveEnvGlobalFlag, isGlobalEnvironment, isGlobalCredential } = require('./global-resource');
 // Environment templates (#2170, epic #2166 A4): the environment-side successor
 // to the `global` live-sharing mechanism above — a template is a curated copy
 // SOURCE for team creation, never a live-shared binding. See
@@ -1077,7 +1077,13 @@ function applyCredentialPatch({ res, cred, scope, body, inUse, label }) {
       const env = loadEnvironment(inUse);
       const envTeam = (env && env.teamId) || 'default';
       const candidate = { ...cred, scope: next.scope, teamId: next.teamId, assignedTeamIds: next.assignedTeamIds };
-      if (!credentialVisibleToTeam(candidate, envTeam)) {
+      // A GLOBAL SERVICE credential (#2357, behind AEE_RESOURCE_ACCESS_V2) is
+      // reachable by every team, so reassigning INTO global can never orphan a
+      // referencing environment — widen the guard to admit it, mirroring the
+      // global-provider composition at the provider call sites (never in the
+      // generic predicate). Legacy behaviour unchanged while the flag is off.
+      if (!credentialVisibleToTeam(candidate, envTeam)
+          && !(RESOURCE_ACCESS_V2 && isGlobalCredential(candidate))) {
         res.status(409).json({
           error: `${label} is used by environment '${inUse}' (team '${envTeam}'); reassignment would orphan it. Detach it first.`,
         });
@@ -1107,6 +1113,19 @@ function getScope(req) {
     memberships: readJsonFile(MEMBERSHIPS_INDEX, []),
     authEnabled: AUTH_ENABLED,
   });
+}
+
+// Is `userId` a CURRENT member of `teamId`? The membership gate behind the
+// identity-LEND rule (unified resource access model §7/§8, #2357): a member's
+// PERSONAL credential is consumable by their team only while the membership
+// lasts. Reads the membership index fresh each call (cheap, small JSON),
+// mirroring getScope; passed into scope.js's pure `personalLendToTeam`. Fresh
+// reads are what make the lend "live" — the moment a membership row is removed
+// the personal credential stops being consumable, with no cache to invalidate.
+function isMemberOfTeam(userId, teamId) {
+  if (!userId || !teamId) return false;
+  const memberships = readJsonFile(MEMBERSHIPS_INDEX, []);
+  return memberships.some(m => m && m.userId === userId && m.teamId === teamId);
 }
 
 // The author stamp for a chat message posted by this request (#2065). Both
@@ -5257,7 +5276,17 @@ function providerVisible(scope, ep) {
   return isGlobalProvider(ep) || visibleCredential(scope, ep);
 }
 function providerUsableByTeam(ep, teamId) {
-  return isGlobalProvider(ep) || credentialVisibleToTeam(ep, teamId);
+  if (isGlobalProvider(ep) || credentialVisibleToTeam(ep, teamId)) return true;
+  // Unified resource access model (§7/§8, #2357) — behind AEE_RESOURCE_ACCESS_V2.
+  // A team may also consume a member's PERSONAL provider as a live LEND (personal
+  // api-key gateway, or a subscription seat) while that member belongs to the
+  // team. This is the third arm of "usable by team T", and it is what fixes the
+  // originally-reported dropdown inconsistency BY CONSTRUCTION: the chat picker
+  // (this set, via usableEndpointsForTeam) and the team-settings default dropdown
+  // (PR7, same set) now compute the identical selectable set, so a provider the
+  // team's agents already run on can no longer be missing as the team default.
+  // Dark until the operator opts in; legacy behaviour is byte-identical otherwise.
+  return RESOURCE_ACCESS_V2 && personalLendToTeam(ep, teamId, isMemberOfTeam);
 }
 
 function usableEndpointsForTeam(teamId) {

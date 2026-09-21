@@ -19,6 +19,9 @@ const {
   resolveCredential,
   selectAgentIdsForOwner,
   selectPersonalCredentialIds,
+  isGlobalServiceCredential,
+  selectGlobalServiceCredentialId,
+  resolveSharedServiceId,
 } = require("./credential-resolution");
 
 // ── owner resolution (AC3, AC4) ─────────────────────────────────────────────
@@ -913,4 +916,138 @@ test("B5 migration (SSH): a cfg-less spawn (not-yet-persisted config) degrades b
     sharedSshKeyId: "key-shared-legacy",
   });
   assert.equal(resolved, "key-shared-legacy");
+});
+
+// ── Global SERVICE credential fallback (unified resource access model §8,
+// epic #2361 PR4 #2357), behind AEE_RESOURCE_ACCESS_V2 ──────────────────────
+//
+// The "shared" tier is a SERVICE credential: the env's own binding, else — only
+// under the flag — a global service credential. The refuse-on-missing rule is
+// untouched; a global service fallback only ever fills a "shared" slot already
+// reachable, never rescues an attributed write that must 424.
+
+test("isGlobalServiceCredential: global + system + service only", () => {
+  assert.equal(isGlobalServiceCredential({ id: "k", global: true, scope: "system", identity: "service" }), true);
+  assert.equal(isGlobalServiceCredential({ id: "k", global: true, scope: "system", identity: "human" }), false, "a human secret can never be global");
+  assert.equal(isGlobalServiceCredential({ id: "k", global: true, scope: "system" }), false, "unclassified legacy is not global until migrated");
+  assert.equal(isGlobalServiceCredential({ id: "k", global: true, scope: "team", identity: "service" }), false, "not system-tier");
+  assert.equal(isGlobalServiceCredential({ id: "k", global: false, scope: "system", identity: "service" }), false, "not flagged global");
+  assert.equal(isGlobalServiceCredential(null), false);
+});
+
+test("selectGlobalServiceCredentialId: first global service entry in index order, else null", () => {
+  const index = [
+    { id: "personal-alice", scope: "personal", userId: "u-alice", identity: "human" },
+    { id: "team-bot", scope: "team", teamId: "payments", identity: "service" },
+    { id: "global-a", scope: "system", global: true, identity: "service" },
+    { id: "global-b", scope: "system", global: true, identity: "service" },
+  ];
+  assert.equal(selectGlobalServiceCredentialId(index), "global-a");
+  assert.equal(selectGlobalServiceCredentialId([{ id: "human", scope: "system", global: true, identity: "human" }]), null);
+  assert.equal(selectGlobalServiceCredentialId([]), null);
+  assert.equal(selectGlobalServiceCredentialId(null), null);
+});
+
+test("resolveSharedServiceId: env binding always wins; global service fills the gap only under the flag", () => {
+  // env binding present → always used, flag irrelevant
+  assert.equal(resolveSharedServiceId("tok-env", "tok-global", false), "tok-env");
+  assert.equal(resolveSharedServiceId("tok-env", "tok-global", true), "tok-env");
+  // no env binding, flag OFF → null (byte-identical to the historical behaviour)
+  assert.equal(resolveSharedServiceId(null, "tok-global", false), null);
+  // no env binding, flag ON → the global service credential
+  assert.equal(resolveSharedServiceId(null, "tok-global", true), "tok-global");
+  // no env binding, no global → null either way
+  assert.equal(resolveSharedServiceId(null, null, true), null);
+});
+
+test("resolveCredential (flag OFF): a global service credential is IGNORED — byte-identical to today", () => {
+  // An owner with no personal token, autonomous, no env binding: today → shared/null.
+  const decision = resolveCredential({
+    operation: "commit",
+    ownerId: "u-alice",
+    personalCredential: null,
+    personalCredentialPresent: false,
+    sharedCredentialId: null,
+    globalServiceCredentialId: "tok-global",
+    resourceAccessV2: false,
+  });
+  assert.deepEqual(decision, { tier: "shared", credentialId: null }, "flag off → no widening");
+});
+
+test("resolveCredential (flag ON): an attributed write with no env binding falls back to the global service credential", () => {
+  const decision = resolveCredential({
+    operation: "commit",
+    ownerId: "u-alice",
+    personalCredential: null,
+    personalCredentialPresent: false, // owner never opted into the personal tier
+    sharedCredentialId: null,
+    globalServiceCredentialId: "tok-global",
+    resourceAccessV2: true,
+  });
+  assert.deepEqual(decision, { tier: "shared", credentialId: "tok-global" });
+});
+
+test("resolveCredential (flag ON): the env's own binding still WINS over a global service credential", () => {
+  const decision = resolveCredential({
+    operation: "push-https",
+    ownerId: "u-alice",
+    personalCredential: null,
+    personalCredentialPresent: false,
+    sharedCredentialId: "tok-team-bot",
+    globalServiceCredentialId: "tok-global",
+    resourceAccessV2: true,
+  });
+  assert.deepEqual(decision, { tier: "shared", credentialId: "tok-team-bot" });
+});
+
+test("resolveCredential (flag ON): a global service credential NEVER rescues an interactive attributed write that must 424", () => {
+  const decision = resolveCredential({
+    operation: "pr",
+    ownerId: "u-alice",
+    personalCredential: null,
+    personalCredentialPresent: false,
+    interactive: true, // a human is chatting and has no personal token
+    sharedCredentialId: null,
+    globalServiceCredentialId: "tok-global",
+    resourceAccessV2: true,
+  });
+  assert.ok(decision.refuse, "refuse-on-missing is untouched by the service fallback");
+  assert.equal(decision.refuse.code, "personal-credential-required");
+});
+
+test("resolveCredential (flag ON): a global service credential NEVER rescues a present-but-unusable personal write", () => {
+  const decision = resolveCredential({
+    operation: "commit",
+    ownerId: "u-alice",
+    personalCredential: null,
+    personalCredentialPresent: true, // present but the caller's isUsable rejected it
+    sharedCredentialId: null,
+    globalServiceCredentialId: "tok-global",
+    resourceAccessV2: true,
+  });
+  assert.ok(decision.refuse, "present-but-unusable still refuses, service fallback or not");
+});
+
+test("resolveCredential (flag ON): a usable personal credential still WINS over any service fallback", () => {
+  const decision = resolveCredential({
+    operation: "commit",
+    ownerId: "u-alice",
+    personalCredential: { id: "tok-personal-alice" },
+    personalCredentialPresent: true,
+    sharedCredentialId: "tok-team-bot",
+    globalServiceCredentialId: "tok-global",
+    resourceAccessV2: true,
+  });
+  assert.deepEqual(decision, { tier: "personal", credentialId: "tok-personal-alice" });
+});
+
+test("resolveCredential (flag ON): a no-owner read/clone uses the global service credential when the env has none", () => {
+  const decision = resolveCredential({
+    operation: "clone", // not attributed → never refuses
+    ownerId: null,
+    sharedCredentialId: null,
+    globalServiceCredentialId: "tok-global",
+    resourceAccessV2: true,
+  });
+  assert.deepEqual(decision, { tier: "shared", credentialId: "tok-global" });
 });

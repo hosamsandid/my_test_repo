@@ -1,5 +1,7 @@
 'use strict';
 
+const { isServiceIdentity } = require('./resource-tier');
+
 // Pure gate for publishing a Working Environment or an MCP server as GLOBAL
 // (#2158) — reachable by every user and every agent with NO entry in
 // `assignedTeamIds` at all. Mirrors the shape and rationale of
@@ -65,4 +67,29 @@ function isGlobalEnvironment(entry) {
   return !!(entry && entry.global === true && entry.scope === 'system');
 }
 
-module.exports = { resolveGlobalFlag, isGlobalEnvironment };
+// Is `entry` (an SSH key or a GitHub token) a GLOBAL SERVICE credential —
+// reachable as a shared secret by every team (unified resource access model
+// §4 / §12.3, epic #2361 PR4 #2357)? Deliberately STRICTER than
+// isGlobalEnvironment: a credential additionally must be a `service` identity.
+// A `human` secret (a personal PAT, a user SSH key) acts as one specific person
+// and is Personal-only — an "acts-as-me for everyone" secret is nonsensical and
+// dangerous, so it can never be globally reachable (the model's core invariant,
+// resource-tier.js `isAllowedTierCombo`). An UNCLASSIFIED legacy record
+// (`identity: null`, never yet migrated) is likewise NOT global here — a secret
+// only widens to every team once the migration has affirmatively stamped it
+// `service`, never by default. Re-reads all three preconditions on every call
+// (a hand-edited or stale `{scope:'team', global:true}` or a since-reclassified
+// record is not global), exactly like isGlobalProvider / isGlobalEnvironment.
+//
+// Composed ONLY at the SSH/GitHub call sites, and ONLY behind the
+// AEE_RESOURCE_ACCESS_V2 flag (this widens the reach of a SECRET) — NEVER inside
+// scope.js's generic `visibleCredential` / `credentialVisibleToTeam`, which also
+// gate the personal/team tiers where a stray `global: true` must stay inert
+// (#2136 finding 2 applies here identically). Providers have their own
+// reachability predicate (`isGlobalProvider`, with the oauth escape hatch); this
+// is the SSH-key / GitHub-token analog, with no such hatch.
+function isGlobalCredential(entry) {
+  return !!(entry && entry.global === true && entry.scope === 'system' && isServiceIdentity(entry));
+}
+
+module.exports = { resolveGlobalFlag, isGlobalEnvironment, isGlobalCredential };

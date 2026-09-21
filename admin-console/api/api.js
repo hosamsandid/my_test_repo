@@ -2811,7 +2811,7 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
       return res.status(400).json({ error: 'assistLlmEndpointId must be a string endpoint id (or null to clear)' });
     } else {
       const tenant = agentTeamId(cfg);
-      const ep = usableEndpointsForTeam(tenant).find(e => e.id === assistLlmEndpointId);
+      const ep = usableEndpointsForTeam(tenant, resolveAgentTeam(cfg)).find(e => e.id === assistLlmEndpointId);
       if (!ep) {
         return res.status(400).json({ error: `assistLlmEndpointId '${assistLlmEndpointId}' is not a provider usable by this team` });
       }
@@ -5275,7 +5275,7 @@ const requireAgentManage = createAgentManageGate({
 function providerVisible(scope, ep) {
   return isGlobalProvider(ep) || visibleCredential(scope, ep);
 }
-function providerUsableByTeam(ep, teamId) {
+function providerUsableByTeam(ep, teamId, agentTeamId) {
   if (isGlobalProvider(ep) || credentialVisibleToTeam(ep, teamId)) return true;
   // Unified resource access model (§7/§8, #2357) — behind AEE_RESOURCE_ACCESS_V2.
   // A team may also consume a member's PERSONAL provider as a live LEND (personal
@@ -5286,11 +5286,20 @@ function providerUsableByTeam(ep, teamId) {
   // (PR7, same set) now compute the identical selectable set, so a provider the
   // team's agents already run on can no longer be missing as the team default.
   // Dark until the operator opts in; legacy behaviour is byte-identical otherwise.
-  return RESOURCE_ACCESS_V2 && personalLendToTeam(ep, teamId, isMemberOfTeam);
+  //
+  // The lend's membership check is keyed on the AGENT TEAM (squad) id
+  // (`resolveAgentTeam`), NOT `teamId` — which is the vestigial credential-axis
+  // tenant (`resolveAgentTenant`, `'default'` in practice, #2358). The membership
+  // index is keyed by the squad (the same space `resolveScopeOwner` /
+  // credential-resolution's baseline owner use), so checking membership in the
+  // tenant space would silently never match. `credentialVisibleToTeam` above
+  // keeps using `teamId` — that is how team-scoped providers are stamped today,
+  // unchanged.
+  return RESOURCE_ACCESS_V2 && !!agentTeamId && personalLendToTeam(ep, agentTeamId, isMemberOfTeam);
 }
 
-function usableEndpointsForTeam(teamId) {
-  return listLlmEndpoints().filter(ep => providerUsableByTeam(ep, teamId));
+function usableEndpointsForTeam(teamId, agentTeamId) {
+  return listLlmEndpoints().filter(ep => providerUsableByTeam(ep, teamId, agentTeamId));
 }
 
 // The non-secret projection of an endpoint sent to the chat UI (never a token).
@@ -5366,7 +5375,9 @@ app.get('/api/agents/:id/model-options', (req, res) => {
     override:       cfg.modelOverride || null,
     models:         endpoint?.models || [],
     // Curated set of providers this agent's team may switch to (never tokens).
-    endpoints:      usableEndpointsForTeam(teamId).map(publicEndpointView),
+    // The Agent-Team (squad) id is passed alongside the tenant so the personal-
+    // provider lend (#2358) checks membership in the space it is keyed on.
+    endpoints:      usableEndpointsForTeam(teamId, resolveAgentTeam(cfg)).map(publicEndpointView),
     // #1213: the team agent's assist-synthesis provider (curator promotion /
     // distillation bill against it). Team-agent-only; null on other roles.
     assistLlmEndpointId: cfg.role === 'team' ? (cfg.assistLlmEndpointId || null) : null,
@@ -5465,7 +5476,7 @@ app.patch('/api/agents/:id/provider', apiLimiter, async (req, res) => {
   if (typeof endpointId !== 'string') {
     return res.status(400).json({ error: 'endpointId must be a string or null' });
   }
-  const target = usableEndpointsForTeam(teamId).find(ep => ep.id === endpointId);
+  const target = usableEndpointsForTeam(teamId, resolveAgentTeam(cfg)).find(ep => ep.id === endpointId);
   if (!target) {
     return res.status(403).json({
       error: `Model provider '${endpointId}' is not available for team '${teamId}'`,
@@ -12545,6 +12556,14 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
     scope: ownership.scope,
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
+    // Persist the personal owner (#2358). Without this a `scope: 'personal'`
+    // provider carried no `userId`, so `ownsPersonalCredential` (which reads
+    // `c.userId`) matched nobody — the owner could neither see nor manage their
+    // own provider, offboarding could not find it to delete, and PR4's
+    // personal-provider lend could never resolve. Mirrors the SSH-key /
+    // GitHub-token indexes, which have always stored `userId`. Null for every
+    // non-personal tier.
+    userId: ownership.userId || null,
     ...(globalGate.global ? { global: true } : {}),
     baseUrl: isOauth ? '' : baseUrl,
     authType,
@@ -12661,6 +12680,11 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   next.scope = ownership.scope;
   next.teamId = ownership.teamId;
   next.assignedTeamIds = ownership.assignedTeamIds;
+  // Keep the personal owner in step with the tier (#2358): a personal provider
+  // retains its owner (from the reassign result, else the existing record); any
+  // non-personal tier clears a stale `userId` so a re-tiered record cannot carry
+  // a dangling former owner. See the create-path note above.
+  next.userId = ownership.scope === 'personal' ? (ownership.userId || current.userId || null) : null;
   // Global flag (#2136): stamped when set, and removed when retracted so a
   // non-global record is byte-clean (no dangling `global: false`).
   if (globalGate.global) next.global = true; else delete next.global;

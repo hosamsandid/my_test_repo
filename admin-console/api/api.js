@@ -66,6 +66,7 @@ const { isTemplateEnvironment, resolveTemplateFlag, copyEnvironmentStructure } =
 const { validateCloneSource, describeClonedCredentialNeeds } = require('./team-clone');
 const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
 const { resolvePoolsEnabled, poolsModeLogLine } = require('./pools-mode');
+const { resolveResourceAccessV2, resourceAccessModeLogLine } = require('./resource-access-mode');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
 const { buildAssistModelOptions } = require('./assist-model-options');
@@ -267,6 +268,11 @@ const AUTH_ENABLED = resolveAuthEnabled(process.env);
 // the mechanism still needs teardown/reaping polish, so an upgraded stack
 // keeps the UI visible-but-disabled until an operator opts in explicitly.
 const POOLS_ENABLED = resolvePoolsEnabled(process.env);
+// Unified resource-access model switch (#2356, concept #2349). Off by default —
+// the redesign (PR4–PR7) lands "dark" behind this flag so an upgraded stack
+// keeps today's scoping/visibility/runtime resolution until an operator opts in
+// explicitly. See resource-access-mode.js.
+const RESOURCE_ACCESS_V2 = resolveResourceAccessV2(process.env);
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 
@@ -2014,6 +2020,14 @@ app.post('/api/maintenance-mode/deactivate', (req, res) => {
 // Soon" treatment of the Scaling controls.
 app.get('/api/pools-mode', (req, res) => {
   res.json({ enabled: POOLS_ENABLED });
+});
+
+/* ─── Unified resource-access feature flag (#2356) ───────────────────── */
+// Read once at boot from AEE_RESOURCE_ACCESS_V2; the SPA fetches this once to
+// decide whether to render the redesigned identity/scope credential surfaces
+// (PR7) or the current tier controls. Off by default — the redesign lands dark.
+app.get('/api/resource-access-mode', (req, res) => {
+  res.json({ enabled: RESOURCE_ACCESS_V2 });
 });
 
 /* ─── Client error telemetry (#1974) ────────────────────────────────── */
@@ -20695,6 +20709,7 @@ app.listen(4000, '0.0.0.0', () => {
   // visibility while the flag is off.
   console.log(`[Admin] ${authModeLogLine(process.env)}`);
   console.log(`[Admin] ${poolsModeLogLine(process.env)}`);
+  console.log(`[Admin] ${resourceAccessModeLogLine(process.env)}`);
   try {
     const warning = singleUserElevationWarning(readJsonFile(USERS_INDEX, []), process.env);
     if (warning) console.warn(`[Admin] ${warning}`);

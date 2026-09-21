@@ -100,6 +100,10 @@ const credentialResolution = require("./credential-resolution");
 // See resource-access-mode.js (byte-mirrored in admin-console/api).
 const { resolveResourceAccessV2, resourceAccessModeLogLine } = require("./resource-access-mode");
 const RESOURCE_ACCESS_V2 = resolveResourceAccessV2(process.env);
+const { resolveAgentTeam } = require("./agent-team");
+// Pure planner for the identity-LEND binding sweep on membership removal
+// (#2358 E1); the applier `sweepMembershipBindings` below supplies the live IO.
+const membershipSweep = require("./membership-sweep");
 const ownershipMigration = require("./ownership-migration");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
@@ -5729,6 +5733,22 @@ function loadGithubTokenIndex() {
 function loadSshKeyIndex() {
   try {
     const raw = fs.readFileSync(SSH_KEYS_INDEX, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+// Read the Model-Provider (LLM endpoint) index (metadata only — scope/userId/
+// authTokenId, never the token). Sibling of loadSshKeyIndex; used by offboarding
+// (#2358 E2) to find and delete a departing human's personal MODEL PROVIDERS,
+// and by the membership-removal sweep to look up a bound provider's owner.
+// Note the secret file is named by `authTokenId`, NOT the endpoint id (see
+// resolveLlmBinding). Best-effort: an unreadable/absent index yields [].
+function loadLlmEndpointsIndex() {
+  try {
+    const raw = fs.readFileSync(LLM_ENDPOINTS_INDEX, "utf8");
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
   } catch {
@@ -12436,6 +12456,161 @@ class Orchestrator {
     return { ownerId: target, respawned, skipped };
   }
 
+  // ── Membership-removal binding sweep (#2358 E1; concept §10 E1 / §12.6) ────
+  //
+  // When human `departedUserId` leaves Agent Team `teamId`, the identity LENDS
+  // they gave the team are over: every team binding that pointed at one of their
+  // PERSONAL resources (a personal provider, PAT or SSH key) is dead and must be
+  // reset to INHERIT (env default / .env / a global service credential — never
+  // "set but dead"), the affected agents respawned, and the reset logged. The
+  // RESOURCE is KEPT — still theirs, still usable in their other teams; only the
+  // BINDING is thrown out. Gated by AEE_RESOURCE_ACCESS_V2 at the caller (the
+  // memberships DELETE arm) — off the flag this never runs and removal behaves
+  // exactly as today. Best-effort per item; a summary is returned for the caller.
+  //
+  // Writing environment.json here is the one place the orchestrator writes an
+  // env file (normally console-owned) — deliberate, and the same class of
+  // system-integrity write `offboardOwner` already does on the credential
+  // indexes: a membership change the console proxied to us must leave no dead
+  // lend behind, and the respawn + agent-config writes are ours regardless.
+  async sweepMembershipBindings(teamId, departedUserId) {
+    const team = teamId != null && String(teamId) !== '' ? String(teamId) : null;
+    const empty = { teamId: team, departedUserId: departedUserId || null, envResets: [], agentResets: [], respawned: [] };
+    if (!team) return empty;
+
+    // The team's agents (the team agent + its members) and the envs they use.
+    const teamAgents = [];
+    const envIds = new Set();
+    for (const id of this.agentConfigs.keys()) {
+      const cfg = loadAgentConfig(id);
+      if (!cfg || resolveAgentTeam(cfg) !== team) continue;
+      teamAgents.push({ id, cfg });
+      if (cfg.environmentId) envIds.add(cfg.environmentId);
+    }
+    // Read each env RAW (not normalized) so the write-back is a minimal edit —
+    // a credential sweep must not also migrate/annotate the env file. The
+    // planner sees the same effective repo array the applier will mutate.
+    const rawByEnv = new Map();
+    const environments = [];
+    for (const envId of envIds) {
+      const raw = this._loadRawEnvironment(envId);
+      if (!raw) continue;
+      rawByEnv.set(envId, raw);
+      const repositories = Array.isArray(raw.repositories)
+        ? raw.repositories
+        : (raw.repository && raw.repository.url ? [raw.repository] : []);
+      environments.push({ envId, env: { ...raw, repositories } });
+    }
+
+    const personalOwnerOf = membershipSweep.buildPersonalOwnerLookup({
+      providerIndex: loadLlmEndpointsIndex(),
+      githubTokenIndex: loadGithubTokenIndex(),
+      sshKeyIndex: loadSshKeyIndex(),
+    });
+    // CURRENT membership, read AFTER the removal (the departed user answers
+    // false); best-effort so an unreadable index degrades to "no members",
+    // which sweeps nothing rather than throwing out of the removal path.
+    const isMemberOfTeam = (userId, tid) => {
+      try { return teamsStore.listMemberships({ teamId: tid, userId }).length > 0; }
+      catch { return false; }
+    };
+
+    const plan = membershipSweep.planMembershipRemovalSweep({
+      teamId: team, environments, agents: teamAgents, personalOwnerOf, isMemberOfTeam,
+    });
+    if (!plan.envResets.length && !plan.agentResets.length) return empty;
+
+    // Apply env resets — one write per env.
+    const envResets = [];
+    const byEnv = new Map();
+    for (const r of plan.envResets) {
+      if (!byEnv.has(r.envId)) byEnv.set(r.envId, []);
+      byEnv.get(r.envId).push(r);
+    }
+    for (const [envId, resets] of byEnv) {
+      const raw = rawByEnv.get(envId);
+      if (raw && this._applyEnvBindingResets(envId, raw, resets)) envResets.push(...resets);
+    }
+
+    // Apply per-agent override resets.
+    const agentResets = [];
+    for (const r of plan.agentResets) {
+      if (this._applyAgentBindingReset(r.agentId, r.field)) agentResets.push(r);
+    }
+
+    // Respawn: every affected env's running agents, plus each override-reset one.
+    const respawned = new Set();
+    for (const envId of new Set(envResets.map(r => r.envId))) {
+      try {
+        const res = await this.respawnAgentsForEnvironment(envId, { reason: 'membership-removal-sweep' });
+        (res.respawned || []).forEach(id => respawned.add(id));
+      } catch (err) {
+        console.error(`[Orchestrator] membership sweep: respawn for env ${envId} failed: ${err.message}`);
+      }
+    }
+    for (const r of agentResets) {
+      try {
+        if (this.respawnAgent(r.agentId, { reason: 'membership-removal-sweep' }).respawned) respawned.add(r.agentId);
+      } catch (err) {
+        console.error(`[Orchestrator] membership sweep: respawn for agent ${r.agentId} failed: ${err.message}`);
+      }
+    }
+
+    if (envResets.length || agentResets.length) {
+      console.log(
+        `[Orchestrator] membership sweep: ${departedUserId || '?'} left team ${team} → `
+        + `reset ${envResets.length} env binding(s) + ${agentResets.length} override(s), respawned ${respawned.size} agent(s)`);
+      recordMembershipSweep(team, departedUserId, envResets, agentResets);
+    }
+    return { teamId: team, departedUserId: departedUserId || null, envResets, agentResets, respawned: [...respawned] };
+  }
+
+  _rawEnvPath(envId) {
+    return path.join(ENVIRONMENTS_DIR, envId, 'environment.json');
+  }
+
+  _loadRawEnvironment(envId) {
+    try { return JSON.parse(fs.readFileSync(this._rawEnvPath(envId), 'utf8')); }
+    catch { return null; }
+  }
+
+  // Null out the swept binding fields on a raw env object and write it back.
+  // Resetting to null means "inherit": a null `llmEndpointId` falls back to the
+  // .env default provider, a null `githubTokenId` / `sshKeyId` to a global
+  // service credential (PR4) or empty. Returns true on a successful write.
+  _applyEnvBindingResets(envId, raw, resets) {
+    for (const r of resets) {
+      if (r.field === 'llmEndpointId') raw.llmEndpointId = null;
+      else if (r.field === 'githubTokenId') raw.githubTokenId = null;
+      else if (r.field === 'repositories.sshKeyId') {
+        if (Array.isArray(raw.repositories) && raw.repositories[r.repoIndex]) {
+          raw.repositories[r.repoIndex].sshKeyId = null;
+        } else if (raw.repository && r.repoIndex === 0) {
+          raw.repository.sshKeyId = null;
+        }
+      }
+    }
+    try {
+      fs.writeFileSync(this._rawEnvPath(envId), JSON.stringify(raw, null, 2));
+      return true;
+    } catch (err) {
+      console.error(`[Orchestrator] membership sweep: could not rewrite env ${envId}: ${err.message}`);
+      return false;
+    }
+  }
+
+  _applyAgentBindingReset(agentId, field) {
+    if (field !== 'llmEndpointOverride') return false;
+    const cfg = loadAgentConfig(agentId);
+    if (!cfg || !('llmEndpointOverride' in cfg)) return false;
+    delete cfg.llmEndpointOverride;
+    try { saveAgentConfig(agentId, cfg); return true; }
+    catch (err) {
+      console.error(`[Orchestrator] membership sweep: could not rewrite agent ${agentId} config: ${err.message}`);
+      return false;
+    }
+  }
+
   // Offboarding (#1571, epic #1558 Phase 5; concept §8, decision D6). When a
   // human is deactivated/removed we (1) PAUSE the agents that were acting under
   // that person's personal identity, then (2) auto-DELETE that person's personal
@@ -12475,10 +12650,16 @@ class Orchestrator {
       }
     }
 
-    // (2) Delete the departing human's PERSONAL SSH keys and GitHub tokens.
+    // (2) Delete the departing human's PERSONAL SSH keys, GitHub tokens and
+    // MODEL PROVIDERS. Providers joined this set in #2358 (E2): a personal
+    // provider (a subscription seat, or a personal api-key gateway) is one
+    // human's identity just like a personal PAT, so it must be removed on
+    // offboarding rather than left orphaned. The provider store names its token
+    // file by `authTokenId`, not the endpoint id, hence the secret-name override.
     const deletedCredentials = [
       ...this._deletePersonalCredentials(loadSshKeyIndex(), SSH_KEYS_INDEX, SSH_KEYS_DIR, target, 'ssh-key'),
       ...this._deletePersonalCredentials(loadGithubTokenIndex(), path.join(GH_TOKENS_DIR, 'index.json'), GH_TOKENS_DIR, target, 'github-token'),
+      ...this._deletePersonalCredentials(loadLlmEndpointsIndex(), LLM_ENDPOINTS_INDEX, LLM_KEYS_DIR, target, 'model-provider', (e) => e.authTokenId),
     ];
 
     if (paused.length || deletedCredentials.length) {
@@ -12494,16 +12675,26 @@ class Orchestrator {
   // is never matched even if its `userId` coincides (AC3). Returns the ids
   // removed (each tagged with `kind`). Best-effort — a missing file is fine
   // (the point is that no residual copy remains, AC1/AC4).
-  _deletePersonalCredentials(index, indexPath, secretDir, ownerId, kind) {
+  // `secretNameOf(entry)` maps a doomed entry to its 0600 secret file name.
+  // Defaults to the entry id (SSH keys and GitHub tokens name the secret by id),
+  // but a Model Provider names its token file by `authTokenId`, NOT the endpoint
+  // id (#2358 E2; see resolveLlmBinding) — so the caller passes an override for
+  // that store. A falsy name (e.g. a provider that never stored a token) unlinks
+  // nothing but the index entry is still dropped.
+  _deletePersonalCredentials(index, indexPath, secretDir, ownerId, kind, secretNameOf) {
     const ids = credentialResolution.selectPersonalCredentialIds(index, ownerId);
     if (!ids.length) return [];
     const doomed = new Set(ids);
-    for (const id of ids) {
+    const nameOf = typeof secretNameOf === 'function' ? secretNameOf : (e) => e && e.id;
+    for (const entry of index) {
+      if (!(entry && entry.id && doomed.has(String(entry.id)))) continue;
+      const secretName = nameOf(entry);
+      if (!secretName) continue;
       try {
-        fs.unlinkSync(path.join(secretDir, path.basename(id)));
+        fs.unlinkSync(path.join(secretDir, path.basename(String(secretName))));
       } catch (err) {
         if (err && err.code !== 'ENOENT') {
-          console.error(`[Orchestrator] offboarding: could not unlink ${kind} '${id}': ${err.message}`);
+          console.error(`[Orchestrator] offboarding: could not unlink ${kind} secret for '${entry.id}': ${err.message}`);
         }
       }
     }
@@ -12547,9 +12738,13 @@ class Orchestrator {
 
     const sshKeys = loadSshKeyIndex();
     const ghTokens = loadGithubTokenIndex();
+    // #2358 E2: model providers join the reconciliation so an orphaned personal
+    // provider (owner deleted in the #2135 window, or by any future gap) is
+    // detected and swept the same way as an SSH key / GitHub token.
+    const llmEndpoints = loadLlmEndpointsIndex();
     const agents = Array.from(this.agentConfigs.keys()).map(id => ({ id, cfg: loadAgentConfig(id) }));
     const owners = credentialResolution.selectOrphanedOwnerIds({
-      credentialIndexes: [sshKeys, ghTokens],
+      credentialIndexes: [sshKeys, ghTokens, llmEndpoints],
       agents,
       loadAgentConfig,
       liveUsers,
@@ -12560,7 +12755,7 @@ class Orchestrator {
     // assessment even when the cleanup below only partly succeeds.
     const orphanSet = new Set(owners);
     const credentials = [];
-    for (const [index, kind] of [[sshKeys, 'ssh-key'], [ghTokens, 'github-token']]) {
+    for (const [index, kind] of [[sshKeys, 'ssh-key'], [ghTokens, 'github-token'], [llmEndpoints, 'model-provider']]) {
       for (const e of Array.isArray(index) ? index : []) {
         if (e && e.scope === 'personal' && e.userId && orphanSet.has(String(e.userId))) {
           credentials.push({
@@ -13589,6 +13784,43 @@ function recordOffboardingDegradation(userId, detail) {
   }
 }
 
+// Put a membership-removal binding sweep (#2358 E1) on the operator's timeline —
+// a human left a team and one or more of their lent personal resources were
+// unbound. Repo-less by construction, same flat shape and null-agentId hazard as
+// `recordOffboardingDegradation` (outcomes stays empty so the console reader,
+// which throws on a null-agentId outcome, never 500s the Event Log).
+function recordMembershipSweep(teamId, userId, envResets, agentResets) {
+  try {
+    const now = new Date().toISOString();
+    githubEventLog.record({
+      ts: now,
+      eventId: `membership-sweep:${teamId}:${userId}:${Date.now()}`,
+      repo: null,
+      event: 'membership.lend-sweep',
+      actor: null,
+      createdAt: now,
+      label: null,
+      ref: null,
+      workItem: null,
+      // noMatchingTrigger BEFORE outcomes, mirroring recordPluginSyncFailure —
+      // keeps the `outcomes: [],\n noMatchingTrigger: false,` sequence unique to
+      // recordOffboardingDegradation (its #2138 mutation-anchor guard requires
+      // exactly one match). Same null-agentId hazard: outcomes stays empty.
+      noMatchingTrigger: false,
+      outcomes: [],
+      source: 'internal',
+      membershipSweep: {
+        teamId: String(teamId),
+        userId: userId ? String(userId) : null,
+        envResets: (envResets || []).map(r => ({ envId: r.envId, field: r.field, from: r.from || null })),
+        agentResets: (agentResets || []).map(r => ({ agentId: r.agentId, field: r.field, from: r.from || null })),
+      },
+    });
+  } catch (err) {
+    console.error(`[Orchestrator] could not log the membership-removal sweep for ${userId}@${teamId}: ${err.message}`);
+  }
+}
+
 // Put a failed plugin materialisation on the operator's timeline (#2308 AC18/
 // AC19). A member whose grant includes a plugin that could not be installed
 // must never fail silently — this is the "discoverable after the fact" half:
@@ -13826,13 +14058,29 @@ async function handleTeamsAdminApi(req, res) {
         return sendJson(res, 200, teamsStore.setMembership(body)), true;
       }
       if (req.method === 'DELETE') {
-        return sendJson(res, 200, teamsStore.removeMembership({
-          userId: parsed.searchParams.get('userId'),
-          teamId: parsed.searchParams.get('teamId'),
+        const memberUserId = parsed.searchParams.get('userId');
+        const memberTeamId = parsed.searchParams.get('teamId');
+        const removed = teamsStore.removeMembership({
+          userId: memberUserId,
+          teamId: memberTeamId,
           // The D4 successor (#2081) — required only when the target is the
           // team's last admin, and validated by the store.
           successorUserId: parsed.searchParams.get('successorUserId') || undefined,
-        })), true;
+        });
+        // #2358 E1 (behind AEE_RESOURCE_ACCESS_V2): the lend ends when the owner
+        // leaves the team. Sweep any team binding that pointed at one of their
+        // personal resources, reset it to inherit, and respawn the affected
+        // agents. Best-effort — a sweep failure never fails the removal (which
+        // already succeeded above); it is logged and surfaced in the response.
+        let sweep = null;
+        if (RESOURCE_ACCESS_V2 && orchestratorSingleton) {
+          try {
+            sweep = await orchestratorSingleton.sweepMembershipBindings(memberTeamId, memberUserId);
+          } catch (err) {
+            console.error(`[Orchestrator] membership-removal sweep failed for ${memberUserId}@${memberTeamId}: ${err.message}`);
+          }
+        }
+        return sendJson(res, 200, { ...removed, ...(sweep ? { sweep } : {}) }), true;
       }
     }
 

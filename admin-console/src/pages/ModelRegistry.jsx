@@ -14,6 +14,7 @@ import OAuthLoginWizard from '../components/OAuthLoginWizard';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
 import { useAuth } from '../auth/AuthContext';
+import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import {
   teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
   canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
@@ -294,6 +295,17 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
   const [oauthFlowId, setOauthFlowId] = useState(null);
   const [wizardOpen, setWizardOpen] = useState(false);
 
+  // The single-user subscription escape hatch (#2360, concept §9), behind
+  // AEE_RESOURCE_ACCESS_V2: an oauth (subscription) provider may be published
+  // GLOBAL — runtime-only, agent runtime everywhere — iff the operator has
+  // confirmed single-user use (complianceAck). The backend (PR2 #2353) already
+  // accepts it; this unlocks the toggle the form disabled for every oauth
+  // provider before. An existing oauth provider carries its recorded ack, so it
+  // qualifies without re-confirming (mirrors the server PUT rule).
+  const resourceAccessV2 = useResourceAccessV2();
+  const oauthGlobalOk = resourceAccessV2 && isOauth
+    && (complianceOk || (wasOauth && endpoint?.complianceAck?.singleUser === true));
+
   // If the user removes the default model from the list (without using the
   // star toggle), drop the dangling pointer so we don't ship a server-rejected
   // value on save.
@@ -303,11 +315,13 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
     }
   }, [models, defaultModelId]);
 
-  // A subscription (oauth) seat can never be global (#2136) — drop the flag if the
-  // user switches this provider to subscription auth so the payload stays valid.
+  // A subscription (oauth) seat can never be global (#2136) UNLESS the
+  // single-user escape hatch applies (#2360, oauthGlobalOk) — drop the flag when
+  // the user switches to subscription auth and the hatch does NOT apply, so the
+  // payload stays valid. When the hatch DOES apply the flag is allowed to stand.
   useEffect(() => {
-    if (isOauth && isGlobal) setIsGlobal(false);
-  }, [isOauth, isGlobal]);
+    if (isOauth && isGlobal && !oauthGlobalOk) setIsGlobal(false);
+  }, [isOauth, isGlobal, oauthGlobalOk]);
 
   // test / discover state
   const [probing, setProbing] = useState(null);            // 'test' | 'discover' | null
@@ -480,13 +494,13 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
       {isSysAdmin && (
         <label style={{
           display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
-          cursor: isOauth ? 'not-allowed' : 'pointer',
-          opacity: isOauth ? 0.6 : 1,
+          cursor: (isOauth && !oauthGlobalOk) ? 'not-allowed' : 'pointer',
+          opacity: (isOauth && !oauthGlobalOk) ? 0.6 : 1,
         }}>
           <input
             type="checkbox"
             checked={isGlobal}
-            disabled={isOauth}
+            disabled={isOauth && !oauthGlobalOk}
             onChange={e => setIsGlobal(e.target.checked)}
             style={{ marginTop: 3, flexShrink: 0 }}
           />
@@ -494,7 +508,9 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
             <strong>Global provider</strong> — available to every user and agent, with no team required.
             <span style={{ display: 'block', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
               {isOauth
-                ? 'A subscription (OAuth) provider is single-user and cannot be made global.'
+                ? (oauthGlobalOk
+                    ? 'A confirmed single-user subscription may be global — runtime-only: every agent can run on it, but assist/helper cannot use it.'
+                    : 'A subscription (OAuth) provider is single-user; confirm single-user use to publish it globally.')
                 : 'Anyone can select and use it; only a System Admin can manage it. The token is never exposed.'}
             </span>
           </span>

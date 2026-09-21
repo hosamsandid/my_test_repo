@@ -140,6 +140,65 @@ export function isGlobalRecord(record) {
   return !!(record && record.global === true && record.scope === 'system');
 }
 
+// ── Identity vs scope (unified resource access model §2/§4/§7/§12.10, #2360) ──
+//
+// The redesign classifies every secret by the IDENTITY it acts as, orthogonal to
+// its tier, and surfaces that as a two-control pair replacing the old
+// "System / Assigned to teams / Team owns" tabs. These pure helpers give the
+// forms the option lists + the allowed-combo guard; they byte-mirror the server
+// (resource-tier.js `isAllowedTierCombo`, llm-endpoint-global.js, and the
+// api.js `oauth-not-team` refusal), which stays the real boundary.
+
+export const IDENTITY_HUMAN = 'human';
+export const IDENTITY_SERVICE = 'service';
+
+// The two identity options, with the concept's exact UI naming (§12.10).
+export const IDENTITY_OPTIONS = [
+  { value: IDENTITY_HUMAN, label: 'Personal identity — acts as you',
+    hint: 'A personal token / key / subscription seat. Every action is attributed to you; it stays yours and can only be lent to a team while you are a member.' },
+  { value: IDENTITY_SERVICE, label: 'Service credential — a shared machine / deploy identity',
+    hint: 'A machine-user token, a deploy key, or an api-key gateway. Belongs to no one person, so it can be shared with a team or made global and survives personnel changes.' },
+];
+
+// Which scopes are legal for a given identity (§4). A `human` secret is
+// Personal-only — the one exception being a subscription (oauth) provider, which
+// MAY be Global via the single-user escape hatch (§9). A `service` secret may sit
+// at any tier.
+export function allowedScopesForIdentity(identity, { kind, isOauth } = {}) {
+  if (identity === IDENTITY_HUMAN) {
+    return (kind === 'provider' && isOauth) ? ['personal', 'global'] : ['personal'];
+  }
+  return ['personal', 'team', 'global'];
+}
+
+// The allowed-combo guard the form submit uses, byte-mirroring the server. UX
+// only — every route re-checks.
+export function isAllowedIdentityScope(identity, scope, ctx = {}) {
+  return allowedScopesForIdentity(identity, ctx).includes(scope);
+}
+
+// The default identity to preselect for a record/kind, matching the server's
+// create-time stamp (PR2/PR3) and the migration inference: a subscription
+// provider is human, an api-key gateway service; a credential inherits its
+// record's stamp, else a personal record is human and any other is service.
+export function defaultIdentity(kind, record = {}) {
+  if (record.identity === IDENTITY_HUMAN || record.identity === IDENTITY_SERVICE) return record.identity;
+  if (kind === 'provider') return record.authType === 'oauth-token' ? IDENTITY_HUMAN : IDENTITY_SERVICE;
+  return record.scope === 'personal' ? IDENTITY_HUMAN : IDENTITY_SERVICE;
+}
+
+// Which scopes may the caller actually CREATE at, for a chosen identity —
+// intersect the identity's legal scopes with the caller's authority (personal:
+// anyone; team: a team-admin of some team / sysadmin; global: sysadmin only).
+// Mirrors the server create gates.
+export function creatableScopesForIdentity(identity, { kind, isOauth, isSysAdmin, adminTeamIds = [] } = {}) {
+  return allowedScopesForIdentity(identity, { kind, isOauth }).filter((scope) => {
+    if (scope === 'personal') return true;
+    if (scope === 'team') return isSysAdmin || adminTeamIds.length > 0;
+    return !!isSysAdmin; // global
+  });
+}
+
 // Team ids the caller administers, from the session `user.teams` descriptor.
 export function adminTeamIdsOf(user) {
   return (user && Array.isArray(user.teams) ? user.teams : [])

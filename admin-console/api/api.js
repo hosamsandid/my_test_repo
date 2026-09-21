@@ -67,6 +67,9 @@ const { validateCloneSource, describeClonedCredentialNeeds } = require('./team-c
 const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
 const { resolvePoolsEnabled, poolsModeLogLine } = require('./pools-mode');
 const { resolveResourceAccessV2, resourceAccessModeLogLine } = require('./resource-access-mode');
+// One-time migration of legacy records onto the unified model (#2359). Pure
+// classifier; the routes below supply the store reads/writes + the gate.
+const resourceMigration = require('./resource-migration');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
 const { buildAssistModelOptions } = require('./assist-model-options');
@@ -12815,6 +12818,70 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   const healthMap = loadLlmHealthMap();
   if (ep.id in healthMap) { delete healthMap[ep.id]; saveLlmHealthMap(healthMap); }
   res.status(204).end();
+});
+
+// ── Unified-access migration (#2359): dry-run report + admin-confirmed apply ──
+//
+// System-Admin-only and gated by AEE_RESOURCE_ACCESS_V2 (the redesign lands
+// dark). The report is READ-ONLY — it enumerates every legacy record still on
+// the removed `system`+assignedTeamIds axis or lacking an `identity`, with an
+// auto-suggested identity + tier. NOTHING changes until an admin POSTs a
+// per-record decision (decision §12.8), and `identity` is immutable once set
+// (§12.5, enforced in resource-migration.js). An un-migrated record keeps
+// resolving through the existing read-compat path meanwhile.
+app.get('/api/resource-migration', (req, res) => {
+  if (!RESOURCE_ACCESS_V2) {
+    return res.status(404).json({ error: 'not found', code: 'resource-access-v2-disabled' });
+  }
+  const scope = getScope(req);
+  if (!scope.all) return res.status(403).json({ error: 'forbidden: the resource migration is System-Admin-only', code: 'forbidden' });
+  res.json(resourceMigration.planResourceMigration({
+    providers: listLlmEndpoints(),
+    sshKeys: listSshKeys(),
+    githubTokens: listGithubTokens(),
+  }));
+});
+
+app.post('/api/resource-migration/apply', apiLimiter, (req, res) => {
+  if (!RESOURCE_ACCESS_V2) {
+    return res.status(404).json({ error: 'not found', code: 'resource-access-v2-disabled' });
+  }
+  const scope = getScope(req);
+  if (!scope.all) return res.status(403).json({ error: 'forbidden: the resource migration is System-Admin-only', code: 'forbidden' });
+  const decisions = Array.isArray(req.body && req.body.decisions) ? req.body.decisions : null;
+  if (!decisions) return res.status(400).json({ error: 'decisions[] is required' });
+
+  // One store per kind, loaded once, mutated in memory, saved once at the end so
+  // a mid-batch failure does not leave a half-written index.
+  const stores = {
+    provider: { list: listLlmEndpoints(), save: saveLlmEndpointsIndex, dirty: false,
+      onDelete: (r) => { if (r.authTokenId) deleteLlmEndpointToken(r.authTokenId); } },
+    'ssh-key': { list: listSshKeys(), save: saveSshKeysIndex, dirty: false,
+      onDelete: (r) => { try { fs.unlinkSync(path.join(SSH_KEYS_DIR, path.basename(String(r.id)))); } catch { /* best-effort */ } } },
+    'github-token': { list: listGithubTokens(), save: saveGithubTokensIndex, dirty: false,
+      onDelete: (r) => { try { fs.unlinkSync(path.join(GH_TOKENS_DIR, path.basename(String(r.id)))); } catch { /* best-effort */ } } },
+  };
+  const applied = [];
+  const errors = [];
+  for (const d of decisions) {
+    const store = d && stores[d.kind];
+    if (!store) { errors.push({ id: d && d.id, kind: d && d.kind, error: 'unknown kind' }); continue; }
+    const idx = store.list.findIndex(r => r && String(r.id) === String(d.id));
+    if (idx === -1) { errors.push({ id: d.id, kind: d.kind, error: 'record not found' }); continue; }
+    try {
+      const { record, deleted } = resourceMigration.applyMigrationDecision(d.kind, store.list[idx], d);
+      if (deleted) { store.onDelete(store.list[idx]); store.list.splice(idx, 1); }
+      else store.list[idx] = record;
+      store.dirty = true;
+      applied.push({ id: d.id, kind: d.kind, deleted: !!deleted });
+    } catch (err) {
+      errors.push({ id: d.id, kind: d.kind, error: err.message });
+    }
+  }
+  for (const store of Object.values(stores)) if (store.dirty) store.save(store.list);
+  // The mounted `auditMutations` middleware already records this POST under
+  // req.user — no explicit audit call needed.
+  res.json({ applied, errors });
 });
 
 // The bound-agents discovery deps, shared by the two routes below so their view

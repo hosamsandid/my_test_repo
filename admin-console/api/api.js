@@ -70,6 +70,9 @@ const { resolveResourceAccessV2, resourceAccessModeLogLine } = require('./resour
 // One-time migration of legacy records onto the unified model (#2359). Pure
 // classifier; the routes below supply the store reads/writes + the gate.
 const resourceMigration = require('./resource-migration');
+// The masked personal-resource projection for the governance Resources view
+// (#2360). Pure; the route supplies the store reads + the System-Admin gate.
+const { listPersonalResources } = require('./personal-resource-view');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
 const { buildAssistModelOptions } = require('./assist-model-options');
@@ -12500,11 +12503,19 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
   const globalGate = resolveGlobalFlag({ wantGlobal: req.body?.global, currentGlobal: false, scopeAll: scope.all, isOauth, hasSingleUserAck: complianceAck === true });
   if (globalGate.error) return res.status(globalGate.status).json({ error: globalGate.error, code: globalGate.code });
   if (globalGate.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };
-  // NOTE: enforcing "a subscription (oauth) seat must be personal or global, never
-  // team-shared" is deferred to the UI-aligned PR — until the create form offers
-  // personal/global for oauth, refusing team/system oauth here would break the
-  // current subscription-create flow. The `identity` stamp below already records
-  // the human class the migration will re-home.
+  // #2360 (behind AEE_RESOURCE_ACCESS_V2): a subscription (oauth) provider acts
+  // as ONE person, so it must be Personal, or Global via the single-user escape
+  // hatch — NEVER team-shared (concept §5 / E9: lending one seat to a team would
+  // silently share it). This was deferred from PR2 #2353 because refusing
+  // team/system oauth before the form offered personal/global would have broken
+  // the subscription-create flow; PR7 offers those, so the rule is enforced now.
+  // Off the flag, the legacy flow is unchanged.
+  if (RESOURCE_ACCESS_V2 && isOauth && !globalGate.global && ownership.scope !== 'personal') {
+    return res.status(400).json({
+      error: 'A subscription (oauth) provider must be personal or global, never team-shared.',
+      code: 'oauth-not-team',
+    });
+  }
   if (!canCreateCredential(scope, ownership)) {
     return res.status(403).json({ error: 'forbidden: you may not create this provider', code: 'forbidden' });
   }
@@ -12677,6 +12688,15 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   });
   if (globalGate.error) return res.status(globalGate.status).json({ error: globalGate.error, code: globalGate.code });
   if (globalGate.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };
+  // #2360: same oauth rule as the create path — a subscription provider must be
+  // personal or global, never team-shared. Applies to the EFFECTIVE auth type
+  // after this update, so switching an existing team provider to oauth is caught.
+  if (RESOURCE_ACCESS_V2 && isOauth && !globalGate.global && ownership.scope !== 'personal') {
+    return res.status(400).json({
+      error: 'A subscription (oauth) provider must be personal or global, never team-shared.',
+      code: 'oauth-not-team',
+    });
+  }
 
   const next = { ...current };
   // Persist the (possibly unchanged) canonical ownership shape (#800).
@@ -12882,6 +12902,30 @@ app.post('/api/resource-migration/apply', apiLimiter, (req, res) => {
   // The mounted `auditMutations` middleware already records this POST under
   // req.user — no explicit audit call needed.
   res.json({ applied, errors });
+});
+
+// ── Governance: the delete-only personal-resources view (#2360, §6/§12.7) ─────
+//
+// A System Admin has a DELETE-only break-glass over a foreign personal resource
+// (canDeleteCredential, PR3) but never see-secret / use. This lists every
+// personal resource MASKED (name, owner, created, fingerprint/authType — never
+// the secret) so the admin can decide to delete one via the existing per-kind
+// DELETE routes (which already gate on canDeleteCredential). System-Admin-only,
+// behind the flag. Read-only + secret-free — no discovery of a secret, only of
+// its existence, exactly what §6 allows.
+app.get('/api/admin/personal-resources', (req, res) => {
+  if (!RESOURCE_ACCESS_V2) {
+    return res.status(404).json({ error: 'not found', code: 'resource-access-v2-disabled' });
+  }
+  const scope = getScope(req);
+  if (!scope.all) return res.status(403).json({ error: 'forbidden: the governance Resources view is System-Admin-only', code: 'forbidden' });
+  res.json({
+    resources: listPersonalResources({
+      providers: listLlmEndpoints(),
+      sshKeys: listSshKeys(),
+      githubTokens: listGithubTokens(),
+    }),
+  });
 });
 
 // The bound-agents discovery deps, shared by the two routes below so their view

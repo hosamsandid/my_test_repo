@@ -16,6 +16,13 @@ import {
   canAccessCredentialPages,
   isAdminForTeam,
   isGlobalRecord,
+  IDENTITY_HUMAN,
+  IDENTITY_SERVICE,
+  IDENTITY_OPTIONS,
+  allowedScopesForIdentity,
+  isAllowedIdentityScope,
+  defaultIdentity,
+  creatableScopesForIdentity,
 } from './credential-scope-view.js';
 
 const names = { default: 'Default', payments: 'Payments', risk: 'Risk' };
@@ -226,4 +233,55 @@ test('isGlobalRecord: true only with BOTH global:true AND scope:"system" — mir
   assert.equal(isGlobalRecord({ scope: 'system' }), false, 'no global key — an ordinary unassigned shared record');
   assert.equal(isGlobalRecord(null), false);
   assert.equal(isGlobalRecord(undefined), false);
+});
+
+// ── identity vs scope (unified access model §4/§7/§12.10, #2360) ────────────
+
+test('IDENTITY_OPTIONS use the concept UI naming', () => {
+  assert.equal(IDENTITY_OPTIONS.length, 2);
+  assert.equal(IDENTITY_OPTIONS.find(o => o.value === IDENTITY_HUMAN).label, 'Personal identity — acts as you');
+  assert.equal(IDENTITY_OPTIONS.find(o => o.value === IDENTITY_SERVICE).label, 'Service credential — a shared machine / deploy identity');
+});
+
+test('allowedScopesForIdentity: a human secret is Personal-only…', () => {
+  assert.deepEqual(allowedScopesForIdentity(IDENTITY_HUMAN, { kind: 'ssh-key' }), ['personal']);
+  assert.deepEqual(allowedScopesForIdentity(IDENTITY_HUMAN, { kind: 'github-token' }), ['personal']);
+  assert.deepEqual(allowedScopesForIdentity(IDENTITY_HUMAN, { kind: 'provider', isOauth: false }), ['personal']);
+});
+
+test('allowedScopesForIdentity: …except a subscription provider may also be global (the hatch)', () => {
+  assert.deepEqual(allowedScopesForIdentity(IDENTITY_HUMAN, { kind: 'provider', isOauth: true }), ['personal', 'global']);
+});
+
+test('allowedScopesForIdentity: a service secret may sit at any tier', () => {
+  assert.deepEqual(allowedScopesForIdentity(IDENTITY_SERVICE, { kind: 'provider' }), ['personal', 'team', 'global']);
+  assert.deepEqual(allowedScopesForIdentity(IDENTITY_SERVICE, { kind: 'ssh-key' }), ['personal', 'team', 'global']);
+});
+
+test('isAllowedIdentityScope mirrors the server refusals', () => {
+  assert.equal(isAllowedIdentityScope(IDENTITY_HUMAN, 'team', { kind: 'ssh-key' }), false);
+  assert.equal(isAllowedIdentityScope(IDENTITY_HUMAN, 'global', { kind: 'ssh-key' }), false);
+  assert.equal(isAllowedIdentityScope(IDENTITY_HUMAN, 'personal', { kind: 'ssh-key' }), true);
+  assert.equal(isAllowedIdentityScope(IDENTITY_HUMAN, 'global', { kind: 'provider', isOauth: true }), true);
+  assert.equal(isAllowedIdentityScope(IDENTITY_HUMAN, 'team', { kind: 'provider', isOauth: true }), false);
+  assert.equal(isAllowedIdentityScope(IDENTITY_SERVICE, 'team', {}), true);
+});
+
+test('defaultIdentity matches the create-time stamp / migration inference', () => {
+  assert.equal(defaultIdentity('provider', { authType: 'oauth-token' }), IDENTITY_HUMAN);
+  assert.equal(defaultIdentity('provider', { authType: 'api-key' }), IDENTITY_SERVICE);
+  assert.equal(defaultIdentity('ssh-key', { scope: 'personal' }), IDENTITY_HUMAN);
+  assert.equal(defaultIdentity('ssh-key', { scope: 'team' }), IDENTITY_SERVICE);
+  assert.equal(defaultIdentity('github-token', { identity: 'service', scope: 'personal' }), IDENTITY_SERVICE, 'an explicit stamp wins over inference');
+});
+
+test('creatableScopesForIdentity intersects identity legality with caller authority', () => {
+  // A plain user: only personal (no team-admin, not sysadmin).
+  assert.deepEqual(creatableScopesForIdentity(IDENTITY_SERVICE, { kind: 'ssh-key', isSysAdmin: false, adminTeamIds: [] }), ['personal']);
+  // A team admin: personal + team, never global.
+  assert.deepEqual(creatableScopesForIdentity(IDENTITY_SERVICE, { kind: 'ssh-key', isSysAdmin: false, adminTeamIds: ['t'] }), ['personal', 'team']);
+  // A sysadmin: all three.
+  assert.deepEqual(creatableScopesForIdentity(IDENTITY_SERVICE, { kind: 'ssh-key', isSysAdmin: true }), ['personal', 'team', 'global']);
+  // A human secret stays personal-only regardless of authority.
+  assert.deepEqual(creatableScopesForIdentity(IDENTITY_HUMAN, { kind: 'ssh-key', isSysAdmin: true }), ['personal']);
 });

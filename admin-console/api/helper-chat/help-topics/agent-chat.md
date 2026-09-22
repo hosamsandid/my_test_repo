@@ -148,9 +148,14 @@ except a team's own header row, which has no room to open (see below).
 
 **Grouping and order.** Agents that belong to an Agent Team are grouped under
 that team; standalone agents are collected under *Single agents*. When every row
-in a group shares one environment, the environment name is hoisted onto
-the group header and the rows stay single-line; a member that deviates keeps its
-own environment line. The **chevron** on a group header is the only control that
+in a group shares one environment, its member rows stay single-line and drop
+that environment from their own line; a member that deviates keeps its own
+environment line. The team header's second line no longer repeats that shared
+environment (it lives on the team's **Settings** tab) — it now names **who is
+behind the team**: an **Own** badge when the team's only member is you, otherwise
+the team's **Team Admin(s)** by display name, comma-separated (a long list folds
+to a trailing `+N`, with the full list on hover). A team with no visible members
+shows no such line. The **chevron** on a group header is the only control that
 collapses/expands it; clicking anywhere else on that row selects the team and
 opens its **Settings** tab in the right rail instead — a team hosts no chat of
 its own, so the middle pane shows a short explanation rather than an empty room.
@@ -164,7 +169,8 @@ are hidden by default, because most of the time they are noise. Turning it on is
 the only thing that widens what the list asks the server for.
 
 **What a row tells you.** A row shows the agent's name, its environment (unless
-hoisted to the group header), and two live signals: a **busy** indicator while a
+it matches the team's shared environment, which the row then drops), and two live
+signals: a **busy** indicator while a
 run is in progress, and an **unread** marker when messages arrived while you were
 looking elsewhere.
 

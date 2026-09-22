@@ -195,6 +195,38 @@ such an integration (or an MCP facade over the orchestrator) is a supported exte
 a blocker. In short: the components already live comfortably outside the portal; the portal
 is the governed assembly of them.
 
+### Can I use GitHub Copilot (or another non-Claude engine) instead of Claude?
+
+Short answer: **not as a drop-in replacement.** It helps to separate two very different
+things this question can mean, because their feasibility is not the same.
+
+**Swapping the model underneath.** Agent Studio's agents run on the Claude Code CLI, which
+reaches its model through any Anthropic-Messages-API-compatible endpoint. Pointing that at a
+*different model* via a proxy/gateway is feasible in principle. The important nuance: in this
+case the harness is still Claude Code — you've changed the model, not the agent. Claude Code
+is built and tuned for Claude models, so a non-Claude model behind a translation shim is an
+unofficial route rather than a supported one.
+
+**Swapping the agent harness itself.** Here a direct switch to GitHub Copilot is **not**
+possible — Copilot isn't an engine you can plug in underneath Agent Studio. If the goal is
+genuinely a non-Claude harness, the realistic route is to adopt a different CLI-based coding
+agent (e.g. GitHub's Copilot CLI, or OpenAI's Codex CLI) and rebuild the runtime around it.
+That is fundamentally doable, but it is a real build effort with meaningful extra cost — not
+a setting you flip.
+
+**Worth checking before any rebuild:** "we use Copilot" and "we use Claude" are often *not*
+mutually exclusive. GitHub Copilot itself offers Claude models, and Claude is available
+through the usual enterprise channels (AWS Bedrock, Google Vertex). If the underlying
+constraint is really about approved vendors rather than the specific engine, pointing Agent
+Studio at an approved endpoint may satisfy it with no rebuild at all.
+
+**Direction.** Because Agent Studio is an accelerator, not a closed product, a harness swap
+is an open extension rather than a blocker — you have the source code. The central team is
+not planning this work right now, so it would be customer-/community-driven. This question
+does recur, though, which means there are likely several parties interested in the same
+rebuild — a good opportunity to join forces and share the effort rather than each solving it
+alone.
+
 ---
 
 [sdk]: https://claude.com/blog/building-agents-with-the-claude-agent-sdk

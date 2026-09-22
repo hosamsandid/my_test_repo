@@ -34,7 +34,7 @@ import { computeContextNudge, nudgeDismissStorageKey, isNudgeDismissed } from '.
 import SessionInfoPopover from './SessionInfoPopover.jsx';
 import { maintenanceBannerText } from './maintenance-banner';
 import { agentRemovedNoticeText } from './agent-removed-notice.js';
-import { providerWarningText } from '../provider-health-view.js';
+import { providerWarningText, personalProviderNoticeText } from '../provider-health-view.js';
 import { RESUME_MESSAGE } from './resume-session';
 import { hoverBaseCss, hoverDimCss } from './hover-highlight.js';
 import { AUTHOR_FIELD, authorStampFor, buildAuthorDirectory } from './message-author.js';
@@ -1214,6 +1214,10 @@ export default function ChatPanel({
   // currently red. The GET /model-options fetch (fired on agent selection) also
   // triggers a fresh probe server-side when the status is stale.
   const providerWarning = providerWarningText(modelOptions?.endpointHealth, modelOptions?.endpointName);
+  // §14 / E10: a non-blocking advisory when this team runs on a member's personal
+  // provider (a lend). { text, tone } or null; carried on the same model-options
+  // snapshot. Only present behind AEE_RESOURCE_ACCESS_V2 for a multi-human squad.
+  const personalNotice = personalProviderNoticeText(modelOptions?.personalProviderNotice);
 
   // #2382: the actionable context-fill nudge, derived from the SAME unified fill
   // `level` (50% / 75%) that colours the header indicator — no second threshold
@@ -1488,6 +1492,19 @@ export default function ChatPanel({
           flexShrink: 0,
         }}>
           {providerWarning}
+        </div>
+      )}
+
+      {personalNotice && (
+        <div role="status" style={{
+          padding: 'var(--eb-space-3) var(--eb-space-4)',
+          background: personalNotice.tone === 'error' ? 'var(--eb-status-error-bg)' : 'var(--eb-status-warning-bg)',
+          borderBottom: `1px solid ${personalNotice.tone === 'error' ? 'var(--eb-status-error)' : 'var(--eb-status-warning)'}`,
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-primary)',
+          flexShrink: 0,
+        }}>
+          {personalNotice.text}
         </div>
       )}
 

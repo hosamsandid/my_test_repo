@@ -100,6 +100,9 @@ const credentialResolution = require("./credential-resolution");
 // See resource-access-mode.js (byte-mirrored in admin-console/api).
 const { resolveResourceAccessV2, resourceAccessModeLogLine } = require("./resource-access-mode");
 const RESOURCE_ACCESS_V2 = resolveResourceAccessV2(process.env);
+// §14 / E10 (#2360): pure policy for a personal provider used as a team default
+// across the team-of-one → multi-user transition. Byte-mirrored in admin-console.
+const { personalDefaultTransitionRisk } = require("./provider-lend-policy");
 const { resolveAgentTeam } = require("./agent-team");
 // Pure planner for the identity-LEND binding sweep on membership removal
 // (#2358 E1); the applier `sweepMembershipBindings` below supplies the live IO.
@@ -426,6 +429,55 @@ function resolveLlmBindingForAgent(cfg, env) {
     ? `agent=${cfg.id} override`
     : `env=${env?.id}`;
   return resolveLlmBinding(endpointId, env?.defaultModelId, { context: ctx });
+}
+
+// The RAW endpoint record (scope/authType/userId top-level), for policy checks
+// that resolveLlmBinding's normalized projection drops. Best-effort — an
+// unreadable/absent index yields null.
+function readLlmEndpointRecord(id) {
+  if (!id) return null;
+  try {
+    const list = JSON.parse(fs.readFileSync(LLM_ENDPOINTS_INDEX, "utf8"));
+    return Array.isArray(list) ? (list.find(e => e && e.id === id) || null) : null;
+  } catch {
+    return null;
+  }
+}
+
+// §14 / E10 (behind AEE_RESOURCE_ACCESS_V2): adding a SECOND human to a squad
+// whose shared model-provider default is a personal SUBSCRIPTION (oauth) seat
+// would silently share a single-user seat (E9, Anthropic Consumer Terms) — a
+// HARD refusal at the membership boundary. A personal API-KEY default is only
+// fragile (a soft notice, surfaced in model-options), never blocked here.
+// Returns { message } to refuse, or null to proceed. Fail-open: any read error
+// (or a non-squad human team) skips the guard — it must never break a legit add.
+function personalOauthLendBlockOnMembershipAdd(teamId, newUserId) {
+  if (!RESOURCE_ACCESS_V2 || !teamId || !newUserId) return null;
+  try {
+    const current = teamsStore.listMemberships({ teamId });
+    const already = current.some(m => m && m.userId === newUserId);
+    const after = already ? current.length : current.length + 1;
+    if (after < 2) return null; // still a team-of-one after the add — lend is fine
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg || teamCfg.role !== "team" || !teamCfg.environmentId) return null;
+    const env = loadEnvironment(teamCfg.environmentId);
+    const endpointId = env && env.llmEndpointId;
+    if (!endpointId) return null;
+    const ep = readLlmEndpointRecord(endpointId);
+    const risk = personalDefaultTransitionRisk({ provider: ep, humanMemberCount: after });
+    if (!risk || risk.level !== "block") return null;
+    const label = (ep && ep.name) ? ep.name : endpointId;
+    return {
+      message:
+        `This team runs on a personal subscription seat (${label}). ` +
+        `A single-user subscription can't be shared with a second member. ` +
+        `Set a Team or Global provider as the team default first (or the owner can ` +
+        `publish it globally as single-user), then add the member — the new member ` +
+        `can also bring their own provider via a per-agent override.`,
+    };
+  } catch {
+    return null;
+  }
 }
 
 // #1213: resolve the assist-synthesis binding for a team's autonomous synthesis
@@ -14055,6 +14107,16 @@ async function handleTeamsAdminApi(req, res) {
       }
       if (req.method === 'POST') {
         const body = await readBody(req);
+        // §14 / E10: refuse growing a squad to ≥2 humans on a personal
+        // subscription (oauth) default (E9). Tagged so the HTTP layer maps it to
+        // 409 with the message forwarded verbatim (see the internalApi catch).
+        const blocked = personalOauthLendBlockOnMembershipAdd(body && body.teamId, body && body.userId);
+        if (blocked) {
+          const e = new Error(blocked.message);
+          e.statusHint = 409;
+          e.code = 'oauth_personal_lend_blocked';
+          throw e;
+        }
         return sendJson(res, 200, teamsStore.setMembership(body)), true;
       }
       if (req.method === 'DELETE') {

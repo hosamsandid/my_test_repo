@@ -14,6 +14,8 @@ import { mcpRowHint, mcpChangeNotice, mcpServerLabel } from '../working-env-mcp-
 import { classifyRepositoryChanges, hasRepositoryChanges } from '../working-env-repo-diff.js';
 import { describeWorkingEnvSubmitState } from '../working-env-submit-state.js';
 import { providerOptionLabel } from '../provider-option-view.js';
+import { personalProviderNoticeText } from '../provider-health-view.js';
+import { useResourceAccessV2 } from '../../context/ResourceAccessContext';
 import { initialTeamEnvForm, teamEnvSubmitBody } from './team-environment-view.js';
 import { describeCredentialRef } from '../credential-ref-legibility.js';
 
@@ -199,6 +201,22 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
   const mcpServers = mcpServerData || [];
   const mcpCredentials = mcpCredentialData || [];
 
+  // Dropdown-consistency fix (#2360, §7): under AEE_RESOURCE_ACCESS_V2 the team
+  // default-provider list is the TEAM-USABLE set (global ∪ own-personal ∪
+  // team-service ∪ live member lends), sourced from the team agent's
+  // model-options — the SAME endpoint the chat picker uses — so the two compute
+  // an identical set by construction. Off the flag it stays /api/llm-endpoints
+  // (today's caller-visibility list), unchanged. A currently-bound provider that
+  // is not in the selectable set is shown read-only ("set — not selectable")
+  // rather than blind-cleared (the credential-ref-legibility pattern).
+  const v2 = useResourceAccessV2();
+  const { data: modelOptionsData } = useApi(v2 && agent?.id ? `/api/agents/${agent.id}/model-options` : null);
+  const providerList = (v2 && Array.isArray(modelOptionsData?.endpoints)) ? modelOptionsData.endpoints : llmEndpoints;
+  const boundProviderMissing = !!form.llmEndpointId && !providerList.some(e => e.id === form.llmEndpointId);
+  // §14 / E10: a non-blocking advisory when the team default is a member's personal
+  // provider (a lend). { text, tone } or null; only present (v2, multi-human squad).
+  const personalNotice = personalProviderNoticeText(modelOptionsData?.personalProviderNotice);
+
   const toolchainRows = toolchainOptions(toolchainData?.toolchains, toolchainData?.runtime);
   const toolchainNotice = toolchainEmptyState(toolchainData?.toolchains, {
     canManage: !!toolchainData?.canManage,
@@ -210,7 +228,7 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
     toolchainId: form.toolchainId || null,
     agentCount: baseline?.agentCount || 0,
   });
-  const selectedEndpoint = llmEndpoints.find(e => e.id === form.llmEndpointId) || null;
+  const selectedEndpoint = providerList.find(e => e.id === form.llmEndpointId) || null;
   const endpointModels = selectedEndpoint?.models || [];
 
   const mcpNotice = mcpChangeNotice({
@@ -444,10 +462,31 @@ function TeamEnvironmentFields({ env, onSaved, tab }) {
             <div style={labelStyle}>Provider</div>
             <select value={form.llmEndpointId} onChange={e => updateEndpoint(e.target.value)} style={inputStyle}>
               <option value="">— inherit from .env —</option>
-              {llmEndpoints.map(ep => (
+              {/* Keep a currently-bound provider that isn't in the selectable set
+                  visible + selected (a teammate's lent personal provider, say)
+                  rather than silently clearing it — replace-only (#2360). */}
+              {boundProviderMissing && (
+                <option value={form.llmEndpointId}>{form.llmEndpointId} (set — not selectable by you)</option>
+              )}
+              {providerList.map(ep => (
                 <option key={ep.id} value={ep.id}>{providerOptionLabel(ep)}</option>
               ))}
             </select>
+            {personalNotice && (
+              <div style={{
+                marginTop: 'var(--eb-space-2)',
+                padding: 'var(--eb-space-2) var(--eb-space-3)',
+                borderRadius: 'var(--eb-radius-md)',
+                background: personalNotice.tone === 'error' ? 'var(--eb-status-error-bg)' : 'var(--eb-status-warning-bg)',
+                border: `1px solid ${personalNotice.tone === 'error' ? 'var(--eb-status-error)' : 'var(--eb-status-warning)'}`,
+                fontSize: 'var(--eb-text-xs)',
+                color: 'var(--eb-text-primary)',
+                display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+              }}>
+                <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                <span>{personalNotice.text}</span>
+              </div>
+            )}
           </div>
           <div>
             <div style={labelStyle}>Default model</div>

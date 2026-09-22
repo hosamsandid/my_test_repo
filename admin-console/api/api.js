@@ -50,6 +50,9 @@ const { tierOwnershipFields, isRetier } = require('./resource-tier');
 // `providerVisible` / `providerUsableByTeam` below), never inside scope.js —
 // those predicates also gate SSH keys and GitHub tokens (finding 2).
 const { resolveGlobalFlag, isGlobalProvider } = require('./llm-endpoint-global');
+// §14 / E10 (#2360): pure policy for a personal provider used as a team default
+// across the team-of-one → multi-user transition. Byte-mirrored in orchestrator.
+const { personalDefaultTransitionRisk } = require('./provider-lend-policy');
 // Global working environments + MCP servers (#2158): the same System-Admin-only
 // publish gate shape, applied to a second resource family. `isGlobalEnvironment`
 // is composed with `visibleEnvironment` ONLY at the environment/MCP-server call
@@ -73,6 +76,9 @@ const resourceMigration = require('./resource-migration');
 // The masked personal-resource projection for the governance Resources view
 // (#2360). Pure; the route supplies the store reads + the System-Admin gate.
 const { listPersonalResources } = require('./personal-resource-view');
+// Resolve the immutable identity stamp for an SSH key / GitHub token, honouring a
+// client override behind the flag ("mark a personal credential as service", #2360).
+const { resolveStampedIdentity } = require('./credential-identity');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
 const { buildAssistModelOptions } = require('./assist-model-options');
@@ -1132,6 +1138,16 @@ function isMemberOfTeam(userId, teamId) {
   if (!userId || !teamId) return false;
   const memberships = readJsonFile(MEMBERSHIPS_INDEX, []);
   return memberships.some(m => m && m.userId === userId && m.teamId === teamId);
+}
+
+// The number of DISTINCT human members of a squad (§14 / E10). Memberships are
+// keyed by the AGENT TEAM (squad) id and are unique per (userId, teamId), so a
+// row count is a member count. Read fresh like `isMemberOfTeam` (cheap JSON, no
+// cache) so the transition policy is always live. 0 for a non-squad / empty id.
+function teamHumanMemberCount(teamId) {
+  if (!teamId) return 0;
+  const memberships = readJsonFile(MEMBERSHIPS_INDEX, []);
+  return memberships.filter(m => m && m.teamId === teamId).length;
 }
 
 // The author stamp for a chat message posted by this request (#2065). Both
@@ -5299,13 +5315,106 @@ function providerUsableByTeam(ep, teamId, agentTeamId) {
   // index is keyed by the squad (the same space `resolveScopeOwner` /
   // credential-resolution's baseline owner use), so checking membership in the
   // tenant space would silently never match. `credentialVisibleToTeam` above
-  // keeps using `teamId` — that is how team-scoped providers are stamped today,
+  // keeps using `teamId` — that is how legacy team-scoped providers are stamped,
   // unchanged.
-  return RESOURCE_ACCESS_V2 && !!agentTeamId && personalLendToTeam(ep, agentTeamId, isMemberOfTeam);
+  if (!RESOURCE_ACCESS_V2 || !agentTeamId) return false;
+  // #2360 re-key + multi-team: a TEAM-scoped provider belongs to a SET of AGENT
+  // teams (`teamIds`, falling back to the legacy single `teamId`) and is usable
+  // by any agent in any of them — this is what makes "Team = the Agent Team(s)"
+  // real, and what lets a CLONED team keep the provider (the clone is appended to
+  // the set server-side, no duplication). `credentialVisibleToTeam` above still
+  // matches a legacy provider stamped with the vestigial tenant ('default'), so
+  // old bindings keep working with no data migration.
+  if (ep && ep.scope === 'team') {
+    const set = Array.isArray(ep.teamIds) && ep.teamIds.length ? ep.teamIds : (ep.teamId ? [ep.teamId] : []);
+    if (set.map(String).includes(String(agentTeamId))) return true;
+  }
+  if (!personalLendToTeam(ep, agentTeamId, isMemberOfTeam)) return false;
+  // §14 / E10: a personal SUBSCRIPTION (oauth) seat is single-user — it cannot be
+  // the shared default of a multi-human squad (E9). Once the squad has ≥2 humans
+  // the oauth lend is VOID, so the provider drops out of the selectable/usable set
+  // (the team-settings dropdown) and PR7 backend enforcement refuses binding it.
+  // A personal API-KEY lend survives — it is only fragile (soft notice in
+  // model-options), never withdrawn here. The hard block at membership-add
+  // (orchestrator) is the sibling guard for the growth direction.
+  const risk = personalDefaultTransitionRisk({ provider: ep, humanMemberCount: teamHumanMemberCount(agentTeamId) });
+  if (risk && risk.level === 'block') return false;
+  return true;
 }
 
 function usableEndpointsForTeam(teamId, agentTeamId) {
   return listLlmEndpoints().filter(ep => providerUsableByTeam(ep, teamId, agentTeamId));
+}
+
+// The agent-team SET a team-scoped provider serves (#2360), falling back to the
+// legacy single `teamId`. Non-team providers → [].
+function providerTeamSet(ep) {
+  if (!ep || ep.scope !== 'team') return [];
+  return Array.isArray(ep.teamIds) && ep.teamIds.length
+    ? ep.teamIds.map(String)
+    : (ep.teamId ? [String(ep.teamId)] : []);
+}
+
+// Co-owned management (#2360, decision A): a team provider is manageable by the
+// admin of ANY team in its set (or a System Admin) — so a cloned team's admin can
+// manage a provider shared with them too. Non-team providers defer to
+// canManageCredential. Gated by the flag; off it, legacy (primary-only) behaviour.
+function canManageProvider(scope, ep) {
+  if (scope && scope.all) return true;
+  if (RESOURCE_ACCESS_V2 && ep && ep.scope === 'team') {
+    return providerTeamSet(ep).some(t => canManageTeam(scope, t));
+  }
+  return canManageCredential(scope, ep);
+}
+
+// #2360 clone/reuse auto-append: when a team is materialised onto an environment
+// whose default provider is TEAM-scoped, add that team to the provider's set so
+// the team can actually use it — the whole point of "a clone keeps a working
+// provider without duplicating it". Best-effort + idempotent + dangling-safe: a
+// stale team id (team creation later fails) simply never matches at consumption,
+// so it is harmless; a failure here never blocks team creation. Gated by the
+// flag; global/personal providers are left untouched (global already serves all).
+function ensureTeamOnEnvProvider(env, teamAgentId) {
+  if (!RESOURCE_ACCESS_V2 || !env || !env.llmEndpointId || !teamAgentId) return;
+  try {
+    const list = listLlmEndpoints();
+    const ep = list.find(e => e.id === env.llmEndpointId);
+    if (!ep || ep.scope !== 'team') return;
+    const set = providerTeamSet(ep);
+    if (set.includes(String(teamAgentId))) return;
+    ep.teamIds = [...set, String(teamAgentId)];
+    if (!ep.teamId) ep.teamId = set[0] || String(teamAgentId);
+    saveLlmEndpointsIndex(list);
+  } catch (err) {
+    console.warn(`[api] could not add team '${teamAgentId}' to env provider: ${err.message}`);
+  }
+}
+
+// Sanitize + authorize a team SET from a write body: dedup, require ≥1 team, and
+// (unless System Admin) require the caller to administer EVERY team in it — you
+// may only share a provider with teams you control. The clone-append is a
+// separate server action, not gated here. Returns { teamIds } or { error,... }.
+function resolveProviderTeamSet(scope, body, primaryTeamId) {
+  const raw = Array.isArray(body && body.teamIds) ? body.teamIds : (primaryTeamId ? [primaryTeamId] : []);
+  const teamIds = [...new Set(raw.map(String).filter(Boolean))];
+  if (!teamIds.length) return { error: 'A team provider needs at least one team', status: 400 };
+  // Validate against AGENT teams (role:'team' agents), not the human-team
+  // collection — this is the whole point of the re-key (#2360).
+  for (const t of teamIds) {
+    if (!agentTeamExists(t)) return { error: `Agent team '${t}' not found`, status: 400 };
+  }
+  if (!scope.all && !teamIds.every(t => canManageTeam(scope, t))) {
+    return { error: 'You can only assign a provider to teams you administer', status: 403, code: 'forbidden' };
+  }
+  return { teamIds };
+}
+
+// Does `id` name an existing AGENT team (a `role: 'team'` agent config)? The
+// agent-team analog of the human-team existence check resolveOwnerTeamId does.
+function agentTeamExists(id) {
+  if (!id || !AGENT_ID_RE.test(id)) return false;
+  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  return !!(cfg && cfg.role === 'team');
 }
 
 // The non-secret projection of an endpoint sent to the chat UI (never a token).
@@ -5364,9 +5473,22 @@ app.get('/api/agents/:id/model-options', (req, res) => {
   // the warning isn't shown off an old reading (non-blocking; the reading here
   // stays honest and a subsequent open reflects the refresh).
   if (endpoint) refreshHealthIfStale(endpoint);
+  // §14 / E10: a soft, advisory notice when this squad's shared default is a
+  // member's PERSONAL provider and the squad is multi-human. 'warn' = a fragile
+  // api-key lend (resets to inherit if the owner leaves, via the E1 sweep);
+  // 'block' = a subscription seat that shouldn't back a multi-user team (a legacy
+  // state — new ones are refused at membership-add). null otherwise. UX only —
+  // never gates the run. `resolveAgentTeam(cfg)` is the squad id the lend is keyed on.
+  const providerRisk = (RESOURCE_ACCESS_V2 && endpoint)
+    ? personalDefaultTransitionRisk({ provider: endpoint, humanMemberCount: teamHumanMemberCount(resolveAgentTeam(cfg)) })
+    : null;
   res.json({
     endpointId:     endpoint?.id || null,
     endpointName:   endpoint?.name || null,
+    // §14 / E10 advisory notice (see above); null in the common case.
+    personalProviderNotice: providerRisk
+      ? { level: providerRisk.level, identity: providerRisk.identity, providerName: endpoint.name || endpoint.id, ownerId: endpoint.userId || null }
+      : null,
     authType:       endpoint ? (endpoint.authType === 'oauth-token' ? 'oauth-token' : 'api-key') : null,
     baseUrl:        endpoint?.baseUrl || null,
     // Persisted health of the effective bound endpoint (#1843); 'unknown' when
@@ -12493,8 +12615,21 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
   // only team-scoped providers for a team they administer.
   const scope = getScope(req);
   let ownership;
-  try { ownership = resolveCredentialOwnership(req.body, scope.userId); }
-  catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  // #2360: a team provider is owned by a SET of AGENT teams, validated against
+  // agent teams (not the human-team collection resolveCredentialOwnership checks).
+  // Global/personal still use the shared resolver. `providerTeamIds` is persisted
+  // onto the entry for team scope.
+  let providerTeamIds = null;
+  const wantGlobalBody = req.body?.global === true;
+  if (RESOURCE_ACCESS_V2 && !wantGlobalBody && req.body?.scope === 'team') {
+    const setRes = resolveProviderTeamSet(scope, req.body, req.body.teamId);
+    if (setRes.error) return res.status(setRes.status || 400).json({ error: setRes.error, ...(setRes.code ? { code: setRes.code } : {}) });
+    ownership = { scope: 'team', teamId: setRes.teamIds[0], assignedTeamIds: [] };
+    providerTeamIds = setRes.teamIds;
+  } else {
+    try { ownership = resolveCredentialOwnership(req.body, scope.userId); }
+    catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+  }
   // Global provider (#2136): a System-Admin-only publish flag. A global provider
   // carries no team assignment at all, so it is always system-scoped-with-no-
   // teams — override the resolved ownership before the create gate so the two
@@ -12502,7 +12637,7 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
   // single-user ack (400); a confirmed single-user subscription MAY go global.
   const globalGate = resolveGlobalFlag({ wantGlobal: req.body?.global, currentGlobal: false, scopeAll: scope.all, isOauth, hasSingleUserAck: complianceAck === true });
   if (globalGate.error) return res.status(globalGate.status).json({ error: globalGate.error, code: globalGate.code });
-  if (globalGate.global) ownership = { scope: 'system', teamId: null, assignedTeamIds: [] };
+  if (globalGate.global) { ownership = { scope: 'system', teamId: null, assignedTeamIds: [] }; providerTeamIds = null; }
   // #2360 (behind AEE_RESOURCE_ACCESS_V2): a subscription (oauth) provider acts
   // as ONE person, so it must be Personal, or Global via the single-user escape
   // hatch — NEVER team-shared (concept §5 / E9: lending one seat to a team would
@@ -12570,6 +12705,9 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
     scope: ownership.scope,
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
+    // #2360 multi-team: the full agent-team set a team provider serves (the clone
+    // gets appended here). Only for team scope; other tiers omit it.
+    ...(providerTeamIds ? { teamIds: providerTeamIds } : {}),
     // Persist the personal owner (#2358). Without this a `scope: 'personal'`
     // provider carried no `userId`, so `ownsPersonalCredential` (which reads
     // `c.userId`) matched nobody — the owner could neither see nor manage their
@@ -12606,42 +12744,62 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   const { name, baseUrl, authToken, models, defaultModelId,
           authType: rawAuthType, complianceAck, oauthFlowId } = req.body || {};
 
-  // Team-scope enforcement (#800): the caller must be able to manage this
-  // provider at all (System Admin, or the Team Admin of a team-scoped
-  // provider's owning team — never a system-scoped provider for a Team Admin).
+  // Manage gate. #2360 co-owned (decision A): a team provider may be managed by
+  // the admin of ANY of its agent teams (canManageProvider), so a cloned team's
+  // admin can edit a shared provider too. Off the flag: legacy (owning-team-only).
   const scope = getScope(req);
-  if (!canManageCredential(scope, current)) {
+  if (!canManageProvider(scope, current)) {
     return res.status(403).json({ error: 'forbidden: you may not manage this provider', code: 'forbidden' });
   }
-  // Optional scope / team-assignment change. Only a System Admin may reassign
-  // (AC8), and a move must not orphan an environment that still references the
-  // provider (AC edge case). The resolved ownership is stamped onto `next` below.
   const cur = normalizeCredential(current);
   const b = req.body || {};
-  const reassigning = ('scope' in b) || ('teamId' in b) || ('assignedTeamIds' in b);
   let ownership = { scope: cur.scope, teamId: cur.teamId, assignedTeamIds: cur.assignedTeamIds };
-  if (reassigning) {
-    if (!canReassignCredential(scope)) {
-      return res.status(403).json({ error: 'forbidden: only a System Admin may reassign a provider', code: 'forbidden' });
+  let nextTeamIds = Array.isArray(current.teamIds) ? current.teamIds.map(String) : undefined;
+
+  if (RESOURCE_ACCESS_V2) {
+    // New model: the desired TIER (personal / team / global) from the ownership
+    // payload. Changing the tier stays System-Admin-only (canReassignCredential);
+    // but editing a team provider's SET while STAYING team-scoped is co-owned
+    // self-service (the manage gate above already authorised the caller).
+    const currentTier = current.global === true ? 'global' : (cur.scope === 'personal' ? 'personal' : 'team');
+    const desiredTier = (b.global === true) ? 'global'
+      : (b.scope === 'personal') ? 'personal'
+      : ('scope' in b ? 'team' : currentTier);
+    if (desiredTier !== currentTier && !canReassignCredential(scope)) {
+      return res.status(403).json({ error: "forbidden: only a System Admin may change a provider's ownership tier", code: 'forbidden' });
     }
-    try {
-      ownership = resolveCredentialOwnership({
-        scope: 'scope' in b ? b.scope : cur.scope,
-        teamId: b.teamId,
-        assignedTeamIds: b.assignedTeamIds,
-      });
-    } catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
-    const inUse = llmEndpointInUse(current.id);
-    if (inUse) {
-      const env = loadEnvironment(inUse);
-      const envTeam = (env && env.teamId) || 'default';
-      const candidate = { ...current, scope: ownership.scope, teamId: ownership.teamId, assignedTeamIds: ownership.assignedTeamIds };
-      // Provider path (#2136): a global provider is usable by every team, so it is
-      // never orphaned — use the provider-specific predicate, not the generic one.
-      if (!providerUsableByTeam(candidate, envTeam)) {
-        return res.status(409).json({
-          error: `Provider is used by environment '${inUse}' (team '${envTeam}'); reassignment would orphan it. Detach it first.`,
+    if (desiredTier === 'personal') { ownership = { scope: 'personal', teamId: null, assignedTeamIds: [] }; nextTeamIds = undefined; }
+    else if (desiredTier === 'global') { ownership = { scope: 'system', teamId: null, assignedTeamIds: [] }; nextTeamIds = undefined; }
+    else {
+      const setRes = resolveProviderTeamSet(scope, b, b.teamId || cur.teamId);
+      if (setRes.error) return res.status(setRes.status || 400).json({ error: setRes.error, ...(setRes.code ? { code: setRes.code } : {}) });
+      ownership = { scope: 'team', teamId: setRes.teamIds[0], assignedTeamIds: [] };
+      nextTeamIds = setRes.teamIds;
+    }
+  } else {
+    // Legacy (flag off): any ownership field is an admin-only reassign, unchanged.
+    const reassigning = ('scope' in b) || ('teamId' in b) || ('assignedTeamIds' in b);
+    if (reassigning) {
+      if (!canReassignCredential(scope)) {
+        return res.status(403).json({ error: 'forbidden: only a System Admin may reassign a provider', code: 'forbidden' });
+      }
+      try {
+        ownership = resolveCredentialOwnership({
+          scope: 'scope' in b ? b.scope : cur.scope,
+          teamId: b.teamId,
+          assignedTeamIds: b.assignedTeamIds,
         });
+      } catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+      const inUse = llmEndpointInUse(current.id);
+      if (inUse) {
+        const env = loadEnvironment(inUse);
+        const envTeam = (env && env.teamId) || 'default';
+        const candidate = { ...current, scope: ownership.scope, teamId: ownership.teamId, assignedTeamIds: ownership.assignedTeamIds };
+        if (!providerUsableByTeam(candidate, envTeam)) {
+          return res.status(409).json({
+            error: `Provider is used by environment '${inUse}' (team '${envTeam}'); reassignment would orphan it. Detach it first.`,
+          });
+        }
       }
     }
   }
@@ -12703,6 +12861,10 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   next.scope = ownership.scope;
   next.teamId = ownership.teamId;
   next.assignedTeamIds = ownership.assignedTeamIds;
+  // #2360 multi-team: the agent-team SET for a team provider; cleared on any
+  // non-team tier so a re-tiered record carries no stale set.
+  if (ownership.scope === 'team' && nextTeamIds && nextTeamIds.length) next.teamIds = nextTeamIds;
+  else delete next.teamIds;
   // Keep the personal owner in step with the tier (#2358): a personal provider
   // retains its owner (from the reassign result, else the existing record); any
   // non-personal tier clears a stale `userId` so a re-tiered record cannot carry
@@ -12822,10 +12984,12 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
   const list = listLlmEndpoints();
   const ep = list.find(e => e.id === req.params.id);
   if (!ep) return res.status(404).json({ error: 'LLM endpoint not found' });
-  // Manage gate (#800): a Team Admin may delete only team-scoped providers of a
-  // team they administer, never a system-scoped one.
+  // Manage gate: a Team Admin may delete a team provider of a team they
+  // administer. #2360 co-owned (decision A): the admin of ANY team in a
+  // multi-team provider's set may delete it (canManageProvider), plus the
+  // personal-tier break-glass (canDeleteCredential). Off the flag: legacy.
   const scope = getScope(req);
-  if (!canDeleteCredential(scope, ep)) {
+  if (!canDeleteCredential(scope, ep) && !canManageProvider(scope, ep)) {
     return res.status(403).json({ error: 'forbidden: you may not delete this provider', code: 'forbidden' });
   }
   const usedBy = llmEndpointInUse(ep.id);
@@ -15229,7 +15393,7 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
   while (loadEnvironment(envId)) {
     envId = `${baseEnvId}-${envSuffix++}`;
   }
-  const llmBinding = pickDefaultLlmBinding();
+  const llmBinding = pickDefaultLlmBinding({ creatorUserId: getScope(req).userId, teamId: null });
   // Stamp the creator as owner so a teamless user can see AND manage their own
   // environment: it has no team to be scoped to, and since #2078 an untiered
   // environment is invisible to a non-admin. `ownsEnvironment` (scope.js) is the
@@ -15688,6 +15852,25 @@ const DISPATCH_LABEL_RE = READY_LABEL_RE;
 const MAX_PARALLEL_MIN = 1;
 const MAX_PARALLEL_MAX = 50;
 
+// Is `ep` a provider the creator can bind as a new team/agent's env default at
+// CREATION time (§14 / E10 follow-up, #2360)? Three cases: a Global (service)
+// provider (everyone, durable), the creator's OWN personal provider (a
+// team-of-one lend to themselves — even a subscription is fine here; the E10
+// guard catches it only when a SECOND human joins), or a team provider whose set
+// already includes the new squad (the clone/reuse case). Checked by OWNERSHIP,
+// not the runtime lend — the creator's Team-Admin membership is written a phase
+// AFTER this, so `providerUsableByTeam`'s lend would not see them as a member yet.
+function providerUsableAtCreation(ep, { creatorUserId, teamId } = {}) {
+  if (!ep) return false;
+  if (isGlobalProvider(ep)) return true;
+  if (ep.scope === 'personal') return !!creatorUserId && String(ep.userId) === String(creatorUserId);
+  if (ep.scope === 'team') {
+    const set = Array.isArray(ep.teamIds) && ep.teamIds.length ? ep.teamIds : (ep.teamId ? [ep.teamId] : []);
+    return !!teamId && set.map(String).includes(String(teamId));
+  }
+  return false;
+}
+
 // The wizard doesn't surface an LLM endpoint chooser yet. Without binding
 // one on the env, the in-chat model picker shows "(no endpoint)" disabled
 // for every team-member — which is how teams looked broken compared to
@@ -15695,10 +15878,25 @@ const MAX_PARALLEL_MAX = 50;
 // Pick the first registered endpoint as a silent default; its operator-set
 // default model (or, as a backstop, the first entry in its catalogue) becomes
 // the env-level default. The user can change either later.
-function pickDefaultLlmBinding() {
+//
+// §14 / E10 follow-up (behind AEE_RESOURCE_ACCESS_V2): a blind `endpoints[0]`
+// could bind a provider the creator/team cannot actually use — a FOREIGN personal
+// provider (whose token the team would then silently run on: the orchestrator has
+// no runtime lend-gate), or a stranger's subscription. When a preference context
+// is supplied, prefer — in registry order, so an operator's intended ordering
+// still wins among usable ones — the first endpoint USABLE by the creator at
+// creation (`providerUsableAtCreation`), and only fall back to `endpoints[0]` when
+// none is usable (never make creation worse than today). Flag OFF, or no context,
+// is byte-identical to the legacy blind pick.
+function pickDefaultLlmBinding(pref) {
   const endpoints = listLlmEndpoints();
   if (endpoints.length === 0) return { llmEndpointId: null, defaultModelId: null };
-  const ep = endpoints[0];
+  let ep = endpoints[0];
+  if (RESOURCE_ACCESS_V2 && pref && pref.creatorUserId) {
+    const usable = endpoints.find(e => providerUsableAtCreation(e, pref));
+    if (usable) ep = usable;
+    else console.warn(`[api] no model provider is usable by the creator of '${pref.teamId || 'agent'}' — falling back to the first registered endpoint`);
+  }
   return {
     llmEndpointId: ep.id,
     defaultModelId: pickEndpointDefaultModel(ep),
@@ -15915,6 +16113,10 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         code: 'template-not-bindable',
       });
     }
+    // #2360: a team materialised onto this env (incl. a clone reusing the cloned
+    // env) is added to a TEAM-scoped default provider's set, so it inherits a
+    // working provider without duplication. Best-effort + dangling-safe.
+    ensureTeamOnEnvProvider(reusedEnv, teamId);
     const primary = reposFromEnv(reusedEnv)[0];
     if (primary?.url) {
       repository = { url: primary.url, branch: primary.branch || 'main', sshKeyId: primary.sshKeyId || null };
@@ -16321,7 +16523,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         repositories: parsed ? [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }] : [],
         githubTokenId,
         mcpServers: normalizedMcpServers,
-        ...defaultLlmEndpointForTeam(),
+        ...defaultLlmEndpointForTeam({ creatorUserId: getScope(req).userId, teamId: teamAgentId }),
         additionalContext: '',
         // Owned by the team it was auto-created for (#2081). Without this the
         // record carries no tier at all, which since #2078 dropped the
@@ -17062,7 +17264,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         repositories: parsed ? [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }] : [],
         githubTokenId,
         mcpServers: normalizedMcpServers,
-        ...defaultLlmEndpointForTeam(),
+        ...defaultLlmEndpointForTeam({ creatorUserId: getScope(req).userId, teamId: teamAgentId }),
         additionalContext: '',
         // Owned by the team it was auto-created for (#2081). Without this the
         // record carries no tier at all, which since #2078 dropped the
@@ -17464,9 +17666,10 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     assignedTeamIds: ownership.assignedTeamIds,
     ...(ownership.userId ? { userId: ownership.userId } : {}),
     // Identity class (unified access model §2): a personal key is one person's
-    // identity (human); a team/system key is a shared service credential. The UI
-    // may later let a personal key be marked service (a private bot key).
-    identity: ownership.scope === 'personal' ? 'human' : 'service',
+    // identity (human); a team/system key is a shared service credential. Behind
+    // AEE_RESOURCE_ACCESS_V2 the client may mark a personal key `service` (a
+    // private bot key) — resolveStampedIdentity enforces the legal combos (#2360).
+    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity, v2: RESOURCE_ACCESS_V2 }),
     fingerprint: sshKeyFingerprint(trimmed),
     createdAt: new Date().toISOString(),
   };
@@ -17522,8 +17725,9 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
     ...(ownership.userId ? { userId: ownership.userId } : {}),
-    // Identity class (unified access model §2): personal → human, else service.
-    identity: ownership.scope === 'personal' ? 'human' : 'service',
+    // Identity class (unified access model §2): personal → human, else service;
+    // behind AEE_RESOURCE_ACCESS_V2 a personal key may be marked service (#2360).
+    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity, v2: RESOURCE_ACCESS_V2 }),
     fingerprint: sshFingerprintFromPubBlob(pubBlob),
     createdAt: new Date().toISOString(),
   };
@@ -17690,8 +17894,9 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
     ...(ownership.userId ? { userId: ownership.userId } : {}),
     // Identity class (unified access model §2): a personal token is one person's
     // identity (human); a team/system token is a shared service credential (e.g. a
-    // machine-user PAT). The UI may later let a personal token be marked service.
-    identity: ownership.scope === 'personal' ? 'human' : 'service',
+    // machine-user PAT). Behind AEE_RESOURCE_ACCESS_V2 the client may mark a
+    // personal token `service` (a private bot PAT) — legal combos enforced (#2360).
+    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity, v2: RESOURCE_ACCESS_V2 }),
     preview: githubTokenPreview(trimmed),
     fingerprint: githubTokenFingerprint(trimmed),
     createdAt: new Date().toISOString(),

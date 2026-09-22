@@ -13,6 +13,7 @@ import PageHelpButton from '../components/PageHelpButton';
 import ModeToggle from '../components/ModeToggle';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
+import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import ReassignPanel from '../components/CredentialReassignPanel';
 import { useAuth } from '../auth/AuthContext';
 import {
@@ -182,11 +183,12 @@ function PublicKeyReveal({ publicKey, onDone }) {
 
 function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, generated, onDoneGenerated,
                       teams, isSysAdmin, adminTeamIds }) {
+  const v2 = useResourceAccessV2();
   const [mode, setMode] = useState('generate');
   const [name, setName] = useState('');
   const [id, setId] = useState('');
   const [privateKey, setPrivateKey] = useState('');
-  const [ownership, setOwnership] = useState(() => defaultOwnership({ isSysAdmin, adminTeamIds }));
+  const [ownership, setOwnership] = useState(() => defaultOwnership({ isSysAdmin, adminTeamIds, v2 }));
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName,
     setId,
@@ -199,8 +201,9 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
     return <PublicKeyReveal publicKey={generated} onDone={onDoneGenerated} />;
   }
 
-  // A team-scoped credential needs an owning team selected before it can be saved.
-  const ownershipReady = ownership.scope === 'system' || !!ownership.teamId;
+  // A team-scoped credential needs an owning team selected before it can be saved;
+  // personal / system scopes are ready without one.
+  const ownershipReady = ownership.scope === 'system' || ownership.scope === 'personal' || !!ownership.teamId;
   const canPaste    = name.trim() && privateKey.trim() && ownershipReady;
   const canGenerate = name.trim() && ownershipReady;
 
@@ -211,6 +214,7 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
       teams={teams}
       isSysAdmin={isSysAdmin}
       adminTeamIds={adminTeamIds}
+      v2={v2}
     />
   );
 
@@ -269,7 +273,7 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
             <button
-              onClick={() => onSaveGenerate({ name: name.trim(), id: id.trim() || undefined, ...ownershipPayload(ownership) })}
+              onClick={() => onSaveGenerate({ name: name.trim(), id: id.trim() || undefined, ...ownershipPayload(ownership, { v2 }) })}
               disabled={saving || !canGenerate}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
@@ -371,7 +375,7 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
             <button
-              onClick={() => onSavePaste({ name: name.trim(), id: id.trim() || undefined, privateKey: privateKey.trim(), ...ownershipPayload(ownership) })}
+              onClick={() => onSavePaste({ name: name.trim(), id: id.trim() || undefined, privateKey: privateKey.trim(), ...ownershipPayload(ownership, { v2 }) })}
               disabled={saving || !canPaste}
               style={{
                 padding: 'var(--eb-space-2) var(--eb-space-4)',
@@ -492,10 +496,10 @@ export default function SshKeys() {
     },
   ];
 
-  async function handleSavePaste({ name, id, privateKey, scope, teamId, assignedTeamIds }) {
+  async function handleSavePaste({ name, id, privateKey, scope, teamId, assignedTeamIds, identity }) {
     setSaving(true); setFormError(null);
     try {
-      await apiCall('POST', '/api/ssh-keys', { name, id, privateKey, scope, teamId, assignedTeamIds });
+      await apiCall('POST', '/api/ssh-keys', { name, id, privateKey, scope, teamId, assignedTeamIds, identity });
       setCreating(false);
       refetch();
     } catch (e) {
@@ -505,10 +509,10 @@ export default function SshKeys() {
     }
   }
 
-  async function handleSaveGenerate({ name, id, scope, teamId, assignedTeamIds }) {
+  async function handleSaveGenerate({ name, id, scope, teamId, assignedTeamIds, identity }) {
     setSaving(true); setFormError(null);
     try {
-      const r = await apiCall('POST', '/api/ssh-keys/generate', { name, id, scope, teamId, assignedTeamIds });
+      const r = await apiCall('POST', '/api/ssh-keys/generate', { name, id, scope, teamId, assignedTeamIds, identity });
       setGeneratedPublicKey(r.publicKey);
       refetch();
     } catch (e) {

@@ -342,6 +342,20 @@ test('describeAuthz: chatFontSize surfaces the caller\'s own preference (#1437)'
   assert.equal(bob.chatFontSize, 12); // default when unset
 });
 
+test('describeAuthz: chatNotifyOnBack surfaces the caller\'s own opt-in, off by default (#2397)', () => {
+  const withPref = [
+    { id: 'u-a', subject: 'alice@corp.com', chatNotifyOnBack: true },
+    { id: 'u-b', subject: 'bob@corp.com' }, // unset → off
+  ];
+  const alice = describeAuthz({ username: 'alice@corp.com', users: withPref, memberships: [] });
+  assert.equal(alice.chatNotifyOnBack, true);
+  const bob = describeAuthz({ username: 'bob@corp.com', users: withPref, memberships: [] });
+  assert.equal(bob.chatNotifyOnBack, false); // off when unset
+  // The recordless env admin (unknown subject) is off too.
+  const stranger = describeAuthz({ username: 'nobody@corp.com', users: withPref, memberships: [] });
+  assert.equal(stranger.chatNotifyOnBack, false);
+});
+
 test('describeAuthz: a record with no stored preference gets the 12px default (#1437)', () => {
   // The seeded administrator is such a record — and, unlike the recordless env
   // admin it replaced, its preference now actually persists (#2059 AC6).

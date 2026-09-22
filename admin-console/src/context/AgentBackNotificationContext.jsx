@@ -1,0 +1,141 @@
+import React, {
+  createContext, useContext, useRef, useEffect, useState, useCallback,
+} from 'react';
+import { useNavigate } from 'react-router';
+import { useAuth } from '../auth/AuthContext.jsx';
+import { useAgentStatuses } from './AgentStatusesContext.jsx';
+import {
+  resolveInitialNotifyEnabled,
+  loadStoredNotifyEnabled,
+  NOTIFY_SETTING_CHANGED_EVENT,
+  computeBackNotifications,
+  selectUnnotified,
+  notificationTitleFor,
+  notificationTagFor,
+  notificationsSupported,
+  getNotificationPermission,
+} from '../pages/agent-chat/agent-back-notification.js';
+
+// "An agent you messaged is back" browser notification (#2397).
+//
+// Mounted app-level (inside AgentStatusesProvider, under BrowserRouter) so it
+// sees the shared /api/agents/statuses poll, survives navigation, and can route
+// on a notification click. It owns three pieces of session-scoped state: the
+// enabled flag (from the per-user setting, live-updated without reload), the set
+// of agents the current user manually messaged this page/session, and a per-turn
+// dedupe map. The deterministic logic all lives in agent-back-notification.js.
+
+// Same key AgentChat.jsx / Shell.jsx use for the in-page "viewed" map, so
+// clicking a notification clears the unread dot exactly like opening the chat.
+const LAST_VIEWED_KEY = 'agentChat.lastViewed';
+
+const AgentBackNotificationContext = createContext(null);
+
+export function AgentBackNotificationProvider({ children }) {
+  const { user } = useAuth();
+  const statuses = useAgentStatuses();
+  const navigate = useNavigate();
+
+  const username = user?.username;
+
+  // Enabled preference. Initialised from the session/local value, then updated
+  // only on a user switch (login) or on the settings-changed broadcast (AC10) —
+  // never re-resolved on an unrelated re-render, which could clobber a just-made
+  // toggle with a stale session value.
+  const [enabled, setEnabled] = useState(() => resolveInitialNotifyEnabled({
+    sessionValue: user?.chatNotifyOnBack,
+    storedValue: loadStoredNotifyEnabled(username),
+    hasServerRecord: user != null && user.userId != null,
+  }));
+  useEffect(() => {
+    setEnabled(resolveInitialNotifyEnabled({
+      sessionValue: user?.chatNotifyOnBack,
+      storedValue: loadStoredNotifyEnabled(username),
+      hasServerRecord: user != null && user.userId != null,
+    }));
+    // Keyed on username only: username + chatNotifyOnBack arrive together from a
+    // single session fetch, so this captures the fresh flag on login/switch
+    // without re-running on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [username]);
+
+  useEffect(() => {
+    function onChanged(e) {
+      const val = e?.detail?.enabled;
+      if (typeof val === 'boolean') setEnabled(val);
+    }
+    window.addEventListener(NOTIFY_SETTING_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(NOTIFY_SETTING_CHANGED_EVENT, onChanged);
+  }, []);
+
+  // Agents the user manually messaged in this page/session (in-memory only —
+  // "current browser page/session" per the ticket; a reload starts fresh, and an
+  // auto-triggered run never lands here because it never goes through the chat
+  // composer's send handler). This is the signal that separates manual sends
+  // from label/schedule/event-triggered runs (AC5/AC6).
+  const manuallyMessagedRef = useRef(new Set());
+  const markManuallyMessaged = useCallback((id) => {
+    if (id) manuallyMessagedRef.current.add(id);
+  }, []);
+
+  const prevStatusesRef = useRef(null);
+  const notifiedRef = useRef({});
+  const enabledRef = useRef(enabled);
+  useEffect(() => { enabledRef.current = enabled; }, [enabled]);
+
+  const fireNotification = useCallback((c) => {
+    try {
+      const n = new window.Notification(notificationTitleFor(c.displayName), {
+        tag: notificationTagFor(c.id),
+        // No body content (AC2) — title (agent name) only.
+      });
+      n.onclick = () => {
+        try { window.focus(); } catch { /* ignore */ }
+        // Mark viewed so the in-page unread dot clears (AC3), matching handleSelect.
+        try {
+          const raw = window.localStorage.getItem(LAST_VIEWED_KEY);
+          const map = raw ? JSON.parse(raw) : {};
+          map[c.id] = Date.now();
+          window.localStorage.setItem(LAST_VIEWED_KEY, JSON.stringify(map));
+        } catch { /* ignore quota / privacy mode */ }
+        navigate(`/chats/${c.id}`);
+        try { n.close(); } catch { /* ignore */ }
+      };
+    } catch { /* a construction failure must never crash the poll */ }
+  }, [navigate]);
+
+  // Runs on every status poll. Always advances the previous-snapshot baseline so
+  // busy→done transitions are measured against the immediately-preceding poll,
+  // regardless of gating.
+  useEffect(() => {
+    const prev = prevStatusesRef.current;
+    prevStatusesRef.current = statuses;
+    if (prev == null) return;                                   // baseline the first poll
+    if (!enabledRef.current) return;                            // AC7: off → nothing fires
+    // AC4: never fire while the tab is the active/visible one.
+    if (typeof document !== 'undefined' && document.visibilityState === 'visible') return;
+    if (!notificationsSupported(window)) return;
+    if (getNotificationPermission(window) !== 'granted') return; // AC8: blocked/denied → silent
+
+    const candidates = computeBackNotifications(prev, statuses, {
+      manuallyMessaged: manuallyMessagedRef.current,
+    });
+    if (candidates.length === 0) return;
+    const { toFire, notified } = selectUnnotified(candidates, notifiedRef.current);
+    notifiedRef.current = notified;
+    for (const c of toFire) fireNotification(c);
+  }, [statuses, fireNotification]);
+
+  return (
+    <AgentBackNotificationContext.Provider value={{ markManuallyMessaged, enabled }}>
+      {children}
+    </AgentBackNotificationContext.Provider>
+  );
+}
+
+// Consumers (ChatPanel's send handler) get a no-op fallback when rendered
+// outside the provider so a test/harness mount never throws.
+export function useAgentBackNotification() {
+  const ctx = useContext(AgentBackNotificationContext);
+  return ctx || { markManuallyMessaged: () => {}, enabled: false };
+}

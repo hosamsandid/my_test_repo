@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { createTeamsStore, DEFAULT_TEAM_ID, normalizeGithubHandle, coerceGithubHandle, coerceChatFontSize } = require('./teams-store');
+const { createTeamsStore, DEFAULT_TEAM_ID, normalizeGithubHandle, coerceGithubHandle, coerceChatFontSize, coerceChatNotifyOnBack } = require('./teams-store');
 
 function freshStore() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'teams-store-'));
@@ -261,6 +261,41 @@ test('chatFontSize: only persisted when set; updatable and clearable', () => {
 
   // An out-of-range value is rejected at the store boundary.
   assert.throws(() => store.updateUser(u.id, { chatFontSize: 42 }), /between 10 and 18/);
+});
+
+// ---- chat "agent is back" notification opt-in (#2397) ---------------------
+
+test('chatNotifyOnBack: coerce accepts booleans, treats blank as unset, rejects non-booleans', () => {
+  assert.equal(coerceChatNotifyOnBack(true), true);
+  assert.equal(coerceChatNotifyOnBack(false), false);
+  assert.equal(coerceChatNotifyOnBack(undefined), undefined); // absent → unset
+  assert.equal(coerceChatNotifyOnBack(null), undefined);
+  assert.equal(coerceChatNotifyOnBack(''), undefined);
+  assert.throws(() => coerceChatNotifyOnBack('yes'), /must be a boolean/);
+  assert.throws(() => coerceChatNotifyOnBack(1), /must be a boolean/);
+});
+
+test('chatNotifyOnBack: only persisted when true; false/blank clears it', () => {
+  const { store } = freshStore();
+  // Off by default → the field is never written.
+  const plain = store.createUser({ subject: 'plain2@corp.com' });
+  assert.equal(plain.chatNotifyOnBack, undefined);
+  // Explicit false on create is still not stored (off is the default).
+  const off = store.createUser({ subject: 'off@corp.com', chatNotifyOnBack: false });
+  assert.equal(off.chatNotifyOnBack, undefined);
+  // Explicit true on create is stored.
+  const on = store.createUser({ subject: 'on@corp.com', chatNotifyOnBack: true });
+  assert.equal(on.chatNotifyOnBack, true);
+  assert.equal(store.getUser(on.id).chatNotifyOnBack, true);
+
+  // Update toggles it and clears it.
+  assert.equal(store.updateUser(plain.id, { chatNotifyOnBack: true }).chatNotifyOnBack, true);
+  assert.equal(store.updateUser(plain.id, { chatNotifyOnBack: false }).chatNotifyOnBack, undefined);
+  // An untouched update leaves an existing value alone.
+  store.updateUser(plain.id, { chatNotifyOnBack: true });
+  assert.equal(store.updateUser(plain.id, { displayName: 'Plain' }).chatNotifyOnBack, true);
+  // A non-boolean is rejected at the store boundary.
+  assert.throws(() => store.updateUser(plain.id, { chatNotifyOnBack: 'on' }), /must be a boolean/);
 });
 
 test('users: delete cascades memberships', () => {

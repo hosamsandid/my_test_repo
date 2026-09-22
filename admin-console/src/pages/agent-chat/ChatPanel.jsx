@@ -5,6 +5,7 @@ import { useSSE } from '../../hooks/useSSE';
 import { useAuth } from '../../auth/AuthContext';
 import { useMaintenanceMode } from '../../context/MaintenanceModeContext';
 import { useTranscriptionSession } from '../../context/TranscriptionSessionContext.jsx';
+import { useAgentBackNotification } from '../../context/AgentBackNotificationContext.jsx';
 import ConfirmDialog from '../../components/ConfirmDialog';
 import SidePanel from '../../components/SidePanel';
 import Message from './Message';
@@ -249,6 +250,11 @@ export default function ChatPanel({
   const { user } = useAuth();
   const username = user?.username;
   const hasServerRecord = user != null && user.userId != null;
+
+  // "Agent you messaged is back" notification (#2397): record every manual send
+  // so the app-level provider can tell this agent's completions apart from
+  // auto-triggered runs (label/schedule/event) it should never notify about.
+  const { markManuallyMessaged } = useAgentBackNotification();
 
   /* ─── Human-message attribution (#2065) ──────────────────────────────
    * `viewer` decides which side a bubble sits on ("is this mine?"), the
@@ -1035,6 +1041,9 @@ export default function ChatPanel({
     if (!roomId) return;
     const body = text.trim();
     if (!body) return;
+    // Mark this agent as one the current user manually messaged, so a completion
+    // of the turn we just kicked off can notify us if we tab away (#2397).
+    if (agent?.id) markManuallyMessaged(agent.id);
     onTodoBoundary?.();
     const optimisticId = `pending-${crypto.randomUUID()}`;
     const ts = Date.now();

@@ -56,7 +56,12 @@ test('reconcileOrphanedOffboardings includes the provider index in detection and
 // ── E1: membership-removal binding sweep, gated ─────────────────────────────
 
 test('the memberships DELETE arm runs the sweep ONLY behind AEE_RESOURCE_ACCESS_V2, best-effort', () => {
-  const body = region("if (collection === 'memberships' && !resourceId)", 'sendJson(res, 404', 2200);
+  // maxSpan bumped 2200 → 2500 for #2360: the personal-oauth lend-block guard
+  // (`personalOauthLendBlockOnMembershipAdd`) added to the sibling POST arm grew
+  // this whole-route region to 2383 chars. The growth is legitimate and lives in
+  // the POST arm, not the DELETE-arm sweep this guard asserts; 2500 matches the
+  // offboardOwner region's budget. Refactor the route block if it grows further.
+  const body = region("if (collection === 'memberships' && !resourceId)", 'sendJson(res, 404', 2500);
   // The removal happens first and unconditionally…
   assert.match(body, /const removed = teamsStore\.removeMembership\(/);
   // …then the sweep, gated by the flag AND the live singleton, in a try/catch so

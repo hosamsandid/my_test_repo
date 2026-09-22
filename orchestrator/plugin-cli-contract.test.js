@@ -533,7 +533,9 @@ test('aee-jira is a dependency-free single file (stdlib imports only)', () => {
   const src = fs.readFileSync(JIRA_CLI, 'utf8');
   const imports = src.split('\n').filter((l) => /^\s*(import|from)\s+/.test(l));
   assert.ok(imports.length > 0);
-  const STDLIB = new Set(['argparse', 'json', 'os', 'sys', 'urllib']);
+  // base64 + re added for #2399 attachment read-side (binary decode + filename
+  // sanitisation) — both Python stdlib, so the dependency-free contract holds.
+  const STDLIB = new Set(['argparse', 'base64', 'json', 'os', 're', 'sys', 'urllib']);
   for (const line of imports) {
     const m = line.match(/^\s*(?:import|from)\s+([a-zA-Z0-9_]+)/);
     assert.ok(m && STDLIB.has(m[1]), `non-stdlib import: ${line.trim()}`);

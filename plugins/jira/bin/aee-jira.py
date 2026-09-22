@@ -17,7 +17,8 @@ Reads:
     aee-jira inbox --consume KAN-6:10312 [ID…]   # drain exactly the events YOUR wake named (payload `id` / `events[].id`)
     aee-jira projects                             # the projects in this team's scope
     aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
-    aee-jira show KAN-6                           # one issue (summary, status, type, assignee, URL)
+    aee-jira show KAN-6                           # one issue (summary, status, type, assignee, URL, attachments)
+    aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
 
 Writes (attributed, role-gated server-side, no human confirmation — moving a
 ticket is routine and reversible):
@@ -41,8 +42,10 @@ Contract (§4.5): `--json` on every subcommand; exit 0 ok / 1 domain error /
 2 usage / 3 broker unreachable; `--help` carries the agent-readable docs.
 """
 import argparse
+import base64
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -86,6 +89,63 @@ def emit(payload, as_json):
         print(body if isinstance(body, str) else json.dumps(body, indent=2))
     else:
         print(payload.get("message", payload.get("error", "error")), file=sys.stderr)
+
+
+def _sanitize(name):
+    """A filesystem-safe segment (no path separators, no traversal)."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(name or "")) or "attachment"
+
+
+def _default_attachment_path(att, issue):
+    ws = os.environ.get("AEE_WORKSPACE", os.path.expanduser("~"))
+    name = att.get("filename") or ("attachment-%s" % att.get("id"))
+    return os.path.join(
+        ws, ".agent-studio", "jira-attachments", _sanitize(issue),
+        "%s-%s" % (_sanitize(att.get("id")), _sanitize(name)),
+    )
+
+
+def emit_attachment(result, out_path, issue, as_json):
+    """Surface `attachment get`: text is printed inline (AC5), binary is decoded
+    and saved to a workspace path the agent can read (AC6). `--out` forces a save
+    for either kind."""
+    att = (result or {}).get("attachment") or {}
+    encoding = att.get("encoding")
+    content = att.get("content") or ""
+    raw = base64.b64decode(content) if encoding == "base64" else content.encode("utf-8")
+
+    saved = None
+    if out_path or encoding == "base64":
+        target = out_path or _default_attachment_path(att, issue)
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(target, "wb") as fh:
+            fh.write(raw)
+        saved = target
+
+    meta = {k: att.get(k) for k in ("id", "filename", "mimeType", "size", "author", "encoding")}
+    if saved:
+        meta["savedPath"] = saved
+
+    if as_json:
+        payload = {"ok": True, "result": dict(meta), "scopeId": None}
+        if encoding == "text":
+            payload["result"]["content"] = content
+        print(json.dumps(payload))
+        return EXIT_OK
+
+    header = "%s (%s, %s bytes)" % (
+        att.get("filename") or att.get("id"), att.get("mimeType") or "unknown type", att.get("size"),
+    )
+    if encoding == "text" and not out_path:
+        print(header)
+        print(content)
+    elif saved:
+        print("%s\nsaved to %s" % (header, saved))
+    else:
+        print(header)
+    return EXIT_OK
 
 
 class BrokerUnreachable(Exception):
@@ -153,6 +213,20 @@ def build_parser():
     p_show = sub.add_parser("show", parents=[common], help="read one issue")
     p_show.add_argument("issue", help="issue key, e.g. KAN-6")
 
+    p_att = sub.add_parser("attachment", parents=[common], help="read an issue's attachments (list them with `show`)")
+    att_sub = p_att.add_subparsers(dest="att_cmd")
+    p_att_get = att_sub.add_parser(
+        "get", parents=[common],
+        help="fetch one attachment's content by id (from `aee-jira show`)",
+    )
+    p_att_get.add_argument("issue", help="issue key the attachment is on, e.g. KAN-6")
+    p_att_get.add_argument("attachment_id", help="the attachment id shown by `aee-jira show`")
+    p_att_get.add_argument(
+        "--out", metavar="PATH",
+        help="write the content to this file; text is printed inline unless --out is given, "
+             "binary is always saved (default: under .agent-studio/jira-attachments/)",
+    )
+
     p_comment = sub.add_parser("comment", parents=[common], help="add a comment to an issue")
     p_comment.add_argument("issue", help="issue key, e.g. KAN-6")
     p_comment.add_argument("--body", required=True, help="the comment text")
@@ -206,6 +280,12 @@ def main(argv=None):
         path = "/list?" + urllib.parse.urlencode(q)
     elif args.cmd == "show":
         path = "/show?" + urllib.parse.urlencode({"issue": args.issue})
+    elif args.cmd == "attachment":
+        if getattr(args, "att_cmd", None) != "get":
+            emit({"ok": False, "error": "usage",
+                  "message": "usage: aee-jira attachment get <issueKey> <attachmentId> [--out PATH]"}, as_json)
+            return EXIT_USAGE
+        path = "/attachment?" + urllib.parse.urlencode({"issue": args.issue, "id": args.attachment_id})
     elif args.cmd == "comment":
         path, method, body = "/comment", "POST", {"issue": args.issue, "body": args.body}
     elif args.cmd == "transition":
@@ -224,6 +304,9 @@ def main(argv=None):
     except BrokerDomainError as e:
         emit({"ok": False, "error": "domain-error", "message": str(e)}, as_json)
         return EXIT_DOMAIN_ERROR
+
+    if args.cmd == "attachment":
+        return emit_attachment(result, getattr(args, "out", None), args.issue, as_json)
 
     emit({"ok": True, "result": result, "scopeId": cfg.get("scopeId")}, as_json)
     return EXIT_OK

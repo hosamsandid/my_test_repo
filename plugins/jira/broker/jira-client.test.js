@@ -328,13 +328,114 @@ test('updateDescription: a blank description is a 400 before any request', async
 });
 
 test('getIssue: reads summary/status/issueType/assignee and builds a browse URL from the real site', async () => {
-  await withFetch(() => ({ ok: true, status: 200, text: async () => JSON.stringify({
-    key: 'ENG-5', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, issuetype: { name: 'Task' } },
-  }) }), async () => {
+  await withFetch((url) => {
+    assert.match(url, /fields=summary,status,description,assignee,issuetype,attachment/);
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: 'ENG-5', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, issuetype: { name: 'Task' } },
+    }) };
+  }, async () => {
     const issue = await jc.getIssue({ siteUrl: 'acme', email: 'e', apiToken: 't' }, 'ENG-5', { env: CRED.env });
     assert.equal(issue.status, 'Ready for Dev');
     assert.equal(issue.issueType, 'Task');
     assert.equal(issue.assignee, 'Jane');
     assert.equal(issue.url, 'https://acme.atlassian.net/browse/ENG-5'); // browse URL uses the real site, not the seam
+    assert.ok(!('attachments' in issue)); // no attachments → no key at all (AC2/AC8)
+  });
+});
+
+// ── attachments (#2399) ──────────────────────────────────────────────────────
+
+test('shapeAttachment: narrows to id/filename/mimeType/size/author/created/contentUrl; drops idless', () => {
+  assert.deepEqual(
+    jc.shapeAttachment({ id: 10312, filename: 'spec.pdf', mimeType: 'application/pdf', size: 2048, author: { displayName: 'Jane' }, created: '2026-09-20T10:00:00Z', content: 'https://acme.atlassian.net/rest/api/3/attachment/content/10312' }),
+    { id: '10312', filename: 'spec.pdf', mimeType: 'application/pdf', size: 2048, author: 'Jane', created: '2026-09-20T10:00:00Z', contentUrl: 'https://acme.atlassian.net/rest/api/3/attachment/content/10312' },
+  );
+  assert.equal(jc.shapeAttachment({ filename: 'no-id.txt' }), null);
+  assert.equal(jc.shapeAttachment(null), null);
+});
+
+test('isTextualAttachment: text/* and text-ish application types + known extensions are inline; images are not', () => {
+  assert.equal(jc.isTextualAttachment('text/plain', 'a.txt'), true);
+  assert.equal(jc.isTextualAttachment('application/json', 'a.json'), true);
+  assert.equal(jc.isTextualAttachment('application/xml', 'a.xml'), true);
+  assert.equal(jc.isTextualAttachment('image/png', 'a.png'), false);
+  assert.equal(jc.isTextualAttachment('application/octet-stream', 'server.log'), true); // extension fallback
+  assert.equal(jc.isTextualAttachment('application/octet-stream', 'photo.jpg'), false);
+});
+
+test('getIssue: lists attachment metadata when present, capped with a true count', async () => {
+  const many = Array.from({ length: 55 }, (_, i) => ({ id: String(1000 + i), filename: `f${i}.txt`, mimeType: 'text/plain', size: 10, author: { displayName: 'Jane' } }));
+  await withFetch(() => ({ ok: true, status: 200, text: async () => JSON.stringify({
+    key: 'ENG-7', fields: { summary: 'S', attachment: many },
+  }) }), async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-7', { env: CRED.env });
+    assert.equal(issue.attachmentCount, 55);
+    assert.equal(issue.attachments.length, jc.ATTACHMENT_LIST_CAP);
+    assert.equal(issue.attachmentsTruncated, true);
+    assert.deepEqual(issue.attachments[0], { id: '1000', filename: 'f0.txt', mimeType: 'text/plain', size: 10, author: 'Jane', created: null, contentUrl: null });
+  });
+});
+
+test('getAttachment: confirms the id is on the issue, downloads a text attachment inline', async () => {
+  await withFetch((url, opts, n) => {
+    if (n === 1) {
+      assert.match(url, /\/rest\/api\/3\/issue\/KAN-6\?fields=attachment$/);
+      return { ok: true, status: 200, text: async () => JSON.stringify({
+        key: 'KAN-6', fields: { attachment: [{ id: '10312', filename: 'notes.md', mimeType: 'text/markdown', size: 11, author: { displayName: 'Jane' }, content: 'https://acme.atlassian.net/rest/api/3/attachment/content/10312' }] },
+      }) };
+    }
+    assert.match(url, /\/rest\/api\/3\/attachment\/content\/10312$/);
+    assert.match(opts.headers.Authorization, /^Basic /);
+    return { ok: true, status: 200, headers: { get: () => 'text/markdown' }, arrayBuffer: async () => Buffer.from('hello world', 'utf8') };
+  }, async () => {
+    const att = await jc.getAttachment(CRED, 'KAN-6', '10312', { env: CRED.env });
+    assert.equal(att.encoding, 'text');
+    assert.equal(att.content, 'hello world');
+    assert.equal(att.filename, 'notes.md');
+  });
+});
+
+test('getAttachment: a binary attachment comes back base64', async () => {
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+  await withFetch((url, opts, n) => {
+    if (n === 1) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({
+        key: 'KAN-6', fields: { attachment: [{ id: '77', filename: 'shot.png', mimeType: 'image/png', size: bytes.length, author: { displayName: 'Jane' } }] },
+      }) };
+    }
+    return { ok: true, status: 200, headers: { get: () => 'image/png' }, arrayBuffer: async () => bytes };
+  }, async () => {
+    const att = await jc.getAttachment(CRED, 'KAN-6', '77', { env: CRED.env });
+    assert.equal(att.encoding, 'base64');
+    assert.equal(att.content, bytes.toString('base64'));
+    assert.equal(att.mimeType, 'image/png');
+  });
+});
+
+test('getAttachment: an id not on the issue is a 404 domain error, and never triggers a download', async () => {
+  const calls = [];
+  await withFetch((url) => {
+    calls.push(url);
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'KAN-6', fields: { attachment: [{ id: '10312', filename: 'a.txt' }] } }) };
+  }, async () => {
+    await assert.rejects(
+      () => jc.getAttachment(CRED, 'KAN-6', '999', { env: CRED.env }),
+      (e) => e.status === 404 && /not on issue KAN-6/.test(e.message),
+    );
+    assert.equal(calls.length, 1); // ownership check only — no content fetch
+  });
+});
+
+test('getAttachment: an over-cap file is refused (413) before any download', async () => {
+  const calls = [];
+  await withFetch((url) => {
+    calls.push(url);
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'KAN-6', fields: { attachment: [{ id: '5', filename: 'huge.bin', mimeType: 'application/octet-stream', size: 999 }] } }) };
+  }, async () => {
+    await assert.rejects(
+      () => jc.getAttachment(CRED, 'KAN-6', '5', { env: CRED.env, maxBytes: 100 }),
+      (e) => e.status === 413 && /over the 100-byte fetch limit/.test(e.message),
+    );
+    assert.equal(calls.length, 1); // refused on metadata, never downloaded
   });
 });

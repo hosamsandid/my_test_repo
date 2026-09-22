@@ -16,7 +16,8 @@ import { OVERLAY_SKILL_DETAIL, OVERLAY_SKILLS_MERGE } from '../context/page-help
 import { SKILLS_HELP_SECTIONS } from './skills-help-sections.js';
 import { isPublishEligible } from './skill-publish-view.js';
 import { useAuth } from '../auth/AuthContext';
-import { adminTeamIdsOf } from './credential-scope-view.js';
+import { useResourceAccessV2 } from '../context/ResourceAccessContext';
+import { adminTeamIdsOf, teamsById } from './credential-scope-view.js';
 import { writableSkillTargets, defaultSkillTarget } from './skill-target-view.js';
 import { planLineageResync, copyResyncKind, summarizeResyncResults } from './skill-lineage-resync.js';
 
@@ -1805,7 +1806,7 @@ function SourceBadge({ value: v }) {
   );
 }
 
-function makeColumns(onDeleteRow, select, onOpenUsage) {
+function makeColumns(onDeleteRow, select, onOpenUsage, teamNames = {}) {
   const cols = [];
   if (select) {
     cols.push({
@@ -1831,7 +1832,12 @@ function makeColumns(onDeleteRow, select, onOpenUsage) {
     { key: 'name', label: 'Skill Name' },
     { key: 'source', label: 'Tier', render: v => <SourceBadge value={v} /> },
     { key: '_scope', label: 'Scope', sortable: false, render: (_, row) => {
-      const v = row.source === 'agent' ? row.agentId : row.source === 'team' ? row.teamId : null;
+      // Team rows resolve their id to a readable name (merged legacy + Agent
+      // Team lookup, #2393 AC3), falling back to the raw id when unknown; agent
+      // rows keep the raw agent id.
+      const v = row.source === 'agent'
+        ? row.agentId
+        : row.source === 'team' ? (teamNames[row.teamId] || row.teamId) : null;
       return v
         ? <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span>
         : <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
@@ -1873,10 +1879,24 @@ export default function SkillsRegistry() {
   // #2307 AC11-14: the Import-to and +New Skill target selectors offer only
   // targets the signed-in caller may actually write to.
   const { user } = useAuth();
+  const resourceAccessV2 = useResourceAccessV2();
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
   const caller = { isSysAdmin, adminTeamIds };
-  const skillTargets = writableSkillTargets(caller, allTeams ?? []);
+  // #2393/#2360 re-key: under the flag, every team picker on this page means an
+  // AGENT TEAM (a role:'team' agent), not the legacy human access-scope "Team"
+  // collection — matching the rest of the console (ModelRegistry, Users, SSH
+  // Keys, GitHub Tokens, the team env panel). Off the flag this is byte-identical
+  // to before (teams = the legacy human-team list).
+  const humanTeams = Array.isArray(allTeams) ? allTeams : [];
+  const agentTeams = (Array.isArray(allAgents) ? allAgents : [])
+    .filter(a => a && a.role === 'team')
+    .map(a => ({ id: a.id, name: a.displayName || a.id }));
+  const teams = resourceAccessV2 ? agentTeams : humanTeams;
+  // Merged id→name lookup so a team-tier skill stamped with a legacy id still
+  // renders a readable name (AC3), mirroring ModelRegistry's merged `names`.
+  const teamNames = { ...teamsById(humanTeams), ...teamsById(agentTeams) };
+  const skillTargets = writableSkillTargets(caller, teams);
   const canWriteAnywhere = skillTargets.length > 0;
   const [filter, setFilter] = useState('All');
   const [showNewForm, setShowNewForm] = useState(false);
@@ -1891,7 +1911,7 @@ export default function SkillsRegistry() {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState(null);
   const [importSuccess, setImportSuccess] = useState(null);
-  const [importTarget, setImportTarget] = useState(() => defaultSkillTarget(caller, allTeams ?? [])); // 'global' or 'team:<id>'
+  const [importTarget, setImportTarget] = useState(() => defaultSkillTarget(caller, teams)); // 'global' or 'team:<id>'
   // #2307 AC11: re-pin the selection if the writable set changes under us
   // (auth/teams load async) and the current value is no longer offered.
   useEffect(() => {
@@ -2074,6 +2094,7 @@ export default function SkillsRegistry() {
     { isSelected: isRowSelected, onToggle: toggleRow },
     // #2317 AC4: the Downstream indicator opens straight on the Usage tab.
     row => openSkill({ ...row, initialTab: 'usage' }),
+    teamNames,
   );
 
   if (loading) {
@@ -2170,7 +2191,7 @@ export default function SkillsRegistry() {
           <h2 style={{ fontSize: 'var(--eb-text-base)', fontWeight: 'var(--eb-font-semibold)', margin: '0 0 var(--eb-space-3)' }}>
             Create skill
           </h2>
-          <NewSkillForm onCreated={handleCreated} onCancel={() => setShowNewForm(false)} teams={allTeams ?? []} caller={caller} />
+          <NewSkillForm onCreated={handleCreated} onCancel={() => setShowNewForm(false)} teams={teams} caller={caller} />
         </div>
       )}
 
@@ -2248,7 +2269,7 @@ export default function SkillsRegistry() {
       {mergeOpen && (
         <MergeSkillsDialog
           sources={selectedList.map(rowToMergeSource)}
-          teams={allTeams ?? []}
+          teams={teams}
           onClose={() => setMergeOpen(false)}
           onMerged={handleMerged}
         />
@@ -2257,7 +2278,7 @@ export default function SkillsRegistry() {
       <SidePanel
         open={!!selectedSkill}
         onClose={() => setSelectedSkill(null)}
-        title={selectedSkill ? `${selectedSkill.name} (${selectedSkill.source === 'pool' ? 'global' : selectedSkill.source}${selectedSkill.teamId ? `: ${selectedSkill.teamId}` : ''})` : ''}
+        title={selectedSkill ? `${selectedSkill.name} (${selectedSkill.source === 'pool' ? 'global' : selectedSkill.source}${selectedSkill.teamId ? `: ${teamNames[selectedSkill.teamId] || selectedSkill.teamId}` : ''})` : ''}
         width="560px"
       >
         {selectedSkill && (
@@ -2269,7 +2290,7 @@ export default function SkillsRegistry() {
             onOpenCopy={openSkill}
             installableAgents={installableAgents}
             agentSkills={allSkills ?? []}
-            teams={allTeams ?? []}
+            teams={teams}
           />
         )}
       </SidePanel>

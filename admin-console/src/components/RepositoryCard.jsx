@@ -3,6 +3,7 @@ import { X, Check, AlertTriangle, Loader2 } from 'lucide-react';
 import { apiCall } from '../hooks/useApi';
 import IconButton from './IconButton';
 import { tokenIsElsewhere, shouldShowTokenHint } from './repository-fields-view.js';
+import { canonicalizeRepoUrlForSshKey } from './repository-url-view.js';
 import { describeCredentialRef } from '../pages/credential-ref-legibility.js';
 
 // RepositoryCard — the ONE repository configuration card in this console.
@@ -142,6 +143,28 @@ export default function RepositoryCard({
   const showTokenHint = shouldShowTokenHint(check, repo.url, githubTokenId, hasEnvironmentToken);
   const elsewhere = tokenIsElsewhere(tokenTarget);
 
+  // #2345: when a row has an SSH key selected, a pasted github.com HTTPS URL is
+  // auto-rewritten to its canonical `git@github.com:<org>/<repo>.git` form —
+  // the same normalization POST /api/quickstart already does — so the reachability
+  // probe (and the eventual clone) uses the key instead of falling into an
+  // unauthenticated HTTPS `git ls-remote` and surfacing a raw Git error.
+  //
+  // Both interaction orders are covered (AC3): selecting the key rewrites the
+  // URL immediately; entering the URL with a key already selected rewrites on
+  // blur (once the URL is committed, not keystroke-by-keystroke while typing).
+  // `canonicalizeRepoUrlForSshKey` is a no-op for every out-of-scope case
+  // (no key, non-github, already-SSH), so these handlers only ever touch the
+  // URL field of THIS row (AC5–AC8, AC10).
+  const commitSshKey = (nextKeyId) => {
+    onChange('sshKeyId', nextKeyId);
+    const rewritten = canonicalizeRepoUrlForSshKey(repo.url, nextKeyId);
+    if (rewritten !== repo.url) onChange('url', rewritten);
+  };
+  const commitUrlRewrite = () => {
+    const rewritten = canonicalizeRepoUrlForSshKey(repo.url, repo.sshKeyId);
+    if (rewritten !== repo.url) onChange('url', rewritten);
+  };
+
   return (
     <div style={{
       border: '1px solid var(--eb-border-default)',
@@ -190,7 +213,7 @@ export default function RepositoryCard({
                 </div>
                 <select
                   value=""
-                  onChange={e => { if (e.target.value) onChange('sshKeyId', e.target.value); }}
+                  onChange={e => { if (e.target.value) commitSshKey(e.target.value); }}
                   style={inputStyle}
                 >
                   <option value="">Replace with a key you can see…</option>
@@ -204,7 +227,7 @@ export default function RepositoryCard({
           return (
             <select
               value={repo.sshKeyId}
-              onChange={e => onChange('sshKeyId', e.target.value)}
+              onChange={e => commitSshKey(e.target.value)}
               style={inputStyle}
             >
               <option value="">— no key (HTTPS only) —</option>
@@ -230,6 +253,7 @@ export default function RepositoryCard({
             }}
             value={repo.url}
             onChange={e => onChange('url', e.target.value)}
+            onBlur={commitUrlRewrite}
             placeholder="git@github.com:org/repo.git"
           />
           <div style={{

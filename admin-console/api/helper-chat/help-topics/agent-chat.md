@@ -152,10 +152,10 @@ in a group shares one environment, its member rows stay single-line and drop
 that environment from their own line; a member that deviates keeps its own
 environment line. The team header's second line no longer repeats that shared
 environment (it lives on the team's **Settings** tab) — it now names **who is
-behind the team**: an **Own** badge when the team's only member is you, otherwise
-the team's **Team Admin(s)** by display name, comma-separated (a long list folds
-to a trailing `+N`, with the full list on hover). A team with no visible members
-shows no such line. The **chevron** on a group header is the only control that
+behind the team**: a **Private** badge when the team's only member is you, otherwise
+everyone with access by display name — Team Admins first, then Team Members —
+comma-separated (a long list folds to a trailing `+N`, with the full list on
+hover). A team with no visible members shows no such line. The **chevron** on a group header is the only control that
 collapses/expands it; clicking anywhere else on that row selects the team and
 opens its **Settings** tab in the right rail instead — a team hosts no chat of
 its own, so the middle pane shows a short explanation rather than an empty room.

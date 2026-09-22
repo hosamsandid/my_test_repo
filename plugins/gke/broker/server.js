@@ -119,7 +119,10 @@ async function runTool(scopeId, name, args) {
       writeAudit(scopeId, verb || 'kube_read', 'denied');
       return textResult((err && err.message) || String(err), true);
     }
-    const masked = maskSecretsOrDefault(result.output, [token]);
+    // maskSecretsOrDefault(raw, fallback, secrets). Passing the token as the
+    // second argument made it the FALLBACK: nothing was masked, and an empty
+    // read handed the live cluster bearer straight back to the agent.
+    const masked = maskSecretsOrDefault(result.output, '(no output)', [token]);
     writeAudit(scopeId, verb || 'kube_read', result.ok ? 'ok' : 'error');
     return textResult(masked, !result.ok);
   }

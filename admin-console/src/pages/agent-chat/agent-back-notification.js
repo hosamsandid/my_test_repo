@@ -119,6 +119,29 @@ export function requestNotificationPermission(win) {
   }
 }
 
+// ── "Is the user looking at us?" gate ────────────────────────────────────────
+//
+// The notification must only fire while the console is NOT the surface the user
+// is actively looking at. #2397 gated on `visibilityState === 'visible'` alone,
+// but visibilityState only flips to `hidden` when the tab is switched away from,
+// minimized, or fully occluded — NOT when the browser window merely loses OS
+// focus while staying on-screen (a second monitor, or alt-tabbing to another app
+// with the browser still visible). That's the most common real "I'm not looking
+// at this" case (#2409 candidate #1), so we also require the document to hold OS
+// focus. The console counts as foreground only when it is BOTH the visible tab
+// AND the focused window; anything else means the user is away and may be
+// notified. `doc` is injectable for tests.
+export function isConsoleInForeground(doc) {
+  const d = doc || (typeof document !== 'undefined' ? document : null);
+  if (!d) return false;
+  // Treat a missing visibilityState/hasFocus as "true" so an environment that
+  // lacks one signal falls back to the other rather than never suppressing.
+  const visible = d.visibilityState ? d.visibilityState === 'visible' : true;
+  if (!visible) return false;
+  const focused = typeof d.hasFocus === 'function' ? d.hasFocus() : true;
+  return visible && focused;
+}
+
 // ── Turn-completion detection ────────────────────────────────────────────────
 
 function toMillis(v) {
@@ -131,12 +154,20 @@ function toMillis(v) {
 // ids the current user manually messaged this page/session, return the agents
 // whose turn just completed and should be notified about.
 //
-// A candidate must, between the two polls: (a) have been `busy`, (b) now be a
-// live non-busy state (NOT busy/disabled/offline — a run that ends offline/errored
-// with no user-facing response never qualifies), (c) carry a lastResponseAt that
-// advanced (a genuine new response, not a session reset), and (d) be an agent
-// the user manually messaged. The busy→done edge already suppresses most
-// flapping; exact-turn dedupe (selectUnnotified) covers the rest.
+// A candidate must, between the two polls: (a) now be a live non-busy state (NOT
+// busy/disabled/offline — a run that ends offline/errored with no user-facing
+// response never qualifies), (b) carry a lastResponseAt that advanced (a genuine
+// new response since we last saw the agent, not a session reset), and (c) be an
+// agent the user manually messaged. Exact-turn dedupe (selectUnnotified) covers
+// any flapping.
+//
+// #2409 candidate #2: we deliberately do NOT require the *immediately preceding*
+// poll to have caught `activityState === 'busy'`. Background tabs throttle the
+// status poll (Chrome ~1/min after a few minutes hidden), so a whole busy→done
+// turn can complete between two coarse polls and the transient busy sample is
+// never observed. Anchoring on "lastResponseAt advanced while the agent is now
+// idle" instead of on the fragile busy edge still catches that completion on the
+// next poll, however coarse — which is exactly the case the feature exists for.
 export function computeBackNotifications(prevList, nextList, { manuallyMessaged } = {}) {
   const out = [];
   if (!Array.isArray(prevList) || !Array.isArray(nextList)) return out;
@@ -152,15 +183,14 @@ export function computeBackNotifications(prevList, nextList, { manuallyMessaged 
 
   for (const next of nextList) {
     if (!next || next.id == null) continue;
-    if (!set.has(next.id)) continue;               // (d) manually messaged only
+    if (!set.has(next.id)) continue;               // (c) manually messaged only
     const prev = prevById.get(next.id);
     if (!prev) continue;                            // no baseline — never fire on first sight
-    if (prev.activityState !== 'busy') continue;    // (a) must have been busy
     const st = next.activityState;
-    if (st === 'busy' || st === 'disabled' || st === 'offline') continue; // (b) live completion
+    if (st === 'busy' || st === 'disabled' || st === 'offline') continue; // (a) live completion
     const prevAt = toMillis(prev.lastResponseAt);
     const nextAt = toMillis(next.lastResponseAt);
-    if (!nextAt || nextAt <= prevAt) continue;      // (c) genuine new response
+    if (!nextAt || nextAt <= prevAt) continue;      // (b) genuine new response since last seen
     out.push({
       id: next.id,
       displayName: next.displayName || next.id,

@@ -13,6 +13,7 @@ import {
   selectUnnotified,
   notificationTitleFor,
   notificationTagFor,
+  isConsoleInForeground,
 } from './agent-back-notification.js';
 
 // A minimal localStorage stand-in.
@@ -110,10 +111,16 @@ test('no baseline (agent unseen in prev poll) never fires', () => {
   assert.deepEqual(computeBackNotifications([], next, { manuallyMessaged: messaged }), []);
 });
 
-test('must have been busy: idle→idle (a fresh response arriving without a busy edge) does not fire', () => {
-  const prev = [{ id: 'a', activityState: 'idle', lastResponseAt: 100 }];
-  const next = [{ id: 'a', activityState: 'idle', lastResponseAt: 200 }];
-  assert.deepEqual(computeBackNotifications(prev, next, { manuallyMessaged: messaged }), []);
+test('AC3: a completion caught across a coarse (throttled) poll — idle→idle with a newer response, no busy sample — still fires', () => {
+  // A backgrounded tab throttles the poll to ~1/min, so a whole busy→done turn
+  // can complete between two polls and the transient busy state is never sampled.
+  // Anchoring on "lastResponseAt advanced while now idle" catches it anyway.
+  const prev = [{ id: 'a', activityState: 'idle', lastResponseAt: 100, displayName: 'Alpha' }];
+  const next = [{ id: 'a', activityState: 'idle', lastResponseAt: 200, displayName: 'Alpha' }];
+  assert.deepEqual(
+    computeBackNotifications(prev, next, { manuallyMessaged: messaged }),
+    [{ id: 'a', displayName: 'Alpha', lastResponseAt: 200 }],
+  );
 });
 
 test('edge: busy→offline / busy→disabled (ended with no user response) do not fire', () => {
@@ -181,4 +188,25 @@ test('notificationTitleFor uses the display name, no body content', () => {
 
 test('notificationTagFor is stable per agent so a new turn replaces the popup', () => {
   assert.equal(notificationTagFor('a'), 'aee-agent-back-a');
+});
+
+// ── foreground gate (#2409 AC1/AC2) ──────────────────────────────────────────
+
+test('isConsoleInForeground: only visible AND focused counts as foreground', () => {
+  // AC1 baseline: a hidden tab is away regardless of focus.
+  assert.equal(isConsoleInForeground({ visibilityState: 'hidden', hasFocus: () => true }), false);
+  // AC2: visible but the window lost OS focus (another app/monitor) is away.
+  assert.equal(isConsoleInForeground({ visibilityState: 'visible', hasFocus: () => false }), false);
+  // Being looked at: visible and focused.
+  assert.equal(isConsoleInForeground({ visibilityState: 'visible', hasFocus: () => true }), true);
+});
+
+test('isConsoleInForeground: a missing signal falls back to the other, missing doc is "away"', () => {
+  // No hasFocus → fall back to visibility only (visible ⇒ foreground).
+  assert.equal(isConsoleInForeground({ visibilityState: 'visible' }), true);
+  // No visibilityState → fall back to focus only.
+  assert.equal(isConsoleInForeground({ hasFocus: () => false }), false);
+  assert.equal(isConsoleInForeground({ hasFocus: () => true }), true);
+  // No document at all → treat as away (allow firing) rather than throw.
+  assert.equal(isConsoleInForeground(null), false);
 });

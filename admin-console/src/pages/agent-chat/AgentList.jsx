@@ -283,7 +283,14 @@ export default function AgentList({
   }, []);
 
   return (
-    <div role="listbox" style={{ display: 'flex', flexDirection: 'column' }}>
+    // A uniform `--eb-space-2` gutter around the whole list so the rounded team
+    // blocks (`TEAM_BLOCK_STYLE`) breathe on every side by the SAME amount that
+    // separates one team from the next (#2370 follow-up): without it the cards
+    // sat flush against the rail's top/left edge while only their `marginBottom`
+    // gap — and the scrollbar on the right — gave them any room. The inset also
+    // aligns the ungrouped "Single agents" rows to the same left edge as the
+    // cards' outer margin.
+    <div role="listbox" style={{ display: 'flex', flexDirection: 'column', padding: 'var(--eb-space-2)' }}>
       {visibleGroups.map((group) => (
         <GroupSection
           key={`${group.kind}:${group.id}`}

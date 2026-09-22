@@ -439,3 +439,76 @@ test('getAttachment: an over-cap file is refused (413) before any download', asy
     assert.equal(calls.length, 1); // refused on metadata, never downloaded
   });
 });
+
+// ── attachment upload (#2408) ─────────────────────────────────────────────────
+
+test('addAttachment: multipart POST with X-Atlassian-Token, returns the created attachment metadata', async () => {
+  await withFetch((url, opts) => {
+    assert.match(url, /\/rest\/api\/3\/issue\/KAN-6\/attachments$/);
+    assert.equal(opts.method, 'POST');
+    assert.match(opts.headers.Authorization, /^Basic /);
+    assert.equal(opts.headers['X-Atlassian-Token'], 'no-check'); // Jira's XSRF guard on this endpoint
+    assert.ok(opts.body instanceof FormData);           // multipart, not JSON
+    assert.equal(opts.headers['Content-Type'], undefined); // boundary set by fetch, not by hand
+    return { ok: true, status: 200, text: async () => JSON.stringify([
+      { id: 20099, filename: 'report.pdf', mimeType: 'application/pdf', size: 3, author: { displayName: 'Jane' } },
+    ]) };
+  }, async () => {
+    const att = await jc.addAttachment(CRED, 'KAN-6', { filename: 'report.pdf', buffer: Buffer.from('abc'), env: CRED.env });
+    assert.deepEqual(att, { id: '20099', filename: 'report.pdf', mimeType: 'application/pdf', size: 3, author: 'Jane', created: null, contentUrl: null });
+  });
+});
+
+test('addAttachment: an over-cap file is refused (413) before any request', async () => {
+  const calls = [];
+  await withFetch((url) => { calls.push(url); return { ok: true, status: 200, text: async () => '[]' }; }, async () => {
+    await assert.rejects(
+      () => jc.addAttachment(CRED, 'KAN-6', { filename: 'big.bin', buffer: Buffer.alloc(200), env: CRED.env, maxBytes: 100 }),
+      (e) => e.status === 413 && /over the 100-byte upload limit/.test(e.message),
+    );
+    assert.equal(calls.length, 0); // never uploaded
+  });
+});
+
+test('addAttachment: a 404 (unknown/foreign issue) is a mapped domain error carrying the status (AC4)', async () => {
+  await withFetch(() => ({ ok: false, status: 404, text: async () => 'no issue' }), async () => {
+    await assert.rejects(
+      () => jc.addAttachment(CRED, 'NOPE-1', { filename: 'a.txt', buffer: Buffer.from('x'), env: CRED.env }),
+      (e) => e.status === 404 && /not found/i.test(e.message),
+    );
+  });
+});
+
+test('addAttachment: a 413 from Jira (instance size limit) maps to a clear message', async () => {
+  await withFetch(() => ({ ok: false, status: 413, text: async () => 'too big' }), async () => {
+    await assert.rejects(
+      () => jc.addAttachment(CRED, 'KAN-6', { filename: 'a.bin', buffer: Buffer.from('x'), env: CRED.env }),
+      (e) => e.status === 413 && /larger than this Jira instance allows/i.test(e.message),
+    );
+  });
+});
+
+test('addAttachment: a transport failure is NOT retried — a retry would create a duplicate attachment (F6)', async () => {
+  const calls = [];
+  const orig = global.fetch;
+  global.fetch = async (url, opts) => {
+    calls.push(`${opts.method} ${new URL(url).pathname}`);
+    const e = new TypeError('fetch failed');
+    e.cause = { code: 'UND_ERR_SOCKET' };
+    throw e;
+  };
+  try {
+    await assert.rejects(
+      () => jc.addAttachment(CRED, 'KAN-6', { filename: 'a.txt', buffer: Buffer.from('x'), env: CRED.env }),
+      /fetch failed \(UND_ERR_SOCKET\)/,
+    );
+    assert.deepEqual(calls, ['POST /rest/api/3/issue/KAN-6/attachments']); // exactly one attempt
+  } finally { global.fetch = orig; }
+});
+
+test('addAttachment: a blank filename or missing buffer is a 400 before any request', async () => {
+  await withFetch(() => { throw new Error('must not be called'); }, async () => {
+    await assert.rejects(() => jc.addAttachment(CRED, 'KAN-6', { filename: '  ', buffer: Buffer.from('x'), env: CRED.env }), (e) => e.status === 400);
+    await assert.rejects(() => jc.addAttachment(CRED, 'KAN-6', { filename: 'a.txt', env: CRED.env }), (e) => e.status === 400);
+  });
+});

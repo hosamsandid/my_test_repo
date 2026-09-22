@@ -61,9 +61,10 @@ console.
 | **System Admin** | A **global flag on the record**, not a membership — see below. |
 | **Login password** | Optional. Stored only as a salted hash; the list shows just **Set** or **None** and the value is never readable back, not even by the account that set it. |
 
-The stored record carries two more fields this form does not expose: a GitHub
-handle (API-only) and the per-user chat font size, which the person sets for
-themselves in the console's **Settings**.
+The stored record carries three more fields this form does not expose: a GitHub
+handle (API-only) and two preferences the person sets for themselves in the
+console's **Settings** — the per-user chat font size and the opt-in to be
+notified when an agent they messaged is back.
 
 **Why the Subject cannot change.** It is not a display field with a lock on it —
 it is the identity every sign-in is matched against, and nothing else in the

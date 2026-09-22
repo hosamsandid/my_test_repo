@@ -15393,7 +15393,7 @@ app.post('/api/quickstart', heavyLimiter, async (req, res) => {
   while (loadEnvironment(envId)) {
     envId = `${baseEnvId}-${envSuffix++}`;
   }
-  const llmBinding = pickDefaultLlmBinding();
+  const llmBinding = pickDefaultLlmBinding({ creatorUserId: getScope(req).userId, teamId: null });
   // Stamp the creator as owner so a teamless user can see AND manage their own
   // environment: it has no team to be scoped to, and since #2078 an untiered
   // environment is invisible to a non-admin. `ownsEnvironment` (scope.js) is the
@@ -15852,6 +15852,25 @@ const DISPATCH_LABEL_RE = READY_LABEL_RE;
 const MAX_PARALLEL_MIN = 1;
 const MAX_PARALLEL_MAX = 50;
 
+// Is `ep` a provider the creator can bind as a new team/agent's env default at
+// CREATION time (§14 / E10 follow-up, #2360)? Three cases: a Global (service)
+// provider (everyone, durable), the creator's OWN personal provider (a
+// team-of-one lend to themselves — even a subscription is fine here; the E10
+// guard catches it only when a SECOND human joins), or a team provider whose set
+// already includes the new squad (the clone/reuse case). Checked by OWNERSHIP,
+// not the runtime lend — the creator's Team-Admin membership is written a phase
+// AFTER this, so `providerUsableByTeam`'s lend would not see them as a member yet.
+function providerUsableAtCreation(ep, { creatorUserId, teamId } = {}) {
+  if (!ep) return false;
+  if (isGlobalProvider(ep)) return true;
+  if (ep.scope === 'personal') return !!creatorUserId && String(ep.userId) === String(creatorUserId);
+  if (ep.scope === 'team') {
+    const set = Array.isArray(ep.teamIds) && ep.teamIds.length ? ep.teamIds : (ep.teamId ? [ep.teamId] : []);
+    return !!teamId && set.map(String).includes(String(teamId));
+  }
+  return false;
+}
+
 // The wizard doesn't surface an LLM endpoint chooser yet. Without binding
 // one on the env, the in-chat model picker shows "(no endpoint)" disabled
 // for every team-member — which is how teams looked broken compared to
@@ -15859,10 +15878,25 @@ const MAX_PARALLEL_MAX = 50;
 // Pick the first registered endpoint as a silent default; its operator-set
 // default model (or, as a backstop, the first entry in its catalogue) becomes
 // the env-level default. The user can change either later.
-function pickDefaultLlmBinding() {
+//
+// §14 / E10 follow-up (behind AEE_RESOURCE_ACCESS_V2): a blind `endpoints[0]`
+// could bind a provider the creator/team cannot actually use — a FOREIGN personal
+// provider (whose token the team would then silently run on: the orchestrator has
+// no runtime lend-gate), or a stranger's subscription. When a preference context
+// is supplied, prefer — in registry order, so an operator's intended ordering
+// still wins among usable ones — the first endpoint USABLE by the creator at
+// creation (`providerUsableAtCreation`), and only fall back to `endpoints[0]` when
+// none is usable (never make creation worse than today). Flag OFF, or no context,
+// is byte-identical to the legacy blind pick.
+function pickDefaultLlmBinding(pref) {
   const endpoints = listLlmEndpoints();
   if (endpoints.length === 0) return { llmEndpointId: null, defaultModelId: null };
-  const ep = endpoints[0];
+  let ep = endpoints[0];
+  if (RESOURCE_ACCESS_V2 && pref && pref.creatorUserId) {
+    const usable = endpoints.find(e => providerUsableAtCreation(e, pref));
+    if (usable) ep = usable;
+    else console.warn(`[api] no model provider is usable by the creator of '${pref.teamId || 'agent'}' — falling back to the first registered endpoint`);
+  }
   return {
     llmEndpointId: ep.id,
     defaultModelId: pickEndpointDefaultModel(ep),
@@ -16489,7 +16523,7 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         repositories: parsed ? [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }] : [],
         githubTokenId,
         mcpServers: normalizedMcpServers,
-        ...defaultLlmEndpointForTeam(),
+        ...defaultLlmEndpointForTeam({ creatorUserId: getScope(req).userId, teamId: teamAgentId }),
         additionalContext: '',
         // Owned by the team it was auto-created for (#2081). Without this the
         // record carries no tier at all, which since #2078 dropped the
@@ -17230,7 +17264,7 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
         repositories: parsed ? [{ url: parsed.httpsUrl, branch, sshKeyId: repository.sshKeyId }] : [],
         githubTokenId,
         mcpServers: normalizedMcpServers,
-        ...defaultLlmEndpointForTeam(),
+        ...defaultLlmEndpointForTeam({ creatorUserId: getScope(req).userId, teamId: teamAgentId }),
         additionalContext: '',
         // Owned by the team it was auto-created for (#2081). Without this the
         // record carries no tier at all, which since #2078 dropped the

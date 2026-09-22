@@ -90,6 +90,35 @@ test('model-options surfaces the soft personalProviderNotice behind the flag', (
   assert.match(body, /personalProviderNotice: providerRisk/);
 });
 
+// ── §14 / E10 follow-up: pickDefaultLlmBinding prefers a creator-usable provider ──
+
+test('providerUsableAtCreation covers global / own-personal / new-squad team, by ownership', () => {
+  const start = SRC.indexOf('function providerUsableAtCreation(');
+  assert.ok(start > 0, 'providerUsableAtCreation not found');
+  const body = SRC.slice(start, SRC.indexOf('\n}', start));
+  assert.match(body, /if \(isGlobalProvider\(ep\)\) return true;/);
+  // Ownership-direct (NOT the runtime lend): the creator's membership is written
+  // a phase later, so the personal case matches on userId, not on membership.
+  assert.match(body, /ep\.scope === 'personal'\) return .*String\(ep\.userId\) === String\(creatorUserId\)/s);
+  assert.match(body, /ep\.scope === 'team'/);
+});
+
+test('pickDefaultLlmBinding is gated and falls back to endpoints[0]', () => {
+  const start = SRC.indexOf('function pickDefaultLlmBinding(');
+  const body = SRC.slice(start, SRC.indexOf('\n}', start));
+  // Legacy blind pick is the untouched default.
+  assert.match(body, /let ep = endpoints\[0\];/);
+  // The preference is dark unless the flag is on AND a creator context is given.
+  assert.match(body, /if \(RESOURCE_ACCESS_V2 && pref && pref\.creatorUserId\)/);
+  assert.match(body, /endpoints\.find\(e => providerUsableAtCreation\(e, pref\)\)/);
+});
+
+test('every team/agent creation site passes a creatorUserId preference', () => {
+  // Standalone quick-create + both POST /api/teams handlers (non-stream + stream).
+  const calls = SRC.match(/(pickDefaultLlmBinding|defaultLlmEndpointForTeam)\(\{ creatorUserId: getScope\(req\)\.userId/g) || [];
+  assert.ok(calls.length >= 3, `expected ≥3 preference-passing creation sites, found ${calls.length}`);
+});
+
 // ── Multi-team providers: co-owned management + team-set + clone auto-append (#2360) ──
 
 test('canManageProvider is co-owned: any team in the set (flagged), else legacy', () => {

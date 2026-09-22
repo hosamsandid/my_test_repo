@@ -392,6 +392,11 @@ deliberate manual act.)
   memberships-`POST` branch — the hard growth-direction guard.
 - `admin-console/api/api.js` `providerUsableByTeam` (binding-direction withdrawal)
   + `teamHumanMemberCount` + the `model-options` `personalProviderNotice`.
-- **Follow-up (not yet done):** `pickDefaultLlmBinding()` should prefer a provider
-  the creator can actually use (own personal / global) over a blind `endpoints[0]`,
-  so a fresh team is never auto-bound to a foreign or unusable provider.
+- `admin-console/api/api.js` `pickDefaultLlmBinding(pref)` +
+  `providerUsableAtCreation` — a fresh team/agent's env default now prefers, in
+  registry order, the first provider USABLE by the creator (global / own-personal /
+  new-squad team), falling back to `endpoints[0]` only when none is usable; so a
+  blind pick can no longer bind a foreign personal provider whose token the team
+  would silently run on (the orchestrator has no runtime lend-gate). Checked by
+  ownership — the creator's membership is written a phase later. Passed at all
+  three creation sites (standalone quick-create + both `POST /api/teams` handlers).

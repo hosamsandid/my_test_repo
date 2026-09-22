@@ -32,7 +32,7 @@
       ]
     }
   ],
-  "platforms": ["podman"],
+  "platforms": ["podman", "kubernetes"],
   "scopes": ["team"],
   "defaultScopeGranularity": "team",
   "quota": {

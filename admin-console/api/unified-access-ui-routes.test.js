@@ -47,3 +47,16 @@ test('GET /api/admin/personal-resources is flag-gated, System-Admin-only, and ma
   // a record that could leak a token/baseUrl.
   assert.doesNotMatch(body, /authTokenId|baseUrl|privateKey/, 'the route must not touch secret-bearing fields');
 });
+
+// ── Agent-Team re-key: providerUsableByTeam matches the agent-team id (#2360) ──
+
+test('providerUsableByTeam adds an agent-team team-service match behind the flag, keeping the legacy tenant match', () => {
+  const start = SRC.indexOf('function providerUsableByTeam(');
+  assert.ok(start > 0, 'providerUsableByTeam not found');
+  const body = SRC.slice(start, SRC.indexOf('\n}', start));
+  // Legacy compat: the tenant match stays (a 'default'-stamped provider works).
+  assert.match(body, /credentialVisibleToTeam\(ep, teamId\)/);
+  // The re-key: a team provider stamped with the AGENT TEAM id is usable, gated.
+  assert.match(body, /if \(!RESOURCE_ACCESS_V2 \|\| !agentTeamId\) return false;/);
+  assert.match(body, /ep\.scope === 'team' && ep\.teamId === agentTeamId/);
+});

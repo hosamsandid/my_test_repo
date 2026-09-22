@@ -5302,9 +5302,16 @@ function providerUsableByTeam(ep, teamId, agentTeamId) {
   // index is keyed by the squad (the same space `resolveScopeOwner` /
   // credential-resolution's baseline owner use), so checking membership in the
   // tenant space would silently never match. `credentialVisibleToTeam` above
-  // keeps using `teamId` — that is how team-scoped providers are stamped today,
+  // keeps using `teamId` — that is how legacy team-scoped providers are stamped,
   // unchanged.
-  return RESOURCE_ACCESS_V2 && !!agentTeamId && personalLendToTeam(ep, agentTeamId, isMemberOfTeam);
+  if (!RESOURCE_ACCESS_V2 || !agentTeamId) return false;
+  // #2360 re-key: a TEAM-scoped provider stamped with the AGENT TEAM id is usable
+  // by that squad's agents — this is what makes "Team = the Agent Team" real.
+  // `credentialVisibleToTeam` above still matches a legacy provider stamped with
+  // the vestigial tenant ('default'), so old bindings keep working with no data
+  // migration; this only ADDS the agent-team space.
+  if (ep && ep.scope === 'team' && ep.teamId === agentTeamId) return true;
+  return personalLendToTeam(ep, agentTeamId, isMemberOfTeam);
 }
 
 function usableEndpointsForTeam(teamId, agentTeamId) {

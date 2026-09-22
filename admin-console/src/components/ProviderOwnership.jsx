@@ -69,6 +69,12 @@ export default function ProviderOwnership({ value, onChange, options = [], teams
                   style={{ ...selectStyle, marginTop: 'var(--eb-space-1)', marginLeft: 'var(--eb-space-5)', minWidth: 240 }}
                 >
                   {!own.teamId && <option value="">Select a team…</option>}
+                  {/* A legacy record stamped with a team id not in the current
+                      agent-team list (e.g. the old 'default') stays visible +
+                      selected rather than silently blanked; pick a real team to migrate it. */}
+                  {own.teamId && !teams.some(t => t.id === own.teamId) && (
+                    <option value={own.teamId}>{own.teamId} (legacy — pick a team to migrate)</option>
+                  )}
                   {teams.map(t => <option key={t.id} value={t.id}>{t.name || t.id}</option>)}
                 </select>
               )}

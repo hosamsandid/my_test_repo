@@ -1065,9 +1065,20 @@ export default function ModelRegistry() {
   const { data: endpoints, loading, error, refetch } = useApi('/api/llm-endpoints');
   const { data: envFallback } = useApi('/api/llm-env-fallback');
   const { data: teamsData } = useApi('/api/admin/teams');
+  const { data: agentsData } = useApi('/api/agents');
   const { user } = useAuth();
-  const teams = Array.isArray(teamsData) ? teamsData : [];
-  const names = teamsById(teams);
+  const resourceAccessV2 = useResourceAccessV2();
+  const humanTeams = Array.isArray(teamsData) ? teamsData : [];
+  // #2360 re-key: under the flag, "Team" means an AGENT TEAM (a role:'team'
+  // agent), not the vestigial human-team collection — so the Ownership dropdown
+  // lists agent teams. The table's name lookup merges both spaces so a legacy
+  // 'default'-stamped provider still resolves to a readable name. Off the flag
+  // this is byte-identical to before (teams = humanTeams).
+  const agentTeams = (Array.isArray(agentsData) ? agentsData : [])
+    .filter(a => a && a.role === 'team')
+    .map(a => ({ id: a.id, name: a.displayName || a.id }));
+  const teams = resourceAccessV2 ? agentTeams : humanTeams;
+  const names = { ...teamsById(humanTeams), ...teamsById(agentTeams) };
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
   const caller = { isSysAdmin, adminTeamIds };

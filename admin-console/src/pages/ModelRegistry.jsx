@@ -16,7 +16,7 @@ import ProviderOwnership from '../components/ProviderOwnership';
 import {
   providerOwnershipOptions, defaultProviderOwnership, providerOwnershipFromRecord,
   providerOwnershipPayload, providerOwnershipReady, canManageProviderClient,
-  providerScopeLabel,
+  providerScopeLabel, providerScopeShowsDetail,
 } from './provider-ownership-view';
 import { useAuth } from '../auth/AuthContext';
 import { useResourceAccessV2 } from '../context/ResourceAccessContext';
@@ -33,7 +33,7 @@ import {
 } from './llm-probe-state';
 import { groupAgentsByTeam, hiddenAgentsNotice, boundAgentsLead, respawnFailureLead } from './group-agents-by-team.js';
 import { describeSubmitState } from './model-provider-submit-state.js';
-import { endpointAssistExclusion } from '../context/assist-selector-exclusion.js';
+import { endpointAssistExclusion, assistExclusionInName, assistExclusionInBaseUrl } from '../context/assist-selector-exclusion.js';
 import { usePageActions } from '../context/PageActionsContext';
 import { healthCellModel, healthCellDetail } from './provider-health-view.js';
 import { useHelpSubject } from '../context/HelperChatContext';
@@ -1116,20 +1116,12 @@ export default function ModelRegistry() {
     if (fresh && fresh !== editing) setEditing(fresh);
   }, [endpoints]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // #2405: the leading ID column was dropped — it duplicated what Name already
+  // identifies and widened the row. Removing it here also removes the provider
+  // id from the filter (DataTable matches across every column's `key`) and from
+  // the auto-derived filter placeholder, so an id value is no longer searchable
+  // and "ID" no longer appears in the hint.
   const COLUMNS = [
-    {
-      key: 'id',
-      label: 'ID',
-      render: (v, row) => row.readOnly
-        ? <span style={{
-            display: 'inline-flex', alignItems: 'center', gap: 4,
-            padding: '0 var(--eb-space-2)', borderRadius: 'var(--eb-radius-sm)',
-            background: 'var(--eb-bg-elevated)',
-            color: 'var(--eb-text-muted)',
-            fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)',
-          }} title="Synthetic record reflecting .env"><Lock size={11} />.env</span>
-        : <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span>,
-    },
     {
       key: 'name',
       label: 'Name',
@@ -1146,34 +1138,24 @@ export default function ModelRegistry() {
             </span>
           );
         }
-        // AC1 / AC2 (#1402): badge explaining why this provider is excluded from assist.
+        // Badge explaining why this provider is excluded from assist (#1402).
+        // #2405: only the team-scope ("Not your teams") badge stays in the Name
+        // column — the oauth ("Agents only") badge moved to the Base URL cell
+        // next to "Subscription (OAuth)", the reason it exists.
         const exclusion = endpointAssistExclusion(row, userTeamIds, isSysAdmin);
-        if (!exclusion) return v;
-        const badgeStyle = {
-          fontSize: 'var(--eb-text-xs)',
-          padding: '0 var(--eb-space-2)',
-          borderRadius: 'var(--eb-radius-sm)',
-          border: '1px solid var(--eb-border-default)',
-          whiteSpace: 'nowrap',
-          flexShrink: 0,
-        };
-        const [badgeText, badgeTitle] = exclusion === 'oauth'
-          ? [
-              'Agents only',
-              "A subscription (OAuth) provider drives agent chat, but can't be used for server-side assist features (Flow Copilot, suggestions). Add an API-key provider to use the assist selector.",
-            ]
-          : [
-              'Not your teams',
-              'This provider is not assigned to any of your teams and will not appear in the assist model selector. A System Admin can assign it on this page.',
-            ];
+        if (!assistExclusionInName(exclusion)) return v;
         return (
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', maxWidth: '100%' }}>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v}</span>
-            <span title={badgeTitle} style={{
-              ...badgeStyle,
-              color: exclusion === 'oauth' ? 'var(--eb-text-secondary)' : 'var(--eb-status-warning)',
-              borderColor: exclusion === 'oauth' ? 'var(--eb-border-default)' : 'var(--eb-status-warning)',
-            }}>{badgeText}</span>
+            <span title="This provider is not assigned to any of your teams and will not appear in the assist model selector. A System Admin can assign it on this page." style={{
+              fontSize: 'var(--eb-text-xs)',
+              padding: '0 var(--eb-space-2)',
+              borderRadius: 'var(--eb-radius-sm)',
+              border: '1px solid var(--eb-status-warning)',
+              whiteSpace: 'nowrap',
+              flexShrink: 0,
+              color: 'var(--eb-status-warning)',
+            }}>Not your teams</span>
           </span>
         );
       },
@@ -1201,14 +1183,18 @@ export default function ModelRegistry() {
             </span>
           );
         }
+        // #2405: keep the Team-scope detail (the assigned team name(s) — real
+        // information) but drop the Personal detail ("Only you and the agents you
+        // own"), which merely repeats what the "Personal" pill already conveys.
+        const showDetail = providerScopeShowsDetail(s.scope);
         return (
           <span style={{ fontSize: 'var(--eb-text-xs)' }}>
             <span style={{
               display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
               background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
-              fontWeight: 'var(--eb-font-medium)', marginRight: 'var(--eb-space-2)',
+              fontWeight: 'var(--eb-font-medium)', marginRight: showDetail ? 'var(--eb-space-2)' : 0,
             }}>{s.label}</span>
-            <span style={{ color: 'var(--eb-text-muted)' }}>{s.detail}</span>
+            {showDetail && <span style={{ color: 'var(--eb-text-muted)' }}>{s.detail}</span>}
           </span>
         );
       },
@@ -1216,14 +1202,37 @@ export default function ModelRegistry() {
     {
       key: 'baseUrl',
       label: 'Base URL',
-      render: (v, row) => row.authType === 'oauth-token'
-        ? <span title="Anthropic subscription (OAuth) — talks directly to api.anthropic.com" style={{
-            display: 'inline-flex', alignItems: 'center', gap: 4,
-            padding: '0 var(--eb-space-2)', borderRadius: 'var(--eb-radius-sm)',
-            background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
-            fontSize: 'var(--eb-text-xs)',
-          }}><LogIn size={11} /> Subscription (OAuth)</span>
-        : <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span>,
+      render: (v, row) => {
+        if (row.authType !== 'oauth-token') {
+          return <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span>;
+        }
+        // #2405: the "Agents only" tag now sits next to the "Subscription (OAuth)"
+        // label — the OAuth subscription is precisely why the provider is
+        // agent-chat-only and excluded from server-side assist — instead of by
+        // the provider name. Same visibility set it had in the Name column.
+        const agentsOnly = assistExclusionInBaseUrl(endpointAssistExclusion(row, userTeamIds, isSysAdmin));
+        return (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+            <span title="Anthropic subscription (OAuth) — talks directly to api.anthropic.com" style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              padding: '0 var(--eb-space-2)', borderRadius: 'var(--eb-radius-sm)',
+              background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
+              fontSize: 'var(--eb-text-xs)',
+            }}><LogIn size={11} /> Subscription (OAuth)</span>
+            {agentsOnly && (
+              <span title="A subscription (OAuth) provider drives agent chat, but can't be used for server-side assist features (Flow Copilot, suggestions). Add an API-key provider to use the assist selector." style={{
+                fontSize: 'var(--eb-text-xs)',
+                padding: '0 var(--eb-space-2)',
+                borderRadius: 'var(--eb-radius-sm)',
+                border: '1px solid var(--eb-border-default)',
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
+                color: 'var(--eb-text-secondary)',
+              }}>Agents only</span>
+            )}
+          </span>
+        );
+      },
     },
     {
       key: 'tokenPreview',

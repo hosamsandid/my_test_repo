@@ -7,6 +7,7 @@ import {
   providerOwnershipPayload,
   providerOwnershipReady,
   providerScopeLabel,
+  providerScopeShowsDetail,
 } from './provider-ownership-view.js';
 
 const byValue = (opts) => Object.fromEntries(opts.map(o => [o.value, o]));
@@ -97,4 +98,13 @@ test('providerScopeLabel: legacy system records collapse EXACTLY as the dialog d
   // an unknown team id falls back to the raw id (no name in the map)
   assert.deepEqual(providerScopeLabel({ scope: 'team', teamId: 'ghost' }, names),
     { scope: 'team', label: 'Team', detail: 'ghost' });
+});
+
+test('providerScopeShowsDetail: Ownership cell renders detail only for Team scope (#2405)', () => {
+  // Team detail is the assigned team name(s) — real information, kept.
+  assert.equal(providerScopeShowsDetail('team'), true);
+  // Personal detail ("Only you and the agents you own") repeats the pill — dropped.
+  assert.equal(providerScopeShowsDetail('personal'), false);
+  // Global renders its own single pill upstream, no detail.
+  assert.equal(providerScopeShowsDetail('global'), false);
 });

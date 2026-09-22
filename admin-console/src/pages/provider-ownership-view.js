@@ -128,6 +128,15 @@ export function providerScopeLabel(rec, names = {}) {
   };
 }
 
+// Whether the Ownership cell should render the descriptor `detail` beside the
+// scope pill (#2405). Only Team scope carries real extra information (the
+// assigned team name(s)); Personal's detail ("Only you and the agents you own")
+// merely repeats what the "Personal" pill already says, so it is dropped to
+// declutter the column. Global renders its own single pill upstream (no detail).
+export function providerScopeShowsDetail(scope) {
+  return scope === 'team';
+}
+
 // Reduce the control state to the API body fields. For team(s): `teamId` = the
 // primary (first) for backward-compat, `teamIds` = the full set. `global` is
 // carried explicitly so an edit can RETRACT it.

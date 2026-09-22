@@ -87,3 +87,16 @@ export function endpointAssistExclusion(ep, userTeamIds, isSysAdmin) {
   if (!isSelectableByTeams(ep, teamIdSet)) return 'team-scope';
   return null;
 }
+
+// Where each assist-exclusion badge renders on the Model Providers table (#2405).
+// The oauth ("Agents only") badge moved next to the "Subscription (OAuth)" label
+// in the Base URL cell — the OAuth subscription IS the reason the provider is
+// agent-chat-only — while the team-scope ("Not your teams") badge stays by the
+// provider name, where it has no natural Base-URL home. Pure so the placement
+// rule is unit-tested without mounting ModelRegistry.
+export function assistExclusionInBaseUrl(exclusion) {
+  return exclusion === 'oauth';
+}
+export function assistExclusionInName(exclusion) {
+  return exclusion === 'team-scope';
+}

@@ -33,16 +33,20 @@ test('resolveContextWindowTokens: handles missing/malformed input', () => {
   assert.equal(resolveContextWindowTokens({ id: '' }), null);
 });
 
-test('computeContextFillLevel: normal below the warning threshold', () => {
+test('computeContextFillLevel: normal below the 50% warning threshold (#2382)', () => {
   assert.deepEqual(computeContextFillLevel(40_000, 200_000), { pct: 20, level: 'normal' });
+  // just under the boundary is still normal
+  assert.deepEqual(computeContextFillLevel(98_000, 200_000), { pct: 49, level: 'normal' });
 });
 
-test('computeContextFillLevel: warning at and above 70%', () => {
+test('computeContextFillLevel: warning at and above 50%, below 75% (#2382)', () => {
+  assert.deepEqual(computeContextFillLevel(100_000, 200_000), { pct: 50, level: 'warning' });
   assert.deepEqual(computeContextFillLevel(140_000, 200_000), { pct: 70, level: 'warning' });
-  assert.deepEqual(computeContextFillLevel(160_000, 200_000), { pct: 80, level: 'warning' });
+  assert.deepEqual(computeContextFillLevel(148_000, 200_000), { pct: 74, level: 'warning' });
 });
 
-test('computeContextFillLevel: critical at and above 90%', () => {
+test('computeContextFillLevel: critical at and above 75% (#2382)', () => {
+  assert.deepEqual(computeContextFillLevel(150_000, 200_000), { pct: 75, level: 'critical' });
   assert.deepEqual(computeContextFillLevel(180_000, 200_000), { pct: 90, level: 'critical' });
 });
 

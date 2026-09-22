@@ -27,6 +27,7 @@ const fs = require('fs');
 const path = require('path');
 
 const {
+  withUnexpectedErrors,
   verifyScopeToken,
   mint,
   auditWriter,
@@ -600,15 +601,13 @@ async function handleRequest(req, res) {
 // a status + message above, so anything landing here is a broker bug. The stack
 // goes to stderr (podman logs); the client gets a generic body — an internal
 // message/stack is not the agent's to read (CodeQL js/stack-trace-exposure).
-const httpServer = http.createServer((req, res) => {
-  handleRequest(req, res).catch((err) => {
-    try {
-      process.stderr.write(`[jira-broker] unhandled request error: ${(err && err.stack) || String(err)}\n`);
-    } catch { /* ignore */ }
-    if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
-    try { res.end(JSON.stringify({ error: 'internal server error' })); } catch { /* ignore */ }
-  });
-});
+// Last-resort catch: every route already maps upstream/validation failures to
+// a status + message above, so anything landing here is a broker bug. The
+// operator keeps the detail; the client gets a generic body (CodeQL
+// js/stack-trace-exposure). Via the SDK wrapper rather than an inline .catch():
+// it also contains a SYNCHRONOUS throw raised before the handler returns a
+// promise, which the inline form could not.
+const httpServer = http.createServer(withUnexpectedErrors('jira-broker', handleRequest));
 
 if (require.main === module) {
   httpServer.listen(PORT, () => process.stdout.write(`[jira-broker] listening on :${PORT}\n`));

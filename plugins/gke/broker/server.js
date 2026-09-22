@@ -24,6 +24,7 @@
 const http = require('http');
 
 const {
+  withUnexpectedErrors,
   verifyScopeToken,
   auditWriter,
   maskSecretsOrDefault,
@@ -247,12 +248,7 @@ async function handleRequest(req, res) {
   await transport.handleRequest(req, res);
 }
 
-const httpServer = http.createServer((req, res) => {
-  handleRequest(req, res).catch((err) => {
-    if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
-    try { res.end(JSON.stringify({ error: (err && err.message) || String(err) })); } catch { /* ignore */ }
-  });
-});
+const httpServer = http.createServer(withUnexpectedErrors('gke-broker', handleRequest));
 
 if (require.main === module) {
   httpServer.listen(PORT, () => process.stdout.write(`[gke-broker] listening on :${PORT}\n`));

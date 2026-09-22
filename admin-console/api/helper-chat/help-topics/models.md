@@ -30,7 +30,7 @@ Any endpoint that speaks the **Anthropic Messages API** works — the Anthropic 
 itself, a LiteLLM proxy, an Azure AI Foundry wrapper, or an internal enterprise
 gateway.
 
-The table on this page is that list of providers, one row each: its **ID** and
+The table on this page is that list of providers, one row each: its
 **Name**, the **Scope / Teams** that owns it (a *Team* provider belongs to one
 team; a *System* provider is assigned to the teams listed beside it, or reads
 *Unassigned*; a **Global** provider shows a single *Global* pill because it

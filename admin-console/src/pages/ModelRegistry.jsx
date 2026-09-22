@@ -16,11 +16,12 @@ import ProviderOwnership from '../components/ProviderOwnership';
 import {
   providerOwnershipOptions, defaultProviderOwnership, providerOwnershipFromRecord,
   providerOwnershipPayload, providerOwnershipReady, canManageProviderClient,
+  providerScopeLabel,
 } from './provider-ownership-view';
 import { useAuth } from '../auth/AuthContext';
 import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import {
-  teamsById, credentialScopeLabel,
+  teamsById,
   canReassignCredentialClient, adminTeamIdsOf,
 } from './credential-scope-view';
 import {
@@ -1153,8 +1154,8 @@ export default function ModelRegistry() {
         };
         const [badgeText, badgeTitle] = exclusion === 'oauth'
           ? [
-              'Not for assist',
-              'OAuth subscription tokens cannot be used for server-side assist calls. Add an API-key provider to use the assist selector.',
+              'Agents only',
+              "A subscription (OAuth) provider drives agent chat, but can't be used for server-side assist features (Flow Copilot, suggestions). Add an API-key provider to use the assist selector.",
             ]
           : [
               'Not your teams',
@@ -1173,14 +1174,20 @@ export default function ModelRegistry() {
       },
     },
     {
-      key: '_scope', label: 'Scope / Teams', sortable: false,
+      // #2360 follow-up: the "Ownership" column mirrors the edit dialog's one-axis
+      // taxonomy (Personal / Team(s) / Global) via `providerScopeLabel`, which is
+      // built on the SAME `providerOwnershipFromRecord` the dialog opens with — so
+      // the row and the dialog can never disagree (the old `credentialScopeLabel`
+      // showed a stale "System" for a team-assigned provider).
+      key: '_scope', label: 'Ownership', sortable: false,
       render: (_, row) => {
         if (row.readOnly) return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
-        // #2136: a global provider is usable by everyone, so its team assignment
-        // is moot — show a single "Global" pill instead of the scope/teams detail.
-        if (row.global) {
+        const s = providerScopeLabel(row, names);
+        // A global provider is usable by everyone, so its team assignment is moot
+        // (#2136): a single accented "Global" pill instead of the scope/teams detail.
+        if (s.scope === 'global') {
           return (
-            <span style={{ fontSize: 'var(--eb-text-xs)' }} title="Available to every user and agent — no team required">
+            <span style={{ fontSize: 'var(--eb-text-xs)' }} title={s.detail}>
               <span style={{
                 display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
                 background: 'var(--eb-accent-subtle, var(--eb-bg-elevated))', color: 'var(--eb-accent, var(--eb-text-secondary))',
@@ -1189,7 +1196,6 @@ export default function ModelRegistry() {
             </span>
           );
         }
-        const s = credentialScopeLabel(row, names);
         return (
           <span style={{ fontSize: 'var(--eb-text-xs)' }}>
             <span style={{

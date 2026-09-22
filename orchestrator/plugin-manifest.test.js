@@ -543,12 +543,13 @@ test('the shipped jira manifest (plugins/jira) is valid', () => {
   assert.deepEqual(manifest.sidecar.capabilities, ['egress']);
   assert.deepEqual(manifest.credentials.map((c) => c.key), ['site-url', 'email', 'api-token']);
   assert.ok(manifest.credentials.every((c) => c.required === true));
-  // Team scope only — a Jira site binding is a team-level fact (§6.1). Podman
-  // only for v1 — the agent→broker network path is Podman-only, so a k8s stack
-  // would wake agents that then cannot read the ticket (§6.1 corrected):
+  // Team scope only — a Jira site binding is a team-level fact (§6.1). Runs on
+  // Podman AND Kubernetes: the broker is structurally identical to github-issues
+  // (egress sidecar + UI + per-scope credential), which is already
+  // kubernetes-eligible, so the agent→broker network path holds on both runtimes.
   assert.deepEqual(manifest.scopes, ['team']);
   assert.equal(defaultGranularity(manifest), 'team');
-  assert.deepEqual(manifest.platforms, ['podman']);
+  assert.deepEqual(manifest.platforms, ['podman', 'kubernetes']);
   assert.equal(manifest.cli.name, 'aee-jira');
   assert.equal(manifest.quota.maxObjects, 500);
   // Phase 3 read UI (`/` @ team-member) + Phase 4 write config (`/admin` @

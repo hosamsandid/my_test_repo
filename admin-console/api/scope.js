@@ -664,6 +664,10 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [], 
   const chatFontSize = (self && Number.isFinite(self.chatFontSize))
     ? self.chatFontSize
     : CHAT_FONT_SIZE_DEFAULT;
+  // Per-user opt-in for the "an agent you messaged is back" browser notification
+  // (#2397). Off by default; anyone without a record (env single-admin) gets the
+  // off default too.
+  const chatNotifyOnBack = !!(self && self.chatNotifyOnBack === true);
   return {
     admin: scope.all,                    // full visibility: env admin OR System Admin
     envAdmin,                            // env single-admin credential
@@ -675,6 +679,7 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [], 
     userId: scope.userId,
     githubHandle,
     chatFontSize,
+    chatNotifyOnBack,
     teams,
   };
 }

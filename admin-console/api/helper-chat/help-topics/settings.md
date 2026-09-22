@@ -2,7 +2,7 @@
 id: settings
 routes: ["modal:settings"]
 title: Settings
-summary: Your four personal preferences — how the chat composer sends, which Model Provider AI helpers bill against, and how the console looks. All of them are per-person; none of them changes what an agent runs on.
+summary: Your five personal preferences — how the chat composer sends, whether an agent you messaged pings you when it is back, which Model Provider AI helpers bill against, and how the console looks. All of them are per-person; none of them changes what an agent runs on.
 seeAlso:
   - { label: "Model Providers", to: "/models" }
   - { label: "Agent Chat", to: "/chats" }
@@ -13,13 +13,14 @@ askPrompts:
   - "Why is the Assist model picker highlighted?"
   - "Will my theme and send-key choice follow me to another browser?"
   - "What is the difference between IDE style and Chat style?"
+  - "Can the console notify me when an agent I messaged finishes?"
   - "Why can I not pick a subscription (OAuth) provider for assist calls?"
   - "Why did my colleague's theme change when I changed mine?"
 ---
 
 ## What this dialog is
 
-Four **personal** preferences, reached from the account menu. Nothing here is
+Five **personal** preferences, reached from the account menu. Nothing here is
 platform configuration: no other person's console changes, and no agent's
 behaviour changes. Everything applies immediately — there is no Save button and
 nothing to confirm, so closing the dialog never discards anything.
@@ -36,7 +37,7 @@ Each section's "?" opens this topic at that section's chapter.
 
 ## Behavior — how the composer sends
 
-One choice, the **send keybinding**, shared by every Agent Chat composer:
+The first choice, the **send keybinding**, is shared by every Agent Chat composer:
 
 | Preset | Enter | Send |
 |---|---|---|
@@ -56,6 +57,23 @@ everywhere else. Two details the table cannot show:
 The change reaches an already-open chat immediately — the composer listens for
 the change rather than reading the preference once at mount, so you do not need
 to reload or switch agents.
+
+The second choice, **Notify when an agent you messaged is back**, is off by
+default. Turn it on and the console asks your browser for notification
+permission; from then on, when an agent *you personally messaged* finishes its
+turn, a browser notification pops with the agent's name — but only while this
+tab is not the one you are looking at, so it never interrupts you where you
+already are. Clicking it brings the console forward and opens that chat. Two
+things bound it:
+
+- **Only chats you started by messaging.** A run kicked off by a label, a
+  schedule or a GitHub event never pings you — the notification is the reply to
+  a message you sent yourself, this browser session. A reload starts that list
+  fresh.
+- **The browser has the final say.** If notifications are blocked for the site,
+  the toggle says so and points you at the padlock in the address bar to
+  re-enable them; a browser with no notification support disables the toggle
+  with a note. Turning it on and off reaches the app immediately, with no reload.
 
 ## Model — which provider AI helpers bill against
 
@@ -108,7 +126,7 @@ changes the *messages* only — the rest of the console keeps its own sizing.
 
 ## Where these preferences live
 
-This is the part that surprises people, because the four preferences do not all
+This is the part that surprises people, because the five preferences do not all
 live in the same place:
 
 | Preference | Stored |
@@ -117,12 +135,13 @@ live in the same place:
 | Theme | in this browser only, for **anyone** who uses it |
 | Assist model | in this browser, **per signed-in username** |
 | Chat font size | on **your user record** (server), with a browser fallback |
+| Notify when an agent is back | on **your user record** (server), with a browser fallback |
 
 Three consequences:
 
-- **The chat font size follows you.** Sign in on another machine and it is
-  already right, because it is stored on your user record and read back with
-  your session.
+- **The chat font size and the notification opt-in follow you.** Sign in on
+  another machine and both are already right, because they are stored on your
+  user record and read back with your session.
 - **Theme and send keybinding do not follow you** — and they are not even tied
   to *you*. They belong to the browser profile, so on a shared or kiosk machine
   the next person inherits whatever you last chose. A fresh browser starts at the

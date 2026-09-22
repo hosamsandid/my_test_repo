@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { MessageCircle, Bot, Server, Users, ChevronDown, ChevronRight, GripVertical, MoreVertical, Loader2 } from 'lucide-react';
 
 import { computeReorder, dropPosition } from './agent-list-dnd.js';
 import { groupEnvironmentName, rowEnvironmentName } from './agent-list-env.js';
 import { buildGroups, groupKey, orderModel, filterModel, stubSectionLabel, poolInstancesLabel } from './agent-list-model.js';
+import { teamMembershipIndicator, membershipsByTeam, fitAdminNames } from './team-membership-view.js';
 import { agentState, isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
 
 // Re-exported so `AgentChat` can populate the filter dropdown without importing
@@ -19,6 +20,13 @@ const ORDER_KEY = 'agentChat.sidebarOrder';
  * default would change identity each time and defeat `React.memo`).
  */
 const EMPTY_BUSY = new Set();
+
+/**
+ * Shared empty membership list handed to a team group that has no rows in the
+ * `GET /api/admin/memberships` payload — a *stable* reference so a memoized
+ * `GroupSection` for such a team is never re-rendered by a fresh `[]` each poll.
+ */
+const EMPTY_MEMBERSHIPS = [];
 
 /**
  * Per-entity collapse-state defaults, keyed by `kind` in the same `<kind>:<id>`
@@ -110,6 +118,12 @@ function saveOrder(order) {
  *   selection onto the team (via `onSelect`) and opens the Settings tab for it
  *   — a team hosts no chat of its own, so selecting one is otherwise a dead
  *   end. Omitted → the header row only toggles/selects, same as before.
+ * @param {object[]} memberships  Flat `GET /api/admin/memberships` payload (all
+ *   of the caller's teams), driving the team-header membership indicator (#2381).
+ * @param {object[]} directory    `GET /api/users/directory` — resolves member
+ *   ids to display names for that indicator.
+ * @param {string|null} viewerId  The viewing user's id, so a team-of-one reads
+ *   as "Own" for its owner and as that person's name for anyone else.
  */
 export default function AgentList({
   agents,
@@ -121,7 +135,15 @@ export default function AgentList({
   busyIds = EMPTY_BUSY,
   onRequestMenu = null,
   onOpenTeamSettings = null,
+  memberships = EMPTY_MEMBERSHIPS,
+  directory = EMPTY_MEMBERSHIPS,
+  viewerId = null,
 }) {
+  // Index memberships by team id once per membership change (#2381). Rebuilds
+  // only when the polled `memberships` array identity changes — the hook keeps
+  // that reference stable across no-op polls — so a team header is not re-grouped
+  // every 5s.
+  const membershipMap = useMemo(() => membershipsByTeam(memberships), [memberships]);
   const [sidebarOrder, setSidebarOrder] = useState(loadOrder);
   useEffect(() => { saveOrder(sidebarOrder); }, [sidebarOrder]);
 
@@ -309,6 +331,9 @@ export default function AgentList({
           onRequestMenu={onRequestMenu}
           onOpenTeamSettings={onOpenTeamSettings}
           isEntityCollapsed={isCollapsed}
+          teamMemberships={membershipMap.get(group.id) || EMPTY_MEMBERSHIPS}
+          directory={directory}
+          viewerId={viewerId}
         />
       ))}
 
@@ -366,6 +391,9 @@ const GroupSection = React.memo(function GroupSection({
   busyIds,
   onRequestMenu,
   onOpenTeamSettings,
+  teamMemberships,
+  directory,
+  viewerId,
 }) {
   const Icon = Users;
   const stubs = group.stubs || [];
@@ -393,9 +421,19 @@ const GroupSection = React.memo(function GroupSection({
   const headerMenu = onRequestMenu
     ? anchor => onRequestMenu({ kind: 'team', group }, anchor)
     : null;
-  // The Working Environment shared by this group's rows is shown once, on the
-  // header; rows that inherit it drop their own line (#1451).
+  // The Working Environment shared by this group's rows is still hoisted to the
+  // group for its MEMBER rows (#1451) — they inherit it and drop their own line
+  // — but since #2381 it is no longer shown on the header itself: that line now
+  // carries the team-membership indicator instead.
   const groupEnv = groupEnvironmentName(group);
+  // Who is behind this team (#2381): "Own", the Team Admin name(s), or nothing.
+  // Recomputed only when this team's own membership list, the directory, or the
+  // viewer changes — all stable across no-op polls — so the header is not
+  // re-rendered on every 5s roster/membership tick.
+  const membershipIndicator = useMemo(
+    () => teamMembershipIndicator({ memberships: teamMemberships, directory, viewerId }),
+    [teamMemberships, directory, viewerId],
+  );
   return (
     <div style={TEAM_BLOCK_STYLE}>
       <CollapsibleHeader
@@ -403,7 +441,7 @@ const GroupSection = React.memo(function GroupSection({
         icon={Icon}
         subtle={!group.header}
         count={count}
-        environmentName={groupEnv}
+        membershipIndicator={membershipIndicator}
         collapsed={collapsed}
         selected={selectedAgentId === group.id}
         onToggle={handleToggle}
@@ -628,7 +666,7 @@ function PoolInstancesSection({ roleAgent, instances, groupEnv, collapsed, onTog
   );
 }
 
-function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, collapsed, selected, onToggle, onActivate, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
+function CollapsibleHeader({ label, icon: Icon, subtle, count, membershipIndicator, collapsed, selected, onToggle, onActivate, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
   const [hovered, setHovered] = useState(false);
 
   const dnd = dragEnabled && drag ? makeRowDnd(drag, dragScope, dragKey) : null;
@@ -730,31 +768,14 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, 
           {label}
         </span>
         {/*
-         * The group's shared Working Environment — shown once here instead of on
-         * every member row (#1451). `textTransform`/`letterSpacing` are reset so
-         * the env name reads as itself, not as an uppercase section label.
+         * The team-membership indicator (#2381), in the slot that used to show
+         * the team's Working Environment name (#1529, since removed from the
+         * header — the env is still on the Settings tab). `textTransform`/
+         * `letterSpacing` are reset so it reads as itself, not as an uppercase
+         * section label. Renders nothing for a team with no visible members
+         * (AC9) rather than an empty affordance.
          */}
-        {environmentName && (
-          <span
-            title={environmentName}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 3,
-              maxWidth: '100%',
-              fontWeight: 'var(--eb-font-normal)',
-              textTransform: 'none',
-              letterSpacing: 0,
-              color: 'var(--eb-text-muted)',
-              overflow: 'hidden',
-            }}
-          >
-            <Server size={10} style={{ flexShrink: 0 }} />
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {environmentName}
-            </span>
-          </span>
-        )}
+        <MembershipLine indicator={membershipIndicator} />
       </span>
       {/*
        * Trailing cluster order (left→right): grip → persistent count. The grip
@@ -784,6 +805,111 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, 
     </button>
   );
 }
+
+/**
+ * The team-header line under the team name (#2381): a short **Own** badge when
+ * the viewer's own team-of-one, otherwise the team's Team Admin name(s). Renders
+ * nothing for `kind: 'none'` (a team with no visible members — AC9).
+ *
+ * The names list must stay on one line and never ellipsis-cut a name mid-string
+ * (AC5): `fitAdminNames` drops whole names from the tail and replaces them with a
+ * compact `+N`, and the full list is always on the `title` tooltip. The fit is
+ * width-driven, so the row is measured with a `ResizeObserver` and the names are
+ * probed with a canvas that mirrors the row's computed font — the actual
+ * decision (which names fit) lives in the pure, unit-tested `fitAdminNames`.
+ */
+function MembershipLine({ indicator }) {
+  const kind = indicator ? indicator.kind : 'none';
+  const names = indicator ? indicator.names : [];
+
+  if (kind === 'own') {
+    return <span style={ownBadgeStyle}>Own</span>;
+  }
+  if (kind === 'admins') {
+    return <TeamAdminsLine names={names} title={indicator.title} />;
+  }
+  return null;
+}
+
+/**
+ * A module-scoped canvas whose 2d context measures text width in the row's own
+ * font. Built lazily and reused, so re-fitting on a resize never allocates.
+ * Falls back to a coarse per-character estimate where no canvas is available
+ * (e.g. a non-DOM test environment) — `fitAdminNames` still keeps whole names.
+ */
+function makeTextMeasurer(el) {
+  if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
+    return (s) => s.length * 7;
+  }
+  const canvas = makeTextMeasurer._canvas || (makeTextMeasurer._canvas = document.createElement('canvas'));
+  const ctx = canvas.getContext ? canvas.getContext('2d') : null;
+  if (!ctx) return (s) => s.length * 7;
+  const cs = (typeof window !== 'undefined' && window.getComputedStyle) ? window.getComputedStyle(el) : null;
+  ctx.font = (cs && cs.font) || (cs ? `${cs.fontSize} ${cs.fontFamily}` : '12px sans-serif');
+  return (s) => ctx.measureText(s).width;
+}
+
+function TeamAdminsLine({ names, title }) {
+  const ref = useRef(null);
+  const [fit, setFit] = useState(() => ({ text: names.join(', '), hiddenCount: 0, title }));
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+    const recompute = () => {
+      const measure = makeTextMeasurer(el);
+      setFit(fitAdminNames(names, el.clientWidth, measure));
+    };
+    recompute();
+    let ro;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(recompute);
+      ro.observe(el);
+    }
+    return () => { if (ro) ro.disconnect(); };
+  }, [names]);
+
+  return (
+    <span ref={ref} title={fit.title || title} style={adminsLineStyle}>
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+        {fit.text}
+      </span>
+      {fit.hiddenCount > 0 && (
+        <span style={{ flexShrink: 0 }}>&nbsp;+{fit.hiddenCount}</span>
+      )}
+    </span>
+  );
+}
+
+// The "Own" pill — the same quiet, bordered treatment as `AgentRow`'s state
+// badge, but not uppercased (it is a word, not a section label).
+const ownBadgeStyle = {
+  alignSelf: 'flex-start',
+  padding: '0 6px',
+  borderRadius: 'var(--eb-radius-sm)',
+  border: '1px solid var(--eb-border-default)',
+  fontSize: 'var(--eb-text-xs)',
+  fontWeight: 'var(--eb-font-medium)',
+  lineHeight: 1.5,
+  color: 'var(--eb-text-muted)',
+  textTransform: 'none',
+  letterSpacing: 0,
+};
+
+// The admin-name line — single-line, font reset so it does not read as an
+// uppercase section label, `minWidth: 0` so the inner span can actually shrink
+// and be measured against the available width.
+const adminsLineStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  maxWidth: '100%',
+  minWidth: 0,
+  fontWeight: 'var(--eb-font-normal)',
+  fontSize: 'var(--eb-text-xs)',
+  textTransform: 'none',
+  letterSpacing: 0,
+  color: 'var(--eb-text-muted)',
+};
 
 function SectionHeader({ label, icon: Icon }) {
   return (

@@ -18,6 +18,7 @@ import { SessionsActiveProvider } from './agent-chat/SessionsActiveContext';
 import { resolveRailWidths } from './agent-chat/rail-layout';
 import { CREATE_ROUTE, emptyStatePointer } from './agent-chat/empty-state';
 import { describeAgentCreateAccess } from './agent-lifecycle/agent-create-access.js';
+import { useTeamMemberships } from '../hooks/useTeamMemberships.js';
 import { resolveTeamConfigTab } from './agent-lifecycle/team-config-tabs-view.js';
 import PageHelpButton from '../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat/agent-chat-help-sections.js';
@@ -212,6 +213,14 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   const railHostRef = useRef(null);
   const { user } = useAuth();
   const createAccess = describeAgentCreateAccess(user);
+
+  // Team-header membership indicator (#2381): who is behind each team. Polled on
+  // the roster's own cadence so it refreshes on Sharing-tab changes exactly like
+  // the rest of the rail refreshes on roster changes (AC6). `viewerId` is what
+  // lets a team-of-one read as "Own" for its owner but as that person's name for
+  // anyone else (AC2 vs the AC3 edge).
+  const { memberships, directory } = useTeamMemberships();
+  const viewerId = user?.userId || null;
 
   // Local map agentId -> roomId, for rooms we created during this session
   // (overrides the persisted `dmRoomId` returned by /api/matrix/agents).
@@ -851,6 +860,9 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
               busyIds={railBusyIds}
               onRequestMenu={handleRequestMenu}
               onOpenTeamSettings={handleOpenSettings}
+              memberships={memberships}
+              directory={directory}
+              viewerId={viewerId}
             />
           )}
         </div>

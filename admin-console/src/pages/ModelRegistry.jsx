@@ -12,13 +12,16 @@ import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
 import OAuthLoginWizard from '../components/OAuthLoginWizard';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
-import CredentialOwnership from '../components/CredentialOwnership';
+import ProviderOwnership from '../components/ProviderOwnership';
+import {
+  providerOwnershipOptions, defaultProviderOwnership, providerOwnershipFromRecord,
+  providerOwnershipPayload, providerOwnershipReady,
+} from './provider-ownership-view';
 import { useAuth } from '../auth/AuthContext';
 import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import {
-  teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
+  teamsById, credentialScopeLabel,
   canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
-  normalizeCredential,
 } from './credential-scope-view';
 import {
   resolveProbeState,
@@ -255,22 +258,14 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
   // On edit only a System Admin may reassign — for everyone else the selector is
   // shown read-only and the ownership fields are omitted from the payload.
   const canReassign = canReassignCredentialClient({ isSysAdmin });
-  const [ownership, setOwnership] = useState(() => {
-    if (isEdit) {
-      const n = normalizeCredential(endpoint);
-      return { scope: n.scope, teamId: n.teamId || '', assignedTeamIds: n.assignedTeamIds || [] };
-    }
-    return defaultOwnership({ isSysAdmin, adminTeamIds });
-  });
+  // Ownership (#2360): ONE axis — Personal / Team / Global — replacing the old
+  // "Global checkbox + System(assign to teams) / Team-owned" pair. Global is now
+  // just the widest option of this control (provider-ownership-view.js). On edit
+  // only a System Admin may re-tier; for everyone else it is shown read-only.
+  const [ownership, setOwnership] = useState(() =>
+    isEdit ? providerOwnershipFromRecord(endpoint) : defaultProviderOwnership({ isSysAdmin, adminTeamIds }));
   const sendOwnership = !isEdit || canReassign;
-  // Global provider (#2136): a System-Admin-only flag that makes the provider
-  // usable by every user and agent with no team assignment. A global provider is
-  // system-scoped with no teams, so the team-assignment control is hidden while
-  // it is on. A subscription (oauth) seat can never be global (single-user).
-  const [isGlobal, setIsGlobal] = useState(endpoint?.global === true);
-  // A global provider has no team assignment, so it is "ready" regardless of the
-  // (hidden) ownership control; otherwise the usual team-picked rule applies.
-  const ownershipReady = isGlobal || !sendOwnership || ownership.scope === 'system' || !!ownership.teamId;
+  const ownershipReady = !sendOwnership || providerOwnershipReady(ownership);
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName,
     setId,
@@ -306,6 +301,12 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
   const oauthGlobalOk = resourceAccessV2 && isOauth
     && (complianceOk || (wasOauth && endpoint?.complianceAck?.singleUser === true));
 
+  // The Ownership radio-card options + the selectable team set for this caller
+  // (#2360). Options carry their own enabled/disabledReason; a subscription
+  // disables Team, and Global is System-Admin-only (shown disabled otherwise).
+  const ownershipOptions = providerOwnershipOptions({ isOauth, isSysAdmin, adminTeamIds, canGlobalOauth: oauthGlobalOk });
+  const selectableTeams = isSysAdmin ? teams : teams.filter(t => adminTeamIds.includes(t.id));
+
   // If the user removes the default model from the list (without using the
   // star toggle), drop the dangling pointer so we don't ship a server-rejected
   // value on save.
@@ -315,13 +316,16 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
     }
   }, [models, defaultModelId]);
 
-  // A subscription (oauth) seat can never be global (#2136) UNLESS the
-  // single-user escape hatch applies (#2360, oauthGlobalOk) — drop the flag when
-  // the user switches to subscription auth and the hatch does NOT apply, so the
-  // payload stays valid. When the hatch DOES apply the flag is allowed to stand.
+  // A subscription (oauth) provider can never be Team, and can only be Global via
+  // the single-user hatch (#2360). If the user switches an already-chosen
+  // Personal/Team/Global state into an illegal one by flipping to subscription
+  // auth, coerce it back to Personal so the payload stays valid.
   useEffect(() => {
-    if (isOauth && isGlobal && !oauthGlobalOk) setIsGlobal(false);
-  }, [isOauth, isGlobal, oauthGlobalOk]);
+    if (!isOauth) return;
+    if (ownership.scope === 'team' || (ownership.scope === 'global' && !oauthGlobalOk)) {
+      setOwnership({ scope: 'personal', teamId: '' });
+    }
+  }, [isOauth, oauthGlobalOk, ownership.scope]);
 
   // test / discover state
   const [probing, setProbing] = useState(null);            // 'test' | 'discover' | null
@@ -443,13 +447,13 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
         : '',
     };
     if (!isEdit && id.trim()) payload.id = id.trim();
-    // Ownership: sent on create, and on edit only when the caller may reassign
-    // (System Admin). Omitting it on a Team Admin edit leaves the scope/team
-    // untouched (and the server would 403 a reassignment anyway).
-    if (sendOwnership) Object.assign(payload, ownershipPayload(ownership));
-    // #2136: only a System Admin may set the global flag; the server re-enforces
-    // this (403 otherwise) and, when global, ignores the team assignment above.
-    if (isSysAdmin) payload.global = isGlobal;
+    // Ownership (#2360): the Personal / Team / Global choice, incl. the `global`
+    // flag, in one payload. Sent on create, and on edit only when the caller may
+    // re-tier (System Admin) — omitting it on a Team-Admin edit leaves the
+    // scope/team untouched (the server would 403 a reassignment anyway). The
+    // server re-enforces every rule (canCreateCredential / resolveGlobalFlag /
+    // oauth-not-team).
+    if (sendOwnership) Object.assign(payload, providerOwnershipPayload(ownership));
     if (isOauth && complianceOk) payload.complianceAck = true;
     // Token sources, in precedence order: manual paste > completed login flow
     // (claimed server-side) > keep/clear existing.
@@ -489,49 +493,6 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
           ? <>Cannot be changed after creation.</>
           : <>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} <strong>Cannot be changed after creation.</strong></>}
       />
-
-      {/* Global provider (#2136) — a System-Admin-only publish flag. */}
-      {isSysAdmin && (
-        <label style={{
-          display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
-          cursor: (isOauth && !oauthGlobalOk) ? 'not-allowed' : 'pointer',
-          opacity: (isOauth && !oauthGlobalOk) ? 0.6 : 1,
-        }}>
-          <input
-            type="checkbox"
-            checked={isGlobal}
-            disabled={isOauth && !oauthGlobalOk}
-            onChange={e => setIsGlobal(e.target.checked)}
-            style={{ marginTop: 3, flexShrink: 0 }}
-          />
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
-            <strong>Global provider</strong> — available to every user and agent, with no team required.
-            <span style={{ display: 'block', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-              {isOauth
-                ? (oauthGlobalOk
-                    ? 'A confirmed single-user subscription may be global — runtime-only: every agent can run on it, but assist/helper cannot use it.'
-                    : 'A subscription (OAuth) provider is single-user; confirm single-user use to publish it globally.')
-                : 'Anyone can select and use it; only a System Admin can manage it. The token is never exposed.'}
-            </span>
-          </span>
-        </label>
-      )}
-
-      {/* Ownership / team scope (#800). Hidden while Global is on — a global
-          provider carries no team assignment (#2136). */}
-      {isGlobal ? null : (isEdit && !canReassign ? (
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          Only a System Admin can change which team owns a provider or reassign a system-scoped one.
-        </div>
-      ) : (
-        <CredentialOwnership
-          value={ownership}
-          onChange={setOwnership}
-          teams={teams}
-          isSysAdmin={isSysAdmin}
-          adminTeamIds={adminTeamIds}
-        />
-      ))}
 
       {/* Auth type — classic API key / proxy vs Claude subscription OAuth */}
       <div>
@@ -588,6 +549,22 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
           {AUTH_TYPE_OPTIONS.find(o => o.value === authType)?.desc}
         </div>
       </div>
+
+      {/* Ownership (#2360): one axis — Personal / Team / Global — replacing the
+          old Global-checkbox + System(assign)/Team-owned pair. On a non-admin
+          edit the tier is fixed (re-tier is System-Admin-only), shown read-only. */}
+      {sendOwnership ? (
+        <ProviderOwnership
+          value={ownership}
+          onChange={setOwnership}
+          options={ownershipOptions}
+          teams={selectableTeams}
+        />
+      ) : (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          Ownership is fixed for this provider — only a System Admin can change who can use it.
+        </div>
+      )}
 
       {!isOauth && (
         <div>

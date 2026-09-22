@@ -73,6 +73,9 @@ const resourceMigration = require('./resource-migration');
 // The masked personal-resource projection for the governance Resources view
 // (#2360). Pure; the route supplies the store reads + the System-Admin gate.
 const { listPersonalResources } = require('./personal-resource-view');
+// Resolve the immutable identity stamp for an SSH key / GitHub token, honouring a
+// client override behind the flag ("mark a personal credential as service", #2360).
+const { resolveStampedIdentity } = require('./credential-identity');
 const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
         WORK_PLANE_ROOM_PREFIX } = require('./work-plane-access');
 const { buildAssistModelOptions } = require('./assist-model-options');
@@ -17464,9 +17467,10 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     assignedTeamIds: ownership.assignedTeamIds,
     ...(ownership.userId ? { userId: ownership.userId } : {}),
     // Identity class (unified access model §2): a personal key is one person's
-    // identity (human); a team/system key is a shared service credential. The UI
-    // may later let a personal key be marked service (a private bot key).
-    identity: ownership.scope === 'personal' ? 'human' : 'service',
+    // identity (human); a team/system key is a shared service credential. Behind
+    // AEE_RESOURCE_ACCESS_V2 the client may mark a personal key `service` (a
+    // private bot key) — resolveStampedIdentity enforces the legal combos (#2360).
+    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity, v2: RESOURCE_ACCESS_V2 }),
     fingerprint: sshKeyFingerprint(trimmed),
     createdAt: new Date().toISOString(),
   };
@@ -17522,8 +17526,9 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
     teamId: ownership.teamId,
     assignedTeamIds: ownership.assignedTeamIds,
     ...(ownership.userId ? { userId: ownership.userId } : {}),
-    // Identity class (unified access model §2): personal → human, else service.
-    identity: ownership.scope === 'personal' ? 'human' : 'service',
+    // Identity class (unified access model §2): personal → human, else service;
+    // behind AEE_RESOURCE_ACCESS_V2 a personal key may be marked service (#2360).
+    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity, v2: RESOURCE_ACCESS_V2 }),
     fingerprint: sshFingerprintFromPubBlob(pubBlob),
     createdAt: new Date().toISOString(),
   };
@@ -17690,8 +17695,9 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
     ...(ownership.userId ? { userId: ownership.userId } : {}),
     // Identity class (unified access model §2): a personal token is one person's
     // identity (human); a team/system token is a shared service credential (e.g. a
-    // machine-user PAT). The UI may later let a personal token be marked service.
-    identity: ownership.scope === 'personal' ? 'human' : 'service',
+    // machine-user PAT). Behind AEE_RESOURCE_ACCESS_V2 the client may mark a
+    // personal token `service` (a private bot PAT) — legal combos enforced (#2360).
+    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity, v2: RESOURCE_ACCESS_V2 }),
     preview: githubTokenPreview(trimmed),
     fingerprint: githubTokenFingerprint(trimmed),
     createdAt: new Date().toISOString(),

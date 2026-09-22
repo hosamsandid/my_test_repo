@@ -42,3 +42,17 @@ test('PUT /api/llm-endpoints keeps userId in step with the tier (personal keeps 
     'a re-tiered provider must not carry a dangling former owner; a personal one keeps its owner',
   );
 });
+
+test('PUT /api/llm-endpoints stamps the owner when SWITCHING a provider TO personal (#2360 regression)', () => {
+  const body = routeBody("app.put('/api/llm-endpoints/:id'");
+  // The bug: the V2 tier switch built `ownership = { scope: 'personal', ... }` by
+  // hand with NO userId, so `next.userId` fell back to null and the provider
+  // vanished from the owner-only list (and became unmanageable). The switch must
+  // resolve ownership through the acting caller (resolveCredentialOwnership stamps
+  // userId), exactly as the create path does — not build it by hand.
+  assert.match(
+    body,
+    /desiredTier === 'personal'[\s\S]*?resolveCredentialOwnership\(\{ scope: 'personal', userId: b\.userId \}, scope\.userId\)/,
+    'switching a provider to the personal tier must resolve (and stamp) the owner via the acting caller',
+  );
+});

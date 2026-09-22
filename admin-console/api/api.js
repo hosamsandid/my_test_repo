@@ -12768,7 +12768,19 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
     if (desiredTier !== currentTier && !canReassignCredential(scope)) {
       return res.status(403).json({ error: "forbidden: only a System Admin may change a provider's ownership tier", code: 'forbidden' });
     }
-    if (desiredTier === 'personal') { ownership = { scope: 'personal', teamId: null, assignedTeamIds: [] }; nextTeamIds = undefined; }
+    if (desiredTier === 'personal') {
+      // #2358/#2360 (bug): a personal provider MUST carry its owner's userId, or
+      // it matches nobody in the owner-only visibility filter — it vanishes from
+      // the list AND becomes unmanageable (personal has no admin bypass). This
+      // branch built the ownership object by hand and dropped the owner, so
+      // `next.userId` below fell back through `ownership.userId (undefined) ||
+      // current.userId (null for a former team/global provider) || null` to null.
+      // Resolve it the same way the create path does: stamp the acting caller,
+      // reject a foreign owner, and validate the user exists.
+      try { ownership = resolveCredentialOwnership({ scope: 'personal', userId: b.userId }, scope.userId); }
+      catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+      nextTeamIds = undefined;
+    }
     else if (desiredTier === 'global') { ownership = { scope: 'system', teamId: null, assignedTeamIds: [] }; nextTeamIds = undefined; }
     else {
       const setRes = resolveProviderTeamSet(scope, b, b.teamId || cur.teamId);

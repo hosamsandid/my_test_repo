@@ -13,6 +13,7 @@ import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
+import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import ReassignPanel from '../components/CredentialReassignPanel';
 import { useAuth } from '../auth/AuthContext';
 import {
@@ -106,17 +107,18 @@ function PermissionRow({ scope, access, note }) {
 }
 
 function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminTeamIds }) {
+  const v2 = useResourceAccessV2();
   const [name, setName] = useState('');
   const [id, setId] = useState('');
   const [token, setToken] = useState('');
-  const [ownership, setOwnership] = useState(() => defaultOwnership({ isSysAdmin, adminTeamIds }));
+  const [ownership, setOwnership] = useState(() => defaultOwnership({ isSysAdmin, adminTeamIds, v2 }));
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName,
     setId,
     getName: () => name,
   });
 
-  const ownershipReady = ownership.scope === 'system' || !!ownership.teamId;
+  const ownershipReady = ownership.scope === 'system' || ownership.scope === 'personal' || !!ownership.teamId;
   const canSubmit = name.trim() && token.trim() && ownershipReady;
 
   return (
@@ -224,6 +226,7 @@ function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminT
         teams={teams}
         isSysAdmin={isSysAdmin}
         adminTeamIds={adminTeamIds}
+        v2={v2}
       />
 
       <div>
@@ -257,7 +260,7 @@ function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminT
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button
-          onClick={() => onSave({ name: name.trim(), id: id.trim() || undefined, token: token.trim(), ...ownershipPayload(ownership) })}
+          onClick={() => onSave({ name: name.trim(), id: id.trim() || undefined, token: token.trim(), ...ownershipPayload(ownership, { v2 }) })}
           disabled={saving || !canSubmit}
           style={{
             padding: 'var(--eb-space-2) var(--eb-space-4)',
@@ -372,10 +375,10 @@ export default function GithubTokens() {
     },
   ];
 
-  async function handleSave({ name, id, token, scope, teamId, assignedTeamIds }) {
+  async function handleSave({ name, id, token, scope, teamId, assignedTeamIds, identity }) {
     setSaving(true); setFormError(null);
     try {
-      await apiCall('POST', '/api/github-tokens', { name, id, token, scope, teamId, assignedTeamIds });
+      await apiCall('POST', '/api/github-tokens', { name, id, token, scope, teamId, assignedTeamIds, identity });
       setCreating(false);
       refetch();
     } catch (e) {

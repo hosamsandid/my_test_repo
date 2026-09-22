@@ -285,3 +285,30 @@ test('creatableScopesForIdentity intersects identity legality with caller author
   // A human secret stays personal-only regardless of authority.
   assert.deepEqual(creatableScopesForIdentity(IDENTITY_HUMAN, { kind: 'ssh-key', isSysAdmin: true }), ['personal']);
 });
+
+// ── v2 ownership carry: identity in default/from-record/payload (#2360) ─────
+
+test('defaultOwnership(v2) adds a service identity; off v2 the shape is unchanged', () => {
+  assert.deepEqual(defaultOwnership({ isSysAdmin: true }), { scope: 'team', teamId: 'default', assignedTeamIds: [] });
+  assert.deepEqual(defaultOwnership({ isSysAdmin: true, v2: true }),
+    { scope: 'team', teamId: 'default', assignedTeamIds: [], identity: 'service' });
+});
+
+test('ownershipFromRecord(v2) opens on the record identity; off v2 no identity', () => {
+  const rec = { id: 'k', scope: 'personal', userId: 'u-1', identity: 'service' };
+  assert.equal(ownershipFromRecord(rec, { v2: false, kind: 'ssh-key' }).identity, undefined);
+  assert.equal(ownershipFromRecord(rec, { v2: true, kind: 'ssh-key' }).identity, 'service');
+  // A legacy record (no stamp) infers per kind: a personal ssh key → human.
+  assert.equal(ownershipFromRecord({ scope: 'personal', userId: 'u' }, { v2: true, kind: 'ssh-key' }).identity, 'human');
+});
+
+test('ownershipPayload(v2) carries identity and round-trips a personal scope', () => {
+  // off v2 — unchanged, no identity, personal not emitted from scope-tabs
+  assert.deepEqual(ownershipPayload({ scope: 'team', teamId: 't' }), { scope: 'team', teamId: 't' });
+  // on v2 — identity carried
+  assert.deepEqual(ownershipPayload({ scope: 'team', teamId: 't', identity: 'service' }, { v2: true }),
+    { scope: 'team', teamId: 't', identity: 'service' });
+  // on v2 — a personal credential marked service round-trips as its own tier
+  assert.deepEqual(ownershipPayload({ scope: 'personal', identity: 'service' }, { v2: true }),
+    { scope: 'personal', identity: 'service' });
+});

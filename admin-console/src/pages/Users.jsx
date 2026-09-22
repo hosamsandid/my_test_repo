@@ -792,7 +792,7 @@ function PersonalResourcesSection({ onError }) {
               {r.fingerprint ? ` · ${r.fingerprint}` : ''}{r.authType ? ` · ${r.authType}` : ''}
             </div>
           </div>
-          <IconButton title="Delete (break-glass)" onClick={() => setConfirm(r)}><Trash2 size={14} /></IconButton>
+          <IconButton icon={Trash2} danger title="Delete (break-glass)" onClick={() => setConfirm(r)} />
         </div>
       ))}
       <ConfirmDialog

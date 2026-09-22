@@ -78,10 +78,15 @@ export function creatableScopes({ isSysAdmin }) {
 }
 
 // The initial ownership state for the create form, given the caller's role and
-// the teams they administer.
-export function defaultOwnership({ isSysAdmin, adminTeamIds = [] }) {
-  if (isSysAdmin) return { scope: 'team', teamId: DEFAULT_TEAM_ID, assignedTeamIds: [] };
-  return { scope: 'team', teamId: adminTeamIds[0] || '', assignedTeamIds: [] };
+// the teams they administer. Under AEE_RESOURCE_ACCESS_V2 (`v2`) the state also
+// carries the `identity` stamp — a create form defaults to a team `service`
+// credential, matching the default `team` scope (a `human` secret is
+// Personal-only). Off the flag the shape is byte-identical to before.
+export function defaultOwnership({ isSysAdmin, adminTeamIds = [], v2 = false } = {}) {
+  const base = isSysAdmin
+    ? { scope: 'team', teamId: DEFAULT_TEAM_ID, assignedTeamIds: [] }
+    : { scope: 'team', teamId: adminTeamIds[0] || '', assignedTeamIds: [] };
+  return v2 ? { ...base, identity: IDENTITY_SERVICE } : base;
 }
 
 // The initial ownership state for an EDIT form: the record's own tier, made
@@ -93,21 +98,36 @@ export function defaultOwnership({ isSysAdmin, adminTeamIds = [] }) {
 //
 // Falls back to `defaultOwnership` when there is no record (the create case), so
 // one call site serves both modes.
-export function ownershipFromRecord(record, { isSysAdmin, adminTeamIds = [] } = {}) {
-  if (!record || typeof record !== 'object') return defaultOwnership({ isSysAdmin, adminTeamIds });
+export function ownershipFromRecord(record, { isSysAdmin, adminTeamIds = [], v2 = false, kind } = {}) {
+  if (!record || typeof record !== 'object') return defaultOwnership({ isSysAdmin, adminTeamIds, v2 });
   const c = normalizeCredential(record);
-  if (c.scope === 'system') return { scope: 'system', teamId: '', assignedTeamIds: [...c.assignedTeamIds] };
-  if (c.scope === 'personal') return { scope: 'personal', teamId: '', assignedTeamIds: [], userId: c.userId };
-  return { scope: 'team', teamId: c.teamId || '', assignedTeamIds: [] };
+  // Under v2 the edit form opens on the record's stamped identity (falling back
+  // to the per-kind inference for a legacy record) — immutable, so the control
+  // shows it read-only, but the state still needs to carry it for the payload.
+  const withIdentity = (own) => (v2 ? { ...own, identity: defaultIdentity(kind, record) } : own);
+  if (c.scope === 'system') return withIdentity({ scope: 'system', teamId: '', assignedTeamIds: [...c.assignedTeamIds] });
+  if (c.scope === 'personal') return withIdentity({ scope: 'personal', teamId: '', assignedTeamIds: [], userId: c.userId });
+  return withIdentity({ scope: 'team', teamId: c.teamId || '', assignedTeamIds: [] });
 }
 
 // Reduce an ownership state to the minimal API payload for a create/patch body.
-export function ownershipPayload(own) {
+// Under AEE_RESOURCE_ACCESS_V2 (`v2`) the payload also carries `identity` (the
+// server honours it only where legal — a personal credential marked `service`),
+// and a `personal` scope round-trips as its own tier (the owner is filled from
+// the session server-side). Off the flag the payload is byte-identical to before.
+export function ownershipPayload(own, { v2 = false } = {}) {
   const o = own || {};
-  if (o.scope === 'system') {
-    return { scope: 'system', assignedTeamIds: [...new Set((o.assignedTeamIds || []).map(String))] };
+  const identity = (v2 && (o.identity === IDENTITY_HUMAN || o.identity === IDENTITY_SERVICE))
+    ? { identity: o.identity } : {};
+  if (o.scope === 'personal') {
+    // Only meaningful under v2 (the create forms offer personal only then); off
+    // the flag this branch is unreachable from the legacy scope-tabs.
+    return { scope: 'personal', ...identity };
   }
-  return { scope: 'team', teamId: o.teamId || undefined };
+  if (o.scope === 'system') {
+    return { scope: 'system', assignedTeamIds: [...new Set((o.assignedTeamIds || []).map(String))], ...identity };
+  }
+  return { scope: 'team', teamId: o.teamId || undefined, ...identity };
 }
 
 // May the caller edit/delete THIS existing credential? Mirrors

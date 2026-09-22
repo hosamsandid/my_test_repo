@@ -47,7 +47,7 @@ poller's, in `broker-sdk/event-cursor.js` (`github-poller.js` is untouched).
 | `viewer-headers.js` | §4.8 signed-viewer verify (byte-identical copy) + the `/admin` → team-admin role gate |
 | `broker-policy.js` | write authorisation (D3): `authorizeWrite` → SDK `authorizeAction` against the manifest `policy`; `requiresApproval` wired-but-empty |
 | `ui/` | the served `/` route (Board tab: issues / watch-health cards / inbox; Activity tab: the retained log) + `/admin` route (watch config with per-project status chips, team-admin). Dependency-free vanilla JS, `--eb-*` tokens, follows the console theme |
-| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials}`, `/cli/*` (`whoami`/`inbox` (peek / `?consume=<id,…>`)/`projects`/`list`/`show`/`attachment` (content by id) + `comment`/`transition` POST), `/ui/*` (incl. `/ui/api/{watches,activity,admin/watch,admin/retry}`) |
+| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials}`, `/cli/*` (`whoami`/`inbox` (peek / `?consume=<id,…>`)/`projects`/`list`/`show`/`attachment` (content by id) + `comment`/`transition`/`update`/`attachment/add` (upload one file per call) POST), `/ui/*` (incl. `/ui/api/{watches,activity,admin/watch,admin/retry}`) |
 
 
 ## Credentials
@@ -82,7 +82,21 @@ match; the inbox holds all of them.
 
 ## Writes — role-gated, not confirmation-gated (D3)
 
-`aee-jira comment` / `transition` POST through the broker. Before the credential
+`aee-jira comment` / `transition` / `update` / `attachment add` POST through the
+broker. `attachment add` sends ONE file per request as `{ issue, filename,
+contentBase64 }`; the broker decodes it and does the multipart upload to Jira's
+`/attachments` endpoint (with the required `X-Atlassian-Token: no-check` header)
+server-side, so the Jira token never leaves the broker — the same containment as
+every read. One request per file keeps the buffered body bounded
+(`ATTACHMENT_BODY_MAX_BYTES` ≈ the base64-grown upload cap) and gives the CLI
+clean per-file success/failure when several files are attached in one
+invocation; the upload is a write and, like the others, is never retried on a
+transport failure (a retry would create a duplicate attachment — Jira never
+dedups a same-named upload). The upload cap is
+`JIRA_ATTACHMENT_UPLOAD_MAX_BYTES` (default 10 MB); the instance's own limit may
+be lower and surfaces as a mapped 413.
+
+Before the credential
 is touched, `broker-policy.authorizeWrite` runs the manifest's `policy` rule
 through the SDK's `authorizeAction`. jira is `scopes: ["team"]`, so every caller
 resolves to `kind: 'team'` and both rules pass — which is D3's intent (moving a

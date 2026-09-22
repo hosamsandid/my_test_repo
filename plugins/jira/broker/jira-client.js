@@ -30,6 +30,13 @@ const PAGE_SIZE = 100;
 const ATTACHMENT_LIST_CAP = 50;
 const ATTACHMENT_MAX_BYTES = Number(process.env.JIRA_ATTACHMENT_MAX_BYTES) || 10 * 1024 * 1024;
 
+// Attachment writes (#2408). The upload cap mirrors the read side's but is its
+// own configurable knob (a site may want a different ceiling for what agents
+// push back than for what they pull) — a file over it is refused before the
+// multipart body is built. Jira's own instance limit may be lower; that surfaces
+// as a mapped HTTP error from the upload itself.
+const ATTACHMENT_UPLOAD_MAX_BYTES = Number(process.env.JIRA_ATTACHMENT_UPLOAD_MAX_BYTES) || 10 * 1024 * 1024;
+
 // Basic-auth header for `email:apiToken`. Jira Cloud's REST v3 uses Basic auth
 // with the Atlassian account e-mail as the username and an API token as the
 // password.
@@ -150,6 +157,8 @@ function mapJiraError(status, bodyText) {
       return 'The Jira account lacks permission for this project or action (403).';
     case 404:
       return 'The Jira project or issue was not found (404), or the account cannot see it.';
+    case 413:
+      return `The file is larger than this Jira instance allows (413)${snippet ? `: ${snippet}` : ''}.`;
     case 429:
       return 'Jira rate limit reached (429) — backing off.';
     default:
@@ -407,6 +416,80 @@ async function getAttachment(cred, issueKey, attachmentId, { env, maxBytes = ATT
   };
 }
 
+// Upload one local file to an issue as a NEW attachment (CLI `attachment add`,
+// #2408). The file's bytes arrive here as a Buffer (the broker decoded the CLI's
+// base64 body); the credential and the Jira call stay server-side, so the token
+// never leaves the broker (AC7). Jira Cloud attaches via a multipart POST to the
+// issue's `/attachments` endpoint that REQUIRES the `X-Atlassian-Token: no-check`
+// header (its XSRF guard) and the file under the form field `file`; it answers
+// 200 with an array of the created attachment(s). The over-cap file is refused
+// before the body is built (AC edge case); an unknown/foreign issue key or a
+// permission/attachments-disabled failure comes back as a mapped domain error
+// (AC4), never a raw Jira body.
+//
+// This is a WRITE and is NEVER retried on a transport failure: a retry that
+// lands after Jira already accepted the first upload would create a DUPLICATE
+// attachment (Jira treats a same-named upload as a new, additional file — it
+// never dedups). Same F6 discipline as addComment / updateDescription.
+async function addAttachment(cred, issueKey, { filename, buffer, mimeType, env, maxBytes = ATTACHMENT_UPLOAD_MAX_BYTES } = {}) {
+  const key = String(issueKey == null ? '' : issueKey).trim();
+  if (!key) { const e = new Error('an issue key is required'); e.status = 400; throw e; }
+  const name = String(filename == null ? '' : filename).trim();
+  if (!name) { const e = new Error('a filename is required'); e.status = 400; throw e; }
+  if (!Buffer.isBuffer(buffer)) { const e = new Error('file content is required'); e.status = 400; throw e; }
+  const cap = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : ATTACHMENT_UPLOAD_MAX_BYTES;
+  if (buffer.length > cap) {
+    const e = new Error(`${name} is ${buffer.length} bytes, over the ${cap}-byte upload limit.`);
+    e.status = 413;
+    throw e;
+  }
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const reqPath = `/rest/api/3/issue/${encodeURIComponent(key)}/attachments`;
+  const form = new FormData();
+  form.append('file', new Blob([buffer], mimeType ? { type: String(mimeType) } : {}), name);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+  let res;
+  try {
+    // `Content-Type` (with the multipart boundary) is set by fetch from the
+    // FormData — do NOT set it by hand or the boundary is lost.
+    res = await fetch(base + reqPath, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'agent-studio-jira-plugin',
+        Authorization: auth,
+        'X-Atlassian-Token': 'no-check',
+      },
+      body: form,
+      signal: ctrl.signal,
+    });
+  } catch (err) {
+    const cause = err && err.cause ? ` (${err.cause.code || err.cause.message || err.cause})` : '';
+    const wrapped = new Error(`${err.message}${cause}`);
+    wrapped.transport = true;
+    throw wrapped; // a write — never retried (a duplicate attachment otherwise)
+  } finally {
+    clearTimeout(timer);
+  }
+  const text = await res.text();
+  if (!res.ok) {
+    const e = new Error(mapJiraError(res.status, text));
+    e.status = res.status;
+    throw e;
+  }
+  const parsed = text ? safeJson(text) : [];
+  const created = (Array.isArray(parsed) ? parsed : [parsed]).map(shapeAttachment).filter((a) => a && a.id);
+  if (!created.length) {
+    const e = new Error(`Jira accepted the upload of ${name} but returned no attachment metadata.`);
+    e.status = 502;
+    throw e;
+  }
+  // One file in → one attachment out; return its metadata (id + filename at least, AC3).
+  return created[0];
+}
+
 // Which Atlassian account the credential authenticates as (GET /myself) — the
 // definitive check for an email/token mismatch (spike diagnostics).
 async function whoAmI(cred, { env } = {}) {
@@ -638,9 +721,11 @@ module.exports = {
   getIssueAttachments,
   downloadAttachmentContent,
   getAttachment,
+  addAttachment,
   listProjects,
   ATTACHMENT_LIST_CAP,
   ATTACHMENT_MAX_BYTES,
+  ATTACHMENT_UPLOAD_MAX_BYTES,
   addComment,
   updateDescription,
   listTransitions,

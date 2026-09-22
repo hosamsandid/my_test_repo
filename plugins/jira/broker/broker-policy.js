@@ -31,6 +31,7 @@ const POLICY = Object.freeze({
   comment: { scopes: ['team'] },
   transition: { scopes: ['team'] },
   update: { scopes: ['team'] },
+  attach: { scopes: ['team'] },
 });
 
 // Wired but empty — see the header.

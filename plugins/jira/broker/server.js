@@ -213,14 +213,20 @@ const poller = new JiraPoller({
 // hostile request cannot buffer unbounded memory; an over-cap body resolves
 // empty and parseJson turns it into `{}` (a 4xx from the handler).
 const MAX_BODY_BYTES = 1_000_000;
-function readBody(req) {
+// An attachment upload carries the file's bytes base64-encoded inside the JSON
+// body (CLI→broker), one file per request. Its cap is the raw upload ceiling
+// grown by the ~4/3 base64 blow-up plus a small JSON envelope margin — bounded,
+// but far above the 1 MB control-message default so a legitimate file is not
+// truncated into an opaque 400.
+const ATTACHMENT_BODY_MAX_BYTES = Math.ceil(jira.ATTACHMENT_UPLOAD_MAX_BYTES * 4 / 3) + 64 * 1024;
+function readBody(req, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve) => {
     let s = '';
     let over = false;
     req.on('data', (c) => {
       if (over) return;
       s += c;
-      if (s.length > MAX_BODY_BYTES) { over = true; s = ''; req.destroy(); }
+      if (s.length > maxBytes) { over = true; s = ''; req.destroy(); }
     });
     req.on('end', () => resolve(s));
     req.on('error', () => resolve(s));
@@ -348,6 +354,58 @@ async function handleCli(req, res, cliPath) {
       return sendJson(res, 200, { attachment });
     } catch (err) {
       writeAudit(scopeId, scopeId, 'attachment', 'error', `${issue}:${id}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
+  // ── attachment upload by path (Phase 4 write, #2408) ─────────────────────
+  // The write counterpart of `/attachment`: the CLI sends ONE file per request
+  // as `{ issue, filename, contentBase64 }`; the broker decodes it and uploads
+  // it to the issue server-side (the Jira token never leaves here — AC7). One
+  // file per request keeps the buffered body bounded and gives the CLI clean
+  // per-file success/failure to report when several files are attached in one
+  // invocation (AC6). Role-gated like the other writes (D3).
+  if (cliPath === '/attachment/add' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('attach');
+    if (!authz.allow) {
+      writeAudit(scopeId, scopeId, 'attach', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'attach', 'no-credential');
+      return sendJson(res, 400, {
+        error: 'This team has no Jira credential configured. A Team Admin sets it on the Plugins page.',
+        code: 'no-credential',
+      });
+    }
+    const raw = await readBody(req, ATTACHMENT_BODY_MAX_BYTES);
+    // An over-cap body is dropped to empty by readBody → parses to `{}` → the
+    // filename/content checks below turn it into a clear 413, not a silent hang.
+    if (!raw) {
+      writeAudit(scopeId, scopeId, 'attach', 'error', 'body-too-large');
+      return sendJson(res, 413, { error: `the upload exceeds the ${jira.ATTACHMENT_UPLOAD_MAX_BYTES}-byte limit for this plugin.` });
+    }
+    const body = parseJson(raw);
+    const issue = String(body.issue || '').trim();
+    const filename = String(body.filename || '').trim();
+    if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
+    if (!filename) return sendJson(res, 400, { error: 'a filename is required' });
+    if (typeof body.contentBase64 !== 'string' || !body.contentBase64) {
+      return sendJson(res, 400, { error: 'file content is required' });
+    }
+    let buffer;
+    try {
+      buffer = Buffer.from(body.contentBase64, 'base64');
+    } catch {
+      return sendJson(res, 400, { error: 'file content is not valid base64' });
+    }
+    try {
+      const attachment = await jira.addAttachment(cred, issue, { filename, buffer, mimeType: body.mimeType });
+      writeAudit(scopeId, scopeId, 'attach', 'ok', `${issue}:${attachment.id} (${filename})`);
+      return sendJson(res, 200, { attachment });
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'attach', 'error', `${issue} ${filename}: ${err.message}`);
       return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
     }
   }

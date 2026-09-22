@@ -266,6 +266,51 @@ test('cli reads: /attachment fetches one attachment by id, cred-gated, 404 for a
   }
 });
 
+test('cli writes: /attachment/add uploads one file per call server-side, cred-gated, 4xx mapped (#2408)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const seen = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1') || String(url).includes('localhost')) return origFetch(url, opts);
+    seen.push({ url: String(url), method: opts && opts.method, token: opts.headers && opts.headers['X-Atlassian-Token'], isForm: opts.body instanceof FormData });
+    if (String(url).includes('/NOPE-1/')) return { ok: false, status: 404, text: async () => 'no issue' };
+    return { ok: true, status: 200, text: async () => JSON.stringify([{ id: 30011, filename: 'part-1.pdf', mimeType: 'application/pdf', size: 3 }]) };
+  };
+  const srv = await listen();
+  try {
+    const contentBase64 = Buffer.from('abc').toString('base64');
+    const ok = await call(srv, 'POST', '/cli/attachment/add', { token: TOKEN, body: { issue: 'KAN-6', filename: 'part-1.pdf', contentBase64 } });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.attachment.id, '30011');
+    assert.equal(ok.body.attachment.filename, 'part-1.pdf');
+    assert.match(seen[0].url, /\/rest\/api\/3\/issue\/KAN-6\/attachments$/);
+    assert.equal(seen[0].method, 'POST');
+    assert.equal(seen[0].token, 'no-check');
+    assert.equal(seen[0].isForm, true);
+
+    // an unknown issue → mapped 404, not a 500 (AC4)
+    const missing = await call(srv, 'POST', '/cli/attachment/add', { token: TOKEN, body: { issue: 'NOPE-1', filename: 'a.txt', contentBase64 } });
+    assert.equal(missing.status, 404);
+    assert.match(missing.body.error, /not found/i);
+
+    // missing filename / content → 400 before any upload
+    assert.equal((await call(srv, 'POST', '/cli/attachment/add', { token: TOKEN, body: { issue: 'KAN-6', contentBase64 } })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/attachment/add', { token: TOKEN, body: { issue: 'KAN-6', filename: 'a.txt' } })).status, 400);
+
+    // no credential → 400 no-credential
+    const nocred = await call(srv, 'POST', '/cli/attachment/add', { token: OTHER, body: { issue: 'KAN-6', filename: 'a.txt', contentBase64 } });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-credential');
+
+    // a GET on the upload path → 404 (upload is POST only)
+    assert.equal((await call(srv, 'GET', '/cli/attachment/add', { token: TOKEN })).status, 404);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
 test('cli writes: comment + transition are role-gated (pass for team scope), cred-gated, audited', async () => {
   broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
   const origFetch = global.fetch;

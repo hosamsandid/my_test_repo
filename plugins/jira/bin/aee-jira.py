@@ -26,6 +26,16 @@ ticket is routine and reversible):
     aee-jira comment KAN-6 --body "Picked this up, see PR #123"
     aee-jira transition KAN-6 --to "In Progress"
     aee-jira update KAN-6 --description "…"   # replace the issue description (the old one stays in Jira's history)
+    aee-jira attachment add KAN-6 report.pdf part-1.pdf   # upload one or more local files as new attachments
+
+`attachment add` takes an issue key and one or more local file paths; each file
+becomes a separate attachment (Jira never overwrites — a same-named upload is a
+new, additional attachment). Every path is checked to exist and be readable
+before any upload starts; when several files are given and one upload fails, the
+others still go through and the result reports per-file success/failure. On
+success each created attachment's id + filename come back (machine-readable with
+`--json`). The file bytes travel to the broker, which does the upload
+server-side — the Jira token never reaches this CLI.
 
 `inbox` without `--consume` peeks. `--consume` takes one or more event ids and
 drains exactly those — the inbox is shared by every agent on the team, each
@@ -57,6 +67,17 @@ EXIT_OK = 0
 EXIT_DOMAIN_ERROR = 1
 EXIT_USAGE = 2
 EXIT_BROKER_UNREACHABLE = 3
+
+# Client-side upload cap, mirroring the broker's JIRA_ATTACHMENT_UPLOAD_MAX_BYTES
+# (default 10 MB). The broker is the authoritative gate; this is only so an
+# over-cap file is refused with a clear, path-naming message before the bytes are
+# read and shipped. A non-positive value disables the client-side check.
+def _upload_cap():
+    try:
+        v = int(os.environ.get("JIRA_ATTACHMENT_UPLOAD_MAX_BYTES") or (10 * 1024 * 1024))
+    except ValueError:
+        v = 10 * 1024 * 1024
+    return v
 
 
 def _config_path():
@@ -186,6 +207,87 @@ def _call(cfg, path, method="GET", body=None):
         raise BrokerUnreachable("cannot reach broker at %s: %s" % (url, e)) from e
 
 
+def do_attachment_add(cfg, issue, paths, as_json):
+    """Upload each local path as a new attachment on `issue`.
+
+    AC5 / edge case: every path is validated (exists, readable, within the cap)
+    BEFORE any upload is attempted — a bad path aborts the whole batch with a
+    message naming it, so nothing is half-uploaded. AC6: once uploads start, a
+    per-file failure is recorded and does not abort the files after it; the
+    result reports which succeeded and which failed.
+    """
+    cap = _upload_cap()
+    problems = []
+    for p in paths:
+        if not os.path.isfile(p):
+            problems.append("%s: not found or not a regular file" % p)
+        elif not os.access(p, os.R_OK):
+            problems.append("%s: not readable" % p)
+        elif cap > 0:
+            try:
+                size = os.path.getsize(p)
+            except OSError as e:
+                problems.append("%s: cannot read size (%s)" % (p, e))
+                continue
+            if size > cap:
+                problems.append("%s: %d bytes, over the %d-byte upload limit" % (p, size, cap))
+    if problems:
+        emit(
+            {"ok": False, "error": "invalid-path",
+             "message": "refusing to upload — fix these path(s) first:\n  " + "\n  ".join(problems)},
+            as_json,
+        )
+        return EXIT_DOMAIN_ERROR
+
+    results = []
+    n_unreachable = 0
+    for p in paths:
+        filename = os.path.basename(p) or "attachment"
+        try:
+            with open(p, "rb") as fh:
+                data = fh.read()
+            resp = _call(cfg, "/attachment/add", "POST", {
+                "issue": issue,
+                "filename": filename,
+                "contentBase64": base64.b64encode(data).decode("ascii"),
+            })
+            att = (resp or {}).get("attachment") or {}
+            results.append({
+                "path": p, "filename": att.get("filename") or filename, "ok": True,
+                "id": att.get("id"), "size": att.get("size"), "mimeType": att.get("mimeType"),
+            })
+        except BrokerUnreachable as e:
+            n_unreachable += 1
+            results.append({"path": p, "filename": filename, "ok": False, "error": str(e)})
+        except (BrokerDomainError, OSError) as e:
+            results.append({"path": p, "filename": filename, "ok": False, "error": str(e)})
+
+    uploaded = [r for r in results if r["ok"]]
+    failed = [r for r in results if not r["ok"]]
+
+    if as_json:
+        print(json.dumps({
+            "ok": not failed,
+            "result": {"issue": issue, "uploaded": len(uploaded), "failed": len(failed), "results": results},
+            "scopeId": cfg.get("scopeId"),
+        }))
+    else:
+        for r in results:
+            if r["ok"]:
+                print("✓ %s → attachment %s (%s)" % (r["filename"], r.get("id"), issue))
+            else:
+                print("✗ %s — %s" % (r["filename"], r.get("error")), file=sys.stderr)
+        print("%d uploaded, %d failed" % (len(uploaded), len(failed)))
+
+    if not failed:
+        return EXIT_OK
+    # Every file failed and every failure was connectivity → surface exit 3 so a
+    # down broker is not misreported as a Jira domain error.
+    if not uploaded and n_unreachable == len(failed):
+        return EXIT_BROKER_UNREACHABLE
+    return EXIT_DOMAIN_ERROR
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="aee-jira",
@@ -225,6 +327,15 @@ def build_parser():
         "--out", metavar="PATH",
         help="write the content to this file; text is printed inline unless --out is given, "
              "binary is always saved (default: under .agent-studio/jira-attachments/)",
+    )
+    p_att_add = att_sub.add_parser(
+        "add", parents=[common],
+        help="upload one or more local files as new attachments to an issue",
+    )
+    p_att_add.add_argument("issue", help="issue key to attach to, e.g. KAN-6")
+    p_att_add.add_argument(
+        "paths", nargs="+", metavar="PATH",
+        help="local file path(s) to upload; each becomes a separate attachment (Jira does not overwrite)",
     )
 
     p_comment = sub.add_parser("comment", parents=[common], help="add a comment to an issue")
@@ -281,9 +392,13 @@ def main(argv=None):
     elif args.cmd == "show":
         path = "/show?" + urllib.parse.urlencode({"issue": args.issue})
     elif args.cmd == "attachment":
-        if getattr(args, "att_cmd", None) != "get":
+        att_cmd = getattr(args, "att_cmd", None)
+        if att_cmd == "add":
+            return do_attachment_add(cfg, args.issue, args.paths, as_json)
+        if att_cmd != "get":
             emit({"ok": False, "error": "usage",
-                  "message": "usage: aee-jira attachment get <issueKey> <attachmentId> [--out PATH]"}, as_json)
+                  "message": "usage: aee-jira attachment get <issueKey> <attachmentId> [--out PATH]\n"
+                             "       aee-jira attachment add <issueKey> <path> [<path> …]"}, as_json)
             return EXIT_USAGE
         path = "/attachment?" + urllib.parse.urlencode({"issue": args.issue, "id": args.attachment_id})
     elif args.cmd == "comment":

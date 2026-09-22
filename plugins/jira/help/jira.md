@@ -77,6 +77,7 @@ All Jira access stays server-side in the broker; the agent never sees the token.
 | `aee-jira inbox` / `aee-jira inbox --consume <id>…` | the queued status changes of the whole team (peek); `--consume` drains exactly the ids named — use the ids from your own wake (`id`, or `events[].id` in a digest), never a teammate's |
 | `aee-jira list --project KAN [--status "Ready for Dev"]`, `aee-jira show KAN-6` | read issues (`show` also lists any attachments) |
 | `aee-jira attachment get KAN-6 <id> [--out PATH]` | fetch one attachment's content by id (from `show`) — text prints inline, binary is saved to a workspace path |
+| `aee-jira attachment add KAN-6 <path> [<path>…]` | upload one or more local files as new attachments — each path becomes a separate attachment (Jira never overwrites); paths are checked to exist before any upload, and the result reports per-file success/failure with each created id |
 | `aee-jira comment KAN-6 --body "…"` | add a comment |
 | `aee-jira update KAN-6 --description "…"` | replace the description (keep what the human wrote and add a section — the old text stays in Jira's history) |
 | `aee-jira transition KAN-6 --to "In Progress"` | move the issue on — this is itself a status change and wakes whichever teammate's trigger names that target status |

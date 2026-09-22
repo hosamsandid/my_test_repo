@@ -35,6 +35,7 @@ const {
   maskSecretsOrDefault,
 } = require('./mask-secrets');
 const { healthEndpoint, teardownScopeEndpoint, internalPushEndpoint, INTERNAL_SCOPE_ID } = require('./endpoints');
+const { withUnexpectedErrors } = require('./unexpected-error');
 const { needsApproval, approvalHoldingPen, parkForApproval } = require('./approval');
 const { authorizeAction, isActionPermitted } = require('./authz');
 const { brokerConfig, quotaExceeded, positiveInt } = require('./broker-config');
@@ -84,6 +85,8 @@ module.exports = {
   // platform routes (§4.9)
   healthEndpoint,
   teardownScopeEndpoint,
+  // unexpected-error containment (§4.9)
+  withUnexpectedErrors,
   internalPushEndpoint,
   INTERNAL_SCOPE_ID,
   // approval holding pen (§4.9)

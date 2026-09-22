@@ -50,6 +50,9 @@ const { tierOwnershipFields, isRetier } = require('./resource-tier');
 // `providerVisible` / `providerUsableByTeam` below), never inside scope.js —
 // those predicates also gate SSH keys and GitHub tokens (finding 2).
 const { resolveGlobalFlag, isGlobalProvider } = require('./llm-endpoint-global');
+// §14 / E10 (#2360): pure policy for a personal provider used as a team default
+// across the team-of-one → multi-user transition. Byte-mirrored in orchestrator.
+const { personalDefaultTransitionRisk } = require('./provider-lend-policy');
 // Global working environments + MCP servers (#2158): the same System-Admin-only
 // publish gate shape, applied to a second resource family. `isGlobalEnvironment`
 // is composed with `visibleEnvironment` ONLY at the environment/MCP-server call
@@ -1135,6 +1138,16 @@ function isMemberOfTeam(userId, teamId) {
   if (!userId || !teamId) return false;
   const memberships = readJsonFile(MEMBERSHIPS_INDEX, []);
   return memberships.some(m => m && m.userId === userId && m.teamId === teamId);
+}
+
+// The number of DISTINCT human members of a squad (§14 / E10). Memberships are
+// keyed by the AGENT TEAM (squad) id and are unique per (userId, teamId), so a
+// row count is a member count. Read fresh like `isMemberOfTeam` (cheap JSON, no
+// cache) so the transition policy is always live. 0 for a non-squad / empty id.
+function teamHumanMemberCount(teamId) {
+  if (!teamId) return 0;
+  const memberships = readJsonFile(MEMBERSHIPS_INDEX, []);
+  return memberships.filter(m => m && m.teamId === teamId).length;
 }
 
 // The author stamp for a chat message posted by this request (#2065). Both
@@ -5316,7 +5329,17 @@ function providerUsableByTeam(ep, teamId, agentTeamId) {
     const set = Array.isArray(ep.teamIds) && ep.teamIds.length ? ep.teamIds : (ep.teamId ? [ep.teamId] : []);
     if (set.map(String).includes(String(agentTeamId))) return true;
   }
-  return personalLendToTeam(ep, agentTeamId, isMemberOfTeam);
+  if (!personalLendToTeam(ep, agentTeamId, isMemberOfTeam)) return false;
+  // §14 / E10: a personal SUBSCRIPTION (oauth) seat is single-user — it cannot be
+  // the shared default of a multi-human squad (E9). Once the squad has ≥2 humans
+  // the oauth lend is VOID, so the provider drops out of the selectable/usable set
+  // (the team-settings dropdown) and PR7 backend enforcement refuses binding it.
+  // A personal API-KEY lend survives — it is only fragile (soft notice in
+  // model-options), never withdrawn here. The hard block at membership-add
+  // (orchestrator) is the sibling guard for the growth direction.
+  const risk = personalDefaultTransitionRisk({ provider: ep, humanMemberCount: teamHumanMemberCount(agentTeamId) });
+  if (risk && risk.level === 'block') return false;
+  return true;
 }
 
 function usableEndpointsForTeam(teamId, agentTeamId) {
@@ -5450,9 +5473,22 @@ app.get('/api/agents/:id/model-options', (req, res) => {
   // the warning isn't shown off an old reading (non-blocking; the reading here
   // stays honest and a subsequent open reflects the refresh).
   if (endpoint) refreshHealthIfStale(endpoint);
+  // §14 / E10: a soft, advisory notice when this squad's shared default is a
+  // member's PERSONAL provider and the squad is multi-human. 'warn' = a fragile
+  // api-key lend (resets to inherit if the owner leaves, via the E1 sweep);
+  // 'block' = a subscription seat that shouldn't back a multi-user team (a legacy
+  // state — new ones are refused at membership-add). null otherwise. UX only —
+  // never gates the run. `resolveAgentTeam(cfg)` is the squad id the lend is keyed on.
+  const providerRisk = (RESOURCE_ACCESS_V2 && endpoint)
+    ? personalDefaultTransitionRisk({ provider: endpoint, humanMemberCount: teamHumanMemberCount(resolveAgentTeam(cfg)) })
+    : null;
   res.json({
     endpointId:     endpoint?.id || null,
     endpointName:   endpoint?.name || null,
+    // §14 / E10 advisory notice (see above); null in the common case.
+    personalProviderNotice: providerRisk
+      ? { level: providerRisk.level, identity: providerRisk.identity, providerName: endpoint.name || endpoint.id, ownerId: endpoint.userId || null }
+      : null,
     authType:       endpoint ? (endpoint.authType === 'oauth-token' ? 'oauth-token' : 'api-key') : null,
     baseUrl:        endpoint?.baseUrl || null,
     // Persisted health of the effective bound endpoint (#1843); 'unknown' when

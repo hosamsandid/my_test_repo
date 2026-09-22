@@ -64,6 +64,32 @@ test('providerUsableByTeam adds an agent-team team-service match behind the flag
   assert.match(body, /set\.map\(String\)\.includes\(String\(agentTeamId\)\)/);
 });
 
+// ── §14 / E10: personal-provider transition guard (subscription hard, api-key soft) ──
+
+test('providerUsableByTeam voids the oauth lend for a multi-human squad (E9)', () => {
+  const start = SRC.indexOf('function providerUsableByTeam(');
+  const body = SRC.slice(start, SRC.indexOf('\n}', start));
+  // The api-key lend still resolves; only a 'block' (personal oauth + ≥2 humans)
+  // withdraws usability. Single-sourced through the pure policy module.
+  assert.match(body, /personalDefaultTransitionRisk\(\{ provider: ep, humanMemberCount: teamHumanMemberCount\(agentTeamId\) \}\)/);
+  assert.match(body, /risk\.level === 'block'.*return false/s);
+});
+
+test('teamHumanMemberCount counts squad memberships fresh (no cache)', () => {
+  const start = SRC.indexOf('function teamHumanMemberCount(');
+  assert.ok(start > 0, 'teamHumanMemberCount not found');
+  const body = SRC.slice(start, SRC.indexOf('\n}', start));
+  assert.match(body, /readJsonFile\(MEMBERSHIPS_INDEX, \[\]\)/);
+  assert.match(body, /filter\(m => m && m\.teamId === teamId\)\.length/);
+});
+
+test('model-options surfaces the soft personalProviderNotice behind the flag', () => {
+  const body = routeBody("app.get('/api/agents/:id/model-options'");
+  assert.match(body, /RESOURCE_ACCESS_V2 && endpoint/);
+  assert.match(body, /personalDefaultTransitionRisk\(\{ provider: endpoint, humanMemberCount: teamHumanMemberCount\(resolveAgentTeam\(cfg\)\) \}\)/);
+  assert.match(body, /personalProviderNotice: providerRisk/);
+});
+
 // ── Multi-team providers: co-owned management + team-set + clone auto-append (#2360) ──
 
 test('canManageProvider is co-owned: any team in the set (flagged), else legacy', () => {

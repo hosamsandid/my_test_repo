@@ -556,7 +556,8 @@ function StubSection({ stubs, groupEnv, selectedAgentId, onSelect, busyIds, onRe
           gap: 'var(--eb-space-2)',
           width: '100%',
           padding: 'var(--eb-space-2) var(--eb-space-3)',
-          paddingLeft: 'calc(var(--eb-space-3) + var(--eb-space-4))',
+          // #2389: stays aligned with its (now un-indented) stub rows.
+          paddingLeft: 'var(--eb-space-3)',
           background: hovered ? 'var(--eb-bg-hover)' : 'transparent',
           border: 'none',
           fontSize: 'var(--eb-text-xs)',
@@ -631,7 +632,8 @@ function PoolInstancesSection({ roleAgent, instances, groupEnv, collapsed, onTog
           gap: 'var(--eb-space-2)',
           width: '100%',
           padding: 'var(--eb-space-2) var(--eb-space-3)',
-          paddingLeft: 'calc(var(--eb-space-3) + var(--eb-space-4) * 2)',
+          // #2389: stays aligned with its instance rows (indent={2} → one step).
+          paddingLeft: 'calc(var(--eb-space-3) + var(--eb-space-4))',
           background: hovered ? 'var(--eb-bg-hover)' : 'transparent',
           border: 'none',
           fontSize: 'var(--eb-text-xs)',
@@ -1038,8 +1040,14 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
         gap: 'var(--eb-space-3)',
         width: '100%',
         padding: 'var(--eb-space-2) var(--eb-space-3)',
-        paddingLeft: indent
-          ? `calc(var(--eb-space-3) + var(--eb-space-4) * ${typeof indent === 'number' ? indent : 1})`
+        // #2389: plain member/stub rows sit flush with the card's base padding.
+        // The old extra `--eb-space-4` step signalled an agent hierarchy the rail
+        // no longer draws — team membership is shown on the card itself now
+        // (#2381/#2387) — so it was just eating horizontal space and truncating
+        // longer names. Pool-instance rows (indent={2}) keep ONE step of indent so
+        // a role and its spawned instances stay visually distinct (#2297, AC3).
+        paddingLeft: (typeof indent === 'number' && indent > 1)
+          ? `calc(var(--eb-space-3) + var(--eb-space-4) * ${indent - 1})`
           : 'var(--eb-space-3)',
         background: selected ? 'var(--eb-bg-selected)' : hovered ? 'var(--eb-bg-hover)' : 'transparent',
         borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',

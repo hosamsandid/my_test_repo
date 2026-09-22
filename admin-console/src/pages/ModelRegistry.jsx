@@ -1082,7 +1082,12 @@ export default function ModelRegistry() {
   const names = { ...teamsById(humanTeams), ...teamsById(agentTeams) };
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
-  const caller = { isSysAdmin, adminTeamIds };
+  // `userId` is REQUIRED for the personal-tier manage check: canManageCredentialClient
+  // authorises a personal provider only when `c.userId === caller.userId`. Omitting
+  // it made every personal provider look unmanageable even to its own owner — the
+  // row showed a lock with no edit/delete (#2360 follow-up). The session carries the
+  // id as `user.userId` (describeAuthz), not `user.id`.
+  const caller = { isSysAdmin, adminTeamIds, userId: user?.userId };
   // User's team IDs for assist-exclusion badge computation (AC1/AC2, #1402).
   const userTeamIds = (user?.teams || []).map(t => t.teamId);
   const [creating, setCreating] = useState(false);

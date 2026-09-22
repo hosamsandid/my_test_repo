@@ -81,7 +81,7 @@ export default function TeamEnvironmentPanel({ agent, tab }) {
     return <ReadOnlyEnvSummary env={env} tab={tab} />;
   }
 
-  return <TeamEnvironmentFields env={env} onSaved={refetch} tab={tab} />;
+  return <TeamEnvironmentFields env={env} agent={agent} onSaved={refetch} tab={tab} />;
 }
 
 // Read-only view of an environment the caller may see but not manage — one
@@ -170,7 +170,7 @@ function ReadOnlyEnvSummary({ env, tab }) {
   );
 }
 
-function TeamEnvironmentFields({ env, onSaved, tab }) {
+function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
   // The record last confirmed by the server — form gating and change notices
   // compare against this, not the initial prop, so a second save in the same
   // session still detects what actually changed.

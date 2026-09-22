@@ -210,7 +210,7 @@ function BehaviorSettings() {
  * A browser-level block is surfaced with a hint on how to re-enable (AC8).
  */
 function NotifyOnBackSetting() {
-  const { user } = useAuth();
+  const { user, patchUser } = useAuth();
   const username = user?.username;
   const hasServerRecord = user != null && user.userId != null;
 
@@ -225,6 +225,10 @@ function NotifyOnBackSetting() {
   function persist(next) {
     setEnabled(next);
     saveStoredNotifyEnabled(username, next);
+    // Reflect the new value in the in-session AuthContext.user right away so
+    // reopening Settings (which remounts and re-reads user.chatNotifyOnBack)
+    // shows the correct state — even if the PUT below is still in flight (#2402).
+    patchUser({ chatNotifyOnBack: next });
     notifyNotifySettingChanged(next);
     apiCall('PUT', '/api/me/preferences', { chatNotifyOnBack: next }).catch(() => {});
   }
@@ -292,7 +296,7 @@ const THEME_OPTIONS = [
  * FONT_SIZE_CHANGED_EVENT custom event (same pattern as send-keybinding).
  */
 function DisplaySettings() {
-  const { user } = useAuth();
+  const { user, patchUser } = useAuth();
   const { theme, setTheme } = useTheme();
   const username = user?.username;
   const hasServerRecord = user != null && user.userId != null;
@@ -308,6 +312,9 @@ function DisplaySettings() {
     if (next === fontSize) return;
     setFontSize(next);
     saveStoredFontSize(username, next);
+    // Same stale-session fix as the notify toggle: reflect the new size in the
+    // in-session user so reopening Settings reads the fresh value (#2402).
+    patchUser({ chatFontSize: next });
     notifyFontSizeChanged(next);
     apiCall('PUT', '/api/me/preferences', { chatFontSize: next }).catch(() => {});
   }

@@ -106,6 +106,28 @@ export function providerOwnershipFromRecord(rec) {
   return { scope: 'global', teamIds: [] };
 }
 
+// The table's "Ownership" descriptor for a provider row — the SAME taxonomy as
+// the edit dialog (Personal / Team(s) / Global), derived from the record through
+// `providerOwnershipFromRecord` so the row and the dialog can never disagree
+// (#2360 follow-up: the table still rendered the old System/Team/Personal
+// `credentialScopeLabel`). `names` is an id→display-name map for the team set.
+// Returns `{ scope, label, detail }`; pure — unit-tested here.
+export function providerScopeLabel(rec, names = {}) {
+  const { scope, teamIds } = providerOwnershipFromRecord(rec);
+  if (scope === 'global') {
+    return { scope: 'global', label: 'Global', detail: 'Every user and agent team' };
+  }
+  if (scope === 'personal') {
+    return { scope: 'personal', label: 'Personal', detail: 'Only you and the agents you own' };
+  }
+  const teamNames = (teamIds || []).map(id => (names && names[id]) || id);
+  return {
+    scope: 'team',
+    label: teamNames.length > 1 ? 'Teams' : 'Team',
+    detail: teamNames.length ? teamNames.join(', ') : 'No team assigned',
+  };
+}
+
 // Reduce the control state to the API body fields. For team(s): `teamId` = the
 // primary (first) for backward-compat, `teamIds` = the full set. `global` is
 // carried explicitly so an edit can RETRACT it.

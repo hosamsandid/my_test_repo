@@ -400,3 +400,8 @@ deliberate manual act.)
   would silently run on (the orchestrator has no runtime lend-gate). Checked by
   ownership — the creator's membership is written a phase later. Passed at all
   three creation sites (standalone quick-create + both `POST /api/teams` handlers).
+- **UI:** `provider-health-view.js` `personalProviderNoticeText(notice)` (pure,
+  `{ text, tone }`) renders the `personalProviderNotice` as a non-blocking badge in
+  the Agent-Chat composer (`ChatPanel.jsx`, beside the health warning) and under the
+  team-settings Provider dropdown (`TeamEnvironmentPanel.jsx`) — 'warn' (fragile
+  api-key lend) vs 'error' (a subscription seat backing a multi-member team).

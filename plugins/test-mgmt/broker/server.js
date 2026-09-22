@@ -110,7 +110,12 @@ async function execVendor(scopeId, subcommand, name, args) {
       token: process.env.TESTMGMT_API_TOKEN,
     });
     // Redact the vendor credential from anything echoed back, per §4.9.
-    const masked = maskSecretsOrDefault(JSON.stringify(body), [process.env.TESTMGMT_API_TOKEN]);
+    // (raw, fallback, secrets) — the token belongs in the third argument. As
+    // the second it became the fallback, so an empty body would have returned
+    // the API token to the caller, and nothing was masked either.
+    const masked = maskSecretsOrDefault(
+      JSON.stringify(body), '(no body)', [process.env.TESTMGMT_API_TOKEN],
+    );
     writeAudit(scopeId, subcommand, 'ok');
     return { content: [{ type: 'text', text: masked }] };
   } catch (err) {

@@ -54,3 +54,16 @@ test('maskSecretsOrDefault falls back only on genuinely empty input', () => {
   assert.equal(maskSecretsOrDefault('-e K=secret', 'fallback'), `-e K=${REDACTION}`);
   assert.equal(maskSecretsOrDefault('token sk-1', 'fallback', ['sk-1']), `token ${REDACTION}`);
 });
+
+test('maskSecretsOrDefault refuses a non-string fallback', () => {
+  // The real bug this guards, found live in the gke and test-mgmt brokers:
+  // `maskSecretsOrDefault(output, [token])` put the credential in the fallback
+  // slot, so a read that produced no output handed the live bearer back to the
+  // agent — and with `secrets` defaulted to [], nothing was masked at all. The
+  // shape is too plausible to leave silently accepted.
+  assert.throws(
+    () => maskSecretsOrDefault('', ['ya29.super-secret']),
+    /fallback must be a string/,
+  );
+  assert.throws(() => maskSecretsOrDefault('output', undefined), /fallback must be a string/);
+});

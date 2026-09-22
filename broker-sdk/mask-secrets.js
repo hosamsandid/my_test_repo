@@ -67,6 +67,16 @@ function maskSecrets(output, secrets = []) {
 // into an empty one; the fallback therefore fires only on a genuinely empty
 // `raw`, exactly as intended.
 function maskSecretsOrDefault(raw, fallback, secrets = []) {
+  // Both brokers that got this call wrong passed the SECRET as `fallback` —
+  // the shape `maskSecretsOrDefault(output, [token])` reads plausibly and is
+  // catastrophic: nothing is masked (secrets defaults to []), and any empty
+  // `raw` returns the credential verbatim to the caller. A non-string fallback
+  // is never legitimate, so refuse it loudly rather than leak quietly.
+  if (typeof fallback !== 'string') {
+    throw new TypeError(
+      'maskSecretsOrDefault: fallback must be a string — secrets belong in the third argument',
+    );
+  }
   return maskSecrets(raw, secrets) || fallback;
 }
 

@@ -1,15 +1,15 @@
 import React from 'react';
 
 // Radio-card Ownership control for Model Providers (#2360). ONE axis —
-// Personal / Team / Global — replacing the old "Global checkbox + System(assign
-// to teams) / Team-owned" pair. The option list (with enabled/disabledReason) is
-// computed by provider-ownership-view.js (`providerOwnershipOptions`) and passed
-// in; this is a thin renderer. A disabled option stays VISIBLE with its reason
-// (discoverability, e.g. "System Admins only"). When "Team" is the active,
-// enabled choice, an inline team picker appears beneath it.
+// Personal / Team(s) / Global — replacing the old "Global checkbox + System(assign
+// to teams) / Team-owned" pair. "Team(s)" is a co-owned SET of agent teams: a
+// provider can serve several teams without being duplicated, and cloning a team
+// appends the clone to the set (server-side). The option list (enabled/
+// disabledReason) is computed by provider-ownership-view.js and passed in.
 //
-// `value` is { scope: 'personal'|'team'|'global', teamId }; `onChange` receives
-// the next state. `teams` is the ALREADY-FILTERED selectable team set.
+// `value` is { scope: 'personal'|'team'|'global', teamIds: string[] }; `onChange`
+// receives the next state. `teams` is the ALREADY-FILTERED selectable team set
+// (the agent teams the caller may assign, each { id, name }).
 
 const labelStyle = {
   fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
@@ -22,13 +22,25 @@ const selectStyle = {
   borderRadius: 'var(--eb-radius-md)', color: 'var(--eb-text-primary)',
   fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit', boxSizing: 'border-box',
 };
+const chipStyle = {
+  display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
+  padding: '2px var(--eb-space-2)', borderRadius: 'var(--eb-radius-sm)',
+  background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+  fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-primary)',
+};
 
 export default function ProviderOwnership({ value, onChange, options = [], teams = [], disabled = false }) {
-  const own = value || { scope: 'personal', teamId: '' };
+  const own = value || { scope: 'personal', teamIds: [] };
+  const teamIds = Array.isArray(own.teamIds) ? own.teamIds : [];
+  const nameOf = (id) => (teams.find(t => t.id === id)?.name) || `${id} (legacy)`;
+  const available = teams.filter(t => !teamIds.includes(t.id));
+
   const pick = (scope) => {
-    if (scope === 'team') onChange({ scope: 'team', teamId: own.teamId || teams[0]?.id || '' });
-    else onChange({ scope, teamId: '' });
+    if (scope === 'team') onChange({ scope: 'team', teamIds: teamIds.length ? teamIds : [] });
+    else onChange({ scope, teamIds: [] });
   };
+  const addTeam = (id) => { if (id && !teamIds.includes(id)) onChange({ scope: 'team', teamIds: [...teamIds, id] }); };
+  const removeTeam = (id) => onChange({ scope: 'team', teamIds: teamIds.filter(t => t !== id) });
 
   return (
     <div>
@@ -62,21 +74,36 @@ export default function ProviderOwnership({ value, onChange, options = [], teams
                   </span>
                 </span>
               </label>
+
               {opt.value === 'team' && active && !off && (
-                <select
-                  value={own.teamId || ''}
-                  onChange={e => onChange({ scope: 'team', teamId: e.target.value })}
-                  style={{ ...selectStyle, marginTop: 'var(--eb-space-1)', marginLeft: 'var(--eb-space-5)', minWidth: 240 }}
-                >
-                  {!own.teamId && <option value="">Select a team…</option>}
-                  {/* A legacy record stamped with a team id not in the current
-                      agent-team list (e.g. the old 'default') stays visible +
-                      selected rather than silently blanked; pick a real team to migrate it. */}
-                  {own.teamId && !teams.some(t => t.id === own.teamId) && (
-                    <option value={own.teamId}>{own.teamId} (legacy — pick a team to migrate)</option>
+                <div style={{ marginLeft: 'var(--eb-space-5)', marginTop: 'var(--eb-space-1)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
+                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>Usable by these agent teams:</div>
+                  {teamIds.length > 0 && (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--eb-space-1)' }}>
+                      {teamIds.map(id => (
+                        <span key={id} style={chipStyle}>
+                          {nameOf(id)}
+                          <button
+                            type="button"
+                            onClick={() => removeTeam(id)}
+                            title="Remove team"
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--eb-text-muted)', padding: 0, lineHeight: 1, fontSize: 'var(--eb-text-sm)' }}
+                          >×</button>
+                        </span>
+                      ))}
+                    </div>
                   )}
-                  {teams.map(t => <option key={t.id} value={t.id}>{t.name || t.id}</option>)}
-                </select>
+                  {available.length > 0 && (
+                    <select
+                      value=""
+                      onChange={e => { addTeam(e.target.value); e.target.value = ''; }}
+                      style={{ ...selectStyle, minWidth: 240, marginTop: 'var(--eb-space-1)' }}
+                    >
+                      <option value="">{teamIds.length ? '+ Add another team…' : 'Select a team…'}</option>
+                      {available.map(t => <option key={t.id} value={t.id}>{t.name || t.id}</option>)}
+                    </select>
+                  )}
+                </div>
               )}
             </div>
           );

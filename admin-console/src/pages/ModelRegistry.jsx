@@ -15,13 +15,13 @@ import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import ProviderOwnership from '../components/ProviderOwnership';
 import {
   providerOwnershipOptions, defaultProviderOwnership, providerOwnershipFromRecord,
-  providerOwnershipPayload, providerOwnershipReady,
+  providerOwnershipPayload, providerOwnershipReady, canManageProviderClient,
 } from './provider-ownership-view';
 import { useAuth } from '../auth/AuthContext';
 import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import {
   teamsById, credentialScopeLabel,
-  canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
+  canReassignCredentialClient, adminTeamIdsOf,
 } from './credential-scope-view';
 import {
   resolveProbeState,
@@ -1307,7 +1307,7 @@ export default function ModelRegistry() {
         );
         // A Team Admin may see a system provider assigned to their team but not
         // manage it (#800) — show a lock, no edit/delete, matching the API gate.
-        if (!canManageCredentialClient(row, caller)) return (
+        if (!canManageProviderClient(row, caller, resourceAccessV2)) return (
           <div style={{ display: 'flex', justifyContent: 'flex-end', color: 'var(--eb-text-muted)' }} title="System-scoped provider — only a System Admin can manage it. You may use it.">
             <Lock size={13} />
           </div>
@@ -1502,7 +1502,7 @@ export default function ModelRegistry() {
           // The .env row opens its read-only panel; a manageable provider opens
           // the editor. A visible-but-unmanageable system provider (Team Admin)
           // is not clickable — its lock already explains why (#800).
-          if (!row.readOnly && !canManageCredentialClient(row, caller)) return;
+          if (!row.readOnly && !canManageProviderClient(row, caller, resourceAccessV2)) return;
           setEditing(row); setFormError(null);
         }}
       />

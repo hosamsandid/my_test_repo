@@ -1,33 +1,50 @@
 // Pure view helpers for the Model-Provider Ownership control (#2360).
 //
-// The redesign collapses the old "Global checkbox + System(assign to teams) /
-// Team-owned" pair into ONE axis — the question "who can use this provider?" —
-// with three mutually exclusive answers, narrow → wide:
+// ONE axis — "who can use this provider?" — with three answers, narrow → wide:
 //
 //   personal → only the owner + the agents they own      (scope: personal)
-//   team     → one team; copied when the team is cloned  (scope: team, teamId)
+//   team     → a SET of agent teams                       (scope: team, teamIds[])
 //   global   → every user and every agent team           (scope: system, global)
+//
+// "team" is a co-owned SET of agent teams (#2360): a provider can serve several
+// teams without being duplicated. The common case is one team; cloning a team
+// APPENDS the clone to the set (server-side), so a cloned team keeps a working
+// provider with no copy of the secret. Storage: `scope: 'team'`, `teamId` = the
+// primary (first) agent team for backward-compat, `teamIds` = the full set.
 //
 // The identity axis is NOT a separate control for providers: it is the auth type
 // (api-key = service → any tier; subscription/oauth = human → personal, or global
-// via the single-user escape hatch, never team). So these helpers take `isOauth`
-// and constrain the options accordingly. Pure (no React, no fetch) → unit-tested
-// in provider-ownership-view.test.js; the JSX lives in ProviderOwnership.jsx.
-//
-// UX only — the server re-checks every rule (canCreateCredential / resolveGlobalFlag).
+// via the single-user escape hatch, never team). Pure (no React/fetch) →
+// unit-tested in provider-ownership-view.test.js. UX only — the server re-checks.
 
-import { normalizeCredential } from './credential-scope-view.js';
+import { normalizeCredential, canManageCredentialClient } from './credential-scope-view.js';
 
 export const PROVIDER_OWNERSHIP_SCOPES = ['personal', 'team', 'global'];
 
-// The three option descriptors for the radio-card control, each with an
-// `enabled` flag and, when disabled, a `disabledReason` (the option stays
-// VISIBLE for discoverability, per the agreed design). Inputs:
-//   isOauth       — the effective auth type is a subscription seat.
-//   isSysAdmin    — the caller has full visibility.
-//   adminTeamIds  — teams the caller administers (for the non-admin team gate).
-//   canGlobalOauth— the single-user escape hatch applies (compliance ack), so an
-//                   oauth provider MAY be global.
+// The agent-team SET a team provider serves (client mirror of api.js
+// providerTeamSet): its `teamIds`, falling back to the legacy single `teamId`.
+export function providerTeamSetOf(ep) {
+  if (!ep || ep.scope !== 'team') return [];
+  return Array.isArray(ep.teamIds) && ep.teamIds.length
+    ? ep.teamIds.map(String)
+    : (ep.teamId ? [String(ep.teamId)] : []);
+}
+
+// Co-owned management (#2360, decision A) — client mirror of api.js
+// canManageProvider: a team provider is manageable by the admin of ANY of its
+// teams (or a System Admin / the legacy owning-team rule). `v2` gates the
+// co-owned widening. UX only — the API re-checks.
+export function canManageProviderClient(ep, caller = {}, v2 = false) {
+  if (canManageCredentialClient(ep, caller)) return true;
+  if (v2 && ep && ep.scope === 'team') {
+    const admin = caller.adminTeamIds || [];
+    return providerTeamSetOf(ep).some(id => admin.includes(id));
+  }
+  return false;
+}
+
+// The three option descriptors for the radio-card control (see #2360). `team`
+// now means one-or-more agent teams; `enabled`/`disabledReason` unchanged.
 export function providerOwnershipOptions({ isOauth = false, isSysAdmin = false, adminTeamIds = [], canGlobalOauth = false } = {}) {
   const hasTeam = isSysAdmin || adminTeamIds.length > 0;
   return [
@@ -40,8 +57,8 @@ export function providerOwnershipOptions({ isOauth = false, isSysAdmin = false, 
     },
     {
       value: 'team',
-      label: 'Team',
-      hint: "One team. Copied with the team when it's cloned.",
+      label: 'Team(s)',
+      hint: 'One or more agent teams. A clone of a team is added automatically — the provider is shared, never duplicated.',
       enabled: !isOauth && hasTeam,
       disabledReason: isOauth
         ? "A subscription is a single seat — it can't be shared with a team."
@@ -60,42 +77,48 @@ export function providerOwnershipOptions({ isOauth = false, isSysAdmin = false, 
 }
 
 // The initial control state for a NEW provider. A subscription defaults to
-// Personal (the only non-hatch tier it may hold); otherwise Team (the common
-// shared case) — preselected to the caller's single admin team when there is
-// exactly one, else left blank so they must choose.
+// Personal; otherwise Team(s) — preselected to the caller's single admin team
+// when there is exactly one, else an empty set they must fill.
 export function defaultProviderOwnership({ isSysAdmin = false, adminTeamIds = [], isOauth = false } = {}) {
-  if (isOauth) return { scope: 'personal', teamId: '' };
-  if (!isSysAdmin && adminTeamIds.length === 1) return { scope: 'team', teamId: adminTeamIds[0] };
-  return { scope: 'team', teamId: '' };
+  if (isOauth) return { scope: 'personal', teamIds: [] };
+  if (!isSysAdmin && adminTeamIds.length === 1) return { scope: 'team', teamIds: [adminTeamIds[0]] };
+  return { scope: 'team', teamIds: [] };
 }
 
-// The control state for an EXISTING provider. A global record → global; a
-// personal/team record → itself; a legacy `system` + assignedTeamIds record
-// collapses to its first assigned team (else global) — the migration off the
-// removed multi-assign axis, surfaced the moment an admin edits it.
+// The control state for an EXISTING provider. Global → global; personal → itself;
+// a team provider → its team SET (`teamIds`, falling back to the legacy single
+// `teamId`); a legacy `system` + assignedTeamIds record collapses to a team set
+// (the multi-assign axis is now first-class again as agent teams).
 export function providerOwnershipFromRecord(rec) {
-  if (!rec || typeof rec !== 'object') return { scope: 'personal', teamId: '' };
-  if (rec.global === true && rec.scope === 'system') return { scope: 'global', teamId: '' };
+  if (!rec || typeof rec !== 'object') return { scope: 'personal', teamIds: [] };
+  if (rec.global === true && rec.scope === 'system') return { scope: 'global', teamIds: [] };
   const n = normalizeCredential(rec);
-  if (n.scope === 'personal') return { scope: 'personal', teamId: '' };
-  if (n.scope === 'team') return { scope: 'team', teamId: n.teamId || '' };
-  if (Array.isArray(n.assignedTeamIds) && n.assignedTeamIds.length) {
-    return { scope: 'team', teamId: String(n.assignedTeamIds[0]) };
+  if (n.scope === 'personal') return { scope: 'personal', teamIds: [] };
+  if (n.scope === 'team') {
+    const set = Array.isArray(rec.teamIds) && rec.teamIds.length
+      ? rec.teamIds.map(String)
+      : (n.teamId ? [String(n.teamId)] : []);
+    return { scope: 'team', teamIds: set };
   }
-  return { scope: 'global', teamId: '' };
+  if (Array.isArray(n.assignedTeamIds) && n.assignedTeamIds.length) {
+    return { scope: 'team', teamIds: n.assignedTeamIds.map(String) };
+  }
+  return { scope: 'global', teamIds: [] };
 }
 
-// Reduce the control state to the API body fields. `global` is carried
-// explicitly so an edit can RETRACT it (global → team/personal). Off the global
-// scope it is `false`; the server ignores it for non-admins.
-export function providerOwnershipPayload({ scope, teamId } = {}) {
+// Reduce the control state to the API body fields. For team(s): `teamId` = the
+// primary (first) for backward-compat, `teamIds` = the full set. `global` is
+// carried explicitly so an edit can RETRACT it.
+export function providerOwnershipPayload({ scope, teamIds } = {}) {
   if (scope === 'global') return { scope: 'system', assignedTeamIds: [], global: true };
-  if (scope === 'team') return { scope: 'team', teamId: teamId || undefined, global: false };
+  if (scope === 'team') {
+    const set = [...new Set((teamIds || []).map(String))];
+    return { scope: 'team', teamId: set[0] || undefined, teamIds: set, global: false };
+  }
   return { scope: 'personal', global: false };
 }
 
-// Is the control in a submittable state? Personal / Global need nothing more;
-// Team needs a chosen team.
-export function providerOwnershipReady({ scope, teamId } = {}) {
-  return scope === 'personal' || scope === 'global' || !!teamId;
+// Is the control submittable? Personal / Global always; Team(s) needs ≥1 team.
+export function providerOwnershipReady({ scope, teamIds } = {}) {
+  return scope === 'personal' || scope === 'global' || (Array.isArray(teamIds) && teamIds.length > 0);
 }

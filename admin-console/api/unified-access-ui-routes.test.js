@@ -56,7 +56,46 @@ test('providerUsableByTeam adds an agent-team team-service match behind the flag
   const body = SRC.slice(start, SRC.indexOf('\n}', start));
   // Legacy compat: the tenant match stays (a 'default'-stamped provider works).
   assert.match(body, /credentialVisibleToTeam\(ep, teamId\)/);
-  // The re-key: a team provider stamped with the AGENT TEAM id is usable, gated.
+  // The re-key + multi-team: a team provider serves a SET of agent teams
+  // (teamIds, falling back to teamId); usable if agentTeamId is in the set.
   assert.match(body, /if \(!RESOURCE_ACCESS_V2 \|\| !agentTeamId\) return false;/);
-  assert.match(body, /ep\.scope === 'team' && ep\.teamId === agentTeamId/);
+  assert.match(body, /ep\.scope === 'team'/);
+  assert.match(body, /Array\.isArray\(ep\.teamIds\)/);
+  assert.match(body, /set\.map\(String\)\.includes\(String\(agentTeamId\)\)/);
+});
+
+// ── Multi-team providers: co-owned management + team-set + clone auto-append (#2360) ──
+
+test('canManageProvider is co-owned: any team in the set (flagged), else legacy', () => {
+  const start = SRC.indexOf('function canManageProvider(');
+  assert.ok(start > 0, 'canManageProvider not found');
+  const body = SRC.slice(start, SRC.indexOf('\n}', start));
+  assert.match(body, /if \(scope && scope\.all\) return true;/);
+  assert.match(body, /RESOURCE_ACCESS_V2 && ep && ep\.scope === 'team'/);
+  assert.match(body, /providerTeamSet\(ep\)\.some\(t => canManageTeam\(scope, t\)\)/);
+});
+
+test('provider create persists the team SET and validates it (resolveProviderTeamSet)', () => {
+  const start = SRC.indexOf("app.post('/api/llm-endpoints'");
+  const body = SRC.slice(start, SRC.indexOf('\napp.', start + 10));
+  assert.match(body, /resolveProviderTeamSet\(scope, req\.body/);
+  assert.match(body, /\{ teamIds: providerTeamIds \}/);
+});
+
+test('provider DELETE allows co-owned deletion (canManageProvider) plus the personal break-glass', () => {
+  const start = SRC.indexOf("app.delete('/api/llm-endpoints/:id'");
+  const body = SRC.slice(start, SRC.indexOf('\napp.', start + 10));
+  assert.match(body, /!canDeleteCredential\(scope, ep\) && !canManageProvider\(scope, ep\)/);
+});
+
+test('cloning/reusing an env auto-appends the team to a team-scoped provider (best-effort)', () => {
+  const gStart = SRC.indexOf('function ensureTeamOnEnvProvider(');
+  assert.ok(gStart > 0, 'ensureTeamOnEnvProvider not found');
+  const g = SRC.slice(gStart, SRC.indexOf('\n}', gStart));
+  assert.match(g, /if \(!ep \|\| ep\.scope !== 'team'\) return;/, 'only team-scoped providers');
+  assert.match(g, /ep\.teamIds = \[\.\.\.set, String\(teamAgentId\)\]/);
+  // wired into the team-materialize path
+  const teams = SRC.indexOf("app.post('/api/teams'");
+  const teamsBody = SRC.slice(teams, SRC.indexOf('\napp.post', teams + 10));
+  assert.match(teamsBody, /ensureTeamOnEnvProvider\(reusedEnv, teamId\)/);
 });

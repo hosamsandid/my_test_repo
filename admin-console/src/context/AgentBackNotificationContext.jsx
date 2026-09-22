@@ -14,6 +14,7 @@ import {
   notificationTagFor,
   notificationsSupported,
   getNotificationPermission,
+  isConsoleInForeground,
 } from '../pages/agent-chat/agent-back-notification.js';
 
 // "An agent you messaged is back" browser notification (#2397).
@@ -89,6 +90,14 @@ export function AgentBackNotificationProvider({ children }) {
         tag: notificationTagFor(c.id),
         // No body content (AC2) — title (agent name) only.
       });
+      // #2409 AC5: an OS-level block (browser grant present, OS/Focus-Assist off)
+      // lets construction succeed but shows nothing and throws nothing. Surface
+      // that (and any async delivery error) in the console so a future "still
+      // doesn't fire" report is diagnosable without another code-archaeology pass.
+      n.onerror = (err) => {
+        // eslint-disable-next-line no-console
+        console.warn('[agent-back-notification] notification failed to display for', c.id, err);
+      };
       n.onclick = () => {
         try { window.focus(); } catch { /* ignore */ }
         // Mark viewed so the in-page unread dot clears (AC3), matching handleSelect.
@@ -101,7 +110,12 @@ export function AgentBackNotificationProvider({ children }) {
         navigate(`/chats/${c.id}`);
         try { n.close(); } catch { /* ignore */ }
       };
-    } catch { /* a construction failure must never crash the poll */ }
+    } catch (err) {
+      // A construction failure must never crash the poll — but no longer swallow
+      // it silently (#2409 AC5): a synchronous throw here is otherwise invisible.
+      // eslint-disable-next-line no-console
+      console.warn('[agent-back-notification] notification construction threw for', c.id, err);
+    }
   }, [navigate]);
 
   // Runs on every status poll. Always advances the previous-snapshot baseline so
@@ -112,8 +126,10 @@ export function AgentBackNotificationProvider({ children }) {
     prevStatusesRef.current = statuses;
     if (prev == null) return;                                   // baseline the first poll
     if (!enabledRef.current) return;                            // AC7: off → nothing fires
-    // AC4: never fire while the tab is the active/visible one.
-    if (typeof document !== 'undefined' && document.visibilityState === 'visible') return;
+    // Never fire while the console is the surface the user is looking at. This
+    // is BOTH visible AND OS-focused (#2409 AC2/candidate #1) — a browser window
+    // that's visible but not focused (another app/monitor) counts as "away".
+    if (isConsoleInForeground(typeof document !== 'undefined' ? document : null)) return;
     if (!notificationsSupported(window)) return;
     if (getNotificationPermission(window) !== 'granted') return; // AC8: blocked/denied → silent
 

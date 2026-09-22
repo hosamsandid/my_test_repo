@@ -222,6 +222,21 @@ function NotifyOnBackSetting() {
   const supported = notificationsSupported();
   const [permission, setPermission] = useState(() => getNotificationPermission());
 
+  // #2409 AC4: the browser's per-site grant can be revoked outside the app (site
+  // settings, org policy, a browser auto-revoke) long after the toggle was turned
+  // on. Re-read it whenever the user returns to this tab so the row reflects a
+  // freshly-blocked state instead of continuing to claim the feature is active.
+  useEffect(() => {
+    if (!supported) return undefined;
+    const recheck = () => setPermission(getNotificationPermission());
+    window.addEventListener('focus', recheck);
+    document.addEventListener('visibilitychange', recheck);
+    return () => {
+      window.removeEventListener('focus', recheck);
+      document.removeEventListener('visibilitychange', recheck);
+    };
+  }, [supported]);
+
   function persist(next) {
     setEnabled(next);
     saveStoredNotifyEnabled(username, next);
@@ -274,7 +289,9 @@ function NotifyOnBackSetting() {
         type="checkbox"
         role="switch"
         aria-label="Notify when an agent you messaged is back"
-        checked={enabled}
+        // When the browser grant is blocked the feature cannot fire, so show the
+        // switch as off rather than silently claiming it is active (#2409 AC4).
+        checked={enabled && !blocked}
         disabled={!supported || blocked}
         onChange={(e) => toggle(e.target.checked)}
         style={{ flexShrink: 0, width: 18, height: 18, cursor: (!supported || blocked) ? 'not-allowed' : 'pointer' }}

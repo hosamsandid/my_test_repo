@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Loader2, RefreshCw, RotateCcw, Gauge, Trash2 } from 'lucide-react';
+import { Loader2, RefreshCw, RotateCcw, Gauge, Trash2, X, AlertTriangle } from 'lucide-react';
 import { apiCall, useApi } from '../../hooks/useApi';
 import { useSSE } from '../../hooks/useSSE';
 import { useAuth } from '../../auth/AuthContext';
@@ -30,6 +30,7 @@ import VirtualList from '../../components/VirtualList.jsx';
 import { EventErrorBoundary } from '../../components/ErrorBoundary.js';
 import { resolveContextWindowTokens, computeContextFillLevel } from './context-window';
 import { headerContextIndicator } from './session-info.js';
+import { computeContextNudge, nudgeDismissStorageKey, isNudgeDismissed } from './context-nudge.js';
 import SessionInfoPopover from './SessionInfoPopover.jsx';
 import { maintenanceBannerText } from './maintenance-banner';
 import { agentRemovedNoticeText } from './agent-removed-notice.js';
@@ -150,6 +151,11 @@ export default function ChatPanel({
   const [sessionId, setSessionId]     = useState(null);
   const [sessionUpdatedAt, setSessionUpdatedAt] = useState(null);
   const [resetting, setResetting]     = useState(false);
+  // #2382: the session id for which the 50% context-fill hint was dismissed
+  // (persisted per-room in localStorage so the dismissal survives a page reload,
+  // Q1). The hint is suppressed only while the live session id still matches;
+  // a reset mints a new id, so the hint can reappear in the fresh session (AC6).
+  const [dismissedNudgeSessionId, setDismissedNudgeSessionId] = useState(null);
   const [resuming, setResuming]       = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -700,6 +706,30 @@ export default function ChatPanel({
     return () => clearTimeout(t);
   }, [messages, agent?.userId, fetchSession]);
 
+  // #2382: seed the dismissed-hint session id from per-room localStorage so a
+  // page reload of the same session keeps the 50% hint dismissed (Q1). Re-runs
+  // when the room changes; a missing/unreadable store is simply "not dismissed".
+  useEffect(() => {
+    const key = nudgeDismissStorageKey(roomId);
+    if (!key) { setDismissedNudgeSessionId(null); return; }
+    try {
+      setDismissedNudgeSessionId(window.localStorage.getItem(key) || null);
+    } catch {
+      setDismissedNudgeSessionId(null);
+    }
+  }, [roomId]);
+
+  // #2382: dismiss the 50% hint for the current session — record the live
+  // session id (per-room, persisted) so the hint stays gone across reloads until
+  // a reset changes the id. Never suppresses the 75% permanent warning (AC7).
+  function dismissContextNudge() {
+    if (!sessionId) return;
+    setDismissedNudgeSessionId(sessionId);
+    const key = nudgeDismissStorageKey(roomId);
+    if (!key) return;
+    try { window.localStorage.setItem(key, sessionId); } catch { /* storage blocked — hint just reappears on reload */ }
+  }
+
   async function handleResetSession() {
     if (!sessionApiBase || resetting) return;
     onTodoBoundary?.();
@@ -1189,6 +1219,25 @@ export default function ChatPanel({
   // snapshot. Only present behind AEE_RESOURCE_ACCESS_V2 for a multi-human squad.
   const personalNotice = personalProviderNoticeText(modelOptions?.personalProviderNotice);
 
+  // #2382: the actionable context-fill nudge, derived from the SAME unified fill
+  // `level` (50% / 75%) that colours the header indicator — no second threshold
+  // system. A dismissible hint from 50%, a permanent reset warning from 75%.
+  // Gated to the interactive chat (AC10): suppressed while a triggered/autonomous
+  // run is in view. Also gated on a live `sessionId`: the nudge only makes sense
+  // for a resettable session, and this is what makes the warning clear the instant
+  // Reset Session drops the pointer (`sessionId → null`) even though the last
+  // request's fill lingers in the session log until the next run (AC5/AC6). A
+  // resumed session already carries its id on first render, so a ≥75% session
+  // still shows the permanent warning immediately (edge case). `dismissed` matches
+  // the live session id against the recorded one, so a reset (new id) re-enables
+  // the hint (AC6).
+  const contextNudge = computeContextNudge({
+    level: contextFillLevel?.level ?? null,
+    usedTokens: contextFill?.tokensIn,
+    interactive: !hasActiveTriggerRun && !!sessionId,
+    dismissed: isNudgeDismissed(dismissedNudgeSessionId, sessionId),
+  });
+
   // Meeting Note-Taker (#1296): the session engine is app-level, so ChatPanel
   // only needs to kick a session off for this agent and know whether one is
   // already running (to disable the entry point + quick dictation).
@@ -1456,6 +1505,97 @@ export default function ChatPanel({
           flexShrink: 0,
         }}>
           {personalNotice.text}
+        </div>
+      )}
+
+      {/* #2382: actionable context-fill nudges, a banner row consistent with the
+          warning banners above (Q3). The 50% hint is dismissible; the 75% warning
+          is permanent and carries a direct Reset Session control. Both derive from
+          the unified fill level. */}
+      {contextNudge.kind === 'hint' && (
+        <div role="status" style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--eb-space-3)',
+          padding: 'var(--eb-space-3) var(--eb-space-4)',
+          background: 'var(--eb-status-warning-bg)',
+          borderBottom: '1px solid var(--eb-status-warning)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-primary)',
+          flexShrink: 0,
+        }}>
+          <Gauge size={15} style={{ flexShrink: 0, color: 'var(--eb-status-warning)' }} />
+          <span style={{ flex: 1, minWidth: 0 }}>
+            This session has filled more than half of the model's context window. The whole
+            conversation is re-sent every turn — <b>reset the session to save tokens</b>.
+          </span>
+          <button
+            type="button"
+            onClick={dismissContextNudge}
+            title="Dismiss this hint for the current session"
+            aria-label="Dismiss context-usage hint"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              flexShrink: 0,
+              background: 'transparent',
+              border: '1px solid var(--eb-border-default)',
+              borderRadius: 'var(--eb-radius-sm)',
+              color: 'var(--eb-text-muted)',
+              padding: '2px 8px',
+              cursor: 'pointer',
+              fontSize: 'var(--eb-text-xs)',
+            }}
+          >
+            <X size={12} /> Dismiss
+          </button>
+        </div>
+      )}
+
+      {contextNudge.kind === 'warning' && (
+        <div role="alert" style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--eb-space-3)',
+          padding: 'var(--eb-space-3) var(--eb-space-4)',
+          background: 'var(--eb-status-warning-bg)',
+          borderBottom: '1px solid var(--eb-status-error)',
+          fontSize: 'var(--eb-text-sm)',
+          color: 'var(--eb-text-primary)',
+          flexShrink: 0,
+        }}>
+          <AlertTriangle size={15} style={{ flexShrink: 0, color: 'var(--eb-status-error)' }} />
+          <span style={{ flex: 1, minWidth: 0 }}>
+            This session is using most of the model's context window, so every turn re-sends a
+            large conversation and costs more tokens. Reset the session to start fresh.
+          </span>
+          <button
+            type="button"
+            onClick={handleResetSession}
+            disabled={!sessionId || resetting || disabled}
+            title="Reset this session — the next message starts a new conversation with no memory of this one."
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              flexShrink: 0,
+              background: 'var(--eb-status-error)',
+              border: '1px solid var(--eb-status-error)',
+              borderRadius: 'var(--eb-radius-sm)',
+              color: 'var(--eb-text-inverted)',
+              padding: '3px 10px',
+              cursor: (!sessionId || resetting || disabled) ? 'not-allowed' : 'pointer',
+              opacity: (!sessionId || resetting || disabled) ? 0.6 : 1,
+              fontSize: 'var(--eb-text-xs)',
+              fontWeight: 600,
+            }}
+          >
+            {resetting
+              ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
+              : <RotateCcw size={12} />}
+            Reset Session
+          </button>
         </div>
       )}
 

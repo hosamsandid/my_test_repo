@@ -277,6 +277,15 @@ how much of the model's context window the conversation has consumed. It is the
 number to watch when replies start losing earlier detail — that is the point to
 *Reset Session*.
 
+As the session fills, the chat also nudges you rather than leaving you to read
+the number. Past **half** the window a dismissible hint suggests resetting the
+session to save tokens — the whole conversation is re-sent every turn, so a long
+one costs more each time; dismissing it keeps it gone for the current session and
+it returns after a reset. Past roughly **three-quarters** a permanent warning
+takes over, carrying its own **Reset Session** button (the same action as the
+toolbar), and it stays until you reset. Both nudges are interactive-chat only —
+they don't appear while you are watching an autonomous or triggered run.
+
 **About this chat** (the **i**) opens the detail behind that one-line indicator:
 
 - **About** — the agent's environment and each repository it has cloned,

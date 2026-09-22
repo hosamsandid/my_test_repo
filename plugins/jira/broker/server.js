@@ -324,6 +324,34 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── attachment content fetch by id (Phase 3 read, #2399) ─────────────────
+  // A read like /show, but it downloads one attachment's bytes server-side and
+  // returns them as inline text or base64. jira.getAttachment confirms the id
+  // belongs to the issue before fetching, so an id on another issue (or one
+  // deleted since `show`) is a mapped 404, never a raw Jira body.
+  if (cliPath === '/attachment' && req.method === 'GET') {
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'attachment', 'no-credential');
+      return sendJson(res, 400, {
+        error: 'This team has no Jira credential configured. A Team Admin sets it on the Plugins page.',
+        code: 'no-credential',
+      });
+    }
+    const issue = (params.get('issue') || '').trim();
+    const id = (params.get('id') || '').trim();
+    if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
+    if (!id) return sendJson(res, 400, { error: 'an attachment id is required' });
+    try {
+      const attachment = await jira.getAttachment(cred, issue, id);
+      writeAudit(scopeId, scopeId, 'attachment', 'ok', `${issue}:${id}`);
+      return sendJson(res, 200, { attachment });
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'attachment', 'error', `${issue}:${id}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
   // ── attributed writes (Phase 4, D3 — role-gated server-side, no confirm) ──
   const writeOps = { '/comment': 'comment', '/transition': 'transition', '/update': 'update' };
   if (writeOps[cliPath] && req.method === 'POST') {

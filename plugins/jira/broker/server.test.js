@@ -226,6 +226,46 @@ test('cli reads: /projects, /list, /show need the per-scope credential and call 
   }
 });
 
+test('cli reads: /attachment fetches one attachment by id, cred-gated, 404 for an unknown id', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1') || String(url).includes('localhost')) return origFetch(url, opts);
+    if (url.includes('?fields=attachment')) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({
+        key: 'KAN-6', fields: { attachment: [{ id: '10312', filename: 'notes.md', mimeType: 'text/markdown', size: 5, author: { displayName: 'Jane' } }] },
+      }) };
+    }
+    // attachment content download
+    return { ok: true, status: 200, headers: { get: () => 'text/markdown' }, arrayBuffer: async () => Buffer.from('hello', 'utf8') };
+  };
+  const srv = await listen();
+  try {
+    const got = await call(srv, 'GET', '/cli/attachment?issue=KAN-6&id=10312', { token: TOKEN });
+    assert.equal(got.status, 200);
+    assert.equal(got.body.attachment.encoding, 'text');
+    assert.equal(got.body.attachment.content, 'hello');
+    assert.equal(got.body.attachment.filename, 'notes.md');
+
+    // an id not on the issue → 404 domain error, not a 500
+    const missing = await call(srv, 'GET', '/cli/attachment?issue=KAN-6&id=999', { token: TOKEN });
+    assert.equal(missing.status, 404);
+    assert.match(missing.body.error, /not on issue KAN-6/);
+
+    // a scope with no credential → 400 no-credential
+    const nocred = await call(srv, 'GET', '/cli/attachment?issue=KAN-6&id=10312', { token: OTHER });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-credential');
+
+    // a missing id arg → 400
+    assert.equal((await call(srv, 'GET', '/cli/attachment?issue=KAN-6', { token: TOKEN })).status, 400);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
 test('cli writes: comment + transition are role-gated (pass for team scope), cred-gated, audited', async () => {
   broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
   const origFetch = global.fetch;

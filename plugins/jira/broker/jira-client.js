@@ -23,6 +23,13 @@ const { resolveJiraApiBase } = require('./event-extract');
 const MAX_PAGES = 20;
 const PAGE_SIZE = 100;
 
+// Attachment reads (#2399). `show` lists at most ATTACHMENT_LIST_CAP items so a
+// screenshot-heavy issue's output stays usable (the count still reports the
+// true total); `attachment get` refuses a file over ATTACHMENT_MAX_BYTES rather
+// than buffer an arbitrarily large body through the broker + the CLI's stdout.
+const ATTACHMENT_LIST_CAP = 50;
+const ATTACHMENT_MAX_BYTES = Number(process.env.JIRA_ATTACHMENT_MAX_BYTES) || 10 * 1024 * 1024;
+
 // Basic-auth header for `email:apiToken`. Jira Cloud's REST v3 uses Basic auth
 // with the Atlassian account e-mail as the username and an API token as the
 // password.
@@ -88,6 +95,47 @@ function shapeIssue(raw) {
     issueType: issueTypeOf(fields),
     changelog: raw.changelog || null,
   };
+}
+
+// Narrow a raw Jira attachment (from `fields.attachment[]`) to the metadata an
+// agent needs to decide whether to fetch it: filename, id, MIME type, size,
+// author display name, when it landed, and the content URL (the broker fetches
+// through it; the agent never sees the credential the URL needs).
+function shapeAttachment(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = String(raw.id == null ? '' : raw.id);
+  if (!id) return null;
+  const size = Number(raw.size);
+  return {
+    id,
+    filename: raw.filename == null ? '' : String(raw.filename),
+    mimeType: raw.mimeType ? String(raw.mimeType) : null,
+    size: Number.isFinite(size) ? size : 0,
+    author: raw.author && raw.author.displayName ? String(raw.author.displayName) : null,
+    created: raw.created ? String(raw.created) : null,
+    contentUrl: raw.content ? String(raw.content) : null,
+  };
+}
+
+// Textual extensions the agent can read inline even when Jira's MIME type is a
+// generic `application/octet-stream` (Jira often mislabels `.md`/`.log`/`.json`).
+const TEXT_EXTENSIONS = new Set([
+  'txt', 'text', 'md', 'markdown', 'rst', 'log', 'json', 'ndjson', 'csv', 'tsv',
+  'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'properties', 'html', 'htm',
+  'css', 'js', 'mjs', 'ts', 'jsx', 'tsx', 'sql', 'sh', 'bash', 'py', 'rb', 'go',
+  'java', 'c', 'h', 'cpp', 'cs', 'diff', 'patch', 'env',
+]);
+
+// Whether an attachment is safe to return as inline UTF-8 text (AC5) vs base64
+// (AC6). Decides on the MIME type first, then falls back to the filename's
+// extension for the octet-stream case.
+function isTextualAttachment(mimeType, filename) {
+  const mt = String(mimeType || '').toLowerCase();
+  if (mt.startsWith('text/')) return true;
+  if (/^application\/(json|xml|xhtml\+xml|javascript|ecmascript|x-yaml|yaml|x-sh|x-shellscript|sql|toml|x-toml)(;|$)/.test(mt)) return true;
+  if (/\+(json|xml)(;|$)/.test(mt)) return true;
+  const ext = String(filename || '').toLowerCase().split('.').pop();
+  return TEXT_EXTENSIONS.has(ext);
 }
 
 // Map a Jira HTTP failure to a clear, actionable message (never a raw 4xx body).
@@ -228,17 +276,134 @@ async function getIssue(cred, issueKey, { env } = {}) {
   const auth = basicAuthHeader(cred.email, cred.apiToken);
   const raw = await requestJson({
     base,
-    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=summary,status,description,assignee,issuetype`,
+    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=summary,status,description,assignee,issuetype,attachment`,
     authHeader: auth,
   });
   const fields = raw.fields || {};
-  return {
+  const out = {
     key: String(raw.key || issueKey),
     summary: fields.summary == null ? '' : String(fields.summary),
     status: fields.status && fields.status.name ? String(fields.status.name) : null,
     issueType: issueTypeOf(fields),
     assignee: fields.assignee && fields.assignee.displayName ? String(fields.assignee.displayName) : null,
     url: `${resolveJiraApiBase(cred.siteUrl)}/browse/${encodeURIComponent(raw.key || issueKey)}`,
+  };
+  // Attachment metadata (#2399, AC1). Only surfaced when the issue actually has
+  // attachments — an issue with none carries no `attachments` key at all, so the
+  // shape is byte-identical to before for the common case (AC2/AC8, no noise).
+  const attachments = (Array.isArray(fields.attachment) ? fields.attachment : [])
+    .map(shapeAttachment)
+    .filter((a) => a && a.id);
+  if (attachments.length) {
+    out.attachmentCount = attachments.length;
+    out.attachments = attachments.slice(0, ATTACHMENT_LIST_CAP);
+    if (attachments.length > ATTACHMENT_LIST_CAP) out.attachmentsTruncated = true;
+  }
+  return out;
+}
+
+// The full (uncapped) attachment list for one issue — the ownership check
+// `getAttachment` runs before a download, kept separate from `getIssue` so the
+// display cap there can never hide a valid id from the check.
+async function getIssueAttachments(cred, issueKey, { env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const raw = await requestJson({
+    base,
+    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=attachment`,
+    authHeader: auth,
+  });
+  const fields = raw.fields || {};
+  return (Array.isArray(fields.attachment) ? fields.attachment : [])
+    .map(shapeAttachment)
+    .filter((a) => a && a.id);
+}
+
+// Download one attachment's raw bytes from Jira's content endpoint. Jira Cloud
+// 302/303-redirects `/attachment/content/{id}` to a signed media URL; `fetch`
+// follows it and (per the Fetch spec) drops the Authorization header on the
+// cross-origin hop — the signed URL needs no credential, so the token never
+// leaves the first, same-origin request. A `Buffer` is returned so the caller
+// decides text vs base64. Same idempotent-GET transport retry as the reads.
+async function downloadAttachmentContent(cred, attachmentId, { env, maxBytes = ATTACHMENT_MAX_BYTES } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const reqPath = `/rest/api/3/attachment/content/${encodeURIComponent(attachmentId)}`;
+  const headers = { Accept: '*/*', 'User-Agent': 'agent-studio-jira-plugin', Authorization: auth };
+  const doAttempt = async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+    let res;
+    try {
+      res = await fetch(base + reqPath, { method: 'GET', headers, redirect: 'follow', signal: ctrl.signal });
+    } catch (err) {
+      const cause = err && err.cause ? ` (${err.cause.code || err.cause.message || err.cause})` : '';
+      const wrapped = new Error(`${err.message}${cause}`);
+      wrapped.transport = true;
+      throw wrapped;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      const e = new Error(mapJiraError(res.status, text));
+      e.status = res.status;
+      throw e;
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (maxBytes && buf.length > maxBytes) {
+      const e = new Error(`attachment content exceeds the ${maxBytes}-byte fetch limit.`);
+      e.status = 413;
+      throw e;
+    }
+    return { buf, contentType: res.headers && res.headers.get ? res.headers.get('content-type') : null };
+  };
+  try {
+    return await doAttempt();
+  } catch (err) {
+    if (err.transport) return doAttempt(); // a read — a stale keep-alive socket is gone on the retry
+    throw err;
+  }
+}
+
+// Fetch one attachment's content by id (CLI `attachment get`, #2399). Confirms
+// the id belongs to the given issue first (AC4 — an id on another issue, or one
+// deleted since `show` listed it, is a clean 404, never a raw Jira body), then
+// refuses an over-cap file (AC edge case) before downloading. Text types come
+// back as inline UTF-8 (AC5), everything else as base64 (AC6); the CLI decides
+// how to surface each.
+async function getAttachment(cred, issueKey, attachmentId, { env, maxBytes = ATTACHMENT_MAX_BYTES } = {}) {
+  const wantId = String(attachmentId == null ? '' : attachmentId).trim();
+  if (!wantId) { const e = new Error('an attachment id is required'); e.status = 400; throw e; }
+  const cap = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : ATTACHMENT_MAX_BYTES;
+  const attachments = await getIssueAttachments(cred, issueKey, { env });
+  const att = attachments.find((a) => a.id === wantId);
+  if (!att) {
+    const e = new Error(
+      `attachment ${wantId} is not on issue ${issueKey} — it may have been deleted, or it belongs to another issue.`,
+    );
+    e.status = 404;
+    throw e;
+  }
+  if (att.size && att.size > cap) {
+    const e = new Error(
+      `attachment ${wantId} (${att.filename}) is ${att.size} bytes, over the ${cap}-byte fetch limit — `
+      + `open it directly in Jira${att.contentUrl ? `: ${att.contentUrl}` : ''}.`,
+    );
+    e.status = 413;
+    throw e;
+  }
+  const { buf, contentType } = await downloadAttachmentContent(cred, wantId, { env, maxBytes: cap });
+  const mimeType = att.mimeType || contentType || null;
+  const textual = isTextualAttachment(mimeType, att.filename);
+  return {
+    id: att.id,
+    filename: att.filename,
+    mimeType,
+    size: att.size || buf.length,
+    author: att.author,
+    encoding: textual ? 'text' : 'base64',
+    content: textual ? buf.toString('utf8') : buf.toString('base64'),
   };
 }
 
@@ -457,6 +622,8 @@ module.exports = {
   buildJqlSearchBody,
   changelogPath,
   shapeIssue,
+  shapeAttachment,
+  isTextualAttachment,
   issueTypeOf,
   commentAdf,
   descriptionAdf,
@@ -468,7 +635,12 @@ module.exports = {
   searchJql,
   fetchFullChangelog,
   getIssue,
+  getIssueAttachments,
+  downloadAttachmentContent,
+  getAttachment,
   listProjects,
+  ATTACHMENT_LIST_CAP,
+  ATTACHMENT_MAX_BYTES,
   addComment,
   updateDescription,
   listTransitions,

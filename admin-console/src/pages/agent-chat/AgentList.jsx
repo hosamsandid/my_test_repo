@@ -31,6 +31,26 @@ const DEFAULT_COLLAPSED = {
   pool: false,
 };
 
+/**
+ * At-rest visual treatment that reads a team's header + all its member rows
+ * (active members, the nested pool-instance sub-list and the stub sub-list) as
+ * ONE grouped block, clearly separated from the next team's block (#2370). A
+ * subtle `--eb-bg-surface` panel + a 1px border + rounded corners draw the
+ * boundary without hover/selection, and the `marginBottom` gap is what the eye
+ * uses to tell where one team ends and the next begins even with many teams
+ * stacked in the rail. All tokens, so it follows the active light/dark theme.
+ *
+ * The "Single agents" section (a plain `SectionHeader` + ungrouped rows) is
+ * deliberately NOT wrapped in this, so ungrouped agents stay visually distinct
+ * from an actual team (AC6).
+ */
+const TEAM_BLOCK_STYLE = {
+  marginBottom: 'var(--eb-space-2)',
+  border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-md)',
+  background: 'var(--eb-bg-surface)',
+};
+
 function loadCollapsed() {
   try {
     const raw = localStorage.getItem(COLLAPSED_KEY);
@@ -370,7 +390,7 @@ const GroupSection = React.memo(function GroupSection({
   // header; rows that inherit it drop their own line (#1451).
   const groupEnv = groupEnvironmentName(group);
   return (
-    <>
+    <div style={TEAM_BLOCK_STYLE}>
       <CollapsibleHeader
         label={group.displayName}
         icon={Icon}
@@ -450,7 +470,7 @@ const GroupSection = React.memo(function GroupSection({
           onRequestMenu={onRequestMenu}
         />
       )}
-    </>
+    </div>
   );
 });
 
@@ -641,11 +661,23 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, 
         gap: 'var(--eb-space-2)',
         width: '100%',
         padding: 'var(--eb-space-3) var(--eb-space-3) var(--eb-space-1)',
-        background: selected ? 'var(--eb-bg-selected)' : hovered ? 'var(--eb-bg-hover)' : 'transparent',
+        // At rest the header wears a filled band (`--eb-bg-hover`) so it reads
+        // as a team header — not just an uppercase agent row — against the
+        // block's `--eb-bg-surface` members area (#2370 AC1). Hover/selected
+        // still layer clearly on top: hover steps up to the stronger
+        // `--eb-bg-active`, selected keeps its purple-tinted fill + accent bar
+        // (AC5). Top corners round to meet the enclosing block.
+        background: selected ? 'var(--eb-bg-selected)' : hovered ? 'var(--eb-bg-active)' : 'var(--eb-bg-hover)',
         borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
         borderTop: 'none',
         borderRight: 'none',
         borderBottom: 'none',
+        borderTopLeftRadius: 'var(--eb-radius-md)',
+        borderTopRightRadius: 'var(--eb-radius-md)',
+        // Collapsed → the header is the block's only row, so its fill must round
+        // at the bottom too to sit flush inside the block's corners (AC4).
+        borderBottomLeftRadius: collapsed ? 'var(--eb-radius-md)' : 0,
+        borderBottomRightRadius: collapsed ? 'var(--eb-radius-md)' : 0,
         fontSize: 'var(--eb-text-xs)',
         fontWeight: 'var(--eb-font-semibold)',
         letterSpacing: '0.04em',

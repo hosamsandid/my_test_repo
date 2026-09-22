@@ -43,22 +43,40 @@ test('AC3 edge: a sole-member team seen by someone else shows the member as its 
   assert.deepEqual(out.names, ['Alice']);
 });
 
-test('AC3: one admin among several members shows that admin by name', () => {
+test('#2387 AC2/AC3: one admin plus a member lists both, admin first (not "Private")', () => {
   const out = teamMembershipIndicator({
     memberships: [admin('u-alice', 't1'), member('u-bob', 't1')], directory: dir, viewerId: 'u-alice',
   });
   assert.equal(out.kind, 'admins');
-  assert.deepEqual(out.names, ['Alice']);
+  assert.deepEqual(out.names, ['Alice', 'Bob']);
+  assert.equal(out.title, 'Alice, Bob');
 });
 
-test('AC4: several admins are all listed, in sorted order', () => {
+test('#2387 AC3: admins come first (sorted), then the remaining members (sorted)', () => {
   const out = teamMembershipIndicator({
     memberships: [admin('u-carol', 't1'), admin('u-alice', 't1'), member('u-bob', 't1')],
     directory: dir, viewerId: 'u-alice',
   });
   assert.equal(out.kind, 'admins');
-  assert.deepEqual(out.names, ['Alice', 'Carol']);
-  assert.equal(out.title, 'Alice, Carol');
+  assert.deepEqual(out.names, ['Alice', 'Carol', 'Bob']);
+  assert.equal(out.title, 'Alice, Carol, Bob');
+});
+
+test('#2387 AC4: a lone admin with a member is a shared list, never "Private"', () => {
+  const out = teamMembershipIndicator({
+    memberships: [admin('u-carol', 't1'), member('u-alice', 't1'), member('u-bob', 't1')],
+    directory: dir, viewerId: 'u-carol',
+  });
+  assert.equal(out.kind, 'admins');
+  assert.deepEqual(out.names, ['Carol', 'Alice', 'Bob']);
+});
+
+test('#2387 AC6: members with no Team Admin still list the members', () => {
+  const out = teamMembershipIndicator({
+    memberships: [member('u-bob', 't1'), member('u-alice', 't1')], directory: dir, viewerId: 'u-carol',
+  });
+  assert.equal(out.kind, 'admins');
+  assert.deepEqual(out.names, ['Alice', 'Bob']);
 });
 
 test('AC9: a team with no visible members renders no line', () => {

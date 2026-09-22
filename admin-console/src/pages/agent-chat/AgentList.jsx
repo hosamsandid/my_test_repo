@@ -123,7 +123,7 @@ function saveOrder(order) {
  * @param {object[]} directory    `GET /api/users/directory` — resolves member
  *   ids to display names for that indicator.
  * @param {string|null} viewerId  The viewing user's id, so a team-of-one reads
- *   as "Own" for its owner and as that person's name for anyone else.
+ *   as "Private" for its owner and as that person's name for anyone else.
  */
 export default function AgentList({
   agents,
@@ -426,7 +426,8 @@ const GroupSection = React.memo(function GroupSection({
   // — but since #2381 it is no longer shown on the header itself: that line now
   // carries the team-membership indicator instead.
   const groupEnv = groupEnvironmentName(group);
-  // Who is behind this team (#2381): "Own", the Team Admin name(s), or nothing.
+  // Who is behind this team (#2381, broadened #2387): "Private", the full member
+  // list (Team Admins first, then Team Members), or nothing.
   // Recomputed only when this team's own membership list, the directory, or the
   // viewer changes — all stable across no-op polls — so the header is not
   // re-rendered on every 5s roster/membership tick.
@@ -807,9 +808,10 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, membershipIndicat
 }
 
 /**
- * The team-header line under the team name (#2381): a short **Own** badge when
- * the viewer's own team-of-one, otherwise the team's Team Admin name(s). Renders
- * nothing for `kind: 'none'` (a team with no visible members — AC9).
+ * The team-header line under the team name (#2381, broadened #2387): a short
+ * **Private** badge when the viewer's own team-of-one, otherwise the team's full
+ * member list (Team Admins first, then Team Members). Renders nothing for
+ * `kind: 'none'` (a team with no visible members — AC9).
  *
  * The names list must stay on one line and never ellipsis-cut a name mid-string
  * (AC5): `fitAdminNames` drops whole names from the tail and replaces them with a
@@ -823,7 +825,7 @@ function MembershipLine({ indicator }) {
   const names = indicator ? indicator.names : [];
 
   if (kind === 'own') {
-    return <span style={ownBadgeStyle}>Own</span>;
+    return <span style={ownBadgeStyle}>Private</span>;
   }
   if (kind === 'admins') {
     return <TeamAdminsLine names={names} title={indicator.title} />;
@@ -881,7 +883,7 @@ function TeamAdminsLine({ names, title }) {
   );
 }
 
-// The "Own" pill — the same quiet, bordered treatment as `AgentRow`'s state
+// The "Private" pill — the same quiet, bordered treatment as `AgentRow`'s state
 // badge, but not uppercased (it is a word, not a section label).
 const ownBadgeStyle = {
   alignSelf: 'flex-start',

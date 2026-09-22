@@ -38,24 +38,31 @@ export function membershipsByTeam(memberships) {
 /**
  * The header indicator for one team, from its own access list.
  *
- *  - **Own** (AC2): exactly one member AND that member is the viewer. "Own" is
- *    specifically the *viewing user's* sole-member team, never just any
- *    team-of-one — a System Admin looking at someone else's team-of-one sees
- *    that person's name instead (AC3 / the edge case).
- *  - **Admins** (AC3/AC4): the display name(s) of the team's current Team
- *    Admin(s), in `memberRows`' already-sorted order (so the list is stable).
- *    An unresolved member keeps `memberRows`' own fallback label rather than a
- *    new "unknown user" treatment (the edge case).
- *  - **None** (AC9): a team with zero visible members renders no line at all,
- *    rather than a misleading badge — and, defensively, a team that somehow has
- *    members but no Team Admin gets no line either (there is nothing truthful to
- *    show, and the store's last-admin rule means it should not happen).
+ *  - **Own/Private** (#2387 AC1, #2381 AC2): exactly one member AND that member
+ *    is the viewer. "Private" (rendered from `kind: 'own'`) is specifically the
+ *    *viewing user's* sole-member team, never just any team-of-one — a System
+ *    Admin looking at someone else's team-of-one sees that person's name
+ *    instead (AC4 / the edge case).
+ *  - **Members** (#2387 AC2/AC3/AC4): the display name(s) of *everyone* with
+ *    access to the team, Team Admins first (in `memberRows`' already-sorted
+ *    order), then the remaining Team Members (same stable, alphabetical order).
+ *    `memberRows` sorts by label, so partitioning it by role keeps each group's
+ *    order stable while putting admins ahead of members. An unresolved member
+ *    keeps `memberRows`' own fallback label rather than a new "unknown user"
+ *    treatment (the edge case). The `kind` stays `'admins'` for continuity with
+ *    #2381's renderer, which is content-agnostic (it just fits a name list).
+ *  - **None** (#2381 AC9): a team with zero visible members renders no line at
+ *    all, rather than a misleading badge. A team that has members but no Team
+ *    Admin still lists those members (#2387 AC6) — the list is everyone, so it
+ *    only falls through to `none` when there is truly nobody to show.
  */
 export function teamMembershipIndicator({ memberships, directory, viewerId } = {}) {
   const rows = memberRows(memberships, directory, viewerId || null);
   if (rows.length === 0) return { kind: 'none', names: [], title: '' };
   if (rows.length === 1 && rows[0].you) return { kind: 'own', names: [], title: '' };
-  const names = rows.filter(r => r.role === ROLE_ADMIN).map(r => r.label);
+  const admins = rows.filter(r => r.role === ROLE_ADMIN).map(r => r.label);
+  const members = rows.filter(r => r.role !== ROLE_ADMIN).map(r => r.label);
+  const names = [...admins, ...members];
   if (names.length === 0) return { kind: 'none', names: [], title: '' };
   return { kind: 'admins', names, title: names.join(', ') };
 }

@@ -200,15 +200,15 @@ test('listProjectIssues: project-scoped JQL, optional status filter, narrow rows
     assert.match(url, /\/rest\/api\/3\/search\/jql/);
     const body = JSON.parse(opts.body);
     assert.equal(body.jql, 'project = "KAN" AND status = "Ready for Dev" ORDER BY updated DESC');
-    assert.deepEqual(body.fields, ['summary', 'status', 'assignee', 'updated', 'issuetype']);
+    assert.deepEqual(body.fields, ['summary', 'status', 'assignee', 'created', 'updated', 'issuetype']);
     return { ok: true, status: 200, text: async () => JSON.stringify({ issues: [
-      { key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, updated: '2026-09-09T10:00:00Z', issuetype: { name: 'Story' } } },
+      { key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, created: '2026-09-08T09:00:00Z', updated: '2026-09-09T10:00:00Z', issuetype: { name: 'Story' } } },
     ] }) };
   }, async () => {
     const rows = await jc.listProjectIssues({ siteUrl: 'acme', email: 'e', apiToken: 't' }, { projectKey: 'KAN', status: 'Ready for Dev', env: CRED.env });
     assert.deepEqual(rows, [{
       key: 'KAN-6', summary: 'Login', status: 'Ready for Dev', issueType: 'Story', assignee: 'Jane',
-      updated: '2026-09-09T10:00:00Z', url: 'https://acme.atlassian.net/browse/KAN-6',
+      created: '2026-09-08T09:00:00Z', updated: '2026-09-09T10:00:00Z', url: 'https://acme.atlassian.net/browse/KAN-6',
     }]);
   });
 });
@@ -422,17 +422,29 @@ test('updateDescription: a blank description is a 400 before any request', async
 
 test('getIssue: reads summary/status/issueType/assignee and builds a browse URL from the real site', async () => {
   await withFetch((url) => {
-    assert.match(url, /fields=summary,status,description,assignee,issuetype,attachment/);
+    assert.match(url, /fields=summary,status,description,assignee,issuetype,attachment,created,updated/);
     return { ok: true, status: 200, text: async () => JSON.stringify({
-      key: 'ENG-5', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, issuetype: { name: 'Task' } },
+      key: 'ENG-5', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, issuetype: { name: 'Task' }, created: '2026-09-08T09:00:00Z', updated: '2026-09-09T10:00:00Z' },
     }) };
   }, async () => {
     const issue = await jc.getIssue({ siteUrl: 'acme', email: 'e', apiToken: 't' }, 'ENG-5', { env: CRED.env });
     assert.equal(issue.status, 'Ready for Dev');
     assert.equal(issue.issueType, 'Task');
     assert.equal(issue.assignee, 'Jane');
+    assert.equal(issue.created, '2026-09-08T09:00:00Z'); // #2414 — timestamps surfaced for age filter/sort
+    assert.equal(issue.updated, '2026-09-09T10:00:00Z');
     assert.equal(issue.url, 'https://acme.atlassian.net/browse/ENG-5'); // browse URL uses the real site, not the seam
     assert.ok(!('attachments' in issue)); // no attachments → no key at all (AC2/AC8)
+  });
+});
+
+test('getIssue: missing created/updated fields surface as null (#2414)', async () => {
+  await withFetch(() => ({ ok: true, status: 200, text: async () => JSON.stringify({
+    key: 'ENG-6', fields: { summary: 'S', status: { name: 'To Do' }, issuetype: { name: 'Task' } },
+  }) }), async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-6', { env: CRED.env });
+    assert.equal(issue.created, null);
+    assert.equal(issue.updated, null);
   });
 });
 

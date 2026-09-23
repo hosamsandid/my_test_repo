@@ -187,7 +187,7 @@ test('consolidateCredentialNav: off the flag is a no-op (byte-identical)', () =>
   assert.deepEqual(consolidateCredentialNav(sections, {}), sections);
 });
 
-test('consolidateCredentialNav: v2 drops My Credentials and opens SSH/GitHub (models stays gated)', () => {
+test('consolidateCredentialNav: v2 drops My Credentials and opens Models + SSH + GitHub', () => {
   const sections = [
     { key: 'connections', items: [
       { path: '/models', credAdmin: true },
@@ -200,11 +200,11 @@ test('consolidateCredentialNav: v2 drops My Credentials and opens SSH/GitHub (mo
   const out = consolidateCredentialNav(sections, { v2: true });
   const items = out[0].items;
   assert.ok(!items.some(i => i.path === '/my-credentials'), 'My Credentials dissolved');
+  assert.equal(items.find(i => i.path === '/models').credAdmin, false, 'Model Providers opened (#2360 follow-up)');
   assert.equal(items.find(i => i.path === '/ssh-keys').credAdmin, false, 'SSH Keys opened');
   assert.equal(items.find(i => i.path === '/github-tokens').credAdmin, false, 'GitHub Tokens opened');
-  assert.equal(items.find(i => i.path === '/models').credAdmin, true, 'Model Providers stays gated');
   assert.equal(items.find(i => i.path === '/mcp').adminOnly, true, 'other gates untouched');
-  // A plain member now sees SSH Keys / GitHub Tokens (open), not My Credentials.
+  // A plain member now sees all three credential pages (open), not My Credentials.
   const visible = filterItems(out[0].items, MEMBER).map(i => i.path);
-  assert.deepEqual(visible, ['/ssh-keys', '/github-tokens']);
+  assert.deepEqual(visible, ['/models', '/ssh-keys', '/github-tokens']);
 });

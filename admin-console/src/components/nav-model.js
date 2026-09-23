@@ -26,12 +26,14 @@ export function filterItems(items, gate) {
 // which open to every authenticated user (a plain member manages their own
 // personal keys/tokens there, row-filtered server-side by `visibleCredential`).
 // So under v2 this drops the My Credentials entry and strips the `credAdmin` gate
-// from SSH Keys / GitHub Tokens. Off the flag it is a no-op — byte-identical to
-// the static nav. (`/models` stays gated for now; providers open separately.)
-// Pure so it can be unit-tested alongside the other nav helpers.
+// from SSH Keys / GitHub Tokens AND Model Providers — the model page is opened the
+// same way, its rows filtered server-side by `providerReadVisible` (global + own
+// personal + team providers you use, read-only). Off the flag it is a no-op —
+// byte-identical to the static nav. Pure so it is unit-tested with the other
+// nav helpers.
 export function consolidateCredentialNav(sections, { v2 = false } = {}) {
   if (!v2) return sections || [];
-  const OPEN = new Set(['/ssh-keys', '/github-tokens']);
+  const OPEN = new Set(['/models', '/ssh-keys', '/github-tokens']);
   return (sections || []).map(section => ({
     ...section,
     items: (section.items || [])

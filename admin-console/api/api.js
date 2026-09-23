@@ -5297,6 +5297,34 @@ const requireAgentManage = createAgentManageGate({
 function providerVisible(scope, ep) {
   return isGlobalProvider(ep) || visibleCredential(scope, ep);
 }
+// READ visibility for the Model Providers LIST + single read GET (#2360, behind
+// AEE_RESOURCE_ACCESS_V2). The page is opened to every authenticated user, so a
+// caller must see the providers they can actually USE — on top of `providerVisible`
+// (global + own personal + team/system they ADMINISTER), also the team/system
+// providers of teams they are a MEMBER of (their agents run on these), READ-ONLY.
+// It never adds another user's personal provider, nor a team the caller isn't in.
+// Safe to widen the read surface: the secret stays masked for a non-manage viewer
+// (`maskLlmEndpointForCaller` keys the token mask on `visibleCredential`, not on
+// this), and the client renders a non-manageable row read-only (a lock, no
+// edit/delete — `canManageProviderClient`). The mutating/action routes stay on
+// `providerVisible` (manage). Off the flag this IS `providerVisible`.
+function providerReadVisible(scope, ep) {
+  if (providerVisible(scope, ep)) return true;
+  if (!RESOURCE_ACCESS_V2 || !scope || !ep) return false;
+  const member = scope.teamIds; // Set of the caller's member team ids (squad ids)
+  if (!member || member.size === 0) return false;
+  const inMember = (id) => member.has(String(id));
+  if (ep.scope === 'team') {
+    const set = Array.isArray(ep.teamIds) && ep.teamIds.length
+      ? ep.teamIds
+      : (ep.teamId ? [ep.teamId] : []);
+    return set.some(inMember);
+  }
+  if (ep.scope === 'system') {
+    return Array.isArray(ep.assignedTeamIds) && ep.assignedTeamIds.some(inMember);
+  }
+  return false;
+}
 function providerUsableByTeam(ep, teamId, agentTeamId) {
   if (isGlobalProvider(ep) || credentialVisibleToTeam(ep, teamId)) return true;
   // Unified resource access model (§7/§8, #2357) — behind AEE_RESOURCE_ACCESS_V2.
@@ -12559,7 +12587,11 @@ app.get('/api/llm-endpoints', (req, res) => {
   const scope = getScope(req);
   const healthMap = loadLlmHealthMap();
   res.json(listLlmEndpoints()
-    .filter(ep => providerVisible(scope, ep))
+    // #2360: under v2 the page is open to every user, so this READ list uses
+    // `providerReadVisible` — global + own personal + team/system the caller
+    // administers OR is a member of (read-only). Off the flag it is exactly
+    // `providerVisible`. The token stays masked for a non-manage viewer below.
+    .filter(ep => providerReadVisible(scope, ep))
     // Merge the persisted health status (#1843) so the Model Providers table
     // renders it on page load with no click (AC3). No record → 'unknown' (AC6).
     // maskLlmEndpointForCaller drops the token tail/fingerprint for a global-only
@@ -12593,8 +12625,11 @@ app.get('/api/llm-endpoints/:id', (req, res) => {
   const scope = getScope(req);
   const ep = listLlmEndpoints().find(e => e.id === req.params.id);
   // Fail closed: a provider the caller may not see is reported as absent (#800),
-  // so a Team Admin cannot probe another team's provider ids by-id.
-  if (!ep || !providerVisible(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
+  // so a caller cannot probe another team's provider ids by-id. Uses the READ
+  // predicate (#2360) so a member can read a provider their team uses; the token
+  // is still masked for a non-manage viewer, and the mutating routes below stay on
+  // `providerVisible` (manage).
+  if (!ep || !providerReadVisible(scope, ep)) return res.status(404).json({ error: 'LLM endpoint not found' });
   // Global-only caller gets the token tail/fingerprint stripped (#2136 finding 3a).
   res.json({ ...maskLlmEndpointForCaller(scope, ep), health: llmHealthViewFor(ep.id) });
 });

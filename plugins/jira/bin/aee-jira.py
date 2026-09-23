@@ -30,6 +30,36 @@ ticket is routine and reversible):
     aee-jira update KAN-6 --description "…"   # replace the issue description (the old one stays in Jira's history)
     aee-jira set-field KAN-6 --field "Team" --value "42"   # set an allow-listed custom field by its Jira name
     aee-jira attachment add KAN-6 report.pdf part-1.pdf   # upload one or more local files as new attachments
+    aee-jira create-epic --project KAN --file plan.json   # create one Epic and its child Stories in one operation
+
+`create-epic` turns one ask into its breakdown: it creates a single Epic and N
+Stories underneath it (each linked to the Epic) in the named project, in one
+call. The Epic + Stories are described by a JSON payload read from --file (or
+stdin when --file is omitted or "-"):
+
+    {
+      "epic":    { "summary": "Q4 payments revamp", "description": "..." },
+      "stories": [
+        { "summary": "Design checkout",
+          "assignee": "<accountId>",
+          "status":   "In Progress",
+          "fields":   { "Team": "42", "Story point estimate": 5 } },
+        { "summary": "Wire the API" }
+      ]
+    }
+
+Only a summary is required (on the epic and on each story). Optional per-issue:
+"description", "assignee" (an Atlassian accountId), "status" (applied as a
+follow-up transition, since Jira creates an issue in the workflow's initial
+status), and "fields" (custom fields by their Jira name). Every custom field
+named in "fields" must be on the team's writable-custom-fields allow-list (the
+same gate as set-field) or the whole operation is refused before anything is
+created; the name is resolved to its id and the value shaped server-side (a
+Team/select/user field is not a plain string; pass an id-bearing field's id).
+The result reports the Epic key + URL and, per Story, its key/URL on success or
+an error on failure (the Epic and the other Stories still go through — Jira has
+no create-transaction). Non-default issue-type names can be overridden with a
+top-level "issueTypes": {"epic": "...", "story": "..."} in the payload.
 
 `set-field` sets ONE custom field an admin has sanctioned (the team's
 `writable-custom-fields` allow-list); a field not on that list is refused. The
@@ -404,7 +434,25 @@ def build_parser():
         help="raw JSON value sent to Jira verbatim (escape hatch for an exotic field shape)",
     )
 
+    p_create = sub.add_parser(
+        "create-epic", parents=[common],
+        help="create one Epic and its child Stories in one operation (payload from --file or stdin)",
+    )
+    p_create.add_argument("--project", required=True, help="project key the Epic + Stories are created in, e.g. KAN")
+    p_create.add_argument(
+        "--file", metavar="PATH",
+        help='JSON payload describing {"epic": {...}, "stories": [...]}; omit or use "-" to read stdin',
+    )
+
     return parser
+
+
+def _read_payload_text(file_path):
+    """The create-epic payload text: from --file, or stdin when omitted / "-"."""
+    if not file_path or file_path == "-":
+        return sys.stdin.read()
+    with open(file_path, "r", encoding="utf-8") as fh:
+        return fh.read()
 
 
 def main(argv=None):
@@ -484,6 +532,25 @@ def main(argv=None):
         else:
             payload["value"] = args.value
         path, method, body = "/set-field", "POST", payload
+    elif args.cmd == "create-epic":
+        try:
+            raw = _read_payload_text(args.file)
+        except OSError as e:
+            emit({"ok": False, "error": "usage", "message": "cannot read payload file: %s" % e}, as_json)
+            return EXIT_USAGE
+        try:
+            doc = json.loads(raw)
+        except ValueError as e:
+            emit({"ok": False, "error": "usage", "message": "payload is not valid JSON: %s" % e}, as_json)
+            return EXIT_USAGE
+        if not isinstance(doc, dict) or not isinstance(doc.get("epic"), dict):
+            emit({"ok": False, "error": "usage",
+                  "message": 'payload must be a JSON object with an "epic" object (and an optional "stories" array)'}, as_json)
+            return EXIT_USAGE
+        body = {"project": args.project, "epic": doc.get("epic"), "stories": doc.get("stories", [])}
+        if isinstance(doc.get("issueTypes"), dict):
+            body["issueTypes"] = doc["issueTypes"]
+        path, method = "/create-epic", "POST"
     else:
         parser.print_help()
         return EXIT_USAGE
@@ -501,6 +568,12 @@ def main(argv=None):
         return emit_attachment(result, getattr(args, "out", None), args.issue, as_json)
 
     emit({"ok": True, "result": result, "scopeId": cfg.get("scopeId")}, as_json)
+    # create-epic is one operation with per-story outcomes: the Epic is created
+    # but a story may fail (Jira has no create-transaction). Surface exit 1 so an
+    # automated caller notices a partial result, while still printing the Epic
+    # key + the per-story map above.
+    if args.cmd == "create-epic" and isinstance(result, dict) and result.get("failed"):
+        return EXIT_DOMAIN_ERROR
     return EXIT_OK
 
 

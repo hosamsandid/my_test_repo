@@ -512,6 +512,68 @@ test('cli writes: /set-field sets an allow-listed custom field, refuses one that
   }
 });
 
+test('cli writes: /create-epic creates an epic + child stories, allow-list-gating custom fields (#2424)', async () => {
+  // A distinct site keeps the process-lifetime field catalog off another test's
+  // schema-less `acme` fixture (real Jira always returns the schema).
+  broker.scopeCredentials.set('team-1', { 'site-url': 'createco', email: 'a@b.c', 'api-token': 'tok', 'writable-custom-fields': 'Team' });
+  const origFetch = global.fetch;
+  const created = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    if (String(url).match(/\/rest\/api\/3\/field$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify([
+        { id: 'customfield_20001', name: 'Team', schema: { type: 'team' } },
+      ]) };
+    }
+    if (opts && opts.method === 'POST' && String(url).match(/\/rest\/api\/3\/issue$/)) {
+      const body = JSON.parse(opts.body);
+      created.push(body.fields);
+      const isEpic = body.fields.issuetype.name === 'Epic';
+      return { ok: true, status: 201, text: async () => JSON.stringify({ key: isEpic ? 'KAN-1' : `KAN-${created.length}` }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  };
+  const srv = await listen();
+  try {
+    const ok = await call(srv, 'POST', '/cli/create-epic', {
+      token: TOKEN,
+      body: { project: 'KAN', epic: { summary: 'Ask' }, stories: [{ summary: 'Task', fields: { Team: '42' } }] },
+    });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.epic.key, 'KAN-1');
+    assert.equal(ok.body.created, 2);
+    assert.equal(ok.body.failed, 0);
+    assert.equal(ok.body.stories[0].key, 'KAN-2');
+    // the story create linked to the epic (native parent) and shaped Team
+    const story = created.find((f) => f.issuetype.name === 'Story');
+    assert.deepEqual(story.parent, { key: 'KAN-1' });
+    assert.deepEqual(story.customfield_20001, { id: '42' });
+
+    // a custom field NOT on the allow-list → 403, nothing created
+    const refused = await call(srv, 'POST', '/cli/create-epic', {
+      token: TOKEN,
+      body: { project: 'KAN', epic: { summary: 'E' }, stories: [{ summary: 'S', fields: { Priority: 'High' } }] },
+    });
+    assert.equal(refused.status, 403);
+
+    // missing project / epic → 400
+    assert.equal((await call(srv, 'POST', '/cli/create-epic', { token: TOKEN, body: { epic: { summary: 'E' } } })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/create-epic', { token: TOKEN, body: { project: 'KAN' } })).status, 400);
+
+    // no credential → 400 no-credential
+    const nocred = await call(srv, 'POST', '/cli/create-epic', { token: OTHER, body: { project: 'X', epic: { summary: 'E' } } });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-credential');
+
+    // GET on the create path → 404 (POST only)
+    assert.equal((await call(srv, 'GET', '/cli/create-epic', { token: TOKEN })).status, 404);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
 test('ui /admin: team-admin only; PUT replaces the watch config', async () => {
   const srv = await listen();
   const { port } = srv.address();

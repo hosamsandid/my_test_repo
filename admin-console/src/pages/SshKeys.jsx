@@ -19,6 +19,7 @@ import { useAuth } from '../auth/AuthContext';
 import {
   teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
   canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
+  isPersonalCredential,
 } from './credential-scope-view';
 import { adminManagedCredentials } from './my-credentials-view';
 import { environmentsUsingSshKey, usageCountLabel, usageTooltip } from './credential-usage';
@@ -425,14 +426,20 @@ export default function SshKeys() {
 
   const teams = Array.isArray(teamsData) ? teamsData : [];
   const names = teamsById(teams);
-  // This page manages team/system (admin-managed) credentials only. Personal
-  // credentials (#1568) — which the caller may also see in this list, since the
-  // API returns their own personal entries — are managed on the self-service
-  // "My Credentials" page and filtered out here so the two tiers stay distinct.
-  const adminKeys = adminManagedCredentials(keys ?? []);
+  const resourceAccessV2 = useResourceAccessV2();
+  // #2360 consolidation: under the flag this page is open to every authenticated
+  // user and shows EVERY credential the caller may see — their own personal rows
+  // (the dissolved "My Credentials" self-service folds in here) plus the
+  // team/system rows they manage. The server already returns own-personal entries
+  // (visibleCredential), so this is a client-side unfilter. Off the flag we keep
+  // the admin-managed-only view and personal stays on the My Credentials page.
+  const rows = resourceAccessV2 ? (keys ?? []) : adminManagedCredentials(keys ?? []);
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
-  const caller = { isSysAdmin, adminTeamIds };
+  // `userId` is required for the personal-tier manage check (canManageCredentialClient):
+  // the OWNER of a personal row must get edit/rotate/delete, not a lock (mirrors
+  // ModelRegistry #2403). Harmless off the flag, where personal rows are filtered out.
+  const caller = { isSysAdmin, adminTeamIds, userId: user?.userId };
 
   // Which Working Environments reference each key (#1141). `envs` is null until
   // /api/environments resolves (or if the caller may not read it) — the "Used by"
@@ -614,8 +621,9 @@ export default function SshKeys() {
         fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
       }}>
         <span>
-          Shared team and platform SSH keys — the private keys that authenticate git transport
-          for the repositories your environments clone.
+          {resourceAccessV2
+            ? 'Your SSH keys — personal, team and platform — the private keys that authenticate git transport for the repositories your environments clone.'
+            : 'Shared team and platform SSH keys — the private keys that authenticate git transport for the repositories your environments clone.'}
         </span>
         <PageHelpButton
           label="Why both an SSH key and a GitHub token?"
@@ -634,7 +642,7 @@ export default function SshKeys() {
 
       <DataTable
         columns={COLUMNS}
-        data={adminKeys}
+        data={rows}
         emptyText="No SSH keys stored yet. Click 'New Key' to add one."
       />
 
@@ -672,7 +680,7 @@ export default function SshKeys() {
             teams={teams}
             isSysAdmin={isSysAdmin}
             adminTeamIds={adminTeamIds}
-            canReassign={canReassignCredentialClient(caller)}
+            canReassign={canReassignCredentialClient(caller) && !isPersonalCredential(editTarget)}
             onSave={handleEditSave}
             onCancel={() => { setEditTarget(null); setFormError(null); }}
             saving={saving}

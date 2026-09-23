@@ -8,6 +8,7 @@ import Login from './pages/Login';
 import { useAuth } from './auth/AuthContext';
 import { useHelperChat } from './context/HelperChatContext';
 import { canAccessCredentialPages } from './pages/credential-scope-view';
+import { useResourceAccessV2 } from './context/ResourceAccessContext';
 
 // Getting Started was retired (#1874): its six concept cards and CTAs are now the
 // Help panel's Overview face. An old bookmark should not land on a blank route, so
@@ -55,10 +56,26 @@ function AdminRoute({ children }) {
 // / model providers. A plain Team Member (or a user in no team) is bounced to
 // /chats. The API is independently scoped, so this is UX, not the security
 // boundary.
-function CredentialRoute({ children }) {
+function CredentialRoute({ children, openUnderV2 = false }) {
   const { user } = useAuth();
+  const v2 = useResourceAccessV2();
+  // #2360: under AEE_RESOURCE_ACCESS_V2 the SSH Keys / GitHub Tokens pages are
+  // consolidated and open to every authenticated user (personal self-service
+  // folds in; rows are `visibleCredential`-filtered server-side). `openUnderV2`
+  // opts a route into that; /models keeps the admin gate for now. Off the flag,
+  // or for a route that doesn't opt in, the legacy Team-Admin gate is unchanged.
+  if (openUnderV2 && v2) return children;
   if (!canAccessCredentialPages(user)) return <Navigate to="/chats" replace />;
   return children;
+}
+
+// My Credentials is dissolved under v2 (#2360): its personal self-service folds
+// into the now-open SSH Keys page. An old link/bookmark redirects there; off the
+// flag the standalone page still renders.
+function MyCredentialsRoute() {
+  const v2 = useResourceAccessV2();
+  if (v2) return <Navigate to="/ssh-keys" replace />;
+  return <MyCredentials />;
 }
 
 const AgentChat           = lazy(() => import('./pages/AgentChat'));
@@ -180,11 +197,11 @@ export default function App() {
           {/* System-Admin curated copy-source catalog that replaced the other
               half of the old page (curating a shared environment). */}
           <Route path="/environment-templates" element={<AdminRoute><EnvironmentTemplates /></AdminRoute>} />
-          <Route path="/ssh-keys"     element={<CredentialRoute><SshKeys /></CredentialRoute>} />
-          <Route path="/github-tokens" element={<CredentialRoute><GithubTokens /></CredentialRoute>} />
+          <Route path="/ssh-keys"     element={<CredentialRoute openUnderV2><SshKeys /></CredentialRoute>} />
+          <Route path="/github-tokens" element={<CredentialRoute openUnderV2><GithubTokens /></CredentialRoute>} />
           {/* Self-service personal credentials (#1568) — open to any authenticated
               human, NOT gated on credAdmin (the personal tier is owner-only). */}
-          <Route path="/my-credentials" element={<MyCredentials />} />
+          <Route path="/my-credentials" element={<MyCredentialsRoute />} />
           <Route path="/skills"       element={<SkillsRegistry />} />
           <Route path="/role-templates" element={<AdminRoute><RoleTemplates /></AdminRoute>} />
           <Route path="/github-events" element={<GithubEventLog />} />

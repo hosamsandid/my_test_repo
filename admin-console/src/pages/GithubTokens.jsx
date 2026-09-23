@@ -19,6 +19,7 @@ import { useAuth } from '../auth/AuthContext';
 import {
   teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
   canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
+  isPersonalCredential,
 } from './credential-scope-view';
 import { adminManagedCredentials } from './my-credentials-view';
 import { environmentsUsingGithubToken, usageCountLabel, usageTooltip } from './credential-usage';
@@ -305,12 +306,19 @@ export default function GithubTokens() {
 
   const teams = Array.isArray(teamsData) ? teamsData : [];
   const names = teamsById(teams);
-  // Admin-managed (team/system) tokens only; personal tokens (#1568) are managed
-  // on the self-service "My Credentials" page and filtered out here.
-  const adminTokens = adminManagedCredentials(tokens ?? []);
+  const resourceAccessV2 = useResourceAccessV2();
+  // #2360 consolidation: under the flag this page opens to every authenticated
+  // user and shows EVERY token the caller may see — their own personal tokens (the
+  // dissolved "My Credentials" self-service folds in here) plus the team/system
+  // tokens they manage. The server already returns own-personal entries
+  // (visibleCredential). Off the flag we keep the admin-managed-only view.
+  const rows = resourceAccessV2 ? (tokens ?? []) : adminManagedCredentials(tokens ?? []);
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
-  const caller = { isSysAdmin, adminTeamIds };
+  // `userId` for the personal-tier manage check — the OWNER of a personal row must
+  // get edit/rotate/delete, not a lock (mirrors ModelRegistry #2403). Harmless off
+  // the flag, where personal rows are filtered out.
+  const caller = { isSysAdmin, adminTeamIds, userId: user?.userId };
 
   // Which Working Environments reference each token (#1141). `envs` is null until
   // /api/environments resolves (or if the caller may not read it) — the "Used by"
@@ -461,7 +469,7 @@ export default function GithubTokens() {
         fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
       }}>
         <span>
-          Shared team and platform GitHub Personal Access Tokens — injected as <code>GH_TOKEN</code> /{' '}
+          {resourceAccessV2 ? 'Your GitHub Personal Access Tokens — personal, team and platform' : 'Shared team and platform GitHub Personal Access Tokens'} — injected as <code>GH_TOKEN</code> /{' '}
           <code>GITHUB_TOKEN</code> into every agent of the environment they are linked to.
         </span>
         <PageHelpButton
@@ -481,7 +489,7 @@ export default function GithubTokens() {
 
       <DataTable
         columns={COLUMNS}
-        data={adminTokens}
+        data={rows}
         emptyText="No GitHub tokens stored yet. Click 'New Token' to add one."
       />
 
@@ -525,7 +533,7 @@ export default function GithubTokens() {
             teams={teams}
             isSysAdmin={isSysAdmin}
             adminTeamIds={adminTeamIds}
-            canReassign={canReassignCredentialClient(caller)}
+            canReassign={canReassignCredentialClient(caller) && !isPersonalCredential(editTarget)}
             onSave={handleEditSave}
             onCancel={() => { setEditTarget(null); setFormError(null); }}
             saving={saving}

@@ -83,6 +83,15 @@ export function creatableScopes({ isSysAdmin }) {
 // credential, matching the default `team` scope (a `human` secret is
 // Personal-only). Off the flag the shape is byte-identical to before.
 export function defaultOwnership({ isSysAdmin, adminTeamIds = [], v2 = false } = {}) {
+  // Under v2 the SSH/GitHub-token pages are open to EVERY authenticated user
+  // (#2360 consolidation): a caller who administers no team and is not a System
+  // Admin can only ever create a PERSONAL credential, so default them straight to
+  // a personal/human one — the form opens ready instead of on a team picker they
+  // can't fill. Off the flag this branch is unreachable (the pages stay
+  // admin-gated) and the returned shape is byte-identical to before.
+  if (v2 && !isSysAdmin && adminTeamIds.length === 0) {
+    return { scope: 'personal', teamId: null, assignedTeamIds: [], identity: IDENTITY_HUMAN };
+  }
   const base = isSysAdmin
     ? { scope: 'team', teamId: DEFAULT_TEAM_ID, assignedTeamIds: [] }
     : { scope: 'team', teamId: adminTeamIds[0] || '', assignedTeamIds: [] };

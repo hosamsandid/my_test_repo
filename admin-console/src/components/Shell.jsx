@@ -13,8 +13,9 @@ import { loadManuallyMessagedIds } from '../pages/agent-chat/agent-back-notifica
 import { canAccessCredentialPages } from '../pages/credential-scope-view';
 import {
   filterItems, filterSections, activeGroupKey, mergeCollapsed,
-  mostSpecificActivePath,
+  mostSpecificActivePath, consolidateCredentialNav,
 } from './nav-model';
+import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import {
   PLUGINS_CHANGED_EVENT, buildPluginNav, pluginsNeedingScopes,
 } from './plugin-nav';
@@ -155,7 +156,10 @@ const NAV_GROUPS = [
     { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,      credAdmin: true },
     { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github,   credAdmin: true },
     // My Credentials (#1568) — personal credential self-service, visible to every
-    // authenticated human (no credAdmin gate).
+    // authenticated human (no credAdmin gate). Under AEE_RESOURCE_ACCESS_V2 this
+    // entry is dissolved by `consolidateCredentialNav` (its self-service folds
+    // into SSH Keys / GitHub Tokens, which then open to all); it stays here for
+    // the flag-off path.
     { path: '/my-credentials', label: 'My Credentials',      Icon: KeyRound },
     { path: '/mcp',           label: 'MCP Servers',          Icon: Server,   adminOnly: true },
     { path: '/github-events', label: 'GitHub Event Log',     Icon: History },
@@ -240,7 +244,11 @@ export default function Shell({ children }) {
   const canSeeCreds = canAccessCredentialPages(user);
   const gate = { admin: !!user?.admin, canSeeCreds };
   const topItems = filterItems(NAV_TOP, gate);
-  const groups = filterSections(NAV_GROUPS, gate);
+  // #2360: under AEE_RESOURCE_ACCESS_V2 the credential pages are consolidated —
+  // My Credentials is dissolved and SSH Keys / GitHub Tokens open to every user
+  // (personal self-service folds into them). Off the flag this is a no-op.
+  const resourceAccessV2 = useResourceAccessV2();
+  const groups = filterSections(consolidateCredentialNav(NAV_GROUPS, { v2: resourceAccessV2 }), gate);
 
   // Dynamic nav entries for UI-bearing plugins that are installed AND either
   // granted to a scope the caller can see (Network Plan epic #1554, Phase 2) or

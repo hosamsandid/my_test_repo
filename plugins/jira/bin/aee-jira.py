@@ -18,7 +18,7 @@ Reads:
     aee-jira projects                             # the projects in this team's scope
     aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
     aee-jira search --jql "<JQL>" [--fields key,summary,status] [--limit N]   # arbitrary JQL, scoped to your team
-    aee-jira show KAN-6                           # one issue (summary, status, type, assignee, created/updated, URL, attachments)
+    aee-jira show KAN-6                           # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments)
     aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
 
 Writes (attributed, role-gated server-side, no human confirmation — moving a
@@ -320,7 +320,7 @@ def build_parser():
     p_search.add_argument("--jql", required=True, help='the JQL query, e.g. "created >= -2d AND issuetype = Story"')
     p_search.add_argument(
         "--fields",
-        help="comma-separated columns to return (default all): key,summary,status,issueType,assignee,updated,url",
+        help="comma-separated columns to return (default all): key,summary,status,issueType,assignee,updated,parent,url",
     )
     p_search.add_argument("--limit", type=int, help="cap the number of issues returned (default 100, max 2000)")
 

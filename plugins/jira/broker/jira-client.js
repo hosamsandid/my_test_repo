@@ -231,6 +231,52 @@ function safeJson(s) {
   try { return JSON.parse(s); } catch { return {}; }
 }
 
+// ── parent / epic-link resolution (#2415) ────────────────────────────────────
+// Two Jira project styles link a Story to its parent Epic differently:
+//   • team-managed (next-gen) — the native `parent` field, always present.
+//   • company-managed (classic) — a custom field named "Epic Link" (schema
+//     `com.pyxis.greenhopper.jira:gh-epic-link`) whose id (`customfield_NNNNN`)
+//     varies per site, and which stores the epic KEY as a plain string.
+// So an agent can traverse Story→Epic in either style, reads request BOTH: the
+// native `parent`, and — when the site has an Epic Link field — that custom
+// field too. The custom-field id is resolved once per site from
+// `/rest/api/3/field` and cached; a missing field or a failed lookup degrades
+// to `null` (native `parent` still works) and must never break a read.
+const EPIC_LINK_SCHEMA = 'com.pyxis.greenhopper.jira:gh-epic-link';
+const epicLinkFieldCache = new Map(); // api base URL → field id | null
+
+async function resolveEpicLinkFieldId(base, auth) {
+  if (epicLinkFieldCache.has(base)) return epicLinkFieldCache.get(base);
+  let fieldId = null;
+  try {
+    const fields = await requestJson({ base, path: '/rest/api/3/field', authHeader: auth });
+    if (Array.isArray(fields)) {
+      const match = fields.find((f) => f && f.schema && f.schema.custom === EPIC_LINK_SCHEMA)
+        || fields.find((f) => f && f.name === 'Epic Link');
+      if (match && match.id) fieldId = String(match.id);
+    }
+  } catch {
+    fieldId = null; // field list unreachable → surface native parent only
+  }
+  epicLinkFieldCache.set(base, fieldId);
+  return fieldId;
+}
+
+// The parent/epic key for a shaped read: prefer the native `parent` key
+// (team-managed), else the resolved Epic Link custom field (classic). `null`
+// when the issue has neither — the common case for a top-level issue or epic.
+function parentKeyOf(fields, epicLinkFieldId) {
+  if (fields && fields.parent && fields.parent.key) return String(fields.parent.key);
+  if (epicLinkFieldId && fields && fields[epicLinkFieldId]) return String(fields[epicLinkFieldId]);
+  return null;
+}
+
+// Test seam: drop the per-site Epic Link id cache so each stubbed-fetch test
+// starts from a clean lookup (the cache is otherwise process-lifetime).
+function __resetCaches() {
+  epicLinkFieldCache.clear();
+}
+
 // One credential = { siteUrl, email, apiToken }. Every method takes it plus an
 // optional `env` for the JIRA_API_BASE seam.
 
@@ -283,9 +329,14 @@ async function fetchFullChangelog(cred, issueKey, { env } = {}) {
 async function getIssue(cred, issueKey, { env } = {}) {
   const base = apiBaseFor(cred.siteUrl, env);
   const auth = basicAuthHeader(cred.email, cred.apiToken);
+  // Resolve the site's Epic Link custom-field id (#2415) so a classic project's
+  // story→epic link is requestable alongside the native `parent`.
+  const epicLinkFieldId = await resolveEpicLinkFieldId(base, auth);
+  const fieldList = ['summary', 'status', 'description', 'assignee', 'issuetype', 'attachment', 'created', 'updated', 'parent'];
+  if (epicLinkFieldId) fieldList.push(epicLinkFieldId);
   const raw = await requestJson({
     base,
-    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=summary,status,description,assignee,issuetype,attachment,created,updated`,
+    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=${fieldList.join(',')}`,
     authHeader: auth,
   });
   const fields = raw.fields || {};
@@ -299,6 +350,9 @@ async function getIssue(cred, issueKey, { env } = {}) {
     // returns ISO-8601 strings; surface them verbatim (null when absent).
     created: fields.created ? String(fields.created) : null,
     updated: fields.updated ? String(fields.updated) : null,
+    // Parent/epic key (#2415) so an agent can traverse Story→Epic: `show` the
+    // key this returns. `null` when the issue has no parent (e.g. an epic).
+    parent: parentKeyOf(fields, epicLinkFieldId),
     url: `${resolveJiraApiBase(cred.siteUrl)}/browse/${encodeURIComponent(raw.key || issueKey)}`,
   };
   // Attachment metadata (#2399, AC1). Only surfaced when the issue actually has
@@ -532,12 +586,14 @@ async function listProjects(cred, { env } = {}) {
 
 // The agent-facing field set both `list` and `search` request from Jira, and
 // the shaped shape they return — the columns an agent sees for a browsed issue.
-const AGENT_ISSUE_FIELDS = ['summary', 'status', 'assignee', 'updated', 'issuetype'];
-const AGENT_ISSUE_COLUMNS = ['key', 'summary', 'status', 'issueType', 'assignee', 'updated', 'url'];
+const AGENT_ISSUE_FIELDS = ['summary', 'status', 'assignee', 'updated', 'issuetype', 'parent'];
+const AGENT_ISSUE_COLUMNS = ['key', 'summary', 'status', 'issueType', 'assignee', 'updated', 'parent', 'url'];
 
 // Narrow one raw search issue to the agent-facing columns (used by both
-// `listProjectIssues` and `searchIssues`). `siteBase` builds the browse URL.
-function shapeAgentIssue(raw, siteBase) {
+// `listProjectIssues` and `searchIssues`). `siteBase` builds the browse URL;
+// `epicLinkFieldId` (when the site has one) lets a classic project's epic key
+// surface as `parent` alongside the native `parent` (#2415).
+function shapeAgentIssue(raw, siteBase, epicLinkFieldId) {
   const f = (raw && raw.fields) || {};
   return {
     key: String((raw && raw.key) || ''),
@@ -546,8 +602,16 @@ function shapeAgentIssue(raw, siteBase) {
     issueType: issueTypeOf(f),
     assignee: f.assignee && f.assignee.displayName ? String(f.assignee.displayName) : null,
     updated: f.updated || null,
+    parent: parentKeyOf(f, epicLinkFieldId),
     url: `${siteBase}/browse/${encodeURIComponent((raw && raw.key) || '')}`,
   };
+}
+
+// The field set a search/list request sends: the agent columns plus, when the
+// site has an Epic Link custom field, its id — so `parentKeyOf` can read the
+// classic-project epic key. (`parent` is already in AGENT_ISSUE_FIELDS.)
+function agentRequestFields(epicLinkFieldId) {
+  return epicLinkFieldId ? [...AGENT_ISSUE_FIELDS, epicLinkFieldId] : AGENT_ISSUE_FIELDS;
 }
 
 // A caller-supplied `--fields` selection reduces a shaped issue to just those
@@ -596,13 +660,16 @@ async function listProjectIssues(cred, { projectKey, status, env } = {}) {
     jql += ` AND status = ${jqlQuote(status.trim())}`;
   }
   jql += ' ORDER BY updated DESC';
+  const epicLinkFieldId = await resolveEpicLinkFieldId(base, auth); // #2415
+  const listFields = ['summary', 'status', 'assignee', 'created', 'updated', 'issuetype', 'parent'];
+  if (epicLinkFieldId) listFields.push(epicLinkFieldId);
   const result = await requestJson({
     base,
     path: '/rest/api/3/search/jql',
     method: 'POST',
     idempotent: true, // a read that happens to be a POST — safe to retry
     authHeader: auth,
-    body: { jql, fields: ['summary', 'status', 'assignee', 'created', 'updated', 'issuetype'], maxResults: PAGE_SIZE },
+    body: { jql, fields: listFields, maxResults: PAGE_SIZE },
   });
   const siteBase = resolveJiraApiBase(cred.siteUrl);
   return (Array.isArray(result.issues) ? result.issues : []).map((raw) => {
@@ -615,6 +682,7 @@ async function listProjectIssues(cred, { projectKey, status, env } = {}) {
       assignee: f.assignee && f.assignee.displayName ? String(f.assignee.displayName) : null,
       created: f.created || null, // #2414 — so an agent can filter/sort list rows by age
       updated: f.updated || null,
+      parent: parentKeyOf(f, epicLinkFieldId), // #2415 — Story→Epic traversal
       url: `${siteBase}/browse/${encodeURIComponent(raw.key || '')}`,
     };
   });
@@ -643,6 +711,8 @@ async function searchIssues(cred, { jql, fields, limit, env } = {}) {
   const base = apiBaseFor(cred.siteUrl, env);
   const auth = basicAuthHeader(cred.email, cred.apiToken);
   const siteBase = resolveJiraApiBase(cred.siteUrl);
+  const epicLinkFieldId = await resolveEpicLinkFieldId(base, auth); // #2415
+  const reqFields = agentRequestFields(epicLinkFieldId);
   const issues = [];
   let nextPageToken;
   for (let page = 0; page < MAX_PAGES && issues.length < cap; page += 1) {
@@ -654,13 +724,13 @@ async function searchIssues(cred, { jql, fields, limit, env } = {}) {
       authHeader: auth,
       body: {
         jql: query,
-        fields: AGENT_ISSUE_FIELDS,
+        fields: reqFields,
         maxResults: Math.min(PAGE_SIZE, cap - issues.length),
         ...(nextPageToken ? { nextPageToken } : {}),
       },
     });
     for (const raw of Array.isArray(result.issues) ? result.issues : []) {
-      const shaped = shapeAgentIssue(raw, siteBase);
+      const shaped = shapeAgentIssue(raw, siteBase, epicLinkFieldId);
       if (shaped.key) issues.push(pickAgentColumns(shaped, fields));
       if (issues.length >= cap) break;
     }
@@ -814,6 +884,9 @@ module.exports = {
   buildJqlSearchBody,
   changelogPath,
   shapeIssue,
+  shapeAgentIssue,
+  parentKeyOf,
+  __resetCaches,
   shapeAttachment,
   isTextualAttachment,
   issueTypeOf,

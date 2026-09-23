@@ -59,6 +59,7 @@ test('apiBaseFor: JIRA_API_BASE seam wins over the stored siteUrl', () => {
 // ── async adapters (global.fetch stubbed) ───────────────────────────────────
 
 function withFetch(handler, fn) {
+  jc.__resetCaches(); // #2415 — drop the per-site Epic Link id cache between tests
   const orig = global.fetch;
   const calls = [];
   global.fetch = async (url, opts) => {
@@ -69,6 +70,17 @@ function withFetch(handler, fn) {
 }
 
 const CRED = { siteUrl: 'acme', email: 'bot@acme.com', apiToken: 'tok', env: { JIRA_API_BASE: 'http://fake-jira:8080' } };
+
+// #2415 — a `/rest/api/3/field` request (the Epic Link id lookup a read makes).
+const isFieldList = (url) => /\/rest\/api\/3\/field$/.test(url);
+// Its stubbed response: no Epic Link field by default (reads fall back to the
+// native `parent`); pass an id to model a company-managed site that has one.
+function fieldListResponse(epicLinkId) {
+  const fields = epicLinkId
+    ? [{ id: epicLinkId, name: 'Epic Link', schema: { custom: 'com.pyxis.greenhopper.jira:gh-epic-link' } }]
+    : [];
+  return { ok: true, status: 200, text: async () => JSON.stringify(fields) };
+}
 
 test('searchProjectIssues: POSTs the JQL search, shapes issues, follows nextPageToken', async () => {
   await withFetch((url, opts, n) => {
@@ -150,8 +162,13 @@ test('requestJson: a NON-idempotent write is never retried — a slow Jira that 
 test('requestJson: the POST-but-read issue search IS retried (the stale-socket case the retry exists for)', async () => {
   const calls = [];
   const orig = global.fetch;
+  jc.__resetCaches();
   global.fetch = async (url, opts) => {
-    calls.push(`${opts.method || 'GET'} ${new URL(url).pathname}`);
+    const pathname = new URL(url).pathname;
+    // The Epic Link id lookup (#2415) is incidental here — serve it and don't
+    // count it, so the assertion stays about the search POST's retry.
+    if (pathname === '/rest/api/3/field') return { ok: true, status: 200, text: async () => '[]' };
+    calls.push(`${opts.method || 'GET'} ${pathname}`);
     if (calls.length === 1) { const e = new TypeError('fetch failed'); e.cause = { code: 'UND_ERR_SOCKET' }; throw e; }
     return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, issues: [] }) };
   };
@@ -197,24 +214,26 @@ test('listProjects: paginates /project/search and narrows to key/name/id/type', 
 
 test('listProjectIssues: project-scoped JQL, optional status filter, narrow rows', async () => {
   await withFetch((url, opts) => {
+    if (isFieldList(url)) return fieldListResponse();
     assert.match(url, /\/rest\/api\/3\/search\/jql/);
     const body = JSON.parse(opts.body);
     assert.equal(body.jql, 'project = "KAN" AND status = "Ready for Dev" ORDER BY updated DESC');
-    assert.deepEqual(body.fields, ['summary', 'status', 'assignee', 'created', 'updated', 'issuetype']);
+    assert.deepEqual(body.fields, ['summary', 'status', 'assignee', 'created', 'updated', 'issuetype', 'parent']);
     return { ok: true, status: 200, text: async () => JSON.stringify({ issues: [
-      { key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, created: '2026-09-08T09:00:00Z', updated: '2026-09-09T10:00:00Z', issuetype: { name: 'Story' } } },
+      { key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, created: '2026-09-08T09:00:00Z', updated: '2026-09-09T10:00:00Z', issuetype: { name: 'Story' }, parent: { key: 'KAN-1' } } },
     ] }) };
   }, async () => {
     const rows = await jc.listProjectIssues({ siteUrl: 'acme', email: 'e', apiToken: 't' }, { projectKey: 'KAN', status: 'Ready for Dev', env: CRED.env });
     assert.deepEqual(rows, [{
       key: 'KAN-6', summary: 'Login', status: 'Ready for Dev', issueType: 'Story', assignee: 'Jane',
-      created: '2026-09-08T09:00:00Z', updated: '2026-09-09T10:00:00Z', url: 'https://acme.atlassian.net/browse/KAN-6',
+      created: '2026-09-08T09:00:00Z', updated: '2026-09-09T10:00:00Z', parent: 'KAN-1', url: 'https://acme.atlassian.net/browse/KAN-6',
     }]);
   });
 });
 
 test('listProjectIssues: status with a backslash-quote cannot break out of the clause', async () => {
   await withFetch((url, opts) => {
+    if (isFieldList(url)) return fieldListResponse();
     assert.equal(JSON.parse(opts.body).jql, 'project = "KAN" AND status = "x\\\\\\" OR 1=1 --" ORDER BY updated DESC');
     return { ok: true, status: 200, text: async () => JSON.stringify({ issues: [] }) };
   }, async () => {
@@ -224,6 +243,7 @@ test('listProjectIssues: status with a backslash-quote cannot break out of the c
 
 test('listProjectIssues: no status → JQL without the status clause', async () => {
   await withFetch((url, opts) => {
+    if (isFieldList(url)) return fieldListResponse();
     assert.equal(JSON.parse(opts.body).jql, 'project = "KAN" ORDER BY updated DESC');
     return { ok: true, status: 200, text: async () => JSON.stringify({ issues: [] }) };
   }, async () => {
@@ -261,16 +281,17 @@ test('pickAgentColumns: no fields → full shape; a subset always keeps key', ()
 });
 
 test('searchIssues: runs the caller JQL, shapes like `list`, follows nextPageToken', async () => {
-  await withFetch((url, opts, n) => {
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return fieldListResponse();
     assert.equal(url, 'http://fake-jira:8080/rest/api/3/search/jql');
     assert.equal(opts.method, 'POST');
     const body = JSON.parse(opts.body);
-    assert.deepEqual(body.fields, ['summary', 'status', 'assignee', 'updated', 'issuetype']);
-    if (n === 1) {
+    assert.deepEqual(body.fields, ['summary', 'status', 'assignee', 'updated', 'issuetype', 'parent']);
+    if (!body.nextPageToken) {
       assert.equal(body.jql, 'issuetype = Story');
       return { ok: true, status: 200, text: async () => JSON.stringify({
         isLast: false, nextPageToken: 'P2',
-        issues: [{ key: 'ENG-1', fields: { summary: 'One', status: { name: 'Open' }, issuetype: { name: 'Story' }, updated: '2026-09-09T10:00:00Z' } }],
+        issues: [{ key: 'ENG-1', fields: { summary: 'One', status: { name: 'Open' }, issuetype: { name: 'Story' }, updated: '2026-09-09T10:00:00Z', parent: { key: 'EPIC-1' } } }],
       }) };
     }
     assert.equal(body.nextPageToken, 'P2');
@@ -279,16 +300,17 @@ test('searchIssues: runs the caller JQL, shapes like `list`, follows nextPageTok
     }) };
   }, async (calls) => {
     const issues = await jc.searchIssues(CRED, { jql: '  issuetype = Story  ', env: CRED.env });
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 3); // 1 Epic Link lookup + 2 search pages
     assert.deepEqual(issues, [
-      { key: 'ENG-1', summary: 'One', status: 'Open', issueType: 'Story', assignee: null, updated: '2026-09-09T10:00:00Z', url: 'https://acme.atlassian.net/browse/ENG-1' },
-      { key: 'ENG-2', summary: 'Two', status: null, issueType: null, assignee: 'Jane', updated: null, url: 'https://acme.atlassian.net/browse/ENG-2' },
+      { key: 'ENG-1', summary: 'One', status: 'Open', issueType: 'Story', assignee: null, updated: '2026-09-09T10:00:00Z', parent: 'EPIC-1', url: 'https://acme.atlassian.net/browse/ENG-1' },
+      { key: 'ENG-2', summary: 'Two', status: null, issueType: null, assignee: 'Jane', updated: null, parent: null, url: 'https://acme.atlassian.net/browse/ENG-2' },
     ]);
   });
 });
 
 test('searchIssues: --limit caps total issues and shrinks the page request, stops paging', async () => {
   await withFetch((url, opts) => {
+    if (isFieldList(url)) return fieldListResponse();
     assert.equal(JSON.parse(opts.body).maxResults, 2); // min(PAGE_SIZE, cap)
     return { ok: true, status: 200, text: async () => JSON.stringify({
       isLast: false, nextPageToken: 'P2',
@@ -299,16 +321,44 @@ test('searchIssues: --limit caps total issues and shrinks the page request, stop
   }, async (calls) => {
     const issues = await jc.searchIssues(CRED, { jql: 'project = ENG', limit: 2, env: CRED.env });
     assert.deepEqual(issues.map((i) => i.key), ['ENG-1', 'ENG-2']); // capped, extra page never fetched
-    assert.equal(calls.length, 1);
+    assert.equal(calls.length, 2); // 1 Epic Link lookup + 1 capped search page
   });
 });
 
 test('searchIssues: --fields narrows the returned columns (validated before any request)', async () => {
-  await withFetch(() => ({ ok: true, status: 200, text: async () => JSON.stringify({
-    isLast: true, issues: [{ key: 'ENG-1', fields: { summary: 'One', status: { name: 'Open' } } }],
-  }) }), async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true, issues: [{ key: 'ENG-1', fields: { summary: 'One', status: { name: 'Open' } } }],
+    }) };
+  }, async () => {
     const issues = await jc.searchIssues(CRED, { jql: 'project = ENG', fields: ['summary'], env: CRED.env });
     assert.deepEqual(issues, [{ key: 'ENG-1', summary: 'One' }]);
+  });
+});
+
+test('searchIssues: resolves the Epic Link field on a classic site and surfaces it as parent (#2415)', async () => {
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return fieldListResponse('customfield_10014');
+    assert.deepEqual(JSON.parse(opts.body).fields, ['summary', 'status', 'assignee', 'updated', 'issuetype', 'parent', 'customfield_10014']);
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true, issues: [{ key: 'ENG-1', fields: { summary: 'One', customfield_10014: 'EPIC-3' } }],
+    }) };
+  }, async () => {
+    const issues = await jc.searchIssues(CRED, { jql: 'project = ENG', env: CRED.env });
+    assert.equal(issues[0].parent, 'EPIC-3');
+  });
+});
+
+test('searchIssues: `parent` is a selectable --fields column (#2415)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true, issues: [{ key: 'ENG-1', fields: { summary: 'One', parent: { key: 'EPIC-9' } } }],
+    }) };
+  }, async () => {
+    const issues = await jc.searchIssues(CRED, { jql: 'project = ENG', fields: ['parent'], env: CRED.env });
+    assert.deepEqual(issues, [{ key: 'ENG-1', parent: 'EPIC-9' }]);
   });
 });
 
@@ -422,7 +472,8 @@ test('updateDescription: a blank description is a 400 before any request', async
 
 test('getIssue: reads summary/status/issueType/assignee and builds a browse URL from the real site', async () => {
   await withFetch((url) => {
-    assert.match(url, /fields=summary,status,description,assignee,issuetype,attachment,created,updated/);
+    if (isFieldList(url)) return fieldListResponse();
+    assert.match(url, /fields=summary,status,description,assignee,issuetype,attachment,created,updated,parent/);
     return { ok: true, status: 200, text: async () => JSON.stringify({
       key: 'ENG-5', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, issuetype: { name: 'Task' }, created: '2026-09-08T09:00:00Z', updated: '2026-09-09T10:00:00Z' },
     }) };
@@ -433,18 +484,59 @@ test('getIssue: reads summary/status/issueType/assignee and builds a browse URL 
     assert.equal(issue.assignee, 'Jane');
     assert.equal(issue.created, '2026-09-08T09:00:00Z'); // #2414 — timestamps surfaced for age filter/sort
     assert.equal(issue.updated, '2026-09-09T10:00:00Z');
+    assert.equal(issue.parent, null); // #2415 — no parent → null (not omitted)
     assert.equal(issue.url, 'https://acme.atlassian.net/browse/ENG-5'); // browse URL uses the real site, not the seam
     assert.ok(!('attachments' in issue)); // no attachments → no key at all (AC2/AC8)
   });
 });
 
 test('getIssue: missing created/updated fields surface as null (#2414)', async () => {
-  await withFetch(() => ({ ok: true, status: 200, text: async () => JSON.stringify({
-    key: 'ENG-6', fields: { summary: 'S', status: { name: 'To Do' }, issuetype: { name: 'Task' } },
-  }) }), async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: 'ENG-6', fields: { summary: 'S', status: { name: 'To Do' }, issuetype: { name: 'Task' } },
+    }) };
+  }, async () => {
     const issue = await jc.getIssue(CRED, 'ENG-6', { env: CRED.env });
     assert.equal(issue.created, null);
     assert.equal(issue.updated, null);
+  });
+});
+
+test('getIssue: surfaces the native parent key (#2415)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse(); // team-managed → no Epic Link field
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: 'ENG-8', fields: { summary: 'Story', status: { name: 'To Do' }, issuetype: { name: 'Story' }, parent: { key: 'ENG-1', fields: { summary: 'The Epic' } } },
+    }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-8', { env: CRED.env });
+    assert.equal(issue.parent, 'ENG-1'); // agent can now `show ENG-1`
+  });
+});
+
+test('getIssue: falls back to the Epic Link custom field on a classic project (#2415)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse('customfield_10014'); // company-managed
+    assert.match(url, /customfield_10014/); // the resolved field id is requested
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: 'ENG-9', fields: { summary: 'Story', status: { name: 'To Do' }, issuetype: { name: 'Story' }, customfield_10014: 'EPIC-7' },
+    }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-9', { env: CRED.env });
+    assert.equal(issue.parent, 'EPIC-7');
+  });
+});
+
+test('getIssue: a failed Epic Link lookup degrades to native parent only (#2415)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return { ok: false, status: 500, text: async () => 'boom' };
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: 'ENG-10', fields: { summary: 'S', status: { name: 'To Do' }, issuetype: { name: 'Story' } },
+    }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-10', { env: CRED.env });
+    assert.equal(issue.parent, null); // lookup failure must not break the read
   });
 });
 
@@ -470,9 +562,12 @@ test('isTextualAttachment: text/* and text-ish application types + known extensi
 
 test('getIssue: lists attachment metadata when present, capped with a true count', async () => {
   const many = Array.from({ length: 55 }, (_, i) => ({ id: String(1000 + i), filename: `f${i}.txt`, mimeType: 'text/plain', size: 10, author: { displayName: 'Jane' } }));
-  await withFetch(() => ({ ok: true, status: 200, text: async () => JSON.stringify({
-    key: 'ENG-7', fields: { summary: 'S', attachment: many },
-  }) }), async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: 'ENG-7', fields: { summary: 'S', attachment: many },
+    }) };
+  }, async () => {
     const issue = await jc.getIssue(CRED, 'ENG-7', { env: CRED.env });
     assert.equal(issue.attachmentCount, 55);
     assert.equal(issue.attachments.length, jc.ATTACHMENT_LIST_CAP);

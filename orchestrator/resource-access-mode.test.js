@@ -23,6 +23,6 @@ test('two-sided guard: orchestrator copy is byte-identical to admin-console copy
 test('the orchestrator copy is the same module, not just the same bytes', () => {
   // Cheap smoke test so a require-path or export-name regression in THIS image
   // is caught here, not only when the redesign's runtime code starts gating on it.
-  assert.equal(resolveResourceAccessV2({ AEE_RESOURCE_ACCESS_V2: 'true' }), true);
-  assert.equal(resolveResourceAccessV2({}), false);
+  assert.equal(resolveResourceAccessV2({ AEE_RESOURCE_ACCESS_V2: 'off' }), false);
+  assert.equal(resolveResourceAccessV2({}), true); // default ON (#2360)
 });

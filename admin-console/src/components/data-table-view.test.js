@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveEmptyState, noMatchText, filterPlaceholder, MAX_FILTER_HINT_COLUMNS } from './data-table-view.js';
+import {
+  resolveEmptyState, noMatchText, filterPlaceholder, MAX_FILTER_HINT_COLUMNS,
+  columnFilterText, rowMatchesFilter,
+} from './data-table-view.js';
 
 test('rows present → no empty state', () => {
   assert.equal(resolveEmptyState({ dataLength: 10, resultLength: 3, filter: 'foo' }), null);
@@ -85,4 +88,77 @@ test('filterPlaceholder: falls back to plain Filter… with no usable labels', (
   assert.equal(filterPlaceholder([{ label: '' }, { hidden: true, label: 'X' }]), 'Filter…');
   assert.equal(filterPlaceholder(), 'Filter…');
   assert.equal(filterPlaceholder(null), 'Filter…');
+});
+
+/* ── Filter predicate (#2442) ──────────────────────────────────────── */
+
+test('columnFilterText: defaults to the raw row value, lower-cased', () => {
+  assert.equal(columnFilterText({ key: 'name' }, { name: 'Widget' }), 'widget');
+});
+
+test('columnFilterText: null/undefined raw value yields empty string', () => {
+  assert.equal(columnFilterText({ key: 'name' }, { name: null }), '');
+  assert.equal(columnFilterText({ key: 'missing' }, { name: 'x' }), '');
+  assert.equal(columnFilterText({ key: 'name' }, null), '');
+  assert.equal(columnFilterText(null, { name: 'x' }), '');
+});
+
+test('columnFilterText: numeric raw value is stringified', () => {
+  assert.equal(columnFilterText({ key: 'total' }, { total: 12345 }), '12345');
+});
+
+test('columnFilterText: filterValue override wins and is applied to (raw,row)', () => {
+  const col = { key: 'key', filterValue: (raw, row) => `${row.name} ${raw}` };
+  assert.equal(columnFilterText(col, { key: 'u_42', name: 'Maier' }), 'maier u_42');
+});
+
+test('columnFilterText: filterValue returning null → empty string (not the raw value)', () => {
+  const col = { key: 'key', filterValue: () => null };
+  assert.equal(columnFilterText(col, { key: 'u_42' }), '');
+});
+
+test('rowMatchesFilter: empty / whitespace query matches every row', () => {
+  const cols = [{ key: 'name' }];
+  assert.equal(rowMatchesFilter({ name: 'x' }, cols, ''), true);
+  assert.equal(rowMatchesFilter({ name: 'x' }, cols, '   '), true);
+  assert.equal(rowMatchesFilter({ name: 'x' }, cols, null), true);
+});
+
+// The core #2442 fix: a column whose render maps a raw id to a display name must
+// filter on that displayed name. Model the Token Usage User column exactly:
+// raw `key` is an account id, filterValue resolves it to "<name> <id>".
+const userNames = new Map([['u_tmaier', 'Thorsten A. Maier'], ['u_hpoly', 'Harris Polychronakis']]);
+const userCol = {
+  key: 'key',
+  filterValue: (raw) => [userNames.get(raw) || raw, raw].filter(Boolean).join(' '),
+};
+const numCols = [{ key: 'input' }, { key: 'output' }, { key: 'total' }];
+const cols = [userCol, ...numCols];
+const rows = [
+  { key: 'u_tmaier', input: 100, output: 5, total: 105 },
+  { key: 'u_hpoly', input: 999, output: 1, total: 1000 },
+];
+
+test('AC1: a displayed name matches its row (and only it)', () => {
+  const hit = rows.filter((r) => rowMatchesFilter(r, cols, 'Maier'));
+  assert.deepEqual(hit.map((r) => r.key), ['u_tmaier']);
+  // partial name, other user
+  assert.deepEqual(rows.filter((r) => rowMatchesFilter(r, cols, 'Harris')).map((r) => r.key), ['u_hpoly']);
+});
+
+test('AC1: the raw account id stays searchable too', () => {
+  assert.deepEqual(rows.filter((r) => rowMatchesFilter(r, cols, 'tmaier')).map((r) => r.key), ['u_tmaier']);
+});
+
+test('AC2: a name that matches nobody yields zero rows', () => {
+  assert.deepEqual(rows.filter((r) => rowMatchesFilter(r, cols, 'Nonexistent')), []);
+});
+
+test('AC3: numeric columns still filter as before', () => {
+  assert.deepEqual(rows.filter((r) => rowMatchesFilter(r, cols, '999')).map((r) => r.key), ['u_hpoly']);
+  assert.deepEqual(rows.filter((r) => rowMatchesFilter(r, cols, '105')).map((r) => r.key), ['u_tmaier']);
+});
+
+test('case-insensitive matching on the displayed name', () => {
+  assert.deepEqual(rows.filter((r) => rowMatchesFilter(r, cols, 'MAIER')).map((r) => r.key), ['u_tmaier']);
 });

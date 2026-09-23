@@ -381,7 +381,11 @@ function ProcessedEventsView() {
       if (row.noMatchingTrigger && row.label) suffix = ` (${row.label})`;
       else if (row.ref) suffix = ` · ${shortRef(row.ref)}`;
       return <span>{friendly || '—'}{suffix}</span>;
-    } },
+    },
+      // #2442: the raw event key ("pull_request.opened") is no longer shown — only
+      // the friendly name ("PR opened"). Search the friendly name, keeping the raw
+      // key matchable too so an operator who knows the API vocabulary still finds it.
+      filterValue: (v) => [eventLabel(v), typeof v === 'string' ? v : ''].filter(Boolean).join(' ') },
     { key: 'actor', label: 'Actor', render: v => v || '—' },
     { key: 'outcomes', label: 'Outcomes', sortable: false, wrap: true, render: (v, row) => {
       if (row.noMatchingTrigger) return <NoMatchBadge />;
@@ -635,7 +639,9 @@ function AgentPendingGroup({ group, onCancel, onReassign, busyId }) {
   })), [group.entries]);
 
   const COLS = [
-    { key: 'kind', label: 'Kind', sortable: false, render: v => <KindBadge kind={v} /> },
+    // #2442: KindBadge shows a friendly label (e.g. "Digest"), not the raw kind
+    // key ("github-digest"), so the filter searches the displayed label.
+    { key: 'kind', label: 'Kind', sortable: false, render: v => <KindBadge kind={v} />, filterValue: v => kindLabel(v) },
     // Work item + Title (#2101): which PR or issue is waiting, in the Processed
     // tab's own vocabulary and its own cells, so the two tabs read alike. Both
     // opt into per-column wrap (#1898's DataTable flag) since a PR title is the

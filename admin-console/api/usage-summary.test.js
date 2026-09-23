@@ -149,6 +149,80 @@ test('a malformed attribution block cannot break the user grouping', () => {
   assert.equal(res.groups[0].invocations, 3);
 });
 
+// ── #2440: the optional second grouping level (cross-tab drill-down) ─────────
+
+const mu = (n) => ({ input: n, output: 0, cacheCreationInput: 0, cacheReadInput: 0 });
+const crossRecs = [
+  // a1 used two models in one turn (turn-wide 30 = 20 + 10) …
+  { ts: '2026-09-01T10:00:00.000Z', agentId: 'a1', teamId: 't1', tokens: tokens(30),
+    modelUsage: { 'model-x': mu(20), 'model-y': mu(10) } },
+  // … and model-x again on its own.
+  { ts: '2026-09-01T11:00:00.000Z', agentId: 'a1', teamId: 't1', tokens: tokens(5),
+    modelUsage: { 'model-x': mu(5) } },
+  { ts: '2026-09-01T12:00:00.000Z', agentId: 'a2', teamId: 't1', tokens: tokens(7),
+    modelUsage: { 'model-y': mu(7) } },
+];
+
+test('secondaryGroupBy agent × model shows each agent broken down by model (AC2)', () => {
+  const res = summarize(crossRecs, { groupBy: 'agent', secondaryGroupBy: 'model' });
+  assert.equal(res.groupBy, 'agent');
+  assert.equal(res.secondaryGroupBy, 'model');
+  const a1 = res.groups.find((g) => g.key === 'a1');
+  // The primary row reconciles with the one-level Agent view: turn-wide tokens.
+  assert.deepEqual([a1.tokens.total, a1.invocations], [35, 2]);
+  // Its models fan over modelUsage (sorted by total desc): model-x 25, model-y 10.
+  assert.deepEqual(
+    a1.subgroups.map((s) => [s.key, s.tokens.total, s.invocations]),
+    [['model-x', 25, 2], ['model-y', 10, 1]],
+  );
+  const a2 = res.groups.find((g) => g.key === 'a2');
+  assert.deepEqual(a2.subgroups.map((s) => [s.key, s.tokens.total]), [['model-y', 7]]);
+});
+
+test('secondaryGroupBy fans the model axis whichever side it is on', () => {
+  const res = summarize(crossRecs, { groupBy: 'model', secondaryGroupBy: 'agent' });
+  const modelY = res.groups.find((g) => g.key === 'model-y');
+  // model-y was used by a1 (10) and a2 (7).
+  assert.deepEqual(modelY.tokens.total, 17);
+  assert.deepEqual(
+    modelY.subgroups.map((s) => [s.key, s.tokens.total]),
+    [['a1', 10], ['a2', 7]],
+  );
+});
+
+test('a non-model × non-model cross-tab reconciles with the primary and the totals', () => {
+  const flat = [
+    { ts: '2026-09-01T10:00:00.000Z', agentId: 'a1', teamId: 't1', tokens: tokens(10) },
+    { ts: '2026-09-01T11:00:00.000Z', agentId: 'a1', teamId: 't2', tokens: tokens(4) },
+    { ts: '2026-09-01T12:00:00.000Z', agentId: 'a2', teamId: 't1', tokens: tokens(6) },
+  ];
+  const res = summarize(flat, { groupBy: 'agent', secondaryGroupBy: 'team' });
+  // Every group's subgroups sum exactly to the group (no model gap here) …
+  for (const g of res.groups) {
+    assert.equal(g.subgroups.reduce((s, x) => s + x.tokens.total, 0), g.tokens.total);
+    assert.equal(g.subgroups.reduce((s, x) => s + x.invocations, 0), g.invocations);
+  }
+  // … and the whole cross-tab sums to the stable grand total (AC5).
+  assert.equal(res.groups.reduce((s, g) => s + g.tokens.total, 0), res.totals.total);
+  assert.equal(res.totals.total, 20);
+});
+
+test('secondaryGroupBy is ignored (output identical) when absent, unknown or equal to primary (AC6)', () => {
+  const flat = [
+    { ts: '2026-09-01T10:00:00.000Z', agentId: 'a1', teamId: 't1', tokens: tokens(10) },
+    { ts: '2026-09-01T11:00:00.000Z', agentId: 'a2', teamId: 't1', tokens: tokens(6) },
+  ];
+  const single = summarize(flat, { groupBy: 'agent' });
+  // The single-dimension result carries no secondary axis and no subgroups.
+  assert.ok(!('secondaryGroupBy' in single));
+  for (const g of single.groups) assert.ok(!('subgroups' in g));
+  // A self-cross adds no information; an unknown value falls through; both are
+  // byte-identical to the one-level result (no regression).
+  assert.deepEqual(summarize(flat, { groupBy: 'agent', secondaryGroupBy: 'agent' }), single);
+  assert.deepEqual(summarize(flat, { groupBy: 'agent', secondaryGroupBy: 'nonsense' }), single);
+  assert.deepEqual(summarize(flat, { groupBy: 'agent', secondaryGroupBy: undefined }), single);
+});
+
 // The orchestrator carries a byte-identical mirror of this module (#679) so the
 // agent-facing read-only usage query reuses one aggregation implementation.
 // This guard is the twin of orchestrator/usage-summary.test.js — either side

@@ -9,7 +9,7 @@ import InfoTip from '../components/InfoTip';
 import PageHelpButton from '../components/PageHelpButton';
 import { TOKEN_USAGE_HELP_SECTIONS } from './token-usage-help-sections.js';
 import { toRows as agentModelRows, modelOptions, filterRowsByModel, isCurrentModel } from './agent-models-view.js';
-import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses, userLabelIndex, userGroupCell, providerTierCell } from './token-usage-view.js';
+import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses, userLabelIndex, userGroupCell, providerTierCell, secondaryGroupOptions, groupValueCell } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
 // auth-cookie gate, so a same-origin anchor navigation carries the session.
@@ -24,13 +24,13 @@ function downloadExport(url) {
 
 // CSV / JSON export buttons for a view (#656 phase 3). `team` narrows the
 // export to the page's selected team (#801) — undefined/'' means all teams.
-function ExportButtons({ kind, since, team }) {
+function ExportButtons({ kind, since, team, groupBy, secondaryGroupBy }) {
   return (
     <span style={{ display: 'inline-flex', gap: 'var(--eb-space-1)' }}>
       {['csv', 'json'].map((format) => (
         <button
           key={format}
-          onClick={() => downloadExport(buildExportUrl(kind, { since, format, team }))}
+          onClick={() => downloadExport(buildExportUrl(kind, { since, format, team, groupBy, secondaryGroupBy }))}
           title={`Download ${format.toUpperCase()} (tokens only — apply prices downstream)`}
           style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}
         >
@@ -281,11 +281,97 @@ function useRangeWindow(rangeKey) {
   }, [rangeKey]);
 }
 
+/* ── Nested (cross-tab) summary table (#2440) ──────────────────────── */
+// A group key label for ANY dimension: `user`/`providerTier` keys are resolved
+// to their display name (the `unknown` bucket named as a gap), every other
+// dimension shows its raw key. Used for both the primary and secondary axes.
+function GroupKeyLabel({ dim, value, userNames }) {
+  const cell = groupValueCell(dim, value, userNames);
+  return <span title={cell.hint || undefined}>{cell.label}</span>;
+}
+
+// The right-aligned token cells shared by a group-total row and a subgroup row.
+function tokenCells(tokens, invocations, muted) {
+  const style = { padding: 4, textAlign: 'right', fontFamily: 'var(--eb-font-mono)', color: muted ? 'var(--eb-text-secondary)' : undefined };
+  return (
+    <>
+      {TOKEN_CLASSES.map((c) => <td key={c.key} style={style}>{formatInt((tokens && tokens[c.key]) || 0)}</td>)}
+      <td style={style}>{formatInt((tokens && tokens.total) || 0)}</td>
+      <td style={style}>{formatInt(invocations || 0)}</td>
+    </>
+  );
+}
+
+// The Agent × Model (and any primary × secondary) cross-tab: one bold group-total
+// row per primary key, its used secondary values indented beneath. DataTable does
+// not model row groups, so this is a bespoke table — the single-level view keeps
+// using DataTable (its sort/filter/paging) unchanged.
+function NestedSummaryTable({ summary, groupBy, secondaryGroupBy, userNames }) {
+  const groups = (summary && summary.groups) || [];
+  const th = { padding: 4, textAlign: 'right', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)', whiteSpace: 'nowrap' };
+  const primaryLabel = (GROUP_OPTIONS.find((g) => g.key === groupBy) || { label: 'Group' }).label;
+  const secondaryLabel = (GROUP_OPTIONS.find((g) => g.key === secondaryGroupBy) || { label: 'Group' }).label;
+
+  if (!groups.length) {
+    return (
+      <div style={{ padding: 'var(--eb-space-4)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-lg)', color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>
+        No token usage recorded in this time range.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ overflowX: 'auto', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-lg)' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
+        <thead>
+          <tr>
+            <th style={{ padding: 4, textAlign: 'left', color: 'var(--eb-text-secondary)', fontWeight: 'var(--eb-font-medium)' }}>
+              {primaryLabel} <span style={{ color: 'var(--eb-text-muted)' }}>/</span> {secondaryLabel}
+            </th>
+            {TOKEN_CLASSES.map((c) => <th key={c.key} style={th}>{c.label}</th>)}
+            <th style={th}>Total</th>
+            <th style={th}>Invocations</th>
+          </tr>
+        </thead>
+        <tbody>
+          {groups.map((g) => (
+            <React.Fragment key={g.key}>
+              <tr style={{ borderTop: '1px solid var(--eb-border-default)', background: 'var(--eb-bg-elevated)' }}>
+                <td style={{ padding: 4, fontWeight: 'var(--eb-font-semibold)' }}>
+                  <GroupKeyLabel dim={groupBy} value={g.key} userNames={userNames} />
+                </td>
+                {tokenCells(g.tokens, g.invocations)}
+              </tr>
+              {(g.subgroups || []).map((s) => (
+                <tr key={`${g.key}/${s.key}`}>
+                  <td style={{ padding: '4px 4px 4px var(--eb-space-5)', color: 'var(--eb-text-secondary)' }}>
+                    <GroupKeyLabel dim={secondaryGroupBy} value={s.key} userNames={userNames} />
+                  </td>
+                  {tokenCells(s.tokens, s.invocations, true)}
+                </tr>
+              ))}
+            </React.Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /* ── Statistics tab (view 1, #654) ─────────────────────────────────── */
 function StatisticsTab({ team }) {
   const [rangeKey, setRangeKey] = useState('7d');
   const [groupBy, setGroupBy] = useState('agent');
+  // #2440: an optional second grouping level (cross-tab drill-down). '' = None,
+  // which restores the exact single-dimension behaviour. A self-cross is never
+  // offered (secondaryGroupOptions drops the primary); if the primary changes
+  // onto the current secondary, the effect below clears it.
+  const [secondaryGroupBy, setSecondaryGroupBy] = useState('');
   const { since } = useRangeWindow(rangeKey);
+  useEffect(() => {
+    if (secondaryGroupBy === groupBy) setSecondaryGroupBy('');
+  }, [groupBy, secondaryGroupBy]);
+  const nested = !!secondaryGroupBy && secondaryGroupBy !== groupBy;
 
   // Per-series chart visibility (#1707). Held as component state so it survives
   // Refresh + range / Group-by changes within the visit (AC10), and mirrored to
@@ -304,7 +390,8 @@ function StatisticsTab({ team }) {
 
   const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
   const teamQ = teamQuery(team);
-  const summaryUrl = `/api/usage/summary?${sinceQ}${teamQ}groupBy=${encodeURIComponent(groupBy)}`;
+  const secondaryQ = nested ? `secondaryGroupBy=${encodeURIComponent(secondaryGroupBy)}&` : '';
+  const summaryUrl = `/api/usage/summary?${sinceQ}${teamQ}${secondaryQ}groupBy=${encodeURIComponent(groupBy)}`;
   const dayUrl = `/api/usage/summary?${sinceQ}${teamQ}groupBy=day`;
 
   const { data: summary, loading, error, refetch } = useApi(summaryUrl);
@@ -314,8 +401,10 @@ function StatisticsTab({ team }) {
   // screen. Names are resolved at read time from the OPEN directory (display
   // name + email only) rather than denormalized into the usage record, because
   // the store is billing-adjacent telemetry with no retention — a name copied
-  // in would outlive the person and go stale. Fetched only for that grouping.
-  const { data: directory } = useApi(groupBy === 'user' ? '/api/users/directory' : null);
+  // in would outlive the person and go stale. Fetched whenever EITHER axis
+  // groups by user (#2440).
+  const needsDirectory = groupBy === 'user' || secondaryGroupBy === 'user';
+  const { data: directory } = useApi(needsDirectory ? '/api/users/directory' : null);
   const userNames = useMemo(() => userLabelIndex(directory), [directory]);
 
   const totals = summary?.totals || { input: 0, output: 0, cacheCreationInput: 0, cacheReadInput: 0, total: 0, invocations: 0 };
@@ -383,10 +472,21 @@ function StatisticsTab({ team }) {
         <select value={groupBy} onChange={(e) => setGroupBy(e.target.value)} style={CONTROL_STYLE}>
           {GROUP_OPTIONS.map((g) => <option key={g.key} value={g.key}>{g.label}</option>)}
         </select>
+        {/* #2440: optional second grouping level. "None" restores the exact
+            single-dimension view; the primary is excluded so a self-cross can't
+            be chosen. */}
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+          then by
+          <InfoTip title="Second grouping level" text="Add a second dimension to break each group down further — e.g. Group by Agent, then by Model to see which model each agent ran and how many tokens it used. Choose “None” for the single-level view." size={12} />
+        </label>
+        <select value={secondaryGroupBy} onChange={(e) => setSecondaryGroupBy(e.target.value)} style={CONTROL_STYLE} aria-label="Second grouping level">
+          <option value="">None</option>
+          {secondaryGroupOptions(groupBy).map((g) => <option key={g.key} value={g.key}>{g.label}</option>)}
+        </select>
         <button onClick={refresh} style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
         </button>
-        <ExportButtons kind="summary" since={since} team={team} />
+        <ExportButtons kind="summary" since={since} team={team} groupBy={groupBy} secondaryGroupBy={nested ? secondaryGroupBy : ''} />
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
 
@@ -412,6 +512,8 @@ function StatisticsTab({ team }) {
 
       {loading ? (
         <div style={{ height: 160, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />
+      ) : nested ? (
+        <NestedSummaryTable summary={summary} groupBy={groupBy} secondaryGroupBy={secondaryGroupBy} userNames={userNames} />
       ) : (
         <DataTable
           columns={COLS}

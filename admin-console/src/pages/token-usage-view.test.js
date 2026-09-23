@@ -33,6 +33,8 @@ import {
   TIER_SIGNAL_HELP,
   COST_NOTE,
   PAGE_DESCRIPTION,
+  secondaryGroupOptions,
+  groupValueCell,
 } from './token-usage-view.js';
 
 test('TOKEN_CLASSES matches the four-class API contract, in display order', () => {
@@ -352,6 +354,45 @@ test('buildExportUrl carries the team filter and omits it for "all teams" (#801)
   // Blank / absent team → omitted (all teams, unfiltered).
   assert.equal(buildExportUrl('summary', { team: '' }), '/api/usage/summary/export?format=csv');
   assert.equal(buildExportUrl('summary', {}), '/api/usage/summary/export?format=csv');
+});
+
+/* ── #2440: second grouping level ──────────────────────────────────── */
+
+test('secondaryGroupOptions offers every dimension except the primary (no self-cross, AC3)', () => {
+  for (const primary of GROUP_OPTIONS.map((g) => g.key)) {
+    const opts = secondaryGroupOptions(primary).map((g) => g.key);
+    assert.ok(!opts.includes(primary), `${primary} must not be offered as its own secondary`);
+    assert.equal(opts.length, GROUP_OPTIONS.length - 1);
+    // Still a subset of the real dimensions, each carrying its human label.
+    for (const g of secondaryGroupOptions(primary)) assert.equal(typeof g.label, 'string');
+  }
+});
+
+test('groupValueCell names user / provider-tier keys and shows other dimensions raw', () => {
+  const byId = userLabelIndex([{ id: 'u-ada', displayName: 'Ada Lovelace' }]);
+  assert.deepEqual(groupValueCell('user', 'u-ada', byId), { label: 'Ada Lovelace', hint: 'u-ada' });
+  assert.equal(groupValueCell('user', UNKNOWN_GROUP_KEY, byId).label, 'Unattributed');
+  assert.equal(groupValueCell('providerTier', 'global', byId).label, 'Global');
+  // Every other dimension shows its raw key (agent/team/model/provider/day).
+  assert.deepEqual(groupValueCell('agent', 'cobol-agent', byId), { label: 'cobol-agent', hint: '' });
+  assert.deepEqual(groupValueCell('model', 'claude-opus-4-8', byId), { label: 'claude-opus-4-8', hint: '' });
+  // A blank/absent key falls back to an em dash rather than an empty cell.
+  assert.equal(groupValueCell('agent', '', byId).label, '—');
+});
+
+test('buildExportUrl carries the on-screen grouping so the export follows the view (#2440)', () => {
+  assert.equal(
+    buildExportUrl('summary', { format: 'csv', groupBy: 'agent', secondaryGroupBy: 'model' }),
+    '/api/usage/summary/export?groupBy=agent&secondaryGroupBy=model&format=csv',
+  );
+  // Primary only (single-level export).
+  assert.equal(
+    buildExportUrl('summary', { format: 'json', groupBy: 'team' }),
+    '/api/usage/summary/export?groupBy=team&format=json',
+  );
+  // Absent grouping is omitted — byte-identical to the pre-#2440 URL.
+  assert.equal(buildExportUrl('summary', { format: 'csv' }), '/api/usage/summary/export?format=csv');
+  assert.equal(buildExportUrl('summary', { format: 'csv', secondaryGroupBy: '' }), '/api/usage/summary/export?format=csv');
 });
 
 test('workItemAverages returns rounded total/input/output means over the attributed work-item count', () => {

@@ -49,10 +49,12 @@ const CHECKS = {
     return src.includes('/api/users/directory') && !src.includes('/api/admin/users');
   },
 
-  // Fetched only for `groupBy === 'user'`. `useApi(null)` is the supported skip
-  // (see hooks/useApi.js), so the other groupings issue no request at all.
+  // Fetched only when a `user` axis is on screen — the primary grouping OR the
+  // #2440 secondary one. `useApi(null)` is the supported skip (see
+  // hooks/useApi.js), so every other grouping issues no request at all.
   'directory-fetched-only-for-the-user-grouping'(src) {
-    return /useApi\(groupBy === 'user' \? '\/api\/users\/directory' : null\)/.test(src);
+    return /const needsDirectory = groupBy === 'user' \|\| secondaryGroupBy === 'user';/.test(src)
+      && /useApi\(needsDirectory \? '\/api\/users\/directory' : null\)/.test(src);
   },
 };
 
@@ -80,9 +82,9 @@ const MUTATIONS = [
   ['group-key-filtered-on-the-displayed-value',
     ", filterValue: groupKeyFilterText },",
     " },"],
-  // A request on every visit, for five groupings that never read it.
+  // A request on every visit, for the groupings that never read it.
   ['directory-fetched-only-for-the-user-grouping',
-    "useApi(groupBy === 'user' ? '/api/users/directory' : null)",
+    "useApi(needsDirectory ? '/api/users/directory' : null)",
     "useApi('/api/users/directory')"],
   // The wrong endpoint: full user records, narrowed to shared teams.
   ['directory-is-the-open-projection',

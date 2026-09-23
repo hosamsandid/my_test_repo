@@ -81,6 +81,12 @@ export function providerOwnershipOptions({ isOauth = false, isSysAdmin = false, 
 // when there is exactly one, else an empty set they must fill.
 export function defaultProviderOwnership({ isSysAdmin = false, adminTeamIds = [], isOauth = false } = {}) {
   if (isOauth) return { scope: 'personal', teamIds: [] };
+  // #2360: the Model Providers page is open to every authenticated user. A caller
+  // who administers no team and isn't a System Admin can only create a Personal
+  // provider (Team/Global are disabled for them), so default there — the form
+  // opens ready instead of on a disabled Team option. (Off the flag the page is
+  // admin-gated, so such a caller never reaches this branch.)
+  if (!isSysAdmin && adminTeamIds.length === 0) return { scope: 'personal', teamIds: [] };
   if (!isSysAdmin && adminTeamIds.length === 1) return { scope: 'team', teamIds: [adminTeamIds[0]] };
   return { scope: 'team', teamIds: [] };
 }

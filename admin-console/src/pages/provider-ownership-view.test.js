@@ -42,6 +42,8 @@ test('defaultProviderOwnership: oauth→personal; one admin team→that team set
   assert.deepEqual(defaultProviderOwnership({ isOauth: true, isSysAdmin: true }), { scope: 'personal', teamIds: [] });
   assert.deepEqual(defaultProviderOwnership({ isSysAdmin: false, adminTeamIds: ['payments'] }), { scope: 'team', teamIds: ['payments'] });
   assert.deepEqual(defaultProviderOwnership({ isSysAdmin: true, adminTeamIds: [] }), { scope: 'team', teamIds: [] });
+  // #2360: a plain member (open Models page) can only create Personal → default there.
+  assert.deepEqual(defaultProviderOwnership({ isSysAdmin: false, adminTeamIds: [] }), { scope: 'personal', teamIds: [] });
 });
 
 test('providerOwnershipFromRecord maps every stored shape into a team SET', () => {

@@ -206,7 +206,7 @@ export default function App() {
           <Route path="/role-templates" element={<AdminRoute><RoleTemplates /></AdminRoute>} />
           <Route path="/github-events" element={<GithubEventLog />} />
           <Route path="/token-usage"  element={<AdminRoute><TokenUsage /></AdminRoute>} />
-          <Route path="/models"       element={<CredentialRoute><ModelRegistry /></CredentialRoute>} />
+          <Route path="/models"       element={<CredentialRoute openUnderV2><ModelRegistry /></CredentialRoute>} />
           <Route path="/mcp"          element={<AdminRoute><McpServers /></AdminRoute>} />
           <Route path="/plugins"      element={<AdminRoute><Plugins /></AdminRoute>} />
           {/* A granted UI plugin is viewable by any team member with the grant —

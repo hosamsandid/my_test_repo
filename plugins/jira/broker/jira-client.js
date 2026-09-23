@@ -285,7 +285,7 @@ async function getIssue(cred, issueKey, { env } = {}) {
   const auth = basicAuthHeader(cred.email, cred.apiToken);
   const raw = await requestJson({
     base,
-    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=summary,status,description,assignee,issuetype,attachment`,
+    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=summary,status,description,assignee,issuetype,attachment,created,updated`,
     authHeader: auth,
   });
   const fields = raw.fields || {};
@@ -295,6 +295,10 @@ async function getIssue(cred, issueKey, { env } = {}) {
     status: fields.status && fields.status.name ? String(fields.status.name) : null,
     issueType: issueTypeOf(fields),
     assignee: fields.assignee && fields.assignee.displayName ? String(fields.assignee.displayName) : null,
+    // Issue timestamps (#2414) so an agent can filter/sort reads by age. Jira
+    // returns ISO-8601 strings; surface them verbatim (null when absent).
+    created: fields.created ? String(fields.created) : null,
+    updated: fields.updated ? String(fields.updated) : null,
     url: `${resolveJiraApiBase(cred.siteUrl)}/browse/${encodeURIComponent(raw.key || issueKey)}`,
   };
   // Attachment metadata (#2399, AC1). Only surfaced when the issue actually has
@@ -544,7 +548,7 @@ async function listProjectIssues(cred, { projectKey, status, env } = {}) {
     method: 'POST',
     idempotent: true, // a read that happens to be a POST — safe to retry
     authHeader: auth,
-    body: { jql, fields: ['summary', 'status', 'assignee', 'updated', 'issuetype'], maxResults: PAGE_SIZE },
+    body: { jql, fields: ['summary', 'status', 'assignee', 'created', 'updated', 'issuetype'], maxResults: PAGE_SIZE },
   });
   const siteBase = resolveJiraApiBase(cred.siteUrl);
   return (Array.isArray(result.issues) ? result.issues : []).map((raw) => {
@@ -555,6 +559,7 @@ async function listProjectIssues(cred, { projectKey, status, env } = {}) {
       status: f.status && f.status.name ? String(f.status.name) : null,
       issueType: issueTypeOf(f),
       assignee: f.assignee && f.assignee.displayName ? String(f.assignee.displayName) : null,
+      created: f.created || null, // #2414 — so an agent can filter/sort list rows by age
       updated: f.updated || null,
       url: `${siteBase}/browse/${encodeURIComponent(raw.key || '')}`,
     };

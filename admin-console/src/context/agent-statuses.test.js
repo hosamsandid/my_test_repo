@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { computeChatCounts, computeAgentStatusMap } from './agent-statuses.js';
+import { computeChatCounts, computeAgentStatusMap, computeTeamAttention } from './agent-statuses.js';
 
 test('computeChatCounts: counts busy and only manually-messaged unread, skips disabled/offline', () => {
   const list = [
@@ -89,4 +89,44 @@ test('computeAgentStatusMap: no state is ever "active" any more (blue removed, A
 
 test('computeAgentStatusMap: tolerates a non-array list', () => {
   assert.deepEqual(computeAgentStatusMap(null, {}), {});
+});
+
+// #2430 — collapsed-team-header attention rollup.
+test('computeTeamAttention: a reply-awaiting (solid green) member raises hasReply (AC1)', () => {
+  const map = { a: 'idle', b: 'unread', c: 'offline' };
+  assert.deepEqual(computeTeamAttention(['a', 'b', 'c'], map), { hasReply: true, hasBusy: false });
+});
+
+test('computeTeamAttention: a busy member raises hasBusy (AC2)', () => {
+  const map = { a: 'idle', b: 'busy' };
+  assert.deepEqual(computeTeamAttention(['a', 'b'], map), { hasReply: false, hasBusy: true });
+});
+
+test('computeTeamAttention: both states co-occur → both flags set, neither hidden (AC3)', () => {
+  const map = { a: 'unread', b: 'busy', c: 'idle' };
+  assert.deepEqual(computeTeamAttention(['a', 'b', 'c'], map), { hasReply: true, hasBusy: true });
+});
+
+test('computeTeamAttention: idle/disabled/offline/auto-activity never roll up (AC4)', () => {
+  // A team whose only "new output" is auto-triggered (hollow green) stays quiet.
+  const map = { a: 'idle', b: 'disabled', c: 'offline', d: 'unread-auto' };
+  assert.deepEqual(computeTeamAttention(['a', 'b', 'c', 'd'], map), { hasReply: false, hasBusy: false });
+});
+
+test('computeTeamAttention: an empty team is quiet', () => {
+  assert.deepEqual(computeTeamAttention([], { a: 'busy' }), { hasReply: false, hasBusy: false });
+});
+
+test('computeTeamAttention: only the listed members count (a busy agent in another team is ignored)', () => {
+  const map = { mine: 'idle', theirs: 'busy' };
+  assert.deepEqual(computeTeamAttention(['mine'], map), { hasReply: false, hasBusy: false });
+});
+
+test('computeTeamAttention: a member with no entry in the status map is treated as quiet', () => {
+  assert.deepEqual(computeTeamAttention(['ghost'], {}), { hasReply: false, hasBusy: false });
+});
+
+test('computeTeamAttention: tolerates a non-array member list or missing map', () => {
+  assert.deepEqual(computeTeamAttention(null, { a: 'busy' }), { hasReply: false, hasBusy: false });
+  assert.deepEqual(computeTeamAttention(['a'], null), { hasReply: false, hasBusy: false });
 });

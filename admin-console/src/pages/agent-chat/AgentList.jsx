@@ -5,6 +5,7 @@ import { computeReorder, dropPosition } from './agent-list-dnd.js';
 import { groupEnvironmentName, rowEnvironmentName } from './agent-list-env.js';
 import { buildGroups, groupKey, orderModel, filterModel, stubSectionLabel, poolInstancesLabel } from './agent-list-model.js';
 import { teamMembershipIndicator, membershipsByTeam, fitAdminNames } from './team-membership-view.js';
+import { computeTeamAttention } from '../../context/agent-statuses.js';
 import { agentState, isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
 
 // Re-exported so `AgentChat` can populate the filter dropdown without importing
@@ -435,6 +436,25 @@ const GroupSection = React.memo(function GroupSection({
     () => teamMembershipIndicator({ memberships: teamMemberships, directory, viewerId }),
     [teamMemberships, directory, viewerId],
   );
+  // #2430 — roll the attention-worthy member states (a reply awaiting you / a
+  // busy agent) up onto the header so a collapsed team still shows *which* team
+  // needs the user. The rollup spans the team's active members and their pool
+  // instances — the same ids the poll tracks; stubs carry no poll status and
+  // never surface. Recomputed only when the status map or the membership shape
+  // changes (the ids array is stable across a no-op poll), so it does not defeat
+  // the header's memoisation. The header renders it only while collapsed (AC6).
+  const memberIds = useMemo(() => {
+    const ids = [];
+    for (const agent of group.children) {
+      ids.push(agent.id);
+      if (agent.instances) for (const inst of agent.instances) ids.push(inst.id);
+    }
+    return ids;
+  }, [group.children]);
+  const attention = useMemo(
+    () => computeTeamAttention(memberIds, statuses),
+    [memberIds, statuses],
+  );
   return (
     <div style={TEAM_BLOCK_STYLE}>
       <CollapsibleHeader
@@ -442,6 +462,7 @@ const GroupSection = React.memo(function GroupSection({
         icon={Icon}
         subtle={!group.header}
         count={count}
+        attention={attention}
         membershipIndicator={membershipIndicator}
         collapsed={collapsed}
         selected={selectedAgentId === group.id}
@@ -669,7 +690,7 @@ function PoolInstancesSection({ roleAgent, instances, groupEnv, collapsed, onTog
   );
 }
 
-function CollapsibleHeader({ label, icon: Icon, subtle, count, membershipIndicator, collapsed, selected, onToggle, onActivate, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
+function CollapsibleHeader({ label, icon: Icon, subtle, count, attention, membershipIndicator, collapsed, selected, onToggle, onActivate, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
   const [hovered, setHovered] = useState(false);
 
   const dnd = dragEnabled && drag ? makeRowDnd(drag, dragScope, dragKey) : null;
@@ -795,6 +816,14 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, membershipIndicat
         />
       )}
       {dnd && <DragGrip dnd={dnd} active={hovered} />}
+      {/*
+       * #2430 — the collapsed-only attention rollup, immediately left of the
+       * always-present count. It surfaces only the two states that demand the
+       * user (a reply awaiting you, a busy agent), so a collapsed team still
+       * reveals *which* team needs attention without expanding it. Hidden while
+       * expanded, where the per-agent member dots already carry this (AC6).
+       */}
+      {collapsed && <AttentionRollup attention={attention} />}
       <span style={{
         flexShrink: 0,
         fontSize: 'var(--eb-text-xs)',
@@ -806,6 +835,41 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, membershipIndicat
         {count}
       </span>
     </button>
+  );
+}
+
+/**
+ * #2430 — the aggregate "needs attention" marker(s) on a collapsed team header.
+ * Renders a solid-green dot when the team holds at least one reply awaiting the
+ * user, and/or an amber pulsing dot when at least one member is busy; both show
+ * together when both are present (AC3), and nothing at all when the team is quiet
+ * (AC4). The dots deliberately reuse the exact tokens and shape of the per-agent
+ * member dots (`--eb-status-success` solid, `--eb-status-warning` pulsing) so the
+ * collapsed marker and the expanded dots read as the same language (AC7) — no new
+ * colours are introduced here.
+ */
+function AttentionRollup({ attention }) {
+  const hasReply = !!attention && attention.hasReply;
+  const hasBusy = !!attention && attention.hasBusy;
+  if (!hasReply && !hasBusy) return null;
+  return (
+    <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', flexShrink: 0 }}>
+      {hasReply && (
+        <span
+          title="Reply awaiting you"
+          aria-label="A reply is awaiting you in this team"
+          style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--eb-status-success)', flexShrink: 0 }}
+        />
+      )}
+      {hasBusy && (
+        <span
+          className="eb-status-pulse"
+          title="An agent is working"
+          aria-label="An agent in this team is working"
+          style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--eb-status-warning)', flexShrink: 0 }}
+        />
+      )}
+    </span>
   );
 }
 

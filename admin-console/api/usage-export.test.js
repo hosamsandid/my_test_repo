@@ -5,9 +5,10 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const {
-  serialize, summaryRows, workItemRows, toCsv,
+  serialize, summaryRows, summaryPivotRows, workItemRows, toCsv,
   SUMMARY_COLUMNS, WORK_ITEM_COLUMNS,
 } = require('./usage-export');
+const { summarize } = require('./usage-summary');
 const { buildWorkItems } = require('./work-items');
 
 // Reuse the two-sided golden records so the export is asserted against the
@@ -145,6 +146,49 @@ test('a malformed attribution block cannot break the export', () => {
     assert.equal(row.attributedUserId, '');
     assert.equal(row.attributionKind, '');
   }
+});
+
+// ── #2440: aggregated (grouped / pivoted) summary export ─────────────────────
+
+test('serialize summary stays the raw per-invocation dump when no groupBy is given', () => {
+  // No regression: the finest-grain FinOps export is unchanged without a grouping.
+  const rawRows = summaryRows(canonical);
+  const out = serialize('summary', 'json', { records: canonical });
+  assert.deepEqual(JSON.parse(out.body), rawRows);
+});
+
+test('summaryPivotRows one-level export mirrors the summarize groups (Total + Invocations)', () => {
+  const { columns, rows } = summaryPivotRows(canonical, { groupBy: 'agent' });
+  const summary = summarize(canonical, { groupBy: 'agent' });
+  assert.deepEqual(columns.map((c) => c.key), ['group', 'input', 'output', 'cacheCreationInput', 'cacheReadInput', 'total', 'invocations']);
+  assert.deepEqual(columns[0].label, 'agent');
+  assert.deepEqual(rows.map((r) => r.group), summary.groups.map((g) => g.key));
+  assert.deepEqual(rows.map((r) => r.total), summary.groups.map((g) => g.tokens.total));
+  assert.deepEqual(rows.map((r) => r.invocations), summary.groups.map((g) => g.invocations));
+  // Grand total reconciles with the aggregator's stable total.
+  assert.equal(rows.reduce((s, r) => s + r.total, 0), summary.groups.reduce((s, g) => s + g.tokens.total, 0));
+});
+
+test('summaryPivotRows two-level export emits one leaf row per (group × subgroup) cell', () => {
+  const { columns, rows } = summaryPivotRows(canonical, { groupBy: 'agent', secondaryGroupBy: 'model' });
+  const summary = summarize(canonical, { groupBy: 'agent', secondaryGroupBy: 'model' });
+  assert.deepEqual(columns.slice(0, 2).map((c) => [c.key, c.label]), [['group', 'agent'], ['subgroup', 'model']]);
+  const expected = [];
+  for (const g of summary.groups) for (const s of g.subgroups) expected.push([g.key, s.key, s.tokens.total, s.invocations]);
+  assert.deepEqual(rows.map((r) => [r.group, r.subgroup, r.total, r.invocations]), expected);
+});
+
+test('serialize summary with a groupBy produces the aggregated pivot CSV, tokens only', () => {
+  const csv = serialize('summary', 'csv', { records: canonical, groupBy: 'agent', secondaryGroupBy: 'model' }).body;
+  const header = csv.split('\n')[0];
+  assert.equal(header, 'agent,model,input,output,cacheCreationInput,cacheReadInput,total,invocations');
+  assert.ok(!/cost|usd|dollar|price/i.test(csv), 'aggregated CSV must not mention money');
+});
+
+test('serialize summary ignores an unknown groupBy and falls back to the raw dump', () => {
+  const raw = serialize('summary', 'json', { records: canonical }).body;
+  const bogus = serialize('summary', 'json', { records: canonical, groupBy: 'nonsense' }).body;
+  assert.deepEqual(JSON.parse(bogus), JSON.parse(raw));
 });
 
 // ── work-item export ────────────────────────────────────────────────────────

@@ -782,9 +782,13 @@ app.get('/api/usage/summary', (req, res) => {
   if (!scope) return;
   const { since, until } = req.query;
   const groupBy = req.query.groupBy;
+  // #2440: an optional second grouping level for the cross-tab drill-down. The
+  // aggregator ignores it when absent, unknown, or equal to the primary, so a
+  // request without it is unchanged.
+  const secondaryGroupBy = req.query.secondaryGroupBy;
   let records = usageLog.readRecords({ since });
   records = narrowUsageRecords(records, scope, usageTeamParam(req));
-  res.json(summarize(records, { since, until, groupBy }));
+  res.json(summarize(records, { since, until, groupBy, secondaryGroupBy }));
 });
 
 // Flat export of the statistics view (#656 phase 3): one row per invocation ×
@@ -794,7 +798,15 @@ app.get('/api/usage/summary', (req, res) => {
 function sendExport(req, res, kind, records, prEvents) {
   const { since, until } = req.query;
   const format = req.query.format === 'json' ? 'json' : 'csv';
-  const out = usageExport.serialize(kind, format, { records, prEvents, since: since || null, until: until || null });
+  // #2440: when the summary export carries a `groupBy` it follows the on-screen
+  // grouping (an aggregated pivot, optionally two-dimensional) instead of the raw
+  // per-invocation×model dump; without it the raw dump is unchanged. Ignored by
+  // the work-items export.
+  const out = usageExport.serialize(kind, format, {
+    records, prEvents,
+    since: since || null, until: until || null,
+    groupBy: req.query.groupBy, secondaryGroupBy: req.query.secondaryGroupBy,
+  });
   const stamp = new Date().toISOString().slice(0, 10);
   res.setHeader('Content-Type', out.contentType);
   res.setHeader('Content-Disposition', `attachment; filename="token-usage-${kind}-${stamp}.${out.ext}"`);

@@ -41,6 +41,27 @@ function withTotal(tokens) {
   return { ...tokens, total };
 }
 
+// Sort key for a group / subgroup list: largest total first, ties broken by key
+// ascending so the order is stable and reproducible.
+function byTotalThenKey(a, b) {
+  return b.tokens.total - a.tokens.total || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+}
+
+// The single group key a record carries for a non-`model` dimension. `model` is
+// the one dimension that fans a record across several keys (its per-model split),
+// so it is handled separately by the callers below.
+function keyFor(rec, groupBy) {
+  if (groupBy === 'team') return rec.teamId || UNKNOWN;
+  // A record with no resolvable charge (no requester, no agent owner) lands in
+  // `unknown` exactly like a team-less one — the gap is reported, never folded
+  // into somebody else's total. Same for a legacy pre-#2137 record.
+  if (groupBy === 'user') return (rec.attribution && rec.attribution.userId) || UNKNOWN;
+  if (groupBy === 'provider') return rec.provider || UNKNOWN;
+  if (groupBy === 'providerTier') return rec.providerTier || UNKNOWN;
+  if (groupBy === 'day') return typeof rec.ts === 'string' ? rec.ts.slice(0, 10) : UNKNOWN;
+  return rec.agentId || UNKNOWN; // 'agent'
+}
+
 // Which group key(s) a record contributes to, paired with the tokens for each.
 // All groupings but `model` attribute the record's turn-wide tokens to one key;
 // `model` fans the record across its per-model split (a record with no
@@ -50,30 +71,54 @@ function contributions(rec, groupBy) {
     const mu = rec.modelUsage && typeof rec.modelUsage === 'object' ? rec.modelUsage : {};
     return Object.keys(mu).map((model) => ({ key: model, tokens: mu[model] }));
   }
-  let key;
-  if (groupBy === 'team') key = rec.teamId || UNKNOWN;
-  // A record with no resolvable charge (no requester, no agent owner) lands in
-  // `unknown` exactly like a team-less one — the gap is reported, never folded
-  // into somebody else's total. Same for a legacy pre-#2137 record.
-  else if (groupBy === 'user') key = (rec.attribution && rec.attribution.userId) || UNKNOWN;
-  else if (groupBy === 'provider') key = rec.provider || UNKNOWN;
-  else if (groupBy === 'providerTier') key = rec.providerTier || UNKNOWN;
-  else if (groupBy === 'day') key = typeof rec.ts === 'string' ? rec.ts.slice(0, 10) : UNKNOWN;
-  else key = rec.agentId || UNKNOWN; // 'agent'
-  return [{ key, tokens: rec.tokens }];
+  return [{ key: keyFor(rec, groupBy), tokens: rec.tokens }];
 }
 
-// summarize(records, { since, until, groupBy }) -> { since, until, groupBy, totals, groups }
+// Which (primary, secondary) cell(s) a record contributes to for a cross-tab
+// (#2440), paired with the tokens for each. Mirrors `contributions`: when
+// neither axis is `model` the record lands in ONE cell carrying its turn-wide
+// tokens; when either axis is `model` the record fans over its per-model split,
+// the model axis taking the model name and the other axis its single key (so a
+// record with no modelUsage contributes to no cell, exactly as the single-axis
+// `model` grouping drops it — the primary group still holds it via
+// `contributions`, so the primary column keeps reconciling with the one-level
+// view). `model` on both axes never reaches here — the caller rejects a
+// secondary equal to the primary.
+function pairContributions(rec, primary, secondary) {
+  const primaryIsModel = primary === 'model';
+  const secondaryIsModel = secondary === 'model';
+  if (primaryIsModel || secondaryIsModel) {
+    const mu = rec.modelUsage && typeof rec.modelUsage === 'object' ? rec.modelUsage : {};
+    return Object.keys(mu).map((model) => ({
+      pKey: primaryIsModel ? model : keyFor(rec, primary),
+      sKey: secondaryIsModel ? model : keyFor(rec, secondary),
+      tokens: mu[model],
+    }));
+  }
+  return [{ pKey: keyFor(rec, primary), sKey: keyFor(rec, secondary), tokens: rec.tokens }];
+}
+
+// summarize(records, { since, until, groupBy, secondaryGroupBy })
+//   -> { since, until, groupBy, totals, groups[, secondaryGroupBy] }
 // totals = sum of every in-range record's turn-wide tokens (+ invocations = record count),
 // so totals stay stable regardless of groupBy; `groups` are sorted by total desc, key asc.
+//
+// An optional `secondaryGroupBy` (#2440) adds a second grouping level: each group
+// gains a `subgroups` array (same shape, same sort) cross-tabulating the second
+// dimension inside the first. It is ignored — and the output is byte-identical to
+// the single-dimension result — when it is absent, unknown, or equal to the
+// primary (a self-cross adds no information; the UI never offers it).
 function summarize(records, query = {}) {
   const since = query.since || null;
   const until = query.until || null;
   const groupBy = GROUP_BY.has(query.groupBy) ? query.groupBy : 'agent';
+  const secondaryGroupBy = GROUP_BY.has(query.secondaryGroupBy) && query.secondaryGroupBy !== groupBy
+    ? query.secondaryGroupBy
+    : null;
 
   const totals = zeroTokens();
   let invocations = 0;
-  const groups = new Map(); // key -> { tokens, invocations }
+  const groups = new Map(); // key -> { tokens, invocations, sub? }
 
   for (const rec of Array.isArray(records) ? records : []) {
     if (!rec || !inRange(rec.ts, since, until)) continue;
@@ -83,19 +128,42 @@ function summarize(records, query = {}) {
       let g = groups.get(key);
       if (!g) {
         g = { tokens: zeroTokens(), invocations: 0 };
+        if (secondaryGroupBy) g.sub = new Map();
         groups.set(key, g);
       }
       addTokens(g.tokens, tokens);
       g.invocations += 1;
     }
+    if (!secondaryGroupBy) continue;
+    for (const { pKey, sKey, tokens } of pairContributions(rec, groupBy, secondaryGroupBy)) {
+      const g = groups.get(pKey);
+      if (!g) continue; // pKey is always one of the primary keys created above
+      let s = g.sub.get(sKey);
+      if (!s) {
+        s = { tokens: zeroTokens(), invocations: 0 };
+        g.sub.set(sKey, s);
+      }
+      addTokens(s.tokens, tokens);
+      s.invocations += 1;
+    }
   }
 
   const totalsOut = { ...withTotal(totals), invocations };
   const groupsOut = [...groups.entries()]
-    .map(([key, g]) => ({ key, tokens: withTotal(g.tokens), invocations: g.invocations }))
-    .sort((a, b) => b.tokens.total - a.tokens.total || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    .map(([key, g]) => {
+      const out = { key, tokens: withTotal(g.tokens), invocations: g.invocations };
+      if (secondaryGroupBy) {
+        out.subgroups = [...g.sub.entries()]
+          .map(([k, s]) => ({ key: k, tokens: withTotal(s.tokens), invocations: s.invocations }))
+          .sort(byTotalThenKey);
+      }
+      return out;
+    })
+    .sort(byTotalThenKey);
 
-  return { since, until, groupBy, totals: totalsOut, groups: groupsOut };
+  const result = { since, until, groupBy, totals: totalsOut, groups: groupsOut };
+  if (secondaryGroupBy) result.secondaryGroupBy = secondaryGroupBy;
+  return result;
 }
 
 module.exports = { summarize, GROUP_BY, TOKEN_CLASSES };

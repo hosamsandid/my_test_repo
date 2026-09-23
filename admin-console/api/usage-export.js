@@ -19,6 +19,7 @@
 //     dropping the unassigned tokens.
 
 const { buildWorkItems, TOKEN_CLASSES } = require('./work-items');
+const { summarize, GROUP_BY } = require('./usage-summary');
 
 const FORMATS = new Set(['csv', 'json']);
 
@@ -132,6 +133,46 @@ function summaryRows(records, { since = null, until = null } = {}) {
   return rows;
 }
 
+// ── Aggregated summary export: the on-screen grouped/pivoted view (#2440) ─────
+// When the caller names a `groupBy` (and optionally a `secondaryGroupBy`), the
+// summary export follows exactly what the Statistics table shows — one row per
+// group, or one row per (group × subgroup) cell for the cross-tab — instead of
+// the raw per-invocation×model dump above. Built on the shared `summarize`
+// aggregator so the numbers are byte-identical to the view (§2: totals reconcile).
+// The raw dump stays the behaviour when no `groupBy` is given (a direct export
+// URL), so nothing that relied on the finest grain regresses.
+//
+// The two key columns are labelled with the dimension names themselves
+// (`agent`, `model`, …) so a downstream pivot keys on them directly; the token
+// columns match the raw export so both shapes read the same downstream.
+function summaryPivotColumns(groupBy, secondaryGroupBy) {
+  const cols = [{ key: 'group', label: groupBy }];
+  if (secondaryGroupBy) cols.push({ key: 'subgroup', label: secondaryGroupBy });
+  for (const k of TOKEN_CLASSES) cols.push({ key: k, label: k });
+  cols.push({ key: 'total', label: 'total' });
+  cols.push({ key: 'invocations', label: 'invocations' });
+  return cols;
+}
+
+function summaryPivotRows(records, { since = null, until = null, groupBy, secondaryGroupBy } = {}) {
+  const summary = summarize(records, { since, until, groupBy, secondaryGroupBy });
+  const secondary = summary.secondaryGroupBy || null;
+  const rows = [];
+  for (const g of summary.groups) {
+    if (secondary) {
+      // A cross-tab leaf per (group × subgroup) cell — exactly the rows the
+      // expanded nested table shows. A `model` axis fans over its per-model
+      // split (as in the view), so those cells need not sum to the group total.
+      for (const s of g.subgroups || []) {
+        rows.push({ group: g.key, subgroup: s.key, ...tokenCols(s.tokens), invocations: s.invocations });
+      }
+    } else {
+      rows.push({ group: g.key, ...tokenCols(g.tokens), invocations: g.invocations });
+    }
+  }
+  return { columns: summaryPivotColumns(summary.groupBy, secondary), rows };
+}
+
 // ── Work-item export: one row per work-item × model + the remainder ──────────
 // Built on top of buildWorkItems so the attribution (§3) is identical to the
 // on-screen view. Each row carries the tier breakdown (created/event/branch/
@@ -213,13 +254,16 @@ function workItemRows(usageRecords, prEvents, { since = null, until = null } = {
 // ── Public serialize entry point ─────────────────────────────────────────────
 // kind: 'summary' | 'work-items'; format: 'csv' | 'json'. Returns the response
 // body plus the content type and a filename stem (no extension) for the route.
-function serialize(kind, format, { records, prEvents, since = null, until = null } = {}) {
+function serialize(kind, format, { records, prEvents, since = null, until = null, groupBy = null, secondaryGroupBy = null } = {}) {
   const fmt = FORMATS.has(format) ? format : 'csv';
   let columns;
   let rows;
   if (kind === 'work-items') {
     columns = WORK_ITEM_COLUMNS;
     rows = workItemRows(records, prEvents, { since, until });
+  } else if (typeof groupBy === 'string' && GROUP_BY.has(groupBy)) {
+    // #2440: follow the on-screen grouping (aggregated pivot, one/two levels).
+    ({ columns, rows } = summaryPivotRows(records, { since, until, groupBy, secondaryGroupBy }));
   } else {
     columns = SUMMARY_COLUMNS;
     rows = summaryRows(records, { since, until });
@@ -233,6 +277,8 @@ function serialize(kind, format, { records, prEvents, since = null, until = null
 module.exports = {
   serialize,
   summaryRows,
+  summaryPivotRows,
+  summaryPivotColumns,
   workItemRows,
   toCsv,
   SUMMARY_COLUMNS,

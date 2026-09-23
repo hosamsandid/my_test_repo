@@ -1167,6 +1167,15 @@ export default function ModelRegistry() {
       // the row and the dialog can never disagree (the old `credentialScopeLabel`
       // showed a stale "System" for a team-assigned provider).
       key: '_scope', label: 'Ownership', sortable: false,
+      // #2442: `_scope` is synthetic (no `row['_scope']`), so filter on the text
+      // this column actually displays — the ownership label plus, for Team scope,
+      // its detail (the assigned team name(s)), or "Global".
+      filterValue: (_, row) => {
+        if (row.readOnly) return '';
+        const s = providerScopeLabel(row, names);
+        if (s.scope === 'global') return 'Global';
+        return [s.label, providerScopeShowsDetail(s.scope) ? s.detail : ''].filter(Boolean).join(' ');
+      },
       render: (_, row) => {
         if (row.readOnly) return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
         const s = providerScopeLabel(row, names);

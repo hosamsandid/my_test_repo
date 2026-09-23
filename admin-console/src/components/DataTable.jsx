@@ -1,12 +1,12 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import { ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight } from 'lucide-react';
-import { resolveEmptyState, filterPlaceholder } from './data-table-view.js';
+import { resolveEmptyState, filterPlaceholder, rowMatchesFilter } from './data-table-view.js';
 
 /**
  * DataTable — Reusable table with sort, filter, pagination.
  *
  * Props:
- *   columns     — Array of { key, label, sortable?, align?, render?, wrap?, hidden? }
+ *   columns     — Array of { key, label, sortable?, align?, render?, wrap?, hidden?, filterValue? }
  *                 wrap:   opt-in — this column's cells wrap onto multiple
  *                         lines (and break long unbroken tokens) instead of
  *                         the default single-line + ellipsis. Off by default,
@@ -14,6 +14,14 @@ import { resolveEmptyState, filterPlaceholder } from './data-table-view.js';
  *                 hidden: keep the column out of the rendered table but still
  *                         include its values in the text filter — lets a value
  *                         stay searchable without occupying a column.
+ *                 filterValue: (rawValue, row) => string. Override the text the
+ *                         filter searches for this column. Needed only when
+ *                         `render` maps the raw value to a *different* displayed
+ *                         string (e.g. an account id shown as a name): without
+ *                         it the filter would search the hidden raw value and
+ *                         typing the visible text would match nothing (#2442).
+ *                         Defaults to the raw `row[col.key]`, so plain columns
+ *                         are unaffected.
  *   data        — Array of row objects
  *   pageSize    — Rows per page (default 10)
  *   onRowClick  — Optional (row) => void
@@ -41,13 +49,7 @@ export default function DataTable({
   /* ── Filter ──────────────────────────────────────────────────────── */
   const filtered = useMemo(() => {
     if (!filter.trim()) return data;
-    const q = filter.toLowerCase();
-    return data.filter(row =>
-      columns.some(col => {
-        const val = row[col.key];
-        return val != null && String(val).toLowerCase().includes(q);
-      })
-    );
+    return data.filter(row => rowMatchesFilter(row, columns, filter));
   }, [data, filter, columns]);
 
   /* ── Sort ─────────────────────────────────────────────────────────── */

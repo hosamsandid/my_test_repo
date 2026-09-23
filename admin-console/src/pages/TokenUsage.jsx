@@ -347,8 +347,25 @@ function StatisticsTab({ team }) {
     return v || '—';
   };
 
+  // #2442: the User / Provider-tier columns show a resolved display string, not
+  // the raw `key`, so the filter must search that displayed string — otherwise
+  // typing a visible name filters out every row. For `user` we keep the raw
+  // account id searchable too (so a legacy id like "tmaier" still matches),
+  // joined onto the resolved name. Every other grouping shows its raw key, so
+  // there is nothing to override.
+  const groupKeyFilterText = (v) => {
+    if (groupBy === 'user') {
+      const cell = userGroupCell(v, userNames);
+      return [cell.label, typeof v === 'string' ? v : ''].filter(Boolean).join(' ');
+    }
+    if (groupBy === 'providerTier') {
+      return providerTierCell(v).label;
+    }
+    return v == null ? '' : String(v);
+  };
+
   const COLS = [
-    { key: 'key', label: groupLabel, render: renderGroupKey },
+    { key: 'key', label: groupLabel, render: renderGroupKey, filterValue: groupKeyFilterText },
     ...TOKEN_CLASSES.map((c) => ({ key: c.key, label: c.label, align: 'right', render: (v) => formatInt(v) })),
     { key: 'total', label: 'Total', align: 'right', render: (v) => formatInt(v) },
     { key: 'invocations', label: 'Invocations', align: 'right', render: (v) => formatInt(v) },

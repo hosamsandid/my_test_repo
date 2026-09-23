@@ -43,6 +43,61 @@ export function noMatchText(query) {
   return `No matches for “${query}”.`;
 }
 
+/**
+ * The searchable text a single column contributes for one row.
+ *
+ * By default a column is filtered on its raw row value (`row[col.key]`), which
+ * is correct for every column that shows that value verbatim (or merely styles
+ * it). But a column whose `render` maps the raw value to a *different* displayed
+ * string — e.g. a raw account id shown as a person's name, or a raw event key
+ * shown as a friendly label — must be searched on what the user actually sees,
+ * or typing the visible text matches nothing (the false-negative in #2442).
+ *
+ * Such a column supplies an optional `filterValue(rawValue, row) => string`
+ * accessor returning the text to search. It may return the display string alone,
+ * or the display string *plus* the raw value (space-joined) when both should stay
+ * searchable — e.g. Token Usage keeps the raw account id matchable alongside the
+ * resolved name. When no `filterValue` is present the raw value is used, so every
+ * existing consumer is unaffected.
+ *
+ * @param {{ key?: string, filterValue?: (raw: any, row: object) => any }} col
+ * @param {object} row
+ * @returns {string} lowercased searchable text ('' when the column has none)
+ */
+export function columnFilterText(col, row) {
+  if (!col || row == null) return '';
+  let val;
+  if (typeof col.filterValue === 'function') {
+    val = col.filterValue(row[col.key], row);
+  } else {
+    val = row[col.key];
+  }
+  return val == null ? '' : String(val).toLowerCase();
+}
+
+/**
+ * Whether a row matches the free-text filter across any of its columns.
+ *
+ * An empty/whitespace-only query matches every row. Otherwise the row matches
+ * when any column's searchable text (see `columnFilterText`) contains the query
+ * — the query is compared verbatim (only lower-cased), matching the previous
+ * predicate so numeric-column and substring filtering behave exactly as before.
+ *
+ * @param {object} row
+ * @param {Array} columns
+ * @param {string} query raw filter text
+ * @returns {boolean}
+ */
+export function rowMatchesFilter(row, columns, query) {
+  const q = typeof query === 'string' ? query.toLowerCase() : '';
+  if (!q.trim()) return true;
+  const cols = Array.isArray(columns) ? columns : [];
+  return cols.some((col) => {
+    const text = columnFilterText(col, row);
+    return text !== '' && text.includes(q);
+  });
+}
+
 /** How many column names to spell out in the filter placeholder before eliding. */
 export const MAX_FILTER_HINT_COLUMNS = 3;
 

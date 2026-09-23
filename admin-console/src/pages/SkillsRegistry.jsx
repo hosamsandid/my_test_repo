@@ -1830,7 +1830,9 @@ function makeColumns(onDeleteRow, select, onOpenUsage, teamNames = {}) {
   }
   cols.push(
     { key: 'name', label: 'Skill Name' },
-    { key: 'source', label: 'Tier', render: v => <SourceBadge value={v} /> },
+    // #2442: SourceBadge relabels the raw source ("pool" → "global"), so the
+    // filter searches the displayed tier label rather than the raw key.
+    { key: 'source', label: 'Tier', render: v => <SourceBadge value={v} />, filterValue: v => BADGE_LABEL[v] || v },
     { key: '_scope', label: 'Scope', sortable: false, render: (_, row) => {
       // Team rows resolve their id to a readable name (merged legacy + Agent
       // Team lookup, #2393 AC3), falling back to the raw id when unknown; agent

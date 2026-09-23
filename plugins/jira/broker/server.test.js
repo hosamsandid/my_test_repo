@@ -152,7 +152,7 @@ test('scope-credentials: the orchestrator push populates the per-scope map; reso
     assert.equal(r.status, 200);
     assert.equal(r.body.scopes, 2);
     assert.equal(r.body.usable, 1); // only team-1 is complete
-    assert.deepEqual(broker.resolveCredential('team-1'), { siteUrl: 'acme', email: 'a@b.c', apiToken: 'tok' });
+    assert.deepEqual(broker.resolveCredential('team-1'), { siteUrl: 'acme', email: 'a@b.c', apiToken: 'tok', readableCustomFields: [] });
     assert.equal(broker.resolveCredential('team-2'), null); // incomplete → not usable
     assert.equal(broker.resolveCredential('team-9'), null); // unknown scope
 
@@ -177,7 +177,7 @@ test('scope-credentials: a granted TEAM token cannot rewrite the map (cross-tena
       });
       assert.equal(r.status, 401);
     }
-    assert.deepEqual(broker.resolveCredential('team-2'), { siteUrl: 'https://b.example', email: 'b@b.c', apiToken: 'tokB' });
+    assert.deepEqual(broker.resolveCredential('team-2'), { siteUrl: 'https://b.example', email: 'b@b.c', apiToken: 'tokB', readableCustomFields: [] });
     // leave the map as the later tests expect it (empty)
     await call(srv, 'PUT', '/internal/scope-credentials', { token: INTERNAL, body: { scopes: {} } });
   } finally { srv.close(); }
@@ -229,6 +229,41 @@ test('cli reads: /projects, /list, /show need the per-scope credential and call 
     const nocred = await call(srv, 'GET', '/cli/projects', { token: OTHER });
     assert.equal(nocred.status, 400);
     assert.equal(nocred.body.code, 'no-credential');
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli reads: custom fields via the admin allow-list and per-request --fields (#2416)', async () => {
+  // The admin configures a default readable custom field "Team"; a per-request
+  // --fields adds "Priority" on top.
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok', 'readable-custom-fields': 'Team' });
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1') || String(url).includes('localhost')) return origFetch(url, opts);
+    if (String(url).match(/\/rest\/api\/3\/field$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify([
+        { id: 'customfield_20001', name: 'Team' },
+        { id: 'customfield_20002', name: 'Priority' },
+      ]) };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, customfield_20001: { title: 'Payments' }, customfield_20002: null },
+    }) };
+  };
+  const srv = await listen();
+  try {
+    // No --fields: the admin default set (Team) is surfaced automatically.
+    const dflt = await call(srv, 'GET', '/cli/show?issue=KAN-6', { token: TOKEN });
+    assert.equal(dflt.status, 200);
+    assert.deepEqual(dflt.body.issue.customFields, { Team: { value: 'Payments' } });
+
+    // --fields adds Priority (empty → null) on top of the default Team.
+    const withFields = await call(srv, 'GET', '/cli/show?issue=KAN-6&fields=Priority', { token: TOKEN });
+    assert.equal(withFields.status, 200);
+    assert.deepEqual(withFields.body.issue.customFields, { Team: { value: 'Payments' }, Priority: null });
   } finally {
     global.fetch = origFetch;
     broker.scopeCredentials.delete('team-1');

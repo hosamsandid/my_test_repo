@@ -107,7 +107,12 @@ function resolveCredential(scopeId) {
   const email = (v.email || '').trim();
   const apiToken = (v['api-token'] || '').trim();
   if (!siteUrl || !email || !apiToken) return null;
-  return { siteUrl, email, apiToken };
+  // Optional admin allow-list of readable custom fields (#2416): a comma list of
+  // human field names ("Team, Sprint") a Team Admin sets alongside site/token.
+  // Surfaced by default on every read; a per-request `--fields` adds to it.
+  const readableCustomFields = String(v['readable-custom-fields'] || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  return { siteUrl, email, apiToken, readableCustomFields };
 }
 
 // ── delivery: POST /internal/plugin-event (Jira plan §4B) ───────────────────
@@ -311,12 +316,22 @@ async function handleCli(req, res, cliPath) {
     }
     try {
       let result;
+      // The admin allow-list of readable custom fields (#2416) is surfaced on
+      // every read by default; a per-request `--fields` custom name adds to it.
+      const defaultCustomFields = cred.readableCustomFields || [];
       if (op === 'projects') {
         result = { projects: await jira.listProjects(cred) };
       } else if (op === 'list') {
         const project = (params.get('project') || '').trim();
         if (!project) return sendJson(res, 400, { error: 'a --project key is required' });
-        result = { project, issues: await jira.listProjectIssues(cred, { projectKey: project, status: params.get('status') || undefined }) };
+        result = {
+          project,
+          issues: await jira.listProjectIssues(cred, {
+            projectKey: project,
+            status: params.get('status') || undefined,
+            customFields: defaultCustomFields,
+          }),
+        };
       } else if (op === 'search') {
         // Arbitrary JQL, scope-guarded by the credential itself (jira.searchIssues):
         // it resolves as the bound account, so it can only read the team's site +
@@ -324,13 +339,34 @@ async function handleCli(req, res, cliPath) {
         const jql = (params.get('jql') || '').trim();
         if (!jql) return sendJson(res, 400, { error: 'a --jql query is required' });
         const fieldsParam = (params.get('fields') || '').trim();
-        const fields = fieldsParam ? fieldsParam.split(',').map((f) => f.trim()).filter(Boolean) : undefined;
+        const requested = fieldsParam ? fieldsParam.split(',').map((f) => f.trim()).filter(Boolean) : [];
+        // `--fields` names standard columns (a projection) AND/OR custom fields:
+        // split them so the columns drive the projection and the custom names are
+        // read + added on top (union with the admin allow-list).
+        const { columns, customNames } = jira.partitionFields(requested);
         const limit = params.get('limit') || undefined;
-        result = { jql, issues: await jira.searchIssues(cred, { jql, fields, limit }) };
+        result = {
+          jql,
+          issues: await jira.searchIssues(cred, {
+            jql,
+            fields: columns.length ? columns : undefined,
+            customFields: jira.mergeCustomFieldNames(defaultCustomFields, customNames),
+            limit,
+          }),
+        };
       } else {
         const issue = (params.get('issue') || '').trim();
         if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
-        result = { issue: await jira.getIssue(cred, issue) };
+        // `show --fields "Team"`: all names are custom fields (a plain `show`
+        // already returns every standard field), unioned with the admin list.
+        const fieldsParam = (params.get('fields') || '').trim();
+        const requested = fieldsParam ? fieldsParam.split(',').map((f) => f.trim()).filter(Boolean) : [];
+        const { customNames } = jira.partitionFields(requested);
+        result = {
+          issue: await jira.getIssue(cred, issue, {
+            customFields: jira.mergeCustomFieldNames(defaultCustomFields, customNames),
+          }),
+        };
       }
       writeAudit(scopeId, scopeId, op, 'ok', params.get('project') || params.get('issue') || params.get('jql') || '');
       return sendJson(res, 200, result);

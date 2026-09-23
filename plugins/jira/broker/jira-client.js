@@ -231,35 +231,153 @@ function safeJson(s) {
   try { return JSON.parse(s); } catch { return {}; }
 }
 
-// ── parent / epic-link resolution (#2415) ────────────────────────────────────
+// ── field catalog: name → id resolution (#2415 epic link, #2416 custom fields) ─
+// Jira addresses custom fields by an opaque id (`customfield_NNNNN`) that varies
+// per site, so any capability that reads one by its human name ("Team", "Epic
+// Link", "Sprint") must first resolve name → id from `/rest/api/3/field`. That
+// list is fetched ONCE per site and cached: it feeds both the Epic Link lookup
+// (#2415) and the agent-requested custom-field reads (#2416) from a single GET.
+//
 // Two Jira project styles link a Story to its parent Epic differently:
 //   • team-managed (next-gen) — the native `parent` field, always present.
 //   • company-managed (classic) — a custom field named "Epic Link" (schema
-//     `com.pyxis.greenhopper.jira:gh-epic-link`) whose id (`customfield_NNNNN`)
-//     varies per site, and which stores the epic KEY as a plain string.
-// So an agent can traverse Story→Epic in either style, reads request BOTH: the
-// native `parent`, and — when the site has an Epic Link field — that custom
-// field too. The custom-field id is resolved once per site from
-// `/rest/api/3/field` and cached; a missing field or a failed lookup degrades
-// to `null` (native `parent` still works) and must never break a read.
+//     `com.pyxis.greenhopper.jira:gh-epic-link`) whose id varies per site, and
+//     which stores the epic KEY as a plain string.
+// So reads request BOTH the native `parent` and — when the site has one — the
+// Epic Link field. A failed catalog fetch degrades to native-`parent`-only and
+// must never break a read; the failure is NOT cached, so it self-heals on the
+// next read (unlike a real "no such field" answer, which is a cached empty map).
 const EPIC_LINK_SCHEMA = 'com.pyxis.greenhopper.jira:gh-epic-link';
-const epicLinkFieldCache = new Map(); // api base URL → field id | null
+const fieldCatalogCache = new Map(); // api base URL → { byName: Map(lowerName → id), epicLinkId: string|null }
 
-async function resolveEpicLinkFieldId(base, auth) {
-  if (epicLinkFieldCache.has(base)) return epicLinkFieldCache.get(base);
-  let fieldId = null;
+async function resolveFieldCatalog(base, auth) {
+  const cached = fieldCatalogCache.get(base);
+  if (cached) return cached;
+  let catalog = null;
   try {
     const fields = await requestJson({ base, path: '/rest/api/3/field', authHeader: auth });
     if (Array.isArray(fields)) {
-      const match = fields.find((f) => f && f.schema && f.schema.custom === EPIC_LINK_SCHEMA)
+      const byName = new Map();
+      for (const f of fields) {
+        if (f && f.id && f.name) byName.set(String(f.name).toLowerCase(), String(f.id));
+      }
+      const epic = fields.find((f) => f && f.schema && f.schema.custom === EPIC_LINK_SCHEMA)
         || fields.find((f) => f && f.name === 'Epic Link');
-      if (match && match.id) fieldId = String(match.id);
+      catalog = { byName, epicLinkId: epic && epic.id ? String(epic.id) : null };
     }
   } catch {
-    fieldId = null; // field list unreachable → surface native parent only
+    catalog = null; // field list unreachable → transient, not cached (self-heals)
   }
-  epicLinkFieldCache.set(base, fieldId);
-  return fieldId;
+  if (catalog) fieldCatalogCache.set(base, catalog);
+  return catalog || { byName: new Map(), epicLinkId: null };
+}
+
+async function resolveEpicLinkFieldId(base, auth) {
+  return (await resolveFieldCatalog(base, auth)).epicLinkId;
+}
+
+// The agent-facing standard columns a `--fields` selection may name (below);
+// declared here so `partitionFields` can be defined before them.
+// (AGENT_ISSUE_COLUMNS is the source of truth — see near shapeAgentIssue.)
+
+// Split a caller's `--fields` list into standard columns (the projection over a
+// shaped issue) and custom-field names (resolved to ids and surfaced under
+// `customFields`). A name matching a known column is a column; anything else is
+// a custom-field name. Pure — no HTTP, so a bad column still fails fast.
+function partitionFields(fields) {
+  const list = Array.isArray(fields) ? fields.map((f) => String(f || '').trim()).filter(Boolean) : [];
+  const columns = [];
+  const customNames = [];
+  for (const f of list) {
+    if (AGENT_ISSUE_COLUMNS.includes(f)) columns.push(f);
+    else customNames.push(f);
+  }
+  return { columns, customNames };
+}
+
+// Merge custom-field name lists (an admin-configured default set ∪ a per-request
+// selection), de-duplicated case-insensitively, first spelling wins. Pure.
+function mergeCustomFieldNames(...groups) {
+  const out = [];
+  const seen = new Set();
+  for (const g of groups) {
+    for (const raw of Array.isArray(g) ? g : []) {
+      const name = String(raw || '').trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(name);
+    }
+  }
+  return out;
+}
+
+// Render one raw custom-field value into something an agent can read. Jira
+// returns wildly different shapes per field type; this normalises the common
+// ones and leaves an unknown shape verbatim. Crucially, an unset field is
+// `null` (Jira returns null, or an empty array) so an EMPTY value is always
+// distinguishable from a set one (#2416 acceptance).
+function renderCustomFieldValue(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) return null; // e.g. an unset multi-select / labels field
+    return raw.map(renderCustomFieldValue);
+  }
+  if (typeof raw === 'object') {
+    // Option / select → {value}; user → {displayName}; version / component →
+    // {name}; team (Advanced Roadmaps) → {id, title}. Prefer the human label but
+    // keep the id when there is one, so a "Team" resolves to a name AND an id.
+    const label = raw.value != null ? raw.value
+      : raw.name != null ? raw.name
+        : raw.title != null ? raw.title
+          : raw.displayName != null ? raw.displayName : null;
+    const id = raw.id != null ? raw.id
+      : raw.accountId != null ? raw.accountId
+        : raw.key != null ? raw.key : null;
+    if (label != null || id != null) {
+      const out = {};
+      if (id != null) out.id = String(id);
+      if (label != null) out.value = String(label);
+      return out;
+    }
+    return raw; // unknown object shape — surface verbatim rather than drop it
+  }
+  return raw; // string / number / boolean
+}
+
+// Resolve the requested custom-field NAMES to ids via the (cached) catalog. An
+// unresolved name is a 400 with the offending name — a typo, or a field this
+// credential's account cannot see — never a silently-dropped field. Returns
+// `{ resolved: [{ name, id }], ids: [id…] }`; empty when nothing was requested,
+// in which case NO catalog fetch happens (the common, custom-field-less read).
+async function resolveCustomFieldSelection(base, auth, names) {
+  const list = mergeCustomFieldNames(names);
+  if (!list.length) return { resolved: [], ids: [] };
+  const catalog = await resolveFieldCatalog(base, auth);
+  const resolved = [];
+  const unknown = [];
+  for (const name of list) {
+    const id = catalog.byName.get(name.toLowerCase());
+    if (id) resolved.push({ name, id });
+    else unknown.push(name);
+  }
+  if (unknown.length) {
+    const e = new Error(
+      `unknown Jira field(s): ${unknown.join(', ')}. Use the field's human name as it appears in Jira (e.g. "Team").`,
+    );
+    e.status = 400;
+    throw e;
+  }
+  return { resolved, ids: resolved.map((r) => r.id) };
+}
+
+// Build the `{ name: renderedValue|null }` map for a raw issue's resolved custom
+// fields, keyed by the caller's original field-name spelling.
+function buildCustomFields(rawFields, resolved) {
+  const out = {};
+  for (const { name, id } of resolved) out[name] = renderCustomFieldValue(rawFields[id]);
+  return out;
 }
 
 // The parent/epic key for a shaped read: prefer the native `parent` key
@@ -271,10 +389,10 @@ function parentKeyOf(fields, epicLinkFieldId) {
   return null;
 }
 
-// Test seam: drop the per-site Epic Link id cache so each stubbed-fetch test
+// Test seam: drop the per-site field catalog cache so each stubbed-fetch test
 // starts from a clean lookup (the cache is otherwise process-lifetime).
 function __resetCaches() {
-  epicLinkFieldCache.clear();
+  fieldCatalogCache.clear();
 }
 
 // One credential = { siteUrl, email, apiToken }. Every method takes it plus an
@@ -325,15 +443,20 @@ async function fetchFullChangelog(cred, issueKey, { env } = {}) {
   return histories;
 }
 
-// Read one issue (CLI `show`). Narrow shape, with the browse URL.
-async function getIssue(cred, issueKey, { env } = {}) {
+// Read one issue (CLI `show`). Narrow shape, with the browse URL. `customFields`
+// (an array of human field names, e.g. ["Team"]) additionally reads those custom
+// fields (#2416) — resolved name → id and surfaced under `customFields`.
+async function getIssue(cred, issueKey, { env, customFields } = {}) {
   const base = apiBaseFor(cred.siteUrl, env);
   const auth = basicAuthHeader(cred.email, cred.apiToken);
   // Resolve the site's Epic Link custom-field id (#2415) so a classic project's
-  // story→epic link is requestable alongside the native `parent`.
+  // story→epic link is requestable alongside the native `parent`, plus any
+  // agent-requested custom fields (#2416). Both read one cached field catalog.
   const epicLinkFieldId = await resolveEpicLinkFieldId(base, auth);
+  const custom = await resolveCustomFieldSelection(base, auth, customFields);
   const fieldList = ['summary', 'status', 'description', 'assignee', 'issuetype', 'attachment', 'created', 'updated', 'parent'];
   if (epicLinkFieldId) fieldList.push(epicLinkFieldId);
+  for (const id of custom.ids) if (!fieldList.includes(id)) fieldList.push(id);
   const raw = await requestJson({
     base,
     path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=${fieldList.join(',')}`,
@@ -355,6 +478,10 @@ async function getIssue(cred, issueKey, { env } = {}) {
     parent: parentKeyOf(fields, epicLinkFieldId),
     url: `${resolveJiraApiBase(cred.siteUrl)}/browse/${encodeURIComponent(raw.key || issueKey)}`,
   };
+  // Requested custom fields (#2416). Only surfaced when some were requested, so
+  // a plain `show` is byte-identical to before. An unset field is `null` (not a
+  // dropped key), so an empty value is distinguishable from a set one.
+  if (custom.resolved.length) out.customFields = buildCustomFields(fields, custom.resolved);
   // Attachment metadata (#2399, AC1). Only surfaced when the issue actually has
   // attachments — an issue with none carries no `attachments` key at all, so the
   // shape is byte-identical to before for the common case (AC2/AC8, no noise).
@@ -652,7 +779,7 @@ function clampSearchLimit(limit) {
 // current status (CLI `list`). `status` is quoted + escaped so it can never
 // break out of the clause. Capped at one page (PAGE_SIZE) — an agent browsing a
 // project does not need 2000 rows.
-async function listProjectIssues(cred, { projectKey, status, env } = {}) {
+async function listProjectIssues(cred, { projectKey, status, customFields, env } = {}) {
   const base = apiBaseFor(cred.siteUrl, env);
   const auth = basicAuthHeader(cred.email, cred.apiToken);
   let jql = `project = ${jqlQuote(projectKey)}`;
@@ -661,8 +788,10 @@ async function listProjectIssues(cred, { projectKey, status, env } = {}) {
   }
   jql += ' ORDER BY updated DESC';
   const epicLinkFieldId = await resolveEpicLinkFieldId(base, auth); // #2415
+  const custom = await resolveCustomFieldSelection(base, auth, customFields); // #2416
   const listFields = ['summary', 'status', 'assignee', 'created', 'updated', 'issuetype', 'parent'];
   if (epicLinkFieldId) listFields.push(epicLinkFieldId);
+  for (const id of custom.ids) if (!listFields.includes(id)) listFields.push(id);
   const result = await requestJson({
     base,
     path: '/rest/api/3/search/jql',
@@ -674,7 +803,7 @@ async function listProjectIssues(cred, { projectKey, status, env } = {}) {
   const siteBase = resolveJiraApiBase(cred.siteUrl);
   return (Array.isArray(result.issues) ? result.issues : []).map((raw) => {
     const f = raw.fields || {};
-    return {
+    const row = {
       key: String(raw.key || ''),
       summary: f.summary == null ? '' : String(f.summary),
       status: f.status && f.status.name ? String(f.status.name) : null,
@@ -685,6 +814,8 @@ async function listProjectIssues(cred, { projectKey, status, env } = {}) {
       parent: parentKeyOf(f, epicLinkFieldId), // #2415 — Story→Epic traversal
       url: `${siteBase}/browse/${encodeURIComponent(raw.key || '')}`,
     };
+    if (custom.resolved.length) row.customFields = buildCustomFields(f, custom.resolved); // #2416
+    return row;
   });
 }
 
@@ -703,16 +834,17 @@ async function listProjectIssues(cred, { projectKey, status, env } = {}) {
 // capped at `limit` issues (default one page, hard-ceilinged at MAX_PAGES ×
 // PAGE_SIZE) so a broad query can never spiral. `fields` optionally narrows the
 // returned columns.
-async function searchIssues(cred, { jql, fields, limit, env } = {}) {
+async function searchIssues(cred, { jql, fields, customFields, limit, env } = {}) {
   const query = String(jql == null ? '' : jql).trim();
   if (!query) { const e = new Error('a JQL query is required'); e.status = 400; throw e; }
-  assertColumns(fields);
+  assertColumns(fields); // the standard-column projection — validated fast, no HTTP
   const cap = clampSearchLimit(limit);
   const base = apiBaseFor(cred.siteUrl, env);
   const auth = basicAuthHeader(cred.email, cred.apiToken);
   const siteBase = resolveJiraApiBase(cred.siteUrl);
   const epicLinkFieldId = await resolveEpicLinkFieldId(base, auth); // #2415
-  const reqFields = agentRequestFields(epicLinkFieldId);
+  const custom = await resolveCustomFieldSelection(base, auth, customFields); // #2416
+  const reqFields = [...agentRequestFields(epicLinkFieldId), ...custom.ids];
   const issues = [];
   let nextPageToken;
   for (let page = 0; page < MAX_PAGES && issues.length < cap; page += 1) {
@@ -731,7 +863,13 @@ async function searchIssues(cred, { jql, fields, limit, env } = {}) {
     });
     for (const raw of Array.isArray(result.issues) ? result.issues : []) {
       const shaped = shapeAgentIssue(raw, siteBase, epicLinkFieldId);
-      if (shaped.key) issues.push(pickAgentColumns(shaped, fields));
+      if (!shaped.key) continue;
+      const row = pickAgentColumns(shaped, fields);
+      // Custom fields are additive: they ride alongside the projected columns
+      // (never narrowed away by `--fields`), so `search --fields Team` returns
+      // the full row plus Team, and `--fields status,Team` returns key+status+Team.
+      if (custom.resolved.length) row.customFields = buildCustomFields(raw.fields || {}, custom.resolved);
+      issues.push(row);
       if (issues.length >= cap) break;
     }
     if (result.isLast !== false || !result.nextPageToken) break;
@@ -886,6 +1024,9 @@ module.exports = {
   shapeIssue,
   shapeAgentIssue,
   parentKeyOf,
+  partitionFields,
+  mergeCustomFieldNames,
+  renderCustomFieldValue,
   __resetCaches,
   shapeAttachment,
   isTextualAttachment,

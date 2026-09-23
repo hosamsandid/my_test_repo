@@ -540,6 +540,124 @@ test('getIssue: a failed Epic Link lookup degrades to native parent only (#2415)
   });
 });
 
+// ── custom-field reads (#2416) ───────────────────────────────────────────────
+
+// A `/rest/api/3/field` response carrying a "Team" custom field (id varies per
+// site), optionally the Epic Link field too.
+function customFieldList({ withEpicLink = false } = {}) {
+  const fields = [{ id: 'customfield_20001', name: 'Team' }];
+  if (withEpicLink) fields.push({ id: 'customfield_10014', name: 'Epic Link', schema: { custom: 'com.pyxis.greenhopper.jira:gh-epic-link' } });
+  return { ok: true, status: 200, text: async () => JSON.stringify(fields) };
+}
+
+test('renderCustomFieldValue: normalises the common shapes; empty is null', () => {
+  assert.equal(jc.renderCustomFieldValue(null), null);
+  assert.equal(jc.renderCustomFieldValue(undefined), null);
+  assert.equal(jc.renderCustomFieldValue([]), null); // an unset multi-value field
+  assert.equal(jc.renderCustomFieldValue('text'), 'text');
+  assert.equal(jc.renderCustomFieldValue(7), 7);
+  assert.deepEqual(jc.renderCustomFieldValue({ id: '42', title: 'Payments' }), { id: '42', value: 'Payments' });
+  assert.deepEqual(jc.renderCustomFieldValue({ value: 'High' }), { value: 'High' });
+  assert.deepEqual(jc.renderCustomFieldValue([{ value: 'a' }, { value: 'b' }]), [{ value: 'a' }, { value: 'b' }]);
+});
+
+test('partitionFields: standard columns vs custom-field names', () => {
+  assert.deepEqual(jc.partitionFields(['status', 'Team', 'summary']), { columns: ['status', 'summary'], customNames: ['Team'] });
+  assert.deepEqual(jc.partitionFields(undefined), { columns: [], customNames: [] });
+  assert.deepEqual(jc.partitionFields(['Team']), { columns: [], customNames: ['Team'] });
+});
+
+test('mergeCustomFieldNames: unions and de-dups case-insensitively, first spelling wins', () => {
+  assert.deepEqual(jc.mergeCustomFieldNames(['Team', 'Sprint'], ['team', 'Epic']), ['Team', 'Sprint', 'Epic']);
+  assert.deepEqual(jc.mergeCustomFieldNames([], ['Team']), ['Team']);
+  assert.deepEqual(jc.mergeCustomFieldNames(undefined, undefined), []);
+});
+
+test('getIssue: --fields reads a custom field, resolving its name → id and rendering the value (#2416)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return customFieldList();
+    assert.match(url, /customfield_20001/); // the resolved id is requested
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: 'ENG-11', fields: { summary: 'S', status: { name: 'To Do' }, customfield_20001: { id: '42', title: 'Payments' } },
+    }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-11', { env: CRED.env, customFields: ['Team'] });
+    assert.deepEqual(issue.customFields, { Team: { id: '42', value: 'Payments' } });
+  });
+});
+
+test('getIssue: an empty custom field is null, distinguishable from a set one (#2416)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return customFieldList();
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'ENG-12', fields: { summary: 'S', customfield_20001: null } }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-12', { env: CRED.env, customFields: ['Team'] });
+    assert.deepEqual(issue.customFields, { Team: null }); // present-but-null, not a dropped key
+  });
+});
+
+test('getIssue: with no --fields the shape carries no customFields key (byte-identical to before)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return customFieldList();
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'ENG-12b', fields: { summary: 'S' } }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-12b', { env: CRED.env });
+    assert.equal('customFields' in issue, false);
+  });
+});
+
+test('getIssue: an unknown --fields name is a 400 naming the offending field (#2416)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return { ok: true, status: 200, text: async () => '[]' };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'ENG-13', fields: {} }) };
+  }, async () => {
+    await assert.rejects(
+      () => jc.getIssue(CRED, 'ENG-13', { env: CRED.env, customFields: ['Nope'] }),
+      (e) => e.status === 400 && /Nope/.test(e.message),
+    );
+  });
+});
+
+test('getIssue: one field-catalog fetch feeds both the Epic Link and custom-field lookups (#2416)', async () => {
+  let fieldGets = 0;
+  await withFetch((url) => {
+    if (isFieldList(url)) { fieldGets += 1; return customFieldList({ withEpicLink: true }); }
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: 'ENG-14', fields: { customfield_10014: 'EPIC-1', customfield_20001: { title: 'Payments' } },
+    }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-14', { env: CRED.env, customFields: ['Team'] });
+    assert.equal(issue.parent, 'EPIC-1'); // classic Epic Link still resolves
+    assert.deepEqual(issue.customFields, { Team: { value: 'Payments' } });
+    assert.equal(fieldGets, 1); // a single catalog GET, not one per concern
+  });
+});
+
+test('searchIssues: customFields ride alongside the projected columns (#2416)', async () => {
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return customFieldList();
+    assert.ok(JSON.parse(opts.body).fields.includes('customfield_20001'));
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true, issues: [{ key: 'ENG-1', fields: { summary: 'One', status: { name: 'Open' }, customfield_20001: { title: 'Payments' } } }],
+    }) };
+  }, async () => {
+    const issues = await jc.searchIssues(CRED, { jql: 'project = ENG', fields: ['status'], customFields: ['Team'], env: CRED.env });
+    assert.deepEqual(issues, [{ key: 'ENG-1', status: 'Open', customFields: { Team: { value: 'Payments' } } }]);
+  });
+});
+
+test('listProjectIssues: an admin-configured custom field is surfaced on each row (#2416)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return customFieldList();
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      issues: [{ key: 'ENG-1', fields: { summary: 'One', customfield_20001: { title: 'Payments' } } }],
+    }) };
+  }, async () => {
+    const issues = await jc.listProjectIssues(CRED, { projectKey: 'ENG', customFields: ['Team'], env: CRED.env });
+    assert.deepEqual(issues[0].customFields, { Team: { value: 'Payments' } });
+  });
+});
+
 // ── attachments (#2399) ──────────────────────────────────────────────────────
 
 test('shapeAttachment: narrows to id/filename/mimeType/size/author/created/contentUrl; drops idless', () => {

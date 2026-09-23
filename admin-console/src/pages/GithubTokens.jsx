@@ -336,6 +336,14 @@ export default function GithubTokens() {
       // so the row and the dialog can never disagree. Off the flag it stays the
       // legacy `credentialScopeLabel` "Scope / Teams" column (byte-identical).
       key: '_scope', label: resourceAccessV2 ? 'Ownership' : 'Scope / Teams', sortable: false,
+      // #2442: `_scope` is synthetic (no `row['_scope']`), so filter on the text
+      // this column actually displays — the ownership/scope label plus its detail
+      // (which carries the team names), or "Global".
+      filterValue: (_, row) => {
+        const s = resourceAccessV2 ? credentialOwnershipLabel(row, names) : credentialScopeLabel(row, names);
+        if (resourceAccessV2 && s.scope === 'global') return 'Global';
+        return [s.label, s.detail].filter(Boolean).join(' ');
+      },
       render: (_, row) => {
         const s = resourceAccessV2 ? credentialOwnershipLabel(row, names) : credentialScopeLabel(row, names);
         if (resourceAccessV2 && s.scope === 'global') {

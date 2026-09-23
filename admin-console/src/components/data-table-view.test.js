@@ -150,6 +150,30 @@ test('AC1: the raw account id stays searchable too', () => {
   assert.deepEqual(rows.filter((r) => rowMatchesFilter(r, cols, 'tmaier')).map((r) => r.key), ['u_tmaier']);
 });
 
+// AC5 sweep: a synthetic column (`key: '_scope'` with no `row['_scope']`) whose
+// render maps the row to an ownership label + a team-name detail. This models the
+// GithubTokens / SshKeys / ModelRegistry `_scope` columns the #2442 sweep fixed:
+// the raw value is undefined, so filtering must lean entirely on `filterValue(row)`.
+const scopeCol = {
+  key: '_scope',
+  filterValue: (_, row) => (row.scope === 'team'
+    ? `Team ${(row.teams || []).join(', ')}`
+    : row.scope === 'global' ? 'Global' : 'Personal'),
+};
+const scopeRows = [
+  { id: 'a', scope: 'team', teams: ['Payments Squad'] },
+  { id: 'b', scope: 'personal' },
+  { id: 'c', scope: 'global' },
+];
+
+test('AC5: a synthetic _scope column filters on the displayed team name, not the (undefined) raw key', () => {
+  const cols2 = [scopeCol, { key: 'id' }];
+  // raw row['_scope'] is undefined — without filterValue this would match nothing
+  assert.deepEqual(scopeRows.filter((r) => rowMatchesFilter(r, cols2, 'Payments')).map((r) => r.id), ['a']);
+  assert.deepEqual(scopeRows.filter((r) => rowMatchesFilter(r, cols2, 'Global')).map((r) => r.id), ['c']);
+  assert.deepEqual(scopeRows.filter((r) => rowMatchesFilter(r, cols2, 'Personal')).map((r) => r.id), ['b']);
+});
+
 test('AC2: a name that matches nobody yields zero rows', () => {
   assert.deepEqual(rows.filter((r) => rowMatchesFilter(r, cols, 'Nonexistent')), []);
 });

@@ -442,7 +442,11 @@ export default function McpServers() {
       )
       : <span style={{ color: 'var(--eb-text-muted)' }}>—</span> },
     { key: 'transport', label: 'Transport' },
-    { key: 'command', label: 'Command/URL', render: (_, r) => (
+    { key: 'command', label: 'Command/URL',
+      // #2442: for http/sse transports the column renders `r.url` while the raw
+      // `command` field is empty — filter on the displayed text so the URL is searchable.
+      filterValue: (_, r) => ((r.transport === 'http' || r.transport === 'sse') ? (r.url || '') : [r.command, ...(r.args || [])].join(' ')),
+      render: (_, r) => (
       <span style={monoStyle}>
         {(r.transport === 'http' || r.transport === 'sse') ? r.url : [r.command, ...(r.args || [])].join(' ')}
       </span>

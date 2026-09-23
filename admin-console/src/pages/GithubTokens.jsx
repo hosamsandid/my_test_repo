@@ -17,7 +17,7 @@ import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import ReassignPanel from '../components/CredentialReassignPanel';
 import { useAuth } from '../auth/AuthContext';
 import {
-  teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
+  teamsById, credentialScopeLabel, credentialOwnershipLabel, defaultOwnership, ownershipPayload,
   canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
   isPersonalCredential,
 } from './credential-scope-view';
@@ -331,9 +331,24 @@ export default function GithubTokens() {
     { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
     { key: 'name', label: 'Name' },
     {
-      key: '_scope', label: 'Scope / Teams', sortable: false,
+      // #2360: under v2 the column mirrors the create/edit dialog taxonomy
+      // (identity + Personal/Team/System/Global) via `credentialOwnershipLabel`,
+      // so the row and the dialog can never disagree. Off the flag it stays the
+      // legacy `credentialScopeLabel` "Scope / Teams" column (byte-identical).
+      key: '_scope', label: resourceAccessV2 ? 'Ownership' : 'Scope / Teams', sortable: false,
       render: (_, row) => {
-        const s = credentialScopeLabel(row, names);
+        const s = resourceAccessV2 ? credentialOwnershipLabel(row, names) : credentialScopeLabel(row, names);
+        if (resourceAccessV2 && s.scope === 'global') {
+          return (
+            <span style={{ fontSize: 'var(--eb-text-xs)' }} title="Available to every user and team — no team required">
+              <span style={{
+                display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
+                background: 'var(--eb-accent-subtle, var(--eb-bg-elevated))', color: 'var(--eb-accent, var(--eb-text-secondary))',
+                fontWeight: 'var(--eb-font-medium)',
+              }}>Global</span>
+            </span>
+          );
+        }
         return (
           <span style={{ fontSize: 'var(--eb-text-xs)' }}>
             <span style={{
@@ -341,7 +356,7 @@ export default function GithubTokens() {
               background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
               fontWeight: 'var(--eb-font-medium)', marginRight: 'var(--eb-space-2)',
             }}>{s.label}</span>
-            <span style={{ color: 'var(--eb-text-muted)' }}>{s.detail}</span>
+            {s.detail && <span style={{ color: 'var(--eb-text-muted)' }}>{s.detail}</span>}
           </span>
         );
       },
@@ -534,6 +549,7 @@ export default function GithubTokens() {
             isSysAdmin={isSysAdmin}
             adminTeamIds={adminTeamIds}
             canReassign={canReassignCredentialClient(caller) && !isPersonalCredential(editTarget)}
+            v2={resourceAccessV2}
             onSave={handleEditSave}
             onCancel={() => { setEditTarget(null); setFormError(null); }}
             saving={saving}

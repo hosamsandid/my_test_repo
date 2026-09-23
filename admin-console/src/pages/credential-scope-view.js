@@ -71,6 +71,30 @@ export function credentialScopeLabel(cred, names = {}) {
   return { scope: 'team', label: 'Team', teams: [name], detail: name };
 }
 
+// The consolidated "Ownership" table descriptor (#2360, under AEE_RESOURCE_ACCESS_V2)
+// — the credential twin of provider-ownership-view's `providerScopeLabel`. It renders
+// the SAME taxonomy the create/edit dialog shows so the row and the dialog can never
+// disagree. Unlike the legacy `credentialScopeLabel` column it folds in the identity
+// axis (a personal credential is `human` → "Personal"; an explicit private service
+// credential → "Personal" + a "Service credential" note) and it honours a global
+// service credential. `detail` is '' when it would merely repeat the pill
+// (personal-human, global), mirroring `providerScopeShowsDetail` (#2405). Pure —
+// unit-tested in credential-scope-view.test.js.
+export function credentialOwnershipLabel(cred, names = {}) {
+  const c = normalizeCredential(cred);
+  if (isGlobalRecord(cred)) return { scope: 'global', label: 'Global', detail: '' };
+  if (c.scope === 'personal') {
+    const isService = !!(cred && cred.identity === IDENTITY_SERVICE);
+    return { scope: 'personal', label: 'Personal', detail: isService ? 'Service credential' : '' };
+  }
+  if (c.scope === 'system') {
+    const teamNames = c.assignedTeamIds.map(id => names[id] || id);
+    return { scope: 'system', label: 'System', detail: teamNames.length ? teamNames.join(', ') : 'Unassigned' };
+  }
+  const name = names[c.teamId] || c.teamId;
+  return { scope: 'team', label: 'Team', detail: name };
+}
+
 // Which scopes may the caller create? System Admins may create both; a Team
 // Admin may only create team-scoped credentials.
 export function creatableScopes({ isSysAdmin }) {

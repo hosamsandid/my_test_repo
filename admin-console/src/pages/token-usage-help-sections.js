@@ -27,6 +27,8 @@ export const TOKEN_USAGE_HELP_SECTIONS = {
   workItems: 'the-work-items-tab',
   // 4 — strongest-signal-wins, the shared / flow-mismatch flags, day filing
   attribution: 'how-runs-are-attributed',
+  // 5 — which model each agent runs, derived from observed usage (#2439)
+  agentModels: 'agent-model',
 };
 
 export default TOKEN_USAGE_HELP_SECTIONS;

@@ -184,3 +184,27 @@ the agent stamped — not the time the record arrived. A run that was spooled
 while the control plane was down and pushed later still lands in its own day, so
 the *Tokens per day* chart and the range filter stay honest about when the work
 was really done rather than showing a spike on the day the backlog drained.
+
+## Agent → model
+
+This tab answers a question the other two cannot: **which model does each agent
+actually run?** The Statistics tab shows models and it shows agents, but never
+the mapping between them, and the agent/team configuration does not show a model
+at all — there is no per-agent model pin today, the model is chosen per
+agent/role at runtime.
+
+So the value here is the **Ist** (what was observed), not a **Soll** (a
+configured setting). It is derived from the same usage records the other tabs
+read: every invocation carries the model(s) it used, so for each agent this tab
+lists **every model it ran** in the selected time range and marks the
+most-recently-used one(s) as **current**. An agent that used more than one model
+shows all of them, not just one — a spread that is otherwise invisible.
+
+Use the **Model** filter to answer the reverse question — *which agents are on
+model X* — for example to find everyone still running an expensive model. The
+range and team filters narrow the picture the same way they do on the other
+tabs.
+
+When per-agent model pinning lands (#1485) this tab can show the configured
+model beside the observed one, so a misconfiguration (Soll ≠ Ist) becomes
+visible at a glance. Until then, observed usage is the only reliable source.

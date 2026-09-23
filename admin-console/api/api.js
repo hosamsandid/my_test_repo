@@ -25,6 +25,7 @@ const githubEventLog = require('./github-event-log');
 const clientErrorLog = require('./client-error-log');
 const usageLog = require('./usage-log');
 const { summarize } = require('./usage-summary');
+const { buildAgentModels } = require('./agent-models');
 const prEventsLog = require('./pr-events-log');
 const { buildWorkItems, workItemDetail } = require('./work-items');
 const usageExport = require('./usage-export');
@@ -806,6 +807,20 @@ app.get('/api/usage/summary/export', (req, res) => {
   let records = usageLog.readRecords({ since: req.query.since });
   records = narrowUsageRecords(records, scope, usageTeamParam(req));
   sendExport(req, res, 'summary', records, null);
+});
+
+// Agent → model inventory (#2439). Answers "which model does this agent run?" —
+// a question the token views can't (they show models and agents, never the
+// mapping) and config.json can't (no per-agent model pin until #1485). Derived
+// purely from OBSERVED usage: the `modelUsage` keys the store already carries per
+// invocation. Team-scoped exactly like the summary above. Tokens are not read.
+app.get('/api/usage/agent-models', (req, res) => {
+  const scope = requireUsageAdmin(req, res);
+  if (!scope) return;
+  const { since, until } = req.query;
+  let records = usageLog.readRecords({ since });
+  records = narrowUsageRecords(records, scope, usageTeamParam(req));
+  res.json(buildAgentModels(records, { since, until }));
 });
 
 // Work-item attribution (#655, §5 view 2 of docs/cost-per-pr-concept.md).

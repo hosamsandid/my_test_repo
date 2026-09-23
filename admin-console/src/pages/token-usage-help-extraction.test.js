@@ -58,9 +58,10 @@ test('the chapter slugs are derived from the headings, not hand-written', () => 
   assert.equal(sectionSlug('How runs are attributed'), TOKEN_USAGE_HELP_SECTIONS.attribution);
 });
 
-test('the four areas the ticket names are top-level chapters, not sub-headings', () => {
+test('the areas the ticket names are top-level chapters, not sub-headings', () => {
   const h2 = topicSections(topicBody).filter(s => s.level === 2).map(s => s.slug);
-  for (const key of ['page', 'statistics', 'workItems', 'attribution']) {
+  // #2439 added a fifth chapter for the Agent → model tab.
+  for (const key of ['page', 'statistics', 'workItems', 'attribution', 'agentModels']) {
     assert.ok(
       h2.includes(TOKEN_USAGE_HELP_SECTIONS[key]),
       `"${TOKEN_USAGE_HELP_SECTIONS[key]}" must stay a "## " chapter — the panel scrolls to `
@@ -68,10 +69,10 @@ test('the four areas the ticket names are top-level chapters, not sub-headings',
     );
   }
   // Tokens-not-costs, the four token classes, the unattributed remainder and the
-  // day-filing rule are deliberately `###` *inside* those four — this is what
-  // catches a fifth top-level chapter creeping in and splitting a deep-link
+  // day-filing rule are deliberately `###` *inside* those chapters — this is what
+  // catches an unintended top-level chapter creeping in and splitting a deep-link
   // target in two.
-  assert.equal(h2.length, 4, `expected exactly the four chapters, got ${h2.join(' · ')}`);
+  assert.equal(h2.length, 5, `expected exactly the five chapters, got ${h2.join(' · ')}`);
 });
 
 test('each Token Usage surface mounts a "?" pointed at its own chapter', () => {

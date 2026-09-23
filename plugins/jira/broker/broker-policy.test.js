@@ -5,10 +5,10 @@ const assert = require('node:assert/strict');
 
 const { POLICY, REQUIRES_APPROVAL, authorizeWrite } = require('./broker-policy');
 
-test('POLICY mirrors the manifest: comment + transition + update + attach, team scope', () => {
+test('POLICY mirrors the manifest: comment + transition + update + attach + set-field, team scope', () => {
   const manifest = require('../plugin.json');
   assert.deepEqual(POLICY, manifest.policy);
-  assert.deepEqual(Object.keys(POLICY).sort(), ['attach', 'comment', 'transition', 'update']);
+  assert.deepEqual(Object.keys(POLICY).sort(), ['attach', 'comment', 'set-field', 'transition', 'update']);
 });
 
 test('requiresApproval is wired but empty (D3 — no confirmation pen in v1)', () => {
@@ -20,6 +20,7 @@ test('authorizeWrite: a team-scoped caller may run all three writes (D3 — rout
   assert.deepEqual(authorizeWrite('transition'), { allow: true });
   assert.deepEqual(authorizeWrite('update'), { allow: true });
   assert.deepEqual(authorizeWrite('attach'), { allow: true });
+  assert.deepEqual(authorizeWrite('set-field'), { allow: true });
 });
 
 test('authorizeWrite: an unlisted subcommand is unrestricted (every rule is opt-in)', () => {

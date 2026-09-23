@@ -152,7 +152,7 @@ test('scope-credentials: the orchestrator push populates the per-scope map; reso
     assert.equal(r.status, 200);
     assert.equal(r.body.scopes, 2);
     assert.equal(r.body.usable, 1); // only team-1 is complete
-    assert.deepEqual(broker.resolveCredential('team-1'), { siteUrl: 'acme', email: 'a@b.c', apiToken: 'tok', readableCustomFields: [] });
+    assert.deepEqual(broker.resolveCredential('team-1'), { siteUrl: 'acme', email: 'a@b.c', apiToken: 'tok', readableCustomFields: [], writableCustomFields: [] });
     assert.equal(broker.resolveCredential('team-2'), null); // incomplete → not usable
     assert.equal(broker.resolveCredential('team-9'), null); // unknown scope
 
@@ -177,7 +177,7 @@ test('scope-credentials: a granted TEAM token cannot rewrite the map (cross-tena
       });
       assert.equal(r.status, 401);
     }
-    assert.deepEqual(broker.resolveCredential('team-2'), { siteUrl: 'https://b.example', email: 'b@b.c', apiToken: 'tokB', readableCustomFields: [] });
+    assert.deepEqual(broker.resolveCredential('team-2'), { siteUrl: 'https://b.example', email: 'b@b.c', apiToken: 'tokB', readableCustomFields: [], writableCustomFields: [] });
     // leave the map as the later tests expect it (empty)
     await call(srv, 'PUT', '/internal/scope-credentials', { token: INTERNAL, body: { scopes: {} } });
   } finally { srv.close(); }
@@ -419,6 +419,56 @@ test('cli writes: /update replaces the description through the client, role- and
     const nocred = await call(srv, 'POST', '/cli/update', { token: OTHER, body: { issue: 'X-1', description: 'y' } });
     assert.equal(nocred.status, 400);
     assert.equal(nocred.body.code, 'no-credential');
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli writes: /set-field sets an allow-listed custom field, refuses one that is not (#2417)', async () => {
+  // The admin sanctions "Team" as writable; "Priority" is not on the list. A
+  // distinct site keeps the process-lifetime field catalog off the schema-less
+  // fixture other tests cached for `acme` (real Jira always returns the schema).
+  broker.scopeCredentials.set('team-1', { 'site-url': 'setfieldco', email: 'a@b.c', 'api-token': 'tok', 'writable-custom-fields': 'Team' });
+  const origFetch = global.fetch;
+  const seen = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    seen.push({ url: String(url), method: opts && opts.method, body: opts && opts.body });
+    if (String(url).match(/\/rest\/api\/3\/field$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify([
+        { id: 'customfield_20001', name: 'Team', schema: { type: 'team' } },
+      ]) };
+    }
+    if (opts && opts.method === 'PUT') return { ok: true, status: 204, text: async () => '' };
+    // idempotency pre-read: the field is currently unset
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'KAN-6', fields: { customfield_20001: null } }) };
+  };
+  const srv = await listen();
+  try {
+    const ok = await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Team', value: '42' } });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(ok.body, { issueKey: 'KAN-6', field: 'Team', changed: true, value: '42' });
+    const put = seen.find((s) => s.method === 'PUT');
+    assert.deepEqual(JSON.parse(put.body), { fields: { customfield_20001: { id: '42' } } });
+
+    // a field NOT on the allow-list → 403, no Jira write (acceptance)
+    const refused = await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Priority', value: 'High' } });
+    assert.equal(refused.status, 403);
+    assert.match(refused.body.error, /not writable/);
+
+    // missing field / value → 400 before any Jira call
+    assert.equal((await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', value: 'x' } })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Team' } })).status, 400);
+
+    // a scope with no credential → 400 no-credential
+    const nocred = await call(srv, 'POST', '/cli/set-field', { token: OTHER, body: { issue: 'X-1', field: 'Team', value: '1' } });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-credential');
+
+    // a GET on the write path → 404 (set-field is POST only)
+    assert.equal((await call(srv, 'GET', '/cli/set-field', { token: TOKEN })).status, 404);
   } finally {
     global.fetch = origFetch;
     broker.scopeCredentials.delete('team-1');

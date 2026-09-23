@@ -78,6 +78,7 @@ granted team.
 | `email` | the Atlassian account e-mail — the Basic-Auth username for the token |
 | `api-token` | a Jira API token — **use a classic (unscoped) token**: id.atlassian.com/manage-profile/security/api-tokens → *Create API token*, **not** *Create API token with scopes*. A scoped token missing `read:jira-work` sees zero projects. |
 | `readable-custom-fields` *(optional)* | comma-separated custom field names agents may read (e.g. `Team, Sprint`), surfaced by default on `show`/`search`/`list`. Leave blank to require an explicit `--fields` per read. Names are resolved to their per-site ids from `/rest/api/3/field`; anything not on this list (or a per-request `--fields`) is never returned. |
+| `writable-custom-fields` *(optional)* | comma-separated custom field names agents may **set** via `aee-jira set-field` (e.g. `Team`). **Leave blank to forbid every field write** — a write is stricter than a read, so unlike the readable list this is a hard allow-list, not a default set: a field not on it is refused (403). Names are resolved to their per-site ids from `/rest/api/3/field`. |
 
 The account whose token this is must be able to see the projects you want to
 watch — the plugin acts with exactly that person's Jira permissions. The entry
@@ -172,6 +173,7 @@ broker; the agent never sees the token.
 | `aee-jira comment KAN-6 --body "…"` | add a comment (attributed to *"an agent on team …"*) |
 | `aee-jira transition KAN-6 --to "In Progress"` | move the issue to that **target status** — the broker resolves the Jira transition and, if none leads there from the issue's current status, reports the available options |
 | `aee-jira update KAN-6 --description "…"` | **replace** the issue description (plain text; blank lines become paragraphs; an italic *rewritten by an agent…* line is appended). The previous text stays in Jira's issue history |
+| `aee-jira set-field KAN-6 --field "Team" --value "<v>"` | **set one allow-listed custom field** by its Jira name. Only fields on the team's `writable-custom-fields` allow-list are writable — any other is refused (403). The name→id and the value shape are resolved server-side per the field's schema type (a Team/select/user field is not a plain string). `--value` takes the value to set — for an id-bearing field like Team, pass the id you read via `show --fields "Team"` (reads return the id alongside the label); `--value-json '<json>'` sends a raw JSON value verbatim for an exotic shape. **Idempotent**: setting a field to the value it already holds makes no change and reports `changed: false`. The change is recorded in Jira's issue history (its attribution — no free-text field to stamp, like `transition`) |
 
 `--json` on every subcommand; exit codes 0 ok / 1 domain error / 2 usage / 3
 broker unreachable.

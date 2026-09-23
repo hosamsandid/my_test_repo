@@ -248,7 +248,8 @@ function safeJson(s) {
 // must never break a read; the failure is NOT cached, so it self-heals on the
 // next read (unlike a real "no such field" answer, which is a cached empty map).
 const EPIC_LINK_SCHEMA = 'com.pyxis.greenhopper.jira:gh-epic-link';
-const fieldCatalogCache = new Map(); // api base URL → { byName: Map(lowerName → id), epicLinkId: string|null }
+// api base URL → { byName: Map(lowerName → id), byId: Map(id → {id,name,schema}), epicLinkId }
+const fieldCatalogCache = new Map();
 
 async function resolveFieldCatalog(base, auth) {
   const cached = fieldCatalogCache.get(base);
@@ -258,18 +259,22 @@ async function resolveFieldCatalog(base, auth) {
     const fields = await requestJson({ base, path: '/rest/api/3/field', authHeader: auth });
     if (Array.isArray(fields)) {
       const byName = new Map();
+      const byId = new Map(); // #2417 — the schema too, so a write can shape the value per field type
       for (const f of fields) {
-        if (f && f.id && f.name) byName.set(String(f.name).toLowerCase(), String(f.id));
+        if (f && f.id && f.name) {
+          byName.set(String(f.name).toLowerCase(), String(f.id));
+          byId.set(String(f.id), { id: String(f.id), name: String(f.name), schema: f.schema || null });
+        }
       }
       const epic = fields.find((f) => f && f.schema && f.schema.custom === EPIC_LINK_SCHEMA)
         || fields.find((f) => f && f.name === 'Epic Link');
-      catalog = { byName, epicLinkId: epic && epic.id ? String(epic.id) : null };
+      catalog = { byName, byId, epicLinkId: epic && epic.id ? String(epic.id) : null };
     }
   } catch {
     catalog = null; // field list unreachable → transient, not cached (self-heals)
   }
   if (catalog) fieldCatalogCache.set(base, catalog);
-  return catalog || { byName: new Map(), epicLinkId: null };
+  return catalog || { byName: new Map(), byId: new Map(), epicLinkId: null };
 }
 
 async function resolveEpicLinkFieldId(base, auth) {
@@ -1013,6 +1018,141 @@ async function transitionIssue(cred, issueKey, { toStatus, env } = {}) {
   return { issueKey, applied: match.name, toStatus: match.toStatus };
 }
 
+// ── custom-field write (#2417) ───────────────────────────────────────────────
+//
+// The write counterpart of the #2416 custom-field read: set an allow-listed
+// custom field (e.g. "Team") on an issue. Three guards, in order:
+//   1. allow-list — the field's human name MUST be in the team's
+//      `writable-custom-fields` list, else it is REFUSED (403). An EMPTY list
+//      means NO field is writable — the safe default until a Team Admin opts a
+//      field in (a writable field is strictly more dangerous than a readable one,
+//      so unlike the read allow-list this gate is mandatory, never a default set).
+//   2. name → id resolution via the (cached) field catalog — an unknown name is a
+//      400 with the offending name, never a silently-dropped write.
+//   3. value shaping per the field's schema type — a Team / select / user field is
+//      not a plain string (`shapeFieldWriteValue`); a raw `jsonValue` is the
+//      escape hatch for an exotic field type, sent verbatim.
+// The write is attributed by Jira's own issue history (the change is recorded
+// under the broker's account, which represents the team — the same "attribution"
+// a `transition` carries: no free-text field to stamp). Idempotent: the current
+// value is read first and the PUT is skipped when it already matches, so a re-run
+// adds no redundant history entry.
+
+// Shape a scalar `value` into the write payload Jira expects for a field of the
+// given `schema`. Pure. A number that will not parse is a 400; every other type
+// degrades to a plain string, the safest default for an unmodelled field.
+function shapeFieldWriteValue(schema, value) {
+  const type = schema && schema.type ? String(schema.type) : 'string';
+  const v = value == null ? '' : String(value);
+  switch (type) {
+    case 'string':
+    case 'date':
+    case 'datetime':
+      return v;
+    case 'number': {
+      const n = Number(v);
+      if (!Number.isFinite(n)) { const e = new Error(`"${value}" is not a number`); e.status = 400; throw e; }
+      return n;
+    }
+    case 'option':
+    case 'option-with-child':
+      return { value: v }; // a single-select — Jira also accepts { id }
+    case 'user':
+      return { accountId: v };
+    case 'team': // Advanced Roadmaps "Team" custom field — keyed by team id
+      return { id: v };
+    case 'array': {
+      const items = schema && schema.items ? String(schema.items) : 'string';
+      if (items === 'option') return [{ value: v }];
+      if (items === 'user') return [{ accountId: v }];
+      return [v];
+    }
+    default:
+      return v; // unmodelled scalar — send as a plain string
+  }
+}
+
+// Whether the current raw field value already equals `wantStr` (idempotency). A
+// rendered object matches on its id OR its human value; a rendered array matches
+// if any member does; a scalar on string equality. Pure.
+function fieldRenderedEquals(rendered, wantStr) {
+  if (rendered && typeof rendered === 'object') {
+    return String(rendered.id) === wantStr || String(rendered.value) === wantStr;
+  }
+  return String(rendered) === wantStr;
+}
+
+function fieldValueMatches(currentRaw, wantStr) {
+  const rendered = renderCustomFieldValue(currentRaw);
+  if (rendered === null || rendered === undefined) return false;
+  if (Array.isArray(rendered)) return rendered.some((r) => fieldRenderedEquals(r, wantStr));
+  return fieldRenderedEquals(rendered, wantStr);
+}
+
+// Set one allow-listed custom field on an issue (CLI `set-field`). `allowList` is
+// the team's sanctioned writable field names; `value` (a scalar, shaped per the
+// field's type) OR `jsonValue` (raw, verbatim) supplies what to write.
+async function setCustomField(cred, issueKey, { fieldName, value, jsonValue, allowList, env } = {}) {
+  const key = String(issueKey == null ? '' : issueKey).trim();
+  if (!key) { const e = new Error('an issue key is required'); e.status = 400; throw e; }
+  const name = String(fieldName == null ? '' : fieldName).trim();
+  if (!name) { const e = new Error('a field name is required'); e.status = 400; throw e; }
+  const hasJson = jsonValue !== undefined;
+  if (!hasJson && (value === undefined || value === null)) {
+    const e = new Error('a value is required (--value or --value-json)'); e.status = 400; throw e;
+  }
+  // (1) allow-list gate — a non-allow-listed field is refused (acceptance).
+  const allow = (Array.isArray(allowList) ? allowList : [])
+    .map((s) => String(s || '').trim().toLowerCase()).filter(Boolean);
+  if (!allow.includes(name.toLowerCase())) {
+    const e = new Error(
+      allow.length
+        ? `field "${name}" is not writable by agents. This team's writable-custom-fields allow-list is: `
+          + `${allowList.join(', ')}. A Team Admin adds it on the Plugins page.`
+        : `no custom field is writable by agents: this team's writable-custom-fields allow-list is empty. `
+          + `A Team Admin adds "${name}" to it on the Plugins page.`,
+    );
+    e.status = 403;
+    throw e;
+  }
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  // (2) name → id + schema.
+  const catalog = await resolveFieldCatalog(base, auth);
+  const id = catalog.byName.get(name.toLowerCase());
+  if (!id) {
+    const e = new Error(`unknown Jira field: ${name}. Use the field's human name as it appears in Jira (e.g. "Team").`);
+    e.status = 400;
+    throw e;
+  }
+  const meta = catalog.byId.get(id) || { id, name, schema: null };
+  // (3) value shaping — raw JSON verbatim, else per the field's schema type.
+  const shaped = hasJson ? jsonValue : shapeFieldWriteValue(meta.schema, value);
+  // Idempotency (scalar path only — a raw jsonValue's shape is not comparable): a
+  // pre-read skips the write when the field already holds the target value, so a
+  // re-run adds no redundant Jira history entry.
+  if (!hasJson) {
+    const cur = await requestJson({
+      base,
+      path: `/rest/api/3/issue/${encodeURIComponent(key)}?fields=${encodeURIComponent(id)}`,
+      authHeader: auth,
+    });
+    const current = (cur.fields || {})[id];
+    if (fieldValueMatches(current, String(value))) {
+      return { issueKey: key, field: name, changed: false, value: renderCustomFieldValue(current) };
+    }
+  }
+  // A write — NOT retried on a transport failure (F6), like updateDescription.
+  await requestJson({
+    base,
+    path: `/rest/api/3/issue/${encodeURIComponent(key)}`,
+    method: 'PUT',
+    authHeader: auth,
+    body: { fields: { [id]: shaped } },
+  });
+  return { issueKey: key, field: name, changed: true, value: hasJson ? jsonValue : value };
+}
+
 module.exports = {
   MAX_PAGES,
   PAGE_SIZE,
@@ -1059,4 +1199,7 @@ module.exports = {
   updateDescription,
   listTransitions,
   transitionIssue,
+  shapeFieldWriteValue,
+  fieldValueMatches,
+  setCustomField,
 };

@@ -27,7 +27,18 @@ ticket is routine and reversible):
     aee-jira comment KAN-6 --body "Picked this up, see PR #123"
     aee-jira transition KAN-6 --to "In Progress"
     aee-jira update KAN-6 --description "…"   # replace the issue description (the old one stays in Jira's history)
+    aee-jira set-field KAN-6 --field "Team" --value "42"   # set an allow-listed custom field by its Jira name
     aee-jira attachment add KAN-6 report.pdf part-1.pdf   # upload one or more local files as new attachments
+
+`set-field` sets ONE custom field an admin has sanctioned (the team's
+`writable-custom-fields` allow-list); a field not on that list is refused. The
+field's name → id and value shape (a Team / select / user field is not a plain
+string) are resolved server-side. Pass `--value` with the value to set — for an
+id-bearing field like Team, pass the id you read via `show --fields "Team"`
+(reads return the id alongside the label). `--value-json '<json>'` sends a raw
+JSON value verbatim for an exotic field shape. The write is idempotent: setting a
+field to the value it already holds reports `changed: false` and makes no change
+in Jira's history.
 
 `attachment add` takes an issue key and one or more local file paths; each file
 becomes a separate attachment (Jira never overwrites — a same-named upload is a
@@ -369,6 +380,20 @@ def build_parser():
     p_update.add_argument("issue", help="issue key, e.g. KAN-6")
     p_update.add_argument("--description", required=True, help="the complete new description text (plain text; blank lines become paragraphs)")
 
+    p_set = sub.add_parser("set-field", parents=[common], help="set an allow-listed custom field on an issue (e.g. Team)")
+    p_set.add_argument("issue", help="issue key, e.g. KAN-6")
+    p_set.add_argument("--field", required=True, help='the field\'s Jira name, e.g. "Team"')
+    g_set = p_set.add_mutually_exclusive_group(required=True)
+    g_set.add_argument(
+        "--value",
+        help="the value to set (shaped per the field's type); for an id-bearing field "
+             'like Team pass the id you read with `show --fields "Team"`',
+    )
+    g_set.add_argument(
+        "--value-json",
+        help="raw JSON value sent to Jira verbatim (escape hatch for an exotic field shape)",
+    )
+
     return parser
 
 
@@ -436,6 +461,17 @@ def main(argv=None):
         path, method, body = "/transition", "POST", {"issue": args.issue, "to": getattr(args, "to")}
     elif args.cmd == "update":
         path, method, body = "/update", "POST", {"issue": args.issue, "description": args.description}
+    elif args.cmd == "set-field":
+        payload = {"issue": args.issue, "field": args.field}
+        if args.value_json is not None:
+            try:
+                payload["valueJson"] = json.loads(args.value_json)
+            except ValueError as e:
+                emit({"ok": False, "error": "usage", "message": "--value-json is not valid JSON: %s" % e}, as_json)
+                return EXIT_USAGE
+        else:
+            payload["value"] = args.value
+        path, method, body = "/set-field", "POST", payload
     else:
         parser.print_help()
         return EXIT_USAGE

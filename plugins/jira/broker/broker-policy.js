@@ -32,6 +32,7 @@ const POLICY = Object.freeze({
   transition: { scopes: ['team'] },
   update: { scopes: ['team'] },
   attach: { scopes: ['team'] },
+  'set-field': { scopes: ['team'] },
 });
 
 // Wired but empty — see the header.

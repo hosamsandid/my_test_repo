@@ -81,6 +81,7 @@ All Jira access stays server-side in the broker; the agent never sees the token.
 | `aee-jira attachment add KAN-6 <path> [<path>…]` | upload one or more local files as new attachments — each path becomes a separate attachment (Jira never overwrites); paths are checked to exist before any upload, and the result reports per-file success/failure with each created id |
 | `aee-jira comment KAN-6 --body "…"` | add a comment |
 | `aee-jira update KAN-6 --description "…"` | replace the description (keep what the human wrote and add a section — the old text stays in Jira's history) |
+| `aee-jira set-field KAN-6 --field "Team" --value "<v>"` | set an allow-listed custom field by its Jira name (only fields a Team Admin put on the team's `writable-custom-fields` list are writable — any other is refused). For an id-bearing field like Team, pass the id you read via `show --fields "Team"`; `--value-json '<json>'` for an exotic field shape. Idempotent — a no-op re-set reports `changed: false` |
 | `aee-jira transition KAN-6 --to "In Progress"` | move the issue on — this is itself a status change and wakes whichever teammate's trigger names that target status |
 
 A good wake instruction says exactly that sequence: *"Take the issue key(s) and

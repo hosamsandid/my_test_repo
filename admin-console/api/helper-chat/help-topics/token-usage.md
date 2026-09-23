@@ -52,9 +52,12 @@ per provider and per model, and a stale price baked into a dashboard is worse
 than no price at all.
 
 Apply your own per-model pricing downstream instead: the **CSV** and **JSON**
-export buttons emit one flat row per invocation × model (Statistics) or per work
-item × model (Work items), carrying the same time window and team filter as the
-view on screen.
+export buttons carry the same time window and team filter as the view on screen.
+The **Work items** export is one flat row per work item × model; the
+**Statistics** export mirrors the on-screen grouping — an aggregated pivot with
+one row per group, or one row per group × subgroup cell when a second dimension
+is set — so grouping by model there still gives a per-model breakdown to price
+against.
 
 ### The four token classes
 
@@ -88,8 +91,18 @@ invocations.
 
 *Group by* re-keys the breakdown table — by agent, team, user, model, provider,
 provider tier or day — against the same range and team filter. The summary tiles
-and the totals never change with it; only the rows underneath do. A few
-behaviours are worth knowing before you read a grouped table as a complete
+and the totals never change with it; only the rows underneath do.
+
+An optional *then by* dropdown adds a **second** dimension, cross-tabulating the
+breakdown into a nested table: for example *Group by agent, then by model*
+answers which models each agent ran and how many tokens each burned. The second
+list excludes whatever the primary is, so a self-cross can't be chosen, and
+**None** restores the single-level table. Each primary group carries its own
+total row with the secondary values indented beneath; a **model** axis still
+fans a run over its per-model split on whichever side it sits, so those cells
+need not sum to the group total — exactly as *Group by model* does on its own.
+
+A few behaviours are worth knowing before you read a grouped table as a complete
 accounting:
 
 - **Group by model fans a run out** across its per-model split, because one run

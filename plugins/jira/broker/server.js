@@ -298,7 +298,7 @@ async function handleCli(req, res, cliPath) {
   }
 
   // ── reads that need the per-scope Jira credential (Phase 3) ───────────────
-  const readOps = { '/projects': 'projects', '/list': 'list', '/show': 'show' };
+  const readOps = { '/projects': 'projects', '/list': 'list', '/search': 'search', '/show': 'show' };
   if (readOps[cliPath] && req.method === 'GET') {
     const op = readOps[cliPath];
     const cred = resolveCredential(scopeId);
@@ -317,12 +317,22 @@ async function handleCli(req, res, cliPath) {
         const project = (params.get('project') || '').trim();
         if (!project) return sendJson(res, 400, { error: 'a --project key is required' });
         result = { project, issues: await jira.listProjectIssues(cred, { projectKey: project, status: params.get('status') || undefined }) };
+      } else if (op === 'search') {
+        // Arbitrary JQL, scope-guarded by the credential itself (jira.searchIssues):
+        // it resolves as the bound account, so it can only read the team's site +
+        // permitted projects — the JQL cannot escape the tenant boundary.
+        const jql = (params.get('jql') || '').trim();
+        if (!jql) return sendJson(res, 400, { error: 'a --jql query is required' });
+        const fieldsParam = (params.get('fields') || '').trim();
+        const fields = fieldsParam ? fieldsParam.split(',').map((f) => f.trim()).filter(Boolean) : undefined;
+        const limit = params.get('limit') || undefined;
+        result = { jql, issues: await jira.searchIssues(cred, { jql, fields, limit }) };
       } else {
         const issue = (params.get('issue') || '').trim();
         if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
         result = { issue: await jira.getIssue(cred, issue) };
       }
-      writeAudit(scopeId, scopeId, op, 'ok', params.get('project') || params.get('issue') || '');
+      writeAudit(scopeId, scopeId, op, 'ok', params.get('project') || params.get('issue') || params.get('jql') || '');
       return sendJson(res, 200, result);
     } catch (err) {
       writeAudit(scopeId, scopeId, op, 'error', err.message);

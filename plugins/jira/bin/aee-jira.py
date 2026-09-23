@@ -17,6 +17,7 @@ Reads:
     aee-jira inbox --consume KAN-6:10312 [ID…]   # drain exactly the events YOUR wake named (payload `id` / `events[].id`)
     aee-jira projects                             # the projects in this team's scope
     aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
+    aee-jira search --jql "<JQL>" [--fields key,summary,status] [--limit N]   # arbitrary JQL, scoped to your team
     aee-jira show KAN-6                           # one issue (summary, status, type, assignee, URL, attachments)
     aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
 
@@ -312,6 +313,17 @@ def build_parser():
     p_list.add_argument("--project", required=True, help="project key, e.g. KAN")
     p_list.add_argument("--status", help="only issues currently in this status")
 
+    p_search = sub.add_parser(
+        "search", parents=[common],
+        help="run an arbitrary JQL query (scoped to your team's site & projects)",
+    )
+    p_search.add_argument("--jql", required=True, help='the JQL query, e.g. "created >= -2d AND issuetype = Story"')
+    p_search.add_argument(
+        "--fields",
+        help="comma-separated columns to return (default all): key,summary,status,issueType,assignee,updated,url",
+    )
+    p_search.add_argument("--limit", type=int, help="cap the number of issues returned (default 100, max 2000)")
+
     p_show = sub.add_parser("show", parents=[common], help="read one issue")
     p_show.add_argument("issue", help="issue key, e.g. KAN-6")
 
@@ -389,6 +401,13 @@ def main(argv=None):
         if args.status:
             q["status"] = args.status
         path = "/list?" + urllib.parse.urlencode(q)
+    elif args.cmd == "search":
+        q = {"jql": args.jql}
+        if args.fields:
+            q["fields"] = args.fields
+        if args.limit is not None:
+            q["limit"] = args.limit
+        path = "/search?" + urllib.parse.urlencode(q)
     elif args.cmd == "show":
         path = "/show?" + urllib.parse.urlencode({"issue": args.issue})
     elif args.cmd == "attachment":

@@ -215,6 +215,16 @@ test('cli reads: /projects, /list, /show need the per-scope credential and call 
     assert.equal(show.status, 200);
     assert.equal(show.body.issue.key, 'KAN-6');
 
+    // arbitrary JQL search, scoped by the credential, shaped like /list
+    const search = await call(srv, 'GET', '/cli/search?jql=issuetype+%3D+Story&limit=5', { token: TOKEN });
+    assert.equal(search.status, 200);
+    assert.equal(search.body.jql, 'issuetype = Story');
+    assert.equal(search.body.issues[0].key, 'KAN-6');
+
+    // a search with no --jql → 400 (the credential is fine, the query is missing)
+    const noJql = await call(srv, 'GET', '/cli/search?jql=', { token: TOKEN });
+    assert.equal(noJql.status, 400);
+
     // a scope with no credential → 400 no-credential (not a 500)
     const nocred = await call(srv, 'GET', '/cli/projects', { token: OTHER });
     assert.equal(nocred.status, 400);

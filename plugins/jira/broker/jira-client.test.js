@@ -242,6 +242,99 @@ test('searchJql: runs an arbitrary query through /search/jql', async () => {
   });
 });
 
+test('clampSearchLimit: default one page, hard-ceilinged at MAX_PAGES × PAGE_SIZE, non-positive → default', () => {
+  assert.equal(jc.clampSearchLimit(undefined), jc.PAGE_SIZE);
+  assert.equal(jc.clampSearchLimit(0), jc.PAGE_SIZE);
+  assert.equal(jc.clampSearchLimit(-5), jc.PAGE_SIZE);
+  assert.equal(jc.clampSearchLimit('nope'), jc.PAGE_SIZE);
+  assert.equal(jc.clampSearchLimit(3), 3);
+  assert.equal(jc.clampSearchLimit(3.9), 3); // floored
+  assert.equal(jc.clampSearchLimit(999999), jc.MAX_PAGES * jc.PAGE_SIZE);
+});
+
+test('pickAgentColumns: no fields → full shape; a subset always keeps key', () => {
+  const issue = { key: 'ENG-1', summary: 's', status: 'Open', issueType: 'Story', assignee: null, updated: 'u', url: 'x' };
+  assert.deepEqual(jc.pickAgentColumns(issue, undefined), issue);
+  assert.deepEqual(jc.pickAgentColumns(issue, []), issue);
+  assert.deepEqual(jc.pickAgentColumns(issue, ['summary']), { key: 'ENG-1', summary: 's' });
+  assert.deepEqual(jc.pickAgentColumns(issue, ['key', 'status']), { key: 'ENG-1', status: 'Open' });
+});
+
+test('searchIssues: runs the caller JQL, shapes like `list`, follows nextPageToken', async () => {
+  await withFetch((url, opts, n) => {
+    assert.equal(url, 'http://fake-jira:8080/rest/api/3/search/jql');
+    assert.equal(opts.method, 'POST');
+    const body = JSON.parse(opts.body);
+    assert.deepEqual(body.fields, ['summary', 'status', 'assignee', 'updated', 'issuetype']);
+    if (n === 1) {
+      assert.equal(body.jql, 'issuetype = Story');
+      return { ok: true, status: 200, text: async () => JSON.stringify({
+        isLast: false, nextPageToken: 'P2',
+        issues: [{ key: 'ENG-1', fields: { summary: 'One', status: { name: 'Open' }, issuetype: { name: 'Story' }, updated: '2026-09-09T10:00:00Z' } }],
+      }) };
+    }
+    assert.equal(body.nextPageToken, 'P2');
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true, issues: [{ key: 'ENG-2', fields: { summary: 'Two', assignee: { displayName: 'Jane' } } }],
+    }) };
+  }, async (calls) => {
+    const issues = await jc.searchIssues(CRED, { jql: '  issuetype = Story  ', env: CRED.env });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(issues, [
+      { key: 'ENG-1', summary: 'One', status: 'Open', issueType: 'Story', assignee: null, updated: '2026-09-09T10:00:00Z', url: 'https://acme.atlassian.net/browse/ENG-1' },
+      { key: 'ENG-2', summary: 'Two', status: null, issueType: null, assignee: 'Jane', updated: null, url: 'https://acme.atlassian.net/browse/ENG-2' },
+    ]);
+  });
+});
+
+test('searchIssues: --limit caps total issues and shrinks the page request, stops paging', async () => {
+  await withFetch((url, opts) => {
+    assert.equal(JSON.parse(opts.body).maxResults, 2); // min(PAGE_SIZE, cap)
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: false, nextPageToken: 'P2',
+      issues: [
+        { key: 'ENG-1', fields: {} }, { key: 'ENG-2', fields: {} }, { key: 'ENG-3', fields: {} },
+      ],
+    }) };
+  }, async (calls) => {
+    const issues = await jc.searchIssues(CRED, { jql: 'project = ENG', limit: 2, env: CRED.env });
+    assert.deepEqual(issues.map((i) => i.key), ['ENG-1', 'ENG-2']); // capped, extra page never fetched
+    assert.equal(calls.length, 1);
+  });
+});
+
+test('searchIssues: --fields narrows the returned columns (validated before any request)', async () => {
+  await withFetch(() => ({ ok: true, status: 200, text: async () => JSON.stringify({
+    isLast: true, issues: [{ key: 'ENG-1', fields: { summary: 'One', status: { name: 'Open' } } }],
+  }) }), async () => {
+    const issues = await jc.searchIssues(CRED, { jql: 'project = ENG', fields: ['summary'], env: CRED.env });
+    assert.deepEqual(issues, [{ key: 'ENG-1', summary: 'One' }]);
+  });
+});
+
+test('searchIssues: an empty JQL is a 400 before any HTTP call', async () => {
+  let called = false;
+  const orig = global.fetch;
+  global.fetch = async () => { called = true; return { ok: true, status: 200, text: async () => '{}' }; };
+  try {
+    await assert.rejects(() => jc.searchIssues(CRED, { jql: '   ', env: CRED.env }), (e) => e.status === 400);
+    assert.equal(called, false);
+  } finally { global.fetch = orig; }
+});
+
+test('searchIssues: an unknown --fields column is a 400 before any HTTP call', async () => {
+  let called = false;
+  const orig = global.fetch;
+  global.fetch = async () => { called = true; return { ok: true, status: 200, text: async () => '{}' }; };
+  try {
+    await assert.rejects(
+      () => jc.searchIssues(CRED, { jql: 'project = ENG', fields: ['bogus'], env: CRED.env }),
+      (e) => e.status === 400 && /bogus/.test(e.message),
+    );
+    assert.equal(called, false);
+  } finally { global.fetch = orig; }
+});
+
 test('commentAdf: wraps text as ADF paragraphs, attribution first', () => {
   const doc = jc.commentAdf('line one\n\nline two', 'by an agent');
   assert.equal(doc.type, 'doc');

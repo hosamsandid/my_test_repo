@@ -24,16 +24,17 @@ askPrompts:
 Every agent invocation reports one **usage record** — the tokens that turn
 consumed, the model(s) it ran on, and the agent, team and provider it belongs
 to. This page is the read side of that store: it aggregates the records in the
-selected time range and answers two different questions, one per tab. The
+selected time range and answers three different questions, one per tab. The
 **Statistics** tab gives you the overall picture; the **Work items** tab ties
-consumption to the piece of work it went into.
+consumption to the piece of work it went into; the **Agent → model** tab shows
+which model each agent actually runs.
 
 Two things bound what you see:
 
 - **System Admin only.** Consumption figures are an operator surface; a Team
   Admin or Team Member gets a 403 on the underlying endpoints, not a filtered
   view. There is no reduced version of this page for other roles.
-- **The page-level Team filter** narrows every figure, both tabs and both
+- **The page-level Team filter** narrows every figure, all three tabs and both
   exports to one access scope. It is shared across the tabs, so switching tabs
   keeps the filter.
 
@@ -70,7 +71,7 @@ problem.
 
 ### Choosing a time range
 
-Both tabs carry the same range selector. **All time** means as far back as the
+All three tabs carry the same range selector. **All time** means as far back as the
 usage log goes: there is no automatic retention on this store — token telemetry
 is billing-adjacent, so nothing is pruned silently — but a stack that was
 rebuilt from scratch starts empty. Which day a given record falls into is a

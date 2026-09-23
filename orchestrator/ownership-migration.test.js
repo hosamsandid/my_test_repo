@@ -204,6 +204,60 @@ test("a malformed membership role is never fanned out", () => {
   assert.deepEqual(planMembershipRepoint({ configs, memberships: ms }), []);
 });
 
+// ── B: the fan-out is terminal for teams born under the new model ────────────
+// A team created via self-service (#2081) carries ownerSource: 'creator' and
+// already holds its correct membership. The legacy scope fan-out must never add
+// members to it, or every restart re-inherits its whole owning scope — the bug.
+test("a team created under the new model (ownerSource: creator) is never a fan-out target", () => {
+  const cfgs = {
+    ...configs,
+    "fresh-team": { id: "fresh-team", role: "team", teamId: "default", ownerId: "u-ada", ownerSource: "creator" },
+  };
+  const plan = planMembershipRepoint({ configs: cfgs, memberships, users });
+  assert.equal(plan.some((p) => p.teamId === "fresh-team"), false,
+    "the default scope's members were fanned into a creator-owned team");
+  // The genuinely legacy teams in the same scope still fan out as before.
+  assert.equal(plan.some((p) => p.teamId === "sdlc-2-0"), true);
+  // A 'migration'-stamped team (this pass's own placeholder) is still a target.
+  const migrated = {
+    ...configs,
+    "legacy-team": { id: "legacy-team", role: "team", teamId: "default", ownerId: "u-bob", ownerSource: "migration" },
+  };
+  assert.equal(
+    planMembershipRepoint({ configs: migrated, memberships, users }).some((p) => p.teamId === "legacy-team"),
+    true,
+  );
+});
+
+// ── C: a System Admin is a flag with scope.all, never a membership ───────────
+// (decentralised-access-concept.md 2.1/2.2). Even a stray Default-Team admin
+// membership must never be materialised onto an Agent Team.
+test("a System Admin's membership is never fanned out", () => {
+  const withSys = [
+    ...users,
+    { id: "u-sys", subject: "sys@example.com", systemAdmin: true, createdAt: "2026-01-01T00:00:00.000Z" },
+  ];
+  const ms = [
+    ...memberships,
+    { id: "m-sys", userId: "u-sys", teamId: "default", role: "team-admin", createdAt: "2026-01-01T00:00:00.000Z" },
+  ];
+  const plan = planMembershipRepoint({ configs, memberships: ms, users: withSys });
+  assert.equal(plan.some((p) => p.userId === "u-sys"), false, "a System Admin was materialised as a team member");
+  // Non-admin members still fan out exactly as before.
+  assert.equal(plan.some((p) => p.userId === "u-cyd"), true);
+});
+
+test("without a users list the System-Admin guard is inert (backward-compatible)", () => {
+  const ms = [
+    ...memberships,
+    { id: "m-sys", userId: "u-sys", teamId: "default", role: "team-admin", createdAt: "2026-01-01T00:00:00.000Z" },
+  ];
+  assert.equal(
+    planMembershipRepoint({ configs, memberships: ms }).some((p) => p.userId === "u-sys"),
+    true,
+  );
+});
+
 test("the planners tolerate empty and malformed input", () => {
   assert.deepEqual(planOwnerBackfill({}), { stamp: [], unresolved: [] });
   assert.deepEqual(planMembershipRepoint({}), []);

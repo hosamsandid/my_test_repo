@@ -38,7 +38,7 @@ poller's, in `broker-sdk/event-cursor.js` (`github-poller.js` is untouched).
 | File | Role |
 |---|---|
 | `event-extract.js` | pure: `resolveJiraApiBase`, `isChangelogTruncated`, `extractStatusChangeEvents` (summary + `issueType`, tolerating raw or shaped issues), `matchesStatusFilter` / `matchesStatusFilters`, `computeQueryWindowMinutes` (catch-up widening, capped 24h) |
-| `jira-client.js` | Jira REST v3 surface (Basic auth); pure builders + thin `fetch` adapters; `JIRA_API_BASE` test seam; `searchProjectIssues` (poll — now requests `issuetype`), `listProjectIssues` / `getIssue` / `listProjects` (CLI + UI reads) |
+| `jira-client.js` | Jira REST v3 surface (Basic auth); pure builders + thin `fetch` adapters; `JIRA_API_BASE` test seam; `searchProjectIssues` (poll — now requests `issuetype`), `listProjectIssues` / `getIssue` / `listProjects` (CLI + UI reads), `searchIssues` (agent arbitrary-JQL read, shaped like `listProjectIssues`, `--limit` clamped to `MAX_PAGES × PAGE_SIZE`) |
 | `watch-store.js` | per-scope watch config (`{ projectKey, statusFilters?: string[] }`, legacy `statusFilter` migrated on read) + poll cursor on `AEE_PLUGIN_STATE_DIR`, atomic writes |
 | `watch-health.js` | pure: the cursor `recentErrors` ring (`recordPollError` / `clearPollFailure`) + the 3-state `deriveWatchHealth` (Watching / Degraded / Failing) + `summariseWatchHealth` roll-up, surfaced on `/watches` |
 | `inbox-store.js` | per-scope queue of delivered-but-unconsumed events; TTL + `quota.maxObjects` ring — **this is what the manifest quota counts**; drained by event id only (`consumeIds`), never team-wide |
@@ -47,7 +47,7 @@ poller's, in `broker-sdk/event-cursor.js` (`github-poller.js` is untouched).
 | `viewer-headers.js` | §4.8 signed-viewer verify (byte-identical copy) + the `/admin` → team-admin role gate |
 | `broker-policy.js` | write authorisation (D3): `authorizeWrite` → SDK `authorizeAction` against the manifest `policy`; `requiresApproval` wired-but-empty |
 | `ui/` | the served `/` route (Board tab: issues / watch-health cards / inbox; Activity tab: the retained log) + `/admin` route (watch config with per-project status chips, team-admin). Dependency-free vanilla JS, `--eb-*` tokens, follows the console theme |
-| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials}`, `/cli/*` (`whoami`/`inbox` (peek / `?consume=<id,…>`)/`projects`/`list`/`show`/`attachment` (content by id) + `comment`/`transition`/`update`/`attachment/add` (upload one file per call) POST), `/ui/*` (incl. `/ui/api/{watches,activity,admin/watch,admin/retry}`) |
+| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials}`, `/cli/*` (`whoami`/`inbox` (peek / `?consume=<id,…>`)/`projects`/`list`/`search` (arbitrary JQL)/`show`/`attachment` (content by id) + `comment`/`transition`/`update`/`attachment/add` (upload one file per call) POST), `/ui/*` (incl. `/ui/api/{watches,activity,admin/watch,admin/retry}`) |
 
 
 ## Credentials

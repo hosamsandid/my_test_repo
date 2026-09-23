@@ -5,6 +5,7 @@ import { useAuth } from '../auth/AuthContext';
 import { usePageActions } from '../context/PageActionsContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
 import { computeAgentStatusMap } from '../context/agent-statuses';
+import { loadManuallyMessagedIds } from './agent-chat/agent-back-notification.js';
 import { AgentRosterProvider, useAgentRoster } from '../context/AgentRosterContext.jsx';
 import AgentList, { buildGroups } from './agent-chat/AgentList';
 import RailLifecycleHost from './agent-chat/RailLifecycleHost.jsx';
@@ -243,8 +244,11 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   const manuallyUnreadRef = useRef(new Set());
 
   // Map agentId -> effective display state
-  // ('busy'|'unread'|'active'|'idle'|'disabled'|'offline'), derived from the
-  // shared agent-status poll (#1677) rather than a page-owned interval.
+  // ('busy'|'unread'|'unread-auto'|'idle'|'disabled'|'offline'), derived from the
+  // shared agent-status poll (#1677) rather than a page-owned interval. #2429: the
+  // manually-messaged set (persisted by AgentBackNotificationContext) splits an
+  // unread response into solid green ("reply awaiting you") vs hollow green
+  // (auto-triggered activity). Read fresh on each poll, like the viewed map.
   const statuses = useAgentStatuses();
   const [agentStatuses, setAgentStatuses] = useState({});
   useEffect(() => {
@@ -257,7 +261,9 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
       viewed[currentId] = Date.now();
       saveLastViewed(viewed);
     }
-    setAgentStatuses(computeAgentStatusMap(statuses, loadLastViewed()));
+    setAgentStatuses(
+      computeAgentStatusMap(statuses, loadLastViewed(), loadManuallyMessagedIds()),
+    );
   }, [statuses]);
 
   // Sidebar filter: All | a specific team | a specific agent. Persisted in

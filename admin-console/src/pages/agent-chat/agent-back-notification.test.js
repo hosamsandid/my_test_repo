@@ -14,6 +14,9 @@ import {
   notificationTitleFor,
   notificationTagFor,
   isConsoleInForeground,
+  MANUALLY_MESSAGED_KEY,
+  loadManuallyMessagedIds,
+  addManuallyMessagedId,
 } from './agent-back-notification.js';
 
 // A minimal localStorage stand-in.
@@ -26,6 +29,37 @@ function makeStore(initial = {}) {
     _map: map,
   };
 }
+
+// ── manually-messaged store (#2429) ──────────────────────────────────────────
+
+test('manually-messaged store: unset reads [], add round-trips and is deduped/ordered', () => {
+  const store = makeStore();
+  assert.deepEqual(loadManuallyMessagedIds(store), []);
+  addManuallyMessagedId('a', store);
+  addManuallyMessagedId('b', store);
+  addManuallyMessagedId('a', store); // dupe — no-op
+  assert.deepEqual(loadManuallyMessagedIds(store), ['a', 'b']);
+  // Persisted under the global key, as a JSON array.
+  assert.deepEqual(JSON.parse(store.getItem(MANUALLY_MESSAGED_KEY)), ['a', 'b']);
+});
+
+test('manually-messaged store: a falsy id is ignored', () => {
+  const store = makeStore();
+  addManuallyMessagedId('', store);
+  addManuallyMessagedId(null, store);
+  addManuallyMessagedId(undefined, store);
+  assert.deepEqual(loadManuallyMessagedIds(store), []);
+});
+
+test('manually-messaged store: tolerates a corrupt / non-array payload', () => {
+  assert.deepEqual(loadManuallyMessagedIds(makeStore({ [MANUALLY_MESSAGED_KEY]: 'not json' })), []);
+  assert.deepEqual(loadManuallyMessagedIds(makeStore({ [MANUALLY_MESSAGED_KEY]: '{"x":1}' })), []);
+  // Non-string entries are filtered out.
+  assert.deepEqual(
+    loadManuallyMessagedIds(makeStore({ [MANUALLY_MESSAGED_KEY]: '["a",1,null,"b"]' })),
+    ['a', 'b'],
+  );
+});
 
 // ── preference store ─────────────────────────────────────────────────────────
 

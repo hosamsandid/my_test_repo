@@ -9,6 +9,7 @@ import {
 import { useAuth } from '../auth/AuthContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
 import { computeChatCounts } from '../context/agent-statuses';
+import { loadManuallyMessagedIds } from '../pages/agent-chat/agent-back-notification.js';
 import { canAccessCredentialPages } from '../pages/credential-scope-view';
 import {
   filterItems, filterSections, activeGroupKey, mergeCollapsed,
@@ -209,7 +210,15 @@ export default function Shell({ children }) {
   // of a Shell-owned interval — one /api/agents/statuses request now feeds every
   // subscribing surface.
   const statuses = useAgentStatuses();
-  const chatCounts = useMemo(() => computeChatCounts(statuses, loadLastViewed()), [statuses]);
+  // #2429: the green nav badge counts only replies *awaiting you* — unread
+  // responses from agents you manually messaged. Auto-triggered activity is
+  // deliberately not counted here (or on the collapsed icon dot below), which is
+  // what deflates the old inflated green counter. The amber busy count is
+  // unchanged.
+  const chatCounts = useMemo(
+    () => computeChatCounts(statuses, loadLastViewed(), loadManuallyMessagedIds()),
+    [statuses],
+  );
 
   // Register how the assist-error nudge surfaces the (now modal-hosted) model
   // picker: open Settings deep-linked to Model so setPickerOpen(true) has a

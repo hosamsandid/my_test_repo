@@ -530,6 +530,60 @@ async function listProjects(cred, { env } = {}) {
   return projects;
 }
 
+// The agent-facing field set both `list` and `search` request from Jira, and
+// the shaped shape they return — the columns an agent sees for a browsed issue.
+const AGENT_ISSUE_FIELDS = ['summary', 'status', 'assignee', 'updated', 'issuetype'];
+const AGENT_ISSUE_COLUMNS = ['key', 'summary', 'status', 'issueType', 'assignee', 'updated', 'url'];
+
+// Narrow one raw search issue to the agent-facing columns (used by both
+// `listProjectIssues` and `searchIssues`). `siteBase` builds the browse URL.
+function shapeAgentIssue(raw, siteBase) {
+  const f = (raw && raw.fields) || {};
+  return {
+    key: String((raw && raw.key) || ''),
+    summary: f.summary == null ? '' : String(f.summary),
+    status: f.status && f.status.name ? String(f.status.name) : null,
+    issueType: issueTypeOf(f),
+    assignee: f.assignee && f.assignee.displayName ? String(f.assignee.displayName) : null,
+    updated: f.updated || null,
+    url: `${siteBase}/browse/${encodeURIComponent((raw && raw.key) || '')}`,
+  };
+}
+
+// A caller-supplied `--fields` selection reduces a shaped issue to just those
+// columns. `undefined`/empty → the full shape. An unknown column is a 400 with
+// the valid set (validated once, up front, by `assertColumns`) — never a
+// silently-dropped field. `key` is always kept: it is the issue's identity.
+function assertColumns(fields) {
+  if (!Array.isArray(fields) || fields.length === 0) return;
+  const unknown = fields.filter((f) => !AGENT_ISSUE_COLUMNS.includes(f));
+  if (unknown.length) {
+    const e = new Error(`unknown --fields: ${unknown.join(', ')}. Valid columns: ${AGENT_ISSUE_COLUMNS.join(', ')}`);
+    e.status = 400;
+    throw e;
+  }
+}
+
+function pickAgentColumns(issue, fields) {
+  if (!Array.isArray(fields) || fields.length === 0) return issue;
+  const keep = new Set(['key', ...fields]);
+  const out = {};
+  for (const col of AGENT_ISSUE_COLUMNS) if (keep.has(col)) out[col] = issue[col];
+  return out;
+}
+
+// `search --limit` bounds: default one page, hard-ceilinged at the same
+// MAX_PAGES × PAGE_SIZE budget the pollers use so a broad query can never
+// spiral. A non-positive or non-numeric value falls back to the default.
+const SEARCH_DEFAULT_LIMIT = PAGE_SIZE;
+const SEARCH_MAX_LIMIT = MAX_PAGES * PAGE_SIZE;
+
+function clampSearchLimit(limit) {
+  const n = Number(limit);
+  if (!Number.isFinite(n) || n <= 0) return SEARCH_DEFAULT_LIMIT;
+  return Math.min(Math.floor(n), SEARCH_MAX_LIMIT);
+}
+
 // A project's issues, most-recently-updated first, optionally filtered to one
 // current status (CLI `list`). `status` is quoted + escaped so it can never
 // break out of the clause. Capped at one page (PAGE_SIZE) — an agent browsing a
@@ -564,6 +618,56 @@ async function listProjectIssues(cred, { projectKey, status, env } = {}) {
       url: `${siteBase}/browse/${encodeURIComponent(raw.key || '')}`,
     };
   });
+}
+
+// Agent-facing arbitrary JQL search (#2413). Promotes the diagnostic-only
+// `searchJql` to the CLI: the caller owns the whole query, so it can express
+// filters `list` cannot (`created`, an empty custom field, a summary regex, …).
+//
+// Scope guard: the query runs under the per-scope credential, exactly like
+// `list`/`show`. Jira resolves it as that account, so it can only ever return
+// issues on the credential's bound site (the base URL) and in the projects that
+// account is permitted to browse — the JQL cannot reach another team's site or a
+// project the credential can't already see. There is no separate allow-list to
+// bypass; the credential *is* the tenant boundary.
+//
+// Shaped like `list` (no changelog expansion — that's a poller concern) and
+// capped at `limit` issues (default one page, hard-ceilinged at MAX_PAGES ×
+// PAGE_SIZE) so a broad query can never spiral. `fields` optionally narrows the
+// returned columns.
+async function searchIssues(cred, { jql, fields, limit, env } = {}) {
+  const query = String(jql == null ? '' : jql).trim();
+  if (!query) { const e = new Error('a JQL query is required'); e.status = 400; throw e; }
+  assertColumns(fields);
+  const cap = clampSearchLimit(limit);
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  const issues = [];
+  let nextPageToken;
+  for (let page = 0; page < MAX_PAGES && issues.length < cap; page += 1) {
+    const result = await requestJson({
+      base,
+      path: '/rest/api/3/search/jql',
+      method: 'POST',
+      idempotent: true, // a read that happens to be a POST — safe to retry
+      authHeader: auth,
+      body: {
+        jql: query,
+        fields: AGENT_ISSUE_FIELDS,
+        maxResults: Math.min(PAGE_SIZE, cap - issues.length),
+        ...(nextPageToken ? { nextPageToken } : {}),
+      },
+    });
+    for (const raw of Array.isArray(result.issues) ? result.issues : []) {
+      const shaped = shapeAgentIssue(raw, siteBase);
+      if (shaped.key) issues.push(pickAgentColumns(shaped, fields));
+      if (issues.length >= cap) break;
+    }
+    if (result.isLast !== false || !result.nextPageToken) break;
+    nextPageToken = result.nextPageToken;
+  }
+  return issues;
 }
 
 // Run an arbitrary JQL (spike diagnostics only — `probe --jql`). Same shaping as
@@ -720,6 +824,12 @@ module.exports = {
   whoAmI,
   searchProjectIssues,
   listProjectIssues,
+  searchIssues,
+  clampSearchLimit,
+  pickAgentColumns,
+  AGENT_ISSUE_COLUMNS,
+  SEARCH_DEFAULT_LIMIT,
+  SEARCH_MAX_LIMIT,
   searchJql,
   fetchFullChangelog,
   getIssue,

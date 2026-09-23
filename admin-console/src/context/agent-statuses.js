@@ -81,3 +81,29 @@ export function computeAgentStatusMap(list, viewed, manuallyMessaged) {
   }
   return map;
 }
+
+// Agent-Chat collapsed team header (#2430): roll the *attention-worthy* member
+// states up onto the collapsed header so the user can spot which team needs them
+// without expanding it. Only two of the #2429 states demand the user's
+// attention and therefore surface here:
+//   - 'unread' (solid green) → a reply awaiting you    → hasReply
+//   - 'busy'   (amber)       → an agent is working      → hasBusy
+// Everything else stays quiet: 'idle'/'disabled' (grey), 'offline' (red) and
+// 'unread-auto' (hollow green FYI) do NOT roll up (AC4) — collapsing a team must
+// stay a way to reduce noise, and auto-triggered activity never demands you. The
+// two flags are independent so a team with both is shown with both markers (AC3);
+// neither hides the other. `memberIds` is the flat set of the team's members
+// whose state the poll tracks (active members + their pool instances); stubs are
+// not-initialised and carry no poll status, so they contribute nothing.
+export function computeTeamAttention(memberIds, statusMap) {
+  let hasReply = false;
+  let hasBusy = false;
+  if (!Array.isArray(memberIds) || !statusMap) return { hasReply, hasBusy };
+  for (const id of memberIds) {
+    const s = statusMap[id];
+    if (s === 'unread') hasReply = true;
+    else if (s === 'busy') hasBusy = true;
+    if (hasReply && hasBusy) break;
+  }
+  return { hasReply, hasBusy };
+}

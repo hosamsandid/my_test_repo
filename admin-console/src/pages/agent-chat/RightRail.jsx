@@ -11,7 +11,7 @@ import { fitTabCount } from './rail-layout';
 import { useSessionsActive } from './SessionsActiveContext';
 import { activeSessionCount } from './sessions-active';
 import { settingsSubject } from './agent-settings-view';
-import { parseTabMap, tabForAgent, withAgentTab } from './rail-tab-memory';
+import { parseTabMap, tabForAgent, withAgentTab, DEFAULT_RAIL_TAB, displayTab, tabRequestAppliesToOwnAgent } from './rail-tab-memory';
 
 // #2267: was a single global "last active tab overall" key. Replaced with a
 // map keyed by agent id (below) so each agent restores its own last tab
@@ -98,7 +98,7 @@ export default function RightRail({
     overrideId: settingsAgentId,
   });
   const showSettings = settings.visible;
-  const [tab, setTab] = useState(() => tabForAgent(loadTabMap(), agentId, TAB_KEYS) || 'sessions');
+  const [tab, setTab] = useState(() => tabForAgent(loadTabMap(), agentId, TAB_KEYS) || DEFAULT_RAIL_TAB);
 
   // Restore-then-persist, in that order, for the same reason they're one
   // effect rather than two: the rail is NOT remounted for an ordinary
@@ -114,7 +114,7 @@ export default function RightRail({
   useEffect(() => {
     if (agentId !== prevAgentIdRef.current) {
       prevAgentIdRef.current = agentId;
-      setTab(tabForAgent(loadTabMap(), agentId, TAB_KEYS) || 'sessions');
+      setTab(tabForAgent(loadTabMap(), agentId, TAB_KEYS) || DEFAULT_RAIL_TAB);
       return;
     }
     if (!agentId) return;
@@ -123,9 +123,20 @@ export default function RightRail({
 
   // External tab request (e.g. clicking the "N learned" badge in the chat
   // header switches to the Knowledge tab). `ts` disambiguates repeat clicks.
+  // A Settings request aimed at an override agent (the row-menu "Settings…" on
+  // some other/disabled agent, or a team header click) is the one request that
+  // must NOT touch the open agent's own tab (#2426 AC3): applying it here would
+  // flip `tab` to 'settings' and persist that into the open agent's slot, the
+  // cross-contamination this ticket removes. The override drives the *displayed*
+  // tab through `effectiveTab` instead. `settings.override` is read from the
+  // same render that consumed the request, so a later override-clear (which does
+  // not re-fire this effect — deps are `[openTabRequest]`) can't retroactively
+  // apply the stale request.
   useEffect(() => {
-    if (openTabRequest && TAB_KEYS.includes(openTabRequest.tab)) setTab(openTabRequest.tab);
-  }, [openTabRequest]);
+    if (!openTabRequest || !TAB_KEYS.includes(openTabRequest.tab)) return;
+    if (!tabRequestAppliesToOwnAgent(openTabRequest.tab, settings.override)) return;
+    setTab(openTabRequest.tab);
+  }, [openTabRequest]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The persisted tab outlives the agent selection, so switching from a team
   // member to a standalone agent can leave 'outcomes' active with no such tab
@@ -135,8 +146,8 @@ export default function RightRail({
   // throw away a persisted Outcomes tab on every page load.
   useEffect(() => {
     if (!agentId) return;
-    if (!showOutcomes && tab === 'outcomes') setTab('sessions');
-    if (!showSettings && tab === 'settings') setTab('sessions');
+    if (!showOutcomes && tab === 'outcomes') setTab(DEFAULT_RAIL_TAB);
+    if (!showSettings && tab === 'settings') setTab(DEFAULT_RAIL_TAB);
   }, [agentId, showOutcomes, showSettings, tab]);
 
   // Session COUNT for the "Sessions" tab badge — regardless of which tab is
@@ -158,6 +169,22 @@ export default function RightRail({
     { key: 'knowledge', Icon: Brain, label: 'Knowledge', hint: 'The team knowledge this agent can read and add to' },
     ...(showSettings ? [{ key: 'settings', Icon: Settings, label: 'Settings', hint: 'This agent\'s configuration — prompt, skills, plugins, context folders, repositories' }] : []),
   ], [sessionCount, showOutcomes, showSettings]);
+
+  // The tab actually shown. Normally the open agent's own `tab`, but a Settings
+  // override for a DIFFERENT agent (see the `openTabRequest` effect) is a
+  // transient view that drives the display without ever becoming the open
+  // agent's own — persisted — tab (#2426). Clearing the override reverts the
+  // display straight to `tab`.
+  const effectiveTab = displayTab(tab, settings.override);
+
+  // Choosing a tab is also the gesture that ends an override view: once the
+  // user picks any tab, they are acting on the open agent again, so drop the
+  // override so `effectiveTab` follows `tab` from here on (including picking the
+  // Settings tab itself, which then means the OPEN agent's own Settings, AC4).
+  const selectTab = (key) => {
+    if (settings.override && onClearSettingsAgent) onClearSettingsAgent();
+    setTab(key);
+  };
 
   // --- Overflow measurement ---------------------------------------------
   // We render a hidden, full-width copy of the tab row to learn each tab's
@@ -201,7 +228,7 @@ export default function RightRail({
 
   const visibleTabs = tabs.slice(0, visibleCount);
   const overflowTabs = tabs.slice(visibleCount);
-  const activeInOverflow = overflowTabs.some((t) => t.key === tab);
+  const activeInOverflow = overflowTabs.some((t) => t.key === effectiveTab);
 
   // --- Overflow dropdown open/close --------------------------------------
   // The dropdown is rendered through a portal (see IconButton for the same
@@ -248,8 +275,8 @@ export default function RightRail({
     return (
       <CollapsedRail
         tabs={tabs}
-        activeTab={tab}
-        onExpandTo={(key) => { setTab(key); if (onOpen) onOpen(); }}
+        activeTab={effectiveTab}
+        onExpandTo={(key) => { selectTab(key); if (onOpen) onOpen(); }}
         onExpand={onOpen}
       />
     );
@@ -281,8 +308,8 @@ export default function RightRail({
             label={t.label}
             hint={t.hint}
             badge={t.badge ?? null}
-            active={tab === t.key}
-            onClick={() => setTab(t.key)}
+            active={effectiveTab === t.key}
+            onClick={() => selectTab(t.key)}
           />
         ))}
 
@@ -337,8 +364,8 @@ export default function RightRail({
                     label={t.label}
                     hint={t.hint}
                     badge={t.badge ?? null}
-                    active={tab === t.key}
-                    onClick={() => { setTab(t.key); setMenuOpen(false); }}
+                    active={effectiveTab === t.key}
+                    onClick={() => { selectTab(t.key); setMenuOpen(false); }}
                   />
                 ))}
               </div>,
@@ -390,11 +417,11 @@ export default function RightRail({
       {/* Body — keep both subtrees mounted via display:none so the user
           doesn't lose log scroll position / expanded folders when toggling. */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-        <div style={{ display: tab === 'sessions' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+        <div style={{ display: effectiveTab === 'sessions' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <SessionsPanel
             agentId={agentId}
             roomId={roomId}
-            active={tab === 'sessions'}
+            active={effectiveTab === 'sessions'}
             hoveredCorrelationId={hoveredCorrelationId}
             onHoverCorrelation={onHoverCorrelation}
             onCostUpdate={onCostUpdate}
@@ -404,27 +431,27 @@ export default function RightRail({
             selectRequest={sessionSelectRequest}
           />
         </div>
-        <div style={{ display: tab === 'workspace' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <WorkspaceBrowser agentId={agentId} active={tab === 'workspace'} refreshKey={workspaceRefreshKey} onReference={onReferenceInChat} />
+        <div style={{ display: effectiveTab === 'workspace' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+          <WorkspaceBrowser agentId={agentId} active={effectiveTab === 'workspace'} refreshKey={workspaceRefreshKey} onReference={onReferenceInChat} />
         </div>
-        <div style={{ display: tab === 'triggers' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-          <TriggersPanel agentId={agentId} active={tab === 'triggers'} />
+        <div style={{ display: effectiveTab === 'triggers' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+          <TriggersPanel agentId={agentId} active={effectiveTab === 'triggers'} />
         </div>
         {showOutcomes && (
-          <div style={{ display: tab === 'outcomes' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
-            <OutcomesPanel agentId={agentId} active={tab === 'outcomes'} />
+          <div style={{ display: effectiveTab === 'outcomes' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+            <OutcomesPanel agentId={agentId} active={effectiveTab === 'outcomes'} />
           </div>
         )}
-        <div style={{ display: tab === 'knowledge' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+        <div style={{ display: effectiveTab === 'knowledge' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           {/* #1922: no external refresh signal any more (Save & Learn was its
               only feeder) — the panel reloads when the tab becomes active. */}
-          <AgentKnowledgePanel agentId={agentId} active={tab === 'knowledge'} />
+          <AgentKnowledgePanel agentId={agentId} active={effectiveTab === 'knowledge'} />
         </div>
         {showSettings && (
-          <div style={{ display: tab === 'settings' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+          <div style={{ display: effectiveTab === 'settings' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
             <AgentSettingsPanel
               agentId={settings.agentId}
-              active={tab === 'settings'}
+              active={effectiveTab === 'settings'}
               chatAgentId={agentId}
               chatAgentName={chatAgentName}
               onBackToChatAgent={settings.override ? onClearSettingsAgent : null}

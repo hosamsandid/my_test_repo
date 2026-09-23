@@ -152,12 +152,34 @@ function planOwnerBackfill({ configs = {}, users = [], memberships = [] } = {}) 
 // `(userId, teamId)`. When one user reaches the same Agent Team through two
 // scopes with different roles, `team-admin` wins — dropping to `team-member`
 // would be the reach loss §8.3 forbids.
-function planMembershipRepoint({ configs = {}, memberships = [] } = {}) {
+// Two guards keep this a ONE-TIME LEGACY migration, not a recurring boot
+// reconcile: it runs on every boot, so without them it re-derives from the
+// still-present scope memberships and re-adds, on each restart, members a human
+// curated away. The property we need: a restart never adds members to a team
+// created under the new model.
+function planMembershipRepoint({ configs = {}, memberships = [], users = [] } = {}) {
+  // (C) A System Admin is a global flag with scope.all, never a membership
+  // (decentralised-access-concept.md 2.1/2.2): their reach comes from the
+  // bypass, so they are never materialised as a team member. `users` marks who
+  // is a System Admin; omitting it disables this guard (kept optional so
+  // existing callers stay valid).
+  const systemAdminIds = new Set(
+    (users || [])
+      .filter((u) => u && u.systemAdmin === true && u.id)
+      .map((u) => String(u.id))
+  );
   // scope id → the Agent Team ids stamped into it
   const teamsByScope = new Map();
   for (const id of Object.keys(configs).sort()) {
     const cfg = configs[id];
     if (!cfg || typeof cfg !== "object" || cfg.role !== "team") continue;
+    // (B) A team created under the new model (ownerSource: 'creator', #2081)
+    // already holds its correct membership (planCreatorMembership) and is never
+    // a fan-out target — otherwise a new team stamped `teamId: 'default'` (its
+    // owning tenant) re-inherits the whole default scope on every restart. Only
+    // genuinely legacy teams (no ownerSource, or the 'migration' placeholder
+    // this pass itself stamps) inherit their scope's members.
+    if (cfg.ownerSource === OWNER_SOURCE_CREATOR) continue;
     const scopeId = isNonEmptyString(cfg.teamId) ? cfg.teamId : DEFAULT_TEAM_ID;
     if (!teamsByScope.has(scopeId)) teamsByScope.set(scopeId, []);
     teamsByScope.get(scopeId).push(id);
@@ -173,6 +195,7 @@ function planMembershipRepoint({ configs = {}, memberships = [] } = {}) {
   for (const m of memberships || []) {
     if (!m || !m.userId || !m.teamId) continue;
     if (m.role !== "team-admin" && m.role !== "team-member") continue;
+    if (systemAdminIds.has(String(m.userId))) continue; // (C)
     for (const teamId of teamsByScope.get(m.teamId) || []) {
       const key = `${m.userId} ${teamId}`;
       if (existing.has(key)) continue;

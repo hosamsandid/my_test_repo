@@ -13,7 +13,7 @@ const {
 } = require("./initial-admin-seed");
 const teamAdminSuccession = require("./team-admin-succession");
 const { resolveAgentTenant, planTenantBackfill } = require("./agent-tenant");
-const { needsAdoption, planAdoption, planBootstrapMembership } = require("./default-team-adoption");
+const { needsAdoption, planAdoption } = require("./default-team-adoption");
 const { makeSkillSourceResolver, parseSkillDescription } = require("./skill-source");
 const {createAnthropicProxyServer} = require('./anthropic-proxy')
 const {
@@ -1245,31 +1245,15 @@ function bootstrapTeams() {
     }
   })();
 
-  // (#1457) System Admin is a global flag, not a membership, so a System Admin
-  // owns the Default Team but has no Team-Admin role in it — give it one. This is
-  // deliberately DECOUPLED from any deployment config (#2059 AC4/AC7): the review
-  // of the #1457 merge caught that promoting from the configured bootstrap subject
-  // on every boot would re-flip the admin flag, making that value a live admin
-  // grant through a membership side-door and silently undoing a deliberate
-  // demotion. So the backfill NEVER re-derives or re-grants admin status: it
-  // reads the CURRENT System Admins from the store and gives each the Team-Admin
-  // membership, idempotently (an empty plan once the pair exists). A user a human
-  // demoted is no longer a System Admin, so is neither found here nor re-promoted.
-  try {
-    for (const admin of teamsStore.listUsers().filter((u) => u && u.systemAdmin === true)) {
-      const membership = planBootstrapMembership({
-        userId: admin.id,
-        memberships: teamsStore.listMemberships({ teamId: DEFAULT_TEAM_ID }),
-        teamId: DEFAULT_TEAM_ID,
-      });
-      if (membership) {
-        teamsStore.setMembership(membership);
-        console.log(`[Orchestrator] Made System Admin '${admin.subject}' ${membership.role} of the Default Team`);
-      }
-    }
-  } catch (err) {
-    console.error(`[Orchestrator] Default-Team Team-Admin backfill failed: ${err.message}`);
-  }
+  // (#1457 backfill retired) A System Admin is a global flag with `scope.all`,
+  // NOT a membership (decentralised-access-concept.md 2.1/2.2): an admin sees and
+  // manages every team through the bypass, so it must never be enrolled as a
+  // `team-admin` MEMBER of the Default Team. The former boot backfill did exactly
+  // that, and the D6 fan-out (`migrateOwnershipModel`) then propagated those
+  // Default-Team memberships into every default-scoped Agent Team on each boot —
+  // re-adding, on every restart, admins a human had removed. No membership is
+  // seeded here anymore; `ensureDefaultTeam()` above keeps the record as the
+  // ownership fallback until the access-scope layer is retired (concept 8.4/A3.3).
 }
 
 // Stamp `teamId: "default"` onto any resource that lacks an owner. Rewrites the
@@ -1442,7 +1426,7 @@ function migrateOwnershipModel() {
 
   // ── Pass 2 — membership fan-out (AC2/AC3) ───────────────────────────────
   let granted = 0;
-  const repoint = ownershipMigration.planMembershipRepoint({ configs, memberships });
+  const repoint = ownershipMigration.planMembershipRepoint({ configs, memberships, users });
   if (repoint.length > 0) {
     try {
       granted = teamsStore.appendMemberships(repoint).length;

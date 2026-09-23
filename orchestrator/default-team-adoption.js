@@ -13,21 +13,22 @@
 // exported from that 14k-line module and therefore cannot be reached by a test
 // — the `initial-admin-seed.js` discipline.
 //
-// Two decisions, both of them easy to get subtly wrong:
+// The one decision here, easy to get subtly wrong:
 //
-//   1. WHICH records still need the stamp. The predicate is `teamId === undefined`
-//      and not a falsy check, because `teamId: null` is a *deliberate* value: the
-//      personal credential tier (#1567) carries `teamId: null` + a `userId` and is
-//      not team-owned at all. Stamping those would hand every System Admin a view
-//      of credentials the personal tier exists to keep private.
-//   2. WHETHER the bootstrap admin still needs its Default-Team `team-admin`
-//      membership. The ticket asks for the membership; the store's `setMembership`
-//      is an upsert, so re-asserting it on every boot would silently re-promote an
-//      admin a human had deliberately demoted. So the plan is empty as soon as any
-//      membership for that pair exists, whatever its role.
+//   WHICH records still need the stamp. The predicate is `teamId === undefined`
+//   and not a falsy check, because `teamId: null` is a *deliberate* value: the
+//   personal credential tier (#1567) carries `teamId: null` + a `userId` and is
+//   not team-owned at all. Stamping those would hand every System Admin a view
+//   of credentials the personal tier exists to keep private.
+//
+// A second decision used to live here — whether the bootstrap admin still needed
+// a Default-Team `team-admin` membership (#1457). It is RETIRED: a System Admin
+// is a global flag with `scope.all`, not a membership (decentralised-access
+// -concept.md 2.1/2.2), and seeding that membership fed the D6 fan-out that
+// re-enrolled admins into every team on each boot. `planBootstrapMembership`
+// and its boot caller are gone.
 
 const DEFAULT_TEAM_ID = 'default';
-const BOOTSTRAP_TEAM_ROLE = 'team-admin';
 
 // Does this record predate the ownership model? `undefined` only — see note 1.
 // An array is rejected explicitly: it is an object whose `teamId` is `undefined`,
@@ -58,23 +59,9 @@ function adoptionCount(entries = []) {
   return planAdoption(entries).length;
 }
 
-// The Default-Team membership the bootstrap admin still needs, or `null`.
-//
-// `null` when there is no bootstrap admin (nothing was seeded) or when a
-// membership for (userId, teamId) already exists in any role — see note 2.
-function planBootstrapMembership({ userId, memberships = [], teamId = DEFAULT_TEAM_ID } = {}) {
-  if (typeof userId !== 'string' || !userId) return null;
-  if (!Array.isArray(memberships)) return null;
-  const held = memberships.some(m => m && m.userId === userId && m.teamId === teamId);
-  if (held) return null;
-  return { userId, teamId, role: BOOTSTRAP_TEAM_ROLE };
-}
-
 module.exports = {
   DEFAULT_TEAM_ID,
-  BOOTSTRAP_TEAM_ROLE,
   needsAdoption,
   planAdoption,
   adoptionCount,
-  planBootstrapMembership,
 };

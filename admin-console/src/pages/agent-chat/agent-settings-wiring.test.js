@@ -184,7 +184,39 @@ test('the tab is derived from the pure subject, never from agentId alone', () =>
 });
 
 test('a stale persisted Settings tab falls back like the Outcomes one does', () => {
-  assert.match(rail, /if \(!showSettings && tab === 'settings'\) setTab\('sessions'\)/);
+  // #2426: the fallback lands on the shared Workspace default, not Sessions.
+  assert.match(rail, /if \(!showSettings && tab === 'settings'\) setTab\(DEFAULT_RAIL_TAB\)/);
+});
+
+/* ── #2426: default is Workspace, and a foreign Settings override never
+      becomes the open agent's own persisted tab ──────────────────────── */
+
+test('the rail resolves its default landing tab from the shared Workspace constant', () => {
+  // No bare `|| 'sessions'` default survives — every no-history fallback and the
+  // stale-tab fallback route through DEFAULT_RAIL_TAB so "the default" is defined once.
+  assert.match(rail, /DEFAULT_RAIL_TAB/);
+  assert.doesNotMatch(rail, /\|\| 'sessions'/);
+  assert.doesNotMatch(rail, /setTab\('sessions'\)/);
+});
+
+test('what the rail SHOWS is derived through displayTab, not the raw persisted tab', () => {
+  // A Settings override for another agent must drive display only; the body and
+  // tab strip read `effectiveTab`, while localStorage still persists the open
+  // agent's own `tab` untouched (AC1/AC3).
+  assert.match(rail, /const effectiveTab = displayTab\(tab, settings\.override\)/);
+  assert.match(rail, /display: effectiveTab === 'settings'/);
+  assert.match(rail, /display: effectiveTab === 'workspace'/);
+  // The persist write is still keyed on the OWN tab, never effectiveTab.
+  assert.match(rail, /withAgentTab\(loadTabMap\(\), agentId, tab\)/);
+  assert.doesNotMatch(rail, /withAgentTab\([^)]*effectiveTab/);
+});
+
+test('a Settings request for an override agent is withheld from the open agent\'s own tab', () => {
+  assert.match(rail, /tabRequestAppliesToOwnAgent\(openTabRequest\.tab, settings\.override\)/);
+});
+
+test('picking any tab ends an active override so it cannot strand the display on Settings', () => {
+  assert.match(rail, /const selectTab = \(key\) => \{[\s\S]*?onClearSettingsAgent\(\)[\s\S]*?setTab\(key\)[\s\S]*?\}/);
 });
 
 /* ── #2235: a team subject never reaches the rail at all any more ── */
@@ -286,7 +318,7 @@ test('a subject change restores that agent\'s own tab before anything persists',
   // was never active for it.
   const combined = code(rail).match(/useEffect\(\(\) => \{\s*if \(agentId !== prevAgentIdRef\.current\) \{[\s\S]*?\}, \[agentId, tab\]\);/);
   assert.ok(combined, 'expected one combined restore+persist effect keyed on [agentId, tab]');
-  assert.match(combined[0], /setTab\(tabForAgent\(loadTabMap\(\), agentId, TAB_KEYS\) \|\| 'sessions'\)/);
+  assert.match(combined[0], /setTab\(tabForAgent\(loadTabMap\(\), agentId, TAB_KEYS\) \|\| DEFAULT_RAIL_TAB\)/);
   assert.match(combined[0], /localStorage\.setItem\(TAB_MAP_KEY, JSON\.stringify\(withAgentTab\(loadTabMap\(\), agentId, tab\)\)\)/);
 });
 

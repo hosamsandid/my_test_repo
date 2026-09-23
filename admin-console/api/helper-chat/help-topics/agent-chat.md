@@ -161,7 +161,15 @@ opens its **Settings** tab in the right rail instead — a team hosts no chat of
 its own, so the middle pane shows a short explanation rather than an empty room.
 Both the collapse state and your own ordering are remembered per user. Drag a
 row by its grip to reorder, or move the focused row with **Alt+↑** / **Alt+↓**
-if you would rather not drag.
+if you would rather not drag. A **collapsed** team header carries an aggregate
+**needs-attention** marker just left of the member count, so a folded team still
+tells you *which* team wants you without expanding it: a solid-green dot when any
+member has a reply awaiting you, and an amber pulsing dot when any member is
+working — the same two states, and the same dots, the per-agent status dots use.
+The quieter states stay hidden — idle, disabled, offline, and unread output from
+a run you did not start (the hollow-green FYI) never roll up, so collapsing a team
+keeps reducing noise. Expand it and the marker gives way to the per-agent dots
+again.
 
 **Finding an agent.** The filter box above the list narrows it as you type. Next
 to it, the **eye** toggle is the *show disabled agents* opt-in: disabled agents

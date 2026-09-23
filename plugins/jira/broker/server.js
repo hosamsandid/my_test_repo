@@ -112,7 +112,12 @@ function resolveCredential(scopeId) {
   // Surfaced by default on every read; a per-request `--fields` adds to it.
   const readableCustomFields = String(v['readable-custom-fields'] || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
-  return { siteUrl, email, apiToken, readableCustomFields };
+  // Optional admin allow-list of WRITABLE custom fields (#2417): a comma list of
+  // human field names ("Team") an agent may set via `aee-jira set-field`. Empty =
+  // no field is writable (the safe default — a write is stricter than a read).
+  const writableCustomFields = String(v['writable-custom-fields'] || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  return { siteUrl, email, apiToken, readableCustomFields, writableCustomFields };
 }
 
 // ── delivery: POST /internal/plugin-event (Jira plan §4B) ───────────────────
@@ -457,7 +462,7 @@ async function handleCli(req, res, cliPath) {
   }
 
   // ── attributed writes (Phase 4, D3 — role-gated server-side, no confirm) ──
-  const writeOps = { '/comment': 'comment', '/transition': 'transition', '/update': 'update' };
+  const writeOps = { '/comment': 'comment', '/transition': 'transition', '/update': 'update', '/set-field': 'set-field' };
   if (writeOps[cliPath] && req.method === 'POST') {
     const op = writeOps[cliPath];
     const authz = brokerPolicy.authorizeWrite(op);
@@ -487,10 +492,26 @@ async function handleCli(req, res, cliPath) {
           description: text,
           attribution: `Description rewritten by an agent on team "${scopeId}" via Agent Studio.`,
         });
+      } else if (op === 'set-field') {
+        const field = String(body.field || '').trim();
+        if (!field) return sendJson(res, 400, { error: 'a field name is required' });
+        const hasJson = Object.prototype.hasOwnProperty.call(body, 'valueJson');
+        if (!hasJson && (body.value === undefined || body.value === null)) {
+          return sendJson(res, 400, { error: 'a value is required (--value or --value-json)' });
+        }
+        result = await jira.setCustomField(cred, issue, {
+          fieldName: field,
+          value: hasJson ? undefined : body.value,
+          jsonValue: hasJson ? body.valueJson : undefined,
+          allowList: cred.writableCustomFields || [],
+        });
       } else {
         result = await jira.transitionIssue(cred, issue, { toStatus: body.to });
       }
-      writeAudit(scopeId, scopeId, op, 'ok', `${issue}${op === 'transition' ? `→${body.to || ''}` : ''}`);
+      const detail = op === 'transition' ? `${issue}→${body.to || ''}`
+        : op === 'set-field' ? `${issue}.${String(body.field || '').trim()}`
+          : issue;
+      writeAudit(scopeId, scopeId, op, 'ok', detail);
       return sendJson(res, 200, result);
     } catch (err) {
       writeAudit(scopeId, scopeId, op, 'error', `${issue}: ${err.message}`);

@@ -47,7 +47,7 @@ poller's, in `broker-sdk/event-cursor.js` (`github-poller.js` is untouched).
 | `viewer-headers.js` | §4.8 signed-viewer verify (byte-identical copy) + the `/admin` → team-admin role gate |
 | `broker-policy.js` | write authorisation (D3): `authorizeWrite` → SDK `authorizeAction` against the manifest `policy`; `requiresApproval` wired-but-empty |
 | `ui/` | the served `/` route (Board tab: issues / watch-health cards / inbox; Activity tab: the retained log) + `/admin` route (watch config with per-project status chips, team-admin). Dependency-free vanilla JS, `--eb-*` tokens, follows the console theme |
-| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials}`, `/cli/*` (`whoami`/`inbox` (peek / `?consume=<id,…>`)/`projects`/`list`/`search` (arbitrary JQL)/`show`/`attachment` (content by id) + `comment`/`transition`/`update`/`attachment/add` (upload one file per call) POST), `/ui/*` (incl. `/ui/api/{watches,activity,admin/watch,admin/retry}`) |
+| `server.js` | wiring: `/healthz`, `/internal/{teardown-scope,scope-credentials}`, `/cli/*` (`whoami`/`inbox` (peek / `?consume=<id,…>`)/`projects`/`list`/`search` (arbitrary JQL)/`show`/`attachment` (content by id) + `comment`/`transition`/`update`/`set-field` (allow-listed custom-field write)/`attachment/add` (upload one file per call) POST), `/ui/*` (incl. `/ui/api/{watches,activity,admin/watch,admin/retry}`) |
 
 
 ## Credentials
@@ -62,7 +62,10 @@ token only — SDK `internalPushEndpoint`; a granted team's token is refused) on
 boot, on grant change and on save — no restart, no secret in code or env. `resolveCredential(scopeId)` reads only that
 pushed map; a granted-but-unconfigured team simply isn't polled. Use a **classic
 (unscoped)** Jira API token — a scoped one missing `read:jira-work` sees zero
-projects.
+projects. Two optional credential values are admin allow-lists of custom fields
+by their human name: `readable-custom-fields` (surfaced by default on
+`show`/`search`/`list`) and `writable-custom-fields` (settable via `set-field` —
+empty means no field is writable; a field not on it is refused).
 
 ## Delivery — the `plugin-event` wake
 
@@ -82,8 +85,17 @@ match; the inbox holds all of them.
 
 ## Writes — role-gated, not confirmation-gated (D3)
 
-`aee-jira comment` / `transition` / `update` / `attachment add` POST through the
-broker. `attachment add` sends ONE file per request as `{ issue, filename,
+`aee-jira comment` / `transition` / `update` / `set-field` / `attachment add`
+POST through the broker. `set-field` sets one custom field (#2417): the broker
+gates it three ways — (1) the field's name must be on the team's
+`writable-custom-fields` allow-list (empty = nothing writable), else 403; (2) the
+name is resolved to its per-site id from the cached `/rest/api/3/field` catalog
+(the same one the #2415/#2416 reads use), a miss is a 400; (3) the value is shaped
+per the field's schema type (`shapeFieldWriteValue` — a Team/select/user field is
+not a plain string), or sent verbatim from `--value-json`. It reads the current
+value first and skips the `PUT` when it already matches (idempotent, `changed:
+false`), and — being a write — is never retried on a transport failure.
+`attachment add` sends ONE file per request as `{ issue, filename,
 contentBase64 }`; the broker decodes it and does the multipart upload to Jira's
 `/attachments` endpoint (with the required `X-Atlassian-Token: no-check` header)
 server-side, so the Jira token never leaves the broker — the same containment as
@@ -99,7 +111,7 @@ be lower and surfaces as a mapped 413.
 Before the credential
 is touched, `broker-policy.authorizeWrite` runs the manifest's `policy` rule
 through the SDK's `authorizeAction`. jira is `scopes: ["team"]`, so every caller
-resolves to `kind: 'team'` and both rules pass — which is D3's intent (moving a
+resolves to `kind: 'team'` and every rule passes — which is D3's intent (moving a
 ticket is routine and reversible; an approval pen would stall unattended flows).
 The value of the gate: the enforcement path exists, so a future tightening (or a
 `requiresApproval` entry for a destructive op) is a manifest edit. `transition`

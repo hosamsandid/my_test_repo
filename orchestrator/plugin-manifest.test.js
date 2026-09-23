@@ -541,11 +541,12 @@ test('the shipped jira manifest (plugins/jira) is valid', () => {
   // is a per-scope plugin credential (§5), so unlike github-issues the declared
   // credentials are NOT empty:
   assert.deepEqual(manifest.sidecar.capabilities, ['egress']);
-  // The three connection credentials are required; `readable-custom-fields` is an
-  // optional admin allow-list of readable custom fields (#2416).
-  assert.deepEqual(manifest.credentials.map((c) => c.key), ['site-url', 'email', 'api-token', 'readable-custom-fields']);
-  assert.ok(manifest.credentials.filter((c) => c.key !== 'readable-custom-fields').every((c) => c.required === true));
-  assert.equal(manifest.credentials.find((c) => c.key === 'readable-custom-fields').required, false);
+  // The three connection credentials are required; `readable-custom-fields` (#2416)
+  // and `writable-custom-fields` (#2417) are optional admin allow-lists.
+  const OPTIONAL_CREDS = ['readable-custom-fields', 'writable-custom-fields'];
+  assert.deepEqual(manifest.credentials.map((c) => c.key), ['site-url', 'email', 'api-token', ...OPTIONAL_CREDS]);
+  assert.ok(manifest.credentials.filter((c) => !OPTIONAL_CREDS.includes(c.key)).every((c) => c.required === true));
+  assert.ok(OPTIONAL_CREDS.every((k) => manifest.credentials.find((c) => c.key === k).required === false));
   // Team scope only — a Jira site binding is a team-level fact (§6.1). Runs on
   // Podman AND Kubernetes: the broker is structurally identical to github-issues
   // (egress sidecar + UI + per-scope credential), which is already
@@ -564,7 +565,7 @@ test('the shipped jira manifest (plugins/jira) is valid', () => {
     { path: '/admin', minRole: 'team-admin' },
   ]);
   assert.notEqual(manifest.ui.global, true);
-  assert.deepEqual(Object.keys(manifest.policy).sort(), ['attach', 'comment', 'transition', 'update']);
+  assert.deepEqual(Object.keys(manifest.policy).sort(), ['attach', 'comment', 'set-field', 'transition', 'update']);
   assert.deepEqual(manifest.requiresApproval, []);
 });
 

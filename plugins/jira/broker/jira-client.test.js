@@ -658,6 +658,111 @@ test('listProjectIssues: an admin-configured custom field is surfaced on each ro
   });
 });
 
+// ── custom-field write (#2417) ───────────────────────────────────────────────
+
+// A `/rest/api/3/field` response carrying a typed "Team" field and a plain-text
+// "Notes" field, so a write can resolve name → id AND shape by schema type.
+function writableFieldList() {
+  return { ok: true, status: 200, text: async () => JSON.stringify([
+    { id: 'customfield_20001', name: 'Team', schema: { type: 'team', custom: 'com.atlassian.teams:rm-teams-custom-field-team' } },
+    { id: 'customfield_20009', name: 'Notes', schema: { type: 'string' } },
+  ]) };
+}
+
+test('shapeFieldWriteValue: shapes per schema type; a bad number is a 400', () => {
+  assert.equal(jc.shapeFieldWriteValue({ type: 'string' }, 'hi'), 'hi');
+  assert.equal(jc.shapeFieldWriteValue({ type: 'date' }, '2026-01-01'), '2026-01-01');
+  assert.equal(jc.shapeFieldWriteValue({ type: 'number' }, '7'), 7);
+  assert.deepEqual(jc.shapeFieldWriteValue({ type: 'option' }, 'High'), { value: 'High' });
+  assert.deepEqual(jc.shapeFieldWriteValue({ type: 'user' }, 'acc-1'), { accountId: 'acc-1' });
+  assert.deepEqual(jc.shapeFieldWriteValue({ type: 'team' }, '42'), { id: '42' });
+  assert.deepEqual(jc.shapeFieldWriteValue({ type: 'array', items: 'option' }, 'a'), [{ value: 'a' }]);
+  assert.deepEqual(jc.shapeFieldWriteValue({ type: 'array', items: 'string' }, 'a'), ['a']);
+  assert.equal(jc.shapeFieldWriteValue(null, 'plain'), 'plain'); // unmodelled → string
+  assert.throws(() => jc.shapeFieldWriteValue({ type: 'number' }, 'NaN'), (e) => e.status === 400);
+});
+
+test('fieldValueMatches: an id/value object, a scalar, an array member, else false', () => {
+  assert.equal(jc.fieldValueMatches({ id: '42', title: 'Payments' }, '42'), true);
+  assert.equal(jc.fieldValueMatches({ id: '42', title: 'Payments' }, 'Payments'), true);
+  assert.equal(jc.fieldValueMatches({ id: '42', title: 'Payments' }, '99'), false);
+  assert.equal(jc.fieldValueMatches('EPIC-1', 'EPIC-1'), true);
+  assert.equal(jc.fieldValueMatches([{ value: 'a' }, { value: 'b' }], 'b'), true);
+  assert.equal(jc.fieldValueMatches(null, 'x'), false);
+});
+
+test('setCustomField: a field not on the allow-list is refused (403) before any Jira call', async () => {
+  await withFetch(() => { throw new Error('no HTTP expected'); }, async (calls) => {
+    await assert.rejects(
+      () => jc.setCustomField(CRED, 'ENG-1', { fieldName: 'Team', value: '42', allowList: ['Sprint'], env: CRED.env }),
+      (e) => e.status === 403 && /not writable/.test(e.message),
+    );
+    // an empty allow-list forbids everything, and names the field for the admin
+    await assert.rejects(
+      () => jc.setCustomField(CRED, 'ENG-1', { fieldName: 'Team', value: '42', allowList: [], env: CRED.env }),
+      (e) => e.status === 403 && /allow-list is empty/.test(e.message) && /"Team"/.test(e.message),
+    );
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('setCustomField: an allow-listed but unknown Jira field name is a 400', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return { ok: true, status: 200, text: async () => '[]' };
+    throw new Error('no write expected');
+  }, async () => {
+    await assert.rejects(
+      () => jc.setCustomField(CRED, 'ENG-1', { fieldName: 'Ghost', value: 'x', allowList: ['Ghost'], env: CRED.env }),
+      (e) => e.status === 400 && /unknown Jira field: Ghost/.test(e.message),
+    );
+  });
+});
+
+test('setCustomField: resolves name → id, shapes by type, and PUTs {fields:{id}} (Team as {id})', async () => {
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return writableFieldList();
+    if (opts && opts.method === 'PUT') return { ok: true, status: 204, text: async () => '' };
+    // the idempotency pre-read: the field is currently unset
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'ENG-1', fields: { customfield_20001: null } }) };
+  }, async (calls) => {
+    const r = await jc.setCustomField(CRED, 'ENG-1', { fieldName: 'Team', value: '42', allowList: ['Team'], env: CRED.env });
+    assert.deepEqual(r, { issueKey: 'ENG-1', field: 'Team', changed: true, value: '42' });
+    const put = calls.find((c) => c.opts && c.opts.method === 'PUT');
+    assert.match(put.url, /\/rest\/api\/3\/issue\/ENG-1$/);
+    assert.deepEqual(JSON.parse(put.opts.body), { fields: { customfield_20001: { id: '42' } } });
+  });
+});
+
+test('setCustomField: idempotent — a value the field already holds is a no-op (no PUT)', async () => {
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return writableFieldList();
+    if (opts && opts.method === 'PUT') throw new Error('should not write when unchanged');
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'ENG-1', fields: { customfield_20001: { id: '42', title: 'Payments' } } }) };
+  }, async (calls) => {
+    const r = await jc.setCustomField(CRED, 'ENG-1', { fieldName: 'Team', value: '42', allowList: ['Team'], env: CRED.env });
+    assert.equal(r.changed, false);
+    assert.deepEqual(r.value, { id: '42', value: 'Payments' });
+    assert.equal(calls.some((c) => c.opts && c.opts.method === 'PUT'), false);
+  });
+});
+
+test('setCustomField: --value-json is sent verbatim, with no idempotency pre-read', async () => {
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return writableFieldList();
+    if (opts && opts.method === 'PUT') return { ok: true, status: 204, text: async () => '' };
+    throw new Error('no GET pre-read expected for jsonValue');
+  }, async (calls) => {
+    const r = await jc.setCustomField(CRED, 'ENG-1', {
+      fieldName: 'Team', jsonValue: { id: '99' }, allowList: ['Team'], env: CRED.env,
+    });
+    assert.equal(r.changed, true);
+    const put = calls.find((c) => c.opts && c.opts.method === 'PUT');
+    assert.deepEqual(JSON.parse(put.opts.body), { fields: { customfield_20001: { id: '99' } } });
+    // exactly two calls: the field catalog GET + the PUT (no pre-read GET)
+    assert.equal(calls.filter((c) => !isFieldList(c.url) && (!c.opts || c.opts.method !== 'PUT')).length, 0);
+  });
+});
+
 // ── attachments (#2399) ──────────────────────────────────────────────────────
 
 test('shapeAttachment: narrows to id/filename/mimeType/size/author/created/contentUrl; drops idless', () => {

@@ -1193,6 +1193,204 @@ async function setCustomField(cred, issueKey, { fieldName, value, jsonValue, all
   return { issueKey: key, field: name, changed: true, value: hasJson ? jsonValue : value };
 }
 
+// ── issue creation: one Epic + its child Stories (#2424) ─────────────────────
+//
+// The first CREATE capability of the plugin (reads + field/description writes
+// existed; nothing created an issue). One call creates one **Epic** (the ask)
+// and N **Stories** underneath it (the breakdown) in a single project, each
+// Story linked to the Epic. Scoped to one project (§ the ticket): the epic and
+// every story land in `projectKey`.
+//
+// Jira has no create-transaction, so the guards run in this order so a bad input
+// fails BEFORE any issue exists (no orphan epic):
+//   1. shape validation — a missing project / epic summary / story summary is a
+//      400 up front.
+//   2. custom-field allow-list — EVERY custom field named anywhere (epic or a
+//      story) MUST be on the team's `writable-custom-fields` list, exactly like
+//      `setCustomField` (#2417): the same fields (Team, Story Points) an admin
+//      sanctioned for a set are the ones creatable here. A non-listed field is a
+//      403 before anything is created. The Epic-link field the broker sets to
+//      wire a Story to its Epic is structural, NOT a user-named field, so it is
+//      exempt from the allow-list.
+//   3. name → id + schema resolution via the (cached) field catalog — an unknown
+//      custom-field name is a 400 up front.
+// The epic is created first (its key is needed to link the stories); then each
+// story is created and, if a `status` was given, transitioned (Jira creates an
+// issue in the workflow's initial status, so a non-default start is a follow-up
+// transition — the ticket's own note). A per-story failure AFTER the epic exists
+// does NOT abort the rest: the story is recorded failed and the operation
+// continues, so the caller gets the epic key + a per-story success/failure map
+// (like `attachment add`). Creates are NEVER retried on a transport failure
+// (F6): a retry landing after Jira accepted the first would create a duplicate.
+const EPIC_ISSUE_TYPE = 'Epic';
+const STORY_ISSUE_TYPE = 'Story';
+
+// Build the `fields` object for one issue-create (epic or story). Pure. `spec`
+// is the caller's `{ summary, description?, assignee?, fields? }`; `fieldMeta`
+// maps a lower-cased custom-field name → its `{ id, schema }` (already resolved
+// + allow-listed). A custom-field value that is already an object/array is sent
+// verbatim (an escape hatch for an exotic shape); a scalar is shaped per the
+// field's schema type via the shared `shapeFieldWriteValue` (Team → {id},
+// number → Number, …).
+function buildCreateFields({ projectKey, issueTypeName, spec, fieldMeta, attribution }) {
+  const fields = {
+    project: { key: projectKey },
+    issuetype: { name: issueTypeName },
+    summary: String(spec.summary || '').trim(),
+  };
+  const desc = spec.description == null ? '' : String(spec.description).trim();
+  if (desc) fields.description = descriptionAdf(desc, attribution);
+  const assignee = spec.assignee == null ? '' : String(spec.assignee).trim();
+  if (assignee) fields.assignee = { accountId: assignee };
+  if (spec.fields && typeof spec.fields === 'object') {
+    for (const [name, value] of Object.entries(spec.fields)) {
+      const meta = fieldMeta.get(name.toLowerCase());
+      if (!meta) continue; // validated up front — defensive
+      fields[meta.id] = value !== null && typeof value === 'object'
+        ? value // exotic shape, verbatim (mirrors set-field's --value-json)
+        : shapeFieldWriteValue(meta.schema, value);
+    }
+  }
+  return fields;
+}
+
+// POST one issue-create. A write — never retried on a transport failure (F6).
+// Returns `{ id, key }` (Jira answers 201 with them).
+async function createIssue(base, auth, fields) {
+  const res = await requestJson({
+    base,
+    path: '/rest/api/3/issue',
+    method: 'POST',
+    authHeader: auth,
+    body: { fields },
+  });
+  return { id: res.id ? String(res.id) : null, key: String(res.key || '') };
+}
+
+// Every custom-field name used across the epic + all stories, first spelling
+// wins (so the error/allow-list messages read as the caller typed them). Pure.
+function collectCustomFieldNames(epic, stories) {
+  const seen = new Set();
+  const out = [];
+  const add = (spec) => {
+    if (spec && spec.fields && typeof spec.fields === 'object') {
+      for (const name of Object.keys(spec.fields)) {
+        const trimmed = String(name || '').trim();
+        if (!trimmed || seen.has(trimmed.toLowerCase())) continue;
+        seen.add(trimmed.toLowerCase());
+        out.push(trimmed);
+      }
+    }
+  };
+  add(epic);
+  for (const s of Array.isArray(stories) ? stories : []) add(s);
+  return out;
+}
+
+async function createEpicWithStories(cred, { projectKey, epic, stories, allowList, attribution, issueTypes, env } = {}) {
+  const project = String(projectKey || '').trim();
+  if (!project) { const e = new Error('a project key is required'); e.status = 400; throw e; }
+  if (!epic || typeof epic !== 'object') { const e = new Error('an epic is required'); e.status = 400; throw e; }
+  if (!String(epic.summary || '').trim()) { const e = new Error('the epic requires a summary'); e.status = 400; throw e; }
+  const storyList = Array.isArray(stories) ? stories : [];
+  storyList.forEach((s, i) => {
+    if (!s || typeof s !== 'object' || !String(s.summary || '').trim()) {
+      const e = new Error(`story #${i + 1} requires a summary`); e.status = 400; throw e;
+    }
+  });
+
+  // (2) allow-list gate — every named custom field must be sanctioned (#2417).
+  const usedNames = collectCustomFieldNames(epic, storyList);
+  const allow = (Array.isArray(allowList) ? allowList : [])
+    .map((s) => String(s || '').trim().toLowerCase()).filter(Boolean);
+  const notAllowed = usedNames.filter((n) => !allow.includes(n.toLowerCase()));
+  if (notAllowed.length) {
+    const e = new Error(
+      allow.length
+        ? `custom field(s) not writable by agents: ${notAllowed.join(', ')}. This team's `
+          + `writable-custom-fields allow-list is: ${allowList.join(', ')}. A Team Admin adds them on the Plugins page.`
+        : `no custom field is writable by agents: this team's writable-custom-fields allow-list is empty. `
+          + `A Team Admin adds ${notAllowed.map((n) => `"${n}"`).join(', ')} to it on the Plugins page.`,
+    );
+    e.status = 403;
+    throw e;
+  }
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+
+  // (3) name → id + schema, up front (one cached catalog fetch feeds every field
+  // AND the Epic-link id used to wire Story→Epic).
+  const catalog = await resolveFieldCatalog(base, auth);
+  const fieldMeta = new Map();
+  const unknown = [];
+  for (const name of usedNames) {
+    const id = catalog.byName.get(name.toLowerCase());
+    if (!id) { unknown.push(name); continue; }
+    fieldMeta.set(name.toLowerCase(), catalog.byId.get(id) || { id, name, schema: null });
+  }
+  if (unknown.length) {
+    const e = new Error(
+      `unknown Jira field(s): ${unknown.join(', ')}. Use the field's human name as it appears in Jira (e.g. "Team").`,
+    );
+    e.status = 400;
+    throw e;
+  }
+
+  const epicTypeName = String((issueTypes && issueTypes.epic) || EPIC_ISSUE_TYPE).trim() || EPIC_ISSUE_TYPE;
+  const storyTypeName = String((issueTypes && issueTypes.story) || STORY_ISSUE_TYPE).trim() || STORY_ISSUE_TYPE;
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  const browseUrl = (key) => `${siteBase}/browse/${encodeURIComponent(key)}`;
+
+  // Apply an optional follow-up status transition to a just-created issue. Jira
+  // creates in the workflow's initial status, so a requested non-default start is
+  // a transition (the ticket's implementer note). A transition failure is
+  // reported alongside the created key, never a hard failure — the issue exists.
+  const applyStatus = async (key, status, out) => {
+    const want = String(status || '').trim();
+    if (!want) return;
+    try {
+      const t = await transitionIssue(cred, key, { toStatus: want, env });
+      out.status = t.toStatus || want;
+    } catch (err) {
+      out.statusError = err.message;
+    }
+  };
+
+  // (1→create) the epic first — its key links every story.
+  const epicFields = buildCreateFields({ projectKey: project, issueTypeName: epicTypeName, spec: epic, fieldMeta, attribution });
+  const epicCreated = await createIssue(base, auth, epicFields);
+  const epicKey = epicCreated.key;
+  const epicOut = { key: epicKey, url: browseUrl(epicKey), summary: String(epic.summary).trim() };
+  await applyStatus(epicKey, epic.status, epicOut);
+
+  // Each story, linked to the epic. Team-managed projects use the native
+  // `parent`; company-managed (classic) uses the Epic Link custom field — mirror
+  // the #2415 read side: a site with an Epic Link field id uses it, else `parent`.
+  const storyResults = [];
+  for (const [i, s] of storyList.entries()) {
+    try {
+      const storyFields = buildCreateFields({ projectKey: project, issueTypeName: storyTypeName, spec: s, fieldMeta, attribution });
+      if (catalog.epicLinkId) storyFields[catalog.epicLinkId] = epicKey;
+      else storyFields.parent = { key: epicKey };
+      const created = await createIssue(base, auth, storyFields);
+      const out = { summary: String(s.summary).trim(), key: created.key, url: browseUrl(created.key), ok: true };
+      await applyStatus(created.key, s.status, out);
+      storyResults.push(out);
+    } catch (err) {
+      storyResults.push({ summary: String(s.summary).trim(), ok: false, error: err.message });
+    }
+  }
+
+  return {
+    project,
+    epic: epicOut,
+    stories: storyResults,
+    created: 1 + storyResults.filter((r) => r.ok).length,
+    failed: storyResults.filter((r) => !r.ok).length,
+  };
+}
+
 module.exports = {
   MAX_PAGES,
   PAGE_SIZE,
@@ -1243,4 +1441,9 @@ module.exports = {
   shapeFieldWriteValue,
   fieldValueMatches,
   setCustomField,
+  buildCreateFields,
+  collectCustomFieldNames,
+  createEpicWithStories,
+  EPIC_ISSUE_TYPE,
+  STORY_ISSUE_TYPE,
 };

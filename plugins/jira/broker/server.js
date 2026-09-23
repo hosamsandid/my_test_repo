@@ -467,6 +467,48 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── issue creation: one Epic + N child Stories (#2424) ───────────────────
+  // The plugin's first CREATE. The CLI sends `{ project, epic, stories[], issueTypes? }`;
+  // the broker creates the epic then each story (linked to it), gating every
+  // named custom field on the team's `writable-custom-fields` allow-list (#2417)
+  // BEFORE anything is created. A per-story failure after the epic exists is
+  // reported, not fatal (jira.createEpicWithStories). Role-gated like the other
+  // writes (D3); the Jira token stays server-side.
+  if (cliPath === '/create-epic' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('create');
+    if (!authz.allow) {
+      writeAudit(scopeId, scopeId, 'create', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'create', 'no-credential');
+      return sendJson(res, 400, {
+        error: 'This team has no Jira credential configured. A Team Admin sets it on the Plugins page.',
+        code: 'no-credential',
+      });
+    }
+    const body = parseJson(await readBody(req));
+    const project = String(body.project || '').trim();
+    if (!project) return sendJson(res, 400, { error: 'a --project key is required' });
+    if (!body.epic || typeof body.epic !== 'object') return sendJson(res, 400, { error: 'an epic is required' });
+    try {
+      const result = await jira.createEpicWithStories(cred, {
+        projectKey: project,
+        epic: body.epic,
+        stories: Array.isArray(body.stories) ? body.stories : [],
+        allowList: cred.writableCustomFields || [],
+        attribution: `Created by an agent on team "${scopeId}" via Agent Studio.`,
+        issueTypes: body.issueTypes && typeof body.issueTypes === 'object' ? body.issueTypes : undefined,
+      });
+      writeAudit(scopeId, scopeId, 'create', 'ok', `${project}:${result.epic.key} +${result.stories.filter((s) => s.ok).length}/${result.stories.length} stories`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'create', 'error', `${project}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
   // ── attributed writes (Phase 4, D3 — role-gated server-side, no confirm) ──
   const writeOps = { '/comment': 'comment', '/transition': 'transition', '/update': 'update', '/set-field': 'set-field' };
   if (writeOps[cliPath] && req.method === 'POST') {

@@ -1001,3 +1001,194 @@ test('addAttachment: a blank filename or missing buffer is a 400 before any requ
     await assert.rejects(() => jc.addAttachment(CRED, 'KAN-6', { filename: 'a.txt', env: CRED.env }), (e) => e.status === 400);
   });
 });
+
+// ── create one Epic + child Stories (#2424) ──────────────────────────────────
+
+// A field catalog carrying a typed "Team" and a numeric "Story point estimate",
+// so a create can resolve name → id AND shape by schema type. `epicLinkId`, when
+// given, models a company-managed site (its story→epic link is the Epic Link
+// custom field, not the native `parent`).
+function createFieldList(epicLinkId) {
+  const fields = [
+    { id: 'customfield_20001', name: 'Team', schema: { type: 'team', custom: 'com.atlassian.teams:rm-teams-custom-field-team' } },
+    { id: 'customfield_10016', name: 'Story point estimate', schema: { type: 'number' } },
+  ];
+  if (epicLinkId) fields.push({ id: epicLinkId, name: 'Epic Link', schema: { custom: 'com.pyxis.greenhopper.jira:gh-epic-link' } });
+  return { ok: true, status: 200, text: async () => JSON.stringify(fields) };
+}
+const isCreate = (url, opts) => opts && opts.method === 'POST' && /\/rest\/api\/3\/issue$/.test(url);
+
+test('buildCreateFields: project + issuetype + summary; description as ADF; assignee; custom fields shaped by schema', () => {
+  const fieldMeta = new Map([
+    ['team', { id: 'customfield_20001', schema: { type: 'team' } }],
+    ['story point estimate', { id: 'customfield_10016', schema: { type: 'number' } }],
+  ]);
+  const f = jc.buildCreateFields({
+    projectKey: 'KAN',
+    issueTypeName: 'Story',
+    spec: { summary: '  Do it  ', description: 'why', assignee: 'acc-1', fields: { Team: '42', 'Story point estimate': '5' } },
+    fieldMeta,
+    attribution: 'by an agent',
+  });
+  assert.equal(f.project.key, 'KAN');
+  assert.deepEqual(f.issuetype, { name: 'Story' });
+  assert.equal(f.summary, 'Do it'); // trimmed
+  assert.equal(f.description.type, 'doc'); // ADF
+  assert.deepEqual(f.assignee, { accountId: 'acc-1' });
+  assert.deepEqual(f.customfield_20001, { id: '42' }); // team → {id}
+  assert.equal(f.customfield_10016, 5); // number → Number
+});
+
+test('buildCreateFields: no description/assignee/fields → only project+issuetype+summary; object value sent verbatim', () => {
+  const f = jc.buildCreateFields({ projectKey: 'KAN', issueTypeName: 'Epic', spec: { summary: 'Ask' }, fieldMeta: new Map() });
+  assert.deepEqual(f, { project: { key: 'KAN' }, issuetype: { name: 'Epic' }, summary: 'Ask' });
+  const meta = new Map([['sprint', { id: 'customfield_30001', schema: { type: 'array' } }]]);
+  const g = jc.buildCreateFields({ projectKey: 'KAN', issueTypeName: 'Story', spec: { summary: 'S', fields: { Sprint: [{ id: 9 }] } }, fieldMeta: meta });
+  assert.deepEqual(g.customfield_30001, [{ id: 9 }]); // object value verbatim (escape hatch)
+});
+
+test('collectCustomFieldNames: union across epic + stories, first spelling wins, case-insensitive dedupe', () => {
+  assert.deepEqual(
+    jc.collectCustomFieldNames({ fields: { Team: 1 } }, [{ fields: { team: 2, 'Story Points': 3 } }, { fields: { 'story points': 4 } }]),
+    ['Team', 'Story Points'],
+  );
+  assert.deepEqual(jc.collectCustomFieldNames({ summary: 'x' }, [{ summary: 'y' }]), []);
+});
+
+test('createEpicWithStories: creates the epic then each story linked via native parent; shapes custom fields; applies status transition', async () => {
+  let epicKey = null;
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return createFieldList(); // team-managed: no Epic Link field
+    if (isCreate(url, opts)) {
+      const body = JSON.parse(opts.body);
+      if (body.fields.issuetype.name === 'Epic') { epicKey = 'KAN-100'; return { ok: true, status: 201, text: async () => JSON.stringify({ id: '1', key: 'KAN-100' }) }; }
+      // a story: linked to the epic via native parent, custom fields shaped
+      assert.deepEqual(body.fields.parent, { key: 'KAN-100' });
+      return { ok: true, status: 201, text: async () => JSON.stringify({ id: '2', key: 'KAN-101' }) };
+    }
+    if (isTransitionList(url) && (!opts || opts.method !== 'POST')) return transitionsResponse(); // list transitions
+    if (isTransitionList(url) && opts.method === 'POST') return { ok: true, status: 204, text: async () => '' }; // apply
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  }, async (calls) => {
+    const r = await jc.createEpicWithStories(CRED, {
+      projectKey: 'KAN',
+      epic: { summary: 'Q4 revamp', description: 'the ask' },
+      stories: [{ summary: 'Design', assignee: 'acc-1', status: 'In Progress', fields: { Team: '42', 'Story point estimate': 5 } }],
+      allowList: ['Team', 'Story point estimate'],
+      attribution: 'by an agent',
+      env: CRED.env,
+    });
+    assert.equal(r.epic.key, 'KAN-100');
+    assert.match(r.epic.url, /\/browse\/KAN-100$/);
+    assert.equal(r.created, 2);
+    assert.equal(r.failed, 0);
+    assert.deepEqual(r.stories[0], { summary: 'Design', key: 'KAN-101', url: `${jc.apiBaseFor('acme', {})}/browse/KAN-101`, ok: true, status: 'In Progress' });
+    // the story create carried the shaped custom fields
+    const storyCreate = calls.find((c) => isCreate(c.url, c.opts) && JSON.parse(c.opts.body).fields.issuetype.name === 'Story');
+    const sf = JSON.parse(storyCreate.opts.body).fields;
+    assert.deepEqual(sf.customfield_20001, { id: '42' });
+    assert.equal(sf.customfield_10016, 5);
+    assert.deepEqual(sf.assignee, { accountId: 'acc-1' });
+  });
+});
+
+test('createEpicWithStories: company-managed site links a story via the Epic Link custom field, not parent', async () => {
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return createFieldList('customfield_10014'); // has an Epic Link field
+    if (isCreate(url, opts)) {
+      const body = JSON.parse(opts.body);
+      if (body.fields.issuetype.name === 'Epic') return { ok: true, status: 201, text: async () => JSON.stringify({ key: 'KAN-1' }) };
+      assert.equal(body.fields.customfield_10014, 'KAN-1'); // epic key via Epic Link
+      assert.equal('parent' in body.fields, false);
+      return { ok: true, status: 201, text: async () => JSON.stringify({ key: 'KAN-2' }) };
+    }
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    const r = await jc.createEpicWithStories(CRED, {
+      projectKey: 'KAN', epic: { summary: 'E' }, stories: [{ summary: 'S' }], allowList: [], env: CRED.env,
+    });
+    assert.equal(r.epic.key, 'KAN-1');
+    assert.equal(r.stories[0].key, 'KAN-2');
+  });
+});
+
+test('createEpicWithStories: a custom field not on the allow-list is refused (403) before any create', async () => {
+  await withFetch(() => { throw new Error('no HTTP expected'); }, async (calls) => {
+    await assert.rejects(
+      () => jc.createEpicWithStories(CRED, {
+        projectKey: 'KAN', epic: { summary: 'E' }, stories: [{ summary: 'S', fields: { Team: '42' } }], allowList: ['Sprint'], env: CRED.env,
+      }),
+      (e) => e.status === 403 && /Team/.test(e.message),
+    );
+    assert.equal(calls.length, 0); // refused before the catalog fetch or any create
+  });
+});
+
+test('createEpicWithStories: an allow-listed but unknown Jira field name is a 400 before any create', async () => {
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return createFieldList();
+    if (isCreate(url, opts)) throw new Error('no create expected');
+    throw new Error('unexpected');
+  }, async () => {
+    await assert.rejects(
+      () => jc.createEpicWithStories(CRED, {
+        projectKey: 'KAN', epic: { summary: 'E', fields: { Ghost: 'x' } }, stories: [], allowList: ['Ghost'], env: CRED.env,
+      }),
+      (e) => e.status === 400 && /unknown Jira field\(s\): Ghost/.test(e.message),
+    );
+  });
+});
+
+test('createEpicWithStories: a missing project / epic summary / story summary is a 400 up front', async () => {
+  await withFetch(() => { throw new Error('no HTTP expected'); }, async () => {
+    await assert.rejects(() => jc.createEpicWithStories(CRED, { projectKey: '', epic: { summary: 'E' }, env: CRED.env }), (e) => e.status === 400);
+    await assert.rejects(() => jc.createEpicWithStories(CRED, { projectKey: 'KAN', epic: { summary: '  ' }, env: CRED.env }), (e) => e.status === 400);
+    await assert.rejects(
+      () => jc.createEpicWithStories(CRED, { projectKey: 'KAN', epic: { summary: 'E' }, stories: [{ summary: '' }], env: CRED.env }),
+      (e) => e.status === 400 && /story #1/.test(e.message),
+    );
+  });
+});
+
+test('createEpicWithStories: a story-create failure after the epic exists is reported, not fatal (no create-transaction)', async () => {
+  let n = 0;
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return createFieldList();
+    if (isCreate(url, opts)) {
+      const body = JSON.parse(opts.body);
+      if (body.fields.issuetype.name === 'Epic') return { ok: true, status: 201, text: async () => JSON.stringify({ key: 'KAN-1' }) };
+      n += 1;
+      if (n === 1) return { ok: false, status: 400, text: async () => 'bad assignee' }; // first story fails
+      return { ok: true, status: 201, text: async () => JSON.stringify({ key: 'KAN-3' }) };
+    }
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    const r = await jc.createEpicWithStories(CRED, {
+      projectKey: 'KAN', epic: { summary: 'E' }, stories: [{ summary: 'bad' }, { summary: 'good' }], allowList: [], env: CRED.env,
+    });
+    assert.equal(r.epic.key, 'KAN-1');
+    assert.equal(r.created, 2); // epic + the good story
+    assert.equal(r.failed, 1);
+    assert.equal(r.stories[0].ok, false);
+    assert.match(r.stories[0].error, /400/);
+    assert.equal(r.stories[1].key, 'KAN-3');
+  });
+});
+
+test('createEpicWithStories: a create is NOT retried on a transport failure (F6 — a retry would duplicate)', async () => {
+  const calls = [];
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return createFieldList();
+    if (isCreate(url, opts)) {
+      calls.push('create');
+      const e = new TypeError('fetch failed'); e.cause = { code: 'UND_ERR_SOCKET' }; throw e;
+    }
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    await assert.rejects(
+      () => jc.createEpicWithStories(CRED, { projectKey: 'KAN', epic: { summary: 'E' }, stories: [], allowList: [], env: CRED.env }),
+      /fetch failed/,
+    );
+    assert.deepEqual(calls, ['create']); // exactly one attempt — no retry
+  });
+});

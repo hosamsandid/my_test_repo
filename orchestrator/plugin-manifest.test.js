@@ -541,8 +541,11 @@ test('the shipped jira manifest (plugins/jira) is valid', () => {
   // is a per-scope plugin credential (§5), so unlike github-issues the declared
   // credentials are NOT empty:
   assert.deepEqual(manifest.sidecar.capabilities, ['egress']);
-  assert.deepEqual(manifest.credentials.map((c) => c.key), ['site-url', 'email', 'api-token']);
-  assert.ok(manifest.credentials.every((c) => c.required === true));
+  // The three connection credentials are required; `readable-custom-fields` is an
+  // optional admin allow-list of readable custom fields (#2416).
+  assert.deepEqual(manifest.credentials.map((c) => c.key), ['site-url', 'email', 'api-token', 'readable-custom-fields']);
+  assert.ok(manifest.credentials.filter((c) => c.key !== 'readable-custom-fields').every((c) => c.required === true));
+  assert.equal(manifest.credentials.find((c) => c.key === 'readable-custom-fields').required, false);
   // Team scope only — a Jira site binding is a team-level fact (§6.1). Runs on
   // Podman AND Kubernetes: the broker is structurally identical to github-issues
   // (egress sidecar + UI + per-scope credential), which is already

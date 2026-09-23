@@ -17,8 +17,8 @@ Reads:
     aee-jira inbox --consume KAN-6:10312 [ID…]   # drain exactly the events YOUR wake named (payload `id` / `events[].id`)
     aee-jira projects                             # the projects in this team's scope
     aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
-    aee-jira search --jql "<JQL>" [--fields key,summary,status] [--limit N]   # arbitrary JQL, scoped to your team
-    aee-jira show KAN-6                           # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments)
+    aee-jira search --jql "<JQL>" [--fields key,summary,status,Team] [--limit N]   # arbitrary JQL, scoped to your team
+    aee-jira show KAN-6 [--fields "Team,Sprint"]   # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments; --fields adds custom fields)
     aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
 
 Writes (attributed, role-gated server-side, no human confirmation — moving a
@@ -320,12 +320,19 @@ def build_parser():
     p_search.add_argument("--jql", required=True, help='the JQL query, e.g. "created >= -2d AND issuetype = Story"')
     p_search.add_argument(
         "--fields",
-        help="comma-separated columns to return (default all): key,summary,status,issueType,assignee,updated,parent,url",
+        help="comma-separated fields to return (default all standard columns): standard "
+             "columns key,summary,status,issueType,assignee,updated,parent,url narrow the "
+             'row; any other name is read as a custom field (e.g. "status,Team")',
     )
     p_search.add_argument("--limit", type=int, help="cap the number of issues returned (default 100, max 2000)")
 
     p_show = sub.add_parser("show", parents=[common], help="read one issue")
     p_show.add_argument("issue", help="issue key, e.g. KAN-6")
+    p_show.add_argument(
+        "--fields",
+        help='comma-separated custom field names to also read, by their Jira name (e.g. "Team,Sprint"); '
+             "an empty field comes back as null, distinguishing it from a set one",
+    )
 
     p_att = sub.add_parser("attachment", parents=[common], help="read an issue's attachments (list them with `show`)")
     att_sub = p_att.add_subparsers(dest="att_cmd")
@@ -409,7 +416,10 @@ def main(argv=None):
             q["limit"] = args.limit
         path = "/search?" + urllib.parse.urlencode(q)
     elif args.cmd == "show":
-        path = "/show?" + urllib.parse.urlencode({"issue": args.issue})
+        q = {"issue": args.issue}
+        if args.fields:
+            q["fields"] = args.fields
+        path = "/show?" + urllib.parse.urlencode(q)
     elif args.cmd == "attachment":
         att_cmd = getattr(args, "att_cmd", None)
         if att_cmd == "add":

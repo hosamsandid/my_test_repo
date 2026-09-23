@@ -945,20 +945,31 @@ function iconForRole(role) {
   }
 }
 
+// #2429 — a four-colour model (green / amber / grey / red), with the only
+// non-colour variable being *fill* on green: a **solid** green dot is a reply
+// awaiting you (an unread response from an agent you manually messaged), a
+// **hollow** green dot is FYI activity from an auto-triggered run you never need
+// to review. Net changes from the old model: blue `active` is gone (folded into
+// the neutral grey idle dot); `disabled` moved off amber onto neutral grey (amber
+// now means "working" only); green split into solid vs hollow. The solid/hollow
+// distinction carries meaning without relying on colour, which keeps it legible
+// for colour-blind users (AC11 / edge case). Colour tokens are unchanged
+// (`--eb-status-*`, `--eb-text-muted`) — this only re-maps state→token + adds the
+// hollow variant.
 const STATUS_DOT = {
-  busy:    { color: 'var(--eb-status-warning)', label: 'Working…',          pulse: true  },
-  unread:  { color: 'var(--eb-status-success)', label: 'New message',       pulse: false },
-  active:  { color: 'var(--eb-status-info)',    label: 'Active session',    pulse: false },
-  idle:    { color: 'var(--eb-text-muted)',     label: 'Waiting for input', pulse: false },
+  busy:        { color: 'var(--eb-status-warning)', label: 'Working…',            pulse: true  },
+  unread:      { color: 'var(--eb-status-success)', label: 'Reply awaiting you',  pulse: false },
+  'unread-auto': { color: 'var(--eb-status-success)', label: 'Activity — nothing needed from you', pulse: false, hollow: true },
+  idle:        { color: 'var(--eb-text-muted)',     label: 'Idle',               pulse: false },
   // #1119 — 'disabled' (intentionally off, one-click enable to chat) and
-  // 'offline' (container not running — a real problem) used to collapse into a
-  // single red "Unavailable" dot, so the user couldn't tell which action was
-  // required. They now render as two distinct dots with actionable tooltips.
-  disabled: { color: 'var(--eb-status-warning)', label: 'Disabled — enable it to chat',   pulse: false },
+  // 'offline' (container not running — a real problem) stay two distinct dots
+  // with actionable tooltips. #2429 moves 'disabled' onto neutral grey (it is not
+  // a "working" state, so it no longer shares amber with busy); 'offline' remains
+  // the red "problem" dot.
+  disabled: { color: 'var(--eb-text-muted)',     label: 'Disabled — enable it to chat',   pulse: false },
   offline:  { color: 'var(--eb-status-error)',   label: 'Offline — container not running', pulse: false },
   // #1957 — a stub is not a paused agent: there is nothing to un-pause, the
-  // agent has never been provisioned. A muted dot rather than the amber
-  // "disabled" one, so the two states stay tellable apart at a glance.
+  // agent has never been provisioned. A muted grey dot, matching disabled/idle.
   stub:     { color: 'var(--eb-text-muted)',     label: 'Not initialised — materialize it to chat', pulse: false },
   // Kept as a fallback for any unrecognised state (see STATUS_DOT lookup below).
   problem: { color: 'var(--eb-status-error)',   label: 'Unavailable',       pulse: false },
@@ -1165,12 +1176,18 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
         ) : (
           <span
             title={dot.label}
+            aria-label={dot.label}
             className={dot.pulse ? 'eb-status-pulse' : undefined}
             style={{
               width: 8,
               height: 8,
               borderRadius: '50%',
-              background: dot.color,
+              // #2429 — a hollow dot (auto-triggered activity) is drawn as an
+              // outline ring: transparent fill + a coloured border, so it reads
+              // as clearly non-demanding next to the filled "for you" dot and the
+              // difference does not rely on colour alone.
+              background: dot.hollow ? 'transparent' : dot.color,
+              boxShadow: dot.hollow ? `inset 0 0 0 1.5px ${dot.color}` : undefined,
               flexShrink: 0,
             }}
           />

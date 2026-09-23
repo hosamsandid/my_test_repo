@@ -69,6 +69,53 @@ export function resolveInitialNotifyEnabled({ sessionValue, storedValue, hasServ
   return false;
 }
 
+// ── Manually-messaged agents (persisted signal) ──────────────────────────────
+//
+// The set of agents the current user *manually messaged* (populated only from
+// the chat composer's send path, never by an auto-triggered run). #2397 keeps it
+// in-memory for the "agent is back" notification; #2429 reuses the same signal to
+// drive the status dot's solid-vs-hollow green (a solid dot = a reply awaiting
+// you, hollow = auto-triggered activity you can glance at). For the dots the
+// signal must survive a reload — otherwise a genuine "awaiting you" reply would
+// silently downgrade to hollow after refresh (#2429 open question 1) — so it is
+// mirrored to localStorage here, alongside the in-memory ref the notification
+// still uses. Global (browser-scoped) key, like `agentChat.lastViewed`: the
+// console treats a browser as one operator, and both dots and the viewed map
+// already read that way.
+export const MANUALLY_MESSAGED_KEY = 'agentChat.manuallyMessaged';
+
+// Read the persisted manually-messaged ids as a plain array (deduped, string
+// ids). Returns [] on any read/parse failure. `store` is injectable for tests.
+export function loadManuallyMessagedIds(store) {
+  const ls = store || (typeof window !== 'undefined' ? window.localStorage : null);
+  if (!ls) return [];
+  try {
+    const raw = ls.getItem(MANUALLY_MESSAGED_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(id => typeof id === 'string' && id);
+  } catch {
+    return [];
+  }
+}
+
+// Add one id to the persisted manually-messaged set (best-effort — a private
+// mode / quota failure is swallowed). Idempotent; preserves insertion order.
+export function addManuallyMessagedId(id, store) {
+  if (!id) return;
+  const ls = store || (typeof window !== 'undefined' ? window.localStorage : null);
+  if (!ls) return;
+  try {
+    const current = loadManuallyMessagedIds(ls);
+    if (current.includes(id)) return;
+    current.push(id);
+    ls.setItem(MANUALLY_MESSAGED_KEY, JSON.stringify(current));
+  } catch {
+    /* ignore */
+  }
+}
+
 // Cross-component notification: SettingsModal dispatches this when the user
 // flips the setting so the app-level provider updates its own state and starts
 // / stops firing without a reload (AC10). Mirrors FONT_SIZE_CHANGED_EVENT.

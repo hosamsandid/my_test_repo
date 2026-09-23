@@ -9,6 +9,7 @@ import {
   loadStoredNotifyEnabled,
   NOTIFY_SETTING_CHANGED_EVENT,
   computeBackNotifications,
+  addManuallyMessagedId,
   selectUnnotified,
   notificationTitleFor,
   notificationTagFor,
@@ -69,14 +70,18 @@ export function AgentBackNotificationProvider({ children }) {
     return () => window.removeEventListener(NOTIFY_SETTING_CHANGED_EVENT, onChanged);
   }, []);
 
-  // Agents the user manually messaged in this page/session (in-memory only —
-  // "current browser page/session" per the ticket; a reload starts fresh, and an
-  // auto-triggered run never lands here because it never goes through the chat
-  // composer's send handler). This is the signal that separates manual sends
-  // from label/schedule/event-triggered runs (AC5/AC6).
+  // Agents the user manually messaged. The in-memory ref drives the "agent is
+  // back" browser notification (#2397 — session-scoped, an auto-triggered run
+  // never lands here because it never goes through the chat composer's send
+  // handler). #2429 additionally mirrors each id to localStorage so the same
+  // manual-vs-automatic signal survives a reload and can drive the status dot's
+  // solid-vs-hollow green (AC5/AC6); the notification keeps using the ref, so its
+  // behaviour is unchanged.
   const manuallyMessagedRef = useRef(new Set());
   const markManuallyMessaged = useCallback((id) => {
-    if (id) manuallyMessagedRef.current.add(id);
+    if (!id) return;
+    manuallyMessagedRef.current.add(id);
+    addManuallyMessagedId(id);
   }, []);
 
   const prevStatusesRef = useRef(null);

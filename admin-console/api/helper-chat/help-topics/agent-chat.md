@@ -169,10 +169,29 @@ are hidden by default, because most of the time they are noise. Turning it on is
 the only thing that widens what the list asks the server for.
 
 **What a row tells you.** A row shows the agent's name, its environment (unless
-it matches the team's shared environment, which the row then drops), and two live
-signals: a **busy** indicator while a
-run is in progress, and an **unread** marker when messages arrived while you were
-looking elsewhere.
+it matches the team's shared environment, which the row then drops), and a
+**status dot** that tells you what, if anything, the agent needs from you.
+
+**The status dot — four colours, plus fill on green.** The dot is deliberately
+about *what you need to do*, not which internal state the agent is in:
+
+- **Green, solid — a reply awaiting you.** An unread response from an agent **you
+  messaged yourself**. This is the only state the green counter next to *Agent
+  Chat* in the sidebar counts.
+- **Green, hollow (an outline ring) — activity, nothing needed.** Unread output
+  from a run **you did not start** — a label, a schedule or an inbound event woke
+  the agent. Glance at it if you like; it is never counted in the sidebar. The
+  hollow-vs-solid difference is a shape, not just a shade, so it stays legible
+  without relying on colour.
+- **Amber, pulsing — working.** A run is in progress. The amber sidebar counter
+  counts these.
+- **Grey — idle or disabled.** Nothing for you to do: the agent is available (a
+  past chat or a live session no longer shows a colour of its own), or it has
+  been intentionally disabled.
+- **Red — offline.** The agent's container is not running — a real problem.
+
+A run started by *you* only shows solid green once it comes back; whether it was
+you who last messaged the agent survives a page reload.
 
 **The row menu.** Every row has a context menu — reach it from the kebab (**⋮**)
 on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:

@@ -102,6 +102,26 @@ test('defaultOwnership: sysadmin → team/default; team admin → first admin te
     { scope: 'team', teamId: 'payments', assignedTeamIds: [] });
 });
 
+test('defaultOwnership: under v2 a plain member (no admin teams) defaults to personal/human (#2360 consolidation)', () => {
+  // The consolidated SSH/GitHub-token pages open to every user; a caller who can
+  // only ever create a personal credential must land on it, not on an unfillable
+  // team picker.
+  assert.deepEqual(
+    defaultOwnership({ isSysAdmin: false, adminTeamIds: [], v2: true }),
+    { scope: 'personal', teamId: null, assignedTeamIds: [], identity: IDENTITY_HUMAN },
+  );
+  // A team admin still defaults to their team (service); a sysadmin to team/default.
+  assert.deepEqual(
+    defaultOwnership({ isSysAdmin: false, adminTeamIds: ['payments'], v2: true }),
+    { scope: 'team', teamId: 'payments', assignedTeamIds: [], identity: IDENTITY_SERVICE },
+  );
+  // Off the flag the plain-member shape is byte-identical to before (team, empty).
+  assert.deepEqual(
+    defaultOwnership({ isSysAdmin: false, adminTeamIds: [], v2: false }),
+    { scope: 'team', teamId: '', assignedTeamIds: [] },
+  );
+});
+
 test('ownershipPayload: strips to API shape', () => {
   assert.deepEqual(ownershipPayload({ scope: 'team', teamId: 'payments', assignedTeamIds: [] }),
     { scope: 'team', teamId: 'payments' });

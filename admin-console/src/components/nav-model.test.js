@@ -9,6 +9,7 @@ import {
   activeGroupKey,
   defaultCollapsed,
   mergeCollapsed,
+  consolidateCredentialNav,
 } from './nav-model.js';
 
 const ADMIN = { admin: true, canSeeCreds: true };
@@ -170,4 +171,40 @@ test('mergeCollapsed reconciles persisted state with current keys', () => {
 
   // Malformed stored value → all defaults.
   assert.deepEqual(mergeCollapsed('nope', keys, 'agent-setup'), defaultCollapsed(keys, 'agent-setup'));
+});
+
+test('consolidateCredentialNav: off the flag is a no-op (byte-identical)', () => {
+  const sections = [
+    { key: 'connections', items: [
+      { path: '/models', credAdmin: true },
+      { path: '/ssh-keys', credAdmin: true },
+      { path: '/github-tokens', credAdmin: true },
+      { path: '/my-credentials' },
+      { path: '/mcp', adminOnly: true },
+    ]},
+  ];
+  assert.deepEqual(consolidateCredentialNav(sections, { v2: false }), sections);
+  assert.deepEqual(consolidateCredentialNav(sections, {}), sections);
+});
+
+test('consolidateCredentialNav: v2 drops My Credentials and opens SSH/GitHub (models stays gated)', () => {
+  const sections = [
+    { key: 'connections', items: [
+      { path: '/models', credAdmin: true },
+      { path: '/ssh-keys', credAdmin: true },
+      { path: '/github-tokens', credAdmin: true },
+      { path: '/my-credentials' },
+      { path: '/mcp', adminOnly: true },
+    ]},
+  ];
+  const out = consolidateCredentialNav(sections, { v2: true });
+  const items = out[0].items;
+  assert.ok(!items.some(i => i.path === '/my-credentials'), 'My Credentials dissolved');
+  assert.equal(items.find(i => i.path === '/ssh-keys').credAdmin, false, 'SSH Keys opened');
+  assert.equal(items.find(i => i.path === '/github-tokens').credAdmin, false, 'GitHub Tokens opened');
+  assert.equal(items.find(i => i.path === '/models').credAdmin, true, 'Model Providers stays gated');
+  assert.equal(items.find(i => i.path === '/mcp').adminOnly, true, 'other gates untouched');
+  // A plain member now sees SSH Keys / GitHub Tokens (open), not My Credentials.
+  const visible = filterItems(out[0].items, MEMBER).map(i => i.path);
+  assert.deepEqual(visible, ['/ssh-keys', '/github-tokens']);
 });

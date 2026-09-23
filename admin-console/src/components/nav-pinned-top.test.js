@@ -131,7 +131,11 @@ test('collapsed (rail) mode still routes the pinned entry through the same rende
 test('the NAV_TOP / NAV_GROUPS data model and its gating are unchanged (AC6)', () => {
   assert.match(SHELL, /const NAV_TOP = \[/, 'NAV_TOP must still be declared in Shell.jsx');
   assert.match(SHELL, /const topItems = filterItems\(NAV_TOP, gate\)/, 'role gating of NAV_TOP is unchanged');
-  assert.match(SHELL, /const groups = filterSections\(NAV_GROUPS, gate\)/, 'role gating of NAV_GROUPS is unchanged');
+  // #2360: the NAV_GROUPS data model is still the source and the gate is still
+  // filterSections — the only change is the v2 credential consolidation transform
+  // wrapped around NAV_GROUPS before filtering (My Credentials dissolved, SSH/GitHub
+  // opened under the flag; a no-op off it).
+  assert.match(SHELL, /const groups = filterSections\(consolidateCredentialNav\(NAV_GROUPS, \{ v2: resourceAccessV2 \}\), gate\)/, 'role gating of NAV_GROUPS is unchanged (now via consolidateCredentialNav under v2)');
   // activePath must still consider BOTH tiers, or the pinned entry loses its
   // highlight the moment a group route is longer/more specific.
   assert.match(SHELL, /\.\.\.topItems\.map\(i => i\.path\)/, 'topItems paths must stay in the activePath candidates');

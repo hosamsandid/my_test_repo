@@ -17,7 +17,7 @@ Reads:
     aee-jira inbox --consume KAN-6:10312 [ID…]   # drain exactly the events YOUR wake named (payload `id` / `events[].id`)
     aee-jira projects                             # the projects in this team's scope
     aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
-    aee-jira show KAN-6                           # one issue (summary, status, type, assignee, URL, attachments)
+    aee-jira show KAN-6                           # one issue (summary, status, type, assignee, created/updated, URL, attachments)
     aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
 
 Writes (attributed, role-gated server-side, no human confirmation — moving a

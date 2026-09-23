@@ -498,6 +498,18 @@ async function getIssue(cred, issueKey, { env, customFields } = {}) {
     out.attachments = attachments.slice(0, ATTACHMENT_LIST_CAP);
     if (attachments.length > ATTACHMENT_LIST_CAP) out.attachmentsTruncated = true;
   }
+  // Available transitions (#2421). The transitions reachable from the issue's
+  // *current* status, folded into `show` so an agent can pick its next move
+  // directly instead of guessing-then-parsing a failed `transition` error.
+  // Reuses `listTransitions`. A failed lookup degrades to omitting the key — a
+  // read stays robust, matching the Epic Link fallback above; on success the
+  // key is always present (possibly `[]` when the workflow allows no move).
+  try {
+    const transitions = await listTransitions(cred, out.key, { env });
+    out.availableTransitions = transitions.map((t) => ({ transition: t.name, toStatus: t.toStatus }));
+  } catch {
+    /* transitions unavailable → omit the key rather than fail the whole read */
+  }
   return out;
 }
 
@@ -714,6 +726,34 @@ async function listProjects(cred, { env } = {}) {
     if (page.isLast || values.length === 0 || (typeof page.total === 'number' && startAt >= page.total)) break;
   }
   return projects;
+}
+
+// The full set of workflow statuses a project supports, grouped by issue type
+// (#2421) — GET /rest/api/3/project/{projectIdOrKey}/statuses. Independent of
+// any single issue's current state, so an agent can see what a workflow supports
+// before an issue reaches a given status (planning / capability check), unlike
+// `show`'s availableTransitions which are relative to one issue's current state.
+// Shaped to `[{ issueType, statuses: [{ name, category }] }]` per issue type.
+async function listProjectStatuses(cred, { projectKey, env } = {}) {
+  const key = String(projectKey || '').trim();
+  if (!key) { const e = new Error('a project key is required'); e.status = 400; throw e; }
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const raw = await requestJson({
+    base,
+    path: `/rest/api/3/project/${encodeURIComponent(key)}/statuses`,
+    authHeader: auth,
+  });
+  const types = Array.isArray(raw) ? raw : [];
+  return types.map((t) => ({
+    issueType: t && t.name ? String(t.name) : null,
+    statuses: (t && Array.isArray(t.statuses) ? t.statuses : []).map((s) => ({
+      name: s && s.name ? String(s.name) : null,
+      // Jira's coarse workflow bucket ("new" / "indeterminate" / "done") — lets
+      // an agent group statuses without hard-coding site-specific names.
+      category: s && s.statusCategory && s.statusCategory.key ? String(s.statusCategory.key) : null,
+    })),
+  }));
 }
 
 // The agent-facing field set both `list` and `search` request from Jira, and
@@ -1192,6 +1232,7 @@ module.exports = {
   getAttachment,
   addAttachment,
   listProjects,
+  listProjectStatuses,
   ATTACHMENT_LIST_CAP,
   ATTACHMENT_MAX_BYTES,
   ATTACHMENT_UPLOAD_MAX_BYTES,

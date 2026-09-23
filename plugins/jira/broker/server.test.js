@@ -236,6 +236,42 @@ test('cli reads: /projects, /list, /show need the per-scope credential and call 
   }
 });
 
+test('cli reads: /statuses returns a project\'s workflow statuses grouped by issue type (#2421)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1') || String(url).includes('localhost')) return origFetch(url, opts);
+    if (String(url).match(/\/rest\/api\/3\/project\/KAN\/statuses$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify([
+        { name: 'Story', statuses: [{ name: 'To Do', statusCategory: { key: 'new' } }, { name: 'Done', statusCategory: { key: 'done' } }] },
+      ]) };
+    }
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+  const srv = await listen();
+  try {
+    const ok = await call(srv, 'GET', '/cli/statuses?project=KAN', { token: TOKEN });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.project, 'KAN');
+    assert.deepEqual(ok.body.statuses, [
+      { issueType: 'Story', statuses: [{ name: 'To Do', category: 'new' }, { name: 'Done', category: 'done' }] },
+    ]);
+
+    // a missing --project is a 400, never a Jira call
+    const noProject = await call(srv, 'GET', '/cli/statuses', { token: TOKEN });
+    assert.equal(noProject.status, 400);
+
+    // a scope with no credential → 400 no-credential
+    const nocred = await call(srv, 'GET', '/cli/statuses?project=KAN', { token: OTHER });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-credential');
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
 test('cli reads: custom fields via the admin allow-list and per-request --fields (#2416)', async () => {
   // The admin configures a default readable custom field "Team"; a per-request
   // --fields adds "Priority" on top.

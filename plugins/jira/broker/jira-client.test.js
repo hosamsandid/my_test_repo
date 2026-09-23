@@ -73,6 +73,13 @@ const CRED = { siteUrl: 'acme', email: 'bot@acme.com', apiToken: 'tok', env: { J
 
 // #2415 — a `/rest/api/3/field` request (the Epic Link id lookup a read makes).
 const isFieldList = (url) => /\/rest\/api\/3\/field$/.test(url);
+// #2421 — the transitions GET `getIssue` now makes to fold `availableTransitions`
+// into `show`. A stubbed default response so every getIssue stub can branch on it.
+const isTransitionList = (url) => /\/transitions$/.test(url);
+const transitionsResponse = () => ({ ok: true, status: 200, text: async () => JSON.stringify({ transitions: [
+  { id: '21', name: 'Start Progress', to: { name: 'In Progress' } },
+  { id: '31', name: 'Done', to: { name: 'Done' } },
+] }) });
 // Its stubbed response: no Epic Link field by default (reads fall back to the
 // native `parent`); pass an id to model a company-managed site that has one.
 function fieldListResponse(epicLinkId) {
@@ -209,6 +216,57 @@ test('listProjects: paginates /project/search and narrows to key/name/id/type', 
       { key: 'ENG', name: 'Engineering', id: '1', type: 'software' },
       { key: 'OPS', name: 'Ops', id: '2', type: 'business' },
     ]);
+  });
+});
+
+test('listProjectStatuses: reads /project/{key}/statuses and groups by issue type (#2421)', async () => {
+  await withFetch((url) => {
+    assert.match(url, /\/rest\/api\/3\/project\/KAN\/statuses$/);
+    return { ok: true, status: 200, text: async () => JSON.stringify([
+      { id: '10001', name: 'Story', subtask: false, statuses: [
+        { id: '1', name: 'To Do', statusCategory: { key: 'new' } },
+        { id: '3', name: 'In Progress', statusCategory: { key: 'indeterminate' } },
+        { id: '4', name: 'Done', statusCategory: { key: 'done' } },
+      ] },
+      { id: '10002', name: 'Bug', subtask: false, statuses: [
+        { id: '1', name: 'Open', statusCategory: { key: 'new' } },
+      ] },
+    ]) };
+  }, async () => {
+    const grouped = await jc.listProjectStatuses(CRED, { projectKey: 'KAN', env: CRED.env });
+    assert.deepEqual(grouped, [
+      { issueType: 'Story', statuses: [
+        { name: 'To Do', category: 'new' },
+        { name: 'In Progress', category: 'indeterminate' },
+        { name: 'Done', category: 'done' },
+      ] },
+      { issueType: 'Bug', statuses: [{ name: 'Open', category: 'new' }] },
+    ]);
+  });
+});
+
+test('listProjectStatuses: a blank project key is a 400 before any HTTP (#2421)', async () => {
+  let called = false;
+  await withFetch(() => { called = true; return { ok: true, status: 200, text: async () => '[]' }; }, async () => {
+    await assert.rejects(
+      () => jc.listProjectStatuses(CRED, { projectKey: '  ', env: CRED.env }),
+      (e) => e.status === 400,
+    );
+    assert.equal(called, false); // fails fast — no Jira call for a missing key
+  });
+});
+
+test('getIssue: a failed transitions lookup degrades to omitting availableTransitions (#2421)', async () => {
+  await withFetch((url) => {
+    if (isFieldList(url)) return fieldListResponse();
+    if (isTransitionList(url)) return { ok: false, status: 500, text: async () => 'boom' };
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: 'ENG-20', fields: { summary: 'S', status: { name: 'To Do' }, issuetype: { name: 'Task' } },
+    }) };
+  }, async () => {
+    const issue = await jc.getIssue(CRED, 'ENG-20', { env: CRED.env });
+    assert.ok(!('availableTransitions' in issue)); // lookup failure must not break the read
+    assert.equal(issue.status, 'To Do');
   });
 });
 
@@ -473,6 +531,7 @@ test('updateDescription: a blank description is a 400 before any request', async
 test('getIssue: reads summary/status/issueType/assignee and builds a browse URL from the real site', async () => {
   await withFetch((url) => {
     if (isFieldList(url)) return fieldListResponse();
+    if (isTransitionList(url)) return transitionsResponse();
     assert.match(url, /fields=summary,status,description,assignee,issuetype,attachment,created,updated,parent/);
     return { ok: true, status: 200, text: async () => JSON.stringify({
       key: 'ENG-5', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, assignee: { displayName: 'Jane' }, issuetype: { name: 'Task' }, created: '2026-09-08T09:00:00Z', updated: '2026-09-09T10:00:00Z' },
@@ -487,6 +546,11 @@ test('getIssue: reads summary/status/issueType/assignee and builds a browse URL 
     assert.equal(issue.parent, null); // #2415 — no parent → null (not omitted)
     assert.equal(issue.url, 'https://acme.atlassian.net/browse/ENG-5'); // browse URL uses the real site, not the seam
     assert.ok(!('attachments' in issue)); // no attachments → no key at all (AC2/AC8)
+    // #2421 — the transitions reachable from the current status, folded into show.
+    assert.deepEqual(issue.availableTransitions, [
+      { transition: 'Start Progress', toStatus: 'In Progress' },
+      { transition: 'Done', toStatus: 'Done' },
+    ]);
   });
 });
 
@@ -518,6 +582,7 @@ test('getIssue: surfaces the native parent key (#2415)', async () => {
 test('getIssue: falls back to the Epic Link custom field on a classic project (#2415)', async () => {
   await withFetch((url) => {
     if (isFieldList(url)) return fieldListResponse('customfield_10014'); // company-managed
+    if (isTransitionList(url)) return transitionsResponse();
     assert.match(url, /customfield_10014/); // the resolved field id is requested
     return { ok: true, status: 200, text: async () => JSON.stringify({
       key: 'ENG-9', fields: { summary: 'Story', status: { name: 'To Do' }, issuetype: { name: 'Story' }, customfield_10014: 'EPIC-7' },
@@ -576,6 +641,7 @@ test('mergeCustomFieldNames: unions and de-dups case-insensitively, first spelli
 test('getIssue: --fields reads a custom field, resolving its name → id and rendering the value (#2416)', async () => {
   await withFetch((url) => {
     if (isFieldList(url)) return customFieldList();
+    if (isTransitionList(url)) return transitionsResponse();
     assert.match(url, /customfield_20001/); // the resolved id is requested
     return { ok: true, status: 200, text: async () => JSON.stringify({
       key: 'ENG-11', fields: { summary: 'S', status: { name: 'To Do' }, customfield_20001: { id: '42', title: 'Payments' } },

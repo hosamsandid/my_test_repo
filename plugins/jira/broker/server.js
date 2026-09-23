@@ -308,7 +308,7 @@ async function handleCli(req, res, cliPath) {
   }
 
   // ── reads that need the per-scope Jira credential (Phase 3) ───────────────
-  const readOps = { '/projects': 'projects', '/list': 'list', '/search': 'search', '/show': 'show' };
+  const readOps = { '/projects': 'projects', '/list': 'list', '/search': 'search', '/show': 'show', '/statuses': 'statuses' };
   if (readOps[cliPath] && req.method === 'GET') {
     const op = readOps[cliPath];
     const cred = resolveCredential(scopeId);
@@ -359,6 +359,12 @@ async function handleCli(req, res, cliPath) {
             limit,
           }),
         };
+      } else if (op === 'statuses') {
+        // The full set of workflow statuses a project supports, grouped by issue
+        // type (#2421) — a project-wide read, independent of any single issue.
+        const project = (params.get('project') || '').trim();
+        if (!project) return sendJson(res, 400, { error: 'a --project key is required' });
+        result = { project, statuses: await jira.listProjectStatuses(cred, { projectKey: project }) };
       } else {
         const issue = (params.get('issue') || '').trim();
         if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });

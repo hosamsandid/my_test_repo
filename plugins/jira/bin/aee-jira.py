@@ -16,9 +16,10 @@ Reads:
     aee-jira inbox                                # peek: every queued status-change event in the team's inbox
     aee-jira inbox --consume KAN-6:10312 [ID…]   # drain exactly the events YOUR wake named (payload `id` / `events[].id`)
     aee-jira projects                             # the projects in this team's scope
+    aee-jira statuses --project KAN               # every workflow status the project supports, grouped by issue type
     aee-jira list --project KAN [--status "Ready for Dev"]   # a project's issues
     aee-jira search --jql "<JQL>" [--fields key,summary,status,Team] [--limit N]   # arbitrary JQL, scoped to your team
-    aee-jira show KAN-6 [--fields "Team,Sprint"]   # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments; --fields adds custom fields)
+    aee-jira show KAN-6 [--fields "Team,Sprint"]   # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments, availableTransitions; --fields adds custom fields)
     aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
 
 Writes (attributed, role-gated server-side, no human confirmation — moving a
@@ -58,7 +59,10 @@ first 20 of YOUR events — peek, take the rest that carry your status, consume
 those too).
 `transition` names the TARGET status; the broker resolves the
 Jira transition from where the issue currently is and reports the available
-options if none leads there.
+options if none leads there. To see those options up front, `show` carries an
+`availableTransitions: [{transition, toStatus}, …]` list of the moves the issue's
+current status allows. `statuses --project KAN` lists every status the project's
+workflow supports, grouped by issue type, independent of any one issue's state.
 
 Contract (§4.5): `--json` on every subcommand; exit 0 ok / 1 domain error /
 2 usage / 3 broker unreachable; `--help` carries the agent-readable docs.
@@ -320,6 +324,12 @@ def build_parser():
 
     sub.add_parser("projects", parents=[common], help="list the Jira projects in this team's scope")
 
+    p_statuses = sub.add_parser(
+        "statuses", parents=[common],
+        help="list every workflow status a project supports, grouped by issue type",
+    )
+    p_statuses.add_argument("--project", required=True, help="project key, e.g. KAN")
+
     p_list = sub.add_parser("list", parents=[common], help="list a project's issues (most-recently-updated first)")
     p_list.add_argument("--project", required=True, help="project key, e.g. KAN")
     p_list.add_argument("--status", help="only issues currently in this status")
@@ -428,6 +438,8 @@ def main(argv=None):
             path += "?" + urllib.parse.urlencode({"consume": ",".join(args.consume)})
     elif args.cmd == "projects":
         path = "/projects"
+    elif args.cmd == "statuses":
+        path = "/statuses?" + urllib.parse.urlencode({"project": args.project})
     elif args.cmd == "list":
         q = {"project": args.project}
         if args.status:

@@ -6,6 +6,7 @@ import {
   isPersonalCredential,
   teamsById,
   credentialScopeLabel,
+  credentialOwnershipLabel,
   creatableScopes,
   defaultOwnership,
   ownershipPayload,
@@ -120,6 +121,31 @@ test('defaultOwnership: under v2 a plain member (no admin teams) defaults to per
     defaultOwnership({ isSysAdmin: false, adminTeamIds: [], v2: false }),
     { scope: 'team', teamId: '', assignedTeamIds: [] },
   );
+});
+
+test('credentialOwnershipLabel: the consolidated Ownership column mirrors the dialog (#2360)', () => {
+  const names = { payments: 'Payments', risk: 'Risk' };
+  // personal + human → just "Personal" (detail dropped as redundant, like providers)
+  assert.deepEqual(credentialOwnershipLabel({ scope: 'personal', userId: 'u' }, names),
+    { scope: 'personal', label: 'Personal', detail: '' });
+  // personal + explicit service (a private bot key) → the identity note is kept
+  assert.deepEqual(credentialOwnershipLabel({ scope: 'personal', userId: 'u', identity: IDENTITY_SERVICE }, names),
+    { scope: 'personal', label: 'Personal', detail: 'Service credential' });
+  // team → team name
+  assert.deepEqual(credentialOwnershipLabel({ scope: 'team', teamId: 'payments' }, names),
+    { scope: 'team', label: 'Team', detail: 'Payments' });
+  // system, assigned → the assigned team names
+  assert.deepEqual(credentialOwnershipLabel({ scope: 'system', assignedTeamIds: ['payments', 'risk'] }, names),
+    { scope: 'system', label: 'System', detail: 'Payments, Risk' });
+  // system, unassigned → "Unassigned"
+  assert.deepEqual(credentialOwnershipLabel({ scope: 'system', assignedTeamIds: [] }, names),
+    { scope: 'system', label: 'System', detail: 'Unassigned' });
+  // a global service credential → single "Global" pill, no detail
+  assert.deepEqual(credentialOwnershipLabel({ scope: 'system', global: true, assignedTeamIds: [] }, names),
+    { scope: 'global', label: 'Global', detail: '' });
+  // an unknown team id falls back to the raw id
+  assert.deepEqual(credentialOwnershipLabel({ scope: 'team', teamId: 'ghost' }, names),
+    { scope: 'team', label: 'Team', detail: 'ghost' });
 });
 
 test('ownershipPayload: strips to API shape', () => {

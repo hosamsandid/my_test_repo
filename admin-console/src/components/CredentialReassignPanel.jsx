@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import CredentialOwnership from './CredentialOwnership';
-import { normalizeCredential, ownershipPayload } from '../pages/credential-scope-view';
+import { normalizeCredential, ownershipPayload, ownershipFromRecord } from '../pages/credential-scope-view';
 
 // Edit form shared by the SSH Keys and GitHub Tokens pages (#798): rename a
 // credential and — for System Admins only — change its scope / team assignment
@@ -35,24 +35,30 @@ const inputStyle = {
   boxSizing: 'border-box',
 };
 
-export default function CredentialReassignPanel({ cred, teams = [], isSysAdmin, adminTeamIds = [], canReassign, onSave, onCancel, saving, error, secretHelp }) {
+export default function CredentialReassignPanel({ cred, teams = [], isSysAdmin, adminTeamIds = [], canReassign, onSave, onCancel, saving, error, secretHelp, v2 = false }) {
   const norm = normalizeCredential(cred || {});
   const [name, setName] = useState(cred?.name || '');
-  const [ownership, setOwnership] = useState({
-    scope: norm.scope,
-    teamId: norm.teamId || '',
-    assignedTeamIds: norm.assignedTeamIds || [],
-  });
+  // #2360: under v2 open the edit form on the SAME identity+scope control the
+  // create form uses (via `ownershipFromRecord`, which carries the record's
+  // immutable `identity`), so edit and create are one taxonomy. Off the flag the
+  // legacy scope-only state is byte-identical to before.
+  const [ownership, setOwnership] = useState(() => (
+    v2
+      ? ownershipFromRecord(cred, { isSysAdmin, adminTeamIds, v2, kind: 'credential' })
+      : { scope: norm.scope, teamId: norm.teamId || '', assignedTeamIds: norm.assignedTeamIds || [] }
+  ));
 
   function handleSave() {
     const body = { name: name.trim() || cred?.name };
     // Only a System Admin may reassign; for everyone else we omit ownership so
     // the server leaves the existing scope/team untouched (and would 403 anyway).
-    if (canReassign) Object.assign(body, ownershipPayload(ownership));
+    // Personal is never reassignable (the caller gates canReassign on that), so a
+    // personal edit is always a name-only rename.
+    if (canReassign) Object.assign(body, ownershipPayload(ownership, { v2 }));
     onSave(body);
   }
 
-  const ownershipReady = !canReassign || ownership.scope === 'system' || !!ownership.teamId;
+  const ownershipReady = !canReassign || ownership.scope === 'system' || ownership.scope === 'personal' || !!ownership.teamId;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-4)' }}>
@@ -80,7 +86,24 @@ export default function CredentialReassignPanel({ cred, teams = [], isSysAdmin, 
         }}>{secretHelp}</div>
       )}
 
-      {canReassign ? (
+      {v2 ? (
+        // #2360: always render the identity+scope control so the edit dialog shows
+        // the same taxonomy as create. `isEdit` fixes the immutable identity
+        // read-only; `disabled` when the caller can't reassign (a non-System-Admin,
+        // or a personal credential — never reassignable) makes it a read-only view
+        // of the current ownership rather than the old bare "only a System Admin…"
+        // line. A name-only rename still saves (handleSave omits ownership).
+        <CredentialOwnership
+          value={ownership}
+          onChange={setOwnership}
+          teams={teams}
+          isSysAdmin={isSysAdmin}
+          adminTeamIds={adminTeamIds}
+          v2
+          isEdit
+          disabled={!canReassign}
+        />
+      ) : canReassign ? (
         <CredentialOwnership
           value={ownership}
           onChange={setOwnership}

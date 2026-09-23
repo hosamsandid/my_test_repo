@@ -8,6 +8,7 @@ import WhenCell from '../components/WhenCell';
 import InfoTip from '../components/InfoTip';
 import PageHelpButton from '../components/PageHelpButton';
 import { TOKEN_USAGE_HELP_SECTIONS } from './token-usage-help-sections.js';
+import { toRows as agentModelRows, modelOptions, filterRowsByModel, isCurrentModel } from './agent-models-view.js';
 import { TOKEN_CLASSES, GROUP_OPTIONS, formatInt, formatPct, formatCompact, formatTileCount, niceScale, buildDaySeries, stackSegments, buildExportUrl, workItemAverages, WORK_ITEM_TILE_HELP, STAT_TILE_HELP, TIER_SIGNAL_HELP, COST_NOTE, PAGE_DESCRIPTION, isClassVisible, toggleHiddenClass, visibleClassList, visibleTotalTokens, visibleMaxTotal, loadHiddenClasses, saveHiddenClasses, userLabelIndex, userGroupCell, providerTierCell } from './token-usage-view.js';
 
 // Trigger a browser download of an export URL. The endpoints are behind the
@@ -626,10 +627,110 @@ function WorkItemsTab({ team }) {
   );
 }
 
+/* ── Agent → model tab (#2439) ─────────────────────────────────────── */
+// Which model each agent actually runs. There is no per-agent model pin yet
+// (#1485), so the value is the Ist — derived from observed usage (the
+// `modelUsage` keys the store carries per invocation), never a configured Soll.
+// Answers "which agents use model X" (the model filter) and shows every model an
+// agent used, with the most-recent one(s) marked current.
+const AGENT_MODEL_SOURCE_NOTE =
+  'Derived from observed usage: the model(s) each agent actually ran in this time range. '
+  + 'The most recently used one is marked "current". There is no configured model pin yet '
+  + '(#1485) — this is the Ist (observed), not a Soll (configured) value.';
+
+// One model as a chip; the current model(s) get an accent border + weight so the
+// live model reads apart from ones the agent merely used earlier.
+function ModelChip({ model, current }) {
+  return (
+    <span style={{
+      display: 'inline-block', padding: '1px 6px', marginRight: 4, marginBottom: 2,
+      fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)',
+      borderRadius: 'var(--eb-radius-sm)',
+      background: current ? 'var(--eb-bg-selected, var(--eb-bg-elevated))' : 'var(--eb-bg-elevated)',
+      border: `1px solid ${current ? 'var(--eb-status-info)' : 'var(--eb-border-default)'}`,
+      color: current ? 'var(--eb-text-primary)' : 'var(--eb-text-secondary)',
+      fontWeight: current ? 'var(--eb-font-semibold)' : 'var(--eb-font-normal)',
+    }}>{model}</span>
+  );
+}
+
+function AgentModelsTab({ team }) {
+  const [rangeKey, setRangeKey] = useState('7d');
+  const [model, setModel] = useState(''); // '' = all models
+  const { since } = useRangeWindow(rangeKey);
+
+  const sinceQ = since ? `since=${encodeURIComponent(since)}&` : '';
+  const teamQ = teamQuery(team);
+  const { data, loading, error, refetch } = useApi(`/api/usage/agent-models?${sinceQ}${teamQ}`);
+
+  const allRows = useMemo(() => agentModelRows(data), [data]);
+  const models = useMemo(() => modelOptions(data), [data]);
+  // Reset the model filter if the chosen model drops out of the new range/team.
+  useEffect(() => {
+    if (model && !models.includes(model)) setModel('');
+  }, [models, model]);
+  const rows = useMemo(() => filterRowsByModel(allRows, model), [allRows, model]);
+
+  const COLS = [
+    { key: 'agentId', label: 'Agent', render: (v) => <span style={{ fontFamily: 'var(--eb-font-mono)' }}>{v}</span> },
+    { key: 'teamId', label: 'Team', render: (v) => v || '—' },
+    { key: 'roleId', label: 'Role', render: (v) => v || '—' },
+    { key: 'current', label: 'Current model', render: (v, r) => (
+      r.currentModels.length
+        ? r.currentModels.map((m) => <ModelChip key={m} model={m} current />)
+        : <span style={{ color: 'var(--eb-text-muted)' }}>—</span>
+    ) },
+    { key: 'models', label: 'Models used', wrap: true, render: (v, r) => (
+      r.modelNames.length
+        ? r.modelNames.map((m) => <ModelChip key={m} model={m} current={isCurrentModel(r, m)} />)
+        : <span style={{ color: 'var(--eb-text-muted)' }}>—</span>
+    ) },
+    { key: 'lastUsed', label: 'Last used', render: (v) => <WhenCell iso={v} /> },
+  ];
+
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)', flexWrap: 'wrap' }}>
+        <select value={rangeKey} onChange={(e) => setRangeKey(e.target.value)} style={CONTROL_STYLE}>
+          {RANGE_PRESETS.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
+        </select>
+        <label style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Model</label>
+        <select value={model} onChange={(e) => setModel(e.target.value)} style={CONTROL_STYLE}>
+          <option value="">All models</option>
+          {models.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+        <button onClick={refetch} style={{ ...CONTROL_STYLE, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
+          <RefreshCw size={14} /> Refresh
+        </button>
+        {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
+      </div>
+
+      {/* AC5: the on-page source of the value, alongside the tab's help chapter. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+        <span>{AGENT_MODEL_SOURCE_NOTE}</span>
+        <InfoTip title="Where this comes from" text={AGENT_MODEL_SOURCE_NOTE} size={12} />
+      </div>
+
+      {loading ? (
+        <div style={{ height: 160, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />
+      ) : (
+        <DataTable
+          columns={COLS}
+          data={rows}
+          pageSize={25}
+          getRowKey={(r) => r.agentId}
+          emptyText="No agent model usage recorded in this time range."
+        />
+      )}
+    </>
+  );
+}
+
 /* ── Main page ─────────────────────────────────────────────────────── */
 const TABS = [
   { key: 'statistics', label: 'Statistics', help: TOKEN_USAGE_HELP_SECTIONS.statistics, helpLabel: 'What the Statistics tab shows' },
   { key: 'work-items', label: 'Work items', help: TOKEN_USAGE_HELP_SECTIONS.workItems, helpLabel: 'What the Work items tab shows' },
+  { key: 'agent-models', label: 'Agent → model', help: TOKEN_USAGE_HELP_SECTIONS.agentModels, helpLabel: 'What the Agent → model tab shows' },
 ];
 
 export default function TokenUsage() {
@@ -697,7 +798,9 @@ export default function TokenUsage() {
         {COST_NOTE}
       </div>
 
-      {tab === 'statistics' ? <StatisticsTab team={team} /> : <WorkItemsTab team={team} />}
+      {tab === 'statistics' ? <StatisticsTab team={team} />
+        : tab === 'work-items' ? <WorkItemsTab team={team} />
+          : <AgentModelsTab team={team} />}
     </div>
   );
 }

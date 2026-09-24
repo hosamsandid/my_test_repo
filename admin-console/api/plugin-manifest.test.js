@@ -454,7 +454,7 @@ test('the shipped jira manifest (plugins/jira) is valid', () => {
     { path: '/admin', minRole: 'team-admin' },
   ]);
   assert.notEqual(manifest.ui.global, true);
-  assert.deepEqual(Object.keys(manifest.policy).sort(), ['attach', 'comment', 'create', 'set-field', 'transition', 'update']);
+  assert.deepEqual(Object.keys(manifest.policy).sort(), ['attach', 'comment', 'create', 'set-field', 'sprint-bulk-create', 'sprint-create', 'transition', 'update']);
   assert.deepEqual(manifest.requiresApproval, []);
 });
 

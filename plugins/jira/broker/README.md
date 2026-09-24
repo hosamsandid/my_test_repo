@@ -86,7 +86,7 @@ match; the inbox holds all of them.
 ## Writes — role-gated, not confirmation-gated (D3)
 
 `aee-jira comment` / `transition` / `update` / `set-field` / `attachment add` /
-`create-epic` POST through the broker. `set-field` sets one custom field (#2417): the broker
+`create-epic` / `sprint create` / `sprint bulk-create` POST through the broker. `set-field` sets one custom field (#2417): the broker
 gates it three ways — (1) the field's name must be on the team's
 `writable-custom-fields` allow-list (empty = nothing writable), else 403; (2) the
 name is resolved to its per-site id from the cached `/rest/api/3/field` catalog
@@ -121,6 +121,24 @@ the Epic key + a success/failure map. A Story's `status` is applied as a follow-
 uses the native `parent` (team-managed) or the Epic Link custom field
 (company-managed), mirroring the #2415 read side. Every create is a write, never
 retried on a transport failure (a retry would duplicate the issue).
+
+`sprint create` / `sprint bulk-create` (#2450) are the plugin's first touch of
+Jira's **Agile** API (`/rest/agile/1.0`, not `/rest/api/3`): board & sprint
+management. A board is resolved by its human name (`resolveBoardByName` — an exact
+case-insensitive match wins, a single substring match is accepted, several are an
+actionable error — mirroring the field name→id resolution). `sprint create` POSTs
+one future sprint (name + start/end + `originBoardId`). `sprint bulk-create` reads
+the board's sprints (`sprint list` also exposes this as a plain read — no policy,
+just the credential), computes a whole run up front from a cadence + a naming
+template + a target end date (the PURE `planSprints` — the month/`weekOfMonth`
+naming keys off each sprint's start Monday, so the "Monday decides the label even
+when the week crosses months" rule falls out, and the run is capped at 104
+sprints), continuing by default from the day after the board's latest existing
+sprint (an explicit `--start` overrides, and is required for a board with no dated
+sprint). Every sprint is created as a Jira *future* sprint (a plain create yields
+one; a Scrum board has only one active sprint), each create is a write never
+retried on a transport failure, and a per-sprint failure is reported (not fatal —
+the dates are precomputed, not chained on Jira's responses), like `create-epic`.
 
 Before the credential
 is touched, `broker-policy.authorizeWrite` runs the manifest's `policy` rule

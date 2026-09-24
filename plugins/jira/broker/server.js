@@ -387,6 +387,35 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── sprint list on a board (Agile read, #2450) ───────────────────────────
+  // A read like /list, but over the Jira Agile API: the sprints on a board
+  // resolved by its human name. Needs the credential (jira.listBoardSprints
+  // resolves board name → id server-side), no write policy — it creates nothing.
+  if (cliPath === '/sprint/list' && req.method === 'GET') {
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'sprint-list', 'no-credential');
+      return sendJson(res, 400, {
+        error: 'This team has no Jira credential configured. A Team Admin sets it on the Plugins page.',
+        code: 'no-credential',
+      });
+    }
+    const board = (params.get('board') || '').trim();
+    if (!board) return sendJson(res, 400, { error: 'a --board name is required' });
+    try {
+      const result = await jira.listBoardSprints(cred, {
+        boardName: board,
+        projectKeyOrId: (params.get('project') || '').trim() || undefined,
+        state: (params.get('state') || '').trim() || undefined,
+      });
+      writeAudit(scopeId, scopeId, 'sprint-list', 'ok', board);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'sprint-list', 'error', `${board}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
   // ── attachment content fetch by id (Phase 3 read, #2399) ─────────────────
   // A read like /show, but it downloads one attachment's bytes server-side and
   // returns them as inline text or base64. jira.getAttachment confirms the id
@@ -505,6 +534,75 @@ async function handleCli(req, res, cliPath) {
       return sendJson(res, 200, result);
     } catch (err) {
       writeAudit(scopeId, scopeId, 'create', 'error', `${project}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
+  // ── sprint creation on a board (Agile write, #2450) ──────────────────────
+  // Two board-scoped writes: create ONE future sprint, or BULK-generate a run of
+  // them up to a target date. Role-gated like every other write (D3); the Jira
+  // token stays server-side. `sprint-bulk-create` continues by default from the
+  // board's latest existing sprint (jira.bulkCreateSprints), so a per-sprint
+  // failure is reported, not fatal — the dates are precomputed, not chained.
+  if (cliPath === '/sprint/create' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('sprint-create');
+    if (!authz.allow) {
+      writeAudit(scopeId, scopeId, 'sprint-create', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'sprint-create', 'no-credential');
+      return sendJson(res, 400, { error: 'This team has no Jira credential configured.', code: 'no-credential' });
+    }
+    const body = parseJson(await readBody(req));
+    const board = String(body.board || '').trim();
+    if (!board) return sendJson(res, 400, { error: 'a --board name is required' });
+    try {
+      const result = await jira.createSprint(cred, {
+        boardName: board,
+        projectKeyOrId: String(body.project || '').trim() || undefined,
+        name: body.name,
+        startDate: body.start,
+        endDate: body.end,
+        goal: body.goal,
+      });
+      writeAudit(scopeId, scopeId, 'sprint-create', 'ok', `${board}:${result.sprint.id || result.sprint.name}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'sprint-create', 'error', `${board}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
+  if (cliPath === '/sprint/bulk-create' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('sprint-bulk-create');
+    if (!authz.allow) {
+      writeAudit(scopeId, scopeId, 'sprint-bulk-create', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'sprint-bulk-create', 'no-credential');
+      return sendJson(res, 400, { error: 'This team has no Jira credential configured.', code: 'no-credential' });
+    }
+    const body = parseJson(await readBody(req));
+    const board = String(body.board || '').trim();
+    if (!board) return sendJson(res, 400, { error: 'a --board name is required' });
+    try {
+      const result = await jira.bulkCreateSprints(cred, {
+        boardName: board,
+        projectKeyOrId: String(body.project || '').trim() || undefined,
+        nameTemplate: body.nameTemplate,
+        cadenceDays: body.cadenceDays,
+        until: body.until,
+        start: body.start,
+        goal: body.goal,
+      });
+      writeAudit(scopeId, scopeId, 'sprint-bulk-create', 'ok', `${board}:${result.created}/${result.requested}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'sprint-bulk-create', 'error', `${board}: ${err.message}`);
       return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
     }
   }

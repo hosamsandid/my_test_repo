@@ -1192,3 +1192,194 @@ test('createEpicWithStories: a create is NOT retried on a transport failure (F6 
     assert.deepEqual(calls, ['create']); // exactly one attempt — no retry
   });
 });
+
+// ── board & sprint management (#2450) ───────────────────────────────────────
+
+const AGILE = 'http://fake-jira:8080/rest/agile/1.0';
+const isBoardSearch = (url) => /\/rest\/agile\/1\.0\/board\?/.test(url);
+const isSprintList = (url) => /\/rest\/agile\/1\.0\/board\/\d+\/sprint/.test(url);
+const isSprintCreate = (url, opts) => /\/rest\/agile\/1\.0\/sprint$/.test(url) && opts && opts.method === 'POST';
+const boardSearchResponse = (boards) => ({ ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: boards }) });
+
+test('weekOfMonth: the Nth-weekday-of-month index (ceil(day/7))', () => {
+  assert.equal(jc.weekOfMonth(new Date(Date.UTC(2026, 9, 26))), 4); // Mon 26 Oct → 4th Monday
+  assert.equal(jc.weekOfMonth(new Date(Date.UTC(2026, 10, 2))), 1); // Mon 2 Nov → 1st Monday
+  assert.equal(jc.weekOfMonth(new Date(Date.UTC(2026, 0, 1))), 1);
+  assert.equal(jc.weekOfMonth(new Date(Date.UTC(2026, 0, 31))), 5);
+});
+
+test('renderSprintName: substitutes known placeholders, leaves unknown verbatim', () => {
+  const day = new Date(Date.UTC(2026, 9, 26)); // Mon 26 Oct 2026
+  assert.equal(jc.renderSprintName('Acc2.0 {MMM}_{weekOfMonth}', day, 1), 'Acc2.0 Oct_4');
+  assert.equal(jc.renderSprintName('{MMMM} {DD}/{MM}/{YYYY} #{n}', day, 3), 'October 26/10/2026 #3');
+  assert.equal(jc.renderSprintName('S{index} {YY}', day, 7), 'S7 26');
+  assert.equal(jc.renderSprintName('keep {bogus}', day, 1), 'keep {bogus}'); // unknown token untouched
+});
+
+test('planSprints: the ticket example — month follows the sprint Monday across a week that crosses months', () => {
+  const plan = jc.planSprints({
+    start: new Date(Date.UTC(2026, 9, 26)), cadenceDays: 7,
+    until: new Date(Date.UTC(2026, 10, 8)), nameTemplate: 'Acc2.0 {MMM}_{weekOfMonth}',
+  });
+  assert.deepEqual(plan, [
+    { name: 'Acc2.0 Oct_4', startDate: '2026-10-26T00:00:00.000Z', endDate: '2026-11-01T00:00:00.000Z' },
+    { name: 'Acc2.0 Nov_1', startDate: '2026-11-02T00:00:00.000Z', endDate: '2026-11-08T00:00:00.000Z' },
+  ]);
+});
+
+test('planSprints: a sprint is generated while its START is on or before the target date', () => {
+  // until falls mid-second-sprint → the second sprint (start ≤ until) is still created.
+  const plan = jc.planSprints({
+    start: new Date(Date.UTC(2026, 0, 5)), cadenceDays: 7,
+    until: new Date(Date.UTC(2026, 0, 13)), nameTemplate: 'S{n}',
+  });
+  assert.deepEqual(plan.map((p) => p.startDate), ['2026-01-05T00:00:00.000Z', '2026-01-12T00:00:00.000Z']);
+});
+
+test('planSprints: rejects an empty template, a bad cadence, and a runaway run', () => {
+  const base = { start: new Date(Date.UTC(2026, 0, 1)), until: new Date(Date.UTC(2026, 0, 8)) };
+  assert.throws(() => jc.planSprints({ ...base, cadenceDays: 7, nameTemplate: '  ' }), /template is required/);
+  assert.throws(() => jc.planSprints({ ...base, cadenceDays: 0, nameTemplate: 'S{n}' }), /cadence/);
+  assert.throws(
+    () => jc.planSprints({ start: base.start, cadenceDays: 1, until: new Date(Date.UTC(2030, 0, 1)), nameTemplate: 'S{n}' }),
+    /more than 104 sprints/,
+  );
+});
+
+test('resolveBoardByName: an exact (case-insensitive) name wins over other substring matches', async () => {
+  await withFetch((url) => {
+    if (isBoardSearch(url)) return boardSearchResponse([
+      { id: 5, name: 'Team Scrum Board', type: 'scrum' },
+      { id: 9, name: 'Team Scrum Board (old)', type: 'scrum' },
+    ]);
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    const b = await jc.resolveBoardByName(CRED, { boardName: 'team scrum board', env: CRED.env });
+    assert.deepEqual(b, { id: '5', name: 'Team Scrum Board', type: 'scrum' });
+  });
+});
+
+test('resolveBoardByName: no match → 404; several non-exact matches → 409', async () => {
+  await withFetch(() => boardSearchResponse([]), async () => {
+    await assert.rejects(() => jc.resolveBoardByName(CRED, { boardName: 'nope', env: CRED.env }), (e) => e.status === 404);
+  });
+  await withFetch(() => boardSearchResponse([
+    { id: 1, name: 'Scrum Board A' }, { id: 2, name: 'Scrum Board B' },
+  ]), async () => {
+    await assert.rejects(() => jc.resolveBoardByName(CRED, { boardName: 'Scrum Board', env: CRED.env }), (e) => e.status === 409);
+  });
+});
+
+test('listBoardSprints: resolves the board by name, paginates, shapes the sprints', async () => {
+  await withFetch((url) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 7, name: 'Board', type: 'scrum' }]);
+    if (isSprintList(url)) return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true,
+      values: [
+        { id: 100, name: 'Sprint 1', state: 'closed', startDate: '2026-01-05T00:00:00.000Z', endDate: '2026-01-11T00:00:00.000Z', originBoardId: 7 },
+        { id: 101, name: 'Sprint 2', state: 'future' },
+      ],
+    }) };
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    const { board, sprints } = await jc.listBoardSprints(CRED, { boardName: 'Board', env: CRED.env });
+    assert.deepEqual(board, { id: '7', name: 'Board' });
+    assert.equal(sprints.length, 2);
+    assert.deepEqual(sprints[0], {
+      id: '100', name: 'Sprint 1', state: 'closed',
+      startDate: '2026-01-05T00:00:00.000Z', endDate: '2026-01-11T00:00:00.000Z', goal: null, boardId: '7',
+    });
+    assert.equal(sprints[1].startDate, null);
+  });
+});
+
+test('createSprint: POSTs name + normalized dates + originBoardId (a write, not retried)', async () => {
+  const bodies = [];
+  const calls = [];
+  await withFetch((url, opts) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 12, name: 'Board' }]);
+    if (isSprintCreate(url, opts)) {
+      calls.push('create');
+      bodies.push(JSON.parse(opts.body));
+      return { ok: true, status: 201, text: async () => JSON.stringify({ id: 300, name: 'Sprint 12', state: 'future', originBoardId: 12 }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  }, async () => {
+    const r = await jc.createSprint(CRED, { boardName: 'Board', name: 'Sprint 12', startDate: '2026-10-26', endDate: '2026-11-01', env: CRED.env });
+    assert.deepEqual(bodies[0], {
+      name: 'Sprint 12', originBoardId: 12,
+      startDate: '2026-10-26T00:00:00.000Z', endDate: '2026-11-01T00:00:00.000Z',
+    });
+    assert.equal(r.sprint.id, '300');
+    assert.equal(r.board.id, '12');
+  });
+  // a create is never retried on a transport failure (F6)
+  await withFetch((url, opts) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 1, name: 'B' }]);
+    if (isSprintCreate(url, opts)) { calls.push('retry?'); const e = new TypeError('fetch failed'); e.cause = { code: 'X' }; throw e; }
+    throw new Error('unexpected');
+  }, async () => {
+    await assert.rejects(() => jc.createSprint(CRED, { boardName: 'B', name: 'S', startDate: '2026-01-01', endDate: '2026-01-07', env: CRED.env }), /fetch failed/);
+  });
+  assert.deepEqual(calls, ['create', 'retry?']); // exactly one create in each phase — no retry
+});
+
+test('bulkCreateSprints: continues from the board latest sprint end, reports a per-sprint failure map', async () => {
+  let creates = 0;
+  await withFetch((url, opts) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 3, name: 'Board' }]);
+    if (isSprintList(url)) return { ok: true, status: 200, text: async () => JSON.stringify({
+      isLast: true,
+      values: [{ id: 50, name: 'Prev', state: 'future', startDate: '2026-10-19T00:00:00.000Z', endDate: '2026-10-25T00:00:00.000Z' }],
+    }) };
+    if (isSprintCreate(url, opts)) {
+      creates += 1;
+      if (creates === 2) return { ok: false, status: 400, text: async () => 'bad' }; // the 2nd sprint fails
+      return { ok: true, status: 201, text: async () => JSON.stringify({ id: 500 + creates, state: 'future' }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  }, async () => {
+    const r = await jc.bulkCreateSprints(CRED, {
+      boardName: 'Board', nameTemplate: 'Acc2.0 {MMM}_{weekOfMonth}', until: '2026-11-15', env: CRED.env,
+    });
+    // continues from 2026-10-25 → first new sprint starts Mon 2026-10-26; through
+    // 2026-11-15 that is 3 sprints (start 10-26, 11-02, 11-09).
+    assert.equal(r.sprints[0].name, 'Acc2.0 Oct_4');
+    assert.equal(r.sprints[0].startDate, '2026-10-26T00:00:00.000Z');
+    assert.equal(r.requested, 3);
+    assert.equal(r.created, 2);
+    assert.equal(r.failed, 1);
+    assert.equal(r.sprints[1].ok, false);
+    assert.match(r.sprints[1].error, /400/);
+  });
+});
+
+test('bulkCreateSprints: a board with no dated sprint and no --start is refused (400)', async () => {
+  await withFetch((url) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 3, name: 'Board' }]);
+    if (isSprintList(url)) return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [] }) };
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    await assert.rejects(
+      () => jc.bulkCreateSprints(CRED, { boardName: 'Board', nameTemplate: 'S{n}', until: '2026-11-08', env: CRED.env }),
+      (e) => e.status === 400 && /supply --start/.test(e.message),
+    );
+  });
+});
+
+test('bulkCreateSprints: an explicit --start overrides continue-from-latest (no sprint list fetched)', async () => {
+  let listed = false;
+  await withFetch((url, opts) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 3, name: 'Board' }]);
+    if (isSprintList(url)) { listed = true; return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [] }) }; }
+    if (isSprintCreate(url, opts)) return { ok: true, status: 201, text: async () => JSON.stringify({ id: 9, state: 'future' }) };
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    const r = await jc.bulkCreateSprints(CRED, {
+      boardName: 'Board', nameTemplate: 'S{n}', start: '2026-01-05', until: '2026-01-05', env: CRED.env,
+    });
+    assert.equal(listed, false); // --start given → no need to read existing sprints
+    assert.equal(r.requested, 1);
+    assert.equal(r.sprints[0].startDate, '2026-01-05T00:00:00.000Z');
+  });
+});

@@ -830,3 +830,71 @@ test('teardown-scope reaps one scope\'s watch + inbox + credential, bearer-authe
     assert.equal(broker.scopeCredentials.has('team-2'), false);
   } finally { srv.close(); }
 });
+
+test('cli sprint: /sprint/list reads a board sprints; /sprint/create + /sprint/bulk-create write (#2450)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'sprintco', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const created = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    const u = String(url);
+    if (/\/rest\/agile\/1\.0\/board\?/.test(u)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [{ id: 42, name: 'Team Scrum Board', type: 'scrum' }] }) };
+    }
+    if (/\/rest\/agile\/1\.0\/board\/42\/sprint/.test(u)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [
+        { id: 1, name: 'Prev', state: 'future', startDate: '2026-10-19T00:00:00.000Z', endDate: '2026-10-25T00:00:00.000Z', originBoardId: 42 },
+      ] }) };
+    }
+    if (/\/rest\/agile\/1\.0\/sprint$/.test(u) && opts.method === 'POST') {
+      const body = JSON.parse(opts.body);
+      created.push(body);
+      return { ok: true, status: 201, text: async () => JSON.stringify({ id: 100 + created.length, name: body.name, state: 'future', originBoardId: 42 }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${u}`);
+  };
+  const srv = await listen();
+  try {
+    // read: list sprints on the board
+    const listed = await call(srv, 'GET', '/cli/sprint/list?board=' + encodeURIComponent('Team Scrum Board'), { token: TOKEN });
+    assert.equal(listed.status, 200);
+    assert.equal(listed.body.board.id, '42');
+    assert.equal(listed.body.sprints[0].name, 'Prev');
+
+    // write: create one sprint
+    const one = await call(srv, 'POST', '/cli/sprint/create', {
+      token: TOKEN, body: { board: 'Team Scrum Board', name: 'Sprint 12', start: '2026-10-26', end: '2026-11-01' },
+    });
+    assert.equal(one.status, 200);
+    assert.equal(one.body.sprint.id, '101');
+    assert.deepEqual(created[created.length - 1], {
+      name: 'Sprint 12', originBoardId: 42, startDate: '2026-10-26T00:00:00.000Z', endDate: '2026-11-01T00:00:00.000Z',
+    });
+
+    // write: bulk-create continues from Prev's end (Mon 2026-10-26) through the target date
+    const bulk = await call(srv, 'POST', '/cli/sprint/bulk-create', {
+      token: TOKEN, body: { board: 'Team Scrum Board', nameTemplate: 'Acc2.0 {MMM}_{weekOfMonth}', until: '2026-11-08' },
+    });
+    assert.equal(bulk.status, 200);
+    assert.equal(bulk.body.requested, 2);
+    assert.equal(bulk.body.created, 2);
+    assert.equal(bulk.body.sprints[0].name, 'Acc2.0 Oct_4');
+    assert.equal(bulk.body.sprints[1].name, 'Acc2.0 Nov_1');
+
+    // board name required
+    assert.equal((await call(srv, 'GET', '/cli/sprint/list', { token: TOKEN })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/sprint/create', { token: TOKEN, body: { name: 'x' } })).status, 400);
+
+    // a scope with no credential → 400 no-credential (both read and write)
+    assert.equal((await call(srv, 'GET', '/cli/sprint/list?board=B', { token: OTHER })).body.code, 'no-credential');
+    const nocred = await call(srv, 'POST', '/cli/sprint/bulk-create', { token: OTHER, body: { board: 'B', nameTemplate: 'S{n}', until: '2026-01-01' } });
+    assert.equal(nocred.body.code, 'no-credential');
+
+    // a GET on a write path → 404 (POST only)
+    assert.equal((await call(srv, 'GET', '/cli/sprint/create', { token: TOKEN })).status, 404);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});

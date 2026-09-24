@@ -34,6 +34,8 @@ const POLICY = Object.freeze({
   attach: { scopes: ['team'] },
   'set-field': { scopes: ['team'] },
   create: { scopes: ['team'] },
+  'sprint-create': { scopes: ['team'] },
+  'sprint-bulk-create': { scopes: ['team'] },
 });
 
 // Wired but empty — see the header.

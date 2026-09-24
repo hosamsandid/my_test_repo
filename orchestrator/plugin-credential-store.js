@@ -17,9 +17,13 @@
 //
 // Raw values are NEVER returned to a caller after they are written — only a
 // per-key `{ set, preview }` and the `setBy`/`setAt` metadata (the same
-// fingerprint-only discipline as SSH keys / GitHub tokens). The one place the
-// raw values leave this module is `resolveScopeCredentialMap`, which the
-// orchestrator uses to push them straight to the broker sidecar server-side.
+// fingerprint-only discipline as SSH keys / GitHub tokens). The one deliberate
+// exception (#2449): a manifest may mark a non-secret credential field
+// `secret: false` (default `true`), and `credentialMeta()` then discloses that
+// field's real stored `value` so the Admin Console can pre-fill an editable
+// input — secret fields (API tokens) keep the fingerprint-only behavior. The
+// other place raw values leave this module is `resolveScopeCredentialMap`, which
+// the orchestrator uses to push them straight to the broker sidecar server-side.
 //
 // Pure decisions (key validation, metadata shaping, preview) are separate from
 // the fs adapter so they unit-test in isolation.
@@ -86,11 +90,18 @@ function credentialMeta(entry, manifestCredentials) {
   const keys = {};
   for (const c of declared) {
     const v = stored[c.key];
+    // A field is secret unless the manifest explicitly opts out (`secret: false`).
+    // Non-secret fields (e.g. Jira's site-url, allow-lists) disclose their real
+    // stored value so the Admin Console can pre-fill an editable input (#2449);
+    // secret fields keep the fingerprint-only discipline (SSH keys / GH tokens).
+    const secret = c.secret !== false;
     keys[c.key] = {
       set: typeof v === 'string' && v.length > 0,
       required: c.required === true,
       description: typeof c.description === 'string' ? c.description : undefined,
       preview: typeof v === 'string' && v.length > 0 ? previewValue(v) : null,
+      secret,
+      ...(secret ? {} : { value: typeof v === 'string' ? v : '' }),
     };
   }
   const requiredKeys = declared.filter((c) => c.required === true).map((c) => c.key);

@@ -436,6 +436,11 @@ test('the shipped jira manifest (plugins/jira) is valid', () => {
   assert.deepEqual(manifest.credentials.map((c) => c.key), ['site-url', 'email', 'api-token', ...OPTIONAL_CREDS]);
   assert.ok(manifest.credentials.filter((c) => !OPTIONAL_CREDS.includes(c.key)).every((c) => c.required === true));
   assert.ok(OPTIONAL_CREDS.every((k) => manifest.credentials.find((c) => c.key === k).required === false));
+  // #2449: everything but the api-token is non-secret (its real value is editable
+  // in the console); only `api-token` keeps the default write-only masking.
+  const NON_SECRET_CREDS = ['site-url', 'email', ...OPTIONAL_CREDS];
+  assert.ok(NON_SECRET_CREDS.every((k) => manifest.credentials.find((c) => c.key === k).secret === false));
+  assert.equal(manifest.credentials.find((c) => c.key === 'api-token').secret, undefined); // secret by default
   // Team scope only. Runs on Podman AND Kubernetes: the broker is structurally
   // identical to github-issues (egress sidecar + UI + per-scope credential), which
   // is already kubernetes-eligible, so the agent→broker path holds on both

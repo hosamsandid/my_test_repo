@@ -65,7 +65,8 @@ pushed map; a granted-but-unconfigured team simply isn't polled. Use a **classic
 projects. Two optional credential values are admin allow-lists of custom fields
 by their human name: `readable-custom-fields` (surfaced by default on
 `show`/`search`/`list`) and `writable-custom-fields` (settable via `set-field` —
-empty means no field is writable; a field not on it is refused).
+empty means every custom field is writable; a non-empty list restricts writes to
+only the named fields, refusing any other).
 
 ## Delivery — the `plugin-event` wake
 
@@ -87,8 +88,9 @@ match; the inbox holds all of them.
 
 `aee-jira comment` / `transition` / `update` / `set-field` / `attachment add` /
 `create-epic` / `sprint create` / `sprint bulk-create` POST through the broker. `set-field` sets one custom field (#2417): the broker
-gates it three ways — (1) the field's name must be on the team's
-`writable-custom-fields` allow-list (empty = nothing writable), else 403; (2) the
+gates it three ways — (1) if the team's `writable-custom-fields` allow-list is
+non-empty, the field's name must be on it, else 403 (empty = every field
+writable); (2) the
 name is resolved to its per-site id from the cached `/rest/api/3/field` catalog
 (the same one the #2415/#2416 reads use), a miss is a 400; (3) the value is shaped
 per the field's schema type (`shapeFieldWriteValue` — a Team/select/user field is
@@ -112,8 +114,9 @@ be lower and surfaces as a mapped 413.
 issueTypes? }` creates one Epic and N child Stories (each linked to it) in one
 project. Jira has no create-transaction, so the guards run up front — shape
 validation, the `writable-custom-fields` allow-list over EVERY custom field named
-(the same #2417 gate that `set-field` uses; the Epic-link field the broker sets is
-structural and exempt), then name→id + schema resolution from the cached catalog.
+(the same #2417/#2449 gate that `set-field` uses — empty list = all writable, a
+non-empty list restricts; the Epic-link field the broker sets is structural and
+exempt), then name→id + schema resolution from the cached catalog.
 The Epic is created first (its key links the Stories), then each Story; a per-Story
 failure after the Epic exists is reported per-Story, not fatal, so the caller gets
 the Epic key + a success/failure map. A Story's `status` is applied as a follow-up

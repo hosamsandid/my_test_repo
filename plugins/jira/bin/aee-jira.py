@@ -54,10 +54,11 @@ stdin when --file is omitted or "-"):
 Only a summary is required (on the epic and on each story). Optional per-issue:
 "description", "assignee" (an Atlassian accountId), "status" (applied as a
 follow-up transition, since Jira creates an issue in the workflow's initial
-status), and "fields" (custom fields by their Jira name). Every custom field
-named in "fields" must be on the team's writable-custom-fields allow-list (the
-same gate as set-field) or the whole operation is refused before anything is
-created; the name is resolved to its id and the value shaped server-side (a
+status), and "fields" (custom fields by their Jira name). Custom fields named in
+"fields" are writable by default (the same gate as set-field); if the team set a
+non-empty writable-custom-fields allow-list, every named field must be on it or
+the whole operation is refused before anything is created. The name is resolved
+to its id and the value shaped server-side (a
 Team/select/user field is not a plain string; pass an id-bearing field's id).
 The result reports the Epic key + URL and, per Story, its key/URL on success or
 an error on failure (the Epic and the other Stories still go through — Jira has
@@ -82,8 +83,9 @@ running Mon 26.10-Sun 01.11 with template "Acc2.0 {MMM}_{weekOfMonth}" is
 sprint is created as a Jira "future" sprint (a board has only one active
 sprint); the result reports each sprint's id, or a per-sprint error.
 
-`set-field` sets ONE custom field an admin has sanctioned (the team's
-`writable-custom-fields` allow-list); a field not on that list is refused. The
+`set-field` sets ONE custom field. Any custom field is writable by default; if an
+admin set a non-empty `writable-custom-fields` allow-list, a field not on that
+list is refused. The
 field's name → id and value shape (a Team / select / user field is not a plain
 string) are resolved server-side. Pass `--value` with the value to set — for an
 id-bearing field like Team, pass the id you read via `show --fields "Team"`

@@ -1141,16 +1141,14 @@ async function setCustomField(cred, issueKey, { fieldName, value, jsonValue, all
   if (!hasJson && (value === undefined || value === null)) {
     const e = new Error('a value is required (--value or --value-json)'); e.status = 400; throw e;
   }
-  // (1) allow-list gate — a non-allow-listed field is refused (acceptance).
+  // (1) allow-list gate — an empty list means unrestricted; a non-empty list
+  // restricts writes to only the named fields (#2449 flips the old deny-by-default).
   const allow = (Array.isArray(allowList) ? allowList : [])
     .map((s) => String(s || '').trim().toLowerCase()).filter(Boolean);
-  if (!allow.includes(name.toLowerCase())) {
+  if (allow.length && !allow.includes(name.toLowerCase())) {
     const e = new Error(
-      allow.length
-        ? `field "${name}" is not writable by agents. This team's writable-custom-fields allow-list is: `
-          + `${allowList.join(', ')}. A Team Admin adds it on the Plugins page.`
-        : `no custom field is writable by agents: this team's writable-custom-fields allow-list is empty. `
-          + `A Team Admin adds "${name}" to it on the Plugins page.`,
+      `field "${name}" is not writable by agents. This team's writable-custom-fields allow-list is: `
+        + `${allowList.join(', ')}. A Team Admin adds it on the Plugins page.`,
     );
     e.status = 403;
     throw e;
@@ -1299,18 +1297,18 @@ async function createEpicWithStories(cred, { projectKey, epic, stories, allowLis
     }
   });
 
-  // (2) allow-list gate — every named custom field must be sanctioned (#2417).
+  // (2) allow-list gate — an empty list means unrestricted; a non-empty list
+  // restricts writes to only the named fields (#2449 flips the old deny-by-default).
   const usedNames = collectCustomFieldNames(epic, storyList);
   const allow = (Array.isArray(allowList) ? allowList : [])
     .map((s) => String(s || '').trim().toLowerCase()).filter(Boolean);
-  const notAllowed = usedNames.filter((n) => !allow.includes(n.toLowerCase()));
+  const notAllowed = allow.length
+    ? usedNames.filter((n) => !allow.includes(n.toLowerCase()))
+    : [];
   if (notAllowed.length) {
     const e = new Error(
-      allow.length
-        ? `custom field(s) not writable by agents: ${notAllowed.join(', ')}. This team's `
-          + `writable-custom-fields allow-list is: ${allowList.join(', ')}. A Team Admin adds them on the Plugins page.`
-        : `no custom field is writable by agents: this team's writable-custom-fields allow-list is empty. `
-          + `A Team Admin adds ${notAllowed.map((n) => `"${n}"`).join(', ')} to it on the Plugins page.`,
+      `custom field(s) not writable by agents: ${notAllowed.join(', ')}. This team's `
+        + `writable-custom-fields allow-list is: ${allowList.join(', ')}. A Team Admin adds them on the Plugins page.`,
     );
     e.status = 403;
     throw e;

@@ -163,9 +163,10 @@ who confirmed it and when on the provider entry. Consequences worth knowing:
 ## Test connection and Discover models
 
 Both buttons probe the provider *before* you commit to it, from the values
-currently in the form. Both send the same request — a `GET` of the endpoint's
-**`/v1/models`** route (for a subscription provider, of `api.anthropic.com`,
-since there is no Base URL to ask) — and differ in what they do with the answer:
+currently in the form. For an **API key / proxy** provider both send the same
+request — a `GET` of the endpoint's **`/v1/models`** route — and differ only in
+what they do with the answer (a **subscription** provider takes a different route
+entirely; see below):
 
 - **Test connection** reports the HTTP result and nothing else. It is the fastest
   way to separate "wrong URL" from "wrong token", and it works even against an
@@ -185,8 +186,19 @@ endpoint is reachable and your credential works, just with no catalog to offer; 
 `401`/`403` still means a real auth failure; a `404` on that route too means the
 Base URL itself is wrong. On a successful fallback, **Test connection** reports OK
 and **Discover models** tells you to enter the model name(s) manually instead of
-showing an empty list or a raw HTTP error. A provider whose `/v1/models` already
-works is completely unaffected — the fallback only fires on a route-missing status.
+showing an empty list or a raw HTTP error. An API-key provider whose `/v1/models`
+already works is completely unaffected — for it the fallback only fires on a
+route-missing status.
+
+**A subscription (OAuth) provider skips `/v1/models` altogether.** Its token is
+honoured only on Anthropic's Claude Code *messages* flow, and the model-list
+route always answers a subscription token with `401 invalid x-api-key`. So both
+buttons go straight to the `count_tokens` probe against `api.anthropic.com` —
+never `/v1/models`, and not as a fallback but as the only path — and **Discover
+models** always asks you to enter the model name(s) manually, because a
+subscription token cannot enumerate models over HTTP at all. The same `count_tokens`
+probe backs the background health poller, so a subscription provider is no longer
+falsely flagged red on the **Health** column either.
 
 **A probe always names the credential it used**, in a line under the two buttons,
 because a `401` means something completely different depending on which one it

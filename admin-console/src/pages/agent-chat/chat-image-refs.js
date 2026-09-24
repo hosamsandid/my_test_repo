@@ -11,16 +11,31 @@
 // preview excludes it: it carries no raster magic and is a text/XSS surface.
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
 
-// An `@<path>` token: '@' preceded by start-of-string or whitespace, followed
-// by a run of non-whitespace characters (a workspace-relative path never
-// contains a space in this app — uploads are slugged, and a user-typed
-// reference follows the same `@<path>` convention `insertRefs` produces).
-const REF_TOKEN_RE = /(^|\s)@(\S+)/g;
-
 function extOf(path) {
   const idx = path.lastIndexOf('.');
   if (idx < 0 || idx === path.length - 1) return '';
   return path.slice(idx + 1).toLowerCase();
+}
+
+// True when `ch` is undefined (end of string) or not an ASCII alphanumeric —
+// i.e. a valid right-hand boundary for a file extension. `_` counts as a
+// boundary too: an extension is a plain alphanumeric run.
+function isExtBoundary(ch) {
+  return ch === undefined || !/[a-z0-9]/i.test(ch);
+}
+
+// If `text[dot]` is the '.' of a known image extension terminated by a boundary
+// (`image (2).png` → yes; `a.pngx` → no; `a.txt` → no), return the index just
+// past the extension; otherwise -1. Iterates a fixed 5-element set, so this is
+// O(1) per call and carries no backtracking (js/polynomial-redos safe, #2453).
+function imageExtEndAt(text, dot) {
+  for (const ext of IMAGE_EXTENSIONS) {
+    const end = dot + 1 + ext.length;
+    if (text.slice(dot + 1, end).toLowerCase() === ext && isExtBoundary(text[end])) {
+      return end;
+    }
+  }
+  return -1;
 }
 
 // Whether `path` is a candidate for inline-thumbnail treatment. A leading `/`
@@ -41,23 +56,49 @@ export function isImageRefCandidate(path) {
 // non-image reference, or plain `@` text that isn't a reference at all) stays
 // part of its surrounding text segment, so it renders exactly as it did
 // before #2146 (AC5).
+//
+// A token is an '@' at start-of-string or after whitespace, and its path runs
+// up to and including the FIRST image extension. Anchoring on the extension —
+// not on the first whitespace — is what lets a workspace filename contain a
+// space, e.g. `image (2).png` minted by the upload de-dupe or `my screenshot.png`
+// from a browser (#2453). A whitespace-then-'@' pre-empts an unclosed token, so
+// `@a.png @b.png` still yields two refs. The scan is a single linear pass with
+// O(1) work per character (no backtracking regex — js/polynomial-redos safe).
 export function parseMessageSegments(body) {
   const text = String(body || '');
   const segments = [];
-  let lastIndex = 0;
-  let m;
-  REF_TOKEN_RE.lastIndex = 0;
-  while ((m = REF_TOKEN_RE.exec(text)) !== null) {
-    const leading = m[1];
-    const path = m[2];
-    if (!isImageRefCandidate(path)) continue;
-    const tokenStart = m.index + leading.length;
-    if (tokenStart > lastIndex) {
-      segments.push({ type: 'text', value: text.slice(lastIndex, tokenStart) });
+  let lastIndex = 0;     // start of the pending (unemitted) text run
+  let tokenStart = -1;   // index of the '@' opening the current candidate, or -1
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+
+    // An '@' at start-of-string or after whitespace opens a candidate. It also
+    // pre-empts any still-open candidate (which, being unclosed, held no image
+    // extension and therefore stays plain text).
+    if (ch === '@' && (i === 0 || /\s/.test(text[i - 1]))) {
+      tokenStart = i;
+      continue;
     }
-    segments.push({ type: 'ref', raw: `@${path}`, path });
-    lastIndex = tokenStart + 1 + path.length;
+
+    // Inside a candidate, the path ends at the first image-extension boundary.
+    if (tokenStart >= 0 && ch === '.') {
+      const end = imageExtEndAt(text, i);
+      if (end >= 0) {
+        const path = text.slice(tokenStart + 1, end);
+        if (isImageRefCandidate(path)) {
+          if (tokenStart > lastIndex) {
+            segments.push({ type: 'text', value: text.slice(lastIndex, tokenStart) });
+          }
+          segments.push({ type: 'ref', raw: `@${path}`, path });
+          lastIndex = end;
+          i = end - 1;    // resume right after the extension (loop's ++ lands on `end`)
+        }
+        tokenStart = -1;  // candidate consumed (emitted, or rejected e.g. a /context key)
+      }
+    }
   }
+
   if (lastIndex < text.length) {
     segments.push({ type: 'text', value: text.slice(lastIndex) });
   }

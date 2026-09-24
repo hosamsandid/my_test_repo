@@ -85,7 +85,13 @@ const { createWorkPlaneGates, WORK_PLANE_AGENT_PREFIXES,
 const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
 const { normalizeDiscoveredModels } = require('./model-discovery');
-const { isRouteMissingStatus, classifyMessagesFallback } = require('./llm-probe-fallback');
+const {
+  isRouteMissingStatus,
+  classifyMessagesFallback,
+  OAUTH_PROBE_SYSTEM,
+  isOauthAuthType,
+  oauthDiscoverResult,
+} = require('./llm-probe-fallback');
 const { CHAT_AUTHOR_FIELD, chatAuthorStamp } = require('./chat-author');
 // Per-human Matrix identity (#1458, epic #2076 P1). Byte-mirrored in
 // orchestrator/human-matrix-store.js — the console reads the same
@@ -13295,11 +13301,15 @@ function llmProbeTarget(baseUrl, token, authType) {
 // reachability + auth via the cheapest true POST route, count_tokens, instead
 // of declaring the whole provider broken. See llm-probe-fallback.js for the
 // (unit-tested, pure) response classification.
-async function probeMessagesFallback(baseUrl, headers) {
+async function probeMessagesFallback(baseUrl, headers, system = null) {
   const url = buildCountTokensUrl(baseUrl);
   const payload = {
     model: '__aee-probe-placeholder__',
     messages: [{ role: 'user', content: 'ping' }],
+    // Subscription-OAuth probes present the Claude Code identity so they
+    // authenticate exactly like real CLI traffic (#2448); the api-key Azure
+    // fallback (#2306) passes no system and its payload is unchanged.
+    ...(system ? { system } : {}),
   };
   const result = await httpPostJson(url, { 'anthropic-version': '2023-06-01', ...headers }, payload);
   const { ok, error } = classifyMessagesFallback(result, describeProbeFailure);
@@ -13314,6 +13324,21 @@ function llmProbeBase(baseUrl, authType) {
 }
 
 async function probeLlmEndpointTest(baseUrl, token, authType) {
+  // Subscription-OAuth tokens are rejected by /v1/models (401 invalid
+  // x-api-key, #2448) — never probe it; verify auth + reachability against the
+  // count_tokens messages route the OAuth flow actually authenticates.
+  if (isOauthAuthType(normalizeAuthType(authType))) {
+    const headers = token ? oauthProbeHeaders(token) : {};
+    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM);
+    return {
+      ok: fallback.ok,
+      url: fallback.url,
+      status: fallback.status,
+      error: fallback.error,
+      sample: null,
+      ...(fallback.ok ? { noModelList: true } : {}),
+    };
+  }
   const { url, headers } = llmProbeTarget(baseUrl, token, authType);
   const result = await httpGetJson(url, headers);
   const ok = result.status >= 200 && result.status < 300;
@@ -13340,6 +13365,13 @@ async function probeLlmEndpointTest(baseUrl, token, authType) {
 }
 
 async function probeLlmEndpointDiscover(baseUrl, token, authType) {
+  // OAuth providers can't enumerate /v1/models (#2448) — confirm the token
+  // against count_tokens and return the manual-entry model-list contract.
+  if (isOauthAuthType(normalizeAuthType(authType))) {
+    const headers = token ? oauthProbeHeaders(token) : {};
+    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM);
+    return oauthDiscoverResult(fallback);
+  }
   const { url, headers } = llmProbeTarget(baseUrl, token, authType);
   const result = await httpGetJson(url, headers);
   if (result.error || result.status < 200 || result.status >= 300) {

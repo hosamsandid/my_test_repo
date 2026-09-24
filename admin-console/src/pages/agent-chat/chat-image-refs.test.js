@@ -84,6 +84,64 @@ test('a message starting with an image reference has no leading empty text segme
   assert.equal(segs[0].type, 'ref');
 });
 
+/* ── filenames containing a space (#2453) ─────────────────────────────── */
+
+test('a lone image reference whose filename contains a space is a single ref segment', () => {
+  const segs = parseMessageSegments('@chat-uploads/my screenshot.png');
+  assert.deepEqual(segs, [
+    { type: 'ref', raw: '@chat-uploads/my screenshot.png', path: 'chat-uploads/my screenshot.png' },
+  ]);
+});
+
+test('the de-dupe shape `image (2).png` (space + parens, minted by our own server) previews', () => {
+  const segs = parseMessageSegments('@chat-uploads/image (2).png');
+  assert.deepEqual(segs, [
+    { type: 'ref', raw: '@chat-uploads/image (2).png', path: 'chat-uploads/image (2).png' },
+  ]);
+});
+
+test('a space-containing reference mid-sentence still splits the surrounding text', () => {
+  const segs = parseMessageSegments('here is @chat-uploads/my screenshot.png ok');
+  assert.deepEqual(segs, [
+    { type: 'text', value: 'here is ' },
+    { type: 'ref', raw: '@chat-uploads/my screenshot.png', path: 'chat-uploads/my screenshot.png' },
+    { type: 'text', value: ' ok' },
+  ]);
+});
+
+test('two space-containing references in one message stay separate', () => {
+  const segs = parseMessageSegments('@a b.png and @c d.png');
+  assert.deepEqual(segs, [
+    { type: 'ref', raw: '@a b.png', path: 'a b.png' },
+    { type: 'text', value: ' and ' },
+    { type: 'ref', raw: '@c d.png', path: 'c d.png' },
+  ]);
+});
+
+test('a space-containing non-image reference stays inside its text (no image ext to anchor)', () => {
+  const segs = parseMessageSegments('see @my notes.txt for details');
+  assert.deepEqual(segs, [{ type: 'text', value: 'see @my notes.txt for details' }]);
+});
+
+test('the path ends at the first image extension, not at a trailing word', () => {
+  // `please` after the extension is not part of the filename.
+  const segs = parseMessageSegments('@chat-uploads/a.png please');
+  assert.deepEqual(segs, [
+    { type: 'ref', raw: '@chat-uploads/a.png', path: 'chat-uploads/a.png' },
+    { type: 'text', value: ' please' },
+  ]);
+});
+
+test('a lookalike extension (`.pngx`) is not treated as an image reference', () => {
+  const segs = parseMessageSegments('@chat-uploads/a.pngx');
+  assert.deepEqual(segs, [{ type: 'text', value: '@chat-uploads/a.pngx' }]);
+});
+
+test('a /context mount key with a space is not treated as an image reference', () => {
+  const segs = parseMessageSegments('@/context/my screenshot.png');
+  assert.deepEqual(segs, [{ type: 'text', value: '@/context/my screenshot.png' }]);
+});
+
 /* ── hasImageRef ──────────────────────────────────────────────────────── */
 
 test('hasImageRef is false for a plain-text-only segment list', () => {

@@ -1391,6 +1391,324 @@ async function createEpicWithStories(cred, { projectKey, epic, stories, allowLis
   };
 }
 
+// ── board & sprint management (Jira Agile API, #2450) ────────────────────────
+//
+// The first capability that touches Jira's **Agile** surface (`/rest/agile/1.0`,
+// not `/rest/api/3`): the board/sprint concept the plugin had none of. Three
+// things an agent can now do, all bound to a Scrum board resolved by its
+// human-readable name (like the field name→id resolution the custom-field ops
+// use, #2416/#2417):
+//   • READ  — list a board's sprints (needed to know "where the last one ends"
+//             so a bulk generation can continue from it).
+//   • WRITE — create ONE sprint (explicit name/start/end).
+//   • WRITE — BULK-generate a run of future sprints from a cadence + a naming
+//             template + a target end date, continuing by default from the
+//             board's latest existing sprint.
+//
+// A Scrum board only ever has one *active* sprint; every sprint this creates is
+// a Jira "future" (not-started) sprint — the state a plain POST /sprint yields,
+// so no state is sent. The whole date/naming computation (`planSprints` and its
+// helpers) is PURE so the month-crosses-week-boundary naming rule and the
+// continuation arithmetic unit-test without a live Jira; the async functions are
+// the thin adapters, same pure-core / I/O-edge split as the rest of this module.
+
+const AGILE_BASE = '/rest/agile/1.0';
+const AGILE_PAGE_SIZE = 50;
+// A hard safety bound on a single bulk generation so a far-future `--until` (or a
+// tiny cadence) can never spiral into thousands of create calls. 2 years of
+// weekly sprints — generous for real planning, cheap to refuse past.
+const MAX_BULK_SPRINTS = 104;
+
+// English month names, fixed (never the runtime locale) so a rendered sprint
+// name is deterministic regardless of where the broker runs.
+const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTHS_FULL = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
+  'August', 'September', 'October', 'November', 'December'];
+
+// Parse a caller date (a bare `YYYY-MM-DD` or a full ISO-8601 string) and
+// truncate it to its UTC calendar day (a Date at 00:00:00.000Z). All sprint date
+// math is done in UTC so it is independent of the broker's timezone. Throws a 400
+// on an unparseable value.
+function parseUtcDay(value, label = 'date') {
+  const s = String(value == null ? '' : value).trim();
+  if (!s) { const e = new Error(`a ${label} is required`); e.status = 400; throw e; }
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) {
+    const e = new Error(`"${value}" is not a valid ${label} (use YYYY-MM-DD)`); e.status = 400; throw e;
+  }
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+function addUtcDays(day, n) {
+  return new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate() + n));
+}
+
+// A UTC-day Date → the `T00:00:00.000Z` ISO string Jira's sprint create accepts.
+function isoStartOfDay(day) {
+  return `${day.toISOString().slice(0, 10)}T00:00:00.000Z`;
+}
+
+// The occurrence index of the day's weekday within its month: the Nth Monday /
+// Tuesday / … . `ceil(dayOfMonth / 7)` — day 1–7 → 1, 8–14 → 2, …, 26 → 4. This
+// is the "week-of-month" the example naming rule uses, and because it is keyed
+// entirely off the sprint's START day (its Monday), the "Monday decides the
+// label even when the week crosses into the next month" rule falls out for free.
+function weekOfMonth(day) {
+  return Math.ceil(day.getUTCDate() / 7);
+}
+
+// Render one sprint's name from a caller template + its start day (+ 1-based
+// index in the batch). Supported placeholders (a known token is substituted; an
+// unknown `{token}` is left verbatim so a typo is visible, not silently dropped):
+//   {MMM} 3-letter month, {MMMM} full month, {MM} 2-digit month, {M} month,
+//   {YYYY} year, {YY} 2-digit year, {DD} 2-digit day, {D} day,
+//   {weekOfMonth} the Nth-weekday-of-month index, {n}/{index} 1-based batch #.
+// Month/day come from the sprint's START day (its Monday) — the documented rule.
+function renderSprintName(template, day, index) {
+  const tokens = {
+    MMM: MONTHS_SHORT[day.getUTCMonth()],
+    MMMM: MONTHS_FULL[day.getUTCMonth()],
+    MM: String(day.getUTCMonth() + 1).padStart(2, '0'),
+    M: String(day.getUTCMonth() + 1),
+    YYYY: String(day.getUTCFullYear()),
+    YY: String(day.getUTCFullYear()).slice(-2),
+    DD: String(day.getUTCDate()).padStart(2, '0'),
+    D: String(day.getUTCDate()),
+    weekOfMonth: String(weekOfMonth(day)),
+    n: String(index),
+    index: String(index),
+  };
+  return String(template).replace(/\{(\w+)\}/g, (m, key) => (
+    Object.prototype.hasOwnProperty.call(tokens, key) ? tokens[key] : m
+  ));
+}
+
+// Pure: the run of sprints to create. Each sprint is `cadenceDays` long; the
+// first starts on `start` (a UTC-day Date) and every next one starts the day
+// AFTER the previous one's (inclusive) end, so the sprints are contiguous. A
+// sprint is generated while its START day is on or before `until` (so the target
+// date is always reached / covered). Returns `[{ name, startDate, endDate }]`
+// with ISO `T00:00:00.000Z` bounds. Throws a 400 on a bad cadence / empty
+// template / a run that would exceed MAX_BULK_SPRINTS.
+function planSprints({ start, cadenceDays, until, nameTemplate }) {
+  const tmpl = String(nameTemplate == null ? '' : nameTemplate).trim();
+  if (!tmpl) { const e = new Error('a name template is required'); e.status = 400; throw e; }
+  const days = Math.floor(Number(cadenceDays));
+  if (!Number.isFinite(days) || days < 1) {
+    const e = new Error('cadence must be a whole number of days ≥ 1'); e.status = 400; throw e;
+  }
+  const sprints = [];
+  let cur = start;
+  let index = 1;
+  while (cur.getTime() <= until.getTime()) {
+    if (sprints.length >= MAX_BULK_SPRINTS) {
+      const e = new Error(
+        `this run would create more than ${MAX_BULK_SPRINTS} sprints — narrow the target date or widen the cadence`,
+      );
+      e.status = 400; throw e;
+    }
+    const end = addUtcDays(cur, days - 1); // inclusive last day (Mon..Sun for weekly)
+    sprints.push({ name: renderSprintName(tmpl, cur, index), startDate: isoStartOfDay(cur), endDate: isoStartOfDay(end) });
+    cur = addUtcDays(cur, days);
+    index += 1;
+  }
+  return sprints;
+}
+
+// Shape one raw Agile sprint to what the CLI consumes.
+function shapeSprint(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = raw.id == null ? null : String(raw.id);
+  if (id == null) return null;
+  return {
+    id,
+    name: raw.name == null ? '' : String(raw.name),
+    state: raw.state ? String(raw.state) : null,
+    startDate: raw.startDate ? String(raw.startDate) : null,
+    endDate: raw.endDate ? String(raw.endDate) : null,
+    goal: raw.goal ? String(raw.goal) : null,
+    boardId: raw.originBoardId == null ? null : String(raw.originBoardId),
+  };
+}
+
+// Resolve a human-readable board NAME to its id (mirrors the field name→id
+// resolution the custom-field ops use). Jira's `?name=` filter is a substring
+// match, so this narrows further: an exact (case-insensitive) name wins; failing
+// that, a single candidate is accepted; otherwise it is an actionable error that
+// lists what it found (a 404 for none, a 409 for several) rather than guessing.
+// `projectKeyOrId` optionally disambiguates when two projects have like-named
+// boards. Returns `{ id, name, type }`.
+async function resolveBoardByName(cred, { boardName, projectKeyOrId, env } = {}) {
+  const wanted = String(boardName == null ? '' : boardName).trim();
+  if (!wanted) { const e = new Error('a board name is required'); e.status = 400; throw e; }
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const boards = [];
+  let startAt = 0;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const qs = new URLSearchParams({ name: wanted, startAt: String(startAt), maxResults: String(AGILE_PAGE_SIZE) });
+    if (projectKeyOrId) qs.set('projectKeyOrId', String(projectKeyOrId));
+    const res = await requestJson({ base, path: `${AGILE_BASE}/board?${qs.toString()}`, authHeader: auth });
+    const values = Array.isArray(res.values) ? res.values : [];
+    for (const b of values) if (b && b.id != null) boards.push({ id: String(b.id), name: String(b.name || ''), type: b.type ? String(b.type) : null });
+    startAt += values.length;
+    if (res.isLast || values.length === 0 || (typeof res.total === 'number' && startAt >= res.total)) break;
+  }
+  if (boards.length === 0) {
+    const e = new Error(`no board found matching "${wanted}". Check the board name (as it appears in Jira).`);
+    e.status = 404; throw e;
+  }
+  const exact = boards.filter((b) => b.name.toLowerCase() === wanted.toLowerCase());
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) {
+    const e = new Error(`"${wanted}" matches ${exact.length} boards: ${exact.map((b) => `${b.name} (id ${b.id})`).join(', ')}. Disambiguate with --project.`);
+    e.status = 409; throw e;
+  }
+  if (boards.length === 1) return boards[0];
+  const e = new Error(`"${wanted}" is ambiguous — ${boards.length} boards contain it: ${boards.map((b) => `${b.name} (id ${b.id})`).join(', ')}. Use the exact board name.`);
+  e.status = 409; throw e;
+}
+
+// Resolve the board (by id if given, else by name) to `{ id, name }`.
+async function resolveBoard(cred, { boardId, boardName, projectKeyOrId, env } = {}) {
+  if (boardId != null && String(boardId).trim()) {
+    return { id: String(boardId).trim(), name: null, type: null };
+  }
+  return resolveBoardByName(cred, { boardName, projectKeyOrId, env });
+}
+
+// List a board's sprints (CLI `sprint list`). `state` optionally filters to Jira's
+// future / active / closed buckets (a comma list). Paginated. Returns
+// `{ board: { id, name }, sprints: [shapeSprint…] }`.
+async function listBoardSprints(cred, { boardId, boardName, projectKeyOrId, state, env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const board = await resolveBoard(cred, { boardId, boardName, projectKeyOrId, env });
+  const sprints = [];
+  let startAt = 0;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const qs = new URLSearchParams({ startAt: String(startAt), maxResults: String(AGILE_PAGE_SIZE) });
+    if (state && String(state).trim()) qs.set('state', String(state).trim());
+    const res = await requestJson({ base, path: `${AGILE_BASE}/board/${encodeURIComponent(board.id)}/sprint?${qs.toString()}`, authHeader: auth });
+    const values = Array.isArray(res.values) ? res.values : [];
+    for (const raw of values) { const s = shapeSprint(raw); if (s) sprints.push(s); }
+    startAt += values.length;
+    if (res.isLast || values.length === 0 || (typeof res.total === 'number' && startAt >= res.total)) break;
+  }
+  return { board: { id: board.id, name: board.name }, sprints };
+}
+
+// Normalise a caller-supplied sprint boundary for `createSprint`: a bare
+// `YYYY-MM-DD` becomes start-of-day UTC; a full ISO string is validated and sent
+// verbatim (the caller owns the exact time).
+function normalizeSprintBoundary(value, label) {
+  const s = String(value == null ? '' : value).trim();
+  if (!s) { const e = new Error(`a ${label} is required`); e.status = 400; throw e; }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `${s}T00:00:00.000Z`;
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) { const e = new Error(`"${value}" is not a valid ${label}`); e.status = 400; throw e; }
+  return s;
+}
+
+// POST one sprint to `/rest/agile/1.0/sprint`. A future (not-started) sprint —
+// no `state` is sent, which is what a plain create yields. A WRITE: never retried
+// on a transport failure (F6) — a retry landing after Jira accepted the first
+// would create a duplicate sprint. Returns the shaped created sprint.
+async function postSprint(base, auth, { name, startDate, endDate, goal, originBoardId }) {
+  const body = { name, originBoardId: Number(originBoardId) };
+  if (startDate) body.startDate = startDate;
+  if (endDate) body.endDate = endDate;
+  if (goal) body.goal = goal;
+  const res = await requestJson({ base, path: `${AGILE_BASE}/sprint`, method: 'POST', authHeader: auth, body });
+  return shapeSprint(res) || { id: res && res.id != null ? String(res.id) : null, name };
+}
+
+// Create ONE sprint on a board (CLI `sprint create`). Explicit name + start/end.
+async function createSprint(cred, { boardId, boardName, projectKeyOrId, name, startDate, endDate, goal, env } = {}) {
+  const sprintName = String(name == null ? '' : name).trim();
+  if (!sprintName) { const e = new Error('a sprint name is required'); e.status = 400; throw e; }
+  const start = normalizeSprintBoundary(startDate, 'start date');
+  const end = normalizeSprintBoundary(endDate, 'end date');
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const board = await resolveBoard(cred, { boardId, boardName, projectKeyOrId, env });
+  const created = await postSprint(base, auth, {
+    name: sprintName, startDate: start, endDate: end, goal: goal ? String(goal) : undefined, originBoardId: board.id,
+  });
+  return { board: { id: board.id, name: board.name }, sprint: created };
+}
+
+// The board's latest sprint end (for "continue from where the last one ends"):
+// the max endDate across all of the board's sprints, or null when none carries a
+// date. Pure over an already-listed sprint array.
+function latestSprintEnd(sprints) {
+  let best = null;
+  for (const s of Array.isArray(sprints) ? sprints : []) {
+    if (!s || !s.endDate) continue;
+    const t = new Date(s.endDate).getTime();
+    if (Number.isNaN(t)) continue;
+    if (best === null || t > best.t) best = { t, sprint: s };
+  }
+  return best;
+}
+
+// BULK-generate a run of future sprints on a board (CLI `sprint bulk-create`).
+// Computes every sprint from a cadence + naming template + target end date,
+// continuing by DEFAULT from the board's latest existing sprint (an explicit
+// `--start` overrides, and is the required fallback for a board with no sprints
+// yet). The plan is computed up front (pure `planSprints`); each sprint is then
+// created, and — because the dates are precomputed, not chained on Jira's
+// responses — a per-sprint failure is recorded and does NOT abort the rest (the
+// caller gets a per-sprint success/failure map, like `create-epic`). Creates are
+// never retried on a transport failure (F6).
+async function bulkCreateSprints(cred, { boardId, boardName, projectKeyOrId, nameTemplate, cadenceDays = 7, until, start, goal, env } = {}) {
+  const untilDay = parseUtcDay(until, 'target end date');
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const board = await resolveBoard(cred, { boardId, boardName, projectKeyOrId, env });
+
+  // Where does the first sprint start? An explicit `--start` wins; otherwise
+  // continue from the day after the board's latest existing sprint's end.
+  let firstStart;
+  if (start != null && String(start).trim()) {
+    firstStart = parseUtcDay(start, 'start date');
+  } else {
+    const { sprints } = await listBoardSprints(cred, { boardId: board.id, env });
+    const latest = latestSprintEnd(sprints);
+    if (!latest) {
+      const e = new Error(
+        `board "${board.name || board.id}" has no dated sprint to continue from — supply --start for the first sprint`,
+      );
+      e.status = 400; throw e;
+    }
+    firstStart = addUtcDays(parseUtcDay(latest.sprint.endDate, 'sprint end date'), 1);
+  }
+
+  const plan = planSprints({ start: firstStart, cadenceDays, until: untilDay, nameTemplate });
+  if (plan.length === 0) {
+    const e = new Error('the target end date is before the first sprint start — nothing to create'); e.status = 400; throw e;
+  }
+
+  const results = [];
+  for (const p of plan) {
+    try {
+      const created = await postSprint(base, auth, {
+        name: p.name, startDate: p.startDate, endDate: p.endDate, goal: goal ? String(goal) : undefined, originBoardId: board.id,
+      });
+      results.push({ name: p.name, startDate: p.startDate, endDate: p.endDate, id: created.id, state: created.state, ok: true });
+    } catch (err) {
+      results.push({ name: p.name, startDate: p.startDate, endDate: p.endDate, ok: false, error: err.message });
+    }
+  }
+  return {
+    board: { id: board.id, name: board.name },
+    requested: plan.length,
+    created: results.filter((r) => r.ok).length,
+    failed: results.filter((r) => !r.ok).length,
+    sprints: results,
+  };
+}
+
 module.exports = {
   MAX_PAGES,
   PAGE_SIZE,
@@ -1446,4 +1764,18 @@ module.exports = {
   createEpicWithStories,
   EPIC_ISSUE_TYPE,
   STORY_ISSUE_TYPE,
+  // board & sprint management (#2450)
+  MAX_BULK_SPRINTS,
+  parseUtcDay,
+  addUtcDays,
+  isoStartOfDay,
+  weekOfMonth,
+  renderSprintName,
+  planSprints,
+  shapeSprint,
+  latestSprintEnd,
+  resolveBoardByName,
+  listBoardSprints,
+  createSprint,
+  bulkCreateSprints,
 };

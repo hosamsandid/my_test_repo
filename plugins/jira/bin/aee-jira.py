@@ -21,6 +21,7 @@ Reads:
     aee-jira search --jql "<JQL>" [--fields key,summary,status,Team] [--limit N]   # arbitrary JQL, scoped to your team
     aee-jira show KAN-6 [--fields "Team,Sprint"]   # one issue (summary, status, type, assignee, created/updated, parent/epic key, URL, attachments, availableTransitions; --fields adds custom fields)
     aee-jira attachment get KAN-6 10312 [--out path]   # fetch one attachment's content by id
+    aee-jira sprint list --board "Team Scrum Board"     # a Scrum board's sprints (resolved by board name)
 
 Writes (attributed, role-gated server-side, no human confirmation — moving a
 ticket is routine and reversible):
@@ -31,6 +32,8 @@ ticket is routine and reversible):
     aee-jira set-field KAN-6 --field "Team" --value "42"   # set an allow-listed custom field by its Jira name
     aee-jira attachment add KAN-6 report.pdf part-1.pdf   # upload one or more local files as new attachments
     aee-jira create-epic --project KAN --file plan.json   # create one Epic and its child Stories in one operation
+    aee-jira sprint create --board "Team Scrum Board" --name "Sprint 12" --start 2026-10-26 --end 2026-11-01
+    aee-jira sprint bulk-create --board "Team Scrum Board" --name-template "Acc2.0 {MMM}_{weekOfMonth}" --until 2026-12-31
 
 `create-epic` turns one ask into its breakdown: it creates a single Epic and N
 Stories underneath it (each linked to the Epic) in the named project, in one
@@ -60,6 +63,24 @@ The result reports the Epic key + URL and, per Story, its key/URL on success or
 an error on failure (the Epic and the other Stories still go through — Jira has
 no create-transaction). Non-default issue-type names can be overridden with a
 top-level "issueTypes": {"epic": "...", "story": "..."} in the payload.
+
+`sprint` manages a Scrum board's sprints, the board resolved by its
+human-readable name (e.g. "Accessio 2.0 Scrum Board"). `sprint list` reads the
+board's sprints (id, name, state, start/end). `sprint create` makes one future
+sprint from an explicit name + start/end. `sprint bulk-create` pre-creates a
+whole run of future sprints up to a target end date in a single call: each
+sprint is `--cadence-days` long (default 7, i.e. weekly Monday-Sunday), the run
+continues by default from the day after the board's latest existing sprint (pass
+`--start` to override, and it is required when the board has no sprints yet), and
+each sprint's name is computed by `--name-template` off that sprint's start day.
+Template placeholders: {MMM} 3-letter month, {MMMM} full month, {MM}/{M} month
+number, {YYYY}/{YY} year, {DD}/{D} day, {weekOfMonth} the Nth-weekday-of-month,
+{n} the 1-based batch index. The month always comes from the sprint's start
+(its Monday) even when the week crosses into the next month — so a sprint
+running Mon 26.10-Sun 01.11 with template "Acc2.0 {MMM}_{weekOfMonth}" is
+"Acc2.0 Oct_4", and the following Mon 02.11-Sun 08.11 is "Acc2.0 Nov_1". Every
+sprint is created as a Jira "future" sprint (a board has only one active
+sprint); the result reports each sprint's id, or a per-sprint error.
 
 `set-field` sets ONE custom field an admin has sanctioned (the team's
 `writable-custom-fields` allow-list); a field not on that list is refused. The
@@ -444,6 +465,42 @@ def build_parser():
         help='JSON payload describing {"epic": {...}, "stories": [...]}; omit or use "-" to read stdin',
     )
 
+    p_sprint = sub.add_parser("sprint", parents=[common], help="manage a Scrum board's sprints (list / create / bulk-create)")
+    sprint_sub = p_sprint.add_subparsers(dest="sprint_cmd")
+
+    p_sprint_list = sprint_sub.add_parser("list", parents=[common], help="list a board's sprints (resolved by board name)")
+    p_sprint_list.add_argument("--board", required=True, help='the Scrum board name, e.g. "Team Scrum Board"')
+    p_sprint_list.add_argument("--project", help="project key/id to disambiguate a board name shared across projects")
+    p_sprint_list.add_argument("--state", help="only sprints in these states (comma list of future,active,closed)")
+
+    p_sprint_create = sprint_sub.add_parser("create", parents=[common], help="create one future sprint on a board")
+    p_sprint_create.add_argument("--board", required=True, help='the Scrum board name')
+    p_sprint_create.add_argument("--project", help="project key/id to disambiguate the board name")
+    p_sprint_create.add_argument("--name", required=True, help="the sprint name")
+    p_sprint_create.add_argument("--start", required=True, help="start date (YYYY-MM-DD or full ISO-8601)")
+    p_sprint_create.add_argument("--end", required=True, help="end date (YYYY-MM-DD or full ISO-8601)")
+    p_sprint_create.add_argument("--goal", help="optional sprint goal")
+
+    p_sprint_bulk = sprint_sub.add_parser(
+        "bulk-create", parents=[common],
+        help="pre-create a run of future sprints up to a target date, continuing from the board's latest sprint",
+    )
+    p_sprint_bulk.add_argument("--board", required=True, help='the Scrum board name')
+    p_sprint_bulk.add_argument("--project", help="project key/id to disambiguate the board name")
+    p_sprint_bulk.add_argument(
+        "--name-template", required=True, dest="name_template",
+        help='name pattern per sprint, e.g. "Acc2.0 {MMM}_{weekOfMonth}"; placeholders '
+             "{MMM}/{MMMM}/{MM}/{M} month, {YYYY}/{YY} year, {DD}/{D} day, {weekOfMonth}, {n} — "
+             "all computed off the sprint's start day (its Monday)",
+    )
+    p_sprint_bulk.add_argument("--until", required=True, help="target end date (YYYY-MM-DD) — create sprints through this date")
+    p_sprint_bulk.add_argument("--cadence-days", type=int, dest="cadence_days", help="days per sprint (default 7, weekly Mon-Sun)")
+    p_sprint_bulk.add_argument(
+        "--start",
+        help="first sprint's start date; overrides continue-from-latest, and is required when the board has no sprints yet",
+    )
+    p_sprint_bulk.add_argument("--goal", help="optional goal applied to every created sprint")
+
     return parser
 
 
@@ -551,6 +608,39 @@ def main(argv=None):
         if isinstance(doc.get("issueTypes"), dict):
             body["issueTypes"] = doc["issueTypes"]
         path, method = "/create-epic", "POST"
+    elif args.cmd == "sprint":
+        sprint_cmd = getattr(args, "sprint_cmd", None)
+        if sprint_cmd == "list":
+            q = {"board": args.board}
+            if args.project:
+                q["project"] = args.project
+            if args.state:
+                q["state"] = args.state
+            path = "/sprint/list?" + urllib.parse.urlencode(q)
+        elif sprint_cmd == "create":
+            path, method = "/sprint/create", "POST"
+            body = {"board": args.board, "name": args.name, "start": args.start, "end": args.end}
+            if args.project:
+                body["project"] = args.project
+            if args.goal:
+                body["goal"] = args.goal
+        elif sprint_cmd == "bulk-create":
+            path, method = "/sprint/bulk-create", "POST"
+            body = {"board": args.board, "nameTemplate": args.name_template, "until": args.until}
+            if args.project:
+                body["project"] = args.project
+            if args.cadence_days is not None:
+                body["cadenceDays"] = args.cadence_days
+            if args.start:
+                body["start"] = args.start
+            if args.goal:
+                body["goal"] = args.goal
+        else:
+            emit({"ok": False, "error": "usage",
+                  "message": "usage: aee-jira sprint list --board <name>\n"
+                             "       aee-jira sprint create --board <name> --name <name> --start <date> --end <date>\n"
+                             "       aee-jira sprint bulk-create --board <name> --name-template <tmpl> --until <date>"}, as_json)
+            return EXIT_USAGE
     else:
         parser.print_help()
         return EXIT_USAGE
@@ -573,6 +663,11 @@ def main(argv=None):
     # automated caller notices a partial result, while still printing the Epic
     # key + the per-story map above.
     if args.cmd == "create-epic" and isinstance(result, dict) and result.get("failed"):
+        return EXIT_DOMAIN_ERROR
+    # sprint bulk-create is likewise one operation with per-sprint outcomes: a
+    # per-sprint failure surfaces exit 1 while still printing the per-sprint map.
+    if args.cmd == "sprint" and getattr(args, "sprint_cmd", None) == "bulk-create" \
+            and isinstance(result, dict) and result.get("failed"):
         return EXIT_DOMAIN_ERROR
     return EXIT_OK
 

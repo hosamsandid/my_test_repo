@@ -35,6 +35,24 @@ test('redactScopeForViewer: strips value previews unless the caller can manage t
   assert.equal(scope.keys['api-token'].preview, 'AT…9xQ'); // original not mutated
 });
 
+test('redactScopeForViewer: a non-secret value is also stripped from a non-manager (#2449)', () => {
+  const scope = {
+    scopeId: 'team-a',
+    keys: {
+      'site-url': { set: true, secret: false, value: 'acme', preview: 'ac…me' },
+      'api-token': { set: true, secret: true, preview: 'AT…9xQ' },
+    },
+  };
+  // Team Admin sees everything.
+  assert.equal(redactScopeForViewer(scope, true), scope);
+  // Plain member: neither the preview nor the real non-secret value survives.
+  const r = redactScopeForViewer(scope, false);
+  assert.equal(r.keys['site-url'].value, null);
+  assert.equal(r.keys['site-url'].preview, null);
+  assert.equal(r.keys['site-url'].set, true); // structural metadata stays
+  assert.equal(scope.keys['site-url'].value, 'acme'); // original not mutated
+});
+
 test('fieldType: secret-shaped keys → password, others → text', () => {
   assert.equal(fieldType('api-token'), 'password');
   assert.equal(fieldType('client-secret'), 'password');

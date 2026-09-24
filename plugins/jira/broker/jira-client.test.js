@@ -757,18 +757,32 @@ test('fieldValueMatches: an id/value object, a scalar, an array member, else fal
   assert.equal(jc.fieldValueMatches(null, 'x'), false);
 });
 
-test('setCustomField: a field not on the allow-list is refused (403) before any Jira call', async () => {
+test('setCustomField: a field not on a NON-EMPTY allow-list is refused (403) before any Jira call', async () => {
   await withFetch(() => { throw new Error('no HTTP expected'); }, async (calls) => {
     await assert.rejects(
       () => jc.setCustomField(CRED, 'ENG-1', { fieldName: 'Team', value: '42', allowList: ['Sprint'], env: CRED.env }),
       (e) => e.status === 403 && /not writable/.test(e.message),
     );
-    // an empty allow-list forbids everything, and names the field for the admin
-    await assert.rejects(
-      () => jc.setCustomField(CRED, 'ENG-1', { fieldName: 'Team', value: '42', allowList: [], env: CRED.env }),
-      (e) => e.status === 403 && /allow-list is empty/.test(e.message) && /"Team"/.test(e.message),
-    );
     assert.equal(calls.length, 0);
+  });
+});
+
+test('setCustomField: an EMPTY allow-list is unrestricted — any resolvable field is writable (#2449)', async () => {
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return writableFieldList();
+    if (opts && opts.method === 'PUT') return { ok: true, status: 204, text: async () => '' };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'ENG-1', fields: { customfield_20001: null } }) };
+  }, async (calls) => {
+    // no admin ever named "Team", yet an empty list permits the write
+    const r = await jc.setCustomField(CRED, 'ENG-1', { fieldName: 'Team', value: '42', allowList: [], env: CRED.env });
+    assert.equal(r.changed, true);
+    const put = calls.find((c) => c.opts && c.opts.method === 'PUT');
+    assert.deepEqual(JSON.parse(put.opts.body), { fields: { customfield_20001: { id: '42' } } });
+    // an unresolvable field is still a 400 even with an empty list (AC3)
+    await assert.rejects(
+      () => jc.setCustomField(CRED, 'ENG-1', { fieldName: 'Ghost', value: 'x', allowList: [], env: CRED.env }),
+      (e) => e.status === 400 && /unknown Jira field: Ghost/.test(e.message),
+    );
   });
 });
 
@@ -1121,6 +1135,25 @@ test('createEpicWithStories: a custom field not on the allow-list is refused (40
       (e) => e.status === 403 && /Team/.test(e.message),
     );
     assert.equal(calls.length, 0); // refused before the catalog fetch or any create
+  });
+});
+
+test('createEpicWithStories: an EMPTY allow-list permits any custom field on the stories (#2449)', async () => {
+  await withFetch((url, opts) => {
+    if (isFieldList(url)) return createFieldList();
+    if (isCreate(url, opts)) {
+      const body = JSON.parse(opts.body);
+      if (body.fields.issuetype.name === 'Epic') return { ok: true, status: 201, text: async () => JSON.stringify({ key: 'KAN-1' }) };
+      assert.deepEqual(body.fields.customfield_20001, { id: '42' }); // "Team" written though never allow-listed
+      return { ok: true, status: 201, text: async () => JSON.stringify({ key: 'KAN-2' }) };
+    }
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    const r = await jc.createEpicWithStories(CRED, {
+      projectKey: 'KAN', epic: { summary: 'E' }, stories: [{ summary: 'S', fields: { Team: '42' } }], allowList: [], env: CRED.env,
+    });
+    assert.equal(r.failed, 0);
+    assert.equal(r.stories[0].key, 'KAN-2');
   });
 });
 

@@ -512,6 +512,79 @@ test('cli writes: /set-field sets an allow-listed custom field, refuses one that
   }
 });
 
+test('cli writes: /set-field with an empty writable-custom-fields allow-list permits any field (#2449)', async () => {
+  // Empty/unset allow-list now means UNRESTRICTED: a field that resolves via the
+  // site catalog is writable even though no admin named it. A distinct site keeps
+  // the process-lifetime field catalog off other tests' cached fixtures.
+  broker.scopeCredentials.set('team-1', { 'site-url': 'unrestrictedco', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const seen = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    seen.push({ url: String(url), method: opts && opts.method, body: opts && opts.body });
+    if (String(url).match(/\/rest\/api\/3\/field$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify([
+        { id: 'customfield_30001', name: 'Team', schema: { type: 'team' } },
+      ]) };
+    }
+    if (opts && opts.method === 'PUT') return { ok: true, status: 204, text: async () => '' };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'KAN-6', fields: { customfield_30001: null } }) };
+  };
+  const srv = await listen();
+  try {
+    // no admin ever named "Team", yet with an empty allow-list the write succeeds
+    const ok = await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Team', value: '42' } });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(ok.body, { issueKey: 'KAN-6', field: 'Team', changed: true, value: '42' });
+    const put = seen.find((s) => s.method === 'PUT');
+    assert.deepEqual(JSON.parse(put.body), { fields: { customfield_30001: { id: '42' } } });
+
+    // an unknown/unresolvable field is still a 400 regardless of the allow-list (AC3)
+    const unknown = await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Nope', value: 'x' } });
+    assert.equal(unknown.status, 400);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli writes: /create-epic with an empty writable-custom-fields allow-list permits any custom field (#2449)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'unrestrictedepicco', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const created = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    if (String(url).match(/\/rest\/api\/3\/field$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify([
+        { id: 'customfield_30001', name: 'Team', schema: { type: 'team' } },
+      ]) };
+    }
+    if (opts && opts.method === 'POST' && String(url).match(/\/rest\/api\/3\/issue$/)) {
+      const body = JSON.parse(opts.body);
+      created.push(body.fields);
+      const isEpic = body.fields.issuetype.name === 'Epic';
+      return { ok: true, status: 201, text: async () => JSON.stringify({ key: isEpic ? 'KAN-1' : `KAN-${created.length}` }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  };
+  const srv = await listen();
+  try {
+    const ok = await call(srv, 'POST', '/cli/create-epic', {
+      token: TOKEN,
+      body: { project: 'KAN', epic: { summary: 'Ask' }, stories: [{ summary: 'Task', fields: { Team: '42' } }] },
+    });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.failed, 0);
+    const story = created.find((f) => f.issuetype.name === 'Story');
+    assert.deepEqual(story.customfield_30001, { id: '42' });
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
 test('cli writes: /create-epic creates an epic + child stories, allow-list-gating custom fields (#2424)', async () => {
   // A distinct site keeps the process-lifetime field catalog off another test's
   // schema-less `acme` fixture (real Jira always returns the schema).

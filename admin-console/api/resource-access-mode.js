@@ -8,18 +8,22 @@
 // docs/unified-resource-access-concept.md) replaces the ad-hoc
 // `{scope, teamId, assignedTeamIds, userId}` tier split across Model Providers,
 // SSH keys and GitHub tokens with one identity-vs-tier model applied to all
-// three classes. It lands as a sequence of PRs (PR4–PR7) that change
-// enforcement, visibility and runtime resolution; this flag lets those PRs land
-// "dark" — merged but inert — until an operator opts in explicitly.
+// three classes.
 //
-// OFF (the DEFAULT): today's behaviour, unchanged. An upgraded stack sees no
-//   difference in how resources are scoped, selected or consumed.
-// ON: the new identity/scope model is enforced end-to-end.
+// ON (the DEFAULT, since the model shipped — #2360): the new identity/scope model
+//   is enforced end-to-end. This is now the reviewed, shipped behaviour, so a
+//   fresh stack gets it without a manual opt-in.
+// OFF: an explicit opt-OUT (a kill switch) that restores today's legacy
+//   behaviour for a stack not ready to move. Flag-off is still kept byte-identical
+//   to the pre-redesign world. The flag itself is scheduled for removal once the
+//   opt-out is no longer needed (tracked separately).
 //
-// **Why off is the default.** Exactly the reasoning behind AUTH_ENABLED
-// (auth-mode.js) and AEE_POOLS_ENABLED (pools-mode.js): a stack that pulls a new
-// image must not find its access rules quietly rewritten. Activation is a
-// deliberate act.
+// **Why ON is now the default.** While the PR chain (PR4–PR7) was landing, the
+// flag defaulted OFF so the changes stayed "dark" — merged but inert — exactly
+// like AUTH_ENABLED / AEE_POOLS_ENABLED. Now that the model is complete and has
+// been exercised end to end, the default flips: the reviewed behaviour ships by
+// default, and an operator who needs the old world opts OUT with a recognised OFF
+// token (0/false/no/off).
 //
 // This module is intentionally self-contained (it inlines its own token sets
 // rather than importing them from auth-mode.js) so it can be kept **byte-
@@ -32,26 +36,29 @@
 // load.
 
 const ON_TOKENS = Object.freeze(['1', 'true', 'yes', 'on']);
-const OFF_TOKENS = Object.freeze(['', '0', 'false', 'no', 'off']);
+const OFF_TOKENS = Object.freeze(['0', 'false', 'no', 'off']);
 
 function resolveResourceAccessV2(env = {}) {
   return describeResourceAccessMode(env).enabled;
 }
 
-// Anything unrecognised reads as OFF — a typo in the flag must not silently
-// switch the whole access model over to a behaviour the operator hasn't reviewed.
+// Empty / unset → ON: the unified model is now the default. An operator opts OUT
+// explicitly with a recognised OFF token; anything unrecognised (a typo) also
+// falls back to the ON default rather than silently disabling the shipped model,
+// and is flagged `recognised: false` so the boot log surfaces it.
 function describeResourceAccessMode(env = {}) {
   const raw = env && env.AEE_RESOURCE_ACCESS_V2;
   const token = String(raw === undefined || raw === null ? '' : raw).trim().toLowerCase();
-  if (ON_TOKENS.includes(token)) return { enabled: true, raw, recognised: true };
+  if (token === '') return { enabled: true, raw, recognised: true };
   if (OFF_TOKENS.includes(token)) return { enabled: false, raw, recognised: true };
-  return { enabled: false, raw, recognised: false };
+  if (ON_TOKENS.includes(token)) return { enabled: true, raw, recognised: true };
+  return { enabled: true, raw, recognised: false };
 }
 
 // One line for the container log at boot, so the mode is never a guess.
 function resourceAccessModeLogLine(env = {}) {
   const mode = describeResourceAccessMode(env);
-  const state = mode.enabled ? 'enabled (unified model)' : 'disabled (default)';
+  const state = mode.enabled ? 'enabled (default)' : 'disabled (explicit opt-out)';
   if (!mode.recognised) {
     return `AEE_RESOURCE_ACCESS_V2='${mode.raw}' is not a recognised boolean — unified resource access ${state}`;
   }

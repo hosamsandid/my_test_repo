@@ -18,10 +18,13 @@ const {
   resourceAccessModeLogLine,
 } = require('./resource-access-mode');
 
-test('AEE_RESOURCE_ACCESS_V2 defaults to off — today\'s behaviour by default', () => {
-  assert.equal(resolveResourceAccessV2({}), false);
-  assert.equal(resolveResourceAccessV2({ AEE_RESOURCE_ACCESS_V2: undefined }), false);
-  assert.equal(resolveResourceAccessV2(), false);
+test('AEE_RESOURCE_ACCESS_V2 defaults to ON — the shipped model is now the default (#2360)', () => {
+  assert.equal(resolveResourceAccessV2({}), true);
+  assert.equal(resolveResourceAccessV2({ AEE_RESOURCE_ACCESS_V2: undefined }), true);
+  assert.equal(resolveResourceAccessV2(), true);
+  // empty / whitespace-only reads as unset → the ON default
+  assert.equal(resolveResourceAccessV2({ AEE_RESOURCE_ACCESS_V2: '' }), true);
+  assert.equal(resolveResourceAccessV2({ AEE_RESOURCE_ACCESS_V2: '  ' }), true);
 });
 
 test('AEE_RESOURCE_ACCESS_V2 accepts the usual on-tokens, case- and space-insensitively', () => {
@@ -30,22 +33,23 @@ test('AEE_RESOURCE_ACCESS_V2 accepts the usual on-tokens, case- and space-insens
   }
 });
 
-test('AEE_RESOURCE_ACCESS_V2 accepts the usual off-tokens', () => {
-  for (const raw of ['', 'false', 'FALSE', '0', 'no', 'off', '  ']) {
+test('AEE_RESOURCE_ACCESS_V2 opts OUT explicitly on the usual off-tokens', () => {
+  for (const raw of ['false', 'FALSE', ' false ', '0', 'no', 'off']) {
     assert.equal(resolveResourceAccessV2({ AEE_RESOURCE_ACCESS_V2: raw }), false, `expected off for '${raw}'`);
   }
 });
 
-test('an unrecognised value is off and flagged as unrecognised', () => {
+test('an unrecognised value falls back to the ON default and is flagged unrecognised', () => {
   const mode = describeResourceAccessMode({ AEE_RESOURCE_ACCESS_V2: 'enabled' });
-  assert.equal(mode.enabled, false);
+  assert.equal(mode.enabled, true);
   assert.equal(mode.recognised, false);
   assert.equal(mode.raw, 'enabled');
   assert.match(resourceAccessModeLogLine({ AEE_RESOURCE_ACCESS_V2: 'enabled' }), /not a recognised boolean/);
 });
 
 test('the boot log line names the mode in plain language', () => {
-  assert.match(resourceAccessModeLogLine({}), /disabled \(default\)/);
+  assert.match(resourceAccessModeLogLine({}), /enabled \(default\)/);
+  assert.match(resourceAccessModeLogLine({ AEE_RESOURCE_ACCESS_V2: 'off' }), /disabled \(explicit opt-out\)/);
   assert.match(resourceAccessModeLogLine({ AEE_RESOURCE_ACCESS_V2: 'true' }), /^Unified resource access: enabled/);
 });
 

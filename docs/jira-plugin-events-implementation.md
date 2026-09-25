@@ -1,6 +1,8 @@
 # Jira plugin — event kinds: implementation plan
 
-> Status: **planned, not started** (written 2026-09-21). This is the *how* for
+> Status: **in progress** (written 2026-09-21; revised 2026-09-25 after main
+> gained issue creation, custom-field writes and attachment upload — §1.11,
+> §2.4; delivered as **one PR in ordered commits**, §3). This is the *how* for
 > `docs/jira-plugin-events-plan.md` (the *what/why* — read it first; its §5
 > first batch is what this plan builds). Shipped baseline:
 > `docs/jira-plugin-plan.md` / `docs/jira-plugin.md`. Every path below is
@@ -73,6 +75,13 @@ Read before designing anything — each of these shaped a decision below.
 10. **Throttle and burst keys are per issue, not per kind.** `_fanOut` keys
     conversations `issue:<key>` / `project:<key>`; the 5/h throttle bucket is
     `${scopeId}:${convKey}`. Decision: keep them shared across kinds (§7).
+11. **The broker writes more than comments now.** Since #2417/#2424/#2449 and
+    the attachment upload, `aee-jira` can create issues (`/create-epic` →
+    `createEpicWithStories`), set custom fields (`/set-field` →
+    `setCustomField`) and add attachments (`/attachment/add`). The poller
+    observes those as `issue_created` / `field_changed` — the same self-wake
+    loop as a comment. → `origin` is stamped on **all three** new kinds, from
+    one own-writes registry (§2.4).
 
 ## 2. Contracts
 
@@ -88,9 +97,9 @@ the top-level strings):
 | kind | extra top-level string fields |
 |---|---|
 | `status_changed` | `fromStatus`, `toStatus` (unchanged) |
-| `issue_created` | `status`, `reporter`, `priority` |
+| `issue_created` | `status`, `reporter`, `priority`, `origin` (`human` \| `agent`) |
 | `comment_added` | `commentId`, `body` (plain text, clamped to `COMMENT_BODY_MAX = 2000` chars, `bodyTruncated: "true"` when cut — a string so the filter rule holds), `origin` (`human` \| `agent`) |
-| `field_changed` | `field` (display name as Jira reports it, e.g. `assignee`, `Fix Version`, `Sprint`), `fieldId` (stable id, e.g. `assignee`, `fixVersions`, `customfield_10020`), `from`, `to`, `fieldType` (`jira` \| `custom`) |
+| `field_changed` | `field` (display name as Jira reports it, e.g. `assignee`, `Fix Version`, `Sprint`), `fieldId` (stable id, e.g. `assignee`, `fixVersions`, `customfield_10020`), `from`, `to`, `fieldType` (`jira` \| `custom`), `origin` (`human` \| `agent`) |
 
 `event` is **always set explicitly** by the extractor (the `|| 'status_changed'`
 default in `deliver()` is removed in PR 1). Non-string values (`null`) are
@@ -133,15 +142,30 @@ New `own-writes-store.js`, per scope, `<stateDir>/own-writes/<scopeId>.json`,
 atomic write like the other stores:
 
 ```
-{ comments: { "<issueKey>:c<commentId>": "<iso>" }, descriptions: { "<issueKey>": "<iso>" } }
+{ comments:     { "<issueKey>:c<commentId>": "<iso>" },
+  issues:       { "<issueKey>": "<iso>" },
+  fields:       { "<issueKey>|<fieldId or lower-cased field name>": "<iso>" },
+  descriptions: { "<issueKey>": "<iso>" } }
 ```
 
-- `server.js` `/comment` handler records the id **before** responding to the
-  CLI (the poll that observes the comment is ≥ 1 tick away, so the write is
-  never racing the read). `/update` records the issue + timestamp (unused by
-  this batch; `description_changed` will need it — cheap to record now).
+- `server.js` records **before** responding to the CLI (the poll that observes
+  the write is ≥ 1 tick away, so the write never races the read):
+  `/comment` → the comment id; `/create-epic` → the epic key and every created
+  story key; `/set-field` → issue + field id when `changed` (`setCustomField`
+  returns the resolved `fieldId` for this); `/attachment/add` → issue +
+  `attachment`; `/update` → issue (unused by this batch; `description_changed`
+  will need it). `/transition` is **not** recorded — `status_changed` keeps
+  its current behaviour and gets no `origin` in this batch.
+- `field_changed` origin: a changelog item on `<issueKey>` whose `fieldId`
+  (or lower-cased `field`) is registered with a stamp between 10 min before
+  and 60 s after the history's `created` → `agent`. Deliberately loose; a
+  human editing the same field in that window is misattributed (a suppressed
+  wake, never a spurious one).
+- `issue_created` origin: registry only. The *"Created by an agent"* marker
+  lives in the description, which the poll does not fetch — not worth widening
+  the search for a fallback.
 - TTL 7 days, pruned in `reap` alongside the inbox; `teardown` deletes the file.
-- `origin` resolution (pure, `event-extract.js` `resolveCommentOrigin`):
+- Comment `origin` resolution (pure, `event-extract.js` `resolveCommentOrigin`):
   `agent` if the id is registered, **else** `agent` if the comment's first
   paragraph is the attribution marker (`Posted by an agent on team` — the
   string `server.js` emits; export it as a constant and import it in the
@@ -167,9 +191,12 @@ shape `orchestrator/plugin-event.js` projects; they are just single-kind now.
 
 ## 3. Work breakdown
 
-Four PRs, each independently shippable and green; each carries its own tests,
-manifest entry, help row and doc paragraph (the convention in
-`docs/jira-plugin-plan.md` §8). Sizes are relative (S < M < L).
+**One PR, four ordered commits** (the "PR n" headings below are those
+commits). Each commit is green on its own and carries its own tests, manifest
+entry, help row and doc paragraph (the convention in
+`docs/jira-plugin-plan.md` §8). Sizes are relative (S < M < L). The
+own-writes registry is needed from commit 2 on (`issue_created` origin), so
+it is introduced there; commits 3 and 4 extend it.
 
 ### PR 1 — kind-aware core, no new kinds (M) — *behaviour-preserving refactor*
 
@@ -291,10 +318,10 @@ Goal: after this PR `status_changed` behaves identically and every later PR is
 | `broker/event-extract.js` (+ test) | 1 2 3 4 |
 | `broker/watch-store.js` (+ test) | 1 |
 | `broker/poller.js` (+ test) | 1 2 3 4 |
-| `broker/server.js` (+ test) | 1 4 |
+| `broker/server.js` (+ test) | 1 2 3 4 |
 | `broker/activity-store.js` (+ test) | 1 |
 | `broker/jira-client.js` (+ test) | 2 4 |
-| `broker/own-writes-store.js` (new, + test) | 4 |
+| `broker/own-writes-store.js` (new, + test) | 2 3 4 |
 | `broker/ui/app.js`, `ui/admin.js`, `ui/admin.html`, `ui/styles.css` | 1 |
 | `broker/spike.js` | 1 |
 | `bin/aee-jira.py` | 1 4 (usage text) |

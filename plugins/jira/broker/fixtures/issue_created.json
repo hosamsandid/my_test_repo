@@ -1,0 +1,33 @@
+{
+  "id": "10042",
+  "key": "KAN-12",
+  "fields": {
+    "summary": "Checkout fails on Safari",
+    "issuetype": {
+      "name": "Bug"
+    },
+    "status": {
+      "name": "To Do"
+    },
+    "created": "2026-01-01T11:58:00.000+0000",
+    "reporter": {
+      "displayName": "Jane Doe",
+      "accountId": "acc-jane"
+    },
+    "priority": {
+      "name": "High"
+    },
+    "comment": {
+      "total": 0,
+      "maxResults": 0,
+      "startAt": 0,
+      "comments": []
+    }
+  },
+  "changelog": {
+    "startAt": 0,
+    "maxResults": 0,
+    "total": 0,
+    "histories": []
+  }
+}

@@ -162,7 +162,13 @@ as producer, maintenance-mode read — and **only for the agent's own `:id`**), 
 **signaler token** for external event sources (`POST /internal/bp-events` — the ACE
 `bp-transition.py` caller; without this class, enforcement would break BP routing).
 Rollout via `INTERNAL_AUTH_MODE=observe|warn|enforce`: one observe week inventories
-every real caller (including forgotten integrations), then enforce. Agent tokens rotate
+every real caller (including forgotten integrations), then enforce. **The unset default
+is deployment-dependent (#2459):** a local Podman Compose stack keeps `observe` for
+developer convenience, while the shared/production-style **GKE/Kubernetes** deploy path
+(`AEE_CONTAINER_RUNTIME=kubernetes`) defaults to `enforce` **once the gate is armed** — so
+a shared cluster does not linger in silent log-only mode. An explicitly set mode always
+wins (a deliberate migration-window `observe` is never overridden), and a non-local
+deployment that is not enforcing logs a startup warning. Agent tokens rotate
 via the existing respawn-on-credential-change path. Companion **GOV-PLATFORM-3**: an
 `auditMutations` sibling on the internal app writes every `/internal/*` mutation to
 `/workspace/audit/audit-internal-<date>.jsonl` with
@@ -1068,7 +1074,7 @@ subject no longer exists.
 | Control-plane token `INTERNAL_API_TOKEN`, bearer header from the proxy layer | The console has no proxy layer — it reaches `:4002` from **126 raw `fetch` call sites**. `admin-console/api/internal-auth-client.js` installs one wrapper over the global `fetch`, scoped to the orchestrator's own origin **and** the `/internal/` prefix. Editing 126 sites would have made completeness a review claim; here a call site cannot opt out and a new one is covered the day it is written. |
 | Per-agent tokens, minted at `startAgentProcess`, baked into the container env like the PAT | Exactly that, as `AEE_INTERNAL_TOKEN`. Deterministic (an HMAC over the agent id), so no state is kept and a respawn re-mints the identical value. |
 | Valid only for the agent-facing allowlist, and only for the agent's own `:id` | `AGENT_ROUTES` in `orchestrator/internal-auth.js`. Derived by reading every caller that runs inside an agent container, not from the prose list — see the two corrections below. |
-| `INTERNAL_AUTH_MODE=observe\|warn\|enforce`, one observe week | Implemented, **`observe` is the default**, and all three rungs run the same predicate — the observe-mode census is therefore a truthful preview of what `enforce` will reject rather than a second, drifting implementation. `enforce` without a token is refused at boot. |
+| `INTERNAL_AUTH_MODE=observe\|warn\|enforce`, one observe week | Implemented; the **unset default is deployment-dependent** (#2459) — `observe` on a local Podman Compose stack, `enforce` on an armed non-local (Kubernetes) deploy, an explicit mode always winning — and all three rungs run the same predicate — the observe-mode census is therefore a truthful preview of what `enforce` will reject rather than a second, drifting implementation. `enforce` without a token is refused at boot. |
 | Agent tokens rotate via the respawn-on-credential-change path | Free, by construction: all three respawn paths funnel through `startAgentProcess`, and changing the secret invalidates every outstanding token at once. |
 
 ### Three corrections §3.5 could not have known

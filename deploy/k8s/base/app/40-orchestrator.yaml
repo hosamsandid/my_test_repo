@@ -38,6 +38,15 @@ spec:
             - name: TZ
               value: Europe/Berlin
             # --- container-runtime seam ---
+            # This value ALSO selects the safer internal-auth default (#2459):
+            # `kubernetes` marks a non-local deployment, so the :4002 gate
+            # defaults to INTERNAL_AUTH_MODE=enforce once armed (an
+            # INTERNAL_API_TOKEN is set in the agent-studio-env Secret) instead
+            # of the local `observe`. The default is applied in the orchestrator
+            # (orchestrator/internal-auth.js), NOT hardcoded here, so that an
+            # operator who explicitly sets INTERNAL_AUTH_MODE in the Secret for
+            # an in-progress migration is never silently overridden. See
+            # docs/deployment.md §2a.
             - name: AEE_CONTAINER_RUNTIME
               value: kubernetes
             - name: AEE_K8S_NAMESPACE

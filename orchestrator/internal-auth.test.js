@@ -71,6 +71,68 @@ test("enforce without a token is refused at BOOT, not at the first request", () 
   assert.equal(ia.bootRefusal(CONFIG), null);
 });
 
+// ── 1b. The safer non-local default (#2459) ─────────────────────────────────
+
+const K8S = { AEE_CONTAINER_RUNTIME: "kubernetes" };
+
+test("isNonLocalDeployment recognises the kubernetes runtime, nothing else", () => {
+  assert.equal(ia.isNonLocalDeployment({ AEE_CONTAINER_RUNTIME: "kubernetes" }), true);
+  assert.equal(ia.isNonLocalDeployment({ AEE_CONTAINER_RUNTIME: "Kubernetes" }), true);
+  assert.equal(ia.isNonLocalDeployment({ AEE_CONTAINER_RUNTIME: "podman" }), false);
+  assert.equal(ia.isNonLocalDeployment({}), false);
+});
+
+test("a non-local ARMED deployment defaults to enforce without setting the mode", () => {
+  const cfg = ia.resolveInternalAuthConfig({ ...K8S, INTERNAL_API_TOKEN: CP_TOKEN });
+  assert.equal(cfg.mode, "enforce");
+  assert.equal(cfg.nonLocal, true);
+  assert.equal(cfg.modeExplicit, false);
+  // …and the default is coherent — enforce with a token is not a boot refusal.
+  assert.equal(ia.bootRefusal(cfg), null);
+});
+
+test("the local compose stack stays observe by default — no regression (AC4)", () => {
+  const cfg = ia.resolveInternalAuthConfig({ INTERNAL_API_TOKEN: CP_TOKEN });
+  assert.equal(cfg.mode, "observe");
+  assert.equal(cfg.nonLocal, false);
+});
+
+test("an explicit observe on a non-local deployment is HONOURED, never overridden (edge case)", () => {
+  const cfg = ia.resolveInternalAuthConfig({
+    ...K8S, INTERNAL_API_TOKEN: CP_TOKEN, INTERNAL_AUTH_MODE: "observe",
+  });
+  assert.equal(cfg.mode, "observe");
+  assert.equal(cfg.modeExplicit, true);
+});
+
+test("a non-local deployment with NO token stays observe (enforce would boot-refuse)", () => {
+  const cfg = ia.resolveInternalAuthConfig({ ...K8S });
+  assert.equal(cfg.mode, "observe");
+  assert.equal(cfg.configured, false);
+  assert.equal(ia.bootRefusal(cfg), null);
+});
+
+test("nonLocalObserveWarning surfaces a non-local deployment not enforcing (AC3)", () => {
+  // Armed + defaulted/explicit observe → the log-only warning.
+  const softExplicit = ia.resolveInternalAuthConfig({
+    ...K8S, INTERNAL_API_TOKEN: CP_TOKEN, INTERNAL_AUTH_MODE: "warn",
+  });
+  assert.match(ia.nonLocalObserveWarning(softExplicit), /not blocked/i);
+  assert.match(ia.nonLocalObserveWarning(softExplicit), /explicitly/i);
+
+  // Unarmed → the "arm it" warning instead.
+  const inert = ia.resolveInternalAuthConfig({ ...K8S });
+  assert.match(ia.nonLocalObserveWarning(inert), /INERT/);
+
+  // Enforcing → nothing to warn about.
+  const enforcing = ia.resolveInternalAuthConfig({ ...K8S, INTERNAL_API_TOKEN: CP_TOKEN });
+  assert.equal(ia.nonLocalObserveWarning(enforcing), null);
+
+  // A LOCAL observe deployment is the expected state — no warning.
+  const local = ia.resolveInternalAuthConfig({ INTERNAL_API_TOKEN: CP_TOKEN });
+  assert.equal(ia.nonLocalObserveWarning(local), null);
+});
+
 // ── 2. An unconfigured stack is unchanged ───────────────────────────────────
 
 test("with nothing configured every caller is allowed and tagged as such", () => {

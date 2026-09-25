@@ -13380,7 +13380,12 @@ async function probeLlmEndpointDiscover(baseUrl, token, authType) {
   // against count_tokens and return the manual-entry model-list contract.
   if (isOauthAuthType(normalizeAuthType(authType))) {
     const headers = token ? oauthProbeHeaders(token) : {};
-    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM);
+    // #2460 AC4: pass { oauth: true } exactly like the Test-connection path
+    // (probeLlmEndpointTest) so a 404 on the fixed api.anthropic.com base is
+    // treated as auth-OK regardless of body shape — otherwise Discover could
+    // report "check the Base URL" while Test reports success for the same valid
+    // provider (and the Base URL isn't even operator-editable for OAuth).
+    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true });
     return oauthDiscoverResult(fallback);
   }
   const { url, headers } = llmProbeTarget(baseUrl, token, authType);

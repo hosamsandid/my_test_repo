@@ -42,7 +42,7 @@ const { ActivityStore } = require('./activity-store');
 const { OwnWritesStore } = require('./own-writes-store');
 const { JiraPoller } = require('./poller');
 const { deriveWatchHealth, summariseWatchHealth } = require('./watch-health');
-const { EVENT_KINDS, EVENT_ID_RE, describeEvent } = require('./event-extract');
+const { EVENT_KINDS, EVENT_ID_RE, AGENT_COMMENT_MARKER, describeEvent } = require('./event-extract');
 const jira = require('./jira-client');
 const brokerPolicy = require('./broker-policy');
 const { verifyViewerHeaders, requiredRoleForPath, roleAllows, roleForTeam } = require('./viewer-headers');
@@ -645,13 +645,15 @@ async function handleCli(req, res, cliPath) {
     const body = parseJson(await readBody(req));
     const issue = String(body.issue || '').trim();
     if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
-    const attribution = `Posted by an agent on team "${scopeId}" via Agent Studio.`;
+    // Opens every agent comment; the comment extractor keys `origin` on it.
+    const attribution = `${AGENT_COMMENT_MARKER} "${scopeId}" via Agent Studio.`;
     try {
       let result;
       if (op === 'comment') {
         const text = String(body.body || '').trim();
         if (!text) return sendJson(res, 400, { error: 'a comment body is required' });
         result = await jira.addComment(cred, issue, { body: text, attribution });
+        if (result && result.id) recordOwnWrite(() => ownWritesStore.recordComment(scopeId, issue, result.id));
       } else if (op === 'update') {
         const text = String(body.description || '').trim();
         if (!text) return sendJson(res, 400, { error: 'a description is required' });
@@ -659,6 +661,8 @@ async function handleCli(req, res, cliPath) {
           description: text,
           attribution: `Description rewritten by an agent on team "${scopeId}" via Agent Studio.`,
         });
+        // Unused by today's kinds; a future description_changed needs it.
+        recordOwnWrite(() => ownWritesStore.recordDescription(scopeId, issue));
       } else if (op === 'set-field') {
         const field = String(body.field || '').trim();
         if (!field) return sendJson(res, 400, { error: 'a field name is required' });

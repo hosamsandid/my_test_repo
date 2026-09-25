@@ -36,6 +36,7 @@ const { EVENT_KINDS } = require('./event-extract');
 const SCOPE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const RETENTION_MS = 14 * 24 * 3600 * 1000;
 const ACTIVITY_MAX = 2000;
+const ROW_BODY_MAX = 300;
 const OUTCOMES = new Set(['delivered', 'digested', 'throttled', 'filtered', 'stale', 'baseline']);
 
 function assertScope(scopeId) {
@@ -64,6 +65,8 @@ function shapeEventForRow(ev) {
   };
   const kind = EVENT_KINDS[e.event];
   for (const f of (kind ? kind.rowFields : ['fromStatus', 'toStatus'])) row[f] = e[f] == null ? null : e[f];
+  // A row is a diagnostic, not the comment store — keep it small.
+  if (typeof row.body === 'string' && row.body.length > ROW_BODY_MAX) row.body = `${row.body.slice(0, ROW_BODY_MAX - 1)}…`;
   return row;
 }
 

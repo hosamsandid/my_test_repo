@@ -591,3 +591,61 @@ test('field_changed: an old field change on a re-touched issue is stale, not fir
   assert.equal(h.delivered.length, 0);
   assert.equal(h.activityStore.list('team-1')[0].outcome, 'stale');
 });
+
+// ── comment_added ───────────────────────────────────────────────────────────
+
+const adfDoc = (...lines) => ({ type: 'doc', version: 1, content: lines.map((t) => ({ type: 'paragraph', content: [{ type: 'text', text: t }] })) });
+const commented = (key, comments, total) => ({
+  key, fields: { summary: `${key} summary`, comment: { total: total == null ? comments.length : total, comments } }, changelog: { histories: [] },
+});
+const jc = (id, created, lines, author = 'Jane') => ({ id, created, author: { displayName: author }, body: adfDoc(...lines) });
+
+test('comment_added: a human comment wakes; the agent\'s own (registered) comment is delivered with origin: agent', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['comment_added'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  h.ownWritesStore.recordComment('team-1', 'ENG-1', '501');
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [commented('ENG-1', [
+    jc('500', '2026-01-01T11:58:00.000+0000', ['Can you clarify the AC?']),
+    jc('501', '2026-01-01T11:59:00.000+0000', ['Posted by an agent on team "team-1" via Agent Studio.', 'Clarified.'], 'Admin'),
+  ])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => [d.events[0].id, d.events[0].origin, d.events[0].body]), [
+    ['ENG-1:c500', 'human', 'Can you clarify the AC?'],
+    ['ENG-1:c501', 'agent', 'Clarified.'],
+  ]);
+});
+
+test('comment_added: a truncated comment list triggers exactly one backfill call for that issue', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['comment_added'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const backfills = [];
+  const restore = fakeFetch((url) => {
+    if (url.includes('/search/jql')) {
+      return { body: { isLast: true, issues: [
+        commented('ENG-1', [jc('1', '2025-06-01T00:00:00Z', ['ancient'])], 40), // search inlined an old one, 40 exist
+        commented('ENG-2', [jc('2', '2026-01-01T11:58:00Z', ['complete list'])]),
+      ] } };
+    }
+    if (url.includes('/comment?')) {
+      backfills.push(url);
+      return { body: { total: 40, comments: [jc('41', '2026-01-01T11:59:00Z', ['newest']), jc('40', '2025-12-31T00:00:00Z', ['old'])] } };
+    }
+    return { body: { isLast: true, values: [] } }; // changelog backfill for the history-less issues
+  });
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(backfills.length, 1);
+  assert.match(backfills[0], /\/issue\/ENG-1\/comment\?/);
+  assert.deepEqual(h.delivered.map((d) => d.events[0].id).sort(), ['ENG-1:c41', 'ENG-2:c2']);
+});
+
+test('comment_added: a comment created before the previous poll on a re-touched issue is stale', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['comment_added'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:59:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [commented('ENG-1', [jc('600', '2026-01-01T11:52:00Z', ['earlier'])])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 0);
+  assert.equal(h.activityStore.list('team-1')[0].outcome, 'stale');
+});

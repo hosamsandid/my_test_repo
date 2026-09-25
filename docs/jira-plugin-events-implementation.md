@@ -1,6 +1,6 @@
 # Jira plugin — event kinds: implementation plan
 
-> Status: **in progress** (written 2026-09-21; revised 2026-09-25 after main
+> Status: **implemented** (written 2026-09-21; revised 2026-09-25 after main
 > gained issue creation, custom-field writes and attachment upload — §1.11,
 > §2.4; delivered as **one PR in ordered commits**, §3). This is the *how* for
 > `docs/jira-plugin-events-plan.md` (the *what/why* — read it first; its §5

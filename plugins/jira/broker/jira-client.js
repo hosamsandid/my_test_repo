@@ -72,8 +72,9 @@ function buildProjectJql(projectKey, windowMinutes) {
 function buildJqlSearchBody(jql, nextPageToken) {
   const body = {
     jql,
-    // `created`/`reporter`/`priority` feed the issue_created extractor.
-    fields: ['summary', 'status', 'issuetype', 'created', 'reporter', 'priority'],
+    // `created`/`reporter`/`priority` feed the issue_created extractor,
+    // `comment` the comment_added one.
+    fields: ['summary', 'status', 'issuetype', 'created', 'reporter', 'priority', 'comment'],
     expand: 'changelog',
     maxResults: PAGE_SIZE,
   };
@@ -104,6 +105,7 @@ function shapeIssue(raw) {
     created: fields.created ? String(fields.created) : null,
     reporter: fields.reporter && fields.reporter.displayName ? String(fields.reporter.displayName) : null,
     priority: fields.priority && fields.priority.name ? String(fields.priority.name) : null,
+    comment: fields.comment && typeof fields.comment === 'object' ? fields.comment : null,
     changelog: raw.changelog || null,
   };
 }
@@ -927,6 +929,35 @@ async function searchIssues(cred, { jql, fields, customFields, limit, env } = {}
   return issues;
 }
 
+// The newest comments of one issue, newest first, stopping at the first one
+// created before `sinceIso` — the backfill for a search response whose comment
+// list was cut short (event-extract.js `isCommentListTruncated`). Returned
+// oldest-first like the search response's own list. Bounded by MAX_PAGES.
+const COMMENT_PAGE_SIZE = 50;
+async function fetchRecentComments(cred, issueKey, { sinceIso, env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const since = Date.parse(sinceIso);
+  const out = [];
+  let startAt = 0;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const res = await requestJson({
+      base,
+      path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?orderBy=-created&startAt=${startAt}&maxResults=${COMMENT_PAGE_SIZE}`,
+      authHeader: auth,
+    });
+    const values = Array.isArray(res.comments) ? res.comments : [];
+    let reachedOld = false;
+    for (const c of values) {
+      if (!Number.isNaN(since) && Date.parse(c.created) < since) { reachedOld = true; break; }
+      out.push(c);
+    }
+    startAt += values.length;
+    if (reachedOld || values.length === 0 || (typeof res.total === 'number' && startAt >= res.total)) break;
+  }
+  return out.reverse();
+}
+
 // Run an arbitrary JQL (spike diagnostics only — `probe --jql`). Same shaping as
 // searchProjectIssues but the caller owns the whole query.
 async function searchJql(cred, jql, { env } = {}) {
@@ -1740,6 +1771,7 @@ module.exports = {
   apiBaseFor,
   whoAmI,
   searchProjectIssues,
+  fetchRecentComments,
   listProjectIssues,
   searchIssues,
   clampSearchLimit,

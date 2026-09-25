@@ -246,8 +246,10 @@ Concept: `docs/plugin-system-concept.md`, `docs/cli-contract.md`.
   `spec-kit` (command-only), `jira` (the first **event-source** plugin — see
   below). `make seed-plugins`.
 - **Event-source plugins — the Jira plugin** (`plugins/jira/`, docs
-  `docs/jira-plugin.md` / `docs/jira-plugin-plan.md`; further event kinds planned in `docs/jira-plugin-events-plan.md`, implementation plan `docs/jira-plugin-events-implementation.md`): wakes granted agents on
-  Jira Cloud status changes. Two generic additions it needed are reusable: the
+  `docs/jira-plugin.md` / `docs/jira-plugin-plan.md`; event kinds in `docs/jira-plugin-events-plan.md` / `docs/jira-plugin-events-implementation.md`): wakes granted agents on
+  Jira Cloud status changes, new issues, comments and other field changes
+  (per-watch opt-in; every wake single-kind; `origin: agent|human` from the
+  broker's own-writes registry breaks self-wake loops). Two generic additions it needed are reusable: the
   **per-scope plugin credential store** (`orchestrator/plugin-credential-store.js`
   — makes the manifest's `credentials[]` real, 0600 under
   `/workspace/plugins/_credentials/<id>/<scopeId>.json`, set by a Team Admin on

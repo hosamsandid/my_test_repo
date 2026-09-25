@@ -104,3 +104,13 @@ test('append: an event without a kind (pre-kinds shape) keeps the status fields'
   assert.equal(row.event.event, null);
   assert.equal(row.event.toStatus, 'B');
 });
+
+test('append: a comment row keeps origin and a clamped body', () => {
+  const s = tmpStore();
+  s.append('team-1', { event: ev('ENG-1:c1', { event: 'comment_added', commentId: '1', origin: 'human', body: 'z'.repeat(1000) }) });
+  const [row] = s.list('team-1');
+  assert.equal(row.event.origin, 'human');
+  assert.equal(row.event.commentId, '1');
+  assert.equal(row.event.body.length, 300);
+  assert.equal('toStatus' in row.event, false);
+});

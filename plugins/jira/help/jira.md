@@ -2,7 +2,7 @@
 id: plugin-jira
 routes: ["/chats", "/plugins/jira/view", "/plugins"]
 title: Jira plugin
-summary: How a Jira status change wakes an agent, what the two trigger filters mean for Jira, and what the agent can do with `aee-jira`.
+summary: How a Jira event (status change, new issue, comment, field change) wakes an agent, what the two trigger filters mean for Jira, how to avoid the comment loop, and what the agent can do with `aee-jira`.
 seeAlso:
   - { label: "Agent Chat", to: "/chats" }
   - { label: "Plugins", to: "/plugins" }
@@ -10,6 +10,7 @@ askPrompts:
   - "How does a Jira status change wake my agent?"
   - "Which fields can I filter a Jira wake on?"
   - "Why did my agent not wake when the ticket moved to Ready for Dev?"
+  - "How do I wake an agent when someone comments on a ticket?"
   - "What can the agent do with aee-jira?"
 ---
 
@@ -31,7 +32,7 @@ and the agent's **trigger** (this page, Triggers tab).
 
 | Field | What to put there for Jira |
 |---|---|
-| **Which event** | `status_changed`, `issue_created` (a new ticket) or `field_changed` (any other field) — whichever the watch forwards (**Watch config** ticks the kinds per project; status changes only by default). Set it on every trigger once a watch forwards more than one kind — *Any event* then wakes on all of them. A status name is **not** an event. |
+| **Which event** | `status_changed`, `issue_created` (a new ticket), `comment_added` or `field_changed` (any other field) — whichever the watch forwards (**Watch config** ticks the kinds per project; status changes only by default). Set it on every trigger once a watch forwards more than one kind — *Any event* then wakes on all of them. A status name is **not** an event. |
 | **Only when…** | a condition on the **fields of that event** (the form's sub-heading reads *fields of `status_changed`*) that picks *which* status changes wake this agent — almost always `toStatus = <the status the issue moved into>`, e.g. `toStatus = Ready for Dev`. |
 
 The **Only when…** condition is what routes a flow through several agents: give
@@ -58,32 +59,39 @@ All plain strings, usable in **Only when…**:
 Several conditions combine with AND: `toStatus = Ready for Dev` plus
 `issueType = Bug` wakes the agent only for bugs entering that status.
 
-### The fields an `issue_created` event carries
+### The other kinds
 
-| Field | Meaning | Example |
+The trigger form's *Only when…* picker lists every kind's fields; the useful
+routing keys:
+
+| Event | Route on | Example |
 |---|---|---|
-| `origin` | `human`, or `agent` when an agent created it (`aee-jira create-epic`) — add `origin = human` so an agent does not wake on its own tickets | `human` |
-| `issueType` | Story, Bug, Task, … | `Bug` |
-| `projectKey` / `issueKey` | the project / the new issue | `KAN` / `KAN-12` |
-| `status` / `priority` | what it was created with | `To Do` / `High` |
-| `reporter` | who created it (display name) | `Jane Doe` |
+| `issue_created` | `origin`, `issueType`, `status`, `priority` | *"new ticket → BA triages"*: `origin = human` |
+| `comment_added` | `origin`, `author`, `issueType` | `origin = human` (always — see below) |
+| `field_changed` | `field` or `fieldId` (custom fields), `to`, `origin` | `field = assignee` + `to = Jane Doe` |
 
-A *"new ticket → Business Analyst triages it"* trigger: *Which event*
-`issue_created`, *Only when…* `origin = human`.
+`field_changed` is one event per changed field — never status, description or
+Rank. A comment's text rides along as `body` (cut at 2000 characters; `aee-jira
+show` has the rest) — context, not a filter. Every wake is one kind only.
 
-### The fields a `field_changed` event carries
+## Avoid the comment loop
 
-One event per changed field (never status, description or Rank):
+An agent's own `aee-jira comment` is a comment, and Jira shows it under the
+Team Admin's account — the same account the admin uses by hand, so `author`
+cannot tell them apart. A `comment_added` trigger without a condition
+therefore wakes the agent on its **own** reply, which replies again. The
+platform only slows that down (5 wakes per issue per hour), it does not stop it.
 
-| Field | Meaning | Example |
-|---|---|---|
-| `field` | the field's name as Jira reports it | `assignee`, `priority`, `labels`, `Sprint`, `Fix Version`, `Attachment` |
-| `fieldId` | its stable id — prefer it for custom fields | `customfield_10020` |
-| `to` / `from` | new / previous value as display text (empty when cleared) | `Jane Doe` |
-| `origin` | `human`, or `agent` for an agent's own `set-field` / `attachment add` | `human` |
-
-Route with *Only when…* `field = assignee` (plus `to = <name>` to wake on
-"assigned to X"), or `fieldId = customfield_…` for a custom field.
+- Put **`origin = human`** on every `comment_added` trigger. The broker
+  records each comment it posts and stamps its echo `origin = agent`.
+- Only when an agent deliberately waits for a *teammate agent's* comment use
+  `origin = agent` — **and** a second condition that tells the two apart (a
+  different `issueType`, a project), and never let two agents both listen on
+  `origin = agent` for the same project without one.
+- Same for `issue_created` (`create-epic`) and `field_changed`
+  (`set-field`, `attachment add`).
+- A status change has no `origin` — an agent's `aee-jira transition` wakes
+  whichever teammate's trigger names that target status, by design.
 
 When more than three transitions land in a single poll — on one issue, or
 across one project (a bulk move such as sprint planning) — they arrive as one
@@ -101,7 +109,7 @@ All Jira access stays server-side in the broker; the agent never sees the token.
 
 | Command | |
 |---|---|
-| `aee-jira inbox` / `aee-jira inbox --consume <id>…` | the queued status changes of the whole team (peek); `--consume` drains exactly the ids named — use the ids from your own wake (`id`, or `events[].id` in a digest), never a teammate's |
+| `aee-jira inbox` / `aee-jira inbox --consume <id>…` | the queued events of the whole team (peek); `--consume` drains exactly the ids named — use the ids from your own wake (`id`, or `events[].id` in a digest), never a teammate's |
 | `aee-jira list --project KAN [--status "Ready for Dev"]`, `aee-jira show KAN-6 [--fields "Team"]` | read issues (`show` also lists any attachments, the `parent`/epic key so you can traverse Story→Epic, and `availableTransitions` — the moves reachable from the issue's current status, so you can `transition --to` one without guessing). `--fields` additionally reads **custom fields** by their Jira name (e.g. `Team`) — an empty field comes back as `null`, so you can tell unset from set |
 | `aee-jira statuses --project KAN` | every workflow status the project supports, grouped by issue type — the full set the workflow allows, independent of any one issue's current state (for planning / checking what a workflow supports) |
 | `aee-jira search --jql "<JQL>" [--fields …] [--limit N]` | run any JQL the team's credential is allowed — for filters `list` can't express (a `created` range, an empty custom field, a summary match). Scoped to the team's bound site & projects; read-only, shaped like `list`. A `--fields` name that isn't a standard column is read as a custom field and rides alongside the row |
@@ -125,16 +133,18 @@ the broker cannot tell agents apart (one scope token per team), so a
 teammate's queued events stay queued only as long as each agent drains just
 what it was woken for.
 
-## When a transition does not wake the agent
+## When a Jira event does not wake the agent
 
 Check in this order:
 
-1. **The trigger's filters.** *Which event* must be blank or `status_changed`;
-   a status name there never matches. *Only when…* must name the exact status
-   the issue moved **into** (`toStatus`), spelled as Jira spells it.
-2. **The watch.** On the plugin's Activity tab a `not a watched status` row
-   means the status is missing from the watch's status set (Watch config page,
-   Team Admin).
+1. **The trigger's filters.** *Which event* must be blank or the event's kind
+   (`status_changed`, `comment_added`, …); a status name there never matches.
+   For a status change, *Only when…* must name the exact status the issue moved
+   **into** (`toStatus`), spelled as Jira spells it. An `origin = human`
+   condition never matches an agent's own write.
+2. **The watch.** On the plugin's Activity tab a `not watched` row means the
+   watch does not forward that kind (its checkbox on the Watch config page) or,
+   for a status change, the status is missing from the watch's status set.
 3. **The grant.** The plugin must be activated for this agent's team (Plugins
    page); the trigger form flags a plugin that is not granted.
 4. **Already seen.** The broker baselines on its first poll and never re-sends a

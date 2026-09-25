@@ -13,7 +13,7 @@ privilege-less client that just carries the scope token.
 Reads:
 
     aee-jira whoami                               # the resolved plugin scope
-    aee-jira inbox                                # peek: every queued status-change event in the team's inbox
+    aee-jira inbox                                # peek: every queued event in the team's inbox
     aee-jira inbox --consume KAN-6:10312 [ID…]   # drain exactly the events YOUR wake named (payload `id` / `events[].id`)
     aee-jira projects                             # the projects in this team's scope
     aee-jira statuses --project KAN               # every workflow status the project supports, grouped by issue type
@@ -368,7 +368,7 @@ def build_parser():
 
     sub.add_parser("whoami", parents=[common], help="show the resolved plugin scope")
 
-    p_inbox = sub.add_parser("inbox", parents=[common], help="the queued status-change events that woke you")
+    p_inbox = sub.add_parser("inbox", parents=[common], help="the queued Jira events (status changes, new issues, comments, field changes) that woke you")
     p_inbox.add_argument(
         "--consume", nargs="+", metavar="EVENT_ID", default=None,
         help="drain exactly these event ids (from your wake payload: `id`, or `events[].id` in a digest); "

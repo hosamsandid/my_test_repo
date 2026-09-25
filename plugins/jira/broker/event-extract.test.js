@@ -309,3 +309,92 @@ test('describeEvent: field_changed reads "<key>: <field> <from> → <to>" with �
   const { describeEvent } = require('./event-extract');
   assert.equal(describeEvent({ event: 'field_changed', issueKey: 'KAN-6', field: 'assignee', from: null, to: 'Bob' }), 'KAN-6: assignee ∅ → Bob');
 });
+
+// ── comment_added ───────────────────────────────────────────────────────────
+
+const adf = (...paras) => ({ type: 'doc', version: 1, content: paras.map((p) => (typeof p === 'string' ? { type: 'paragraph', content: [{ type: 'text', text: p }] } : p)) });
+const commentIssue = (comments, total) => ({
+  key: 'KAN-6', summary: 'S', issueType: 'Story',
+  comment: { total: total == null ? comments.length : total, comments },
+});
+const cmt = (id, created, body, author = 'Jane') => ({ id, created, author: { displayName: author }, body });
+
+test('adfToText: paragraphs, hard breaks, mentions, lists and code blocks flatten to readable text', () => {
+  const { adfToText } = require('./event-extract');
+  const doc = { type: 'doc', content: [
+    { type: 'paragraph', content: [{ type: 'text', text: 'Hi ' }, { type: 'mention', attrs: { id: 'x', text: '@Bob' } }, { type: 'text', text: ',' }, { type: 'hardBreak' }, { type: 'text', text: 'second line' }] },
+    { type: 'bulletList', content: [
+      { type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'one' }] }] },
+      { type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'two' }] }] },
+    ] },
+    { type: 'codeBlock', attrs: { language: 'js' }, content: [{ type: 'text', text: 'x = 1' }] },
+    { type: 'paragraph', content: [{ type: 'mention', attrs: { text: 'Carol' } }, { type: 'emoji', attrs: { shortName: ':smile:', text: '😄' } }] },
+  ] };
+  assert.equal(adfToText(doc), 'Hi @Bob,\nsecond line\n- one\n- two\nx = 1\n@Carol😄');
+  assert.equal(adfToText(null), '');
+  assert.equal(adfToText({ type: 'weird', content: 'nope' }), 'nope');
+});
+
+test('extractCommentEvents: one event per comment inside the window; id <key>:c<id>; body flattened', () => {
+  const { extractCommentEvents, EVENT_ID_RE } = require('./event-extract');
+  const events = extractCommentEvents(commentIssue([
+    cmt('100', '2025-12-01T09:00:00.000+0000', adf('old')),
+    cmt('101', '2026-01-01T11:58:00.000+0000', adf('Is this', 'ready?')),
+  ]), { projectKey: 'KAN', siteBase: 'https://acme.atlassian.net', windowStartIso: '2026-01-01T11:50:00Z' });
+  assert.deepEqual(events, [{
+    id: 'KAN-6:c101',
+    event: 'comment_added',
+    issueKey: 'KAN-6',
+    projectKey: 'KAN',
+    issueType: 'Story',
+    summary: 'S',
+    created: '2026-01-01T11:58:00.000+0000',
+    author: 'Jane',
+    commentId: '101',
+    body: 'Is this\nready?',
+    origin: 'human',
+    issueUrl: 'https://acme.atlassian.net/browse/KAN-6?focusedCommentId=101',
+  }]);
+  assert.ok(EVENT_ID_RE.test(events[0].id));
+});
+
+test('extractCommentEvents: origin — registry → agent; marker only → agent (body without the marker); same account, plain → human', () => {
+  const { extractCommentEvents, AGENT_COMMENT_MARKER } = require('./event-extract');
+  const marked = adf({ type: 'paragraph', content: [{ type: 'text', text: `${AGENT_COMMENT_MARKER} "team-1" via Agent Studio.`, marks: [{ type: 'em' }] }] }, 'Refined the ACs.');
+  const events = extractCommentEvents(commentIssue([
+    cmt('201', '2026-01-01T11:58:00Z', adf('registered'), 'Admin'),
+    cmt('202', '2026-01-01T11:58:10Z', marked, 'Admin'),
+    cmt('203', '2026-01-01T11:58:20Z', adf('typed by the admin'), 'Admin'),
+  ]), { ownWrites: { comments: { 'KAN-6:c201': '2026-01-01T11:58:00Z' } } });
+  assert.deepEqual(events.map((e) => [e.commentId, e.origin]), [['201', 'agent'], ['202', 'agent'], ['203', 'human']]);
+  assert.equal(events[1].body, 'Refined the ACs.');
+});
+
+test('extractCommentEvents: body clamp + bodyTruncated as a string', () => {
+  const { extractCommentEvents, COMMENT_BODY_MAX } = require('./event-extract');
+  const [long, short] = extractCommentEvents(commentIssue([
+    cmt('301', '2026-01-01T11:58:00Z', adf('y'.repeat(COMMENT_BODY_MAX + 50))),
+    cmt('302', '2026-01-01T11:58:00Z', adf('short')),
+  ]));
+  assert.equal(long.body.length, COMMENT_BODY_MAX);
+  assert.equal(long.bodyTruncated, 'true');
+  assert.equal('bodyTruncated' in short, false);
+});
+
+test('extractCommentEvents: no comment field / no created stamp → nothing', () => {
+  const { extractCommentEvents } = require('./event-extract');
+  assert.deepEqual(extractCommentEvents({ key: 'KAN-6' }), []);
+  assert.deepEqual(extractCommentEvents(commentIssue([cmt('1', undefined, adf('x'))])), []);
+});
+
+test('isCommentListTruncated: total beyond the inlined list', () => {
+  const { isCommentListTruncated } = require('./event-extract');
+  assert.equal(isCommentListTruncated({ total: 30, comments: [{}] }), true);
+  assert.equal(isCommentListTruncated({ total: 1, comments: [{}] }), false);
+  assert.equal(isCommentListTruncated(null), false);
+});
+
+test('describeEvent: comment_added names author and origin', () => {
+  const { describeEvent } = require('./event-extract');
+  assert.equal(describeEvent({ event: 'comment_added', issueKey: 'KAN-6', author: 'Jane', origin: 'human' }), 'KAN-6: comment by Jane (human)');
+});

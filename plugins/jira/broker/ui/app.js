@@ -135,7 +135,7 @@
   // ── event kinds ───────────────────────────────────────────────────────────
   // The "what happened" cell per event kind (the UI twin of event-extract.js
   // `describeEvent`). A row with no `event` predates kinds: a status change.
-  var KIND_LABEL = { status_changed: 'Status changes', issue_created: 'New issues', field_changed: 'Field changes' };
+  var KIND_LABEL = { status_changed: 'Status changes', issue_created: 'New issues', field_changed: 'Field changes', comment_added: 'Comments' };
   // An event the broker's own write caused (`origin: agent`) is tagged.
   function originTag(ev) { return ev.origin === 'agent' ? ' <span class="hint">(by agent)</span>' : ''; }
   function kindOf(ev) { return (ev && ev.event) || 'status_changed'; }
@@ -145,6 +145,10 @@
       return esc(ev.fromStatus || 'new') + ' <span class="arr">→</span> ' + esc(ev.toStatus || '?');
     }
     if (kind === 'issue_created') return 'created' + (ev.status ? ' in ' + esc(ev.status) : '') + originTag(ev);
+    if (kind === 'comment_added') {
+      var text = String(ev.body || '').replace(/\s+/g, ' ');
+      return 'comment' + originTag(ev) + (text ? ': <span class="hint">' + esc(text.length > 80 ? text.slice(0, 79) + '…' : text) + '</span>' : '');
+    }
     if (kind === 'field_changed') {
       return esc(ev.field || ev.fieldId || 'field') + ': ' + esc(ev.from == null ? '∅' : ev.from)
         + ' <span class="arr">→</span> ' + esc(ev.to == null ? '∅' : ev.to) + originTag(ev);

@@ -26,7 +26,19 @@ const EVENT_KINDS = {
   status_changed: { label: 'Status changes', noun: 'status changes', rowFields: ['fromStatus', 'toStatus'] },
   issue_created: { label: 'New issues', noun: 'new issues', rowFields: ['status', 'reporter', 'priority', 'origin'] },
   field_changed: { label: 'Other field changes', noun: 'field changes', rowFields: ['field', 'fieldId', 'from', 'to', 'fieldType', 'origin'] },
+  comment_added: { label: 'Comments', noun: 'comments', rowFields: ['commentId', 'body', 'bodyTruncated', 'origin'] },
 };
+
+// The provenance line the broker puts first in every comment it posts
+// (server.js builds its attribution from this constant, so they cannot
+// drift). A comment opening with it is an agent's, even when the own-writes
+// registry was lost with the state volume.
+const AGENT_COMMENT_MARKER = 'Posted by an agent on team';
+
+// A comment's plain-text `body` in the wake payload is cut here and flagged
+// `bodyTruncated: "true"` (a string, so it stays a filterable top-level
+// string); `aee-jira show` has the full text.
+const COMMENT_BODY_MAX = 2000;
 
 // Changelog fields that never become a `field_changed`: `status` is its own
 // kind; `description` is a parked kind with its own loop risk (`aee-jira
@@ -60,6 +72,7 @@ function describeEvent(ev) {
     return `${key}: ${e.fromStatus || 'new'} → ${e.toStatus || '?'}`;
   }
   if (e.event === 'issue_created') return `${key} created${e.summary ? `: ${e.summary}` : ''}`;
+  if (e.event === 'comment_added') return `${key}: comment by ${e.author || 'someone'}${e.origin ? ` (${e.origin})` : ''}`;
   if (e.event === 'field_changed') return `${key}: ${e.field || e.fieldId || 'field'} ${e.from ?? '∅'} → ${e.to ?? '∅'}`;
   return key || String(e.event || 'event');
 }
@@ -239,6 +252,100 @@ function extractFieldChangeEvents(issue, { projectKey, siteBase, ownWrites } = {
   return events;
 }
 
+// ── comments ────────────────────────────────────────────────────────────────
+
+// Atlassian Document Format → plain text. Paragraph-like blocks end a line,
+// `hardBreak` is a newline, a mention reads `@Name`, list items get "- ",
+// anything unknown is recursed into. Never throws.
+const ADF_BLOCKS = new Set(['paragraph', 'heading', 'codeBlock', 'blockquote', 'listItem', 'tableRow', 'panel', 'rule', 'mediaSingle']);
+function adfToText(node) {
+  const walk = (n) => {
+    if (n == null) return '';
+    if (typeof n === 'string') return n;
+    if (Array.isArray(n)) return n.map(walk).join('');
+    if (typeof n !== 'object') return '';
+    const attrs = n.attrs || {};
+    switch (n.type) {
+      case 'text': return n.text || '';
+      case 'hardBreak': return '\n';
+      case 'mention': {
+        const t = String(attrs.text || attrs.displayName || attrs.id || '');
+        return t.startsWith('@') ? t : `@${t}`;
+      }
+      case 'emoji': return String(attrs.text || attrs.shortName || '');
+      case 'inlineCard': return String(attrs.url || '');
+      case 'tableCell':
+      case 'tableHeader': return `${walk(n.content)} `;
+      default: break;
+    }
+    const inner = walk(n.content);
+    if (n.type === 'listItem') return `- ${inner.replace(/\n+$/, '')}\n`;
+    return ADF_BLOCKS.has(n.type) ? `${inner.replace(/\n+$/, '')}\n` : inner;
+  };
+  return walk(node).replace(/\n{3,}/g, '\n\n').trim();
+}
+
+// Whether the search response cut an issue's comment list short (the
+// `isChangelogTruncated` pattern) — then the poller backfills recent comments.
+function isCommentListTruncated(comment) {
+  return !!comment
+    && typeof comment.total === 'number'
+    && Array.isArray(comment.comments)
+    && comment.total > comment.comments.length;
+}
+
+// Whether a comment's ADF opens with the agent provenance paragraph.
+function opensWithAgentMarker(body) {
+  const first = body && Array.isArray(body.content) ? body.content[0] : null;
+  return !!first && adfToText(first).startsWith(AGENT_COMMENT_MARKER);
+}
+
+// `origin` of a comment: `agent` when the registry holds its id, or — the
+// restart-safe fallback — when it opens with the provenance line; else
+// `human`. A human who types the marker only ever suppresses a wake.
+function resolveCommentOrigin(issueKey, comment, ownWrites) {
+  if (ownWrites && ownWrites.comments && ownWrites.comments[`${issueKey}:c${comment.id}`]) return 'agent';
+  return opensWithAgentMarker(comment.body) ? 'agent' : 'human';
+}
+
+// One `comment_added` event per comment created inside this poll's window
+// (`windowStartIso`, as for issue_created — the JQL window is on `updated`,
+// so an old issue's old comments ride along). A comment without a parseable
+// `created` yields nothing. Edits to an existing comment are not events.
+function extractCommentEvents(issue, { projectKey, siteBase, windowStartIso, ownWrites } = {}) {
+  const events = [];
+  if (!issue || !issue.key || !issue.comment || !Array.isArray(issue.comment.comments)) return events;
+  const windowStart = Date.parse(windowStartIso);
+  const summary = issueSummaryOf(issue);
+  const issueType = issueTypeNameOf(issue);
+  for (const c of issue.comment.comments) {
+    if (!c || c.id == null) continue;
+    const created = Date.parse(c.created);
+    if (Number.isNaN(created)) continue;
+    if (!Number.isNaN(windowStart) && created < windowStart) continue;
+    // The agent's own provenance line is not what the reader needs.
+    const content = c.body && Array.isArray(c.body.content) ? c.body.content : [];
+    const text = adfToText({ type: 'doc', content: opensWithAgentMarker(c.body) ? content.slice(1) : content });
+    const truncated = text.length > COMMENT_BODY_MAX;
+    events.push({
+      id: `${issue.key}:c${c.id}`,
+      event: 'comment_added',
+      issueKey: issue.key,
+      projectKey: projectKey || null,
+      issueType,
+      summary,
+      created: c.created,
+      author: (c.author && c.author.displayName) || null,
+      commentId: String(c.id),
+      body: truncated ? `${text.slice(0, COMMENT_BODY_MAX - 1)}…` : text,
+      ...(truncated ? { bodyTruncated: 'true' } : {}),
+      origin: resolveCommentOrigin(issue.key, c, ownWrites),
+      issueUrl: siteBase ? `${siteBase}/browse/${issue.key}?focusedCommentId=${encodeURIComponent(c.id)}` : null,
+    });
+  }
+  return events;
+}
+
 // The exact-match gate on the status an issue transitioned INTO, mirroring the
 // GitHub poller's `labelFilter`. Empty / null / undefined = no filter (fires on
 // any status change).
@@ -289,6 +396,12 @@ module.exports = {
   resolveIssueOrigin,
   extractFieldChangeEvents,
   resolveFieldOrigin,
+  extractCommentEvents,
+  resolveCommentOrigin,
+  isCommentListTruncated,
+  adfToText,
+  AGENT_COMMENT_MARKER,
+  COMMENT_BODY_MAX,
   FIELD_CHANGED_DENY,
   FIELD_VALUE_MAX,
   OWN_FIELD_WRITE_SKEW_MS,

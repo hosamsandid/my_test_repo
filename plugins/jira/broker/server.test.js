@@ -408,6 +408,8 @@ test('cli writes: comment + transition are role-gated (pass for team scope), cre
     const c = await call(srv, 'POST', '/cli/comment', { token: TOKEN, body: { issue: 'KAN-6', body: 'picked up' } });
     assert.equal(c.status, 200);
     assert.equal(c.body.issueKey, 'KAN-6');
+    // recorded before the reply → the poller stamps its echo origin: agent
+    assert.ok(broker.ownWritesStore.snapshot('team-1').comments['KAN-6:c1']);
 
     const t = await call(srv, 'POST', '/cli/transition', { token: TOKEN, body: { issue: 'KAN-6', to: 'In Progress' } });
     assert.equal(t.status, 200);

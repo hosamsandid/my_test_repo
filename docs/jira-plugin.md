@@ -61,6 +61,16 @@ make seed-plugins      # lays plugins/jira/ into the pool
 Then **Administration → Plugins → Jira → Install** (System Admin). Install starts
 the broker sidecar and grants the plugin to nobody.
 
+**Upgrading an installed Jira plugin** (e.g. to get the event kinds). Do
+**not** uninstall and reinstall — uninstall reaps every team's Jira credential.
+Instead: `make plugin-images` + `make seed-plugins` as above, then copy
+`plugin.json`, `bin/` and `help/` from `plugins/jira/` over the installed
+copy at `/workspace/plugins/jira/` and restart the stack (`make restart`). The
+registry re-validates the manifest on read, granted agents get the new
+`aee-jira` on the next plugin reconcile, and watch configs, cursors and the
+inbox survive on the plugin's state volume. Existing watches stay *status
+changes only* until a Team Admin ticks another kind.
+
 ### 2. Grant it to a team
 
 On the same page, the Jira card's team-assign control — or a per-agent grant on
@@ -99,8 +109,8 @@ The Jira plugin's **Watch config** page (`/admin`, team-admin — reached from t
 
 - `projectKey` — e.g. `KAN`.
 - `events` — which **kinds** of event the row forwards (checkboxes):
-  *Status changes* (`status_changed`), *New issues* (`issue_created`), *Other
-  field changes* (`field_changed`). Default
+  *Status changes* (`status_changed`), *New issues* (`issue_created`),
+  *Comments* (`comment_added`), *Other field changes* (`field_changed`). Default
   — and the migration for a row saved before kinds existed — is status changes
   only, so an upgrade never makes a watch noisier.
 - `statusFilters` — a **set** of target statuses (chips). An empty set fires on
@@ -118,7 +128,7 @@ per-agent trigger: Agent Chat → **Triggers** → add → type **Plugin event**
 | Field | |
 |---|---|
 | Plugin | `jira` (picked from the installed plugins) |
-| Which event | `status_changed`, `issue_created`, `field_changed`, or *Any event*. Offered as a select from the manifest's `events[]`. Once a watch forwards more than one kind, set it on **every** trigger — *Any event* with no *Only when…* wakes on every kind. A status name is **not** an event — the form flags one as *not an event this plugin declares*. |
+| Which event | `status_changed`, `issue_created`, `comment_added`, `field_changed`, or *Any event*. Offered as a select from the manifest's `events[]`. Once a watch forwards more than one kind, set it on **every** trigger — *Any event* with no *Only when…* wakes on every kind. A status name is **not** an event — the form flags one as *not an event this plugin declares*. |
 | Only when… | **which status wakes this agent** — condition rows `field = value`, e.g. `toStatus = Ready for Dev`; the field picker lists the payload keys below with an example. No conditions = every watched transition wakes this agent. Stored as `payloadFilter: { toStatus: "Ready for Dev" }`. |
 | Wake instruction | what the agent should do — e.g. *"Take the event id(s) from the event payload, run `aee-jira inbox --consume <id>…`, read the issue with `aee-jira show`, refine the description and write it back with `aee-jira update`, then move it on with `aee-jira transition`."* |
 
@@ -169,6 +179,28 @@ Never a `field_changed`: `status` (its own kind), `description` (an agent's
 `aee-jira update` would wake it — a separate kind, not yet built) and `Rank`
 (every board drag writes one). Several labels changed at once arrive as one
 item, space-separated, as Jira logs them.
+
+The fields a `comment_added` payload carries — id `<issueKey>:c<commentId>`:
+
+| Key | |
+|---|---|
+| `origin` | `agent` when this team's agents posted it (`aee-jira comment` — the broker records every comment id it creates, and as a restart-safe fallback recognises the *"Posted by an agent on team …"* line every agent comment opens with), else `human` |
+| `author` | the commenter's display name — the Team Admin's account for an agent's comment, which is why `origin` exists |
+| `commentId` | Jira's comment id |
+| `body` | the comment as plain text (Atlassian Document Format flattened; the agent provenance line dropped), cut at 2000 characters |
+| `bodyTruncated` | `"true"` when `body` was cut — `aee-jira show` has the full text |
+
+**Put `origin = human` on every `comment_added` trigger.** Without it an agent
+that answers with `aee-jira comment` wakes on its own answer and answers again;
+the platform's loop protection is frequency-only (5 wakes per issue per hour),
+so it would slow that loop, not stop it. Waiting for a *teammate agent's*
+comment is the one reason for `origin = agent` — then add a second condition
+that separates the two agents. The help topic's *Avoid the comment loop*
+section says the same for the console.
+
+Only comments **created** inside the poll window are events; editing an
+existing comment is not. An issue with more comments than the search response
+inlines gets one extra `GET /issue/{key}/comment` for its newest ones.
 
 Every wake is **single-kind**: a poll that sees a new issue and a status change
 sends two wakes, one per kind, so *Which event* always matches cleanly.
@@ -252,7 +284,7 @@ member of a granted team), two tabs:
     the next retry time, a short log of the actual errors with timestamps,
     a **Retry now** button (team-admin), and a pointer to
     *Plugins → Jira → Credentials*.
-  - **Inbox** — the status changes queued for this team's agents.
+  - **Inbox** — the events queued for this team's agents.
 - **Activity** — the retained event log (see below).
 
 The **Watch config** link (team-admin only) opens `/admin` — the
@@ -274,10 +306,10 @@ Chat help.
 Two records, for two audiences:
 
 - **Activity tab** (the plugin's `/` route) — the plugin's own retained log:
-  every fresh status change the poller saw in a watched project and what it did
+  every fresh event the poller saw in a watched project and what it did
   with it — `woke agents` / `folded into digest` / `throttled` /
-  `not a watched status` / `baseline`. Grouped by day, filterable by issue type
-  and by *Watched* vs *All activity* (the latter also shows transitions the
+  `not watched` / `baseline`. Grouped by day, filterable by event kind (once
+  more than one kind is present), issue type and *Watched* vs *All activity* (the latter also shows transitions the
   poller saw but did not act on). Kept **14 days**, independent of the agent
   inbox. This is the `JiraEventLog.jsx` #1539 deferred, at zero platform cost.
 - **Platform GitHub Event Log** (`/github-events`) — every *wake* also writes one
@@ -289,6 +321,13 @@ Two records, for two audiences:
 
 ## Limits
 
+- **Throttle shared across kinds.** The per-issue 5-wakes-per-hour throttle
+  counts every kind together — it is loop protection for one issue's
+  conversation, and a comment loop is exactly what it must catch. A status
+  change plus four comments on one issue in one hour drops the fifth wake
+  (`throttled` on the Activity tab; the event is still in the log).
+- **Poll only, no Jira webhooks.** Every kind is found by the same ~60 s JQL
+  poll; nothing is instant.
 - **No claim-label analogue.** Nothing in Jira marks an issue "picked up" the way
   a GitHub `ready` → `ready:wip` swap does.
 - **Not on the Process Canvas.** A Jira wake is not a flow edge; it does not

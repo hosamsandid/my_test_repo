@@ -51,7 +51,8 @@ const {
 } = require('../../../broker-sdk');
 const {
   EVENT_KINDS, DEFAULT_WATCH_EVENTS, describeEvent,
-  resolveJiraApiBase, isChangelogTruncated, extractStatusChangeEvents, extractIssueCreatedEvents, extractFieldChangeEvents,
+  resolveJiraApiBase, isChangelogTruncated, isCommentListTruncated,
+  extractStatusChangeEvents, extractIssueCreatedEvents, extractFieldChangeEvents, extractCommentEvents,
   matchesStatusFilters, computeQueryWindowMinutes,
 } = require('./event-extract');
 const { recordPollError, clearPollFailure } = require('./watch-health');
@@ -241,6 +242,18 @@ class JiraPoller {
       events.push(...extractStatusChangeEvents({ ...issue, changelog }, { projectKey, siteBase }));
       events.push(...extractIssueCreatedEvents(issue, { projectKey, siteBase, windowStartIso, ownWrites }));
       events.push(...extractFieldChangeEvents({ ...issue, changelog }, { projectKey, siteBase, ownWrites }));
+      // A busy issue's comment list is cut short in the search response; fetch
+      // the ones inside the window (a failure keeps what the search returned).
+      let comment = issue.comment;
+      if (isCommentListTruncated(comment)) {
+        try {
+          const comments = await jira.fetchRecentComments(cred, issue.key, { sinceIso: windowStartIso, env: this.env });
+          comment = { ...comment, comments };
+        } catch (err) {
+          this.log(`[jira-poller] ${issue.key}: comment backfill failed (${err.message}) — using what the search returned`);
+        }
+      }
+      events.push(...extractCommentEvents({ ...issue, comment }, { projectKey, siteBase, windowStartIso, ownWrites }));
     }
 
     // A poll succeeded — clear the active-failure fields (keeping the error ring

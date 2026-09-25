@@ -132,6 +132,69 @@ export function probeTitle(state, kind = 'test') {
 }
 
 /**
+ * Turn a probe result into operator-facing text (#2460). The backend returns
+ * `{ ok, reason, status, error, noModelList, ... }`, where `reason` is a stable
+ * machine code (see llm-probe-fallback.js PROBE_REASON) and `error` is the raw
+ * HTTP detail. This renders the code as plain, actionable language and keeps the
+ * raw detail as a SECONDARY line (`detail`), never the primary — and never
+ * leaks the internal placeholder model or a bare HTTP status as the headline.
+ *
+ * @param result  probe result (or, on a discover 502, `{ ok:false, reason, error }`
+ *                assembled from the thrown apiCall error)
+ * @param kind    'test' | 'discover' — only affects success phrasing
+ * @param opts.isOauth  the provider uses subscription (OAuth) auth — tunes the
+ *                      auth/unreachable remedy (setup token vs API key; fixed
+ *                      Anthropic base vs operator Base URL)
+ * @returns { ok, text, detail } — `detail` is null when there is nothing useful
+ *          to add beyond the primary line.
+ */
+export function probeResultMessage(result = {}, kind = 'test', opts = {}) {
+  const isOauth = !!opts.isOauth;
+  const ok = !!result.ok;
+  // The raw detail worth keeping as a secondary line. `error` already has the
+  // placeholder model redacted server-side; drop a bare "HTTP <status>" that
+  // adds nothing over the plain message.
+  const raw = typeof result.error === 'string' ? result.error.trim() : '';
+  const detail = raw && !/^HTTP\s+\d+$/i.test(raw) ? raw : null;
+
+  if (ok) {
+    const base = kind === 'discover'
+      ? 'Connected — the provider is reachable and the credentials are valid.'
+      : 'Connection successful — the provider is reachable and the credentials are valid.';
+    const suffix = result.noModelList
+      ? ' Automatic model discovery isn’t available for this provider — enter the model name(s) manually.'
+      : '';
+    return { ok: true, text: base + suffix, detail: null };
+  }
+
+  let text;
+  switch (result.reason) {
+    case 'auth':
+      text = isOauth
+        ? 'Authentication failed — the subscription token was rejected. Re-run the login or paste a new setup token, then try again.'
+        : 'Authentication failed — the API key was rejected. Check the key (or paste a new one) and try again.';
+      break;
+    case 'unreachable':
+      text = isOauth
+        ? 'Couldn’t reach the Anthropic API — check your network connection and try again.'
+        : 'Couldn’t reach the endpoint — check the Base URL and your network connection, then try again.';
+      break;
+    case 'base-url':
+      text = 'Reached the server, but the API route wasn’t found — check the Base URL.';
+      break;
+    case 'http-error':
+      text = 'The provider returned an unexpected error — see the details below.';
+      break;
+    default:
+      // No recognised code (e.g. an unrelated thrown error) — lead with the raw
+      // detail if we have one, else a safe generic.
+      text = detail || 'The connection check failed.';
+      return { ok: false, text, detail: detail && text !== detail ? detail : null };
+  }
+  return { ok: false, text, detail };
+}
+
+/**
  * Route + payload for a probe. Stored-token probes go to the per-endpoint
  * routes; everything else to the stateless probe routes with the form values.
  */

@@ -7,6 +7,7 @@ import {
   probeNote,
   probeTitle,
   probeRequest,
+  probeResultMessage,
   OAUTH_AUTH_TYPE,
 } from './llm-probe-state.js';
 
@@ -187,4 +188,54 @@ test('resolveProbeState tolerates an empty form (create dialog, nothing typed)',
   assert.equal(s.isOauth, false);
   assert.equal(s.canProbe, false);
   assert.equal(s.blocked, 'no-base-url');
+});
+
+/* ── probeResultMessage: plain, actionable probe verdicts (#2460) ─────────── */
+
+test('probeResultMessage: success is plain, with no placeholder model and no raw URL', () => {
+  const m = probeResultMessage({ ok: true, status: 200, url: 'https://api.anthropic.com/v1/messages/count_tokens' }, 'test');
+  assert.equal(m.ok, true);
+  assert.doesNotMatch(m.text, /__aee-probe-placeholder__/);
+  assert.doesNotMatch(m.text, /https?:\/\//);
+  assert.doesNotMatch(m.text, /HTTP \d/);
+  assert.equal(m.detail, null);
+});
+
+test('probeResultMessage: OAuth success notes manual model entry (noModelList)', () => {
+  const m = probeResultMessage({ ok: true, noModelList: true }, 'test', { isOauth: true });
+  assert.equal(m.ok, true);
+  assert.match(m.text, /manually/i);
+});
+
+test('probeResultMessage: an auth failure is actionable and auth-type specific (AC5)', () => {
+  const oauth = probeResultMessage({ ok: false, reason: 'auth', error: 'HTTP 401' }, 'test', { isOauth: true });
+  assert.equal(oauth.ok, false);
+  assert.match(oauth.text, /setup token|re-run the login/i);
+  const apiKey = probeResultMessage({ ok: false, reason: 'auth', error: 'HTTP 403' }, 'test', { isOauth: false });
+  assert.match(apiKey.text, /API key/i);
+  // A bare "HTTP 401" adds nothing over the plain message → dropped as detail.
+  assert.equal(oauth.detail, null);
+});
+
+test('probeResultMessage: unreachable phrasing differs for OAuth (fixed base) vs api-key', () => {
+  assert.match(probeResultMessage({ ok: false, reason: 'unreachable' }, 'test', { isOauth: true }).text, /Anthropic API/);
+  assert.match(probeResultMessage({ ok: false, reason: 'unreachable' }, 'test', { isOauth: false }).text, /Base URL/);
+});
+
+test('probeResultMessage: base-url failure points at the Base URL', () => {
+  const m = probeResultMessage({ ok: false, reason: 'base-url', error: 'HTTP 404' }, 'test');
+  assert.match(m.text, /Base URL/);
+});
+
+test('probeResultMessage: an unexpected http error keeps the meaningful proxy body as detail (AC7)', () => {
+  const m = probeResultMessage({ ok: false, reason: 'http-error', error: 'HTTP 400 — Budget has been exceeded!' }, 'test');
+  assert.equal(m.ok, false);
+  assert.match(m.text, /unexpected/i);
+  assert.equal(m.detail, 'HTTP 400 — Budget has been exceeded!');
+});
+
+test('probeResultMessage: an unrecognised failure (thrown error, no code) leads with the raw message', () => {
+  const m = probeResultMessage({ ok: false, error: 'network down' }, 'test');
+  assert.equal(m.ok, false);
+  assert.equal(m.text, 'network down');
 });

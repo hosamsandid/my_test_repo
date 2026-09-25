@@ -34,7 +34,8 @@ function harness(opts = {}) {
   const watchStore = new WatchStore({ stateDir: dir });
   const inboxStore = new InboxStore({ stateDir: dir, ...(opts.inbox || {}) });
   const activityStore = new ActivityStore({ stateDir: dir, now: opts.now });
-  const ownWritesStore = new OwnWritesStore({ stateDir: dir, now: opts.now });
+  // the poller's clock, so a record made "now" lines up with the fixtures
+  const ownWritesStore = new OwnWritesStore({ stateDir: dir, now: opts.now || (() => Date.parse('2026-01-01T12:00:00Z')) });
   const delivered = [];
   const poller = new JiraPoller({
     watchStore,
@@ -529,4 +530,64 @@ test('issue_created: an issue the broker created itself carries origin: agent', 
   ] } }));
   try { await h.poller._tick(); } finally { restore(); }
   assert.deepEqual(h.delivered.map((d) => [d.events[0].issueKey, d.events[0].origin]), [['ENG-9', 'agent'], ['ENG-10', 'human']]);
+});
+
+// ── field_changed ───────────────────────────────────────────────────────────
+
+const mixedHistory = (id, created, items) => ({ id, created, author: { displayName: 'Jane' }, items });
+
+test('field_changed: one history with status + assignee → one status wake and one field wake; Rank never fires', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['status_changed', 'field_changed'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [issue('ENG-1', [mixedHistory('700', '2026-01-01T11:59:00Z', [
+    { field: 'status', fieldId: 'status', fromString: 'To Do', toString: 'In Progress' },
+    { field: 'assignee', fieldId: 'assignee', fromString: null, toString: 'Bob' },
+    { field: 'Rank', fieldId: 'customfield_10019', fromString: '', toString: 'Ranked higher' },
+  ])])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => d.events.map((e) => e.id)), [['ENG-1:700'], ['ENG-1:700.assignee']]);
+  assert.equal(h.delivered[1].events[0].event, 'field_changed');
+});
+
+test('field_changed: a sprint-planning bulk move folds into one status digest and one field digest (two wakes, not 20)', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['status_changed', 'field_changed'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const issues = Array.from({ length: 10 }, (_, i) => issue(`ENG-${i + 1}`, [mixedHistory(`80${i}`, '2026-01-01T11:59:00Z', [
+    { field: 'status', fieldId: 'status', fromString: 'Backlog', toString: 'Ready for Dev' },
+    { field: 'Sprint', fieldtype: 'custom', fieldId: 'customfield_10020', fromString: '', toString: 'Sprint 4' },
+  ])]));
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => [d.kind, d.events[0].event, d.events.length]), [
+    ['digest', 'status_changed', 10],
+    ['digest', 'field_changed', 10],
+  ]);
+  assert.match(h.activityStore.list('team-1').find((r) => r.event.event === 'field_changed').detail, /10 field changes in ENG/);
+});
+
+test('field_changed: a field the broker set itself carries origin: agent', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['field_changed'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  h.ownWritesStore.recordField('team-1', 'ENG-1', 'customfield_20001'); // stamped at the harness clock, 12:00
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [issue('ENG-1', [
+    mixedHistory('900', '2026-01-01T11:59:30Z', [{ field: 'Team', fieldtype: 'custom', fieldId: 'customfield_20001', fromString: null, toString: 'Blue' }]),
+    mixedHistory('901', '2026-01-01T11:59:40Z', [{ field: 'priority', fieldId: 'priority', fromString: 'Low', toString: 'High' }]),
+  ])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => [d.events[0].field, d.events[0].origin]), [['Team', 'agent'], ['priority', 'human']]);
+});
+
+test('field_changed: an old field change on a re-touched issue is stale, not fired', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['field_changed'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:59:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [issue('ENG-1', [
+    mixedHistory('950', '2025-12-01T09:00:00Z', [{ field: 'labels', fieldId: 'labels', fromString: '', toString: 'old' }]),
+  ])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 0);
+  assert.equal(h.activityStore.list('team-1')[0].outcome, 'stale');
 });

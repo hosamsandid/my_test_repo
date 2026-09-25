@@ -31,7 +31,7 @@ and the agent's **trigger** (this page, Triggers tab).
 
 | Field | What to put there for Jira |
 |---|---|
-| **Which event** | `status_changed` or `issue_created` (a new ticket) — whichever the watch forwards (**Watch config** ticks the kinds per project; status changes only by default). Set it on every trigger once a watch forwards more than one kind — *Any event* then wakes on all of them. A status name is **not** an event. |
+| **Which event** | `status_changed`, `issue_created` (a new ticket) or `field_changed` (any other field) — whichever the watch forwards (**Watch config** ticks the kinds per project; status changes only by default). Set it on every trigger once a watch forwards more than one kind — *Any event* then wakes on all of them. A status name is **not** an event. |
 | **Only when…** | a condition on the **fields of that event** (the form's sub-heading reads *fields of `status_changed`*) that picks *which* status changes wake this agent — almost always `toStatus = <the status the issue moved into>`, e.g. `toStatus = Ready for Dev`. |
 
 The **Only when…** condition is what routes a flow through several agents: give
@@ -70,6 +70,20 @@ Several conditions combine with AND: `toStatus = Ready for Dev` plus
 
 A *"new ticket → Business Analyst triages it"* trigger: *Which event*
 `issue_created`, *Only when…* `origin = human`.
+
+### The fields a `field_changed` event carries
+
+One event per changed field (never status, description or Rank):
+
+| Field | Meaning | Example |
+|---|---|---|
+| `field` | the field's name as Jira reports it | `assignee`, `priority`, `labels`, `Sprint`, `Fix Version`, `Attachment` |
+| `fieldId` | its stable id — prefer it for custom fields | `customfield_10020` |
+| `to` / `from` | new / previous value as display text (empty when cleared) | `Jane Doe` |
+| `origin` | `human`, or `agent` for an agent's own `set-field` / `attachment add` | `human` |
+
+Route with *Only when…* `field = assignee` (plus `to = <name>` to wake on
+"assigned to X"), or `fieldId = customfield_…` for a custom field.
 
 When more than three transitions land in a single poll — on one issue, or
 across one project (a bulk move such as sprint planning) — they arrive as one

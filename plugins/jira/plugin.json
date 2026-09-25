@@ -45,6 +45,22 @@
         { "key": "reporter", "description": "who created it (display name)" },
         { "key": "issueKey", "description": "one specific issue", "example": "KAN-12" }
       ]
+    },
+    {
+      "name": "field_changed",
+      "description": "Any other field of a watched issue changed — assignee, priority, labels, sprint, fix version, a custom field, an attachment… (not status, description or rank)",
+      "payload": [
+        { "key": "field", "description": "the field's name as Jira reports it", "example": "assignee" },
+        { "key": "fieldId", "description": "the field's stable id — use it for custom fields, whose names vary per site", "example": "customfield_10020" },
+        { "key": "to", "description": "the new value (display text; empty when cleared)", "example": "Jane Doe" },
+        { "key": "from", "description": "the previous value (display text)" },
+        { "key": "origin", "description": "human, or agent when an agent set it (aee-jira set-field / attachment add) — filter origin = human so an agent does not wake on its own edits", "example": "human" },
+        { "key": "fieldType", "description": "jira (built-in) or custom", "example": "custom" },
+        { "key": "projectKey", "description": "the Jira project", "example": "KAN" },
+        { "key": "issueType", "description": "Story, Bug, Task, …", "example": "Bug" },
+        { "key": "author", "description": "who changed it (display name)" },
+        { "key": "issueKey", "description": "one specific issue", "example": "KAN-10" }
+      ]
     }
   ],
   "platforms": ["podman", "kubernetes"],

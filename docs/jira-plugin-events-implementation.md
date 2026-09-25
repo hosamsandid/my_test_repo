@@ -144,7 +144,7 @@ atomic write like the other stores:
 ```
 { comments:     { "<issueKey>:c<commentId>": "<iso>" },
   issues:       { "<issueKey>": "<iso>" },
-  fields:       { "<issueKey>|<fieldId or lower-cased field name>": "<iso>" },
+  fields:       { "<issueKey>|<fieldId or lower-cased field name>": ["<iso>", …] },
   descriptions: { "<issueKey>": "<iso>" } }
 ```
 
@@ -157,10 +157,11 @@ atomic write like the other stores:
   will need it). `/transition` is **not** recorded — `status_changed` keeps
   its current behaviour and gets no `origin` in this batch.
 - `field_changed` origin: a changelog item on `<issueKey>` whose `fieldId`
-  (or lower-cased `field`) is registered with a stamp between 10 min before
-  and 60 s after the history's `created` → `agent`. Deliberately loose; a
-  human editing the same field in that window is misattributed (a suppressed
-  wake, never a spurious one).
+  (or lower-cased `field`) has a registered stamp within ±2 min
+  (`OWN_FIELD_WRITE_SKEW_MS`) of the history's `created` → `agent`. A field
+  keeps its last 20 stamps so repeated writes all match. A human editing the
+  same field in that window is misattributed (a suppressed wake, never a
+  spurious one).
 - `issue_created` origin: registry only. The *"Created by an agent"* marker
   lives in the description, which the poll does not fetch — not worth widening
   the search for a fallback.

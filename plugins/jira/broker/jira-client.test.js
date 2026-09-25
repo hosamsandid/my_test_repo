@@ -813,7 +813,7 @@ test('setCustomField: resolves name → id, shapes by type, and PUTs {fields:{id
     return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'ENG-1', fields: { customfield_20001: null } }) };
   }, async (calls) => {
     const r = await jc.setCustomField(CRED, 'ENG-1', { fieldName: 'Team', value: '42', allowList: ['Team'], env: CRED.env });
-    assert.deepEqual(r, { issueKey: 'ENG-1', field: 'Team', changed: true, value: '42' });
+    assert.deepEqual(r, { issueKey: 'ENG-1', field: 'Team', fieldId: 'customfield_20001', changed: true, value: '42' });
     const put = calls.find((c) => c.opts && c.opts.method === 'PUT');
     assert.match(put.url, /\/rest\/api\/3\/issue\/ENG-1$/);
     assert.deepEqual(JSON.parse(put.opts.body), { fields: { customfield_20001: { id: '42' } } });

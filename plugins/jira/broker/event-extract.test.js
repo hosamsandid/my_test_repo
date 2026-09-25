@@ -224,3 +224,88 @@ test('describeEvent: issue_created reads "<key> created: <summary>"', () => {
   const { describeEvent } = require('./event-extract');
   assert.equal(describeEvent({ event: 'issue_created', issueKey: 'KAN-12', summary: 'New thing' }), 'KAN-12 created: New thing');
 });
+
+// ── extractFieldChangeEvents ────────────────────────────────────────────────
+
+const fieldIssue = (items, created = '2026-01-01T11:58:00.000+0000') => ({
+  key: 'KAN-6', summary: 'S', issueType: 'Story',
+  changelog: { histories: [{ id: '10500', created, author: { displayName: 'Jane' }, items }] },
+});
+
+test('extractFieldChangeEvents: status + assignee in one history → only the assignee is a field event, with its own id', () => {
+  const { extractFieldChangeEvents, EVENT_ID_RE } = require('./event-extract');
+  const issue = fieldIssue([
+    { field: 'status', fieldtype: 'jira', fieldId: 'status', fromString: 'To Do', toString: 'Done' },
+    { field: 'assignee', fieldtype: 'jira', fieldId: 'assignee', fromString: null, toString: 'Bob' },
+  ]);
+  const events = extractFieldChangeEvents(issue, { projectKey: 'KAN', siteBase: 'https://acme.atlassian.net' });
+  assert.deepEqual(events, [{
+    id: 'KAN-6:10500.assignee',
+    event: 'field_changed',
+    issueKey: 'KAN-6',
+    projectKey: 'KAN',
+    issueType: 'Story',
+    summary: 'S',
+    created: '2026-01-01T11:58:00.000+0000',
+    author: 'Jane',
+    field: 'assignee',
+    fieldId: 'assignee',
+    fieldType: 'jira',
+    from: null,
+    to: 'Bob',
+    origin: 'human',
+    issueUrl: 'https://acme.atlassian.net/browse/KAN-6',
+  }]);
+  assert.ok(EVENT_ID_RE.test(events[0].id));
+  // and the status item is still a status event with the history id alone
+  assert.deepEqual(extractStatusChangeEvents(issue).map((e) => e.id), ['KAN-6:10500']);
+});
+
+test('extractFieldChangeEvents: Rank, description and status are denylisted (field or fieldId, any case)', () => {
+  const { extractFieldChangeEvents } = require('./event-extract');
+  const events = extractFieldChangeEvents(fieldIssue([
+    { field: 'Rank', fieldtype: 'custom', fieldId: 'customfield_10019', fromString: '', toString: 'Ranked higher' },
+    { field: 'description', fieldId: 'description', fromString: 'a', toString: 'b' },
+    { field: 'Status', fromString: 'A', toString: 'B' },
+    { field: 'labels', fieldId: 'labels', fromString: '', toString: 'urgent' },
+  ]));
+  assert.deepEqual(events.map((e) => e.field), ['labels']);
+});
+
+test('extractFieldChangeEvents: a custom field keeps its stable fieldId; ids never carry a second colon', () => {
+  const { extractFieldChangeEvents, EVENT_ID_RE } = require('./event-extract');
+  const [sprint, weird] = extractFieldChangeEvents(fieldIssue([
+    { field: 'Sprint', fieldtype: 'custom', fieldId: 'customfield_10020', fromString: '', toString: 'KAN Sprint 4' },
+    { field: 'Fix Version: odd/name', fromString: null, toString: '1.2' }, // no fieldId → slug of the name
+  ]));
+  assert.equal(sprint.id, 'KAN-6:10500.customfield_10020');
+  assert.equal(sprint.fieldType, 'custom');
+  assert.equal(sprint.to, 'KAN Sprint 4');
+  assert.equal(weird.id, 'KAN-6:10500.Fix_Version_odd_name');
+  assert.ok(EVENT_ID_RE.test(sprint.id) && EVENT_ID_RE.test(weird.id));
+});
+
+test('extractFieldChangeEvents: long values are clamped', () => {
+  const { extractFieldChangeEvents, FIELD_VALUE_MAX } = require('./event-extract');
+  const [ev] = extractFieldChangeEvents(fieldIssue([{ field: 'environment', fieldId: 'environment', fromString: null, toString: 'x'.repeat(5000) }]));
+  assert.equal(ev.to.length, FIELD_VALUE_MAX);
+  assert.ok(ev.to.endsWith('…'));
+});
+
+test('resolveFieldOrigin: agent only for a recorded write to the same issue+field close to the history time', () => {
+  const { extractFieldChangeEvents, OWN_FIELD_WRITE_SKEW_MS } = require('./event-extract');
+  const at = Date.parse('2026-01-01T11:58:00.000Z');
+  const own = (key, iso) => ({ fields: { [key]: [iso] } });
+  const item = { field: 'Team', fieldtype: 'custom', fieldId: 'customfield_20001', fromString: null, toString: 'Blue' };
+  const origin = (ownWrites) => extractFieldChangeEvents(fieldIssue([item]), { ownWrites })[0].origin;
+  assert.equal(origin(own('KAN-6|customfield_20001', new Date(at + 3000).toISOString())), 'agent'); // by fieldId
+  assert.equal(origin(own('KAN-6|team', new Date(at - 1000).toISOString())), 'agent'); // by case-folded name
+  assert.equal(origin(own('KAN-6|customfield_20001', new Date(at + OWN_FIELD_WRITE_SKEW_MS + 1000).toISOString())), 'human'); // too far apart
+  assert.equal(origin(own('KAN-7|customfield_20001', new Date(at).toISOString())), 'human'); // another issue
+  assert.equal(origin(null), 'human');
+});
+
+test('describeEvent: field_changed reads "<key>: <field> <from> → <to>" with ∅ for a missing side', () => {
+  const { describeEvent } = require('./event-extract');
+  assert.equal(describeEvent({ event: 'field_changed', issueKey: 'KAN-6', field: 'assignee', from: null, to: 'Bob' }), 'KAN-6: assignee ∅ → Bob');
+});

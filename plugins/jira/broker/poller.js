@@ -51,7 +51,7 @@ const {
 } = require('../../../broker-sdk');
 const {
   EVENT_KINDS, DEFAULT_WATCH_EVENTS, describeEvent,
-  resolveJiraApiBase, isChangelogTruncated, extractStatusChangeEvents, extractIssueCreatedEvents,
+  resolveJiraApiBase, isChangelogTruncated, extractStatusChangeEvents, extractIssueCreatedEvents, extractFieldChangeEvents,
   matchesStatusFilters, computeQueryWindowMinutes,
 } = require('./event-extract');
 const { recordPollError, clearPollFailure } = require('./watch-health');
@@ -240,6 +240,7 @@ class JiraPoller {
       }
       events.push(...extractStatusChangeEvents({ ...issue, changelog }, { projectKey, siteBase }));
       events.push(...extractIssueCreatedEvents(issue, { projectKey, siteBase, windowStartIso, ownWrites }));
+      events.push(...extractFieldChangeEvents({ ...issue, changelog }, { projectKey, siteBase, ownWrites }));
     }
 
     // A poll succeeded — clear the active-failure fields (keeping the error ring

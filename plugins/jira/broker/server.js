@@ -505,6 +505,9 @@ async function handleCli(req, res, cliPath) {
     }
     try {
       const attachment = await jira.addAttachment(cred, issue, { filename, buffer, mimeType: body.mimeType });
+      // Jira logs an upload as an `Attachment` changelog item (fieldId
+      // `attachment`) — a field_changed the poller will see.
+      recordOwnWrite(() => ownWritesStore.recordField(scopeId, issue, 'attachment'));
       writeAudit(scopeId, scopeId, 'attach', 'ok', `${issue}:${attachment.id} (${filename})`);
       return sendJson(res, 200, { attachment });
     } catch (err) {
@@ -669,6 +672,10 @@ async function handleCli(req, res, cliPath) {
           jsonValue: hasJson ? body.valueJson : undefined,
           allowList: cred.writableCustomFields || [],
         });
+        // A no-op re-set writes nothing to Jira, so there is no echo to mark.
+        if (result && result.changed) {
+          recordOwnWrite(() => ownWritesStore.recordField(scopeId, issue, result.fieldId || field));
+        }
       } else {
         result = await jira.transitionIssue(cred, issue, { toStatus: body.to });
       }

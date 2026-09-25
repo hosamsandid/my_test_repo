@@ -99,7 +99,8 @@ The Jira plugin's **Watch config** page (`/admin`, team-admin — reached from t
 
 - `projectKey` — e.g. `KAN`.
 - `events` — which **kinds** of event the row forwards (checkboxes):
-  *Status changes* (`status_changed`), *New issues* (`issue_created`). Default
+  *Status changes* (`status_changed`), *New issues* (`issue_created`), *Other
+  field changes* (`field_changed`). Default
   — and the migration for a row saved before kinds existed — is status changes
   only, so an upgrade never makes a watch noisier.
 - `statusFilters` — a **set** of target statuses (chips). An empty set fires on
@@ -117,7 +118,7 @@ per-agent trigger: Agent Chat → **Triggers** → add → type **Plugin event**
 | Field | |
 |---|---|
 | Plugin | `jira` (picked from the installed plugins) |
-| Which event | `status_changed`, `issue_created`, or *Any event*. Offered as a select from the manifest's `events[]`. Once a watch forwards more than one kind, set it on **every** trigger — *Any event* with no *Only when…* wakes on every kind. A status name is **not** an event — the form flags one as *not an event this plugin declares*. |
+| Which event | `status_changed`, `issue_created`, `field_changed`, or *Any event*. Offered as a select from the manifest's `events[]`. Once a watch forwards more than one kind, set it on **every** trigger — *Any event* with no *Only when…* wakes on every kind. A status name is **not** an event — the form flags one as *not an event this plugin declares*. |
 | Only when… | **which status wakes this agent** — condition rows `field = value`, e.g. `toStatus = Ready for Dev`; the field picker lists the payload keys below with an example. No conditions = every watched transition wakes this agent. Stored as `payloadFilter: { toStatus: "Ready for Dev" }`. |
 | Wake instruction | what the agent should do — e.g. *"Take the event id(s) from the event payload, run `aee-jira inbox --consume <id>…`, read the issue with `aee-jira show`, refine the description and write it back with `aee-jira update`, then move it on with `aee-jira transition`."* |
 
@@ -151,6 +152,23 @@ The fields an `issue_created` payload carries (plus `id` = `<issueKey>:created`,
 | `issueType` / `projectKey` / `issueKey` | as above |
 | `status` / `priority` | what the issue was created with |
 | `reporter` | who created it (display name) — the Team Admin's account for an agent-created issue, which is why `origin` exists |
+
+The fields a `field_changed` payload carries — one event per changed field,
+id `<issueKey>:<changelogId>.<fieldId>` (one history can change several
+fields):
+
+| Key | |
+|---|---|
+| `field` | the field's display name as Jira reports it (`assignee`, `priority`, `labels`, `Sprint`, `Fix Version`, `Attachment`, …) |
+| `fieldId` | the stable id (`assignee`, `fixVersions`, `customfield_10020`) — route custom fields on this; their display names vary per site |
+| `from` / `to` | Jira's display strings, cut at 500 characters; absent side = `null` (an unassign has no `to`) |
+| `fieldType` | `jira` or `custom` |
+| `origin` | `agent` when the change matches a write this team's agents made through the broker (`set-field`, `attachment add`) on the same issue + field within ±2 minutes, else `human` |
+
+Never a `field_changed`: `status` (its own kind), `description` (an agent's
+`aee-jira update` would wake it — a separate kind, not yet built) and `Rank`
+(every board drag writes one). Several labels changed at once arrive as one
+item, space-separated, as Jira logs them.
 
 Every wake is **single-kind**: a poll that sees a new issue and a status change
 sends two wakes, one per kind, so *Which event* always matches cleanly.

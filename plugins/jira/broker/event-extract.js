@@ -25,7 +25,24 @@
 const EVENT_KINDS = {
   status_changed: { label: 'Status changes', noun: 'status changes', rowFields: ['fromStatus', 'toStatus'] },
   issue_created: { label: 'New issues', noun: 'new issues', rowFields: ['status', 'reporter', 'priority', 'origin'] },
+  field_changed: { label: 'Other field changes', noun: 'field changes', rowFields: ['field', 'fieldId', 'from', 'to', 'fieldType', 'origin'] },
 };
+
+// Changelog fields that never become a `field_changed`: `status` is its own
+// kind; `description` is a parked kind with its own loop risk (`aee-jira
+// update`); `Rank` is written by every board drag and would drown the rest.
+// Matched on the item's `field` or `fieldId`, case-insensitive.
+const FIELD_CHANGED_DENY = ['status', 'description', 'rank'];
+
+// `from`/`to` ride in the wake payload and the inbox; a long free-text field
+// (Environment, a text custom field) is cut here — `aee-jira show` has it all.
+const FIELD_VALUE_MAX = 500;
+
+// How far apart an own-writes stamp and a changelog history's `created` may be
+// and still be the same write (broker-vs-Jira clock skew plus the write's own
+// round trip). A human editing the same field of the same issue inside this
+// window reads as `agent` — a missed wake, never a spurious one.
+const OWN_FIELD_WRITE_SKEW_MS = 2 * 60_000;
 const KNOWN_EVENTS = Object.keys(EVENT_KINDS);
 const DEFAULT_WATCH_EVENTS = ['status_changed'];
 
@@ -43,6 +60,7 @@ function describeEvent(ev) {
     return `${key}: ${e.fromStatus || 'new'} → ${e.toStatus || '?'}`;
   }
   if (e.event === 'issue_created') return `${key} created${e.summary ? `: ${e.summary}` : ''}`;
+  if (e.event === 'field_changed') return `${key}: ${e.field || e.fieldId || 'field'} ${e.from ?? '∅'} → ${e.to ?? '∅'}`;
   return key || String(e.event || 'event');
 }
 
@@ -152,6 +170,75 @@ function extractIssueCreatedEvents(issue, { projectKey, siteBase, windowStartIso
   }];
 }
 
+function clampValue(v) {
+  if (v == null) return null;
+  const s = String(v);
+  return s.length > FIELD_VALUE_MAX ? `${s.slice(0, FIELD_VALUE_MAX - 1)}…` : s;
+}
+
+// The id segment for a field: its stable `fieldId` when Jira gives one
+// (`assignee`, `customfield_10020`), else a slug of the display name — never
+// a second colon (EVENT_ID_RE).
+function fieldIdSegment(item) {
+  const raw = item.fieldId || item.field || 'field';
+  return String(raw).replace(/[^A-Za-z0-9_]+/g, '_').slice(0, 40) || 'field';
+}
+
+// `origin` of a field change: `agent` when the registry holds a write to this
+// issue's field (by `fieldId` or case-folded display name) stamped within
+// OWN_FIELD_WRITE_SKEW_MS of the history's `created`.
+function resolveFieldOrigin(issueKey, item, createdIso, ownWrites) {
+  const fields = ownWrites && ownWrites.fields;
+  const created = Date.parse(createdIso);
+  if (!fields || Number.isNaN(created)) return 'human';
+  const refs = [item.fieldId, item.field].filter(Boolean).map((r) => `${issueKey}|${String(r).trim().toLowerCase()}`);
+  for (const ref of refs) {
+    const stamps = Array.isArray(fields[ref]) ? fields[ref] : [];
+    if (stamps.some((at) => Math.abs(Date.parse(at) - created) <= OWN_FIELD_WRITE_SKEW_MS)) return 'agent';
+  }
+  return 'human';
+}
+
+// One `field_changed` event per changelog item whose field is not denylisted.
+// One history can change several fields, so the id is
+// `<key>:<historyId>.<fieldId>`. `from`/`to` are Jira's display strings
+// (`null` when absent — an unassign has no `toString`).
+function extractFieldChangeEvents(issue, { projectKey, siteBase, ownWrites } = {}) {
+  const events = [];
+  if (!issue || !issue.key) return events;
+  const summary = issueSummaryOf(issue);
+  const issueType = issueTypeNameOf(issue);
+  const histories = (issue.changelog && Array.isArray(issue.changelog.histories))
+    ? issue.changelog.histories
+    : [];
+  for (const h of histories) {
+    if (!h || h.id == null || !Array.isArray(h.items)) continue;
+    for (const item of h.items) {
+      if (!item || (!item.field && !item.fieldId)) continue;
+      const names = [item.field, item.fieldId].filter(Boolean).map((n) => String(n).toLowerCase());
+      if (names.some((n) => FIELD_CHANGED_DENY.includes(n))) continue;
+      events.push({
+        id: `${issue.key}:${h.id}.${fieldIdSegment(item)}`,
+        event: 'field_changed',
+        issueKey: issue.key,
+        projectKey: projectKey || null,
+        issueType,
+        summary,
+        created: h.created || null,
+        author: (h.author && h.author.displayName) || null,
+        field: item.field ? String(item.field) : null,
+        fieldId: item.fieldId ? String(item.fieldId) : null,
+        fieldType: item.fieldtype ? String(item.fieldtype) : null,
+        from: clampValue(item.fromString),
+        to: clampValue(item.toString),
+        origin: resolveFieldOrigin(issue.key, item, h.created, ownWrites),
+        issueUrl: siteBase ? `${siteBase}/browse/${issue.key}` : null,
+      });
+    }
+  }
+  return events;
+}
+
 // The exact-match gate on the status an issue transitioned INTO, mirroring the
 // GitHub poller's `labelFilter`. Empty / null / undefined = no filter (fires on
 // any status change).
@@ -200,6 +287,11 @@ module.exports = {
   extractStatusChangeEvents,
   extractIssueCreatedEvents,
   resolveIssueOrigin,
+  extractFieldChangeEvents,
+  resolveFieldOrigin,
+  FIELD_CHANGED_DENY,
+  FIELD_VALUE_MAX,
+  OWN_FIELD_WRITE_SKEW_MS,
   matchesStatusFilter,
   matchesStatusFilters,
   computeQueryWindowMinutes,

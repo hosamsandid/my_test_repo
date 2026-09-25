@@ -485,7 +485,9 @@ test('cli writes: /set-field sets an allow-listed custom field, refuses one that
   try {
     const ok = await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Team', value: '42' } });
     assert.equal(ok.status, 200);
-    assert.deepEqual(ok.body, { issueKey: 'KAN-6', field: 'Team', changed: true, value: '42' });
+    assert.deepEqual(ok.body, { issueKey: 'KAN-6', field: 'Team', fieldId: 'customfield_20001', changed: true, value: '42' });
+    // the write is in the own-writes registry under the field id (→ origin: agent on the echo)
+    assert.equal(broker.ownWritesStore.snapshot('team-1').fields['KAN-6|customfield_20001'].length, 1);
     const put = seen.find((s) => s.method === 'PUT');
     assert.deepEqual(JSON.parse(put.body), { fields: { customfield_20001: { id: '42' } } });
 
@@ -535,7 +537,7 @@ test('cli writes: /set-field with an empty writable-custom-fields allow-list per
     // no admin ever named "Team", yet with an empty allow-list the write succeeds
     const ok = await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Team', value: '42' } });
     assert.equal(ok.status, 200);
-    assert.deepEqual(ok.body, { issueKey: 'KAN-6', field: 'Team', changed: true, value: '42' });
+    assert.deepEqual(ok.body, { issueKey: 'KAN-6', field: 'Team', fieldId: 'customfield_30001', changed: true, value: '42' });
     const put = seen.find((s) => s.method === 'PUT');
     assert.deepEqual(JSON.parse(put.body), { fields: { customfield_30001: { id: '42' } } });
 

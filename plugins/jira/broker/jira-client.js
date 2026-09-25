@@ -1181,7 +1181,7 @@ async function setCustomField(cred, issueKey, { fieldName, value, jsonValue, all
     });
     const current = (cur.fields || {})[id];
     if (fieldValueMatches(current, String(value))) {
-      return { issueKey: key, field: name, changed: false, value: renderCustomFieldValue(current) };
+      return { issueKey: key, field: name, fieldId: id, changed: false, value: renderCustomFieldValue(current) };
     }
   }
   // A write — NOT retried on a transport failure (F6), like updateDescription.
@@ -1192,7 +1192,7 @@ async function setCustomField(cred, issueKey, { fieldName, value, jsonValue, all
     authHeader: auth,
     body: { fields: { [id]: shaped } },
   });
-  return { issueKey: key, field: name, changed: true, value: hasJson ? jsonValue : value };
+  return { issueKey: key, field: name, fieldId: id, changed: true, value: hasJson ? jsonValue : value };
 }
 
 // ── issue creation: one Epic + its child Stories (#2424) ─────────────────────

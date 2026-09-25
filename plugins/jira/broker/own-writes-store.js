@@ -15,8 +15,13 @@
 //
 //   { comments:     { "<issueKey>:c<commentId>": "<iso>" },
 //     issues:       { "<issueKey>": "<iso>" },
-//     fields:       { "<issueKey>|<fieldRef>": "<iso>" },
+//     fields:       { "<issueKey>|<fieldRef>": ["<iso>", …] },
 //     descriptions: { "<issueKey>": "<iso>" } }
+//
+// A field write has no id of its own to match (the changelog history id is
+// not returned by the write), so it is matched by issue + field + time, and a
+// field keeps its last FIELD_STAMPS_MAX stamps — two quick writes to the same
+// field are both recognised. Every other section is one stamp per key.
 //
 // Written BEFORE the broker answers the CLI; the poll that observes the write
 // is at least one tick away. Entries expire after RETENTION_MS (reaped on the
@@ -29,6 +34,7 @@ const path = require('path');
 const SCOPE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const RETENTION_MS = 7 * 24 * 3600 * 1000;
 const SECTIONS = ['comments', 'issues', 'fields', 'descriptions'];
+const FIELD_STAMPS_MAX = 20;
 
 function assertScope(scopeId) {
   if (typeof scopeId !== 'string' || !SCOPE_RE.test(scopeId)) {
@@ -106,7 +112,14 @@ class OwnWritesStore {
 
   recordIssue(scopeId, issueKey) { this._record(scopeId, 'issues', String(issueKey)); }
   recordComment(scopeId, issueKey, commentId) { this._record(scopeId, 'comments', `${issueKey}:c${commentId}`); }
-  recordField(scopeId, issueKey, fieldRef) { this._record(scopeId, 'fields', fieldKey(issueKey, fieldRef)); }
+  recordField(scopeId, issueKey, fieldRef) {
+    const doc = this._read(scopeId);
+    const key = fieldKey(issueKey, fieldRef);
+    const stamps = Array.isArray(doc.fields[key]) ? doc.fields[key] : [];
+    stamps.push(new Date(this.now()).toISOString());
+    doc.fields[key] = stamps.slice(-FIELD_STAMPS_MAX);
+    this._write(scopeId, doc);
+  }
   recordDescription(scopeId, issueKey) { this._record(scopeId, 'descriptions', String(issueKey)); }
 
   // The whole registry for one scope — what the poller hands the (pure)
@@ -120,9 +133,14 @@ class OwnWritesStore {
     const doc = this._read(scopeId);
     const cutoff = this.now() - this.retentionMs;
     let removed = 0;
+    const live = (at) => (Date.parse(at) || 0) >= cutoff;
     for (const s of SECTIONS) {
       for (const [k, at] of Object.entries(doc[s])) {
-        if ((Date.parse(at) || 0) < cutoff) { delete doc[s][k]; removed += 1; }
+        if (Array.isArray(at)) {
+          const kept = at.filter(live);
+          removed += at.length - kept.length;
+          if (kept.length) doc[s][k] = kept; else delete doc[s][k];
+        } else if (!live(at)) { delete doc[s][k]; removed += 1; }
       }
     }
     if (removed) this._write(scopeId, doc);
@@ -141,4 +159,4 @@ class OwnWritesStore {
   }
 }
 
-module.exports = { OwnWritesStore, fieldKey, RETENTION_MS };
+module.exports = { OwnWritesStore, fieldKey, RETENTION_MS, FIELD_STAMPS_MAX };

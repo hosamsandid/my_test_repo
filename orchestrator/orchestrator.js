@@ -209,6 +209,7 @@ const flowSupervisor = require("./flow-supervisor");
 const recurringPoolSource = require("./recurring-pool-source");
 const predictedPaths = require("./predicted-paths");
 const poolInstanceLanes = require("./pool-instance-lanes");
+const provisioningSweep = require("./provisioning-sweep");
 
 // ── Read-write context mount helpers (writing into a mounted host folder) ──
 // A caller path is RELATIVE to /context. For a single legacy folder the mount
@@ -3131,6 +3132,111 @@ async function recurringPoolSweepTeam(teamId, { now = Date.now() } = {}) {
   }
 
   return (reaped.length || dispatched.length) ? { teamId, reaped, dispatched } : null;
+}
+
+// #2493 — the age past which a still-`_provisioning` config is treated as stuck.
+// Env-overridable; falls back to the pure module's conservative 10-minute default.
+const PROVISIONING_STUCK_MS = Math.max(
+  1,
+  Number(process.env.AEE_PROVISIONING_STUCK_MS) || provisioningSweep.PROVISIONING_STUCK_MS,
+);
+
+// #2493 — the stuck-`_provisioning` reaper. Pure decisions in provisioning-sweep.js
+// (unit-tested); this is the impure half — scan, reap, record.
+//
+// Deliberately a FLAT scan of every agent id, NOT the per-team enumeration the
+// other sweeps use: a standalone half-create (`resolveAndReserveAgentId`'s
+// placeholder) has no parent team at all, and a team-member / pool-instance
+// leftover (`addTeamMember`) is found by the very same scan — so one pass covers
+// both creation paths (AC4). Reaps through the ordinary DELETE /internal/agents/:id
+// route (`_internalSelfDelete`), so a leftover gets the identical config + Matrix
+// user + workspace + container + plugin-scope teardown every other delete gets —
+// covering the partial-artifact edge case without a hand-rolled second cleanup
+// path. Best-effort and awaited sequentially; a per-agent failure is logged and
+// never escapes. NOT maintenance-gated, matching poolReapSweepTeam — clearing out
+// a stuck leftover is never "starting" new work. Idempotency (edge case 2) comes
+// from two layers: the tick's overlap guard (a slow sweep never stacks) and the
+// DELETE route removing config.json in its fast phase, so the next scan no longer
+// sees a record whose teardown is still finishing in the background.
+async function provisioningReapSweep(now = Date.now(), { thresholdMs = PROVISIONING_STUCK_MS } = {}) {
+  let ids = [];
+  try {
+    ids = listAgentIds();
+  } catch (err) {
+    console.warn(`[Provisioning] agent enumeration failed: ${err.message}`);
+    return;
+  }
+  for (const id of ids) {
+    let cfg = null;
+    try {
+      cfg = loadAgentConfig(id);
+    } catch {
+      continue;
+    }
+    if (!cfg || cfg._provisioning !== true) continue;
+
+    // Prefer the explicit `_provisioningAt` stamp; fall back to the config file's
+    // mtime for a leftover written before that stamp existed.
+    let fileMtimeMs = null;
+    try {
+      fileMtimeMs = fs.statSync(path.join(agentDir(id), "config.json")).mtimeMs;
+    } catch { /* stat failed — provisioningAgeMs falls back to the stamp alone */ }
+
+    const ageMs = provisioningSweep.provisioningAgeMs(
+      { provisioningAt: cfg._provisioningAt, fileMtimeMs },
+      now,
+    );
+    if (!provisioningSweep.isStuckProvisioning(cfg, ageMs, thresholdMs)) continue; // AC5: never a live in-flight attempt
+
+    const origin = provisioningSweep.provisioningOrigin(cfg);
+    console.warn(`[Provisioning] ${id} stuck at _provisioning:true for ${ageMs}ms (origin=${origin}) — reaping`);
+
+    let status = null;
+    try {
+      status = await _internalSelfDelete(id);
+    } catch (err) {
+      console.warn(`[Provisioning] reap request for ${id} threw: ${err.message}`);
+    }
+    // 200 = torn down; 404 = already gone (a background teardown from a prior
+    // tick finished it) — both mean the leftover is resolved.
+    const reaped = status === 200 || status === 404;
+
+    // AC3: never silent — one operator-visible row whether the reap succeeded or
+    // the delete route was unreachable/refused, so a persistent failure is
+    // auditable instead of a config that quietly reappears every tick. The
+    // github-event-log write is itself best-effort and must never abort the sweep.
+    try {
+      const eventId = `provsweep:${crypto.randomBytes(6).toString("hex")}`;
+      const ghEvent = provisioningSweep.buildProvisioningSweepLogEvent({
+        agentId: id, eventId, now: new Date(now).toISOString(),
+      });
+      githubEventLog.record({
+        ...githubEventLog.buildEventEntry({
+          ghEvent,
+          repoFullName: null,
+          key: provisioningSweep.PROVISIONING_SWEEP_KEY,
+          outcomes: [{ agentId: id, triggerId: null, status: reaped ? "reaped" : "reap-failed", reason: null, digest: false }],
+        }),
+        source: "provisioning-sweep",
+        emittedBy: "provisioning-sweep",
+        ...provisioningSweep.buildProvisioningSweepLogFields({
+          agentId: id,
+          origin,
+          ageMs,
+          action: reaped ? "reaped" : "reap-failed",
+          error: reaped ? null : `delete route returned ${status === null ? "no response" : status}`,
+        }),
+      });
+    } catch (err) {
+      console.warn(`[Provisioning] event-log record for ${id} failed: ${err.message}`);
+    }
+
+    if (reaped) {
+      console.log(`[Provisioning] reaped stuck ${id} (origin=${origin})`);
+    } else {
+      console.warn(`[Provisioning] reap of ${id} did not confirm (status=${status}) — next tick will retry`);
+    }
+  }
 }
 
 // ============================================================
@@ -10502,7 +10608,11 @@ class Orchestrator {
   // few lines later in `createAgent`.
   resolveAndReserveAgentId(baseId) {
     const id = nextAvailableAgentId(baseId, isAgentIdTaken);
-    const placeholder = { id, role: 'agent', enabled: false, _provisioning: true };
+    // `_provisioningAt` (#2493) stamps WHEN the half-created state began so the
+    // stuck-provisioning reaper can tell a stalled attempt from one that simply
+    // hasn't finished yet (provisioning-sweep.js). Cleared, with `_provisioning`,
+    // on the success path.
+    const placeholder = { id, role: 'agent', enabled: false, _provisioning: true, _provisioningAt: new Date().toISOString() };
     saveAgentConfig(id, placeholder);
     this.agentConfigs.set(id, { config: placeholder });
     return id;
@@ -10813,6 +10923,9 @@ class Orchestrator {
       teamId: ownerTeamId,
       enabled: false,
       _provisioning: true,
+      // #2493 — see resolveAndReserveAgentId: WHEN the half-created state began,
+      // so the stuck-provisioning reaper never touches a live in-flight add.
+      _provisioningAt: new Date().toISOString(),
     });
 
     const password = `agent-${memberId}-${Date.now()}`;
@@ -13690,6 +13803,7 @@ class Orchestrator {
       enabled: true,
     };
     delete newConfig._provisioning;
+    delete newConfig._provisioningAt; // #2493 — clear the stuck-reaper stamp alongside the flag
 
     if (role === "team-member") {
       newConfig.parentTeamId = parentTeamId;
@@ -19657,6 +19771,35 @@ async function main() {
   };
   const poolReapTimer = setInterval(runPoolReapTick, POOL_REAP_TICK_INTERVAL_MS);
   if (typeof poolReapTimer.unref === "function") poolReapTimer.unref();
+
+  // ============================================================
+  // #2493 — stuck-`_provisioning` reaper tick. Detects agent configs that have
+  // held `_provisioning:true` past `PROVISIONING_STUCK_MS` — a half-created
+  // leftover from a provisioning step that threw after the config was written —
+  // and reaps them (config + partial Matrix/workspace/container artifacts) via
+  // the ordinary delete route, recording an operator-visible row per action.
+  // Its own tick, like the pool-reap above: it is not team-scoped (a standalone
+  // half-create has no team) and covers ordinary agent creation as well as pool
+  // spawns (AC4). NOT maintenance-gated — reaping a stuck leftover is cleanup,
+  // never "starting" work, matching the admission/pool-reap ticks. Costs one
+  // directory scan per interval for an installation with nothing stuck.
+  // ============================================================
+  const PROVISIONING_REAP_TICK_INTERVAL_MS = Number(process.env.AEE_PROVISIONING_REAP_TICK_INTERVAL_MS || 60_000);
+  let provisioningReapBusy = false;
+  const runProvisioningReapTick = async () => {
+    if (provisioningReapBusy) return; // overlap guard — a slow sweep must not stack (edge case 2: no double-act)
+    provisioningReapBusy = true;
+    try {
+      await provisioningReapSweep();
+    } catch (err) {
+      // Never let the sweep escape the timer — the next tick retries.
+      console.warn(`[Provisioning] reap sweep failed: ${err.message}`);
+    } finally {
+      provisioningReapBusy = false;
+    }
+  };
+  const provisioningReapTimer = setInterval(runProvisioningReapTick, PROVISIONING_REAP_TICK_INTERVAL_MS);
+  if (typeof provisioningReapTimer.unref === "function") provisioningReapTimer.unref();
 
   // ============================================================
   // Agent Pools — Phase 2 (#2247): the Flow Supervisor's reconcile tick.

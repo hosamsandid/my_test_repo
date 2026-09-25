@@ -176,8 +176,9 @@ team …"* attribution paragraph (`AGENT_COMMENT_MARKER`). Before answering the
 CLI, `comment` / `create-epic` / `set-field` (when changed) / `attachment add`
 / `update` record the write in `own-writes-store.js`, so the poller stamps the
 echo `origin: agent` — a trigger filtered `origin = human` never wakes an agent
-on its own write. `transition` is not recorded (a status change has no
-`origin`).
+on its own write. `transition` records a wildcard field write (`<issue>|*`):
+the status change itself has no `origin`, but the `resolution` / screen-field
+items Jira logs with it echo as `origin: agent`.
 
 ## Debugging — `spike.js`
 

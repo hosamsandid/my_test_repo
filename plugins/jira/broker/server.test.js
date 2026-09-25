@@ -413,6 +413,8 @@ test('cli writes: comment + transition are role-gated (pass for team scope), cre
 
     const t = await call(srv, 'POST', '/cli/transition', { token: TOKEN, body: { issue: 'KAN-6', to: 'In Progress' } });
     assert.equal(t.status, 200);
+    // a transition records the wildcard field write (resolution & screen fields echo as origin: agent)
+    assert.equal(broker.ownWritesStore.snapshot('team-1').fields['KAN-6|*'].length, 1);
     assert.equal(t.body.applied, 'Go');
 
     // a scope with no credential → 400, not a 500
@@ -623,6 +625,7 @@ test('cli writes: /create-epic creates an epic + child stories, allow-list-gatin
     assert.equal(ok.body.stories[0].key, 'KAN-2');
     // every created key is in the own-writes registry (→ origin: agent on the echo)
     assert.deepEqual(Object.keys(broker.ownWritesStore.snapshot('team-1').issues).sort(), ['KAN-1', 'KAN-2']);
+    assert.ok(broker.ownWritesStore.snapshot('team-1').fields['KAN-2|*'], 'a created story is covered for its follow-up transition');
     // the story create linked to the epic (native parent) and shaped Team
     const story = created.find((f) => f.issuetype.name === 'Story');
     assert.deepEqual(story.parent, { key: 'KAN-1' });

@@ -18,6 +18,10 @@
 //     fields:       { "<issueKey>|<fieldRef>": ["<iso>", …] },
 //     descriptions: { "<issueKey>": "<iso>" } }
 //
+// `<fieldRef>` `*` is the wildcard: a write that changes fields without naming
+// them (a transition — resolution, transition-screen fields). Any field change
+// on that issue near the stamp is then the agent's.
+//
 // A field write has no id of its own to match (the changelog history id is
 // not returned by the write), so it is matched by issue + field + time, and a
 // field keeps its last FIELD_STAMPS_MAX stamps — two quick writes to the same

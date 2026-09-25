@@ -173,7 +173,7 @@ fields):
 | `fieldId` | the stable id (`assignee`, `fixVersions`, `customfield_10020`) — route custom fields on this; their display names vary per site |
 | `from` / `to` | Jira's display strings, cut at 500 characters; absent side = `null` (an unassign has no `to`) |
 | `fieldType` | `jira` or `custom` |
-| `origin` | `agent` when the change matches a write this team's agents made through the broker (`set-field`, `attachment add`) on the same issue + field within ±2 minutes, else `human` |
+| `origin` | `agent` when the change matches a write this team's agents made through the broker (`set-field`, `attachment add`) on the same issue + field within ±2 minutes — or any field on an issue an agent transitioned or created in that window (`resolution`, transition-screen fields) — else `human` |
 
 Never a `field_changed`: `status` (its own kind), `description` (an agent's
 `aee-jira update` would wake it — a separate kind, not yet built) and `Rank`

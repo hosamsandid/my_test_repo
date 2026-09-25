@@ -649,3 +649,25 @@ test('comment_added: a comment created before the previous poll on a re-touched 
   assert.equal(h.delivered.length, 0);
   assert.equal(h.activityStore.list('team-1')[0].outcome, 'stale');
 });
+
+test('field_changed: fields changed by an agent transition (resolution in the same history) read origin: agent', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['status_changed', 'field_changed'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  h.ownWritesStore.recordField('team-1', 'ENG-1', '*'); // what /transition records
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [
+    issue('ENG-1', [mixedHistory('990', '2026-01-01T11:59:50Z', [
+      { field: 'status', fieldId: 'status', fromString: 'In Review', toString: 'Done' },
+      { field: 'resolution', fieldId: 'resolution', fromString: null, toString: 'Done' },
+    ])]),
+    issue('ENG-2', [mixedHistory('991', '2026-01-01T11:59:50Z', [
+      { field: 'resolution', fieldId: 'resolution', fromString: null, toString: 'Done' },
+    ])]),
+  ] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  const fields = h.delivered.filter((d) => d.events[0].event === 'field_changed').map((d) => [d.events[0].issueKey, d.events[0].origin]);
+  assert.deepEqual(fields, [['ENG-1', 'agent'], ['ENG-2', 'human']]);
+  // the status change itself stays origin-less and still wakes the next stage
+  const status = h.delivered.find((d) => d.events[0].event === 'status_changed').events[0];
+  assert.equal('origin' in status, false);
+});

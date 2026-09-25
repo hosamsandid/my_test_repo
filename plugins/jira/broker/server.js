@@ -549,7 +549,12 @@ async function handleCli(req, res, cliPath) {
         allowList: cred.writableCustomFields || [],
         attribution: `Created by an agent on team "${scopeId}" via Agent Studio.`,
         issueTypes: body.issueTypes && typeof body.issueTypes === 'object' ? body.issueTypes : undefined,
-        onCreated: (key) => recordOwnWrite(() => ownWritesStore.recordIssue(scopeId, key)),
+        // Each created issue is ours; its follow-up `status` transition (and
+        // whatever fields that sets) is covered by the wildcard field record.
+        onCreated: (key) => recordOwnWrite(() => {
+          ownWritesStore.recordIssue(scopeId, key);
+          ownWritesStore.recordField(scopeId, key, '*');
+        }),
       });
       writeAudit(scopeId, scopeId, 'create', 'ok', `${project}:${result.epic.key} +${result.stories.filter((s) => s.ok).length}/${result.stories.length} stories`);
       return sendJson(res, 200, result);
@@ -682,6 +687,11 @@ async function handleCli(req, res, cliPath) {
         }
       } else {
         result = await jira.transitionIssue(cred, issue, { toStatus: body.to });
+        // The status change itself has no `origin` (a transition is meant to
+        // wake the next stage), but Jira logs `resolution` and any
+        // transition-screen field in the same history — those field_changed
+        // echoes are ours.
+        recordOwnWrite(() => ownWritesStore.recordField(scopeId, issue, '*'));
       }
       const detail = op === 'transition' ? `${issue}→${body.to || ''}`
         : op === 'set-field' ? `${issue}.${String(body.field || '').trim()}`

@@ -88,8 +88,7 @@ platform only slows that down (5 wakes per issue per hour), it does not stop it.
   `origin = agent` — **and** a second condition that tells the two apart (a
   different `issueType`, a project), and never let two agents both listen on
   `origin = agent` for the same project without one.
-- Same for `issue_created` (`create-epic`) and `field_changed`
-  (`set-field`, `attachment add`).
+- Same for `issue_created` and `field_changed` (incl. a transition's `resolution`).
 - A status change has no `origin` — an agent's `aee-jira transition` wakes
   whichever teammate's trigger names that target status, by design.
 

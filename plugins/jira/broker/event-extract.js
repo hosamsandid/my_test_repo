@@ -199,12 +199,15 @@ function fieldIdSegment(item) {
 
 // `origin` of a field change: `agent` when the registry holds a write to this
 // issue's field (by `fieldId` or case-folded display name) stamped within
-// OWN_FIELD_WRITE_SKEW_MS of the history's `created`.
+// OWN_FIELD_WRITE_SKEW_MS of the history's `created`. The wildcard ref
+// `<issueKey>|*` is an agent write that changes fields it does not name — a
+// transition (Jira logs `resolution` and any transition-screen field in the
+// same history as the status) or an issue the broker just created.
 function resolveFieldOrigin(issueKey, item, createdIso, ownWrites) {
   const fields = ownWrites && ownWrites.fields;
   const created = Date.parse(createdIso);
   if (!fields || Number.isNaN(created)) return 'human';
-  const refs = [item.fieldId, item.field].filter(Boolean).map((r) => `${issueKey}|${String(r).trim().toLowerCase()}`);
+  const refs = [item.fieldId, item.field, '*'].filter(Boolean).map((r) => `${issueKey}|${String(r).trim().toLowerCase()}`);
   for (const ref of refs) {
     const stamps = Array.isArray(fields[ref]) ? fields[ref] : [];
     if (stamps.some((at) => Math.abs(Date.parse(at) - created) <= OWN_FIELD_WRITE_SKEW_MS)) return 'agent';

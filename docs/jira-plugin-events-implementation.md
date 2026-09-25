@@ -154,8 +154,11 @@ atomic write like the other stores:
   story key; `/set-field` → issue + field id when `changed` (`setCustomField`
   returns the resolved `fieldId` for this); `/attachment/add` → issue +
   `attachment`; `/update` → issue (unused by this batch; `description_changed`
-  will need it). `/transition` is **not** recorded — `status_changed` keeps
-  its current behaviour and gets no `origin` in this batch.
+  will need it); `/transition` and every issue `/create-epic` creates → the
+  wildcard field `<issueKey>|*`. The status change itself gets no `origin`
+  (`status_changed` keeps its behaviour — a transition is meant to wake the
+  next stage), but Jira logs `resolution` and any transition-screen field in
+  the same history, and those `field_changed` echoes must read `agent`.
 - `field_changed` origin: a changelog item on `<issueKey>` whose `fieldId`
   (or lower-cased `field`) has a registered stamp within ±2 min
   (`OWN_FIELD_WRITE_SKEW_MS`) of the history's `created` → `agent`. A field

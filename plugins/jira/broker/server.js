@@ -607,6 +607,98 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── sprint lifecycle transitions (Agile writes, #2491) ────────────────────
+  // Close the active sprint / start the next future one / advance (both in one).
+  // Role-gated like every other write (D3); the Jira token stays server-side.
+  // `sprint-advance` reports each phase distinctly (jira.advanceSprint), so a
+  // partial roll-over is visible rather than fatal.
+  if (cliPath === '/sprint/close' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('sprint-close');
+    if (!authz.allow) {
+      writeAudit(scopeId, scopeId, 'sprint-close', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'sprint-close', 'no-credential');
+      return sendJson(res, 400, { error: 'This team has no Jira credential configured.', code: 'no-credential' });
+    }
+    const body = parseJson(await readBody(req));
+    const board = String(body.board || '').trim();
+    if (!board) return sendJson(res, 400, { error: 'a --board name is required' });
+    try {
+      const result = await jira.closeSprint(cred, {
+        boardName: board,
+        projectKeyOrId: String(body.project || '').trim() || undefined,
+        sprintId: body.sprintId,
+      });
+      writeAudit(scopeId, scopeId, 'sprint-close', 'ok', `${board}:${result.sprint.id}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'sprint-close', 'error', `${board}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
+  if (cliPath === '/sprint/start' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('sprint-start');
+    if (!authz.allow) {
+      writeAudit(scopeId, scopeId, 'sprint-start', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'sprint-start', 'no-credential');
+      return sendJson(res, 400, { error: 'This team has no Jira credential configured.', code: 'no-credential' });
+    }
+    const body = parseJson(await readBody(req));
+    const board = String(body.board || '').trim();
+    if (!board) return sendJson(res, 400, { error: 'a --board name is required' });
+    try {
+      const result = await jira.startSprint(cred, {
+        boardName: board,
+        projectKeyOrId: String(body.project || '').trim() || undefined,
+        sprintId: body.sprintId,
+      });
+      writeAudit(scopeId, scopeId, 'sprint-start', 'ok', `${board}:${result.sprint.id}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'sprint-start', 'error', `${board}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
+  if (cliPath === '/sprint/advance' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('sprint-advance');
+    if (!authz.allow) {
+      writeAudit(scopeId, scopeId, 'sprint-advance', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'sprint-advance', 'no-credential');
+      return sendJson(res, 400, { error: 'This team has no Jira credential configured.', code: 'no-credential' });
+    }
+    const body = parseJson(await readBody(req));
+    const board = String(body.board || '').trim();
+    if (!board) return sendJson(res, 400, { error: 'a --board name is required' });
+    try {
+      const result = await jira.advanceSprint(cred, {
+        boardName: board,
+        projectKeyOrId: String(body.project || '').trim() || undefined,
+        closeSprintId: body.closeSprintId,
+        startSprintId: body.startSprintId,
+      });
+      const closeState = result.close.ok ? 'closed' : (result.close.skipped ? 'none' : 'close-fail');
+      const startState = result.start.ok ? 'started' : 'start-fail';
+      writeAudit(scopeId, scopeId, 'sprint-advance', result.failed ? 'partial' : 'ok', `${board}:${closeState}/${startState}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'sprint-advance', 'error', `${board}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
   // ── attributed writes (Phase 4, D3 — role-gated server-side, no confirm) ──
   const writeOps = { '/comment': 'comment', '/transition': 'transition', '/update': 'update', '/set-field': 'set-field' };
   if (writeOps[cliPath] && req.method === 'POST') {

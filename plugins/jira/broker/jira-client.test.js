@@ -1416,3 +1416,206 @@ test('bulkCreateSprints: an explicit --start overrides continue-from-latest (no 
     assert.equal(r.sprints[0].startDate, '2026-01-05T00:00:00.000Z');
   });
 });
+
+// ── sprint lifecycle transitions: close / start / advance (#2491) ────────────
+
+const isSprintState = (url, opts) => /\/rest\/agile\/1\.0\/sprint\/\d+$/.test(url) && opts && opts.method === 'POST';
+const isSprintGet = (url, opts) => /\/rest\/agile\/1\.0\/sprint\/\d+$/.test(url) && (!opts || opts.method === 'GET' || !opts.method);
+const isSprintIssues = (url) => /\/rest\/agile\/1\.0\/sprint\/\d+\/issue/.test(url);
+const sprintIssuesResponse = (cats) => ({ ok: true, status: 200, text: async () => JSON.stringify({
+  total: cats.length, issues: cats.map((k, i) => ({ id: String(i), fields: { status: { statusCategory: { key: k } } } })),
+}) });
+
+test('activeSprintOf / nextFutureSprint: pick the active one and the earliest-starting future one', () => {
+  const sprints = [
+    { id: '1', state: 'closed', startDate: '2026-01-01T00:00:00.000Z' },
+    { id: '2', state: 'active', startDate: '2026-01-08T00:00:00.000Z' },
+    { id: '3', state: 'future', startDate: '2026-01-22T00:00:00.000Z' },
+    { id: '4', state: 'future', startDate: '2026-01-15T00:00:00.000Z' },
+  ];
+  assert.equal(jc.activeSprintOf(sprints).id, '2');
+  assert.equal(jc.nextFutureSprint(sprints).id, '4'); // earliest future start wins
+  assert.equal(jc.activeSprintOf([]), null);
+  assert.equal(jc.nextFutureSprint([{ id: '9', state: 'closed' }]), null);
+});
+
+test('closeSprint: closes the board active sprint, re-sends its fields, reports incomplete issues', async () => {
+  const bodies = [];
+  const calls = [];
+  await withFetch((url, opts) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 7, name: 'Board' }]);
+    if (isSprintIssues(url)) return sprintIssuesResponse(['done', 'indeterminate', 'new']); // 2 incomplete
+    if (isSprintState(url, opts)) {
+      calls.push('state');
+      bodies.push(JSON.parse(opts.body));
+      return { ok: true, status: 200, text: async () => JSON.stringify({ id: 200, name: 'Sprint 5', state: 'closed', originBoardId: 7 }) };
+    }
+    if (isSprintList(url)) return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [
+      { id: 199, name: 'Old', state: 'closed' },
+      { id: 200, name: 'Sprint 5', state: 'active', startDate: '2026-02-02T00:00:00.000Z', endDate: '2026-02-08T00:00:00.000Z', goal: 'ship it' },
+    ] }) };
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  }, async () => {
+    const r = await jc.closeSprint(CRED, { boardName: 'Board', env: CRED.env });
+    assert.equal(r.sprint.id, '200');
+    assert.equal(r.sprint.state, 'closed');
+    assert.equal(r.incompleteIssues, 2);
+    assert.equal(bodies[0].state, 'closed');
+    assert.equal(bodies[0].startDate, '2026-02-02T00:00:00.000Z'); // existing fields re-sent
+    assert.equal(bodies[0].goal, 'ship it');
+  });
+  assert.deepEqual(calls, ['state']); // exactly one write
+});
+
+test('closeSprint: no active sprint → 409; a non-active --sprint-id → 409', async () => {
+  await withFetch((url) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 7, name: 'Board' }]);
+    if (isSprintList(url)) return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [{ id: 1, state: 'closed' }] }) };
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    await assert.rejects(() => jc.closeSprint(CRED, { boardName: 'Board', env: CRED.env }), (e) => e.status === 409 && /no active sprint/.test(e.message));
+  });
+  await withFetch((url, opts) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 7, name: 'Board' }]);
+    if (isSprintState(url, opts)) throw new Error('must not write');
+    if (isSprintGet(url, opts)) return { ok: true, status: 200, text: async () => JSON.stringify({ id: 55, name: 'Fut', state: 'future' }) };
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    await assert.rejects(() => jc.closeSprint(CRED, { boardName: 'Board', sprintId: '55', env: CRED.env }), (e) => e.status === 409 && /only an active sprint can be closed/.test(e.message));
+  });
+});
+
+test('closeSprint: incomplete-issue count degrades to null on a lookup failure (never breaks the close)', async () => {
+  await withFetch((url, opts) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 7, name: 'Board' }]);
+    if (isSprintIssues(url)) return { ok: false, status: 500, text: async () => 'boom' };
+    if (isSprintList(url)) return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [{ id: 200, name: 'A', state: 'active', startDate: '2026-02-02T00:00:00.000Z', endDate: '2026-02-08T00:00:00.000Z' }] }) };
+    if (isSprintState(url, opts)) return { ok: true, status: 200, text: async () => JSON.stringify({ id: 200, state: 'closed' }) };
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    const r = await jc.closeSprint(CRED, { boardName: 'Board', env: CRED.env });
+    assert.equal(r.incompleteIssues, null);
+    assert.equal(r.sprint.state, 'closed');
+  });
+});
+
+test('startSprint: activates the earliest future sprint (not retried on transport failure)', async () => {
+  const bodies = [];
+  const calls = [];
+  await withFetch((url, opts) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 7, name: 'Board' }]);
+    if (isSprintList(url)) return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [
+      { id: 300, name: 'Later', state: 'future', startDate: '2026-03-16T00:00:00.000Z', endDate: '2026-03-22T00:00:00.000Z' },
+      { id: 301, name: 'Next', state: 'future', startDate: '2026-03-09T00:00:00.000Z', endDate: '2026-03-15T00:00:00.000Z' },
+    ] }) };
+    if (isSprintState(url, opts)) {
+      calls.push('state'); bodies.push({ url, body: JSON.parse(opts.body) });
+      return { ok: true, status: 200, text: async () => JSON.stringify({ id: 301, name: 'Next', state: 'active' }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  }, async () => {
+    const r = await jc.startSprint(CRED, { boardName: 'Board', env: CRED.env });
+    assert.equal(r.sprint.id, '301');
+    assert.equal(r.sprint.state, 'active');
+    assert.match(bodies[0].url, /\/sprint\/301$/); // the earliest-start future one
+    assert.equal(bodies[0].body.state, 'active');
+  });
+  // never retried
+  await withFetch((url, opts) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 7, name: 'Board' }]);
+    if (isSprintList(url)) return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [{ id: 301, name: 'Next', state: 'future', startDate: '2026-03-09T00:00:00.000Z', endDate: '2026-03-15T00:00:00.000Z' }] }) };
+    if (isSprintState(url, opts)) { calls.push('retry?'); const e = new TypeError('fetch failed'); e.cause = { code: 'X' }; throw e; }
+    throw new Error('unexpected');
+  }, async () => {
+    await assert.rejects(() => jc.startSprint(CRED, { boardName: 'Board', env: CRED.env }), /fetch failed/);
+  });
+  assert.deepEqual(calls, ['state', 'retry?']);
+});
+
+test('startSprint: refuses a second active sprint, a non-future target, and a dateless sprint', async () => {
+  // already an active sprint
+  await withFetch((url, opts) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 7, name: 'Board' }]);
+    if (isSprintState(url, opts)) throw new Error('must not write');
+    if (isSprintList(url)) return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [
+      { id: 400, name: 'Running', state: 'active', startDate: '2026-01-01T00:00:00.000Z', endDate: '2026-01-07T00:00:00.000Z' },
+      { id: 401, name: 'Next', state: 'future', startDate: '2026-01-08T00:00:00.000Z', endDate: '2026-01-14T00:00:00.000Z' },
+    ] }) };
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    await assert.rejects(() => jc.startSprint(CRED, { boardName: 'Board', env: CRED.env }), (e) => e.status === 409 && /already has an active sprint/.test(e.message));
+  });
+  // a dateless future sprint
+  await withFetch((url, opts) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 7, name: 'Board' }]);
+    if (isSprintState(url, opts)) throw new Error('must not write');
+    if (isSprintList(url)) return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [{ id: 402, name: 'Undated', state: 'future' }] }) };
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    await assert.rejects(() => jc.startSprint(CRED, { boardName: 'Board', env: CRED.env }), (e) => e.status === 400 && /no start\/end date/.test(e.message));
+  });
+});
+
+test('advanceSprint: closes the active sprint then starts the next future one', async () => {
+  const writes = [];
+  await withFetch((url, opts) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 7, name: 'Board' }]);
+    if (isSprintIssues(url)) return sprintIssuesResponse(['done']); // 0 incomplete
+    if (isSprintList(url)) return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [
+      { id: 500, name: 'Cur', state: 'active', startDate: '2026-04-06T00:00:00.000Z', endDate: '2026-04-12T00:00:00.000Z' },
+      { id: 501, name: 'Nxt', state: 'future', startDate: '2026-04-13T00:00:00.000Z', endDate: '2026-04-19T00:00:00.000Z' },
+    ] }) };
+    if (isSprintState(url, opts)) {
+      const body = JSON.parse(opts.body);
+      writes.push({ url, state: body.state });
+      const id = url.match(/\/sprint\/(\d+)$/)[1];
+      return { ok: true, status: 200, text: async () => JSON.stringify({ id: Number(id), state: body.state }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  }, async () => {
+    const r = await jc.advanceSprint(CRED, { boardName: 'Board', env: CRED.env });
+    assert.equal(r.failed, false);
+    assert.equal(r.close.ok, true);
+    assert.equal(r.close.sprint.id, '500');
+    assert.equal(r.close.incompleteIssues, 0);
+    assert.equal(r.start.ok, true);
+    assert.equal(r.start.sprint.id, '501');
+    assert.deepEqual(writes.map((w) => w.state), ['closed', 'active']); // close before start
+  });
+});
+
+test('advanceSprint: no active sprint skips the close but still starts the next future one', async () => {
+  await withFetch((url, opts) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 7, name: 'Board' }]);
+    if (isSprintList(url)) return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [
+      { id: 601, name: 'Nxt', state: 'future', startDate: '2026-05-04T00:00:00.000Z', endDate: '2026-05-10T00:00:00.000Z' },
+    ] }) };
+    if (isSprintState(url, opts)) { const body = JSON.parse(opts.body); return { ok: true, status: 200, text: async () => JSON.stringify({ id: 601, state: body.state }) }; }
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    const r = await jc.advanceSprint(CRED, { boardName: 'Board', env: CRED.env });
+    assert.equal(r.close.ok, false);
+    assert.equal(r.close.skipped, true);
+    assert.equal(r.start.ok, true);
+    assert.equal(r.failed, false); // a skipped close is not a failure
+  });
+});
+
+test('advanceSprint: closed but no future sprint to start is a reported partial (failed:true)', async () => {
+  await withFetch((url, opts) => {
+    if (isBoardSearch(url)) return boardSearchResponse([{ id: 7, name: 'Board' }]);
+    if (isSprintIssues(url)) return sprintIssuesResponse(['new']); // 1 incomplete
+    if (isSprintList(url)) return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [
+      { id: 700, name: 'Cur', state: 'active', startDate: '2026-06-01T00:00:00.000Z', endDate: '2026-06-07T00:00:00.000Z' },
+    ] }) };
+    if (isSprintState(url, opts)) { const body = JSON.parse(opts.body); return { ok: true, status: 200, text: async () => JSON.stringify({ id: 700, state: body.state }) }; }
+    throw new Error(`unexpected ${url}`);
+  }, async () => {
+    const r = await jc.advanceSprint(CRED, { boardName: 'Board', env: CRED.env });
+    assert.equal(r.close.ok, true);
+    assert.equal(r.close.incompleteIssues, 1);
+    assert.equal(r.start.ok, false);
+    assert.match(r.start.error, /no future sprint to start/);
+    assert.equal(r.failed, true);
+  });
+});

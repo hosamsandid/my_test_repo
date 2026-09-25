@@ -9,7 +9,7 @@ test('POLICY mirrors the manifest: comment + transition + update + attach + set-
   const manifest = require('../plugin.json');
   assert.deepEqual(POLICY, manifest.policy);
   assert.deepEqual(Object.keys(POLICY).sort(),
-    ['attach', 'comment', 'create', 'set-field', 'sprint-bulk-create', 'sprint-create', 'transition', 'update']);
+    ['attach', 'comment', 'create', 'set-field', 'sprint-advance', 'sprint-bulk-create', 'sprint-close', 'sprint-create', 'sprint-start', 'transition', 'update']);
 });
 
 test('requiresApproval is wired but empty (D3 — no confirmation pen in v1)', () => {
@@ -25,6 +25,9 @@ test('authorizeWrite: a team-scoped caller may run all three writes (D3 — rout
   assert.deepEqual(authorizeWrite('create'), { allow: true });
   assert.deepEqual(authorizeWrite('sprint-create'), { allow: true });
   assert.deepEqual(authorizeWrite('sprint-bulk-create'), { allow: true });
+  assert.deepEqual(authorizeWrite('sprint-close'), { allow: true });
+  assert.deepEqual(authorizeWrite('sprint-start'), { allow: true });
+  assert.deepEqual(authorizeWrite('sprint-advance'), { allow: true });
 });
 
 test('authorizeWrite: an unlisted subcommand is unrestricted (every rule is opt-in)', () => {

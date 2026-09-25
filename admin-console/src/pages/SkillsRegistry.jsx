@@ -20,6 +20,7 @@ import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import { adminTeamIdsOf, teamsById } from './credential-scope-view.js';
 import { writableSkillTargets, defaultSkillTarget } from './skill-target-view.js';
 import { planLineageResync, copyResyncKind, summarizeResyncResults } from './skill-lineage-resync.js';
+import { warningRows, transferPreviewRequiresAck, warningsSummaryLabel } from './skill-transfer-preview-view.js';
 
 /* ─── Skill name validation (mirrors SKILL_NAME_RE in api.js) ─────────── */
 const SKILL_NAME_RE = /^[a-zA-Z0-9_-]+([.:][a-zA-Z0-9_-]+)*$/;
@@ -64,6 +65,64 @@ const dangerBtnStyle = {
   color: 'var(--eb-status-error)',
   cursor: 'pointer',
 };
+
+/* ─── Skill-transfer injection-scan preview dialog (#2468) ──────────────── */
+const previewOverlayStyle = {
+  position: 'fixed', inset: 0, background: 'oklch(0 0 0 / 0.5)',
+  display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
+  padding: 'var(--eb-space-4)',
+};
+const previewCardStyle = {
+  background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-lg)', padding: 'var(--eb-space-5, 20px)',
+  width: '90%', maxWidth: 620, maxHeight: '85vh', overflowY: 'auto',
+  boxShadow: 'var(--eb-shadow-xl)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)',
+};
+const previewTitleStyle = {
+  margin: 0, fontSize: 'var(--eb-text-md)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-primary)',
+};
+const previewMutedStyle = { margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' };
+const previewLabelStyle = {
+  fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-medium)',
+  color: 'var(--eb-text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em',
+};
+const previewContentStyle = {
+  margin: 0, maxHeight: 240, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+  fontFamily: 'var(--eb-font-mono, monospace)', fontSize: 'var(--eb-text-xs)',
+  background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-3)', color: 'var(--eb-text-primary)',
+};
+const previewWarnBannerStyle = {
+  fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)',
+  background: 'color-mix(in oklch, var(--eb-status-warning) 12%, transparent)',
+  border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-3)',
+};
+const previewOkBannerStyle = {
+  fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+  background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-2) var(--eb-space-3)',
+};
+const previewAckRowStyle = {
+  display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
+  fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', cursor: 'pointer',
+};
+const previewFooterStyle = {
+  display: 'flex', justifyContent: 'flex-end', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)',
+};
+const previewCancelBtnStyle = {
+  padding: 'var(--eb-space-2) var(--eb-space-4)', background: 'var(--eb-bg-elevated)',
+  color: 'var(--eb-text-secondary)', border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)', cursor: 'pointer', fontFamily: 'inherit',
+};
+function previewConfirmBtnStyle(requiresAck, canConfirm) {
+  return {
+    padding: 'var(--eb-space-2) var(--eb-space-4)',
+    background: requiresAck ? 'var(--eb-status-warning)' : 'var(--eb-accent-primary)',
+    color: '#fff', border: 'none', borderRadius: 'var(--eb-radius-md)',
+    fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', fontFamily: 'inherit',
+    cursor: canConfirm ? 'pointer' : 'not-allowed', opacity: canConfirm ? 1 : 0.5,
+  };
+}
 
 /* ─── New skill form ───────────────────────────────────────────────────── */
 function NewSkillForm({ onCreated, onCancel, teams = [], caller }) {
@@ -662,6 +721,10 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
   const [promoteError, setPromoteError] = useState(null);
   const [confirmOverwrite, setConfirmOverwrite] = useState(false);
   const [pendingTransfer, setPendingTransfer] = useState(null);
+  // #2468: advisory injection-scan preview shown before a transfer commits.
+  // null | { loading, body } | { body, content, existingContent, warnings, willOverwrite }.
+  const [transferPreview, setTransferPreview] = useState(null);
+  const [previewAck, setPreviewAck] = useState(false);
   const [installTarget, setInstallTarget] = useState('');
   const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState(null);
@@ -812,11 +875,44 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
   // permission, stamps lineage + carries provenance. On a destination name
   // collision the engine returns 409 {exists}; we surface the overwrite dialog and
   // replay the same transfer with onCollision:'overwrite'.
+  // #2468: a transfer crosses the only cross-team trust boundary, so it is
+  // preceded by a DRY-RUN preview that shows the target content and any advisory
+  // prompt-injection warnings before anything is written. `beginTransfer` runs the
+  // preview and opens the dialog; the dialog's confirm calls `transfer` to commit.
+  // Uses assistFetch so the team's selected assist model powers the semantic scan
+  // stage (absent/failed provider silently degrades to the pattern scan server-side).
+  async function beginTransfer(body) {
+    setPromoteError(null);
+    setPreviewAck(false);
+    setTransferPreview({ loading: true, body });
+    try {
+      const res = await assistFetch('/api/skills/transfer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...body, preview: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setTransferPreview({
+        body,
+        content: typeof data.content === 'string' ? data.content : '',
+        existingContent: typeof data.existingContent === 'string' ? data.existingContent : null,
+        warnings: Array.isArray(data.warnings) ? data.warnings : [],
+        willOverwrite: !!data.willOverwrite,
+      });
+    } catch (e) {
+      setTransferPreview(null);
+      setPromoteError(e.message);
+    }
+  }
+
+  // On a destination name collision the engine returns 409 {exists}; we surface
+  // the overwrite dialog and replay the same transfer with onCollision:'overwrite'.
   async function transfer(body) {
     setPromoting(true);
     setPromoteError(null);
     try {
-      const res = await fetch('/api/skills/transfer', {
+      const res = await assistFetch('/api/skills/transfer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -826,6 +922,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
         if (res.status === 409 && data.exists) {
           setPendingTransfer(body);
           setConfirmOverwrite(true);
+          setTransferPreview(null);
           setPromoting(false);
           return;
         }
@@ -836,6 +933,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
       }
       setConfirmOverwrite(false);
       setPendingTransfer(null);
+      setTransferPreview(null);
       onPromoted?.({ name: data.name, source: data.to?.tier === 'team' ? 'team' : 'pool', teamId: data.to?.teamId });
     } catch (e) {
       setPromoteError(e.message);
@@ -1034,7 +1132,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
             </button>
             {isTeam && (
               <button
-                onClick={() => transfer({ name: skill.name, from: { tier: 'team', teamId: skill.teamId }, to: { tier: 'global' }, mode: 'copy' })}
+                onClick={() => beginTransfer({ name: skill.name, from: { tier: 'team', teamId: skill.teamId }, to: { tier: 'global' }, mode: 'copy' })}
                 disabled={promoting}
                 style={primaryBtnStyle(promoting)}
                 title="Copy this team skill into the global pool (visible to all teams); the team-tier copy stays put"
@@ -1044,7 +1142,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
             )}
             {isTeam && (
               <button
-                onClick={() => transfer({ name: skill.name, from: { tier: 'team', teamId: skill.teamId }, to: { tier: 'global' }, mode: 'move' })}
+                onClick={() => beginTransfer({ name: skill.name, from: { tier: 'team', teamId: skill.teamId }, to: { tier: 'global' }, mode: 'move' })}
                 disabled={promoting}
                 style={secondaryBtnStyle}
                 title="Move this team skill into the global pool (retires the team-tier copy, keeps a recoverable snapshot)"
@@ -1161,7 +1259,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
               ))}
             </select>
             <button
-              onClick={() => transfer({ name: skill.name, from: { tier: 'global' }, to: { tier: 'team', teamId: adoptTeamId }, mode: 'copy' })}
+              onClick={() => beginTransfer({ name: skill.name, from: { tier: 'global' }, to: { tier: 'team', teamId: adoptTeamId }, mode: 'copy' })}
               disabled={!adoptTeamId || promoting}
               style={primaryBtnStyle(!adoptTeamId || promoting)}
               title="Copy this global skill into the selected team's pool and activate it"
@@ -1169,7 +1267,7 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
               {promoting ? 'Adopting…' : 'Adopt'}
             </button>
             <button
-              onClick={() => transfer({ name: skill.name, from: { tier: 'global' }, to: { tier: 'team', teamId: adoptTeamId }, mode: 'move' })}
+              onClick={() => beginTransfer({ name: skill.name, from: { tier: 'global' }, to: { tier: 'team', teamId: adoptTeamId }, mode: 'move' })}
               disabled={!adoptTeamId || promoting}
               style={!adoptTeamId || promoting ? { ...secondaryBtnStyle, cursor: 'not-allowed', opacity: 0.5 } : secondaryBtnStyle}
               title="Move this global skill into the selected team's pool (retires the global copy, keeps a recoverable snapshot). Requires System Admin."
@@ -1346,6 +1444,86 @@ function SkillViewer({ skill, onDeleted, onPromoted, onOpenCopy, installableAgen
         }
         onCancel={() => { setConfirmDelete(false); setDeleteError(null); setDeleteBlocking(null); }}
       />
+
+      {/* #2468: advisory injection-scan preview shown before a transfer commits.
+          Always shows the content crossing the boundary; when the scan surfaced
+          warnings, a checkbox forces one extra explicit acknowledgement before
+          the Transfer button enables (a clean scan proceeds with a single click). */}
+      {transferPreview && (() => {
+        const pv = transferPreview;
+        const loading = !!pv.loading;
+        const warnings = pv.warnings || [];
+        const rows = warningRows(warnings);
+        const requiresAck = transferPreviewRequiresAck(warnings);
+        const canConfirm = !loading && !promoting && (!requiresAck || previewAck);
+        const to = (pv.body && pv.body.to) || {};
+        const dest = to.tier === 'global' ? 'the global pool' : `team "${to.teamId}"`;
+        const closePreview = () => { setTransferPreview(null); setPreviewAck(false); };
+        return (
+          <div
+            role="dialog" aria-modal="true" aria-label="Review skill transfer"
+            style={previewOverlayStyle}
+            onMouseDown={(e) => { if (e.target === e.currentTarget && !promoting) closePreview(); }}
+          >
+            <div style={previewCardStyle}>
+              <h3 style={previewTitleStyle}>Review transfer of “{skill.name}” to {dest}</h3>
+              {loading ? (
+                <p style={previewMutedStyle}>Scanning skill content for prompt-injection indicators…</p>
+              ) : (
+                <>
+                  {requiresAck ? (
+                    <div style={previewWarnBannerStyle}>
+                      <div style={{ fontWeight: 'var(--eb-font-semibold)', marginBottom: 'var(--eb-space-1)' }}>
+                        ⚠ {warningsSummaryLabel(warnings)}
+                      </div>
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        {rows.map((r) => (
+                          <li key={r.key} style={{ marginBottom: 2 }}>
+                            <span style={{ opacity: 0.75 }}>[{r.stageLabel}]</span> {r.message}
+                            {r.count ? ` (×${r.count})` : ''}
+                            {r.evidence ? <span style={{ opacity: 0.75 }}>: “{r.evidence}”</span> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : (
+                    <div style={previewOkBannerStyle}>✓ {warningsSummaryLabel(warnings)}</div>
+                  )}
+                  {pv.willOverwrite && (
+                    <div style={previewMutedStyle}>This transfer overwrites an existing skill at the destination.</div>
+                  )}
+                  <div style={previewLabelStyle}>
+                    Content to transfer{pv.existingContent != null ? ' (incoming version)' : ''}
+                  </div>
+                  <pre style={previewContentStyle}>{pv.content || '(empty)'}</pre>
+                  {pv.existingContent != null && (
+                    <>
+                      <div style={previewLabelStyle}>Current version at destination</div>
+                      <pre style={{ ...previewContentStyle, opacity: 0.7 }}>{pv.existingContent || '(empty)'}</pre>
+                    </>
+                  )}
+                  {requiresAck && (
+                    <label style={previewAckRowStyle}>
+                      <input type="checkbox" checked={previewAck} onChange={(e) => setPreviewAck(e.target.checked)} />
+                      <span>I have reviewed the warnings above and want to transfer this skill anyway.</span>
+                    </label>
+                  )}
+                </>
+              )}
+              <div style={previewFooterStyle}>
+                <button onClick={closePreview} disabled={promoting} style={previewCancelBtnStyle}>Cancel</button>
+                <button
+                  onClick={() => canConfirm && transfer(pv.body)}
+                  disabled={!canConfirm}
+                  style={previewConfirmBtnStyle(requiresAck, canConfirm)}
+                >
+                  {promoting ? 'Transferring…' : 'Transfer'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Overwrite confirmation (destination tier already has a skill with this name) */}
       <ConfirmDialog

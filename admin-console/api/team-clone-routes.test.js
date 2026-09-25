@@ -65,6 +65,13 @@ const CHECKS = {
   },
   'clone-validates-source-role': (s) => has(route(s, MARKERS.envCreate), "validateCloneSource(sourceCfg)"),
   'clone-response-carries-credentials-needed': (s) => has(route(s, MARKERS.envCreate), 'credentialsNeeded: describeClonedCredentialNeeds(templateSeed)'),
+  // #2469: a clone is credential-stripped by design (#2171), so it can never
+  // carry a GitHub token — the #2323 `checkGithubTokenRequirement` hard block
+  // must NOT fire on the copyFromTeamId path. The guard call auto-acknowledges
+  // a reference-only environment for a clone (`|| Boolean(clonedFromTeamId)`),
+  // while leaving a genuine manual repo-backed create fully guarded.
+  'clone-auto-acknowledges-github-token-requirement': (s) =>
+    has(route(s, MARKERS.envCreate), 'acknowledgeNoToken: req.body?.acknowledgeNoToken || Boolean(clonedFromTeamId)'),
 };
 
 function runChecks(src) {
@@ -107,6 +114,12 @@ const MUTATIONS = [
     from: 'res.status(201).json({ ...env, credentialsNeeded: describeClonedCredentialNeeds(templateSeed) });',
     to: 'res.status(201).json({ ...env });',
     expect: ['clone-response-carries-credentials-needed'],
+  },
+  {
+    why: 'the clone-path auto-acknowledge is dropped, so #2323\'s github_token_required hard block fires on every credential-stripped clone (#2469)',
+    from: 'acknowledgeNoToken: req.body?.acknowledgeNoToken || Boolean(clonedFromTeamId),',
+    to: 'acknowledgeNoToken: req.body?.acknowledgeNoToken,',
+    expect: ['clone-auto-acknowledges-github-token-requirement'],
   },
 ];
 

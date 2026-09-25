@@ -971,3 +971,101 @@ test('cli sprint: /sprint/list reads a board sprints; /sprint/create + /sprint/b
     srv.close();
   }
 });
+
+test('cli sprint: /sprint/close, /sprint/start and /sprint/advance transition sprint state (#2491)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'sprintco', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const writes = [];
+  // one active (id 1) + one future (id 2) sprint on board 42
+  const sprintList = [
+    { id: 1, name: 'Cur', state: 'active', startDate: '2026-10-19T00:00:00.000Z', endDate: '2026-10-25T00:00:00.000Z', originBoardId: 42 },
+    { id: 2, name: 'Next', state: 'future', startDate: '2026-10-26T00:00:00.000Z', endDate: '2026-11-01T00:00:00.000Z', originBoardId: 42 },
+  ];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    const u = String(url);
+    if (/\/rest\/agile\/1\.0\/board\?/.test(u)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [{ id: 42, name: 'Team Scrum Board', type: 'scrum' }] }) };
+    }
+    if (/\/rest\/agile\/1\.0\/sprint\/\d+\/issue/.test(u)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ total: 1, issues: [{ id: 'x', fields: { status: { statusCategory: { key: 'new' } } } }] }) };
+    }
+    if (/\/rest\/agile\/1\.0\/board\/42\/sprint/.test(u)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: sprintList }) };
+    }
+    if (/\/rest\/agile\/1\.0\/sprint\/(\d+)$/.test(u) && opts.method === 'POST') {
+      const id = Number(u.match(/\/sprint\/(\d+)$/)[1]);
+      const body = JSON.parse(opts.body);
+      writes.push({ id, state: body.state });
+      return { ok: true, status: 200, text: async () => JSON.stringify({ id, name: body.name, state: body.state, originBoardId: 42 }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${u}`);
+  };
+  const srv = await listen();
+  try {
+    // close the active sprint → reports incompleteIssues
+    const closed = await call(srv, 'POST', '/cli/sprint/close', { token: TOKEN, body: { board: 'Team Scrum Board' } });
+    assert.equal(closed.status, 200);
+    assert.equal(closed.body.sprint.id, '1');
+    assert.equal(closed.body.sprint.state, 'closed');
+    assert.equal(closed.body.incompleteIssues, 1);
+
+    // with no active sprint left, start the next future one
+    sprintList[0].state = 'closed';
+    const started = await call(srv, 'POST', '/cli/sprint/start', { token: TOKEN, body: { board: 'Team Scrum Board' } });
+    assert.equal(started.status, 200);
+    assert.equal(started.body.sprint.id, '2');
+    assert.equal(started.body.sprint.state, 'active');
+
+    // board name required + POST-only
+    assert.equal((await call(srv, 'POST', '/cli/sprint/close', { token: TOKEN, body: {} })).status, 400);
+    assert.equal((await call(srv, 'GET', '/cli/sprint/advance', { token: TOKEN })).status, 404);
+
+    // no-credential scope
+    assert.equal((await call(srv, 'POST', '/cli/sprint/start', { token: OTHER, body: { board: 'B' } })).body.code, 'no-credential');
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli sprint: /sprint/advance reports a partial roll-over distinctly (#2491)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'sprintco', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    const u = String(url);
+    if (/\/rest\/agile\/1\.0\/board\?/.test(u)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [{ id: 42, name: 'Team Scrum Board', type: 'scrum' }] }) };
+    }
+    if (/\/rest\/agile\/1\.0\/sprint\/\d+\/issue/.test(u)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ total: 0, issues: [] }) };
+    }
+    if (/\/rest\/agile\/1\.0\/board\/42\/sprint/.test(u)) {
+      // only an active sprint, no future one to start
+      return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [
+        { id: 1, name: 'Cur', state: 'active', startDate: '2026-10-19T00:00:00.000Z', endDate: '2026-10-25T00:00:00.000Z', originBoardId: 42 },
+      ] }) };
+    }
+    if (/\/rest\/agile\/1\.0\/sprint\/(\d+)$/.test(u) && opts.method === 'POST') {
+      const id = Number(u.match(/\/sprint\/(\d+)$/)[1]);
+      const body = JSON.parse(opts.body);
+      return { ok: true, status: 200, text: async () => JSON.stringify({ id, state: body.state }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${u}`);
+  };
+  const srv = await listen();
+  try {
+    const adv = await call(srv, 'POST', '/cli/sprint/advance', { token: TOKEN, body: { board: 'Team Scrum Board' } });
+    assert.equal(adv.status, 200); // partial is a 200 with a failed flag, not an HTTP error
+    assert.equal(adv.body.close.ok, true);
+    assert.equal(adv.body.start.ok, false);
+    assert.match(adv.body.start.error, /no future sprint to start/);
+    assert.equal(adv.body.failed, true);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});

@@ -36,6 +36,9 @@ const POLICY = Object.freeze({
   create: { scopes: ['team'] },
   'sprint-create': { scopes: ['team'] },
   'sprint-bulk-create': { scopes: ['team'] },
+  'sprint-close': { scopes: ['team'] },
+  'sprint-start': { scopes: ['team'] },
+  'sprint-advance': { scopes: ['team'] },
 });
 
 // Wired but empty — see the header.

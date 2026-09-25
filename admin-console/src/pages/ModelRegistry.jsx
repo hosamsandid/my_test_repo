@@ -30,6 +30,7 @@ import {
   probeNote,
   probeTitle,
   probeRequest,
+  probeResultMessage,
 } from './llm-probe-state';
 import { groupAgentsByTeam, hiddenAgentsNotice, boundAgentsLead, respawnFailureLead } from './group-agents-by-team.js';
 import { describeSubmitState } from './model-provider-submit-state.js';
@@ -373,13 +374,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
     try {
       const { path, body } = probeRequest(probeForm, 'test');
       const r = await apiCall('POST', path, body);
-      setProbeMsg({
-        ok: r.ok,
-        text: r.ok
-          ? `OK (HTTP ${r.status}) — ${r.url}`
-            + (r.noModelList ? ' — this endpoint does not expose a model list; enter the model name(s) manually.' : '')
-          : `Failed: ${r.error || 'HTTP ' + r.status} (${r.url})`,
-      });
+      setProbeMsg(probeResultMessage(r, 'test', { isOauth: probe.isOauth }));
     } catch (e) {
       setProbeMsg({ ok: false, text: e.message });
     } finally {
@@ -401,10 +396,17 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
         setProbeMsg({ ok: true, text: r.message });
       } else {
         setDiscovered(r.models || []);
-        setProbeMsg({ ok: true, text: `Found ${r.count ?? r.models?.length ?? 0} model(s) at ${r.url}` });
+        setProbeMsg({ ok: true, text: `Found ${r.count ?? r.models?.length ?? 0} model(s).` });
       }
     } catch (e) {
-      setProbeMsg({ ok: false, text: e.message });
+      // discover-models answers a failed probe with 502, so apiCall throws; the
+      // verdict code rides on the thrown error (#2460) — render it the same way
+      // the always-200 test route is rendered inline.
+      setProbeMsg(probeResultMessage(
+        { ok: false, reason: e.reason, error: e.serverMessage || e.message },
+        'discover',
+        { isOauth: probe.isOauth },
+      ));
     } finally {
       setProbing(null);
     }
@@ -832,10 +834,19 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
           style={{ padding: 0 }}
         />
         {probeMsg && (
-          <span style={{
-            fontSize: 'var(--eb-text-xs)',
-            color: probeMsg.ok ? 'var(--eb-status-success)' : 'var(--eb-status-error)',
-          }}>{probeMsg.text}</span>
+          <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
+            <span style={{
+              fontSize: 'var(--eb-text-xs)',
+              color: probeMsg.ok ? 'var(--eb-status-success)' : 'var(--eb-status-error)',
+            }}>{probeMsg.text}</span>
+            {/* Raw HTTP/proxy detail kept secondary, never the headline (#2460
+                AC2) — e.g. a LiteLLM "Budget exceeded" body still shows here. */}
+            {probeMsg.detail && (
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                {probeMsg.detail}
+              </span>
+            )}
+          </span>
         )}
         {/* Always name the credential a probe would use, so a 401 can never be
             mistaken for a failed login (#912). */}

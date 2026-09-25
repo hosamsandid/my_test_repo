@@ -86,7 +86,10 @@ const { buildAssistModelOptions } = require('./assist-model-options');
 const llmHealth = require('./llm-health');
 const { normalizeDiscoveredModels } = require('./model-discovery');
 const {
+  PROBE_PLACEHOLDER_MODEL,
+  redactProbePlaceholder,
   isRouteMissingStatus,
+  httpFailureCode,
   classifyMessagesFallback,
   OAUTH_PROBE_SYSTEM,
   isOauthAuthType,
@@ -13274,6 +13277,9 @@ function describeProbeFailure(status, body) {
   } else if (typeof body === 'string' && body.trim()) {
     detail = body.trim();
   }
+  // The probe's internal placeholder model is echoed back in a 404 not_found
+  // body — never let it reach the operator (#2460 AC3).
+  if (detail) detail = redactProbePlaceholder(detail);
   const base = status ? `HTTP ${status}` : 'request failed';
   return detail ? `${base} — ${detail}` : base;
 }
@@ -13301,10 +13307,10 @@ function llmProbeTarget(baseUrl, token, authType) {
 // reachability + auth via the cheapest true POST route, count_tokens, instead
 // of declaring the whole provider broken. See llm-probe-fallback.js for the
 // (unit-tested, pure) response classification.
-async function probeMessagesFallback(baseUrl, headers, system = null) {
+async function probeMessagesFallback(baseUrl, headers, system = null, opts = {}) {
   const url = buildCountTokensUrl(baseUrl);
   const payload = {
-    model: '__aee-probe-placeholder__',
+    model: PROBE_PLACEHOLDER_MODEL,
     messages: [{ role: 'user', content: 'ping' }],
     // Subscription-OAuth probes present the Claude Code identity so they
     // authenticate exactly like real CLI traffic (#2448); the api-key Azure
@@ -13312,8 +13318,10 @@ async function probeMessagesFallback(baseUrl, headers, system = null) {
     ...(system ? { system } : {}),
   };
   const result = await httpPostJson(url, { 'anthropic-version': '2023-06-01', ...headers }, payload);
-  const { ok, error } = classifyMessagesFallback(result, describeProbeFailure);
-  return { ok, url, status: result.status, error };
+  // `oauth` marks the fixed-base subscription probe, where an unknown-model 404
+  // is auth-OK rather than a wrong Base URL (#2460 AC4).
+  const { ok, code, error } = classifyMessagesFallback(result, describeProbeFailure, { oauth: Boolean(opts.oauth) });
+  return { ok, code, url, status: result.status, error };
 }
 
 // The base the fallback messages/count_tokens probe targets — mirrors
@@ -13329,12 +13337,13 @@ async function probeLlmEndpointTest(baseUrl, token, authType) {
   // count_tokens messages route the OAuth flow actually authenticates.
   if (isOauthAuthType(normalizeAuthType(authType))) {
     const headers = token ? oauthProbeHeaders(token) : {};
-    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM);
+    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true });
     return {
       ok: fallback.ok,
       url: fallback.url,
       status: fallback.status,
       error: fallback.error,
+      reason: fallback.code,
       sample: null,
       ...(fallback.ok ? { noModelList: true } : {}),
     };
@@ -13349,6 +13358,7 @@ async function probeLlmEndpointTest(baseUrl, token, authType) {
       url: fallback.url,
       status: fallback.status,
       error: fallback.error,
+      reason: fallback.code,
       sample: null,
       ...(fallback.ok ? { noModelList: true } : {}),
     };
@@ -13358,6 +13368,7 @@ async function probeLlmEndpointTest(baseUrl, token, authType) {
     url,
     status: result.status,
     error: result.error || (ok ? null : describeProbeFailure(result.status, result.body)),
+    reason: ok ? undefined : httpFailureCode(result),
     sample: ok && result.body && typeof result.body === 'object'
       ? Array.isArray(result.body?.data) ? result.body.data.slice(0, 3) : result.body
       : null,
@@ -13386,9 +13397,9 @@ async function probeLlmEndpointDiscover(baseUrl, token, authType) {
           message: 'This endpoint does not expose a model list — enter the model name(s) manually.',
         };
       }
-      return { error: fallback.error, url: fallback.url, status: fallback.status };
+      return { error: fallback.error, url: fallback.url, status: fallback.status, reason: fallback.code };
     }
-    return { error: result.error || describeProbeFailure(result.status, result.body), url, status: result.status };
+    return { error: result.error || describeProbeFailure(result.status, result.body), url, status: result.status, reason: httpFailureCode(result) };
   }
   // OpenAI-compatible shape: { data: [{ id, ... }] }; LiteLLM also exposes
   // model_info on each entry. Normalize to our { id, displayName, kind?,

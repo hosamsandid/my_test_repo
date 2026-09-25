@@ -91,6 +91,10 @@ export async function apiCall(method, url, body) {
       console.error(`[api] ${method} ${url} → ${res.status}: ${technicalMessage}`);
     }
     if (err && err.code) e.code = err.code;
+    // Probe verdict code (#2460) — lets a caller that catches a 502 from
+    // discover-models render the same plain, actionable message as the
+    // always-200 test route does inline.
+    if (err && err.reason) e.reason = err.reason;
     // Carried through for the `id-conflict` shape (#2218) so a caller using
     // apiCall's throw-based contract can still offer an inline re-suggestion,
     // the way the clone/import forms already do over their own raw fetch.

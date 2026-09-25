@@ -1,7 +1,17 @@
 # ---- aee-base: Agent Execution Environment runtime ----
 # Python 3.12 + Node 20 + Claude Code CLI.
 # Used by all three container tiers (bind, clone, image).
-FROM python:3.12-slim AS aee-base
+#
+# The base image is digest-pinned (supply-chain hardening, #2458): the tag stays
+# for readability while the @sha256 pins the exact multi-arch index, so a
+# re-pointed or altered upstream `python:3.12-slim` can never be adopted silently
+# on the next build. To intentionally bump it (e.g. a new Python patch or a
+# security fix), resolve the new digest and replace it below:
+#   docker buildx imagetools inspect python:3.12-slim   # copy the top-level Digest
+# (or `docker pull python:3.12-slim` then `docker inspect --format '{{index .RepoDigests 0}}'`).
+# Same pattern for the digest-pinned toolchain variants and the SHA-pinned GitHub
+# Actions in .github/workflows/*.yml — see docs/supply-chain-pins.md.
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS aee-base
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

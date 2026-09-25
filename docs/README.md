@@ -73,6 +73,7 @@ story end to end and are the closest thing to a user manual.
 | [mcp-servers.md](mcp-servers.md) | Connecting live knowledge sources via MCP |
 | [context-mount.md](context-mount.md) | Giving agents live access to one or more host folders, read-only by default (local env, admin-only) |
 | [agent-toolchains.md](agent-toolchains.md) | Giving an agent a language stack it can actually build with: pinning your project's version, adding a toolchain, locked-down networks |
+| [supply-chain-pins.md](supply-chain-pins.md) | Bumping a pinned build-pipeline revision: SHA-pinned GitHub Actions, the digest-pinned Docker base image, and the Dependabot npm/actions bumps |
 | [agent-chat-troubleshooting.md](agent-chat-troubleshooting.md) | **"My agent doesn't answer"** — the runbook. Start here when something is broken |
 | [hosting/gcp/gke-runbook.md](hosting/gcp/gke-runbook.md) | **GKE hosting runbook** — first-time bootstrap, env-file/credential model, and symptom-keyed troubleshooting for the hosted test/preprod environments |
 | [collaboration-mode-faq.md](collaboration-mode-faq.md) | **Collaboration-mode FAQ** — the common questions about running Agent Studio with a team (concurrency, shared knowledge, credentials, access control), with resolutions and known gaps |

@@ -111,7 +111,7 @@ export default function RepoPropagationDialog({
   if (!open) return null;
 
   const agentCount = agents.length;
-  const lines = catchUp ? [] : repositoryChangeLines(diff, agentCount);
+  const lines = catchUp ? [] : repositoryChangeLines(diff);
   const toDo = catchUp ? 1 : propagatableCount(diff);
   const done = summary !== null || !!err;
 

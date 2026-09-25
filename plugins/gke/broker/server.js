@@ -24,6 +24,7 @@
 const http = require('http');
 
 const {
+  withUnexpectedErrors,
   verifyScopeToken,
   auditWriter,
   maskSecretsOrDefault,
@@ -118,7 +119,10 @@ async function runTool(scopeId, name, args) {
       writeAudit(scopeId, verb || 'kube_read', 'denied');
       return textResult((err && err.message) || String(err), true);
     }
-    const masked = maskSecretsOrDefault(result.output, [token]);
+    // maskSecretsOrDefault(raw, fallback, secrets). Passing the token as the
+    // second argument made it the FALLBACK: nothing was masked, and an empty
+    // read handed the live cluster bearer straight back to the agent.
+    const masked = maskSecretsOrDefault(result.output, '(no output)', [token]);
     writeAudit(scopeId, verb || 'kube_read', result.ok ? 'ok' : 'error');
     return textResult(masked, !result.ok);
   }
@@ -247,12 +251,7 @@ async function handleRequest(req, res) {
   await transport.handleRequest(req, res);
 }
 
-const httpServer = http.createServer((req, res) => {
-  handleRequest(req, res).catch((err) => {
-    if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
-    try { res.end(JSON.stringify({ error: (err && err.message) || String(err) })); } catch { /* ignore */ }
-  });
-});
+const httpServer = http.createServer(withUnexpectedErrors('gke-broker', handleRequest));
 
 if (require.main === module) {
   httpServer.listen(PORT, () => process.stdout.write(`[gke-broker] listening on :${PORT}\n`));

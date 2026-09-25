@@ -23,6 +23,11 @@ import {
   resolveInitialFontSize, loadStoredFontSize, saveStoredFontSize,
   notifyFontSizeChanged,
 } from '../pages/agent-chat/chat-font-size.js';
+import {
+  resolveInitialNotifyEnabled, loadStoredNotifyEnabled, saveStoredNotifyEnabled,
+  notifyNotifySettingChanged, notificationsSupported, getNotificationPermission,
+  requestNotificationPermission,
+} from '../pages/agent-chat/agent-back-notification.js';
 
 /**
  * SettingsModal — the user Settings dialog (#1802, UX-1 foundation).
@@ -171,25 +176,126 @@ function BehaviorSettings() {
   }
 
   return (
+    <>
+      <div style={settingRowStyle}>
+        <div>
+          <div style={settingLabelStyle}>Send on Enter</div>
+          <div style={settingHintStyle}>
+            Choose what pressing Enter does in the chat composer. IDE style keeps
+            Enter for newlines ({isMac ? '⌘' : 'Ctrl'}+↩ sends); Chat style sends
+            on Enter (Shift+↩ for a newline).
+          </div>
+        </div>
+        <select
+          value={sendKeybinding}
+          onChange={(e) => change(e.target.value)}
+          aria-label="Enter key sends or inserts a newline"
+          style={selectStyle}
+        >
+          {options.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </div>
+      <NotifyOnBackSetting />
+    </>
+  );
+}
+
+/**
+ * "Notify me when an agent I messaged is back" (#2397). Off by default; turning
+ * it on requests browser notification permission. Persists to localStorage +
+ * server (like the font size) and broadcasts NOTIFY_SETTING_CHANGED_EVENT so the
+ * app-level provider starts/stops firing immediately, without a reload (AC10).
+ * A browser-level block is surfaced with a hint on how to re-enable (AC8).
+ */
+function NotifyOnBackSetting() {
+  const { user, patchUser } = useAuth();
+  const username = user?.username;
+  const hasServerRecord = user != null && user.userId != null;
+
+  const [enabled, setEnabled] = useState(() => resolveInitialNotifyEnabled({
+    sessionValue: user?.chatNotifyOnBack,
+    storedValue: loadStoredNotifyEnabled(username),
+    hasServerRecord,
+  }));
+  const supported = notificationsSupported();
+  const [permission, setPermission] = useState(() => getNotificationPermission());
+
+  // #2409 AC4: the browser's per-site grant can be revoked outside the app (site
+  // settings, org policy, a browser auto-revoke) long after the toggle was turned
+  // on. Re-read it whenever the user returns to this tab so the row reflects a
+  // freshly-blocked state instead of continuing to claim the feature is active.
+  useEffect(() => {
+    if (!supported) return undefined;
+    const recheck = () => setPermission(getNotificationPermission());
+    window.addEventListener('focus', recheck);
+    document.addEventListener('visibilitychange', recheck);
+    return () => {
+      window.removeEventListener('focus', recheck);
+      document.removeEventListener('visibilitychange', recheck);
+    };
+  }, [supported]);
+
+  function persist(next) {
+    setEnabled(next);
+    saveStoredNotifyEnabled(username, next);
+    // Reflect the new value in the in-session AuthContext.user right away so
+    // reopening Settings (which remounts and re-reads user.chatNotifyOnBack)
+    // shows the correct state — even if the PUT below is still in flight (#2402).
+    patchUser({ chatNotifyOnBack: next });
+    notifyNotifySettingChanged(next);
+    apiCall('PUT', '/api/me/preferences', { chatNotifyOnBack: next }).catch(() => {});
+  }
+
+  async function toggle(wantOn) {
+    if (!wantOn) { persist(false); return; }
+    if (!supported) return; // no API — leave off, the hint explains it
+    let perm = getNotificationPermission();
+    if (perm === 'default') {
+      perm = await requestNotificationPermission();
+      setPermission(perm);
+    }
+    if (perm === 'granted') {
+      persist(true);
+    } else {
+      // Denied/blocked at the browser level: reflect the block, don't persist an
+      // on state the feature can't honour, and never re-prompt (AC8, edge case).
+      setPermission(perm);
+      persist(false);
+    }
+  }
+
+  const blocked = supported && permission === 'denied';
+
+  return (
     <div style={settingRowStyle}>
       <div>
-        <div style={settingLabelStyle}>Send on Enter</div>
+        <div style={settingLabelStyle}>Notify when an agent you messaged is back</div>
         <div style={settingHintStyle}>
-          Choose what pressing Enter does in the chat composer. IDE style keeps
-          Enter for newlines ({isMac ? '⌘' : 'Ctrl'}+↩ sends); Chat style sends
-          on Enter (Shift+↩ for a newline).
+          {!supported ? (
+            'This browser does not support notifications.'
+          ) : blocked ? (
+            'Notifications are blocked for this site. Enable them in your browser’s '
+            + 'site settings (the padlock in the address bar), then turn this on again.'
+          ) : (
+            'Shows a browser notification when an agent you personally messaged '
+            + 'finishes — only while this tab isn’t the one you’re looking at. '
+            + 'Turning it on asks your browser for permission.'
+          )}
         </div>
       </div>
-      <select
-        value={sendKeybinding}
-        onChange={(e) => change(e.target.value)}
-        aria-label="Enter key sends or inserts a newline"
-        style={selectStyle}
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>{o.label}</option>
-        ))}
-      </select>
+      <input
+        type="checkbox"
+        role="switch"
+        aria-label="Notify when an agent you messaged is back"
+        // When the browser grant is blocked the feature cannot fire, so show the
+        // switch as off rather than silently claiming it is active (#2409 AC4).
+        checked={enabled && !blocked}
+        disabled={!supported || blocked}
+        onChange={(e) => toggle(e.target.checked)}
+        style={{ flexShrink: 0, width: 18, height: 18, cursor: (!supported || blocked) ? 'not-allowed' : 'pointer' }}
+      />
     </div>
   );
 }
@@ -207,7 +313,7 @@ const THEME_OPTIONS = [
  * FONT_SIZE_CHANGED_EVENT custom event (same pattern as send-keybinding).
  */
 function DisplaySettings() {
-  const { user } = useAuth();
+  const { user, patchUser } = useAuth();
   const { theme, setTheme } = useTheme();
   const username = user?.username;
   const hasServerRecord = user != null && user.userId != null;
@@ -223,6 +329,9 @@ function DisplaySettings() {
     if (next === fontSize) return;
     setFontSize(next);
     saveStoredFontSize(username, next);
+    // Same stale-session fix as the notify toggle: reflect the new size in the
+    // in-session user so reopening Settings reads the fresh value (#2402).
+    patchUser({ chatFontSize: next });
     notifyFontSizeChanged(next);
     apiCall('PUT', '/api/me/preferences', { chatFontSize: next }).catch(() => {});
   }

@@ -20,6 +20,28 @@ export function filterItems(items, gate) {
   return (items || []).filter(item => itemVisible(item, gate));
 }
 
+// Credential-page consolidation (#2360, behind AEE_RESOURCE_ACCESS_V2). Once the
+// unified resource-access model is on, the personal-credential self-service page
+// (`/my-credentials`) is DISSOLVED: its function folds into the per-type pages,
+// which open to every authenticated user (a plain member manages their own
+// personal keys/tokens there, row-filtered server-side by `visibleCredential`).
+// So under v2 this drops the My Credentials entry and strips the `credAdmin` gate
+// from SSH Keys / GitHub Tokens AND Model Providers — the model page is opened the
+// same way, its rows filtered server-side by `providerReadVisible` (global + own
+// personal + team providers you use, read-only). Off the flag it is a no-op —
+// byte-identical to the static nav. Pure so it is unit-tested with the other
+// nav helpers.
+export function consolidateCredentialNav(sections, { v2 = false } = {}) {
+  if (!v2) return sections || [];
+  const OPEN = new Set(['/models', '/ssh-keys', '/github-tokens']);
+  return (sections || []).map(section => ({
+    ...section,
+    items: (section.items || [])
+      .filter(item => item.path !== '/my-credentials')
+      .map(item => (OPEN.has(item.path) && item.credAdmin ? { ...item, credAdmin: false } : item)),
+  }));
+}
+
 // Apply the role gate to a list of { key, items } sections and drop any that end
 // up empty — so a group (or bottom cluster) with no visible items for the current
 // role renders no header at all (AC9, "no empty groups").

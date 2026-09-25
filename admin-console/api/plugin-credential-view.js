@@ -45,7 +45,11 @@ function redactScopeForViewer(scope, canManage) {
   const keys = scope.keys && typeof scope.keys === 'object' ? scope.keys : {};
   const redacted = {};
   for (const [k, meta] of Object.entries(keys)) {
-    redacted[k] = meta && typeof meta === 'object' ? { ...meta, preview: null } : meta;
+    // A non-manager sees neither the preview nor the real stored value of a
+    // non-secret field (#2449): configuration is a Team-Admin concern.
+    redacted[k] = meta && typeof meta === 'object'
+      ? { ...meta, preview: null, ...(Object.prototype.hasOwnProperty.call(meta, 'value') ? { value: null } : {}) }
+      : meta;
   }
   return { ...scope, keys: redacted };
 }

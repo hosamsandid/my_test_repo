@@ -102,7 +102,7 @@ function createPluginCredentialWiring(deps) {
     if (req.method === 'GET' && !scopeId) {
       sendJson(res, 200, {
         pluginId,
-        credentials: declared.map((c) => ({ key: c.key, required: c.required === true, description: c.description || null })),
+        credentials: declared.map((c) => ({ key: c.key, required: c.required === true, description: c.description || null, secret: c.secret !== false })),
         scopes: grantedScopes.map((sid) => ({
           scopeId: sid, teamName: teamName(sid),
           ...credentialStore.meta(pluginId, sid, declared),

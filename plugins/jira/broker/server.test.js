@@ -152,7 +152,7 @@ test('scope-credentials: the orchestrator push populates the per-scope map; reso
     assert.equal(r.status, 200);
     assert.equal(r.body.scopes, 2);
     assert.equal(r.body.usable, 1); // only team-1 is complete
-    assert.deepEqual(broker.resolveCredential('team-1'), { siteUrl: 'acme', email: 'a@b.c', apiToken: 'tok' });
+    assert.deepEqual(broker.resolveCredential('team-1'), { siteUrl: 'acme', email: 'a@b.c', apiToken: 'tok', readableCustomFields: [], writableCustomFields: [] });
     assert.equal(broker.resolveCredential('team-2'), null); // incomplete → not usable
     assert.equal(broker.resolveCredential('team-9'), null); // unknown scope
 
@@ -177,7 +177,7 @@ test('scope-credentials: a granted TEAM token cannot rewrite the map (cross-tena
       });
       assert.equal(r.status, 401);
     }
-    assert.deepEqual(broker.resolveCredential('team-2'), { siteUrl: 'https://b.example', email: 'b@b.c', apiToken: 'tokB' });
+    assert.deepEqual(broker.resolveCredential('team-2'), { siteUrl: 'https://b.example', email: 'b@b.c', apiToken: 'tokB', readableCustomFields: [], writableCustomFields: [] });
     // leave the map as the later tests expect it (empty)
     await call(srv, 'PUT', '/internal/scope-credentials', { token: INTERNAL, body: { scopes: {} } });
   } finally { srv.close(); }
@@ -215,10 +215,176 @@ test('cli reads: /projects, /list, /show need the per-scope credential and call 
     assert.equal(show.status, 200);
     assert.equal(show.body.issue.key, 'KAN-6');
 
+    // arbitrary JQL search, scoped by the credential, shaped like /list
+    const search = await call(srv, 'GET', '/cli/search?jql=issuetype+%3D+Story&limit=5', { token: TOKEN });
+    assert.equal(search.status, 200);
+    assert.equal(search.body.jql, 'issuetype = Story');
+    assert.equal(search.body.issues[0].key, 'KAN-6');
+
+    // a search with no --jql → 400 (the credential is fine, the query is missing)
+    const noJql = await call(srv, 'GET', '/cli/search?jql=', { token: TOKEN });
+    assert.equal(noJql.status, 400);
+
     // a scope with no credential → 400 no-credential (not a 500)
     const nocred = await call(srv, 'GET', '/cli/projects', { token: OTHER });
     assert.equal(nocred.status, 400);
     assert.equal(nocred.body.code, 'no-credential');
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli reads: /statuses returns a project\'s workflow statuses grouped by issue type (#2421)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1') || String(url).includes('localhost')) return origFetch(url, opts);
+    if (String(url).match(/\/rest\/api\/3\/project\/KAN\/statuses$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify([
+        { name: 'Story', statuses: [{ name: 'To Do', statusCategory: { key: 'new' } }, { name: 'Done', statusCategory: { key: 'done' } }] },
+      ]) };
+    }
+    return { ok: false, status: 404, text: async () => 'not found' };
+  };
+  const srv = await listen();
+  try {
+    const ok = await call(srv, 'GET', '/cli/statuses?project=KAN', { token: TOKEN });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.project, 'KAN');
+    assert.deepEqual(ok.body.statuses, [
+      { issueType: 'Story', statuses: [{ name: 'To Do', category: 'new' }, { name: 'Done', category: 'done' }] },
+    ]);
+
+    // a missing --project is a 400, never a Jira call
+    const noProject = await call(srv, 'GET', '/cli/statuses', { token: TOKEN });
+    assert.equal(noProject.status, 400);
+
+    // a scope with no credential → 400 no-credential
+    const nocred = await call(srv, 'GET', '/cli/statuses?project=KAN', { token: OTHER });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-credential');
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli reads: custom fields via the admin allow-list and per-request --fields (#2416)', async () => {
+  // The admin configures a default readable custom field "Team"; a per-request
+  // --fields adds "Priority" on top.
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok', 'readable-custom-fields': 'Team' });
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1') || String(url).includes('localhost')) return origFetch(url, opts);
+    if (String(url).match(/\/rest\/api\/3\/field$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify([
+        { id: 'customfield_20001', name: 'Team' },
+        { id: 'customfield_20002', name: 'Priority' },
+      ]) };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      key: 'KAN-6', fields: { summary: 'Login', status: { name: 'Ready for Dev' }, customfield_20001: { title: 'Payments' }, customfield_20002: null },
+    }) };
+  };
+  const srv = await listen();
+  try {
+    // No --fields: the admin default set (Team) is surfaced automatically.
+    const dflt = await call(srv, 'GET', '/cli/show?issue=KAN-6', { token: TOKEN });
+    assert.equal(dflt.status, 200);
+    assert.deepEqual(dflt.body.issue.customFields, { Team: { value: 'Payments' } });
+
+    // --fields adds Priority (empty → null) on top of the default Team.
+    const withFields = await call(srv, 'GET', '/cli/show?issue=KAN-6&fields=Priority', { token: TOKEN });
+    assert.equal(withFields.status, 200);
+    assert.deepEqual(withFields.body.issue.customFields, { Team: { value: 'Payments' }, Priority: null });
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli reads: /attachment fetches one attachment by id, cred-gated, 404 for an unknown id', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1') || String(url).includes('localhost')) return origFetch(url, opts);
+    if (url.includes('?fields=attachment')) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({
+        key: 'KAN-6', fields: { attachment: [{ id: '10312', filename: 'notes.md', mimeType: 'text/markdown', size: 5, author: { displayName: 'Jane' } }] },
+      }) };
+    }
+    // attachment content download
+    return { ok: true, status: 200, headers: { get: () => 'text/markdown' }, arrayBuffer: async () => Buffer.from('hello', 'utf8') };
+  };
+  const srv = await listen();
+  try {
+    const got = await call(srv, 'GET', '/cli/attachment?issue=KAN-6&id=10312', { token: TOKEN });
+    assert.equal(got.status, 200);
+    assert.equal(got.body.attachment.encoding, 'text');
+    assert.equal(got.body.attachment.content, 'hello');
+    assert.equal(got.body.attachment.filename, 'notes.md');
+
+    // an id not on the issue → 404 domain error, not a 500
+    const missing = await call(srv, 'GET', '/cli/attachment?issue=KAN-6&id=999', { token: TOKEN });
+    assert.equal(missing.status, 404);
+    assert.match(missing.body.error, /not on issue KAN-6/);
+
+    // a scope with no credential → 400 no-credential
+    const nocred = await call(srv, 'GET', '/cli/attachment?issue=KAN-6&id=10312', { token: OTHER });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-credential');
+
+    // a missing id arg → 400
+    assert.equal((await call(srv, 'GET', '/cli/attachment?issue=KAN-6', { token: TOKEN })).status, 400);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli writes: /attachment/add uploads one file per call server-side, cred-gated, 4xx mapped (#2408)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'acme', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const seen = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1') || String(url).includes('localhost')) return origFetch(url, opts);
+    seen.push({ url: String(url), method: opts && opts.method, token: opts.headers && opts.headers['X-Atlassian-Token'], isForm: opts.body instanceof FormData });
+    if (String(url).includes('/NOPE-1/')) return { ok: false, status: 404, text: async () => 'no issue' };
+    return { ok: true, status: 200, text: async () => JSON.stringify([{ id: 30011, filename: 'part-1.pdf', mimeType: 'application/pdf', size: 3 }]) };
+  };
+  const srv = await listen();
+  try {
+    const contentBase64 = Buffer.from('abc').toString('base64');
+    const ok = await call(srv, 'POST', '/cli/attachment/add', { token: TOKEN, body: { issue: 'KAN-6', filename: 'part-1.pdf', contentBase64 } });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.attachment.id, '30011');
+    assert.equal(ok.body.attachment.filename, 'part-1.pdf');
+    assert.match(seen[0].url, /\/rest\/api\/3\/issue\/KAN-6\/attachments$/);
+    assert.equal(seen[0].method, 'POST');
+    assert.equal(seen[0].token, 'no-check');
+    assert.equal(seen[0].isForm, true);
+
+    // an unknown issue → mapped 404, not a 500 (AC4)
+    const missing = await call(srv, 'POST', '/cli/attachment/add', { token: TOKEN, body: { issue: 'NOPE-1', filename: 'a.txt', contentBase64 } });
+    assert.equal(missing.status, 404);
+    assert.match(missing.body.error, /not found/i);
+
+    // missing filename / content → 400 before any upload
+    assert.equal((await call(srv, 'POST', '/cli/attachment/add', { token: TOKEN, body: { issue: 'KAN-6', contentBase64 } })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/attachment/add', { token: TOKEN, body: { issue: 'KAN-6', filename: 'a.txt' } })).status, 400);
+
+    // no credential → 400 no-credential
+    const nocred = await call(srv, 'POST', '/cli/attachment/add', { token: OTHER, body: { issue: 'KAN-6', filename: 'a.txt', contentBase64 } });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-credential');
+
+    // a GET on the upload path → 404 (upload is POST only)
+    assert.equal((await call(srv, 'GET', '/cli/attachment/add', { token: TOKEN })).status, 404);
   } finally {
     global.fetch = origFetch;
     broker.scopeCredentials.delete('team-1');
@@ -289,6 +455,191 @@ test('cli writes: /update replaces the description through the client, role- and
     const nocred = await call(srv, 'POST', '/cli/update', { token: OTHER, body: { issue: 'X-1', description: 'y' } });
     assert.equal(nocred.status, 400);
     assert.equal(nocred.body.code, 'no-credential');
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli writes: /set-field sets an allow-listed custom field, refuses one that is not (#2417)', async () => {
+  // The admin sanctions "Team" as writable; "Priority" is not on the list. A
+  // distinct site keeps the process-lifetime field catalog off the schema-less
+  // fixture other tests cached for `acme` (real Jira always returns the schema).
+  broker.scopeCredentials.set('team-1', { 'site-url': 'setfieldco', email: 'a@b.c', 'api-token': 'tok', 'writable-custom-fields': 'Team' });
+  const origFetch = global.fetch;
+  const seen = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    seen.push({ url: String(url), method: opts && opts.method, body: opts && opts.body });
+    if (String(url).match(/\/rest\/api\/3\/field$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify([
+        { id: 'customfield_20001', name: 'Team', schema: { type: 'team' } },
+      ]) };
+    }
+    if (opts && opts.method === 'PUT') return { ok: true, status: 204, text: async () => '' };
+    // idempotency pre-read: the field is currently unset
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'KAN-6', fields: { customfield_20001: null } }) };
+  };
+  const srv = await listen();
+  try {
+    const ok = await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Team', value: '42' } });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(ok.body, { issueKey: 'KAN-6', field: 'Team', changed: true, value: '42' });
+    const put = seen.find((s) => s.method === 'PUT');
+    assert.deepEqual(JSON.parse(put.body), { fields: { customfield_20001: { id: '42' } } });
+
+    // a field NOT on the allow-list → 403, no Jira write (acceptance)
+    const refused = await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Priority', value: 'High' } });
+    assert.equal(refused.status, 403);
+    assert.match(refused.body.error, /not writable/);
+
+    // missing field / value → 400 before any Jira call
+    assert.equal((await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', value: 'x' } })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Team' } })).status, 400);
+
+    // a scope with no credential → 400 no-credential
+    const nocred = await call(srv, 'POST', '/cli/set-field', { token: OTHER, body: { issue: 'X-1', field: 'Team', value: '1' } });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-credential');
+
+    // a GET on the write path → 404 (set-field is POST only)
+    assert.equal((await call(srv, 'GET', '/cli/set-field', { token: TOKEN })).status, 404);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli writes: /set-field with an empty writable-custom-fields allow-list permits any field (#2449)', async () => {
+  // Empty/unset allow-list now means UNRESTRICTED: a field that resolves via the
+  // site catalog is writable even though no admin named it. A distinct site keeps
+  // the process-lifetime field catalog off other tests' cached fixtures.
+  broker.scopeCredentials.set('team-1', { 'site-url': 'unrestrictedco', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const seen = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    seen.push({ url: String(url), method: opts && opts.method, body: opts && opts.body });
+    if (String(url).match(/\/rest\/api\/3\/field$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify([
+        { id: 'customfield_30001', name: 'Team', schema: { type: 'team' } },
+      ]) };
+    }
+    if (opts && opts.method === 'PUT') return { ok: true, status: 204, text: async () => '' };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ key: 'KAN-6', fields: { customfield_30001: null } }) };
+  };
+  const srv = await listen();
+  try {
+    // no admin ever named "Team", yet with an empty allow-list the write succeeds
+    const ok = await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Team', value: '42' } });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(ok.body, { issueKey: 'KAN-6', field: 'Team', changed: true, value: '42' });
+    const put = seen.find((s) => s.method === 'PUT');
+    assert.deepEqual(JSON.parse(put.body), { fields: { customfield_30001: { id: '42' } } });
+
+    // an unknown/unresolvable field is still a 400 regardless of the allow-list (AC3)
+    const unknown = await call(srv, 'POST', '/cli/set-field', { token: TOKEN, body: { issue: 'KAN-6', field: 'Nope', value: 'x' } });
+    assert.equal(unknown.status, 400);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli writes: /create-epic with an empty writable-custom-fields allow-list permits any custom field (#2449)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'unrestrictedepicco', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const created = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    if (String(url).match(/\/rest\/api\/3\/field$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify([
+        { id: 'customfield_30001', name: 'Team', schema: { type: 'team' } },
+      ]) };
+    }
+    if (opts && opts.method === 'POST' && String(url).match(/\/rest\/api\/3\/issue$/)) {
+      const body = JSON.parse(opts.body);
+      created.push(body.fields);
+      const isEpic = body.fields.issuetype.name === 'Epic';
+      return { ok: true, status: 201, text: async () => JSON.stringify({ key: isEpic ? 'KAN-1' : `KAN-${created.length}` }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  };
+  const srv = await listen();
+  try {
+    const ok = await call(srv, 'POST', '/cli/create-epic', {
+      token: TOKEN,
+      body: { project: 'KAN', epic: { summary: 'Ask' }, stories: [{ summary: 'Task', fields: { Team: '42' } }] },
+    });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.failed, 0);
+    const story = created.find((f) => f.issuetype.name === 'Story');
+    assert.deepEqual(story.customfield_30001, { id: '42' });
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
+});
+
+test('cli writes: /create-epic creates an epic + child stories, allow-list-gating custom fields (#2424)', async () => {
+  // A distinct site keeps the process-lifetime field catalog off another test's
+  // schema-less `acme` fixture (real Jira always returns the schema).
+  broker.scopeCredentials.set('team-1', { 'site-url': 'createco', email: 'a@b.c', 'api-token': 'tok', 'writable-custom-fields': 'Team' });
+  const origFetch = global.fetch;
+  const created = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    if (String(url).match(/\/rest\/api\/3\/field$/)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify([
+        { id: 'customfield_20001', name: 'Team', schema: { type: 'team' } },
+      ]) };
+    }
+    if (opts && opts.method === 'POST' && String(url).match(/\/rest\/api\/3\/issue$/)) {
+      const body = JSON.parse(opts.body);
+      created.push(body.fields);
+      const isEpic = body.fields.issuetype.name === 'Epic';
+      return { ok: true, status: 201, text: async () => JSON.stringify({ key: isEpic ? 'KAN-1' : `KAN-${created.length}` }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${url}`);
+  };
+  const srv = await listen();
+  try {
+    const ok = await call(srv, 'POST', '/cli/create-epic', {
+      token: TOKEN,
+      body: { project: 'KAN', epic: { summary: 'Ask' }, stories: [{ summary: 'Task', fields: { Team: '42' } }] },
+    });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.epic.key, 'KAN-1');
+    assert.equal(ok.body.created, 2);
+    assert.equal(ok.body.failed, 0);
+    assert.equal(ok.body.stories[0].key, 'KAN-2');
+    // the story create linked to the epic (native parent) and shaped Team
+    const story = created.find((f) => f.issuetype.name === 'Story');
+    assert.deepEqual(story.parent, { key: 'KAN-1' });
+    assert.deepEqual(story.customfield_20001, { id: '42' });
+
+    // a custom field NOT on the allow-list → 403, nothing created
+    const refused = await call(srv, 'POST', '/cli/create-epic', {
+      token: TOKEN,
+      body: { project: 'KAN', epic: { summary: 'E' }, stories: [{ summary: 'S', fields: { Priority: 'High' } }] },
+    });
+    assert.equal(refused.status, 403);
+
+    // missing project / epic → 400
+    assert.equal((await call(srv, 'POST', '/cli/create-epic', { token: TOKEN, body: { epic: { summary: 'E' } } })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/create-epic', { token: TOKEN, body: { project: 'KAN' } })).status, 400);
+
+    // no credential → 400 no-credential
+    const nocred = await call(srv, 'POST', '/cli/create-epic', { token: OTHER, body: { project: 'X', epic: { summary: 'E' } } });
+    assert.equal(nocred.status, 400);
+    assert.equal(nocred.body.code, 'no-credential');
+
+    // GET on the create path → 404 (POST only)
+    assert.equal((await call(srv, 'GET', '/cli/create-epic', { token: TOKEN })).status, 404);
   } finally {
     global.fetch = origFetch;
     broker.scopeCredentials.delete('team-1');
@@ -551,4 +902,72 @@ test('teardown-scope reaps one scope\'s watch + inbox + credential, bearer-authe
     assert.equal(broker.inboxStore.count('team-2'), 0);
     assert.equal(broker.scopeCredentials.has('team-2'), false);
   } finally { srv.close(); }
+});
+
+test('cli sprint: /sprint/list reads a board sprints; /sprint/create + /sprint/bulk-create write (#2450)', async () => {
+  broker.scopeCredentials.set('team-1', { 'site-url': 'sprintco', email: 'a@b.c', 'api-token': 'tok' });
+  const origFetch = global.fetch;
+  const created = [];
+  global.fetch = async (url, opts) => {
+    if (String(url).includes('127.0.0.1')) return origFetch(url, opts);
+    const u = String(url);
+    if (/\/rest\/agile\/1\.0\/board\?/.test(u)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [{ id: 42, name: 'Team Scrum Board', type: 'scrum' }] }) };
+    }
+    if (/\/rest\/agile\/1\.0\/board\/42\/sprint/.test(u)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ isLast: true, values: [
+        { id: 1, name: 'Prev', state: 'future', startDate: '2026-10-19T00:00:00.000Z', endDate: '2026-10-25T00:00:00.000Z', originBoardId: 42 },
+      ] }) };
+    }
+    if (/\/rest\/agile\/1\.0\/sprint$/.test(u) && opts.method === 'POST') {
+      const body = JSON.parse(opts.body);
+      created.push(body);
+      return { ok: true, status: 201, text: async () => JSON.stringify({ id: 100 + created.length, name: body.name, state: 'future', originBoardId: 42 }) };
+    }
+    throw new Error(`unexpected ${opts && opts.method} ${u}`);
+  };
+  const srv = await listen();
+  try {
+    // read: list sprints on the board
+    const listed = await call(srv, 'GET', '/cli/sprint/list?board=' + encodeURIComponent('Team Scrum Board'), { token: TOKEN });
+    assert.equal(listed.status, 200);
+    assert.equal(listed.body.board.id, '42');
+    assert.equal(listed.body.sprints[0].name, 'Prev');
+
+    // write: create one sprint
+    const one = await call(srv, 'POST', '/cli/sprint/create', {
+      token: TOKEN, body: { board: 'Team Scrum Board', name: 'Sprint 12', start: '2026-10-26', end: '2026-11-01' },
+    });
+    assert.equal(one.status, 200);
+    assert.equal(one.body.sprint.id, '101');
+    assert.deepEqual(created[created.length - 1], {
+      name: 'Sprint 12', originBoardId: 42, startDate: '2026-10-26T00:00:00.000Z', endDate: '2026-11-01T00:00:00.000Z',
+    });
+
+    // write: bulk-create continues from Prev's end (Mon 2026-10-26) through the target date
+    const bulk = await call(srv, 'POST', '/cli/sprint/bulk-create', {
+      token: TOKEN, body: { board: 'Team Scrum Board', nameTemplate: 'Acc2.0 {MMM}_{weekOfMonth}', until: '2026-11-08' },
+    });
+    assert.equal(bulk.status, 200);
+    assert.equal(bulk.body.requested, 2);
+    assert.equal(bulk.body.created, 2);
+    assert.equal(bulk.body.sprints[0].name, 'Acc2.0 Oct_4');
+    assert.equal(bulk.body.sprints[1].name, 'Acc2.0 Nov_1');
+
+    // board name required
+    assert.equal((await call(srv, 'GET', '/cli/sprint/list', { token: TOKEN })).status, 400);
+    assert.equal((await call(srv, 'POST', '/cli/sprint/create', { token: TOKEN, body: { name: 'x' } })).status, 400);
+
+    // a scope with no credential → 400 no-credential (both read and write)
+    assert.equal((await call(srv, 'GET', '/cli/sprint/list?board=B', { token: OTHER })).body.code, 'no-credential');
+    const nocred = await call(srv, 'POST', '/cli/sprint/bulk-create', { token: OTHER, body: { board: 'B', nameTemplate: 'S{n}', until: '2026-01-01' } });
+    assert.equal(nocred.body.code, 'no-credential');
+
+    // a GET on a write path → 404 (POST only)
+    assert.equal((await call(srv, 'GET', '/cli/sprint/create', { token: TOKEN })).status, 404);
+  } finally {
+    global.fetch = origFetch;
+    broker.scopeCredentials.delete('team-1');
+    srv.close();
+  }
 });

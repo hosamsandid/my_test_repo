@@ -13,7 +13,7 @@ const {
 } = require("./initial-admin-seed");
 const teamAdminSuccession = require("./team-admin-succession");
 const { resolveAgentTenant, planTenantBackfill } = require("./agent-tenant");
-const { needsAdoption, planAdoption, planBootstrapMembership } = require("./default-team-adoption");
+const { needsAdoption, planAdoption } = require("./default-team-adoption");
 const { makeSkillSourceResolver, parseSkillDescription } = require("./skill-source");
 const {createAnthropicProxyServer} = require('./anthropic-proxy')
 const {
@@ -93,6 +93,20 @@ const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require("./prom
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const credentialResolution = require("./credential-resolution");
+// Unified resource-access model switch (#2356, epic #2361, concept #2349).
+// Off by default: the redesign's runtime resolution (the global service
+// credential fallback below) and lifecycle sweeps (PR5) stay dark until an
+// operator opts in — an upgraded stack keeps today's behaviour byte-identical.
+// See resource-access-mode.js (byte-mirrored in admin-console/api).
+const { resolveResourceAccessV2, resourceAccessModeLogLine } = require("./resource-access-mode");
+const RESOURCE_ACCESS_V2 = resolveResourceAccessV2(process.env);
+// §14 / E10 (#2360): pure policy for a personal provider used as a team default
+// across the team-of-one → multi-user transition. Byte-mirrored in admin-console.
+const { personalDefaultTransitionRisk } = require("./provider-lend-policy");
+const { resolveAgentTeam } = require("./agent-team");
+// Pure planner for the identity-LEND binding sweep on membership removal
+// (#2358 E1); the applier `sweepMembershipBindings` below supplies the live IO.
+const membershipSweep = require("./membership-sweep");
 const ownershipMigration = require("./ownership-migration");
 const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
@@ -415,6 +429,55 @@ function resolveLlmBindingForAgent(cfg, env) {
     ? `agent=${cfg.id} override`
     : `env=${env?.id}`;
   return resolveLlmBinding(endpointId, env?.defaultModelId, { context: ctx });
+}
+
+// The RAW endpoint record (scope/authType/userId top-level), for policy checks
+// that resolveLlmBinding's normalized projection drops. Best-effort — an
+// unreadable/absent index yields null.
+function readLlmEndpointRecord(id) {
+  if (!id) return null;
+  try {
+    const list = JSON.parse(fs.readFileSync(LLM_ENDPOINTS_INDEX, "utf8"));
+    return Array.isArray(list) ? (list.find(e => e && e.id === id) || null) : null;
+  } catch {
+    return null;
+  }
+}
+
+// §14 / E10 (behind AEE_RESOURCE_ACCESS_V2): adding a SECOND human to a squad
+// whose shared model-provider default is a personal SUBSCRIPTION (oauth) seat
+// would silently share a single-user seat (E9, Anthropic Consumer Terms) — a
+// HARD refusal at the membership boundary. A personal API-KEY default is only
+// fragile (a soft notice, surfaced in model-options), never blocked here.
+// Returns { message } to refuse, or null to proceed. Fail-open: any read error
+// (or a non-squad human team) skips the guard — it must never break a legit add.
+function personalOauthLendBlockOnMembershipAdd(teamId, newUserId) {
+  if (!RESOURCE_ACCESS_V2 || !teamId || !newUserId) return null;
+  try {
+    const current = teamsStore.listMemberships({ teamId });
+    const already = current.some(m => m && m.userId === newUserId);
+    const after = already ? current.length : current.length + 1;
+    if (after < 2) return null; // still a team-of-one after the add — lend is fine
+    const teamCfg = loadAgentConfig(teamId);
+    if (!teamCfg || teamCfg.role !== "team" || !teamCfg.environmentId) return null;
+    const env = loadEnvironment(teamCfg.environmentId);
+    const endpointId = env && env.llmEndpointId;
+    if (!endpointId) return null;
+    const ep = readLlmEndpointRecord(endpointId);
+    const risk = personalDefaultTransitionRisk({ provider: ep, humanMemberCount: after });
+    if (!risk || risk.level !== "block") return null;
+    const label = (ep && ep.name) ? ep.name : endpointId;
+    return {
+      message:
+        `This team runs on a personal subscription seat (${label}). ` +
+        `A single-user subscription can't be shared with a second member. ` +
+        `Set a Team or Global provider as the team default first (or the owner can ` +
+        `publish it globally as single-user), then add the member — the new member ` +
+        `can also bring their own provider via a per-agent override.`,
+    };
+  } catch {
+    return null;
+  }
 }
 
 // #1213: resolve the assist-synthesis binding for a team's autonomous synthesis
@@ -1182,31 +1245,15 @@ function bootstrapTeams() {
     }
   })();
 
-  // (#1457) System Admin is a global flag, not a membership, so a System Admin
-  // owns the Default Team but has no Team-Admin role in it — give it one. This is
-  // deliberately DECOUPLED from any deployment config (#2059 AC4/AC7): the review
-  // of the #1457 merge caught that promoting from the configured bootstrap subject
-  // on every boot would re-flip the admin flag, making that value a live admin
-  // grant through a membership side-door and silently undoing a deliberate
-  // demotion. So the backfill NEVER re-derives or re-grants admin status: it
-  // reads the CURRENT System Admins from the store and gives each the Team-Admin
-  // membership, idempotently (an empty plan once the pair exists). A user a human
-  // demoted is no longer a System Admin, so is neither found here nor re-promoted.
-  try {
-    for (const admin of teamsStore.listUsers().filter((u) => u && u.systemAdmin === true)) {
-      const membership = planBootstrapMembership({
-        userId: admin.id,
-        memberships: teamsStore.listMemberships({ teamId: DEFAULT_TEAM_ID }),
-        teamId: DEFAULT_TEAM_ID,
-      });
-      if (membership) {
-        teamsStore.setMembership(membership);
-        console.log(`[Orchestrator] Made System Admin '${admin.subject}' ${membership.role} of the Default Team`);
-      }
-    }
-  } catch (err) {
-    console.error(`[Orchestrator] Default-Team Team-Admin backfill failed: ${err.message}`);
-  }
+  // (#1457 backfill retired) A System Admin is a global flag with `scope.all`,
+  // NOT a membership (decentralised-access-concept.md 2.1/2.2): an admin sees and
+  // manages every team through the bypass, so it must never be enrolled as a
+  // `team-admin` MEMBER of the Default Team. The former boot backfill did exactly
+  // that, and the D6 fan-out (`migrateOwnershipModel`) then propagated those
+  // Default-Team memberships into every default-scoped Agent Team on each boot —
+  // re-adding, on every restart, admins a human had removed. No membership is
+  // seeded here anymore; `ensureDefaultTeam()` above keeps the record as the
+  // ownership fallback until the access-scope layer is retired (concept 8.4/A3.3).
 }
 
 // Stamp `teamId: "default"` onto any resource that lacks an owner. Rewrites the
@@ -1379,7 +1426,7 @@ function migrateOwnershipModel() {
 
   // ── Pass 2 — membership fan-out (AC2/AC3) ───────────────────────────────
   let granted = 0;
-  const repoint = ownershipMigration.planMembershipRepoint({ configs, memberships });
+  const repoint = ownershipMigration.planMembershipRepoint({ configs, memberships, users });
   if (repoint.length > 0) {
     try {
       granted = teamsStore.appendMemberships(repoint).length;
@@ -5729,6 +5776,22 @@ function loadSshKeyIndex() {
   }
 }
 
+// Read the Model-Provider (LLM endpoint) index (metadata only — scope/userId/
+// authTokenId, never the token). Sibling of loadSshKeyIndex; used by offboarding
+// (#2358 E2) to find and delete a departing human's personal MODEL PROVIDERS,
+// and by the membership-removal sweep to look up a bound provider's owner.
+// Note the secret file is named by `authTokenId`, NOT the endpoint id (see
+// resolveLlmBinding). Best-effort: an unreadable/absent index yields [].
+function loadLlmEndpointsIndex() {
+  try {
+    const raw = fs.readFileSync(LLM_ENDPOINTS_INDEX, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 // Resolve the GitHub-token id an attributed write (PR/HTTPS push) should run
 // under, applying the personal → team → system order with refuse-on-missing
 // (#1569, concept §5/§6). Returns `{ githubTokenId }` (the id to inject; the
@@ -5835,8 +5898,9 @@ function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) 
   const interactive = actingSenderUserId != null;
   const ownerId = credentialResolution.resolveEffectiveOwnerId(
     cfg, loadAgentConfig, actingSenderUserId, loadBaselineDeps());
+  const tokenIndex = loadGithubTokenIndex();
   const personal = credentialResolution.findPersonalCredentialState(
-    loadGithubTokenIndex(), ownerId, undefined, loadLiveUserGate());
+    tokenIndex, ownerId, undefined, loadLiveUserGate());
   const decision = credentialResolution.resolveCredential({
     operation,
     ownerId,
@@ -5846,6 +5910,13 @@ function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) 
     sharedCredentialId: env?.githubTokenId || null,
     kind: "GitHub token",
     interactive,
+    // Unified model §8 (#2357, behind AEE_RESOURCE_ACCESS_V2): a global service
+    // token is the last-resort service fallback when the env has no binding.
+    // Never rescues an attributed write that must 424 — it only fills a "shared"
+    // slot that was already reachable.
+    globalServiceCredentialId: RESOURCE_ACCESS_V2
+      ? credentialResolution.selectGlobalServiceCredentialId(tokenIndex) : null,
+    resourceAccessV2: RESOURCE_ACCESS_V2,
   });
   if (decision.refuse) {
     const e = new Error(decision.refuse.message);
@@ -5869,8 +5940,9 @@ function resolveAttributedSshKey(id, sharedSshKeyId, operation, actingSenderMatr
   const interactive = actingSenderUserId != null;
   const ownerId = credentialResolution.resolveEffectiveOwnerId(
     cfg, loadAgentConfig, actingSenderUserId, loadBaselineDeps());
+  const keyIndex = loadSshKeyIndex();
   const personal = credentialResolution.findPersonalCredentialState(
-    loadSshKeyIndex(), ownerId, undefined, loadLiveUserGate());
+    keyIndex, ownerId, undefined, loadLiveUserGate());
   const decision = credentialResolution.resolveCredential({
     operation,
     ownerId,
@@ -5880,6 +5952,11 @@ function resolveAttributedSshKey(id, sharedSshKeyId, operation, actingSenderMatr
     sharedCredentialId: sharedSshKeyId || null,
     kind: "SSH key",
     interactive,
+    // Unified model §8 (#2357): a global service deploy key is the last-resort
+    // service fallback when the repo/env carries no key (behind the flag).
+    globalServiceCredentialId: RESOURCE_ACCESS_V2
+      ? credentialResolution.selectGlobalServiceCredentialId(keyIndex) : null,
+    resourceAccessV2: RESOURCE_ACCESS_V2,
   });
   if (decision.refuse) {
     const e = new Error(decision.refuse.message);
@@ -5931,6 +6008,9 @@ function resolveBaselineGithubTokenId(cfg, env) {
     personalCredentialOrphaned: personal.orphaned,
     sharedCredentialId,
     kind: "GitHub token",
+    globalServiceCredentialId: RESOURCE_ACCESS_V2
+      ? credentialResolution.selectGlobalServiceCredentialId(tokenIndex) : null,
+    resourceAccessV2: RESOURCE_ACCESS_V2,
   });
   return decision.credentialId || null;
 }
@@ -5957,6 +6037,9 @@ function resolveBaselineSshKeyId(cfg, sharedSshKeyId) {
     personalCredentialOrphaned: personal.orphaned,
     sharedCredentialId: sharedSshKeyId || null,
     kind: "SSH key",
+    globalServiceCredentialId: RESOURCE_ACCESS_V2
+      ? credentialResolution.selectGlobalServiceCredentialId(keyIndex) : null,
+    resourceAccessV2: RESOURCE_ACCESS_V2,
   });
   return decision.credentialId || null;
 }
@@ -8807,7 +8890,15 @@ async function _execRepo(cmd, args, { cwd, env, timeout = 30_000 }) {
 // over the API).
 async function agentGitPush(id, env, body = {}) {
   const repo = agentGitOps.resolveAgentRepo({
-    repositories: env?.repositories,
+    // #2464: agent-scoped repositories are cloned into the workspace (the clone
+    // path unions both lists) but were absent from the pushable set, so every
+    // `gh-as-agent push --repo <agent-scoped>` was rejected as "not in this
+    // environment". Union them here exactly as the clone/git-panel paths do, so
+    // an agent can deliver to a repo attached as "this agent only".
+    repositories: [
+      ...(Array.isArray(env?.repositories) ? env.repositories : []),
+      ...normalizeAgentRepositories((loadAgentConfig(id) || {}).agentRepositories),
+    ],
     requestedRepo: body.repo,
     agentWorkspace: agentDir(id),
   });
@@ -8887,7 +8978,12 @@ async function _agentGitPushLocked(id, repo, req, gitEnv, body) {
 // GitHub poller can attribute the resulting events (loop protection).
 async function agentCreatePr(id, env, body = {}) {
   const repo = agentGitOps.resolveAgentRepo({
-    repositories: env?.repositories,
+    // #2464: mirror agentGitPush — an agent-scoped repo must be a valid PR
+    // target too, not only pushable, or the agent can push but never open a PR.
+    repositories: [
+      ...(Array.isArray(env?.repositories) ? env.repositories : []),
+      ...normalizeAgentRepositories((loadAgentConfig(id) || {}).agentRepositories),
+    ],
     requestedRepo: body.repo,
     agentWorkspace: agentDir(id),
   });
@@ -12409,6 +12505,161 @@ class Orchestrator {
     return { ownerId: target, respawned, skipped };
   }
 
+  // ── Membership-removal binding sweep (#2358 E1; concept §10 E1 / §12.6) ────
+  //
+  // When human `departedUserId` leaves Agent Team `teamId`, the identity LENDS
+  // they gave the team are over: every team binding that pointed at one of their
+  // PERSONAL resources (a personal provider, PAT or SSH key) is dead and must be
+  // reset to INHERIT (env default / .env / a global service credential — never
+  // "set but dead"), the affected agents respawned, and the reset logged. The
+  // RESOURCE is KEPT — still theirs, still usable in their other teams; only the
+  // BINDING is thrown out. Gated by AEE_RESOURCE_ACCESS_V2 at the caller (the
+  // memberships DELETE arm) — off the flag this never runs and removal behaves
+  // exactly as today. Best-effort per item; a summary is returned for the caller.
+  //
+  // Writing environment.json here is the one place the orchestrator writes an
+  // env file (normally console-owned) — deliberate, and the same class of
+  // system-integrity write `offboardOwner` already does on the credential
+  // indexes: a membership change the console proxied to us must leave no dead
+  // lend behind, and the respawn + agent-config writes are ours regardless.
+  async sweepMembershipBindings(teamId, departedUserId) {
+    const team = teamId != null && String(teamId) !== '' ? String(teamId) : null;
+    const empty = { teamId: team, departedUserId: departedUserId || null, envResets: [], agentResets: [], respawned: [] };
+    if (!team) return empty;
+
+    // The team's agents (the team agent + its members) and the envs they use.
+    const teamAgents = [];
+    const envIds = new Set();
+    for (const id of this.agentConfigs.keys()) {
+      const cfg = loadAgentConfig(id);
+      if (!cfg || resolveAgentTeam(cfg) !== team) continue;
+      teamAgents.push({ id, cfg });
+      if (cfg.environmentId) envIds.add(cfg.environmentId);
+    }
+    // Read each env RAW (not normalized) so the write-back is a minimal edit —
+    // a credential sweep must not also migrate/annotate the env file. The
+    // planner sees the same effective repo array the applier will mutate.
+    const rawByEnv = new Map();
+    const environments = [];
+    for (const envId of envIds) {
+      const raw = this._loadRawEnvironment(envId);
+      if (!raw) continue;
+      rawByEnv.set(envId, raw);
+      const repositories = Array.isArray(raw.repositories)
+        ? raw.repositories
+        : (raw.repository && raw.repository.url ? [raw.repository] : []);
+      environments.push({ envId, env: { ...raw, repositories } });
+    }
+
+    const personalOwnerOf = membershipSweep.buildPersonalOwnerLookup({
+      providerIndex: loadLlmEndpointsIndex(),
+      githubTokenIndex: loadGithubTokenIndex(),
+      sshKeyIndex: loadSshKeyIndex(),
+    });
+    // CURRENT membership, read AFTER the removal (the departed user answers
+    // false); best-effort so an unreadable index degrades to "no members",
+    // which sweeps nothing rather than throwing out of the removal path.
+    const isMemberOfTeam = (userId, tid) => {
+      try { return teamsStore.listMemberships({ teamId: tid, userId }).length > 0; }
+      catch { return false; }
+    };
+
+    const plan = membershipSweep.planMembershipRemovalSweep({
+      teamId: team, environments, agents: teamAgents, personalOwnerOf, isMemberOfTeam,
+    });
+    if (!plan.envResets.length && !plan.agentResets.length) return empty;
+
+    // Apply env resets — one write per env.
+    const envResets = [];
+    const byEnv = new Map();
+    for (const r of plan.envResets) {
+      if (!byEnv.has(r.envId)) byEnv.set(r.envId, []);
+      byEnv.get(r.envId).push(r);
+    }
+    for (const [envId, resets] of byEnv) {
+      const raw = rawByEnv.get(envId);
+      if (raw && this._applyEnvBindingResets(envId, raw, resets)) envResets.push(...resets);
+    }
+
+    // Apply per-agent override resets.
+    const agentResets = [];
+    for (const r of plan.agentResets) {
+      if (this._applyAgentBindingReset(r.agentId, r.field)) agentResets.push(r);
+    }
+
+    // Respawn: every affected env's running agents, plus each override-reset one.
+    const respawned = new Set();
+    for (const envId of new Set(envResets.map(r => r.envId))) {
+      try {
+        const res = await this.respawnAgentsForEnvironment(envId, { reason: 'membership-removal-sweep' });
+        (res.respawned || []).forEach(id => respawned.add(id));
+      } catch (err) {
+        console.error(`[Orchestrator] membership sweep: respawn for env ${envId} failed: ${err.message}`);
+      }
+    }
+    for (const r of agentResets) {
+      try {
+        if (this.respawnAgent(r.agentId, { reason: 'membership-removal-sweep' }).respawned) respawned.add(r.agentId);
+      } catch (err) {
+        console.error(`[Orchestrator] membership sweep: respawn for agent ${r.agentId} failed: ${err.message}`);
+      }
+    }
+
+    if (envResets.length || agentResets.length) {
+      console.log(
+        `[Orchestrator] membership sweep: ${departedUserId || '?'} left team ${team} → `
+        + `reset ${envResets.length} env binding(s) + ${agentResets.length} override(s), respawned ${respawned.size} agent(s)`);
+      recordMembershipSweep(team, departedUserId, envResets, agentResets);
+    }
+    return { teamId: team, departedUserId: departedUserId || null, envResets, agentResets, respawned: [...respawned] };
+  }
+
+  _rawEnvPath(envId) {
+    return path.join(ENVIRONMENTS_DIR, envId, 'environment.json');
+  }
+
+  _loadRawEnvironment(envId) {
+    try { return JSON.parse(fs.readFileSync(this._rawEnvPath(envId), 'utf8')); }
+    catch { return null; }
+  }
+
+  // Null out the swept binding fields on a raw env object and write it back.
+  // Resetting to null means "inherit": a null `llmEndpointId` falls back to the
+  // .env default provider, a null `githubTokenId` / `sshKeyId` to a global
+  // service credential (PR4) or empty. Returns true on a successful write.
+  _applyEnvBindingResets(envId, raw, resets) {
+    for (const r of resets) {
+      if (r.field === 'llmEndpointId') raw.llmEndpointId = null;
+      else if (r.field === 'githubTokenId') raw.githubTokenId = null;
+      else if (r.field === 'repositories.sshKeyId') {
+        if (Array.isArray(raw.repositories) && raw.repositories[r.repoIndex]) {
+          raw.repositories[r.repoIndex].sshKeyId = null;
+        } else if (raw.repository && r.repoIndex === 0) {
+          raw.repository.sshKeyId = null;
+        }
+      }
+    }
+    try {
+      fs.writeFileSync(this._rawEnvPath(envId), JSON.stringify(raw, null, 2));
+      return true;
+    } catch (err) {
+      console.error(`[Orchestrator] membership sweep: could not rewrite env ${envId}: ${err.message}`);
+      return false;
+    }
+  }
+
+  _applyAgentBindingReset(agentId, field) {
+    if (field !== 'llmEndpointOverride') return false;
+    const cfg = loadAgentConfig(agentId);
+    if (!cfg || !('llmEndpointOverride' in cfg)) return false;
+    delete cfg.llmEndpointOverride;
+    try { saveAgentConfig(agentId, cfg); return true; }
+    catch (err) {
+      console.error(`[Orchestrator] membership sweep: could not rewrite agent ${agentId} config: ${err.message}`);
+      return false;
+    }
+  }
+
   // Offboarding (#1571, epic #1558 Phase 5; concept §8, decision D6). When a
   // human is deactivated/removed we (1) PAUSE the agents that were acting under
   // that person's personal identity, then (2) auto-DELETE that person's personal
@@ -12448,10 +12699,16 @@ class Orchestrator {
       }
     }
 
-    // (2) Delete the departing human's PERSONAL SSH keys and GitHub tokens.
+    // (2) Delete the departing human's PERSONAL SSH keys, GitHub tokens and
+    // MODEL PROVIDERS. Providers joined this set in #2358 (E2): a personal
+    // provider (a subscription seat, or a personal api-key gateway) is one
+    // human's identity just like a personal PAT, so it must be removed on
+    // offboarding rather than left orphaned. The provider store names its token
+    // file by `authTokenId`, not the endpoint id, hence the secret-name override.
     const deletedCredentials = [
       ...this._deletePersonalCredentials(loadSshKeyIndex(), SSH_KEYS_INDEX, SSH_KEYS_DIR, target, 'ssh-key'),
       ...this._deletePersonalCredentials(loadGithubTokenIndex(), path.join(GH_TOKENS_DIR, 'index.json'), GH_TOKENS_DIR, target, 'github-token'),
+      ...this._deletePersonalCredentials(loadLlmEndpointsIndex(), LLM_ENDPOINTS_INDEX, LLM_KEYS_DIR, target, 'model-provider', (e) => e.authTokenId),
     ];
 
     if (paused.length || deletedCredentials.length) {
@@ -12467,16 +12724,26 @@ class Orchestrator {
   // is never matched even if its `userId` coincides (AC3). Returns the ids
   // removed (each tagged with `kind`). Best-effort — a missing file is fine
   // (the point is that no residual copy remains, AC1/AC4).
-  _deletePersonalCredentials(index, indexPath, secretDir, ownerId, kind) {
+  // `secretNameOf(entry)` maps a doomed entry to its 0600 secret file name.
+  // Defaults to the entry id (SSH keys and GitHub tokens name the secret by id),
+  // but a Model Provider names its token file by `authTokenId`, NOT the endpoint
+  // id (#2358 E2; see resolveLlmBinding) — so the caller passes an override for
+  // that store. A falsy name (e.g. a provider that never stored a token) unlinks
+  // nothing but the index entry is still dropped.
+  _deletePersonalCredentials(index, indexPath, secretDir, ownerId, kind, secretNameOf) {
     const ids = credentialResolution.selectPersonalCredentialIds(index, ownerId);
     if (!ids.length) return [];
     const doomed = new Set(ids);
-    for (const id of ids) {
+    const nameOf = typeof secretNameOf === 'function' ? secretNameOf : (e) => e && e.id;
+    for (const entry of index) {
+      if (!(entry && entry.id && doomed.has(String(entry.id)))) continue;
+      const secretName = nameOf(entry);
+      if (!secretName) continue;
       try {
-        fs.unlinkSync(path.join(secretDir, path.basename(id)));
+        fs.unlinkSync(path.join(secretDir, path.basename(String(secretName))));
       } catch (err) {
         if (err && err.code !== 'ENOENT') {
-          console.error(`[Orchestrator] offboarding: could not unlink ${kind} '${id}': ${err.message}`);
+          console.error(`[Orchestrator] offboarding: could not unlink ${kind} secret for '${entry.id}': ${err.message}`);
         }
       }
     }
@@ -12520,9 +12787,13 @@ class Orchestrator {
 
     const sshKeys = loadSshKeyIndex();
     const ghTokens = loadGithubTokenIndex();
+    // #2358 E2: model providers join the reconciliation so an orphaned personal
+    // provider (owner deleted in the #2135 window, or by any future gap) is
+    // detected and swept the same way as an SSH key / GitHub token.
+    const llmEndpoints = loadLlmEndpointsIndex();
     const agents = Array.from(this.agentConfigs.keys()).map(id => ({ id, cfg: loadAgentConfig(id) }));
     const owners = credentialResolution.selectOrphanedOwnerIds({
-      credentialIndexes: [sshKeys, ghTokens],
+      credentialIndexes: [sshKeys, ghTokens, llmEndpoints],
       agents,
       loadAgentConfig,
       liveUsers,
@@ -12533,7 +12804,7 @@ class Orchestrator {
     // assessment even when the cleanup below only partly succeeds.
     const orphanSet = new Set(owners);
     const credentials = [];
-    for (const [index, kind] of [[sshKeys, 'ssh-key'], [ghTokens, 'github-token']]) {
+    for (const [index, kind] of [[sshKeys, 'ssh-key'], [ghTokens, 'github-token'], [llmEndpoints, 'model-provider']]) {
       for (const e of Array.isArray(index) ? index : []) {
         if (e && e.scope === 'personal' && e.userId && orphanSet.has(String(e.userId))) {
           credentials.push({
@@ -13562,6 +13833,43 @@ function recordOffboardingDegradation(userId, detail) {
   }
 }
 
+// Put a membership-removal binding sweep (#2358 E1) on the operator's timeline —
+// a human left a team and one or more of their lent personal resources were
+// unbound. Repo-less by construction, same flat shape and null-agentId hazard as
+// `recordOffboardingDegradation` (outcomes stays empty so the console reader,
+// which throws on a null-agentId outcome, never 500s the Event Log).
+function recordMembershipSweep(teamId, userId, envResets, agentResets) {
+  try {
+    const now = new Date().toISOString();
+    githubEventLog.record({
+      ts: now,
+      eventId: `membership-sweep:${teamId}:${userId}:${Date.now()}`,
+      repo: null,
+      event: 'membership.lend-sweep',
+      actor: null,
+      createdAt: now,
+      label: null,
+      ref: null,
+      workItem: null,
+      // noMatchingTrigger BEFORE outcomes, mirroring recordPluginSyncFailure —
+      // keeps the `outcomes: [],\n noMatchingTrigger: false,` sequence unique to
+      // recordOffboardingDegradation (its #2138 mutation-anchor guard requires
+      // exactly one match). Same null-agentId hazard: outcomes stays empty.
+      noMatchingTrigger: false,
+      outcomes: [],
+      source: 'internal',
+      membershipSweep: {
+        teamId: String(teamId),
+        userId: userId ? String(userId) : null,
+        envResets: (envResets || []).map(r => ({ envId: r.envId, field: r.field, from: r.from || null })),
+        agentResets: (agentResets || []).map(r => ({ agentId: r.agentId, field: r.field, from: r.from || null })),
+      },
+    });
+  } catch (err) {
+    console.error(`[Orchestrator] could not log the membership-removal sweep for ${userId}@${teamId}: ${err.message}`);
+  }
+}
+
 // Put a failed plugin materialisation on the operator's timeline (#2308 AC18/
 // AC19). A member whose grant includes a plugin that could not be installed
 // must never fail silently — this is the "discoverable after the fact" half:
@@ -13796,16 +14104,42 @@ async function handleTeamsAdminApi(req, res) {
       }
       if (req.method === 'POST') {
         const body = await readBody(req);
+        // §14 / E10: refuse growing a squad to ≥2 humans on a personal
+        // subscription (oauth) default (E9). Tagged so the HTTP layer maps it to
+        // 409 with the message forwarded verbatim (see the internalApi catch).
+        const blocked = personalOauthLendBlockOnMembershipAdd(body && body.teamId, body && body.userId);
+        if (blocked) {
+          const e = new Error(blocked.message);
+          e.statusHint = 409;
+          e.code = 'oauth_personal_lend_blocked';
+          throw e;
+        }
         return sendJson(res, 200, teamsStore.setMembership(body)), true;
       }
       if (req.method === 'DELETE') {
-        return sendJson(res, 200, teamsStore.removeMembership({
-          userId: parsed.searchParams.get('userId'),
-          teamId: parsed.searchParams.get('teamId'),
+        const memberUserId = parsed.searchParams.get('userId');
+        const memberTeamId = parsed.searchParams.get('teamId');
+        const removed = teamsStore.removeMembership({
+          userId: memberUserId,
+          teamId: memberTeamId,
           // The D4 successor (#2081) — required only when the target is the
           // team's last admin, and validated by the store.
           successorUserId: parsed.searchParams.get('successorUserId') || undefined,
-        })), true;
+        });
+        // #2358 E1 (behind AEE_RESOURCE_ACCESS_V2): the lend ends when the owner
+        // leaves the team. Sweep any team binding that pointed at one of their
+        // personal resources, reset it to inherit, and respawn the affected
+        // agents. Best-effort — a sweep failure never fails the removal (which
+        // already succeeded above); it is logged and surfaced in the response.
+        let sweep = null;
+        if (RESOURCE_ACCESS_V2 && orchestratorSingleton) {
+          try {
+            sweep = await orchestratorSingleton.sweepMembershipBindings(memberTeamId, memberUserId);
+          } catch (err) {
+            console.error(`[Orchestrator] membership-removal sweep failed for ${memberUserId}@${memberTeamId}: ${err.message}`);
+          }
+        }
+        return sendJson(res, 200, { ...removed, ...(sweep ? { sweep } : {}) }), true;
       }
     }
 
@@ -13859,8 +14193,12 @@ async function main() {
     console.log(
       `[Orchestrator] internal-auth mode=${internalAuthConfig.mode} `
       + `configured=${internalAuthConfig.configured}`
+      + `${internalAuthConfig.nonLocal ? ' deployment=non-local' : ''}`
       + (internalAuthConfig.configured ? '' : ' (gate inert — set INTERNAL_API_TOKEN to arm it)'),
     );
+    // #2459 AC3: never let a non-local deployment sit in log-only mode silently.
+    const authWarning = internalAuth.nonLocalObserveWarning(internalAuthConfig);
+    if (authWarning) console.warn(`[Orchestrator] ${authWarning}`);
   }
   migrateLegacyAgentConfigs();
   migrateSkillGrantsToAgents();
@@ -18920,6 +19258,9 @@ async function main() {
   internalApi.listen(4002, '0.0.0.0', () =>
     console.log('[Orchestrator] Internal API listening on :4002')
   );
+  // Surface the unified resource-access mode at boot so it is never a guess
+  // (mirrors the admin-console boot log; #2356/#2357).
+  console.log(`[Orchestrator] ${resourceAccessModeLogLine(process.env)}`);
 
   // ============================================================
   // Webhook server — receives HTTP triggers from external systems

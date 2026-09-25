@@ -16,10 +16,14 @@ export function resolveContextWindowTokens(model) {
   return null;
 }
 
-// Thresholds are an implementation choice (the issue leaves them open):
-// unobtrusive below 70%, warning from 70%, critical from 90%.
-const WARNING_THRESHOLD_PCT = 70;
-const CRITICAL_THRESHOLD_PCT = 90;
+// Unified fill thresholds (#2382) — the SINGLE source of truth for both the
+// header's coloured indicator and the actionable reset nudge: unobtrusive below
+// 50%, `warning` from 50% (a dismissible "reset to save tokens" hint), `critical`
+// from 75% (a permanent, non-dismissible reset warning). There is deliberately
+// no second threshold system anywhere — every surface derives its state from the
+// `level` this returns. (Earlier 70/90 values, when the indicator was passive.)
+const WARNING_THRESHOLD_PCT = 50;
+const CRITICAL_THRESHOLD_PCT = 75;
 
 export function computeContextFillLevel(inputTokens, contextWindowTokens) {
   if (typeof inputTokens !== 'number' || inputTokens < 0) return null;

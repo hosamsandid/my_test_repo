@@ -12,12 +12,17 @@ import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
 import OAuthLoginWizard from '../components/OAuthLoginWizard';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
-import CredentialOwnership from '../components/CredentialOwnership';
-import { useAuth } from '../auth/AuthContext';
+import ProviderOwnership from '../components/ProviderOwnership';
 import {
-  teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
-  canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
-  normalizeCredential,
+  providerOwnershipOptions, defaultProviderOwnership, providerOwnershipFromRecord,
+  providerOwnershipPayload, providerOwnershipReady, canManageProviderClient,
+  providerScopeLabel, providerScopeShowsDetail,
+} from './provider-ownership-view';
+import { useAuth } from '../auth/AuthContext';
+import { useResourceAccessV2 } from '../context/ResourceAccessContext';
+import {
+  teamsById,
+  canReassignCredentialClient, adminTeamIdsOf,
 } from './credential-scope-view';
 import {
   resolveProbeState,
@@ -25,10 +30,11 @@ import {
   probeNote,
   probeTitle,
   probeRequest,
+  probeResultMessage,
 } from './llm-probe-state';
 import { groupAgentsByTeam, hiddenAgentsNotice, boundAgentsLead, respawnFailureLead } from './group-agents-by-team.js';
 import { describeSubmitState } from './model-provider-submit-state.js';
-import { endpointAssistExclusion } from '../context/assist-selector-exclusion.js';
+import { endpointAssistExclusion, assistExclusionInName, assistExclusionInBaseUrl } from '../context/assist-selector-exclusion.js';
 import { usePageActions } from '../context/PageActionsContext';
 import { healthCellModel, healthCellDetail } from './provider-health-view.js';
 import { useHelpSubject } from '../context/HelperChatContext';
@@ -254,22 +260,14 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
   // On edit only a System Admin may reassign — for everyone else the selector is
   // shown read-only and the ownership fields are omitted from the payload.
   const canReassign = canReassignCredentialClient({ isSysAdmin });
-  const [ownership, setOwnership] = useState(() => {
-    if (isEdit) {
-      const n = normalizeCredential(endpoint);
-      return { scope: n.scope, teamId: n.teamId || '', assignedTeamIds: n.assignedTeamIds || [] };
-    }
-    return defaultOwnership({ isSysAdmin, adminTeamIds });
-  });
+  // Ownership (#2360): ONE axis — Personal / Team / Global — replacing the old
+  // "Global checkbox + System(assign to teams) / Team-owned" pair. Global is now
+  // just the widest option of this control (provider-ownership-view.js). On edit
+  // only a System Admin may re-tier; for everyone else it is shown read-only.
+  const [ownership, setOwnership] = useState(() =>
+    isEdit ? providerOwnershipFromRecord(endpoint) : defaultProviderOwnership({ isSysAdmin, adminTeamIds }));
   const sendOwnership = !isEdit || canReassign;
-  // Global provider (#2136): a System-Admin-only flag that makes the provider
-  // usable by every user and agent with no team assignment. A global provider is
-  // system-scoped with no teams, so the team-assignment control is hidden while
-  // it is on. A subscription (oauth) seat can never be global (single-user).
-  const [isGlobal, setIsGlobal] = useState(endpoint?.global === true);
-  // A global provider has no team assignment, so it is "ready" regardless of the
-  // (hidden) ownership control; otherwise the usual team-picked rule applies.
-  const ownershipReady = isGlobal || !sendOwnership || ownership.scope === 'system' || !!ownership.teamId;
+  const ownershipReady = !sendOwnership || providerOwnershipReady(ownership);
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName,
     setId,
@@ -294,6 +292,23 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
   const [oauthFlowId, setOauthFlowId] = useState(null);
   const [wizardOpen, setWizardOpen] = useState(false);
 
+  // The single-user subscription escape hatch (#2360, concept §9), behind
+  // AEE_RESOURCE_ACCESS_V2: an oauth (subscription) provider may be published
+  // GLOBAL — runtime-only, agent runtime everywhere — iff the operator has
+  // confirmed single-user use (complianceAck). The backend (PR2 #2353) already
+  // accepts it; this unlocks the toggle the form disabled for every oauth
+  // provider before. An existing oauth provider carries its recorded ack, so it
+  // qualifies without re-confirming (mirrors the server PUT rule).
+  const resourceAccessV2 = useResourceAccessV2();
+  const oauthGlobalOk = resourceAccessV2 && isOauth
+    && (complianceOk || (wasOauth && endpoint?.complianceAck?.singleUser === true));
+
+  // The Ownership radio-card options + the selectable team set for this caller
+  // (#2360). Options carry their own enabled/disabledReason; a subscription
+  // disables Team, and Global is System-Admin-only (shown disabled otherwise).
+  const ownershipOptions = providerOwnershipOptions({ isOauth, isSysAdmin, adminTeamIds, canGlobalOauth: oauthGlobalOk });
+  const selectableTeams = isSysAdmin ? teams : teams.filter(t => adminTeamIds.includes(t.id));
+
   // If the user removes the default model from the list (without using the
   // star toggle), drop the dangling pointer so we don't ship a server-rejected
   // value on save.
@@ -303,11 +318,16 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
     }
   }, [models, defaultModelId]);
 
-  // A subscription (oauth) seat can never be global (#2136) — drop the flag if the
-  // user switches this provider to subscription auth so the payload stays valid.
+  // A subscription (oauth) provider can never be Team, and can only be Global via
+  // the single-user hatch (#2360). If the user switches an already-chosen
+  // Personal/Team/Global state into an illegal one by flipping to subscription
+  // auth, coerce it back to Personal so the payload stays valid.
   useEffect(() => {
-    if (isOauth && isGlobal) setIsGlobal(false);
-  }, [isOauth, isGlobal]);
+    if (!isOauth) return;
+    if (ownership.scope === 'team' || (ownership.scope === 'global' && !oauthGlobalOk)) {
+      setOwnership({ scope: 'personal', teamId: '' });
+    }
+  }, [isOauth, oauthGlobalOk, ownership.scope]);
 
   // test / discover state
   const [probing, setProbing] = useState(null);            // 'test' | 'discover' | null
@@ -354,13 +374,7 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
     try {
       const { path, body } = probeRequest(probeForm, 'test');
       const r = await apiCall('POST', path, body);
-      setProbeMsg({
-        ok: r.ok,
-        text: r.ok
-          ? `OK (HTTP ${r.status}) — ${r.url}`
-            + (r.noModelList ? ' — this endpoint does not expose a model list; enter the model name(s) manually.' : '')
-          : `Failed: ${r.error || 'HTTP ' + r.status} (${r.url})`,
-      });
+      setProbeMsg(probeResultMessage(r, 'test', { isOauth: probe.isOauth }));
     } catch (e) {
       setProbeMsg({ ok: false, text: e.message });
     } finally {
@@ -382,10 +396,17 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
         setProbeMsg({ ok: true, text: r.message });
       } else {
         setDiscovered(r.models || []);
-        setProbeMsg({ ok: true, text: `Found ${r.count ?? r.models?.length ?? 0} model(s) at ${r.url}` });
+        setProbeMsg({ ok: true, text: `Found ${r.count ?? r.models?.length ?? 0} model(s).` });
       }
     } catch (e) {
-      setProbeMsg({ ok: false, text: e.message });
+      // discover-models answers a failed probe with 502, so apiCall throws; the
+      // verdict code rides on the thrown error (#2460) — render it the same way
+      // the always-200 test route is rendered inline.
+      setProbeMsg(probeResultMessage(
+        { ok: false, reason: e.reason, error: e.serverMessage || e.message },
+        'discover',
+        { isOauth: probe.isOauth },
+      ));
     } finally {
       setProbing(null);
     }
@@ -429,13 +450,13 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
         : '',
     };
     if (!isEdit && id.trim()) payload.id = id.trim();
-    // Ownership: sent on create, and on edit only when the caller may reassign
-    // (System Admin). Omitting it on a Team Admin edit leaves the scope/team
-    // untouched (and the server would 403 a reassignment anyway).
-    if (sendOwnership) Object.assign(payload, ownershipPayload(ownership));
-    // #2136: only a System Admin may set the global flag; the server re-enforces
-    // this (403 otherwise) and, when global, ignores the team assignment above.
-    if (isSysAdmin) payload.global = isGlobal;
+    // Ownership (#2360): the Personal / Team / Global choice, incl. the `global`
+    // flag, in one payload. Sent on create, and on edit only when the caller may
+    // re-tier (System Admin) — omitting it on a Team-Admin edit leaves the
+    // scope/team untouched (the server would 403 a reassignment anyway). The
+    // server re-enforces every rule (canCreateCredential / resolveGlobalFlag /
+    // oauth-not-team).
+    if (sendOwnership) Object.assign(payload, providerOwnershipPayload(ownership));
     if (isOauth && complianceOk) payload.complianceAck = true;
     // Token sources, in precedence order: manual paste > completed login flow
     // (claimed server-side) > keep/clear existing.
@@ -475,47 +496,6 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
           ? <>Cannot be changed after creation.</>
           : <>Auto-derived from Name; edit to override. {ID_FORMAT_HINT} <strong>Cannot be changed after creation.</strong></>}
       />
-
-      {/* Global provider (#2136) — a System-Admin-only publish flag. */}
-      {isSysAdmin && (
-        <label style={{
-          display: 'flex', gap: 'var(--eb-space-2)', alignItems: 'flex-start',
-          cursor: isOauth ? 'not-allowed' : 'pointer',
-          opacity: isOauth ? 0.6 : 1,
-        }}>
-          <input
-            type="checkbox"
-            checked={isGlobal}
-            disabled={isOauth}
-            onChange={e => setIsGlobal(e.target.checked)}
-            style={{ marginTop: 3, flexShrink: 0 }}
-          />
-          <span style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>
-            <strong>Global provider</strong> — available to every user and agent, with no team required.
-            <span style={{ display: 'block', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-              {isOauth
-                ? 'A subscription (OAuth) provider is single-user and cannot be made global.'
-                : 'Anyone can select and use it; only a System Admin can manage it. The token is never exposed.'}
-            </span>
-          </span>
-        </label>
-      )}
-
-      {/* Ownership / team scope (#800). Hidden while Global is on — a global
-          provider carries no team assignment (#2136). */}
-      {isGlobal ? null : (isEdit && !canReassign ? (
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
-          Only a System Admin can change which team owns a provider or reassign a system-scoped one.
-        </div>
-      ) : (
-        <CredentialOwnership
-          value={ownership}
-          onChange={setOwnership}
-          teams={teams}
-          isSysAdmin={isSysAdmin}
-          adminTeamIds={adminTeamIds}
-        />
-      ))}
 
       {/* Auth type — classic API key / proxy vs Claude subscription OAuth */}
       <div>
@@ -572,6 +552,22 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
           {AUTH_TYPE_OPTIONS.find(o => o.value === authType)?.desc}
         </div>
       </div>
+
+      {/* Ownership (#2360): one axis — Personal / Team / Global — replacing the
+          old Global-checkbox + System(assign)/Team-owned pair. On a non-admin
+          edit the tier is fixed (re-tier is System-Admin-only), shown read-only. */}
+      {sendOwnership ? (
+        <ProviderOwnership
+          value={ownership}
+          onChange={setOwnership}
+          options={ownershipOptions}
+          teams={selectableTeams}
+        />
+      ) : (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          Ownership is fixed for this provider — only a System Admin can change who can use it.
+        </div>
+      )}
 
       {!isOauth && (
         <div>
@@ -838,10 +834,19 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
           style={{ padding: 0 }}
         />
         {probeMsg && (
-          <span style={{
-            fontSize: 'var(--eb-text-xs)',
-            color: probeMsg.ok ? 'var(--eb-status-success)' : 'var(--eb-status-error)',
-          }}>{probeMsg.text}</span>
+          <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
+            <span style={{
+              fontSize: 'var(--eb-text-xs)',
+              color: probeMsg.ok ? 'var(--eb-status-success)' : 'var(--eb-status-error)',
+            }}>{probeMsg.text}</span>
+            {/* Raw HTTP/proxy detail kept secondary, never the headline (#2460
+                AC2) — e.g. a LiteLLM "Budget exceeded" body still shows here. */}
+            {probeMsg.detail && (
+              <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                {probeMsg.detail}
+              </span>
+            )}
+          </span>
         )}
         {/* Always name the credential a probe would use, so a 401 can never be
             mistaken for a failed login (#912). */}
@@ -1072,12 +1077,28 @@ export default function ModelRegistry() {
   const { data: endpoints, loading, error, refetch } = useApi('/api/llm-endpoints');
   const { data: envFallback } = useApi('/api/llm-env-fallback');
   const { data: teamsData } = useApi('/api/admin/teams');
+  const { data: agentsData } = useApi('/api/agents');
   const { user } = useAuth();
-  const teams = Array.isArray(teamsData) ? teamsData : [];
-  const names = teamsById(teams);
+  const resourceAccessV2 = useResourceAccessV2();
+  const humanTeams = Array.isArray(teamsData) ? teamsData : [];
+  // #2360 re-key: under the flag, "Team" means an AGENT TEAM (a role:'team'
+  // agent), not the vestigial human-team collection — so the Ownership dropdown
+  // lists agent teams. The table's name lookup merges both spaces so a legacy
+  // 'default'-stamped provider still resolves to a readable name. Off the flag
+  // this is byte-identical to before (teams = humanTeams).
+  const agentTeams = (Array.isArray(agentsData) ? agentsData : [])
+    .filter(a => a && a.role === 'team')
+    .map(a => ({ id: a.id, name: a.displayName || a.id }));
+  const teams = resourceAccessV2 ? agentTeams : humanTeams;
+  const names = { ...teamsById(humanTeams), ...teamsById(agentTeams) };
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
-  const caller = { isSysAdmin, adminTeamIds };
+  // `userId` is REQUIRED for the personal-tier manage check: canManageCredentialClient
+  // authorises a personal provider only when `c.userId === caller.userId`. Omitting
+  // it made every personal provider look unmanageable even to its own owner — the
+  // row showed a lock with no edit/delete (#2360 follow-up). The session carries the
+  // id as `user.userId` (describeAuthz), not `user.id`.
+  const caller = { isSysAdmin, adminTeamIds, userId: user?.userId };
   // User's team IDs for assist-exclusion badge computation (AC1/AC2, #1402).
   const userTeamIds = (user?.teams || []).map(t => t.teamId);
   const [creating, setCreating] = useState(false);
@@ -1106,20 +1127,12 @@ export default function ModelRegistry() {
     if (fresh && fresh !== editing) setEditing(fresh);
   }, [endpoints]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // #2405: the leading ID column was dropped — it duplicated what Name already
+  // identifies and widened the row. Removing it here also removes the provider
+  // id from the filter (DataTable matches across every column's `key`) and from
+  // the auto-derived filter placeholder, so an id value is no longer searchable
+  // and "ID" no longer appears in the hint.
   const COLUMNS = [
-    {
-      key: 'id',
-      label: 'ID',
-      render: (v, row) => row.readOnly
-        ? <span style={{
-            display: 'inline-flex', alignItems: 'center', gap: 4,
-            padding: '0 var(--eb-space-2)', borderRadius: 'var(--eb-radius-sm)',
-            background: 'var(--eb-bg-elevated)',
-            color: 'var(--eb-text-muted)',
-            fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)',
-          }} title="Synthetic record reflecting .env"><Lock size={11} />.env</span>
-        : <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span>,
-    },
     {
       key: 'name',
       label: 'Name',
@@ -1136,47 +1149,52 @@ export default function ModelRegistry() {
             </span>
           );
         }
-        // AC1 / AC2 (#1402): badge explaining why this provider is excluded from assist.
+        // Badge explaining why this provider is excluded from assist (#1402).
+        // #2405: only the team-scope ("Not your teams") badge stays in the Name
+        // column — the oauth ("Agents only") badge moved to the Base URL cell
+        // next to "Subscription (OAuth)", the reason it exists.
         const exclusion = endpointAssistExclusion(row, userTeamIds, isSysAdmin);
-        if (!exclusion) return v;
-        const badgeStyle = {
-          fontSize: 'var(--eb-text-xs)',
-          padding: '0 var(--eb-space-2)',
-          borderRadius: 'var(--eb-radius-sm)',
-          border: '1px solid var(--eb-border-default)',
-          whiteSpace: 'nowrap',
-          flexShrink: 0,
-        };
-        const [badgeText, badgeTitle] = exclusion === 'oauth'
-          ? [
-              'Not for assist',
-              'OAuth subscription tokens cannot be used for server-side assist calls. Add an API-key provider to use the assist selector.',
-            ]
-          : [
-              'Not your teams',
-              'This provider is not assigned to any of your teams and will not appear in the assist model selector. A System Admin can assign it on this page.',
-            ];
+        if (!assistExclusionInName(exclusion)) return v;
         return (
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', maxWidth: '100%' }}>
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v}</span>
-            <span title={badgeTitle} style={{
-              ...badgeStyle,
-              color: exclusion === 'oauth' ? 'var(--eb-text-secondary)' : 'var(--eb-status-warning)',
-              borderColor: exclusion === 'oauth' ? 'var(--eb-border-default)' : 'var(--eb-status-warning)',
-            }}>{badgeText}</span>
+            <span title="This provider is not assigned to any of your teams and will not appear in the assist model selector. A System Admin can assign it on this page." style={{
+              fontSize: 'var(--eb-text-xs)',
+              padding: '0 var(--eb-space-2)',
+              borderRadius: 'var(--eb-radius-sm)',
+              border: '1px solid var(--eb-status-warning)',
+              whiteSpace: 'nowrap',
+              flexShrink: 0,
+              color: 'var(--eb-status-warning)',
+            }}>Not your teams</span>
           </span>
         );
       },
     },
     {
-      key: '_scope', label: 'Scope / Teams', sortable: false,
+      // #2360 follow-up: the "Ownership" column mirrors the edit dialog's one-axis
+      // taxonomy (Personal / Team(s) / Global) via `providerScopeLabel`, which is
+      // built on the SAME `providerOwnershipFromRecord` the dialog opens with — so
+      // the row and the dialog can never disagree (the old `credentialScopeLabel`
+      // showed a stale "System" for a team-assigned provider).
+      key: '_scope', label: 'Ownership', sortable: false,
+      // #2442: `_scope` is synthetic (no `row['_scope']`), so filter on the text
+      // this column actually displays — the ownership label plus, for Team scope,
+      // its detail (the assigned team name(s)), or "Global".
+      filterValue: (_, row) => {
+        if (row.readOnly) return '';
+        const s = providerScopeLabel(row, names);
+        if (s.scope === 'global') return 'Global';
+        return [s.label, providerScopeShowsDetail(s.scope) ? s.detail : ''].filter(Boolean).join(' ');
+      },
       render: (_, row) => {
         if (row.readOnly) return <span style={{ color: 'var(--eb-text-muted)' }}>—</span>;
-        // #2136: a global provider is usable by everyone, so its team assignment
-        // is moot — show a single "Global" pill instead of the scope/teams detail.
-        if (row.global) {
+        const s = providerScopeLabel(row, names);
+        // A global provider is usable by everyone, so its team assignment is moot
+        // (#2136): a single accented "Global" pill instead of the scope/teams detail.
+        if (s.scope === 'global') {
           return (
-            <span style={{ fontSize: 'var(--eb-text-xs)' }} title="Available to every user and agent — no team required">
+            <span style={{ fontSize: 'var(--eb-text-xs)' }} title={s.detail}>
               <span style={{
                 display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
                 background: 'var(--eb-accent-subtle, var(--eb-bg-elevated))', color: 'var(--eb-accent, var(--eb-text-secondary))',
@@ -1185,15 +1203,18 @@ export default function ModelRegistry() {
             </span>
           );
         }
-        const s = credentialScopeLabel(row, names);
+        // #2405: keep the Team-scope detail (the assigned team name(s) — real
+        // information) but drop the Personal detail ("Only you and the agents you
+        // own"), which merely repeats what the "Personal" pill already conveys.
+        const showDetail = providerScopeShowsDetail(s.scope);
         return (
           <span style={{ fontSize: 'var(--eb-text-xs)' }}>
             <span style={{
               display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
               background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
-              fontWeight: 'var(--eb-font-medium)', marginRight: 'var(--eb-space-2)',
+              fontWeight: 'var(--eb-font-medium)', marginRight: showDetail ? 'var(--eb-space-2)' : 0,
             }}>{s.label}</span>
-            <span style={{ color: 'var(--eb-text-muted)' }}>{s.detail}</span>
+            {showDetail && <span style={{ color: 'var(--eb-text-muted)' }}>{s.detail}</span>}
           </span>
         );
       },
@@ -1201,14 +1222,37 @@ export default function ModelRegistry() {
     {
       key: 'baseUrl',
       label: 'Base URL',
-      render: (v, row) => row.authType === 'oauth-token'
-        ? <span title="Anthropic subscription (OAuth) — talks directly to api.anthropic.com" style={{
-            display: 'inline-flex', alignItems: 'center', gap: 4,
-            padding: '0 var(--eb-space-2)', borderRadius: 'var(--eb-radius-sm)',
-            background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
-            fontSize: 'var(--eb-text-xs)',
-          }}><LogIn size={11} /> Subscription (OAuth)</span>
-        : <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span>,
+      render: (v, row) => {
+        if (row.authType !== 'oauth-token') {
+          return <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>{v}</span>;
+        }
+        // #2405: the "Agents only" tag now sits next to the "Subscription (OAuth)"
+        // label — the OAuth subscription is precisely why the provider is
+        // agent-chat-only and excluded from server-side assist — instead of by
+        // the provider name. Same visibility set it had in the Name column.
+        const agentsOnly = assistExclusionInBaseUrl(endpointAssistExclusion(row, userTeamIds, isSysAdmin));
+        return (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+            <span title="Anthropic subscription (OAuth) — talks directly to api.anthropic.com" style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              padding: '0 var(--eb-space-2)', borderRadius: 'var(--eb-radius-sm)',
+              background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
+              fontSize: 'var(--eb-text-xs)',
+            }}><LogIn size={11} /> Subscription (OAuth)</span>
+            {agentsOnly && (
+              <span title="A subscription (OAuth) provider drives agent chat, but can't be used for server-side assist features (Flow Copilot, suggestions). Add an API-key provider to use the assist selector." style={{
+                fontSize: 'var(--eb-text-xs)',
+                padding: '0 var(--eb-space-2)',
+                borderRadius: 'var(--eb-radius-sm)',
+                border: '1px solid var(--eb-border-default)',
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
+                color: 'var(--eb-text-secondary)',
+              }}>Agents only</span>
+            )}
+          </span>
+        );
+      },
     },
     {
       key: 'tokenPreview',
@@ -1303,7 +1347,7 @@ export default function ModelRegistry() {
         );
         // A Team Admin may see a system provider assigned to their team but not
         // manage it (#800) — show a lock, no edit/delete, matching the API gate.
-        if (!canManageCredentialClient(row, caller)) return (
+        if (!canManageProviderClient(row, caller, resourceAccessV2)) return (
           <div style={{ display: 'flex', justifyContent: 'flex-end', color: 'var(--eb-text-muted)' }} title="System-scoped provider — only a System Admin can manage it. You may use it.">
             <Lock size={13} />
           </div>
@@ -1498,7 +1542,7 @@ export default function ModelRegistry() {
           // The .env row opens its read-only panel; a manageable provider opens
           // the editor. A visible-but-unmanageable system provider (Team Admin)
           // is not clickable — its lock already explains why (#800).
-          if (!row.readOnly && !canManageCredentialClient(row, caller)) return;
+          if (!row.readOnly && !canManageProviderClient(row, caller, resourceAccessV2)) return;
           setEditing(row); setFormError(null);
         }}
       />

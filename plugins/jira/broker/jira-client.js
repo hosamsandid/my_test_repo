@@ -23,6 +23,20 @@ const { resolveJiraApiBase } = require('./event-extract');
 const MAX_PAGES = 20;
 const PAGE_SIZE = 100;
 
+// Attachment reads (#2399). `show` lists at most ATTACHMENT_LIST_CAP items so a
+// screenshot-heavy issue's output stays usable (the count still reports the
+// true total); `attachment get` refuses a file over ATTACHMENT_MAX_BYTES rather
+// than buffer an arbitrarily large body through the broker + the CLI's stdout.
+const ATTACHMENT_LIST_CAP = 50;
+const ATTACHMENT_MAX_BYTES = Number(process.env.JIRA_ATTACHMENT_MAX_BYTES) || 10 * 1024 * 1024;
+
+// Attachment writes (#2408). The upload cap mirrors the read side's but is its
+// own configurable knob (a site may want a different ceiling for what agents
+// push back than for what they pull) — a file over it is refused before the
+// multipart body is built. Jira's own instance limit may be lower; that surfaces
+// as a mapped HTTP error from the upload itself.
+const ATTACHMENT_UPLOAD_MAX_BYTES = Number(process.env.JIRA_ATTACHMENT_UPLOAD_MAX_BYTES) || 10 * 1024 * 1024;
+
 // Basic-auth header for `email:apiToken`. Jira Cloud's REST v3 uses Basic auth
 // with the Atlassian account e-mail as the username and an API token as the
 // password.
@@ -90,6 +104,47 @@ function shapeIssue(raw) {
   };
 }
 
+// Narrow a raw Jira attachment (from `fields.attachment[]`) to the metadata an
+// agent needs to decide whether to fetch it: filename, id, MIME type, size,
+// author display name, when it landed, and the content URL (the broker fetches
+// through it; the agent never sees the credential the URL needs).
+function shapeAttachment(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = String(raw.id == null ? '' : raw.id);
+  if (!id) return null;
+  const size = Number(raw.size);
+  return {
+    id,
+    filename: raw.filename == null ? '' : String(raw.filename),
+    mimeType: raw.mimeType ? String(raw.mimeType) : null,
+    size: Number.isFinite(size) ? size : 0,
+    author: raw.author && raw.author.displayName ? String(raw.author.displayName) : null,
+    created: raw.created ? String(raw.created) : null,
+    contentUrl: raw.content ? String(raw.content) : null,
+  };
+}
+
+// Textual extensions the agent can read inline even when Jira's MIME type is a
+// generic `application/octet-stream` (Jira often mislabels `.md`/`.log`/`.json`).
+const TEXT_EXTENSIONS = new Set([
+  'txt', 'text', 'md', 'markdown', 'rst', 'log', 'json', 'ndjson', 'csv', 'tsv',
+  'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'properties', 'html', 'htm',
+  'css', 'js', 'mjs', 'ts', 'jsx', 'tsx', 'sql', 'sh', 'bash', 'py', 'rb', 'go',
+  'java', 'c', 'h', 'cpp', 'cs', 'diff', 'patch', 'env',
+]);
+
+// Whether an attachment is safe to return as inline UTF-8 text (AC5) vs base64
+// (AC6). Decides on the MIME type first, then falls back to the filename's
+// extension for the octet-stream case.
+function isTextualAttachment(mimeType, filename) {
+  const mt = String(mimeType || '').toLowerCase();
+  if (mt.startsWith('text/')) return true;
+  if (/^application\/(json|xml|xhtml\+xml|javascript|ecmascript|x-yaml|yaml|x-sh|x-shellscript|sql|toml|x-toml)(;|$)/.test(mt)) return true;
+  if (/\+(json|xml)(;|$)/.test(mt)) return true;
+  const ext = String(filename || '').toLowerCase().split('.').pop();
+  return TEXT_EXTENSIONS.has(ext);
+}
+
 // Map a Jira HTTP failure to a clear, actionable message (never a raw 4xx body).
 function mapJiraError(status, bodyText) {
   const snippet = typeof bodyText === 'string' ? bodyText.slice(0, 200) : '';
@@ -102,6 +157,8 @@ function mapJiraError(status, bodyText) {
       return 'The Jira account lacks permission for this project or action (403).';
     case 404:
       return 'The Jira project or issue was not found (404), or the account cannot see it.';
+    case 413:
+      return `The file is larger than this Jira instance allows (413)${snippet ? `: ${snippet}` : ''}.`;
     case 429:
       return 'Jira rate limit reached (429) — backing off.';
     default:
@@ -174,6 +231,175 @@ function safeJson(s) {
   try { return JSON.parse(s); } catch { return {}; }
 }
 
+// ── field catalog: name → id resolution (#2415 epic link, #2416 custom fields) ─
+// Jira addresses custom fields by an opaque id (`customfield_NNNNN`) that varies
+// per site, so any capability that reads one by its human name ("Team", "Epic
+// Link", "Sprint") must first resolve name → id from `/rest/api/3/field`. That
+// list is fetched ONCE per site and cached: it feeds both the Epic Link lookup
+// (#2415) and the agent-requested custom-field reads (#2416) from a single GET.
+//
+// Two Jira project styles link a Story to its parent Epic differently:
+//   • team-managed (next-gen) — the native `parent` field, always present.
+//   • company-managed (classic) — a custom field named "Epic Link" (schema
+//     `com.pyxis.greenhopper.jira:gh-epic-link`) whose id varies per site, and
+//     which stores the epic KEY as a plain string.
+// So reads request BOTH the native `parent` and — when the site has one — the
+// Epic Link field. A failed catalog fetch degrades to native-`parent`-only and
+// must never break a read; the failure is NOT cached, so it self-heals on the
+// next read (unlike a real "no such field" answer, which is a cached empty map).
+const EPIC_LINK_SCHEMA = 'com.pyxis.greenhopper.jira:gh-epic-link';
+// api base URL → { byName: Map(lowerName → id), byId: Map(id → {id,name,schema}), epicLinkId }
+const fieldCatalogCache = new Map();
+
+async function resolveFieldCatalog(base, auth) {
+  const cached = fieldCatalogCache.get(base);
+  if (cached) return cached;
+  let catalog = null;
+  try {
+    const fields = await requestJson({ base, path: '/rest/api/3/field', authHeader: auth });
+    if (Array.isArray(fields)) {
+      const byName = new Map();
+      const byId = new Map(); // #2417 — the schema too, so a write can shape the value per field type
+      for (const f of fields) {
+        if (f && f.id && f.name) {
+          byName.set(String(f.name).toLowerCase(), String(f.id));
+          byId.set(String(f.id), { id: String(f.id), name: String(f.name), schema: f.schema || null });
+        }
+      }
+      const epic = fields.find((f) => f && f.schema && f.schema.custom === EPIC_LINK_SCHEMA)
+        || fields.find((f) => f && f.name === 'Epic Link');
+      catalog = { byName, byId, epicLinkId: epic && epic.id ? String(epic.id) : null };
+    }
+  } catch {
+    catalog = null; // field list unreachable → transient, not cached (self-heals)
+  }
+  if (catalog) fieldCatalogCache.set(base, catalog);
+  return catalog || { byName: new Map(), byId: new Map(), epicLinkId: null };
+}
+
+async function resolveEpicLinkFieldId(base, auth) {
+  return (await resolveFieldCatalog(base, auth)).epicLinkId;
+}
+
+// The agent-facing standard columns a `--fields` selection may name (below);
+// declared here so `partitionFields` can be defined before them.
+// (AGENT_ISSUE_COLUMNS is the source of truth — see near shapeAgentIssue.)
+
+// Split a caller's `--fields` list into standard columns (the projection over a
+// shaped issue) and custom-field names (resolved to ids and surfaced under
+// `customFields`). A name matching a known column is a column; anything else is
+// a custom-field name. Pure — no HTTP, so a bad column still fails fast.
+function partitionFields(fields) {
+  const list = Array.isArray(fields) ? fields.map((f) => String(f || '').trim()).filter(Boolean) : [];
+  const columns = [];
+  const customNames = [];
+  for (const f of list) {
+    if (AGENT_ISSUE_COLUMNS.includes(f)) columns.push(f);
+    else customNames.push(f);
+  }
+  return { columns, customNames };
+}
+
+// Merge custom-field name lists (an admin-configured default set ∪ a per-request
+// selection), de-duplicated case-insensitively, first spelling wins. Pure.
+function mergeCustomFieldNames(...groups) {
+  const out = [];
+  const seen = new Set();
+  for (const g of groups) {
+    for (const raw of Array.isArray(g) ? g : []) {
+      const name = String(raw || '').trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(name);
+    }
+  }
+  return out;
+}
+
+// Render one raw custom-field value into something an agent can read. Jira
+// returns wildly different shapes per field type; this normalises the common
+// ones and leaves an unknown shape verbatim. Crucially, an unset field is
+// `null` (Jira returns null, or an empty array) so an EMPTY value is always
+// distinguishable from a set one (#2416 acceptance).
+function renderCustomFieldValue(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) return null; // e.g. an unset multi-select / labels field
+    return raw.map(renderCustomFieldValue);
+  }
+  if (typeof raw === 'object') {
+    // Option / select → {value}; user → {displayName}; version / component →
+    // {name}; team (Advanced Roadmaps) → {id, title}. Prefer the human label but
+    // keep the id when there is one, so a "Team" resolves to a name AND an id.
+    const label = raw.value != null ? raw.value
+      : raw.name != null ? raw.name
+        : raw.title != null ? raw.title
+          : raw.displayName != null ? raw.displayName : null;
+    const id = raw.id != null ? raw.id
+      : raw.accountId != null ? raw.accountId
+        : raw.key != null ? raw.key : null;
+    if (label != null || id != null) {
+      const out = {};
+      if (id != null) out.id = String(id);
+      if (label != null) out.value = String(label);
+      return out;
+    }
+    return raw; // unknown object shape — surface verbatim rather than drop it
+  }
+  return raw; // string / number / boolean
+}
+
+// Resolve the requested custom-field NAMES to ids via the (cached) catalog. An
+// unresolved name is a 400 with the offending name — a typo, or a field this
+// credential's account cannot see — never a silently-dropped field. Returns
+// `{ resolved: [{ name, id }], ids: [id…] }`; empty when nothing was requested,
+// in which case NO catalog fetch happens (the common, custom-field-less read).
+async function resolveCustomFieldSelection(base, auth, names) {
+  const list = mergeCustomFieldNames(names);
+  if (!list.length) return { resolved: [], ids: [] };
+  const catalog = await resolveFieldCatalog(base, auth);
+  const resolved = [];
+  const unknown = [];
+  for (const name of list) {
+    const id = catalog.byName.get(name.toLowerCase());
+    if (id) resolved.push({ name, id });
+    else unknown.push(name);
+  }
+  if (unknown.length) {
+    const e = new Error(
+      `unknown Jira field(s): ${unknown.join(', ')}. Use the field's human name as it appears in Jira (e.g. "Team").`,
+    );
+    e.status = 400;
+    throw e;
+  }
+  return { resolved, ids: resolved.map((r) => r.id) };
+}
+
+// Build the `{ name: renderedValue|null }` map for a raw issue's resolved custom
+// fields, keyed by the caller's original field-name spelling.
+function buildCustomFields(rawFields, resolved) {
+  const out = {};
+  for (const { name, id } of resolved) out[name] = renderCustomFieldValue(rawFields[id]);
+  return out;
+}
+
+// The parent/epic key for a shaped read: prefer the native `parent` key
+// (team-managed), else the resolved Epic Link custom field (classic). `null`
+// when the issue has neither — the common case for a top-level issue or epic.
+function parentKeyOf(fields, epicLinkFieldId) {
+  if (fields && fields.parent && fields.parent.key) return String(fields.parent.key);
+  if (epicLinkFieldId && fields && fields[epicLinkFieldId]) return String(fields[epicLinkFieldId]);
+  return null;
+}
+
+// Test seam: drop the per-site field catalog cache so each stubbed-fetch test
+// starts from a clean lookup (the cache is otherwise process-lifetime).
+function __resetCaches() {
+  fieldCatalogCache.clear();
+}
+
 // One credential = { siteUrl, email, apiToken }. Every method takes it plus an
 // optional `env` for the JIRA_API_BASE seam.
 
@@ -222,24 +448,248 @@ async function fetchFullChangelog(cred, issueKey, { env } = {}) {
   return histories;
 }
 
-// Read one issue (CLI `show`). Narrow shape, with the browse URL.
-async function getIssue(cred, issueKey, { env } = {}) {
+// Read one issue (CLI `show`). Narrow shape, with the browse URL. `customFields`
+// (an array of human field names, e.g. ["Team"]) additionally reads those custom
+// fields (#2416) — resolved name → id and surfaced under `customFields`.
+async function getIssue(cred, issueKey, { env, customFields } = {}) {
   const base = apiBaseFor(cred.siteUrl, env);
   const auth = basicAuthHeader(cred.email, cred.apiToken);
+  // Resolve the site's Epic Link custom-field id (#2415) so a classic project's
+  // story→epic link is requestable alongside the native `parent`, plus any
+  // agent-requested custom fields (#2416). Both read one cached field catalog.
+  const epicLinkFieldId = await resolveEpicLinkFieldId(base, auth);
+  const custom = await resolveCustomFieldSelection(base, auth, customFields);
+  const fieldList = ['summary', 'status', 'description', 'assignee', 'issuetype', 'attachment', 'created', 'updated', 'parent'];
+  if (epicLinkFieldId) fieldList.push(epicLinkFieldId);
+  for (const id of custom.ids) if (!fieldList.includes(id)) fieldList.push(id);
   const raw = await requestJson({
     base,
-    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=summary,status,description,assignee,issuetype`,
+    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=${fieldList.join(',')}`,
     authHeader: auth,
   });
   const fields = raw.fields || {};
-  return {
+  const out = {
     key: String(raw.key || issueKey),
     summary: fields.summary == null ? '' : String(fields.summary),
     status: fields.status && fields.status.name ? String(fields.status.name) : null,
     issueType: issueTypeOf(fields),
     assignee: fields.assignee && fields.assignee.displayName ? String(fields.assignee.displayName) : null,
+    // Issue timestamps (#2414) so an agent can filter/sort reads by age. Jira
+    // returns ISO-8601 strings; surface them verbatim (null when absent).
+    created: fields.created ? String(fields.created) : null,
+    updated: fields.updated ? String(fields.updated) : null,
+    // Parent/epic key (#2415) so an agent can traverse Story→Epic: `show` the
+    // key this returns. `null` when the issue has no parent (e.g. an epic).
+    parent: parentKeyOf(fields, epicLinkFieldId),
     url: `${resolveJiraApiBase(cred.siteUrl)}/browse/${encodeURIComponent(raw.key || issueKey)}`,
   };
+  // Requested custom fields (#2416). Only surfaced when some were requested, so
+  // a plain `show` is byte-identical to before. An unset field is `null` (not a
+  // dropped key), so an empty value is distinguishable from a set one.
+  if (custom.resolved.length) out.customFields = buildCustomFields(fields, custom.resolved);
+  // Attachment metadata (#2399, AC1). Only surfaced when the issue actually has
+  // attachments — an issue with none carries no `attachments` key at all, so the
+  // shape is byte-identical to before for the common case (AC2/AC8, no noise).
+  const attachments = (Array.isArray(fields.attachment) ? fields.attachment : [])
+    .map(shapeAttachment)
+    .filter((a) => a && a.id);
+  if (attachments.length) {
+    out.attachmentCount = attachments.length;
+    out.attachments = attachments.slice(0, ATTACHMENT_LIST_CAP);
+    if (attachments.length > ATTACHMENT_LIST_CAP) out.attachmentsTruncated = true;
+  }
+  // Available transitions (#2421). The transitions reachable from the issue's
+  // *current* status, folded into `show` so an agent can pick its next move
+  // directly instead of guessing-then-parsing a failed `transition` error.
+  // Reuses `listTransitions`. A failed lookup degrades to omitting the key — a
+  // read stays robust, matching the Epic Link fallback above; on success the
+  // key is always present (possibly `[]` when the workflow allows no move).
+  try {
+    const transitions = await listTransitions(cred, out.key, { env });
+    out.availableTransitions = transitions.map((t) => ({ transition: t.name, toStatus: t.toStatus }));
+  } catch {
+    /* transitions unavailable → omit the key rather than fail the whole read */
+  }
+  return out;
+}
+
+// The full (uncapped) attachment list for one issue — the ownership check
+// `getAttachment` runs before a download, kept separate from `getIssue` so the
+// display cap there can never hide a valid id from the check.
+async function getIssueAttachments(cred, issueKey, { env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const raw = await requestJson({
+    base,
+    path: `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=attachment`,
+    authHeader: auth,
+  });
+  const fields = raw.fields || {};
+  return (Array.isArray(fields.attachment) ? fields.attachment : [])
+    .map(shapeAttachment)
+    .filter((a) => a && a.id);
+}
+
+// Download one attachment's raw bytes from Jira's content endpoint. Jira Cloud
+// 302/303-redirects `/attachment/content/{id}` to a signed media URL; `fetch`
+// follows it and (per the Fetch spec) drops the Authorization header on the
+// cross-origin hop — the signed URL needs no credential, so the token never
+// leaves the first, same-origin request. A `Buffer` is returned so the caller
+// decides text vs base64. Same idempotent-GET transport retry as the reads.
+async function downloadAttachmentContent(cred, attachmentId, { env, maxBytes = ATTACHMENT_MAX_BYTES } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const reqPath = `/rest/api/3/attachment/content/${encodeURIComponent(attachmentId)}`;
+  const headers = { Accept: '*/*', 'User-Agent': 'agent-studio-jira-plugin', Authorization: auth };
+  const doAttempt = async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+    let res;
+    try {
+      res = await fetch(base + reqPath, { method: 'GET', headers, redirect: 'follow', signal: ctrl.signal });
+    } catch (err) {
+      const cause = err && err.cause ? ` (${err.cause.code || err.cause.message || err.cause})` : '';
+      const wrapped = new Error(`${err.message}${cause}`);
+      wrapped.transport = true;
+      throw wrapped;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      const e = new Error(mapJiraError(res.status, text));
+      e.status = res.status;
+      throw e;
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (maxBytes && buf.length > maxBytes) {
+      const e = new Error(`attachment content exceeds the ${maxBytes}-byte fetch limit.`);
+      e.status = 413;
+      throw e;
+    }
+    return { buf, contentType: res.headers && res.headers.get ? res.headers.get('content-type') : null };
+  };
+  try {
+    return await doAttempt();
+  } catch (err) {
+    if (err.transport) return doAttempt(); // a read — a stale keep-alive socket is gone on the retry
+    throw err;
+  }
+}
+
+// Fetch one attachment's content by id (CLI `attachment get`, #2399). Confirms
+// the id belongs to the given issue first (AC4 — an id on another issue, or one
+// deleted since `show` listed it, is a clean 404, never a raw Jira body), then
+// refuses an over-cap file (AC edge case) before downloading. Text types come
+// back as inline UTF-8 (AC5), everything else as base64 (AC6); the CLI decides
+// how to surface each.
+async function getAttachment(cred, issueKey, attachmentId, { env, maxBytes = ATTACHMENT_MAX_BYTES } = {}) {
+  const wantId = String(attachmentId == null ? '' : attachmentId).trim();
+  if (!wantId) { const e = new Error('an attachment id is required'); e.status = 400; throw e; }
+  const cap = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : ATTACHMENT_MAX_BYTES;
+  const attachments = await getIssueAttachments(cred, issueKey, { env });
+  const att = attachments.find((a) => a.id === wantId);
+  if (!att) {
+    const e = new Error(
+      `attachment ${wantId} is not on issue ${issueKey} — it may have been deleted, or it belongs to another issue.`,
+    );
+    e.status = 404;
+    throw e;
+  }
+  if (att.size && att.size > cap) {
+    const e = new Error(
+      `attachment ${wantId} (${att.filename}) is ${att.size} bytes, over the ${cap}-byte fetch limit — `
+      + `open it directly in Jira${att.contentUrl ? `: ${att.contentUrl}` : ''}.`,
+    );
+    e.status = 413;
+    throw e;
+  }
+  const { buf, contentType } = await downloadAttachmentContent(cred, wantId, { env, maxBytes: cap });
+  const mimeType = att.mimeType || contentType || null;
+  const textual = isTextualAttachment(mimeType, att.filename);
+  return {
+    id: att.id,
+    filename: att.filename,
+    mimeType,
+    size: att.size || buf.length,
+    author: att.author,
+    encoding: textual ? 'text' : 'base64',
+    content: textual ? buf.toString('utf8') : buf.toString('base64'),
+  };
+}
+
+// Upload one local file to an issue as a NEW attachment (CLI `attachment add`,
+// #2408). The file's bytes arrive here as a Buffer (the broker decoded the CLI's
+// base64 body); the credential and the Jira call stay server-side, so the token
+// never leaves the broker (AC7). Jira Cloud attaches via a multipart POST to the
+// issue's `/attachments` endpoint that REQUIRES the `X-Atlassian-Token: no-check`
+// header (its XSRF guard) and the file under the form field `file`; it answers
+// 200 with an array of the created attachment(s). The over-cap file is refused
+// before the body is built (AC edge case); an unknown/foreign issue key or a
+// permission/attachments-disabled failure comes back as a mapped domain error
+// (AC4), never a raw Jira body.
+//
+// This is a WRITE and is NEVER retried on a transport failure: a retry that
+// lands after Jira already accepted the first upload would create a DUPLICATE
+// attachment (Jira treats a same-named upload as a new, additional file — it
+// never dedups). Same F6 discipline as addComment / updateDescription.
+async function addAttachment(cred, issueKey, { filename, buffer, mimeType, env, maxBytes = ATTACHMENT_UPLOAD_MAX_BYTES } = {}) {
+  const key = String(issueKey == null ? '' : issueKey).trim();
+  if (!key) { const e = new Error('an issue key is required'); e.status = 400; throw e; }
+  const name = String(filename == null ? '' : filename).trim();
+  if (!name) { const e = new Error('a filename is required'); e.status = 400; throw e; }
+  if (!Buffer.isBuffer(buffer)) { const e = new Error('file content is required'); e.status = 400; throw e; }
+  const cap = Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : ATTACHMENT_UPLOAD_MAX_BYTES;
+  if (buffer.length > cap) {
+    const e = new Error(`${name} is ${buffer.length} bytes, over the ${cap}-byte upload limit.`);
+    e.status = 413;
+    throw e;
+  }
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const reqPath = `/rest/api/3/issue/${encodeURIComponent(key)}/attachments`;
+  const form = new FormData();
+  form.append('file', new Blob([buffer], mimeType ? { type: String(mimeType) } : {}), name);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+  let res;
+  try {
+    // `Content-Type` (with the multipart boundary) is set by fetch from the
+    // FormData — do NOT set it by hand or the boundary is lost.
+    res = await fetch(base + reqPath, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'agent-studio-jira-plugin',
+        Authorization: auth,
+        'X-Atlassian-Token': 'no-check',
+      },
+      body: form,
+      signal: ctrl.signal,
+    });
+  } catch (err) {
+    const cause = err && err.cause ? ` (${err.cause.code || err.cause.message || err.cause})` : '';
+    const wrapped = new Error(`${err.message}${cause}`);
+    wrapped.transport = true;
+    throw wrapped; // a write — never retried (a duplicate attachment otherwise)
+  } finally {
+    clearTimeout(timer);
+  }
+  const text = await res.text();
+  if (!res.ok) {
+    const e = new Error(mapJiraError(res.status, text));
+    e.status = res.status;
+    throw e;
+  }
+  const parsed = text ? safeJson(text) : [];
+  const created = (Array.isArray(parsed) ? parsed : [parsed]).map(shapeAttachment).filter((a) => a && a.id);
+  if (!created.length) {
+    const e = new Error(`Jira accepted the upload of ${name} but returned no attachment metadata.`);
+    e.status = 502;
+    throw e;
+  }
+  // One file in → one attachment out; return its metadata (id + filename at least, AC3).
+  return created[0];
 }
 
 // Which Atlassian account the credential authenticates as (GET /myself) — the
@@ -278,11 +728,103 @@ async function listProjects(cred, { env } = {}) {
   return projects;
 }
 
+// The full set of workflow statuses a project supports, grouped by issue type
+// (#2421) — GET /rest/api/3/project/{projectIdOrKey}/statuses. Independent of
+// any single issue's current state, so an agent can see what a workflow supports
+// before an issue reaches a given status (planning / capability check), unlike
+// `show`'s availableTransitions which are relative to one issue's current state.
+// Shaped to `[{ issueType, statuses: [{ name, category }] }]` per issue type.
+async function listProjectStatuses(cred, { projectKey, env } = {}) {
+  const key = String(projectKey || '').trim();
+  if (!key) { const e = new Error('a project key is required'); e.status = 400; throw e; }
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const raw = await requestJson({
+    base,
+    path: `/rest/api/3/project/${encodeURIComponent(key)}/statuses`,
+    authHeader: auth,
+  });
+  const types = Array.isArray(raw) ? raw : [];
+  return types.map((t) => ({
+    issueType: t && t.name ? String(t.name) : null,
+    statuses: (t && Array.isArray(t.statuses) ? t.statuses : []).map((s) => ({
+      name: s && s.name ? String(s.name) : null,
+      // Jira's coarse workflow bucket ("new" / "indeterminate" / "done") — lets
+      // an agent group statuses without hard-coding site-specific names.
+      category: s && s.statusCategory && s.statusCategory.key ? String(s.statusCategory.key) : null,
+    })),
+  }));
+}
+
+// The agent-facing field set both `list` and `search` request from Jira, and
+// the shaped shape they return — the columns an agent sees for a browsed issue.
+const AGENT_ISSUE_FIELDS = ['summary', 'status', 'assignee', 'updated', 'issuetype', 'parent'];
+const AGENT_ISSUE_COLUMNS = ['key', 'summary', 'status', 'issueType', 'assignee', 'updated', 'parent', 'url'];
+
+// Narrow one raw search issue to the agent-facing columns (used by both
+// `listProjectIssues` and `searchIssues`). `siteBase` builds the browse URL;
+// `epicLinkFieldId` (when the site has one) lets a classic project's epic key
+// surface as `parent` alongside the native `parent` (#2415).
+function shapeAgentIssue(raw, siteBase, epicLinkFieldId) {
+  const f = (raw && raw.fields) || {};
+  return {
+    key: String((raw && raw.key) || ''),
+    summary: f.summary == null ? '' : String(f.summary),
+    status: f.status && f.status.name ? String(f.status.name) : null,
+    issueType: issueTypeOf(f),
+    assignee: f.assignee && f.assignee.displayName ? String(f.assignee.displayName) : null,
+    updated: f.updated || null,
+    parent: parentKeyOf(f, epicLinkFieldId),
+    url: `${siteBase}/browse/${encodeURIComponent((raw && raw.key) || '')}`,
+  };
+}
+
+// The field set a search/list request sends: the agent columns plus, when the
+// site has an Epic Link custom field, its id — so `parentKeyOf` can read the
+// classic-project epic key. (`parent` is already in AGENT_ISSUE_FIELDS.)
+function agentRequestFields(epicLinkFieldId) {
+  return epicLinkFieldId ? [...AGENT_ISSUE_FIELDS, epicLinkFieldId] : AGENT_ISSUE_FIELDS;
+}
+
+// A caller-supplied `--fields` selection reduces a shaped issue to just those
+// columns. `undefined`/empty → the full shape. An unknown column is a 400 with
+// the valid set (validated once, up front, by `assertColumns`) — never a
+// silently-dropped field. `key` is always kept: it is the issue's identity.
+function assertColumns(fields) {
+  if (!Array.isArray(fields) || fields.length === 0) return;
+  const unknown = fields.filter((f) => !AGENT_ISSUE_COLUMNS.includes(f));
+  if (unknown.length) {
+    const e = new Error(`unknown --fields: ${unknown.join(', ')}. Valid columns: ${AGENT_ISSUE_COLUMNS.join(', ')}`);
+    e.status = 400;
+    throw e;
+  }
+}
+
+function pickAgentColumns(issue, fields) {
+  if (!Array.isArray(fields) || fields.length === 0) return issue;
+  const keep = new Set(['key', ...fields]);
+  const out = {};
+  for (const col of AGENT_ISSUE_COLUMNS) if (keep.has(col)) out[col] = issue[col];
+  return out;
+}
+
+// `search --limit` bounds: default one page, hard-ceilinged at the same
+// MAX_PAGES × PAGE_SIZE budget the pollers use so a broad query can never
+// spiral. A non-positive or non-numeric value falls back to the default.
+const SEARCH_DEFAULT_LIMIT = PAGE_SIZE;
+const SEARCH_MAX_LIMIT = MAX_PAGES * PAGE_SIZE;
+
+function clampSearchLimit(limit) {
+  const n = Number(limit);
+  if (!Number.isFinite(n) || n <= 0) return SEARCH_DEFAULT_LIMIT;
+  return Math.min(Math.floor(n), SEARCH_MAX_LIMIT);
+}
+
 // A project's issues, most-recently-updated first, optionally filtered to one
 // current status (CLI `list`). `status` is quoted + escaped so it can never
 // break out of the clause. Capped at one page (PAGE_SIZE) — an agent browsing a
 // project does not need 2000 rows.
-async function listProjectIssues(cred, { projectKey, status, env } = {}) {
+async function listProjectIssues(cred, { projectKey, status, customFields, env } = {}) {
   const base = apiBaseFor(cred.siteUrl, env);
   const auth = basicAuthHeader(cred.email, cred.apiToken);
   let jql = `project = ${jqlQuote(projectKey)}`;
@@ -290,27 +832,95 @@ async function listProjectIssues(cred, { projectKey, status, env } = {}) {
     jql += ` AND status = ${jqlQuote(status.trim())}`;
   }
   jql += ' ORDER BY updated DESC';
+  const epicLinkFieldId = await resolveEpicLinkFieldId(base, auth); // #2415
+  const custom = await resolveCustomFieldSelection(base, auth, customFields); // #2416
+  const listFields = ['summary', 'status', 'assignee', 'created', 'updated', 'issuetype', 'parent'];
+  if (epicLinkFieldId) listFields.push(epicLinkFieldId);
+  for (const id of custom.ids) if (!listFields.includes(id)) listFields.push(id);
   const result = await requestJson({
     base,
     path: '/rest/api/3/search/jql',
     method: 'POST',
     idempotent: true, // a read that happens to be a POST — safe to retry
     authHeader: auth,
-    body: { jql, fields: ['summary', 'status', 'assignee', 'updated', 'issuetype'], maxResults: PAGE_SIZE },
+    body: { jql, fields: listFields, maxResults: PAGE_SIZE },
   });
   const siteBase = resolveJiraApiBase(cred.siteUrl);
   return (Array.isArray(result.issues) ? result.issues : []).map((raw) => {
     const f = raw.fields || {};
-    return {
+    const row = {
       key: String(raw.key || ''),
       summary: f.summary == null ? '' : String(f.summary),
       status: f.status && f.status.name ? String(f.status.name) : null,
       issueType: issueTypeOf(f),
       assignee: f.assignee && f.assignee.displayName ? String(f.assignee.displayName) : null,
+      created: f.created || null, // #2414 — so an agent can filter/sort list rows by age
       updated: f.updated || null,
+      parent: parentKeyOf(f, epicLinkFieldId), // #2415 — Story→Epic traversal
       url: `${siteBase}/browse/${encodeURIComponent(raw.key || '')}`,
     };
+    if (custom.resolved.length) row.customFields = buildCustomFields(f, custom.resolved); // #2416
+    return row;
   });
+}
+
+// Agent-facing arbitrary JQL search (#2413). Promotes the diagnostic-only
+// `searchJql` to the CLI: the caller owns the whole query, so it can express
+// filters `list` cannot (`created`, an empty custom field, a summary regex, …).
+//
+// Scope guard: the query runs under the per-scope credential, exactly like
+// `list`/`show`. Jira resolves it as that account, so it can only ever return
+// issues on the credential's bound site (the base URL) and in the projects that
+// account is permitted to browse — the JQL cannot reach another team's site or a
+// project the credential can't already see. There is no separate allow-list to
+// bypass; the credential *is* the tenant boundary.
+//
+// Shaped like `list` (no changelog expansion — that's a poller concern) and
+// capped at `limit` issues (default one page, hard-ceilinged at MAX_PAGES ×
+// PAGE_SIZE) so a broad query can never spiral. `fields` optionally narrows the
+// returned columns.
+async function searchIssues(cred, { jql, fields, customFields, limit, env } = {}) {
+  const query = String(jql == null ? '' : jql).trim();
+  if (!query) { const e = new Error('a JQL query is required'); e.status = 400; throw e; }
+  assertColumns(fields); // the standard-column projection — validated fast, no HTTP
+  const cap = clampSearchLimit(limit);
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  const epicLinkFieldId = await resolveEpicLinkFieldId(base, auth); // #2415
+  const custom = await resolveCustomFieldSelection(base, auth, customFields); // #2416
+  const reqFields = [...agentRequestFields(epicLinkFieldId), ...custom.ids];
+  const issues = [];
+  let nextPageToken;
+  for (let page = 0; page < MAX_PAGES && issues.length < cap; page += 1) {
+    const result = await requestJson({
+      base,
+      path: '/rest/api/3/search/jql',
+      method: 'POST',
+      idempotent: true, // a read that happens to be a POST — safe to retry
+      authHeader: auth,
+      body: {
+        jql: query,
+        fields: reqFields,
+        maxResults: Math.min(PAGE_SIZE, cap - issues.length),
+        ...(nextPageToken ? { nextPageToken } : {}),
+      },
+    });
+    for (const raw of Array.isArray(result.issues) ? result.issues : []) {
+      const shaped = shapeAgentIssue(raw, siteBase, epicLinkFieldId);
+      if (!shaped.key) continue;
+      const row = pickAgentColumns(shaped, fields);
+      // Custom fields are additive: they ride alongside the projected columns
+      // (never narrowed away by `--fields`), so `search --fields Team` returns
+      // the full row plus Team, and `--fields status,Team` returns key+status+Team.
+      if (custom.resolved.length) row.customFields = buildCustomFields(raw.fields || {}, custom.resolved);
+      issues.push(row);
+      if (issues.length >= cap) break;
+    }
+    if (result.isLast !== false || !result.nextPageToken) break;
+    nextPageToken = result.nextPageToken;
+  }
+  return issues;
 }
 
 // Run an arbitrary JQL (spike diagnostics only — `probe --jql`). Same shaping as
@@ -448,6 +1058,655 @@ async function transitionIssue(cred, issueKey, { toStatus, env } = {}) {
   return { issueKey, applied: match.name, toStatus: match.toStatus };
 }
 
+// ── custom-field write (#2417) ───────────────────────────────────────────────
+//
+// The write counterpart of the #2416 custom-field read: set an allow-listed
+// custom field (e.g. "Team") on an issue. Three guards, in order:
+//   1. allow-list — the field's human name MUST be in the team's
+//      `writable-custom-fields` list, else it is REFUSED (403). An EMPTY list
+//      means NO field is writable — the safe default until a Team Admin opts a
+//      field in (a writable field is strictly more dangerous than a readable one,
+//      so unlike the read allow-list this gate is mandatory, never a default set).
+//   2. name → id resolution via the (cached) field catalog — an unknown name is a
+//      400 with the offending name, never a silently-dropped write.
+//   3. value shaping per the field's schema type — a Team / select / user field is
+//      not a plain string (`shapeFieldWriteValue`); a raw `jsonValue` is the
+//      escape hatch for an exotic field type, sent verbatim.
+// The write is attributed by Jira's own issue history (the change is recorded
+// under the broker's account, which represents the team — the same "attribution"
+// a `transition` carries: no free-text field to stamp). Idempotent: the current
+// value is read first and the PUT is skipped when it already matches, so a re-run
+// adds no redundant history entry.
+
+// Shape a scalar `value` into the write payload Jira expects for a field of the
+// given `schema`. Pure. A number that will not parse is a 400; every other type
+// degrades to a plain string, the safest default for an unmodelled field.
+function shapeFieldWriteValue(schema, value) {
+  const type = schema && schema.type ? String(schema.type) : 'string';
+  const v = value == null ? '' : String(value);
+  switch (type) {
+    case 'string':
+    case 'date':
+    case 'datetime':
+      return v;
+    case 'number': {
+      const n = Number(v);
+      if (!Number.isFinite(n)) { const e = new Error(`"${value}" is not a number`); e.status = 400; throw e; }
+      return n;
+    }
+    case 'option':
+    case 'option-with-child':
+      return { value: v }; // a single-select — Jira also accepts { id }
+    case 'user':
+      return { accountId: v };
+    case 'team': // Advanced Roadmaps "Team" custom field — keyed by team id
+      return { id: v };
+    case 'array': {
+      const items = schema && schema.items ? String(schema.items) : 'string';
+      if (items === 'option') return [{ value: v }];
+      if (items === 'user') return [{ accountId: v }];
+      return [v];
+    }
+    default:
+      return v; // unmodelled scalar — send as a plain string
+  }
+}
+
+// Whether the current raw field value already equals `wantStr` (idempotency). A
+// rendered object matches on its id OR its human value; a rendered array matches
+// if any member does; a scalar on string equality. Pure.
+function fieldRenderedEquals(rendered, wantStr) {
+  if (rendered && typeof rendered === 'object') {
+    return String(rendered.id) === wantStr || String(rendered.value) === wantStr;
+  }
+  return String(rendered) === wantStr;
+}
+
+function fieldValueMatches(currentRaw, wantStr) {
+  const rendered = renderCustomFieldValue(currentRaw);
+  if (rendered === null || rendered === undefined) return false;
+  if (Array.isArray(rendered)) return rendered.some((r) => fieldRenderedEquals(r, wantStr));
+  return fieldRenderedEquals(rendered, wantStr);
+}
+
+// Set one allow-listed custom field on an issue (CLI `set-field`). `allowList` is
+// the team's sanctioned writable field names; `value` (a scalar, shaped per the
+// field's type) OR `jsonValue` (raw, verbatim) supplies what to write.
+async function setCustomField(cred, issueKey, { fieldName, value, jsonValue, allowList, env } = {}) {
+  const key = String(issueKey == null ? '' : issueKey).trim();
+  if (!key) { const e = new Error('an issue key is required'); e.status = 400; throw e; }
+  const name = String(fieldName == null ? '' : fieldName).trim();
+  if (!name) { const e = new Error('a field name is required'); e.status = 400; throw e; }
+  const hasJson = jsonValue !== undefined;
+  if (!hasJson && (value === undefined || value === null)) {
+    const e = new Error('a value is required (--value or --value-json)'); e.status = 400; throw e;
+  }
+  // (1) allow-list gate — an empty list means unrestricted; a non-empty list
+  // restricts writes to only the named fields (#2449 flips the old deny-by-default).
+  const allow = (Array.isArray(allowList) ? allowList : [])
+    .map((s) => String(s || '').trim().toLowerCase()).filter(Boolean);
+  if (allow.length && !allow.includes(name.toLowerCase())) {
+    const e = new Error(
+      `field "${name}" is not writable by agents. This team's writable-custom-fields allow-list is: `
+        + `${allowList.join(', ')}. A Team Admin adds it on the Plugins page.`,
+    );
+    e.status = 403;
+    throw e;
+  }
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  // (2) name → id + schema.
+  const catalog = await resolveFieldCatalog(base, auth);
+  const id = catalog.byName.get(name.toLowerCase());
+  if (!id) {
+    const e = new Error(`unknown Jira field: ${name}. Use the field's human name as it appears in Jira (e.g. "Team").`);
+    e.status = 400;
+    throw e;
+  }
+  const meta = catalog.byId.get(id) || { id, name, schema: null };
+  // (3) value shaping — raw JSON verbatim, else per the field's schema type.
+  const shaped = hasJson ? jsonValue : shapeFieldWriteValue(meta.schema, value);
+  // Idempotency (scalar path only — a raw jsonValue's shape is not comparable): a
+  // pre-read skips the write when the field already holds the target value, so a
+  // re-run adds no redundant Jira history entry.
+  if (!hasJson) {
+    const cur = await requestJson({
+      base,
+      path: `/rest/api/3/issue/${encodeURIComponent(key)}?fields=${encodeURIComponent(id)}`,
+      authHeader: auth,
+    });
+    const current = (cur.fields || {})[id];
+    if (fieldValueMatches(current, String(value))) {
+      return { issueKey: key, field: name, changed: false, value: renderCustomFieldValue(current) };
+    }
+  }
+  // A write — NOT retried on a transport failure (F6), like updateDescription.
+  await requestJson({
+    base,
+    path: `/rest/api/3/issue/${encodeURIComponent(key)}`,
+    method: 'PUT',
+    authHeader: auth,
+    body: { fields: { [id]: shaped } },
+  });
+  return { issueKey: key, field: name, changed: true, value: hasJson ? jsonValue : value };
+}
+
+// ── issue creation: one Epic + its child Stories (#2424) ─────────────────────
+//
+// The first CREATE capability of the plugin (reads + field/description writes
+// existed; nothing created an issue). One call creates one **Epic** (the ask)
+// and N **Stories** underneath it (the breakdown) in a single project, each
+// Story linked to the Epic. Scoped to one project (§ the ticket): the epic and
+// every story land in `projectKey`.
+//
+// Jira has no create-transaction, so the guards run in this order so a bad input
+// fails BEFORE any issue exists (no orphan epic):
+//   1. shape validation — a missing project / epic summary / story summary is a
+//      400 up front.
+//   2. custom-field allow-list — EVERY custom field named anywhere (epic or a
+//      story) MUST be on the team's `writable-custom-fields` list, exactly like
+//      `setCustomField` (#2417): the same fields (Team, Story Points) an admin
+//      sanctioned for a set are the ones creatable here. A non-listed field is a
+//      403 before anything is created. The Epic-link field the broker sets to
+//      wire a Story to its Epic is structural, NOT a user-named field, so it is
+//      exempt from the allow-list.
+//   3. name → id + schema resolution via the (cached) field catalog — an unknown
+//      custom-field name is a 400 up front.
+// The epic is created first (its key is needed to link the stories); then each
+// story is created and, if a `status` was given, transitioned (Jira creates an
+// issue in the workflow's initial status, so a non-default start is a follow-up
+// transition — the ticket's own note). A per-story failure AFTER the epic exists
+// does NOT abort the rest: the story is recorded failed and the operation
+// continues, so the caller gets the epic key + a per-story success/failure map
+// (like `attachment add`). Creates are NEVER retried on a transport failure
+// (F6): a retry landing after Jira accepted the first would create a duplicate.
+const EPIC_ISSUE_TYPE = 'Epic';
+const STORY_ISSUE_TYPE = 'Story';
+
+// Build the `fields` object for one issue-create (epic or story). Pure. `spec`
+// is the caller's `{ summary, description?, assignee?, fields? }`; `fieldMeta`
+// maps a lower-cased custom-field name → its `{ id, schema }` (already resolved
+// + allow-listed). A custom-field value that is already an object/array is sent
+// verbatim (an escape hatch for an exotic shape); a scalar is shaped per the
+// field's schema type via the shared `shapeFieldWriteValue` (Team → {id},
+// number → Number, …).
+function buildCreateFields({ projectKey, issueTypeName, spec, fieldMeta, attribution }) {
+  const fields = {
+    project: { key: projectKey },
+    issuetype: { name: issueTypeName },
+    summary: String(spec.summary || '').trim(),
+  };
+  const desc = spec.description == null ? '' : String(spec.description).trim();
+  if (desc) fields.description = descriptionAdf(desc, attribution);
+  const assignee = spec.assignee == null ? '' : String(spec.assignee).trim();
+  if (assignee) fields.assignee = { accountId: assignee };
+  if (spec.fields && typeof spec.fields === 'object') {
+    for (const [name, value] of Object.entries(spec.fields)) {
+      const meta = fieldMeta.get(name.toLowerCase());
+      if (!meta) continue; // validated up front — defensive
+      fields[meta.id] = value !== null && typeof value === 'object'
+        ? value // exotic shape, verbatim (mirrors set-field's --value-json)
+        : shapeFieldWriteValue(meta.schema, value);
+    }
+  }
+  return fields;
+}
+
+// POST one issue-create. A write — never retried on a transport failure (F6).
+// Returns `{ id, key }` (Jira answers 201 with them).
+async function createIssue(base, auth, fields) {
+  const res = await requestJson({
+    base,
+    path: '/rest/api/3/issue',
+    method: 'POST',
+    authHeader: auth,
+    body: { fields },
+  });
+  return { id: res.id ? String(res.id) : null, key: String(res.key || '') };
+}
+
+// Every custom-field name used across the epic + all stories, first spelling
+// wins (so the error/allow-list messages read as the caller typed them). Pure.
+function collectCustomFieldNames(epic, stories) {
+  const seen = new Set();
+  const out = [];
+  const add = (spec) => {
+    if (spec && spec.fields && typeof spec.fields === 'object') {
+      for (const name of Object.keys(spec.fields)) {
+        const trimmed = String(name || '').trim();
+        if (!trimmed || seen.has(trimmed.toLowerCase())) continue;
+        seen.add(trimmed.toLowerCase());
+        out.push(trimmed);
+      }
+    }
+  };
+  add(epic);
+  for (const s of Array.isArray(stories) ? stories : []) add(s);
+  return out;
+}
+
+async function createEpicWithStories(cred, { projectKey, epic, stories, allowList, attribution, issueTypes, env } = {}) {
+  const project = String(projectKey || '').trim();
+  if (!project) { const e = new Error('a project key is required'); e.status = 400; throw e; }
+  if (!epic || typeof epic !== 'object') { const e = new Error('an epic is required'); e.status = 400; throw e; }
+  if (!String(epic.summary || '').trim()) { const e = new Error('the epic requires a summary'); e.status = 400; throw e; }
+  const storyList = Array.isArray(stories) ? stories : [];
+  storyList.forEach((s, i) => {
+    if (!s || typeof s !== 'object' || !String(s.summary || '').trim()) {
+      const e = new Error(`story #${i + 1} requires a summary`); e.status = 400; throw e;
+    }
+  });
+
+  // (2) allow-list gate — an empty list means unrestricted; a non-empty list
+  // restricts writes to only the named fields (#2449 flips the old deny-by-default).
+  const usedNames = collectCustomFieldNames(epic, storyList);
+  const allow = (Array.isArray(allowList) ? allowList : [])
+    .map((s) => String(s || '').trim().toLowerCase()).filter(Boolean);
+  const notAllowed = allow.length
+    ? usedNames.filter((n) => !allow.includes(n.toLowerCase()))
+    : [];
+  if (notAllowed.length) {
+    const e = new Error(
+      `custom field(s) not writable by agents: ${notAllowed.join(', ')}. This team's `
+        + `writable-custom-fields allow-list is: ${allowList.join(', ')}. A Team Admin adds them on the Plugins page.`,
+    );
+    e.status = 403;
+    throw e;
+  }
+
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+
+  // (3) name → id + schema, up front (one cached catalog fetch feeds every field
+  // AND the Epic-link id used to wire Story→Epic).
+  const catalog = await resolveFieldCatalog(base, auth);
+  const fieldMeta = new Map();
+  const unknown = [];
+  for (const name of usedNames) {
+    const id = catalog.byName.get(name.toLowerCase());
+    if (!id) { unknown.push(name); continue; }
+    fieldMeta.set(name.toLowerCase(), catalog.byId.get(id) || { id, name, schema: null });
+  }
+  if (unknown.length) {
+    const e = new Error(
+      `unknown Jira field(s): ${unknown.join(', ')}. Use the field's human name as it appears in Jira (e.g. "Team").`,
+    );
+    e.status = 400;
+    throw e;
+  }
+
+  const epicTypeName = String((issueTypes && issueTypes.epic) || EPIC_ISSUE_TYPE).trim() || EPIC_ISSUE_TYPE;
+  const storyTypeName = String((issueTypes && issueTypes.story) || STORY_ISSUE_TYPE).trim() || STORY_ISSUE_TYPE;
+  const siteBase = resolveJiraApiBase(cred.siteUrl);
+  const browseUrl = (key) => `${siteBase}/browse/${encodeURIComponent(key)}`;
+
+  // Apply an optional follow-up status transition to a just-created issue. Jira
+  // creates in the workflow's initial status, so a requested non-default start is
+  // a transition (the ticket's implementer note). A transition failure is
+  // reported alongside the created key, never a hard failure — the issue exists.
+  const applyStatus = async (key, status, out) => {
+    const want = String(status || '').trim();
+    if (!want) return;
+    try {
+      const t = await transitionIssue(cred, key, { toStatus: want, env });
+      out.status = t.toStatus || want;
+    } catch (err) {
+      out.statusError = err.message;
+    }
+  };
+
+  // (1→create) the epic first — its key links every story.
+  const epicFields = buildCreateFields({ projectKey: project, issueTypeName: epicTypeName, spec: epic, fieldMeta, attribution });
+  const epicCreated = await createIssue(base, auth, epicFields);
+  const epicKey = epicCreated.key;
+  const epicOut = { key: epicKey, url: browseUrl(epicKey), summary: String(epic.summary).trim() };
+  await applyStatus(epicKey, epic.status, epicOut);
+
+  // Each story, linked to the epic. Team-managed projects use the native
+  // `parent`; company-managed (classic) uses the Epic Link custom field — mirror
+  // the #2415 read side: a site with an Epic Link field id uses it, else `parent`.
+  const storyResults = [];
+  for (const [i, s] of storyList.entries()) {
+    try {
+      const storyFields = buildCreateFields({ projectKey: project, issueTypeName: storyTypeName, spec: s, fieldMeta, attribution });
+      if (catalog.epicLinkId) storyFields[catalog.epicLinkId] = epicKey;
+      else storyFields.parent = { key: epicKey };
+      const created = await createIssue(base, auth, storyFields);
+      const out = { summary: String(s.summary).trim(), key: created.key, url: browseUrl(created.key), ok: true };
+      await applyStatus(created.key, s.status, out);
+      storyResults.push(out);
+    } catch (err) {
+      storyResults.push({ summary: String(s.summary).trim(), ok: false, error: err.message });
+    }
+  }
+
+  return {
+    project,
+    epic: epicOut,
+    stories: storyResults,
+    created: 1 + storyResults.filter((r) => r.ok).length,
+    failed: storyResults.filter((r) => !r.ok).length,
+  };
+}
+
+// ── board & sprint management (Jira Agile API, #2450) ────────────────────────
+//
+// The first capability that touches Jira's **Agile** surface (`/rest/agile/1.0`,
+// not `/rest/api/3`): the board/sprint concept the plugin had none of. Three
+// things an agent can now do, all bound to a Scrum board resolved by its
+// human-readable name (like the field name→id resolution the custom-field ops
+// use, #2416/#2417):
+//   • READ  — list a board's sprints (needed to know "where the last one ends"
+//             so a bulk generation can continue from it).
+//   • WRITE — create ONE sprint (explicit name/start/end).
+//   • WRITE — BULK-generate a run of future sprints from a cadence + a naming
+//             template + a target end date, continuing by default from the
+//             board's latest existing sprint.
+//
+// A Scrum board only ever has one *active* sprint; every sprint this creates is
+// a Jira "future" (not-started) sprint — the state a plain POST /sprint yields,
+// so no state is sent. The whole date/naming computation (`planSprints` and its
+// helpers) is PURE so the month-crosses-week-boundary naming rule and the
+// continuation arithmetic unit-test without a live Jira; the async functions are
+// the thin adapters, same pure-core / I/O-edge split as the rest of this module.
+
+const AGILE_BASE = '/rest/agile/1.0';
+const AGILE_PAGE_SIZE = 50;
+// A hard safety bound on a single bulk generation so a far-future `--until` (or a
+// tiny cadence) can never spiral into thousands of create calls. 2 years of
+// weekly sprints — generous for real planning, cheap to refuse past.
+const MAX_BULK_SPRINTS = 104;
+
+// English month names, fixed (never the runtime locale) so a rendered sprint
+// name is deterministic regardless of where the broker runs.
+const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTHS_FULL = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
+  'August', 'September', 'October', 'November', 'December'];
+
+// Parse a caller date (a bare `YYYY-MM-DD` or a full ISO-8601 string) and
+// truncate it to its UTC calendar day (a Date at 00:00:00.000Z). All sprint date
+// math is done in UTC so it is independent of the broker's timezone. Throws a 400
+// on an unparseable value.
+function parseUtcDay(value, label = 'date') {
+  const s = String(value == null ? '' : value).trim();
+  if (!s) { const e = new Error(`a ${label} is required`); e.status = 400; throw e; }
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) {
+    const e = new Error(`"${value}" is not a valid ${label} (use YYYY-MM-DD)`); e.status = 400; throw e;
+  }
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+function addUtcDays(day, n) {
+  return new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate() + n));
+}
+
+// A UTC-day Date → the `T00:00:00.000Z` ISO string Jira's sprint create accepts.
+function isoStartOfDay(day) {
+  return `${day.toISOString().slice(0, 10)}T00:00:00.000Z`;
+}
+
+// The occurrence index of the day's weekday within its month: the Nth Monday /
+// Tuesday / … . `ceil(dayOfMonth / 7)` — day 1–7 → 1, 8–14 → 2, …, 26 → 4. This
+// is the "week-of-month" the example naming rule uses, and because it is keyed
+// entirely off the sprint's START day (its Monday), the "Monday decides the
+// label even when the week crosses into the next month" rule falls out for free.
+function weekOfMonth(day) {
+  return Math.ceil(day.getUTCDate() / 7);
+}
+
+// Render one sprint's name from a caller template + its start day (+ 1-based
+// index in the batch). Supported placeholders (a known token is substituted; an
+// unknown `{token}` is left verbatim so a typo is visible, not silently dropped):
+//   {MMM} 3-letter month, {MMMM} full month, {MM} 2-digit month, {M} month,
+//   {YYYY} year, {YY} 2-digit year, {DD} 2-digit day, {D} day,
+//   {weekOfMonth} the Nth-weekday-of-month index, {n}/{index} 1-based batch #.
+// Month/day come from the sprint's START day (its Monday) — the documented rule.
+function renderSprintName(template, day, index) {
+  const tokens = {
+    MMM: MONTHS_SHORT[day.getUTCMonth()],
+    MMMM: MONTHS_FULL[day.getUTCMonth()],
+    MM: String(day.getUTCMonth() + 1).padStart(2, '0'),
+    M: String(day.getUTCMonth() + 1),
+    YYYY: String(day.getUTCFullYear()),
+    YY: String(day.getUTCFullYear()).slice(-2),
+    DD: String(day.getUTCDate()).padStart(2, '0'),
+    D: String(day.getUTCDate()),
+    weekOfMonth: String(weekOfMonth(day)),
+    n: String(index),
+    index: String(index),
+  };
+  return String(template).replace(/\{(\w+)\}/g, (m, key) => (
+    Object.prototype.hasOwnProperty.call(tokens, key) ? tokens[key] : m
+  ));
+}
+
+// Pure: the run of sprints to create. Each sprint is `cadenceDays` long; the
+// first starts on `start` (a UTC-day Date) and every next one starts the day
+// AFTER the previous one's (inclusive) end, so the sprints are contiguous. A
+// sprint is generated while its START day is on or before `until` (so the target
+// date is always reached / covered). Returns `[{ name, startDate, endDate }]`
+// with ISO `T00:00:00.000Z` bounds. Throws a 400 on a bad cadence / empty
+// template / a run that would exceed MAX_BULK_SPRINTS.
+function planSprints({ start, cadenceDays, until, nameTemplate }) {
+  const tmpl = String(nameTemplate == null ? '' : nameTemplate).trim();
+  if (!tmpl) { const e = new Error('a name template is required'); e.status = 400; throw e; }
+  const days = Math.floor(Number(cadenceDays));
+  if (!Number.isFinite(days) || days < 1) {
+    const e = new Error('cadence must be a whole number of days ≥ 1'); e.status = 400; throw e;
+  }
+  const sprints = [];
+  let cur = start;
+  let index = 1;
+  while (cur.getTime() <= until.getTime()) {
+    if (sprints.length >= MAX_BULK_SPRINTS) {
+      const e = new Error(
+        `this run would create more than ${MAX_BULK_SPRINTS} sprints — narrow the target date or widen the cadence`,
+      );
+      e.status = 400; throw e;
+    }
+    const end = addUtcDays(cur, days - 1); // inclusive last day (Mon..Sun for weekly)
+    sprints.push({ name: renderSprintName(tmpl, cur, index), startDate: isoStartOfDay(cur), endDate: isoStartOfDay(end) });
+    cur = addUtcDays(cur, days);
+    index += 1;
+  }
+  return sprints;
+}
+
+// Shape one raw Agile sprint to what the CLI consumes.
+function shapeSprint(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = raw.id == null ? null : String(raw.id);
+  if (id == null) return null;
+  return {
+    id,
+    name: raw.name == null ? '' : String(raw.name),
+    state: raw.state ? String(raw.state) : null,
+    startDate: raw.startDate ? String(raw.startDate) : null,
+    endDate: raw.endDate ? String(raw.endDate) : null,
+    goal: raw.goal ? String(raw.goal) : null,
+    boardId: raw.originBoardId == null ? null : String(raw.originBoardId),
+  };
+}
+
+// Resolve a human-readable board NAME to its id (mirrors the field name→id
+// resolution the custom-field ops use). Jira's `?name=` filter is a substring
+// match, so this narrows further: an exact (case-insensitive) name wins; failing
+// that, a single candidate is accepted; otherwise it is an actionable error that
+// lists what it found (a 404 for none, a 409 for several) rather than guessing.
+// `projectKeyOrId` optionally disambiguates when two projects have like-named
+// boards. Returns `{ id, name, type }`.
+async function resolveBoardByName(cred, { boardName, projectKeyOrId, env } = {}) {
+  const wanted = String(boardName == null ? '' : boardName).trim();
+  if (!wanted) { const e = new Error('a board name is required'); e.status = 400; throw e; }
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const boards = [];
+  let startAt = 0;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const qs = new URLSearchParams({ name: wanted, startAt: String(startAt), maxResults: String(AGILE_PAGE_SIZE) });
+    if (projectKeyOrId) qs.set('projectKeyOrId', String(projectKeyOrId));
+    const res = await requestJson({ base, path: `${AGILE_BASE}/board?${qs.toString()}`, authHeader: auth });
+    const values = Array.isArray(res.values) ? res.values : [];
+    for (const b of values) if (b && b.id != null) boards.push({ id: String(b.id), name: String(b.name || ''), type: b.type ? String(b.type) : null });
+    startAt += values.length;
+    if (res.isLast || values.length === 0 || (typeof res.total === 'number' && startAt >= res.total)) break;
+  }
+  if (boards.length === 0) {
+    const e = new Error(`no board found matching "${wanted}". Check the board name (as it appears in Jira).`);
+    e.status = 404; throw e;
+  }
+  const exact = boards.filter((b) => b.name.toLowerCase() === wanted.toLowerCase());
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) {
+    const e = new Error(`"${wanted}" matches ${exact.length} boards: ${exact.map((b) => `${b.name} (id ${b.id})`).join(', ')}. Disambiguate with --project.`);
+    e.status = 409; throw e;
+  }
+  if (boards.length === 1) return boards[0];
+  const e = new Error(`"${wanted}" is ambiguous — ${boards.length} boards contain it: ${boards.map((b) => `${b.name} (id ${b.id})`).join(', ')}. Use the exact board name.`);
+  e.status = 409; throw e;
+}
+
+// Resolve the board (by id if given, else by name) to `{ id, name }`.
+async function resolveBoard(cred, { boardId, boardName, projectKeyOrId, env } = {}) {
+  if (boardId != null && String(boardId).trim()) {
+    return { id: String(boardId).trim(), name: null, type: null };
+  }
+  return resolveBoardByName(cred, { boardName, projectKeyOrId, env });
+}
+
+// List a board's sprints (CLI `sprint list`). `state` optionally filters to Jira's
+// future / active / closed buckets (a comma list). Paginated. Returns
+// `{ board: { id, name }, sprints: [shapeSprint…] }`.
+async function listBoardSprints(cred, { boardId, boardName, projectKeyOrId, state, env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const board = await resolveBoard(cred, { boardId, boardName, projectKeyOrId, env });
+  const sprints = [];
+  let startAt = 0;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const qs = new URLSearchParams({ startAt: String(startAt), maxResults: String(AGILE_PAGE_SIZE) });
+    if (state && String(state).trim()) qs.set('state', String(state).trim());
+    const res = await requestJson({ base, path: `${AGILE_BASE}/board/${encodeURIComponent(board.id)}/sprint?${qs.toString()}`, authHeader: auth });
+    const values = Array.isArray(res.values) ? res.values : [];
+    for (const raw of values) { const s = shapeSprint(raw); if (s) sprints.push(s); }
+    startAt += values.length;
+    if (res.isLast || values.length === 0 || (typeof res.total === 'number' && startAt >= res.total)) break;
+  }
+  return { board: { id: board.id, name: board.name }, sprints };
+}
+
+// Normalise a caller-supplied sprint boundary for `createSprint`: a bare
+// `YYYY-MM-DD` becomes start-of-day UTC; a full ISO string is validated and sent
+// verbatim (the caller owns the exact time).
+function normalizeSprintBoundary(value, label) {
+  const s = String(value == null ? '' : value).trim();
+  if (!s) { const e = new Error(`a ${label} is required`); e.status = 400; throw e; }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `${s}T00:00:00.000Z`;
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) { const e = new Error(`"${value}" is not a valid ${label}`); e.status = 400; throw e; }
+  return s;
+}
+
+// POST one sprint to `/rest/agile/1.0/sprint`. A future (not-started) sprint —
+// no `state` is sent, which is what a plain create yields. A WRITE: never retried
+// on a transport failure (F6) — a retry landing after Jira accepted the first
+// would create a duplicate sprint. Returns the shaped created sprint.
+async function postSprint(base, auth, { name, startDate, endDate, goal, originBoardId }) {
+  const body = { name, originBoardId: Number(originBoardId) };
+  if (startDate) body.startDate = startDate;
+  if (endDate) body.endDate = endDate;
+  if (goal) body.goal = goal;
+  const res = await requestJson({ base, path: `${AGILE_BASE}/sprint`, method: 'POST', authHeader: auth, body });
+  return shapeSprint(res) || { id: res && res.id != null ? String(res.id) : null, name };
+}
+
+// Create ONE sprint on a board (CLI `sprint create`). Explicit name + start/end.
+async function createSprint(cred, { boardId, boardName, projectKeyOrId, name, startDate, endDate, goal, env } = {}) {
+  const sprintName = String(name == null ? '' : name).trim();
+  if (!sprintName) { const e = new Error('a sprint name is required'); e.status = 400; throw e; }
+  const start = normalizeSprintBoundary(startDate, 'start date');
+  const end = normalizeSprintBoundary(endDate, 'end date');
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const board = await resolveBoard(cred, { boardId, boardName, projectKeyOrId, env });
+  const created = await postSprint(base, auth, {
+    name: sprintName, startDate: start, endDate: end, goal: goal ? String(goal) : undefined, originBoardId: board.id,
+  });
+  return { board: { id: board.id, name: board.name }, sprint: created };
+}
+
+// The board's latest sprint end (for "continue from where the last one ends"):
+// the max endDate across all of the board's sprints, or null when none carries a
+// date. Pure over an already-listed sprint array.
+function latestSprintEnd(sprints) {
+  let best = null;
+  for (const s of Array.isArray(sprints) ? sprints : []) {
+    if (!s || !s.endDate) continue;
+    const t = new Date(s.endDate).getTime();
+    if (Number.isNaN(t)) continue;
+    if (best === null || t > best.t) best = { t, sprint: s };
+  }
+  return best;
+}
+
+// BULK-generate a run of future sprints on a board (CLI `sprint bulk-create`).
+// Computes every sprint from a cadence + naming template + target end date,
+// continuing by DEFAULT from the board's latest existing sprint (an explicit
+// `--start` overrides, and is the required fallback for a board with no sprints
+// yet). The plan is computed up front (pure `planSprints`); each sprint is then
+// created, and — because the dates are precomputed, not chained on Jira's
+// responses — a per-sprint failure is recorded and does NOT abort the rest (the
+// caller gets a per-sprint success/failure map, like `create-epic`). Creates are
+// never retried on a transport failure (F6).
+async function bulkCreateSprints(cred, { boardId, boardName, projectKeyOrId, nameTemplate, cadenceDays = 7, until, start, goal, env } = {}) {
+  const untilDay = parseUtcDay(until, 'target end date');
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const board = await resolveBoard(cred, { boardId, boardName, projectKeyOrId, env });
+
+  // Where does the first sprint start? An explicit `--start` wins; otherwise
+  // continue from the day after the board's latest existing sprint's end.
+  let firstStart;
+  if (start != null && String(start).trim()) {
+    firstStart = parseUtcDay(start, 'start date');
+  } else {
+    const { sprints } = await listBoardSprints(cred, { boardId: board.id, env });
+    const latest = latestSprintEnd(sprints);
+    if (!latest) {
+      const e = new Error(
+        `board "${board.name || board.id}" has no dated sprint to continue from — supply --start for the first sprint`,
+      );
+      e.status = 400; throw e;
+    }
+    firstStart = addUtcDays(parseUtcDay(latest.sprint.endDate, 'sprint end date'), 1);
+  }
+
+  const plan = planSprints({ start: firstStart, cadenceDays, until: untilDay, nameTemplate });
+  if (plan.length === 0) {
+    const e = new Error('the target end date is before the first sprint start — nothing to create'); e.status = 400; throw e;
+  }
+
+  const results = [];
+  for (const p of plan) {
+    try {
+      const created = await postSprint(base, auth, {
+        name: p.name, startDate: p.startDate, endDate: p.endDate, goal: goal ? String(goal) : undefined, originBoardId: board.id,
+      });
+      results.push({ name: p.name, startDate: p.startDate, endDate: p.endDate, id: created.id, state: created.state, ok: true });
+    } catch (err) {
+      results.push({ name: p.name, startDate: p.startDate, endDate: p.endDate, ok: false, error: err.message });
+    }
+  }
+  return {
+    board: { id: board.id, name: board.name },
+    requested: plan.length,
+    created: results.filter((r) => r.ok).length,
+    failed: results.filter((r) => !r.ok).length,
+    sprints: results,
+  };
+}
+
 module.exports = {
   MAX_PAGES,
   PAGE_SIZE,
@@ -457,6 +1716,14 @@ module.exports = {
   buildJqlSearchBody,
   changelogPath,
   shapeIssue,
+  shapeAgentIssue,
+  parentKeyOf,
+  partitionFields,
+  mergeCustomFieldNames,
+  renderCustomFieldValue,
+  __resetCaches,
+  shapeAttachment,
+  isTextualAttachment,
   issueTypeOf,
   commentAdf,
   descriptionAdf,
@@ -465,12 +1732,48 @@ module.exports = {
   whoAmI,
   searchProjectIssues,
   listProjectIssues,
+  searchIssues,
+  clampSearchLimit,
+  pickAgentColumns,
+  AGENT_ISSUE_COLUMNS,
+  SEARCH_DEFAULT_LIMIT,
+  SEARCH_MAX_LIMIT,
   searchJql,
   fetchFullChangelog,
   getIssue,
+  getIssueAttachments,
+  downloadAttachmentContent,
+  getAttachment,
+  addAttachment,
   listProjects,
+  listProjectStatuses,
+  ATTACHMENT_LIST_CAP,
+  ATTACHMENT_MAX_BYTES,
+  ATTACHMENT_UPLOAD_MAX_BYTES,
   addComment,
   updateDescription,
   listTransitions,
   transitionIssue,
+  shapeFieldWriteValue,
+  fieldValueMatches,
+  setCustomField,
+  buildCreateFields,
+  collectCustomFieldNames,
+  createEpicWithStories,
+  EPIC_ISSUE_TYPE,
+  STORY_ISSUE_TYPE,
+  // board & sprint management (#2450)
+  MAX_BULK_SPRINTS,
+  parseUtcDay,
+  addUtcDays,
+  isoStartOfDay,
+  weekOfMonth,
+  renderSprintName,
+  planSprints,
+  shapeSprint,
+  latestSprintEnd,
+  resolveBoardByName,
+  listBoardSprints,
+  createSprint,
+  bulkCreateSprints,
 };

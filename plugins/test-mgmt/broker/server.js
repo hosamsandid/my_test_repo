@@ -32,6 +32,7 @@
 const http = require('http');
 
 const {
+  withUnexpectedErrors,
   verifyScopeToken,
   auditWriter,
   maskSecretsOrDefault,
@@ -110,7 +111,12 @@ async function execVendor(scopeId, subcommand, name, args) {
       token: process.env.TESTMGMT_API_TOKEN,
     });
     // Redact the vendor credential from anything echoed back, per §4.9.
-    const masked = maskSecretsOrDefault(JSON.stringify(body), [process.env.TESTMGMT_API_TOKEN]);
+    // (raw, fallback, secrets) — the token belongs in the third argument. As
+    // the second it became the fallback, so an empty body would have returned
+    // the API token to the caller, and nothing was masked either.
+    const masked = maskSecretsOrDefault(
+      JSON.stringify(body), '(no body)', [process.env.TESTMGMT_API_TOKEN],
+    );
     writeAudit(scopeId, subcommand, 'ok');
     return { content: [{ type: 'text', text: masked }] };
   } catch (err) {
@@ -211,12 +217,7 @@ function readBody(req) {
   });
 }
 
-const httpServer = http.createServer((req, res) => {
-  handleRequest(req, res).catch((err) => {
-    if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
-    try { res.end(JSON.stringify({ error: (err && err.message) || String(err) })); } catch { /* ignore */ }
-  });
-});
+const httpServer = http.createServer(withUnexpectedErrors('test-mgmt-broker', handleRequest));
 
 if (require.main === module) {
   httpServer.listen(PORT, () => process.stdout.write(`[test-mgmt-broker] listening on :${PORT}\n`));

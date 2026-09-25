@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { healthCellModel, healthCellDetail, providerWarningText } from './provider-health-view.js';
+import { healthCellModel, healthCellDetail, providerWarningText, personalProviderNoticeText } from './provider-health-view.js';
 
 test('healthCellModel: ok/error/unknown map to tones', () => {
   assert.deepEqual(healthCellModel({ status: 'ok' }), { label: 'OK', tone: 'ok' });
@@ -34,4 +34,31 @@ test('providerWarningText: falls back gracefully with no name / no reason', () =
   const w = providerWarningText({ status: 'error', reason: null }, '');
   assert.match(w, /the bound Model Provider/);
   assert.doesNotMatch(w, /\(\)/); // no empty parens when reason is absent
+});
+
+test('personalProviderNoticeText: null when there is nothing to say', () => {
+  assert.equal(personalProviderNoticeText(null), null);
+  assert.equal(personalProviderNoticeText(undefined), null);
+  assert.equal(personalProviderNoticeText({ level: 'none' }), null);
+  assert.equal(personalProviderNoticeText({}), null);
+});
+
+test('personalProviderNoticeText: warn is the fragile api-key lend', () => {
+  const n = personalProviderNoticeText({ level: 'warn', identity: 'api-key', providerName: 'My Gateway' });
+  assert.equal(n.tone, 'warn');
+  assert.match(n.text, /My Gateway/);
+  assert.match(n.text, /lend/);
+  assert.match(n.text, /register a Team provider/i);
+});
+
+test('personalProviderNoticeText: block is the subscription-seat error', () => {
+  const n = personalProviderNoticeText({ level: 'block', identity: 'oauth', providerName: 'My Sub' });
+  assert.equal(n.tone, 'error');
+  assert.match(n.text, /My Sub/);
+  assert.match(n.text, /single-user seat/);
+});
+
+test('personalProviderNoticeText: graceful with no provider name', () => {
+  const n = personalProviderNoticeText({ level: 'warn' });
+  assert.match(n.text, /a member’s personal provider/);
 });

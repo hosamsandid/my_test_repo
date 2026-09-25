@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router';
 import { Plus, Pencil, Trash2, ShieldCheck, KeyRound, Users2, AlertTriangle } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
+import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import DataTable from '../components/DataTable';
 import PageHelpButton from '../components/PageHelpButton';
 import CredentialOwnership from '../components/CredentialOwnership';
@@ -747,7 +748,69 @@ function EnvironmentOwnershipRow({ env, teams, teamNames, onSaved, onError }) {
   );
 }
 
+// The delete-only governance view over PERSONAL resources (#2360, §6/§12.7),
+// behind AEE_RESOURCE_ACCESS_V2. A System Admin sees every personal
+// provider / SSH key / GitHub token MASKED — name, owner, created, and a
+// non-secret discriminator only, NEVER the secret — and may DELETE one
+// (canDeleteCredential's break-glass) but never see-secret or use it. Delete
+// routes through the existing per-kind DELETE endpoints, which re-check the gate.
+const PERSONAL_RESOURCE_DELETE_PATH = {
+  provider: '/api/llm-endpoints',
+  'ssh-key': '/api/ssh-keys',
+  'github-token': '/api/github-tokens',
+};
+const PERSONAL_RESOURCE_KIND_LABEL = { provider: 'Model provider', 'ssh-key': 'SSH key', 'github-token': 'GitHub token' };
+
+function PersonalResourcesSection({ onError }) {
+  const { data, loading, refetch } = useApi('/api/admin/personal-resources');
+  const [confirm, setConfirm] = useState(null); // the resource pending delete
+
+  async function doDelete(r) {
+    try {
+      await apiCall('DELETE', `${PERSONAL_RESOURCE_DELETE_PATH[r.kind]}/${encodeURIComponent(r.id)}`);
+    } catch (e) { onError(e.message); }
+    finally { setConfirm(null); refetch(); }
+  }
+
+  const resources = (data && data.resources) || [];
+  return (
+    <Section title={`Personal resources (${resources.length})`}>
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 'var(--eb-space-2)' }}>
+        Every user's personal secret, masked. You may delete one for governance / offboarding hygiene,
+        but never see its secret or use it — the owner alone can.
+      </div>
+      {loading && <div aria-busy="true" style={{ height: 80, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-md)' }} />}
+      {!loading && resources.length === 0 && (
+        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>No personal resources.</div>
+      )}
+      {resources.map(r => (
+        <div key={`${r.kind}:${r.id}`} style={cardStyle}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 'var(--eb-text-sm)' }}>{r.name}</div>
+            <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
+              {PERSONAL_RESOURCE_KIND_LABEL[r.kind] || r.kind} · owner {r.ownerId || 'unknown'}
+              {r.fingerprint ? ` · ${r.fingerprint}` : ''}{r.authType ? ` · ${r.authType}` : ''}
+            </div>
+          </div>
+          <IconButton icon={Trash2} danger title="Delete (break-glass)" onClick={() => setConfirm(r)} />
+        </div>
+      ))}
+      <ConfirmDialog
+        open={!!confirm}
+        title="Delete personal resource?"
+        message={confirm
+          ? `Delete ${PERSONAL_RESOURCE_KIND_LABEL[confirm.kind] || confirm.kind} "${confirm.name}" owned by ${confirm.ownerId || 'unknown'}? The secret is removed — revoke it at its provider too. This cannot be undone.`
+          : ''}
+        variant="danger" confirmLabel="Delete"
+        onConfirm={() => confirm && doDelete(confirm)}
+        onCancel={() => setConfirm(null)}
+      />
+    </Section>
+  );
+}
+
 function ResourcesTab() {
+  const resourceAccessV2 = useResourceAccessV2();
   const { data: teams, loading: lt, error: et } = useApi('/api/admin/teams');
   const { data: agents, loading: laAgents, refetch: refetchAgents } = useApi('/api/agents');
   const { data: environments, refetch: refetchEnvs } = useApi('/api/environments');
@@ -860,6 +923,9 @@ function ResourcesTab() {
             />
           ))}
         </Section>
+        {/* The delete-only personal-resource governance view (#2360) — only
+            when the unified model is on; the endpoint 404s otherwise. */}
+        {resourceAccessV2 && <PersonalResourcesSection onError={setActionError} />}
       </div>
     </div>
   );

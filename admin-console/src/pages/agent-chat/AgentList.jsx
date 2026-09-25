@@ -1,9 +1,11 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { MessageCircle, Bot, Server, Users, ChevronDown, ChevronRight, GripVertical, MoreVertical, Loader2 } from 'lucide-react';
 
 import { computeReorder, dropPosition } from './agent-list-dnd.js';
 import { groupEnvironmentName, rowEnvironmentName } from './agent-list-env.js';
 import { buildGroups, groupKey, orderModel, filterModel, stubSectionLabel, poolInstancesLabel } from './agent-list-model.js';
+import { teamMembershipIndicator, membershipsByTeam, fitAdminNames } from './team-membership-view.js';
+import { computeTeamAttention } from '../../context/agent-statuses.js';
 import { agentState, isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
 
 // Re-exported so `AgentChat` can populate the filter dropdown without importing
@@ -21,6 +23,13 @@ const ORDER_KEY = 'agentChat.sidebarOrder';
 const EMPTY_BUSY = new Set();
 
 /**
+ * Shared empty membership list handed to a team group that has no rows in the
+ * `GET /api/admin/memberships` payload — a *stable* reference so a memoized
+ * `GroupSection` for such a team is never re-rendered by a fresh `[]` each poll.
+ */
+const EMPTY_MEMBERSHIPS = [];
+
+/**
  * Per-entity collapse-state defaults, keyed by `kind` in the same `<kind>:<id>`
  * namespace `groupKey` uses for teams — matches the Agents overview page so the
  * chat sidebar behaves consistently: teams (and, since #2297, a role's pool
@@ -29,6 +38,26 @@ const EMPTY_BUSY = new Set();
 const DEFAULT_COLLAPSED = {
   team: false,
   pool: false,
+};
+
+/**
+ * At-rest visual treatment that reads a team's header + all its member rows
+ * (active members, the nested pool-instance sub-list and the stub sub-list) as
+ * ONE grouped block, clearly separated from the next team's block (#2370). A
+ * subtle `--eb-bg-surface` panel + a 1px border + rounded corners draw the
+ * boundary without hover/selection, and the `marginBottom` gap is what the eye
+ * uses to tell where one team ends and the next begins even with many teams
+ * stacked in the rail. All tokens, so it follows the active light/dark theme.
+ *
+ * The "Single agents" section (a plain `SectionHeader` + ungrouped rows) is
+ * deliberately NOT wrapped in this, so ungrouped agents stay visually distinct
+ * from an actual team (AC6).
+ */
+const TEAM_BLOCK_STYLE = {
+  marginBottom: 'var(--eb-space-2)',
+  border: '1px solid var(--eb-border-default)',
+  borderRadius: 'var(--eb-radius-md)',
+  background: 'var(--eb-bg-surface)',
 };
 
 function loadCollapsed() {
@@ -90,6 +119,12 @@ function saveOrder(order) {
  *   selection onto the team (via `onSelect`) and opens the Settings tab for it
  *   — a team hosts no chat of its own, so selecting one is otherwise a dead
  *   end. Omitted → the header row only toggles/selects, same as before.
+ * @param {object[]} memberships  Flat `GET /api/admin/memberships` payload (all
+ *   of the caller's teams), driving the team-header membership indicator (#2381).
+ * @param {object[]} directory    `GET /api/users/directory` — resolves member
+ *   ids to display names for that indicator.
+ * @param {string|null} viewerId  The viewing user's id, so a team-of-one reads
+ *   as "Private" for its owner and as that person's name for anyone else.
  */
 export default function AgentList({
   agents,
@@ -101,7 +136,15 @@ export default function AgentList({
   busyIds = EMPTY_BUSY,
   onRequestMenu = null,
   onOpenTeamSettings = null,
+  memberships = EMPTY_MEMBERSHIPS,
+  directory = EMPTY_MEMBERSHIPS,
+  viewerId = null,
 }) {
+  // Index memberships by team id once per membership change (#2381). Rebuilds
+  // only when the polled `memberships` array identity changes — the hook keeps
+  // that reference stable across no-op polls — so a team header is not re-grouped
+  // every 5s.
+  const membershipMap = useMemo(() => membershipsByTeam(memberships), [memberships]);
   const [sidebarOrder, setSidebarOrder] = useState(loadOrder);
   useEffect(() => { saveOrder(sidebarOrder); }, [sidebarOrder]);
 
@@ -263,7 +306,14 @@ export default function AgentList({
   }, []);
 
   return (
-    <div role="listbox" style={{ display: 'flex', flexDirection: 'column' }}>
+    // A uniform `--eb-space-2` gutter around the whole list so the rounded team
+    // blocks (`TEAM_BLOCK_STYLE`) breathe on every side by the SAME amount that
+    // separates one team from the next (#2370 follow-up): without it the cards
+    // sat flush against the rail's top/left edge while only their `marginBottom`
+    // gap — and the scrollbar on the right — gave them any room. The inset also
+    // aligns the ungrouped "Single agents" rows to the same left edge as the
+    // cards' outer margin.
+    <div role="listbox" style={{ display: 'flex', flexDirection: 'column', padding: 'var(--eb-space-2)' }}>
       {visibleGroups.map((group) => (
         <GroupSection
           key={`${group.kind}:${group.id}`}
@@ -282,6 +332,9 @@ export default function AgentList({
           onRequestMenu={onRequestMenu}
           onOpenTeamSettings={onOpenTeamSettings}
           isEntityCollapsed={isCollapsed}
+          teamMemberships={membershipMap.get(group.id) || EMPTY_MEMBERSHIPS}
+          directory={directory}
+          viewerId={viewerId}
         />
       ))}
 
@@ -339,6 +392,9 @@ const GroupSection = React.memo(function GroupSection({
   busyIds,
   onRequestMenu,
   onOpenTeamSettings,
+  teamMemberships,
+  directory,
+  viewerId,
 }) {
   const Icon = Users;
   const stubs = group.stubs || [];
@@ -366,17 +422,48 @@ const GroupSection = React.memo(function GroupSection({
   const headerMenu = onRequestMenu
     ? anchor => onRequestMenu({ kind: 'team', group }, anchor)
     : null;
-  // The Working Environment shared by this group's rows is shown once, on the
-  // header; rows that inherit it drop their own line (#1451).
+  // The Working Environment shared by this group's rows is still hoisted to the
+  // group for its MEMBER rows (#1451) — they inherit it and drop their own line
+  // — but since #2381 it is no longer shown on the header itself: that line now
+  // carries the team-membership indicator instead.
   const groupEnv = groupEnvironmentName(group);
+  // Who is behind this team (#2381, broadened #2387): "Private", the full member
+  // list (Team Admins first, then Team Members), or nothing.
+  // Recomputed only when this team's own membership list, the directory, or the
+  // viewer changes — all stable across no-op polls — so the header is not
+  // re-rendered on every 5s roster/membership tick.
+  const membershipIndicator = useMemo(
+    () => teamMembershipIndicator({ memberships: teamMemberships, directory, viewerId }),
+    [teamMemberships, directory, viewerId],
+  );
+  // #2430 — roll the attention-worthy member states (a reply awaiting you / a
+  // busy agent) up onto the header so a collapsed team still shows *which* team
+  // needs the user. The rollup spans the team's active members and their pool
+  // instances — the same ids the poll tracks; stubs carry no poll status and
+  // never surface. Recomputed only when the status map or the membership shape
+  // changes (the ids array is stable across a no-op poll), so it does not defeat
+  // the header's memoisation. The header renders it only while collapsed (AC6).
+  const memberIds = useMemo(() => {
+    const ids = [];
+    for (const agent of group.children) {
+      ids.push(agent.id);
+      if (agent.instances) for (const inst of agent.instances) ids.push(inst.id);
+    }
+    return ids;
+  }, [group.children]);
+  const attention = useMemo(
+    () => computeTeamAttention(memberIds, statuses),
+    [memberIds, statuses],
+  );
   return (
-    <>
+    <div style={TEAM_BLOCK_STYLE}>
       <CollapsibleHeader
         label={group.displayName}
         icon={Icon}
         subtle={!group.header}
         count={count}
-        environmentName={groupEnv}
+        attention={attention}
+        membershipIndicator={membershipIndicator}
         collapsed={collapsed}
         selected={selectedAgentId === group.id}
         onToggle={handleToggle}
@@ -450,7 +537,7 @@ const GroupSection = React.memo(function GroupSection({
           onRequestMenu={onRequestMenu}
         />
       )}
-    </>
+    </div>
   );
 });
 
@@ -490,7 +577,8 @@ function StubSection({ stubs, groupEnv, selectedAgentId, onSelect, busyIds, onRe
           gap: 'var(--eb-space-2)',
           width: '100%',
           padding: 'var(--eb-space-2) var(--eb-space-3)',
-          paddingLeft: 'calc(var(--eb-space-3) + var(--eb-space-4))',
+          // #2389: stays aligned with its (now un-indented) stub rows.
+          paddingLeft: 'var(--eb-space-3)',
           background: hovered ? 'var(--eb-bg-hover)' : 'transparent',
           border: 'none',
           fontSize: 'var(--eb-text-xs)',
@@ -565,7 +653,8 @@ function PoolInstancesSection({ roleAgent, instances, groupEnv, collapsed, onTog
           gap: 'var(--eb-space-2)',
           width: '100%',
           padding: 'var(--eb-space-2) var(--eb-space-3)',
-          paddingLeft: 'calc(var(--eb-space-3) + var(--eb-space-4) * 2)',
+          // #2389: stays aligned with its instance rows (indent={2} → one step).
+          paddingLeft: 'calc(var(--eb-space-3) + var(--eb-space-4))',
           background: hovered ? 'var(--eb-bg-hover)' : 'transparent',
           border: 'none',
           fontSize: 'var(--eb-text-xs)',
@@ -601,7 +690,7 @@ function PoolInstancesSection({ roleAgent, instances, groupEnv, collapsed, onTog
   );
 }
 
-function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, collapsed, selected, onToggle, onActivate, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
+function CollapsibleHeader({ label, icon: Icon, subtle, count, attention, membershipIndicator, collapsed, selected, onToggle, onActivate, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
   const [hovered, setHovered] = useState(false);
 
   const dnd = dragEnabled && drag ? makeRowDnd(drag, dragScope, dragKey) : null;
@@ -641,11 +730,23 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, 
         gap: 'var(--eb-space-2)',
         width: '100%',
         padding: 'var(--eb-space-3) var(--eb-space-3) var(--eb-space-1)',
-        background: selected ? 'var(--eb-bg-selected)' : hovered ? 'var(--eb-bg-hover)' : 'transparent',
+        // At rest the header wears a filled band (`--eb-bg-hover`) so it reads
+        // as a team header — not just an uppercase agent row — against the
+        // block's `--eb-bg-surface` members area (#2370 AC1). Hover/selected
+        // still layer clearly on top: hover steps up to the stronger
+        // `--eb-bg-active`, selected keeps its purple-tinted fill + accent bar
+        // (AC5). Top corners round to meet the enclosing block.
+        background: selected ? 'var(--eb-bg-selected)' : hovered ? 'var(--eb-bg-active)' : 'var(--eb-bg-hover)',
         borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
         borderTop: 'none',
         borderRight: 'none',
         borderBottom: 'none',
+        borderTopLeftRadius: 'var(--eb-radius-md)',
+        borderTopRightRadius: 'var(--eb-radius-md)',
+        // Collapsed → the header is the block's only row, so its fill must round
+        // at the bottom too to sit flush inside the block's corners (AC4).
+        borderBottomLeftRadius: collapsed ? 'var(--eb-radius-md)' : 0,
+        borderBottomRightRadius: collapsed ? 'var(--eb-radius-md)' : 0,
         fontSize: 'var(--eb-text-xs)',
         fontWeight: 'var(--eb-font-semibold)',
         letterSpacing: '0.04em',
@@ -691,31 +792,14 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, 
           {label}
         </span>
         {/*
-         * The group's shared Working Environment — shown once here instead of on
-         * every member row (#1451). `textTransform`/`letterSpacing` are reset so
-         * the env name reads as itself, not as an uppercase section label.
+         * The team-membership indicator (#2381), in the slot that used to show
+         * the team's Working Environment name (#1529, since removed from the
+         * header — the env is still on the Settings tab). `textTransform`/
+         * `letterSpacing` are reset so it reads as itself, not as an uppercase
+         * section label. Renders nothing for a team with no visible members
+         * (AC9) rather than an empty affordance.
          */}
-        {environmentName && (
-          <span
-            title={environmentName}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 3,
-              maxWidth: '100%',
-              fontWeight: 'var(--eb-font-normal)',
-              textTransform: 'none',
-              letterSpacing: 0,
-              color: 'var(--eb-text-muted)',
-              overflow: 'hidden',
-            }}
-          >
-            <Server size={10} style={{ flexShrink: 0 }} />
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {environmentName}
-            </span>
-          </span>
-        )}
+        <MembershipLine indicator={membershipIndicator} />
       </span>
       {/*
        * Trailing cluster order (left→right): grip → persistent count. The grip
@@ -732,6 +816,14 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, 
         />
       )}
       {dnd && <DragGrip dnd={dnd} active={hovered} />}
+      {/*
+       * #2430 — the collapsed-only attention rollup, immediately left of the
+       * always-present count. It surfaces only the two states that demand the
+       * user (a reply awaiting you, a busy agent), so a collapsed team still
+       * reveals *which* team needs attention without expanding it. Hidden while
+       * expanded, where the per-agent member dots already carry this (AC6).
+       */}
+      {collapsed && <AttentionRollup attention={attention} />}
       <span style={{
         flexShrink: 0,
         fontSize: 'var(--eb-text-xs)',
@@ -745,6 +837,147 @@ function CollapsibleHeader({ label, icon: Icon, subtle, count, environmentName, 
     </button>
   );
 }
+
+/**
+ * #2430 — the aggregate "needs attention" marker(s) on a collapsed team header.
+ * Renders a solid-green dot when the team holds at least one reply awaiting the
+ * user, and/or an amber pulsing dot when at least one member is busy; both show
+ * together when both are present (AC3), and nothing at all when the team is quiet
+ * (AC4). The dots deliberately reuse the exact tokens and shape of the per-agent
+ * member dots (`--eb-status-success` solid, `--eb-status-warning` pulsing) so the
+ * collapsed marker and the expanded dots read as the same language (AC7) — no new
+ * colours are introduced here.
+ */
+function AttentionRollup({ attention }) {
+  const hasReply = !!attention && attention.hasReply;
+  const hasBusy = !!attention && attention.hasBusy;
+  if (!hasReply && !hasBusy) return null;
+  return (
+    <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', flexShrink: 0 }}>
+      {hasReply && (
+        <span
+          title="Reply awaiting you"
+          aria-label="A reply is awaiting you in this team"
+          style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--eb-status-success)', flexShrink: 0 }}
+        />
+      )}
+      {hasBusy && (
+        <span
+          className="eb-status-pulse"
+          title="An agent is working"
+          aria-label="An agent in this team is working"
+          style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--eb-status-warning)', flexShrink: 0 }}
+        />
+      )}
+    </span>
+  );
+}
+
+/**
+ * The team-header line under the team name (#2381, broadened #2387): a short
+ * **Private** badge when the viewer's own team-of-one, otherwise the team's full
+ * member list (Team Admins first, then Team Members). Renders nothing for
+ * `kind: 'none'` (a team with no visible members — AC9).
+ *
+ * The names list must stay on one line and never ellipsis-cut a name mid-string
+ * (AC5): `fitAdminNames` drops whole names from the tail and replaces them with a
+ * compact `+N`, and the full list is always on the `title` tooltip. The fit is
+ * width-driven, so the row is measured with a `ResizeObserver` and the names are
+ * probed with a canvas that mirrors the row's computed font — the actual
+ * decision (which names fit) lives in the pure, unit-tested `fitAdminNames`.
+ */
+function MembershipLine({ indicator }) {
+  const kind = indicator ? indicator.kind : 'none';
+  const names = indicator ? indicator.names : [];
+
+  if (kind === 'own') {
+    return <span style={ownBadgeStyle}>Private</span>;
+  }
+  if (kind === 'admins') {
+    return <TeamAdminsLine names={names} title={indicator.title} />;
+  }
+  return null;
+}
+
+/**
+ * A module-scoped canvas whose 2d context measures text width in the row's own
+ * font. Built lazily and reused, so re-fitting on a resize never allocates.
+ * Falls back to a coarse per-character estimate where no canvas is available
+ * (e.g. a non-DOM test environment) — `fitAdminNames` still keeps whole names.
+ */
+function makeTextMeasurer(el) {
+  if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
+    return (s) => s.length * 7;
+  }
+  const canvas = makeTextMeasurer._canvas || (makeTextMeasurer._canvas = document.createElement('canvas'));
+  const ctx = canvas.getContext ? canvas.getContext('2d') : null;
+  if (!ctx) return (s) => s.length * 7;
+  const cs = (typeof window !== 'undefined' && window.getComputedStyle) ? window.getComputedStyle(el) : null;
+  ctx.font = (cs && cs.font) || (cs ? `${cs.fontSize} ${cs.fontFamily}` : '12px sans-serif');
+  return (s) => ctx.measureText(s).width;
+}
+
+function TeamAdminsLine({ names, title }) {
+  const ref = useRef(null);
+  const [fit, setFit] = useState(() => ({ text: names.join(', '), hiddenCount: 0, title }));
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+    const recompute = () => {
+      const measure = makeTextMeasurer(el);
+      setFit(fitAdminNames(names, el.clientWidth, measure));
+    };
+    recompute();
+    let ro;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(recompute);
+      ro.observe(el);
+    }
+    return () => { if (ro) ro.disconnect(); };
+  }, [names]);
+
+  return (
+    <span ref={ref} title={fit.title || title} style={adminsLineStyle}>
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+        {fit.text}
+      </span>
+      {fit.hiddenCount > 0 && (
+        <span style={{ flexShrink: 0 }}>&nbsp;+{fit.hiddenCount}</span>
+      )}
+    </span>
+  );
+}
+
+// The "Private" pill — the same quiet, bordered treatment as `AgentRow`'s state
+// badge, but not uppercased (it is a word, not a section label).
+const ownBadgeStyle = {
+  alignSelf: 'flex-start',
+  padding: '0 6px',
+  borderRadius: 'var(--eb-radius-sm)',
+  border: '1px solid var(--eb-border-default)',
+  fontSize: 'var(--eb-text-xs)',
+  fontWeight: 'var(--eb-font-medium)',
+  lineHeight: 1.5,
+  color: 'var(--eb-text-muted)',
+  textTransform: 'none',
+  letterSpacing: 0,
+};
+
+// The admin-name line — single-line, font reset so it does not read as an
+// uppercase section label, `minWidth: 0` so the inner span can actually shrink
+// and be measured against the available width.
+const adminsLineStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  maxWidth: '100%',
+  minWidth: 0,
+  fontWeight: 'var(--eb-font-normal)',
+  fontSize: 'var(--eb-text-xs)',
+  textTransform: 'none',
+  letterSpacing: 0,
+  color: 'var(--eb-text-muted)',
+};
 
 function SectionHeader({ label, icon: Icon }) {
   return (
@@ -776,20 +1009,31 @@ function iconForRole(role) {
   }
 }
 
+// #2429 — a four-colour model (green / amber / grey / red), with the only
+// non-colour variable being *fill* on green: a **solid** green dot is a reply
+// awaiting you (an unread response from an agent you manually messaged), a
+// **hollow** green dot is FYI activity from an auto-triggered run you never need
+// to review. Net changes from the old model: blue `active` is gone (folded into
+// the neutral grey idle dot); `disabled` moved off amber onto neutral grey (amber
+// now means "working" only); green split into solid vs hollow. The solid/hollow
+// distinction carries meaning without relying on colour, which keeps it legible
+// for colour-blind users (AC11 / edge case). Colour tokens are unchanged
+// (`--eb-status-*`, `--eb-text-muted`) — this only re-maps state→token + adds the
+// hollow variant.
 const STATUS_DOT = {
-  busy:    { color: 'var(--eb-status-warning)', label: 'Working…',          pulse: true  },
-  unread:  { color: 'var(--eb-status-success)', label: 'New message',       pulse: false },
-  active:  { color: 'var(--eb-status-info)',    label: 'Active session',    pulse: false },
-  idle:    { color: 'var(--eb-text-muted)',     label: 'Waiting for input', pulse: false },
+  busy:        { color: 'var(--eb-status-warning)', label: 'Working…',            pulse: true  },
+  unread:      { color: 'var(--eb-status-success)', label: 'Reply awaiting you',  pulse: false },
+  'unread-auto': { color: 'var(--eb-status-success)', label: 'Activity — nothing needed from you', pulse: false, hollow: true },
+  idle:        { color: 'var(--eb-text-muted)',     label: 'Idle',               pulse: false },
   // #1119 — 'disabled' (intentionally off, one-click enable to chat) and
-  // 'offline' (container not running — a real problem) used to collapse into a
-  // single red "Unavailable" dot, so the user couldn't tell which action was
-  // required. They now render as two distinct dots with actionable tooltips.
-  disabled: { color: 'var(--eb-status-warning)', label: 'Disabled — enable it to chat',   pulse: false },
+  // 'offline' (container not running — a real problem) stay two distinct dots
+  // with actionable tooltips. #2429 moves 'disabled' onto neutral grey (it is not
+  // a "working" state, so it no longer shares amber with busy); 'offline' remains
+  // the red "problem" dot.
+  disabled: { color: 'var(--eb-text-muted)',     label: 'Disabled — enable it to chat',   pulse: false },
   offline:  { color: 'var(--eb-status-error)',   label: 'Offline — container not running', pulse: false },
   // #1957 — a stub is not a paused agent: there is nothing to un-pause, the
-  // agent has never been provisioned. A muted dot rather than the amber
-  // "disabled" one, so the two states stay tellable apart at a glance.
+  // agent has never been provisioned. A muted grey dot, matching disabled/idle.
   stub:     { color: 'var(--eb-text-muted)',     label: 'Not initialised — materialize it to chat', pulse: false },
   // Kept as a fallback for any unrecognised state (see STATUS_DOT lookup below).
   problem: { color: 'var(--eb-status-error)',   label: 'Unavailable',       pulse: false },
@@ -871,8 +1115,14 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
         gap: 'var(--eb-space-3)',
         width: '100%',
         padding: 'var(--eb-space-2) var(--eb-space-3)',
-        paddingLeft: indent
-          ? `calc(var(--eb-space-3) + var(--eb-space-4) * ${typeof indent === 'number' ? indent : 1})`
+        // #2389: plain member/stub rows sit flush with the card's base padding.
+        // The old extra `--eb-space-4` step signalled an agent hierarchy the rail
+        // no longer draws — team membership is shown on the card itself now
+        // (#2381/#2387) — so it was just eating horizontal space and truncating
+        // longer names. Pool-instance rows (indent={2}) keep ONE step of indent so
+        // a role and its spawned instances stay visually distinct (#2297, AC3).
+        paddingLeft: (typeof indent === 'number' && indent > 1)
+          ? `calc(var(--eb-space-3) + var(--eb-space-4) * ${indent - 1})`
           : 'var(--eb-space-3)',
         background: selected ? 'var(--eb-bg-selected)' : hovered ? 'var(--eb-bg-hover)' : 'transparent',
         borderLeft: selected ? '3px solid var(--eb-accent-primary)' : '3px solid transparent',
@@ -990,12 +1240,18 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
         ) : (
           <span
             title={dot.label}
+            aria-label={dot.label}
             className={dot.pulse ? 'eb-status-pulse' : undefined}
             style={{
               width: 8,
               height: 8,
               borderRadius: '50%',
-              background: dot.color,
+              // #2429 — a hollow dot (auto-triggered activity) is drawn as an
+              // outline ring: transparent fill + a coloured border, so it reads
+              // as clearly non-demanding next to the filled "for you" dot and the
+              // difference does not rely on colour alone.
+              background: dot.hollow ? 'transparent' : dot.color,
+              boxShadow: dot.hollow ? `inset 0 0 0 1.5px ${dot.color}` : undefined,
               flexShrink: 0,
             }}
           />

@@ -9,11 +9,13 @@ import {
 import { useAuth } from '../auth/AuthContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
 import { computeChatCounts } from '../context/agent-statuses';
+import { loadManuallyMessagedIds } from '../pages/agent-chat/agent-back-notification.js';
 import { canAccessCredentialPages } from '../pages/credential-scope-view';
 import {
   filterItems, filterSections, activeGroupKey, mergeCollapsed,
-  mostSpecificActivePath,
+  mostSpecificActivePath, consolidateCredentialNav,
 } from './nav-model';
+import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import {
   PLUGINS_CHANGED_EVENT, buildPluginNav, pluginsNeedingScopes,
 } from './plugin-nav';
@@ -154,7 +156,10 @@ const NAV_GROUPS = [
     { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,      credAdmin: true },
     { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github,   credAdmin: true },
     // My Credentials (#1568) — personal credential self-service, visible to every
-    // authenticated human (no credAdmin gate).
+    // authenticated human (no credAdmin gate). Under AEE_RESOURCE_ACCESS_V2 this
+    // entry is dissolved by `consolidateCredentialNav` (its self-service folds
+    // into SSH Keys / GitHub Tokens, which then open to all); it stays here for
+    // the flag-off path.
     { path: '/my-credentials', label: 'My Credentials',      Icon: KeyRound },
     { path: '/mcp',           label: 'MCP Servers',          Icon: Server,   adminOnly: true },
     { path: '/github-events', label: 'GitHub Event Log',     Icon: History },
@@ -209,7 +214,15 @@ export default function Shell({ children }) {
   // of a Shell-owned interval — one /api/agents/statuses request now feeds every
   // subscribing surface.
   const statuses = useAgentStatuses();
-  const chatCounts = useMemo(() => computeChatCounts(statuses, loadLastViewed()), [statuses]);
+  // #2429: the green nav badge counts only replies *awaiting you* — unread
+  // responses from agents you manually messaged. Auto-triggered activity is
+  // deliberately not counted here (or on the collapsed icon dot below), which is
+  // what deflates the old inflated green counter. The amber busy count is
+  // unchanged.
+  const chatCounts = useMemo(
+    () => computeChatCounts(statuses, loadLastViewed(), loadManuallyMessagedIds()),
+    [statuses],
+  );
 
   // Register how the assist-error nudge surfaces the (now modal-hosted) model
   // picker: open Settings deep-linked to Model so setPickerOpen(true) has a
@@ -231,7 +244,11 @@ export default function Shell({ children }) {
   const canSeeCreds = canAccessCredentialPages(user);
   const gate = { admin: !!user?.admin, canSeeCreds };
   const topItems = filterItems(NAV_TOP, gate);
-  const groups = filterSections(NAV_GROUPS, gate);
+  // #2360: under AEE_RESOURCE_ACCESS_V2 the credential pages are consolidated —
+  // My Credentials is dissolved and SSH Keys / GitHub Tokens open to every user
+  // (personal self-service folds into them). Off the flag this is a no-op.
+  const resourceAccessV2 = useResourceAccessV2();
+  const groups = filterSections(consolidateCredentialNav(NAV_GROUPS, { v2: resourceAccessV2 }), gate);
 
   // Dynamic nav entries for UI-bearing plugins that are installed AND either
   // granted to a scope the caller can see (Network Plan epic #1554, Phase 2) or

@@ -28,6 +28,7 @@ const fs = require('fs');
 const path = require('path');
 
 const {
+  withUnexpectedErrors,
   healthEndpoint,
   teardownScopeEndpoint,
   brokerConfig,
@@ -108,12 +109,7 @@ async function handleRequest(req, res) {
   return void sendJson(res, 404, { error: 'not found' });
 }
 
-const httpServer = http.createServer((req, res) => {
-  handleRequest(req, res).catch((err) => {
-    if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
-    try { res.end(JSON.stringify({ error: (err && err.message) || String(err) })); } catch { /* ignore */ }
-  });
-});
+const httpServer = http.createServer(withUnexpectedErrors('patterns-catalog-broker', handleRequest));
 
 if (require.main === module) {
   httpServer.listen(PORT, () => process.stdout.write(`[patterns-catalog-broker] listening on :${PORT}\n`));

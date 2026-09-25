@@ -10,7 +10,7 @@ const {
   computeScope, visibleTeam, visibleAgent,
   canManageTeam, isTeamAdminOfAny, canManageAgent, canManageEnvironment, visibleUser, describeAuthz, isKnownPrincipal,
   normalizeCredential, visibleCredential, canManageCredential, canDeleteCredential,
-  canCreateCredential, canReassignCredential, credentialVisibleToTeam,
+  canCreateCredential, canReassignCredential, credentialVisibleToTeam, personalLendToTeam,
   canViewUsageStatistics, assistSelectableEndpoint, resolveAgentTenant,
   visibleEnvironment, canCreateEnvironment, canRetierEnvironment, ownsEnvironment,
 } = require('./scope');
@@ -340,6 +340,20 @@ test('describeAuthz: chatFontSize surfaces the caller\'s own preference (#1437)'
   assert.equal(alice.chatFontSize, 16);
   const bob = describeAuthz({ username: 'bob@corp.com', users: withPref, memberships: [] });
   assert.equal(bob.chatFontSize, 12); // default when unset
+});
+
+test('describeAuthz: chatNotifyOnBack surfaces the caller\'s own opt-in, off by default (#2397)', () => {
+  const withPref = [
+    { id: 'u-a', subject: 'alice@corp.com', chatNotifyOnBack: true },
+    { id: 'u-b', subject: 'bob@corp.com' }, // unset → off
+  ];
+  const alice = describeAuthz({ username: 'alice@corp.com', users: withPref, memberships: [] });
+  assert.equal(alice.chatNotifyOnBack, true);
+  const bob = describeAuthz({ username: 'bob@corp.com', users: withPref, memberships: [] });
+  assert.equal(bob.chatNotifyOnBack, false); // off when unset
+  // The recordless env admin (unknown subject) is off too.
+  const stranger = describeAuthz({ username: 'nobody@corp.com', users: withPref, memberships: [] });
+  assert.equal(stranger.chatNotifyOnBack, false);
 });
 
 test('describeAuthz: a record with no stored preference gets the 12px default (#1437)', () => {
@@ -692,6 +706,47 @@ test('credentialVisibleToTeam: used for the reassignment-orphan guard', () => {
   assert.equal(credentialVisibleToTeam({ scope: 'system', assignedTeamIds: ['payments', 'risk'] }, 'risk'), true);
   assert.equal(credentialVisibleToTeam({ scope: 'system', assignedTeamIds: ['payments'] }, 'risk'), false);
   assert.equal(credentialVisibleToTeam({ teamId: 'default' }, undefined), true); // legacy default
+});
+
+// ── personalLendToTeam: the LIVE LEND (unified access model §7/§8, #2357) ────
+// A personal credential is consumable by team T iff its owner is a CURRENT
+// member of T. Composed at the consume call sites (behind AEE_RESOURCE_ACCESS_V2);
+// the flag-gating is the caller's job, this predicate is the pure primitive.
+
+test('personalLendToTeam: a member\'s personal credential is lent to their team', () => {
+  const isMember = (u, t) => u === 'u-alice' && t === 'payments';
+  const cred = { scope: 'personal', userId: 'u-alice', identity: 'human' };
+  assert.equal(personalLendToTeam(cred, 'payments', isMember), true);
+});
+
+test('personalLendToTeam: the lend DIES when the owner leaves the team (AC: lend dies)', () => {
+  // The membership gate is the whole lifetime of the lend — the same fixture,
+  // once the owner is no longer returned as a member, is no longer consumable.
+  const cred = { scope: 'personal', userId: 'u-alice', identity: 'human' };
+  const stillMember = (u, t) => u === 'u-alice' && t === 'payments';
+  const leftTeam = () => false; // membership row removed → no longer a member
+  assert.equal(personalLendToTeam(cred, 'payments', stillMember), true);
+  assert.equal(personalLendToTeam(cred, 'payments', leftTeam), false);
+});
+
+test('personalLendToTeam: never lends a teammate\'s credential to a team you are not in', () => {
+  const isMember = (u, t) => u === 'u-alice' && t === 'payments';
+  const cred = { scope: 'personal', userId: 'u-alice', identity: 'human' };
+  assert.equal(personalLendToTeam(cred, 'risk', isMember), false, 'owner is not a member of risk');
+});
+
+test('personalLendToTeam: only PERSONAL credentials are lends — team/system/global are not', () => {
+  const isMember = () => true;
+  assert.equal(personalLendToTeam({ scope: 'team', teamId: 'payments' }, 'payments', isMember), false);
+  assert.equal(personalLendToTeam({ scope: 'system', assignedTeamIds: ['payments'] }, 'payments', isMember), false);
+  assert.equal(personalLendToTeam({ scope: 'system', global: true, identity: 'service' }, 'payments', isMember), false);
+});
+
+test('personalLendToTeam fails closed on missing owner / team / membership gate', () => {
+  assert.equal(personalLendToTeam({ scope: 'personal', userId: 'u-a' }, 'payments', undefined), false, 'no gate');
+  assert.equal(personalLendToTeam({ scope: 'personal', userId: null }, 'payments', () => true), false, 'no owner');
+  assert.equal(personalLendToTeam({ scope: 'personal', userId: 'u-a' }, '', () => true), false, 'no team');
+  assert.equal(personalLendToTeam(null, 'payments', () => true), false, 'no credential');
 });
 
 // ── Model Providers / LLM endpoints reuse the same primitives (#800) ───────

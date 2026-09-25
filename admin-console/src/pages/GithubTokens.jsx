@@ -13,11 +13,13 @@ import IconButton from '../components/IconButton';
 import PageHelpButton from '../components/PageHelpButton';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
+import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import ReassignPanel from '../components/CredentialReassignPanel';
 import { useAuth } from '../auth/AuthContext';
 import {
-  teamsById, credentialScopeLabel, defaultOwnership, ownershipPayload,
+  teamsById, credentialScopeLabel, credentialOwnershipLabel, defaultOwnership, ownershipPayload,
   canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
+  isPersonalCredential,
 } from './credential-scope-view';
 import { adminManagedCredentials } from './my-credentials-view';
 import { environmentsUsingGithubToken, usageCountLabel, usageTooltip } from './credential-usage';
@@ -106,17 +108,18 @@ function PermissionRow({ scope, access, note }) {
 }
 
 function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminTeamIds }) {
+  const v2 = useResourceAccessV2();
   const [name, setName] = useState('');
   const [id, setId] = useState('');
   const [token, setToken] = useState('');
-  const [ownership, setOwnership] = useState(() => defaultOwnership({ isSysAdmin, adminTeamIds }));
+  const [ownership, setOwnership] = useState(() => defaultOwnership({ isSysAdmin, adminTeamIds, v2 }));
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName,
     setId,
     getName: () => name,
   });
 
-  const ownershipReady = ownership.scope === 'system' || !!ownership.teamId;
+  const ownershipReady = ownership.scope === 'system' || ownership.scope === 'personal' || !!ownership.teamId;
   const canSubmit = name.trim() && token.trim() && ownershipReady;
 
   return (
@@ -224,6 +227,7 @@ function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminT
         teams={teams}
         isSysAdmin={isSysAdmin}
         adminTeamIds={adminTeamIds}
+        v2={v2}
       />
 
       <div>
@@ -257,7 +261,7 @@ function CreateForm({ onSave, onCancel, saving, error, teams, isSysAdmin, adminT
 
       <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
         <button
-          onClick={() => onSave({ name: name.trim(), id: id.trim() || undefined, token: token.trim(), ...ownershipPayload(ownership) })}
+          onClick={() => onSave({ name: name.trim(), id: id.trim() || undefined, token: token.trim(), ...ownershipPayload(ownership, { v2 }) })}
           disabled={saving || !canSubmit}
           style={{
             padding: 'var(--eb-space-2) var(--eb-space-4)',
@@ -302,12 +306,19 @@ export default function GithubTokens() {
 
   const teams = Array.isArray(teamsData) ? teamsData : [];
   const names = teamsById(teams);
-  // Admin-managed (team/system) tokens only; personal tokens (#1568) are managed
-  // on the self-service "My Credentials" page and filtered out here.
-  const adminTokens = adminManagedCredentials(tokens ?? []);
+  const resourceAccessV2 = useResourceAccessV2();
+  // #2360 consolidation: under the flag this page opens to every authenticated
+  // user and shows EVERY token the caller may see — their own personal tokens (the
+  // dissolved "My Credentials" self-service folds in here) plus the team/system
+  // tokens they manage. The server already returns own-personal entries
+  // (visibleCredential). Off the flag we keep the admin-managed-only view.
+  const rows = resourceAccessV2 ? (tokens ?? []) : adminManagedCredentials(tokens ?? []);
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
-  const caller = { isSysAdmin, adminTeamIds };
+  // `userId` for the personal-tier manage check — the OWNER of a personal row must
+  // get edit/rotate/delete, not a lock (mirrors ModelRegistry #2403). Harmless off
+  // the flag, where personal rows are filtered out.
+  const caller = { isSysAdmin, adminTeamIds, userId: user?.userId };
 
   // Which Working Environments reference each token (#1141). `envs` is null until
   // /api/environments resolves (or if the caller may not read it) — the "Used by"
@@ -320,9 +331,32 @@ export default function GithubTokens() {
     { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
     { key: 'name', label: 'Name' },
     {
-      key: '_scope', label: 'Scope / Teams', sortable: false,
+      // #2360: under v2 the column mirrors the create/edit dialog taxonomy
+      // (identity + Personal/Team/System/Global) via `credentialOwnershipLabel`,
+      // so the row and the dialog can never disagree. Off the flag it stays the
+      // legacy `credentialScopeLabel` "Scope / Teams" column (byte-identical).
+      key: '_scope', label: resourceAccessV2 ? 'Ownership' : 'Scope / Teams', sortable: false,
+      // #2442: `_scope` is synthetic (no `row['_scope']`), so filter on the text
+      // this column actually displays — the ownership/scope label plus its detail
+      // (which carries the team names), or "Global".
+      filterValue: (_, row) => {
+        const s = resourceAccessV2 ? credentialOwnershipLabel(row, names) : credentialScopeLabel(row, names);
+        if (resourceAccessV2 && s.scope === 'global') return 'Global';
+        return [s.label, s.detail].filter(Boolean).join(' ');
+      },
       render: (_, row) => {
-        const s = credentialScopeLabel(row, names);
+        const s = resourceAccessV2 ? credentialOwnershipLabel(row, names) : credentialScopeLabel(row, names);
+        if (resourceAccessV2 && s.scope === 'global') {
+          return (
+            <span style={{ fontSize: 'var(--eb-text-xs)' }} title="Available to every user and team — no team required">
+              <span style={{
+                display: 'inline-block', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
+                background: 'var(--eb-accent-subtle, var(--eb-bg-elevated))', color: 'var(--eb-accent, var(--eb-text-secondary))',
+                fontWeight: 'var(--eb-font-medium)',
+              }}>Global</span>
+            </span>
+          );
+        }
         return (
           <span style={{ fontSize: 'var(--eb-text-xs)' }}>
             <span style={{
@@ -330,7 +364,7 @@ export default function GithubTokens() {
               background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-secondary)',
               fontWeight: 'var(--eb-font-medium)', marginRight: 'var(--eb-space-2)',
             }}>{s.label}</span>
-            <span style={{ color: 'var(--eb-text-muted)' }}>{s.detail}</span>
+            {s.detail && <span style={{ color: 'var(--eb-text-muted)' }}>{s.detail}</span>}
           </span>
         );
       },
@@ -372,10 +406,10 @@ export default function GithubTokens() {
     },
   ];
 
-  async function handleSave({ name, id, token, scope, teamId, assignedTeamIds }) {
+  async function handleSave({ name, id, token, scope, teamId, assignedTeamIds, identity }) {
     setSaving(true); setFormError(null);
     try {
-      await apiCall('POST', '/api/github-tokens', { name, id, token, scope, teamId, assignedTeamIds });
+      await apiCall('POST', '/api/github-tokens', { name, id, token, scope, teamId, assignedTeamIds, identity });
       setCreating(false);
       refetch();
     } catch (e) {
@@ -458,7 +492,7 @@ export default function GithubTokens() {
         fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
       }}>
         <span>
-          Shared team and platform GitHub Personal Access Tokens — injected as <code>GH_TOKEN</code> /{' '}
+          {resourceAccessV2 ? 'Your GitHub Personal Access Tokens — personal, team and platform' : 'Shared team and platform GitHub Personal Access Tokens'} — injected as <code>GH_TOKEN</code> /{' '}
           <code>GITHUB_TOKEN</code> into every agent of the environment they are linked to.
         </span>
         <PageHelpButton
@@ -478,7 +512,7 @@ export default function GithubTokens() {
 
       <DataTable
         columns={COLUMNS}
-        data={adminTokens}
+        data={rows}
         emptyText="No GitHub tokens stored yet. Click 'New Token' to add one."
       />
 
@@ -522,7 +556,8 @@ export default function GithubTokens() {
             teams={teams}
             isSysAdmin={isSysAdmin}
             adminTeamIds={adminTeamIds}
-            canReassign={canReassignCredentialClient(caller)}
+            canReassign={canReassignCredentialClient(caller) && !isPersonalCredential(editTarget)}
+            v2={resourceAccessV2}
             onSave={handleEditSave}
             onCancel={() => { setEditTarget(null); setFormError(null); }}
             saving={saving}

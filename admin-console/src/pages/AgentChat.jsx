@@ -5,6 +5,7 @@ import { useAuth } from '../auth/AuthContext';
 import { usePageActions } from '../context/PageActionsContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
 import { computeAgentStatusMap } from '../context/agent-statuses';
+import { loadManuallyMessagedIds } from './agent-chat/agent-back-notification.js';
 import { AgentRosterProvider, useAgentRoster } from '../context/AgentRosterContext.jsx';
 import AgentList, { buildGroups } from './agent-chat/AgentList';
 import RailLifecycleHost from './agent-chat/RailLifecycleHost.jsx';
@@ -18,6 +19,7 @@ import { SessionsActiveProvider } from './agent-chat/SessionsActiveContext';
 import { resolveRailWidths } from './agent-chat/rail-layout';
 import { CREATE_ROUTE, emptyStatePointer } from './agent-chat/empty-state';
 import { describeAgentCreateAccess } from './agent-lifecycle/agent-create-access.js';
+import { useTeamMemberships } from '../hooks/useTeamMemberships.js';
 import { resolveTeamConfigTab } from './agent-lifecycle/team-config-tabs-view.js';
 import PageHelpButton from '../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat/agent-chat-help-sections.js';
@@ -213,6 +215,14 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   const { user } = useAuth();
   const createAccess = describeAgentCreateAccess(user);
 
+  // Team-header membership indicator (#2381): who is behind each team. Polled on
+  // the roster's own cadence so it refreshes on Sharing-tab changes exactly like
+  // the rest of the rail refreshes on roster changes (AC6). `viewerId` is what
+  // lets a team-of-one read as "Own" for its owner but as that person's name for
+  // anyone else (AC2 vs the AC3 edge).
+  const { memberships, directory } = useTeamMemberships();
+  const viewerId = user?.userId || null;
+
   // Local map agentId -> roomId, for rooms we created during this session
   // (overrides the persisted `dmRoomId` returned by /api/matrix/agents).
   const [createdRooms, setCreatedRooms] = useState({});
@@ -234,8 +244,11 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   const manuallyUnreadRef = useRef(new Set());
 
   // Map agentId -> effective display state
-  // ('busy'|'unread'|'active'|'idle'|'disabled'|'offline'), derived from the
-  // shared agent-status poll (#1677) rather than a page-owned interval.
+  // ('busy'|'unread'|'unread-auto'|'idle'|'disabled'|'offline'), derived from the
+  // shared agent-status poll (#1677) rather than a page-owned interval. #2429: the
+  // manually-messaged set (persisted by AgentBackNotificationContext) splits an
+  // unread response into solid green ("reply awaiting you") vs hollow green
+  // (auto-triggered activity). Read fresh on each poll, like the viewed map.
   const statuses = useAgentStatuses();
   const [agentStatuses, setAgentStatuses] = useState({});
   useEffect(() => {
@@ -248,7 +261,9 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
       viewed[currentId] = Date.now();
       saveLastViewed(viewed);
     }
-    setAgentStatuses(computeAgentStatusMap(statuses, loadLastViewed()));
+    setAgentStatuses(
+      computeAgentStatusMap(statuses, loadLastViewed(), loadManuallyMessagedIds()),
+    );
   }, [statuses]);
 
   // Sidebar filter: All | a specific team | a specific agent. Persisted in
@@ -851,6 +866,9 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
               busyIds={railBusyIds}
               onRequestMenu={handleRequestMenu}
               onOpenTeamSettings={handleOpenSettings}
+              memberships={memberships}
+              directory={directory}
+              viewerId={viewerId}
             />
           )}
         </div>

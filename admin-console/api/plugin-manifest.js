@@ -28,7 +28,7 @@
 //     id, name, description,
 //     sidecar: { image, env?, capabilities?, internalPort },  // required unless commands present
 //     cli: { name, entrypoint, runtime },                     // required unless commands present
-//     credentials?: [ { key, description?, required? } ],
+//     credentials?: [ { key, description?, required?, secret? } ],
 //     platforms?: [ "podman" | "kubernetes" | "any" ],
 //     scopes?: [ "team" | "agent" ],           // granularities the broker honours
 //     defaultScopeGranularity?: "team" | "agent",  // grant default within scopes (§4.4/§10)
@@ -313,6 +313,11 @@ function validatePluginManifest(input) {
         seen.add(c.key);
         const entry = { key: c.key.trim(), required: c.required === true };
         if (isNonEmptyString(c.description)) entry.description = c.description.trim();
+        // A field is secret by default (write-only, masked). A plugin author may
+        // opt one out with `secret: false` (#2449) — then the Admin Console shows
+        // its real stored value; only the explicit opt-out is carried, so every
+        // existing manifest stays byte-identical.
+        if (c.secret === false) entry.secret = false;
         credentials.push(entry);
       }
     }

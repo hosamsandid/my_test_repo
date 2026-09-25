@@ -95,6 +95,48 @@ function operationPrefersPersonal(operation) {
   return ATTRIBUTED_OPERATIONS.has(operation);
 }
 
+// ── Global SERVICE credential discovery (unified resource access model §8,
+// epic #2361 PR4 #2357) ─────────────────────────────────────────────────────
+//
+// A global service credential is the LAST-RESORT service fallback for the
+// "shared" tier: an attributed write prefers the acting human's personal
+// credential → the team's service credential (the env binding, `sharedCredentialId`)
+// → a global service credential → else the 424 refusal (interactive). Reads /
+// clones / polling are shared-eligible against any service credential the same
+// way. This is the runtime half of admin-console `global-resource.js`
+// `isGlobalCredential`; the two live in separate images (orchestrator vs
+// admin-console) and cannot require across the package boundary, so the
+// predicate is mirrored here rather than shared. Kept byte-semantically in step:
+// a global service credential is `global === true` + `scope === 'system'` +
+// `identity === 'service'` — a `human` secret (personal PAT / user key) is
+// Personal-only and can NEVER be global, and an unclassified legacy record
+// (`identity` absent) is NOT global until the migration affirmatively stamps it
+// `service` (a secret never widens to every team by default).
+function isGlobalServiceCredential(entry) {
+  return !!(entry && entry.global === true && entry.scope === "system" && entry.identity === "service");
+}
+
+// The id of a global service credential in an index array, or null. First match
+// in index order (deterministic); the env binding is always preferred over this,
+// so this only decides the tie when there is no team binding at all.
+function selectGlobalServiceCredentialId(index) {
+  if (!Array.isArray(index)) return null;
+  for (const entry of index) {
+    if (isGlobalServiceCredential(entry) && entry.id) return String(entry.id);
+  }
+  return null;
+}
+
+// The credential id the SHARED (service) tier resolves to: the env's own binding
+// if it has one, else — under AEE_RESOURCE_ACCESS_V2 (#2357) — a global service
+// credential, else null. Off the flag this is byte-identical to the historical
+// `sharedCredentialId || null`, so an un-opted-in stack is unchanged.
+function resolveSharedServiceId(sharedCredentialId, globalServiceCredentialId, resourceAccessV2) {
+  if (sharedCredentialId) return String(sharedCredentialId);
+  if (resourceAccessV2 && globalServiceCredentialId) return String(globalServiceCredentialId);
+  return null;
+}
+
 // Resolve the human OWNER of an agent for personal-credential resolution.
 //
 // - A `team-member` resolves to its parent Agent Team's `ownerId` (one hop),
@@ -345,15 +387,24 @@ function resolveCredential({
   sharedCredentialId = null,
   kind = "GitHub token",
   interactive = false,
+  globalServiceCredentialId = null,
+  resourceAccessV2 = false,
 }) {
   const attributed = operationPrefersPersonal(operation);
+  // The SHARED tier is a SERVICE credential (unified model §8, #2357): the env's
+  // own binding, else — under AEE_RESOURCE_ACCESS_V2 — a global service
+  // credential. Off the flag this is exactly the historical `sharedCredentialId
+  // || null`, so nothing changes until an operator opts in. The refuse-on-missing
+  // rule is untouched: a global service fallback only ever fills a "shared" slot
+  // that was already reachable, never rescues an attributed write that must 424.
+  const sharedId = resolveSharedServiceId(sharedCredentialId, globalServiceCredentialId, resourceAccessV2);
 
   // No owner → the personal tier never applies. Use the shared team/system
   // credential exactly as today, and NEVER refuse (AC8). Until #2077 this was
   // the branch every agent took; it now covers a `team-member` whose parent
   // team is somehow unowned, and any role D8 leaves unowned.
   if (!ownerId) {
-    return { tier: "shared", credentialId: sharedCredentialId || null };
+    return { tier: "shared", credentialId: sharedId };
   }
 
   // Owner known + a usable personal credential exists → prefer it (AC1).
@@ -388,7 +439,7 @@ function resolveCredential({
   // A shared-eligible operation (read-only clone, the repo probe, polling) may
   // still use the shared credential — the fallback chain applies only where a
   // shared credential is legitimately acceptable (AC2 second half / AC7).
-  return { tier: "shared", credentialId: sharedCredentialId || null };
+  return { tier: "shared", credentialId: sharedId };
 }
 
 // Owner-scoped respawn selection (#1570, Phase 4). Given already-loaded agent
@@ -514,6 +565,9 @@ module.exports = {
   DEFAULT_TEAM_ID,
   ATTRIBUTED_OPERATIONS,
   operationPrefersPersonal,
+  isGlobalServiceCredential,
+  selectGlobalServiceCredentialId,
+  resolveSharedServiceId,
   resolveAgentOwnerId,
   resolveEffectiveOwnerId,
   resolveBaselineOwnerId,

@@ -170,13 +170,14 @@ On orchestrator startup (`main()`), after the legacy role migration:
 
 1. `bootstrapTeams()` — `ensureDefaultTeam()` (idempotent), then
    `seedInitialSystemAdmin()` from environment config (#2059, below — seeds the
-   real System-Admin *record* on a zero-user stack), and finally the bootstrap
-   admin's **`team-admin` membership of the Default Team** (#1457). System Admin
-   is a global flag rather than a membership, so without this step the team that
-   owns every adopted resource had no Team Admin at all. The membership is
-   planned, not asserted: `setMembership` is an upsert, so it is created only when
-   no membership for that (user, team) pair exists in *any* role — an admin a
-   human deliberately demoted is not re-promoted on each boot.
+   real System-Admin *record* on a zero-user stack). It seeds **no** membership: a
+   System Admin is a global flag with `scope.all`, not a membership
+   (`decentralised-access-concept.md` §2.1/§2.2), so it sees and manages every
+   team through the bypass without being a member. The former #1457 step that gave
+   each System Admin a `team-admin` membership of the Default Team is **retired**:
+   it fed the D6 fan-out (`migrateOwnershipModel`), which then propagated those
+   Default-Team memberships into every default-scoped Agent Team on each boot —
+   re-enrolling, on every restart, admins a human had removed.
 2. `backfillResourceOwnership()` — stamps `teamId: "default"` onto any agent,
    environment, credential index entry or **MCP server** (#1457) that lacks one.
    Idempotent: a stamped resource is skipped on subsequent boots, and the JSON is
@@ -201,9 +202,9 @@ Two properties of the adoption pass are load-bearing:
   MCP server yet.
 
 The decisions above live in the pure `orchestrator/default-team-adoption.js`
-(`needsAdoption` / `planAdoption` / `planBootstrapMembership`), because
-`bootstrapTeams` and `backfillResourceOwnership` are not exported from
-`orchestrator.js` and cannot otherwise be reached by a test.
+(`needsAdoption` / `planAdoption`), because `bootstrapTeams` and
+`backfillResourceOwnership` are not exported from `orchestrator.js` and cannot
+otherwise be reached by a test.
 
 ### Single-user compatibility mode (`AUTH_ENABLED`, #1457)
 

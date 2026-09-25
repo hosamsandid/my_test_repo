@@ -31,6 +31,11 @@ const POLICY = Object.freeze({
   comment: { scopes: ['team'] },
   transition: { scopes: ['team'] },
   update: { scopes: ['team'] },
+  attach: { scopes: ['team'] },
+  'set-field': { scopes: ['team'] },
+  create: { scopes: ['team'] },
+  'sprint-create': { scopes: ['team'] },
+  'sprint-bulk-create': { scopes: ['team'] },
 });
 
 // Wired but empty — see the header.

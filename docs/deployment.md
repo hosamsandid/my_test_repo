@@ -198,20 +198,50 @@ manifest change), and from there:
 
 | Mode | Behaviour | When |
 |---|---|---|
-| `observe` (default) | allow everything, log every call that *would* be rejected | first — for at least a week |
+| `observe` | allow everything, log every call that *would* be rejected | first — for at least a week |
 | `warn` | same, logged louder | optional middle rung |
 | `enforce` | reject with 401/403 | once the observe log is quiet |
+
+**Default depends on the deployment target** (#2459). The safe default is not the
+same everywhere, so the mode you get when `INTERNAL_AUTH_MODE` is *unset* differs:
+
+| Deployment | Unset default | Rationale |
+|---|---|---|
+| Local Podman Compose (`AEE_CONTAINER_RUNTIME` unset / `podman`) | `observe` | developer convenience — the container network is a single laptop |
+| Shared / production-style **GKE / Kubernetes** (`AEE_CONTAINER_RUNTIME=kubernetes`) | `enforce` **once armed** (a token is set); `observe` while unarmed | a shared cluster must not sit in silent log-only mode — but `enforce` needs a token, so it only kicks in after you arm the gate |
+
+This is a **decision baked into the orchestrator**, not the manifests, so it
+honours one important exception: **an explicitly set mode always wins.** If you
+are mid-migration on the GKE path and deliberately set `INTERNAL_AUTH_MODE=observe`,
+that choice stands — the safer default applies only when the variable is *unset*,
+never overriding a deliberate one. To stage the rollout on GKE, either arm the
+gate and let it default straight to `enforce`, or set `INTERNAL_AUTH_MODE=observe`
+explicitly for the census week and drop it (or set `enforce`) afterwards.
+
+A non-local deployment that is **not** enforcing — unarmed, or on an explicit/
+defaulted `observe`/`warn` — logs a startup warning so it does not go unnoticed:
+
+```
+[Orchestrator] internal-auth: non-local deployment is … not enforce — :4002 violations are logged but NOT blocked …
+```
 
 During the observe week, inventory the real callers:
 
 ```bash
 podman logs orchestrator 2>&1 | grep '\[internal-auth\]' | grep would-deny
+# on GKE: kubectl logs deploy/orchestrator -n <namespace> | grep '\[internal-auth\]'
 ```
 
 An empty result means nothing outside the console and the agents is talking to
 `:4002`, and `enforce` is safe. A non-empty one names the caller and the route
 before it breaks, which is the entire point of the rung. Setting `enforce`
 without a token is refused at boot rather than silently locking everyone out.
+
+> **Open question (flagged for Product Owner):** whether a *non*-GKE but
+> network-exposed Podman deployment (e.g. bound to a non-localhost interface)
+> should also default to `enforce`. It currently does not — the code keys the
+> safer default off the Kubernetes runtime only. Such a deployment can still opt
+> in by setting `INTERNAL_AUTH_MODE=enforce` explicitly.
 
 Rotation is a value change plus a respawn: agent tokens are derived, so changing
 `INTERNAL_API_TOKEN` (or `INTERNAL_AGENT_TOKEN_SECRET`) invalidates every

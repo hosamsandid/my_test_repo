@@ -24,16 +24,17 @@ askPrompts:
 Every agent invocation reports one **usage record** — the tokens that turn
 consumed, the model(s) it ran on, and the agent, team and provider it belongs
 to. This page is the read side of that store: it aggregates the records in the
-selected time range and answers two different questions, one per tab. The
+selected time range and answers three different questions, one per tab. The
 **Statistics** tab gives you the overall picture; the **Work items** tab ties
-consumption to the piece of work it went into.
+consumption to the piece of work it went into; the **Agent → model** tab shows
+which model each agent actually runs.
 
 Two things bound what you see:
 
 - **System Admin only.** Consumption figures are an operator surface; a Team
   Admin or Team Member gets a 403 on the underlying endpoints, not a filtered
   view. There is no reduced version of this page for other roles.
-- **The page-level Team filter** narrows every figure, both tabs and both
+- **The page-level Team filter** narrows every figure, all three tabs and both
   exports to one access scope. It is shared across the tabs, so switching tabs
   keeps the filter.
 
@@ -51,9 +52,12 @@ per provider and per model, and a stale price baked into a dashboard is worse
 than no price at all.
 
 Apply your own per-model pricing downstream instead: the **CSV** and **JSON**
-export buttons emit one flat row per invocation × model (Statistics) or per work
-item × model (Work items), carrying the same time window and team filter as the
-view on screen.
+export buttons carry the same time window and team filter as the view on screen.
+The **Work items** export is one flat row per work item × model; the
+**Statistics** export mirrors the on-screen grouping — an aggregated pivot with
+one row per group, or one row per group × subgroup cell when a second dimension
+is set — so grouping by model there still gives a per-model breakdown to price
+against.
 
 ### The four token classes
 
@@ -70,7 +74,7 @@ problem.
 
 ### Choosing a time range
 
-Both tabs carry the same range selector. **All time** means as far back as the
+All three tabs carry the same range selector. **All time** means as far back as the
 usage log goes: there is no automatic retention on this store — token telemetry
 is billing-adjacent, so nothing is pruned silently — but a stack that was
 rebuilt from scratch starts empty. Which day a given record falls into is a
@@ -87,8 +91,18 @@ invocations.
 
 *Group by* re-keys the breakdown table — by agent, team, user, model, provider,
 provider tier or day — against the same range and team filter. The summary tiles
-and the totals never change with it; only the rows underneath do. A few
-behaviours are worth knowing before you read a grouped table as a complete
+and the totals never change with it; only the rows underneath do.
+
+An optional *then by* dropdown adds a **second** dimension, cross-tabulating the
+breakdown into a nested table: for example *Group by agent, then by model*
+answers which models each agent ran and how many tokens each burned. The second
+list excludes whatever the primary is, so a self-cross can't be chosen, and
+**None** restores the single-level table. Each primary group carries its own
+total row with the secondary values indented beneath; a **model** axis still
+fans a run over its per-model split on whichever side it sits, so those cells
+need not sum to the group total — exactly as *Group by model* does on its own.
+
+A few behaviours are worth knowing before you read a grouped table as a complete
 accounting:
 
 - **Group by model fans a run out** across its per-model split, because one run
@@ -184,3 +198,27 @@ the agent stamped — not the time the record arrived. A run that was spooled
 while the control plane was down and pushed later still lands in its own day, so
 the *Tokens per day* chart and the range filter stay honest about when the work
 was really done rather than showing a spike on the day the backlog drained.
+
+## Agent → model
+
+This tab answers a question the other two cannot: **which model does each agent
+actually run?** The Statistics tab shows models and it shows agents, but never
+the mapping between them, and the agent/team configuration does not show a model
+at all — there is no per-agent model pin today, the model is chosen per
+agent/role at runtime.
+
+So the value here is the **Ist** (what was observed), not a **Soll** (a
+configured setting). It is derived from the same usage records the other tabs
+read: every invocation carries the model(s) it used, so for each agent this tab
+lists **every model it ran** in the selected time range and marks the
+most-recently-used one(s) as **current**. An agent that used more than one model
+shows all of them, not just one — a spread that is otherwise invisible.
+
+Use the **Model** filter to answer the reverse question — *which agents are on
+model X* — for example to find everyone still running an expensive model. The
+range and team filters narrow the picture the same way they do on the other
+tabs.
+
+When per-agent model pinning lands (#1485) this tab can show the configured
+model beside the observed one, so a misconfiguration (Soll ≠ Ist) becomes
+visible at a glance. Until then, observed usage is the only reliable source.

@@ -318,3 +318,90 @@ unknown (a spike gates activation, not the decision).
   membership-removal binding sweep), assist binding.
 - **Consumers to keep in step:** every `resolveAssistTarget` call site (Helper
   Chat, knowledge synthesis, Flow Copilot, prompt generation, hill-climb).
+
+## 14. Amendment (2026-09-22): the team-of-one → multi-user transition (#2360)
+
+Context this amendment builds on (all shipped behind `AEE_RESOURCE_ACCESS_V2`):
+the **#2360 re-key** made a provider's `team` scope mean a **set of Agent Teams**
+(`scope:'team'`, `teamId` = primary, `teamIds[]` = the co-owned set — usable by
+any agent in any team in the set, manageable by any set-team admin, a clone
+auto-appends). Provider **identity** is fixed by auth type (api-key → `service`;
+oauth/subscription → `human`), so the identity axis is not a separate control for
+providers. Since #2229 every ordinary agent is a **team of one**.
+
+**The taxonomy is decided by identity + reach, not headcount:**
+
+- **Personal** is the natural home of a **team-of-one** — legal for both api-key
+  and subscription. A team consuming a member's personal provider never *owns* it;
+  it **lends** it (`personalLendToTeam`, keyed on the owner's membership of the
+  **squad** id) for the duration of that membership.
+- **Team** is the durable home for a **multi-person** team: an explicitly declared
+  **service** (api-key) provider owned by the squad(s), surviving membership
+  changes.
+- **Global** is System-Admin-curated shared infrastructure (or the single-user
+  subscription escape hatch, runtime-only — §9).
+
+**E10 — a squad goes multi-*human* while its default is a member's PERSONAL
+provider.** This is the transition the earlier edge cases did not cover (E1 is the
+owner *leaving*; E10 is the squad *gaining a second human* while the owner stays).
+The trigger is **human membership**, not the count of worker agents: a subscription
+is single-*user* (single human), so one human running many of their own agents on
+their own seat is fine — the violation is a *second human* benefiting from it. The
+env default is a single field, and the runtime lend keys on the **owner's** squad
+membership (which still passes), so once a second human joins, **their agents (and
+the shared team agents operated on their behalf) silently run on the first
+member's personal seat/key.** Resolution splits by identity (decided 2026-09-22,
+implemented behind `AEE_RESOURCE_ACCESS_V2`):
+
+- **subscription / oauth (`human`) — HARD (E9 enforcement).** Sharing a single-user
+  seat with other members is forbidden by ToS (§ E9). Two guards, single-sourced
+  through the pure classifier `provider-lend-policy.js`
+  `personalDefaultTransitionRisk({ provider, humanMemberCount })`:
+  - **Growth direction** — the membership-add endpoint (`teamsStore.setMembership`
+    via `POST /internal/.../memberships`) **refuses** (409, `oauth_personal_lend_blocked`)
+    when the add would take the squad to ≥2 humans **and** the squad's env default
+    is a **personal oauth** provider. Fail-open on any read error / non-squad team.
+  - **Binding direction** — `providerUsableByTeam` **withdraws** a personal oauth
+    provider from a squad's usable/selectable set once the squad has ≥2 humans, so
+    it can't be picked as the team default (dropdown) and PR7 backend enforcement
+    refuses binding it.
+  Together these hold the invariant "a multi-human squad never has a personal-oauth
+  env default", so no runtime lend-gate in the orchestrator is needed. Mirrors the
+  create-time "a subscription provider must be personal or global, never team-shared"
+  guard.
+- **api-key (`service`) — SOFT (advisory).** Legal but fragile: billing/identity
+  concentrate on one member, and the E1 leave-sweep will reset the binding to
+  inherit when they go. The api-key lend is **not** withdrawn; instead
+  `personalDefaultTransitionRisk` returns `{ level: 'warn' }`, surfaced as a
+  non-blocking `personalProviderNotice` on `GET /api/agents/:id/model-options`
+  ("This team runs on a member's personal provider — a lend that resets if they
+  leave; register a Team provider for durability"). The member can also self-bind
+  their own provider via a per-agent override.
+
+**No auto-convert (decided 2026-09-22).** We do **not** build a one-click
+"promote my personal api-key provider → Team provider" action. The owner registers
+a durable Team (service) provider manually when they want one. (A promote path is
+only ever legal for api-key — a subscription can never become `team` — and it would
+silently change billing/ownership semantics, so it is left as an explicit,
+deliberate manual act.)
+
+**Implemented touchpoints (all flag-gated):**
+- `orchestrator/provider-lend-policy.js` ↔ `admin-console/api/provider-lend-policy.js`
+  — the pure classifier (byte-identical, `provider-lend-policy.test.js` parity guard).
+- `orchestrator/orchestrator.js` `personalOauthLendBlockOnMembershipAdd` + the
+  memberships-`POST` branch — the hard growth-direction guard.
+- `admin-console/api/api.js` `providerUsableByTeam` (binding-direction withdrawal)
+  + `teamHumanMemberCount` + the `model-options` `personalProviderNotice`.
+- `admin-console/api/api.js` `pickDefaultLlmBinding(pref)` +
+  `providerUsableAtCreation` — a fresh team/agent's env default now prefers, in
+  registry order, the first provider USABLE by the creator (global / own-personal /
+  new-squad team), falling back to `endpoints[0]` only when none is usable; so a
+  blind pick can no longer bind a foreign personal provider whose token the team
+  would silently run on (the orchestrator has no runtime lend-gate). Checked by
+  ownership — the creator's membership is written a phase later. Passed at all
+  three creation sites (standalone quick-create + both `POST /api/teams` handlers).
+- **UI:** `provider-health-view.js` `personalProviderNoticeText(notice)` (pure,
+  `{ text, tone }`) renders the `personalProviderNotice` as a non-blocking badge in
+  the Agent-Chat composer (`ChatPanel.jsx`, beside the health warning) and under the
+  team-settings Provider dropdown (`TeamEnvironmentPanel.jsx`) — 'warn' (fragile
+  api-key lend) vs 'error' (a subscription seat backing a multi-member team).

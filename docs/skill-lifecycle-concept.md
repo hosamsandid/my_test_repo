@@ -199,6 +199,24 @@ manifest all keep the historic fresh-v1 stamp (the corrupt case still snapshots 
 A `move` that also overwrites gets both this destination-side snapshot and the existing
 source-side archive — independent, both land in the archive.
 
+**Advisory injection scan at the trust boundary (#2468).** A transfer is the one point
+where skill content crosses a cross-team trust boundary, so the engine runs a
+**lightweight, advisory two-stage prompt-injection scan** over the *resolved* source
+content on every call — a pure pattern pass (`skill-injection-scan.js`:
+override-instruction / agent-directed-imperative / embedded-system-prompt /
+hidden-unicode / external-URL / base64-blob / exfiltration rules) plus, when the
+caller's assist provider resolves, a semantic LLM stage merged into the same findings;
+no provider, a timeout or any failure degrades silently to pattern-only. The scan
+**never blocks**: the response carries `warnings: []` (empty when clean) and the transfer
+always completes. A `preview: true` dry-run branch returns the target content (plus the
+destination's current content for an overwrite diff) and `warnings` **without writing
+anything** — the Skills Registry runs it first so an operator sees the content, and any
+warnings, before committing, and a non-empty `warnings` requires one extra explicit
+acknowledgement in the UI. The existing transfer knowledge event records
+`scanWarningCount` + `scanWarningCategories` (count and category only, never the flagged
+text). No new restriction lands anywhere outside this endpoint — in-team
+create/edit/distill/KB are untouched.
+
 The legacy endpoints become thin delegating wrappers and are removed from the UI:
 `/api/skills/promote` (agent→global bypassing the team tier and provenance — now
 superseded by the engine's own first-class agent→global cell, #2180),

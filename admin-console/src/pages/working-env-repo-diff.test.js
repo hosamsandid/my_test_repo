@@ -170,7 +170,7 @@ test("a collision alone raises the offer even when nothing else moved", () => {
   assert.equal(diff.changeCount, 0, "neither entry changed");
   assert.equal(hasRepositoryChanges(diff), true, "but one of them can never arrive");
   assert.match(
-    repositoryChangeLines(diff, 2).find((l) => l.kind === "collision").text,
+    repositoryChangeLines(diff).find((l) => l.kind === "collision").text,
     /only the first repository with a given folder name is cloned/,
   );
 });
@@ -221,7 +221,7 @@ test("the per-class lines name the repositories and mark the removal as a warnin
     [repo("git@github.com:acme/legacy.git"), repo("git@github.com:acme/widgets.git", { branch: "main" })],
     [repo("git@github.com:acme/widgets.git", { branch: "dev" }), repo("git@github.com:acme/docs.git")],
   );
-  const lines = repositoryChangeLines(diff, 3);
+  const lines = repositoryChangeLines(diff);
   const byKind = Object.fromEntries(lines.map((l) => [l.kind, l]));
   assert.match(byKind.added.text, /docs/);
   assert.match(byKind.changed.text, /widgets/);
@@ -232,9 +232,26 @@ test("the per-class lines name the repositories and mark the removal as a warnin
   assert.match(byKind.removed.text, /manual step/);
 });
 
+// #2466 — the per-class lines must never assert an agent count sourced from the
+// (frequently empty) agents prop; the streamed per-agent report below is the
+// only source of truth for how many agents were affected.
+test("#2466 — no line claims an agent count, even with no agents supplied", () => {
+  const diff = classifyRepositoryChanges(
+    [repo("git@github.com:acme/legacy.git")],
+    [repo("git@github.com:acme/docs.git")],
+  );
+  for (const line of repositoryChangeLines(diff)) {
+    assert.doesNotMatch(
+      line.text,
+      /\b\d+ agents?\b/,
+      `line "${line.kind}" must not assert an agent count: ${line.text}`,
+    );
+  }
+});
+
 test("no lines are produced for a clean diff", () => {
   const list = [repo("git@github.com:acme/widgets.git")];
-  assert.deepEqual(repositoryChangeLines(classifyRepositoryChanges(list, list), 3), []);
+  assert.deepEqual(repositoryChangeLines(classifyRepositoryChanges(list, list)), []);
 });
 
 // ── D4: outOfDateIndicator (#2066 AC19) ────────────────────────────────────

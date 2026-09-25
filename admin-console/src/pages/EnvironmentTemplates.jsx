@@ -1105,6 +1105,17 @@ export default function EnvironmentTemplates() {
       key: 'repositories',
       label: 'Repositories',
       sortable: false,
+      // #2442: the raw `repositories` value is an array (stringifies to
+      // `[object Object]`), so filter on the repo names the column renders — each
+      // repo's url and its short name, so a row is findable by either.
+      filterValue: (_, row) => {
+        const repos = Array.isArray(row.repositories) && row.repositories.length > 0
+          ? row.repositories
+          : (row.repository?.url ? [row.repository] : []);
+        return repos
+          .map(r => `${r.url || ''} ${String(r.url || '').split('/').pop().replace(/\.git$/, '')}`)
+          .join(' ');
+      },
       render: (_, row) => {
         const repos = Array.isArray(row.repositories) && row.repositories.length > 0
           ? row.repositories

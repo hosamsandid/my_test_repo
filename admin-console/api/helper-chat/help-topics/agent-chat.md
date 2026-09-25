@@ -148,15 +148,28 @@ except a team's own header row, which has no room to open (see below).
 
 **Grouping and order.** Agents that belong to an Agent Team are grouped under
 that team; standalone agents are collected under *Single agents*. When every row
-in a group shares one environment, the environment name is hoisted onto
-the group header and the rows stay single-line; a member that deviates keeps its
-own environment line. The **chevron** on a group header is the only control that
+in a group shares one environment, its member rows stay single-line and drop
+that environment from their own line; a member that deviates keeps its own
+environment line. The team header's second line no longer repeats that shared
+environment (it lives on the team's **Settings** tab) — it now names **who is
+behind the team**: a **Private** badge when the team's only member is you, otherwise
+everyone with access by display name — Team Admins first, then Team Members —
+comma-separated (a long list folds to a trailing `+N`, with the full list on
+hover). A team with no visible members shows no such line. The **chevron** on a group header is the only control that
 collapses/expands it; clicking anywhere else on that row selects the team and
 opens its **Settings** tab in the right rail instead — a team hosts no chat of
 its own, so the middle pane shows a short explanation rather than an empty room.
 Both the collapse state and your own ordering are remembered per user. Drag a
 row by its grip to reorder, or move the focused row with **Alt+↑** / **Alt+↓**
-if you would rather not drag.
+if you would rather not drag. A **collapsed** team header carries an aggregate
+**needs-attention** marker just left of the member count, so a folded team still
+tells you *which* team wants you without expanding it: a solid-green dot when any
+member has a reply awaiting you, and an amber pulsing dot when any member is
+working — the same two states, and the same dots, the per-agent status dots use.
+The quieter states stay hidden — idle, disabled, offline, and unread output from
+a run you did not start (the hollow-green FYI) never roll up, so collapsing a team
+keeps reducing noise. Expand it and the marker gives way to the per-agent dots
+again.
 
 **Finding an agent.** The filter box above the list narrows it as you type. Next
 to it, the **eye** toggle is the *show disabled agents* opt-in: disabled agents
@@ -164,9 +177,29 @@ are hidden by default, because most of the time they are noise. Turning it on is
 the only thing that widens what the list asks the server for.
 
 **What a row tells you.** A row shows the agent's name, its environment (unless
-hoisted to the group header), and two live signals: a **busy** indicator while a
-run is in progress, and an **unread** marker when messages arrived while you were
-looking elsewhere.
+it matches the team's shared environment, which the row then drops), and a
+**status dot** that tells you what, if anything, the agent needs from you.
+
+**The status dot — four colours, plus fill on green.** The dot is deliberately
+about *what you need to do*, not which internal state the agent is in:
+
+- **Green, solid — a reply awaiting you.** An unread response from an agent **you
+  messaged yourself**. This is the only state the green counter next to *Agent
+  Chat* in the sidebar counts.
+- **Green, hollow (an outline ring) — activity, nothing needed.** Unread output
+  from a run **you did not start** — a label, a schedule or an inbound event woke
+  the agent. Glance at it if you like; it is never counted in the sidebar. The
+  hollow-vs-solid difference is a shape, not just a shade, so it stays legible
+  without relying on colour.
+- **Amber, pulsing — working.** A run is in progress. The amber sidebar counter
+  counts these.
+- **Grey — idle or disabled.** Nothing for you to do: the agent is available (a
+  past chat or a live session no longer shows a colour of its own), or it has
+  been intentionally disabled.
+- **Red — offline.** The agent's container is not running — a real problem.
+
+A run started by *you* only shows solid green once it comes back; whether it was
+you who last messaged the agent survives a page reload.
 
 **The row menu.** Every row has a context menu — reach it from the kebab (**⋮**)
 on hover, a right-click, or the **Menu** / **Shift+F10** keys. It carries:
@@ -276,6 +309,15 @@ rather than the control silently doing nothing.
 how much of the model's context window the conversation has consumed. It is the
 number to watch when replies start losing earlier detail — that is the point to
 *Reset Session*.
+
+As the session fills, the chat also nudges you rather than leaving you to read
+the number. Past **half** the window a dismissible hint suggests resetting the
+session to save tokens — the whole conversation is re-sent every turn, so a long
+one costs more each time; dismissing it keeps it gone for the current session and
+it returns after a reset. Past roughly **three-quarters** a permanent warning
+takes over, carrying its own **Reset Session** button (the same action as the
+toolbar), and it stays until you reset. Both nudges are interactive-chat only —
+they don't appear while you are watching an autonomous or triggered run.
 
 **About this chat** (the **i**) opens the detail behind that one-line indicator:
 
@@ -703,7 +745,7 @@ belongs to this team):
 
 | Tab | What it does |
 |---|---|
-| **Repositories** | Zero or more repos, cloned into a member's workspace when that member is created. Each row can bind its own SSH key for a private SSH URL; a private HTTPS URL needs the *GitHub Token* select instead. Mark a repository *Read-only* to clone it for reference only — it is still cloned, but members are told not to commit or push to it. |
+| **Repositories** | Zero or more repos, cloned into a member's workspace when that member is created. Each row can bind its own SSH key for a private SSH URL; a private HTTPS URL needs the *GitHub Token* select instead. Selecting an SSH key on a row whose URL is a `github.com` HTTPS (or bare) URL rewrites it to its canonical `git@github.com:org/repo.git` SSH form so the reachability check and clone use the key — non-github and already-SSH URLs are left as typed. Mark a repository *Read-only* to clone it for reference only — it is still cloned, but members are told not to commit or push to it. |
 | **Model provider** | Optional override — members start on this provider and its default model instead of the global `.env` fallback. |
 | **Toolchain** | Optional — which container image members are spawned from, picked from the System-Admin-registered list. Absent means the default image. |
 | **MCP servers** | Optional server + credential pairs from the MCP registry, materialised into each member's `.claude/settings.json` at seed time. |

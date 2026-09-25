@@ -9,9 +9,7 @@ const {
   needsAdoption,
   planAdoption,
   adoptionCount,
-  planBootstrapMembership,
   DEFAULT_TEAM_ID,
-  BOOTSTRAP_TEAM_ROLE,
 } = require('./default-team-adoption');
 
 // ── needsAdoption / planAdoption ────────────────────────────────────────────
@@ -69,54 +67,6 @@ test('adoptionCount counts changed records, not the size of the index', () => {
   assert.equal(adoptionCount([]), 0);
 });
 
-// ── planBootstrapMembership ─────────────────────────────────────────────────
-
-test('the bootstrap admin gets a team-admin membership on the Default Team', () => {
-  assert.deepEqual(
-    planBootstrapMembership({ userId: 'u1', memberships: [] }),
-    { userId: 'u1', teamId: DEFAULT_TEAM_ID, role: BOOTSTRAP_TEAM_ROLE },
-  );
-  assert.equal(BOOTSTRAP_TEAM_ROLE, 'team-admin');
-});
-
-test('no bootstrap admin (nothing seeded) plans no membership', () => {
-  assert.equal(planBootstrapMembership({ userId: undefined, memberships: [] }), null);
-  assert.equal(planBootstrapMembership({ userId: '', memberships: [] }), null);
-  assert.equal(planBootstrapMembership(), null);
-});
-
-test('an existing team-admin membership is not re-asserted', () => {
-  const memberships = [{ userId: 'u1', teamId: 'default', role: 'team-admin' }];
-  assert.equal(planBootstrapMembership({ userId: 'u1', memberships }), null);
-});
-
-// setMembership is an upsert, so re-asserting would silently re-promote.
-test('a deliberately demoted admin is left demoted, not re-promoted every boot', () => {
-  const memberships = [{ userId: 'u1', teamId: 'default', role: 'team-member' }];
-  assert.equal(planBootstrapMembership({ userId: 'u1', memberships }), null);
-});
-
-test('a membership in another team does not satisfy the Default Team one', () => {
-  const memberships = [{ userId: 'u1', teamId: 'team-a', role: 'team-admin' }];
-  assert.deepEqual(
-    planBootstrapMembership({ userId: 'u1', memberships }),
-    { userId: 'u1', teamId: DEFAULT_TEAM_ID, role: BOOTSTRAP_TEAM_ROLE },
-  );
-});
-
-test('another user holding the role does not satisfy this admin', () => {
-  const memberships = [{ userId: 'u2', teamId: 'default', role: 'team-admin' }];
-  assert.deepEqual(planBootstrapMembership({ userId: 'u1', memberships }).userId, 'u1');
-});
-
-test('planBootstrapMembership tolerates a malformed membership list', () => {
-  assert.equal(planBootstrapMembership({ userId: 'u1', memberships: 'nope' }), null);
-  assert.deepEqual(
-    planBootstrapMembership({ userId: 'u1', memberships: [null, {}, { userId: 'u1' }] }),
-    { userId: 'u1', teamId: DEFAULT_TEAM_ID, role: BOOTSTRAP_TEAM_ROLE },
-  );
-});
-
 // ── wiring guards over orchestrator.js ──────────────────────────────────────
 //
 // bootstrapTeams / backfillResourceOwnership are not exported from the 14k-line
@@ -144,16 +94,18 @@ test('backfillResourceOwnership adopts MCP servers', () => {
   assert.doesNotMatch(body, /stamped \+= list\.length/, 'the over-reporting count is back');
 });
 
-test('bootstrapTeams creates the Default-Team membership through the plan', () => {
+test('bootstrapTeams no longer enrols System Admins as Default-Team members (#1457 retired)', () => {
   const src = orchestratorSource();
   const at = src.indexOf('function bootstrapTeams');
   assert.ok(at > 0, 'bootstrapTeams not found');
   const body = src.slice(at, src.indexOf('\nfunction ', at + 10));
-  assert.match(body, /planBootstrapMembership\(/, 'the membership is not planned');
-  assert.match(body, /teamsStore\.setMembership\(membership\)/, 'the planned membership is not written');
-  // The guard that matters: the write must be conditional on the plan, or a
-  // human's demotion is undone on the next boot.
-  assert.match(body, /if \(membership\)\s*\{/, 'setMembership is not gated on the plan');
+  // A System Admin is a global flag with scope.all, not a membership: the boot
+  // pass must seed NO Default-Team membership, or the D6 fan-out re-enrols
+  // admins into every team on each restart.
+  assert.doesNotMatch(body, /planBootstrapMembership\(/, 'the retired admin backfill is back');
+  assert.doesNotMatch(body, /setMembership\(/, 'bootstrapTeams must seed no membership');
+  // It still guarantees the Default Team record exists as the ownership fallback.
+  assert.match(body, /ensureDefaultTeam\(\)/, 'the Default Team record is no longer ensured');
 });
 
 // ── #2083 (P5): the shared tier and the adoption pass must not fight ────────

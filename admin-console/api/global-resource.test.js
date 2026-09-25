@@ -6,7 +6,7 @@
 // Run: node --test admin-console/api/global-resource.test.js
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { resolveGlobalFlag, isGlobalEnvironment } = require('./global-resource');
+const { resolveGlobalFlag, isGlobalEnvironment, isGlobalCredential } = require('./global-resource');
 
 test('body without a global field keeps the current value', () => {
   assert.deepEqual(resolveGlobalFlag({ currentGlobal: false, scopeAll: false }), { global: false });
@@ -69,4 +69,38 @@ test('a global record carries no team assignment, but the predicate does not its
   // publishing), not re-derived here — this predicate only re-reads what is on
   // disk, exactly like isGlobalProvider does for model providers.
   assert.equal(isGlobalEnvironment({ global: true, scope: 'system', assignedTeamIds: [] }), true);
+});
+
+// ── isGlobalCredential (unified resource access model §4/§12.3, #2357) ───────
+// The SSH-key / GitHub-token analog of isGlobalProvider — STRICTER than
+// isGlobalEnvironment: a global credential must also be a `service` identity.
+
+test('a global SERVICE credential is global (all three preconditions met)', () => {
+  assert.equal(isGlobalCredential({ global: true, scope: 'system', identity: 'service' }), true);
+});
+
+test('a HUMAN credential is NEVER global, even flagged global:true + scope:system', () => {
+  // The model's core invariant: a secret that acts as one specific person is
+  // Personal-only and can never widen to every team (resource-tier isAllowedTierCombo).
+  assert.equal(isGlobalCredential({ global: true, scope: 'system', identity: 'human' }), false);
+});
+
+test('an UNCLASSIFIED legacy credential (identity absent/null) is not global until migrated', () => {
+  // A secret never widens to every team by default — the migration must
+  // affirmatively stamp it `service` first.
+  assert.equal(isGlobalCredential({ global: true, scope: 'system' }), false);
+  assert.equal(isGlobalCredential({ global: true, scope: 'system', identity: null }), false);
+  assert.equal(isGlobalCredential({ global: true, scope: 'system', identity: 'bogus' }), false);
+});
+
+test('isGlobalCredential re-reads the global flag and the tier on every call', () => {
+  assert.equal(isGlobalCredential({ global: true, scope: 'team', identity: 'service' }), false, 'hand-edited/stale — not system-tier');
+  assert.equal(isGlobalCredential({ global: false, scope: 'system', identity: 'service' }), false, 'not flagged global');
+  assert.equal(isGlobalCredential({ scope: 'system', identity: 'service' }), false, 'no global key at all');
+});
+
+test('isGlobalCredential fails closed on missing/malformed input', () => {
+  assert.equal(isGlobalCredential(null), false);
+  assert.equal(isGlobalCredential(undefined), false);
+  assert.equal(isGlobalCredential({}), false);
 });

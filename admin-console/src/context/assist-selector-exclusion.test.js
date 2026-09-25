@@ -8,6 +8,8 @@ import {
   classifyExclusions,
   exclusionMessage,
   endpointAssistExclusion,
+  assistExclusionInName,
+  assistExclusionInBaseUrl,
 } from './assist-selector-exclusion.js';
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
@@ -143,4 +145,24 @@ test('endpointAssistExclusion: "team-scope" for team-scoped provider in differen
 
 test('endpointAssistExclusion: null for team-scoped provider in user team', () => {
   assert.equal(endpointAssistExclusion(EP_TEAM_T1, ['t1'], false), null);
+});
+
+// ── badge placement on the Model Providers table (#2405) ────────────────────
+
+test('assistExclusionInName: only the team-scope ("Not your teams") badge stays in the Name column', () => {
+  assert.equal(assistExclusionInName('team-scope'), true);
+  assert.equal(assistExclusionInName('oauth'), false);
+  assert.equal(assistExclusionInName(null), false);
+});
+
+test('assistExclusionInBaseUrl: the oauth ("Agents only") badge moves to the Base URL cell', () => {
+  assert.equal(assistExclusionInBaseUrl('oauth'), true);
+  assert.equal(assistExclusionInBaseUrl('team-scope'), false);
+  assert.equal(assistExclusionInBaseUrl(null), false);
+});
+
+test('badge placement is mutually exclusive — no exclusion reason lands in both columns', () => {
+  for (const reason of ['oauth', 'team-scope', null]) {
+    assert.equal(assistExclusionInName(reason) && assistExclusionInBaseUrl(reason), false);
+  }
 });

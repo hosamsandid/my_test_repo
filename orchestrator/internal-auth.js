@@ -73,9 +73,34 @@ const AGENT_SECRET_SALT = "aee-internal-agent-secret-v1";
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
-function parseAuthMode(raw) {
+// `fallback` is the mode an unset/invalid value lands on. It is a parameter,
+// not a constant, because the safe default is deployment-dependent (#2459): a
+// local compose stack falls back to `observe`, a non-local (kubernetes) one to
+// `enforce`. A recognised rung is ALWAYS honoured verbatim — that is what keeps
+// an operator's deliberate `INTERNAL_AUTH_MODE=observe` (an in-progress
+// migration) from being silently overridden by the safer default.
+function parseAuthMode(raw, fallback = "observe") {
   const v = String(raw || "").trim().toLowerCase();
-  return AUTH_MODES.includes(v) ? v : "observe";
+  return AUTH_MODES.includes(v) ? v : fallback;
+}
+
+// Whether an explicit, recognised mode was configured (as opposed to unset or a
+// typo). The safer default and the boot warning both key off this, so an
+// operator who deliberately chose a rung is treated differently from one who
+// left it unset.
+function authModeExplicit(raw) {
+  return AUTH_MODES.includes(String(raw || "").trim().toLowerCase());
+}
+
+// The deployment contexts where the safer `enforce` default applies (#2459).
+// Keyed on the same runtime seam the spawner uses (`AEE_CONTAINER_RUNTIME`):
+// `kubernetes` is the shared/production-style GKE deploy path (`deploy/k8s/`),
+// while the local single-developer Podman Compose stack (`podman`/unset) keeps
+// `observe` for developer convenience. The non-GKE-but-network-exposed Podman
+// case is deliberately NOT covered here — it is the issue's open question,
+// flagged for Product-Owner decision rather than guessed at.
+function isNonLocalDeployment(env = {}) {
+  return String(env.AEE_CONTAINER_RUNTIME || "").trim().toLowerCase() === "kubernetes";
 }
 
 // The control-plane token is the single operator knob; the agent signing secret
@@ -90,13 +115,31 @@ function parseAuthMode(raw) {
 function resolveInternalAuthConfig(env = {}, { pluginScopeSecret = null } = {}) {
   const controlPlaneToken = String(env.INTERNAL_API_TOKEN || "").trim();
   const explicitAgentSecret = String(env.INTERNAL_AGENT_TOKEN_SECRET || "").trim();
-  const mode = parseAuthMode(env.INTERNAL_AUTH_MODE);
+  const configured = Boolean(controlPlaneToken || explicitAgentSecret);
+  const nonLocal = isNonLocalDeployment(env);
+  // Safer default OUTSIDE local development (#2459). A non-local deployment with
+  // the gate ARMED (a token configured) defaults to `enforce` when the operator
+  // has not chosen a mode — so the GKE path stops shipping in silent log-only
+  // mode without anyone setting `INTERNAL_AUTH_MODE`. Kept off the unconfigured
+  // case on purpose: with no token the gate is inert anyway, and `enforce` there
+  // would be refused at boot (`bootRefusal`) and kill the platform. The local
+  // stack keeps `observe`. An explicit rung always wins (see `parseAuthMode`),
+  // so a deliberate migration-window `observe` is never overridden.
+  const defaultMode = (nonLocal && configured) ? "enforce" : "observe";
+  const modeExplicit = authModeExplicit(env.INTERNAL_AUTH_MODE);
+  const mode = parseAuthMode(env.INTERNAL_AUTH_MODE, defaultMode);
   const agentTokenSecret = explicitAgentSecret
     || (controlPlaneToken
       ? crypto.scryptSync(controlPlaneToken, AGENT_SECRET_SALT, 32).toString("hex")
       : "");
   return Object.freeze({
     mode,
+    // `true` only when a recognised rung was set explicitly (not unset/typo).
+    // The boot warning reads it to distinguish a deliberate `observe` from a
+    // deployment that simply never chose one.
+    modeExplicit,
+    // `true` on the non-local (kubernetes) deploy path — see the boot warning.
+    nonLocal,
     controlPlaneToken,
     agentTokenSecret,
     pluginScopeSecret,
@@ -104,7 +147,7 @@ function resolveInternalAuthConfig(env = {}, { pluginScopeSecret = null } = {}) 
     // mint, so the gate has to stay inert whatever the mode says. `configured`
     // is what the boot check reads to refuse an `enforce` that would lock every
     // caller out of the platform.
-    configured: Boolean(controlPlaneToken || explicitAgentSecret),
+    configured,
   });
 }
 
@@ -118,6 +161,32 @@ function bootRefusal(config) {
       + "including the admin console, would be rejected.";
   }
   return null;
+}
+
+// #2459 AC3: a non-local deployment must not sit in log-only mode UNNOTICED.
+// Returns a warning string when a non-local (kubernetes) deployment is not
+// enforcing, or null. Two shapes, because the fix differs:
+//   - unconfigured: the gate is inert (no token) — the operator has to arm it;
+//     `enforce` is refused at boot until they do, so this is the actionable step.
+//   - configured but observe/warn: violations are logged but NOT blocked. If the
+//     operator set that explicitly it is likely a deliberate migration window
+//     (legitimate, but still worth surfacing); if it defaulted there it should
+//     not have — either way, name it so it does not go silent.
+// The adapter logs this at warn level; it is never a boot refusal.
+function nonLocalObserveWarning(config) {
+  if (!config.nonLocal || config.mode === "enforce") return null;
+  if (!config.configured) {
+    return "internal-auth: non-local deployment with the :4002 gate INERT "
+      + "(no INTERNAL_API_TOKEN) — every agent container can reach the control "
+      + "plane unauthenticated. Set INTERNAL_API_TOKEN to arm it; this path then "
+      + "defaults to enforce.";
+  }
+  const why = config.modeExplicit
+    ? `INTERNAL_AUTH_MODE=${config.mode} is set explicitly`
+    : `running in ${config.mode}`;
+  return `internal-auth: non-local deployment is ${why}, not enforce — :4002 `
+    + "violations are logged but NOT blocked. Move to INTERNAL_AUTH_MODE=enforce "
+    + "once the observe log is quiet.";
 }
 
 // ── Per-agent tokens ────────────────────────────────────────────────────────
@@ -429,8 +498,10 @@ module.exports = {
   PLUGIN_SCOPE_ROUTES,
   AGENT_TOKEN_PREFIX,
   parseAuthMode,
+  isNonLocalDeployment,
   resolveInternalAuthConfig,
   bootRefusal,
+  nonLocalObserveWarning,
   mintAgentToken,
   verifyAgentToken,
   classifyCaller,

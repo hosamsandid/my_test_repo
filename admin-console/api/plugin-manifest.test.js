@@ -430,24 +430,36 @@ test('the shipped jira manifest (plugins/jira) is valid', () => {
   // is a per-scope plugin credential (§5), so unlike github-issues the declared
   // credentials are NOT empty:
   assert.deepEqual(manifest.sidecar.capabilities, ['egress']);
-  assert.deepEqual(manifest.credentials.map((c) => c.key), ['site-url', 'email', 'api-token']);
-  assert.ok(manifest.credentials.every((c) => c.required === true));
-  // Team scope only; Podman only for v1 (the agent→broker path is Podman-only,
-  // §6.1 corrected):
+  // The three connection credentials are required; `readable-custom-fields` (#2416)
+  // and `writable-custom-fields` (#2417) are optional admin allow-lists.
+  const OPTIONAL_CREDS = ['readable-custom-fields', 'writable-custom-fields'];
+  assert.deepEqual(manifest.credentials.map((c) => c.key), ['site-url', 'email', 'api-token', ...OPTIONAL_CREDS]);
+  assert.ok(manifest.credentials.filter((c) => !OPTIONAL_CREDS.includes(c.key)).every((c) => c.required === true));
+  assert.ok(OPTIONAL_CREDS.every((k) => manifest.credentials.find((c) => c.key === k).required === false));
+  // #2449: everything but the api-token is non-secret (its real value is editable
+  // in the console); only `api-token` keeps the default write-only masking.
+  const NON_SECRET_CREDS = ['site-url', 'email', ...OPTIONAL_CREDS];
+  assert.ok(NON_SECRET_CREDS.every((k) => manifest.credentials.find((c) => c.key === k).secret === false));
+  assert.equal(manifest.credentials.find((c) => c.key === 'api-token').secret, undefined); // secret by default
+  // Team scope only. Runs on Podman AND Kubernetes: the broker is structurally
+  // identical to github-issues (egress sidecar + UI + per-scope credential), which
+  // is already kubernetes-eligible, so the agent→broker path holds on both
+  // runtimes.
   assert.deepEqual(manifest.scopes, ['team']);
   assert.equal(defaultGranularity(manifest), 'team');
-  assert.deepEqual(manifest.platforms, ['podman']);
+  assert.deepEqual(manifest.platforms, ['podman', 'kubernetes']);
   assert.equal(manifest.cli.name, 'aee-jira');
   assert.equal(manifest.quota.maxObjects, 500);
   // Phase 3 read UI (`/` @ team-member) + Phase 4 write config (`/admin` @
-  // team-admin); `policy` declares the three writes as governed subcommands
-  // (D3 — role-gated, no confirmation pen, so `requiresApproval` stays empty).
+  // team-admin); `policy` declares the writes as governed subcommands (D3 —
+  // role-gated, no confirmation pen, so `requiresApproval` stays empty). `attach`
+  // (#2408) is the attachment upload, gated like the other writes.
   assert.deepEqual(manifest.ui.routes, [
     { path: '/', minRole: 'team-member' },
     { path: '/admin', minRole: 'team-admin' },
   ]);
   assert.notEqual(manifest.ui.global, true);
-  assert.deepEqual(Object.keys(manifest.policy).sort(), ['comment', 'transition', 'update']);
+  assert.deepEqual(Object.keys(manifest.policy).sort(), ['attach', 'comment', 'create', 'set-field', 'sprint-bulk-create', 'sprint-create', 'transition', 'update']);
   assert.deepEqual(manifest.requiresApproval, []);
 });
 

@@ -144,6 +144,26 @@ Team-Admin-only actions simply do not appear when the skill you opened is not
 on their tier, and the **Import to:** / **+ New Skill** target pickers only
 ever offer a pool you may actually write to.
 
+### The transfer preview and injection scan
+
+Moving a skill across the tiers from this page — **Promote to global**, **Move
+to global**, **Adopt** or **Move to team** — first opens a **preview** of the
+exact content that would cross the boundary, before anything is written (for an
+overwrite it shows the destination's current content too, so you can compare).
+A transfer is the one point where a skill leaves the team that authored it, so
+the preview also runs an **advisory prompt-injection scan** over that content:
+a two-stage check — a fast pattern pass, and, when your team has an assist model
+selected, an AI review — looking for hidden or manipulative instructions rather
+than legitimate domain guidance.
+
+The scan only **warns**; it never blocks. A clean result (*"No prompt-injection
+indicators found"*) proceeds with a single click. When the scan flags something
+(*"N potential prompt-injection indicators found"*), you must tick one explicit
+acknowledgement before the **Transfer** button enables, so a flagged skill is
+never promoted by reflex — but once you confirm, the transfer still completes
+either way. No such step is added anywhere else: in-team create, edit, distill
+and the knowledge pipeline are untouched.
+
 ### Publishing an agent's edited skill (Publish)
 
 An agent-tier skill row on this page — or the matching entry in the Knowledge

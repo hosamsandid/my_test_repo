@@ -181,6 +181,23 @@ test("AC18: the Git panel's update can resolve an agent-scoped repo's SSH key", 
   );
 });
 
+test("#2464: push and PR resolve the repo from env + agent-scoped repositories", () => {
+  // The clone path unions both lists, so an agent-scoped repo lands on disk;
+  // the git-ops path resolved from env.repositories ONLY, so that same repo was
+  // rejected as "not in this environment" before any credential resolution —
+  // the agent could commit locally but never push or open a PR to it. Both
+  // call sites must hand resolveAgentRepo the SAME union the clone path builds.
+  for (const marker of ["async function agentGitPush(", "async function agentCreatePr("]) {
+    const body = block(marker, "resolveAttributedGithubToken");
+    assert.match(body, /resolveAgentRepo\(\{/, `${marker} resolves the repo`);
+    assert.match(
+      body,
+      /repositories:\s*\[\s*\.\.\.\(Array\.isArray\(env\?\.repositories\)[\s\S]{0,200}?normalizeAgentRepositories\(\(loadAgentConfig\(id\) \|\| \{\}\)\.agentRepositories\)/,
+      `${marker} must union agent-scoped repositories into the pushable set`,
+    );
+  }
+});
+
 test("the three internal routes exist and map refusal codes onto statuses", () => {
   const route = block("const agentReposMatch = req.url.match(", "const disableMatch");
   assert.match(route, /\['GET', 'POST', 'DELETE'\]\.includes\(req\.method\)/);

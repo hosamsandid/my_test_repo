@@ -30,6 +30,7 @@ const fs = require('fs');
 const path = require('path');
 
 const {
+  withUnexpectedErrors,
   verifyScopeToken,
   auditWriter,
   healthEndpoint,
@@ -394,12 +395,7 @@ async function handleRequest(req, res) {
   return void sendJson(res, 404, { error: 'not found' });
 }
 
-const httpServer = http.createServer((req, res) => {
-  handleRequest(req, res).catch((err) => {
-    if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
-    try { res.end(JSON.stringify({ error: (err && err.message) || String(err) })); } catch { /* ignore */ }
-  });
-});
+const httpServer = http.createServer(withUnexpectedErrors('github-issues-broker', handleRequest));
 
 if (require.main === module) {
   httpServer.listen(PORT, () => process.stdout.write(`[github-issues-broker] listening on :${PORT}\n`));

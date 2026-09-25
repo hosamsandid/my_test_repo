@@ -121,6 +121,18 @@ function coerceChatFontSize(raw) {
   return n;
 }
 
+// Per-user opt-in for the "an agent you messaged is back" browser notification
+// (#2397). Off by default; persisted only when explicitly enabled so an unset
+// record keeps the feature off (mirrors chatFontSize's "unset = default"). A
+// blank/absent value leaves it unset; anything else must be a real boolean.
+function coerceChatNotifyOnBack(raw) {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'boolean') {
+    throw badRequest('chatNotifyOnBack must be a boolean');
+  }
+  return raw;
+}
+
 // A membership's `teamId` may name an **Agent Team** as well as a legacy access
 // scope (#2077 D1; self-service creation, #2081). This module owns
 // teams/users/memberships and has no agent access, so the second half of that
@@ -256,7 +268,7 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
     return listUsers().find(u => (u.subject || '').toLowerCase() === s) || null;
   }
 
-  function createUser({ subject, email, displayName, systemAdmin, githubHandle, chatFontSize } = {}) {
+  function createUser({ subject, email, displayName, systemAdmin, githubHandle, chatFontSize, chatNotifyOnBack } = {}) {
     if (!isNonEmptyString(subject)) {
       throw badRequest('user subject is required');
     }
@@ -278,6 +290,10 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
     // an unset record keeps the 12px session default (#1437).
     const cfs = coerceChatFontSize(chatFontSize);
     if (cfs !== undefined) user.chatFontSize = cfs;
+    // Optional per-user browser-notification opt-in — persisted only when
+    // explicitly enabled, so an unset record keeps the feature off (#2397).
+    const cnb = coerceChatNotifyOnBack(chatNotifyOnBack);
+    if (cnb === true) user.chatNotifyOnBack = true;
     users.push(user);
     writeArray(USERS_INDEX, users);
     return user;
@@ -309,6 +325,13 @@ function createTeamsStore({ root, agentTeamExists } = {}) {
       // A blank/absent value clears the override back to the 12px default.
       if (cfs === undefined) delete user.chatFontSize;
       else user.chatFontSize = cfs;
+    }
+    if (patch.chatNotifyOnBack !== undefined) {
+      const cnb = coerceChatNotifyOnBack(patch.chatNotifyOnBack);
+      // Off is the default, so a false/blank value clears the field entirely
+      // rather than storing an explicit `false` (#2397).
+      if (cnb === true) user.chatNotifyOnBack = true;
+      else delete user.chatNotifyOnBack;
     }
     user.updatedAt = nowIso();
     users[idx] = user;
@@ -682,6 +705,7 @@ module.exports = {
   normalizeGithubHandle,
   coerceGithubHandle,
   coerceChatFontSize,
+  coerceChatNotifyOnBack,
   CHAT_FONT_SIZE_MIN,
   CHAT_FONT_SIZE_MAX,
   CHAT_FONT_SIZE_DEFAULT,

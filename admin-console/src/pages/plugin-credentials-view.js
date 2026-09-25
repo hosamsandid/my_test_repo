@@ -17,18 +17,29 @@ export function fieldType(key) {
 }
 
 // The descriptor list the form renders, from the `credentials` array
-// (`[{ key, required, description }]`) and one scope's `keys` metadata.
+// (`[{ key, required, description, secret? }]`) and one scope's `keys` metadata.
+// A `secret: false` field (#2449) discloses its real stored value (`meta.value`)
+// so the input pre-fills editable rather than showing a masked keep-hint; a
+// secret field keeps the write-only, preview-only behavior.
 export function fieldDescriptors(credentials, scopeKeysMeta = {}) {
   return (Array.isArray(credentials) ? credentials : []).map((c) => {
     const meta = scopeKeysMeta[c.key] || {};
+    // A field is secret (write-only, masked, byte-identical to pre-#2449) UNLESS
+    // the manifest explicitly opts out with `secret: false`. The name-based
+    // heuristic (SECRET_KEY_RE via fieldType) is only the password/text input
+    // hint for a secret field — never what decides masking.
+    const secret = !(meta.secret === false || c.secret === false);
+    const storedValue = (!secret && typeof meta.value === 'string') ? meta.value : '';
     return {
       key: c.key,
       required: c.required === true,
       description: c.description || meta.description || null,
-      type: fieldType(c.key),
+      type: secret ? fieldType(c.key) : 'text',
+      secret,
       set: !!meta.set,
       preview: meta.preview || null,
-      placeholder: meta.set
+      storedValue,
+      placeholder: secret && meta.set
         ? `Stored (${meta.preview || '••••'}) — leave blank to keep`
         : (c.required ? 'Required' : 'Optional'),
     };

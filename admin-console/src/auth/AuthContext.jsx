@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import { applyUserPreferencePatch } from './auth-user-preferences.js';
 
 // Auth state for the whole console (#276). Backed by an HttpOnly session cookie
 // the server sets on login, so a browser refresh re-validates via
@@ -57,6 +58,15 @@ export function AuthProvider({ children }) {
     setState({ loading: false, authenticated: true, user: data.user || null });
   }, []);
 
+  // Optimistically reflect a just-saved user preference (chatNotifyOnBack,
+  // chatFontSize, …) in the in-session user so a reader that re-reads the session
+  // value later — the Settings dialog re-runs its useState initializers each time
+  // it reopens (Modal unmounts its children on close) — sees the fresh value
+  // instead of the frozen load-time one (#2402). No user in session → no-op.
+  const patchUser = useCallback((patch) => {
+    setState(s => (s.user ? { ...s, user: applyUserPreferencePatch(s.user, patch) } : s));
+  }, []);
+
   const logout = useCallback(async () => {
     try {
       await fetch('/api/auth/logout', { method: 'POST' });
@@ -70,8 +80,8 @@ export function AuthProvider({ children }) {
   // is replaced (never mutated) on each change, so depending on it is correct;
   // login/logout/refresh are already useCallback-stable.
   const value = useMemo(
-    () => ({ ...state, login, logout, refresh }),
-    [state, login, logout, refresh],
+    () => ({ ...state, login, logout, refresh, patchUser }),
+    [state, login, logout, refresh, patchUser],
   );
 
   return (

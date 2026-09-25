@@ -30,7 +30,7 @@ Any endpoint that speaks the **Anthropic Messages API** works — the Anthropic 
 itself, a LiteLLM proxy, an Azure AI Foundry wrapper, or an internal enterprise
 gateway.
 
-The table on this page is that list of providers, one row each: its **ID** and
+The table on this page is that list of providers, one row each: its
 **Name**, the **Scope / Teams** that owns it (a *Team* provider belongs to one
 team; a *System* provider is assigned to the teams listed beside it, or reads
 *Unassigned*; a **Global** provider shows a single *Global* pill because it
@@ -163,9 +163,10 @@ who confirmed it and when on the provider entry. Consequences worth knowing:
 ## Test connection and Discover models
 
 Both buttons probe the provider *before* you commit to it, from the values
-currently in the form. Both send the same request — a `GET` of the endpoint's
-**`/v1/models`** route (for a subscription provider, of `api.anthropic.com`,
-since there is no Base URL to ask) — and differ in what they do with the answer:
+currently in the form. For an **API key / proxy** provider both send the same
+request — a `GET` of the endpoint's **`/v1/models`** route — and differ only in
+what they do with the answer (a **subscription** provider takes a different route
+entirely; see below):
 
 - **Test connection** reports the HTTP result and nothing else. It is the fastest
   way to separate "wrong URL" from "wrong token", and it works even against an
@@ -182,11 +183,27 @@ but expose no model-listing route at all, which used to read as a broken provide
 Both buttons now fall back to a `POST` of `/v1/messages/count_tokens` with a
 placeholder model name that is never actually served: a `400` (or `2xx`) means the
 endpoint is reachable and your credential works, just with no catalog to offer; a
-`401`/`403` still means a real auth failure; a `404` on that route too means the
-Base URL itself is wrong. On a successful fallback, **Test connection** reports OK
+`401`/`403` still means a real auth failure. A `404` is the subtle case, because
+the endpoint returns it both when the route is genuinely absent *and* when it
+reaches the route but rejects the never-served placeholder model: a `404` that
+names the model as unknown (an Anthropic `not_found_error` body) counts as
+reachable and authenticated — the credential was accepted *before* the model was
+checked — while an opaque `404` with no such body still means the Base URL itself
+is wrong. On a successful fallback, **Test connection** reports OK
 and **Discover models** tells you to enter the model name(s) manually instead of
-showing an empty list or a raw HTTP error. A provider whose `/v1/models` already
-works is completely unaffected — the fallback only fires on a route-missing status.
+showing an empty list or a raw HTTP error. An API-key provider whose `/v1/models`
+already works is completely unaffected — for it the fallback only fires on a
+route-missing status.
+
+**A subscription (OAuth) provider skips `/v1/models` altogether.** Its token is
+honoured only on Anthropic's Claude Code *messages* flow, and the model-list
+route always answers a subscription token with `401 invalid x-api-key`. So both
+buttons go straight to the `count_tokens` probe against `api.anthropic.com` —
+never `/v1/models`, and not as a fallback but as the only path — and **Discover
+models** always asks you to enter the model name(s) manually, because a
+subscription token cannot enumerate models over HTTP at all. The same `count_tokens`
+probe backs the background health poller, so a subscription provider is no longer
+falsely flagged red on the **Health** column either.
 
 **A probe always names the credential it used**, in a line under the two buttons,
 because a `401` means something completely different depending on which one it

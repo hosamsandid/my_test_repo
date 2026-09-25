@@ -18,15 +18,17 @@ import {
   humansAfterUpsert, humansAfterRemove,
   humanAfterConsumeAdd, humanAfterConsumeRemove, humanAfterEmitAdd, humanAfterEmitRemove,
 } from './humans-registry-ops';
+import { parseGitHubUrl } from '../../components/repository-url-view.js';
 
-// Mirrors orchestrator/github-poller.js — owner/repo from a repository URL.
+// owner/repo from a repository URL, for a canvas-created github-event trigger.
+// Delegates to the shared `parseGitHubUrl` (#2345) rather than keep a partial
+// regex copy of it — one parser now recognizes every github.com URL form
+// (git@, ssh://, https with optional www., bare github.com), and the fullName
+// is scheme-independent (`<org>/<repo>`), which is exactly what the poller
+// matches on.
 function parseRepoFullName(url) {
-  if (!url) return null;
-  const ssh = String(url).match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/);
-  if (ssh) return `${ssh[1]}/${ssh[2]}`;
-  const https = String(url).match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
-  if (https) return `${https[1]}/${https[2]}`;
-  return null;
+  const parsed = parseGitHubUrl(url);
+  return parsed ? `${parsed.org}/${parsed.repo}` : null;
 }
 
 // The repo a canvas-created github-event trigger should poll: the first

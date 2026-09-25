@@ -27,6 +27,7 @@ const fs = require('fs');
 const path = require('path');
 
 const {
+  withUnexpectedErrors,
   verifyScopeToken,
   mint,
   auditWriter,
@@ -106,7 +107,17 @@ function resolveCredential(scopeId) {
   const email = (v.email || '').trim();
   const apiToken = (v['api-token'] || '').trim();
   if (!siteUrl || !email || !apiToken) return null;
-  return { siteUrl, email, apiToken };
+  // Optional admin allow-list of readable custom fields (#2416): a comma list of
+  // human field names ("Team, Sprint") a Team Admin sets alongside site/token.
+  // Surfaced by default on every read; a per-request `--fields` adds to it.
+  const readableCustomFields = String(v['readable-custom-fields'] || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  // Optional admin allow-list of WRITABLE custom fields (#2417): a comma list of
+  // human field names ("Team") an agent may set via `aee-jira set-field`. Empty =
+  // no field is writable (the safe default — a write is stricter than a read).
+  const writableCustomFields = String(v['writable-custom-fields'] || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  return { siteUrl, email, apiToken, readableCustomFields, writableCustomFields };
 }
 
 // ── delivery: POST /internal/plugin-event (Jira plan §4B) ───────────────────
@@ -212,14 +223,20 @@ const poller = new JiraPoller({
 // hostile request cannot buffer unbounded memory; an over-cap body resolves
 // empty and parseJson turns it into `{}` (a 4xx from the handler).
 const MAX_BODY_BYTES = 1_000_000;
-function readBody(req) {
+// An attachment upload carries the file's bytes base64-encoded inside the JSON
+// body (CLI→broker), one file per request. Its cap is the raw upload ceiling
+// grown by the ~4/3 base64 blow-up plus a small JSON envelope margin — bounded,
+// but far above the 1 MB control-message default so a legitimate file is not
+// truncated into an opaque 400.
+const ATTACHMENT_BODY_MAX_BYTES = Math.ceil(jira.ATTACHMENT_UPLOAD_MAX_BYTES * 4 / 3) + 64 * 1024;
+function readBody(req, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve) => {
     let s = '';
     let over = false;
     req.on('data', (c) => {
       if (over) return;
       s += c;
-      if (s.length > MAX_BODY_BYTES) { over = true; s = ''; req.destroy(); }
+      if (s.length > maxBytes) { over = true; s = ''; req.destroy(); }
     });
     req.on('end', () => resolve(s));
     req.on('error', () => resolve(s));
@@ -291,7 +308,7 @@ async function handleCli(req, res, cliPath) {
   }
 
   // ── reads that need the per-scope Jira credential (Phase 3) ───────────────
-  const readOps = { '/projects': 'projects', '/list': 'list', '/show': 'show' };
+  const readOps = { '/projects': 'projects', '/list': 'list', '/search': 'search', '/show': 'show', '/statuses': 'statuses' };
   if (readOps[cliPath] && req.method === 'GET') {
     const op = readOps[cliPath];
     const cred = resolveCredential(scopeId);
@@ -304,18 +321,65 @@ async function handleCli(req, res, cliPath) {
     }
     try {
       let result;
+      // The admin allow-list of readable custom fields (#2416) is surfaced on
+      // every read by default; a per-request `--fields` custom name adds to it.
+      const defaultCustomFields = cred.readableCustomFields || [];
       if (op === 'projects') {
         result = { projects: await jira.listProjects(cred) };
       } else if (op === 'list') {
         const project = (params.get('project') || '').trim();
         if (!project) return sendJson(res, 400, { error: 'a --project key is required' });
-        result = { project, issues: await jira.listProjectIssues(cred, { projectKey: project, status: params.get('status') || undefined }) };
+        result = {
+          project,
+          issues: await jira.listProjectIssues(cred, {
+            projectKey: project,
+            status: params.get('status') || undefined,
+            customFields: defaultCustomFields,
+          }),
+        };
+      } else if (op === 'search') {
+        // Arbitrary JQL, scope-guarded by the credential itself (jira.searchIssues):
+        // it resolves as the bound account, so it can only read the team's site +
+        // permitted projects — the JQL cannot escape the tenant boundary.
+        const jql = (params.get('jql') || '').trim();
+        if (!jql) return sendJson(res, 400, { error: 'a --jql query is required' });
+        const fieldsParam = (params.get('fields') || '').trim();
+        const requested = fieldsParam ? fieldsParam.split(',').map((f) => f.trim()).filter(Boolean) : [];
+        // `--fields` names standard columns (a projection) AND/OR custom fields:
+        // split them so the columns drive the projection and the custom names are
+        // read + added on top (union with the admin allow-list).
+        const { columns, customNames } = jira.partitionFields(requested);
+        const limit = params.get('limit') || undefined;
+        result = {
+          jql,
+          issues: await jira.searchIssues(cred, {
+            jql,
+            fields: columns.length ? columns : undefined,
+            customFields: jira.mergeCustomFieldNames(defaultCustomFields, customNames),
+            limit,
+          }),
+        };
+      } else if (op === 'statuses') {
+        // The full set of workflow statuses a project supports, grouped by issue
+        // type (#2421) — a project-wide read, independent of any single issue.
+        const project = (params.get('project') || '').trim();
+        if (!project) return sendJson(res, 400, { error: 'a --project key is required' });
+        result = { project, statuses: await jira.listProjectStatuses(cred, { projectKey: project }) };
       } else {
         const issue = (params.get('issue') || '').trim();
         if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
-        result = { issue: await jira.getIssue(cred, issue) };
+        // `show --fields "Team"`: all names are custom fields (a plain `show`
+        // already returns every standard field), unioned with the admin list.
+        const fieldsParam = (params.get('fields') || '').trim();
+        const requested = fieldsParam ? fieldsParam.split(',').map((f) => f.trim()).filter(Boolean) : [];
+        const { customNames } = jira.partitionFields(requested);
+        result = {
+          issue: await jira.getIssue(cred, issue, {
+            customFields: jira.mergeCustomFieldNames(defaultCustomFields, customNames),
+          }),
+        };
       }
-      writeAudit(scopeId, scopeId, op, 'ok', params.get('project') || params.get('issue') || '');
+      writeAudit(scopeId, scopeId, op, 'ok', params.get('project') || params.get('issue') || params.get('jql') || '');
       return sendJson(res, 200, result);
     } catch (err) {
       writeAudit(scopeId, scopeId, op, 'error', err.message);
@@ -323,8 +387,228 @@ async function handleCli(req, res, cliPath) {
     }
   }
 
+  // ── sprint list on a board (Agile read, #2450) ───────────────────────────
+  // A read like /list, but over the Jira Agile API: the sprints on a board
+  // resolved by its human name. Needs the credential (jira.listBoardSprints
+  // resolves board name → id server-side), no write policy — it creates nothing.
+  if (cliPath === '/sprint/list' && req.method === 'GET') {
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'sprint-list', 'no-credential');
+      return sendJson(res, 400, {
+        error: 'This team has no Jira credential configured. A Team Admin sets it on the Plugins page.',
+        code: 'no-credential',
+      });
+    }
+    const board = (params.get('board') || '').trim();
+    if (!board) return sendJson(res, 400, { error: 'a --board name is required' });
+    try {
+      const result = await jira.listBoardSprints(cred, {
+        boardName: board,
+        projectKeyOrId: (params.get('project') || '').trim() || undefined,
+        state: (params.get('state') || '').trim() || undefined,
+      });
+      writeAudit(scopeId, scopeId, 'sprint-list', 'ok', board);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'sprint-list', 'error', `${board}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
+  // ── attachment content fetch by id (Phase 3 read, #2399) ─────────────────
+  // A read like /show, but it downloads one attachment's bytes server-side and
+  // returns them as inline text or base64. jira.getAttachment confirms the id
+  // belongs to the issue before fetching, so an id on another issue (or one
+  // deleted since `show`) is a mapped 404, never a raw Jira body.
+  if (cliPath === '/attachment' && req.method === 'GET') {
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'attachment', 'no-credential');
+      return sendJson(res, 400, {
+        error: 'This team has no Jira credential configured. A Team Admin sets it on the Plugins page.',
+        code: 'no-credential',
+      });
+    }
+    const issue = (params.get('issue') || '').trim();
+    const id = (params.get('id') || '').trim();
+    if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
+    if (!id) return sendJson(res, 400, { error: 'an attachment id is required' });
+    try {
+      const attachment = await jira.getAttachment(cred, issue, id);
+      writeAudit(scopeId, scopeId, 'attachment', 'ok', `${issue}:${id}`);
+      return sendJson(res, 200, { attachment });
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'attachment', 'error', `${issue}:${id}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
+  // ── attachment upload by path (Phase 4 write, #2408) ─────────────────────
+  // The write counterpart of `/attachment`: the CLI sends ONE file per request
+  // as `{ issue, filename, contentBase64 }`; the broker decodes it and uploads
+  // it to the issue server-side (the Jira token never leaves here — AC7). One
+  // file per request keeps the buffered body bounded and gives the CLI clean
+  // per-file success/failure to report when several files are attached in one
+  // invocation (AC6). Role-gated like the other writes (D3).
+  if (cliPath === '/attachment/add' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('attach');
+    if (!authz.allow) {
+      writeAudit(scopeId, scopeId, 'attach', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'attach', 'no-credential');
+      return sendJson(res, 400, {
+        error: 'This team has no Jira credential configured. A Team Admin sets it on the Plugins page.',
+        code: 'no-credential',
+      });
+    }
+    const raw = await readBody(req, ATTACHMENT_BODY_MAX_BYTES);
+    // An over-cap body is dropped to empty by readBody → parses to `{}` → the
+    // filename/content checks below turn it into a clear 413, not a silent hang.
+    if (!raw) {
+      writeAudit(scopeId, scopeId, 'attach', 'error', 'body-too-large');
+      return sendJson(res, 413, { error: `the upload exceeds the ${jira.ATTACHMENT_UPLOAD_MAX_BYTES}-byte limit for this plugin.` });
+    }
+    const body = parseJson(raw);
+    const issue = String(body.issue || '').trim();
+    const filename = String(body.filename || '').trim();
+    if (!issue) return sendJson(res, 400, { error: 'an issue key is required' });
+    if (!filename) return sendJson(res, 400, { error: 'a filename is required' });
+    if (typeof body.contentBase64 !== 'string' || !body.contentBase64) {
+      return sendJson(res, 400, { error: 'file content is required' });
+    }
+    let buffer;
+    try {
+      buffer = Buffer.from(body.contentBase64, 'base64');
+    } catch {
+      return sendJson(res, 400, { error: 'file content is not valid base64' });
+    }
+    try {
+      const attachment = await jira.addAttachment(cred, issue, { filename, buffer, mimeType: body.mimeType });
+      writeAudit(scopeId, scopeId, 'attach', 'ok', `${issue}:${attachment.id} (${filename})`);
+      return sendJson(res, 200, { attachment });
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'attach', 'error', `${issue} ${filename}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
+  // ── issue creation: one Epic + N child Stories (#2424) ───────────────────
+  // The plugin's first CREATE. The CLI sends `{ project, epic, stories[], issueTypes? }`;
+  // the broker creates the epic then each story (linked to it), gating every
+  // named custom field on the team's `writable-custom-fields` allow-list (#2417)
+  // BEFORE anything is created. A per-story failure after the epic exists is
+  // reported, not fatal (jira.createEpicWithStories). Role-gated like the other
+  // writes (D3); the Jira token stays server-side.
+  if (cliPath === '/create-epic' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('create');
+    if (!authz.allow) {
+      writeAudit(scopeId, scopeId, 'create', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'create', 'no-credential');
+      return sendJson(res, 400, {
+        error: 'This team has no Jira credential configured. A Team Admin sets it on the Plugins page.',
+        code: 'no-credential',
+      });
+    }
+    const body = parseJson(await readBody(req));
+    const project = String(body.project || '').trim();
+    if (!project) return sendJson(res, 400, { error: 'a --project key is required' });
+    if (!body.epic || typeof body.epic !== 'object') return sendJson(res, 400, { error: 'an epic is required' });
+    try {
+      const result = await jira.createEpicWithStories(cred, {
+        projectKey: project,
+        epic: body.epic,
+        stories: Array.isArray(body.stories) ? body.stories : [],
+        allowList: cred.writableCustomFields || [],
+        attribution: `Created by an agent on team "${scopeId}" via Agent Studio.`,
+        issueTypes: body.issueTypes && typeof body.issueTypes === 'object' ? body.issueTypes : undefined,
+      });
+      writeAudit(scopeId, scopeId, 'create', 'ok', `${project}:${result.epic.key} +${result.stories.filter((s) => s.ok).length}/${result.stories.length} stories`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'create', 'error', `${project}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
+  // ── sprint creation on a board (Agile write, #2450) ──────────────────────
+  // Two board-scoped writes: create ONE future sprint, or BULK-generate a run of
+  // them up to a target date. Role-gated like every other write (D3); the Jira
+  // token stays server-side. `sprint-bulk-create` continues by default from the
+  // board's latest existing sprint (jira.bulkCreateSprints), so a per-sprint
+  // failure is reported, not fatal — the dates are precomputed, not chained.
+  if (cliPath === '/sprint/create' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('sprint-create');
+    if (!authz.allow) {
+      writeAudit(scopeId, scopeId, 'sprint-create', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'sprint-create', 'no-credential');
+      return sendJson(res, 400, { error: 'This team has no Jira credential configured.', code: 'no-credential' });
+    }
+    const body = parseJson(await readBody(req));
+    const board = String(body.board || '').trim();
+    if (!board) return sendJson(res, 400, { error: 'a --board name is required' });
+    try {
+      const result = await jira.createSprint(cred, {
+        boardName: board,
+        projectKeyOrId: String(body.project || '').trim() || undefined,
+        name: body.name,
+        startDate: body.start,
+        endDate: body.end,
+        goal: body.goal,
+      });
+      writeAudit(scopeId, scopeId, 'sprint-create', 'ok', `${board}:${result.sprint.id || result.sprint.name}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'sprint-create', 'error', `${board}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
+  if (cliPath === '/sprint/bulk-create' && req.method === 'POST') {
+    const authz = brokerPolicy.authorizeWrite('sprint-bulk-create');
+    if (!authz.allow) {
+      writeAudit(scopeId, scopeId, 'sprint-bulk-create', 'denied', authz.code);
+      return sendJson(res, 403, { error: authz.reason, code: authz.code });
+    }
+    const cred = resolveCredential(scopeId);
+    if (!cred) {
+      writeAudit(scopeId, scopeId, 'sprint-bulk-create', 'no-credential');
+      return sendJson(res, 400, { error: 'This team has no Jira credential configured.', code: 'no-credential' });
+    }
+    const body = parseJson(await readBody(req));
+    const board = String(body.board || '').trim();
+    if (!board) return sendJson(res, 400, { error: 'a --board name is required' });
+    try {
+      const result = await jira.bulkCreateSprints(cred, {
+        boardName: board,
+        projectKeyOrId: String(body.project || '').trim() || undefined,
+        nameTemplate: body.nameTemplate,
+        cadenceDays: body.cadenceDays,
+        until: body.until,
+        start: body.start,
+        goal: body.goal,
+      });
+      writeAudit(scopeId, scopeId, 'sprint-bulk-create', 'ok', `${board}:${result.created}/${result.requested}`);
+      return sendJson(res, 200, result);
+    } catch (err) {
+      writeAudit(scopeId, scopeId, 'sprint-bulk-create', 'error', `${board}: ${err.message}`);
+      return sendJson(res, err.status && err.status >= 400 && err.status < 500 ? err.status : 502, { error: err.message });
+    }
+  }
+
   // ── attributed writes (Phase 4, D3 — role-gated server-side, no confirm) ──
-  const writeOps = { '/comment': 'comment', '/transition': 'transition', '/update': 'update' };
+  const writeOps = { '/comment': 'comment', '/transition': 'transition', '/update': 'update', '/set-field': 'set-field' };
   if (writeOps[cliPath] && req.method === 'POST') {
     const op = writeOps[cliPath];
     const authz = brokerPolicy.authorizeWrite(op);
@@ -354,10 +638,26 @@ async function handleCli(req, res, cliPath) {
           description: text,
           attribution: `Description rewritten by an agent on team "${scopeId}" via Agent Studio.`,
         });
+      } else if (op === 'set-field') {
+        const field = String(body.field || '').trim();
+        if (!field) return sendJson(res, 400, { error: 'a field name is required' });
+        const hasJson = Object.prototype.hasOwnProperty.call(body, 'valueJson');
+        if (!hasJson && (body.value === undefined || body.value === null)) {
+          return sendJson(res, 400, { error: 'a value is required (--value or --value-json)' });
+        }
+        result = await jira.setCustomField(cred, issue, {
+          fieldName: field,
+          value: hasJson ? undefined : body.value,
+          jsonValue: hasJson ? body.valueJson : undefined,
+          allowList: cred.writableCustomFields || [],
+        });
       } else {
         result = await jira.transitionIssue(cred, issue, { toStatus: body.to });
       }
-      writeAudit(scopeId, scopeId, op, 'ok', `${issue}${op === 'transition' ? `→${body.to || ''}` : ''}`);
+      const detail = op === 'transition' ? `${issue}→${body.to || ''}`
+        : op === 'set-field' ? `${issue}.${String(body.field || '').trim()}`
+          : issue;
+      writeAudit(scopeId, scopeId, op, 'ok', detail);
       return sendJson(res, 200, result);
     } catch (err) {
       writeAudit(scopeId, scopeId, op, 'error', `${issue}: ${err.message}`);
@@ -600,15 +900,13 @@ async function handleRequest(req, res) {
 // a status + message above, so anything landing here is a broker bug. The stack
 // goes to stderr (podman logs); the client gets a generic body — an internal
 // message/stack is not the agent's to read (CodeQL js/stack-trace-exposure).
-const httpServer = http.createServer((req, res) => {
-  handleRequest(req, res).catch((err) => {
-    try {
-      process.stderr.write(`[jira-broker] unhandled request error: ${(err && err.stack) || String(err)}\n`);
-    } catch { /* ignore */ }
-    if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
-    try { res.end(JSON.stringify({ error: 'internal server error' })); } catch { /* ignore */ }
-  });
-});
+// Last-resort catch: every route already maps upstream/validation failures to
+// a status + message above, so anything landing here is a broker bug. The
+// operator keeps the detail; the client gets a generic body (CodeQL
+// js/stack-trace-exposure). Via the SDK wrapper rather than an inline .catch():
+// it also contains a SYNCHRONOUS throw raised before the handler returns a
+// promise, which the inline form could not.
+const httpServer = http.createServer(withUnexpectedErrors('jira-broker', handleRequest));
 
 if (require.main === module) {
   httpServer.listen(PORT, () => process.stdout.write(`[jira-broker] listening on :${PORT}\n`));

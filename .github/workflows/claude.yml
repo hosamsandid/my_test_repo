@@ -6,25 +6,36 @@ on:
   pull_request_review_comment:
     types: [created]
 
+# id-token: write is intentionally omitted: this workflow authenticates to the
+# LLM proxy with a static secret (ANTHROPIC_AUTH_TOKEN), not OIDC, so no OIDC
+# token minting is required. Re-add it only alongside a documented OIDC use.
 permissions:
   contents: write
   pull-requests: write
   issues: write
-  id-token: write
 
 jobs:
   claude:
+    # Only run for a genuine human whose comment mentions @claude AND who is a
+    # trusted member of this repo. author_association is OWNER/MEMBER/COLLABORATOR
+    # only (never CONTRIBUTOR/FIRST_TIME_CONTRIBUTOR/NONE), and user.type == 'User'
+    # excludes bots and GitHub Apps that happen to mention @claude. Without this
+    # gate any account able to comment could invoke the job's write permissions.
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
+      (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
+      ) &&
+      github.event.comment.user.type == 'User' &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 1
 
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1.0.234
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
         env:

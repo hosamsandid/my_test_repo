@@ -533,7 +533,9 @@ test('aee-jira is a dependency-free single file (stdlib imports only)', () => {
   const src = fs.readFileSync(JIRA_CLI, 'utf8');
   const imports = src.split('\n').filter((l) => /^\s*(import|from)\s+/.test(l));
   assert.ok(imports.length > 0);
-  const STDLIB = new Set(['argparse', 'json', 'os', 'sys', 'urllib']);
+  // base64 + re added for #2399 attachment read-side (binary decode + filename
+  // sanitisation) — both Python stdlib, so the dependency-free contract holds.
+  const STDLIB = new Set(['argparse', 'base64', 'json', 'os', 're', 'sys', 'urllib']);
   for (const line of imports) {
     const m = line.match(/^\s*(?:import|from)\s+([a-zA-Z0-9_]+)/);
     assert.ok(m && STDLIB.has(m[1]), `non-stdlib import: ${line.trim()}`);
@@ -613,6 +615,29 @@ test('aee-jira: inbox --consume <ids> is wired to a broker call (unreachable →
   assert.equal(h.status, 0);
   assert.match(h.stdout, /EVENT_ID/);
   assert.match(h.stdout, /events\[\]\.id/);
+});
+
+test('aee-jira: attachment add with no paths → exit 2 (usage); a nonexistent path → exit 1, never a broker call', () => {
+  const ws = grantedJiraWorkspace();
+  assert.equal(runJira(['attachment', 'add', 'KAN-1', '--json'], ws).status, 2); // argparse: paths required
+  const missing = runJira(['attachment', 'add', 'KAN-1', '/no/such/file.pdf', '--json'], ws);
+  assert.equal(missing.status, 1); // client-side path validation, before any upload
+  const obj = JSON.parse(missing.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.error, 'invalid-path');
+  assert.match(obj.message, /\/no\/such\/file\.pdf/);
+});
+
+test('aee-jira: attachment add of a real file against an unreachable broker → exit 3 (wired to a broker call)', () => {
+  const ws = grantedJiraWorkspace();
+  const file = path.join(ws, 'upload-me.txt');
+  fs.writeFileSync(file, 'hello');
+  const r = runJira(['attachment', 'add', 'KAN-1', file, '--json'], ws);
+  assert.equal(r.status, 3, r.stdout + r.stderr);
+  const obj = JSON.parse(r.stdout.trim());
+  assert.equal(obj.ok, false);
+  assert.equal(obj.result.failed, 1);
+  assert.equal(obj.result.uploaded, 0);
 });
 
 function runJiraAsync(args, workspace) {

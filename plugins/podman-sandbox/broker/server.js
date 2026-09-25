@@ -25,6 +25,7 @@ const YAML = require('yaml');
 // broker agree on which resources belong to a scope. Container isolation
 // behaviour is otherwise unchanged.
 const {
+  withUnexpectedErrors,
   verifyScopeToken,
   OWNER_LABEL_KEY,
   ownerLabelArg,
@@ -607,14 +608,7 @@ const handleHealth = healthEndpoint();
 const handleTeardown = teardownScopeEndpoint((scopeId) => teardownScope(scopeId), { secret: SIGNING_SECRET });
 
 // --- HTTP wiring -------------------------------------------------------------
-const httpServer = http.createServer((req, res) => {
-  handleRequest(req, res).catch((err) => {
-    if (!res.headersSent) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-    }
-    try { res.end(JSON.stringify({ error: (err && err.message) || String(err) })); } catch { /* ignore */ }
-  });
-});
+const httpServer = http.createServer(withUnexpectedErrors('podman-mcp', handleRequest));
 
 async function handleRequest(req, res) {
   if (req.method === 'GET' && req.url === '/healthz') {

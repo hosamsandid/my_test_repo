@@ -6,6 +6,7 @@ import {
   isPersonalCredential,
   teamsById,
   credentialScopeLabel,
+  credentialOwnershipLabel,
   creatableScopes,
   defaultOwnership,
   ownershipPayload,
@@ -16,6 +17,13 @@ import {
   canAccessCredentialPages,
   isAdminForTeam,
   isGlobalRecord,
+  IDENTITY_HUMAN,
+  IDENTITY_SERVICE,
+  IDENTITY_OPTIONS,
+  allowedScopesForIdentity,
+  isAllowedIdentityScope,
+  defaultIdentity,
+  creatableScopesForIdentity,
 } from './credential-scope-view.js';
 
 const names = { default: 'Default', payments: 'Payments', risk: 'Risk' };
@@ -93,6 +101,51 @@ test('defaultOwnership: sysadmin → team/default; team admin → first admin te
   assert.deepEqual(defaultOwnership({ isSysAdmin: true }), { scope: 'team', teamId: 'default', assignedTeamIds: [] });
   assert.deepEqual(defaultOwnership({ isSysAdmin: false, adminTeamIds: ['payments', 'risk'] }),
     { scope: 'team', teamId: 'payments', assignedTeamIds: [] });
+});
+
+test('defaultOwnership: under v2 a plain member (no admin teams) defaults to personal/human (#2360 consolidation)', () => {
+  // The consolidated SSH/GitHub-token pages open to every user; a caller who can
+  // only ever create a personal credential must land on it, not on an unfillable
+  // team picker.
+  assert.deepEqual(
+    defaultOwnership({ isSysAdmin: false, adminTeamIds: [], v2: true }),
+    { scope: 'personal', teamId: null, assignedTeamIds: [], identity: IDENTITY_HUMAN },
+  );
+  // A team admin still defaults to their team (service); a sysadmin to team/default.
+  assert.deepEqual(
+    defaultOwnership({ isSysAdmin: false, adminTeamIds: ['payments'], v2: true }),
+    { scope: 'team', teamId: 'payments', assignedTeamIds: [], identity: IDENTITY_SERVICE },
+  );
+  // Off the flag the plain-member shape is byte-identical to before (team, empty).
+  assert.deepEqual(
+    defaultOwnership({ isSysAdmin: false, adminTeamIds: [], v2: false }),
+    { scope: 'team', teamId: '', assignedTeamIds: [] },
+  );
+});
+
+test('credentialOwnershipLabel: the consolidated Ownership column mirrors the dialog (#2360)', () => {
+  const names = { payments: 'Payments', risk: 'Risk' };
+  // personal + human → just "Personal" (detail dropped as redundant, like providers)
+  assert.deepEqual(credentialOwnershipLabel({ scope: 'personal', userId: 'u' }, names),
+    { scope: 'personal', label: 'Personal', detail: '' });
+  // personal + explicit service (a private bot key) → the identity note is kept
+  assert.deepEqual(credentialOwnershipLabel({ scope: 'personal', userId: 'u', identity: IDENTITY_SERVICE }, names),
+    { scope: 'personal', label: 'Personal', detail: 'Service credential' });
+  // team → team name
+  assert.deepEqual(credentialOwnershipLabel({ scope: 'team', teamId: 'payments' }, names),
+    { scope: 'team', label: 'Team', detail: 'Payments' });
+  // system, assigned → the assigned team names
+  assert.deepEqual(credentialOwnershipLabel({ scope: 'system', assignedTeamIds: ['payments', 'risk'] }, names),
+    { scope: 'system', label: 'System', detail: 'Payments, Risk' });
+  // system, unassigned → "Unassigned"
+  assert.deepEqual(credentialOwnershipLabel({ scope: 'system', assignedTeamIds: [] }, names),
+    { scope: 'system', label: 'System', detail: 'Unassigned' });
+  // a global service credential → single "Global" pill, no detail
+  assert.deepEqual(credentialOwnershipLabel({ scope: 'system', global: true, assignedTeamIds: [] }, names),
+    { scope: 'global', label: 'Global', detail: '' });
+  // an unknown team id falls back to the raw id
+  assert.deepEqual(credentialOwnershipLabel({ scope: 'team', teamId: 'ghost' }, names),
+    { scope: 'team', label: 'Team', detail: 'ghost' });
 });
 
 test('ownershipPayload: strips to API shape', () => {
@@ -226,4 +279,82 @@ test('isGlobalRecord: true only with BOTH global:true AND scope:"system" — mir
   assert.equal(isGlobalRecord({ scope: 'system' }), false, 'no global key — an ordinary unassigned shared record');
   assert.equal(isGlobalRecord(null), false);
   assert.equal(isGlobalRecord(undefined), false);
+});
+
+// ── identity vs scope (unified access model §4/§7/§12.10, #2360) ────────────
+
+test('IDENTITY_OPTIONS use the concept UI naming', () => {
+  assert.equal(IDENTITY_OPTIONS.length, 2);
+  assert.equal(IDENTITY_OPTIONS.find(o => o.value === IDENTITY_HUMAN).label, 'Personal identity — acts as you');
+  assert.equal(IDENTITY_OPTIONS.find(o => o.value === IDENTITY_SERVICE).label, 'Service credential — a shared machine / deploy identity');
+});
+
+test('allowedScopesForIdentity: a human secret is Personal-only…', () => {
+  assert.deepEqual(allowedScopesForIdentity(IDENTITY_HUMAN, { kind: 'ssh-key' }), ['personal']);
+  assert.deepEqual(allowedScopesForIdentity(IDENTITY_HUMAN, { kind: 'github-token' }), ['personal']);
+  assert.deepEqual(allowedScopesForIdentity(IDENTITY_HUMAN, { kind: 'provider', isOauth: false }), ['personal']);
+});
+
+test('allowedScopesForIdentity: …except a subscription provider may also be global (the hatch)', () => {
+  assert.deepEqual(allowedScopesForIdentity(IDENTITY_HUMAN, { kind: 'provider', isOauth: true }), ['personal', 'global']);
+});
+
+test('allowedScopesForIdentity: a service secret may sit at any tier', () => {
+  assert.deepEqual(allowedScopesForIdentity(IDENTITY_SERVICE, { kind: 'provider' }), ['personal', 'team', 'global']);
+  assert.deepEqual(allowedScopesForIdentity(IDENTITY_SERVICE, { kind: 'ssh-key' }), ['personal', 'team', 'global']);
+});
+
+test('isAllowedIdentityScope mirrors the server refusals', () => {
+  assert.equal(isAllowedIdentityScope(IDENTITY_HUMAN, 'team', { kind: 'ssh-key' }), false);
+  assert.equal(isAllowedIdentityScope(IDENTITY_HUMAN, 'global', { kind: 'ssh-key' }), false);
+  assert.equal(isAllowedIdentityScope(IDENTITY_HUMAN, 'personal', { kind: 'ssh-key' }), true);
+  assert.equal(isAllowedIdentityScope(IDENTITY_HUMAN, 'global', { kind: 'provider', isOauth: true }), true);
+  assert.equal(isAllowedIdentityScope(IDENTITY_HUMAN, 'team', { kind: 'provider', isOauth: true }), false);
+  assert.equal(isAllowedIdentityScope(IDENTITY_SERVICE, 'team', {}), true);
+});
+
+test('defaultIdentity matches the create-time stamp / migration inference', () => {
+  assert.equal(defaultIdentity('provider', { authType: 'oauth-token' }), IDENTITY_HUMAN);
+  assert.equal(defaultIdentity('provider', { authType: 'api-key' }), IDENTITY_SERVICE);
+  assert.equal(defaultIdentity('ssh-key', { scope: 'personal' }), IDENTITY_HUMAN);
+  assert.equal(defaultIdentity('ssh-key', { scope: 'team' }), IDENTITY_SERVICE);
+  assert.equal(defaultIdentity('github-token', { identity: 'service', scope: 'personal' }), IDENTITY_SERVICE, 'an explicit stamp wins over inference');
+});
+
+test('creatableScopesForIdentity intersects identity legality with caller authority', () => {
+  // A plain user: only personal (no team-admin, not sysadmin).
+  assert.deepEqual(creatableScopesForIdentity(IDENTITY_SERVICE, { kind: 'ssh-key', isSysAdmin: false, adminTeamIds: [] }), ['personal']);
+  // A team admin: personal + team, never global.
+  assert.deepEqual(creatableScopesForIdentity(IDENTITY_SERVICE, { kind: 'ssh-key', isSysAdmin: false, adminTeamIds: ['t'] }), ['personal', 'team']);
+  // A sysadmin: all three.
+  assert.deepEqual(creatableScopesForIdentity(IDENTITY_SERVICE, { kind: 'ssh-key', isSysAdmin: true }), ['personal', 'team', 'global']);
+  // A human secret stays personal-only regardless of authority.
+  assert.deepEqual(creatableScopesForIdentity(IDENTITY_HUMAN, { kind: 'ssh-key', isSysAdmin: true }), ['personal']);
+});
+
+// ── v2 ownership carry: identity in default/from-record/payload (#2360) ─────
+
+test('defaultOwnership(v2) adds a service identity; off v2 the shape is unchanged', () => {
+  assert.deepEqual(defaultOwnership({ isSysAdmin: true }), { scope: 'team', teamId: 'default', assignedTeamIds: [] });
+  assert.deepEqual(defaultOwnership({ isSysAdmin: true, v2: true }),
+    { scope: 'team', teamId: 'default', assignedTeamIds: [], identity: 'service' });
+});
+
+test('ownershipFromRecord(v2) opens on the record identity; off v2 no identity', () => {
+  const rec = { id: 'k', scope: 'personal', userId: 'u-1', identity: 'service' };
+  assert.equal(ownershipFromRecord(rec, { v2: false, kind: 'ssh-key' }).identity, undefined);
+  assert.equal(ownershipFromRecord(rec, { v2: true, kind: 'ssh-key' }).identity, 'service');
+  // A legacy record (no stamp) infers per kind: a personal ssh key → human.
+  assert.equal(ownershipFromRecord({ scope: 'personal', userId: 'u' }, { v2: true, kind: 'ssh-key' }).identity, 'human');
+});
+
+test('ownershipPayload(v2) carries identity and round-trips a personal scope', () => {
+  // off v2 — unchanged, no identity, personal not emitted from scope-tabs
+  assert.deepEqual(ownershipPayload({ scope: 'team', teamId: 't' }), { scope: 'team', teamId: 't' });
+  // on v2 — identity carried
+  assert.deepEqual(ownershipPayload({ scope: 'team', teamId: 't', identity: 'service' }, { v2: true }),
+    { scope: 'team', teamId: 't', identity: 'service' });
+  // on v2 — a personal credential marked service round-trips as its own tier
+  assert.deepEqual(ownershipPayload({ scope: 'personal', identity: 'service' }, { v2: true }),
+    { scope: 'personal', identity: 'service' });
 });

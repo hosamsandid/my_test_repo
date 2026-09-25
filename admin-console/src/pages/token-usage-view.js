@@ -299,14 +299,37 @@ export const PAGE_DESCRIPTION =
 // 'summary' | 'work-items', `format` is 'csv' | 'json'. Carries the current
 // time window (`since`) so the export matches what's on screen; the server
 // applies the same team scope as the view endpoints.
-export function buildExportUrl(kind, { since, format, team } = {}) {
+export function buildExportUrl(kind, { since, format, team, groupBy, secondaryGroupBy } = {}) {
   const params = new URLSearchParams();
   if (since) params.set('since', since);
   // `team` narrows the export to a single team (#801); a blank/absent value
   // means "all teams" and is simply omitted so the export stays unfiltered.
   if (team) params.set('team', team);
+  // #2440: carry the on-screen grouping so the summary export follows the view
+  // (an aggregated pivot) instead of the raw dump. Both are omitted when absent,
+  // so an export URL without a grouping is byte-identical to before.
+  if (groupBy) params.set('groupBy', groupBy);
+  if (secondaryGroupBy) params.set('secondaryGroupBy', secondaryGroupBy);
   params.set('format', format === 'json' ? 'json' : 'csv');
   return `/api/usage/${kind}/export?${params.toString()}`;
+}
+
+// #2440: the choices offered by the SECONDARY group-by dropdown for a given
+// primary — every dimension except the primary itself, so a nonsensical
+// self-cross (agent × agent) can never be selected. Empty selection ("None")
+// is handled by the caller, restoring the single-dimension view.
+export function secondaryGroupOptions(primary) {
+  return GROUP_OPTIONS.filter((g) => g.key !== primary);
+}
+
+// #2440: how one group/subgroup key reads for ANY dimension, so the primary and
+// secondary axes label their keys identically. `user` and `providerTier` keys
+// are machine values named via the helpers above (and the `unknown` bucket is
+// named as a gap, never a person/tier); every other dimension shows its raw key.
+export function groupValueCell(dim, key, userNames) {
+  if (dim === 'user') return userGroupCell(key, userNames);
+  if (dim === 'providerTier') return providerTierCell(key);
+  return { label: key || '—', hint: '' };
 }
 
 // ── Per-series visibility for the "Tokens per day" chart (#1707) ──────

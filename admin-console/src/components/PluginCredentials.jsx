@@ -85,7 +85,7 @@ function ScopeFields({ pluginId, credentials, scope, onSaved }) {
                 <input
                   type={d.type}
                   autoComplete="off"
-                  value={draft[d.key] || ''}
+                  value={draft[d.key] !== undefined ? draft[d.key] : (d.secret ? '' : d.storedValue)}
                   placeholder={d.placeholder}
                   disabled={busy}
                   onChange={(e) => setDraft((p) => ({ ...p, [d.key]: e.target.value }))}

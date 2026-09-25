@@ -468,6 +468,31 @@ function credentialVisibleToTeam(cred, teamId) {
   return c.teamId === t;
 }
 
+// The LIVE LEND (unified resource access model §7/§8, epic #2361 PR4 #2357).
+//
+// A `personal` credential is consumable by team T while — and ONLY while — its
+// owner is a CURRENT member of T. Binding a human's personal PAT / SSH key /
+// subscription seat to a team LENDS that person's identity for the duration of
+// their membership; the team never owns it, and the lend ends the instant they
+// leave the team (edge case E1 — the binding sweep in PR5 then re-homes the
+// binding). This is the third arm of "consumable by team T" (the other two —
+// a team-service credential of T, and a global service credential — are
+// `credentialVisibleToTeam` and `isGlobalCredential`/`isGlobalProvider`
+// respectively, composed alongside this at the call sites).
+//
+// Pure: `isMemberOfTeam(userId, teamId)` is the injected membership gate (the
+// same shape credential-resolution.js's `hasMembership` takes), so this module
+// stays IO-free. Composed at the consume call sites (api.js `providerUsableByTeam`
+// and the SSH/GitHub binding pickers) ONLY behind AEE_RESOURCE_ACCESS_V2 — like
+// every other reach-widening in this redesign it stays dark until an operator
+// opts in. A non-personal credential, an ownerless one, or a missing/absent
+// membership gate all read as "not lent" (fail closed).
+function personalLendToTeam(cred, teamId, isMemberOfTeam) {
+  const c = normalizeCredential(cred);
+  if (!c || c.scope !== TIER_PERSONAL || !c.userId || !teamId) return false;
+  return typeof isMemberOfTeam === 'function' && !!isMemberOfTeam(c.userId, teamId);
+}
+
 // ── Config-write authorization for agents / environments (#989) ─────────────
 //
 // The #302/#584 model gives list/read endpoints a *visibility* filter
@@ -639,6 +664,10 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [], 
   const chatFontSize = (self && Number.isFinite(self.chatFontSize))
     ? self.chatFontSize
     : CHAT_FONT_SIZE_DEFAULT;
+  // Per-user opt-in for the "an agent you messaged is back" browser notification
+  // (#2397). Off by default; anyone without a record (env single-admin) gets the
+  // off default too.
+  const chatNotifyOnBack = !!(self && self.chatNotifyOnBack === true);
   return {
     admin: scope.all,                    // full visibility: env admin OR System Admin
     envAdmin,                            // env single-admin credential
@@ -650,6 +679,7 @@ function describeAuthz({ username, adminUsername, users = [], memberships = [], 
     userId: scope.userId,
     githubHandle,
     chatFontSize,
+    chatNotifyOnBack,
     teams,
   };
 }
@@ -687,5 +717,6 @@ module.exports = {
   canCreateCredential,
   canReassignCredential,
   credentialVisibleToTeam,
+  personalLendToTeam,
   canViewUsageStatistics,
 };

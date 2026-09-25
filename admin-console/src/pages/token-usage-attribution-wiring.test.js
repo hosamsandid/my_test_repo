@@ -28,7 +28,16 @@ const CHECKS = {
   'group-key-rendered-through-the-pure-helpers'(src) {
     return /userGroupCell\(v, userNames\)/.test(src)
       && /providerTierCell\(v\)/.test(src)
-      && /\{ key: 'key', label: groupLabel, render: renderGroupKey \}/.test(src);
+      && /render: renderGroupKey\b/.test(src);
+  },
+
+  // #2442: the group-key column filters on its *displayed* value, not the raw
+  // account id — the User/Provider-tier text filter searches what is on screen,
+  // via the same pure helpers the cell renders through. Without this, typing a
+  // visible name matches the hidden raw id and every row silently disappears.
+  'group-key-filtered-on-the-displayed-value'(src) {
+    return /filterValue: groupKeyFilterText/.test(src)
+      && /const groupKeyFilterText = \(v\) =>/.test(src);
   },
 
   // The OPEN directory, never `/api/admin/users`: that route returns the whole
@@ -40,10 +49,12 @@ const CHECKS = {
     return src.includes('/api/users/directory') && !src.includes('/api/admin/users');
   },
 
-  // Fetched only for `groupBy === 'user'`. `useApi(null)` is the supported skip
-  // (see hooks/useApi.js), so the other groupings issue no request at all.
+  // Fetched only when a `user` axis is on screen — the primary grouping OR the
+  // #2440 secondary one. `useApi(null)` is the supported skip (see
+  // hooks/useApi.js), so every other grouping issues no request at all.
   'directory-fetched-only-for-the-user-grouping'(src) {
-    return /useApi\(groupBy === 'user' \? '\/api\/users\/directory' : null\)/.test(src);
+    return /const needsDirectory = groupBy === 'user' \|\| secondaryGroupBy === 'user';/.test(src)
+      && /useApi\(needsDirectory \? '\/api\/users\/directory' : null\)/.test(src);
   },
 };
 
@@ -64,11 +75,16 @@ const MUTATIONS = [
   // Back to printing the raw key: a column of account UUIDs, and the literal
   // string `unknown` where a person's name belongs.
   ['group-key-rendered-through-the-pure-helpers',
-    "{ key: 'key', label: groupLabel, render: renderGroupKey },",
-    "{ key: 'key', label: groupLabel, render: (v) => v || '—' },"],
-  // A request on every visit, for five groupings that never read it.
+    "render: renderGroupKey, filterValue: groupKeyFilterText },",
+    "render: (v) => v || '—', filterValue: groupKeyFilterText },"],
+  // #2442 undone: the filter falls back to the raw id, so typing a visible name
+  // matches nothing and the whole table empties.
+  ['group-key-filtered-on-the-displayed-value',
+    ", filterValue: groupKeyFilterText },",
+    " },"],
+  // A request on every visit, for the groupings that never read it.
   ['directory-fetched-only-for-the-user-grouping',
-    "useApi(groupBy === 'user' ? '/api/users/directory' : null)",
+    "useApi(needsDirectory ? '/api/users/directory' : null)",
     "useApi('/api/users/directory')"],
   // The wrong endpoint: full user records, narrowed to shared teams.
   ['directory-is-the-open-projection',

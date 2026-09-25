@@ -57,6 +57,30 @@ test('credentialMeta: per-key set/preview, completeness, no raw values', () => {
   assert.equal(JSON.stringify(meta).includes('ATATT-longtokenvalue'), false); // never leaks
 });
 
+test('credentialMeta: a secret:false field discloses its real stored value; secret keys never do (#2449)', () => {
+  const creds = [
+    { key: 'site-url', required: true, secret: false },
+    { key: 'writable-custom-fields', required: false, secret: false },
+    { key: 'api-token', required: true }, // no flag → secret by default
+  ];
+  const meta = credentialMeta(
+    { values: { 'site-url': 'acme', 'writable-custom-fields': 'Team, Sprint', 'api-token': 'ATATT-longtokenvalue' }, setBy: 'a', setAt: 'T' },
+    creds,
+  );
+  // non-secret fields carry secret:false and the real value, editable in the UI
+  assert.equal(meta.keys['site-url'].secret, false);
+  assert.equal(meta.keys['site-url'].value, 'acme');
+  assert.equal(meta.keys['writable-custom-fields'].value, 'Team, Sprint');
+  // an unset non-secret field returns '' (so the input renders empty, not undefined)
+  const empty = credentialMeta({ values: {} }, creds);
+  assert.equal(empty.keys['site-url'].value, '');
+  // the secret field keeps the fingerprint-only discipline: no `value`, only preview
+  assert.equal(meta.keys['api-token'].secret, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(meta.keys['api-token'], 'value'), false);
+  assert.equal(meta.keys['api-token'].preview, 'AT…alue');
+  assert.equal(JSON.stringify(meta).includes('ATATT-longtokenvalue'), false); // secret never leaks
+});
+
 // ── store round-trip ────────────────────────────────────────────────────────
 
 test('write → meta: partial writes merge and are stored even when incomplete; file is 0600', () => {

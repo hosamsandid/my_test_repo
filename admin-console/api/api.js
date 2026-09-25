@@ -148,6 +148,7 @@ const { resolveAgentStateDir } = require('./agent-state-dir');
 const skillDrift = require('./skill-drift');
 const skillLineage = require('./skill-lineage');
 const skillTransfer = require('./skill-transfer');
+const skillInjectionScan = require('./skill-injection-scan');
 const skillDeletion = require('./skill-deletion');
 const skillMerge = require('./skill-merge');
 const skillImport = require('./skill-import');
@@ -12098,6 +12099,38 @@ async function activateTransferredTeamSkill(humanTeamId, name) {
   return results;
 }
 
+// Advisory two-stage prompt-injection scan run at the skill-transfer trust
+// boundary (#2468). Stage 1 is the deterministic pattern scan (always runs).
+// Stage 2 is an optional semantic read by the caller's assist LLM — it runs only
+// when a provider resolves, and ANY failure/timeout degrades silently to the
+// pattern result, exactly like "no provider configured" (AC2 + edge cases). This
+// is ADVISORY: it NEVER blocks or delays the transfer beyond a bounded timeout,
+// mirroring predicted-paths.js's "an empty/failed scan imposes no restriction".
+const SKILL_SCAN_LLM_TIMEOUT_MS = 8000;
+async function scanSkillForTransfer(req, content, name) {
+  const patternFindings = skillInjectionScan.scanSkillContent(content);
+  let llmFindings = null;
+  try {
+    const target = resolveAssistTarget(req, { requireSelection: false });
+    // Only a fully resolved, usable provider runs stage 2. A selection error, a
+    // misconfigured provider, or the bare .env-less bootstrap all leave the
+    // pattern result standing alone — never an error, never a required setup.
+    if (target && !target.selectionError && !target.error && target.baseUrl) {
+      const url = buildMessagesUrl(target.baseUrl);
+      const headers = {
+        'anthropic-version': '2023-06-01',
+        ...(target.token ? { Authorization: `Bearer ${target.token}`, 'x-api-key': target.token } : {}),
+      };
+      const payload = { model: target.model, ...skillInjectionScan.buildInjectionScanPrompt({ name, content }) };
+      const result = await httpPostJson(url, headers, payload, SKILL_SCAN_LLM_TIMEOUT_MS);
+      if (!result.error && result.status >= 200 && result.status < 300) {
+        llmFindings = skillInjectionScan.parseInjectionScanResponse(extractMessageText(result.body));
+      }
+    }
+  } catch { /* best-effort: the pattern scan stands alone */ }
+  return skillInjectionScan.mergeFindings(patternFindings, llmFindings);
+}
+
 app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
   // 1. Validate + plan (pure). Regexes are the api.js originals so a valid plan
   //    is always writable by the dir resolvers below.
@@ -12142,6 +12175,42 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
   if (src.error) return res.status(400).json({ error: `from: ${src.error}` });
   if (!fs.existsSync(path.join(src.dir, 'SKILL.md'))) {
     return res.status(404).json({ error: `skill '${plan.name}' not found at the source` });
+  }
+  // Read the ACTUAL source content post-resolution (AC edge case: a same-session
+  // edit-then-promote must be scanned as-edited, never a stale cached copy). The
+  // 512 KB cap matches the workspace browser's file cap; anything larger is
+  // scanned truncated by the pure module's own guard.
+  let sourceContent = '';
+  try { sourceContent = fs.readFileSync(path.join(src.dir, 'SKILL.md'), 'utf8'); } catch { /* empty */ }
+
+  // 3b. Advisory preview (#2468). A `preview: true` request is a DRY RUN: it runs
+  //     the two-stage injection scan and returns the target content (+ the
+  //     destination's current content for an update diff) and `warnings`, writing
+  //     NOTHING. The console shows this before it commits the transfer, and gates
+  //     the commit on an extra explicit confirmation when warnings are present.
+  //     The commit request (below) re-scans and returns the same `warnings` shape,
+  //     so the audit log always reflects a real scan of what was actually written.
+  if (req.body && req.body.preview === true) {
+    const warnings = await scanSkillForTransfer(req, sourceContent, plan.name);
+    const willOverwrite = plan.onCollision === 'overwrite' && transferSkillExistsAt(plan.to, plan.name);
+    let existingContent = null;
+    if (transferSkillExistsAt(plan.to, plan.name)) {
+      const destPreview = resolveTransferSkillDir(plan.to, plan.name);
+      if (!destPreview.error) {
+        try { existingContent = fs.readFileSync(path.join(destPreview.dir, 'SKILL.md'), 'utf8'); } catch { /* none */ }
+      }
+    }
+    return res.json({
+      preview: true,
+      name: plan.name,
+      from: plan.from,
+      to: plan.to,
+      mode: plan.mode,
+      warnings,
+      content: sourceContent.length > 512 * 1024 ? sourceContent.slice(0, 512 * 1024) : sourceContent,
+      existingContent: existingContent != null && existingContent.length > 512 * 1024 ? existingContent.slice(0, 512 * 1024) : existingContent,
+      willOverwrite,
+    });
   }
 
   // 4. Resolve destination name honouring the collision mode.
@@ -12234,6 +12303,13 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
     try { fs.rmSync(src.dir, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 
+  // 9b. Advisory injection scan of what was actually transferred (#2468). Runs
+  //     over the resolved source content so a same-session edit is scanned as-is.
+  //     Best-effort and never blocks: it has already been written, and the scan
+  //     is purely to surface `warnings` + record the outcome for a later audit.
+  const warnings = await scanSkillForTransfer(req, sourceContent, destName);
+  const scanSummary = skillInjectionScan.summarizeFindings(warnings);
+
   // 10. Best-effort activation of a team target (default on) + a live-feed event.
   let activation = null;
   if (plan.activate && plan.to.tier === 'team') {
@@ -12253,6 +12329,10 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
       mode: plan.mode,
       renamed: destName !== plan.name ? plan.name : undefined,
       by: skillActor(req),
+      // #2468: finding COUNT + CATEGORY only — never the flagged text — so an
+      // audit can see which transfers carried warnings without persisting content.
+      scanWarningCount: scanSummary.count,
+      scanWarningCategories: scanSummary.categories.length ? scanSummary.categories : undefined,
     }) + '\n');
   } catch { /* best effort */ }
 
@@ -12286,6 +12366,7 @@ app.post('/api/skills/transfer', heavyLimiter, async (req, res) => {
     destArchived: destArchived ? destArchived.id : undefined,
     activate: plan.activate,
     activation: activation || undefined,
+    warnings, // #2468: advisory injection-scan findings ([] when clean).
   });
 });
 

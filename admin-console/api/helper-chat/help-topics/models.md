@@ -183,8 +183,13 @@ but expose no model-listing route at all, which used to read as a broken provide
 Both buttons now fall back to a `POST` of `/v1/messages/count_tokens` with a
 placeholder model name that is never actually served: a `400` (or `2xx`) means the
 endpoint is reachable and your credential works, just with no catalog to offer; a
-`401`/`403` still means a real auth failure; a `404` on that route too means the
-Base URL itself is wrong. On a successful fallback, **Test connection** reports OK
+`401`/`403` still means a real auth failure. A `404` is the subtle case, because
+the endpoint returns it both when the route is genuinely absent *and* when it
+reaches the route but rejects the never-served placeholder model: a `404` that
+names the model as unknown (an Anthropic `not_found_error` body) counts as
+reachable and authenticated — the credential was accepted *before* the model was
+checked — while an opaque `404` with no such body still means the Base URL itself
+is wrong. On a successful fallback, **Test connection** reports OK
 and **Discover models** tells you to enter the model name(s) manually instead of
 showing an empty list or a raw HTTP error. An API-key provider whose `/v1/models`
 already works is completely unaffected — for it the fallback only fires on a

@@ -39,6 +39,7 @@ const {
 const { WatchStore } = require('./watch-store');
 const { InboxStore } = require('./inbox-store');
 const { ActivityStore } = require('./activity-store');
+const { OwnWritesStore } = require('./own-writes-store');
 const { JiraPoller } = require('./poller');
 const { deriveWatchHealth, summariseWatchHealth } = require('./watch-health');
 const { EVENT_KINDS, EVENT_ID_RE, describeEvent } = require('./event-extract');
@@ -67,6 +68,15 @@ const inboxStore = new InboxStore({ stateDir: STATE_DIR, ttlSeconds: cfg.quota.t
 // Its own 14-day retention + row cap — deliberately NOT the manifest quota,
 // which counts inbox objects (see activity-store.js).
 const activityStore = new ActivityStore({ stateDir: STATE_DIR });
+// What this broker itself wrote to Jira, so the poller can stamp `origin` on
+// the events those writes come back as (own-writes-store.js).
+const ownWritesStore = new OwnWritesStore({ stateDir: STATE_DIR });
+
+// Recording an own write must never fail the write the agent asked for — the
+// cost of a lost record is one `origin: human` on the echo, not an error.
+function recordOwnWrite(fn) {
+  try { fn(); } catch (err) { process.stderr.write(`[jira-broker] own-writes record failed: ${err.message}\n`); }
+}
 const audit = auditWriter(AUDIT_DIR, { retentionMs: 30 * 24 * 3600 * 1000 });
 
 // Per-watch health from the poll cursors, keyed by the watch's projectKey. When
@@ -215,6 +225,7 @@ const poller = new JiraPoller({
   watchStore,
   inboxStore,
   activityStore,
+  ownWritesStore,
   resolveCredential,
   deliver,
   intervalMs: Number(process.env.JIRA_POLL_INTERVAL_MS) || undefined,
@@ -535,6 +546,7 @@ async function handleCli(req, res, cliPath) {
         allowList: cred.writableCustomFields || [],
         attribution: `Created by an agent on team "${scopeId}" via Agent Studio.`,
         issueTypes: body.issueTypes && typeof body.issueTypes === 'object' ? body.issueTypes : undefined,
+        onCreated: (key) => recordOwnWrite(() => ownWritesStore.recordIssue(scopeId, key)),
       });
       writeAudit(scopeId, scopeId, 'create', 'ok', `${project}:${result.epic.key} +${result.stories.filter((s) => s.ok).length}/${result.stories.length} stories`);
       return sendJson(res, 200, result);
@@ -839,7 +851,10 @@ const handleHealth = healthEndpoint(async () => ({
 }));
 const handleTeardown = teardownScopeEndpoint((scopeId) => {
   scopeCredentials.delete(String(scopeId));
-  return { reaped: watchStore.teardown(scopeId) + inboxStore.teardown(scopeId) + activityStore.teardown(scopeId) };
+  return {
+    reaped: watchStore.teardown(scopeId) + inboxStore.teardown(scopeId) + activityStore.teardown(scopeId)
+      + ownWritesStore.teardown(scopeId),
+  };
 }, { secret: SIGNING_SECRET });
 
 // PUT /internal/scope-credentials — the orchestrator's per-scope credential push
@@ -922,4 +937,4 @@ if (require.main === module) {
   poller.start();
 }
 
-module.exports = { handleRequest, httpServer, watchStore, inboxStore, activityStore, poller, resolveCredential, deliver, scopeCredentials, PLUGIN_ID, SIGNING_SECRET, DIGEST_MAX_EVENTS };
+module.exports = { handleRequest, httpServer, watchStore, inboxStore, activityStore, ownWritesStore, poller, resolveCredential, deliver, scopeCredentials, PLUGIN_ID, SIGNING_SECRET, DIGEST_MAX_EVENTS };

@@ -617,6 +617,8 @@ test('cli writes: /create-epic creates an epic + child stories, allow-list-gatin
     assert.equal(ok.body.created, 2);
     assert.equal(ok.body.failed, 0);
     assert.equal(ok.body.stories[0].key, 'KAN-2');
+    // every created key is in the own-writes registry (→ origin: agent on the echo)
+    assert.deepEqual(Object.keys(broker.ownWritesStore.snapshot('team-1').issues).sort(), ['KAN-1', 'KAN-2']);
     // the story create linked to the epic (native parent) and shaped Team
     const story = created.find((f) => f.issuetype.name === 'Story');
     assert.deepEqual(story.parent, { key: 'KAN-1' });

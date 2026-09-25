@@ -32,6 +32,19 @@
         { "key": "author", "description": "who moved it (display name)" },
         { "key": "issueKey", "description": "one specific issue", "example": "KAN-10" }
       ]
+    },
+    {
+      "name": "issue_created",
+      "description": "A new issue was created in a watched project",
+      "payload": [
+        { "key": "origin", "description": "human, or agent when an agent created it with aee-jira create-epic — filter origin = human so an agent does not wake on its own tickets", "example": "human" },
+        { "key": "issueType", "description": "Story, Bug, Task, …", "example": "Bug" },
+        { "key": "projectKey", "description": "the Jira project", "example": "KAN" },
+        { "key": "status", "description": "the status it was created in", "example": "To Do" },
+        { "key": "priority", "description": "its priority", "example": "High" },
+        { "key": "reporter", "description": "who created it (display name)" },
+        { "key": "issueKey", "description": "one specific issue", "example": "KAN-12" }
+      ]
     }
   ],
   "platforms": ["podman", "kubernetes"],

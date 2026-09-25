@@ -11,6 +11,7 @@ const { WatchStore } = require('./watch-store');
 const { InboxStore } = require('./inbox-store');
 const { ActivityStore } = require('./activity-store');
 const { deriveWatchHealth } = require('./watch-health');
+const { OwnWritesStore } = require('./own-writes-store');
 
 // A fake Jira: one project's issues keyed by call, driven per test.
 function fakeFetch(script) {
@@ -33,11 +34,13 @@ function harness(opts = {}) {
   const watchStore = new WatchStore({ stateDir: dir });
   const inboxStore = new InboxStore({ stateDir: dir, ...(opts.inbox || {}) });
   const activityStore = new ActivityStore({ stateDir: dir, now: opts.now });
+  const ownWritesStore = new OwnWritesStore({ stateDir: dir, now: opts.now });
   const delivered = [];
   const poller = new JiraPoller({
     watchStore,
     inboxStore,
     activityStore,
+    ownWritesStore,
     resolveCredential: opts.resolveCredential || (() => ({ siteUrl: 'acme', email: 'bot@acme.com', apiToken: 'tok' })),
     deliver: async (payload) => { delivered.push(payload); },
     env: { JIRA_API_BASE: 'http://fake-jira:8080' },
@@ -45,7 +48,7 @@ function harness(opts = {}) {
     now: opts.now || (() => Date.parse('2026-01-01T12:00:00Z')),
     ...opts.poller,
   });
-  return { dir, watchStore, inboxStore, activityStore, poller, delivered };
+  return { dir, watchStore, inboxStore, activityStore, ownWritesStore, poller, delivered };
 }
 
 const issue = (key, histories) => ({ key, fields: { summary: `${key} summary` }, changelog: { histories } });
@@ -445,4 +448,85 @@ test('every delivered status change carries event: status_changed; a watch whose
   const filtered = h.activityStore.list('team-1').filter((r) => r.outcome === 'filtered');
   assert.equal(filtered.length, 1);
   assert.match(filtered[0].detail, /In Progress is not a watched status/);
+});
+
+// ── issue_created ───────────────────────────────────────────────────────────
+
+const createdIssue = (key, created, histories = []) => ({
+  key, fields: { summary: `${key} summary`, created, status: { name: 'To Do' }, reporter: { displayName: 'Jane' }, priority: { name: 'High' } },
+  changelog: { histories },
+});
+
+test('issue_created: not forwarded unless the watch opts in (recorded as filtered)', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG' }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [createdIssue('ENG-9', '2026-01-01T11:58:00.000+0000', [statusHistory('1', 'A', 'B', '2026-01-01T11:58:00Z')])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => d.events[0].event), ['status_changed']);
+  const f = h.activityStore.list('team-1').find((r) => r.outcome === 'filtered');
+  assert.equal(f.event.event, 'issue_created');
+  assert.match(f.detail, /issue_created is not watched/);
+});
+
+test('issue_created + status change in one poll → two single-kind wakes', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['status_changed', 'issue_created'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [createdIssue('ENG-9', '2026-01-01T11:58:00.000+0000', [statusHistory('1', 'To Do', 'In Progress', '2026-01-01T11:59:00Z')])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 2);
+  assert.deepEqual(h.delivered.map((d) => d.events.map((e) => e.event)), [['issue_created'], ['status_changed']]);
+  const created = h.delivered[0].events[0];
+  assert.equal(created.id, 'ENG-9:created');
+  assert.equal(created.reporter, 'Jane');
+  assert.equal(created.priority, 'High');
+  assert.equal(created.status, 'To Do');
+  assert.equal(created.origin, 'human');
+  assert.deepEqual(h.inboxStore.list('team-1').map((e) => e.event.id).sort(), ['ENG-9:1', 'ENG-9:created']);
+});
+
+test('issue_created fires once: the next poll sees the same issue again and stays quiet', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['issue_created'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const script = () => ({ body: { isLast: true, issues: [createdIssue('ENG-9', '2026-01-01T11:58:00.000+0000')] } });
+  let restore = fakeFetch(script);
+  try { await h.poller._tick(); } finally { restore(); }
+  restore = fakeFetch(script);
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 1);
+});
+
+test('issue_created on the baseline poll is recorded, not fired', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['issue_created'] }] });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [createdIssue('ENG-9', '2026-01-01T11:58:00.000+0000')] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 0);
+  assert.deepEqual(h.watchStore.getCursor('team-1', 'acme::ENG').seen, ['ENG-9:created']);
+});
+
+test('issue_created: an issue created before the previous poll (first seen late) is stale, not fired', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['issue_created'] }] });
+  // inside the 10-min JQL window, but before lastPolledAt minus grace
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:59:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [createdIssue('ENG-9', '2026-01-01T11:51:00.000+0000')] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 0);
+  assert.equal(h.activityStore.list('team-1')[0].outcome, 'stale');
+});
+
+test('issue_created: an issue the broker created itself carries origin: agent', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['issue_created'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  h.ownWritesStore.recordIssue('team-1', 'ENG-9');
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [
+    createdIssue('ENG-9', '2026-01-01T11:58:00.000+0000'),
+    createdIssue('ENG-10', '2026-01-01T11:58:30.000+0000'),
+  ] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.deepEqual(h.delivered.map((d) => [d.events[0].issueKey, d.events[0].origin]), [['ENG-9', 'agent'], ['ENG-10', 'human']]);
 });

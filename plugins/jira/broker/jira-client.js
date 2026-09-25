@@ -72,7 +72,8 @@ function buildProjectJql(projectKey, windowMinutes) {
 function buildJqlSearchBody(jql, nextPageToken) {
   const body = {
     jql,
-    fields: ['summary', 'status', 'issuetype'],
+    // `created`/`reporter`/`priority` feed the issue_created extractor.
+    fields: ['summary', 'status', 'issuetype', 'created', 'reporter', 'priority'],
     expand: 'changelog',
     maxResults: PAGE_SIZE,
   };
@@ -100,6 +101,9 @@ function shapeIssue(raw) {
     summary: fields.summary == null ? '' : String(fields.summary),
     status,
     issueType: issueTypeOf(fields),
+    created: fields.created ? String(fields.created) : null,
+    reporter: fields.reporter && fields.reporter.displayName ? String(fields.reporter.displayName) : null,
+    priority: fields.priority && fields.priority.name ? String(fields.priority.name) : null,
     changelog: raw.changelog || null,
   };
 }
@@ -1285,7 +1289,10 @@ function collectCustomFieldNames(epic, stories) {
   return out;
 }
 
-async function createEpicWithStories(cred, { projectKey, epic, stories, allowList, attribution, issueTypes, env } = {}) {
+// `onCreated(key)` fires the moment each issue exists — before the next create
+// — so the broker's own-writes registry knows the key before any poll can see
+// it (a large epic spans several poll ticks).
+async function createEpicWithStories(cred, { projectKey, epic, stories, allowList, attribution, issueTypes, env, onCreated } = {}) {
   const project = String(projectKey || '').trim();
   if (!project) { const e = new Error('a project key is required'); e.status = 400; throw e; }
   if (!epic || typeof epic !== 'object') { const e = new Error('an epic is required'); e.status = 400; throw e; }
@@ -1359,6 +1366,7 @@ async function createEpicWithStories(cred, { projectKey, epic, stories, allowLis
   const epicFields = buildCreateFields({ projectKey: project, issueTypeName: epicTypeName, spec: epic, fieldMeta, attribution });
   const epicCreated = await createIssue(base, auth, epicFields);
   const epicKey = epicCreated.key;
+  if (typeof onCreated === 'function') onCreated(epicKey);
   const epicOut = { key: epicKey, url: browseUrl(epicKey), summary: String(epic.summary).trim() };
   await applyStatus(epicKey, epic.status, epicOut);
 
@@ -1372,6 +1380,7 @@ async function createEpicWithStories(cred, { projectKey, epic, stories, allowLis
       if (catalog.epicLinkId) storyFields[catalog.epicLinkId] = epicKey;
       else storyFields.parent = { key: epicKey };
       const created = await createIssue(base, auth, storyFields);
+      if (typeof onCreated === 'function') onCreated(created.key);
       const out = { summary: String(s.summary).trim(), key: created.key, url: browseUrl(created.key), ok: true };
       await applyStatus(created.key, s.status, out);
       storyResults.push(out);

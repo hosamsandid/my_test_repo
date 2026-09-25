@@ -135,14 +135,17 @@
   // ── event kinds ───────────────────────────────────────────────────────────
   // The "what happened" cell per event kind (the UI twin of event-extract.js
   // `describeEvent`). A row with no `event` predates kinds: a status change.
-  var KIND_LABEL = { status_changed: 'Status changes' };
+  var KIND_LABEL = { status_changed: 'Status changes', issue_created: 'New issues' };
+  // An event the broker's own write caused (`origin: agent`) is tagged.
+  function originTag(ev) { return ev.origin === 'agent' ? ' <span class="hint">(by agent)</span>' : ''; }
   function kindOf(ev) { return (ev && ev.event) || 'status_changed'; }
   function eventHtml(ev) {
     var kind = kindOf(ev);
     if (kind === 'status_changed') {
       return esc(ev.fromStatus || 'new') + ' <span class="arr">→</span> ' + esc(ev.toStatus || '?');
     }
-    return esc(KIND_LABEL[kind] || kind);
+    if (kind === 'issue_created') return 'created' + (ev.status ? ' in ' + esc(ev.status) : '') + originTag(ev);
+    return esc(KIND_LABEL[kind] || kind) + originTag(ev);
   }
 
   // ── inbox ─────────────────────────────────────────────────────────────────

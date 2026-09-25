@@ -31,7 +31,7 @@ and the agent's **trigger** (this page, Triggers tab).
 
 | Field | What to put there for Jira |
 |---|---|
-| **Which event** | `status_changed` — the only event the Jira plugin sends today, so *Any event* is equivalent. A status name is **not** an event. |
+| **Which event** | `status_changed` or `issue_created` (a new ticket) — whichever the watch forwards (**Watch config** ticks the kinds per project; status changes only by default). Set it on every trigger once a watch forwards more than one kind — *Any event* then wakes on all of them. A status name is **not** an event. |
 | **Only when…** | a condition on the **fields of that event** (the form's sub-heading reads *fields of `status_changed`*) that picks *which* status changes wake this agent — almost always `toStatus = <the status the issue moved into>`, e.g. `toStatus = Ready for Dev`. |
 
 The **Only when…** condition is what routes a flow through several agents: give
@@ -57,6 +57,19 @@ All plain strings, usable in **Only when…**:
 
 Several conditions combine with AND: `toStatus = Ready for Dev` plus
 `issueType = Bug` wakes the agent only for bugs entering that status.
+
+### The fields an `issue_created` event carries
+
+| Field | Meaning | Example |
+|---|---|---|
+| `origin` | `human`, or `agent` when an agent created it (`aee-jira create-epic`) — add `origin = human` so an agent does not wake on its own tickets | `human` |
+| `issueType` | Story, Bug, Task, … | `Bug` |
+| `projectKey` / `issueKey` | the project / the new issue | `KAN` / `KAN-12` |
+| `status` / `priority` | what it was created with | `To Do` / `High` |
+| `reporter` | who created it (display name) | `Jane Doe` |
+
+A *"new ticket → Business Analyst triages it"* trigger: *Which event*
+`issue_created`, *Only when…* `origin = human`.
 
 When more than three transitions land in a single poll — on one issue, or
 across one project (a bulk move such as sprint planning) — they arrive as one

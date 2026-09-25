@@ -95,14 +95,19 @@ restart.
 
 The Jira plugin's **Watch config** page (`/admin`, team-admin — reached from the
 "Watch config" link on the plugin's main page): a list of
-`{ projectKey, statusFilters? }` rows.
+`{ projectKey, statusFilters?, events }` rows.
 
 - `projectKey` — e.g. `KAN`.
+- `events` — which **kinds** of event the row forwards (checkboxes):
+  *Status changes* (`status_changed`), *New issues* (`issue_created`). Default
+  — and the migration for a row saved before kinds existed — is status changes
+  only, so an upgrade never makes a watch noisier.
 - `statusFilters` — a **set** of target statuses (chips). An empty set fires on
   **any** status change; add one or more (exact match, case-sensitive — copy
   each from Jira) to fire only on transitions **into any of them**, e.g.
   `Ready for Dev` + `In Review`. A config written before multi-status support
   (a singular `statusFilter` string) is migrated to a one-element set on read.
+  The set gates status changes only — never another kind.
 
 ### 5. Give the agents a `plugin-event` trigger
 
@@ -112,7 +117,7 @@ per-agent trigger: Agent Chat → **Triggers** → add → type **Plugin event**
 | Field | |
 |---|---|
 | Plugin | `jira` (picked from the installed plugins) |
-| Which event | *Any event* or `status_changed` (the only event the plugin sends). Offered as a select from the manifest's `events[]`. A status name is **not** an event — the form flags one as *not an event this plugin declares*. |
+| Which event | `status_changed`, `issue_created`, or *Any event*. Offered as a select from the manifest's `events[]`. Once a watch forwards more than one kind, set it on **every** trigger — *Any event* with no *Only when…* wakes on every kind. A status name is **not** an event — the form flags one as *not an event this plugin declares*. |
 | Only when… | **which status wakes this agent** — condition rows `field = value`, e.g. `toStatus = Ready for Dev`; the field picker lists the payload keys below with an example. No conditions = every watched transition wakes this agent. Stored as `payloadFilter: { toStatus: "Ready for Dev" }`. |
 | Wake instruction | what the agent should do — e.g. *"Take the event id(s) from the event payload, run `aee-jira inbox --consume <id>…`, read the issue with `aee-jira show`, refine the description and write it back with `aee-jira update`, then move it on with `aee-jira transition`."* |
 
@@ -136,6 +141,19 @@ The fields a `status_changed` payload carries, all plain strings:
 | `created` | ISO timestamp of the transition; rarely useful for routing (an exact-match filter on a timestamp never matches twice) |
 | `summary` | the issue title at the time of the transition; rarely useful for routing (exact-match on a title is brittle — it changes) |
 | `issueUrl` | the Jira browse link; not useful for routing |
+
+The fields an `issue_created` payload carries (plus `id` = `<issueKey>:created`,
+`created`, `summary`, `issueUrl` as above; `author` = the reporter):
+
+| Key | |
+|---|---|
+| `origin` | `human`, or `agent` when this team's agents created the issue (`aee-jira create-epic`) — the broker records every issue it creates. Filter `origin = human` on a triage trigger so an agent's own tickets do not wake it |
+| `issueType` / `projectKey` / `issueKey` | as above |
+| `status` / `priority` | what the issue was created with |
+| `reporter` | who created it (display name) — the Team Admin's account for an agent-created issue, which is why `origin` exists |
+
+Every wake is **single-kind**: a poll that sees a new issue and a status change
+sends two wakes, one per kind, so *Which event* always matches cleanly.
 
 A burst digest matches when **any** of its folded events matches, and the woken
 agent receives the digest **projected to its own filter**: only the folded

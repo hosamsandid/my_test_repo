@@ -169,3 +169,58 @@ test('the manifest declares only kinds the broker can produce (events[].name ⊆
   for (const e of manifest.events) assert.ok(KNOWN_EVENTS.includes(e.name), `manifest event ${e.name} is not in KNOWN_EVENTS`);
   for (const k of KNOWN_EVENTS) assert.ok(Array.isArray(EVENT_KINDS[k].rowFields) && EVENT_KINDS[k].label && EVENT_KINDS[k].noun);
 });
+
+// ── extractIssueCreatedEvents ───────────────────────────────────────────────
+
+test('extractIssueCreatedEvents: an issue created inside the window → one issue_created event', () => {
+  const { extractIssueCreatedEvents, EVENT_ID_RE } = require('./event-extract');
+  const events = extractIssueCreatedEvents(
+    { key: 'KAN-12', summary: 'New thing', issueType: 'Story', status: 'To Do', reporter: 'Jane', priority: 'High', created: '2026-01-01T11:58:00.000+0000' },
+    { projectKey: 'KAN', siteBase: 'https://acme.atlassian.net', windowStartIso: '2026-01-01T11:50:00Z' },
+  );
+  assert.deepEqual(events, [{
+    id: 'KAN-12:created',
+    event: 'issue_created',
+    issueKey: 'KAN-12',
+    projectKey: 'KAN',
+    issueType: 'Story',
+    summary: 'New thing',
+    created: '2026-01-01T11:58:00.000+0000',
+    author: 'Jane',
+    reporter: 'Jane',
+    status: 'To Do',
+    priority: 'High',
+    origin: 'human',
+    issueUrl: 'https://acme.atlassian.net/browse/KAN-12',
+  }]);
+  assert.ok(EVENT_ID_RE.test(events[0].id));
+});
+
+test('extractIssueCreatedEvents: an old issue merely touched inside the window is not "created"', () => {
+  const { extractIssueCreatedEvents } = require('./event-extract');
+  assert.deepEqual(extractIssueCreatedEvents(
+    { key: 'KAN-1', created: '2025-06-01T09:00:00.000+0000' },
+    { windowStartIso: '2026-01-01T11:50:00Z' },
+  ), []);
+});
+
+test('extractIssueCreatedEvents: no parseable created stamp → nothing (never guess an issue is new)', () => {
+  const { extractIssueCreatedEvents } = require('./event-extract');
+  assert.deepEqual(extractIssueCreatedEvents({ key: 'KAN-1' }, { windowStartIso: '2026-01-01T11:50:00Z' }), []);
+  assert.deepEqual(extractIssueCreatedEvents({ key: 'KAN-1', created: 'yesterday' }, {}), []);
+  assert.deepEqual(extractIssueCreatedEvents(null, {}), []);
+});
+
+test('extractIssueCreatedEvents: origin is agent when the own-writes registry holds the key', () => {
+  const { extractIssueCreatedEvents } = require('./event-extract');
+  const [ev] = extractIssueCreatedEvents(
+    { key: 'KAN-12', created: '2026-01-01T11:58:00Z' },
+    { ownWrites: { issues: { 'KAN-12': '2026-01-01T11:57:59Z' } } },
+  );
+  assert.equal(ev.origin, 'agent');
+});
+
+test('describeEvent: issue_created reads "<key> created: <summary>"', () => {
+  const { describeEvent } = require('./event-extract');
+  assert.equal(describeEvent({ event: 'issue_created', issueKey: 'KAN-12', summary: 'New thing' }), 'KAN-12 created: New thing');
+});

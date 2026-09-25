@@ -24,6 +24,7 @@
 // activity row keeps (activity-store.js `shapeEventForRow`).
 const EVENT_KINDS = {
   status_changed: { label: 'Status changes', noun: 'status changes', rowFields: ['fromStatus', 'toStatus'] },
+  issue_created: { label: 'New issues', noun: 'new issues', rowFields: ['status', 'reporter', 'priority', 'origin'] },
 };
 const KNOWN_EVENTS = Object.keys(EVENT_KINDS);
 const DEFAULT_WATCH_EVENTS = ['status_changed'];
@@ -41,6 +42,7 @@ function describeEvent(ev) {
   if (e.event === 'status_changed' && (e.fromStatus || e.toStatus)) {
     return `${key}: ${e.fromStatus || 'new'} → ${e.toStatus || '?'}`;
   }
+  if (e.event === 'issue_created') return `${key} created${e.summary ? `: ${e.summary}` : ''}`;
   return key || String(e.event || 'event');
 }
 
@@ -113,6 +115,43 @@ function extractStatusChangeEvents(issue, { projectKey, siteBase } = {}) {
   return events;
 }
 
+// `origin` of an issue the broker may have created itself (`aee-jira
+// create-epic`): `agent` when the own-writes registry holds its key, else
+// `human`. Registry only — the "Created by an agent" marker lives in the
+// description, which the poll does not fetch.
+function resolveIssueOrigin(issueKey, ownWrites) {
+  return ownWrites && ownWrites.issues && ownWrites.issues[issueKey] ? 'agent' : 'human';
+}
+
+// One `issue_created` event for an issue created inside this poll's JQL
+// window. The window selects by `updated`, so an old issue touched today is
+// in it too — `created` must be at or after `windowStartIso`. An issue with
+// no parseable `created` yields nothing: without it a new issue cannot be told
+// from an old one, and guessing would announce every touched issue as new.
+// The seen-id cursor (`<key>:created`) and the horizon gate do the rest.
+function extractIssueCreatedEvents(issue, { projectKey, siteBase, windowStartIso, ownWrites } = {}) {
+  if (!issue || !issue.key) return [];
+  const created = Date.parse(issue.created);
+  if (Number.isNaN(created)) return [];
+  const windowStart = Date.parse(windowStartIso);
+  if (!Number.isNaN(windowStart) && created < windowStart) return [];
+  return [{
+    id: `${issue.key}:created`,
+    event: 'issue_created',
+    issueKey: issue.key,
+    projectKey: projectKey || null,
+    issueType: issueTypeNameOf(issue),
+    summary: issueSummaryOf(issue),
+    created: issue.created,
+    author: issue.reporter || null,
+    reporter: issue.reporter || null,
+    status: issue.status || null,
+    priority: issue.priority || null,
+    origin: resolveIssueOrigin(issue.key, ownWrites),
+    issueUrl: siteBase ? `${siteBase}/browse/${issue.key}` : null,
+  }];
+}
+
 // The exact-match gate on the status an issue transitioned INTO, mirroring the
 // GitHub poller's `labelFilter`. Empty / null / undefined = no filter (fires on
 // any status change).
@@ -159,6 +198,8 @@ module.exports = {
   resolveJiraApiBase,
   isChangelogTruncated,
   extractStatusChangeEvents,
+  extractIssueCreatedEvents,
+  resolveIssueOrigin,
   matchesStatusFilter,
   matchesStatusFilters,
   computeQueryWindowMinutes,

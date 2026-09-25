@@ -51,7 +51,8 @@ const {
 } = require('../../../broker-sdk');
 const {
   EVENT_KINDS, DEFAULT_WATCH_EVENTS, describeEvent,
-  resolveJiraApiBase, isChangelogTruncated, extractStatusChangeEvents, matchesStatusFilters, computeQueryWindowMinutes,
+  resolveJiraApiBase, isChangelogTruncated, extractStatusChangeEvents, extractIssueCreatedEvents,
+  matchesStatusFilters, computeQueryWindowMinutes,
 } = require('./event-extract');
 const { recordPollError, clearPollFailure } = require('./watch-health');
 const jira = require('./jira-client');
@@ -90,13 +91,15 @@ class JiraPoller {
   // deps:
   //   watchStore, inboxStore                         — the two state stores
   //   activityStore                                  — optional retained event log
+  //   ownWritesStore                                 — optional registry of the broker's own
+  //                                                    writes, for `origin` (own-writes-store.js)
   //   resolveCredential(scopeId) -> {siteUrl,email,apiToken} | null
   //   deliver({ scopeId, kind, agentIds, convKey, events, cap }) -> Promise
   //       kind: 'events' | 'digest' | 'throttle-warning'
   //   log(msg)                                        — optional
   //   env                                            — JIRA_API_BASE seam passthrough
   constructor({
-    watchStore, inboxStore, activityStore, resolveCredential, deliver,
+    watchStore, inboxStore, activityStore, ownWritesStore, resolveCredential, deliver,
     intervalMs, baseWindowMinutes, throttleStatePath, log, env, now = () => Date.now(),
   } = {}) {
     if (!watchStore || !inboxStore) throw new Error('JiraPoller requires watchStore and inboxStore');
@@ -105,6 +108,7 @@ class JiraPoller {
     this.watchStore = watchStore;
     this.inboxStore = inboxStore;
     this.activityStore = activityStore || null;
+    this.ownWritesStore = ownWritesStore || null;
     this.resolveCredential = resolveCredential;
     this.deliver = deliver;
     this.intervalMs = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : DEFAULT_INTERVAL_MS;
@@ -159,6 +163,7 @@ class JiraPoller {
     }
     this.inboxStore.reap(scopeId);
     if (this.activityStore) { try { this.activityStore.reap(scopeId); } catch { /* best effort */ } }
+    if (this.ownWritesStore) { try { this.ownWritesStore.reap(scopeId); } catch { /* best effort */ } }
     if (!cfg.watches.length) return out;
 
     const cred = this.resolveCredential(scopeId);
@@ -216,6 +221,8 @@ class JiraPoller {
 
     // Flatten every issue's changelog (backfilling any that the search truncated).
     const events = [];
+    const windowStartIso = new Date(this.now() - windowMinutes * 60_000).toISOString();
+    const ownWrites = this._ownWrites(scopeId);
     for (const issue of issues) {
       let changelog = issue.changelog;
       // Backfill when the search truncated the changelog OR did not inline it at
@@ -232,6 +239,7 @@ class JiraPoller {
         }
       }
       events.push(...extractStatusChangeEvents({ ...issue, changelog }, { projectKey, siteBase }));
+      events.push(...extractIssueCreatedEvents(issue, { projectKey, siteBase, windowStartIso, ownWrites }));
     }
 
     // A poll succeeded — clear the active-failure fields (keeping the error ring
@@ -318,6 +326,16 @@ class JiraPoller {
       res.fired += fired;
     }
     return res;
+  }
+
+  // The scope's own-writes registry for this poll; empty when there is no
+  // store or it cannot be read (every event then reads as `origin: human`).
+  _ownWrites(scopeId) {
+    if (!this.ownWritesStore) return null;
+    try { return this.ownWritesStore.snapshot(scopeId); } catch (err) {
+      this.log(`[jira-poller] own-writes read failed for ${scopeId}: ${err.message}`);
+      return null;
+    }
   }
 
   // Best-effort append to the retained activity log; a store failure never

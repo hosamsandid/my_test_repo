@@ -27,7 +27,7 @@ test('jqlQuote: backslash is escaped BEFORE the quote, so `\\"` cannot close the
 });
 
 test('buildJqlSearchBody: fields + changelog expansion; expand is a STRING on /search/jql; nextPageToken only when given', () => {
-  assert.deepEqual(jc.buildJqlSearchBody('jql'), { jql: 'jql', fields: ['summary', 'status', 'issuetype'], expand: 'changelog', maxResults: 100 });
+  assert.deepEqual(jc.buildJqlSearchBody('jql'), { jql: 'jql', fields: ['summary', 'status', 'issuetype', 'created', 'reporter', 'priority'], expand: 'changelog', maxResults: 100 });
   assert.equal(typeof jc.buildJqlSearchBody('jql').expand, 'string'); // array form is a 400 on this endpoint
   assert.equal(jc.buildJqlSearchBody('jql', 'TOK').nextPageToken, 'TOK');
 });
@@ -36,11 +36,18 @@ test('changelogPath: encodes the issue key and paginates', () => {
   assert.equal(jc.changelogPath('ENG-1', 100), '/rest/api/3/issue/ENG-1/changelog?startAt=100&maxResults=100');
 });
 
-test('shapeIssue: narrows to key/summary/status/issueType/changelog', () => {
+test('shapeIssue: narrows to key/summary/status/issueType/created/reporter/priority/changelog', () => {
   assert.deepEqual(
     jc.shapeIssue({ key: 'ENG-1', fields: { summary: 'S', status: { name: 'In Progress' }, issuetype: { name: 'Bug' } }, changelog: { total: 1, histories: [] } }),
-    { key: 'ENG-1', summary: 'S', status: 'In Progress', issueType: 'Bug', changelog: { total: 1, histories: [] } },
+    { key: 'ENG-1', summary: 'S', status: 'In Progress', issueType: 'Bug', created: null, reporter: null, priority: null, changelog: { total: 1, histories: [] } },
   );
+  const full = jc.shapeIssue({ key: 'ENG-3', fields: {
+    summary: 'S', created: '2026-01-01T11:58:00.000+0000',
+    reporter: { displayName: 'Jane', accountId: 'x', emailAddress: 'j@x' }, priority: { name: 'High', id: '2' },
+  } });
+  assert.equal(full.created, '2026-01-01T11:58:00.000+0000');
+  assert.equal(full.reporter, 'Jane');
+  assert.equal(full.priority, 'High');
   assert.equal(jc.shapeIssue({ key: 'ENG-2', fields: { summary: 'S' } }).issueType, null);
   assert.equal(jc.shapeIssue(null), null);
 });
@@ -1084,7 +1091,9 @@ test('createEpicWithStories: creates the epic then each story linked via native 
     if (isTransitionList(url) && opts.method === 'POST') return { ok: true, status: 204, text: async () => '' }; // apply
     throw new Error(`unexpected ${opts && opts.method} ${url}`);
   }, async (calls) => {
+    const seen = [];
     const r = await jc.createEpicWithStories(CRED, {
+      onCreated: (key) => seen.push({ key, createsSoFar: calls.filter((c) => isCreate(c.url, c.opts)).length }),
       projectKey: 'KAN',
       epic: { summary: 'Q4 revamp', description: 'the ask' },
       stories: [{ summary: 'Design', assignee: 'acc-1', status: 'In Progress', fields: { Team: '42', 'Story point estimate': 5 } }],
@@ -1093,6 +1102,8 @@ test('createEpicWithStories: creates the epic then each story linked via native 
       env: CRED.env,
     });
     assert.equal(r.epic.key, 'KAN-100');
+    // onCreated fires per issue, right after ITS create — before the next one
+    assert.deepEqual(seen, [{ key: 'KAN-100', createsSoFar: 1 }, { key: 'KAN-101', createsSoFar: 2 }]);
     assert.match(r.epic.url, /\/browse\/KAN-100$/);
     assert.equal(r.created, 2);
     assert.equal(r.failed, 0);

@@ -8890,7 +8890,15 @@ async function _execRepo(cmd, args, { cwd, env, timeout = 30_000 }) {
 // over the API).
 async function agentGitPush(id, env, body = {}) {
   const repo = agentGitOps.resolveAgentRepo({
-    repositories: env?.repositories,
+    // #2464: agent-scoped repositories are cloned into the workspace (the clone
+    // path unions both lists) but were absent from the pushable set, so every
+    // `gh-as-agent push --repo <agent-scoped>` was rejected as "not in this
+    // environment". Union them here exactly as the clone/git-panel paths do, so
+    // an agent can deliver to a repo attached as "this agent only".
+    repositories: [
+      ...(Array.isArray(env?.repositories) ? env.repositories : []),
+      ...normalizeAgentRepositories((loadAgentConfig(id) || {}).agentRepositories),
+    ],
     requestedRepo: body.repo,
     agentWorkspace: agentDir(id),
   });
@@ -8970,7 +8978,12 @@ async function _agentGitPushLocked(id, repo, req, gitEnv, body) {
 // GitHub poller can attribute the resulting events (loop protection).
 async function agentCreatePr(id, env, body = {}) {
   const repo = agentGitOps.resolveAgentRepo({
-    repositories: env?.repositories,
+    // #2464: mirror agentGitPush — an agent-scoped repo must be a valid PR
+    // target too, not only pushable, or the agent can push but never open a PR.
+    repositories: [
+      ...(Array.isArray(env?.repositories) ? env.repositories : []),
+      ...normalizeAgentRepositories((loadAgentConfig(id) || {}).agentRepositories),
+    ],
     requestedRepo: body.repo,
     agentWorkspace: agentDir(id),
   });

@@ -430,3 +430,19 @@ test('the project cap counts GATED events across every watch on the project (F7 
   assert.deepEqual(h.delivered.map((d) => d.kind), ['digest']);
   assert.equal(h.delivered[0].events.length, 4);
 });
+
+test('every delivered status change carries event: status_changed; a watch whose events set is explicit still gates by status', async () => {
+  const h = harness();
+  h.watchStore.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: ['status_changed'], statusFilters: ['Done'] }] });
+  h.watchStore.saveCursor('team-1', 'acme::ENG', { seen: [], lastPolledAt: '2026-01-01T11:55:00Z' });
+  const restore = fakeFetch(() => ({ body: { isLast: true, issues: [issue('ENG-1', [
+    statusHistory('501', 'To Do', 'In Progress', '2026-01-01T11:58:00Z'),
+    statusHistory('502', 'In Progress', 'Done', '2026-01-01T11:59:00Z'),
+  ])] } }));
+  try { await h.poller._tick(); } finally { restore(); }
+  assert.equal(h.delivered.length, 1);
+  assert.equal(h.delivered[0].events[0].event, 'status_changed');
+  const filtered = h.activityStore.list('team-1').filter((r) => r.outcome === 'filtered');
+  assert.equal(filtered.length, 1);
+  assert.match(filtered[0].detail, /In Progress is not a watched status/);
+});

@@ -28,7 +28,7 @@
     view: 'board',
     projectNames: {},
     watches: [], watchHealth: null, expanded: {},
-    activity: { rows: [], type: null, scope: 'watched' },
+    activity: { rows: [], type: null, kind: null, scope: 'watched' },
   };
 
   // Follow live theme toggles from the console (same origin).
@@ -132,6 +132,19 @@
     }).catch(function (e) { box.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; });
   }
 
+  // ── event kinds ───────────────────────────────────────────────────────────
+  // The "what happened" cell per event kind (the UI twin of event-extract.js
+  // `describeEvent`). A row with no `event` predates kinds: a status change.
+  var KIND_LABEL = { status_changed: 'Status changes' };
+  function kindOf(ev) { return (ev && ev.event) || 'status_changed'; }
+  function eventHtml(ev) {
+    var kind = kindOf(ev);
+    if (kind === 'status_changed') {
+      return esc(ev.fromStatus || 'new') + ' <span class="arr">→</span> ' + esc(ev.toStatus || '?');
+    }
+    return esc(KIND_LABEL[kind] || kind);
+  }
+
   // ── inbox ─────────────────────────────────────────────────────────────────
   function loadInbox() {
     get('/inbox?' + teamQS()).then(function (r) {
@@ -142,7 +155,7 @@
           var ev = e.event || {};
           var when = ev.created || e.receivedAt || '';
           return '<div class="issue-item"><strong>' + esc(ev.issueKey || ev.id || '?') + '</strong> '
-            + esc(ev.fromStatus || 'new') + ' <span class="arr">→</span> ' + esc(ev.toStatus || '?')
+            + eventHtml(ev)
             + (when ? '<div class="hint">' + esc(fmtTime(when)) + ' · ' + esc(fmtDay(when)) + '</div>' : '')
             + '</div>';
         }).join('')
@@ -250,17 +263,25 @@
   ];
 
   // The "Wakes on <pills> … wakes N agents" second row of a watch-card head.
+  // The status pills describe `status_changed` only; every other opted-in kind
+  // is appended by name.
   function wakesRow(w) {
     var list = w.statusFilters || [];
-    var pills;
-    if (!list.length) {
-      pills = '<span class="wc-any">any status change</span>';
-    } else {
-      pills = list.slice(0, 3).map(function (s, idx) {
-        return statusPill(s, STATUS_DOTS[idx % STATUS_DOTS.length]);
-      }).join('');
-      if (list.length > 3) pills += '<span class="wc-more">+' + (list.length - 3) + ' more</span>';
+    var kinds = (w.events && w.events.length) ? w.events : ['status_changed'];
+    var pills = '';
+    if (kinds.indexOf('status_changed') >= 0) {
+      if (!list.length) {
+        pills = '<span class="wc-any">any status change</span>';
+      } else {
+        pills = list.slice(0, 3).map(function (s, idx) {
+          return statusPill(s, STATUS_DOTS[idx % STATUS_DOTS.length]);
+        }).join('');
+        if (list.length > 3) pills += '<span class="wc-more">+' + (list.length - 3) + ' more</span>';
+      }
     }
+    kinds.forEach(function (k) {
+      if (k !== 'status_changed') pills += '<span class="wc-any">' + esc((KIND_LABEL[k] || k).toLowerCase()) + '</span>';
+    });
     return '<div class="wc-wakes"><span class="wc-wakes-label">Wakes on</span>' + pills
       + '<span class="wc-agents">' + esc(wakeText(w)) + '</span></div>';
   }
@@ -389,7 +410,7 @@
     delivered: { label: 'woke agents', cls: 'oc-ok' },
     digested: { label: 'folded into digest', cls: 'oc-info' },
     throttled: { label: 'throttled', cls: 'oc-warn' },
-    filtered: { label: 'not a watched status', cls: 'oc-muted' },
+    filtered: { label: 'not watched', cls: 'oc-muted' },
     stale: { label: 'old transition, issue re-touched', cls: 'oc-muted' },
     baseline: { label: 'baseline', cls: 'oc-muted' },
   };
@@ -404,7 +425,26 @@
     var rows = state.activity.rows;
     if (state.activity.scope === 'watched') rows = rows.filter(function (r) { return ACTED[r.outcome]; });
     if (state.activity.type) rows = rows.filter(function (r) { return (r.event.issueType || 'Other') === state.activity.type; });
+    if (state.activity.kind) rows = rows.filter(function (r) { return kindOf(r.event) === state.activity.kind; });
     return rows;
+  }
+
+  // Kind chips appear only once the log holds more than one kind — a
+  // status-only team sees the Activity tab exactly as before.
+  function renderKindFilters() {
+    var kinds = {};
+    state.activity.rows.forEach(function (r) { kinds[kindOf(r.event)] = 1; });
+    var keys = Object.keys(kinds).sort();
+    var box = $('kindFilters');
+    if (keys.length < 2) { box.innerHTML = ''; state.activity.kind = null; return; }
+    var chips = ['<button class="chip' + (state.activity.kind == null ? ' is-active' : '') + '" data-kind="">All events</button>'];
+    keys.forEach(function (k) {
+      chips.push('<button class="chip' + (state.activity.kind === k ? ' is-active' : '') + '" data-kind="' + esc(k) + '">' + esc(KIND_LABEL[k] || k) + '</button>');
+    });
+    box.innerHTML = chips.join('');
+    Array.prototype.forEach.call(box.querySelectorAll('[data-kind]'), function (b) {
+      b.onclick = function () { state.activity.kind = b.dataset.kind || null; renderActivity(); };
+    });
   }
 
   function renderTypeFilters() {
@@ -424,6 +464,7 @@
   }
 
   function renderActivity() {
+    renderKindFilters();
     renderTypeFilters();
     var rows = visibleActivityRows();
     var box = $('activity');
@@ -445,7 +486,7 @@
         + typeGlyph(ev.issueType)
         + '<span class="ac-main">' + keyCell
         + '<span class="ac-summary">' + esc(ev.summary || '') + '</span></span>'
-        + '<span class="ac-transition">' + esc(ev.fromStatus || '?') + ' <span class="arr">→</span> ' + esc(ev.toStatus || '?') + '</span>'
+        + '<span class="ac-transition">' + eventHtml(ev) + '</span>'
         + '<span class="ac-time">' + esc(fmtTime(when)) + (ev.author ? ' · ' + esc(ev.author) : '') + '</span>'
         + outcomeChip(r.outcome, r.detail)
         + '</div>';

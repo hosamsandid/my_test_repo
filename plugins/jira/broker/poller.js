@@ -17,15 +17,17 @@
 //      polled per watch, the first row consumed the fresh ids and the second
 //      row never fired).
 //   3. widen the JQL window to cover any gap since the last poll (capped 24h).
-//   4. search, backfill truncated changelogs, flatten to status-change events.
+//   4. search, backfill truncated changelogs, extract typed events (each with
+//      an explicit `event` kind — event-extract.js).
 //   5. dedup against the cursor's seen-id set (first poll only baselines — no
 //      fire), drop anything created before the previous poll's horizon (an
 //      issue re-entering the `updated` window carries its WHOLE changelog —
 //      seen-ids alone cannot tell an old transition from a new one), gate by
-//      the watches' `statusFilters`, fold a BULK transition (more than
-//      PROJECT_BURST_CAP gated events in one poll of one project) into one
-//      lossless digest, else collapse per-issue bursts and apply the
-//      hour-scoped throttle.
+//      the watches' opt-in `events` kinds and (status changes) their
+//      `statusFilters`, then — per kind, so every wake is single-kind — fold
+//      a BULK change (more than PROJECT_BURST_CAP gated events in one poll of
+//      one project) into one lossless digest, else collapse per-issue bursts
+//      and apply the hour-scoped throttle.
 //   6. hand every surviving event to `deliver()` — the transport seam. The
 //      broker passes the `POST /internal/plugin-event` wake (server.js); the
 //      poller does not know or care what the transport is.
@@ -47,7 +49,10 @@ const {
   saveThrottleState,
   checkAndIncThrottle,
 } = require('../../../broker-sdk');
-const { resolveJiraApiBase, isChangelogTruncated, extractStatusChangeEvents, matchesStatusFilters, computeQueryWindowMinutes } = require('./event-extract');
+const {
+  EVENT_KINDS, DEFAULT_WATCH_EVENTS, describeEvent,
+  resolveJiraApiBase, isChangelogTruncated, extractStatusChangeEvents, matchesStatusFilters, computeQueryWindowMinutes,
+} = require('./event-extract');
 const { recordPollError, clearPollFailure } = require('./watch-health');
 const jira = require('./jira-client');
 
@@ -69,6 +74,17 @@ const DEFAULT_BASE_WINDOW_MINUTES = 10;
 // Like every digest it is NOT throttled — the digest is the anti-flood
 // response, and it is bounded to one per poll per project by construction.
 const PROJECT_BURST_CAP = BURST_CAP;
+
+// A watch's opt-in kinds. The store normalises `events` on read; the fallback
+// covers a watch object handed in directly (tests, spike.js).
+function watchWantsKind(watch, kind) {
+  const kinds = Array.isArray(watch.events) && watch.events.length ? watch.events : DEFAULT_WATCH_EVENTS;
+  return kinds.includes(kind);
+}
+
+function kindNoun(kind) {
+  return (EVENT_KINDS[kind] && EVENT_KINDS[kind].noun) || 'events';
+}
 
 class JiraPoller {
   // deps:
@@ -263,24 +279,44 @@ class JiraPoller {
     if (!fresh.length) return res;
     fresh.sort((a, b) => String(a.created || '').localeCompare(String(b.created || '')));
 
-    // Split fresh events by the watches' status sets. An event fires at most
-    // ONCE however many watches on this project match it (the first matching
-    // watch claims it). A transition into a status no watch asked for is still
-    // recorded (outcome `filtered`) so the Activity view can show "the poller
-    // saw it, and did nothing" — the "All activity" toggle in the UI.
+    // Split fresh events by the watches' opt-in kinds (`events`) and, for a
+    // status change, their status sets. An event fires at most ONCE however
+    // many watches on this project match it (the first matching watch claims
+    // it). An event no watch asked for is still recorded (outcome `filtered`)
+    // so the Activity view can show "the poller saw it, and did nothing" — the
+    // "All activity" toggle in the UI.
     const gated = [];
     const filteredRows = [];
     for (const ev of fresh) {
-      const watch = watches.find((w) => matchesStatusFilters(ev.toStatus, w.statusFilters));
+      const kindWatches = watches.filter((w) => watchWantsKind(w, ev.event));
+      if (!kindWatches.length) {
+        filteredRows.push({ event: ev, outcome: 'filtered', detail: `${ev.event} is not watched` });
+        continue;
+      }
+      const watch = ev.event === 'status_changed'
+        ? kindWatches.find((w) => matchesStatusFilters(ev.toStatus, w.statusFilters))
+        : kindWatches[0];
       if (watch) gated.push({ watch, event: ev });
       else filteredRows.push({ event: ev, outcome: 'filtered', detail: `${ev.toStatus || '?'} is not a watched status` });
     }
     this._recordActivity(scopeId, filteredRows);
     if (!gated.length) return res;
 
-    const { fired, rows } = await this._fanOut(scopeId, gated);
-    this._recordActivity(scopeId, rows);
-    res.fired = fired;
+    // One fan-out per event kind: a wake carries exactly one top-level `event`,
+    // and that is all a trigger's `eventFilter` sees — a digest mixing a comment
+    // into four status changes would be delivered as `status_changed` and a
+    // comment listener would never wake (implementation plan §1.2). The
+    // project burst cap therefore applies per kind per poll.
+    const byKind = new Map();
+    for (const g of gated) {
+      if (!byKind.has(g.event.event)) byKind.set(g.event.event, []);
+      byKind.get(g.event.event).push(g);
+    }
+    for (const part of byKind.values()) {
+      const { fired, rows } = await this._fanOut(scopeId, part);
+      this._recordActivity(scopeId, rows);
+      res.fired += fired;
+    }
     return res;
   }
 
@@ -311,7 +347,7 @@ class JiraPoller {
       const events = gated.map(({ event }) => event);
       for (const event of events) {
         this.inboxStore.append(scopeId, event, { convKey, digest: true });
-        rows.push({ event, outcome: 'digested', detail: `${events.length} transitions in ${projectKey} in one poll` });
+        rows.push({ event, outcome: 'digested', detail: `${events.length} ${kindNoun(event.event)} in ${projectKey} in one poll` });
       }
       await this.deliver({ scopeId, kind: 'digest', agentIds, convKey, projectKey, events, cap: PROJECT_BURST_CAP });
       this.log(`[jira-poller] bulk-digest: ${events.length} events in ${projectKey} → ${scopeId} (one wake)`);
@@ -348,7 +384,7 @@ class JiraPoller {
         }
         this.inboxStore.append(scopeId, it.event, { convKey: plan.convKey });
         await this.deliver({ scopeId, kind: 'events', agentIds, convKey: plan.convKey, events: [it.event] });
-        this.log(`[jira-poller] queued status_changed (${it.event.id}) ${it.event.fromStatus} → ${it.event.toStatus} → ${scopeId}`);
+        this.log(`[jira-poller] queued ${it.event.event} (${it.event.id}) ${describeEvent(it.event)} → ${scopeId}`);
         rows.push({ event: it.event, outcome: 'delivered' });
         fired += 1;
       }

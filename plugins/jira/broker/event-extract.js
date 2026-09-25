@@ -1,6 +1,6 @@
 'use strict';
 
-// ─── jira broker: changelog → status-change events (pure) ────────────────────
+// ─── jira broker: search response → typed events (pure) ─────────────────────
 //
 // Jira Cloud has no discrete immutable events feed. Instead, per tracked
 // project we run a narrow JQL search (`updated >= -Nm`) with `expand=changelog`
@@ -13,6 +13,36 @@
 // design work there was sound; only its *shape* (platform code, not a plugin)
 // was the mistake (docs/jira-plugin-plan.md §1, §6.2). These functions are the
 // good part. Pure — no I/O, unit-tested in isolation.
+//
+// Every event carries an explicit `event` kind (docs/jira-plugin-events-
+// implementation.md §2.1). `EVENT_KINDS` is the one list of kinds the broker
+// can produce — the watch store's opt-in set, the admin checkboxes, the
+// activity row shape and the manifest's `events[]` all agree with it.
+
+// The kinds this broker extracts, in display order. Per kind: the admin
+// checkbox label, the digest noun, and the kind-specific top-level fields an
+// activity row keeps (activity-store.js `shapeEventForRow`).
+const EVENT_KINDS = {
+  status_changed: { label: 'Status changes', noun: 'status changes', rowFields: ['fromStatus', 'toStatus'] },
+};
+const KNOWN_EVENTS = Object.keys(EVENT_KINDS);
+const DEFAULT_WATCH_EVENTS = ['status_changed'];
+
+// A wake's event id is the `aee-jira inbox --consume <id>` argument, so every
+// extractor's ids must match this — exactly ONE colon (`<issueKey>:<rest>`).
+// server.js gates `consume` on it; the extractor tests assert it per kind.
+const EVENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[A-Za-z0-9._-]{1,64}$/;
+
+// The one-line human summary of an event (poller log, wake summary). Unknown
+// kinds fall back to the issue key.
+function describeEvent(ev) {
+  const e = ev && typeof ev === 'object' ? ev : {};
+  const key = e.issueKey || e.projectKey || '';
+  if (e.event === 'status_changed' && (e.fromStatus || e.toStatus)) {
+    return `${key}: ${e.fromStatus || 'new'} → ${e.toStatus || '?'}`;
+  }
+  return key || String(e.event || 'event');
+}
 
 // A bare Atlassian subdomain ("acme") → "https://acme.atlassian.net"; a full
 // origin ("https://acme.atlassian.net", a custom domain, or an http test
@@ -50,8 +80,8 @@ function issueTypeNameOf(issue) {
   return (issue.fields && issue.fields.issuetype && issue.fields.issuetype.name) || null;
 }
 
-// Flatten an issue's (possibly backfilled) changelog into one candidate event
-// per status-field change. `siteBase` builds the browse URL; pass null to omit
+// Flatten an issue's (possibly backfilled) changelog into one candidate
+// `status_changed` event per status-field change. `siteBase` builds the browse URL; pass null to omit
 // it. Never throws on a malformed issue — returns [].
 function extractStatusChangeEvents(issue, { projectKey, siteBase } = {}) {
   const events = [];
@@ -67,6 +97,7 @@ function extractStatusChangeEvents(issue, { projectKey, siteBase } = {}) {
       if (!item || item.field !== 'status') continue;
       events.push({
         id: `${issue.key}:${h.id}`,
+        event: 'status_changed',
         issueKey: issue.key,
         projectKey: projectKey || null,
         issueType,
@@ -120,6 +151,11 @@ function computeQueryWindowMinutes(lastPolledAtIso, nowMs, { baseMinutes = DEFAU
 }
 
 module.exports = {
+  EVENT_KINDS,
+  KNOWN_EVENTS,
+  DEFAULT_WATCH_EVENTS,
+  EVENT_ID_RE,
+  describeEvent,
   resolveJiraApiBase,
   isChangelogTruncated,
   extractStatusChangeEvents,

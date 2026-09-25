@@ -41,6 +41,7 @@ const { InboxStore } = require('./inbox-store');
 const { ActivityStore } = require('./activity-store');
 const { JiraPoller } = require('./poller');
 const { deriveWatchHealth, summariseWatchHealth } = require('./watch-health');
+const { EVENT_KINDS, EVENT_ID_RE, describeEvent } = require('./event-extract');
 const jira = require('./jira-client');
 const brokerPolicy = require('./broker-policy');
 const { verifyViewerHeaders, requiredRoleForPath, roleAllows, roleForTeam } = require('./viewer-headers');
@@ -129,11 +130,15 @@ function orchestratorUrl() {
   return (process.env.AEE_ORCHESTRATOR_URL || 'http://orchestrator:4002').replace(/\/+$/, '');
 }
 
+// The wake's one-line summary. A digest is single-kind (the poller fans out
+// per kind), so its noun comes from the first event's kind.
 function summariseEvents(kind, events, { projectKey } = {}) {
-  if (kind === 'digest') return `${events.length} status changes${projectKey ? ` in ${projectKey}` : ''}`;
-  const e = events[0] || {};
-  const issue = e.issueKey || e.projectKey || '';
-  return `${issue}${e.fromStatus && e.toStatus ? `: ${e.fromStatus} → ${e.toStatus}` : ''}`.trim() || 'status change';
+  const first = events[0] || {};
+  if (kind === 'digest') {
+    const noun = (EVENT_KINDS[first.event] && EVENT_KINDS[first.event].noun) || 'events';
+    return `${events.length} ${noun}${projectKey ? ` in ${projectKey}` : ''}`;
+  }
+  return describeEvent(first);
 }
 
 // A wake POST must settle fast — the poll loop holds `running` across it (one
@@ -164,7 +169,8 @@ async function deliver({ scopeId, kind, events, projectKey }) {
   const first = events[0] || {};
   const eventId = kind === 'digest' ? null : (first.id || null);
   const body = {
-    event: first.event || 'status_changed',
+    // Every extractor sets `event` explicitly; there is no default kind.
+    event: first.event,
     summary: summariseEvents(kind, events, { projectKey }),
     // Omit rather than send an explicit null for a digest (the validator
     // accepts either, but the entry shape prefers omission).
@@ -258,8 +264,8 @@ function query(req) {
 // teammate's events. A stale CLI copy sending `consume=1` gets a 400 that
 // names the fix instead of a silent team-wide drain. An agent may only ever
 // drain the ids its own wake named (a convention the CLI keeps — the broker
-// cannot tell agents apart, one scope token per team).
-const EVENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[A-Za-z0-9._-]{1,64}$/;
+// cannot tell agents apart, one scope token per team). `EVENT_ID_RE` lives in
+// event-extract.js so every extractor's ids are tested against the same rule.
 // Ids travel in the GET query string; 200 ids at the regex's maximum length
 // would exceed Node's 16 KB header limit (431, fails closed) — realistic ids
 // (`KAN-6:10312`) fit ~1000×.
@@ -750,7 +756,10 @@ async function handleUiApi(req, res, apiPath, viewer) {
   // broker watches.
   if (apiPath === '/admin/watch' && req.method === 'GET') {
     const conf = watchStore.loadConfig(team);
-    return sendJson(res, 200, { watches: conf.watches, setBy: conf.setBy, setAt: conf.setAt });
+    // `eventKinds` drives the per-watch checkboxes, so the admin page never
+    // hard-codes a kind the broker cannot produce.
+    const eventKinds = Object.entries(EVENT_KINDS).map(([name, k]) => ({ name, label: k.label }));
+    return sendJson(res, 200, { watches: conf.watches, eventKinds, setBy: conf.setBy, setAt: conf.setAt });
   }
   if (apiPath === '/admin/watch' && req.method === 'PUT') {
     const body = parseJson(await readBody(req));

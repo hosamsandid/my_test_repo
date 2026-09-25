@@ -86,3 +86,21 @@ test('an invalid scopeId is refused (path-traversal guard)', () => {
   assert.throws(() => s.list('../../etc/passwd'));
   assert.throws(() => s.append('a/b', { event: ev('X:1') }));
 });
+
+test('append: a row keeps the event kind and that kind\'s own fields only', () => {
+  const s = tmpStore();
+  s.append('team-1', { event: ev('ENG-1:1', { event: 'status_changed', body: 'not a status field' }) });
+  const [row] = s.list('team-1');
+  assert.equal(row.event.event, 'status_changed');
+  assert.equal(row.event.fromStatus, 'A');
+  assert.equal(row.event.toStatus, 'B');
+  assert.equal('body' in row.event, false);
+});
+
+test('append: an event without a kind (pre-kinds shape) keeps the status fields', () => {
+  const s = tmpStore();
+  s.append('team-1', { event: ev('ENG-1:1') });
+  const [row] = s.list('team-1');
+  assert.equal(row.event.event, null);
+  assert.equal(row.event.toStatus, 'B');
+});

@@ -671,6 +671,11 @@ test('ui /admin: team-admin only; PUT replaces the watch config', async () => {
 
     const get = await ui('/ui/api/admin/watch?team=team-1', { headers: admin });
     assert.deepEqual(get.body.watches[0].statusFilters, ['Ready for Dev', 'In Review']);
+    assert.deepEqual(get.body.watches[0].events, ['status_changed']); // migrated default
+    // the checkbox vocabulary comes from the broker, one entry per KNOWN_EVENTS kind
+    const { KNOWN_EVENTS } = require('./event-extract');
+    assert.deepEqual(get.body.eventKinds.map((k) => k.name), KNOWN_EVENTS);
+    assert.ok(get.body.eventKinds.every((k) => typeof k.label === 'string' && k.label));
     assert.equal(get.body.setBy, 'a');
   } finally {
     broker.watchStore.teardown('team-1');

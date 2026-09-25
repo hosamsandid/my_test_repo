@@ -5,13 +5,14 @@
 // "What did the poller see, and what did it do with it." The inbox (inbox-
 // store.js) is a CONSUMABLE queue — a woken agent drains it and it is gone — so
 // it cannot answer "which tickets moved recently". This is the retained record:
-// every FRESH status change in a watched project (survived seen-id dedup), with
-// an outcome tag saying what the plugin did:
+// every FRESH event in a watched project (survived seen-id dedup), with an
+// outcome tag saying what the plugin did:
 //
 //   delivered  — a wake was fired for the granted agents
 //   digested   — folded into a burst digest (still a wake, lossless)
 //   throttled  — dropped by the hour-scoped conversation throttle
-//   filtered   — fresh, but its target status matched no `statusFilters` entry
+//   filtered   — fresh, but no watch opted into its kind, or (a status change)
+//                its target status matched no `statusFilters` entry
 //   stale      — unseen, but created before the previous poll: an old transition
 //                on an issue that merely re-entered the `updated` window
 //   baseline   — seen on the very first poll for this project (never fires)
@@ -30,6 +31,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { EVENT_KINDS } = require('./event-extract');
 
 const SCOPE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const RETENTION_MS = 14 * 24 * 3600 * 1000;
@@ -43,21 +45,26 @@ function assertScope(scopeId) {
   return scopeId;
 }
 
-// Narrow a status-change event to what a row needs (no `payload`, no bulk).
+// Narrow an event to what a row needs (no `payload`, no bulk): the common
+// fields plus the kind's own (event-extract.js `EVENT_KINDS[kind].rowFields`).
+// A row written before kinds existed has no `event` and reads as a status
+// change in the UI.
 function shapeEventForRow(ev) {
   const e = ev && typeof ev === 'object' ? ev : {};
-  return {
+  const row = {
     id: e.id || null,
+    event: e.event || null,
     issueKey: e.issueKey || null,
     projectKey: e.projectKey || null,
     issueType: e.issueType || null,
     summary: e.summary || null,
-    fromStatus: e.fromStatus || null,
-    toStatus: e.toStatus || null,
     author: e.author || null,
     created: e.created || null,
     issueUrl: e.issueUrl || null,
   };
+  const kind = EVENT_KINDS[e.event];
+  for (const f of (kind ? kind.rowFields : ['fromStatus', 'toStatus'])) row[f] = e[f] == null ? null : e[f];
+  return row;
 }
 
 class ActivityStore {

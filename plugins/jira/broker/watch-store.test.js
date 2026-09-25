@@ -16,9 +16,9 @@ function tmpStore() {
 test('normalizeWatch: needs a projectKey; defaults wake to all-granted', () => {
   assert.equal(normalizeWatch({}), null);
   assert.equal(normalizeWatch({ statusFilters: ['Done'] }), null);
-  assert.deepEqual(normalizeWatch({ projectKey: ' ENG ' }), { projectKey: 'ENG', wake: { agentIds: 'all-granted' } });
+  assert.deepEqual(normalizeWatch({ projectKey: ' ENG ' }), { projectKey: 'ENG', events: ['status_changed'], wake: { agentIds: 'all-granted' } });
   assert.deepEqual(normalizeWatch({ projectKey: 'ENG', statusFilters: ['Ready'], wake: { agentIds: ['a', 'b'] } }), {
-    projectKey: 'ENG', statusFilters: ['Ready'], wake: { agentIds: ['a', 'b'] },
+    projectKey: 'ENG', statusFilters: ['Ready'], events: ['status_changed'], wake: { agentIds: ['a', 'b'] },
   });
 });
 
@@ -33,8 +33,24 @@ test('normalizeWatch: statusFilters set is trimmed, de-duplicated, order preserv
 test('normalizeWatch: a legacy singular statusFilter migrates to a one-element statusFilters', () => {
   assert.deepEqual(
     normalizeWatch({ projectKey: 'ENG', statusFilter: 'Ready for Dev' }),
-    { projectKey: 'ENG', statusFilters: ['Ready for Dev'], wake: { agentIds: 'all-granted' } },
+    { projectKey: 'ENG', statusFilters: ['Ready for Dev'], events: ['status_changed'], wake: { agentIds: 'all-granted' } },
   );
+});
+
+test('normalizeWatch: events is an opt-in set — absent/empty/unknown → status_changed; unknown names dropped; KNOWN_EVENTS order', () => {
+  const { KNOWN_EVENTS } = require('./event-extract');
+  assert.deepEqual(normalizeWatch({ projectKey: 'ENG' }).events, ['status_changed']);
+  assert.deepEqual(normalizeWatch({ projectKey: 'ENG', events: [] }).events, ['status_changed']);
+  assert.deepEqual(normalizeWatch({ projectKey: 'ENG', events: ['bogus', 42] }).events, ['status_changed']);
+  const all = KNOWN_EVENTS.slice().reverse();
+  assert.deepEqual(normalizeWatch({ projectKey: 'ENG', events: [...all, 'bogus', all[0]] }).events, KNOWN_EVENTS);
+});
+
+test('setConfig: events round-trips through the store', () => {
+  const s = tmpStore();
+  const { KNOWN_EVENTS } = require('./event-extract');
+  s.setConfig('team-1', { watches: [{ projectKey: 'ENG', events: KNOWN_EVENTS }] });
+  assert.deepEqual(s.loadConfig('team-1').watches[0].events, KNOWN_EVENTS);
 });
 
 test('loadConfig: an untouched scope is an empty config, never a 404', () => {

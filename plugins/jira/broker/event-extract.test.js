@@ -52,6 +52,7 @@ test('extractStatusChangeEvents: one status item → one event with composite id
   const events = extractStatusChangeEvents(issue, { projectKey: 'ENG', siteBase: 'https://acme.atlassian.net' });
   assert.deepEqual(events, [{
     id: 'ENG-42:10001',
+    event: 'status_changed',
     issueKey: 'ENG-42',
     projectKey: 'ENG',
     issueType: 'Bug',
@@ -140,4 +141,31 @@ test('computeQueryWindowMinutes: capped at 24h no matter how long the sidecar wa
 test('computeQueryWindowMinutes: a future last-poll (clock skew) → base window, never negative', () => {
   const now = Date.parse('2026-01-01T12:00:00Z');
   assert.equal(computeQueryWindowMinutes('2026-01-01T13:00:00Z', now, { baseMinutes: 10 }), 10);
+});
+
+// ── kinds, ids, describeEvent ───────────────────────────────────────────────
+
+test('every status_changed id satisfies EVENT_ID_RE (the inbox --consume gate)', () => {
+  const { EVENT_ID_RE } = require('./event-extract');
+  const events = extractStatusChangeEvents({
+    key: 'ENG-42',
+    changelog: { histories: [{ id: '10001', items: [{ field: 'status', fromString: 'A', toString: 'B' }] }] },
+  });
+  assert.equal(events.length, 1);
+  assert.ok(events.every((e) => EVENT_ID_RE.test(e.id)), events.map((e) => e.id).join(','));
+  assert.equal(EVENT_ID_RE.test('ENG-42:1:assignee'), false, 'a second colon is un-consumable');
+});
+
+test('describeEvent: status change reads from → to; unknown kinds fall back to the key', () => {
+  const { describeEvent } = require('./event-extract');
+  assert.equal(describeEvent({ event: 'status_changed', issueKey: 'KAN-6', fromStatus: 'To Do', toStatus: 'Done' }), 'KAN-6: To Do → Done');
+  assert.equal(describeEvent({ event: 'mystery', issueKey: 'KAN-6' }), 'KAN-6');
+  assert.equal(describeEvent(null), 'event');
+});
+
+test('the manifest declares only kinds the broker can produce (events[].name ⊆ KNOWN_EVENTS)', () => {
+  const { KNOWN_EVENTS, EVENT_KINDS } = require('./event-extract');
+  const manifest = JSON.parse(require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'plugin.json'), 'utf8'));
+  for (const e of manifest.events) assert.ok(KNOWN_EVENTS.includes(e.name), `manifest event ${e.name} is not in KNOWN_EVENTS`);
+  for (const k of KNOWN_EVENTS) assert.ok(Array.isArray(EVENT_KINDS[k].rowFields) && EVENT_KINDS[k].label && EVENT_KINDS[k].noun);
 });

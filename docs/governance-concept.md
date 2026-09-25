@@ -162,7 +162,13 @@ as producer, maintenance-mode read — and **only for the agent's own `:id`**), 
 **signaler token** for external event sources (`POST /internal/bp-events` — the ACE
 `bp-transition.py` caller; without this class, enforcement would break BP routing).
 Rollout via `INTERNAL_AUTH_MODE=observe|warn|enforce`: one observe week inventories
-every real caller (including forgotten integrations), then enforce. Agent tokens rotate
+every real caller (including forgotten integrations), then enforce. **The unset default
+is deployment-dependent (#2459):** a local Podman Compose stack keeps `observe` for
+developer convenience, while the shared/production-style **GKE/Kubernetes** deploy path
+(`AEE_CONTAINER_RUNTIME=kubernetes`) defaults to `enforce` **once the gate is armed** — so
+a shared cluster does not linger in silent log-only mode. An explicitly set mode always
+wins (a deliberate migration-window `observe` is never overridden), and a non-local
+deployment that is not enforcing logs a startup warning. Agent tokens rotate
 via the existing respawn-on-credential-change path. Companion **GOV-PLATFORM-3**: an
 `auditMutations` sibling on the internal app writes every `/internal/*` mutation to
 `/workspace/audit/audit-internal-<date>.jsonl` with

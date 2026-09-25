@@ -14180,8 +14180,12 @@ async function main() {
     console.log(
       `[Orchestrator] internal-auth mode=${internalAuthConfig.mode} `
       + `configured=${internalAuthConfig.configured}`
+      + `${internalAuthConfig.nonLocal ? ' deployment=non-local' : ''}`
       + (internalAuthConfig.configured ? '' : ' (gate inert — set INTERNAL_API_TOKEN to arm it)'),
     );
+    // #2459 AC3: never let a non-local deployment sit in log-only mode silently.
+    const authWarning = internalAuth.nonLocalObserveWarning(internalAuthConfig);
+    if (authWarning) console.warn(`[Orchestrator] ${authWarning}`);
   }
   migrateLegacyAgentConfigs();
   migrateSkillGrantsToAgents();

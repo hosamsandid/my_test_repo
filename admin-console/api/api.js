@@ -14998,11 +14998,23 @@ app.post('/api/environments', heavyLimiter, (req, res) => {
   // #2323: a repo-backed environment with no GitHub token silently breaks the
   // whole GitHub automation. Block it unless the caller explicitly acknowledges a
   // reference-only environment (`acknowledgeNoToken`).
+  //
+  // #2469: a Clone Team copy (`copyFromTeamId`) is credential-stripped by design
+  // (#2171) — its structure is copied through `copyEnvironmentStructure`, which
+  // always drops the SSH key / GitHub token / MCP creds. So a clone can NEVER
+  // carry a token, and this #2323 pre-clone hard block would otherwise fire on
+  // every single clone regardless of what the *source* team's credentials look
+  // like. The missing credentials are already reported *after* the clone via
+  // `credentialsNeeded`/`credentialsNeededLines()` (so the creator adds them
+  // before materializing members), making the pre-clone block redundant here —
+  // treat a team clone as an implicit reference-only acknowledgement. The guard
+  // still fully applies to a genuine manual create/edit of a repo-backed
+  // environment (no `copyFromTeamId`), which is the accident #2323 guards against.
   {
     const need = checkGithubTokenRequirement({
       repositories: normalizedRepos,
       githubTokenId,
-      acknowledgeNoToken: req.body?.acknowledgeNoToken,
+      acknowledgeNoToken: req.body?.acknowledgeNoToken || Boolean(clonedFromTeamId),
     });
     if (!need.ok) return res.status(need.status).json({ error: need.error, code: need.code });
   }

@@ -176,10 +176,8 @@ function plural(n, one, many) {
  *
  * @returns {Array<{kind: string, tone: 'info'|'warning', text: string}>}
  */
-export function repositoryChangeLines(diff, agentCount = 0) {
+export function repositoryChangeLines(diff) {
   if (!hasRepositoryChanges(diff)) return [];
-  const n = Number(agentCount) || 0;
-  const who = `${n} ${plural(n, 'agent', 'agents')}`;
   const lines = [];
 
   const added = diff.added || [];
@@ -188,7 +186,7 @@ export function repositoryChangeLines(diff, agentCount = 0) {
       kind: 'added',
       tone: 'info',
       text: `${added.length} ${plural(added.length, 'repository', 'repositories')} added `
-        + `(${nameList(added)}) — cloned into ${who}.`,
+        + `(${nameList(added)}) — cloned into each agent's workspace; see the per-agent report below.`,
     });
   }
 
@@ -209,8 +207,8 @@ export function repositoryChangeLines(diff, agentCount = 0) {
       kind: 'removed',
       tone: 'warning',
       text: `${removed.length} ${plural(removed.length, 'repository', 'repositories')} removed `
-        + `(${nameList(removed)}) — nothing is deleted from any agent. ${who} keep their copies; `
-        + `removing them is a manual step, so no unpushed work can be lost.`,
+        + `(${nameList(removed)}) — nothing is deleted from any agent; existing copies are kept. `
+        + `Removing them is a manual step, so no unpushed work can be lost.`,
     });
   }
 

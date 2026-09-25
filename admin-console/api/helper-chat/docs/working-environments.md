@@ -70,6 +70,10 @@ is the scope and what follows from it:
 - It carries **no credential of its own**: the clone uses the existing SSH-key
   registry or this environment's GitHub token. A repository neither can reach is
   refused before any clone is attempted, naming which credential was tried.
+- It is a valid **delivery target**, not only a browsable clone: `gh-as-agent
+  push` / `gh-as-agent pr` deliver to it exactly as to an environment repository,
+  reusing the same SSH key or GitHub token (#2464). When the environment also has
+  repositories, `--repo <name>` is required to disambiguate.
 - Only a user who may **manage** the agent can attach or remove one; a chat-only
   user sees the list but no action.
 - Removing it **deletes the working copy**, and the confirmation names the

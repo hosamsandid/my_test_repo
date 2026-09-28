@@ -18,6 +18,7 @@ const {
   hasSkillGrant,
   skillsSection,
   backgroundTasksSection,
+  askHumanSection,
   GIT_SECTION,
   TRIGGER_SECTION,
   WORKSPACE_SECTION,
@@ -152,6 +153,39 @@ test('the wait-for-an-external-event advice is autonomous-only', () => {
   assert.doesNotMatch(plain, /check_suite\.completed/);
   assert.ok(plain.startsWith('## Background tasks'));
   assert.ok(auto.startsWith(plain)); // autonomous = core + advice appended
+});
+
+// ---- asking the human (aee-ask, #2523) -------------------------------------
+
+test('Asking the human section is ALWAYS present and steers to aee-ask', () => {
+  for (const autonomous of [true, false]) {
+    const md = assembleClaudeMd({ base: BASE, agentPrompt: 'x', role: 'agent', env: null, autonomous });
+    const order = headings(md);
+    assert.ok(order.includes('Asking the human'), `missing when autonomous=${autonomous}`);
+    assert.match(md, /aee-ask "[^"]+" --header \w+ --option "[^"]+::[^"]+"/);
+    assert.match(md, /do \*\*not\*\*\s+write the question/);
+    assert.match(md, /\*\*end your turn immediately\*\*/);
+    assert.match(md, /--multi/);
+    // Run-semantics guidance, next to Background tasks, before Important Notes.
+    assert.ok(order.indexOf('Background tasks') < order.indexOf('Asking the human'));
+    assert.ok(order.indexOf('Asking the human') < order.indexOf('Important Notes'));
+  }
+});
+
+test('the unattended-run caveat on aee-ask is autonomous-only', () => {
+  const auto = askHumanSection(true);
+  const plain = askHumanSection(false);
+  assert.ok(plain.startsWith('## Asking the human'));
+  assert.doesNotMatch(plain, /unattended/);
+  assert.match(auto, /unattended triggered run/);
+  assert.ok(auto.startsWith(plain)); // autonomous = core + caveat appended
+});
+
+test('a stale base-template copy of Asking the human is dropped, not duplicated', () => {
+  const stale = `${BASE}\n\n## Asking the human\n\nOLD COPY`;
+  const md = assembleClaudeMd({ base: stale, agentPrompt: 'x', role: 'agent', env: null });
+  assert.equal(headings(md).filter((h) => h === 'Asking the human').length, 1);
+  assert.ok(!md.includes('OLD COPY'));
 });
 
 // ---- read-only host context folder (#1283 mount, #1286 prompt block) --------

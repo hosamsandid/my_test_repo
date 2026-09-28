@@ -1392,6 +1392,49 @@ def _ask_user_mcp_config() -> str:
     })
 
 
+# ---- aee-ask CLI facade (#2523) ----
+#
+# The MCP delivery above is refused by the enterprise managed policy (hence
+# AEE_DISABLE_ASK_MCP=1 in the image), so the working path is the `aee-ask` CLI.
+# It validates its own arguments and writes an AskUserQuestion-shaped
+# `{"questions": [...]}` JSON to a per-invocation sentinel file whose path the
+# runner hands it via AEE_ASK_FILE. The runner never parses the Bash command
+# string: it keys on the sentinel's presence (checked after every tool_result
+# and once more after the CLI exits), then routes the payload through the same
+# render/persist path as the tool_use intercept. Per-invocation (not one fixed
+# path) so a concurrent DM turn and trigger run in the same container can never
+# pick up each other's question.
+_ASK_FILE_ENV = "AEE_ASK_FILE"
+
+
+def _ask_sentinel_path(invocation_id: str) -> Path:
+    """Run-scoped sentinel path the `aee-ask` CLI writes for this invocation."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", invocation_id or "") or uuid.uuid4().hex
+    return _agent_workdir() / STATE_DIR / "ask" / f"{safe}.json"
+
+
+def _read_ask_sentinel(path: Path) -> dict | None:
+    """The queued `{"questions": [...]}` payload, or None when there is no
+    sentinel or it carries nothing usable (a torn/garbled file is ignored rather
+    than surfaced as a half-rendered question)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and isinstance(data.get("questions"), list) and data["questions"]:
+        return data
+    return None
+
+
+def _clear_ask_sentinel(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"[Runner] could not remove ask sentinel {path}: {exc}", file=sys.stderr)
+
+
 def _is_ask_user_question_tool(name) -> bool:
     """True for the AskUserQuestion tool by its bare built-in name or its
     MCP-namespaced form (`mcp__<server>__AskUserQuestion`)."""
@@ -1462,11 +1505,12 @@ def _ask_user_question_payload(tool_input) -> dict | None:
     so a Matrix client that cannot render the buttons still sees the full
     question + options as text (graceful degradation, AC8).
 
-    MVP is single-choice (D1): a `multiSelect: true` question is deliberately
-    omitted from the interactive payload — it still reaches the human as the text
-    body, and the UI leaves it as plain text (AC4). Each option gets a stable
-    `optionId` (`<questionIndex>:<optionIndex>`) unique within the message so the
-    clicked answer can carry a structured identifier back (AC2 / D2).
+    A `multiSelect: true` question is carried with `"multiSelect": true` so the
+    UI renders toggleable options plus a Submit button, and its answer carries
+    every selected label (#2523 — supersedes the single-choice-only MVP of
+    #1663 D1). Each option gets a stable `optionId`
+    (`<questionIndex>:<optionIndex>`) unique within the message so the clicked
+    answer can carry a structured identifier back (AC2 / D2).
     """
     if not isinstance(tool_input, dict):
         return None
@@ -1478,8 +1522,6 @@ def _ask_user_question_payload(tool_input) -> dict | None:
     for qi, q in enumerate(questions):
         if not isinstance(q, dict):
             continue
-        if q.get("multiSelect") is True:
-            continue  # single-choice only in the MVP (D1)
         options = q.get("options")
         if not isinstance(options, list):
             continue
@@ -1498,6 +1540,8 @@ def _ask_user_question_payload(tool_input) -> dict | None:
         if not out_options:
             continue
         qentry: dict = {"questionId": f"q{qi}", "options": out_options}
+        if q.get("multiSelect") is True:
+            qentry["multiSelect"] = True
         header = q.get("header")
         if isinstance(header, str) and header.strip():
             qentry["header"] = header.strip()
@@ -1509,6 +1553,45 @@ def _ask_user_question_payload(tool_input) -> dict | None:
     if not out_questions:
         return None
     return {"version": 1, "questions": out_questions}
+
+
+_ASK_ANSWER_FIELD = "io.aee.ask-answer"
+_ASK_ANSWER_MAX_LABELS = 50
+
+
+def _ask_answer_prompt(body: str, content) -> str:
+    """The resume prompt for a human's quick-reply answer (#2523).
+
+    A single-choice answer's chat body is already the chosen label, so it is
+    passed through unchanged. A multi-select answer carries its selections as
+    `labels` (on the answer itself, or per entry of a multi-question
+    `answers[]`); its visible body only joins them with ", ", which is ambiguous
+    when a label contains a comma. For those, rebuild the prompt from the
+    structured labels so every selected answer reaches the model as its own
+    line. Anything malformed falls back to the plain body.
+    """
+    if not isinstance(content, dict):
+        return body
+    answer = content.get(_ASK_ANSWER_FIELD)
+    if not isinstance(answer, dict):
+        return body
+    entries = answer.get("answers") if isinstance(answer.get("answers"), list) else [answer]
+    entries = [e for e in entries if isinstance(e, dict)]
+    if not any(isinstance(e.get("labels"), list) for e in entries):
+        return body
+
+    blocks: list[str] = []
+    for e in entries:
+        raw = e.get("labels") if isinstance(e.get("labels"), list) else [e.get("label")]
+        labels = [l.strip() for l in raw[:_ASK_ANSWER_MAX_LABELS]
+                  if isinstance(l, str) and l.strip()]
+        if not labels:
+            return body
+        blocks.append("\n".join(f"- {l}" for l in labels))
+    if len(blocks) == 1:
+        return "My answer to your question (selected options):\n" + blocks[0]
+    return "My answers to your questions (selected options, in question order):\n" + "\n".join(
+        f"Question {i}:\n{b}" for i, b in enumerate(blocks, 1))
 
 
 # ---- status.json ----
@@ -3270,6 +3353,12 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     env["AEE_ACTING_SENDER"] = _acting_sender_env_value(run_context)
     if resume_id:
         env["KNOWLEDGE_SESSION_ID"] = resume_id
+    # `aee-ask` sentinel for THIS invocation (#2523): the CLI writes the queued
+    # question here, the stream loop below picks it up. Cleared first so a stale
+    # file from a crashed earlier run can never surface as a fresh question.
+    ask_sentinel = _ask_sentinel_path(f"{correlation_id or 'run'}-{uuid.uuid4().hex[:8]}")
+    _clear_ask_sentinel(ask_sentinel)
+    env[_ASK_FILE_ENV] = str(ask_sentinel)
 
     # Git context for the usage record (#654): capture HEAD before the run so the
     # record can show what this invocation moved. Best-effort — never blocks the run.
@@ -3313,6 +3402,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     assistant_chunks: list[str] = []
     stderr_chunks: list[str] = []
     ask_question_input: dict | None = None  # first AskUserQuestion tool input (#447)
+    ask_via_cli = False  # question came from the `aee-ask` sentinel (#2523)
     context_usage: dict = {}  # last assistant-message usage this invocation (#509)
     bg_task_events: list[dict] = []  # raw background-task payloads for orphan detection
     # Coalesce the CLI's high-frequency thinking_tokens ticks into a throttled
@@ -3321,7 +3411,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
 
     def handle_line(line: str) -> None:
         nonlocal final_result, observed_session, ask_question_input, result_event
-        nonlocal last_api_status
+        nonlocal last_api_status, ask_via_cli
         for ev in _map_stream_json_line(line, correlation_id, context_usage,
                                         requested_model=model_arg):
             if (ev.get("type") == "system_event"
@@ -3362,6 +3452,30 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                     and ask_question_input is None
                     and isinstance(ev.get("input"), dict)):
                 ask_question_input = ev["input"]
+            elif (ev.get("type") == "tool_result"
+                    and ask_question_input is None):
+                # Keyed on the sentinel's presence, not on parsing the Bash
+                # command: the CLI has already validated + serialised it.
+                queued = _read_ask_sentinel(ask_sentinel)
+                if queued is not None:
+                    ask_question_input = queued
+                    ask_via_cli = True
+                    # Hard end (#2523, design decision on the issue): stop the
+                    # process the moment the sentinel appears. At this point the
+                    # CLI is waiting on the model's next API response, so no
+                    # further tool has started — ending here (rather than on a
+                    # later tool_use, which Claude Code has already begun
+                    # executing when we see it) keeps the question the terminal
+                    # message with nothing run after it. The session transcript
+                    # already holds this tool_result, so `--resume` still works;
+                    # the cost is no `result` event / usage record for the turn.
+                    # The rc != 0 path below posts the question.
+                    print("[Runner] aee-ask question captured — ending the turn",
+                          file=sys.stderr)
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
 
     def drain_stderr():
         try:
@@ -3398,6 +3512,15 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
         tail = tt_throttle.flush()
         if tail is not None:
             _append_event(room_id, tail)
+        # Last look for an `aee-ask` sentinel whose tool_result never reached the
+        # stream (the race the ticket names), then consume it so it can never
+        # leak into a later turn.
+        if ask_question_input is None:
+            queued = _read_ask_sentinel(ask_sentinel)
+            if queued is not None:
+                ask_question_input = queued
+                ask_via_cli = True
+        _clear_ask_sentinel(ask_sentinel)
 
     rc = proc.returncode
     stderr_blob = "".join(stderr_chunks)
@@ -3453,7 +3576,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     # run_context by reference (same channel as `_loopOutputTokens` above) so the
     # DM path can attach it as `io.aee.ask-question` on the posted message without
     # widening the return signature. None when the question is not renderable as
-    # single-choice buttons (e.g. multiSelect) — the text body still carries it.
+    # quick-reply options — the text body still carries it.
     if ask_reply is not None and isinstance(run_context, dict):
         run_context["_askQuestion"] = _ask_user_question_payload(ask_question_input)
 
@@ -3462,7 +3585,8 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
         _user_stop_requested = False
         if ask_reply is not None and not was_user_stop:
             print("[Runner] AskUserQuestion captured — posting question to chat "
-                  "instead of the tool error", file=sys.stderr)
+                  "instead of the tool error"
+                  + (" (via aee-ask)" if ask_via_cli else ""), file=sys.stderr)
             return ask_reply, observed_session
         err = subprocess.CalledProcessError(rc, "claude", output=None, stderr=stderr_blob)
         err.user_aborted = was_user_stop  # type: ignore[attr-defined]
@@ -7444,7 +7568,11 @@ async def run_dm_listener() -> None:
             # trigger prompts are deliberately untouched (out of scope).
             known_commands = _list_slash_command_tokens(
                 _agent_workdir() / ".claude" / "commands")
-            prepared = _prepare_chat_prompt(body, known_commands)
+            # A multi-select quick-reply answer (#2523) is resumed with every
+            # selected label from its structured `io.aee.ask-answer`.
+            content = (getattr(event, "source", None) or {}).get("content")
+            prepared = _prepare_chat_prompt(_ask_answer_prompt(body, content),
+                                            known_commands)
             send_body = prepared["prompt"]
             if prepared["isSlash"]:
                 _append_event(room_id, {
@@ -7547,7 +7675,8 @@ async def run_dm_listener() -> None:
 
             # If the run paused on an AskUserQuestion, carry the structured
             # options to the console so it can render clickable quick-reply
-            # buttons (#1663). Absent / multiSelect → plain text reply only.
+            # buttons (#1663; multi-select toggles + Submit, #2523). Absent →
+            # plain text reply only.
             ask_question = dm_run_context.get("_askQuestion")
             extra_content = (
                 {"io.aee.ask-question": ask_question}

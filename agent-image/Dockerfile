@@ -118,6 +118,14 @@ RUN chmod +x /opt/ace/scripts/aee-emit \
 RUN chmod +x /opt/ace/scripts/aee-wake \
     && ln -sf /opt/ace/scripts/aee-wake /usr/local/bin/aee-wake
 
+# `aee-ask` — put a structured decision to the human and pause the run (#2523).
+# The CLI-facade replacement for the policy-blocked `aee-ask` MCP server (see
+# AEE_DISABLE_ASK_MCP below): it writes the question to the per-turn sentinel
+# file the entrypoint hands it via AEE_ASK_FILE, and the entrypoint posts it as
+# the turn's terminal quick-reply message. No network, no MCP.
+RUN chmod +x /opt/ace/scripts/aee-ask \
+    && ln -sf /opt/ace/scripts/aee-ask /usr/local/bin/aee-ask
+
 # `usage` — read-only view of this agent's / its team's token usage (#679). On
 # PATH so agents call it directly: `usage me` / `usage team` query the
 # orchestrator's read-only usage endpoint across the volume-isolation boundary
@@ -144,7 +152,8 @@ ENV NODE_ENV=production
 
 # LOCAL OPT-OUT: this environment's Claude Code managed policy blocks MCP servers,
 # so the bundled aee-ask server is refused and every agent turn exits non-zero.
-# The flow does not use AskUserQuestion, so we skip injecting the MCP server.
+# Human decision prompts go through the `aee-ask` CLI instead (#2523), so we
+# skip injecting the MCP server.
 # Remove this line once the enterprise policy allowlists MCP (the entrypoint gate
 # defaults to off, so upstream behaviour is unchanged without it).
 ENV AEE_DISABLE_ASK_MCP=1

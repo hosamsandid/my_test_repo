@@ -162,6 +162,8 @@ aee-ask "Which checks should run?" --multi --option unit --option "e2e::slow"
 
 The human's answer arrives as your next message. If `aee-ask` rejects its
 arguments (exit 2), nothing was asked — fix them and call it again.
+The runner ends the whole turn the moment a question is queued, so call
+`aee-ask` from your own session, never from a Task sub-agent.
 
 ## Shared team knowledge (`knowledge`)
 

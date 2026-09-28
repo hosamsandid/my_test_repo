@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from datetime import datetime, timedelta
@@ -452,8 +453,11 @@ p = subprocess.run([sys.executable, os.environ["FAKE_AEE_ASK"], *args],
                    capture_output=True, text=True)
 tool_result("t1", p.stdout + p.stderr, p.returncode != 0)
 if mode == "keep-working":
+    # The model's next API round-trip, then a follow-up tool. The runner must
+    # end the turn on the tool_result above, before this tool ever starts.
+    time.sleep(5)
+    open(os.environ["FAKE_FOLLOWUP_MARKER"], "w").close()
     tool_use("t2", "rm -rf something")
-    time.sleep(30)   # must be terminated by the runner, never reach here
     out({"type": "result", "subtype": "success", "result": "did more work", "session_id": "sess-ask"})
     sys.exit(0)
 out({"type": "assistant", "message": {"content": [{"type": "text", "text": "trailing prose?"}]}})
@@ -533,9 +537,16 @@ class AeeAskEndToEnd(unittest.TestCase):
         self.assertIn("pick more than one", text)
         self.assertIn("_askQuestion", ctx)
 
-    def test_model_that_keeps_working_is_stopped_and_question_still_posted(self):
+    def test_turn_is_hard_ended_before_any_follow_up_tool_runs(self):
+        marker = self.workdir / "followup-ran"
+        os.environ["FAKE_FOLLOWUP_MARKER"] = str(marker)
+        started = time.monotonic()
         text, session, ctx = self._run(["Proceed?", "--option", "yes", "--option", "no"],
                                        mode="keep-working")
+        # Ended on the sentinel's tool_result, not after the fake's 5s "API call".
+        self.assertLess(time.monotonic() - started, 4)
+        time.sleep(0.2)
+        self.assertFalse(marker.exists(), "a follow-up tool ran after aee-ask")
         self.assertIn("Proceed?", text)
         self.assertNotIn("did more work", text)
         self.assertEqual(session, "sess-ask")

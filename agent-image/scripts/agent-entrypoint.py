@@ -3412,17 +3412,6 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                     and ask_question_input is None
                     and isinstance(ev.get("input"), dict)):
                 ask_question_input = ev["input"]
-            elif ev.get("type") == "tool_use" and ask_via_cli:
-                # Hard end (#2523): the model was told to stop after `aee-ask`
-                # but is taking a further action. Stop the process so the
-                # question stays the terminal message and nothing runs on
-                # behind the human's back; the rc != 0 path below still posts it.
-                print("[Runner] aee-ask question pending — ending the turn "
-                      "(model kept working after asking)", file=sys.stderr)
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
             elif (ev.get("type") == "tool_result"
                     and ask_question_input is None):
                 # Keyed on the sentinel's presence, not on parsing the Bash
@@ -3431,6 +3420,22 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                 if queued is not None:
                     ask_question_input = queued
                     ask_via_cli = True
+                    # Hard end (#2523, design decision on the issue): stop the
+                    # process the moment the sentinel appears. At this point the
+                    # CLI is waiting on the model's next API response, so no
+                    # further tool has started — ending here (rather than on a
+                    # later tool_use, which Claude Code has already begun
+                    # executing when we see it) keeps the question the terminal
+                    # message with nothing run after it. The session transcript
+                    # already holds this tool_result, so `--resume` still works;
+                    # the cost is no `result` event / usage record for the turn.
+                    # The rc != 0 path below posts the question.
+                    print("[Runner] aee-ask question captured — ending the turn",
+                          file=sys.stderr)
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
 
     def drain_stderr():
         try:

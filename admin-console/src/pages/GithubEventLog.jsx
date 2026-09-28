@@ -13,6 +13,7 @@ import {
   pendingRowMenu, reassignPickerState, reassignTargetLabel, pendingReassignError, pendingReassignSuccess,
 } from './pending-queue-view';
 import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip } from './event-outcome-view';
+import { OUTCOME_TONES, NO_MATCH_LABEL, outcomePresentation } from './event-outcome-presentation';
 import { eventLabel } from './agent-chat/trigger-summary';
 import { workItemTypeLabel } from './github-event-log-type';
 import { isHandoffRow, handoffNote, handoffNoteDisplay, handoffTitleHint } from './github-event-handoff-view';
@@ -36,52 +37,43 @@ const controlStyle = {
   fontFamily: 'inherit',
 };
 
-/* ── Outcome chip ──────────────────────────────────────────────────── */
-// Semantics: delivered = success (it worked as intended), dropped = muted
-// (a protection layer did its job on purpose, not an error), digest =
-// info (bundled, not lost), no matching trigger = warning (worth an
-// admin's attention — "nobody's listening" per issue #469 AC #4).
-function OutcomeChip({ outcome, eventId, onOpenSession }) {
-  let bg, color, label;
-  // wakeLabel is set when the subscriber's labelFilter matched (#1846). null
-  // means any-label listener; undefined means a legacy row or a drop before
-  // the label gate (history-horizon). Show it only when it's a real string.
-  const wakeSuffix = typeof outcome.wakeLabel === 'string' ? ` (${outcome.wakeLabel})` : '';
-  if (outcome.status === 'delivered') {
-    bg = 'var(--eb-status-success-bg)';
-    color = 'var(--eb-status-success)';
-    label = `delivered${wakeSuffix} → ${outcome.agentName || outcome.agentId}`;
-  } else if (outcome.status === 'digest') {
-    bg = 'var(--eb-status-info-bg)';
-    color = 'var(--eb-status-info)';
-    label = `digested${wakeSuffix} → ${outcome.agentName || outcome.agentId}`;
-  } else {
-    bg = 'var(--eb-bg-elevated)';
-    color = 'var(--eb-text-secondary)';
-    label = `dropped (${outcome.reason || 'unknown'})${wakeSuffix} → ${outcome.agentName || outcome.agentId}`;
-  }
+/* ── Outcome line (#2524) ──────────────────────────────────────────────
+   Each outcome is a plain text line — no pill border/background, since a
+   rounded pill cannot contain the multi-line text a long outcome wraps into.
+   The status is carried by a leading marker (shape + colour, see
+   event-outcome-presentation.js) hung outside the wrapping text, so wrapped
+   lines align under the text and never under the marker. */
+const outcomeLineStyle = {
+  display: 'flex',
+  alignItems: 'baseline',
+  gap: 6,
+  fontSize: 'var(--eb-text-xs)',
+  lineHeight: 1.4,
+  maxWidth: '100%',
+  minWidth: 0,
+};
+const outcomeMarkerStyle = { flex: 'none', fontSize: '0.85em' };
+// Wrap within the bounded Outcomes column (#1898): the label wraps at its
+// spaces, and a long unbroken token (e.g. a long agent id) breaks rather than
+// overflowing and forcing a horizontal scrollbar.
+const outcomeTextStyle = {
+  minWidth: 0,
+  whiteSpace: 'normal',
+  overflowWrap: 'anywhere',
+  wordBreak: 'break-word',
+};
 
-  const baseStyle = {
-    display: 'inline-block',
-    padding: '1px 6px',
-    borderRadius: 'var(--eb-radius-full)',
-    fontSize: 'var(--eb-text-xs)',
-    fontWeight: 'var(--eb-font-medium)',
-    background: bg, color,
-    border: `1px solid ${color}`,
-    // Wrap within the bounded Outcomes column (#1898): the label wraps at its
-    // spaces, and a long unbroken token (e.g. a long agent id) breaks rather
-    // than overflowing and forcing a horizontal scrollbar (AC5/AC6). Capped at
-    // the cell width so no single chip can widen the table.
-    whiteSpace: 'normal',
-    overflowWrap: 'anywhere',
-    wordBreak: 'break-word',
-    maxWidth: '100%',
-  };
+function OutcomeMarker({ marker, color }) {
+  return <span aria-hidden="true" style={{ ...outcomeMarkerStyle, color }}>{marker}</span>;
+}
+
+function OutcomeLine({ outcome, eventId, onOpenSession }) {
+  const [hover, setHover] = useState(false);
+  const { label, marker, markerColor, textColor } = outcomePresentation(outcome);
 
   // Only a `delivered` outcome that carries a triggerId maps to a real Claude
   // session, so only those become an activatable control (AC1/AC2). Everything
-  // else stays a plain, non-interactive status chip.
+  // else stays plain, non-interactive text.
   const explain = outcomeTooltip(outcome);
   const correlationId = buildTriggerCorrelationId(outcome.triggerId, eventId);
   if (isSessionOutcome(outcome) && correlationId && onOpenSession) {
@@ -89,22 +81,35 @@ function OutcomeChip({ outcome, eventId, onOpenSession }) {
       <button
         type="button"
         onClick={() => onOpenSession(outcome.agentId, correlationId)}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
         aria-label={`Open session for ${outcome.agentName || outcome.agentId}`}
         title={`${explain}\n\nClick to open the session this event triggered.`}
         style={{
-          ...baseStyle,
-          cursor: 'pointer',
+          ...outcomeLineStyle,
+          // Reset the native button chrome so it reads as a text link.
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          margin: 0,
+          textAlign: 'left',
           fontFamily: 'inherit',
-          textDecoration: 'underline',
-          textUnderlineOffset: 2,
+          cursor: 'pointer',
+          color: hover ? 'var(--eb-accent-hover)' : 'var(--eb-accent-primary)',
         }}
       >
-        {label}
+        <OutcomeMarker marker={marker} color={markerColor} />
+        <span style={{ ...outcomeTextStyle, textDecoration: 'underline', textUnderlineOffset: 2 }}>{label}</span>
       </button>
     );
   }
 
-  return <span style={baseStyle} title={explain || undefined}>{label}</span>;
+  return (
+    <div style={{ ...outcomeLineStyle, color: textColor }} title={explain || undefined}>
+      <OutcomeMarker marker={marker} color={markerColor} />
+      <span style={outcomeTextStyle}>{label}</span>
+    </div>
+  );
 }
 
 /* ── Work-item cell (#1827) ────────────────────────────────────────────
@@ -236,25 +241,17 @@ function shortRef(ref) {
   return ref.replace(/^refs\/heads\//, '').replace(/^refs\/tags\//, '');
 }
 
-function NoMatchBadge() {
+// Same plain-text line as an outcome (#2524), marked as a warning.
+function NoMatchLine() {
+  const { marker, markerColor, textColor } = OUTCOME_TONES.noMatch;
   return (
-    <span
+    <div
       title={noMatchTooltip()}
-      style={{
-        display: 'inline-block',
-        padding: '1px 6px',
-        borderRadius: 'var(--eb-radius-full)',
-        fontSize: 'var(--eb-text-xs)',
-        fontWeight: 'var(--eb-font-medium)',
-        background: 'var(--eb-status-warning-bg)',
-        color: 'var(--eb-status-warning)',
-        border: '1px solid var(--eb-status-warning)',
-        whiteSpace: 'nowrap',
-        cursor: 'help',
-      }}
+      style={{ ...outcomeLineStyle, color: textColor, fontWeight: 'var(--eb-font-medium)', cursor: 'help' }}
     >
-      nobody's listening
-    </span>
+      <OutcomeMarker marker={marker} color={markerColor} />
+      <span style={outcomeTextStyle}>{NO_MATCH_LABEL}</span>
+    </div>
   );
 }
 
@@ -388,12 +385,13 @@ function ProcessedEventsView() {
       filterValue: (v) => [eventLabel(v), typeof v === 'string' ? v : ''].filter(Boolean).join(' ') },
     { key: 'actor', label: 'Actor', render: v => v || '—' },
     { key: 'outcomes', label: 'Outcomes', sortable: false, wrap: true, render: (v, row) => {
-      if (row.noMatchingTrigger) return <NoMatchBadge />;
+      if (row.noMatchingTrigger) return <NoMatchLine />;
       const list = Array.isArray(v) ? v : [];
+      // One outcome per line (#2524), spaced so each reads on its own.
       return (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, minWidth: 0 }}>
           {list.map((o, i) => (
-            <OutcomeChip key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} />
+            <OutcomeLine key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} />
           ))}
         </div>
       );

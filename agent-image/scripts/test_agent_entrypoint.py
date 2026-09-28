@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -344,6 +345,218 @@ class AskUserQuestionInterceptEndToEnd(unittest.TestCase):
         # The captured input renders through the existing helpers unchanged.
         self.assertIsNotNone(entrypoint._format_ask_user_question(ev["input"]))
         self.assertIsNotNone(entrypoint._ask_user_question_payload(ev["input"]))
+
+
+_AEE_ASK = Path(__file__).resolve().parent / "aee-ask"
+
+
+def _run_aee_ask(args, sentinel):
+    env = dict(os.environ)
+    env["AEE_ASK_FILE"] = str(sentinel)
+    return subprocess.run([sys.executable, str(_AEE_ASK), *args],
+                          capture_output=True, text=True, env=env, timeout=30)
+
+
+class AeeAskCli(unittest.TestCase):
+    """The `aee-ask` CLI facade (#2523): validates its own args and writes an
+    AskUserQuestion-shaped payload to the run-scoped sentinel file."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.sentinel = Path(self._tmp.name) / ".agent-studio" / "ask" / "t.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_ticket_example_writes_the_old_tool_input_shape(self):
+        proc = _run_aee_ask(["Which base branch?", "--header", "Branch",
+                             "--option", "main::default",
+                             "--option", "release::hotfix line"], self.sentinel)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("END YOUR TURN NOW", proc.stdout)
+        data = json.loads(self.sentinel.read_text(encoding="utf-8"))
+        self.assertEqual(data, {"questions": [{
+            "question": "Which base branch?",
+            "header": "Branch",
+            "options": [{"label": "main", "description": "default"},
+                        {"label": "release", "description": "hotfix line"}],
+        }]})
+        # Same card as the old MCP path: identical helpers, identical output.
+        payload = entrypoint._ask_user_question_payload(data)
+        self.assertEqual(payload["questions"][0]["header"], "Branch")
+        self.assertEqual([o["label"] for o in payload["questions"][0]["options"]],
+                         ["main", "release"])
+        self.assertIn("**main** — default", fmt(data))
+
+    def test_multi_sets_multiselect(self):
+        proc = _run_aee_ask(["Which checks?", "--multi", "--option", "unit",
+                             "--option", "e2e::slow"], self.sentinel)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(self.sentinel.read_text(encoding="utf-8"))
+        q = data["questions"][0]
+        self.assertIs(q["multiSelect"], True)
+        self.assertEqual(q["options"][0], {"label": "unit"})  # description optional
+        self.assertIn("pick more than one", fmt(data))
+
+    def test_invalid_input_fails_fast_and_queues_nothing(self):
+        cases = [
+            ["Which?"],                                   # no options
+            ["Which?", "--option", "::only a description"],  # empty label
+            ["Which?", "--option", ""],                   # empty option
+            ["Which?", "--option"],                       # missing value
+            ["--option", "a"],                            # no question
+            ["Which?", "--option", "a", "--option", "a"],  # duplicate label
+            ["Which?", "extra", "--option", "a"],         # unquoted question
+            ["Which?", "--option", "a", "--bogus"],       # unknown flag
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                proc = _run_aee_ask(args, self.sentinel)
+                self.assertEqual(proc.returncode, 2)
+                self.assertTrue(proc.stderr.strip())
+                self.assertNotIn("END YOUR TURN", proc.stdout)
+                self.assertFalse(self.sentinel.exists())
+
+    def test_a_second_call_in_the_same_turn_adds_a_question(self):
+        _run_aee_ask(["A?", "--option", "x"], self.sentinel)
+        _run_aee_ask(["B?", "--option", "y"], self.sentinel)
+        data = json.loads(self.sentinel.read_text(encoding="utf-8"))
+        self.assertEqual([q["question"] for q in data["questions"]], ["A?", "B?"])
+
+    def test_question_may_start_with_a_dash_after_double_dash(self):
+        proc = _run_aee_ask(["--option", "a", "--", "-x or -y?"], self.sentinel)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(self.sentinel.read_text(encoding="utf-8"))
+        self.assertEqual(data["questions"][0]["question"], "-x or -y?")
+
+
+# A stand-in for the `claude` CLI: emits stream-json for a turn in which the
+# model runs `aee-ask` through Bash (for real, against $AEE_ASK_FILE), then
+# behaves per FAKE_CLAUDE_MODE.
+_FAKE_CLAUDE = r'''#!/usr/bin/env python3
+import json, os, subprocess, sys, time
+sys.stdin.read()
+mode = os.environ.get("FAKE_CLAUDE_MODE", "obey")
+def out(obj):
+    sys.stdout.write(json.dumps(obj) + "\n"); sys.stdout.flush()
+def tool_use(tid, cmd):
+    out({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": tid,
+         "name": "Bash", "input": {"command": cmd}}]}})
+def tool_result(tid, text, err=False):
+    out({"type": "user", "message": {"content": [{"type": "tool_result",
+         "tool_use_id": tid, "content": text, "is_error": err}]}})
+out({"type": "system", "subtype": "init", "session_id": "sess-ask"})
+args = json.loads(os.environ["FAKE_ASK_ARGS"])
+tool_use("t1", "aee-ask ...")
+p = subprocess.run([sys.executable, os.environ["FAKE_AEE_ASK"], *args],
+                   capture_output=True, text=True)
+tool_result("t1", p.stdout + p.stderr, p.returncode != 0)
+if mode == "keep-working":
+    tool_use("t2", "rm -rf something")
+    time.sleep(30)   # must be terminated by the runner, never reach here
+    out({"type": "result", "subtype": "success", "result": "did more work", "session_id": "sess-ask"})
+    sys.exit(0)
+out({"type": "assistant", "message": {"content": [{"type": "text", "text": "trailing prose?"}]}})
+out({"type": "result", "subtype": "success", "result": "Which branch do you want?",
+     "session_id": "sess-ask", "usage": {}})
+'''
+
+
+class AeeAskEndToEnd(unittest.TestCase):
+    """CLI → sentinel → interception → terminal message (#2523 AC), driving the
+    real `_call_claude_once` against a fake `claude` that runs the real CLI."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.workdir = root / "agent"
+        self.workdir.mkdir()
+        bindir = root / "bin"
+        bindir.mkdir()
+        fake = bindir / "claude"
+        fake.write_text(_FAKE_CLAUDE.replace("#!/usr/bin/env python3",
+                                             f"#!{sys.executable}", 1), encoding="utf-8")
+        fake.chmod(0o755)
+        self.env = {
+            "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
+            "FAKE_AEE_ASK": str(_AEE_ASK),
+            "AEE_DISABLE_ASK_MCP": "1",  # the shipped default — no MCP needed
+        }
+        self.events = []
+        self._patches = [
+            patch.dict(os.environ, self.env),
+            patch.object(entrypoint, "_agent_workdir", return_value=self.workdir),
+            patch.object(entrypoint, "_append_event",
+                         side_effect=lambda _r, ev: self.events.append(ev)),
+            patch.object(entrypoint, "_spool_usage_record"),
+            patch.object(entrypoint, "_build_memory_hint", return_value="hint"),
+            patch.object(entrypoint, "_resolve_repo_dir", return_value=None),
+            patch.object(entrypoint, "_resolve_model_arg", return_value=None),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self._patches):
+            p.stop()
+        self._tmp.cleanup()
+
+    def _run(self, ask_args, mode="obey"):
+        os.environ["FAKE_ASK_ARGS"] = json.dumps(ask_args)
+        os.environ["FAKE_CLAUDE_MODE"] = mode
+        ctx = {}
+        text, session = entrypoint._call_claude_once(
+            "hi", "!room:local", "corr-1", None, None, 60, run_context=ctx)
+        return text, session, ctx
+
+    def _no_sentinel_left(self):
+        ask_dir = self.workdir / ".agent-studio" / "ask"
+        return not ask_dir.exists() or not any(ask_dir.iterdir())
+
+    def test_question_becomes_the_terminal_message_with_the_card_payload(self):
+        args = ["Which base branch?", "--header", "Branch",
+                "--option", "main::default", "--option", "release::hotfix line"]
+        text, session, ctx = self._run(args)
+        expected = {"questions": [{"question": "Which base branch?", "header": "Branch",
+                                   "options": [{"label": "main", "description": "default"},
+                                               {"label": "release", "description": "hotfix line"}]}]}
+        # Trailing model prose / result text is discarded — the question wins.
+        self.assertEqual(text, fmt(expected))
+        self.assertNotIn("trailing prose", text)
+        self.assertEqual(ctx["_askQuestion"], entrypoint._ask_user_question_payload(expected))
+        self.assertEqual(session, "sess-ask")  # resumable session id captured
+        self.assertTrue(self._no_sentinel_left())
+
+    def test_multi_question_reaches_chat(self):
+        text, _s, ctx = self._run(["Which checks?", "--multi",
+                                   "--option", "unit", "--option", "e2e"])
+        self.assertIn("pick more than one", text)
+        self.assertIn("_askQuestion", ctx)
+
+    def test_model_that_keeps_working_is_stopped_and_question_still_posted(self):
+        text, session, ctx = self._run(["Proceed?", "--option", "yes", "--option", "no"],
+                                       mode="keep-working")
+        self.assertIn("Proceed?", text)
+        self.assertNotIn("did more work", text)
+        self.assertEqual(session, "sess-ask")
+        self.assertIsNotNone(ctx.get("_askQuestion"))
+        self.assertTrue(self._no_sentinel_left())
+
+    def test_invalid_ask_does_not_end_the_turn(self):
+        text, _s, ctx = self._run(["Which?"])  # no options → usage error
+        self.assertEqual(text, "Which branch do you want?")
+        self.assertNotIn("_askQuestion", ctx)
+
+    def test_each_invocation_gets_its_own_sentinel_path(self):
+        seen = []
+        real = entrypoint._ask_sentinel_path
+        with patch.object(entrypoint, "_ask_sentinel_path",
+                          side_effect=lambda i: seen.append(real(i)) or seen[-1]):
+            self._run(["A?", "--option", "x"])
+            self._run(["B?", "--option", "y"])
+        self.assertEqual(len(set(seen)), 2)
+        for path in seen:
+            self.assertTrue(str(path).startswith(str(self.workdir / ".agent-studio" / "ask")))
 
 
 class BuildHarvestHint(unittest.TestCase):

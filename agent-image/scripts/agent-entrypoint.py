@@ -1392,6 +1392,49 @@ def _ask_user_mcp_config() -> str:
     })
 
 
+# ---- aee-ask CLI facade (#2523) ----
+#
+# The MCP delivery above is refused by the enterprise managed policy (hence
+# AEE_DISABLE_ASK_MCP=1 in the image), so the working path is the `aee-ask` CLI.
+# It validates its own arguments and writes an AskUserQuestion-shaped
+# `{"questions": [...]}` JSON to a per-invocation sentinel file whose path the
+# runner hands it via AEE_ASK_FILE. The runner never parses the Bash command
+# string: it keys on the sentinel's presence (checked after every tool_result
+# and once more after the CLI exits), then routes the payload through the same
+# render/persist path as the tool_use intercept. Per-invocation (not one fixed
+# path) so a concurrent DM turn and trigger run in the same container can never
+# pick up each other's question.
+_ASK_FILE_ENV = "AEE_ASK_FILE"
+
+
+def _ask_sentinel_path(invocation_id: str) -> Path:
+    """Run-scoped sentinel path the `aee-ask` CLI writes for this invocation."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", invocation_id or "") or uuid.uuid4().hex
+    return _agent_workdir() / STATE_DIR / "ask" / f"{safe}.json"
+
+
+def _read_ask_sentinel(path: Path) -> dict | None:
+    """The queued `{"questions": [...]}` payload, or None when there is no
+    sentinel or it carries nothing usable (a torn/garbled file is ignored rather
+    than surfaced as a half-rendered question)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and isinstance(data.get("questions"), list) and data["questions"]:
+        return data
+    return None
+
+
+def _clear_ask_sentinel(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"[Runner] could not remove ask sentinel {path}: {exc}", file=sys.stderr)
+
+
 def _is_ask_user_question_tool(name) -> bool:
     """True for the AskUserQuestion tool by its bare built-in name or its
     MCP-namespaced form (`mcp__<server>__AskUserQuestion`)."""
@@ -3270,6 +3313,12 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     env["AEE_ACTING_SENDER"] = _acting_sender_env_value(run_context)
     if resume_id:
         env["KNOWLEDGE_SESSION_ID"] = resume_id
+    # `aee-ask` sentinel for THIS invocation (#2523): the CLI writes the queued
+    # question here, the stream loop below picks it up. Cleared first so a stale
+    # file from a crashed earlier run can never surface as a fresh question.
+    ask_sentinel = _ask_sentinel_path(f"{correlation_id or 'run'}-{uuid.uuid4().hex[:8]}")
+    _clear_ask_sentinel(ask_sentinel)
+    env[_ASK_FILE_ENV] = str(ask_sentinel)
 
     # Git context for the usage record (#654): capture HEAD before the run so the
     # record can show what this invocation moved. Best-effort — never blocks the run.
@@ -3313,6 +3362,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     assistant_chunks: list[str] = []
     stderr_chunks: list[str] = []
     ask_question_input: dict | None = None  # first AskUserQuestion tool input (#447)
+    ask_via_cli = False  # question came from the `aee-ask` sentinel (#2523)
     context_usage: dict = {}  # last assistant-message usage this invocation (#509)
     bg_task_events: list[dict] = []  # raw background-task payloads for orphan detection
     # Coalesce the CLI's high-frequency thinking_tokens ticks into a throttled
@@ -3321,7 +3371,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
 
     def handle_line(line: str) -> None:
         nonlocal final_result, observed_session, ask_question_input, result_event
-        nonlocal last_api_status
+        nonlocal last_api_status, ask_via_cli
         for ev in _map_stream_json_line(line, correlation_id, context_usage,
                                         requested_model=model_arg):
             if (ev.get("type") == "system_event"
@@ -3362,6 +3412,25 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                     and ask_question_input is None
                     and isinstance(ev.get("input"), dict)):
                 ask_question_input = ev["input"]
+            elif ev.get("type") == "tool_use" and ask_via_cli:
+                # Hard end (#2523): the model was told to stop after `aee-ask`
+                # but is taking a further action. Stop the process so the
+                # question stays the terminal message and nothing runs on
+                # behind the human's back; the rc != 0 path below still posts it.
+                print("[Runner] aee-ask question pending — ending the turn "
+                      "(model kept working after asking)", file=sys.stderr)
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            elif (ev.get("type") == "tool_result"
+                    and ask_question_input is None):
+                # Keyed on the sentinel's presence, not on parsing the Bash
+                # command: the CLI has already validated + serialised it.
+                queued = _read_ask_sentinel(ask_sentinel)
+                if queued is not None:
+                    ask_question_input = queued
+                    ask_via_cli = True
 
     def drain_stderr():
         try:
@@ -3398,6 +3467,15 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
         tail = tt_throttle.flush()
         if tail is not None:
             _append_event(room_id, tail)
+        # Last look for an `aee-ask` sentinel whose tool_result never reached the
+        # stream (the race the ticket names), then consume it so it can never
+        # leak into a later turn.
+        if ask_question_input is None:
+            queued = _read_ask_sentinel(ask_sentinel)
+            if queued is not None:
+                ask_question_input = queued
+                ask_via_cli = True
+        _clear_ask_sentinel(ask_sentinel)
 
     rc = proc.returncode
     stderr_blob = "".join(stderr_chunks)
@@ -3462,7 +3540,8 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
         _user_stop_requested = False
         if ask_reply is not None and not was_user_stop:
             print("[Runner] AskUserQuestion captured — posting question to chat "
-                  "instead of the tool error", file=sys.stderr)
+                  "instead of the tool error"
+                  + (" (via aee-ask)" if ask_via_cli else ""), file=sys.stderr)
             return ask_reply, observed_session
         err = subprocess.CalledProcessError(rc, "claude", output=None, stderr=stderr_blob)
         err.user_aborted = was_user_stop  # type: ignore[attr-defined]

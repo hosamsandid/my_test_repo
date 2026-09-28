@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Shared CLI-contract conformance test (#1522).
 
-Exercises the five built-in agent CLIs — `aee-artifact`, `aee-emit`,
-`aee-wake`, `knowledge`, `gh-as-agent` — against the one shared contract documented in
+Exercises the six built-in agent CLIs — `aee-artifact`, `aee-emit`,
+`aee-wake`, `aee-ask`, `knowledge`, `gh-as-agent` — against the one shared contract documented in
 `docs/cli-contract.md` (concept `docs/plugin-system-concept.md` §4.5):
 
   * Discovery: `--help` / `-h` / `help` / bare invocation → exit 0 with the
@@ -38,6 +38,7 @@ CLIS = {
     "aee-artifact": [sys.executable, str(SCRIPTS / "aee-artifact")],
     "aee-emit": [sys.executable, str(SCRIPTS / "aee-emit")],
     "aee-wake": [sys.executable, str(SCRIPTS / "aee-wake")],
+    "aee-ask": [sys.executable, str(SCRIPTS / "aee-ask")],
     "knowledge": [sys.executable, str(SCRIPTS / "knowledge")],
     "gh-as-agent": ["bash", str(SCRIPTS / "gh-as-agent")],
 }
@@ -88,6 +89,7 @@ class UsageErrors(unittest.TestCase):
         cases = [
             ("aee-emit", ["ready"]),            # label but no --issue/--pr target
             ("aee-wake", ["--to"]),             # --to with no value
+            ("aee-ask", ["Which?"]),            # question but no --option
             ("aee-artifact", ["add", "only-name"]),  # missing <path>
             ("knowledge", ["add"]),             # missing <kind> <text>
             ("gh-as-agent", ["pr"]),            # missing --title (before any network)
@@ -162,6 +164,25 @@ class JsonOutput(unittest.TestCase):
         )
         self.assertEqual(code, 3, "it reached the unreachable-backend path, not a usage error")
         self.assertFalse(json.loads(out.strip())["ok"])
+
+
+    def test_aee_ask_json_roundtrip_and_usage_error(self):
+        # Backend-free by design (#2523): the question goes to a sentinel file.
+        with tempfile.TemporaryDirectory() as d:
+            sentinel = os.path.join(d, "ask.json")
+            code, out, _ = run("aee-ask", ["Go?", "--option", "yes", "--json"],
+                               env_extra={"AEE_ASK_FILE": sentinel})
+            self.assertEqual(code, 0)
+            obj = json.loads(out.strip())
+            self.assertTrue(obj["ok"])
+            self.assertEqual(obj["questions"], 1)
+            self.assertTrue(os.path.exists(sentinel))
+
+            code, out, _ = run("aee-ask", ["Go?", "--json"],
+                               env_extra={"AEE_ASK_FILE": sentinel + ".2"})
+            self.assertEqual(code, 2)
+            self.assertFalse(json.loads(out.strip())["ok"])
+            self.assertFalse(os.path.exists(sentinel + ".2"))
 
 
 class UnreachableBackend(unittest.TestCase):

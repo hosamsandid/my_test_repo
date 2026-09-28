@@ -1,10 +1,10 @@
 // ─── Non-route help wiring guard (E17 #1892, epic #1870 Phase 4) ─────────────
 //
-// The three surfaces this ticket reaches are not routes, so `help-coverage.test.js`
-// cannot see them: the Settings dialog, the first-run setup wizard, and the steps
-// inside the Agent Team Wizard. What can rot here is not content but *wiring* —
-// a fourth first-run step, a renamed wizard step, or a dropped `useHelpSubject`
-// call would each silently make a surface help-less again with no test failing.
+// The surfaces this ticket reaches are not routes, so `help-coverage.test.js`
+// cannot see them: the Settings dialog and the steps inside the Agent Team
+// Wizard. What can rot here is not content but *wiring* — a renamed wizard step
+// or a dropped `useHelpSubject` call would each silently make a surface
+// help-less again with no test failing.
 //
 // So this reads the real sources and asserts the wiring, with the two invariants
 // that actually matter:
@@ -105,36 +105,6 @@ test('every Agent Team Wizard step key is registered in help-routes.js', () => {
   }
 });
 
-// ── the first-run wizard: help for every step, sourced from existing topics ──
-
-const setupWizard = readSource('SetupWizard.jsx');
-
-test('the first-run wizard renders inline help for its current step', () => {
-  // It runs *instead of* the Shell, so the panel is not mounted — the help has to
-  // be rendered in the gate itself (AC2).
-  assert.match(setupWizard, /<SetupStepHelp stepId=\{stepId\} \/>/);
-  assert.match(setupWizard, /OVERLAY_SETUP_WIZARD/);
-  assert.doesNotMatch(
-    setupWizard, /openHelpFor/,
-    'openHelpFor would flip panel state behind a screen where no panel is mounted',
-  );
-});
-
-test('every first-run step has a context key, and it aliases an existing page topic', () => {
-  const ids = objectIds(setupWizard, 'STEPS');
-  assert.ok(ids && ids.length > 0, 'STEPS not found in SetupWizard.jsx');
-  for (const id of ids) {
-    const key = `wizard:setup#${id}`;
-    const entry = CONTEXT_KEYS[key];
-    assert.ok(entry, `${key} is a first-run step with no registered help context`);
-    assert.ok(
-      entry.alias,
-      `${key} must alias the route whose topic already covers it — the first-run flow `
-      + 'reuses existing topics rather than duplicating their prose (AC2)',
-    );
-  }
-});
-
 // ── the help panel never opens on its own (#2069) ────────────────────────────
 //
 // #1873 shipped a first-run auto-open nudge here: a route-keyed effect that
@@ -207,7 +177,7 @@ test('the auto-open decision helpers are gone from the pure core', () => {
 
 test('the panel-registration counter is gone with the nudge that needed it', () => {
   // Scope 3: `panelCountRef`/`registerHelpPanel` existed solely to keep the
-  // nudge from being spent on the first-run SetupWizard, which mounts no panel.
+  // nudge from being spent on a screen that mounts no panel.
   const ctx = stripComments(fs.readFileSync(path.join(HERE, '../context/HelperChatContext.jsx'), 'utf8'));
   const panel = stripComments(fs.readFileSync(path.join(HERE, '../components/HelperChatPanel.jsx'), 'utf8'));
   assert.doesNotMatch(ctx, /panelCountRef|registerHelpPanel/);

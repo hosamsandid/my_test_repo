@@ -163,27 +163,25 @@ const KNOWN_ROUTE_PATHS = new Set([...PAGE_ROUTES, ...ALLOWLIST]);
 
 // ── non-route help contexts (E17 #1892, docs/helper-chat-concept.md §3.2) ──
 //
-// Three help-worthy surfaces are not routes at all, so a pathname cannot address
-// them: the **Settings dialog** (an overlay on top of whatever page you are on),
-// the **first-run setup wizard** (rendered *instead of* the Shell, before any
-// route exists) and the **individual steps inside a wizard** (sub-states of one
+// Two kinds of help-worthy surface are not routes at all, so a pathname cannot
+// address them: **overlays** such as the Settings dialog (on top of whatever page
+// you are on) and the **individual steps inside a wizard** (sub-states of one
 // route). The help context therefore widens from a bare pathname to
 // `{ route, overlay, step }`, and a topic can claim any of these keys in the same
 // `routes:` front-matter list it claims a pathname in.
 //
 // A context key is namespaced so it can never collide with a pathname (which
 // always starts with `/`):
-//   `<kind>:<name>`   an overlay          — `modal:settings`, `wizard:setup`
+//   `<kind>:<name>`   an overlay          — `modal:settings`, `modal:skill-detail`
 //   `<base>#<state>`  a sub-state of a route or of an overlay — `/team-setup#process`
 //
 // Every key is listed here for the same reason every route is listed above: so a
-// key can only be typo'd or orphaned on purpose. `alias` points a key at the
-// route whose topic already answers it — that is how the first-run wizard gets
-// help "sourced from the same topic content used elsewhere" (#1892 AC2) without
-// a second copy of the prose.
+// key can only be typo'd or orphaned on purpose. An optional `alias` points a key
+// at the route whose topic already answers it, so a surface can reuse that
+// topic's prose without a second copy (#1892 AC2). No key uses one today
+// (#2532); the resolvers keep supporting it.
 const OVERLAY_KEYS = {
   'modal:settings': 'The Settings dialog (account menu → Settings).',
-  'wizard:setup': 'The first-run setup wizard, rendered before the Shell exists.',
   'modal:skill-detail': 'The skill detail side panel on the Skills page.',
   'modal:skills-merge': 'The Merge skills dialog on the Skills page.',
   'modal:knowledge-config': 'The Team knowledge configuration side panel on the Knowledge page.',
@@ -213,21 +211,12 @@ const OVERLAY_KEYS = {
 
 const CONTEXT_KEYS = {
   'modal:settings': { label: 'Settings dialog' },
-  // The dialog's three sections. Optional coverage, exactly like the wizard steps
-  // below: while no topic claims one, the resolver falls back to the dialog's own
+  // The dialog's three sections. Optional coverage, exactly like the Agent Team
+  // Wizard steps below: while no topic claims one, the resolver falls back to the dialog's own
   // topic, so the section keys are an extension point rather than a debt.
   'modal:settings#behavior': { label: 'Settings · Behavior' },
   'modal:settings#model': { label: 'Settings · Model' },
   'modal:settings#display': { label: 'Settings · Display' },
-  'wizard:setup': { label: 'First-run setup' },
-  // The first-run wizard's three steps reuse the topics the corresponding
-  // console pages already own — no duplicate prose (AC2). All three resolve:
-  // `/models` (E8) and the credentials topic E10 (#1884) gave `/ssh-keys` +
-  // `/github-tokens`. A step whose aliased topic is ever missing renders no help
-  // box rather than an empty one.
-  'wizard:setup#llm': { label: 'First-run · Model Provider', alias: '/models' },
-  'wizard:setup#ssh-key': { label: 'First-run · SSH Key', alias: '/ssh-keys' },
-  'wizard:setup#gh-token': { label: 'First-run · GitHub Token', alias: '/github-tokens' },
   // Agent Team Wizard steps (AC3). A step key is *optional* coverage by design:
   // while no topic claims it the resolver falls through to the wizard's own
   // route topic, so the panel is never emptier than it is today. #1888 owns the

@@ -3,9 +3,9 @@
 // ─── Non-route help-context guard (E17 #1892, helper-chat-concept.md §3.2) ───
 //
 // `help-coverage.test.js` guarantees every *route* is classified. This file does
-// the same job for the three surfaces that have no route at all — the Settings
-// dialog, the first-run setup wizard, and a wizard step — so a context key can
-// only be mistyped or orphaned on purpose:
+// the same job for the surfaces that have no route at all — overlays such as the
+// Settings dialog, and wizard steps — so a context key can only be mistyped or
+// orphaned on purpose:
 //
 //   • every key a shipped topic claims is registered in CONTEXT_KEYS,
 //   • every key is well-formed and its base is something the system knows,
@@ -182,20 +182,6 @@ test('AC3: a step topic wins over the wizard route topic when one exists', () =>
   assert.equal(fixture.topicForContext({ route: '/team-setup', step: 'process' })?.id, 'team-setup-process');
   assert.equal(fixture.topicForContext({ route: '/team-setup', step: 'review' })?.id, 'team-setup');
   assert.equal(fixture.topicForContext({ route: '/wizard/team', step: 'process' })?.id, 'team-setup-process');
-});
-
-test('AC2: a first-run wizard step resolves through its alias to the page topic', () => {
-  // No prose is duplicated for the wizard: `wizard:setup#llm` aliases /models.
-  const hit = fixture.resolveHelpContext({ route: '/', overlay: 'wizard:setup', step: 'llm' });
-  assert.equal(hit?.topic?.id, 'models');
-  assert.equal(hit.key, 'wizard:setup#llm');
-});
-
-test('AC2: a first-run step whose aliased topic does not exist resolves to nothing', () => {
-  // /ssh-keys is TOPIC_PENDING (#1884): the wizard shows no help box rather than
-  // an empty one, and needs no change when that topic lands.
-  const bare = buildRegistry([{ id: 'models', routes: ['/models'], title: 'M', body: 'x' }]);
-  assert.equal(bare.topicForContext({ route: '/', overlay: 'wizard:setup', step: 'ssh-key' }), null);
 });
 
 test('an unknown context resolves to null (the caller shows the Overview)', () => {

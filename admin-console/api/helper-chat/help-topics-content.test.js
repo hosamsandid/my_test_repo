@@ -431,8 +431,8 @@ const TOPIC_CONTENT = [
     id: 'credentials',
     routes: ['/ssh-keys', '/github-tokens', '/my-credentials'],
     // #1884 lifted the intro boxes and the FOUR duplicated "why both an SSH key
-    // and a GitHub token" notes (SSH Keys, GitHub Tokens, My Credentials and the
-    // SetupWizard's two credential steps). The topic additionally records what
+    // and a GitHub token" notes (SSH Keys, GitHub Tokens, My Credentials and two
+    // onboarding steps since removed). The topic additionally records what
     // no box said: the three ownership tiers, the strict personal privacy
     // guarantee, the per-operation-class runtime resolution order with
     // refuse-on-missing, and the rotate-in-place vs create-new-and-repoint split.

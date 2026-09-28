@@ -270,7 +270,7 @@ Every Phase-3 ticket follows the same shape:
 | **E7** | Access | Top intro box incl. the **Team vs Agent Team** distinction; roles (System/Team Admin/Member) |
 | **E8** | Model Providers | Top intro + the two auth-type descriptions + OAuth/probe dialog prose |
 | **E9** | MCP Servers | Top intro (servers + credentials + env pairing) + the "where does 'required' come from" InfoTip |
-| **E10** | Credentials & GitHub access | SSH Keys + GitHub Tokens + My Credentials intros + the duplicated **"why both / defense-in-depth"** prose + SetupWizard credential steps + success-dialog SSO instructions (author once, reuse) |
+| **E10** | Credentials & GitHub access | SSH Keys + GitHub Tokens + My Credentials intros + the duplicated **"why both / defense-in-depth"** prose + SetupWizard credential steps (that screen was removed in #2532) + success-dialog SSO instructions (author once, reuse) |
 | **E11** | Token Usage | Intro banner + `COST_NOTE` + `TIER_SIGNAL_HELP` attribution-tier explainer |
 | **E12** | GitHub Event Log | Intro (observational log; processed vs pending) |
 | **E13** | Maintenance Mode | Intro + the "while active" behaviour box |
@@ -396,9 +396,9 @@ scrolls to the requested heading, so a chapter with no "?" is one scroll from wh
 link lands — never unreachable. A child should therefore give a "?" to a **surface**, and let
 the shared concept chapters be found by reading on. Two things a multi-route child must check
 that a single-route one need not: whether an **alias** in `CONTEXT_KEYS` renders the topic
-somewhere else (the SetupWizard's two credential steps alias `/ssh-keys` and `/github-tokens`
-and render the *whole body* inline via `SetupStepHelp`, so expanding the topic lengthens that
-collapsible too), and whether a page's "?" sits inside a permission branch (My Credentials'
+somewhere else (when this was written, two onboarding steps aliased `/ssh-keys` and
+`/github-tokens` and rendered the *whole body* inline; that screen was removed in #2532 and no
+key carries an alias today), and whether a page's "?" sits inside a permission branch (My Credentials'
 must stay outside its `canOwn` branch — the single-admin who cannot own personal credentials
 is exactly the reader who needs the chapter explaining why).
 

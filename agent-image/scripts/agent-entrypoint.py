@@ -7273,6 +7273,14 @@ async def run_dm_listener() -> None:
                     file=sys.stderr,
                 )
 
+            # Deterministic KB harvest for interactive DMs (issue #2517, Phase 1):
+            # ask this turn to END its reply with a fenced ```knowledge block, the
+            # same instruction the per-invocation trigger path adds via learn_hint.
+            # Appended to the per-turn prompt (NOT folded into _build_memory_hint)
+            # so the byte-identical parity with orchestrator/prompt-assembly.js's
+            # buildMemoryHint stays untouched. Empty below autonomy 1 → no change.
+            send_body += build_harvest_block_hint(_knowledge_autonomy_level())
+
             _append_event(room_id, {
                 "type": "claude.invoke",
                 "correlationId": correlation_id,
@@ -7302,6 +7310,16 @@ async def run_dm_listener() -> None:
                 )
             finally:
                 _bump_active(-1, session)
+
+            # Deterministic KB harvest for interactive DMs (issue #2517, Phase 1):
+            # parse the ```knowledge block this turn emitted, record each lesson in
+            # the shared KB, and strip the block so the user never sees it — the
+            # same runtime step the per-invocation path runs. Strip BEFORE the
+            # empty/whitespace fallback below so it sees the stripped text.
+            # Internally no-ops (and returns the text unchanged) below autonomy 1.
+            result = await asyncio.to_thread(
+                _harvest_shared_lessons, result, correlation_id
+            )
 
             # Runtime self-correction for orphaned background tasks (#2277): a
             # chat/DM turn is never itself a correction (that only ever arrives

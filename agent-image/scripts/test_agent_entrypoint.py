@@ -5759,5 +5759,49 @@ class BgOrphanCorrectionDispatchPlacement(unittest.TestCase):
         self.assertLess(call_site, check_site)
 
 
+class DmKnowledgeHarvestWiring(unittest.TestCase):
+    """#2517 Phase 1: the interactive DM path must add the harvest-block
+    instruction to the per-turn prompt AND run the deterministic harvest after
+    the call, mirroring the per-invocation trigger path. `on_message` is a nested
+    async Matrix listener with no dedicated harness in this suite, so — like the
+    sibling placement guards above — the wiring facts are read off the module
+    source. Each is a SILENT failure otherwise: no block hint / no harvest call
+    means DM turns quietly stop feeding the shared knowledge base."""
+
+    SRC = _MODULE_PATH.read_text(encoding="utf-8")
+
+    def _dm_body(self):
+        start = self.SRC.index("async def on_message")
+        end = self.SRC.index("async def ", start + 1)
+        return self.SRC[start:end]
+
+    def test_block_hint_appended_to_the_prompt_before_the_invoke_event(self):
+        body = self._dm_body()
+        append_site = body.index(
+            "send_body += build_harvest_block_hint(_knowledge_autonomy_level())")
+        invoke_site = body.index('"type": "claude.invoke"')
+        # The prompt is mutated before the char-count is logged, so promptChars
+        # reflects what the model actually sees.
+        self.assertLess(append_site, invoke_site)
+
+    def test_harvest_runs_after_the_call_and_before_the_reply_fallback(self):
+        body = self._dm_body()
+        call_site = body.index(
+            "_call_claude, send_body, room_id, correlation_id, blueprint_id")
+        harvest_site = body.index(
+            "_harvest_shared_lessons, result, correlation_id")
+        fallback_site = body.index("reply = result if (result and result.strip())")
+        # After the call (so there is a reply to strip) and before the empty
+        # fallback (so the fallback sees the stripped text).
+        self.assertLess(call_site, harvest_site)
+        self.assertLess(harvest_site, fallback_site)
+
+    def test_harvest_uses_the_dm_turns_correlation_id(self):
+        # The concept keys DM lessons on the Matrix event id of the message that
+        # started the turn — the same `correlation_id` used everywhere else here.
+        body = self._dm_body()
+        self.assertIn("_harvest_shared_lessons, result, correlation_id", body)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -396,9 +396,9 @@ scrolls to the requested heading, so a chapter with no "?" is one scroll from wh
 link lands — never unreachable. A child should therefore give a "?" to a **surface**, and let
 the shared concept chapters be found by reading on. Two things a multi-route child must check
 that a single-route one need not: whether an **alias** in `CONTEXT_KEYS` renders the topic
-somewhere else (the SetupWizard's two credential steps alias `/ssh-keys` and `/github-tokens`
-and render the *whole body* inline via `SetupStepHelp`, so expanding the topic lengthens that
-collapsible too), and whether a page's "?" sits inside a permission branch (My Credentials'
+somewhere else (when this was written, two onboarding steps aliased `/ssh-keys` and
+`/github-tokens` and rendered the *whole body* inline; that screen was removed in #2532 and no
+key carries an alias today), and whether a page's "?" sits inside a permission branch (My Credentials'
 must stay outside its `canOwn` branch — the single-admin who cannot own personal credentials
 is exactly the reader who needs the chapter explaining why).
 

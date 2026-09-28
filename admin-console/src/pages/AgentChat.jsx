@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useParams, useNavigate, useSearchParams } from 'react-router';
+import { useParams, useNavigate, useSearchParams, useLocation } from 'react-router';
 import { MessageCircle, Loader2, Plus, Upload, Eye, EyeOff, Users } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { usePageActions } from '../context/PageActionsContext';
@@ -10,7 +10,8 @@ import { AgentRosterProvider, useAgentRoster } from '../context/AgentRosterConte
 import AgentList, { buildGroups } from './agent-chat/AgentList';
 import RailLifecycleHost from './agent-chat/RailLifecycleHost.jsx';
 import { loadShowDisabled, saveShowDisabled, matrixAgentsUrl } from './agent-chat/rail-lifecycle.js';
-import { isChatOpenable } from './agent-lifecycle/agent-lifecycle-menu.js';
+import { isChatOpenable, agentState } from './agent-lifecycle/agent-lifecycle-menu.js';
+import { revealTargetFrom, isAwaitingReveal, revealPlan, revealEmptyStateCopy, REVEAL_WAIT_MS, REVEAL_RETRY_MS } from './agent-chat/reveal-agent.js';
 import ChatPanel from './agent-chat/ChatPanel';
 import RightRail from './agent-chat/RightRail';
 import AgentSettingsPanel from './agent-chat/AgentSettingsPanel';
@@ -572,6 +573,36 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
     }
   }, [agents, agentId]);
   const agentRemoved = !!agentId && !!agents && !routedAgent && seenAgentIdRef.current === agentId;
+
+  // #2521: arriving from the Flow Editor's Create-team confirmation, the route
+  // names the new team's first agent and the router state asks to reveal it
+  // (see `reveal-agent.js`). The roster may not carry the new team yet, so the
+  // unknown-id bounce below is held — with explicit refetches — until it
+  // appears or `REVEAL_WAIT_MS` passes; then the row is made visible once.
+  const location = useLocation();
+  const revealId = revealTargetFrom(location.state, agentId);
+  const [revealExpiredFor, setRevealExpiredFor] = useState(null);
+  const awaitingReveal = isAwaitingReveal(revealId, agents, revealExpiredFor);
+  useEffect(() => {
+    if (!awaitingReveal) return;
+    const retry = setInterval(() => { refetch(); }, REVEAL_RETRY_MS);
+    const giveUp = setTimeout(() => setRevealExpiredFor(revealId), REVEAL_WAIT_MS);
+    return () => { clearInterval(retry); clearTimeout(giveUp); };
+  }, [awaitingReveal, revealId, refetch]);
+  const [revealRequest, setRevealRequest] = useState(null);
+  useEffect(() => {
+    if (!revealId || !routedAgent) return;
+    const { resetFilter } = revealPlan(routedAgent, listFilter);
+    if (resetFilter) setListFilter({ kind: 'all' });
+    setRevealRequest({ id: revealId, ts: Date.now() });
+    // Consume the state so a reload/back does not reveal (or wait) again.
+    navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
+  }, [revealId, routedAgent, listFilter, navigate, location.pathname, location.search]);
+  // A reveal is for the arrival only — moving to another chat drops it, so a
+  // later re-expand of the same group does not scroll back to that row.
+  useEffect(() => {
+    setRevealRequest(prev => (prev && prev.id !== agentId ? null : prev));
+  }, [agentId]);
   // D2: keep the last known snapshot on screen instead of falling back to the
   // unrelated "pick an agent" empty state — an inline notice (rendered by
   // `ChatPanel` via `removedFromRoster`) replaces the live data instead, and
@@ -649,9 +680,11 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
   useEffect(() => {
     if (!loading && agentId && agents && !agents.find(a => a.id === agentId)) {
       if (seenAgentIdRef.current === agentId) return;
+      // #2521: a just-created agent the roster has not picked up yet.
+      if (awaitingReveal) return;
       navigate('/chats', { replace: true });
     }
-  }, [agentId, agents, loading, navigate]);
+  }, [agentId, agents, loading, navigate, awaitingReveal]);
 
   // Restore last-opened agent on mount when no `:agentId` is in the URL and
   // a stored value still exists in the loaded agent list. We use `replace`
@@ -869,6 +902,7 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
               memberships={memberships}
               directory={directory}
               viewerId={viewerId}
+              revealRequest={revealRequest}
             />
           )}
         </div>
@@ -921,7 +955,13 @@ function AgentChatInner({ showDisabled, setShowDisabled }) {
                 removedFromRoster={agentRemoved}
               />
             ) : (
-              <EmptyState />
+              <EmptyState
+                // #2521: say what is happening instead of "pick an agent" while
+                // a just-created agent is awaited, or when the routed agent is
+                // a not-yet-provisioned stub (it has no chat to open).
+                waitingForNewAgent={awaitingReveal}
+                stubAgent={routedAgent && agentState(routedAgent) === 'stub' ? routedAgent : null}
+              />
             )}
           </div>
 
@@ -1116,9 +1156,11 @@ function FilterSelect({ agents, filter, onChange }) {
  * Centered "pick an agent" card shown when no `:agentId` is in the route.
  * Mirrors the empty-state design of other admin-console pages: lucide icon,
  * primary line, secondary help text, all on a soft surface with a subtle
- * border so it doesn't feel like a 404 page.
+ * border so it doesn't feel like a 404 page. #2521 swaps the copy while a
+ * just-created agent is awaited, or when the routed agent is a stub.
  */
-function EmptyState() {
+function EmptyState({ waitingForNewAgent = false, stubAgent = null }) {
+  const copy = revealEmptyStateCopy({ waiting: waitingForNewAgent, stubAgent });
   return (
     <div style={{
       flex: 1,
@@ -1155,14 +1197,14 @@ function EmptyState() {
           fontWeight: 'var(--eb-font-semibold)',
           color: 'var(--eb-text-primary)',
         }}>
-          Pick an agent on the left to start chatting
+          {copy ? copy.title : 'Pick an agent on the left to start chatting'}
         </div>
         <div style={{
           fontSize: 'var(--eb-text-sm)',
           color: 'var(--eb-text-muted)',
           lineHeight: 1.5,
         }}>
-          Replies stream in real time as the agent thinks.
+          {copy ? copy.hint : 'Replies stream in real time as the agent thinks.'}
         </div>
       </div>
     </div>

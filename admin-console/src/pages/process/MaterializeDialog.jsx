@@ -4,8 +4,8 @@ import SidePanel from '../../components/SidePanel';
 import { apiCall } from '../../hooks/useApi';
 import { describeMaterializeError } from './materialize-error.js';
 import LaunchStep from './LaunchStep';
-import { slugify } from './launch-team.js';
-import { CREATE_TEAM_DIALOG_TITLE, OPEN_TEAM_LABEL } from './create-team-copy.js';
+import { slugify, agentChatTargetFor } from './launch-team.js';
+import { CREATE_TEAM_DIALOG_TITLE, OPEN_IN_AGENT_CHAT_LABEL } from './create-team-copy.js';
 
 // Turn a process-template bundle — an imported file or the open draft — into a
 // real team (#334). Titled **Create team** since #2053: it used to be
@@ -33,6 +33,9 @@ export default function MaterializeDialog({ bundle, onClose, onDone, onCreated, 
   // `null` means "still loading" (undefined once resolved), so LaunchStep's
   // `hasUsableProvider !== false` never blocks prematurely.
   const [hasUsableProvider, setHasUsableProvider] = useState(undefined);
+  // The completed launch's result, kept for the completion action (#2521):
+  // the server's echoed `teamId` is the authoritative one to route by.
+  const [createdResult, setCreatedResult] = useState(null);
 
   // A draft opened from a live team (#348) remembers its origin so we can default
   // to extending it rather than creating a colliding new team.
@@ -131,18 +134,24 @@ export default function MaterializeDialog({ bundle, onClose, onDone, onCreated, 
         // the button again was safe. The panel now stays on the result card,
         // which names the team, plus the notice the parent supplies, and the
         // navigation is an explicit click.
-        onComplete={(result) => onCreated?.(result)}
+        onComplete={(result) => { setCreatedResult(result); onCreated?.(result); }}
         hasUsableProvider={hasUsableProvider}
         completionNotice={createdNotice}
+        // #2521: the way onward is Agent Chat on the team's first agent —
+        // talking to the new agents is what comes next — not the team's canvas
+        // the user is already looking at, so there is no "back to the Flow
+        // Editor" action at all. `onDone` still runs first so the dialog and
+        // the draft/import-preview state are cleaned up exactly as before.
         completionAction={(
           <button
             type="button"
             onClick={() => {
               onDone?.();
-              navigate(`/process/${encodeURIComponent(values.teamId)}`);
+              const { path, state } = agentChatTargetFor(bundle, createdResult?.teamId || values.teamId);
+              navigate(path, { state });
             }}
             style={primaryAction}
-          >{OPEN_TEAM_LABEL}</button>
+          >{OPEN_IN_AGENT_CHAT_LABEL}</button>
         )}
         leftAction={<button type="button" onClick={onClose} style={ghost}>Cancel</button>}
       />

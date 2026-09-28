@@ -296,3 +296,25 @@ export async function runLaunchStream({ body, onEvent, url = '/api/teams/stream'
     try { onEvent(JSON.parse(tail)); } catch { /* ignore */ }
   }
 }
+
+// Where the Create-team confirmation's completion action lands (#2521): Agent
+// Chat, on the team's FIRST agent — the member created from `bundle.roles[0]`.
+// The id mirrors the server's `planMembers` (api.js): a bundle role always
+// materializes as a single `<teamId>-<roleId>` member (the processTemplate path
+// never sets a count), so the target is known without waiting on the roster.
+// The router state asks Agent Chat to reveal the row (expand its group/stub
+// section, scroll to it) and to wait for it if the background roster refresh
+// has not picked the new team up yet. A bundle with no usable first role falls
+// back to the team itself (`/chats/<teamId>` — its configuration surface,
+// #2235); no team id at all falls back to plain `/chats`.
+export function agentChatTargetFor(bundle, teamId) {
+  const team = typeof teamId === 'string' ? teamId.trim() : '';
+  if (!team) return { path: '/chats', state: null };
+  const firstRole = Array.isArray(bundle?.roles) ? bundle.roles[0] : null;
+  const roleId = typeof firstRole?.id === 'string' ? firstRole.id.trim() : '';
+  const agentId = roleId ? `${team}-${roleId}` : team;
+  return {
+    path: `/chats/${encodeURIComponent(agentId)}`,
+    state: { revealAgentId: agentId },
+  };
+}

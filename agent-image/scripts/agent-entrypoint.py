@@ -2430,6 +2430,179 @@ def _harvest_shared_lessons(text: str, correlation_id: str) -> str:
         return text
 
 
+# ---- End-of-session consolidation harvest for interactive DMs (issue #2518) ---
+#
+# Phase 1 (#2517) harvests per DM turn — opportunistic but fragmentary. This
+# Phase 2 pass looks at a whole (recent) idle session ONCE: when a DM room has
+# been quiet for the configured interval AND had real activity since the last
+# consolidation, a dedicated non-interactive run reflects over the transcript to
+# record durable, coherent lessons and tidy the private `memory/*.md` notebook —
+# and posts NOTHING to the room. Gated on autonomy >= 1 (KB on), skipped in
+# Maintenance Mode, serialized on the WorkspaceGate, and driven through
+# `_call_claude_once` so the room's `--resume` session pointer is never moved.
+# The idle/new-activity decision and the prompt assembly are pure helpers below
+# (unit tested); the timer/loop that fires them lives in `run_dm_listener`.
+
+_DM_SESSION_IDLE_MINUTES_DEFAULT = 20
+
+
+def _dm_session_idle_seconds() -> int:
+    """Idle window (seconds) after which an inactive DM room is consolidated.
+
+    Configured via ``DM_SESSION_IDLE_MINUTES`` (default 20). A value <= 0
+    disables the consolidation pass entirely (returns 0). Any positive value is
+    honoured but floored at 60 s so a mis-set tiny value can't fire a
+    consolidation between two turns of one live conversation. A missing or
+    malformed value falls back to the default."""
+    raw = os.environ.get("DM_SESSION_IDLE_MINUTES")
+    try:
+        minutes = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        minutes = _DM_SESSION_IDLE_MINUTES_DEFAULT
+    if minutes <= 0:
+        return 0
+    return max(60, int(minutes * 60))
+
+
+def _dm_consolidation_due(state, now: float, idle_seconds: int) -> bool:
+    """Decide whether a DM room's session should be consolidated now (pure).
+
+    ``state`` is the per-room activity record: ``lastActivityAt`` (epoch seconds
+    of the most recent human message OR agent reply, 0 if none) and
+    ``lastConsolidatedActivityAt`` (the ``lastActivityAt`` captured at the last
+    consolidation, 0 if never). Due iff the feature is enabled, the room has seen
+    activity, it has been idle for at least ``idle_seconds``, AND there is new
+    activity since the last consolidation. The last clause is what makes an idle
+    room with nothing new a no-op and guarantees exactly one pass per session:
+    the caller sets ``lastConsolidatedActivityAt = lastActivityAt`` after firing,
+    so it only re-arms once a fresh turn bumps ``lastActivityAt`` again."""
+    if idle_seconds <= 0:
+        return False
+    if not isinstance(state, dict):
+        return False
+    last_activity = state.get("lastActivityAt") or 0.0
+    if last_activity <= 0:
+        return False
+    if (now - last_activity) < idle_seconds:
+        return False
+    last_consolidated = state.get("lastConsolidatedActivityAt") or 0.0
+    return last_activity > last_consolidated
+
+
+def render_consolidation_transcript(events, max_chars: int = 12000) -> str:
+    """Render the recent session events into a compact User/Assistant transcript
+    for the consolidation prompt (pure). Keeps the MOST RECENT turns within the
+    ~``max_chars`` budget (~3k tokens, aligned with the digest philosophy) —
+    older turns are dropped from the front. Recognises the two text-bearing
+    session-log events: ``message.received`` (human ``body``) and ``result``
+    (the agent's final ``result`` text). Robust to non-dict / text-less rows."""
+    turns = []
+    for ev in events if isinstance(events, list) else []:
+        if not isinstance(ev, dict):
+            continue
+        t = ev.get("type")
+        if t == "message.received":
+            body = ev.get("body")
+            if isinstance(body, str) and body.strip():
+                turns.append("User: " + body.strip())
+        elif t == "result":
+            r = ev.get("result")
+            if isinstance(r, str) and r.strip():
+                turns.append("Assistant: " + r.strip())
+    # Accumulate from the newest backwards so the kept window is the tail.
+    kept: list[str] = []
+    total = 0
+    for turn in reversed(turns):
+        add = len(turn) + (2 if kept else 0)  # "\n\n" join cost
+        if kept and total + add > max_chars:
+            break
+        kept.append(turn)
+        total += add
+    kept.reverse()
+    return "\n\n".join(kept)
+
+
+def build_consolidation_prompt(transcript_window: str, autonomy_level: int) -> str:
+    """Assemble the end-of-session consolidation / reflection prompt (pure, #2518).
+
+    Reflection + harvest ONLY: the run records durable, coherent lessons that
+    only become clear at the end of a working session, consolidates the private
+    ``memory/*.md`` notebook, and stays SILENT — its reply is discarded, treated
+    like a ``[PASS]``. The fenced ```knowledge block instruction
+    (``build_harvest_block_hint``) is appended so the runtime harvests the block
+    deterministically, exactly as every other run does; it also carries the
+    "knowledge search first to avoid restating" contract that dedups against the
+    Phase 1 per-turn harvest."""
+    window = transcript_window if isinstance(transcript_window, str) else ""
+    base = (
+        "You are running an automated END-OF-SESSION CONSOLIDATION pass over a "
+        "direct-message working session that has just gone idle. There is NO "
+        "human reading right now and you must post NOTHING user-facing — your "
+        "reply is discarded. This is a reflection/harvest run, not a chat turn.\n\n"
+        "Do exactly two things, quietly:\n"
+        "1. Reflect over the whole recent transcript below and consolidate your "
+        "private episodic memory: update memory/context.md, memory/log.md and the "
+        "other memory/*.md files with a concise, coherent summary of what "
+        "happened and any durable lessons that only became clear across the "
+        "session. Update entries in place — never duplicate an existing one.\n"
+        "2. Capture durable, team-useful lessons (project conventions, "
+        "environment facts, key entities) for the shared knowledge base. Run "
+        'knowledge search "<topic>" FIRST so you never restate something already '
+        "recorded earlier this session or by a teammate.\n\n"
+        "Keep it tight: record only what holds BEYOND this one session — no "
+        "chat-specific or one-off detail. If there is nothing durable to "
+        "consolidate, just make no changes.\n\n"
+        "--- RECENT SESSION TRANSCRIPT (oldest first, may be truncated) ---\n"
+        f"{window}\n"
+        "--- END TRANSCRIPT ---"
+    )
+    return base + build_harvest_block_hint(autonomy_level)
+
+
+def _read_session_events_tail(room_id: str, max_lines: int = 400) -> list:
+    """Read the last ``max_lines`` JSON events from a room's session log
+    (``sessions/<roomId>.jsonl``), oldest-first. Best-effort: a missing or
+    unreadable file yields ``[]`` and never raises. Malformed lines are skipped.
+    IO shell around the pure ``render_consolidation_transcript``."""
+    try:
+        path = _session_log_file(room_id)
+        if not path.exists():
+            return []
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines[-max_lines:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def _fetch_maintenance_active() -> bool:
+    """Best-effort platform Maintenance-Mode check (blocking; call via
+    ``asyncio.to_thread``). Mirrors ``TriggerScheduler._maintenance_active``'s
+    fail-open-to-inactive posture — the state file lives outside this agent's
+    mounted subtree, so we ask the orchestrator over the internal channel. Any
+    failure reads as "not active"; the consolidation caller re-checks each tick,
+    so a transient miss just defers, never fires, a pass during maintenance."""
+    try:
+        url = f"{ORCHESTRATOR_INTERNAL_URL.rstrip('/')}/internal/maintenance-mode"
+        req = urllib.request.Request(url, method="GET", headers=_internal_headers())
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status != 200:
+                return False
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        return bool(isinstance(data, dict) and data.get("active"))
+    except Exception:
+        return False
+
+
 # ---- Claude invocation (stream-json + session resumption) ----
 
 def _resolve_model_arg() -> str | None:
@@ -7133,6 +7306,13 @@ async def run_dm_listener() -> None:
     # so both paths share the *same* gate: chat turns queue behind a running
     # loop or an in-flight trigger, and vice versa, in the one workspace.
     workspace_gate = WorkspaceGate()
+    # End-of-session consolidation harvest (#2518): per-room activity clock.
+    # room_id -> {"lastActivityAt": epoch, "lastConsolidatedActivityAt": epoch}.
+    # In-memory for this listener process — a restart resets it, so no
+    # consolidation fires until fresh activity arrives, which is the desired
+    # best-effort posture. Bumped on every human message and every agent reply
+    # (see on_message); drained by the consolidation_loop timer below.
+    dm_activity: dict[str, dict] = {}
 
     async def joined_members(room_id: str) -> list[str]:
         cached = member_cache.get(room_id)
@@ -7211,6 +7391,13 @@ async def run_dm_listener() -> None:
             return
         if not await is_human_sender(room_id, sender):
             return
+
+        # End-of-session consolidation (#2518): stamp this room's activity clock
+        # at the moment a human message ARRIVES — before the workspace gate, so a
+        # message that lands while a consolidation (or loop) holds the gate still
+        # re-arms the next session's pass. Turn end is stamped again after the
+        # reply is posted below.
+        dm_activity.setdefault(room_id, {})["lastActivityAt"] = time.time()
 
         # #1157: a chat turn is a workspace-touching run, so it serializes on
         # the same agent-wide gate as triggers and loops — it no longer runs
@@ -7377,6 +7564,9 @@ async def run_dm_listener() -> None:
                 raise
 
             _write_last_response_at()
+            # Consolidation (#2518): stamp turn-end so the idle clock counts from
+            # the reply, not the incoming message.
+            dm_activity.setdefault(room_id, {})["lastActivityAt"] = time.time()
             _append_event(room_id, {
                 "type": "message.posted",
                 "correlationId": correlation_id,
@@ -7424,6 +7614,102 @@ async def run_dm_listener() -> None:
         finally:
             workspace_gate.release_chat_turn()
 
+    async def _consolidate_room(room_id: str, state: dict,
+                                idle_seconds: int) -> None:
+        """Run one end-of-session consolidation pass for an idle DM room (#2518).
+
+        Serializes on the shared workspace gate, feeds a reflection/harvest-only
+        prompt over the recent transcript through the NON-INTERACTIVE
+        `_call_claude_once` (so the room's `--resume` pointer is never moved),
+        harvests the emitted ```knowledge block, and posts NOTHING. Best-effort:
+        any failure is logged and the room is still marked consolidated up to the
+        snapshot so the pass fires exactly once per session."""
+        # Snapshot the activity we're consolidating up to. Marked done in the
+        # finally regardless of outcome (like a [PASS]); a turn arriving mid-run
+        # bumps lastActivityAt past this and re-arms the next session's pass.
+        snapshot = state.get("lastActivityAt") or 0.0
+        correlation_id = f"consolidation:{uuid.uuid4().hex}"
+        # #1157: take the one workspace gate so this never overlaps a live chat
+        # turn, a trigger, or a loop iteration in the single clone.
+        async with workspace_gate.acquire():
+            # A turn may have landed while we queued for the gate — re-check
+            # under the gate so a room that is active again is left alone
+            # ("not while a turn is in flight" AC).
+            if not _dm_consolidation_due(dm_activity.get(room_id),
+                                         time.time(), idle_seconds):
+                return
+            try:
+                events = await asyncio.to_thread(_read_session_events_tail, room_id)
+                window = render_consolidation_transcript(events)
+                if not window.strip():
+                    print(f"[Runner:{agent_id}] consolidation: empty transcript "
+                          f"for {room_id}, skipping", file=sys.stderr)
+                    return
+                prompt = build_consolidation_prompt(
+                    window, _knowledge_autonomy_level())
+                print(f"[Runner:{agent_id}] DM session consolidation for {room_id} "
+                      f"({len(window)} transcript chars)", file=sys.stderr)
+                # resume_id=None → fresh non-interactive run; the reply is
+                # harvested for its ```knowledge block then DISCARDED (silent).
+                text, _observed = await asyncio.to_thread(
+                    _call_claude_once, prompt, room_id, correlation_id, None,
+                    blueprint_id, CLAUDE_TIMEOUT_SEC, _base_run_context(),
+                )
+                await asyncio.to_thread(
+                    _harvest_shared_lessons, text, correlation_id)
+            except Exception as exc:  # never break the listener
+                print(f"[Runner:{agent_id}] consolidation failed for {room_id}: "
+                      f"{exc}", file=sys.stderr)
+            finally:
+                cur = dm_activity.get(room_id)
+                if isinstance(cur, dict):
+                    cur["lastConsolidatedActivityAt"] = max(
+                        cur.get("lastConsolidatedActivityAt") or 0.0, snapshot)
+
+    async def consolidation_loop() -> None:
+        """Timer that fires `_consolidate_room` for DM rooms that have gone idle
+        with new activity since their last consolidation (#2518). Fully gated on
+        the KB being on (autonomy >= 1) and on Maintenance Mode; both are
+        re-checked every tick so a live change takes effect without a restart."""
+        idle_seconds = _dm_session_idle_seconds()
+        if idle_seconds <= 0:
+            print(f"[Runner:{agent_id}] DM session consolidation disabled "
+                  f"(DM_SESSION_IDLE_MINUTES<=0)", file=sys.stderr)
+            return
+        # Poll frequently enough to be responsive, cheaply — a fraction of the
+        # idle window, clamped to [15s, 60s].
+        check_interval = min(60.0, max(15.0, idle_seconds / 4))
+        while not _shutdown.is_set():
+            try:
+                await asyncio.sleep(check_interval)
+            except asyncio.CancelledError:
+                break
+            if _shutdown.is_set():
+                break
+            # No KB checkout / autonomy 0 → the whole pass is a no-op (AC).
+            if _knowledge_autonomy_level() < 1:
+                continue
+            now = time.time()
+            due = [rid for rid, st in list(dm_activity.items())
+                   if _dm_consolidation_due(st, now, idle_seconds)]
+            if not due:
+                continue
+            # Never fire in Maintenance Mode — leave the rooms due for after it.
+            try:
+                if await asyncio.to_thread(_fetch_maintenance_active):
+                    continue
+            except Exception:
+                pass
+            for room_id in due:
+                if _shutdown.is_set():
+                    break
+                st = dm_activity.get(room_id)
+                # Re-check under the current clock: a turn may have landed
+                # between the scan and here, making it no longer idle.
+                if not _dm_consolidation_due(st, time.time(), idle_seconds):
+                    continue
+                await _consolidate_room(room_id, st, idle_seconds)
+
     async def save_token_callback(response):
         if isinstance(response, SyncResponse) and response.next_batch:
             _save_next_batch(response.next_batch)
@@ -7463,6 +7749,11 @@ async def run_dm_listener() -> None:
             )
             scheduler = None
 
+    # End-of-session consolidation timer (#2518). A standalone background task —
+    # independent of the trigger scheduler so it runs even if the scheduler fails
+    # to start — that fires a silent harvest/reflection pass for idle DM rooms.
+    consolidation_task = asyncio.create_task(consolidation_loop())
+
     _DM_LOOP_RUNNING = True
     sync_fail_streak = 0
     try:
@@ -7491,6 +7782,12 @@ async def run_dm_listener() -> None:
                 await asyncio.sleep(2)
     finally:
         _DM_LOOP_RUNNING = False
+        if not consolidation_task.done():
+            consolidation_task.cancel()
+            try:
+                await consolidation_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if scheduler is not None:
             try:
                 await scheduler.stop()

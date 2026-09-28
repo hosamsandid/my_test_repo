@@ -108,10 +108,13 @@ function classifyMessagesFallback(result, describeFailure, opts = {}) {
 }
 
 // The system identity Claude Code itself sends. Included on the oauth-token
-// count_tokens probe so the request authenticates identically to real CLI
+// /v1/messages probe so the request authenticates identically to real CLI
 // traffic — subscription (OAuth) tokens are only honoured on the Claude Code
 // messages flow, and enforcement can reject a request that doesn't present
-// this identity before it ever validates the body.
+// this identity before it ever validates the body. (The probe deliberately
+// hits /v1/messages, not count_tokens: Anthropic accepts JWT/OAuth bearer
+// tokens on messages but rejects them on count_tokens with "401 jwt auth is
+// not yet supported on count_tokens".)
 const OAUTH_PROBE_SYSTEM = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 // Subscription-OAuth tokens (Claude Max/Enterprise via `claude setup-token`)
@@ -129,7 +132,7 @@ function isOauthAuthType(authType) {
 // messages-probe outcome. OAuth can't list /v1/models, so a successful auth
 // yields an empty, manual-entry model list (mirroring the #2306 noModelList
 // contract); a failed probe surfaces the auth/reachability error verbatim.
-// `fallback` is the { ok, url, status, error } from the count_tokens probe.
+// `fallback` is the { ok, url, status, error } from the /v1/messages probe.
 function oauthDiscoverResult(fallback) {
   if (fallback.ok) {
     return {

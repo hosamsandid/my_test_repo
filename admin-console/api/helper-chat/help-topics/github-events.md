@@ -85,11 +85,19 @@ There is no webhook into this stack, so the orchestrator **polls** the GitHub
 Events API every ~30 s for every repository that appears in a Working
 Environment carrying a **GitHub token**.
 
-Two consequences that surprise people:
+Three consequences that surprise people:
 
 - **The Events API is lossy by design.** It does not emit every action — most
   notably there is no `pull_request.synchronize`, so "a new commit was pushed to
   the PR" is not an event you can subscribe to.
+- **The first push to a new branch shows up as its pull request.** GitHub
+  reports no push for the push that creates a branch, so when a pull request is
+  opened (or reopened) from a branch of the same repository, the poller adds a
+  **push** row of its own for that branch and head commit. If GitHub also
+  reports a real push for the same branch and commit, whichever of the two
+  arrives second is logged as **dropped (push-duplicate)** — a push trigger
+  wakes only once per commit. A branch pushed without opening a pull request
+  still produces no row.
 - **An event is fresh if its id has not been seen before**, not if it is recent.
   The poller keeps a per-repository set of **seen ids**, so a re-polled page
   costs nothing and nothing is delivered twice. The very first poll after a

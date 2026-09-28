@@ -168,21 +168,30 @@ chat, the runner must post a normal Matrix message** — i.e. return it as the
 turn's reply text via `send_formatted` (markdown→HTML). No frontend change is
 needed for that. The only standing bridge is the final `result` text posted once
 per run; other intermediate tool calls do **not** reach the chat on their own —
-the one exception is `AskUserQuestion`, which is intercepted (see below).
+the one exception is a human decision question, which is intercepted (see below).
 
-**`AskUserQuestion` in this environment:** a turn is a single non-interactive
+**Asking the user in this environment (`aee-ask`):** a turn is a single non-interactive
 `claude --print` process (the prompt is fed on stdin, #1727), so the tool's
-*built-in* form (which is interactive-TTY-only) is removed from the model's tool
-set entirely in headless print mode — a bare `--allowedTools` add does nothing. To make asking the user possible
-headlessly (#1712) the runner re-supplies an **identically-shaped**
+*built-in* `AskUserQuestion` (which is interactive-TTY-only) is removed from the model's tool
+set entirely in headless print mode — a bare `--allowedTools` add does nothing.
+The working path is the **`aee-ask` CLI** (#2523, `agent-image/scripts/aee-ask`,
+on `PATH`): it validates its arguments (bad input → exit 2, nothing queued) and
+writes an `AskUserQuestion`-shaped `{"questions":[…]}` payload to a
+per-invocation sentinel file the runner hands it via `AEE_ASK_FILE`. The runner
+checks for that sentinel after every `tool_result` (and once more after the CLI
+exits) — it never parses the Bash command — and **hard-ends the turn** the moment
+it appears, so nothing runs after the question. That kill costs the turn its
+`result` event/usage record, but the session stays `--resume`-able. Call
+`aee-ask` from the main session, never from a Task sub-agent.
+The older delivery (#1712) re-supplies an **identically-shaped**
 `AskUserQuestion` from a bundled, dependency-free stdio MCP server
 (`agent-image/scripts/ask-user-mcp.py`, registered via `--mcp-config` in
-`agent-entrypoint.py`); it reaches the model as `mcp__aee-ask__AskUserQuestion`.
-When you call it the runner **intercepts** the `tool_use` (matching either the
-namespaced or the bare name), renders the question(s) into a readable chat
-message with clickable quick-reply buttons (#1663), and posts that instead of a
-reply — the MCP tool returns a clean "end your turn and wait" result so the run
-completes as a success and stays `--resume`-able. The user's chosen option (or
+`agent-entrypoint.py`, reaching the model as `mcp__aee-ask__AskUserQuestion`,
+intercepted on its `tool_use`); the enterprise managed policy refuses MCP
+servers, so the image sets `AEE_DISABLE_ASK_MCP=1` and skips it. Either way the
+runner renders the question(s) into a readable chat
+message with clickable quick-reply buttons (#1663) and posts that as the turn's
+terminal message, dropping any trailing model text. The user's chosen option (or
 free-text) then continues the resumed session as a new turn. A `multiSelect`
 question renders as toggles plus Submit and resumes with every selected label
 (#2523; it used to degrade to the plain text body). (Issue #447 added the original

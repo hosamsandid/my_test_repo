@@ -153,7 +153,6 @@ const skillDeletion = require('./skill-deletion');
 const skillMerge = require('./skill-merge');
 const skillImport = require('./skill-import');
 const skillGrantValidate = require('./skill-grant-validate');
-const { buildSetupStatus } = require('./setup-status');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
 const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
@@ -2142,20 +2141,6 @@ app.post('/api/client-errors', clientErrorLimiter, (req, res) => {
   // (the Logs page streams it) — the JSONL file is the durable copy.
   console.warn(clientErrorLog.logLine(built.event));
   res.status(204).end();
-});
-
-/* ─── Setup Status ──────────────────────────────────────────────────── */
-
-app.get('/api/setup/status', (req, res) => {
-  const llmEndpoints = readJsonFile(LLM_ENDPOINTS_INDEX, []);
-  const sshKeys      = readJsonFile(SSH_KEYS_INDEX, []);
-  const ghTokens     = readJsonFile(GH_TOKENS_INDEX, []);
-
-  res.json(buildSetupStatus({
-    llmCount: llmEndpoints.length,
-    sshCount: sshKeys.length,
-    ghCount: ghTokens.length,
-  }));
 });
 
 /* ─── Agents ────────────────────────────────────────────────────────── */

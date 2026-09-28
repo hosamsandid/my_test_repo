@@ -533,7 +533,7 @@ consumers: `GET /api/helper/page-help` (the panel's "This page" face +
 `breadcrumbs.js`; the `docs/**` corpus is vendored under `helper-chat/docs/`
 (parity-tested). Coverage is a CI ratchet (`help-coverage.test.js`,
 `help-baseline.test.js`): a page route with no topic and no named owner fails.
-Non-route contexts (`modal:*`, `wizard:*#step`) are addressable via
+Non-route contexts (`modal:*`, `/team-setup#<step>`) are addressable via
 `useHelpSubject`. Concept: `docs/context-help-system-concept.md`.
 
 ### Agent Team Wizard

@@ -232,15 +232,6 @@ test('a dynamic child route and a redirect source ground like their canonical ro
   assert.deepEqual(contextTopics(reg, '/').map((t) => t.id), ['chat']); // / → /chats
 });
 
-test('an overlay context resolves through its CONTEXT_KEYS alias', () => {
-  // The first-run wizard's steps carry no topic of their own; each aliases the
-  // page whose topic answers it, so the grounding must match that page's set.
-  const reg = scopedRegistry();
-  const viaAlias = contextTopics(reg, { overlay: 'wizard:setup', step: 'ssh-key' });
-  assert.deepEqual(viaAlias.map((t) => t.id), contextTopics(reg, '/ssh-keys').map((t) => t.id));
-  assert.deepEqual(viaAlias.map((t) => t.id), ['creds', 'c']);
-});
-
 test('an overlay with no topic and no alias falls through to the page underneath', () => {
   // `modal:skill-detail` is registered for the z-index lift only (#1990), so a
   // question asked with it open is grounded on the page's topic.

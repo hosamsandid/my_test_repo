@@ -202,6 +202,81 @@ function conversationKey(ghEvent) {
   return ghEvent?.type || 'misc';
 }
 
+// #2529: the Events API emits NO `PushEvent` (and often no `CreateEvent`) for
+// the push that creates a branch — only later pushes to the now-existing branch
+// surface as `push`. The PR opened from that branch DOES arrive, carrying the
+// head ref/sha, so it is the only reliable carrier for "the first push landed".
+// Synthesise a push-class event from it so `['push']` subscribers wake for the
+// PR-opening push like for any later one. Same-repo heads only: a fork PR's
+// head was pushed to the fork, not to this repo. Returns null when the event is
+// not a PR open/reopen or lacks a usable head ref/sha.
+const PR_PUSH_ACTIONS = new Set(['opened', 'reopened']);
+
+function synthesizePrOpenPush(ghEvent) {
+  if (!ghEvent || ghEvent.type !== 'PullRequestEvent') return null;
+  const p = ghEvent.payload || {};
+  if (!PR_PUSH_ACTIONS.has(p.action)) return null;
+  const pr = p.pull_request || {};
+  const head = pr.head || {};
+  if (typeof head.ref !== 'string' || !head.ref || typeof head.sha !== 'string' || !head.sha) return null;
+  const headRepo = head.repo?.full_name || head.repo?.name;
+  if (headRepo && ghEvent.repo?.name && headRepo !== ghEvent.repo.name) return null;
+  return {
+    id: `prpush:${ghEvent.id}`,
+    type: 'PushEvent',
+    actor: ghEvent.actor,
+    repo: ghEvent.repo,
+    created_at: ghEvent.created_at,
+    payload: {
+      ref: `refs/heads/${head.ref}`,
+      head: head.sha,
+      synthesizedFrom: `pull_request.${p.action}`,
+      pull_request: {
+        number: pr.number,
+        url: pr.url,
+        ...(pr.html_url || prApiUrlToHtmlUrl(pr.url) ? { html_url: pr.html_url || prApiUrlToHtmlUrl(pr.url) } : {}),
+      },
+    },
+  };
+}
+
+// Oldest-first batch → the same batch with a synthetic push placed right after
+// each PR open/reopen it was derived from (causal order preserved).
+function expandPrOpenPushes(ghEvents) {
+  const out = [];
+  for (const ev of Array.isArray(ghEvents) ? ghEvents : []) {
+    out.push(ev);
+    const synth = synthesizePrOpenPush(ev);
+    if (synth) out.push(synth);
+  }
+  return out;
+}
+
+// De-dup key for a push-class delivery (#2529 AC2): the same head landing on the
+// same branch — once via the synthetic PR-open push, once via a real (possibly
+// late) `PushEvent` — must wake a subscriber only once.
+function pushHeadKey(ghEvent) {
+  const p = ghEvent?.payload || {};
+  if (typeof p.ref !== 'string' || !p.ref || typeof p.head !== 'string' || !p.head) return null;
+  return `${p.ref}@${p.head}`;
+}
+
+// Bounded per-repo memory of push heads already seen (TTL + cap), persisted in
+// state.json alongside `seen`/`armed`. Mutates in place.
+const PUSH_HEADS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const PUSH_HEADS_MAX = 500;
+
+function gcPushHeads(heads, now = Date.now()) {
+  for (const [k, ts] of Object.entries(heads)) {
+    if (!Number.isFinite(ts) || now - ts > PUSH_HEADS_TTL_MS) delete heads[k];
+  }
+  const keys = Object.keys(heads);
+  if (keys.length > PUSH_HEADS_MAX) {
+    keys.sort((a, b) => heads[a] - heads[b]);
+    for (const k of keys.slice(0, keys.length - PUSH_HEADS_MAX)) delete heads[k];
+  }
+}
+
 // Does a `*.labeled`/`*.unlabeled` event satisfy a subscriber's `labelFilter`?
 //
 // The naive check — `payload.label.name === wanted` — is INSUFFICIENT on the
@@ -831,12 +906,32 @@ class GitHubPoller {
     const armed = repoState.armed;
     if (this._wakeEdgeDedup) wakeArmory.gcArmed(armed);
 
-    for (const ghEvent of ghEvents) {
+    // #2529: push heads already seen on this repo, for the synthetic-vs-real
+    // push de-dup below. Same persistence/self-heal contract as `armed`.
+    if (!repoState.pushHeads || typeof repoState.pushHeads !== 'object') repoState.pushHeads = {};
+    const pushHeads = repoState.pushHeads;
+    gcPushHeads(pushHeads);
+
+    for (const ghEvent of expandPrOpenPushes(ghEvents)) {
       const key = eventKey(ghEvent);
       const logEntry = { ghEvent, key, outcomes: [] };
       eventLogEntries.set(ghEvent.id, logEntry);
       if (!key) continue;
       const convKey = conversationKey(ghEvent);
+
+      // #2529: first push-class event for a (branch, head sha) wins; a later one
+      // — the real PushEvent after the PR-open synthetic, or a PR (re)open whose
+      // head a real push already delivered — is a duplicate. Recorded
+      // subscription-independently so the order of arrival never matters.
+      const synthesizedFrom = key === 'push' ? ghEvent.payload?.synthesizedFrom : null;
+      let pushDuplicate = false;
+      if (key === 'push') {
+        const hk = pushHeadKey(ghEvent);
+        if (hk) {
+          if (pushHeads[hk] != null) pushDuplicate = true;
+          else pushHeads[hk] = Date.now();
+        }
+      }
 
       // #2152: disarm on removal/close, subscription-independent and BEFORE this
       // event's subscriber arm-check. Events are oldest-first, so a same-batch
@@ -881,6 +976,10 @@ class GitHubPoller {
 
       for (const sub of subscribers) {
         if (!sub.events.has(key)) continue;
+        // #2529: a trigger that also listens to the originating PR event is
+        // already woken by it — the synthetic push would wake it twice for the
+        // same moment. Not an outcome: the real PR event row records its wake.
+        if (synthesizedFrom && sub.events.has(synthesizedFrom)) continue;
 
         const outcome = { agentId: sub.agentId, triggerId: sub.triggerId, status: 'pending', reason: null, digest: false };
         logEntry.outcomes.push(outcome);
@@ -898,6 +997,16 @@ class GitHubPoller {
           );
           outcome.status = 'dropped';
           outcome.reason = 'history-horizon';
+          continue;
+        }
+
+        if (pushDuplicate) {
+          console.log(
+            `[GH-Poller] push-dedup: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+            `(${pushHeadKey(ghEvent)} already seen)`,
+          );
+          outcome.status = 'dropped';
+          outcome.reason = 'push-duplicate';
           continue;
         }
 
@@ -1537,6 +1646,11 @@ module.exports = {
   prApiUrlToHtmlUrl,
   eventKey,
   conversationKey,
+  synthesizePrOpenPush,
+  expandPrOpenPushes,
+  pushHeadKey,
+  gcPushHeads,
+  PUSH_HEADS_MAX,
   workItemNumber,
   labelFilterMatches,
   detectMergedPrs,

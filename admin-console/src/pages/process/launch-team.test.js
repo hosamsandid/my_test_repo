@@ -15,6 +15,7 @@ import {
   buildLaunchBody,
   launchSubmitLabel,
   launchResultMessage,
+  agentChatTargetFor,
   splitNdjson,
   runLaunchStream,
   TEAM_ID_RE,
@@ -446,4 +447,43 @@ test('runLaunchStream: non-ok response with no body throws with status + error',
       return true;
     },
   );
+});
+
+// ─── agentChatTargetFor (#2521) ──────────────────────────────────────────────
+
+test('agentChatTargetFor: the first role of the bundle, as the server names its member', () => {
+  const bundle = { roles: [{ id: 'developer' }, { id: 'reviewer' }] };
+  assert.deepEqual(agentChatTargetFor(bundle, 'acme'), {
+    path: '/chats/acme-developer',
+    state: { revealAgentId: 'acme-developer' },
+  });
+});
+
+test('agentChatTargetFor: role order decides, not alphabetical order (AC2)', () => {
+  const bundle = { roles: [{ id: 'zeta' }, { id: 'alpha' }] };
+  assert.equal(agentChatTargetFor(bundle, 'acme').state.revealAgentId, 'acme-zeta');
+});
+
+test('agentChatTargetFor: never routes to the Flow Editor (AC1/AC7)', () => {
+  for (const [b, t] of [[{ roles: [{ id: 'dev' }] }, 'acme'], [{ roles: [] }, 'acme'], [null, 'acme'], [null, '']]) {
+    const { path } = agentChatTargetFor(b, t);
+    assert.match(path, /^\/chats(\/|$)/);
+    assert.doesNotMatch(path, /\/process\//);
+  }
+});
+
+test('agentChatTargetFor: degrades to the team, then to the chat overview', () => {
+  // No usable first role: the team's own configuration surface (#2235).
+  assert.deepEqual(agentChatTargetFor({ roles: [] }, 'acme'), { path: '/chats/acme', state: { revealAgentId: 'acme' } });
+  assert.equal(agentChatTargetFor({ roles: [{}] }, 'acme').path, '/chats/acme');
+  assert.equal(agentChatTargetFor(undefined, 'acme').path, '/chats/acme');
+  // No team id at all: plain Agent Chat, nothing to reveal.
+  assert.deepEqual(agentChatTargetFor({ roles: [{ id: 'dev' }] }, ''), { path: '/chats', state: null });
+  assert.deepEqual(agentChatTargetFor({ roles: [{ id: 'dev' }] }, undefined), { path: '/chats', state: null });
+});
+
+test('agentChatTargetFor: the path segment is URL-encoded, the state id is not', () => {
+  const r = agentChatTargetFor({ roles: [{ id: 'a b' }] }, 'acme');
+  assert.equal(r.path, '/chats/acme-a%20b');
+  assert.equal(r.state.revealAgentId, 'acme-a b');
 });

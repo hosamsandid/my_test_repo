@@ -241,7 +241,9 @@ test('the rail renders the stub section from the model, never its own split', ()
 
 test('the stub section is collapsed by default and its rows are not draggable (AC2/AC8)', () => {
   const section = agentList.match(/function StubSection\([\s\S]*?\n\}/)[0];
-  assert.match(section, /useState\(true\)/);
+  // Collapsed unless it holds the agent a #2521 reveal targets.
+  assert.match(section, /useState\(!holdsReveal\)/);
+  assert.match(section, /const holdsReveal = !!revealId && stubs\.some\(s => s\.id === revealId\);/);
   // No drag props: a stub is not part of the persisted member order.
   assert.doesNotMatch(section, /dragScope=/);
   assert.doesNotMatch(section, /drag=\{/);

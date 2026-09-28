@@ -110,8 +110,13 @@ export function createdTeamNotice(teamName, { fromImport = false } = {}) {
   return `This design stays a draft — editing it from now on no longer changes team “${name}”.`;
 }
 
-/** The action that closes the confirmation and opens what was created. */
-export const OPEN_TEAM_LABEL = 'Open team';
+/**
+ * The action that closes the confirmation and opens what was created — in
+ * Agent Chat, on the team's first agent (#2521), since talking to the new
+ * agents is what comes next. It used to read "Open team" and lead back to the
+ * canvas the user was already on; the label now names the destination.
+ */
+export const OPEN_IN_AGENT_CHAT_LABEL = 'Open in Agent Chat';
 
 /**
  * The member-level act, which is NOT team creation: cloning the repository and

@@ -270,7 +270,7 @@ Every Phase-3 ticket follows the same shape:
 | **E7** | Access | Top intro box incl. the **Team vs Agent Team** distinction; roles (System/Team Admin/Member) |
 | **E8** | Model Providers | Top intro + the two auth-type descriptions + OAuth/probe dialog prose |
 | **E9** | MCP Servers | Top intro (servers + credentials + env pairing) + the "where does 'required' come from" InfoTip |
-| **E10** | Credentials & GitHub access | SSH Keys + GitHub Tokens + My Credentials intros + the duplicated **"why both / defense-in-depth"** prose + SetupWizard credential steps + success-dialog SSO instructions (author once, reuse) |
+| **E10** | Credentials & GitHub access | SSH Keys + GitHub Tokens + My Credentials intros + the duplicated **"why both / defense-in-depth"** prose + SetupWizard credential steps (that screen was removed in #2532) + success-dialog SSO instructions (author once, reuse) |
 | **E11** | Token Usage | Intro banner + `COST_NOTE` + `TIER_SIGNAL_HELP` attribution-tier explainer |
 | **E12** | GitHub Event Log | Intro (observational log; processed vs pending) |
 | **E13** | Maintenance Mode | Intro + the "while active" behaviour box |

@@ -5803,5 +5803,217 @@ class DmKnowledgeHarvestWiring(unittest.TestCase):
         self.assertIn("_harvest_shared_lessons, result, correlation_id", body)
 
 
+class DmSessionIdleSeconds(unittest.TestCase):
+    """#2518: DM_SESSION_IDLE_MINUTES resolution — configurable, sane default,
+    disable switch, and a floor so a tiny mis-set value can't fire between two
+    turns of one live conversation."""
+
+    fn = staticmethod(entrypoint._dm_session_idle_seconds)
+
+    def _with(self, value):
+        env = {} if value is None else {"DM_SESSION_IDLE_MINUTES": value}
+        with patch.dict(os.environ, env, clear=False):
+            if value is None:
+                os.environ.pop("DM_SESSION_IDLE_MINUTES", None)
+            return self.fn()
+
+    def test_default_is_twenty_minutes(self):
+        self.assertEqual(self._with(None), 20 * 60)
+
+    def test_malformed_falls_back_to_default(self):
+        self.assertEqual(self._with("not-a-number"), 20 * 60)
+
+    def test_custom_value_is_honoured(self):
+        self.assertEqual(self._with("30"), 30 * 60)
+
+    def test_zero_or_negative_disables(self):
+        self.assertEqual(self._with("0"), 0)
+        self.assertEqual(self._with("-5"), 0)
+
+    def test_small_positive_is_floored_at_60s(self):
+        # 0.1 min = 6s would be reckless; floored to 60s.
+        self.assertEqual(self._with("0.1"), 60)
+
+
+class DmConsolidationDue(unittest.TestCase):
+    """#2518: the pure idle + new-activity decision. Encodes every AC the pass
+    fires (and every one it must not) on the two per-room timestamps."""
+
+    fn = staticmethod(entrypoint._dm_consolidation_due)
+    IDLE = 1200  # 20 min
+
+    def test_idle_with_new_activity_is_due(self):
+        st = {"lastActivityAt": 1000.0, "lastConsolidatedActivityAt": 0.0}
+        self.assertTrue(self.fn(st, 1000.0 + self.IDLE + 1, self.IDLE))
+
+    def test_not_yet_idle_is_not_due(self):
+        st = {"lastActivityAt": 1000.0, "lastConsolidatedActivityAt": 0.0}
+        self.assertFalse(self.fn(st, 1000.0 + self.IDLE - 1, self.IDLE))
+
+    def test_idle_but_nothing_new_since_last_consolidation_is_not_due(self):
+        # Already consolidated up to this exact activity → no repeat pass.
+        st = {"lastActivityAt": 1000.0, "lastConsolidatedActivityAt": 1000.0}
+        self.assertFalse(self.fn(st, 1000.0 + self.IDLE + 100, self.IDLE))
+
+    def test_new_activity_after_a_prior_consolidation_re_arms(self):
+        st = {"lastActivityAt": 2000.0, "lastConsolidatedActivityAt": 1000.0}
+        self.assertTrue(self.fn(st, 2000.0 + self.IDLE + 1, self.IDLE))
+
+    def test_never_active_room_is_not_due(self):
+        self.assertFalse(self.fn({}, 9_999_999.0, self.IDLE))
+
+    def test_disabled_idle_window_is_never_due(self):
+        st = {"lastActivityAt": 1000.0, "lastConsolidatedActivityAt": 0.0}
+        self.assertFalse(self.fn(st, 1000.0 + 999_999, 0))
+
+    def test_non_dict_state_is_not_due(self):
+        self.assertFalse(self.fn(None, 9_999_999.0, self.IDLE))
+
+
+class RenderConsolidationTranscript(unittest.TestCase):
+    """#2518: pure render of session-log events into a bounded User/Assistant
+    transcript, keeping the most recent turns within budget."""
+
+    fn = staticmethod(entrypoint.render_consolidation_transcript)
+
+    def test_renders_human_and_agent_turns_in_order(self):
+        events = [
+            {"type": "message.received", "body": "hello"},
+            {"type": "result", "result": "hi there"},
+            {"type": "message.received", "body": "bye"},
+        ]
+        out = self.fn(events)
+        self.assertEqual(out, "User: hello\n\nAssistant: hi there\n\nUser: bye")
+
+    def test_ignores_textless_and_non_dict_rows(self):
+        events = [
+            {"type": "claude.invoke", "promptChars": 5},
+            "not-a-dict",
+            {"type": "message.received", "body": "   "},
+            {"type": "result", "result": "kept"},
+        ]
+        self.assertEqual(self.fn(events), "Assistant: kept")
+
+    def test_keeps_the_most_recent_within_budget(self):
+        events = [{"type": "message.received", "body": "old"},
+                  {"type": "message.received", "body": "new"}]
+        # Budget only fits the last turn.
+        out = self.fn(events, max_chars=len("User: new"))
+        self.assertEqual(out, "User: new")
+
+    def test_empty_or_non_list_is_empty_string(self):
+        self.assertEqual(self.fn([]), "")
+        self.assertEqual(self.fn(None), "")
+
+
+class BuildConsolidationPrompt(unittest.TestCase):
+    """#2518: the consolidation prompt is reflection+harvest+silent, carries the
+    transcript, and — at autonomy >= 1 — ends with the same ```knowledge block
+    instruction the runtime harvests deterministically. At autonomy 0 the block
+    hint is empty (but the pass is gated off upstream anyway)."""
+
+    fn = staticmethod(entrypoint.build_consolidation_prompt)
+
+    def test_contains_transcript_and_reflection_instructions(self):
+        out = self.fn("User: hi\n\nAssistant: yo", 1)
+        self.assertIn("User: hi", out)
+        self.assertIn("memory/log.md", out)
+        self.assertIn("knowledge search", out)
+        self.assertIn("post NOTHING", out)
+
+    def test_appends_the_harvest_block_hint_at_autonomy_1(self):
+        out = self.fn("x", 1)
+        self.assertIn("```knowledge", out)
+        self.assertTrue(out.endswith(entrypoint.build_harvest_block_hint(1)))
+
+    def test_no_block_hint_at_autonomy_0(self):
+        out = self.fn("x", 0)
+        self.assertNotIn("```knowledge", out)
+
+    def test_non_string_transcript_is_tolerated(self):
+        # Never raises on a bad window (defensive).
+        self.assertIn("END TRANSCRIPT", self.fn(None, 1))
+
+
+class DmConsolidationBlockHarvest(unittest.TestCase):
+    """#2518: a consolidation reply's ```knowledge block is recorded via the SAME
+    deterministic harvest primitive as every other run (dedup/parse parity), and
+    the stripped text is what would be discarded."""
+
+    def test_block_is_parsed_and_stripped(self):
+        reply = (
+            "internal reflection notes\n\n"
+            "```knowledge\n"
+            '{"kind": "fact", "text": "The DM listener process is long-lived"}\n'
+            "```"
+        )
+        entries = entrypoint.parse_harvest_block(reply)
+        self.assertEqual(entries,
+                         [{"kind": "fact",
+                           "text": "The DM listener process is long-lived"}])
+        self.assertEqual(entrypoint.strip_harvest_block(reply),
+                         "internal reflection notes")
+
+
+class DmConsolidationWiring(unittest.TestCase):
+    """#2518: the consolidation pass must be wired into run_dm_listener with all
+    its gates. Like the sibling Phase-1 guard, `run_dm_listener` is a nested async
+    Matrix listener with no harness here, so the load-bearing wiring facts are
+    read off the module source. Each would be a SILENT regression: a dropped gate
+    means a pass fires when it must not (maintenance, autonomy 0), or moves the
+    --resume pointer, or never runs at all."""
+
+    SRC = _MODULE_PATH.read_text(encoding="utf-8")
+
+    def _listener_body(self):
+        start = self.SRC.index("async def run_dm_listener")
+        return self.SRC[start:]
+
+    def test_activity_is_stamped_on_human_message(self):
+        body = self._listener_body()
+        # Stamped before the workspace gate so a message during a held gate re-arms.
+        stamp = body.index('dm_activity.setdefault(room_id, {})["lastActivityAt"]')
+        gate = body.index("workspace_gate.chat_full()")
+        self.assertLess(stamp, gate)
+
+    def test_consolidation_uses_call_claude_once_with_no_resume(self):
+        body = self._listener_body()
+        # resume_id positional is None → the room's --resume pointer is untouched.
+        self.assertIn(
+            "_call_claude_once, prompt, room_id, correlation_id, None,", body)
+        # And it must NOT write a session pointer from the consolidation path.
+        consol = body[body.index("async def _consolidate_room"):
+                      body.index("async def consolidation_loop")]
+        self.assertNotIn("_write_session_pointer", consol)
+
+    def test_consolidation_harvests_and_posts_nothing(self):
+        body = self._listener_body()
+        consol = body[body.index("async def _consolidate_room"):
+                      body.index("async def consolidation_loop")]
+        self.assertIn("_harvest_shared_lessons, text, correlation_id", consol)
+        # A silent pass never calls send_formatted.
+        self.assertNotIn("send_formatted", consol)
+
+    def test_consolidation_serializes_on_the_workspace_gate(self):
+        body = self._listener_body()
+        consol = body[body.index("async def _consolidate_room"):
+                      body.index("async def consolidation_loop")]
+        self.assertIn("workspace_gate.acquire()", consol)
+
+    def test_loop_gates_on_autonomy_and_maintenance(self):
+        body = self._listener_body()
+        loop = body[body.index("async def consolidation_loop"):
+                    body.index("async def save_token_callback")]
+        self.assertIn("_knowledge_autonomy_level() < 1", loop)
+        self.assertIn("_fetch_maintenance_active", loop)
+        self.assertIn("_dm_consolidation_due", loop)
+
+    def test_loop_task_is_started_and_cancelled(self):
+        body = self._listener_body()
+        self.assertIn("consolidation_task = asyncio.create_task(consolidation_loop())",
+                      body)
+        self.assertIn("consolidation_task.cancel()", body)
+
+
 if __name__ == "__main__":
     unittest.main()

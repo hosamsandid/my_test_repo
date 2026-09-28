@@ -499,8 +499,9 @@ uncovered). Key pieces:
   message, falling back to the normal default position with a notice if the
   id can't be found.
 - `Message` — sanitised markdown (`react-markdown` + gfm + pretty-code +
-  `rehype-sanitize`); quick-reply cards for `AskUserQuestion`
-  (`ask-user-mcp.py` re-supplies it in headless mode); inline image
+  `rehype-sanitize`); quick-reply cards for `AskUserQuestion`-shaped
+  questions (raised headlessly via the `aee-ask` CLI → per-turn sentinel file,
+  #2523; the `ask-user-mcp.py` path is policy-blocked); inline image
   thumbnails; hover-revealed "Copy link" builds the `?msg=` deep-link above
   (#2310, plain text bubbles only).
 - `MessageInput` — composer, send-keybinding preset, per-agent drafts,

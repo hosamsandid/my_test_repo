@@ -193,6 +193,7 @@ function isRelocatedHeading(heading) {
   return (
     heading === "Workspace" ||
     heading === "Background tasks" ||
+    heading === "Asking the human" ||
     heading.startsWith("GitHub Actions") ||
     heading.startsWith("Trigger management")
   );
@@ -513,6 +514,34 @@ function backgroundTasksSection(autonomous) {
   return autonomous ? base + waitAdvice : base;
 }
 
+// Human decision prompts (#2523) — ALWAYS emitted, because `aee-ask` is baked
+// into every agent image. Claude Code strips its built-in AskUserQuestion tool
+// in headless mode and the managed policy blocks the MCP server that used to
+// re-supply it, so without this nudge agents ask in plain prose, which nothing
+// downstream can detect, render as a quick-reply card, or route. The caveat
+// about nobody reading in real time is autonomous-only, mirroring the
+// Background tasks section's split.
+function askHumanSection(autonomous) {
+  const base =
+    '## Asking the human\n\n' +
+    'When you need the human to make a decision before you can continue, do **not** ' +
+    'write the question and its options out as prose. Call `aee-ask` instead — it ' +
+    'shows the question as a quick-reply card with clickable options:\n\n' +
+    '```bash\n' +
+    'aee-ask "Which base branch?" --header Branch --option "main::default" --option "release::hotfix line"\n' +
+    '```\n\n' +
+    'Repeat `--option "label::description"` for each choice (`::description` is ' +
+    'optional); add `--multi` if more than one may be picked. After a successful ' +
+    'call **end your turn immediately** — do not answer the question yourself and do ' +
+    "not take any further action. The human's answer arrives as your next message. " +
+    'If `aee-ask` rejects its arguments, fix them and call it again.';
+  const unattended =
+    '\n\nIn an unattended triggered run nobody may be reading in real time — prefer ' +
+    'the hand-off your role defines (an issue comment, an outcome label) over pausing ' +
+    'on a question there.';
+  return autonomous ? base + unattended : base;
+}
+
 // Compose the full CLAUDE.md from the base template + per-agent inputs.
 //
 // Ordering (fix: the authored role used to be buried in the middle):
@@ -528,6 +557,7 @@ function backgroundTasksSection(autonomous) {
 //   9. ## GitHub Actions        (relocated) — only if the env has a repository
 //  10. ## Trigger management    (relocated) — only if the agent is autonomous
 // 10b. ## Background tasks       (code-owned) — ALWAYS (Task(*) is always allowed)
+// 10c. ## Asking the human       (code-owned) — ALWAYS (`aee-ask` is in every image)
 //  11. ## Important Notes       (from base)
 //  12. any other base sections an operator added (preserved verbatim)
 //  13. ## Memory System (Shared — Blueprint Instance) (if a blueprint instance)
@@ -653,6 +683,10 @@ function assembleClaudeMd({ base, agentPrompt, role, env, skills = [], skillDesc
   //      (the dangling-promise bug); the external-event advice is autonomous-only.
   blocks.push(backgroundTasksSection(autonomous));
 
+  // 10c. Asking the human — ALWAYS, because `aee-ask` ships in every agent
+  //      image (#2523); without it agents ask in prose the UI cannot surface.
+  blocks.push(askHumanSection(autonomous));
+
   // 11. Important Notes
   const notes = take("Important Notes");
   if (notes) blocks.push(notes);
@@ -745,6 +779,7 @@ module.exports = {
   hasSkillGrant,
   skillsSection,
   backgroundTasksSection,
+  askHumanSection,
   pluginCapabilitiesSection,
   WORKSPACE_SECTION,
   GIT_SECTION,

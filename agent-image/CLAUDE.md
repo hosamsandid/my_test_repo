@@ -149,6 +149,20 @@ aee-artifact list "Functional Design"      # all matching entries
 If the upstream pushed but never registered an artifact you expect, do not guess
 a path — tell the user it is missing and stop.
 
+## Asking the human (`aee-ask`)
+
+When you need the human to decide something before you can continue, do not ask
+in prose — call `aee-ask`, which shows the question in Agent Chat as a quick-reply
+card, then **end your turn immediately**:
+
+```
+aee-ask "Which base branch?" --header Branch --option "main::default" --option "release::hotfix line"
+aee-ask "Which checks should run?" --multi --option unit --option "e2e::slow"
+```
+
+The human's answer arrives as your next message. If `aee-ask` rejects its
+arguments (exit 2), nothing was asked — fix them and call it again.
+
 ## Shared team knowledge (`knowledge`)
 
 `aee-artifact` hands **one deliverable** to **one downstream agent**. The

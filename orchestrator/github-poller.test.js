@@ -1441,25 +1441,74 @@ const {
   PUSH_HEADS_MAX,
 } = require("./github-poller");
 
-function prOpenedEvent(id, { action = "opened", number = 42, ref = "feat/x", sha = "abc1234def", headRepo = "org/repo", createdAt } = {}) {
+// The Events API's real (slimmed) PullRequestEvent shape (#2529 review B1):
+// `repo.name` is `owner/name`, but `head.repo` / `base.repo` are
+// `{ id, name: <SHORT name>, url }` — no `full_name`.
+const REPO_ID = 1001;
+const REPO_API_URL = "https://api.github.com/repos/org/repo";
+const sameRepo = { id: REPO_ID, name: "repo", url: REPO_API_URL };
+
+function prOpenedEvent(id, { action = "opened", number = 42, ref = "feat/x", sha = "abc1234def", headRepo = sameRepo, createdAt } = {}) {
   return {
     id,
     actor: { login: "dev" },
     created_at: createdAt || new Date().toISOString(),
     type: "PullRequestEvent",
-    repo: { name: "org/repo" },
+    repo: { id: REPO_ID, name: "org/repo", url: REPO_API_URL },
     payload: {
       action,
       number,
       pull_request: {
         number,
         url: `https://api.github.com/repos/org/repo/pulls/${number}`,
-        head: { ref, sha, repo: headRepo ? { id: 1, name: headRepo } : undefined },
-        base: { ref: "main", sha: "base000", repo: { id: 1, name: "org/repo" } },
+        head: { ref, sha, repo: headRepo || undefined },
+        base: { ref: "main", sha: "base000", repo: sameRepo },
       },
     },
   };
 }
+
+// Captured verbatim from the live Events API (this PR's own
+// `pull_request.opened`, #2530) — pins the production shape end to end.
+const REAL_PR_OPENED = {
+  id: "15937106102",
+  type: "PullRequestEvent",
+  actor: { id: 1, login: "thorsten-a-maier_accent" },
+  repo: {
+    id: 1225674781,
+    name: "AccentureCodeFoundry/314092_agent-execution-environment",
+    url: "https://api.github.com/repos/AccentureCodeFoundry/314092_agent-execution-environment",
+  },
+  payload: {
+    action: "opened",
+    number: 2530,
+    pull_request: {
+      id: 4666725854,
+      number: 2530,
+      url: "https://api.github.com/repos/AccentureCodeFoundry/314092_agent-execution-environment/pulls/2530",
+      head: {
+        ref: "feat/2529-pr-open-push-wake",
+        sha: "4f1f84aee1c61a2e8f22ac49a155a4bc5be42294",
+        repo: {
+          id: 1225674781,
+          name: "314092_agent-execution-environment",
+          url: "https://api.github.com/repos/AccentureCodeFoundry/314092_agent-execution-environment",
+        },
+      },
+      base: {
+        ref: "main",
+        sha: "2fc34a8dfe19208ffd420ab0843cbdd3ced2f517",
+        repo: {
+          id: 1225674781,
+          name: "314092_agent-execution-environment",
+          url: "https://api.github.com/repos/AccentureCodeFoundry/314092_agent-execution-environment",
+        },
+      },
+    },
+  },
+  public: false,
+  created_at: "2026-09-28T16:51:59Z",
+};
 
 function pushEvent(id, { ref = "refs/heads/feat/x", head = "abc1234def", createdAt } = {}) {
   return {
@@ -1512,11 +1561,33 @@ test("synthesizePrOpenPush: other PR actions, non-PR events, fork heads and miss
   assert.equal(synthesizePrOpenPush(prOpenedEvent("a", { action: "closed" })), null);
   assert.equal(synthesizePrOpenPush(prOpenedEvent("b", { action: "labeled" })), null);
   assert.equal(synthesizePrOpenPush(pushEvent("c")), null);
-  assert.equal(synthesizePrOpenPush(prOpenedEvent("d", { headRepo: "someone/fork" })), null);
+  assert.equal(synthesizePrOpenPush(prOpenedEvent("d", {
+    headRepo: { id: 2002, name: "fork", url: "https://api.github.com/repos/someone/fork" } })), null);
   assert.equal(synthesizePrOpenPush(prOpenedEvent("e", { sha: "" })), null);
   assert.equal(synthesizePrOpenPush(null), null);
   // A reduced head without repo info is treated as same-repo.
   assert.ok(synthesizePrOpenPush(prOpenedEvent("f", { headRepo: null })));
+});
+
+test("synthesizePrOpenPush (review B1): a same-repo head whose SHORT name differs from repo.name still synthesizes", () => {
+  const ev = prOpenedEvent("g");
+  assert.notEqual(ev.payload.pull_request.head.repo.name, ev.repo.name); // "repo" vs "org/repo"
+  assert.ok(synthesizePrOpenPush(ev));
+  // …and the captured live event does too.
+  const s = synthesizePrOpenPush(REAL_PR_OPENED);
+  assert.ok(s, "the real Events API payload must synthesize a push");
+  assert.equal(s.payload.ref, "refs/heads/feat/2529-pr-open-push-wake");
+  assert.equal(s.payload.head, "4f1f84aee1c61a2e8f22ac49a155a4bc5be42294");
+});
+
+test("synthesizePrOpenPush (review B1): a fork with the SAME short name but another id yields null", () => {
+  const fork = { id: 2002, name: "repo", url: "https://api.github.com/repos/someone/repo" };
+  assert.equal(synthesizePrOpenPush(prOpenedEvent("h", { headRepo: fork })), null);
+  // Id beats url: same id is same repo even if the url differs (renamed repo).
+  assert.ok(synthesizePrOpenPush(prOpenedEvent("i", { headRepo: { ...sameRepo, url: "https://api.github.com/repos/org/renamed" } })));
+  // Url fallback when ids are missing on either side.
+  assert.ok(synthesizePrOpenPush(prOpenedEvent("j", { headRepo: { name: "repo", url: REPO_API_URL } })));
+  assert.equal(synthesizePrOpenPush(prOpenedEvent("k", { headRepo: { name: "repo", url: fork.url } })), null);
 });
 
 test("expandPrOpenPushes: inserts the synthetic push right after its PR event", () => {
@@ -1555,6 +1626,18 @@ test("_fanOutBatch (#2529 AC1): a PR-opening push fires a ['push'] trigger once,
   // The original PR row is still logged (nobody listening to it here).
   const prRow = recorded.find((r) => r.event === "pull_request.opened");
   assert.equal(prRow.noMatchingTrigger, true);
+});
+
+test("_fanOutBatch (#2529 AC1, review B1): the captured live pull_request.opened fires a ['push'] trigger", async () => {
+  const poller = new GitHubPoller();
+  const { recorded, enqueued } = await runBatch(poller, [[REAL_PR_OPENED]], [pushSub()]);
+
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0].entry.github.event, "push");
+  assert.equal(enqueued[0].entry.github.eventId, "prpush:15937106102");
+  assert.equal(enqueued[0].entry.github.payload.ref, "refs/heads/feat/2529-pr-open-push-wake");
+  const pushRow = recorded.find((r) => r.event === "push");
+  assert.equal(pushRow.outcomes[0].status, "delivered");
 });
 
 test("_fanOutBatch (#2529 AC2): a later real PushEvent for the same head is dropped as a duplicate — across batches", async () => {

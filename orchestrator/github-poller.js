@@ -212,6 +212,23 @@ function conversationKey(ghEvent) {
 // not a PR open/reopen or lacks a usable head ref/sha.
 const PR_PUSH_ACTIONS = new Set(['opened', 'reopened']);
 
+// Is the PR's head in this repo (not a fork)? Decided by repo **id**, never by
+// name: the Events API's slimmed payload gives `head.repo.name` as the SHORT
+// name (`repo`) while `ghEvent.repo.name` is `owner/repo`, and a fork usually
+// keeps the same short name. Compared against `base.repo.id` (else the event's
+// own `repo.id`), falling back to the API `url` when an id is missing. A head
+// with no repo identity at all (reduced payload) is treated as same-repo; one
+// whose identity cannot be compared with anything is not.
+function prHeadIsSameRepo(ghEvent, pr) {
+  const head = pr?.head?.repo;
+  if (!head || (head.id == null && !head.url)) return true;
+  const baseId = pr?.base?.repo?.id ?? ghEvent?.repo?.id;
+  if (head.id != null && baseId != null) return head.id === baseId;
+  const baseUrl = pr?.base?.repo?.url || ghEvent?.repo?.url;
+  if (head.url && baseUrl) return head.url === baseUrl;
+  return false;
+}
+
 function synthesizePrOpenPush(ghEvent) {
   if (!ghEvent || ghEvent.type !== 'PullRequestEvent') return null;
   const p = ghEvent.payload || {};
@@ -219,8 +236,7 @@ function synthesizePrOpenPush(ghEvent) {
   const pr = p.pull_request || {};
   const head = pr.head || {};
   if (typeof head.ref !== 'string' || !head.ref || typeof head.sha !== 'string' || !head.sha) return null;
-  const headRepo = head.repo?.full_name || head.repo?.name;
-  if (headRepo && ghEvent.repo?.name && headRepo !== ghEvent.repo.name) return null;
+  if (!prHeadIsSameRepo(ghEvent, pr)) return null;
   return {
     id: `prpush:${ghEvent.id}`,
     type: 'PushEvent',

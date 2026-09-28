@@ -1708,10 +1708,19 @@ function llmTokenPreview(token) {
   return `…${tail}`;
 }
 
+// Strip ALL whitespace, not just the ends. A subscription setup-token copied
+// out of a line-wrapped terminal can carry an embedded newline/space that
+// survives `.trim()` and corrupts the Bearer Authorization header ("Header
+// 'Authorization' has invalid value"). LLM tokens (api-key or oauth-token)
+// never contain internal whitespace, so this is always safe.
+function sanitizeLlmToken(token) {
+  return String(token || '').replace(/\s+/g, '');
+}
+
 function readLlmEndpointToken(authTokenId) {
   if (!authTokenId) return '';
   try {
-    return fs.readFileSync(path.join(LLM_KEYS_DIR, authTokenId), 'utf8').trim();
+    return sanitizeLlmToken(fs.readFileSync(path.join(LLM_KEYS_DIR, authTokenId), 'utf8'));
   } catch {
     return '';
   }
@@ -1719,7 +1728,7 @@ function readLlmEndpointToken(authTokenId) {
 
 function writeLlmEndpointToken(authTokenId, token) {
   const p = path.join(LLM_KEYS_DIR, authTokenId);
-  fs.writeFileSync(p, token, { mode: 0o600 });
+  fs.writeFileSync(p, sanitizeLlmToken(token), { mode: 0o600 });
   try { fs.chmodSync(p, 0o600); } catch { /* best effort */ }
 }
 

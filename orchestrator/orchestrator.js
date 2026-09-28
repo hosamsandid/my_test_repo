@@ -404,7 +404,12 @@ function resolveLlmBinding(endpointId, modelPin, { context } = {}) {
   let token = "";
   if (ep.authTokenId) {
     try {
-      token = fs.readFileSync(path.join(LLM_KEYS_DIR, ep.authTokenId), "utf8").trim();
+      // Strip ALL whitespace, not just the ends: a subscription setup-token
+      // copied out of a line-wrapped terminal can carry an embedded newline/
+      // space that survives `.trim()` and corrupts the Authorization header
+      // ("Header 'Authorization' has invalid value"). LLM tokens never contain
+      // internal whitespace, so this is safe for both api-key and oauth-token.
+      token = fs.readFileSync(path.join(LLM_KEYS_DIR, ep.authTokenId), "utf8").replace(/\s+/g, "");
     } catch (err) {
       console.error(`[Orchestrator] Cannot read LLM token for endpoint ${ep.id}: ${err.message}`);
     }

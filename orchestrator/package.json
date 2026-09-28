@@ -6,6 +6,6 @@
     "test": "node --test"
   },
   "dependencies": {
-    "matrix-bot-sdk": "^0.7.1"
+    "matrix-bot-sdk": "^0.8.0"
   }
 }

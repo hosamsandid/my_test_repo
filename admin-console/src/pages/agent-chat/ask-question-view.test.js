@@ -11,6 +11,10 @@ import {
   questionProgressLabel,
   indexAskAnswers,
   questionState,
+  toggleSelection,
+  buildSelectionAnswer,
+  buildSelectionAnswerContent,
+  answerChoosesOption,
 } from './ask-question-view.js';
 
 test('field names match the runtime contract', () => {
@@ -92,7 +96,7 @@ test('indexAskAnswers maps question event ids to their first answer', () => {
 
 test('questionState: last unanswered question is answerable', () => {
   const s = questionState({ index: 2, messageCount: 3, answer: undefined });
-  assert.deepEqual(s, { answerable: true, answeredOptionId: null, answeredLabel: null, multiAnswers: null });
+  assert.deepEqual(s, { answerable: true, answeredOptionId: null, answeredLabel: null, answeredOptionIds: null, multiAnswers: null });
 });
 
 test('questionState: a later message makes buttons inert (superseded/answered)', () => {
@@ -193,4 +197,100 @@ test('indexAskAnswers indexes consolidated multi-answer by questionEventId', () 
   const a = map.get('$q');
   assert.ok(Array.isArray(a.answers));
   assert.equal(a.answers[0].label, 'OAuth');
+});
+
+// ── Multi-select (#2523) ────────────────────────────────────────────────────
+
+const MULTI_Q = {
+  questionId: 'q0',
+  question: 'Which checks?',
+  multiSelect: true,
+  options: [
+    { optionId: '0:0', label: 'unit' },
+    { optionId: '0:1', label: 'e2e, slow' },
+    { optionId: '0:2', label: 'lint' },
+  ],
+};
+
+test('normalizeAskQuestion keeps multiSelect only when it is literally true', () => {
+  const out = normalizeAskQuestion({ questions: [
+    { question: 'Many?', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }] },
+    { question: 'One?', multiSelect: 'yes', options: [{ label: 'C' }] },
+    { question: 'Plain?', options: [{ label: 'D' }] },
+  ] });
+  assert.equal(out.questions[0].multiSelect, true);
+  assert.equal('multiSelect' in out.questions[1], false);
+  assert.equal('multiSelect' in out.questions[2], false);
+});
+
+test('toggleSelection adds and removes without mutating', () => {
+  const start = ['0:0'];
+  const added = toggleSelection(start, '0:2');
+  assert.deepEqual(added, ['0:0', '0:2']);
+  assert.deepEqual(start, ['0:0']);
+  assert.deepEqual(toggleSelection(added, '0:0'), ['0:2']);
+  assert.deepEqual(toggleSelection(undefined, '0:1'), ['0:1']);
+});
+
+test('buildSelectionAnswer keeps card order and joins labels for display', () => {
+  const a = buildSelectionAnswer(MULTI_Q, ['0:2', '0:1']);
+  assert.deepEqual(a, {
+    questionId: 'q0',
+    optionIds: ['0:1', '0:2'],
+    labels: ['e2e, slow', 'lint'],
+    label: 'e2e, slow, lint',
+  });
+});
+
+test('buildSelectionAnswer is null with nothing (or only unknown ids) selected', () => {
+  assert.equal(buildSelectionAnswer(MULTI_Q, []), null);
+  assert.equal(buildSelectionAnswer(MULTI_Q, ['9:9']), null);
+  assert.equal(buildSelectionAnswer(MULTI_Q, undefined), null);
+});
+
+test('buildSelectionAnswerContent carries every selection, correlated by questionEventId', () => {
+  const answer = buildSelectionAnswer(MULTI_Q, ['0:0', '0:1']);
+  assert.deepEqual(buildSelectionAnswerContent('$q1', answer), {
+    'io.aee.ask-answer': {
+      questionEventId: '$q1',
+      questionId: 'q0',
+      optionIds: ['0:0', '0:1'],
+      labels: ['unit', 'e2e, slow'],
+      label: 'unit, e2e, slow',
+    },
+  });
+});
+
+test('questionState exposes answeredOptionIds for a multi-select answer only', () => {
+  const content = buildSelectionAnswerContent('$q1', buildSelectionAnswer(MULTI_Q, ['0:0', '0:2']));
+  const st = questionState({ index: 0, messageCount: 2, answer: content['io.aee.ask-answer'] });
+  assert.equal(st.answerable, false);
+  assert.deepEqual(st.answeredOptionIds, ['0:0', '0:2']);
+  const single = questionState({ index: 0, messageCount: 2,
+    answer: { questionEventId: '$q', optionId: '0:0', label: 'A' } });
+  assert.equal(single.answeredOptionIds, null);
+  assert.equal(single.answeredOptionId, '0:0');
+});
+
+test('answerChoosesOption covers single, multi-select and consolidated answers', () => {
+  assert.equal(answerChoosesOption({ optionId: '0:1' }, 'q0', '0:1'), true);
+  assert.equal(answerChoosesOption({ optionId: '0:1' }, 'q0', '0:0'), false);
+  assert.equal(answerChoosesOption({ optionIds: ['0:0', '0:2'] }, 'q0', '0:2'), true);
+  assert.equal(answerChoosesOption({ optionIds: ['0:0'] }, 'q0', '0:1'), false);
+  const consolidated = { answers: [
+    { questionId: 'q0', optionId: '0:1', label: 'x' },
+    { questionId: 'q1', optionIds: ['1:0', '1:2'], labels: ['a', 'c'], label: 'a, c' },
+  ] };
+  assert.equal(answerChoosesOption(consolidated, 'q0', '0:1'), true);
+  assert.equal(answerChoosesOption(consolidated, 'q1', '1:2'), true);
+  assert.equal(answerChoosesOption(consolidated, 'q1', '1:1'), false);
+  assert.equal(answerChoosesOption(consolidated, 'q0', '1:0'), false);
+  assert.equal(answerChoosesOption(null, 'q0', '0:0'), false);
+});
+
+test('multiAnswerText shows a multi-select step as its joined labels', () => {
+  assert.equal(multiAnswerText([
+    { questionId: 'q0', optionId: '0:0', label: 'main' },
+    { questionId: 'q1', optionIds: ['1:0', '1:1'], labels: ['unit', 'e2e'], label: 'unit, e2e' },
+  ]), 'main\nunit, e2e');
 });

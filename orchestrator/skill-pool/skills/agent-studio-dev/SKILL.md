@@ -183,8 +183,9 @@ namespaced or the bare name), renders the question(s) into a readable chat
 message with clickable quick-reply buttons (#1663), and posts that instead of a
 reply — the MCP tool returns a clean "end your turn and wait" result so the run
 completes as a success and stays `--resume`-able. The user's chosen option (or
-free-text) then continues the resumed session as a new turn. Single-choice only —
-`multiSelect` degrades to the plain text body. (Issue #447 added the original
+free-text) then continues the resumed session as a new turn. A `multiSelect`
+question renders as toggles plus Submit and resumes with every selected label
+(#2523; it used to degrade to the plain text body). (Issue #447 added the original
 interception; #1712 made the tool actually reachable.) Plain-text questions in
 your reply still work too.
 

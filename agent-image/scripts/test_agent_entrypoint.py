@@ -167,22 +167,26 @@ class AskUserQuestionPayload(unittest.TestCase):
         # An option with no description omits the key entirely.
         self.assertEqual(q["options"][1], {"optionId": "0:1", "label": "API key"})
 
-    def test_multiselect_excluded_from_interactive_payload(self):
-        # A multiSelect question is single-select-only in the MVP (D1/AC4):
-        # dropped from the structured payload (still in the text body).
-        self.assertIsNone(self.fn({"questions": [{
+    def test_multiselect_question_is_flagged_in_the_payload(self):
+        # #2523 (supersedes #1663 D1): a multiSelect question is carried with
+        # `multiSelect: true` so the UI renders toggles + Submit.
+        out = self.fn({"questions": [{
             "header": "H", "question": "Pick some", "multiSelect": True,
             "options": [{"label": "A"}, {"label": "B"}],
-        }]}))
+        }]})
+        q = out["questions"][0]
+        self.assertIs(q["multiSelect"], True)
+        self.assertEqual([o["label"] for o in q["options"]], ["A", "B"])
 
-    def test_multiselect_mixed_keeps_single_choice_only(self):
+    def test_multiselect_mixed_keeps_both_and_flags_only_the_multi_one(self):
         out = self.fn({"questions": [
             {"header": "Q1", "question": "One?", "options": [{"label": "A"}]},
             {"header": "Q2", "question": "Many?", "multiSelect": True,
              "options": [{"label": "B"}, {"label": "C"}]},
         ]})
-        self.assertEqual(len(out["questions"]), 1)
-        self.assertEqual(out["questions"][0]["questionId"], "q0")
+        self.assertEqual([q["questionId"] for q in out["questions"]], ["q0", "q1"])
+        self.assertNotIn("multiSelect", out["questions"][0])  # single-choice unchanged
+        self.assertIs(out["questions"][1]["multiSelect"], True)
 
     def test_option_ids_unique_across_questions(self):
         out = self.fn({"questions": [
@@ -466,6 +470,52 @@ out({"type": "result", "subtype": "success", "result": "Which branch do you want
 '''
 
 
+class AskAnswerPrompt(unittest.TestCase):
+    """A multi-select quick-reply answer resumes with every selection (#2523)."""
+    fn = staticmethod(entrypoint._ask_answer_prompt)
+    F = "io.aee.ask-answer"
+
+    def test_single_choice_answer_passes_the_body_through(self):
+        content = {self.F: {"questionEventId": "$q", "optionId": "0:0", "label": "main"}}
+        self.assertEqual(self.fn("main", content), "main")
+
+    def test_plain_messages_pass_through(self):
+        for content in (None, {}, {"body": "x"}, {self.F: "junk"}):
+            self.assertEqual(self.fn("hello", content), "hello")
+
+    def test_multi_select_answer_injects_every_selected_label(self):
+        content = {self.F: {"questionEventId": "$q", "questionId": "q0",
+                            "optionIds": ["0:0", "0:2"], "labels": ["unit", "e2e, slow"],
+                            "label": "unit, e2e, slow"}}
+        out = self.fn("unit, e2e, slow", content)
+        self.assertEqual(out, "My answer to your question (selected options):\n"
+                              "- unit\n- e2e, slow")
+
+    def test_multi_question_answer_with_a_multi_select_entry(self):
+        content = {self.F: {"questionEventId": "$q", "answers": [
+            {"questionId": "q0", "optionId": "0:1", "label": "release"},
+            {"questionId": "q1", "optionIds": ["1:0", "1:1"], "labels": ["unit", "e2e"],
+             "label": "unit, e2e"},
+        ]}}
+        out = self.fn("release\nunit, e2e", content)
+        self.assertEqual(out, "My answers to your questions (selected options, in question order):\n"
+                              "Question 1:\n- release\nQuestion 2:\n- unit\n- e2e")
+
+    def test_multi_question_answer_without_multi_select_passes_through(self):
+        content = {self.F: {"questionEventId": "$q", "answers": [
+            {"questionId": "q0", "optionId": "0:1", "label": "a"},
+            {"questionId": "q1", "optionId": "1:0", "label": "b"}]}}
+        self.assertEqual(self.fn("a\nb", content), "a\nb")
+
+    def test_malformed_selection_falls_back_to_the_body(self):
+        content = {self.F: {"questionEventId": "$q", "labels": [None, "  ", 3]}}
+        self.assertEqual(self.fn("body", content), "body")
+
+    def test_dm_handler_resumes_with_the_structured_answer(self):
+        src = Path(entrypoint.__file__).read_text(encoding="utf-8")
+        self.assertIn("_prepare_chat_prompt(_ask_answer_prompt(body, content),", src)
+
+
 class AeeAskEndToEnd(unittest.TestCase):
     """CLI → sentinel → interception → terminal message (#2523 AC), driving the
     real `_call_claude_once` against a fake `claude` that runs the real CLI."""
@@ -535,7 +585,9 @@ class AeeAskEndToEnd(unittest.TestCase):
         text, _s, ctx = self._run(["Which checks?", "--multi",
                                    "--option", "unit", "--option", "e2e"])
         self.assertIn("pick more than one", text)
-        self.assertIn("_askQuestion", ctx)
+        q = ctx["_askQuestion"]["questions"][0]
+        self.assertIs(q["multiSelect"], True)  # rendered as toggles + Submit
+        self.assertEqual([o["label"] for o in q["options"]], ["unit", "e2e"])
 
     def test_turn_is_hard_ended_before_any_follow_up_tool_runs(self):
         marker = self.workdir / "followup-ran"

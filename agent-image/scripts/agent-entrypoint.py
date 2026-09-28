@@ -1505,11 +1505,12 @@ def _ask_user_question_payload(tool_input) -> dict | None:
     so a Matrix client that cannot render the buttons still sees the full
     question + options as text (graceful degradation, AC8).
 
-    MVP is single-choice (D1): a `multiSelect: true` question is deliberately
-    omitted from the interactive payload — it still reaches the human as the text
-    body, and the UI leaves it as plain text (AC4). Each option gets a stable
-    `optionId` (`<questionIndex>:<optionIndex>`) unique within the message so the
-    clicked answer can carry a structured identifier back (AC2 / D2).
+    A `multiSelect: true` question is carried with `"multiSelect": true` so the
+    UI renders toggleable options plus a Submit button, and its answer carries
+    every selected label (#2523 — supersedes the single-choice-only MVP of
+    #1663 D1). Each option gets a stable `optionId`
+    (`<questionIndex>:<optionIndex>`) unique within the message so the clicked
+    answer can carry a structured identifier back (AC2 / D2).
     """
     if not isinstance(tool_input, dict):
         return None
@@ -1521,8 +1522,6 @@ def _ask_user_question_payload(tool_input) -> dict | None:
     for qi, q in enumerate(questions):
         if not isinstance(q, dict):
             continue
-        if q.get("multiSelect") is True:
-            continue  # single-choice only in the MVP (D1)
         options = q.get("options")
         if not isinstance(options, list):
             continue
@@ -1541,6 +1540,8 @@ def _ask_user_question_payload(tool_input) -> dict | None:
         if not out_options:
             continue
         qentry: dict = {"questionId": f"q{qi}", "options": out_options}
+        if q.get("multiSelect") is True:
+            qentry["multiSelect"] = True
         header = q.get("header")
         if isinstance(header, str) and header.strip():
             qentry["header"] = header.strip()
@@ -1552,6 +1553,45 @@ def _ask_user_question_payload(tool_input) -> dict | None:
     if not out_questions:
         return None
     return {"version": 1, "questions": out_questions}
+
+
+_ASK_ANSWER_FIELD = "io.aee.ask-answer"
+_ASK_ANSWER_MAX_LABELS = 50
+
+
+def _ask_answer_prompt(body: str, content) -> str:
+    """The resume prompt for a human's quick-reply answer (#2523).
+
+    A single-choice answer's chat body is already the chosen label, so it is
+    passed through unchanged. A multi-select answer carries its selections as
+    `labels` (on the answer itself, or per entry of a multi-question
+    `answers[]`); its visible body only joins them with ", ", which is ambiguous
+    when a label contains a comma. For those, rebuild the prompt from the
+    structured labels so every selected answer reaches the model as its own
+    line. Anything malformed falls back to the plain body.
+    """
+    if not isinstance(content, dict):
+        return body
+    answer = content.get(_ASK_ANSWER_FIELD)
+    if not isinstance(answer, dict):
+        return body
+    entries = answer.get("answers") if isinstance(answer.get("answers"), list) else [answer]
+    entries = [e for e in entries if isinstance(e, dict)]
+    if not any(isinstance(e.get("labels"), list) for e in entries):
+        return body
+
+    blocks: list[str] = []
+    for e in entries:
+        raw = e.get("labels") if isinstance(e.get("labels"), list) else [e.get("label")]
+        labels = [l.strip() for l in raw[:_ASK_ANSWER_MAX_LABELS]
+                  if isinstance(l, str) and l.strip()]
+        if not labels:
+            return body
+        blocks.append("\n".join(f"- {l}" for l in labels))
+    if len(blocks) == 1:
+        return "My answer to your question (selected options):\n" + blocks[0]
+    return "My answers to your questions (selected options, in question order):\n" + "\n".join(
+        f"Question {i}:\n{b}" for i, b in enumerate(blocks, 1))
 
 
 # ---- status.json ----
@@ -3536,7 +3576,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     # run_context by reference (same channel as `_loopOutputTokens` above) so the
     # DM path can attach it as `io.aee.ask-question` on the posted message without
     # widening the return signature. None when the question is not renderable as
-    # single-choice buttons (e.g. multiSelect) — the text body still carries it.
+    # quick-reply options — the text body still carries it.
     if ask_reply is not None and isinstance(run_context, dict):
         run_context["_askQuestion"] = _ask_user_question_payload(ask_question_input)
 
@@ -7528,7 +7568,11 @@ async def run_dm_listener() -> None:
             # trigger prompts are deliberately untouched (out of scope).
             known_commands = _list_slash_command_tokens(
                 _agent_workdir() / ".claude" / "commands")
-            prepared = _prepare_chat_prompt(body, known_commands)
+            # A multi-select quick-reply answer (#2523) is resumed with every
+            # selected label from its structured `io.aee.ask-answer`.
+            content = (getattr(event, "source", None) or {}).get("content")
+            prepared = _prepare_chat_prompt(_ask_answer_prompt(body, content),
+                                            known_commands)
             send_body = prepared["prompt"]
             if prepared["isSlash"]:
                 _append_event(room_id, {
@@ -7631,7 +7675,8 @@ async def run_dm_listener() -> None:
 
             # If the run paused on an AskUserQuestion, carry the structured
             # options to the console so it can render clickable quick-reply
-            # buttons (#1663). Absent / multiSelect → plain text reply only.
+            # buttons (#1663; multi-select toggles + Submit, #2523). Absent →
+            # plain text reply only.
             ask_question = dm_run_context.get("_askQuestion")
             extra_content = (
                 {"io.aee.ask-question": ask_question}

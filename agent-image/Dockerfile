@@ -11,7 +11,7 @@
 # (or `docker pull python:3.12-slim` then `docker inspect --format '{{index .RepoDigests 0}}'`).
 # Same pattern for the digest-pinned toolchain variants and the SHA-pinned GitHub
 # Actions in .github/workflows/*.yml — see docs/supply-chain-pins.md.
-FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS aee-base
+FROM python:3.14-slim@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2 AS aee-base
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

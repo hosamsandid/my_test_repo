@@ -204,6 +204,43 @@ test('buildFlowBoard: done rows stay for the retention window, then drop', () =>
   assert.equal(mk(25 * 60, { doneRetentionHours: 48 }).rows.length, 1);
 });
 
+test('buildFlowBoard: rows flow top to bottom — Ready, stages in hand-off order, newest in stage on top, done last newest first', () => {
+  const marked = (n, mins) => issue(n, { updatedAt: iso(mins), body: 'x\n<!-- agent: t-developer -->' });
+  const devSession = (n, mins) => ({ agentId: `t-developer-i${n}`, session: { id: `s${n}`, startedAt: iso(mins), workItem: { repo: 'o/r', kind: 'issue', number: n } } });
+  const b = board({
+    github: {
+      issues: [
+        marked(1, 300), marked(2, 10), // Ready (never picked up)
+        issue(3), issue(4), // Developer (running sessions)
+        issue(5, { labels: ['ready-for-review'], updatedAt: iso(20) }), // Code Reviewer
+        issue(6, { state: 'closed', closedAt: iso(200) }), issue(7, { state: 'closed', closedAt: iso(15) }), // Done
+      ],
+    },
+    events: [delivered(6, 't-developer', 2000), delivered(7, 't-developer', 2000)],
+    sessions: [devSession(3, 90), devSession(4, 5)],
+  });
+  const at = (n) => b.rows.find((r) => r.id === `o/r#${n}`);
+  assert.deepEqual([1, 2].map((n) => at(n).status), ['ready', 'ready']);
+  assert.deepEqual([3, 4].map((n) => at(n).stageId), ['t-developer', 't-developer']);
+  assert.equal(at(5).stageId, 't-reviewer');
+  assert.deepEqual([6, 7].map((n) => at(n).status), ['done', 'done']);
+  // Ready above role stages, earlier stage above later, newest-in-stage first,
+  // done below everything, most recently done first.
+  assert.deepEqual(b.rows.map((r) => r.id), ['o/r#2', 'o/r#1', 'o/r#4', 'o/r#3', 'o/r#5', 'o/r#7', 'o/r#6']);
+});
+
+test('buildFlowBoard: a missing stage-entry time sorts as oldest in its stage, tie broken by id, stable across refreshes', () => {
+  const sess = (n, startedAt) => ({ agentId: `t-developer-i${n}`, session: { id: `s${n}`, startedAt, workItem: { repo: 'o/r', kind: 'issue', number: n } } });
+  const mk = (order) => board({
+    github: { issues: order.map((n) => issue(n)) },
+    sessions: order.map((n) => sess(n, n === 11 ? iso(500) : undefined)),
+  });
+  const first = mk([12, 13, 11]).rows;
+  assert.deepEqual(first.map((r) => r.since), [iso(500), null, null]);
+  assert.deepEqual(first.map((r) => r.id), ['o/r#11', 'o/r#12', 'o/r#13']);
+  assert.deepEqual(mk([13, 11, 12]).rows.map((r) => r.id), first.map((r) => r.id));
+});
+
 test('buildFlowBoard: an agent PR later handled by humans stays until done', () => {
   const b = board({
     github: { prs: [pr(90, { state: 'closed', merged: true, mergedAt: iso(30) })] },

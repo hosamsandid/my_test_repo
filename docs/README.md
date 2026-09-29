@@ -88,7 +88,7 @@ shipped behaviour.
 | Document | Subject |
 |---|---|
 | [key-files.md](key-files.md) | Repository layout and the files that matter |
-| [cli-contract.md](cli-contract.md) | The one contract every built-in agent CLI (`knowledge`, `aee-artifact`, `aee-emit`, `gh-as-agent`) follows — naming, `--help`, `--json`, exit codes |
+| [cli-contract.md](cli-contract.md) | The one contract every built-in agent CLI (`knowledge`, `aee-artifact`, `gh-as-agent`) follows — naming, `--help`, `--json`, exit codes |
 | [teams-data-model.md](teams-data-model.md) | Teams, users, memberships; roles and resource ownership |
 | [flow-connection-model.md](flow-connection-model.md) | The unified connection model behind the Flow editor *(German)* |
 | [process-template-format.md](process-template-format.md) | Schema of the portable process-template bundle |

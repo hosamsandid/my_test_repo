@@ -157,8 +157,8 @@ token classes** — (a) a **control-plane token** (`INTERNAL_API_TOKEN`, injecte
 admin-console container, sent as a bearer header by the proxy layer; grants the full
 `/internal/*` surface), (b) **per-agent tokens** minted at `startAgentProcess` and baked
 into the container env exactly like the PAT (valid only for the agent-facing allowlist —
-`/internal/agents/:id/claim`, `ticket*`, knowledge, usage ingest, `/internal/flow-emit`
-as producer, maintenance-mode read — and **only for the agent's own `:id`**), (c) a
+`/internal/agents/:id/claim`, `ticket*`, knowledge, usage ingest,
+maintenance-mode read — and **only for the agent's own `:id`**), (c) a
 **signaler token** for external event sources (`POST /internal/bp-events` — the ACE
 `bp-transition.py` caller; without this class, enforcement would break BP routing).
 Rollout via `INTERNAL_AUTH_MODE=observe|warn|enforce`: one observe week inventories

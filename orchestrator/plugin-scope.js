@@ -31,8 +31,24 @@ const DEFAULT_GRANULARITY = 'team';
 // credential. `resolveScopeId` returns null for it; `mintScopeToken` refuses it.
 const INTERNAL_SCOPE_ID = '_internal';
 
+// #2562: the scope a broker authenticates its credential-grant request under —
+// `_grant-<scopeId>`. Reserved like `_internal`: never derived for an agent,
+// never minted into a workspace, so a granted agent's own scope token (which a
+// chat turn can read from its workspace) can never reach the grant route and
+// pull a person's secret into the container.
+const GRANT_SCOPE_PREFIX = '_grant-';
+
 function isReservedScopeId(scopeId) {
-  return scopeId === INTERNAL_SCOPE_ID;
+  return scopeId === INTERNAL_SCOPE_ID
+    || (typeof scopeId === 'string' && scopeId.startsWith(GRANT_SCOPE_PREFIX));
+}
+
+// The team/agent scope a broker grant token stands for, or null when `scopeId`
+// is not a grant scope.
+function scopeIdFromGrantScope(scopeId) {
+  if (typeof scopeId !== 'string' || !scopeId.startsWith(GRANT_SCOPE_PREFIX)) return null;
+  const inner = scopeId.slice(GRANT_SCOPE_PREFIX.length);
+  return inner && !isReservedScopeId(inner) ? inner : null;
 }
 
 // Container/network labels the orchestrator stamps on a plugin's sidecar and a
@@ -75,7 +91,9 @@ module.exports = {
   GRANULARITIES,
   DEFAULT_GRANULARITY,
   INTERNAL_SCOPE_ID,
+  GRANT_SCOPE_PREFIX,
   isReservedScopeId,
+  scopeIdFromGrantScope,
   PLUGIN_ID_LABEL,
   OWNER_LABEL_KEY,
   isMember,

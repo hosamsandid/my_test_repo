@@ -162,7 +162,7 @@ const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantF
 const { planWorkspaceSync, planCliRefresh } = require("./plugin-sync");
 const { resolveAgentStateDir } = require("./agent-state-dir");
 const mcpSeed = require("./mcp-seed");
-const { resolveScopeId } = require("./plugin-scope");
+const { resolveScopeId, scopeIdFromGrantScope } = require("./plugin-scope");
 const pluginRegistry = require("./plugin-registry");
 const pluginRuntime = require("./plugin-runtime");
 const { resolveScopeGithubCredentials, buildTeamFlowLabels } = require("./plugin-github-creds");
@@ -16727,8 +16727,16 @@ async function main() {
         sendJson(res, 401, { ok: false, code: 'bad-token' });
         return;
       }
+      // Only the broker's reserved grant token — never the team scope token a
+      // granted agent holds in its workspace (it would let a chat turn fetch
+      // the sender's personal secret into the container, AC10).
+      const scopeId = scopeIdFromGrantScope(scope.scopeId);
+      if (!scopeId) {
+        sendJson(res, 403, { ok: false, code: 'grant-token-required' });
+        return;
+      }
       readBody(req).then((body) => {
-        const { pluginId, scopeId } = scope;
+        const { pluginId } = scope;
         let agentId = null;
         try { agentId = pluginRunIdentity.verifyCallerToken(String((body && body.callerToken) || ''), pluginRuntime.signingSecret()); } catch { agentId = null; }
         if (!agentId) {

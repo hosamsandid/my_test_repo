@@ -55,6 +55,7 @@
 
 const crypto = require("crypto");
 const pluginScopeToken = require("./plugin-scope-token");
+const { scopeIdFromGrantScope } = require("./plugin-scope");
 
 const AUTH_MODES = ["observe", "warn", "enforce"];
 
@@ -328,8 +329,10 @@ const AGENT_ROUTES = [
 // wake-agent — is a control-plane concern and stays refused.
 const PLUGIN_SCOPE_ROUTES = [
   { method: "POST", pattern: /^\/internal\/plugin-event$/ },
-  // #2562: a broker asks which credential ONE agent CLI call may use.
-  { method: "POST", pattern: /^\/internal\/plugin-credential-grant$/ },
+  // #2562: a broker asks which credential ONE agent CLI call may use. Only with
+  // its reserved `_grant-<scopeId>` token: the plain scope token is also held by
+  // every granted agent, and this route returns a person's secret.
+  { method: "POST", pattern: /^\/internal\/plugin-credential-grant$/, grantScope: true },
 ];
 
 // Strip the query string and decode each path segment, so an allowlist entry
@@ -459,8 +462,12 @@ function decideInternalAuth({ method, url, headers = {}, config }) {
     if (pathname === null) {
       return { ...base, allowed: false, denied: enforcing, status: 403, reason: "unparseable-path" };
     }
-    if (!pluginRouteRule(method, pathname)) {
+    const pluginRule = pluginRouteRule(method, pathname);
+    if (!pluginRule) {
       return { ...base, allowed: false, denied: enforcing, status: 403, reason: "route-not-plugin-facing" };
+    }
+    if (pluginRule.grantScope && !scopeIdFromGrantScope(caller.scopeId)) {
+      return { ...base, allowed: false, denied: enforcing, status: 403, reason: "grant-token-required" };
     }
     return { ...base, allowed: true, denied: false, status: 0, reason: "plugin-allowlist" };
   }

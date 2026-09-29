@@ -148,13 +148,14 @@ function personalHarness() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pcr-personal-'));
   const credentialStore = new PluginCredentialStore({ dir });
   const pushes = [];
+  const readIds = [];
   const jira = { id: 'jira', name: 'Jira', credentials: JIRA_CREDS, personalCredentials: PERSONAL };
   const wiring = createPluginCredentialWiring({
     listAgentIds: () => [],
     loadAgentConfig: () => null,
     pluginRegistry: {
       installedManifests: () => ({ jira, other: { id: 'other', credentials: [] } }),
-      readPluginManifest: (id) => (id === 'jira' ? { ok: true, manifest: jira } : id === 'other' ? { ok: true, manifest: { id: 'other', credentials: [] } } : { ok: false }),
+      readPluginManifest: (id) => (readIds.push(id), id === 'jira' ? { ok: true, manifest: jira } : id === 'other' ? { ok: true, manifest: { id: 'other', credentials: [] } } : { ok: false }),
     },
     pluginRuntime: { pushScopeCredentials: async (m, scopes) => { pushes.push({ id: m.id, scopes }); } },
     effectivePlugins: () => [],
@@ -162,7 +163,7 @@ function personalHarness() {
     resolveScopeId: () => null,
     credentialStore,
   });
-  return { wiring, credentialStore, pushes };
+  return { wiring, credentialStore, pushes, readIds };
 }
 
 async function personalCall(wiring, method, url, body) {
@@ -199,6 +200,13 @@ test('personal routes: unknown plugin / no personal tier → 404; bad ids → 40
   assert.equal((await personalCall(wiring, 'PUT', '/internal/users/alice/plugin-credentials/other', { values: {} })).status, 404);
   assert.equal((await personalCall(wiring, 'PUT', '/internal/users/alice/plugin-credentials/nope', { values: {} })).status, 404);
   assert.equal((await personalCall(wiring, 'GET', '/internal/users/..%2F..%2Fetc/plugin-credentials')).status, 400);
+  // A traversal pluginId is refused before it names a registry path (review S1, CodeQL).
+  const { wiring: w2, readIds } = personalHarness();
+  for (const url of ['/internal/users/alice/plugin-credentials/..%2F..%2Fetc', '/internal/users/alice/plugin-credentials/..']) {
+    assert.equal((await personalCall(w2, 'PUT', url, { values: {} })).status, 404, url);
+    assert.equal((await personalCall(w2, 'DELETE', url)).status, 404, url);
+  }
+  assert.deepEqual(readIds, [], 'readPluginManifest is never called with an invalid id');
   const bad = await personalCall(wiring, 'PUT', '/internal/users/alice/plugin-credentials/jira', { values: { email: 5 } });
   assert.equal(bad.status, 400);
   assert.equal((await personalCall(wiring, 'GET', '/internal/users/alice/other')).handled, false);

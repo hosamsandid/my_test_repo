@@ -1237,7 +1237,7 @@ test('autonomous run: service account, audited as non-interactive; none configur
   }
 });
 
-test('the default grant resolver asks the orchestrator with the scope token + caller token and fails closed', async () => {
+test('the default grant resolver asks the orchestrator with the reserved grant token + caller token and fails closed', async () => {
   broker._setGrantResolver(null); // the real round-trip
   const origFetch = global.fetch;
   const asked = [];
@@ -1255,7 +1255,9 @@ test('the default grant resolver asks the orchestrator with the scope token + ca
   try {
     let r = await callAs(srv, 'GET', '/cli/whoami', { token: TOKEN, caller: 'aeecall1.abc.def' });
     assert.equal(r.status, 200);
-    assert.equal(asked[0].auth, `Bearer ${mint('jira', 'team-1', 'test-secret')}`);
+    // The reserved grant scope — never the team token the agent holds (review B1).
+    assert.equal(asked[0].auth, `Bearer ${mint('jira', '_grant-team-1', 'test-secret')}`);
+    assert.notEqual(asked[0].auth, `Bearer ${TOKEN}`);
     assert.deepEqual(asked[0].body, { callerToken: 'aeecall1.abc.def' });
 
     answer = { status: 403, body: { ok: false, code: 'untrusted-sender', message: 'Refused: not a member.' } };

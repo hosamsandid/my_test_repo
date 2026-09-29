@@ -30,6 +30,7 @@ const {
   withUnexpectedErrors,
   verifyScopeToken,
   mint,
+  grantScopeId,
   auditWriter,
   healthEndpoint,
   teardownScopeEndpoint,
@@ -315,7 +316,10 @@ async function defaultGrantResolver({ scopeId, callerToken }) {
   try {
     const res = await fetch(`${orchestratorUrl()}/internal/plugin-credential-grant`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${mint(PLUGIN_ID, scopeId, SIGNING_SECRET)}` },
+      // The reserved grant scope, never the team's own token: every granted
+      // agent holds that one in its workspace, so accepting it here would let a
+      // chat turn fetch the sender's personal secret itself (#2562).
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${mint(PLUGIN_ID, grantScopeId(scopeId), SIGNING_SECRET)}` },
       body: JSON.stringify({ callerToken }),
       signal: AbortSignal.timeout(GRANT_TIMEOUT_MS),
     });

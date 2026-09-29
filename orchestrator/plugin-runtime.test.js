@@ -214,3 +214,24 @@ test('mintScopeToken refuses the reserved `_internal` scope; mintInternalToken i
   // an ordinary scope still mints
   assert.ok(runtime.mintScopeToken('jira', 'team-1', tmp));
 });
+
+test('#2562 review B1: a workspace-issued scope token is never a credential-grant token', () => {
+  const tmp = require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'plugin-rt-'));
+  const { verify, mint } = require('./plugin-scope-token');
+  const { scopeIdFromGrantScope } = require('./plugin-scope');
+  const ia = require('./internal-auth');
+  assert.equal(runtime.mintScopeToken('jira', '_grant-team-1', tmp), null, 'the grant scope is never minted into a workspace');
+  const ws = runtime.mintScopeToken('jira', 'team-1', tmp);
+  assert.equal(scopeIdFromGrantScope(verify(ws, runtime.signingSecret(tmp)).scopeId), null);
+  const config = ia.resolveInternalAuthConfig(
+    { INTERNAL_API_TOKEN: 'cp-token', INTERNAL_AUTH_MODE: 'enforce' },
+    { pluginScopeSecret: runtime.signingSecret(tmp) },
+  );
+  const decide = (tok) => ia.decideInternalAuth({
+    method: 'POST', url: '/internal/plugin-credential-grant', headers: { authorization: `Bearer ${tok}` }, config,
+  });
+  const refused = decide(ws);
+  assert.equal(refused.allowed, false);
+  assert.equal(refused.denied, true);
+  assert.equal(decide(mint('jira', '_grant-team-1', runtime.signingSecret(tmp))).allowed, true, "the broker's grant token passes");
+});

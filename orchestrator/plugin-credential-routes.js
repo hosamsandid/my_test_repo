@@ -23,6 +23,8 @@
 //   resolveScopeId(cfg, granularity)   → scopeId | null
 //   credentialStore                    → PluginCredentialStore
 //   log(msg)                           → optional
+const { PLUGIN_ID_RE } = require('./plugin-credential-store');
+
 function createPluginCredentialWiring(deps) {
   const {
     listAgentIds, loadAgentConfig, pluginRegistry, pluginRuntime,
@@ -178,6 +180,12 @@ function createPluginCredentialWiring(deps) {
         return true;
       }
       if ((req.method === 'PUT' || req.method === 'DELETE') && pluginId) {
+        // Validate the URL-decoded id BEFORE it names a registry path (CodeQL
+        // js/path-injection): `..%2F…` must never read another plugin.json.
+        if (!PLUGIN_ID_RE.test(pluginId)) {
+          sendJson(res, 404, { error: 'Plugin not found' });
+          return true;
+        }
         const entry = pluginRegistry.readPluginManifest(pluginId);
         const manifest = entry && entry.ok ? entry.manifest : null;
         if (!manifest || !Array.isArray(manifest.personalCredentials) || manifest.personalCredentials.length === 0) {

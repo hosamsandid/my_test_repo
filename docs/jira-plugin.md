@@ -290,7 +290,10 @@ Matrix room and event) or `autonomous`. For a chat run the orchestrator reads
 the event from the homeserver and takes the sender from there. Each `aee-jira`
 call carries the agent's caller token (`AEE_AGENT_CALLER_TOKEN`, which names
 the agent, not a person); the broker forwards it to
-`POST /internal/plugin-credential-grant`. That route checks the one active
+`POST /internal/plugin-credential-grant`, authenticated with a reserved
+`_grant-<scope>` token only the broker mints. The team scope token an agent
+holds in its workspace is refused there, so nothing inside the container can
+ask for a person's credential itself. That route checks the one active
 run, the sender's team trust (re-checked on every call) and the stored
 personal credential. The old `AEE_ACTING_SENDER` env var plays no part.
 
@@ -325,7 +328,7 @@ with the service account.
 | a call returns `personal-credential-required` | a chat turn, and the sender has no personal Jira credential | the sender adds it under Connections → Plugin Tokens |
 | a call returns `personal-credential-rejected` | Jira refused the sender's personal token (401) — expired or revoked | the sender renews it on Plugin Tokens |
 | a call returns `untrusted-sender` | the chat message came from someone not trusted for this agent | share the team with that person, or ask a member |
-| a call returns `no-active-run` / `ambiguous-run` / `run-key-revoked` | the call is not inside exactly one run the runner declared, or something in the container requested a second run key | respawn the agent; do not run `aee-jira` from background processes that outlive the turn |
+| a call returns `no-active-run` / `ambiguous-run` / `run-key-revoked` | the call is not inside exactly one run the runner declared (e.g. a second Claude run in the same agent overlapped a chat turn — the call is refused rather than guessed), or something in the container requested a second run key | respawn the agent; do not run `aee-jira` from background processes that outlive the turn |
 | a chat turn returns `no-site` | the sender has a personal credential, but the team has no Jira site set | Team Admin sets the site on the Plugins page |
 | an automated run returns `no-service-account` | the team has no service-account credential set | Team Admin sets it on the Plugins page |
 | broker log: `Jira rejected the credential (401)` | the e-mail and token aren't the same Atlassian identity, or the token was revoked | regenerate a **classic** token while signed in as the intended account |

@@ -53,7 +53,8 @@ poller's, in `broker-sdk/event-cursor.js` (`github-poller.js` is untouched).
 ## Credentials
 
 **Two tiers (#2562).** Every `/cli/*` call first asks the orchestrator
-`POST /internal/plugin-credential-grant` (this broker's scope token + the
+`POST /internal/plugin-credential-grant` (this broker's reserved `_grant-<scopeId>`
+token — `grantScopeId`, never the team token agents hold — + the
 agent's `X-AEE-Agent-Token` caller token) whose account it runs under —
 `defaultGrantResolver`, swappable in tests via `_setGrantResolver`. A **chat**
 turn gets the sender's personal `email` / `api-token` for that one call (site

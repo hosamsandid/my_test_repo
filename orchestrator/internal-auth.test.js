@@ -553,7 +553,13 @@ test("#2562: the per-person credential routes are control-plane only; the grant 
     assert.equal(decide(method, url, asPlugin(), PLUGIN_CONFIG).allowed, false, `plugin must not reach ${method} ${url}`);
     assert.equal(decide(method, url, asConsole()).allowed, true);
   }
-  assert.equal(decide("POST", "/internal/plugin-credential-grant", asPlugin(), PLUGIN_CONFIG).allowed, true);
+  // Only the broker's reserved grant token — the team scope token every granted
+  // agent holds in its workspace is refused (review B1, AC9/AC10).
+  const grant = scopeToken.mint("jira", "_grant-team-a", PLUGIN_SECRET);
+  assert.equal(decide("POST", "/internal/plugin-credential-grant", asPlugin(grant), PLUGIN_CONFIG).allowed, true);
+  const ws = decide("POST", "/internal/plugin-credential-grant", asPlugin(), PLUGIN_CONFIG);
+  assert.equal(ws.allowed, false);
+  assert.equal(ws.reason, "grant-token-required");
   assert.equal(decide("POST", "/internal/plugin-credential-grant", asAgent()).allowed, false);
   // an agent reaches only ITS OWN run-identity routes
   assert.equal(decide("POST", "/internal/agents/team-y-developer/run-key", asAgent()).allowed, false);

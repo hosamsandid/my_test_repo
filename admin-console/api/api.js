@@ -8922,6 +8922,49 @@ app.get('/api/teams/:teamId/tickets', apiLimiter, async (req, res) => {
   }
 });
 
+// GET /api/teams/:teamId/flow-board — the lean Flow Control board (#2573):
+// stages from the flow graph, one row per work item a team agent took part
+// in, running sessions, pools and human blocks. Visibility-only like
+// `tickets`; `?refresh=1` is forwarded (the orchestrator's single-flight cache
+// otherwise serves a sweep younger than its TTL). `canManage` tells the page
+// whether to offer the pool switches and the column configuration.
+app.get('/api/teams/:teamId/flow-board', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  const qs = req.query && req.query.refresh === '1' ? '?refresh=1' : '';
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-board${qs}`);
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) data.canManage = !!canManageTeam(scope, teamId);
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/flow-board-config — save the optional per-team
+// column configuration (rename/merge/hide stages, done retention). A team
+// setting, so gated like every other team mutation (`canManageTeam`).
+app.post('/api/teams/:teamId/flow-board-config', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-board-config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config: req.body && req.body.config }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // GET /api/teams/:teamId/pool-control — board data for the Flow Control
 // board's pause/drain/force-dispatch controls (#2250 Phase 5, epic #2251).
 // Visibility-only like `tickets`/`flow-anomalies`: no `canManageTeam` gate on

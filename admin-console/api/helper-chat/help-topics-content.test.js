@@ -532,33 +532,32 @@ const TOPIC_CONTENT = [
   {
     id: 'flow-control',
     routes: ['/flow-control'],
-    // #2116 (epic #2112 Flow Control §4.4) — a NET-NEW topic: there was no box
-    // to extract, because the page did not exist. The four chapters below are
-    // each the landing target of a "?" on the matching board surface, so the
-    // headings are load-bearing rather than decorative.
+    // #2116 introduced the topic; #2573 rebuilt the board as a "who is working
+    // on what" view. Each chapter is the landing target of a "?" on the
+    // matching board surface, so the headings are load-bearing.
     chapters: [
       'What the Flow Control board shows',
-      'The lifecycle stages',
-      'Blockers and what to do about them',
-      'The epic roll-up',
+      'Who is working right now',
+      'Pause, Drain and Switch on',
+      'Where you are needed',
+      'The stages',
+      'Changing the columns',
     ],
-    // The load-bearing claim of the whole subsystem is that state comes from
-    // GitHub evidence and not from labels — a reword that softens it would make
-    // the board look like every other label-driven view, which is precisely the
-    // failure §4.1 exists to prevent. The read-only property is pinned for the
-    // same reason: the ledger mutates nothing, and a topic promising a repair
-    // button would be promising a later phase's feature.
+    // The load-bearing claims: only work the team touched appears, the stages
+    // come from the team's own flow (no label vocabulary), and Pause differs
+    // from Drain — a reword that blurs any of these misleads the operator.
     concepts: [
-      'the fact wins',
-      'Claimed done',
-      'read-only',
-      'Superseded',
-      'Stale base',
-      'Orphaned',
-      'time in the current stage',
-      'An empty',
+      'Only work the team took part in appears',
+      'Dependabot',
+      'Nothing in progress',
+      'every 30 seconds',
       'Maintenance mode',
-      'mutually exclusive',
+      'GitHub unreachable',
+      'nothing depends on label names',
+      'one row',
+      'time in that stage',
+      'switches itself Off',
+      'Draining, n still running',
     ],
   },
   {

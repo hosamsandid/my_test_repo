@@ -1639,13 +1639,18 @@ def _persist_running_sessions() -> None:
 
 def _new_session(session_type: str, *, room_id: str | None = None, label: str = "",
                  trigger_type: str | None = None, trigger_id: str | None = None,
-                 correlation_id: str | None = None) -> dict:
+                 correlation_id: str | None = None,
+                 work_item: dict | None = None) -> dict:
     """Build a running-session descriptor for _bump_active. Fields mirror the
     legacy Node writer so RunningSessionsPanel renders them unchanged.
 
     `correlation_id` is the id stamped on this run's session-log rows, letting
     the admin console scope one session's log even when sessions share a room
-    (#543)."""
+    (#543).
+
+    `work_item` (`{repo, kind, number}`, #2573) names the issue/PR a GitHub-
+    triggered run is working on, so the Flow Control board can list "who is
+    working on what" without guessing from the trigger label."""
     return {
         "id": uuid.uuid4().hex,
         "type": session_type,
@@ -1655,7 +1660,26 @@ def _new_session(session_type: str, *, room_id: str | None = None, label: str = 
         "roomId": room_id,
         "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
         "correlationId": correlation_id,
+        "workItem": work_item,
     }
+
+
+def _session_work_item(gh: dict | None) -> dict | None:
+    """The `{repo, kind, number}` a GitHub-triggered run works on (#2573) —
+    derived from the same poller ctx block `_usage_github_and_key` reads. A PR
+    wins over an issue (a PR comment event carries both shapes). None for a
+    non-GitHub run or an event naming no issue/PR (push)."""
+    block, _ = _usage_github_and_key(gh)
+    if not block or not block.get("repo"):
+        return None
+    if block.get("prNumber") is not None:
+        return {"repo": block["repo"], "kind": "pr", "number": block["prNumber"]}
+    if block.get("issueNumber") is not None:
+        payload = gh.get("payload") if isinstance(gh.get("payload"), dict) else {}
+        issue = payload.get("issue") if isinstance(payload.get("issue"), dict) else {}
+        kind = "pr" if issue.get("pull_request") else "issue"
+        return {"repo": block["repo"], "kind": kind, "number": block["issueNumber"]}
+    return None
 
 
 def _bump_active(delta: int, session: dict | None = None) -> None:
@@ -7098,6 +7122,7 @@ class TriggerScheduler:
             "trigger", room_id=room_id, label=str(tid),
             trigger_type=trigger.get("type"), trigger_id=tid,
             correlation_id=correlation_id,
+            work_item=_session_work_item(gh),
         )
         _bump_active(+1, session)
         try:

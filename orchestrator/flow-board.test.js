@@ -1,0 +1,293 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fb = require('./flow-board');
+
+const trig = (labelFilter, extra = {}) => ({ id: `t-${labelFilter}`, type: 'github-event', labelFilter, ...extra });
+
+// The SDLC team of the issue's own example: Ready → Developer → Code Reviewer
+// → Doc Sync → Merger → Done, with a Reworker looping back to review and a
+// pooled Developer.
+const SDLC = [
+  { id: 't-developer', displayName: 'Developer', emits: ['ready-for-review'], triggers: [trig('ready')] },
+  { id: 't-developer-i12', displayName: 'Developer', poolInstance: true, poolOf: 't-developer', poolItem: 12, poolRepo: 'o/r', triggers: [trig('ready')] },
+  { id: 't-reviewer', displayName: 'Code Reviewer', emits: ['changes-requested', 'ready-for-documentation-update'], triggers: [trig('ready-for-review')] },
+  { id: 't-reworker', displayName: 'Reworker', emits: ['ready-for-review'], triggers: [trig('changes-requested')] },
+  { id: 't-docsync', displayName: 'Doc Sync', triggers: [trig('ready-for-documentation-update', { emits: ['ready-to-merge'] })] },
+  { id: 't-merger', displayName: 'Merger', outcomes: { options: [{ id: 'x', actions: [{ type: 'setLabel', label: 'merge-conflict' }] }] }, triggers: [trig('ready-to-merge'), trig('ready-to-merge:wip')] },
+  { id: 't-solver', displayName: 'Conflict Solver', emits: ['ready-to-merge'], triggers: [trig('merge-conflict')] },
+];
+const SDLC_LABELS = [{ name: 'ready', humanGate: true }];
+
+// A second, entirely different vocabulary — no label or role name in common.
+const KITCHEN = [
+  { id: 'k-chef', displayName: 'Chef', emits: ['dish-cooked'], triggers: [trig('order-placed')] },
+  { id: 'k-taster', displayName: 'Taster', emits: ['dish-approved', 'sent-back'], triggers: [trig('dish-cooked')] },
+  { id: 'k-sous', displayName: 'Sous Chef', emits: ['dish-cooked'], triggers: [trig('sent-back')] },
+  { id: 'k-waiter', displayName: 'Waiter', triggers: [trig('dish-approved')] },
+  { id: 'k-dishwasher', displayName: 'Dishwasher', triggers: [{ id: 'c', type: 'cron', cron: '* * * * *' }] },
+];
+
+const labelsOf = (stages) => stages.map((s) => s.label);
+
+test('deriveFlowStages: SDLC graph → Ready, roles in hand-off order, Done; pool instance and loop-back shown once', () => {
+  const { stages } = fb.deriveFlowStages(SDLC, { labels: SDLC_LABELS });
+  assert.deepEqual(labelsOf(stages), [
+    'Ready', 'Developer', 'Code Reviewer', 'Reworker', 'Doc Sync', 'Merger', 'Conflict Solver', 'Done',
+  ]);
+  assert.equal(stages.filter((s) => s.label === 'Developer').length, 1);
+});
+
+test('deriveFlowStages: a different vocabulary derives its own stages (no fixed label names)', () => {
+  const { stages } = fb.deriveFlowStages(KITCHEN, { labels: [] });
+  assert.deepEqual(labelsOf(stages), ['Ready', 'Chef', 'Taster', 'Sous Chef', 'Waiter', 'Done']);
+});
+
+test('deriveFlowStages: channels name a hand-off without labels', () => {
+  const members = [
+    { id: 'x-writer', displayName: 'Writer', triggers: [trig('go')] },
+    { id: 'x-editor', displayName: 'Editor', channels: [{ artifact: 'pr', from: 'writer' }], triggers: [{ id: 'e', type: 'github-event' }] },
+  ];
+  const { stages } = fb.deriveFlowStages(members, { teamId: 'x' });
+  assert.deepEqual(labelsOf(stages), ['Ready', 'Writer', 'Editor', 'Done']);
+});
+
+test('deriveFlowStages: config renames, merges and hides stages', () => {
+  const { stages, stageOf } = fb.deriveFlowStages(SDLC, {
+    labels: SDLC_LABELS,
+    config: {
+      stages: {
+        't-reviewer': { label: 'Review' },
+        't-reworker': { mergeInto: 't-reviewer' },
+        't-solver': { mergeInto: 't-merger' },
+        't-docsync': { hidden: true },
+      },
+    },
+  });
+  assert.deepEqual(labelsOf(stages), ['Ready', 'Developer', 'Review', 'Merger', 'Done']);
+  assert.equal(stageOf('t-reworker'), 2);
+  assert.equal(stageOf('t-docsync'), 2); // hidden → nearest visible stage before it
+  assert.equal(stageOf('t-solver'), 3);
+});
+
+test('deriveFlowStages: the unconfigured role order stays available for the column dialog', () => {
+  const { roles } = fb.deriveFlowStages(SDLC, { labels: SDLC_LABELS, config: { stages: { 't-docsync': { hidden: true } } } });
+  assert.deepEqual(roles.map((r) => r.label), ['Developer', 'Code Reviewer', 'Reworker', 'Doc Sync', 'Merger', 'Conflict Solver']);
+  assert.equal(board().roles.length, 6);
+});
+
+test('normalizeBoardConfig: defaults, bounds and junk', () => {
+  assert.deepEqual(fb.normalizeBoardConfig(null), { doneRetentionHours: 24, stages: {} });
+  assert.equal(fb.normalizeBoardConfig({ doneRetentionHours: 48 }).doneRetentionHours, 48);
+  assert.equal(fb.normalizeBoardConfig({ doneRetentionHours: -1 }).doneRetentionHours, 24);
+  assert.deepEqual(fb.normalizeBoardConfig({ stages: { a: { hidden: 'yes', mergeInto: 'a' }, b: 5 } }).stages, {});
+});
+
+test('makeRoleResolver: instances (live or reaped) count as their role; strangers are null', () => {
+  const roleOf = fb.makeRoleResolver(SDLC);
+  assert.equal(roleOf('t-developer-i12'), 't-developer');
+  assert.equal(roleOf('t-developer-i99'), 't-developer'); // reaped — id shape only
+  assert.equal(roleOf('t-reviewer'), 't-reviewer');
+  assert.equal(roleOf('other-agent'), null);
+});
+
+const NOW = Date.parse('2026-09-29T12:00:00Z');
+const iso = (minsAgo) => new Date(NOW - minsAgo * 60_000).toISOString();
+const issue = (n, extra = {}) => ({ repo: 'o/r', number: n, title: `Issue ${n}`, url: `u/${n}`, state: 'open', labels: [], updatedAt: iso(600), ...extra });
+const pr = (n, extra = {}) => ({ repo: 'o/r', number: n, title: `PR ${n}`, url: `u/${n}`, state: 'open', labels: [], updatedAt: iso(600), headRef: `feat/${n}`, ...extra });
+const delivered = (n, agentId, minsAgo, extra = {}) => ({
+  ts: iso(minsAgo), eventId: `e${n}-${agentId}-${minsAgo}`, repo: 'o/r', workItem: { kind: 'issue', number: n },
+  outcomes: [{ agentId, status: 'delivered' }], ...extra,
+});
+
+function board(overrides = {}) {
+  return fb.buildFlowBoard({ members: SDLC, labels: SDLC_LABELS, teamId: 't', now: NOW, ...overrides });
+}
+
+test('buildFlowBoard: only items a team agent touched appear; dependabot and backlog never do', () => {
+  const b = board({
+    github: {
+      issues: [issue(1), issue(2), issue(3, { labels: ['ready'] })],
+      prs: [pr(50, { author: 'dependabot[bot]' }), pr(51, { body: 'x\n<!-- agent: t-developer -->' })],
+    },
+    events: [delivered(1, 't-developer', 30), { ...delivered(50, 't-reviewer', 5), workItem: { kind: 'pr', number: 50 } }],
+  });
+  const ids = b.rows.map((r) => r.id).sort();
+  assert.deepEqual(ids, ['o/r#1', 'o/r#3', 'o/r#51']);
+  const released = b.rows.find((r) => r.id === 'o/r#3');
+  assert.equal(released.stageId, 't-developer'); // `ready` → Developer woken next
+  assert.equal(released.status, 'queued');
+});
+
+test('buildFlowBoard: issue and the PR the woken agent opened form one row, no Closes needed', () => {
+  const ev = delivered(7, 't-developer-i7', 90);
+  const b = board({
+    github: { issues: [issue(7)], prs: [pr(70, { labels: ['ready-for-review'] }), pr(71)] },
+    events: [ev],
+    prRecords: [
+      { kind: 'pr-created', agentId: 't-developer-i7', repo: 'o/r', prNumber: 70, correlationId: `trigger:t:gh:${ev.eventId}`, ts: iso(60) },
+      { kind: 'pr-created', agentId: 't-reworker', repo: 'o/r', prNumber: 71, ts: iso(10) }, // no issue → own row
+    ],
+  });
+  assert.equal(b.rows.length, 2);
+  const row = b.rows.find((r) => r.id === 'o/r#7');
+  assert.deepEqual(row.prs.map((p) => p.number), [70]);
+  assert.equal(row.stageId, 't-reviewer');
+  assert.equal(row.status, 'queued');
+  assert.ok(b.rows.find((r) => r.id === 'o/r#71'));
+});
+
+test('buildFlowBoard: a non-pooled role woken by a platform-minted event id (int:/intlbl:/refire:) links its PR to the issue', () => {
+  for (const eventId of ['int:abcdef012345', 'intlbl:0123abcd', 'refire:feedbeef']) {
+    const b = board({
+      github: { issues: [issue(8, { updatedAt: iso(90) })], prs: [pr(80, { labels: ['ready-for-review'] })] },
+      events: [{ ...delivered(8, 't-developer', 90), eventId }],
+      prRecords: [{ kind: 'pr-created', agentId: 't-developer', repo: 'o/r', prNumber: 80, correlationId: `trigger:t-ready:gh:${eventId}`, ts: iso(60) }],
+    });
+    assert.deepEqual(b.rows.map((r) => r.id), ['o/r#8'], eventId);
+    assert.deepEqual(b.rows[0].prs.map((p) => p.number), [80]);
+    assert.equal(b.rows[0].stageId, 't-reviewer');
+    assert.deepEqual(b.needsHuman, []);
+  }
+});
+
+test('buildFlowBoard: an idle "last woke here" never outranks an agent queued on another item of the row', () => {
+  const ev = delivered(10, 't-developer', 120);
+  const b = board({
+    github: { issues: [issue(10)], prs: [pr(100, { labels: ['ready-for-review'] })] },
+    events: [ev, delivered(10, 't-merger', 90)],
+    prRecords: [{ kind: 'pr-created', agentId: 't-developer', repo: 'o/r', prNumber: 100, correlationId: `trigger:t:gh:${ev.eventId}`, ts: iso(100) }],
+  });
+  assert.equal(b.rows.length, 1);
+  assert.equal(b.rows[0].stageId, 't-reviewer');
+  assert.equal(b.rows[0].status, 'queued');
+});
+
+test('buildFlowBoard: several PRs for one issue — one row, stage follows the most advanced open PR', () => {
+  const b = board({
+    github: {
+      issues: [issue(8)],
+      prs: [pr(80, { labels: ['ready-for-review'] }), pr(81, { labels: ['ready-to-merge:wip'] }), pr(82, { state: 'closed', labels: ['ready-to-merge'] })],
+    },
+    prRecords: [80, 81, 82].map((n) => ({ kind: 'pr-created', agentId: 't-developer-i8', repo: 'o/r', prNumber: n, ts: iso(100) })),
+  });
+  assert.equal(b.rows.length, 1);
+  assert.equal(b.rows[0].prs.length, 3);
+  assert.equal(b.rows[0].stageId, 't-merger');
+  assert.equal(b.rows[0].status, 'working');
+});
+
+test('buildFlowBoard: a running session marks the role working, with its start as time in stage', () => {
+  const b = board({
+    github: { issues: [issue(9)] },
+    sessions: [{ agentId: 't-developer-i9', session: { id: 's', startedAt: iso(12), workItem: { repo: 'o/r', kind: 'issue', number: 9 } } }],
+  });
+  assert.equal(b.rows[0].status, 'working');
+  assert.equal(b.rows[0].stageId, 't-developer');
+  assert.equal(b.rows[0].since, iso(12));
+  assert.equal(b.sessions.length, 1);
+  assert.equal(b.sessions[0].roleLabel, 'Developer');
+  assert.equal(b.sessions[0].instance, 9);
+  assert.equal(b.sessions[0].issue.number, 9);
+});
+
+test('buildFlowBoard: done rows stay for the retention window, then drop', () => {
+  const mk = (closedMinsAgo, config) => board({
+    config,
+    github: { issues: [issue(4, { state: 'closed', closedAt: iso(closedMinsAgo) })] },
+    events: [delivered(4, 't-developer', 2000)],
+  });
+  assert.equal(mk(60).rows[0].status, 'done');
+  assert.equal(mk(60).rows[0].stageId, 'done');
+  assert.equal(mk(25 * 60).rows.length, 0);
+  assert.equal(mk(25 * 60, { doneRetentionHours: 48 }).rows.length, 1);
+});
+
+test('buildFlowBoard: an agent PR later handled by humans stays until done', () => {
+  const b = board({
+    github: { prs: [pr(90, { state: 'closed', merged: true, mergedAt: iso(30) })] },
+    prRecords: [{ kind: 'pr-created', agentId: 't-developer', repo: 'o/r', prNumber: 90, ts: iso(3000) }],
+  });
+  assert.equal(b.rows[0].status, 'done');
+  assert.equal(b.rows[0].prs[0].state, 'merged');
+});
+
+test('buildFlowBoard: human blocks carry a plain reason; an agent already queued is not a block', () => {
+  const b = board({
+    github: {
+      prs: [
+        pr(61, { mergeable: 'CONFLICTING' }),
+        pr(62, { mergeable: 'CONFLICTING', labels: ['merge-conflict'] }),
+        pr(63, { reviewDecision: 'APPROVED', checks: 'passing' }),
+        pr(64, { checks: 'failing' }),
+        pr(65, { labels: ['needs-human', 'ready-for-review'] }),
+      ],
+    },
+    prRecords: [61, 62, 63, 64, 65].map((n) => ({ kind: 'pr-created', agentId: 't-developer', repo: 'o/r', prNumber: n, ts: iso(10) })),
+  });
+  const reason = (n) => (b.rows.find((r) => r.id === `o/r#${n}`).needsHuman || {}).reason || null;
+  assert.equal(reason(61), 'conflict with base');
+  assert.equal(reason(62), null);
+  assert.equal(reason(63), 'approved — waiting for merge');
+  assert.equal(reason(64), 'checks failing');
+  assert.equal(reason(65), 'flagged for a human');
+  assert.deepEqual(b.needsHuman.map((n) => n.id).sort(), ['o/r#61', 'o/r#63', 'o/r#64', 'o/r#65']);
+});
+
+test('buildFlowBoard: a dead end past the stall window says no agent is scheduled', () => {
+  const b = board({ github: { issues: [issue(5)] }, events: [delivered(5, 't-reviewer', 45)] });
+  assert.equal(b.rows[0].status, 'idle');
+  assert.equal(b.rows[0].needsHuman.reason, 'no agent is scheduled to continue');
+  const fresh = board({ github: { issues: [issue(5)] }, events: [delivered(5, 't-reviewer', 5)] });
+  assert.equal(fresh.rows[0].needsHuman, null);
+});
+
+test('buildFlowBoard: a label handed to a person reads as waiting for approval', () => {
+  const members = [...KITCHEN, { id: 'k-host', displayName: 'Host', emits: ['guest-sign-off'], triggers: [trig('dish-approved')] }];
+  const b = fb.buildFlowBoard({
+    members, now: NOW,
+    github: { issues: [issue(3, { labels: ['guest-sign-off'] })] },
+    events: [delivered(3, 'k-host', 90)],
+  });
+  assert.equal(b.rows[0].needsHuman.reason, 'waiting for approval');
+});
+
+test('buildFlowBoard: a session linked to a closed item keeps its run but no ghost row', () => {
+  const b = board({
+    github: { issues: [issue(6, { state: 'closed', closedAt: iso(26 * 60) })] },
+    sessions: [{ agentId: 't-merger', session: { id: 's', startedAt: iso(1), workItem: { repo: 'o/r', kind: 'issue', number: 6 } } }],
+  });
+  assert.equal(b.rows.length, 0);
+  assert.equal(b.sessions.length, 1);
+  assert.equal(b.sessions[0].rowId, null);
+  assert.equal(b.sessions[0].issue, null);
+});
+
+test('buildFlowBoard: pools report busy of capacity, state and held work', () => {
+  const b = board({
+    github: { issues: [issue(12)] },
+    sessions: [{ agentId: 't-developer-i12', session: { id: 's', startedAt: iso(3) } }],
+    pools: [{ agentId: 't-developer', roleId: 'developer', maxInstances: 3, state: 'draining', held: 2,
+      instances: [{ instanceId: 't-developer-i12' }, { instanceId: 't-developer-i13' }] }],
+  });
+  assert.deepEqual(
+    { busy: b.pools[0].busy, capacity: b.pools[0].capacity, state: b.pools[0].state, held: b.pools[0].held },
+    { busy: 1, capacity: 3, state: 'draining', held: 2 },
+  );
+  // The pool instance's own item links the session when the run carries none.
+  assert.equal(b.sessions[0].issue.number, 12);
+});
+
+test('eventIdFromCorrelation / markerAgents / checksState', () => {
+  assert.equal(fb.eventIdFromCorrelation('trigger:t1:gh:12345'), '12345');
+  assert.equal(fb.eventIdFromCorrelation('dm:x'), null);
+  assert.equal(fb.eventIdFromCorrelation('trigger:t1:gh:int:abc123'), 'int:abc123');
+  assert.equal(fb.eventIdFromCorrelation('trigger:t1:gh:intlbl:abc123'), 'intlbl:abc123');
+  assert.equal(fb.eventIdFromCorrelation('trigger:t1:gh:refire:abc123'), 'refire:abc123');
+  assert.deepEqual(fb.markerAgents('a <!-- agent: t-dev --> b <!-- agent: t-rev -->'), ['t-dev', 't-rev']);
+  assert.equal(fb.checksState('FAILURE'), 'failing');
+  assert.equal(fb.checksState('PENDING'), 'pending');
+  assert.equal(fb.checksState('SUCCESS'), 'passing');
+  assert.equal(fb.checksState(null), null);
+});

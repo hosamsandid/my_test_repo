@@ -767,68 +767,11 @@ test('buildProcessTemplate carries github + channels; drops derived channel trig
   assert.equal(rev.triggers.length, 0); // derived channel trigger dropped from the portable bundle
 });
 
-// ── #1194: internal transport on labelled PR/issue channels ──
+// ── #2578: a legacy channel `transport` is tolerated and dropped ──
+// The internal transport was removed: every labelled channel listener is an
+// ordinary poller-delivered github-event trigger, whatever an old port says.
 
-test('#1194: expandGithubChannels stamps transport:internal on a labelled internal channel; poller-excluded', () => {
-  const bundle = {
-    processTemplateVersion: 1, name: 'x', level: 'template',
-    roles: [
-      { id: 'reviewer', github: { producesPr: true }, triggers: [] },
-      { id: 'merger', channels: [{ artifact: 'pr', from: 'reviewer', label: 'approved', transport: 'internal' }], triggers: [] },
-    ],
-  };
-  const out = expandGithubChannels(bundle);
-  const t = out.roles.find(r => r.id === 'merger').triggers.find(x => x.channel);
-  assert.equal(t.labelFilter, 'approved');
-  assert.deepEqual(t.events, ['pull_request.labeled']);
-  assert.equal(t.transport, 'internal', 'derived listener carries internal transport');
-});
-
-test('#1194: an UNLABELLED channel never goes internal (artifact-open stays poller-delivered)', () => {
-  const bundle = {
-    processTemplateVersion: 1, name: 'x', level: 'template',
-    roles: [
-      { id: 'dev', github: { producesPr: true }, triggers: [] },
-      // transport on an unlabelled channel is meaningless — must be ignored.
-      { id: 'rev', channels: [{ artifact: 'pr', from: 'dev', transport: 'internal' }], triggers: [] },
-    ],
-  };
-  const t = expandGithubChannels(bundle).roles.find(r => r.id === 'rev').triggers.find(x => x.channel);
-  assert.deepEqual(t.events, ['pull_request.opened', 'pull_request.reopened']);
-  assert.ok(!('transport' in t), 'no transport stamped on an artifact-open listener');
-});
-
-test('#1194: a gate:human labelled channel stays poller-delivered even if transport:internal is set', () => {
-  const bundle = {
-    processTemplateVersion: 1, name: 'x', level: 'template',
-    roles: [
-      { id: 'dev', github: { producesPr: true }, triggers: [] },
-      { id: 'deployer', channels: [{ artifact: 'pr', from: 'dev', label: 'approved', gate: 'human', transport: 'internal' }], triggers: [] },
-    ],
-  };
-  const t = expandGithubChannels(bundle).roles.find(r => r.id === 'deployer').triggers.find(x => x.channel);
-  assert.equal(t.labelFilter, 'approved');
-  assert.ok(!('transport' in t), 'a person applies the label on GitHub — poller only');
-});
-
-test('#1194: consolidation is all-or-nothing — a mixed internal/poller group stays poller-delivered', () => {
-  const bundle = {
-    processTemplateVersion: 1, name: 'x', level: 'template',
-    roles: [
-      { id: 'a', github: { producesIssue: true }, triggers: [] },
-      { id: 'b', github: { producesIssue: true }, triggers: [] },
-      { id: 'router', channels: [
-        { artifact: 'issue', from: 'a', label: 'dispatch', transport: 'internal' },
-        { artifact: 'issue', from: 'b', label: 'dispatch' }, // poller — one poller producer disqualifies the shared listener
-      ], triggers: [] },
-    ],
-  };
-  const listeners = expandGithubChannels(bundle).roles.find(r => r.id === 'router').triggers.filter(x => x.channel);
-  assert.equal(listeners.length, 1, 'still one consolidated listener');
-  assert.ok(!('transport' in listeners[0]), 'a lone poller producer keeps the whole listener on the poller');
-});
-
-test('#1194: all-internal channels consolidate into ONE internal listener', () => {
+test('#2578: expandGithubChannels ignores a legacy channel transport — the listener is poller-delivered', () => {
   const bundle = {
     processTemplateVersion: 1, name: 'x', level: 'template',
     roles: [
@@ -841,11 +784,13 @@ test('#1194: all-internal channels consolidate into ONE internal listener', () =
     ],
   };
   const listeners = expandGithubChannels(bundle).roles.find(r => r.id === 'router').triggers.filter(x => x.channel);
-  assert.equal(listeners.length, 1);
-  assert.equal(listeners[0].transport, 'internal');
+  assert.equal(listeners.length, 1, 'still one consolidated listener');
+  assert.equal(listeners[0].labelFilter, 'dispatch');
+  assert.deepEqual(listeners[0].events, ['issues.labeled']);
+  assert.ok(!('transport' in listeners[0]), 'no transport stamped on the derived listener');
 });
 
-test('#1194: the internal channel flips the producer Outcomes-block instruction to aee-emit', () => {
+test('#2578: a legacy channel transport no longer flips the producer Outcomes block to aee-emit', () => {
   const bundle = {
     processTemplateVersion: 1, name: 'x', level: 'template',
     roles: [
@@ -856,12 +801,13 @@ test('#1194: the internal channel flips the producer Outcomes-block instruction 
         channels: [{ artifact: 'pr', from: 'reviewer', label: 'approved', transport: 'internal' }], triggers: [] },
     ],
   };
-  const out = expandGithubChannels(bundle);
-  const rev = out.roles.find(r => r.id === 'reviewer');
-  assert.match(rev.systemPrompt, /aee-emit/, 'producer told to announce the label internally');
+  const rev = expandGithubChannels(bundle).roles.find(r => r.id === 'reviewer');
+  assert.doesNotMatch(rev.systemPrompt, /aee-emit|internal channel/);
+  assert.match(rev.systemPrompt, /apply label `approved` — this wakes \*\*Merger\*\*/,
+    'the producer applies the label on GitHub; the poller wakes the consumer');
 });
 
-test('#1194: buildProcessTemplate round-trips channel transport on export', () => {
+test('#2578: buildProcessTemplate drops a legacy channel transport on export', () => {
   const b = buildProcessTemplate({
     name: 'x', level: 'live', teamId: 'acme',
     roles: [
@@ -870,36 +816,44 @@ test('#1194: buildProcessTemplate round-trips channel transport on export', () =
     ],
   });
   const mrg = b.roles.find(r => r.id === 'mrg');
-  assert.equal(mrg.channels[0].transport, 'internal', 'export preserves the internal-delivery choice');
+  assert.ok(!('transport' in mrg.channels[0]), 'export carries no transport');
   assert.equal(mrg.channels[0].from, 'rev', 'and still remaps the portable role key');
 });
 
-test('#1194: remapChannel drops transport on an unlabelled or human channel (not meaningful)', () => {
-  const b = buildProcessTemplate({
-    name: 'x', level: 'live', teamId: 'acme',
-    roles: [
-      { id: 'acme-p', displayName: 'P', github: { producesPr: true, producesIssue: true }, triggers: [] },
-      { id: 'acme-c', displayName: 'C', channels: [
-        { artifact: 'pr', from: 'acme-p', transport: 'internal' }, // unlabelled — drop
-        { artifact: 'issue', from: 'acme-p', label: 'approved', gate: 'human', transport: 'internal' }, // human — drop
-      ], triggers: [] },
-    ],
-  });
-  const c = b.roles.find(r => r.id === 'c');
-  assert.ok(!('transport' in c.channels[0]), 'unlabelled channel carries no transport');
-  assert.ok(!('transport' in c.channels[1]), 'human-gated channel carries no transport');
-});
-
-test('#1194: validateProcessTemplate rejects a bad transport value / internal without a label / internal on a human gate', () => {
+test('#2578: validateProcessTemplate accepts (does not reject) any legacy channel transport', () => {
   const mk = (ch) => ({
     processTemplateVersion: 1, name: 'x', level: 'template',
     roles: [{ id: 'r', channels: [ch], triggers: [] }],
   });
-  assert.equal(validateProcessTemplate(mk({ artifact: 'pr', from: 'p', label: 'x', transport: 'bogus' })).ok, false);
-  assert.equal(validateProcessTemplate(mk({ artifact: 'pr', from: 'p', transport: 'internal' })).ok, false);
-  assert.equal(validateProcessTemplate(mk({ artifact: 'pr', from: 'p', label: 'x', gate: 'human', transport: 'internal' })).ok, false);
-  // A valid labelled internal channel passes.
-  assert.equal(validateProcessTemplate(mk({ artifact: 'pr', from: 'p', label: 'x', transport: 'internal' })).ok, true);
+  for (const ch of [
+    { artifact: 'pr', from: 'p', label: 'x', transport: 'bogus' },
+    { artifact: 'pr', from: 'p', transport: 'internal' },
+    { artifact: 'pr', from: 'p', label: 'x', gate: 'human', transport: 'internal' },
+    { artifact: 'pr', from: 'p', label: 'x', transport: 'internal' },
+  ]) {
+    const v = validateProcessTemplate(mk(ch));
+    assert.equal(v.ok, true, v.error);
+  }
+});
+
+test('#2578: materialise drops a legacy channel transport (customRoles + member body)', () => {
+  const bundle = {
+    processTemplateVersion: 1, name: 'x', level: 'template',
+    roles: [
+      { id: 'rev', displayName: 'Rev', systemPrompt: 'p', github: { producesPr: true }, triggers: [] },
+      { id: 'mrg', displayName: 'Mrg', systemPrompt: 'p',
+        channels: [{ artifact: 'pr', from: 'rev', label: 'approved', transport: 'internal' }], triggers: [] },
+    ],
+  };
+  const roles = templateToCustomRoles(bundle);
+  const mrg = roles.find(r => r.id === 'mrg');
+  assert.ok(!('transport' in mrg.channels[0]), 'customRoles channel carries no transport');
+  // A hand-built template still carrying the field (library template path).
+  const member = buildMemberFromTemplate(
+    { ...mrg, channels: [{ artifact: 'pr', from: 'rev', label: 'approved', transport: 'internal' }] },
+    { teamId: 'acme', vars: { repoFullName: 'o/r' } },
+  );
+  assert.deepEqual(member.channels, [{ artifact: 'pr', from: 'acme-rev', label: 'approved' }]);
 });
 
 test('#981: buildProcessTemplate round-trips the artifact audience flags', () => {
@@ -2032,9 +1986,9 @@ test('launchedLoopConflict: rejects a second launched loop, allows the first (#1
   assert.equal(launchedLoopConflict(null, launched), false);
 });
 
-// ── #1174: internal-channel transport — round-trip, validation, prompt wording ─
+// ── #2578: a legacy trigger `transport` is tolerated and dropped ────────────
 
-test('#1174: transport survives export → validate → customRoles → materialise', () => {
+test('#2578: a legacy trigger transport is dropped through export → validate → customRoles → materialise', () => {
   const bundle = buildProcessTemplate({
     name: 'x', level: 'live', teamId: 'acme',
     roles: [{
@@ -2045,87 +1999,61 @@ test('#1174: transport survives export → validate → customRoles → material
     }],
   });
   const exported = bundle.roles[0].triggers.find(t => t.id === 't');
-  assert.equal(exported.transport, 'internal');
+  assert.equal(exported.transport, undefined, 'export drops it');
   assert.equal(validateProcessTemplate(bundle).ok, true);
 
-  const roles = templateToCustomRoles(bundle);
-  assert.equal(roles[0].triggers[0].transport, 'internal');
+  // A legacy bundle that still carries it (hand-edited / pre-#2578 export).
+  const legacy = { ...bundle, roles: [{ ...bundle.roles[0], triggers: [{ ...exported, transport: 'internal' }] }] };
+  assert.equal(validateProcessTemplate(legacy).ok, true, 'tolerated, not rejected');
+  const roles = templateToCustomRoles(legacy);
+  assert.equal(roles[0].triggers[0].transport, undefined);
 
-  const member = buildMemberFromTemplate(roles[0], { teamId: 'acme', vars: { repoFullName: 'o/r' } });
+  const member = buildMemberFromTemplate(
+    { ...roles[0], triggers: [{ ...roles[0].triggers[0], transport: 'internal' }] },
+    { teamId: 'acme', vars: { repoFullName: 'o/r' } },
+  );
   const mt = member.triggers.find(t => t.id === 't');
-  assert.equal(mt.transport, 'internal');
-  // Claim coexists — the runner swap works on internally delivered wakes too.
-  assert.deepEqual(mt.claim, { remove: 'ready', add: 'ready:wip' });
+  assert.equal(mt.transport, undefined, 'the materialised listener is poller-delivered');
+  assert.deepEqual(mt.claim, { remove: 'ready', add: 'ready:wip' }, 'the claim is unaffected');
 });
 
-test('#1174: default (github/absent) transport is not exported — bundles stay noise-free', () => {
-  const bundle = buildProcessTemplate({
-    name: 'x', level: 'template',
-    roles: [{ id: 'dev', displayName: 'Dev', systemPrompt: 'p',
-      triggers: [
-        { id: 'a', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', transport: 'github' },
-        { id: 'b', type: 'github-event', events: ['issues.labeled'], labelFilter: 'go' },
-      ] }],
-  });
-  for (const t of bundle.roles[0].triggers) assert.equal(t.transport, undefined);
-});
-
-test('#1174: validateProcessTemplate rejects a bad transport value and internal on a non-label trigger', () => {
+test('#2578: validateProcessTemplate accepts any legacy trigger transport value', () => {
   const mk = (trigger) => ({
     processTemplateVersion: 1, name: 'x', level: 'template',
     roles: [{ id: 'dev', displayName: 'Dev', triggers: [trigger] }],
   });
-  assert.equal(validateProcessTemplate(mk(
+  for (const t of [
     { id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', transport: 'quantum' },
-  )).ok, false);
-  assert.equal(validateProcessTemplate(mk(
     { id: 't', type: 'github-event', events: ['pull_request.opened'], transport: 'internal' },
-  )).ok, false);
-  assert.equal(validateProcessTemplate(mk(
-    { id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', transport: 'internal' },
-  )).ok, true);
+    { id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', transport: 'github' },
+  ]) {
+    const v = validateProcessTemplate(mk(t));
+    assert.equal(v.ok, true, v.error);
+  }
 });
 
-test('#1174: outcomesWiringContext reports labels with an internal listener', () => {
+test('#2578: outcomesWiringContext ignores a legacy trigger transport (no internalLabels)', () => {
   const { outcomesWiringContext } = require('./process-template');
   const ctx = outcomesWiringContext('ba', {
     roles: [
       { id: 'ba', displayName: 'BA', triggers: [] },
       { id: 'dev', displayName: 'Developer', triggers: [
         { type: 'github-event', labelFilter: 'ready', transport: 'internal' }] },
-      { id: 'qa', displayName: 'QA', triggers: [
-        { type: 'github-event', labelFilter: 'qa:go' }] },
     ],
   });
-  assert.deepEqual(ctx.internalLabels, ['ready']);
-  // A poller-delivered label contributes no internal marker.
-  assert.deepEqual(ctx.consumersByLabel['qa:go'], ['QA']);
+  assert.equal(ctx.internalLabels, undefined);
+  assert.deepEqual(ctx.consumersByLabel.ready, ['Developer']);
 });
 
-test('#1174: outcomesBlock instructs aee-emit for internal labels, gh for the rest', () => {
+test('#2578: outcomesBlock tells the producer to apply every label on GitHub (no aee-emit)', () => {
   const outcomes = { mode: 'anyOf', options: [
     { id: 'done', title: 'Done', actions: [{ type: 'setLabel', label: 'ready' }] },
-    { id: 'qa', title: 'QA', actions: [{ type: 'setLabel', label: 'qa:go' }] },
   ] };
-  const wiring = {
-    consumersByLabel: { ready: ['Developer'], 'qa:go': ['QA'] },
-    reviewers: {}, gateLabels: [], internalLabels: ['ready'],
-  };
+  // A stale `internalLabels` (e.g. a caller built before #2578) is ignored.
+  const wiring = { consumersByLabel: { ready: ['Dev'] }, reviewers: {}, gateLabels: [], internalLabels: ['ready'] };
   const block = outcomesBlock(outcomes, wiring);
-  assert.match(block, /aee-emit "ready" --issue <n>/);
-  assert.match(block, /wakes \*\*Developer\*\* directly/);
-  // The github-delivered label keeps the plain apply wording.
-  assert.match(block, /apply label `qa:go` — this wakes \*\*QA\*\*/);
-  // Hard rule appended once for the internal label set.
-  assert.match(block, /never with `gh issue edit --add-label`/);
-});
-
-test('#1174: outcomesBlock without internal labels is unchanged (no aee-emit mention)', () => {
-  const outcomes = { mode: 'anyOf', options: [
-    { id: 'done', title: 'Done', actions: [{ type: 'setLabel', label: 'ready' }] },
-  ] };
-  const wiring = { consumersByLabel: { ready: ['Dev'] }, reviewers: {}, gateLabels: [] };
-  assert.doesNotMatch(outcomesBlock(outcomes, wiring), /aee-emit/);
+  assert.doesNotMatch(block, /aee-emit|internal channel/);
+  assert.match(block, /apply label `ready` — this wakes \*\*Dev\*\*/);
 });
 
 // ── #2030: direct agent hand-off — the prompt projection (§4.3) ─────────────
@@ -2293,8 +2221,8 @@ test('#2031: a wakeAgent action derives ONE wake-agent listener on its TARGET', 
   assert.equal(t.wakeHandoff, true, 'the derived marker is what makes it strippable');
   assert.deepEqual(t.sources, ['dev']);
   assert.ok(t.prompt && t.prompt.length > 0, 'it carries a wake instruction');
-  // A direct hand-off has no GitHub event, no label to claim, and is internal by
-  // construction — so none of the label-listener machinery may be stamped on it.
+  // A direct hand-off has no GitHub event and no label to claim — so none of the
+  // label-listener machinery may be stamped on it.
   for (const k of ['events', 'labelFilter', 'claim', 'transport', 'repo', 'activatedAt']) {
     assert.equal(t[k], undefined, `a wake listener must carry no \`${k}\``);
   }
@@ -2560,7 +2488,7 @@ test('#2113: a channel port declares the post-condition and it survives export',
   assert.equal(channelPostcondition({ label: 'ready-to-merge', postcondition: 'merged' }), 'merged');
   assert.equal(channelPostcondition({ label: 'x' }), '');
   assert.equal(channelPostcondition(null), '');
-  // Only the non-default is carried, like autoClaim/transport — exercised
+  // Only the non-default is carried, like autoClaim — exercised
   // through the real caller (buildProcessTemplate -> remapChannel).
   const b = buildProcessTemplate({
     name: 'T', level: 'live', teamId: 'acme',
@@ -2593,8 +2521,8 @@ test('#2113: a mistyped channel post-condition is refused, not silently dropped'
   const good = validateProcessTemplate(bundle(
     { artifact: 'pr', from: 'dev', label: 'ready-to-merge', postcondition: 'merged' }));
   assert.equal(good.ok, true, good.error);
-  // The `transport` precedent: a mistyped value would be silently dropped by
-  // cleanPostcondition and the author would believe the claim is verified.
+  // A mistyped value would be silently dropped by cleanPostcondition and the
+  // author would believe the claim is verified.
   const typo = validateProcessTemplate(bundle(
     { artifact: 'pr', from: 'dev', label: 'ready-to-merge', postcondition: 'merge' }));
   assert.equal(typo.ok, false);

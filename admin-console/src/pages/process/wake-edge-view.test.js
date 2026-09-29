@@ -109,8 +109,8 @@ test('the renderer registers a `wake` style that is SOLID', () => {
   const src = renderSource();
   assert.match(src, /wake:\s*\{\s*color:\s*WAKE_EDGE_COLOR,\s*label:\s*WAKE_EDGE_LEGEND\s*\}/,
     'EDGE_STYLES.wake reads its hue/legend from the pure module');
-  // No `dashed` on the entry: dotted/dashed already means "internal transport of
-  // a label", and a direct hand-off carries no label to transport.
+  // No `dashed` on the entry: a dash already marks data flow, dependencies,
+  // schedules and human decisions, and a direct hand-off is none of those.
   assert.doesNotMatch(src, /wake:\s*\{[^}]*dashed/, 'the wake style must stay solid');
   assert.equal(WAKE_EDGE_LEGEND, 'direct hand-off');
 });

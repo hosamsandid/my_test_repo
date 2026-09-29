@@ -239,7 +239,7 @@ function safeEqualStrings(a, b) {
 // ── The agent-facing allowlist ──────────────────────────────────────────────
 //
 // Derived by reading every caller that runs INSIDE an agent container
-// (`agent-image/scripts/`: agent-entrypoint.py, aee-emit, aee-wake, knowledge,
+// (`agent-image/scripts/`: agent-entrypoint.py, aee-wake, knowledge,
 // usage, gh-as-agent) rather than from the prose list in §3.5 — the prose names
 // "knowledge", "usage ingest" and "maintenance-mode read" as categories, and one
 // of its four concrete paths (`/internal/agents/:id/claim`) no longer exists.
@@ -298,9 +298,9 @@ const AGENT_ROUTES = [
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/enqueue-pending$/, scope: "peer" },
 
   // Routes with no agent id in the path. Each carries its own integrity check:
-  // flow-emit and wake-agent resolve + authorize the target themselves, and
+  // wake-agent resolves + authorizes the target itself, and
   // loop-verify/verdict is keyed on an opaque one-shot verify token.
-  { method: "POST", pattern: /^\/internal\/flow-emit$/, scope: "any" },
+  // (POST /internal/flow-emit was removed with the internal transport, #2578.)
   { method: "POST", pattern: /^\/internal\/wake-agent$/, scope: "any" },
   { method: "GET", pattern: /^\/internal\/loop-verify\/verdict$/, scope: "any" },
   { method: "POST", pattern: /^\/internal\/loop-verify\/verdict$/, scope: "any" },

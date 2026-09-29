@@ -93,7 +93,7 @@ case ":$PATH:" in
     status=1 ;;
 esac
 
-for cli in gh-as-agent knowledge aee-artifact aee-emit usage; do
+for cli in gh-as-agent knowledge aee-artifact aee-emit aee-wake usage; do
   resolved="$(command -v "$cli" 2>/dev/null || true)"
   if [ -n "$resolved" ]; then say ok "$cli -> $resolved"; else say FAIL "$cli does not resolve"; status=1; fi
 done

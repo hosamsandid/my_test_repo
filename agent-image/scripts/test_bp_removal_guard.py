@@ -172,8 +172,8 @@ class ConversationalPathSurvives(unittest.TestCase):
             self.assertIn(kept, ENTRYPOINT_CODE, f"{kept} must survive")
 
     def test_the_orchestrator_internal_url_survives_the_claim_loop(self):
-        # The claim loop defined this constant, but the flow-emit / wake helpers
-        # read it — removing the loop must not have taken it along.
+        # The claim loop defined this constant, but the wake / maintenance-mode
+        # helpers read it — removing the loop must not have taken it along.
         self.assertIn("ORCHESTRATOR_INTERNAL_URL = os.environ.get(", ENTRYPOINT_CODE)
         self.assertGreaterEqual(
             ENTRYPOINT_CODE.count("ORCHESTRATOR_INTERNAL_URL"), 2,
@@ -256,7 +256,7 @@ class BaseInstructionFileUsesTheSupportedModel(unittest.TestCase):
             "gh-as-agent push",
             "gh-as-agent pr",
             "aee-artifact add",
-            "aee-emit",
+            "--add-label",
             "knowledge search",
             "usage me",
             "ticket.json",

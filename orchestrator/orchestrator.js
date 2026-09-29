@@ -36,7 +36,6 @@ const {
 } = require("./knowledge-store");
 const knowledgeSync = require("./knowledge-sync");
 const { createKeyedMutex } = require("./keyed-mutex");
-const flowEmit = require("./flow-emit");
 const wakeAgent = require("./wake-agent");
 const pluginEvent = require("./plugin-event");
 const pluginScopeToken = require("./plugin-scope-token");
@@ -1779,7 +1778,7 @@ function _flowGithubGetJson(apiPath, token) {
 
 // #1897 AC8: best-effort resolution of an issue/PR title for a synthetic
 // internal-delivery event. The trigger notice shows `[#N](url): <title>` when
-// the title is known; internal-transport (flow-emit) and plugin-fast-path
+// the title is known; label-fast-path (plugin / Flow Supervisor)
 // deliveries synthesize a minimal `{number, html_url}` subject with NO title
 // (only poller-delivered PRs are enriched today), so we fetch it here with the
 // repo's team token — exactly as the poller does for PRs. Never throws and
@@ -1790,8 +1789,8 @@ function _flowGithubGetJson(apiPath, token) {
 // strict `parseCloses` (closes/fixes/resolves #N + `issue-N` branch) costs no
 // extra call — the same "no second request" the poller's `_enrichPullRequestPayload`
 // relies on. `closesIssues` matters for #2114 admission control: `entryTicketRef`
-// keys "same-ticket" off it, so a synthetic PR event built by flow-emit.js /
-// github-label-fastpath.js MUST carry it or an internal/label-fast-path
+// keys "same-ticket" off it, so a synthetic PR event built by
+// github-label-fastpath.js MUST carry it or a label-fast-path
 // reviewer-wake mis-keys as a new ticket and deadlocks at `wipLimit: 1`. Using
 // the STRICT closing-keyword parse here (not a loose issue↔PR link) is
 // deliberate: entry attribution must not merge two separate tickets.
@@ -1849,7 +1848,7 @@ async function wakeGithubLabelListeners({ repo, number, kind, label, actor, sour
     // Enqueue first (immediate wake), then arm the dedup marker so the
     // poller's later delivery of the same label is dropped.
     enqueuePending(l.agentId, {
-      ...flowEmit.buildPendingEntry(l.triggerId, key, ghEvent),
+      ...labelFastPath.buildPendingEntry(l.triggerId, key, ghEvent),
       source,
     });
     labelDedupMarkers.add({
@@ -3175,8 +3174,8 @@ async function admissionSweepTeam(teamId) {
   });
   const promoted = admissionControl.promoteHeld({ lane: reconciled.lane, wipLimit });
 
-  // Enqueue FIRST, persist the lane second — the same ordering the
-  // internal-channel emit uses (concept §4.2 step 3). A crash between the two
+  // Enqueue FIRST, persist the lane second — the same ordering the label
+  // fast-path and wake-agent use (the hand-off first, bookkeeping second). A crash between the two
   // re-delivers a dispatch the queue already holds, which the claim label and
   // the poller's own re-delivery tolerate; the reverse order would drop it from
   // the hold queue without ever putting it anywhere, and losing work is the one
@@ -10404,8 +10403,8 @@ function resolveAdmissionFlow(agentId) {
 }
 
 function enqueuePending(agentId, entry, { admissionChecked = false, decision = null } = {}) {
-  // The gate sits here rather than at each of the five producers (poller
-  // fan-out, flow-emit, the label fast-path, wake-agent, the hook server)
+  // The gate sits here rather than at each of the four producers (poller
+  // fan-out, the label fast-path, wake-agent, the hook server)
   // because this function is the queue's single writer: one seam cannot be
   // bypassed by a producer added later. `admissionChecked` is the promotion
   // path re-entering with a dispatch the lane has already admitted.
@@ -10435,7 +10434,7 @@ function enqueuePending(agentId, entry, { admissionChecked = false, decision = n
         }
         // TRUE, not false: the dispatch is durably recorded and WILL fire. A
         // `false` here means "nothing anywhere has this event" (#2030) and would
-        // make an `aee-emit` producer report a delivery failure for work that is
+        // make an `aee-wake` producer report a delivery failure for work that is
         // merely queued behind a full lane.
         return true;
       }
@@ -10465,17 +10464,18 @@ function enqueuePending(agentId, entry, { admissionChecked = false, decision = n
     console.error(`[Orchestrator] Cannot enqueue pending for ${agentId}: ${err.message}`);
     // Additive (#2030): report the failure so a caller that has no other trace
     // to fall back on can refuse rather than confirm. Every pre-existing caller
-    // ignores the return value and is unaffected — a label emit still has its
-    // mirrored GitHub label as evidence, but a direct hand-off leaves nothing
+    // ignores the return value and is unaffected — a label hand-off still has
+    // its GitHub label as evidence, but a direct hand-off leaves nothing
     // anywhere, so "enqueued" must not be reported for a write that failed.
     return false;
   }
   return true;
 }
 
-// #1173: pick the GitHub token an internal-channel emit uses to mirror its
-// label — the first environment whose repositories contain the repo, the same
-// first-env-wins rule the poller's plan applies. null when no env covers it.
+// #1173: pick the GitHub token the orchestrator uses for its own REST calls on
+// a repo (label stamps, title/PR-detail fetches) — the first environment whose
+// repositories contain the repo, the same first-env-wins rule the poller's
+// plan applies. null when no env covers it.
 function resolveRepoGithubTokenId(repoFullName) {
   const { parseRepoFullName } = require("./github-poller");
   const { githubApiBase, DEFAULT_GITHUB_API_BASE } = require("./github-api-base");
@@ -10533,10 +10533,9 @@ async function _lookupPoolReworkRef(repoFullName, itemKey) {
   }
 }
 
-// #1173: mirror a label onto an issue/PR after an internal-channel delivery.
-// Decoration only — the wake already went through the queue, so every failure
-// here becomes a returned warning, never a delivery failure (concept §4.2
-// step 3: enqueue first, stamp second). The add endpoint doesn't reliably
+// #1173: apply a label onto an issue/PR on the platform's behalf (today: the
+// pool reaper's `needs-human`). Best-effort — every failure here becomes a
+// returned warning, never a thrown error. The add endpoint doesn't reliably
 // auto-create labels, so on a failed add the label is created (422 = already
 // exists, e.g. a lost race — fine) and the add retried once, mirroring the
 // runner's claim-swap behavior.
@@ -10569,7 +10568,7 @@ async function stampMirrorLabel(repoFullName, number, label, warnings) {
     if (!resp.ok) {
       await fetch(`${base}/repos/${repoFullName}/labels`, {
         method: "POST", headers,
-        body: JSON.stringify({ name: label, color: "ededed", description: "internal-channel mirror label" }),
+        body: JSON.stringify({ name: label, color: "ededed", description: "label applied by the platform" }),
       }).catch(() => {});
       resp = await addLabel();
     }
@@ -16439,91 +16438,6 @@ async function main() {
       return;
     }
 
-    // ── Internal-channel emit (#1173, epic #1172) ─────────────────────────
-    // A producer agent announces "label L set on issue/PR #n of repo R"
-    // (via the `aee-emit` CLI) and the wake is delivered directly to every
-    // `transport: 'internal'` listener — enqueue FIRST, then mirror the label
-    // onto GitHub as decoration (best-effort). Internal-transport triggers
-    // are excluded from the poller plan (`pollerSubscribes`), so the mirror
-    // stamp can never double-deliver. docs/internal-channels-concept.md §4.2.
-    if (req.method === 'POST' && req.url === '/internal/flow-emit') {
-      let body = '';
-      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
-      req.on('end', async () => {
-        let parsed;
-        try {
-          parsed = flowEmit.validateEmitRequest(JSON.parse(body || '{}'));
-        } catch (err) {
-          parsed = { ok: false, error: err.message };
-        }
-        if (!parsed.ok) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: parsed.error }));
-          return;
-        }
-        try {
-          const { agentId, repo, label, target } = parsed.value;
-          const key = flowEmit.eventKeyForKind(target.kind);
-          const agents = listAgentIds().map((aid) => ({
-            agentId: aid,
-            enabled: loadAgentConfig(aid)?.enabled !== false,
-            triggers: loadTriggers(aid),
-          }));
-          const listeners = flowEmit.matchInternalListeners(
-            { repo, label, kind: target.kind }, agents);
-          // #1897 AC8: resolve the title best-effort so the notice isn't blank.
-          // #2114: also carry the PR's closesIssues (from the same fetch) so the
-          // admission gate keys this hand-off to the issue's ticket, not a new one.
-          const { title, closesIssues } = await fetchWorkItemDetail(repo, target.kind, target.number);
-          const ghEvent = flowEmit.buildSyntheticEvent({
-            repo, label, kind: target.kind, number: target.number, title, closesIssues,
-            producerId: agentId,
-            eventId: `int:${crypto.randomBytes(6).toString('hex')}`,
-            now: new Date().toISOString(),
-          });
-          for (const l of listeners) {
-            enqueuePending(l.agentId, flowEmit.buildPendingEntry(l.triggerId, key, ghEvent));
-            console.log(
-              `[Orchestrator] flow-emit: ${repo}#${target.number} +${label} ` +
-              `by ${agentId} → agent=${l.agentId} trigger=${l.triggerId}`);
-          }
-          const warnings = [];
-          const labelStamped = await stampMirrorLabel(repo, target.number, label, warnings);
-          // Same transparency log the poller writes, tagged with the delivery
-          // path — internal and polled events share one operator timeline.
-          githubEventLog.record({
-            ...githubEventLog.buildEventEntry({
-              ghEvent, repoFullName: repo, key,
-              outcomes: listeners.map((l) => ({
-                agentId: l.agentId, triggerId: l.triggerId,
-                status: 'delivered', reason: null, digest: false,
-              })),
-            }),
-            source: 'internal',
-            emittedBy: agentId,
-          });
-          if (listeners.length === 0) {
-            console.log(
-              `[Orchestrator] flow-emit: ${repo}#${target.number} +${label} ` +
-              `by ${agentId} matched no internal listener (label ${labelStamped ? 'stamped' : 'NOT stamped'})`);
-          }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            ok: true,
-            matched: listeners.length,
-            listeners,
-            labelStamped,
-            warnings,
-          }));
-        } catch (err) {
-          console.error(`[Orchestrator] flow-emit error: ${err.message}`);
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: err.message }));
-        }
-      });
-      return;
-    }
-
     // ── Direct agent-to-agent hand-off (#2030) ────────────────────────────
     // A producer agent says "dear agent, take this over" (via the `aee-wake`
     // CLI) and the wake is delivered straight into the target's durable queue
@@ -16563,7 +16477,7 @@ async function main() {
             res.end(JSON.stringify({ ok: false, reason: resolved.reason }));
             return;
           }
-          // Enqueue first, log second — the same ordering flow-emit uses: the
+          // Enqueue first, log second — the same ordering the label fast-path uses: the
           // hand-off is what must not be lost, and the log is best-effort.
           const enqueued = enqueuePending(resolved.agentId, wakeAgent.buildWakeEntry({
             from: fromAgentId, note, teamId: resolved.teamId,
@@ -16724,7 +16638,7 @@ async function main() {
     // POLLER-SUBSCRIBED listener directly and leave a dedup marker so the
     // poller drops the later duplicate. The label itself is unchanged on GitHub
     // (the human already applied it) — this path does NOT stamp any label. The
-    // target trigger stays transport:'github' (no config change).
+    // target trigger needs no config change.
     //
     // #2247: the same wake half is reused by the Flow Supervisor's auto-dispatch
     // — see `wakeGithubLabelListeners` below, which THIS handler is now a thin

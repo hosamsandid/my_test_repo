@@ -60,12 +60,13 @@ export function environmentRepoOptions(options) {
 
 // null = no warning. A warning only when the trigger would be polled if its
 // repository were listened to, and the status row says it is not: disabled
-// triggers already read "Off", and internal-transport label listeners never go
-// through the poller. A missing row (status unavailable, or not visible to the
-// viewer) is no warning — we do not guess.
+// triggers already read "Off". Every enabled github-event trigger goes through
+// the poller (the internal transport was removed in #2578). A missing row
+// (status unavailable, or not visible to the viewer) is no warning — we do not
+// guess.
 export function triggerRepoWarning(trigger, statusRows, { agentId = null } = {}) {
   if (!trigger || trigger.type !== 'github-event') return null;
-  if (trigger.enabled === false || trigger.transport === 'internal') return null;
+  if (trigger.enabled === false) return null;
   const repo = typeof trigger.repo === 'string' ? trigger.repo.trim() : '';
   if (!repo) return null;
   const row = (Array.isArray(statusRows) ? statusRows : []).find((r) => r && r.repo === repo);

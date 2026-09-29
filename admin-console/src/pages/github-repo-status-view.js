@@ -83,7 +83,6 @@ export function sortRows(rows) {
 export const IGNORED_REASON_LABEL = {
   'agent-disabled': 'agent disabled',
   'trigger-disabled': 'trigger disabled',
-  internal: 'internal channel — delivered without the poller',
   'no-events': 'no events selected',
   invalid: 'invalid trigger',
 };

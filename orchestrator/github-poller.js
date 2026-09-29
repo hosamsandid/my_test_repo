@@ -1733,15 +1733,11 @@ class GitHubPoller {
 }
 
 // Does this trigger subscribe to the poller at all? The type/enabled/shape
-// gates from the plan builder, plus the internal-channel exclusion (#1173):
-// a `transport: 'internal'` listener is delivered by POST /internal/flow-emit,
-// never by the poller. Keeping it out of the plan is the SINGLE dedup
-// mechanism of the internal-channels design — the mirror-stamped label the
-// emit leaves on GitHub is decoration only precisely because no subscriber
-// here can react to it (docs/internal-channels-concept.md §4.3).
+// gates from the plan builder. Every github-event trigger is poller-delivered:
+// the internal transport (and its `transport: 'internal'` exclusion) was
+// removed in #2578, so a legacy `transport` field on a trigger is ignored.
 function pollerSubscribes(t) {
   if (!t || t.type !== 'github-event' || t.enabled === false) return false;
-  if (t.transport === 'internal') return false;
   if (!t.repo || !Array.isArray(t.events) || t.events.length === 0) return false;
   return true;
 }

@@ -383,64 +383,47 @@ test('#1004: a terminal/external outcome drops the output-missing expectation', 
   assert.equal(base.anomalies.filter((a) => a.class === 'output-missing').length, 1);
 });
 
-// ── #1175: internal-channel transport awareness ─────────────────────────────
+// ── #2578: a legacy `transport` field no longer changes the diagnosis ───────
+//
+// The internal transport (#1175) was removed: a trigger still carrying
+// `transport: 'internal'` is an ordinary poller-delivered listener, so its
+// wake edge carries no `internal` flag and wake-not-claimed keeps the
+// lost-event hypothesis.
 
-const INTERNAL_MEMBERS = [
+const LEGACY_MEMBERS = [
   { id: 'team-dev', displayName: 'Dev', triggers: [
     { id: 't1', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready',
       transport: 'internal', claim: { remove: 'ready', add: 'ready:wip' } },
   ] },
 ];
-const INTERNAL_MODEL = buildFlowModel(INTERNAL_MEMBERS, { labels: [{ name: 'ready' }] });
+const LEGACY_MODEL = buildFlowModel(LEGACY_MEMBERS, { labels: [{ name: 'ready' }] });
 
-test('#1175: buildFlowModel marks a wake edge internal only when every listener is', () => {
-  assert.equal(INTERNAL_MODEL.wakeEdges.find((w) => w.label === 'ready').internal, true);
-  const mixed = buildFlowModel([
-    ...INTERNAL_MEMBERS,
-    { id: 'team-qa', displayName: 'QA', triggers: [
-      { id: 't2', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' },
-    ] },
-  ], { labels: [{ name: 'ready' }] });
-  assert.equal(mixed.wakeEdges.find((w) => w.label === 'ready').internal, false,
-    'one poller-delivered listener keeps the lost-event hypothesis alive');
-  assert.equal(MODEL.wakeEdges.find((w) => w.label === 'ready').internal, false);
+test('#2578: buildFlowModel ignores a legacy transport field on a wake edge', () => {
+  const edge = LEGACY_MODEL.wakeEdges.find((w) => w.label === 'ready');
+  assert.deepEqual(edge.consumers, ['team-dev']);
+  assert.equal('internal' in edge, false);
 });
 
-test('#1175: claim-without-wake is the normal claimed state — no anomaly on either transport', () => {
-  // A failed mirror stamp on an internal delivery ends in exactly this GitHub
-  // state (claim label only, wake never stamped) — it must read as
-  // delivered-and-claimed. The same state on a poller listener is the normal
-  // post-claim-swap picture. Both: quiet (until claim-stalled's T2, which is
-  // about the work, not the delivery).
+test('claim-without-wake is the normal claimed state — no anomaly', () => {
+  // The post-claim-swap picture (claim label only, wake label removed) is
+  // quiet until claim-stalled's T2, which is about the work, not the delivery.
   const github = { objects: [
     { kind: 'issue', number: 7, url: 'u', state: 'open', createdAt: minsAgo(40), updatedAt: minsAgo(30),
       labels: [{ name: 'ready:wip', appliedAt: minsAgo(30) }] },
   ] };
-  for (const model of [INTERNAL_MODEL, MODEL]) {
+  for (const model of [LEGACY_MODEL, MODEL]) {
     const { anomalies } = detectFlowAnomalies({ model, github, sessions: {}, now: NOW });
     assert.equal(anomalies.length, 0);
   }
 });
 
-test('#1175: claim-stalled still fires on an internal listener after T2 — the work is stalled, not the delivery', () => {
-  const github = { objects: [
-    { kind: 'issue', number: 8, url: 'u', state: 'open', createdAt: hoursAgo(4), updatedAt: hoursAgo(3),
-      labels: [{ name: 'ready:wip', appliedAt: hoursAgo(3) }] },
-  ] };
-  const { anomalies } = detectFlowAnomalies({ model: INTERNAL_MODEL, github, sessions: {}, now: NOW });
-  assert.equal(anomalies.length, 1);
-  assert.equal(anomalies[0].class, 'claim-stalled');
-});
-
-test('#1175: wake-not-claimed on an internal listener points at the consumer, not a lost event', () => {
+test('#2578: wake-not-claimed on a legacy transport listener keeps the lost-event hypothesis', () => {
   const github = { objects: [
     { kind: 'issue', number: 9, url: 'u', state: 'open', createdAt: minsAgo(40), updatedAt: minsAgo(40),
       labels: [{ name: 'ready', appliedAt: minsAgo(30) }] },
   ] };
-  const internal = detectFlowAnomalies({ model: INTERNAL_MODEL, github, sessions: {}, now: NOW });
-  assert.equal(internal.anomalies[0].class, 'wake-not-claimed');
-  assert.match(internal.anomalies[0].message, /internal channel \(durable\)/);
-  assert.doesNotMatch(internal.anomalies[0].message, /may have been lost/);
-  const poller = detectFlowAnomalies({ model: MODEL, github, sessions: {}, now: NOW });
-  assert.match(poller.anomalies.find((a) => a.class === 'wake-not-claimed').message, /may have been lost/);
+  const { anomalies } = detectFlowAnomalies({ model: LEGACY_MODEL, github, sessions: {}, now: NOW });
+  assert.equal(anomalies[0].class, 'wake-not-claimed');
+  assert.match(anomalies[0].message, /may have been lost/);
+  assert.doesNotMatch(anomalies[0].message, /internal channel/);
 });

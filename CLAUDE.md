@@ -310,15 +310,20 @@ else queues FIFO.
   label-swap with optional `postcondition`), `wake-agent` (direct agent-to-agent
   hand-off, queue-fired), `loop` (re-arms on completion; `maxIterations` required;
   optional `verify` gate; fresh context per iteration).
-- **`transport: 'internal'`**: a label listener excluded from the poller and woken
-  directly by `POST /internal/flow-emit` (`aee-emit`); label mirrored to GitHub as
-  decoration only.
+- **Labelled hand-offs** are always poller-delivered: the producer applies the
+  label on GitHub (`gh issue|pr edit --add-label`), the poller wakes the
+  listener (≤ one poll interval, ~30 s). The label on GitHub is the single
+  source of truth; a human re-applying it wakes the listener the same way. The
+  `transport: 'internal'` path (`aee-emit`, `/internal/flow-emit`) was removed
+  in #2578 (`aee-emit` remains one release as a deprecated shim that just
+  applies the label); a legacy `transport` field is ignored on import and
+  stripped from existing agents by a startup sweep.
 - Results post to `trigger.roomId` or the DM room; no room yet → skipped;
   `[PASS]` suppresses output.
 - **Session policy**: `per-invocation` → triggered runs start fresh (no
   `--resume`), don't move the session pointer; absent = `persistent` (legacy).
 - Concepts: `docs/triggers.md`, `docs/loop-triggers-concept.md`,
-  `docs/internal-channels-concept.md`, `docs/direct-agent-handoff-concept.md`,
+  `docs/direct-agent-handoff-concept.md`,
   `docs/process-template-format.md`.
 
 ### Process Canvas / Flows

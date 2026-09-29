@@ -250,11 +250,11 @@ best-effort) that every N minutes:
 
    | Blocker | Safe automatic action | Primitive |
    |---|---|---|
-   | `unclaimed` after T₁ | re-emit the wake label / wake the owning role | `flow-emit` / `aee-wake` |
+   | `unclaimed` after T₁ | re-emit the wake label / wake the owning role | `github-label-applied` / `aee-wake` |
    | `claimed-done-not-merged` | roll the claim back to the raw wake label so the real step re-fires (never fabricate progress) | claim rollback |
    | `conflict` (behind only, cleanly updatable) | ask the owning developer/reworker to update the branch, with a specific note | `aee-wake` |
    | `ci-red` (transient) | re-run checks once; still red → escalate | GH re-run |
-   | `issue-closed-but-successor-not-dispatched` | re-fire the orchestrator's dispatch | `flow-emit` / `aee-wake` |
+   | `issue-closed-but-successor-not-dispatched` | re-fire the orchestrator's dispatch | `github-label-applied` / `aee-wake` |
 
    The last row is the direct fix for §1 failure (1): advancement is driven off
    the *reconciled* "done" signal (PR merged ∧ issue closed ∧ post-condition
@@ -269,8 +269,7 @@ best-effort) that every N minutes:
 
 The supervisor's hands already exist and are same-team-scoped and audited:
 `aee-wake`/`POST /internal/wake-agent` (`orchestrator/wake-agent.js`),
-`aee-emit`/`POST /internal/flow-emit` (`orchestrator/flow-emit.js`),
-`POST /internal/github-label-applied`, and `performReassign`
+`POST /internal/github-label-applied` (`orchestrator/github-label-fastpath.js`), and `performReassign`
 (`orchestrator/pending-reassign.js`).
 
 **4.3b — Optional LLM Supervisor agent (judgment layer).** A team role whose
@@ -355,7 +354,7 @@ serialisation point.
 | Already shipped (the foundation) | New (the gap this concept fills) |
 |---|---|
 | anomaly detector (4 classes, thresholds), `anomaly-history.jsonl` | PR-truth sweep + `claimed-done-not-merged` reconciler class |
-| hands: `aee-wake`, `flow-emit`, `github-label-applied`, `performReassign` (audited, same-team) | deterministic supervisor that drives them on a ladder + budget |
+| hands: `aee-wake`, `github-label-applied`, `performReassign` (audited, same-team) | deterministic supervisor that drives them on a ladder + budget |
 | netzplan board (status/owner fields, CLI writes) | the reconciliation event-feed behind it |
 | claim mechanism (`:wip`/`:completed`/rollback) | verify-before-claim post-condition |
 | human-gate semantics, DMs, Process-Canvas anomaly panel | one aggregated human inbox + push |

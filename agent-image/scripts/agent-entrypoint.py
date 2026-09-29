@@ -6621,7 +6621,7 @@ class TriggerScheduler:
             # which the Events API can collapse onto an arbitrary one of
             # several labels applied in the same action. Consumption ladder,
             # first truthy wins: the pending entry's own stamped `wakeLabel`
-            # (set by every writer — poller, flow-emit, reassign — to the
+            # (set by every writer — poller, label fast-path, reassign — to the
             # matched `labelFilter`; covers the reported bug) → the trigger's
             # own `labelFilter` (covers an entry queued before the stamp
             # existed, #2151 AC5) → `payload.label.name` (the only correct
@@ -7407,8 +7407,8 @@ class TriggerScheduler:
         )
 
 
-# Base address of the orchestrator's internal API, used by the flow-emit and
-# wake helpers above. The BriefingPack claim loop that also lived here — a
+# Base address of the orchestrator's internal API, used by the wake helpers
+# above. The BriefingPack claim loop that also lived here — a
 # 30 s poll of /internal/orchestrators/{AGENT_ID}/claim-tick that DM'd a nudge
 # when a pack transitioned to `status: dispatched` — was removed in #1967:
 # the route went with epic #1961 Phase 1, and `role: "orchestrator"` is a
@@ -8044,7 +8044,7 @@ def _migrate_state_dir(workspace: Path) -> None:
 def _setup_plugin_cli_env() -> None:
     """Make this agent's granted plugin CLIs runnable (#1547).
 
-    Built-in CLIs (`aee-artifact`, `knowledge`, `aee-emit`, …) are symlinked into
+    Built-in CLIs (`aee-artifact`, `knowledge`, `aee-wake`, …) are symlinked into
     /usr/local/bin at image build time. Plugin CLIs cannot be: they are seeded
     per agent into `<workspace>/.agent-studio/bin` when a plugin is GRANTED, which
     is a live file sync with no respawn (concept §4.5).

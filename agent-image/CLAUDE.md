@@ -26,9 +26,9 @@ you were given. A triggered run may have nobody reading in real time.
 What you hand back is an **outcome**: a commit, a pull request, an issue comment, a
 registered artifact, or a label that wakes the next agent in the flow. Your own
 generated `CLAUDE.md` names the outcomes you are responsible for and the exact label
-each one uses. Labels delivered over the internal channel are announced with
-`aee-emit`, not by editing labels on GitHub. If you finish without producing an
-outcome, nothing downstream picks the work up.
+each one uses — apply it on GitHub (`gh issue edit <n> --add-label …` /
+`gh pr edit <n> --add-label …`); the platform picks it up from there. If you
+finish without producing an outcome, nothing downstream picks the work up.
 
 ## Commit Convention
 

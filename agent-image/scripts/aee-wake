@@ -16,9 +16,9 @@ on GitHub will show that the hand-off did or did not happen; the platform's own
 event log is the audit trail.
 
 `--to` names a role WIRED to you in the flow, on your own team. Reaching nobody
-is not an ambiguous outcome, it is a wiring bug — so unlike `aee-emit` (where a
-label also has standalone value as a status marker, hence its exit-0 warning on
-`matched: 0`) this tool fails LOUD: an unknown target, a target outside your
+is not an ambiguous outcome, it is a wiring bug — so unlike a label hand-off
+(where a label also has standalone value as a status marker even when nobody
+listens) this tool fails LOUD: an unknown target, a target outside your
 team, or yourself all exit 1. Surface that to the user instead of retrying or
 picking a different target.
 

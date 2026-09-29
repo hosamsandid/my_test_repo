@@ -55,7 +55,7 @@ const CHECKS = {
   },
 
   // A held dispatch is queued, not failed. Returning false here would make an
-  // `aee-emit` producer (#2030) report a delivery failure for work that will
+  // `aee-wake` producer (#2030) report a delivery failure for work that will
   // fire as soon as capacity frees.
   'hold-reports-enqueued'(src) {
     const body = slice(src, 'if (!d.admit) {', 'const p = pendingPath(agentId);', 1200);

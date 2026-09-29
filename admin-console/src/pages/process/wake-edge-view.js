@@ -7,16 +7,14 @@
 // reader can name, and this one carries nothing:
 //
 //   label hand-off (#3b82f6)  blue,   solid,  label chip  → the label IS the name
-//   internal label (#1174)    family hue, dotted `2 3`    → dotted = internal
-//                                                            transport OF A LABEL
 //   outcome-keyed  (#828)     amber #eab308               → the ◇ switch badge
 //   data flow / dependency    green #22c55e / red #ef4444 dashed
 //   gate: 'human'             red #dc2626, solid
 //   human decision / brake    rose #e11d48, dashed `6 4`
 //
-// Hence: INDIGO and SOLID. Solid because dotted is already spoken for — it means
-// "the internal transport of a label", and a direct hand-off is not a label at
-// all, so borrowing the dash would say the wrong thing rather than nothing.
+// Hence: INDIGO and SOLID. Solid because a dash already marks data flow,
+// dependencies, schedules and human decisions, and a direct hand-off is none of
+// those, so borrowing the dash would say the wrong thing rather than nothing.
 // Indigo (#6366f1) is the free slot the concept names, but it sits close to
 // label-blue, so the colour is deliberately NOT what carries the distinction —
 // the chip glyph is.

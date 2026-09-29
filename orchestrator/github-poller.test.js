@@ -610,12 +610,11 @@ test("_enrichPullRequestPayload: a fetch failure still parses closes from the br
   assert.equal(out.pull_request.html_url, "https://github.com/o/r/pull/500");
 });
 
-// ── pollerSubscribes (#1173): internal-channel triggers never enter the plan ─
+// ── pollerSubscribes ─────────────────────────────────────────────────────────
 //
-// The exclusion below is the SINGLE dedup mechanism of the internal-channels
-// design: /internal/flow-emit mirrors the label onto GitHub after delivering
-// the wake through the queue, and that stamp may never wake the listener a
-// second time via the poller (docs/internal-channels-concept.md §4.3).
+// Every well-formed, enabled github-event trigger is poller-subscribed. The
+// internal transport was removed in #2578: a trigger still carrying a legacy
+// `transport` field (any value) is an ordinary poller subscriber.
 
 const subscribable = (over = {}) => ({
   id: "t1", type: "github-event", repo: "org/repo",
@@ -628,8 +627,22 @@ test("pollerSubscribes: a plain github-event trigger subscribes", () => {
   assert.equal(pollerSubscribes(subscribable({ transport: "github" })), true);
 });
 
-test("pollerSubscribes: transport 'internal' is excluded — the label mirror cannot double-deliver", () => {
-  assert.equal(pollerSubscribes(subscribable({ transport: "internal" })), false);
+test("pollerSubscribes: a legacy transport 'internal' field no longer excludes the trigger (#2578)", () => {
+  assert.equal(pollerSubscribes(subscribable({ transport: "internal" })), true);
+});
+
+test("computePollPlan (#2578): a trigger carrying a legacy transport 'internal' field is in the plan", () => {
+  const { computePollPlan } = require("./github-poller");
+  const plan = computePollPlan({
+    allowNonGithubHost: false,
+    environments: [{ id: "env", githubTokenId: "tok", repositories: [{ url: "git@github.com:org/repo.git" }] }],
+    agents: [{
+      id: "reviewer", config: { environmentId: "env" }, triggersMtime: null,
+      triggers: [subscribable({ id: "legacy-internal", transport: "internal" })],
+    }],
+  });
+  const subs = plan.get("org/repo")?.subscribers || [];
+  assert.deepEqual(subs.map((x) => [x.agentId, x.triggerId]), [["reviewer", "legacy-internal"]]);
 });
 
 test("pollerSubscribes: disabled, wrong-type and malformed triggers are excluded", () => {

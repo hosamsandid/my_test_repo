@@ -34,6 +34,7 @@ const { resolveGithubApiTarget, githubApiBase, DEFAULT_GITHUB_API_BASE } = requi
 const wakeArmory = require('./wake-armory');
 const { canonicalEventKey, listensTo } = require('./event-key-aliases');
 const pushAttribution = require('./push-attribution');
+const { parseBranchFilter, pushBranch, branchFilterMatches } = require('./branch-filter');
 
 // Poll cadence. Fixed 30s in production; overridable via
 // AEE_GITHUB_POLL_INTERVAL_MS (#711) so the E2E stack can tighten it — the
@@ -1152,6 +1153,25 @@ class GitHubPoller {
           }
         }
 
+        // Branch filter for `push` events (#2570). Content routing like the
+        // label filter: a push to a branch the trigger does not list is dropped
+        // here, before any wake. Scoped to `push` only — a trigger that also
+        // listens to other events is unaffected for those (AC9). A tag push has
+        // no branch, so a non-empty filter never matches it. The log entry's
+        // `ref` already names the branch, so the outcome needs no copy of it.
+        if (key === 'push' && sub.branchFilter) {
+          const branch = pushBranch(ghEvent);
+          if (!branchFilterMatches(branch, sub.branchFilter)) {
+            console.log(
+              `[GH-Poller] branch-filter: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+              `(ref='${ghEvent.payload?.ref ?? '?'}', want='${sub.branchFilter.join(', ')}')`,
+            );
+            outcome.status = 'dropped';
+            outcome.reason = 'branch-filter';
+            continue;
+          }
+        }
+
         // Record the matched wake label per-outcome (#1846). This is the label
         // that actually satisfied this subscriber's filter — which may differ
         // from payload.label.name when the Events API collapses a multi-label
@@ -1754,15 +1774,11 @@ class GitHubPoller {
 }
 
 // Does this trigger subscribe to the poller at all? The type/enabled/shape
-// gates from the plan builder, plus the internal-channel exclusion (#1173):
-// a `transport: 'internal'` listener is delivered by POST /internal/flow-emit,
-// never by the poller. Keeping it out of the plan is the SINGLE dedup
-// mechanism of the internal-channels design — the mirror-stamped label the
-// emit leaves on GitHub is decoration only precisely because no subscriber
-// here can react to it (docs/internal-channels-concept.md §4.3).
+// gates from the plan builder. Every github-event trigger is poller-delivered:
+// the internal transport (and its `transport: 'internal'` exclusion) was
+// removed in #2578, so a legacy `transport` field on a trigger is ignored.
 function pollerSubscribes(t) {
   if (!t || t.type !== 'github-event' || t.enabled === false) return false;
-  if (t.transport === 'internal') return false;
   if (!t.repo || !Array.isArray(t.events) || t.events.length === 0) return false;
   return true;
 }
@@ -1828,6 +1844,7 @@ function computePollPlan({ environments = [], agents = [], allowNonGithubHost = 
       const source = repoToToken.get(t.repo);
       if (!source) continue;
 
+      const branchFilter = parseBranchFilter(t.branchFilter);
       let bucket = plan.get(t.repo);
       if (!bucket) {
         bucket = { tokenId: source.tokenId, envId: source.envId, subscribers: [] };
@@ -1860,6 +1877,9 @@ function computePollPlan({ environments = [], agents = [], allowNonGithubHost = 
         // (null = any push) and the subscriber's Agent Team it is scoped to.
         pushedBy: pushAttribution.normalizePushedBy(t.pushedBy),
         teamId: pushAttribution.teamOf(agent.config),
+        // Optional branch filter for `push` events (#2570): the parsed pattern
+        // list, or null for no filter (every branch — legacy behaviour).
+        branchFilter: branchFilter.length ? branchFilter : null,
       });
     }
   }

@@ -250,11 +250,11 @@ best-effort) that every N minutes:
 
    | Blocker | Safe automatic action | Primitive |
    |---|---|---|
-   | `unclaimed` after T₁ | re-emit the wake label / wake the owning role | `flow-emit` / `aee-wake` |
+   | `unclaimed` after T₁ | re-emit the wake label / wake the owning role | `github-label-applied` / `aee-wake` |
    | `claimed-done-not-merged` | roll the claim back to the raw wake label so the real step re-fires (never fabricate progress) | claim rollback |
    | `conflict` (behind only, cleanly updatable) | ask the owning developer/reworker to update the branch, with a specific note | `aee-wake` |
    | `ci-red` (transient) | re-run checks once; still red → escalate | GH re-run |
-   | `issue-closed-but-successor-not-dispatched` | re-fire the orchestrator's dispatch | `flow-emit` / `aee-wake` |
+   | `issue-closed-but-successor-not-dispatched` | re-fire the orchestrator's dispatch | `github-label-applied` / `aee-wake` |
 
    The last row is the direct fix for §1 failure (1): advancement is driven off
    the *reconciled* "done" signal (PR merged ∧ issue closed ∧ post-condition
@@ -269,8 +269,7 @@ best-effort) that every N minutes:
 
 The supervisor's hands already exist and are same-team-scoped and audited:
 `aee-wake`/`POST /internal/wake-agent` (`orchestrator/wake-agent.js`),
-`aee-emit`/`POST /internal/flow-emit` (`orchestrator/flow-emit.js`),
-`POST /internal/github-label-applied`, and `performReassign`
+`POST /internal/github-label-applied` (`orchestrator/github-label-fastpath.js`), and `performReassign`
 (`orchestrator/pending-reassign.js`).
 
 **4.3b — Optional LLM Supervisor agent (judgment layer).** A team role whose
@@ -355,7 +354,7 @@ serialisation point.
 | Already shipped (the foundation) | New (the gap this concept fills) |
 |---|---|
 | anomaly detector (4 classes, thresholds), `anomaly-history.jsonl` | PR-truth sweep + `claimed-done-not-merged` reconciler class |
-| hands: `aee-wake`, `flow-emit`, `github-label-applied`, `performReassign` (audited, same-team) | deterministic supervisor that drives them on a ladder + budget |
+| hands: `aee-wake`, `github-label-applied`, `performReassign` (audited, same-team) | deterministic supervisor that drives them on a ladder + budget |
 | netzplan board (status/owner fields, CLI writes) | the reconciliation event-feed behind it |
 | claim mechanism (`:wip`/`:completed`/rollback) | verify-before-claim post-condition |
 | human-gate semantics, DMs, Process-Canvas anomaly panel | one aggregated human inbox + push |
@@ -602,3 +601,66 @@ hides its empty columns is a filtered list.
 
 **Still not built:** §4.5's central human inbox. The board surfaces
 `needsHuman` per card, which is the input that phase consumes, and nothing more.
+
+## Amendment 3 — the board rebuilt as "who is working on what" (#2573)
+
+The Amendment-2 board answered "where is every open ticket, in nine fixed
+stages" and was used for something else: *which agent is working on what right
+now, and where do I have to step in*. It also loaded slowly (a full ledger
+sweep per view) and listed work no agent had touched. #2573 replaces it; the
+ticket ledger itself (`ticket-reconciler.js`, `GET …/tickets`) is untouched,
+because the Flow Supervisor (#2117) still reads it.
+
+**A3.1 — one pure derivation, one endpoint.** `orchestrator/flow-board.js`
+(pure, node:test-covered) builds the whole board; the orchestrator's
+`GET /internal/teams/:teamId/flow-board` feeds it one parallel GitHub sweep
+per repo (open issues, open PRs, items closed within the retention window,
+plus one GraphQL query for mergeability/review/checks) and serves it from a
+per-team single-flight cache (15 s TTL, `?refresh=1` forces a sweep). Every
+viewer shares one sweep; a GitHub outage returns the last good snapshot
+flagged `stale` with a warning. The console proxies it as
+`GET /api/teams/:teamId/flow-board`.
+
+**A3.2 — stages come from the flow graph, not a fixed list.** The role graph
+is read from the members' ports: labels a role emits (`emits`, trigger
+`emits`, outcome `setLabel` actions) and consumes (github-event
+`labelFilter`, minus `:wip`/`:completed` claim variants), plus `channels[]`.
+Roots are roles woken by a label no role emits; roles are placed by
+breadth-first depth, a loop-back role (e.g. a Reworker) before its forward
+sibling, then the longest forward path. Board columns = **Ready**, one per
+role in that order, **Done**. A role on several paths appears once; pool
+instances (`<team>-<role>-i<item>`, live or already reaped) count as their
+role. An optional per-team `flow-board.json` (`{doneRetentionHours, stages:
+{<memberId>: {label, hidden, mergeInto}}}`) renames, merges or hides stages.
+
+**A3.3 — only touched work appears.** An item is on the board once a team
+agent was delivered an event for it (GitHub Event Log), opened or pushed to
+it (`pr-events` log, or an agent marker in the body), ran a session on it,
+or — for an issue — carries a label a team role consumes (released). An
+issue and the PRs its woken agent opened form one row, linked through the
+pr-created record's correlation id to the waking event — no `Closes #n`
+needed. Dependabot PRs never appear. Finished rows stay for
+`doneRetentionHours` (default 24).
+
+**A3.4 — sessions know their work item.** The agent runtime now records a
+`workItem` (`{repo, kind, number}`) on each triggered session, so the
+"Working now" area can name the issue or PR per run; a pool instance falls
+back to its own `poolItem`.
+
+**A3.5 — human blocks are plain reasons.** Instead of the ledger's ten
+blocker codes, a row carries at most one of: flagged for a human, conflict
+with base, waiting for approval (a label the flow hands to no agent),
+approved — waiting for merge, checks failing, or no agent is scheduled to
+continue (nothing woke or queued for 30 min after the last run). A conflict
+already queued for an agent is not a human block.
+
+**A3.6 — Drain now ends in Off.** `pool-control.json` gains a third state,
+`off`: it refuses every dispatch, including reuse of a live instance.
+`settleDrain` turns `draining` into `off` once the role's last instance is
+gone — checked on the pool reap sweep and on every read of the board or the
+pool controls. **Switch on** is the existing `state: running` write, which
+also redelivers work held while the role was paused/draining/off.
+
+**Removed from the board:** the stat chips, the epic roll-up, the Backlog
+column and the list of all open PRs. The pool-lane panel is folded into
+"Working now".

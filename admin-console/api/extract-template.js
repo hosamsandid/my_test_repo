@@ -22,6 +22,7 @@
 //     simply have no path into the output.
 
 const store = require('./agent-templates-store');
+const { parseBranchFilter } = require('./branch-filter');
 
 const { TRIGGER_TYPES, PATTERN_ROLES } = store;
 
@@ -106,6 +107,8 @@ function sanitizeTemplateTrigger(tr) {
   if (tr.type === 'github-event') {
     if (Array.isArray(tr.events)) out.events = tr.events.filter(e => typeof e === 'string');
     if (isNonEmptyString(tr.labelFilter)) out.labelFilter = tr.labelFilter;
+    const branches = parseBranchFilter(tr.branchFilter);
+    if (branches.length) out.branchFilter = branches;
   }
   if (isNonEmptyString(tr.preCheckScript)) out.preCheckScript = tr.preCheckScript;
   if (tr.preCheckEnv && typeof tr.preCheckEnv === 'object' && !Array.isArray(tr.preCheckEnv)) {

@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections.js';
 import { topicSections, sectionSlug } from '../context/page-help-view.js';
 
-// ─── #2116 (epic #2112) Flow Control board help guard ────────────────────────
+// ─── #2116 / #2573 Flow Control board help guard ────────────────────────
 //
 // The board's surfaces deep-link into the `flow-control` topic's chapters. Two
 // things rot silently and neither throws at runtime:
@@ -60,10 +60,10 @@ test('the chapter slugs are derived from the headings, not hand-written', () => 
   // If sectionSlug ever changed its rule the constants would still "exist" as
   // strings while matching nothing at runtime.
   assert.equal(sectionSlug('What the Flow Control board shows'), FLOW_CONTROL_HELP_SECTIONS.page);
-  assert.equal(sectionSlug('The epic roll-up'), FLOW_CONTROL_HELP_SECTIONS.epics);
+  assert.equal(sectionSlug('Pause, Drain and Switch on'), FLOW_CONTROL_HELP_SECTIONS.poolControls);
 });
 
-test('the four areas are top-level chapters, not sub-headings', () => {
+test('the chapters are top-level, not sub-headings', () => {
   const h2 = topicSections(topicBody).filter((s) => s.level === 2).map((s) => s.slug);
   for (const key of Object.keys(FLOW_CONTROL_HELP_SECTIONS)) {
     assert.ok(
@@ -85,7 +85,7 @@ test('each board surface mounts a "?" pointed at its own chapter', () => {
     /import \{ FLOW_CONTROL_HELP_SECTIONS \} from '\.\/flow-control-help-sections'/.test(page),
     'the slugs must come from the shared registry, never be written out inline',
   );
-  for (const key of ['page', 'states', 'epics', 'poolControls', 'poolLanes']) {
+  for (const key of Object.keys(FLOW_CONTROL_HELP_SECTIONS)) {
     assert.ok(
       page.includes(`FLOW_CONTROL_HELP_SECTIONS.${key}`),
       `the ${key} surface must deep-link to its chapter (never a hand-written slug)`,
@@ -102,40 +102,46 @@ test('no chapter slug is inlined as a string literal in the page', () => {
   }
 });
 
-// ─── AC2, from the page's side ───────────────────────────────────────────────
+// ─── #2573: the page decides nothing and reads one endpoint ─────────────────
 //
-// `flow-control-view.test.js` proves the *decisions* never read a label. This
-// asserts the JSX did not reintroduce one behind the pure module's back — the
-// only place a raw label could re-enter the board.
+// Stages, rows and block reasons are derived server-side from the flow graph
+// (`orchestrator/flow-board.js`). A label read or a flow token in the JSX would
+// be a second, hard-coded vocabulary behind the graph's back.
 
 test('the page renders no raw label of its own', () => {
-  assert.ok(
-    !/\.labels\b/.test(page),
-    'FlowControl.jsx must not read ticket.labels — state comes from the reconciler (AC2)',
-  );
+  assert.ok(!/\.labels\b/.test(page), 'FlowControl.jsx must not read labels — the stages come from the flow graph');
   for (const token of ['ready-2', 'ready-for-review', ':completed', ':wip']) {
     assert.ok(!page.includes(token), `the flow vocabulary "${token}" must not appear in the page`);
   }
 });
 
-test('the ticket ledger itself stays observe-only, even though the board now mutates pool state (#2250)', () => {
-  // §4.1's guarantee is about the LEDGER — a ticket's derived state must never
-  // be set by a mutating call from this page. #2250 Phase 5 adds a legitimate,
-  // ADJACENT mutation surface (pause/resume/drain a pooled role; force-dispatch
-  // a held ticket past the WIP limit) that acts on the admission lane / pool
-  // runtime state, never on a ticket's own lifecycle field — so the ledger
-  // fetch itself must stay GET-only, and every POST must target one of the
-  // two named pool-control endpoints, never `/tickets`.
-  assert.ok(
-    /apiCall\('GET', `\/api\/teams\/\$\{encodeURIComponent\(teamId\)\}\/tickets`\)/.test(page),
-    'the board must read the ledger endpoint',
+test('one read, and the removed surfaces stay removed (AC10, AC11)', () => {
+  const reads = page.match(/apiCall\('GET', `[^`]*`/g) || [];
+  assert.deepEqual(
+    reads,
+    ["apiCall('GET', `/api/teams/${encodeURIComponent(teamId)}/flow-board${refresh ? '?refresh=1' : ''}`"],
+    'the board must load from the single flow-board endpoint',
   );
+  for (const gone of ['/tickets', '/pool-lanes', 'EpicRollups', 'SummaryRow', 'Backlog']) {
+    assert.ok(!page.includes(gone), `"${gone}" must not come back`);
+  }
+});
+
+test('every write targets a pool control or the column configuration', () => {
   const mutations = page.match(/apiCall\('(POST|PUT|PATCH|DELETE)', `[^`]*`/g) || [];
-  assert.ok(mutations.length > 0, 'expected the pool-control/force-dispatch mutations to be present');
+  assert.equal(mutations.length, 3, `expected three writes, got ${mutations.join(' | ')}`);
   for (const call of mutations) {
     assert.ok(
-      /\/pool-control\/\$\{encodeURIComponent\(roleId\)\}`$/.test(call) || /\/force-dispatch`$/.test(call),
-      `unexpected mutating call in the Flow Control board: ${call} — the ticket ledger must stay observe-only`,
+      /\/pool-control\/\$\{encodeURIComponent\(roleId\)\}`$/.test(call)
+        || /\/force-dispatch`$/.test(call)
+        || /\/flow-board-config`$/.test(call),
+      `unexpected mutating call in the Flow Control board: ${call}`,
     );
   }
+});
+
+test('auto-refresh uses the shared interval and the per-user preference (AC12)', () => {
+  assert.match(page, /setInterval\([\s\S]{0,120}AUTO_REFRESH_MS\)/);
+  assert.match(page, /readAutoRefresh\(username\)/);
+  assert.match(page, /writeAutoRefresh\(username, !on\)/);
 });

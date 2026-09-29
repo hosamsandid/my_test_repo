@@ -27,7 +27,7 @@
 // `source="github"` one, and one `source: 'internal-plugin'` event-log row per
 // wake.
 //
-// Like `wake-agent.js` / `flow-emit.js`, this module is fs-free so the delivery
+// Like `wake-agent.js` / `github-label-fastpath.js`, this module is fs-free so the delivery
 // contract is unit-testable: request validation, target resolution and the
 // queue-entry shape. All I/O stays in orchestrator.js.
 

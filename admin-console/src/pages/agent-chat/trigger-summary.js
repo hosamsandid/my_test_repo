@@ -4,6 +4,8 @@
 // readout (`TemplateReadonly` in NodeInspector.jsx) so the friendly event
 // wording has a single source of truth (#778).
 
+import { parseBranchFilter } from './branch-filter.js';
+
 // Subset of GitHub Events API event types most useful for agent workflows.
 // (The Events API does not emit every webhook action — e.g. pull_request
 // has opened/closed/reopened but not synchronize. It also splits closed
@@ -230,7 +232,11 @@ export function summarizeGithubEventTrigger(trigger) {
   const label = trigger?.labelFilter && eventsAreLabelFilterable(raw)
     ? String(trigger.labelFilter)
     : null;
-  return { events, label };
+  // #2570: the push branch filter only applies to the `push` event, so it is
+  // shown only when the trigger listens on push. null = every branch.
+  const branchList = raw.includes('push') ? parseBranchFilter(trigger?.branchFilter) : [];
+  const branches = branchList.length ? branchList.join(', ') : null;
+  return { events, label, branches };
 }
 
 // The claim payload a TriggersPanel save carries (#1006): the raw layer follows
@@ -245,21 +251,6 @@ export function claimBodyFor({ labelFilter, events, claimOn, isEdit }) {
     .some(e => e === 'issues.labeled' || e === 'pull_request.labeled');
   if (lf && labeled && claimOn) return { remove: lf, add: `${lf}:wip` };
   return isEdit ? null : undefined;
-}
-
-// Delivery-transport field for a saved github-event trigger body (#1189). Pure
-// mirror of the TriggerForm decision so it is unit-testable:
-//   - a label listener (`showTransport`) writes an EXPLICIT value — 'github'
-//     too, never omitted, so toggling internal → github clears a stored
-//     'internal' on the PUT `{...prev, ...body}` merge;
-//   - a trigger that is not (or no longer) a label listener but carried a stale
-//     transport gets it cleared to 'github' on edit;
-//   - a plain non-label trigger keeps no transport key (undefined drops).
-// Returns the value to assign to `body.transport`, or undefined to omit it.
-export function transportBodyFor({ showTransport, transport, isEdit, priorTransport }) {
-  if (showTransport) return transport === 'internal' ? 'internal' : 'github';
-  if (isEdit && priorTransport) return 'github';
-  return undefined;
 }
 
 // The optional "pushed by agent" producer filter on a push trigger (#2571), as

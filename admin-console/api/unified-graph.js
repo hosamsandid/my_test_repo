@@ -155,8 +155,8 @@ function processEdgeToUnified(e) {
     // Direct agent-to-agent hand-off (#2031, concept §10 / resolved decision 11).
     // A new discriminator, not `on: 'label'` (which presupposes a carrying label
     // and a listening `triggerId`) and not `handoff` (already means "human
-    // decision / brake"). No label, no artifact, no transport toggle: a direct
-    // hand-off is internal by construction, so there is nothing to select.
+    // decision / brake"). No label, no artifact: a direct hand-off is delivered
+    // inside the platform by construction, so there is nothing to select.
     //
     // `outcome` rides along because the producer authored the hand-off INSIDE an
     // outcome option — it is what `edgeId` keys on and what the canvas titles a
@@ -222,9 +222,6 @@ function processEdgeToUnified(e) {
   // so the canvas can render the claim badge on the listener edge — same
   // pass-through shape as the loop stop-contract blob (#936).
   if (e.claim) u.claim = e.claim;
-  // Internal-channel transport (#1174): forwarded so the canvas styles the
-  // delivery path and the edge dialog can toggle it.
-  if (e.transport === 'internal') u.transport = 'internal';
   return u;
 }
 
@@ -459,10 +456,6 @@ function buildUnifiedGraph(nodes, edges, options) {
         // Authored wake-prompt override (#868), surfaced so the channel edit
         // dialog can pre-fill and round-trip it.
         ...(typeof ch.wakePrompt === 'string' && ch.wakePrompt.trim() ? { wakePrompt: ch.wakePrompt } : {}),
-        // Internal-channel transport (#1194), surfaced so the channel edit dialog /
-        // Routing row can pre-fill the Delivery control and the canvas can style
-        // the edge. Only the non-default is carried (mirrors the port).
-        ...(ch.transport === 'internal' && ch.label && ch.gate !== 'human' ? { transport: 'internal' } : {}),
         ...(nodeIds.has(ch.from) ? {} : { orphan: true }),
       });
     }

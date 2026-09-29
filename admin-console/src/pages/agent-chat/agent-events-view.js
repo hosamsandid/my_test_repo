@@ -40,6 +40,14 @@ function q(label) {
   return label ? `'${label}'` : 'the label';
 }
 
+// The pushed branch / tag named by a push row's `ref` (#2570).
+function refText(ref) {
+  if (typeof ref !== 'string' || !ref) return 'this branch';
+  if (ref.startsWith('refs/heads/')) return `branch '${ref.slice('refs/heads/'.length)}'`;
+  if (ref.startsWith('refs/tags/')) return `tag '${ref.slice('refs/tags/'.length)}'`;
+  return `'${ref}'`;
+}
+
 // Human-readable drop reason (AC3). `row.label` is the label the event carried
 // (the one a label-filter / self-claim drop ignored); `row.wakeLabel` is the
 // trigger's wake label.
@@ -52,6 +60,10 @@ export function dropReasonText(row) {
       return `Already woken for ${q(wake)} on this item — a repeat of the same label is ignored until it is removed and re-applied.`;
     case 'label-filter':
       return `Label ${q(label)} is not the one this trigger listens for, so it was ignored.`;
+    case 'branch-filter': {
+      const what = refText(row.ref);
+      return `${what.charAt(0).toUpperCase()}${what.slice(1)} is not in this trigger's branch filter, so the push was ignored.`;
+    }
     case 'throttle':
       return 'Too many events on this item within the hour — the rate cap dropped this one.';
     case 'internal-dedup':

@@ -259,16 +259,14 @@ test('github channel edges: a labelled human-gated channel carries label + gate'
   assert.equal(e.gate, 'human');
 });
 
-test('#1194: a labelled internal channel edge surfaces transport; a human/unlabelled one does not', () => {
+test('#2578: a legacy channel/trigger transport never surfaces on an edge', () => {
   const g = buildUnifiedGraph([
-    { id: 'rev', triggers: [], github: { producesPr: true } },
+    { id: 'rev', triggers: [], github: { producesPr: true }, emits: ['go'] },
     { id: 'mrg', triggers: [], channels: [{ artifact: 'pr', from: 'rev', label: 'approved', transport: 'internal' }] },
-    { id: 'dep', triggers: [], channels: [{ artifact: 'pr', from: 'rev', label: 'approved', gate: 'human', transport: 'internal' }] },
-    { id: 'cons', triggers: [], channels: [{ artifact: 'pr', from: 'rev', transport: 'internal' }] },
+    { id: 'cons', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'go', transport: 'internal' }] },
   ]);
-  assert.equal(findEdge(g, x => x.on === 'github' && x.to === 'mrg').transport, 'internal');
-  assert.ok(!('transport' in findEdge(g, x => x.on === 'github' && x.to === 'dep')), 'human gate stays poller-delivered');
-  assert.ok(!('transport' in findEdge(g, x => x.on === 'github' && x.to === 'cons')), 'unlabelled stays poller-delivered');
+  assert.ok(!('transport' in findEdge(g, x => x.on === 'github' && x.to === 'mrg')), 'channel edge');
+  assert.ok(!('transport' in findEdge(g, x => x.on === 'label' && x.to === 'cons')), 'label edge');
 });
 
 test('github channel edges: PR and issue channels between the same pair are distinct', () => {
@@ -832,11 +830,9 @@ test('#2031: a wakeAgent action becomes an on:\'wake\' edge, not a label edge', 
   assert.equal(e.note, 'mind step 3');
   // The three things a direct hand-off deliberately does NOT carry: it is not a
   // label hand-off, it has no listening trigger to edit (the consumer's listener
-  // is derived from this action), and it is internal by construction so there is
-  // no transport to select.
+  // is derived from this action), and it is platform-delivered by construction.
   assert.equal(e.label, undefined, 'no label token');
   assert.equal(e.triggerId, undefined, 'no listening trigger — the action is the authoring point');
-  assert.equal(e.transport, undefined, 'internal by construction — nothing to toggle');
   assert.equal(e.gate, undefined);
   assert.equal(e.handoff, undefined, '`handoff` means human decision / brake — never reused here');
   assert.equal(g.edges.filter(x => x.on === 'label').length, 0);

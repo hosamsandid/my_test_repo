@@ -193,3 +193,13 @@ test('projectAgentRows (#2571): a producer-filter drop carries who pushed (null 
   assert.deepEqual(rows.map(r => r.producer), ['t1-review', null]);
   assert.equal('producer' in eventLog.projectAgentRows([armedDrop], DEV)[0], false);
 });
+
+test('projectAgentRows (#2570): a push row carries its ref so a branch-filter drop can name the branch', () => {
+  const push = {
+    ts: '2026-09-29T10:00:00.000Z', eventId: 'p1', repo: 'o/r', event: 'push', ref: 'refs/heads/agent-knowledge',
+    outcomes: [{ agentId: 'dev', triggerId: 'on-push', status: 'dropped', reason: 'branch-filter' }],
+  };
+  const [row] = eventLog.projectAgentRows([push], 'dev');
+  assert.equal(row.ref, 'refs/heads/agent-knowledge');
+  assert.equal(row.reason, 'branch-filter');
+});

@@ -15,19 +15,20 @@ import {
   conditionsFromFilter, conditionsToFilter, payloadFilterSummary, conditionsHeading,
 } from './plugin-event-filter.js';
 import { liveOps } from '../process/edit-adapters';
-import { isGateLabel, isBrakeLabel } from '../process/label-flags';
 import {
   GITHUB_EVENT_OPTIONS,
   LABEL_FILTERABLE_EVENTS,
   summarizeGithubEventTrigger,
   summarizeLoopTrigger,
   claimBodyFor,
-  transportBodyFor,
   isStandingSubscription,
   pushedByIds,
   pushedByBodyFor,
   summarizePushSchedule,
 } from './trigger-summary.js';
+import {
+  branchFilterFormError, branchFilterToInput, branchFilterBody, BRANCH_FILTER_PLACEHOLDER, BRANCH_FILTER_HELP,
+} from './branch-filter.js';
 import { DOW_LABELS, parseCronState, buildCron, describeCron } from './cron-format.js';
 import { triggerRepoOptions, environmentRepoOptions, triggerRepoWarning } from './trigger-repo-status.js';
 import {
@@ -412,6 +413,14 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
             <strong style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>
               {ghSummary.events.length ? ghSummary.events.join(', ') : 'No event'}
             </strong>
+            {ghSummary.branches && (
+              <>
+                {' · branches: '}
+                <strong style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>
+                  {ghSummary.branches}
+                </strong>
+              </>
+            )}
             {ghSummary.label && (
               <>
                 {' · label '}
@@ -634,7 +643,7 @@ function PushedByPicker({ roster, selected, onToggle }) {
   );
 }
 
-export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false, allowLoopType = true, lockType = null, submitLabel = null, labels = null }) {
+export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false, allowLoopType = true, lockType = null, submitLabel = null }) {
   const isEdit = !!initialValues;
   const typeLocked = isEdit && !allowTypeChange;
   // Loop-launch mode (#1020): the composer launcher reuses this form pinned to
@@ -669,6 +678,9 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     // same-team agent ids; empty = any push. Pre-filled from the stored value,
     // which the Flow editor sets on a data-flow hand-off to its upstream.
     pushedBy:    pushedByIds(initialValues),
+    // Optional push branch filter (#2570), edited as a comma-separated string and
+    // stored as an array. Empty = every branch.
+    branchFilter: branchFilterToInput(initialValues?.branchFilter),
     secret:      initialValues?.secret      ?? (initialType === 'http' ? '' : generateSecret()),
     description: initialValues?.description ?? '',
     prompt:      initialValues?.prompt      ?? '',
@@ -700,10 +712,6 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     // when it fires — ON by default for new listeners (the platform convention
     // the engine/channel paths follow); an edit reflects the stored state.
     claimOn:       isEdit ? !!initialValues?.claim : true,
-    // Delivery transport (#1189): 'internal' delivers the wake over the
-    // orchestrator queue (label mirrored to GitHub); 'github' is poller
-    // delivery. Only meaningful for a label listener — see `showTransport`.
-    transport:     initialValues?.transport === 'internal' ? 'internal' : 'github',
     // ── plugin-event fields (Jira plan §4B) ──────────────────────────────
     // `pluginId` names which granted plugin may fire this listener; the
     // optional `eventFilter` is the broker's own event name (opaque to the
@@ -719,16 +727,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   const isDataFlow = form.type === 'data-flow';
   const showLabelFilter = form.type === 'github-event'
     && form.events.some(e => LABEL_FILTERABLE_EVENTS.has(e));
-  // Delivery selector (#1189): a real label listener (label event + a filter),
-  // and NOT a human gate/brake — a person sets those on GitHub, so only the
-  // poller can see them (mirrors the edge dialog's rule). The gate check needs
-  // the label registry; when it isn't provided (e.g. Agent-Chat), fall open and
-  // show the selector — the backend still rejects an invalid transport.
-  const trimmedFilter = (form.labelFilter || '').trim();
-  const gateLikeFilter = labels
-    ? (isGateLabel(labels, trimmedFilter) || isBrakeLabel(labels, trimmedFilter))
-    : false;
-  const showTransport = showLabelFilter && !!trimmedFilter && !gateLikeFilter;
+  const showBranchFilter = form.type === 'github-event' && form.events.includes('push');
   const [copyDone, setCopyDone] = useState(null); // 'path' | 'secret' | null
   const [secretVisible, setSecretVisible] = useState(!isEdit);
   const [formError, setFormError] = useState(null);
@@ -950,6 +949,8 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     if (form.type === 'github-event') {
       if (!form.repo && !isDraftMode) { setFormError('Repository is required.'); return; }
       if (form.events.length === 0) { setFormError('Select the event this trigger reacts to.'); return; }
+      const branchError = showBranchFilter ? branchFilterFormError(form.branchFilter) : null;
+      if (branchError) { setFormError(branchError); return; }
     }
     if (isDataFlow) {
       if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
@@ -1025,6 +1026,9 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       // path clear an existing filter when the user blanks the field.
       const lf = (form.labelFilter || '').trim();
       body.labelFilter = (showLabelFilter && lf) ? lf : null;
+      // Branch filter (#2570): an array, or `null` so an edit clears it when
+      // the field is blanked or the event is no longer push.
+      body.branchFilter = branchFilterBody(form.branchFilter, { show: showBranchFilter });
       // Claim stamping (#1006): the raw layer follows the same convention as
       // the engine paths — a `.labeled` label listener claims its wake label
       // unless the author opted out. On edit, `null` clears a stored claim;
@@ -1032,12 +1036,6 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       body.claim = claimBodyFor({
         labelFilter: body.labelFilter, events: form.events, claimOn: form.claimOn, isEdit,
       });
-      // Delivery transport (#1189) — pure decision in trigger-summary.js so it
-      // stays unit-tested; undefined omits the key for a plain non-label trigger.
-      const tp = transportBodyFor({
-        showTransport, transport: form.transport, isEdit, priorTransport: initialValues?.transport,
-      });
-      if (tp !== undefined) body.transport = tp;
     }
     // Producer filter (#2571) — pure decision in trigger-summary.js.
     const pb = pushedByBodyFor({
@@ -1581,6 +1579,24 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             <PushedByPicker roster={pushRoster} selected={form.pushedBy} onToggle={togglePushedBy} />
           )}
 
+          {showBranchFilter && (
+            <div>
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                Branches
+              </div>
+              <input
+                type="text"
+                value={form.branchFilter}
+                onChange={e => set('branchFilter', e.target.value)}
+                placeholder={BRANCH_FILTER_PLACEHOLDER}
+                style={{ ...FIELD_STYLE, width: '100%' }}
+              />
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                {BRANCH_FILTER_HELP}
+              </div>
+            </div>
+          )}
+
           {showLabelFilter && (
             <div>
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
@@ -1601,26 +1617,6 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                   <input type="checkbox" checked={form.claimOn} onChange={e => set('claimOn', e.target.checked)} />
                   Claim the wake label on fire (<code>{form.labelFilter.trim()}</code> → <code>{form.labelFilter.trim()}:wip</code>) — makes work-in-progress visible on GitHub
                 </label>
-              )}
-              {showTransport && (
-                <div style={{ marginTop: 'var(--eb-space-3)' }}>
-                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
-                    Delivery
-                  </div>
-                  <select
-                    value={form.transport}
-                    onChange={e => set('transport', e.target.value)}
-                    style={{ ...FIELD_STYLE, width: '100%' }}
-                  >
-                    <option value="github">Via GitHub events — the poller delivers the wake (~30s)</option>
-                    <option value="internal">Direct (internal) — label mirrored to GitHub</option>
-                  </select>
-                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
-                    {form.transport === 'internal'
-                      ? <>The wake is delivered directly by the orchestrator (no polling latency, no lost events); the producer announces the label with <code>aee-emit</code>, and it is still stamped on GitHub as visible status.</>
-                      : <>The wake rides the GitHub Events API, delivered by the poller.</>}
-                  </div>
-                </div>
               )}
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
                 Tip: hand-offs between agents are easier to wire and edit in the <a href="/flows" style={{ color: 'var(--eb-accent-primary)' }}>Flow Editor</a>.

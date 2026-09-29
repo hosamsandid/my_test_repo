@@ -9,6 +9,8 @@ const {
   validateLabelAppliedRequest,
   matchPollerListeners,
   buildSyntheticEvent,
+  buildPendingEntry,
+  TARGET_KINDS,
 } = require('./github-label-fastpath');
 
 // ── validateLabelAppliedRequest ─────────────────────────────────────────────
@@ -80,12 +82,15 @@ test('match: a non-matching label wakes only the any-label listener', () => {
   assert.deepEqual(out, [{ agentId: 'dispatcher', triggerId: 't-any' }]);
 });
 
-test('match: transport:internal listeners are NOT matched (poller-subscribed only)', () => {
+test('match: a legacy transport field is ignored — the trigger is poller-subscribed (#2578)', () => {
   const agents = [{
     agentId: 'dev', enabled: true,
     triggers: [{ id: 't', type: 'github-event', repo: 'org/repo', events: ['issues.labeled'], labelFilter: 'ready', transport: 'internal' }],
   }];
-  assert.deepEqual(matchPollerListeners({ repo: 'org/repo', label: 'ready', kind: 'issue' }, agents), []);
+  assert.deepEqual(
+    matchPollerListeners({ repo: 'org/repo', label: 'ready', kind: 'issue' }, agents),
+    [{ agentId: 'dev', triggerId: 't' }],
+  );
 });
 
 test('match: gated out by disabled agent / disabled trigger / wrong repo / wrong event', () => {
@@ -142,4 +147,41 @@ test('buildSyntheticEvent: resolved title rides on the subject (#1897 AC8)', () 
   // Blank/absent title is not carried (backward-compatible, notice degrades).
   const noTitle = buildSyntheticEvent({ repo: 'org/repo', label: 'ready', kind: 'issue', number: 42, title: '', actor: 'alice', eventId: 'x4', now: '2026-09-01T00:00:00Z' });
   assert.equal(noTitle.payload.issue.title, undefined);
+});
+
+test('TARGET_KINDS lists both label-apply targets', () => {
+  assert.deepEqual(TARGET_KINDS, ['issue', 'pr']);
+});
+
+// ── buildPendingEntry ───────────────────────────────────────────────────────
+
+test('buildSyntheticEvent + buildPendingEntry: issue entry satisfies the claim-plan contract', () => {
+  // `_claim_plan` in agent-entrypoint.py reads github.repo ("owner/name") and
+  // payload.issue.number — the swap must work on a fast-path delivered wake.
+  const ev = buildSyntheticEvent({
+    repo: 'org/repo', label: 'ready', kind: 'issue', number: 42,
+    actor: 'alice', eventId: 'intlbl:abc123', now: '2026-08-02T10:00:00Z',
+  });
+  const entry = buildPendingEntry('t1', 'issues.labeled', ev);
+  assert.equal(entry.triggerId, 't1');
+  assert.equal(entry.source, 'internal');
+  // #2151: stamped from the synthesized event's own label.
+  assert.equal(entry.wakeLabel, 'ready');
+  assert.equal(entry.github.event, 'issues.labeled');
+  assert.equal(entry.github.eventId, 'intlbl:abc123');
+  assert.equal(entry.github.repo, 'org/repo');
+  assert.equal(entry.github.actor, 'alice');
+  assert.equal(entry.github.createdAt, '2026-08-02T10:00:00Z');
+  assert.equal(entry.github.payload.action, 'labeled');
+  assert.equal(entry.github.payload.label.name, 'ready');
+  assert.equal(entry.github.payload.issue.number, 42);
+  assert.equal(entry.github.payload.pull_request, undefined);
+});
+
+test('#2151: buildPendingEntry stamps wakeLabel null when the synthesized event carries no label', () => {
+  const entry = buildPendingEntry('t1', 'issues.labeled', {
+    id: 'intlbl:no-label', actor: { login: 'alice' }, repo: { name: 'org/repo' },
+    created_at: '2026-08-02T10:00:00Z', payload: { action: 'labeled', issue: { number: 1 } },
+  });
+  assert.equal(entry.wakeLabel, null);
 });

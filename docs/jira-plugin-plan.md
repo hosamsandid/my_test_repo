@@ -145,7 +145,7 @@ wake — the tag `github-label-applied` already writes.
 and framed as `<external-agent-handoff>` **from a peer agent**. An external
 system's event is not a peer hand-off, and mislabelling it in the prompt is the
 kind of small dishonesty that costs a debugging session later. Same reasoning
-`wake-agent.js` itself gives for not widening `flow-emit`.
+`wake-agent.js` itself gave for not widening `flow-emit` (since removed, #2578).
 
 *Cost:* one trigger type, one endpoint, one queue kind, one prompt envelope,
 one `TriggerForm` branch. Compare with #1539's five layers — and every one of
@@ -167,8 +167,8 @@ Verified against source, not inferred:
    unlisted type silently falls back to `'cron'` when the form opens, so editing
    an existing `plugin-event` trigger would rewrite it as a cron.
 3. **`pollerSubscribes` (`orchestrator/github-poller.js`)** — must exclude
-   `plugin-event` from the GitHub poll plan, the same exclusion `transport:
-   'internal'` already gets.
+   `plugin-event` from the GitHub poll plan, as `transport: 'internal'`
+   listeners once were (that transport was removed in #2578).
 4. **`isAutonomousState` (`orchestrator/agent-autonomy.js`) — no change needed.**
    It is `sessionPolicy === 'per-invocation' || triggers.length > 0`, so a
    `plugin-event` trigger flips the agent to autonomous (and rebuilds its
@@ -176,7 +176,7 @@ Verified against source, not inferred:
 
 ### Option C — extend `flow-emit`
 
-Rejected for the reason `wake-agent.js` already documents: `validateEmitRequest`'s
+Moot since #2578 removed `flow-emit`; it was rejected for the reason `wake-agent.js` already documents: `validateEmitRequest`'s
 required `label` + `target` are load-bearing for all its callers, and a Jira event
 anchors to no GitHub artifact.
 

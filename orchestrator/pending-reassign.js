@@ -32,6 +32,7 @@ const {
   passesHorizon,
   GRACE_MS,
 } = require('./github-poller');
+const { parseBranchFilter, pushBranch, branchFilterMatches } = require('./branch-filter');
 
 // Why a candidate was refused, in the poller's own vocabulary so an operator
 // reading a refusal can look the reason up in the Event Log's outcome legend.
@@ -41,6 +42,7 @@ const REFUSAL_REASONS = {
   'event-not-subscribed': 'it does not subscribe to this event type',
   'history-horizon': 'the event predates its trigger\'s subscription window',
   'label-filter': 'its trigger subscribes to a different label',
+  'branch-filter': 'its trigger only reacts to pushes on other branches',
 };
 
 // Rebuild the event shape the poller matched on from a queued `github` entry.
@@ -76,8 +78,8 @@ function ghEventFromEntry(entry) {
 //                                     entry to a different agent is not a
 //                                     self-wake.
 //
-// What remains IS the match: event-key membership, the history horizon and the
-// label filter — each evaluated with the poller's own exported predicate, and
+// What remains IS the match: event-key membership, the history horizon, the
+// label filter and the push branch filter — each evaluated with the poller's own exported predicate, and
 // each in the same order, so the reason a candidate is refused reads the same
 // way it would in the Event Log.
 function triggerAccepts(trigger, { eventKey, ghEvent, repo, triggersMtime }) {
@@ -97,6 +99,10 @@ function triggerAccepts(trigger, { eventKey, ghEvent, repo, triggersMtime }) {
   const labelFilter = (typeof trigger.labelFilter === 'string' && trigger.labelFilter.trim()) || null;
   if (labelFilter && !labelFilterMatches(ghEvent, labelFilter)) {
     return { ok: false, reason: 'label-filter' };
+  }
+  // Branch filter (#2570) — `push` only, same parse + match as the poller.
+  if (eventKey === 'push' && !branchFilterMatches(pushBranch(ghEvent), parseBranchFilter(trigger.branchFilter))) {
+    return { ok: false, reason: 'branch-filter' };
   }
   return { ok: true, triggerId: trigger.id, labelFilter };
 }
@@ -165,7 +171,7 @@ function eligibleTargets(entry, candidates) {
 // the target's trigger, so an operator cannot hand an agent an event that
 // predates its own subscription window.)
 //
-// `source: 'internal'` matches the flow-emit / wake-agent entries so log
+// `source: 'internal'` matches the label fast-path / wake-agent entries so log
 // readers can tell the delivery path apart (docs/direct-agent-handoff-concept.md).
 //
 // `wakeLabel` is re-stamped from the TARGET's own `labelFilter` (#2151), never

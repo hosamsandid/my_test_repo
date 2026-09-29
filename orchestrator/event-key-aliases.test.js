@@ -11,7 +11,6 @@ const assert = require("node:assert/strict");
 const { EVENT_KEY_ALIASES, canonicalEventKey, listensTo } = require("./event-key-aliases");
 const { GitHubPoller, eventKey, pollerSubscribes, selectFreshEvents } = require("./github-poller");
 const githubEventLog = require("./github-event-log");
-const { matchInternalListeners } = require("./flow-emit");
 const { matchPollerListeners } = require("./github-label-fastpath");
 const { triggerAccepts } = require("./pending-reassign");
 
@@ -175,18 +174,10 @@ test("pending-reassign: a queued review entry with either key form is accepted b
     "event-not-subscribed");
 });
 
-// Flow emit and the label fast-path only ever deliver `*.labeled` keys, so a
-// review key cannot reach them; what they must share with the poller is the
+// The label fast-path only ever delivers `*.labeled` keys, so a review key
+// cannot reach it; what they must share with the poller is the
 // matcher — pinned below by triggers that mix label and review keys (matched
 // once) and the drift guard that every matcher goes through `listensTo`.
-test("flow-emit matchInternalListeners: matches through the shared helper, once per trigger", () => {
-  const agents = [{ agentId: "a", triggers: [
-    { id: "t1", type: "github-event", transport: "internal", repo: REPO, events: ["pull_request.labeled", "pull_request_review.created"] },
-    { id: "t2", type: "github-event", transport: "internal", repo: REPO, events: ["pull_request_review.submitted"] },
-  ] }];
-  assert.deepEqual(matchInternalListeners({ repo: REPO, label: "x", kind: "pr" }, agents), [{ agentId: "a", triggerId: "t1" }]);
-});
-
 test("label fast-path matchPollerListeners: matches through the shared helper, once per trigger", () => {
   const agents = [{ agentId: "a", triggers: [
     { id: "t1", type: "github-event", repo: REPO, events: ["issues.labeled", "pull_request_review.submitted"] },
@@ -195,10 +186,10 @@ test("label fast-path matchPollerListeners: matches through the shared helper, o
   assert.deepEqual(matchPollerListeners({ repo: REPO, label: "x", kind: "issue" }, agents), [{ agentId: "a", triggerId: "t1" }]);
 });
 
-test("flow-emit / label fast-path / pending-reassign / poller all match through listensTo (drift guard)", () => {
+test("label fast-path / pending-reassign / poller all match through listensTo (drift guard)", () => {
   const fs = require("fs");
   const path = require("path");
-  for (const f of ["flow-emit.js", "github-label-fastpath.js", "pending-reassign.js", "github-poller.js"]) {
+  for (const f of ["github-label-fastpath.js", "pending-reassign.js", "github-poller.js"]) {
     const src = fs.readFileSync(path.join(__dirname, f), "utf8");
     assert.match(src, /listensTo\(/, f);
     assert.doesNotMatch(src, /\.events\.(includes|has)\(/, `${f} must not compare event keys verbatim`);

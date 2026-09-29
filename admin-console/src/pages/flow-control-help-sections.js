@@ -9,18 +9,18 @@
 // heading breaks the deep link SILENTLY (the panel just renders from the top).
 
 export const FLOW_CONTROL_HELP_SECTIONS = {
-  // 1 — evidence-not-labels, the read-only rule, and the empty/degraded states
+  // 1 — what appears on the board and what does not; refresh; degraded states
   page: 'what-the-flow-control-board-shows',
-  // 2 — the nine columns, and that they are graph positions rather than labels
-  states: 'the-lifecycle-stages',
-  // 3 — the ten reason codes, who clears each, and the two decline-on-doubt rules
-  blockers: 'blockers-and-what-to-do-about-them',
-  // 4 — the four mutually exclusive buckets and why they always sum to the total
-  epics: 'the-epic-roll-up',
-  // 5 — pause/drain a pooled role, force-dispatch a held ticket (#2250 Phase 5)
-  poolControls: 'pool-controls',
-  // 6 — the read-only running/held-same-epic/timed-out lane view (#2273)
-  poolLanes: 'pool-instance-lanes',
+  // 2 — area ①: running sessions and pool occupancy
+  working: 'who-is-working-right-now',
+  // 3 — Pause vs Drain vs Switch on, and Force dispatch
+  poolControls: 'pause-drain-and-switch-on',
+  // 4 — area ②: the human-block reasons and what to do about each
+  needsYou: 'where-you-are-needed',
+  // 5 — area ③: stages derived from the flow graph, one row per work item
+  states: 'the-stages',
+  // 6 — the optional per-team column configuration and done retention
+  columns: 'changing-the-columns',
 };
 
 export default FLOW_CONTROL_HELP_SECTIONS;

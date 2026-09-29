@@ -610,12 +610,11 @@ test("_enrichPullRequestPayload: a fetch failure still parses closes from the br
   assert.equal(out.pull_request.html_url, "https://github.com/o/r/pull/500");
 });
 
-// ── pollerSubscribes (#1173): internal-channel triggers never enter the plan ─
+// ── pollerSubscribes ─────────────────────────────────────────────────────────
 //
-// The exclusion below is the SINGLE dedup mechanism of the internal-channels
-// design: /internal/flow-emit mirrors the label onto GitHub after delivering
-// the wake through the queue, and that stamp may never wake the listener a
-// second time via the poller (docs/internal-channels-concept.md §4.3).
+// Every well-formed, enabled github-event trigger is poller-subscribed. The
+// internal transport was removed in #2578: a trigger still carrying a legacy
+// `transport` field (any value) is an ordinary poller subscriber.
 
 const subscribable = (over = {}) => ({
   id: "t1", type: "github-event", repo: "org/repo",
@@ -628,8 +627,22 @@ test("pollerSubscribes: a plain github-event trigger subscribes", () => {
   assert.equal(pollerSubscribes(subscribable({ transport: "github" })), true);
 });
 
-test("pollerSubscribes: transport 'internal' is excluded — the label mirror cannot double-deliver", () => {
-  assert.equal(pollerSubscribes(subscribable({ transport: "internal" })), false);
+test("pollerSubscribes: a legacy transport 'internal' field no longer excludes the trigger (#2578)", () => {
+  assert.equal(pollerSubscribes(subscribable({ transport: "internal" })), true);
+});
+
+test("computePollPlan (#2578): a trigger carrying a legacy transport 'internal' field is in the plan", () => {
+  const { computePollPlan } = require("./github-poller");
+  const plan = computePollPlan({
+    allowNonGithubHost: false,
+    environments: [{ id: "env", githubTokenId: "tok", repositories: [{ url: "git@github.com:org/repo.git" }] }],
+    agents: [{
+      id: "reviewer", config: { environmentId: "env" }, triggersMtime: null,
+      triggers: [subscribable({ id: "legacy-internal", transport: "internal" })],
+    }],
+  });
+  const subs = plan.get("org/repo")?.subscribers || [];
+  assert.deepEqual(subs.map((x) => [x.agentId, x.triggerId]), [["reviewer", "legacy-internal"]]);
 });
 
 test("pollerSubscribes: disabled, wrong-type and malformed triggers are excluded", () => {
@@ -1896,4 +1909,80 @@ test("computePollPlan (#2571): carries the trigger's pushedBy filter and the own
   });
   const subs = plan.get("org/repo").subscribers;
   assert.deepEqual(subs.map((s) => [s.triggerId, s.pushedBy, s.teamId]), [["a", ["t1-spec"], "t1"], ["b", null, "t1"]]);
+});
+
+// ── Push branch filter (#2570) ───────────────────────────────────────────────
+
+test("computePollPlan (#2570): carries the parsed branchFilter, null when empty", () => {
+  const { computePollPlan } = require("./github-poller");
+  const trig = (id, extra) => ({ id, type: "github-event", enabled: true, repo: "acme/r", events: ["push"], ...extra });
+  const plan = computePollPlan({
+    allowNonGithubHost: false,
+    environments: [{ id: "env", githubTokenId: "tok", repositories: [{ url: "git@github.com:acme/r.git" }] }],
+    agents: [{
+      id: "dev", config: { environmentId: "env" }, triggersMtime: null,
+      triggers: [
+        trig("list", { branchFilter: ["main", "feature/*"] }),
+        trig("csv", { branchFilter: " main , dev ,," }),
+        trig("blank", { branchFilter: " , " }),
+        trig("none"),
+      ],
+    }],
+  });
+  const byId = new Map(plan.get("acme/r").subscribers.map((s) => [s.triggerId, s.branchFilter]));
+  assert.deepEqual(byId.get("list"), ["main", "feature/*"]);
+  assert.deepEqual(byId.get("csv"), ["main", "dev"]);
+  assert.equal(byId.get("blank"), null);
+  assert.equal(byId.get("none"), null);
+});
+
+test("_fanOutBatch (#2570 AC6): a push to a branch outside the filter is dropped before any wake and logged with its ref", async () => {
+  const poller = new GitHubPoller();
+  const sub = pushSub({ branchFilter: ["main", "feature/*"] });
+  const { recorded, enqueued } = await runBatch(poller, [[
+    pushEvent("kb", { ref: "refs/heads/agent-knowledge", head: "h1" }),
+    pushEvent("main", { ref: "refs/heads/main", head: "h2" }),
+    pushEvent("feat", { ref: "refs/heads/feature/login", head: "h3" }),
+    pushEvent("deep", { ref: "refs/heads/feature/a/b", head: "h4" }),
+    pushEvent("tag", { ref: "refs/tags/v1.0", head: "h5" }),
+  ]], [sub]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["main", "feat"]);
+  const row = (id) => recorded.find((r) => r.eventId === id);
+  assert.equal(row("kb").outcomes[0].status, "dropped");
+  assert.equal(row("kb").outcomes[0].reason, "branch-filter");
+  assert.equal(row("kb").ref, "refs/heads/agent-knowledge");
+  assert.equal(row("deep").outcomes[0].reason, "branch-filter");
+  assert.equal(row("tag").outcomes[0].reason, "branch-filter");
+});
+
+test("_fanOutBatch (#2570 AC2): no filter keeps firing on every branch and on tags", async () => {
+  const poller = new GitHubPoller();
+  const { enqueued } = await runBatch(poller, [[
+    pushEvent("kb", { ref: "refs/heads/agent-knowledge", head: "h1" }),
+    pushEvent("tag", { ref: "refs/tags/v1.0", head: "h2" }),
+  ]], [pushSub()]);
+  assert.equal(enqueued.length, 2);
+});
+
+test("_fanOutBatch (#2570 AC9): the branch filter only gates push, never the trigger's other events", async () => {
+  const poller = new GitHubPoller();
+  const sub = pushSub({ events: new Set(["push", "issues.opened"]), branchFilter: ["main"] });
+  const issueOpened = {
+    id: "io-1", actor: { login: "dev" }, created_at: new Date().toISOString(), type: "IssuesEvent",
+    repo: { name: "org/repo" },
+    payload: { action: "opened", issue: { number: 7, title: "x", html_url: "https://github.com/org/repo/issues/7" } },
+  };
+  const { enqueued } = await runBatch(poller, [[
+    issueOpened, pushEvent("kb", { ref: "refs/heads/agent-knowledge", head: "h1" }),
+  ]], [sub]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["io-1"]);
+});
+
+test("_fanOutBatch (#2570 edge case): the synthetic PR-open push is matched on its head branch", async () => {
+  const poller = new GitHubPoller();
+  const { enqueued } = await runBatch(poller, [[prOpenedEvent("pr-1")]], [pushSub({ branchFilter: ["main"] })]);
+  assert.equal(enqueued.length, 0);
+  const poller2 = new GitHubPoller();
+  const r2 = await runBatch(poller2, [[prOpenedEvent("pr-2")]], [pushSub({ branchFilter: ["**"] })]);
+  assert.equal(r2.enqueued.length, 1);
 });

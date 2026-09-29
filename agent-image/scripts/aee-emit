@@ -1,68 +1,38 @@
 #!/usr/bin/env python3
-"""aee-emit — announce a label hand-off over the internal channel (#1173).
+"""aee-emit — DEPRECATED compatibility shim (#2578). Apply the label on GitHub instead.
 
-Why: a label hand-off wired with `transport: 'internal'` is NOT delivered by
-the GitHub Events API round trip (poller latency, lost windows, throttles) —
-the orchestrator delivers the wake directly to every internal listener's
-durable queue, and only then mirrors the label onto the issue/PR so GitHub
-stays the human-readable process state. Setting the label yourself with
-`gh issue edit --add-label` would paint the status but wake NOBODY: internal
-listeners are deliberately invisible to the poller. So when your trigger
-prompt says to emit a label over the internal channel, use this:
+The internal-channel hand-off this command used to announce was removed: every
+label hand-off is now an ordinary GitHub label, and the GitHub poller wakes
+every matching listener. Prompts of teams created before that change may still
+say to run `aee-emit`, so for one release this command keeps its old surface
+and simply applies the label on the issue / pull request — exactly what you
+should do directly:
 
-    aee-emit ready --issue 42
-    aee-emit qa:approved --pr 7
-    aee-emit ready --issue 42 --repo my-clone-dir   # multi-repo environments
+    gh issue edit 42 --add-label ready        # instead of: aee-emit ready --issue 42
+    gh pr edit 7 --add-label qa:approved      # instead of: aee-emit qa:approved --pr 7
 
-The orchestrator reports how many listeners were woken. `matched: 0` means
-the hand-off reached no one — the label is still stamped as a status marker,
-but the flow is mis-wired; surface that to the user instead of retrying.
+Usage (unchanged):
 
-Fail-closed: if the orchestrator is unreachable the hand-off was NOT
-delivered — this tool exits non-zero and says so. Do not fall back to setting
-the label manually; that cannot wake an internal listener.
+    aee-emit <label> (--issue <n> | --pr <n>) [--repo <clone-dir>] [--json]
 
-Pass --json on any invocation for a single machine-readable result object on
-stdout instead of the human lines.
+A label that does not exist on the repository yet is created, then applied.
+This shim will be removed in a later release.
 
 Exit codes (shared CLI contract, docs/cli-contract.md): 0 ok · 1 domain error
-(orchestrator reachable but rejected the emit) · 2 usage error · 3 orchestrator
-unreachable (the hand-off was NOT delivered).
+(GitHub refused the label) · 2 usage error.
 """
 
 import json
 import os
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 
-ORCH = (os.environ.get("ORCHESTRATOR_INTERNAL_URL")
-        or os.environ.get("AEE_ORCHESTRATOR_URL")
-        or "http://orchestrator:4002").rstrip("/")
-TIMEOUT_SEC = 20
-
-
-# Internal-API credential (#1456, GOV-PLATFORM-2). `startAgentProcess` bakes a
-# per-agent token into the container env, exactly like the GitHub PAT; it is
-# valid only for the agent-facing allowlist and only for this agent's own id.
-# Absent — a stack that has not armed the gate — the call goes out
-# unauthenticated and the orchestrator behaves exactly as it did before.
-# Duplicated across the agent-side CLIs on purpose: each is a dependency-free
-# single file by contract (docs/cli-contract.md §4.5), so there is nowhere
-# shared to put it.
-def internal_headers(extra=None):
-    headers = dict(extra or {})
-    token = os.environ.get("AEE_INTERNAL_TOKEN")
-    if token:
-        headers["Authorization"] = "Bearer " + token
-    return headers
-
-# Shared CLI-contract exit codes (docs/cli-contract.md).
 EXIT_OK = 0
 EXIT_DOMAIN = 1
 EXIT_USAGE = 2
-EXIT_UNREACHABLE = 3
+
+DEPRECATION = ("aee-emit is deprecated (#2578) — label hand-offs are plain GitHub "
+               "labels now; use `gh issue|pr edit <n> --add-label <label>` directly.")
 
 _AS_JSON = False
 
@@ -79,10 +49,8 @@ def usage():
     die("usage: aee-emit <label> (--issue <n> | --pr <n>) [--repo <clone-dir>] [--json]")
 
 
-def resolve_repo_full_name(clone_dir: str | None) -> str:
-    """owner/name from the clone's origin remote. Host-agnostic (the last two
-    path segments), so github.com, SSH aliases and the E2E fake-github base
-    all resolve the same way."""
+def resolve_repo_full_name(clone_dir):
+    """owner/name from the clone's origin remote (host-agnostic)."""
     cmd = ["git"]
     if clone_dir:
         if not os.path.isdir(clone_dir):
@@ -103,15 +71,19 @@ def resolve_repo_full_name(clone_dir: str | None) -> str:
     return f"{parts[-2]}/{parts[-1]}"
 
 
-def main(argv: list[str]):
+def gh(args):
+    try:
+        return subprocess.run(["gh", *args], capture_output=True, text=True)
+    except FileNotFoundError:
+        die("the `gh` CLI is not available", EXIT_DOMAIN)
+
+
+def main(argv):
     global _AS_JSON
     if not argv or argv[0] in ("-h", "--help", "help"):
         sys.stdout.write(__doc__)
         return
-    label = None
-    kind = None
-    number = None
-    clone_dir = None
+    label = kind = number = clone_dir = None
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -140,70 +112,30 @@ def main(argv: list[str]):
         else:
             usage()
         i += 1
-
     if not label or kind is None or number is None or number <= 0:
         usage()
-    agent_id = os.environ.get("AGENT_ID")
-    if not agent_id:
-        die("AGENT_ID is not set in the environment")
 
-    payload = {
-        "agentId": agent_id,
-        "repo": resolve_repo_full_name(clone_dir),
-        "label": label,
-        "target": {"kind": kind, "number": number},
-    }
-    req = urllib.request.Request(
-        f"{ORCH}/internal/flow-emit",
-        data=json.dumps(payload).encode("utf-8"),
-        headers=internal_headers({"Content-Type": "application/json"}),
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode("utf-8", "replace")[:300]
-        except Exception:
-            pass
-        die(f"orchestrator rejected the emit (HTTP {exc.code}): {body}", EXIT_DOMAIN)
-    except Exception as exc:
-        die(f"could not reach the orchestrator at {ORCH} — the hand-off was "
-            f"NOT delivered ({exc}). Do not fall back to setting the label "
-            f"manually; that cannot wake an internal listener.", EXIT_UNREACHABLE)
-
-    matched = data.get("matched", 0)
-    ref = f"{payload['repo']}#{number}"
+    sys.stderr.write(f"aee-emit: {DEPRECATION}\n")
+    repo = resolve_repo_full_name(clone_dir)
+    edit = [kind, "edit", str(number), "--add-label", label, "-R", repo]
+    r = gh(edit)
+    created = False
+    if r.returncode != 0:
+        # Most likely the label does not exist yet — create it, then retry once.
+        c = gh(["label", "create", label, "--color", "FBCA04",
+                "--description", "flow hand-off label", "-R", repo])
+        created = c.returncode == 0
+        r = gh(edit)
+    ref = f"{repo}#{number}"
+    if r.returncode != 0:
+        die(f"could not apply '{label}' on {ref}: {(r.stderr or r.stdout or '').strip()}", EXIT_DOMAIN)
     if _AS_JSON:
         sys.stdout.write(json.dumps({
-            "ok": True,
-            "label": label,
-            "ref": ref,
-            "matched": matched,
-            "listeners": data.get("listeners", []),
-            "labelStamped": bool(data.get("labelStamped")),
-            "warnings": data.get("warnings", []),
+            "ok": True, "label": label, "ref": ref, "labelCreated": created,
+            "deprecated": True,
         }) + "\n")
         return
-    if matched:
-        who = ", ".join(
-            f"{l.get('agentId')}({l.get('triggerId')})"
-            for l in data.get("listeners", []))
-        print(f"aee-emit: '{label}' on {ref} delivered to {matched} listener(s): {who}")
-    else:
-        sys.stderr.write(
-            f"aee-emit: WARNING — '{label}' on {ref} matched NO internal "
-            f"listener. The label was {'stamped as a status marker' if data.get('labelStamped') else 'NOT stamped either'}, "
-            f"but no agent was woken; the flow wiring looks wrong. Surface this "
-            f"to the user.\n")
-    if not data.get("labelStamped"):
-        sys.stderr.write(
-            "aee-emit: note — the GitHub mirror label was not stamped "
-            "(delivery itself is unaffected).\n")
-    for w in data.get("warnings", []):
-        sys.stderr.write(f"aee-emit: warning: {w}\n")
+    print(f"aee-emit: applied '{label}' on {ref} — the GitHub poller wakes its listeners.")
 
 
 if __name__ == "__main__":

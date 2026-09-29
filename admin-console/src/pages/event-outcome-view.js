@@ -52,6 +52,12 @@ export const OUTCOME_LEGEND = [
     whatToDo: 'Normal label-routing — the trigger only wakes on its configured label. No action needed unless the label wiring itself is wrong.',
   },
   {
+    key: 'branch-filter',
+    term: 'dropped (branch-filter)',
+    meaning: "A push went to a branch (or tag) the trigger's branch filter does not list.",
+    whatToDo: "Normal branch routing — the trigger only wakes on pushes to its configured branches. Widen the trigger's Branches field if this branch should wake the agent.",
+  },
+  {
     key: 'wake-already-armed',
     term: 'dropped (wake-already-armed)',
     meaning: 'The agent was already woken for this label on this item; a repeat of the same label is ignored until the label is removed and re-applied.',

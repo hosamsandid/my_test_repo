@@ -833,7 +833,7 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
 
     async def test_null_stamp_falls_through_to_payload_label_for_any_label_listener(self):
         """#2151 AC2: a filter-less (any-label) listener's stamped wakeLabel is
-        `None` (poller/flow-emit convention) — the notice must still fall
+        `None` (poller/label fast-path convention) — the notice must still fall
         through to `payload.label.name`, unchanged behaviour."""
         scheduler, client = self._scheduler()
         trigger = {"id": "t-ignore", "type": "github-event"}
@@ -850,7 +850,7 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         self.assertIn("`ux`", body)
 
     async def test_internal_delivery_stays_byte_identical_when_stamp_agrees(self):
-        """#2151 AC3: flow-emit / label-fastpath synthetic events stamp
+        """#2151 AC3: label-fastpath synthetic events stamp
         wakeLabel equal to their own payload.label.name — the notice must be
         unaffected either way."""
         scheduler, client = self._scheduler()
@@ -1039,7 +1039,7 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
     # -- #1897: unified issue/PR notice with abbreviated link ------------------
 
     async def test_pr_notice_shows_number_regardless_of_delivery_path(self):
-        """AC1: a PR notice shows `#N` even from an internal-transport delivery
+        """AC1: a PR notice shows `#N` even from a synthetic (label fast-path) delivery
         whose synthetic payload carries a number + url (and here a title)."""
         scheduler, client = self._scheduler()
         trigger = {"id": "t1", "type": "github-event"}
@@ -3280,6 +3280,34 @@ class NewSession(unittest.TestCase):
     def test_correlation_id_defaults_to_none(self):
         s = entrypoint._new_session("dm", room_id="!r:local")
         self.assertIsNone(s["correlationId"])
+        self.assertIsNone(s["workItem"])
+
+    def test_work_item_recorded(self):
+        wi = {"repo": "o/r", "kind": "issue", "number": 7}
+        s = entrypoint._new_session("trigger", work_item=wi)
+        self.assertEqual(s["workItem"], wi)
+
+
+class SessionWorkItem(unittest.TestCase):
+    """#2573: a GitHub-triggered session names the issue/PR it works on."""
+
+    def test_issue_event(self):
+        gh = {"repo": "o/r", "payload": {"issue": {"number": 5}}}
+        self.assertEqual(entrypoint._session_work_item(gh),
+                         {"repo": "o/r", "kind": "issue", "number": 5})
+
+    def test_pr_event_wins(self):
+        gh = {"repo": "o/r", "payload": {"pull_request": {"number": 9}, "issue": {"number": 9}}}
+        self.assertEqual(entrypoint._session_work_item(gh),
+                         {"repo": "o/r", "kind": "pr", "number": 9})
+
+    def test_issue_comment_on_pr_is_pr(self):
+        gh = {"repo": "o/r", "payload": {"issue": {"number": 4, "pull_request": {"url": "x"}}}}
+        self.assertEqual(entrypoint._session_work_item(gh)["kind"], "pr")
+
+    def test_non_github_or_push(self):
+        self.assertIsNone(entrypoint._session_work_item(None))
+        self.assertIsNone(entrypoint._session_work_item({"repo": "o/r", "payload": {"ref": "refs/heads/x"}}))
 
 
 class SessionPointerResumeFlag(unittest.TestCase):
@@ -4459,6 +4487,19 @@ class NonconformantTriggerReasonTest(unittest.TestCase):
         self.assertIsNone(entrypoint._nonconformant_trigger_reason(
             {"type": "cron", "events": ["a", "b"]}))
         self.assertIsNone(entrypoint._nonconformant_trigger_reason("not-a-dict"))
+
+    def test_branch_filter_validated_like_the_console(self):
+        # #2570 — mirror of branchFilterError in admin-console/api/branch-filter.js.
+        base = {"type": "github-event", "events": ["push"]}
+        for ok in (None, "", " , ", [], "main, feature/*", ["release-*", "**"], "v1.?"):
+            self.assertIsNone(entrypoint._nonconformant_trigger_reason({**base, "branchFilter": ok}), ok)
+        self.assertEqual(entrypoint._branch_filter_error("main, /"),
+                         'branchFilter entry "/" must not start or end with "/"')
+        self.assertIn("whitespace", entrypoint._nonconformant_trigger_reason(
+            {**base, "branchFilter": ["my branch"]}))
+        self.assertIn('"//"', entrypoint._branch_filter_error("a//b"))
+        self.assertIn("wildcards", entrypoint._branch_filter_error("***"))
+        self.assertIn("comma-separated", entrypoint._branch_filter_error(42))
 
 
 class BuildScopedKnowledge(unittest.TestCase):

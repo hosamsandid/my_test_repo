@@ -1639,13 +1639,18 @@ def _persist_running_sessions() -> None:
 
 def _new_session(session_type: str, *, room_id: str | None = None, label: str = "",
                  trigger_type: str | None = None, trigger_id: str | None = None,
-                 correlation_id: str | None = None) -> dict:
+                 correlation_id: str | None = None,
+                 work_item: dict | None = None) -> dict:
     """Build a running-session descriptor for _bump_active. Fields mirror the
     legacy Node writer so RunningSessionsPanel renders them unchanged.
 
     `correlation_id` is the id stamped on this run's session-log rows, letting
     the admin console scope one session's log even when sessions share a room
-    (#543)."""
+    (#543).
+
+    `work_item` (`{repo, kind, number}`, #2573) names the issue/PR a GitHub-
+    triggered run is working on, so the Flow Control board can list "who is
+    working on what" without guessing from the trigger label."""
     return {
         "id": uuid.uuid4().hex,
         "type": session_type,
@@ -1655,7 +1660,26 @@ def _new_session(session_type: str, *, room_id: str | None = None, label: str = 
         "roomId": room_id,
         "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
         "correlationId": correlation_id,
+        "workItem": work_item,
     }
+
+
+def _session_work_item(gh: dict | None) -> dict | None:
+    """The `{repo, kind, number}` a GitHub-triggered run works on (#2573) —
+    derived from the same poller ctx block `_usage_github_and_key` reads. A PR
+    wins over an issue (a PR comment event carries both shapes). None for a
+    non-GitHub run or an event naming no issue/PR (push)."""
+    block, _ = _usage_github_and_key(gh)
+    if not block or not block.get("repo"):
+        return None
+    if block.get("prNumber") is not None:
+        return {"repo": block["repo"], "kind": "pr", "number": block["prNumber"]}
+    if block.get("issueNumber") is not None:
+        payload = gh.get("payload") if isinstance(gh.get("payload"), dict) else {}
+        issue = payload.get("issue") if isinstance(payload.get("issue"), dict) else {}
+        kind = "pr" if issue.get("pull_request") else "issue"
+        return {"repo": block["repo"], "kind": kind, "number": block["issueNumber"]}
+    return None
 
 
 def _bump_active(delta: int, session: dict | None = None) -> None:
@@ -3915,6 +3939,39 @@ def _postcondition_verdict(kind, facts: dict | None) -> tuple[bool, str]:
     return True, ""
 
 
+def _branch_filter_error(raw) -> str | None:
+    """Push-trigger branch filter (#2570) — a mirror of `branchFilterError` in
+    admin-console/api/branch-filter.js (matching lives in
+    orchestrator/branch-filter.js; keep them in sync). None/absent/blank = no
+    filter (valid). Otherwise a comma-separated string or a list of strings
+    whose entries could each name a branch."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str) and not (
+        isinstance(raw, list) and all(isinstance(v, str) for v in raw)
+    ):
+        return "branchFilter must be a comma-separated string or an array of branch names"
+    parts = raw.split(",") if isinstance(raw, str) else [p for v in raw for p in v.split(",")]
+    seen: list[str] = []
+    for part in parts:
+        entry = part.strip()
+        if not entry or entry in seen:
+            continue
+        seen.append(entry)
+        if re.search(r"[\s\x00-\x1f\x7f]", entry):
+            why = "contains whitespace or a control character"
+        elif entry.startswith("/") or entry.endswith("/"):
+            why = 'must not start or end with "/"'
+        elif "//" in entry:
+            why = 'must not contain "//"'
+        elif "***" in entry:
+            why = 'only "*" and "**" are wildcards'
+        else:
+            continue
+        return f'branchFilter entry "{entry}" {why}'
+    return None
+
+
 def _nonconformant_trigger_reason(trigger) -> str | None:
     """Raw-layer wiring guard (#1006, concept §4.8) — a DOCUMENTED MIRROR of
     `rawTriggerError` in admin-console/api/process-template.js (the orchestrator
@@ -3936,6 +3993,9 @@ def _nonconformant_trigger_reason(trigger) -> str | None:
             f"it listens on {len(events)} events ({', '.join(map(str, events))}) — "
             "a github-event trigger carries exactly ONE event; create one trigger per event"
         )
+    branch_error = _branch_filter_error(trigger.get("branchFilter"))
+    if branch_error:
+        return branch_error
     claim = trigger.get("claim")
     if claim is None:
         return None
@@ -6561,7 +6621,7 @@ class TriggerScheduler:
             # which the Events API can collapse onto an arbitrary one of
             # several labels applied in the same action. Consumption ladder,
             # first truthy wins: the pending entry's own stamped `wakeLabel`
-            # (set by every writer — poller, flow-emit, reassign — to the
+            # (set by every writer — poller, label fast-path, reassign — to the
             # matched `labelFilter`; covers the reported bug) → the trigger's
             # own `labelFilter` (covers an entry queued before the stamp
             # existed, #2151 AC5) → `payload.label.name` (the only correct
@@ -7062,6 +7122,7 @@ class TriggerScheduler:
             "trigger", room_id=room_id, label=str(tid),
             trigger_type=trigger.get("type"), trigger_id=tid,
             correlation_id=correlation_id,
+            work_item=_session_work_item(gh),
         )
         _bump_active(+1, session)
         try:
@@ -7346,8 +7407,8 @@ class TriggerScheduler:
         )
 
 
-# Base address of the orchestrator's internal API, used by the flow-emit and
-# wake helpers above. The BriefingPack claim loop that also lived here — a
+# Base address of the orchestrator's internal API, used by the wake helpers
+# above. The BriefingPack claim loop that also lived here — a
 # 30 s poll of /internal/orchestrators/{AGENT_ID}/claim-tick that DM'd a nudge
 # when a pack transitioned to `status: dispatched` — was removed in #1967:
 # the route went with epic #1961 Phase 1, and `role: "orchestrator"` is a
@@ -7983,7 +8044,7 @@ def _migrate_state_dir(workspace: Path) -> None:
 def _setup_plugin_cli_env() -> None:
     """Make this agent's granted plugin CLIs runnable (#1547).
 
-    Built-in CLIs (`aee-artifact`, `knowledge`, `aee-emit`, …) are symlinked into
+    Built-in CLIs (`aee-artifact`, `knowledge`, `aee-wake`, …) are symlinked into
     /usr/local/bin at image build time. Plugin CLIs cannot be: they are seeded
     per agent into `<workspace>/.agent-studio/bin` when a plugin is GRANTED, which
     is a live file sync with no respawn (concept §4.5).

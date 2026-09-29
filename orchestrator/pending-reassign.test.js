@@ -157,7 +157,7 @@ const AGREEMENT_CASES = [
     trigger: trigger({ id: "t-e", enabled: false }),
   },
   {
-    name: "internal transport → refused (never poller-subscribed)",
+    name: "legacy transport field → accepted (poller-subscribed since #2578)",
     agentId: "reviewer-f",
     trigger: trigger({ id: "t-f", transport: "internal" }),
   },
@@ -179,8 +179,7 @@ test("AC1: eligibleTargets agrees with the poller's own fan-out on every case", 
   // absent here — which is itself part of the verdict.
   const subscribers = AGREEMENT_CASES
     .filter((c) => c.trigger.type === "github-event"
-      && c.trigger.enabled !== false
-      && c.trigger.transport !== "internal")
+      && c.trigger.enabled !== false)
     .map((c) => ({
       agentId: c.agentId,
       triggerId: c.trigger.id,
@@ -609,4 +608,18 @@ test("the acting human is carried onto the moved entry, not invented", () => {
   assert.equal(withUser.entry.reassignedBy, "u-1");
   const anon = harness({ byUserId: undefined }).run();
   assert.equal(anon.entry.reassignedBy, null, "an unattributed move records null, never a guess");
+});
+
+// ── #2570: push branch filter, same rule as the poller ──────────────────────
+
+test("triggerAccepts (#2570): a push trigger's branchFilter refuses a push to another branch", () => {
+  const pushEv = ghEvent({ type: "PushEvent", payload: { ref: "refs/heads/agent-knowledge", head: "abc" } });
+  const pushTrigger = (over) => trigger({ events: ["push"], labelFilter: undefined, ...over });
+  const ctx = { eventKey: "push", ghEvent: pushEv, repo: "org/repo", triggersMtime: null };
+
+  assert.equal(triggerAccepts(pushTrigger({ branchFilter: ["main"] }), ctx).reason, "branch-filter");
+  assert.equal(triggerAccepts(pushTrigger({ branchFilter: ["agent-*"] }), ctx).ok, true);
+  assert.equal(triggerAccepts(pushTrigger({ branchFilter: " , " }), ctx).ok, true, "blank filter = every branch");
+  assert.equal(triggerAccepts(pushTrigger({}), ctx).ok, true);
+  assert.ok(REFUSAL_REASONS["branch-filter"]);
 });

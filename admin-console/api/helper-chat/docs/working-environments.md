@@ -172,8 +172,7 @@ repo was previously resolved only at materialise time — so a repo added to, sw
 on, or removed from a live environment left those triggers pointing at the old
 repo (or at none, in which case the poller silently skipped them). Adding, swapping
 or removing the primary repo now re-resolves it on the live agents, so the poller
-starts (or stops) polling within ~30s with no respawn; `transport: 'internal'`
-listeners are left untouched. This runs on the save itself — independent of the
+starts (or stops) polling within ~30s with no respawn. This runs on the save itself — independent of the
 propagation offer above, and never failing it.
 
 ## Editing from a team's Settings tab

@@ -31,7 +31,7 @@ When a new agent is created with an environment, the orchestrator:
 1. Seeds `.claude/` and `memory/` from the skill-pool volume
 2. Copies the agent's granted skills into the workspace (resolved team-pool-first, then global — the grant lives on the team or agent, not on the environment)
 3. Clones the configured repositories — SSH repos use the bound SSH key; HTTPS GitHub repos use the environment's GitHub token
-4. Materialises the environment's MCP server references into the agent's `.claude/settings.json`
+4. Materialises the environment's MCP server references into the agent's `.mcp.json`
 5. Assembles a merged `CLAUDE.md` from the base template, the environment section, and the agent's own prompt
 
 This means all agents in the same environment share the same repository and credential access — but each gets an independent workspace and memory that evolves separately from that point on.

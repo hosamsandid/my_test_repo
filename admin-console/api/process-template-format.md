@@ -290,7 +290,11 @@ the same option.
   than letting a second one route around it. A ticket is released when GitHub
   shows nothing open for it — its PR merged and its issue closed, or its issue
   left open carrying no active flow label and no PR, which is a flow that dropped
-  the ticket and would otherwise freeze the lane forever.
+  the ticket and would otherwise freeze the lane forever. An open PR counts
+  towards a ticket only if it *closes* it — `Closes`/`Fixes`/`Resolves #N` in its
+  body, or an `issue-N` head branch, the same parse that keys the ticket at
+  admission; a bare `#N` mention (e.g. a changelog inlined into a Dependabot PR)
+  does not hold the lane.
 
 - **Wiring is `outcomes` ↔ `labelFilter`.** An edge *A → label L → B* exists when
   a `setLabel` action in role `A`'s `outcomes` port names `L` (#831), and a

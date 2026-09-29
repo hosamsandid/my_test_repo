@@ -5,6 +5,9 @@ governing skills; phases cut as #774/#775/#776) — this document redesigns **wh
 how it comes into existence**. It changes the content pipeline, not the grant/pool/activation
 model.
 
+> **Update (#2592, shipped):** the per-lesson amendment cards of §3.2 are superseded by the
+> domain → skill pipeline in §3.6 — every domain grows into exactly one living skill.
+
 ## 1. Problem (verified against the current pipeline)
 
 The convergence mechanism ("≥2 distinct agents learned a similar lesson" → skill candidate) uses a
@@ -137,6 +140,39 @@ bump — the existing version/lineage machinery already carries this.
 - **Role tags**: domains carry `roles[]`; surfaced on skill cards ("for: developer, reworker")
   and available to later role-scoped grants. Cross-role flow skills are explicitly first-class.
 
+### 3.6 One living skill per domain (#2592 — shipped)
+
+Once a team has domains (`orchestrator/knowledge-domain-skills.js`, driven by the collector's
+`_runDomainSkillPipeline`), no lesson-named team skill is created at autonomy ≥2:
+
+- **Routing.** Only *converged* clusters are routed (digest routing runs first, so a
+  convention/fact below the digest-only bar never reaches here). All new clusters are classified
+  in **one batched LLM call per pass**, with the §3.3 heuristic as fallback; the method (`llm` /
+  `heuristic` / `vocab`) is recorded on the row. A routed lesson is parked as `domain-queued`;
+  a lesson that fits no domain is `unrouted` — digest only, counted towards a new-domain proposal,
+  never its own skill — and is re-classified only after the domain list changes.
+- **Per domain, one unit of work.** Extend when the domain skill exists; create when it does not
+  and the queue meets the **first-skill threshold** (default ≥3 lessons from ≥2 agents, per team
+  `domainSkillThreshold`, set in *Configure knowledge*); otherwise wait.
+- **Per autonomy level.** Level 3 with the *Knowledge → team skill* gate on `auto` applies the
+  work directly (within the shared per-pass cap; the rest waits for the next pass). Level 2, or a
+  gate on review, raises **one card per domain** ("Create / update skill *Domain*", id
+  `ds-<domainId>`) listing every pending lesson; accepting it can only create/extend that
+  domain's skill. `GET /api/knowledge/promotion-suggestions` returns `domainId`, `domainName`,
+  `domainSkill`; the card reads "→ *Domain*".
+- **Settlement (G6).** A lesson is marked promoted only when its entry ids are in the provenance
+  of the skill it went into. Every "skill already exists" path folds the lesson in (unioning its
+  ids into provenance) rather than claiming it on a name match.
+- **Budget.** Adding a domain, splitting one, or confirming a proposal at or over the soft skill
+  budget answers `409 over-budget` until the operator confirms; declining changes nothing.
+- **Taxonomy edits.** *Rename* keeps the domain id, so the skill (and its card) stays the same.
+  *Remove* leaves the skill as an ordinary unassigned team skill; the domain's queued lessons
+  are re-classified. *Merge/split* yield one skill per resulting domain via Consolidate (§4).
+- **Consolidate.** A domain with ≥2 member skills merges them into a playbook; a domain with a
+  single other skill folds it into the domain skill (a one-source `fold` merge); accepting a
+  domain also queues its pending lesson cards for the domain skill. Team skills matching no
+  domain are only folded in through Consolidate.
+
 ## 4. Migration — consolidating an existing team
 
 One-time, operator-driven consolidation for teams that already accumulated micro-skills
@@ -181,3 +217,5 @@ This concept reshapes what flows through the Phase-2/3 surfaces, not the surface
    amendment cards, LLM synthesis on all writing paths, domain-based naming, skill budget.
 3. **Distillation + migration tooling.** Periodic refactor pass, "Distill" action, one-time
    consolidation flow for existing teams.
+4. **One skill per domain (#2592, shipped).** Domain queue, first-skill threshold, one card per
+   domain, provenance-based settlement, over-budget confirmation — §3.6.

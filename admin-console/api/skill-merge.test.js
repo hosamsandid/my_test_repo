@@ -34,6 +34,18 @@ test('planMerge: rejects fewer than two sources', () => {
   assert.match(r.error, /at least two sources/);
 });
 
+test('planMerge: a single-source fold into a different target is allowed only with fold:true (#2592)', () => {
+  const src = { tier: 'team', teamId: 'squad-a', name: 'x' };
+  const ok = planMerge({ sources: [src], target: { tier: 'team', teamId: 'squad-a', name: 't' }, fold: true });
+  assert.strictEqual(ok.ok, true);
+  assert.strictEqual(ok.sources.length, 1);
+  const self = planMerge({ sources: [src], target: { tier: 'team', teamId: 'squad-a', name: 'x' }, fold: true });
+  assert.strictEqual(self.ok, false);
+  assert.match(self.error, /different from its source/);
+  const none = planMerge({ sources: [], target: { tier: 'team', teamId: 'squad-a', name: 't' }, fold: true });
+  assert.strictEqual(none.ok, false);
+});
+
 test('planMerge: rejects a bad source tier', () => {
   const r = planMerge({
     sources: [{ tier: 'nope', name: 'x' }, { tier: 'global', name: 'y' }],

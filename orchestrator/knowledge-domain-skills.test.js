@@ -204,3 +204,24 @@ test('settleCoveredRows: a row with no entry ids is never settled', () => {
   assert.deepEqual(out.settled, []);
   assert.equal(out.rows[0].status, 'domain-queued');
 });
+
+test('foldIntoSkill: provenance is unioned even when no new statement is added (G6)', () => {
+  const bundle = S.bundleLessons(DEV, [queued('a', DEV.id, { text: 'run lint' })]);
+  const existingMd = '---\nname: dev-workflow\ndescription: x\n---\n# Dev workflow\n\n- run lint (0)\n';
+  const out = S.foldIntoSkill({
+    existingMd, existingProv: { entryIds: ['old'], amendmentsSinceDistillation: 2 },
+    candidate: bundle, name: DEV.id, domain: DEV, teamId: 't1', now: NOW,
+  });
+  assert.equal(out.added, 0);
+  assert.deepEqual(out.provenance.entryIds, ['old', 'e-a']);
+  assert.equal(out.provenance.amendmentsSinceDistillation, 2, 'no content → no amendment counted');
+
+  const grown = S.foldIntoSkill({
+    existingMd, existingProv: { entryIds: ['old'], amendmentsSinceDistillation: 2 },
+    candidate: S.bundleLessons(DEV, [queued('b', DEV.id, { text: 'squash before merge' })]),
+    name: DEV.id, domain: DEV, teamId: 't1', now: NOW,
+  });
+  assert.equal(grown.added, 1);
+  assert.equal(grown.provenance.amendmentsSinceDistillation, 3);
+  assert.match(grown.skillMd, /squash before merge/);
+});

@@ -22,7 +22,9 @@
 // Pure: no IO. The orchestrator collector owns the reads/writes and the LLM seam.
 
 const { domainSkillName } = require('./knowledge-domains');
-const { curatorThemeSkillDraft, curatorThemeSkillProvenance } = require('./knowledge-curator');
+const {
+  curatorThemeSkillDraft, curatorThemeSkillProvenance, curatorSkillExtension, curatorExtendProvenance,
+} = require('./knowledge-curator');
 const { DEFAULT_DOMAIN_SKILL_THRESHOLD, normalizeDomainSkillThreshold } = require('./knowledge-store');
 
 const DOMAIN_CARD_SOURCE = 'domain-skill';
@@ -316,6 +318,30 @@ function domainSkillProvenance({ teamId, domain, bundle, now } = {}) {
 }
 
 /**
+ * Fold lessons into an EXISTING skill (#2592, G6). Always unions the lessons' entry
+ * ids into the provenance — even when every statement is already in the document —
+ * so "promoted into X" is never claimed for a lesson X's provenance doesn't list.
+ * The amendment counter (distillation cadence) only moves when content was added.
+ *
+ * @returns {{ skillMd: string, provenance: object, added: number, description: string }}
+ */
+function foldIntoSkill({ existingMd, existingProv, candidate, name, domain, teamId, now } = {}) {
+  const ext = curatorSkillExtension(existingMd, candidate, { name, domain: domain || undefined });
+  const prev = existingProv && typeof existingProv === 'object' ? existingProv : {};
+  let provenance = curatorExtendProvenance({
+    existingProv: prev, from: 'team', to: 'team', teamId,
+    entryIds: _ids(candidate && candidate.entryIds), candidate, now,
+  });
+  if (!ext.added) {
+    provenance = {
+      ...provenance,
+      amendmentsSinceDistillation: Number.isInteger(prev.amendmentsSinceDistillation) ? prev.amendmentsSinceDistillation : 0,
+    };
+  }
+  return { skillMd: ext.skillMd, provenance, added: ext.added, description: ext.description };
+}
+
+/**
  * Settle the lesson rows that went into a skill — but ONLY those whose entry ids
  * are all present in the skill's provenance (AC8). Anything not covered stays as it
  * was, so it is retried rather than silently marked done.
@@ -357,5 +383,6 @@ module.exports = {
   reconcileDomainCards,
   domainSkillDraft,
   domainSkillProvenance,
+  foldIntoSkill,
   settleCoveredRows,
 };

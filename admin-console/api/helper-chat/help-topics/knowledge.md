@@ -137,9 +137,8 @@ live in the Skills column, and nothing any of them produces is applied without
 your review.
 
 - **Domains** — the themes this team's lessons cluster into, e.g. *JCL
-  conversion* or *DB2 migration*. Domains are the buckets that consolidation
-  folds the team's many small skills into, so routing stays tidy as knowledge
-  grows. Changing them is always a human decision: seed the defaults, or let the
+  conversion* or *DB2 migration*. Each domain grows into exactly one skill
+  (below); adding one over the skill budget asks first. Changing them is always a human decision: seed the defaults, or let the
   model *propose* a set over the team's lessons that you confirm first. The panel
   also tracks the team's soft skill budget, so you can see when a base is
   drifting towards too many overlapping skills — which is the signal to
@@ -156,6 +155,14 @@ your review.
 The three are a sequence more often than a choice: domains first, then
 consolidation to collapse the long tail into playbooks, then distillation to keep
 an individual playbook readable as it accumulates.
+
+### One skill per domain
+
+With domains, converged lessons grow their domain's one skill instead of new
+ones: automatically at autonomy 3 with the team-skill gate automatic, else via
+one card per domain. A first skill needs 3 lessons from 2 agents (adjustable).
+Lessons fitting no domain stay digest-only; renaming keeps the skill, removing
+leaves it as a team skill.
 
 ## Configuration: forgetting, assist model and storage
 

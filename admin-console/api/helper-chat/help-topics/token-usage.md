@@ -109,6 +109,10 @@ accounting:
   may call more than one model. A run that recorded no per-model detail still
   counts in the totals but contributes to no model row, so the model rows can
   legitimately add up to less than the total tile.
+- **Group by agent folds auto-scaled instances** into the agent that has the
+  pool configured: a Developer's per-ticket instances add up on its one row, on
+  screen, as the other dimension and in the export. The per-ticket split is on
+  the Work items tab; the raw export keeps each run's own instance id.
 - **Group by user** charges each run to a person — the human who sent the chat
   message that started it, or, for an autonomous or triggered run, the owner of
   the agent. Runs that can be charged to neither fall under **Unattributed**, a

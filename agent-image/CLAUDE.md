@@ -257,7 +257,7 @@ read-only endpoint across that boundary (just like `knowledge`). It is
 **token counts only — never a money figure**, and it can never write or delete a
 usage record.
 
-Your own usage:
+Your own usage (a pooled role's figure includes its auto-scaled instances):
 
 ```
 usage me

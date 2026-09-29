@@ -185,6 +185,21 @@ test('serialize summary with a groupBy produces the aggregated pivot CSV, tokens
   assert.ok(!/cost|usd|dollar|price/i.test(csv), 'aggregated CSV must not mention money');
 });
 
+test('#2585 AC6: agent-grouped summary export folds pool instances like the table; raw dump keeps instance ids', () => {
+  const t = { input: 2, output: 1, cacheCreationInput: 0, cacheReadInput: 0 };
+  const recs = [
+    { ts: '2026-09-29T10:00:00Z', agentId: 'tm-dev', teamId: 'tm', tokens: t },
+    { ts: '2026-09-29T10:00:00Z', agentId: 'tm-dev-i7', teamId: 'tm', tokens: t },
+    { ts: '2026-09-29T10:00:00Z', agentId: 'tm-dev-i8', teamId: 'tm', tokens: t, poolOf: 'tm-dev' },
+    { ts: '2026-09-29T10:00:00Z', agentId: 'tm-own-i1', teamId: 'tm', tokens: t },
+  ];
+  const opts = { records: recs, groupBy: 'agent', nonInstanceAgentIds: ['tm-own-i1'] };
+  const rows = JSON.parse(serialize('summary', 'json', opts).body);
+  assert.deepEqual(rows.map((r) => [r.group, r.total, r.invocations]), [['tm-dev', 9, 3], ['tm-own-i1', 3, 1]]);
+  const raw = JSON.parse(serialize('summary', 'json', { records: recs }).body);
+  assert.deepEqual(raw.map((r) => r.agentId), ['tm-dev', 'tm-dev-i7', 'tm-dev-i8', 'tm-own-i1']);
+});
+
 test('serialize summary ignores an unknown groupBy and falls back to the raw dump', () => {
   const raw = serialize('summary', 'json', { records: canonical }).body;
   const bogus = serialize('summary', 'json', { records: canonical, groupBy: 'nonsense' }).body;

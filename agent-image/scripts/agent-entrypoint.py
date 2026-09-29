@@ -1341,62 +1341,28 @@ def _map_stream_json_line(line: str, correlation_id: str,
     return events
 
 
-# ---- AskUserQuestion → chat message (#447, reachable via bundled MCP #1712) ----
+# ---- AskUserQuestion → chat message (#447) ----
 #
 # `AskUserQuestion` is Claude Code's structured "ask the human a question" tool.
 # Its *built-in* form is interactive-TTY-only: in the `-p`/print mode every agent
 # turn runs in (a single non-interactive process, stdin closed) the CLI removes it
 # from the model's tool set entirely, so the model can never emit it — adding it to
 # --allowedTools / --tools does not help (the tool is filtered before permissions
-# are consulted). To close that gap (#1712) the runner instead offers an
-# identically-shaped `AskUserQuestion` tool from a bundled, dependency-free stdio
-# MCP server (`ask-user-mcp.py`) via --mcp-config, so it *is* available to the
-# model headlessly. When the model calls it the tool_use surfaces in the stream as
-# `mcp__aee-ask__AskUserQuestion`; the MCP tool returns a short "end your turn and
-# wait" instruction so the turn completes cleanly (a normal success `result`, the
-# session stays coherent for --resume) rather than erroring. We intercept that
-# tool_use, render the question(s) into a readable chat message (+ the #1663
-# quick-reply payload), and post it instead of the model's reply. The user's next
-# chat message then continues the resumed session — the answer arrives as a normal,
-# context-bearing turn. The bare-name match is kept so an interactive/legacy
-# built-in emission is handled identically.
+# are consulted). Agents therefore ask through the `aee-ask` CLI (#2523, below),
+# the only supported mechanism — the runner deliberately registers no MCP server
+# of its own for this (#1719). Should an `AskUserQuestion` tool_use still appear
+# (an interactive/legacy built-in emission, or an MCP-namespaced one from a
+# server the environment's settings.json provides), it is intercepted, rendered
+# into a readable chat message (+ the #1663 quick-reply payload) and posted
+# instead of the model's reply. The user's next chat message then continues the
+# resumed session — the answer arrives as a normal, context-bearing turn.
 _ASK_USER_QUESTION_TOOL = "AskUserQuestion"
-# The bundled MCP server that re-supplies the tool headlessly, the key it is
-# registered under, and the resulting namespaced tool name the model calls.
-_ASK_USER_MCP_SERVER = SCRIPTS_DIR / "ask-user-mcp.py"
-_ASK_USER_MCP_KEY = "aee-ask"
-_ASK_USER_MCP_TOOL = f"mcp__{_ASK_USER_MCP_KEY}__{_ASK_USER_QUESTION_TOOL}"
-# In environments where Claude Code managed policy restricts MCP servers, the
-# bundled aee-ask server is refused and `claude` exits non-zero on every turn.
-# Operators who know their environment forbids MCP can set AEE_DISABLE_ASK_MCP=1
-# to skip injecting it; the agent then runs without the headless AskUserQuestion
-# tool instead of failing. Default off -> behaviour unchanged.
-_ASK_MCP_DISABLED = os.environ.get("AEE_DISABLE_ASK_MCP", "").strip().lower() in (
-    "1", "true", "yes", "on",
-)
-
-
-def _ask_user_mcp_config() -> str:
-    """Inline --mcp-config JSON registering the bundled AskUserQuestion server.
-
-    Passed alongside (not instead of) any env-provisioned MCP servers in the
-    agent's settings.json — without --strict-mcp-config the CLI merges the two.
-    """
-    return json.dumps({
-        "mcpServers": {
-            _ASK_USER_MCP_KEY: {
-                "command": "python3",
-                "args": [str(_ASK_USER_MCP_SERVER)],
-            }
-        }
-    })
 
 
 # ---- aee-ask CLI facade (#2523) ----
 #
-# The MCP delivery above is refused by the enterprise managed policy (hence
-# AEE_DISABLE_ASK_MCP=1 in the image), so the working path is the `aee-ask` CLI.
-# It validates its own arguments and writes an AskUserQuestion-shaped
+# The one way an agent asks a structured question (#1719). The `aee-ask` CLI
+# validates its own arguments and writes an AskUserQuestion-shaped
 # `{"questions": [...]}` JSON to a per-invocation sentinel file whose path the
 # runner hands it via AEE_ASK_FILE. The runner never parses the Bash command
 # string: it keys on the sentinel's presence (checked after every tool_result
@@ -2741,15 +2707,11 @@ def _base_claude_args(prompt: str, memory_hint: str, model_arg: str | None) -> l
         args.extend(["--model", model_arg])
     tools = ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)",
              "Glob(*)", "Grep(*)", "Task(*)", "WebFetch(*)", "WebSearch(*)"]
-    if not _ASK_MCP_DISABLED:
-        # AskUserQuestion, offered headlessly via the bundled MCP server (#1712);
-        # its tool_use is intercepted and turned into a paused chat question
-        # rather than executed for real.
-        tools.append(_ASK_USER_MCP_TOOL)
+    # No --mcp-config / --strict-mcp-config here (#1719): structured questions
+    # go through the `aee-ask` CLI via Bash, and MCP servers the environment's
+    # settings.json provides keep loading through the CLI's normal merge.
     for tool in tools:
         args.extend(["--allowedTools", tool])
-    if not _ASK_MCP_DISABLED:
-        args.extend(["--mcp-config", _ask_user_mcp_config()])
     return args
 
 

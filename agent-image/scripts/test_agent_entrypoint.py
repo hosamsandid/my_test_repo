@@ -213,42 +213,43 @@ class AskUserQuestionPayload(unittest.TestCase):
         self.assertIsNone(self.fn({"questions": [{}, {"options": []}]}))
 
 
-class AskUserQuestionReachable(unittest.TestCase):
-    """AskUserQuestion is offered headlessly via the bundled MCP server (#1712)."""
+class AskUserQuestionNoMcp(unittest.TestCase):
+    """aee-ask is the only structured-question mechanism (#1719): the runner
+    registers no MCP server for it, while a stray AskUserQuestion tool_use is
+    still intercepted (#447)."""
 
     def test_is_ask_user_question_tool_matches_bare_and_namespaced(self):
         fn = entrypoint._is_ask_user_question_tool
         self.assertTrue(fn("AskUserQuestion"))                       # built-in
-        self.assertTrue(fn("mcp__aee-ask__AskUserQuestion"))         # bundled MCP
         self.assertTrue(fn("mcp__other-server__AskUserQuestion"))    # any server
-        self.assertEqual(fn("mcp__aee-ask__AskUserQuestion"),
-                         entrypoint._is_ask_user_question_tool(entrypoint._ASK_USER_MCP_TOOL))
 
     def test_is_ask_user_question_tool_rejects_others(self):
         fn = entrypoint._is_ask_user_question_tool
         for bad in (None, "", 42, "Bash", "AskUserQuestionX",
-                    "AskUserQuestionExtra", "mcp__aee-ask__SomethingElse"):
+                    "AskUserQuestionExtra", "mcp__other-server__SomethingElse"):
             self.assertFalse(fn(bad))
 
-    def test_mcp_config_registers_bundled_server(self):
-        import json as _json
-        cfg = _json.loads(entrypoint._ask_user_mcp_config())
-        server = cfg["mcpServers"][entrypoint._ASK_USER_MCP_KEY]
-        self.assertEqual(server["command"], "python3")
-        self.assertEqual(server["args"], [str(entrypoint._ASK_USER_MCP_SERVER)])
-        # The namespaced tool name is derived from the same key.
-        self.assertEqual(entrypoint._ASK_USER_MCP_TOOL,
-                         f"mcp__{entrypoint._ASK_USER_MCP_KEY}__AskUserQuestion")
+    def test_base_claude_args_registers_no_ask_mcp_server(self):
+        # Regardless of any leftover opt-out flag in the environment, no run
+        # registers or allows an MCP-delivered AskUserQuestion ...
+        for env in ({}, {"AEE_DISABLE_ASK_MCP": "0"}, {"AEE_DISABLE_ASK_MCP": "1"}):
+            with patch.dict(os.environ, env):
+                args = entrypoint._base_claude_args("hi", "", None)
+            self.assertNotIn("--mcp-config", args)
+            allowed = [args[i + 1] for i, a in enumerate(args) if a == "--allowedTools"]
+            self.assertFalse(any("AskUserQuestion" in t or t.startswith("mcp__")
+                                 for t in allowed), allowed)
+            # ... and settings.json-provisioned MCP servers are not suppressed.
+            self.assertNotIn("--strict-mcp-config", args)
+        # Bash (which `aee-ask` runs through) stays allowed.
+        self.assertIn("Bash(*)", allowed)
 
-    def test_base_claude_args_offers_and_allows_the_tool(self):
-        args = entrypoint._base_claude_args("hi", "", None)
-        # The MCP server is registered ...
-        self.assertIn("--mcp-config", args)
-        cfg = args[args.index("--mcp-config") + 1]
-        self.assertIn(entrypoint._ASK_USER_MCP_KEY, cfg)
-        # ... and the namespaced tool is on the allow list.
-        allowed = {args[i + 1] for i, a in enumerate(args) if a == "--allowedTools"}
-        self.assertIn(entrypoint._ASK_USER_MCP_TOOL, allowed)
+    def test_bundled_mcp_server_is_gone(self):
+        scripts = Path(__file__).resolve().parent
+        self.assertFalse((scripts / "ask-user-mcp.py").exists())
+        for attr in ("_ask_user_mcp_config", "_ASK_USER_MCP_TOOL",
+                     "_ASK_USER_MCP_KEY", "_ASK_USER_MCP_SERVER", "_ASK_MCP_DISABLED"):
+            self.assertFalse(hasattr(entrypoint, attr), attr)
 
     def test_base_claude_args_keeps_prompt_off_argv(self):
         # #1727: the prompt is delivered on stdin, never as an argv argument, so
@@ -269,63 +270,9 @@ class AskUserQuestionReachable(unittest.TestCase):
         self.assertEqual(args[args.index("--append-system-prompt") + 1], "mem-hint")
 
 
-class AskUserMcpServer(unittest.TestCase):
-    """Drive the bundled ask-user-mcp.py stdio server over JSON-RPC."""
-
-    _SERVER = Path(__file__).resolve().parent / "ask-user-mcp.py"
-
-    def _rpc(self, requests):
-        import json as _json
-        proc = subprocess.run(
-            ["python3", str(self._SERVER)],
-            input="\n".join(_json.dumps(r) for r in requests) + "\n",
-            capture_output=True, text=True, timeout=15,
-        )
-        return [_json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
-
-    def test_initialize_advertises_tools_capability(self):
-        out = self._rpc([{"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                          "params": {}}])
-        self.assertEqual(out[0]["id"], 1)
-        self.assertIn("tools", out[0]["result"]["capabilities"])
-        self.assertEqual(out[0]["result"]["serverInfo"]["name"], "aee-ask")
-
-    def test_tools_list_exposes_ask_user_question_with_questions_schema(self):
-        out = self._rpc([{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}])
-        tools = out[0]["result"]["tools"]
-        self.assertEqual(len(tools), 1)
-        tool = tools[0]
-        self.assertEqual(tool["name"], "AskUserQuestion")
-        props = tool["inputSchema"]["properties"]
-        self.assertIn("questions", props)
-        # Shape must match what _format_ask_user_question / _payload consume.
-        qprops = props["questions"]["items"]["properties"]
-        self.assertEqual(set(qprops), {"header", "question", "options", "multiSelect"})
-
-    def test_tools_call_returns_non_error_stop_instruction(self):
-        out = self._rpc([{"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-                          "params": {"name": "AskUserQuestion",
-                                     "arguments": {"questions": [
-                                         {"question": "A or B?",
-                                          "options": [{"label": "A"}]}]}}}])
-        res = out[0]["result"]
-        self.assertNotIn("error", out[0])
-        text = res["content"][0]["text"]
-        self.assertIn("END YOUR TURN", text.upper())
-
-    def test_unknown_request_gets_error_notification_ignored(self):
-        out = self._rpc([
-            {"jsonrpc": "2.0", "method": "notifications/initialized"},   # ignored
-            {"jsonrpc": "2.0", "id": 9, "method": "no/such/method"},     # error
-        ])
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0]["id"], 9)
-        self.assertEqual(out[0]["error"]["code"], -32601)
-
-
 class AskUserQuestionInterceptEndToEnd(unittest.TestCase):
-    """The stream mapper + intercept predicate recognise the MCP-namespaced
-    tool_use the model actually emits, feeding the existing #447/#1663 render."""
+    """The stream mapper + intercept predicate recognise an MCP-namespaced
+    AskUserQuestion tool_use, feeding the existing #447/#1663 render."""
 
     def test_mapper_carries_namespaced_tool_name_and_intercept_matches(self):
         import json as _json
@@ -334,7 +281,7 @@ class AskUserQuestionInterceptEndToEnd(unittest.TestCase):
             "message": {"content": [{
                 "type": "tool_use",
                 "id": "toolu_1",
-                "name": "mcp__aee-ask__AskUserQuestion",
+                "name": "mcp__other-server__AskUserQuestion",
                 "input": {"questions": [{"header": "Deploy",
                                          "question": "Staging or prod first?",
                                          "options": [{"label": "Staging"},
@@ -345,7 +292,7 @@ class AskUserQuestionInterceptEndToEnd(unittest.TestCase):
                   if e.get("type") == "tool_use"]
         self.assertEqual(len(events), 1)
         ev = events[0]
-        self.assertEqual(ev["tool"], "mcp__aee-ask__AskUserQuestion")
+        self.assertEqual(ev["tool"], "mcp__other-server__AskUserQuestion")
         self.assertTrue(entrypoint._is_ask_user_question_tool(ev["tool"]))
         # The captured input renders through the existing helpers unchanged.
         self.assertIsNotNone(entrypoint._format_ask_user_question(ev["input"]))
@@ -534,7 +481,6 @@ class AeeAskEndToEnd(unittest.TestCase):
         self.env = {
             "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
             "FAKE_AEE_ASK": str(_AEE_ASK),
-            "AEE_DISABLE_ASK_MCP": "1",  # the shipped default — no MCP needed
         }
         self.events = []
         self._patches = [

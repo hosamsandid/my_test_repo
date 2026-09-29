@@ -37,7 +37,8 @@ Options:
     --json            print the raw endpoint JSON instead of the table
 
 Scope is resolved server-side from your agent identity: `me` is your own
-records; `team` is your resolved team's aggregate. An unknown/teamless agent on
+records plus those of your auto-scaled pool instances, if you are a pooled role;
+`team` is your resolved team's aggregate. An unknown/teamless agent on
 `team` scope gets a zeroed result, never another team's usage.
 
 Exit codes: 0 ok · 2 usage error · 3 orchestrator unreachable / bad response.

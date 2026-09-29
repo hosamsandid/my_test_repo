@@ -128,10 +128,10 @@ RUN chmod +x /opt/ace/scripts/aee-wake \
     && ln -sf /opt/ace/scripts/aee-wake /usr/local/bin/aee-wake
 
 # `aee-ask` — put a structured decision to the human and pause the run (#2523).
-# The CLI-facade replacement for the policy-blocked `aee-ask` MCP server (see
-# AEE_DISABLE_ASK_MCP below): it writes the question to the per-turn sentinel
-# file the entrypoint hands it via AEE_ASK_FILE, and the entrypoint posts it as
-# the turn's terminal quick-reply message. No network, no MCP.
+# The only way an agent asks a structured question (the former MCP server was
+# removed in #1719): it writes the question to the per-turn sentinel file the
+# entrypoint hands it via AEE_ASK_FILE, and the entrypoint posts it as the
+# turn's terminal quick-reply message. No network, no MCP.
 RUN chmod +x /opt/ace/scripts/aee-ask \
     && ln -sf /opt/ace/scripts/aee-ask /usr/local/bin/aee-ask
 
@@ -158,14 +158,6 @@ RUN mkdir -p /opt/aee
 ENV PATH="${PATH}:/opt/aee/plugin-bin"
 
 ENV NODE_ENV=production
-
-# LOCAL OPT-OUT: this environment's Claude Code managed policy blocks MCP servers,
-# so the bundled aee-ask server is refused and every agent turn exits non-zero.
-# Human decision prompts go through the `aee-ask` CLI instead (#2523), so we
-# skip injecting the MCP server.
-# Remove this line once the enterprise policy allowlists MCP (the entrypoint gate
-# defaults to off, so upstream behaviour is unchanged without it).
-ENV AEE_DISABLE_ASK_MCP=1
 
 ENTRYPOINT ["python3", "/opt/ace/scripts/agent-entrypoint.py"]
 

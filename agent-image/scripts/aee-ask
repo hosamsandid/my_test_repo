@@ -24,8 +24,8 @@ Options:
   --json                     one machine-readable JSON result object on stdout
 
 Why a CLI: Claude Code strips its built-in AskUserQuestion tool in headless
-(`--print`) mode and the managed policy blocks the MCP server that used to
-re-supply it. So this CLI validates its own arguments and writes the question
+(`--print`) mode, and the MCP server that used to re-supply it was removed
+(#1719). So this CLI validates its own arguments and writes the question
 as JSON to a run-scoped sentinel file (`$AEE_ASK_FILE`, set by the runtime for
 each turn); the runtime picks the sentinel up, ends the turn and posts the
 question as its terminal chat message. It talks to nothing over the network.

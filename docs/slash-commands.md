@@ -114,7 +114,8 @@ exact headless mode:
 
 1. **Slash-command expansion works headlessly — no gap for AC1.** Unlike the
    built-in `AskUserQuestion` tool (which the CLI strips in `-p` mode and had to
-   be re-supplied via a bundled MCP server, #1712), **file-based slash commands
+   be re-supplied — first via a bundled MCP server, #1712, since #1719 only via
+   the `aee-ask` CLI), **file-based slash commands
    are expanded in `--print` mode**: a message `/<ns>:<cmd> [args]` on stdin runs
    the command's prompt with `$ARGUMENTS` substituted. Multi-line messages whose
    first line is a command, and arguments containing option-like characters

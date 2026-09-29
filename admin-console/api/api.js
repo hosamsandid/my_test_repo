@@ -9470,6 +9470,12 @@ app.get('/api/process/template', (req, res) => {
       // (e.g. Developer → Code Reviewer "PR"). buildProcessTemplate reduces the
       // member-id `from` to a portable role key via remapChannel.
       ...(Array.isArray(cfg.channels) && cfg.channels.length ? { channels: cfg.channels } : {}),
+      // Agent instance pools (#2246): the member's opt-in pooling config. It MUST
+      // ride the exported ROLE — buildProcessTemplate's `normalizePool(r.pool)`
+      // only serializes what it is given, so without this the pooled role exports
+      // as unpooled and a team with `autoDispatch`/`wipLimit` re-imports as an
+      // invalid bundle (autoDispatch enabled, no pooled role — #2579).
+      ...(cfg.pool && typeof cfg.pool === 'object' ? { pool: cfg.pool } : {}),
     });
     // `channels` rides along so a channel's `gate: 'human'` classifies its routing
     // label as a gate in the exported registry too (#928).

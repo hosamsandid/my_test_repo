@@ -290,6 +290,8 @@ const AGENT_ROUTES = [
   // credential, so `own` here is exactly what stops agent A pushing as agent B.
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/git\/push$/, scope: "own" },
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/git\/pr$/, scope: "own" },
+  // Chat-attributed `gh` writes (#2559, the `gh` shim) — same reasoning.
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/github\/gh$/, scope: "own" },
 
   // THE ONE CROSS-AGENT ROUTE. The loop verifier (#933) hands its verify request
   // to a SIBLING's queue, so `own` would break every loop with a `verify.agentId`

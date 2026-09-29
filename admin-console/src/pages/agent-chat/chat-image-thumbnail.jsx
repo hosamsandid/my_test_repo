@@ -11,8 +11,9 @@ function baseName(path) {
 // SAME `FileViewerModal` the Workspace tab's file tree opens (Escape-to-close,
 // backdrop-click-to-close, fit-to-window), fed by the same `/file` metadata
 // fetch a tree click makes (`useWorkspaceFileData`), so this is not a second
-// viewer — it is the existing one, opened from a different trigger.
-function ChatImagePreviewModal({ agentId, path, onClose }) {
+// viewer — it is the existing one, opened from a different trigger. Also
+// opened by the composer's attachment cards (#2567 AC8).
+export function ChatImagePreviewModal({ agentId, path, onClose }) {
   const { data, loading, error } = useWorkspaceFileData(agentId, path);
   return (
     <FileViewerModal

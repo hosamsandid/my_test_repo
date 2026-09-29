@@ -149,6 +149,12 @@ legend — this is the longer version.
 | **dropped (wake-already-armed)** | Already woken for this label on this item; a repeat does not wake it again until the label is removed and re-added. | Usually no. Re-fire a lost hand-off from the agent's Events tab. |
 | **nobody's listening** | No trigger subscribed to this event **type** at all. | Maybe. If something should have reacted, the wiring is missing — add or fix the `github-event` trigger on the target agent. |
 
+A **dropped (branch-filter)** row comes from a *Push* trigger with a
+**Branches** filter (e.g. `main, feature/*`): `*` matches within one path
+segment, `**` also across `/`, names match exactly, and tag pushes never match.
+Empty means every branch. Widen the trigger's Branches field in Agent Chat →
+Triggers if the push should have woken the agent.
+
 A `delivered` or `digested` outcome may carry the **wake label** in brackets: the
 label that actually satisfied the subscriber's filter. No bracket means the
 listener takes any label.

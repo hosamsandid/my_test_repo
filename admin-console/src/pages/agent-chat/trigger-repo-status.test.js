@@ -79,13 +79,17 @@ test('AC5: listened-to repositories (listening or failing) show no warning', () 
   assert.equal(triggerRepoWarning(trig({ repo: 'acme/failing' }), ROWS), null);
 });
 
-test('no warning for disabled / internal / non-github triggers, a missing row, or unavailable status', () => {
+test('no warning for disabled / non-github triggers, a missing row, or unavailable status', () => {
   assert.equal(triggerRepoWarning(trig({ enabled: false }), ROWS), null);
-  assert.equal(triggerRepoWarning(trig({ transport: 'internal' }), ROWS), null);
   assert.equal(triggerRepoWarning({ type: 'cron', cron: '* * * * *' }, ROWS), null);
   assert.equal(triggerRepoWarning(trig({ repo: 'acme/unknown' }), ROWS), null);
   assert.equal(triggerRepoWarning(trig(), null), null);
   assert.equal(triggerRepoWarning(trig({ repo: '' }), ROWS), null);
+});
+
+test('#2578: a legacy trigger still carrying transport is polled like any other and warns', () => {
+  const w = triggerRepoWarning(trig({ transport: 'internal' }), ROWS, { agentId: 'dev' });
+  assert.equal(w.status, 'no-token');
 });
 
 test('TriggersPanel wires the picker options and the row warning', () => {

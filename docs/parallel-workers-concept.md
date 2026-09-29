@@ -727,6 +727,10 @@ role down — flip `pool.enabled` off once it goes idle." A future UI could
 still fork the two (e.g. auto-suggest disabling the role once a draining
 role's instance count hits zero); nothing here forecloses that, it simply
 isn't built.
+*Superseded by #2573 (`flow-control-concept.md` Amendment 3):* the two now
+differ — a `draining` role settles to a third state, `off` (`settleDrain`),
+once its last instance is gone; `off` refuses every dispatch, including reuse,
+until **Switch on** (the same `state: "running"` write).
 
 **A6.2b — a refusal must be held, never allowed to fall through to the
 TEMPLATE's own queue (code-review finding, rework of #2281).** The first cut
@@ -914,6 +918,8 @@ role's live state, and a fourth route/registration for the same team-scoped
 data would be a second home for one fact. Polls on the same refresh cadence
 as the rest of the board (manual Refresh + after every pause/resume/drain/
 force-dispatch action), no dedicated auto-refresh timer of its own.
+*Superseded by #2573:* the board no longer reads `/pool-lanes`; the panel was
+folded into the rebuilt board's "Working now" area (endpoint unchanged).
 
 ## Amendment 9 — Agent Chat left-rail sub-grouping (#2297; live-refreshed, see Amendment 11)
 

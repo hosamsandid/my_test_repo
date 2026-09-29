@@ -114,9 +114,11 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
+const { applyPushedBy } = require('./push-producer-filter');
 const { normalizeBranchFilter } = require('./branch-filter');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
+const { rederiveTeamDataFlow } = require('./derived-data-flow');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
 const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
 const { presentEffectiveIdentity } = require('./effective-github-identity');
@@ -137,6 +139,7 @@ const extractTemplate = require('./extract-template');
 const { runCopilot, isCopilotAborted, classifyTurnFailure, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
 const { copilotHistoryAccess, readTeamCopilotHistory, writeTeamCopilotHistory } = require('./team-copilot-history');
 const { httpPostStreamText } = require('./anthropic-transport');
+const { planInternalTransportMigration } = require('./internal-transport-migration');
 const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
@@ -2440,15 +2443,6 @@ function memberRepoFullName(cfg) {
   } catch { return null; }
 }
 
-// A derived data-flow trigger is one the `expandDataFlowSteps` derivation owns:
-// it carries the `dataFlow` marker and the canonical `<consumer>-on-push-<up>`
-// id. Manually-authored data-flow triggers (arbitrary ids) don't match and are
-// preserved untouched by reconciliation. Kept in sync with process-template.js.
-function isDerivedDataFlowTrigger(t, memberId) {
-  return t && t.dataFlow === true && typeof t.id === 'string'
-    && t.id.startsWith(`${memberId}-on-push-`);
-}
-
 // Re-derive the functional data-flow push triggers for a whole team from its
 // members' declarative ports (`dataFlow.{dependsOn,inputs,outputs}`), mirroring
 // what `expandDataFlowSteps` does at materialise time. This is what makes a live
@@ -2470,18 +2464,10 @@ async function reconcileTeamDataFlow(teamId) {
   }
   if (members.length === 0) return;
 
-  // Strip the previously-derived triggers so expandDataFlowSteps regenerates the
-  // full current set from the ports (a plain no-op leaves stale ones behind).
-  const roles = members.map(m => ({
-    id: m.id,
-    displayName: m.displayName,
-    inputs: Array.isArray(m.df.inputs) ? m.df.inputs : [],
-    outputs: Array.isArray(m.df.outputs) ? m.df.outputs : [],
-    dependsOn: Array.isArray(m.df.dependsOn) ? m.df.dependsOn : [],
-    triggers: m.triggers.filter(t => !isDerivedDataFlowTrigger(t, m.id)),
-  }));
-  const expanded = expandDataFlowSteps({ roles }).roles;
-  const byId = new Map(expanded.map(r => [r.id, r]));
+  // Strip the previously-derived triggers (full-id AND role-key ids) so
+  // expandDataFlowSteps regenerates the full current set from the ports (a plain
+  // no-op leaves stale ones behind) — see derived-data-flow.js.
+  const derived = rederiveTeamDataFlow(teamId, members);
   const norm = (arr) => JSON.stringify([...arr].sort((a, b) => (a.id < b.id ? -1 : 1)));
 
   for (const m of members) {
@@ -2490,10 +2476,7 @@ async function reconcileTeamDataFlow(teamId) {
     // (#446). Content-compare (order-insensitive on id) so we write when the
     // wiring OR its preserved activatedAt genuinely changed — but skip a pure
     // no-op, which would bump triggers.json mtime for nothing.
-    const next = injectDerivedTriggerRepo(
-      stampDerivedActivation(byId.get(m.id)?.triggers || [], m.triggers),
-      m.repo,
-    );
+    const next = injectDerivedTriggerRepo(derived.get(m.id) || [], m.repo);
     if (norm(next) === norm(m.triggers)) continue;
     try { await putTriggers(m.id, next); notifyAgentReload(m.id); }
     catch { /* best-effort — never break the originating request */ }
@@ -3338,12 +3321,6 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         // reconcileTeamGithubChannels re-stamps the claim the author just turned
         // off. Only the non-default is persisted.
         ...(c.autoClaim === false ? { autoClaim: false } : {}),
-        // Internal-channel transport (#1194) — must survive the live port write so
-        // reconcileTeamGithubChannels re-derives an internal (poller-excluded)
-        // listener. Only meaningful on a labelled, non-human channel; anything else
-        // stays poller-delivered, so a stray `transport` on those is dropped here.
-        ...(c.transport === 'internal' && typeof c.label === 'string' && c.label.trim() && c.gate !== 'human'
-          ? { transport: 'internal' } : {}),
       }));
     if (norm.length) fresh.channels = norm; else delete fresh.channels;
     channelsChanged = true;
@@ -6285,6 +6262,12 @@ app.get('/api/scripts/:name', apiLimiter, async (req, res) => {
 // new full array and PUTs it through the orchestrator, which persists it and
 // signals the agent (SIGUSR2) to re-pull. We read the current array via
 // controlOrAgentPath so it works on both the shared and isolated layouts.
+// #2571: the producer filter's same-team check reads agent configs by id.
+function readAgentConfigForFilter(agentId) {
+  if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) return null;
+  return readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+}
+
 async function putTriggers(agentId, triggers) {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   const r = await fetch(
@@ -6320,14 +6303,20 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   // direct API) can persist a non-conformant listener unchallenged again.
   const te = rawTriggerError(newTrigger);
   if (te) return res.status(400).json({ error: te });
-  // Internal-channel transport (#1174): a mistyped value would silently leave
-  // the listener poller-delivered while the producer runs `aee-emit` — checked
-  // here (route-level), mirroring validateProcessTemplate's bundle check.
-  const tpe = triggerTransportError(newTrigger);
-  if (tpe) return res.status(400).json({ error: tpe });
+  // A legacy `transport` is tolerated and dropped (the internal transport was
+  // removed in #2578 — every label listener is poller-delivered).
+  delete newTrigger.transport;
   // Push branch filter (#2570): persisted in its normalized array form (or
   // absent = every branch), validated by rawTriggerError above.
   normalizeBranchFilter(newTrigger);
+  // "Pushed by agent" producer filter (#2571): same-team agent ids on push
+  // triggers only.
+  const pbf = applyPushedBy(newTrigger, { ownerId: id, lookupAgent: readAgentConfigForFilter });
+  if (pbf.error) return res.status(400).json({ error: pbf.error });
+  if (pbf.trigger !== newTrigger) {
+    delete newTrigger.pushedBy;
+    Object.assign(newTrigger, pbf.trigger);
+  }
   // At most one active chat-launched loop per agent (#1020 AC8). A launched
   // loop is a one-off run; a second launch while one runs would race two
   // runners, so reject it — the composer reflects the running state and
@@ -6381,12 +6370,19 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   // UNCHANGED (the LegacyMultiEventNote migration flow keeps working).
   const te = rawTriggerError(merged, prev);
   if (te) return res.status(400).json({ error: te });
-  // Internal-channel transport (#1174) — same route-level check as POST.
-  const tpe = triggerTransportError(merged);
-  if (tpe) return res.status(400).json({ error: tpe });
+  // Legacy `transport` (#2578) — dropped as on POST, including one lingering
+  // on the stored trigger, so an edit never re-persists it.
+  delete merged.transport;
   // Push branch filter (#2570) — normalized as on POST; a blank/null value
   // clears a stored filter.
   normalizeBranchFilter(merged);
+  // Producer filter (#2571) — same route-level check as POST; `null` clears it.
+  const pbf = applyPushedBy(merged, { ownerId: id, lookupAgent: readAgentConfigForFilter });
+  if (pbf.error) return res.status(400).json({ error: pbf.error });
+  if (pbf.trigger !== merged) {
+    delete merged.pushedBy;
+    Object.assign(merged, pbf.trigger);
+  }
   if (merged.type === 'github-event') {
     const now = new Date().toISOString();
     // Refresh the activation horizon on a disable→enable flip so a
@@ -6468,22 +6464,6 @@ app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) =
   }
   res.status(204).end();
 });
-
-// Internal-channel transport (#1174): value + shape hygiene for a trigger write.
-// The failure mode of a bad value is silent (the listener stays in the poller
-// plan and `aee-emit` wakes nobody), so it is rejected, not tolerated. Kept
-// route-level — the bundle-side twin lives in validateProcessTemplate.
-function triggerTransportError(t) {
-  if (t.transport === undefined) return null;
-  if (t.transport !== 'internal' && t.transport !== 'github') {
-    return "transport must be 'internal' or 'github'";
-  }
-  if (t.transport === 'internal'
-      && !(t.type === 'github-event' && typeof t.labelFilter === 'string' && t.labelFilter.trim())) {
-    return "transport 'internal' requires a github-event label listener (labelFilter)";
-  }
-  return null;
-}
 
 // A trigger write on a team member changes WHO CONSUMES its siblings' labels —
 // re-render the team's generated Outcomes blocks (#1007). Best-effort: a
@@ -6640,12 +6620,15 @@ app.get('/api/process/graph', (req, res) => {
 // Build a graph from an imported bundle (no persistence) so the canvas can
 // render it as a blueprint (#334). Reuses the same pure builder.
 app.post('/api/process/graph', (req, res) => {
-  const raw = req.body && req.body.processTemplate;
+  // Repair safe cross-field inconsistencies before validating (#2579) so a
+  // small, mechanically-fixable defect in an imported bundle no longer hard-fails
+  // the render; `coercions` surfaces every repair applied.
+  const { bundle: coerced, warnings: coercions } = coerceImportBundle(req.body && req.body.processTemplate);
   // Drafts (#345) may be empty works-in-progress.
-  const v = validateProcessTemplate(raw, { allowEmptyRoles: true });
+  const v = validateProcessTemplate(coerced, { allowEmptyRoles: true });
   if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
   // Map legacy pr-review roles (#347) onto the #380 channel ports so old drafts render.
-  const bundle = liftTriggerEmits(normalizeLegacyReview(raw));
+  const bundle = liftTriggerEmits(normalizeLegacyReview(coerced));
   const agents = bundle.roles.map(r => ({
     id: r.id, role: 'template', displayName: r.displayName || r.id,
     sessionPolicy: r.sessionPolicy || 'persistent',
@@ -6663,6 +6646,8 @@ app.post('/api/process/graph', (req, res) => {
     // The bundle's own registries are the authority: labels for gate/brake
     // classification (#928), humans for the named-role bindings (#987).
     humans: Array.isArray(bundle.humans) ? bundle.humans : [],
+    // Auto-repairs applied on import (#2579) — non-fatal, surfaced to the client.
+    ...(coercions.length ? { coercions } : {}),
     ...buildProcessGraph(agents, { labels: bundle.labels, humans: bundle.humans }),
   });
 });
@@ -8923,6 +8908,49 @@ app.get('/api/teams/:teamId/tickets', apiLimiter, async (req, res) => {
   }
 });
 
+// GET /api/teams/:teamId/flow-board — the lean Flow Control board (#2573):
+// stages from the flow graph, one row per work item a team agent took part
+// in, running sessions, pools and human blocks. Visibility-only like
+// `tickets`; `?refresh=1` is forwarded (the orchestrator's single-flight cache
+// otherwise serves a sweep younger than its TTL). `canManage` tells the page
+// whether to offer the pool switches and the column configuration.
+app.get('/api/teams/:teamId/flow-board', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  const qs = req.query && req.query.refresh === '1' ? '?refresh=1' : '';
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-board${qs}`);
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) data.canManage = !!canManageTeam(scope, teamId);
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/flow-board-config — save the optional per-team
+// column configuration (rename/merge/hide stages, done retention). A team
+// setting, so gated like every other team mutation (`canManageTeam`).
+app.post('/api/teams/:teamId/flow-board-config', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-board-config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config: req.body && req.body.config }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
 // GET /api/teams/:teamId/pool-control — board data for the Flow Control
 // board's pause/drain/force-dispatch controls (#2250 Phase 5, epic #2251).
 // Visibility-only like `tickets`/`flow-anomalies`: no `canManageTeam` gate on
@@ -9383,11 +9411,14 @@ app.post('/api/teams/:teamId/enable', apiLimiter, async (req, res) => {
  * (roles may carry inputs/outputs/dependsOn) through the unified model so the
  * draft editor renders label + dependency + artifact edges and unified lints. */
 app.post('/api/flows/graph', (req, res) => {
-  const raw = req.body && req.body.processTemplate;
-  const v = validateProcessTemplate(raw, { allowEmptyRoles: true });
+  // Repair safe cross-field inconsistencies before validating (#2579) so an
+  // imported bundle with a small, mechanically-fixable defect still renders
+  // instead of hard-failing; `coercions` reports every repair applied.
+  const { bundle: coerced, warnings: coercions } = coerceImportBundle(req.body && req.body.processTemplate);
+  const v = validateProcessTemplate(coerced, { allowEmptyRoles: true });
   if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
   // Map legacy pr-review roles (#347) onto the #380 channel ports so old drafts render.
-  const bundle = liftTriggerEmits(normalizeLegacyReview(raw));
+  const bundle = liftTriggerEmits(normalizeLegacyReview(coerced));
   const flow = processTemplateToUnified(bundle);
   const bundleHumans = Array.isArray(bundle.humans) ? bundle.humans : [];
   res.json({
@@ -9397,6 +9428,8 @@ app.post('/api/flows/graph', (req, res) => {
     // The bundle's own registries drive gate/brake classification (#928) and the
     // named human-role bindings (#987).
     humans: bundleHumans,
+    // Auto-repairs applied on import (#2579) — non-fatal, surfaced to the client.
+    ...(coercions.length ? { coercions } : {}),
     ...buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels, humans: bundleHumans }),
   });
 });
@@ -9471,6 +9504,12 @@ app.get('/api/process/template', (req, res) => {
       // (e.g. Developer → Code Reviewer "PR"). buildProcessTemplate reduces the
       // member-id `from` to a portable role key via remapChannel.
       ...(Array.isArray(cfg.channels) && cfg.channels.length ? { channels: cfg.channels } : {}),
+      // Agent instance pools (#2246): the member's opt-in pooling config. It MUST
+      // ride the exported ROLE — buildProcessTemplate's `normalizePool(r.pool)`
+      // only serializes what it is given, so without this the pooled role exports
+      // as unpooled and a team with `autoDispatch`/`wipLimit` re-imports as an
+      // invalid bundle (autoDispatch enabled, no pooled role — #2579).
+      ...(cfg.pool && typeof cfg.pool === 'object' ? { pool: cfg.pool } : {}),
     });
     // `channels` rides along so a channel's `gate: 'human'` classifies its routing
     // label as a gate in the exported registry too (#928).
@@ -10424,12 +10463,16 @@ app.post('/api/process/drafts', apiLimiter, (req, res) => {
   // Seed from an imported bundle if provided, else an empty skeleton.
   let bundle = emptyDraftBundle(name);
   if (req.body?.processTemplate) {
-    const v = validateProcessTemplate(req.body.processTemplate, { allowEmptyRoles: true });
+    // Repair safe cross-field inconsistencies before validating (#2579) so an
+    // older/leaky export still seeds a draft instead of being rejected; the
+    // draft is then persisted already-consistent.
+    const { bundle: coerced } = coerceImportBundle(req.body.processTemplate);
+    const v = validateProcessTemplate(coerced, { allowEmptyRoles: true });
     if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
     // Strip the access fields off an imported bundle (#2068): an exported and
     // re-imported draft belongs to the importer, and must never carry a foreign
     // access set in.
-    bundle = { ...draftAccess.stripAccessFields(req.body.processTemplate), name };
+    bundle = { ...draftAccess.stripAccessFields(coerced), name };
   }
   // AC1 — `createdBy` is resolved from the authenticated caller, never from the
   // request body (the `PUT /api/me/preferences` rule), and the access set starts
@@ -16601,7 +16644,15 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // They are resolved exactly like catalog templates by the materialisation
   // loop below (var substitution over prompt + triggers).
   let customRolesRaw = Array.isArray(body.customRoles) ? body.customRoles : [];
+  let importCoercions = [];
   if (body.processTemplate) {
+    // Repair safe cross-field inconsistencies before validating (#2579) and reuse
+    // the coerced bundle for EVERY downstream read (stages/labels/humans/wipLimit/
+    // autoDispatch below), so an older/leaky export materialises consistently
+    // instead of being rejected outright.
+    const coerced = coerceImportBundle(body.processTemplate);
+    body.processTemplate = coerced.bundle;
+    importCoercions = coerced.warnings;
     const v = validateProcessTemplate(body.processTemplate);
     if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
     // Expand GitHub channels (#380) into consumer github-event triggers + the
@@ -17087,7 +17138,10 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         .filter(p => !toCreate.some(c => c.memberId === p.memberId))
         .map(p => p.memberId),
       dms: created.dms,
-      ...(suffixWarnings.length ? { warnings: suffixWarnings } : {}),
+      // Suffix collisions + any import auto-repairs (#2579) share the one
+      // non-fatal `warnings` channel.
+      ...((suffixWarnings.length || importCoercions.length)
+        ? { warnings: [...importCoercions, ...suffixWarnings] } : {}),
     });
 
     // Phase E — label provisioning (best-effort, after response sent).
@@ -17324,7 +17378,13 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // Inline roles (parity with POST /api/teams): either `customRoles` or a whole
   // `processTemplate` bundle (Process Canvas import / wizard Process step, #422).
   let customRolesRaw = Array.isArray(body.customRoles) ? body.customRoles : [];
+  let importCoercions = [];
   if (body.processTemplate) {
+    // Repair safe cross-field inconsistencies before validating (#2579), reusing
+    // the coerced bundle for every downstream read — parity with POST /api/teams.
+    const coerced = coerceImportBundle(body.processTemplate);
+    body.processTemplate = coerced.bundle;
+    importCoercions = coerced.warnings;
     const v = validateProcessTemplate(body.processTemplate);
     if (!v.ok) return fail(400, `Invalid processTemplate: ${v.error}`);
     customRolesRaw = templateToCustomRoles(
@@ -17856,7 +17916,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           .filter(p => !toCreate.some(c => c.memberId === p.memberId))
           .map(p => p.memberId),
         dms: created.dms,
-        ...(suffixWarnings.length ? { warnings: [...suffixWarnings, ...provWarn] } : (provWarn.length ? { warnings: provWarn } : {})),
+        // Import auto-repairs (#2579) + suffix collisions + label-provisioning
+        // warnings all share the one non-fatal `warnings` channel.
+        ...((importCoercions.length || suffixWarnings.length || provWarn.length)
+          ? { warnings: [...importCoercions, ...suffixWarnings, ...provWarn] } : {}),
       },
     });
     res.end();
@@ -21454,6 +21517,45 @@ function sweepExportStaging() {
   if (swept > 0) console.log(`[Admin] Swept ${swept} leftover export staging dir(s)`);
 }
 
+// Startup sweep for the removed internal transport (#2578). Drops the dead
+// `transport` field from every agent's config.json `channels[]` and
+// triggers.json, then re-reconciles each affected team so its derived listeners
+// and `## Outcomes` blocks (which used to tell producers to run `aee-emit`) are
+// re-rendered. The decision is the pure planInternalTransportMigration; this is
+// only the I/O. Best-effort and idempotent: a failed putTriggers (e.g. the
+// orchestrator is still starting) is counted, not thrown, and a rerun — the
+// retry below or the next start — picks up whatever is left.
+async function sweepInternalTransport() {
+  const agents = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    let prompt = null;
+    try { prompt = fs.readFileSync(path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md'), 'utf8'); } catch { /* none */ }
+    agents.push({ id, cfg, triggers, prompt });
+  }
+  const plan = planInternalTransportMigration(agents);
+  let failed = 0;
+  for (const { id, cfg } of plan.configs) {
+    try { writeJsonAtomic(path.join(AGENTS_DIR, id, 'config.json'), cfg); } catch { failed++; }
+  }
+  for (const { id, triggers } of plan.triggers) {
+    try { await putTriggers(id, triggers); notifyAgentReload(id); } catch { failed++; }
+  }
+  for (const teamId of plan.teamIds) {
+    try {
+      await reconcileTeamGithubChannels(teamId);
+      await reconcileTeamOutcomes(teamId);
+    } catch { failed++; }
+  }
+  if (plan.configs.length || plan.triggers.length || plan.teamIds.length) {
+    console.log(`[Admin] Internal-transport sweep (#2578): ${plan.configs.length} config(s), `
+      + `${plan.triggers.length} trigger file(s), ${plan.teamIds.length} team(s) re-reconciled`
+      + (failed ? `, ${failed} write(s) failed — retried later` : ''));
+  }
+  return { failed };
+}
+
 app.listen(4000, '0.0.0.0', () => {
   console.log('[Admin] Listening on :4000');
   // State the authorization mode explicitly (#1457) — and, in single-user mode,
@@ -21467,5 +21569,12 @@ app.listen(4000, '0.0.0.0', () => {
   try { backfillSkillManifests(); } catch (err) { console.error(`[Admin] Skill manifest backfill failed: ${err.message}`); }
   try { sweepExportStaging(); } catch (err) { console.error(`[Admin] Export staging sweep failed: ${err.message}`); }
   try { backfillDraftAccess(); } catch (err) { console.error(`[Admin] Draft access backfill failed: ${err.message}`); }
+  // Async (triggers go through the orchestrator). The orchestrator may still be
+  // starting beside us, so a sweep with failed writes is retried once a minute
+  // later; anything still left is picked up on the next start.
+  const logSweepError = (err) => console.error(`[Admin] Internal-transport sweep failed: ${err.message}`);
+  sweepInternalTransport().then(({ failed }) => {
+    if (failed) setTimeout(() => { sweepInternalTransport().catch(logSweepError); }, 60_000).unref();
+  }).catch(logSweepError);
   try { startLlmHealthPoller(); } catch (err) { console.error(`[Admin] Model Provider health poller failed to start: ${err.message}`); }
 });

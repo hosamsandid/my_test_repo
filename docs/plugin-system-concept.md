@@ -36,14 +36,14 @@ agent image. The platform needs one extension seam instead: **plugins are
 registered, granted, and audited; the platform stays generic.**
 
 Non-goals: plugins never become load-bearing for the platform itself. Flow
-primitives (`aee-emit`, `aee-artifact`, `gh-as-agent`) and the knowledge
+primitives (`aee-artifact`, `gh-as-agent`) and the knowledge
 system stay built-in (§7).
 
 ## 2. Prior art this design reuses
 
 | Building block | Where | Reused for |
 |---|---|---|
-| CLI facade over an internal API | `knowledge`, `aee-artifact`, `aee-emit`, `gh-as-agent` (`agent-image/scripts/`) | the agent-facing plugin surface |
+| CLI facade over an internal API | `knowledge`, `aee-artifact`, `gh-as-agent` (`agent-image/scripts/`) | the agent-facing plugin surface |
 | Registry + separate credential store | `/workspace/mcp-servers/`, `/workspace/mcp-credentials/_keys/` | plugin registry + plugin credentials |
 | Per-agent network isolation with attachable services | `AEE_PER_AGENT_NETWORK_SERVICES` seam in `spawn-container.js` | wiring a sidecar into granted agents' networks only |
 | Team-owned grants, no env coupling | `skill-grants.js` (`effectiveSkills`) | plugin grant resolution |
@@ -556,7 +556,7 @@ admin to the difference. The boundary rule:
 > (§4.1) so capability and domain knowledge ship together, each in its
 > proper lifecycle.
 
-- **Flow primitives** `aee-emit`, `aee-artifact`, `gh-as-agent`: flow
+- **Flow primitives** `aee-artifact`, `gh-as-agent`: flow
   semantics depend on them (trigger prompts instruct their use); making them
   optional inverts the layering. They stay in `agent-image/scripts/`, and are
   only aligned to the CLI *contract* conventions over time.

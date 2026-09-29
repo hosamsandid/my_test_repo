@@ -233,7 +233,6 @@ test("an agent reaches its own telemetry, knowledge, triggers, ticket and git ro
 
 test("an agent reaches the id-less routes that carry their own integrity check", () => {
   for (const [method, url] of [
-    ["POST", "/internal/flow-emit"],
     ["POST", "/internal/wake-agent"],
     ["GET", "/internal/loop-verify/verdict?token=abc"],
     ["POST", "/internal/loop-verify/verdict"],
@@ -291,6 +290,7 @@ test("an agent is refused on the control-plane surface", () => {
     ["POST", "/internal/agents/import"],
     ["GET", "/internal/agents/processes"],
     ["POST", "/internal/knowledge/autonomy"],
+    ["POST", "/internal/flow-emit"],                          // removed with the internal transport (#2578)
   ]) {
     const d = decide(method, url, asAgent());
     assert.equal(d.allowed, false, `${method} ${url} must not be agent-facing`);
@@ -441,7 +441,6 @@ test("a plugin scope token is refused on EVERY other route — agent-facing or c
   for (const [method, url] of [
     ["GET", "/internal/plugin-event"],
     ["POST", "/internal/wake-agent"],
-    ["POST", "/internal/flow-emit"],
     ["GET", "/internal/maintenance-mode"],
     ["POST", "/internal/agents/team-x-developer/enqueue-pending"],
     ["DELETE", "/internal/agents/team-x-developer"],

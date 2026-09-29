@@ -171,7 +171,15 @@ function roleIdFromMemberId(memberId, teamId) {
 // only block a NEW spawn — a redelivered event for a ticket already in flight
 // still resolves to its existing instance (D11), because pausing dispatch of
 // new work is not the same as abandoning work already admitted.
-const POOL_CONTROL_STATES = ['paused', 'draining'];
+//
+// #2573 gives Drain its own ending: once the last running instance of a
+// `draining` role has finished, the role settles to `off` by itself
+// (`settleDrain`, driven by the orchestrator's periodic pool sweep). `off`
+// refuses/holds new work exactly like `paused`; the difference is only in who
+// ends it — a paused role expects a Resume, an off role a deliberate
+// "Switch on". Both clear back to running through the same POST, which
+// redelivers everything held meanwhile, so nothing is lost either way.
+const POOL_CONTROL_STATES = ['paused', 'draining', 'off'];
 
 /**
  * `raw` is the whole team's `{ "<roleId>": { state, changedAt } }` map as
@@ -198,6 +206,18 @@ function normalizePoolControl(raw) {
 function poolControlState(control, roleId) {
   const c = control && control[roleId];
   return c && POOL_CONTROL_STATES.includes(c.state) ? c.state : 'running';
+}
+
+/**
+ * #2573: the drain → off transition. Returns the state the role should be in
+ * given how many of its instances are still running — `off` once a
+ * `draining` role has nothing left running, otherwise the state unchanged.
+ * A non-finite busy count (unreadable) never settles — fails closed so a
+ * drain is never declared finished on a guess.
+ */
+function settleDrain(state, busyCount) {
+  if (state !== 'draining') return state;
+  return Number.isFinite(busyCount) && busyCount <= 0 ? 'off' : state;
 }
 
 // Paused/draining hold queue (code-review finding on #2281's review of this
@@ -254,6 +274,12 @@ function normalizePausedHold(raw) {
 function planPoolDispatch({ teamId, roleId, pool, itemKey, existingInstanceIds = [], controlState = 'running' }) {
   if (itemKey === null || itemKey === undefined) return { action: 'unpooled' };
   const instanceId = poolInstanceId(teamId, roleId, itemKey);
+  // An `off` role has nothing running by definition (#2573: it only gets
+  // there once a drain finished), so even a leftover idle instance for the
+  // same item must not pick up new work until the role is switched on.
+  if (controlState === 'off') {
+    return { action: 'refuse', reason: controlState, instanceId };
+  }
   if (existingInstanceIds.includes(instanceId)) {
     return { action: 'reuse', instanceId };
   }
@@ -336,6 +362,7 @@ module.exports = {
   roleIdFromMemberId,
   normalizePoolControl,
   poolControlState,
+  settleDrain,
   normalizePausedHold,
   planPoolDispatch,
   isInstanceTimedOut,

@@ -82,6 +82,12 @@ export const OUTCOME_LEGEND = [
     whatToDo: 'Nothing to do.',
   },
   {
+    key: 'producer-filter',
+    term: 'dropped (producer filter)',
+    meaning: "The push trigger only wakes on pushes by the agents in its \"pushed by\" filter, and this push was made by another agent — or by a producer the platform could not attribute (a human, a raw git push, a knowledge-base sync).",
+    whatToDo: 'Nothing to do if that is intended. Otherwise widen or clear the filter on the trigger.',
+  },
+  {
     key: 'no-match',
     term: "nobody's listening",
     meaning: 'No trigger subscribed to this event type at all, so nobody was woken.',

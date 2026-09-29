@@ -339,7 +339,7 @@ formerly `.aee/` — is now **`.agent-studio/`** (an upgraded agent is migrated
 automatically, keeping all state). What deliberately **remains** "AEE" is purely
 *internal* and not surfaced in the file tree: the `AEE_*` operator environment
 variables, the `aee.*` container labels, and the `io.aee.*` agent↔console wire
-keys. The `aee-…` command-line tools (`aee-artifact`, `aee-emit`, `aee-podman`,
+keys. The `aee-…` command-line tools (`aee-artifact`, `aee-podman`,
 `aee-test`, …) keep their names for now; retiring the CLI prefix is tracked
 separately (a plugin-ecosystem convention decision, out of scope for the
 directory rename).

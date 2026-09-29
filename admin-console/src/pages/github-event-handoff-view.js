@@ -29,8 +29,9 @@
 export const HANDOFF_WAKE_EVENT = 'handoff.wake';
 
 // Whether a log row is a direct hand-off. Keyed on the event key, NOT on
-// `source: 'internal'` — an `aee-emit` internal label channel (#1173) carries
-// that same source and is an ordinary labelled row.
+// `source: 'internal'` — other platform-written rows (and labelled rows logged
+// before the internal transport was removed in #2578) carry that same source
+// and are ordinary labelled rows.
 export function isHandoffRow(row) {
   return !!row && typeof row === 'object' && row.event === HANDOFF_WAKE_EVENT;
 }

@@ -265,9 +265,9 @@ queue. It is **what a human can see afterwards**.
 
 A direct hand-off has some deliberate limits. Its target must be another agent
 **on the same team** — never a person, because a hand-off is delivered to the
-target's queue and a human role has none, and never the producer itself. It also
-carries no *Delivery* choice: unlike a label, which can travel either over
-GitHub events or internally, a direct hand-off is internal by construction.
+target's queue and a human role has none, and never the producer itself. Unlike a
+label, which always travels through GitHub, a direct hand-off is delivered by
+the platform itself.
 
 The dialog offers a **note** — a sentence about what you are handing over. Two
 things are worth knowing about it. It reaches the consumer as *context to
@@ -303,22 +303,14 @@ directory still hands over correctly. And an artifact hand-off is a *wake*, not
 a start-gate: nothing blocks a downstream agent from running, it is simply told
 there is something to read.
 
-### Internal delivery vs the poller
+### How a label hand-off is delivered
 
-A label hand-off between two agents carries a **Delivery** choice:
-
-- **Via GitHub events** — the wake rides the GitHub Events API and is delivered
-  by the poller, roughly every 30 seconds.
-- **Direct (internal)** — the orchestrator delivers the wake itself. The
-  producing agent announces the label with `aee-emit`, the consumer is queued
-  immediately, and the label is *still* stamped onto GitHub as visible status.
-
-Internal delivery has no polling latency and cannot lose an event to the API's
-event window, so it is the better default for agent-to-agent hand-offs, and the
-generated flows use it. It is deliberately **not** offered for human gates and
-brakes: a person applies those on GitHub, so only the poller can see them. A
-pull-request or issue channel may go internal only when it is labelled and
-agent-set — the channel *opening* an artifact always stays poller-delivered.
+Every label hand-off travels through GitHub. The producing agent applies the
+label on the issue or pull request, and the GitHub poller wakes the consumer —
+within one poll interval, roughly 30 seconds. The label on GitHub is the single
+source of truth: a person re-applying the same label wakes the consumer exactly
+like an agent does, and every wake shows up in the **GitHub Event Log**. (The
+former *Direct (internal)* delivery option was removed in #2578.)
 
 ## Human gates, brakes and named human roles
 

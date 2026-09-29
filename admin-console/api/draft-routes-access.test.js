@@ -93,7 +93,15 @@ test('AC1 — both create paths stamp from the caller, never from the body', () 
 test('AC1 — an imported processTemplate cannot carry an access set in', () => {
   // Export/Import must not become a way to grant yourself access, or to grant
   // access to someone who never asked for it.
-  assert.match(CREATE(), /draftAccess\.stripAccessFields\(req\.body\.processTemplate\)/);
+  const src = CREATE();
+  // #2579 routes the import through coerceImportBundle first; the strip then
+  // applies to that coerced copy — which must itself come from the body.
+  assert.match(src, /coerceImportBundle\(req\.body\.processTemplate\)/);
+  assert.match(src, /bundle = \{ \.\.\.draftAccess\.stripAccessFields\((?:req\.body\.processTemplate|coerced)\)/);
+  assert.ok(
+    src.indexOf('stripAccessFields') < src.indexOf('const draft = {'),
+    'the access set must be stripped before the draft is built and stored',
+  );
 });
 
 test('AC4/AC5 — the save route strips the incoming pair and carries the stored one', () => {

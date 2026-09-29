@@ -23,11 +23,11 @@
     "report": "playwright show-report"
   },
   "devDependencies": {
-    "@playwright/test": "^1.48.0"
+    "@playwright/test": "^1.63.0"
   },
   "dependencies": {
     "js-yaml": "^5.4.2",
-    "jszip": "^3.10.1",
+    "jszip": "^3.10.2",
     "pixelmatch": "^5.3.0",
     "pngjs": "^7.0.0",
     "pptxgenjs": "^4.0.1"

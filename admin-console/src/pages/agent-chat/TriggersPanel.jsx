@@ -15,15 +15,16 @@ import {
   conditionsFromFilter, conditionsToFilter, payloadFilterSummary, conditionsHeading,
 } from './plugin-event-filter.js';
 import { liveOps } from '../process/edit-adapters';
-import { isGateLabel, isBrakeLabel } from '../process/label-flags';
 import {
   GITHUB_EVENT_OPTIONS,
   LABEL_FILTERABLE_EVENTS,
   summarizeGithubEventTrigger,
   summarizeLoopTrigger,
   claimBodyFor,
-  transportBodyFor,
   isStandingSubscription,
+  pushedByIds,
+  pushedByBodyFor,
+  summarizePushSchedule,
 } from './trigger-summary.js';
 import {
   branchFilterFormError, branchFilterToInput, branchFilterBody, BRANCH_FILTER_PLACEHOLDER, BRANCH_FILTER_HELP,
@@ -55,8 +56,9 @@ const POLL_MS = 30_000;
 
 // A data-flow trigger is an agent dependency: a push to the team repo wakes
 // this one with a hand-off prompt. Under the hood it's a github-event/push
-// trigger. It fires on any push (source filtering was removed); the woken
-// agent decides whether the change is relevant. Identified solely by the
+// trigger. It fires on any push unless it carries a `pushedBy` producer filter
+// (#2571 — set automatically for a Flow-editor hand-off to its upstream); the
+// woken agent decides whether the change is relevant. Identified solely by the
 // `dataFlow` marker — a plain push trigger (no marker) is just a push trigger.
 function isDataFlowTrigger(t) {
   return !!t && t.dataFlow === true;
@@ -303,7 +305,7 @@ function DateTimePicker({ value, onChange }) {
 // former EmitsSection/EmitsEditor and their emit-suggestions/emits endpoints are
 // gone; the trigger row no longer renders an emits chip or edit button.
 
-function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onToggled, repoWarning = null }) {
+function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onToggled, repoWarning = null, nameOf = undefined }) {
   const [toggling, setToggling] = useState(false);
   const [scriptPanelName, setScriptPanelName] = useState(null);
   const preCheckScriptName = scriptNameFromPath(trigger.preCheckScript);
@@ -319,7 +321,7 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
     : null;
   let schedule;
   if (isDataFlow) {
-    schedule = `wakes on push${trigger.repo ? ` to ${trigger.repo}` : ' to the team repo'}`;
+    schedule = summarizePushSchedule(trigger, nameOf);
   } else if (trigger.type === 'loop') {
     schedule = summarizeLoopTrigger(trigger);
   } else if (trigger.type === 'http') {
@@ -328,7 +330,11 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
     const filterCopy = payloadFilterSummary(trigger.payloadFilter);
     schedule = `${trigger.pluginId || 'plugin'}${trigger.eventFilter ? ` · ${trigger.eventFilter}` : ' · any event'}${filterCopy ? ` · ${filterCopy}` : ''}`;
   } else if (ghSummary) {
-    schedule = trigger.repo || 'any repo';
+    // A manual push trigger with a producer filter (#2571) reads like a
+    // data-flow one, so "from whom" is never hidden.
+    schedule = pushedByIds(trigger).length && (trigger.events || []).includes('push')
+      ? summarizePushSchedule(trigger, nameOf)
+      : (trigger.repo || 'any repo');
   } else if (trigger.cron) {
     schedule = describeCron(parseCronState(trigger.cron)) || trigger.cron;
   } else {
@@ -599,7 +605,45 @@ function pickDefaultVerifier(siblings) {
 // `onRemove` renders a delete affordance (the flow editor's ⏰ edge needs it);
 // `allowTypeChange` unlocks the Type selector on edit (the flow editor permits
 // turning a schedule into a different trigger kind, re-deriving the edge).
-export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false, allowLoopType = true, lockType = null, submitLabel = null, labels = null }) {
+// Optional "pushed by agent" multi-select (#2571): the agents of this Agent
+// Team whose pushes may fire the trigger. Empty = any push. A stored id that is
+// no longer on the roster stays listed (and selected) so a save never drops it
+// silently.
+function PushedByPicker({ roster, selected, onToggle }) {
+  const known = new Set((roster || []).map(a => a.id));
+  const rows = [...(roster || []), ...selected.filter(id => !known.has(id)).map(id => ({ id, displayName: id }))];
+  return (
+    <div>
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+        Pushed by (optional)
+      </div>
+      {roster === null ? (
+        <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2)' }}>
+          <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', marginRight: 6, verticalAlign: 'middle' }} />
+          Loading team agents…
+        </div>
+      ) : rows.length === 0 ? (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>
+          Only an agent of an Agent Team can filter by producer.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {rows.map(a => (
+            <label key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}>
+              <input type="checkbox" checked={selected.includes(a.id)} onChange={() => onToggle(a.id)} />
+              {a.displayName}{a.displayName !== a.id && <code style={{ color: 'var(--eb-text-muted)' }}>{a.id}</code>}
+            </label>
+          ))}
+        </div>
+      )}
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+        empty = any push. When set, only pushes these agents made through the platform (<code>gh-as-agent push</code>/<code>pr</code>) fire it — a human's push or another team's never does.
+      </div>
+    </div>
+  );
+}
+
+export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false, allowLoopType = true, lockType = null, submitLabel = null }) {
   const isEdit = !!initialValues;
   const typeLocked = isEdit && !allowTypeChange;
   // Loop-launch mode (#1020): the composer launcher reuses this form pinned to
@@ -630,6 +674,10 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     // Empty string = match any label (legacy behavior). The poller treats
     // missing or empty as no filter, so the wire format is `string | undefined`.
     labelFilter: initialValues?.labelFilter ?? '',
+    // Optional "pushed by agent" producer filter on a push trigger (#2571):
+    // same-team agent ids; empty = any push. Pre-filled from the stored value,
+    // which the Flow editor sets on a data-flow hand-off to its upstream.
+    pushedBy:    pushedByIds(initialValues),
     // Optional push branch filter (#2570), edited as a comma-separated string and
     // stored as an array. Empty = every branch.
     branchFilter: branchFilterToInput(initialValues?.branchFilter),
@@ -664,10 +712,6 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     // when it fires — ON by default for new listeners (the platform convention
     // the engine/channel paths follow); an edit reflects the stored state.
     claimOn:       isEdit ? !!initialValues?.claim : true,
-    // Delivery transport (#1189): 'internal' delivers the wake over the
-    // orchestrator queue (label mirrored to GitHub); 'github' is poller
-    // delivery. Only meaningful for a label listener — see `showTransport`.
-    transport:     initialValues?.transport === 'internal' ? 'internal' : 'github',
     // ── plugin-event fields (Jira plan §4B) ──────────────────────────────
     // `pluginId` names which granted plugin may fire this listener; the
     // optional `eventFilter` is the broker's own event name (opaque to the
@@ -684,16 +728,6 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   const showLabelFilter = form.type === 'github-event'
     && form.events.some(e => LABEL_FILTERABLE_EVENTS.has(e));
   const showBranchFilter = form.type === 'github-event' && form.events.includes('push');
-  // Delivery selector (#1189): a real label listener (label event + a filter),
-  // and NOT a human gate/brake — a person sets those on GitHub, so only the
-  // poller can see them (mirrors the edge dialog's rule). The gate check needs
-  // the label registry; when it isn't provided (e.g. Agent-Chat), fall open and
-  // show the selector — the backend still rejects an invalid transport.
-  const trimmedFilter = (form.labelFilter || '').trim();
-  const gateLikeFilter = labels
-    ? (isGateLabel(labels, trimmedFilter) || isBrakeLabel(labels, trimmedFilter))
-    : false;
-  const showTransport = showLabelFilter && !!trimmedFilter && !gateLikeFilter;
   const [copyDone, setCopyDone] = useState(null); // 'path' | 'secret' | null
   const [secretVisible, setSecretVisible] = useState(!isEdit);
   const [formError, setFormError] = useState(null);
@@ -860,6 +894,35 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     });
   }, [form.type, isTeamLoopAgent, loopRoster]);
 
+  // Producer-filter roster (#2571): the agents of this agent's Agent Team
+  // (self included — an agent may wake on its own pushes; the runtime-less team
+  // agent and pool instances excluded — a role id covers its instances). Only
+  // fetched for a push / data-flow trigger on a live agent. `null` = not loaded.
+  const isPushTrigger = isDataFlow || (form.type === 'github-event' && form.events.includes('push'));
+  const [pushRoster, setPushRoster] = useState(isDraftMode ? [] : null);
+  useEffect(() => {
+    if (isDraftMode || !isPushTrigger || pushRoster !== null) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const agents = await apiCall('GET', '/api/agents');
+        const list = Array.isArray(agents) ? agents : [];
+        const parentTeamId = list.find(a => a.id === agentId)?.parentTeamId || null;
+        const members = parentTeamId
+          ? list.filter(a => a.parentTeamId === parentTeamId && a.role !== 'team' && !a.poolInstance)
+              .map(a => ({ id: a.id, displayName: a.displayName || a.id }))
+          : [];
+        if (!cancelled) setPushRoster(members);
+      } catch {
+        if (!cancelled) setPushRoster([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isPushTrigger, agentId, pushRoster, isDraftMode]);
+  const togglePushedBy = (id) => setForm(f => ({
+    ...f, pushedBy: f.pushedBy.includes(id) ? f.pushedBy.filter(x => x !== id) : [...f.pushedBy, id],
+  }));
+
   // Lazy-generate a secret the first time http is selected, so users get a
   // working default without having to click "regenerate".
   function changeType(next) {
@@ -911,7 +974,8 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     if (!isEdit) body.id = form.id.trim() || undefined;
     if (isDataFlow) {
       // A data-flow dependency is a push trigger. It fires on any push to the
-      // repo (no origin scoping); the woken agent decides relevance.
+      // repo unless a producer filter names who must have pushed (#2571); the
+      // woken agent decides relevance.
       if (form.repo) body.repo = form.repo; // a draft's repo lands at materialise
       body.events = ['push'];
       body.dataFlow = true;
@@ -972,13 +1036,13 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       body.claim = claimBodyFor({
         labelFilter: body.labelFilter, events: form.events, claimOn: form.claimOn, isEdit,
       });
-      // Delivery transport (#1189) — pure decision in trigger-summary.js so it
-      // stays unit-tested; undefined omits the key for a plain non-label trigger.
-      const tp = transportBodyFor({
-        showTransport, transport: form.transport, isEdit, priorTransport: initialValues?.transport,
-      });
-      if (tp !== undefined) body.transport = tp;
     }
+    // Producer filter (#2571) — pure decision in trigger-summary.js.
+    const pb = pushedByBodyFor({
+      isPush: isPushTrigger, isDataFlow: isDataFlow && !isDraftMode, selected: form.pushedBy, isEdit,
+      priorPushedBy: initialValues?.pushedBy,
+    });
+    if (pb !== undefined) body.pushedBy = pb;
     await onSave(body);
   }
 
@@ -1400,9 +1464,14 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
           }}>
             <GitBranch size={11} style={{ verticalAlign: 'middle', marginRight: 4, color: 'var(--eb-accent-primary)' }} />
-            Woken by <strong>any push</strong> to the team repo — including this
-            agent's own.
+            {form.pushedBy.length
+              ? <>Woken only by pushes <strong>from the agents picked below</strong> to the team repo.</>
+              : <>Woken by <strong>any push</strong> to the team repo — including this agent's own.</>}
           </div>
+
+          {!isDraftMode && (
+            <PushedByPicker roster={pushRoster} selected={form.pushedBy} onToggle={togglePushedBy} />
+          )}
 
           {isDraftMode ? (
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', lineHeight: 1.5 }}>
@@ -1506,6 +1575,10 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             )}
           </div>
 
+          {isPushTrigger && !isDraftMode && (
+            <PushedByPicker roster={pushRoster} selected={form.pushedBy} onToggle={togglePushedBy} />
+          )}
+
           {showBranchFilter && (
             <div>
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
@@ -1544,26 +1617,6 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                   <input type="checkbox" checked={form.claimOn} onChange={e => set('claimOn', e.target.checked)} />
                   Claim the wake label on fire (<code>{form.labelFilter.trim()}</code> → <code>{form.labelFilter.trim()}:wip</code>) — makes work-in-progress visible on GitHub
                 </label>
-              )}
-              {showTransport && (
-                <div style={{ marginTop: 'var(--eb-space-3)' }}>
-                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
-                    Delivery
-                  </div>
-                  <select
-                    value={form.transport}
-                    onChange={e => set('transport', e.target.value)}
-                    style={{ ...FIELD_STYLE, width: '100%' }}
-                  >
-                    <option value="github">Via GitHub events — the poller delivers the wake (~30s)</option>
-                    <option value="internal">Direct (internal) — label mirrored to GitHub</option>
-                  </select>
-                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
-                    {form.transport === 'internal'
-                      ? <>The wake is delivered directly by the orchestrator (no polling latency, no lost events); the producer announces the label with <code>aee-emit</code>, and it is still stamped on GitHub as visible status.</>
-                      : <>The wake rides the GitHub Events API, delivered by the poller.</>}
-                  </div>
-                </div>
               )}
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
                 Tip: hand-offs between agents are easier to wire and edit in the <a href="/flows" style={{ color: 'var(--eb-accent-primary)' }}>Flow Editor</a>.
@@ -1773,6 +1826,9 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
   // Repositories area) — drives the "not listening" notice on github-event
   // rows. Live agents only; a failed read just shows no notice.
   const [repoStatusRows, setRepoStatusRows] = useState(null);
+  // #2571: display names for the producer filter on push-trigger cards
+  // ("wakes on push from Specifier …"). Live agents only; ids on failure.
+  const [agentNames, setAgentNames] = useState(null);
 
   const fetchTriggers = useCallback(async (id) => {
     if (!id) { setTriggers([]); return; }
@@ -1786,6 +1842,11 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
         apiCall('GET', '/api/github-events/repo-status')
           .then((body) => setRepoStatusRows(Array.isArray(body?.repos) ? body.repos : null))
           .catch(() => setRepoStatusRows(null));
+      }
+      if (ops.mode !== 'draft' && list.some((t) => pushedByIds(t).length)) {
+        apiCall('GET', '/api/agents')
+          .then((agents) => setAgentNames(new Map((Array.isArray(agents) ? agents : []).map(a => [a.id, a.displayName || a.id]))))
+          .catch(() => setAgentNames(null));
       }
     } catch (e) {
       setError(e.message);
@@ -1957,6 +2018,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
             onDeleted={setDeleteTarget}
             onToggled={afterRowMutation}
             repoWarning={isDraft ? null : triggerRepoWarning(t, repoStatusRows, { agentId })}
+            nameOf={agentNames ? (id) => agentNames.get(id) : undefined}
           />
         ))}
       </div>

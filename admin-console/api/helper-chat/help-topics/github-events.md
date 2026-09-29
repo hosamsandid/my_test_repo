@@ -108,14 +108,11 @@ Three consequences that surprise people:
 
 ### The poller is not the only writer
 
-Four other things write rows here, which is why this stays one honest timeline of
+Three other things write rows here, which is why this stays one honest timeline of
 every wake rather than a log of one delivery mechanism:
 
-- **Internal-channel hand-offs.** A hand-off on an internal channel
-  (`transport: 'internal'`) is woken directly by the producer's `aee-emit`
-  instead of travelling through the Events API, and is recorded here too.
 - **Labels applied in the console.** A label a human applies through the GitHub
-  Issues plugin is delivered immediately on that fast path, and the poller's
+  Issues plugin is delivered immediately on an internal fast path, and the poller's
   later sighting of the same `*.labeled` event is dropped as a duplicate.
 - **Direct agent-to-agent hand-offs.** A `wakeAgent` hand-off wakes a teammate
   straight through the platform — no issue, PR or label — so this log is its
@@ -168,11 +165,21 @@ single plain message instead of starting one session per event. If a burst looks
 like several deliveries but you only find one summary message, that is what you
 are looking at.
 
-**There is no source filtering.** Every agent shares one GitHub token, so an
+**There is no source filtering** (one exception below). Every agent shares one GitHub token, so an
 event caused by an agent looks exactly like an event caused by a human, and a
 trigger fires on either. The identity stamps `gh-as-agent` writes are for
 humans reading GitHub, not for delivery decisions — the only thing standing
 between two agents and an infinite ping-pong is the throttle above.
+
+The one exception is a push trigger's optional **producer filter** ("Pushed
+by" on the trigger form, `pushedBy` on the trigger). A data-flow hand-off drawn
+in the Flow editor gets it automatically, naming its upstream agent. The
+platform records who pushed what when an agent pushes through `gh-as-agent
+push`/`pr`, and a filtered trigger then fires only on pushes by the named agents
+of its own Agent Team, or by a pool instance of a named role. Any other push is
+logged as **dropped (pushed by `x`, not in producer filter)**. A push by a
+human, a raw `git push` or a branch deletion is logged as **dropped (producer
+unknown)**. An empty filter means any push.
 
 ### Reading a "my agent never woke up" case
 
@@ -200,8 +207,7 @@ A repository is polled only if **all** are true:
   as *this agent only*,
 - that environment — for an agent's own repository, the agent's environment —
   carries a **GitHub token** whose file is readable, and
-- at least one **enabled** agent has an **enabled** `github-event` trigger on it
-  (internal-channel label listeners do not count — they never need the poller).
+- at least one **enabled** agent has an **enabled** `github-event` trigger on it.
 
 A repository that fails any of these produces **no rows at all** — not even
 *nobody's listening*, which is reported only for a repository that *is* polled.
@@ -224,7 +230,7 @@ cycle (~30 s) old.
 | **Listening** | The poller fetches this repository's events every cycle. *Waiting for first poll* right after a start or a change. | Nothing. |
 | **Failing** | The poller tries, but GitHub refuses or does not answer. The row shows the last error (HTTP status and message), since when, the number of failed attempts and the next retry. **Rate limited** is a failing variant. | Bad credentials (401) or no access (403/404): fix or rotate the token on **GitHub Tokens**. Rate limited: wait for the retry. |
 | **Not listening — no token** | No environment listing the repository — nor, for an agent's own repository, the agent's environment — has a usable GitHub token: none is set, the id is invalid, or the token file is missing or empty. | Set a token on the environment's **Repositories** tab, or re-add it on **GitHub Tokens**. |
-| **Not listening — no trigger** | A token exists, but no enabled agent has an enabled trigger on it. Often intentional. Ignored triggers are named with the reason (agent disabled, trigger disabled, internal channel, no events). | Add or enable a trigger on the agent's **Triggers** tab — only if you want events. |
+| **Not listening — no trigger** | A token exists, but no enabled agent has an enabled trigger on it. Often intentional. Ignored triggers are named with the reason (agent disabled, trigger disabled, no events). | Add or enable a trigger on the agent's **Triggers** tab — only if you want events. |
 | **Not listening — repository not attached** | Only a trigger names it: no environment lists it and no agent has it attached (e.g. it was removed from the agent). | Add it to the environment's **Repositories** or attach it to the agent. |
 | **Not listening — unsupported repository** | The URL is not a GitHub `owner/name` repository (another host, or a typo in a trigger). | Correct the URL or the trigger's repository. |
 

@@ -10,6 +10,14 @@
 > made auditable through the platform's own event log instead. Free-form
 > agent↔agent messaging stays the deferred horizon of this same concept (§12,
 > P4).
+>
+> **Updated by #2578.** The internal label transport (#1172 — `aee-emit`,
+> `POST /internal/flow-emit`, `orchestrator/flow-emit.js`, `transport: 'internal'`)
+> this concept contrasts itself with has been removed; every label hand-off is
+> now poller-delivered and the label on GitHub is the single source of truth
+> (`docs/internal-channels-concept.md`). References to it below are design
+> history — the file/line pointers into it no longer resolve. `aee-wake` /
+> `POST /internal/wake-agent` are unaffected.
 
 ## 1. Problem
 
@@ -23,8 +31,8 @@ GitHub artifact — and the anchoring is **enforced, not incidental**:
   hand-off — the conversation throttle (`THROTTLE_THRESHOLD = 5` per hour per
   `(agent, conversationKey)`, `orchestrator/github-poller.js:57-58`) and the
   burst digest (`BURST_CAP = 3` per poll, `github-poller.js:85`).
-- **Internal channels (#1172, shipped).** The *delivery* is already internal,
-  but the *model* still requires a label on a work item:
+- **Internal channels (#1172, shipped then; removed by #2578).** The *delivery*
+  was internal, but the *model* still required a label on a work item:
   `validateEmitRequest` rejects a body without a non-empty `label` **and** a
   `target: {kind: 'issue'|'pr', number}` with a positive integer number
   (`orchestrator/flow-emit.js:29-64`); `matchInternalListeners` only matches
@@ -48,7 +56,7 @@ words along** — a label is one bit of vocabulary, not a message.
 | Agent-wide serialization | `WorkspaceGate` (`agent-entrypoint.py:3976`), acquired in `_execute` (`:5856`) | ✅ the run must pass through it |
 | Blast-radius runaway backstop | `TriggerBackstop` (#611, `agent-entrypoint.py:3899-3973`), evaluated inside `_execute_guarded` | ✅ the AC-6 answer |
 | Untrusted-payload prompt framing | the `<external-event source="github">` block (`agent-entrypoint.py:6094-6106`) | ✅ the shape the note reuses |
-| Internal transport + event-log row | `POST /internal/flow-emit` (`orchestrator/orchestrator.js:11854-11918`) | ✅ the mould, not the endpoint |
+| Internal transport + event-log row | `POST /internal/flow-emit` (`orchestrator/orchestrator.js:11854-11918`; removed by #2578) | ✅ the mould, not the endpoint |
 | Cross-agent rendezvous over the same queue | `loop-verify` (#933, `agent-entrypoint.py:5436-5443`) | ✅ evidence the substrate is stable |
 | **Label-free, artifact-free wake + flow edge** | — | ❌ **this concept** |
 | **Free-form agent→agent message channel** | — | ❌ deferred (§12 P4) |
@@ -205,17 +213,15 @@ silently wrong prompt, not an error. The clause takes the form:
 > hand off directly to **Code Reviewer**: run
 > `aee-wake --to code-reviewer --note "Look closely at the migration in step 3."`
 
-and — mirroring the internal-channel hard rule already appended for
-`aee-emit` (`process-template.js:878-881`) — one tail paragraph, because the
-failure mode is equally invisible:
+and one tail paragraph (mirroring the hard rule once appended for the removed
+`aee-emit`), because the failure mode is invisible:
 
 > A direct hand-off is delivered inside the platform: always announce it with
 > `aee-wake`, never by applying a label — there is no label on this edge, and
 > nothing on GitHub will show that the hand-off did or did not happen.
 
 The wiring context (`outcomesWiringContext`, `process-template.js:732-776`)
-gains one field alongside `consumersByLabel` / `reviewers` / `gateLabels` /
-`internalLabels`: a `roleId → displayName` map so the clause can name the
+gains one field alongside `consumersByLabel` / `reviewers` / `gateLabels`: a `roleId → displayName` map so the clause can name the
 target in human words rather than echoing a slug.
 
 Two further authorities know the action-type enum and must learn the new
@@ -524,7 +530,6 @@ from every neighbour it could be confused with:
 | Neighbour | Today | `on: 'wake'` |
 |---|---|---|
 | label hand-off | blue `#3b82f6`, solid, label chip | new hue, **`⇥ <Target>`** chip — no label token |
-| internal label channel (#1174) | its family hue, dotted `2 3` (`flow-graph-render.js:1974-1979`) | **solid** — dotted already means "internal transport of a label" |
 | outcome-keyed label edge (#828) | amber `#eab308` (`:1893`) | not amber |
 | data-flow / dependency | green `#22c55e` / red `#ef4444` dashed (`:29-30`) | neither |
 | `gate: 'human'` | red `#dc2626` solid (`:35`) | not red |
@@ -566,7 +571,7 @@ becomes visible to a human*:
 
 | Use | Mechanism | Because |
 |---|---|---|
-| A human tracks this state on the issue/PR (`stage:approved`) | **#1172 label-internal** | The label is the human-readable process state; the internal transport only makes its delivery reliable. |
+| A human tracks this state on the issue/PR (`stage:approved`) | **label hand-off** (poller-delivered) | The label is the human-readable process state and the single source of truth; a person re-applying it wakes the listener too. |
 | Pure coordination with no natural home on a work item | **`wakeAgent`** (this concept) | No label to invent, no artifact to hang it on; the event log carries the audit. |
 | The producer's output *is* a PR/issue and the reviewer reacts to it | **#1480 outcome `openPr`/`openIssue`** + a channel | The artifact is the hand-off. |
 
@@ -588,12 +593,12 @@ and the git-state/nudge half of its dialog has no analogue because this adds a
 |---|---|---|
 | **P1** | Delivery + schema. `wakeAgent` in `ACTION_TYPES` + `validateOutcomes`; **all five whitelists/remaps of §4.2** + the `label-suffix.js` non-regression; `orchestrator/wake-agent.js` + `POST /internal/wake-agent`; `aee-wake` + its three `Dockerfile` lines; the `wake-agent` `_handle_pending_entry` branch routed through `_execute`; the marker widening (§9); the prompt projection (§4.3). **Both copies** of `process-template-format.md` in the same commit (byte-parity guard: `admin-console/api/flow-copilot.test.js:31-38`). Edges hand-editable on `triggers.json` / the bundle. | — |
 | **P2** | Flow Editor: `on: 'wake'` through `process-graph.js` → `unified-graph.js` (incl. `edgeId`) → `flow-graph-render.js` (style, legend key list, edge branch), `PROCESS_CREATE_TYPES`, the edge-chooser tile + `wiring-engine.js` writer, the Edit-hand-off dialog, the `RoutingSection` action type, and the derived consumer trigger written by the reconciler. | P1 |
-| **P3** | Defaults, lints & observability polish: the event-log row rendering + both pending-queue projections (§7), the outcome suggester + Flow-Copilot prompt enum (§4.3), an `outcome-without-consumer` sibling for a `wakeAgent` whose target is disabled, an info lint suggesting a direct hand-off for a pure agent→agent label edge whose label nobody reads, and the loop-safety verdict from §8 / Q1. **Shipped in #2032**; the four lints it added are `wake-target-disabled`, `wake-target-unresolved`, `wake-without-note` and `direct-handoff-candidate` (see §12.1). | P1, P2 |
+| **P3** | Defaults, lints & observability polish: the event-log row rendering + both pending-queue projections (§7), the outcome suggester + Flow-Copilot prompt enum (§4.3), an `outcome-without-consumer` sibling for a `wakeAgent` whose target is disabled, an info lint suggesting a direct hand-off for a pure agent→agent label edge whose label nobody reads, and the loop-safety verdict from §8 / Q1. **Shipped in #2032**; the four lints it added are `wake-target-disabled`, `wake-target-unresolved`, `wake-without-note` and `direct-handoff-candidate` (see §12.1; the last was retired by #2578). | P1, P2 |
 | **P4** *(deferred)* | Room-based free-form agent↔agent messaging — only if a need beyond wake+note appears. | revisit after P1–P3 |
 
 ### 12.1 The P3 lints, and why each is scoped the way it is
 
-All four live in `computeLints` (`admin-console/api/process-graph.js`) and are
+The first three live in `computeLints` (`admin-console/api/process-graph.js`) and are
 advisory, like every lint there.
 
 | Code | Severity | Fires when | Deliberately does NOT fire when |
@@ -601,7 +606,7 @@ advisory, like every lint there.
 | `wake-target-disabled` | warning | every `wake-agent` trigger on the target is `enabled: false` — `_execute_wake_agent` takes the first *enabled* one, so the entry is dequeued and dropped with nothing on GitHub to show it | the target has **no** `wake-agent` trigger at all: that listener is DERIVED (`expandWakeHandoffs` / `reconcileTeamWakeHandoffs`), so its absence in a draft or an imported bundle is the reconciler's business at materialise time, not an authoring error. Warning about it would fire on every draft that has ever drawn a hand-off. This is why the lint is narrower than the ticket's phrase "whose target is disabled" — agent-level `enabled` is not threaded into the graph at all, and the *flow-visible* form of "cannot receive it" is the switched-off listener |
 | `wake-target-unresolved` | warning | the action names an unknown role, a human role, or its own role — the three cases §10 draws no edge for, so the outcome exists, the canvas shows nothing, and delivery refuses it with a 404/403 the author never sees | ever, once `validateOutcomes` has an `agents` source: it rejects all three at authoring time, so a surviving one is imported or hand-edited data. Suppresses `wake-without-note` on the same action — a target that cannot receive anything makes the note question moot |
 | `wake-without-note` | info | the action carries no note (§13 Q3) | a note is present. Never an error: a required field invites `"done"` |
-| `direct-handoff-candidate` | info | an agent→agent label edge that *already* opted out of GitHub delivery (`transport: 'internal'`) whose label has exactly one producer, one consumer, and appears on no other edge — then the label token only routes this one pair | the label is a gate, a brake, consumed by a named human, has a second producer or consumer, or is still poller-delivered. That last one is the ladder: `internal-channel-candidate` → this. Both never fire on the same edge, and the message states what a hand-off costs — the label and its `:wip`/`:completed` claim states stop appearing on the issue/PR, which is the §11 "a human tracks this state" row |
+| `direct-handoff-candidate` | — | **Retired by #2578.** It fired only on an agent→agent label edge that had already opted out of GitHub delivery (the removed internal transport) and whose label had one producer and one consumer. Every labelled edge is poller-delivered now — which is what lets a person wake the listener by re-applying the label — so suggesting "drop the label" would give that up | — |
 
 The label-name index behind the last one reads only the edge kinds whose
 `label` is a label *token* (`LABEL_EDGE_KINDS`): a `timer` edge's label is its
@@ -644,12 +649,12 @@ cross-team hand-off, and any rubric grading of the hand-off (#1481).
 | 4 | `to` names a wired same-team role; no implicit "next stage" routing | §6 |
 | 5 | A dedicated `POST /internal/wake-agent` + `aee-wake`, not an extended `flow-emit` | §5.2 |
 | 6 | One `source: 'internal'` event-log row per hand-off — plus the UI slice that makes it readable | §7 |
-| 7 | Same-team only, stricter than the #1172 path | §6 |
+| 7 | Same-team only, stricter than a label hand-off | §6 |
 | 8 | Runs through `_execute`, so it inherits `WorkspaceGate` **and** the #611 backstop | §5.3, §8, §9 |
 | 9 | Fail-loud on unknown target (exit `1`) — a deliberate divergence from `aee-emit`'s exit-`0` warning | §5.1 |
 | 10 | The queue stays unbounded; execution, not enqueueing, is what gets bounded | §9 |
 | 11 | New edge discriminator `on: 'wake'`; `handoff` is taken | §10 |
-| 12 | Coexists with #1172 and #1480; answers #1968's candidate question with "the wired edge" | §11 |
+| 12 | Coexists with label hand-offs and #1480; answers #1968's candidate question with "the wired edge" | §11 |
 | 13 | The #611 consumer-side backstop is the only limiter — no pair-level hand-off throttle; §7's row supplies the diagnosis instead | §8, §13 Q1 |
 | 14 | `note` stays optional, nudged by an `info` lint per edge rather than required | §13 Q3 |
 
@@ -666,11 +671,8 @@ cross-team hand-off, and any rubric grading of the hand-off (#1481).
 | `admin-console/api/process-template.js:1408-1501` | `buildMemberFromTemplate` — the role-id → member-id remap (`from` at `:1496-1498`) |
 | `admin-console/api/process-template.js:1104-1147` | `expandGithubChannels` — the only writer of a consumer's derived `triggers.json` entry |
 | `admin-console/api/label-suffix.js:76-80`, `:203-212` | the `setLabel` suffix stamper that must **not** touch `to` |
-| `orchestrator/flow-emit.js:29-135` | the pure-core mould: validate → match → entry shape |
-| `orchestrator/orchestrator.js:11854-11918` | the `/internal/flow-emit` route — the I/O + event-log pattern to mirror |
 | `orchestrator/orchestrator.js:7175-7192` | `enqueuePending` — unbounded, id-stamped, single-event-loop |
 | `orchestrator/orchestrator.js:1989`, `:799-800` | how a team is resolved from a config (`parentTeamId \|\| teamId`) |
-| `agent-image/scripts/aee-emit` | the CLI shape, exit codes, and the fail-closed wording to adapt |
 | `agent-image/scripts/agent-entrypoint.py:5394-5498` | `_handle_pending_entry` — where the `wake-agent` branch goes |
 | `agent-image/scripts/agent-entrypoint.py:5502-5563` | `_execute_handover_dm` — the precedent **not** to copy (no gate, no backstop) |
 | `agent-image/scripts/agent-entrypoint.py:5829-5911` | `_execute` / `_execute_guarded` — the chokepoint that holds both guards |
@@ -684,5 +686,5 @@ cross-team hand-off, and any rubric grading of the hand-off (#1481).
 | `admin-console/src/pages/process/connection-capabilities.js:42-46` | `PROCESS_CREATE_TYPES` — which tiles an agent→agent drag offers |
 | `admin-console/api/flow-copilot.test.js:31-38` | the byte-parity guard over the two `process-template-format.md` copies |
 | `docs/agent-outcomes-concept.md` §3, §6 | the outcomes model `wakeAgent` extends |
-| `docs/internal-channels-concept.md` §4 | the internal transport this reuses, and what it required that this drops |
+| `docs/internal-channels-concept.md` | the retired internal transport (#2578) this was contrasted with |
 | `docs/cli-contract.md` §2-§4 | the `--help` / `--json` / exit-code contract `aee-wake` must honour |

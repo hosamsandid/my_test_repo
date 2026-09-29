@@ -342,7 +342,7 @@ test('lint: a brake label emitted by an agent trips NOTHING', () => {
   assert.ok(!g.lints.some(l => l.code === 'dead-end-emitter'));
 });
 
-test('lint: a clean wired pair produces no problem lints; poller delivery gets the internal hint', () => {
+test('lint: a clean wired pair produces no lints at all', () => {
   const g = buildProcessGraph([
     { id: 'a', emits: ['dispatch'], triggers: [{ id: 't', type: 'github-event', from: 'humans', events: ['x'] }] },
     // The listener carries its derived claim (#958): since `unclaimed-listener`
@@ -351,34 +351,23 @@ test('lint: a clean wired pair produces no problem lints; poller delivery gets t
     { id: 'b', triggers: [{ id: 't', type: 'github-event', from: 'any-except-self', labelFilter: 'dispatch',
       claim: { remove: 'dispatch', add: 'dispatch:wip' } }] },
   ]);
-  // #1175: a poller-delivered agent→agent hand-off is not a defect, but it is
-  // no longer silent either — the one advisory hint suggests internal delivery.
-  assert.deepEqual(g.lints.map((l) => `${l.code}:${l.severity}`), ['internal-channel-candidate:info']);
+  // A poller-delivered agent→agent label is the normal hand-off (#2578): neither
+  // the retired `internal-channel-candidate` nor `direct-handoff-candidate` hint
+  // fires on it any more.
+  assert.deepEqual(g.lints, []);
 });
 
-test('#1175: an internal-transport listener silences the internal-channel hint', () => {
+test('#2578: a legacy transport field is inert — no internal hint, no edge/triggerView field', () => {
   const g = buildProcessGraph([
     { id: 'a', emits: ['dispatch'], triggers: [] },
-    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'dispatch', transport: 'internal',
+    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'dispatch', transport: 'internal',
       claim: { remove: 'dispatch', add: 'dispatch:wip' } }] },
   ]);
   assert.ok(!g.lints.some((l) => l.code === 'internal-channel-candidate'));
-  // #2032 makes this exact fixture the NEXT rung's candidate: a single-pair
-  // label that already opted out of GitHub delivery is a label nobody reads,
-  // so the direct-hand-off hint takes over where the internal one stops. The
-  // two are a ladder — asserted here so neither can start firing together.
-  assert.deepEqual(g.lints.map((l) => `${l.code}:${l.severity}`),
-    ['direct-handoff-candidate:info']);
-});
-
-test('#1175: gate and orphan label edges never raise the internal-channel hint', () => {
-  const g = buildProcessGraph([
-    { id: 'b', triggers: [
-      { id: 'tg', type: 'github-event', labelFilter: 'approved', claim: { remove: 'approved', add: 'approved:wip' } },
-      { id: 'to', type: 'github-event', labelFilter: 'nobody-sets-this', claim: { remove: 'nobody-sets-this', add: 'nobody-sets-this:wip' } },
-    ] },
-  ], { labels: [{ name: 'approved', humanGate: true }] });
-  assert.ok(!g.lints.some((l) => l.code === 'internal-channel-candidate'));
+  const e = g.edges.find(x => x.to === 'b' && x.label === 'dispatch');
+  assert.equal(e.transport, undefined, 'the edge carries no transport');
+  const nb = g.nodes.find(n => n.id === 'b');
+  assert.equal(nb.triggers.find(t => t.id === 't').transport, undefined, 'triggerView drops it');
 });
 
 test('github channel: derived channel triggers do not produce label/event edges', () => {
@@ -1366,22 +1355,6 @@ test('#1008: derived channel/data-flow triggers are exempt from the raw-trigger 
     'only the hand-authored deviation is flagged');
 });
 
-// ── #1174: internal-channel transport rides on label-listener edges ──────────
-
-test('#1174: a transport-internal listener projects transport onto its edge and triggerView', () => {
-  const g = buildProcessGraph([
-    { id: 'a', emits: ['ready'], triggers: [] },
-    { id: 'b', triggers: [{ id: 't', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready', transport: 'internal' }] },
-    { id: 'c', triggers: [{ id: 'u', type: 'github-event', events: ['issues.labeled'], labelFilter: 'ready' }] },
-  ]);
-  const eb = g.edges.find(x => x.to === 'b' && x.label === 'ready');
-  const ec = g.edges.find(x => x.to === 'c' && x.label === 'ready');
-  assert.equal(eb.transport, 'internal');
-  assert.equal(ec.transport, undefined);
-  const nb = g.nodes.find(n => n.id === 'b');
-  assert.equal(nb.triggers.find(t => t.id === 't').transport, 'internal');
-});
-
 // ── #1197: a plain label a person consumes is a delivery, not a gate/brake ────
 
 test('#1197: a plain label consumed by a human draws a delivery edge (kind label, handoff human, no brake) + touchpoint', () => {
@@ -1622,73 +1595,10 @@ test('#2032: wake-without-note is the Q3 answer — info, never a requirement', 
   assert.ok(!lintCodes(handoffGraph({ note: 'a sentence' })).includes('wake-without-note'));
 });
 
-test('#2032: direct-handoff-candidate needs a single pair AND internal delivery', () => {
-  const mk = (over = {}) => buildProcessGraph([
-    { id: 'a', emits: ['dispatch'], triggers: [] },
-    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'dispatch',
-      transport: 'internal', claim: { remove: 'dispatch', add: 'dispatch:wip' } }] },
-    ...(over.extra || []),
-  ], over.opts);
-  assert.ok(lintCodes(mk()).includes('direct-handoff-candidate'));
-  // A second producer means the label is a shared vocabulary, not this pair's
-  // private plumbing.
-  assert.ok(!lintCodes(mk({ extra: [{ id: 'c', emits: ['dispatch'], triggers: [] }] }))
-    .includes('direct-handoff-candidate'));
-  // A second consumer, likewise.
-  assert.ok(!lintCodes(mk({ extra: [{ id: 'd', triggers: [{ id: 't2', type: 'github-event',
-    labelFilter: 'dispatch', transport: 'internal', claim: { remove: 'dispatch', add: 'dispatch:wip' } }] }] }))
-    .includes('direct-handoff-candidate'));
-});
-
-test('#2032: direct-handoff-candidate never fires on a label a person touches', () => {
-  // The §11 "a human tracks this state on the issue/PR" row: a gate, a brake
-  // and a plain label a named human consumes each mean somebody besides the
-  // pair reads it, so the label is not plumbing to be removed.
-  const pair = (label, opts) => buildProcessGraph([
-    { id: 'a', emits: [label], triggers: [] },
-    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: label,
-      transport: 'internal', claim: { remove: label, add: `${label}:wip` } }] },
-  ], opts);
-  assert.ok(!lintCodes(pair('approved', { labels: [{ name: 'approved', humanGate: true }] }))
-    .includes('direct-handoff-candidate'));
-  assert.ok(!lintCodes(pair('hold', { labels: [{ name: 'hold', brake: true }] }))
-    .includes('direct-handoff-candidate'));
-  assert.ok(!lintCodes(pair('shipped', {
-    humans: [{ id: 'lead', name: 'Lead', consumes: [{ label: 'shipped' }] }],
-  })).includes('direct-handoff-candidate'));
-});
-
-test('#2032: a poller-delivered pair gets the internal hint, not the hand-off one', () => {
-  // The ladder: poller → internal → direct. Suggesting "drop the label" to a
-  // flow that has not even opted out of GitHub delivery skips a step, and
-  // poller delivery is also what lets a HUMAN wake the listener by hand.
-  const g = buildProcessGraph([
-    { id: 'a', emits: ['dispatch'], triggers: [] },
-    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'dispatch',
-      claim: { remove: 'dispatch', add: 'dispatch:wip' } }] },
-  ]);
-  assert.deepEqual(lintCodes(g), ['internal-channel-candidate']);
-});
-
-test('#2032: a cron expression can never be mistaken for a label name', () => {
-  // A `timer` edge's `label` is its cron string and a `webhook` edge's is a
-  // description, so a label-name index that read every edge would let an
-  // unrelated string claim the label and silence the hint.
-  const g = buildProcessGraph([
-    { id: 'a', emits: ['dispatch'], triggers: [{ id: 'c', type: 'cron', cron: 'dispatch' }] },
-    { id: 'b', triggers: [{ id: 't', type: 'github-event', labelFilter: 'dispatch',
-      transport: 'internal', claim: { remove: 'dispatch', add: 'dispatch:wip' } }] },
-  ]);
-  assert.ok(g.edges.some(e => e.kind === 'timer' && e.label === 'dispatch'),
-    'the fixture really does put the label string on a timer edge');
-  assert.ok(lintCodes(g).includes('direct-handoff-candidate'));
-});
-
 test('#2032: computeLints still works without a classifier (nodes+edges callers)', () => {
   // The signature is `computeLints(nodes, edges, classifier?)`; the new lints
   // read `isBrake`, which the fallback classifier must therefore also provide.
   const nodes = [{ id: 'a', triggers: [] }, { id: 'b', triggers: [] }];
-  const edges = [{ from: 'a', to: 'b', label: 'dispatch', kind: 'agent', triggerId: 't', transport: 'internal' }];
+  const edges = [{ from: 'a', to: 'b', label: 'hold', kind: 'agent', triggerId: 't' }];
   assert.doesNotThrow(() => computeLints(nodes, edges));
-  assert.ok(computeLints(nodes, edges).some(l => l.code === 'direct-handoff-candidate'));
 });

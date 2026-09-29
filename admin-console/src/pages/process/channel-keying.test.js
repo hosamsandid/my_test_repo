@@ -122,31 +122,14 @@ test('upsertChannel keeps the claim opt-out independent per label sibling', () =
   assert.equal('autoClaim' in list.find(c => c.label === 'b'), false);
 });
 
-test('#1194: upsertChannel persists transport:internal only on a labelled, non-human channel', () => {
-  // Labelled, agent-set → carried.
+test('#2578: upsertChannel drops a legacy transport key instead of persisting it', () => {
+  // A caller passing transport (a stale client) writes no transport field.
   assert.deepEqual(
     upsertChannel([], { artifact: 'pr', from: 'rev', label: 'approved', transport: 'internal' }),
-    [{ artifact: 'pr', from: 'rev', label: 'approved', transport: 'internal' }]);
-  // Unlabelled → dropped (artifact-open stays poller-delivered).
-  assert.deepEqual(
-    upsertChannel([], { artifact: 'pr', from: 'rev', transport: 'internal' }),
-    [{ artifact: 'pr', from: 'rev' }]);
-  // Human gate → dropped (a person applies the label on GitHub).
-  assert.deepEqual(
-    upsertChannel([], { artifact: 'pr', from: 'rev', label: 'approved', gate: 'human', transport: 'internal' }),
-    [{ artifact: 'pr', from: 'rev', label: 'approved', gate: 'human' }]);
-  // 'github' (the default) is represented by absence, no noise on the port.
-  assert.deepEqual(
-    upsertChannel([], { artifact: 'pr', from: 'rev', label: 'approved', transport: 'github' }),
     [{ artifact: 'pr', from: 'rev', label: 'approved' }]);
-});
-
-test('#1194: upsertChannel toggles transport in place; re-drawing without it clears the flag', () => {
-  const on = upsertChannel([{ artifact: 'pr', from: 'rev', label: 'go' }],
-    { artifact: 'pr', from: 'rev', label: 'go', transport: 'internal' });
-  assert.equal(on.length, 1);
-  assert.equal(on[0].transport, 'internal');
-  const off = upsertChannel(on, { artifact: 'pr', from: 'rev', label: 'go' });
-  assert.equal(off.length, 1);
-  assert.equal('transport' in off[0], false, 'switching back to GitHub clears the flag, not sets github');
+  // Re-saving a legacy port that still carries it (e.g. `{ ...c, autoClaim }`)
+  // rewrites the entry without the key.
+  const out = upsertChannel([{ artifact: 'pr', from: 'rev', label: 'go', transport: 'internal' }],
+    { artifact: 'pr', from: 'rev', label: 'go', transport: 'internal', autoClaim: false });
+  assert.deepEqual(out, [{ artifact: 'pr', from: 'rev', label: 'go', autoClaim: false }]);
 });

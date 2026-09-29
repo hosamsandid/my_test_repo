@@ -926,6 +926,21 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           }}><X size={16} /></button>
         </div>
       )}
+      {imported && Array.isArray(imported.graph?.coercions) && imported.graph.coercions.length > 0 && (
+        <div style={{
+          marginBottom: 'var(--eb-space-3)', padding: 'var(--eb-space-2) var(--eb-space-3)', flexShrink: 0,
+          background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)',
+          fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-1)' }}>
+            <AlertTriangle size={14} style={{ color: 'var(--eb-status-warning)' }} />
+            <strong>Auto-repaired on import ({imported.graph.coercions.length})</strong>
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-4)' }}>
+            {imported.graph.coercions.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
+        </div>
+      )}
       {importError && (
         <div style={{ marginBottom: 'var(--eb-space-3)', color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{importError}</div>
       )}

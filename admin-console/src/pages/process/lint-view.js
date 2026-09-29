@@ -30,7 +30,6 @@ const LINT_INFO = {
   'wake-target-unresolved': { title: 'Hand-off names no reachable agent', fix: 'Point the hand-off at another agent on this team — a person has no queue, and an agent cannot hand off to itself.' },
   'wake-target-disabled': { title: 'Hand-off target cannot receive it', fix: "Re-enable the target's hand-off input, or the wake is queued and then dropped." },
   'wake-without-note': { title: 'Hand-off carries no context', fix: 'Add a sentence of context — it is what the target and the event log get instead of a label.' },
-  'direct-handoff-candidate': { title: 'Label only routes one pair', fix: 'Consider a direct hand-off instead — unless a person tracks this label on the issue/PR.' },
 };
 
 const SEVERITY_WORD = { error: 'Error', warning: 'Warning', info: 'Info' };

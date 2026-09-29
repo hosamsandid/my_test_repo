@@ -36,7 +36,6 @@ const {
 } = require("./knowledge-store");
 const knowledgeSync = require("./knowledge-sync");
 const { createKeyedMutex } = require("./keyed-mutex");
-const flowEmit = require("./flow-emit");
 const wakeAgent = require("./wake-agent");
 const pluginEvent = require("./plugin-event");
 const pluginScopeToken = require("./plugin-scope-token");
@@ -106,6 +105,7 @@ const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assessConversionEligibility, planTeamConversion, planTeamOfOneCreation } = require("./team-conversion");
 const teamOfOneMigration = require("./team-of-one-migration");
+const pushAttribution = require("./push-attribution");
 const { nextAvailableAgentId, suggestFreeAgentId } = require("./agent-id-resolution");
 const { syncAgentRepoPlan, summarizeRepoResults, repoDivergence } = require("./repo-sync");
 // Agent-scoped repositories (#2067): a repository attached to ONE agent,
@@ -201,6 +201,7 @@ const { buildTicketLedger } = require("./ticket-reconciler");
 const ticketReconcileSweep = require("./ticket-reconcile-sweep");
 const agentPool = require("./agent-pool");
 const flowSupervisor = require("./flow-supervisor");
+const flowBoard = require("./flow-board");
 const recurringPoolSource = require("./recurring-pool-source");
 const predictedPaths = require("./predicted-paths");
 const poolInstanceLanes = require("./pool-instance-lanes");
@@ -1481,6 +1482,46 @@ function backfillTriggerHorizonStamps() {
   }
 }
 
+// #2571 AC6: derived data-flow triggers (Flow-editor hand-offs, `dataFlow:
+// true`) that predate the "pushed by agent" producer filter get one naming
+// exactly their upstream, so a push by another role, another Agent Team on the
+// same repo, a human or a knowledge-base sync stops waking them. Manually-
+// authored push triggers (no `dataFlow` marker) are never touched, nor is a
+// trigger that already carries a `pushedBy` (even an explicit `[]` = any push).
+// Idempotent; runs on every start.
+function migrateDataFlowProducerFilters() {
+  const teamCache = new Map();
+  const teamOfAgent = (agentId) => {
+    if (!teamCache.has(agentId)) teamCache.set(agentId, pushAttribution.teamOf(loadAgentConfig(agentId)));
+    return teamCache.get(agentId);
+  };
+  let migrated = 0;
+  for (const id of listAgentIds()) {
+    const p = controlOrPoolPath(id, "triggers.json");
+    if (!fs.existsSync(p)) continue;
+    const teamId = teamOfAgent(id);
+    if (!teamId) continue;
+    let triggers, mtimeIso;
+    try {
+      triggers = JSON.parse(fs.readFileSync(p, "utf8"));
+      mtimeIso = fs.statSync(p).mtime.toISOString();
+    } catch (err) {
+      console.error(`[Orchestrator] Producer-filter migration: skipping ${id}: ${err.message}`);
+      continue;
+    }
+    const { triggers: next, changed } = pushAttribution.migrateDataFlowProducerFilter(triggers, {
+      memberId: id, teamId, teamOfAgent, horizon: mtimeIso,
+    });
+    if (changed.length === 0) continue;
+    saveTriggers(id, next);
+    migrated++;
+    console.log(`[Orchestrator] Producer filter set on data-flow trigger(s) of ${id}: ${changed.join(", ")}`);
+  }
+  if (migrated > 0) {
+    console.log(`[Orchestrator] Producer-filter migration updated ${migrated} agent(s)`);
+  }
+}
+
 // Resolve the owning (human) Team for a newly created resource. An explicit id
 // must reference an existing team; absence falls back to the default team.
 function resolveOwnerTeamId(teamId) {
@@ -1778,7 +1819,7 @@ function _flowGithubGetJson(apiPath, token) {
 
 // #1897 AC8: best-effort resolution of an issue/PR title for a synthetic
 // internal-delivery event. The trigger notice shows `[#N](url): <title>` when
-// the title is known; internal-transport (flow-emit) and plugin-fast-path
+// the title is known; label-fast-path (plugin / Flow Supervisor)
 // deliveries synthesize a minimal `{number, html_url}` subject with NO title
 // (only poller-delivered PRs are enriched today), so we fetch it here with the
 // repo's team token — exactly as the poller does for PRs. Never throws and
@@ -1789,8 +1830,8 @@ function _flowGithubGetJson(apiPath, token) {
 // strict `parseCloses` (closes/fixes/resolves #N + `issue-N` branch) costs no
 // extra call — the same "no second request" the poller's `_enrichPullRequestPayload`
 // relies on. `closesIssues` matters for #2114 admission control: `entryTicketRef`
-// keys "same-ticket" off it, so a synthetic PR event built by flow-emit.js /
-// github-label-fastpath.js MUST carry it or an internal/label-fast-path
+// keys "same-ticket" off it, so a synthetic PR event built by
+// github-label-fastpath.js MUST carry it or a label-fast-path
 // reviewer-wake mis-keys as a new ticket and deadlocks at `wipLimit: 1`. Using
 // the STRICT closing-keyword parse here (not a loose issue↔PR link) is
 // deliberate: entry attribution must not merge two separate tickets.
@@ -1848,7 +1889,7 @@ async function wakeGithubLabelListeners({ repo, number, kind, label, actor, sour
     // Enqueue first (immediate wake), then arm the dedup marker so the
     // poller's later delivery of the same label is dropped.
     enqueuePending(l.agentId, {
-      ...flowEmit.buildPendingEntry(l.triggerId, key, ghEvent),
+      ...labelFastPath.buildPendingEntry(l.triggerId, key, ghEvent),
       source,
     });
     labelDedupMarkers.add({
@@ -2052,6 +2093,14 @@ function _flowTeamMembers(teamId) {
       // run legitimate — the detector drops the output-missing expectation.
       outcomes: cfg.outcomes || null,
       triggers,
+      // Flow Control board (#2573): the consumed channels name hand-offs, and a
+      // pool instance must count as its role (additive — the anomaly detector
+      // and the ticket ledger ignore these).
+      channels: Array.isArray(cfg.channels) ? cfg.channels : [],
+      poolInstance: !!cfg.poolInstance,
+      poolOf: cfg.poolOf || null,
+      poolItem: cfg.poolItem != null ? cfg.poolItem : null,
+      poolRepo: cfg.poolRepo || null,
     });
     if (cfg.environmentId) envIds.add(cfg.environmentId);
   }
@@ -2437,6 +2486,376 @@ async function computeTeamTicketLedger(teamId, { now = Date.now() } = {}) {
   };
 }
 
+// ── Flow Control board (#2573, concept Amendment 3) ─────────────────────────
+//
+// The lean "who is working on what" board. Unlike the ticket ledger above
+// (≈7 GitHub calls per open PR, sequential), this is ONE list sweep per repo —
+// open issues, open PRs, recently closed items, and a single GraphQL query for
+// every open PR's mergeability/review/check rollup — all repos in parallel.
+// Everything else comes from the platform's own logs (event log, PR-link log,
+// running sessions), so the reference team (~60 open PRs) renders in well
+// under 2 s. The ledger and `/tickets` are untouched (#2117 still reads them).
+
+// A GitHub GraphQL POST, GET-helper's sibling. `/api/v3` (GHE) maps to
+// `/api/graphql`; api.github.com to `/graphql`.
+function _flowGithubGraphql(query, variables, token) {
+  const { resolveGithubApiTarget } = require("./github-api-base");
+  const api = resolveGithubApiTarget();
+  const gqlPath = /\/v3$/.test(api.basePath) ? api.basePath.replace(/\/v3$/, "/graphql") : `${api.basePath}/graphql`;
+  const payload = JSON.stringify({ query, variables });
+  return new Promise((resolve, reject) => {
+    const req = api.transport.request(
+      {
+        hostname: api.hostname,
+        port: api.port,
+        path: gqlPath,
+        method: "POST",
+        headers: {
+          "User-Agent": "agent-studio-poller",
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload),
+          Authorization: `Bearer ${token}`,
+        },
+        timeout: 15_000,
+      },
+      (resp) => {
+        let body = "";
+        resp.on("data", (c) => (body += c));
+        resp.on("end", () => {
+          if (resp.statusCode !== 200) return reject(new Error(`GitHub graphql → HTTP ${resp.statusCode}`));
+          try {
+            const json = JSON.parse(body);
+            if (!json || !json.data) return reject(new Error("GitHub graphql → no data"));
+            resolve(json.data);
+          } catch (err) {
+            reject(new Error(`GitHub graphql → bad JSON: ${err.message}`));
+          }
+        });
+      },
+    );
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error("GitHub graphql → timeout")));
+    req.end(payload);
+  });
+}
+
+const FLOW_BOARD_PR_STATUS_QUERY = `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:100,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number mergeable reviewDecision commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}`;
+
+// Up to `maxPages` pages of a list endpoint, stopping at the first short page.
+async function _flowGithubGetPages(apiPath, token, maxPages) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const sep = apiPath.includes("?") ? "&" : "?";
+    const batch = await _flowGithubGetJson(`${apiPath}${sep}per_page=100&page=${page}`, token);
+    if (!Array.isArray(batch)) break;
+    out.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return out;
+}
+
+const _labelList = (labels) =>
+  (Array.isArray(labels) ? labels : []).map((l) => (typeof l === "string" ? l : l && l.name)).filter(Boolean);
+
+// One repo's snapshot in the board's input shape. Throws only when the repo is
+// unreachable altogether (the open-issues list failed); the PR list, closed
+// list and GraphQL rollup each degrade on their own.
+async function _flowBoardSweepRepo(repo, token, { sinceIso }) {
+  const [owner, name] = repo.split("/");
+  const seg = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+  const warnings = [];
+  const [openIssues, openPrs, closed, gql] = await Promise.all([
+    _flowGithubGetPages(`${seg}/issues?state=open&sort=updated&direction=desc`, token, 3),
+    _flowGithubGetPages(`${seg}/pulls?state=open&sort=updated&direction=desc`, token, 2).catch((err) => {
+      warnings.push(`${repo}: pulls: ${err.message}`);
+      return [];
+    }),
+    _flowGithubGetPages(`${seg}/issues?state=closed&sort=updated&direction=desc&since=${encodeURIComponent(sinceIso)}`, token, 2).catch((err) => {
+      warnings.push(`${repo}: closed items: ${err.message}`);
+      return [];
+    }),
+    _flowGithubGraphql(FLOW_BOARD_PR_STATUS_QUERY, { owner, name }, token).catch((err) => {
+      warnings.push(`${repo}: PR status: ${err.message}`);
+      return null;
+    }),
+  ]);
+  const status = new Map();
+  const nodes = gql && gql.repository && gql.repository.pullRequests && gql.repository.pullRequests.nodes;
+  for (const n of Array.isArray(nodes) ? nodes : []) {
+    if (!n || n.number == null) continue;
+    const c = n.commits && n.commits.nodes && n.commits.nodes[0];
+    status.set(Number(n.number), {
+      mergeable: n.mergeable || null,
+      reviewDecision: n.reviewDecision || null,
+      checks: flowBoard.checksState(c && c.commit && c.commit.statusCheckRollup && c.commit.statusCheckRollup.state),
+    });
+  }
+  const issues = [];
+  const prs = [];
+  for (const it of [...openIssues, ...closed]) {
+    if (!it || it.number == null) continue;
+    const base = {
+      repo, number: it.number, title: it.title || "", url: it.html_url || null,
+      state: it.state === "closed" ? "closed" : "open", labels: _labelList(it.labels),
+      body: typeof it.body === "string" ? it.body : "", author: (it.user && it.user.login) || null,
+      createdAt: it.created_at || null, updatedAt: it.updated_at || null, closedAt: it.closed_at || null,
+    };
+    if (!it.pull_request) issues.push(base);
+    else if (base.state === "closed") {
+      const mergedAt = it.pull_request.merged_at || null;
+      prs.push({ ...base, merged: !!mergedAt, mergedAt });
+    }
+    // Open PRs come from the pulls list below (it carries the head branch).
+  }
+  for (const p of openPrs) {
+    if (!p || p.number == null) continue;
+    const st = status.get(Number(p.number)) || {};
+    const body = typeof p.body === "string" ? p.body : "";
+    const headRef = (p.head && p.head.ref) || null;
+    prs.push({
+      repo, number: p.number, title: p.title || "", url: p.html_url || null, state: "open",
+      labels: _labelList(p.labels), body, author: (p.user && p.user.login) || null, draft: !!p.draft,
+      createdAt: p.created_at || null, updatedAt: p.updated_at || null, headRef,
+      closes: prEventsLog.parseCloses(body, headRef),
+      mergeable: st.mergeable || null, reviewDecision: st.reviewDecision || null, checks: st.checks || null,
+    });
+  }
+  return { issues, prs, warnings };
+}
+
+// Every running session of the team's agents (pooled and not). The registry is
+// what the agent itself pushes (#185) — an idle agent has an empty one.
+function _flowBoardSessions(members) {
+  const out = [];
+  for (const m of members) {
+    let reg = [];
+    try {
+      reg = JSON.parse(fs.readFileSync(agentStatePath(m.id, "running-sessions.json"), "utf8"));
+    } catch {
+      reg = [];
+    }
+    for (const session of Array.isArray(reg) ? reg : []) {
+      if (session && typeof session === "object") out.push({ agentId: m.id, session });
+    }
+  }
+  return out;
+}
+
+// How many of a pooled role's instances are still doing something: a running
+// session, or a dispatch already queued to it. The drain → off test.
+function _poolRoleBusyCount(roleFullId) {
+  let busy = 0;
+  for (const id of _liveInstanceIdsForRole(roleFullId)) {
+    let reg = [];
+    try {
+      reg = JSON.parse(fs.readFileSync(agentStatePath(id, "running-sessions.json"), "utf8"));
+    } catch {
+      reg = [];
+    }
+    const status = _readInstanceStatus(id);
+    if ((Array.isArray(reg) && reg.length) || (status && status.state === "busy") || readPendingEntries(id).length) busy++;
+  }
+  return busy;
+}
+
+// #2573 AC13: a `draining` role whose last instance has finished switches
+// itself `off`. Run by the periodic pool sweep and on every board/pool-control
+// read, so the board never shows a finished drain as still draining.
+function settlePoolDrains(teamId) {
+  const control = loadPoolControl(teamId);
+  let changed = false;
+  for (const role of _teamPooledRoles(teamId)) {
+    const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
+    const state = agentPool.poolControlState(control, roleId);
+    if (state !== "draining") continue;
+    if (agentPool.settleDrain(state, _poolRoleBusyCount(role.id)) === "off") {
+      control[roleId] = { state: "off", changedAt: new Date().toISOString() };
+      changed = true;
+      console.log(`[AgentPool] ${teamId}: ${roleId} finished draining — switched off`);
+    }
+  }
+  if (changed) savePoolControl(teamId, control);
+  return control;
+}
+
+// Per-team board configuration (column renames/merges/hides, done retention).
+// Operator runtime config beside pool-control, kept out of the bundle.
+function flowBoardConfigPath(teamId) {
+  return controlOrPoolPath(teamId, "flow-board.json");
+}
+
+function loadFlowBoardConfig(teamId) {
+  try {
+    return flowBoard.normalizeBoardConfig(JSON.parse(fs.readFileSync(flowBoardConfigPath(teamId), "utf8")));
+  } catch {
+    return flowBoard.normalizeBoardConfig(null);
+  }
+}
+
+async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
+  const teamCfg = loadAgentConfig(teamId) || {};
+  const labels = Array.isArray(teamCfg.labels) ? teamCfg.labels : [];
+  const config = loadFlowBoardConfig(teamId);
+  const { members, envIds } = _flowTeamMembers(teamId);
+  const repoToken = _flowRepoTokens(envIds);
+  const sinceIso = new Date(now - config.doneRetentionHours * 3600 * 1000).toISOString();
+
+  const warnings = [];
+  const github = { issues: [], prs: [] };
+  const swept = await Promise.all(
+    [...repoToken].map(([repo, token]) =>
+      _flowBoardSweepRepo(repo, token, { sinceIso }).then(
+        (r) => ({ repo, ...r }),
+        (err) => ({ repo, error: err.message }),
+      ),
+    ),
+  );
+  let reached = 0;
+  for (const r of swept) {
+    if (r.error) {
+      warnings.push(`${r.repo}: ${r.error}`);
+      continue;
+    }
+    reached++;
+    github.issues.push(...r.issues);
+    github.prs.push(...r.prs);
+    warnings.push(...r.warnings);
+  }
+
+  const team = new Set(members.map((m) => m.id));
+  const teamPrefix = `${teamId}-`;
+  const ours = (agentId) => typeof agentId === "string" && (team.has(agentId) || agentId.startsWith(teamPrefix));
+  let events = [];
+  try {
+    events = githubEventLog.readEntries().filter(
+      (e) => e && Array.isArray(e.outcomes) && e.outcomes.some((o) => o && ours(o.agentId)),
+    );
+  } catch {
+    events = [];
+  }
+  let prRecords = [];
+  try {
+    prRecords = _readPrEventRecords().filter((r) => r && (r.teamId === teamId || ours(r.agentId)));
+  } catch {
+    prRecords = [];
+  }
+
+  const control = settlePoolDrains(teamId);
+  const pausedHold = loadPausedHold(teamId);
+  const pools = _teamPooledRoles(teamId).map((role) => {
+    const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
+    const c = control[roleId] || null;
+    return {
+      agentId: role.id,
+      roleId,
+      displayName: role.cfg.displayName || roleId,
+      maxInstances: role.pool.maxInstances,
+      state: agentPool.poolControlState(control, roleId),
+      changedAt: c ? c.changedAt : null,
+      held: (pausedHold[roleId] || []).length,
+      instances: _liveInstanceIdsForRole(role.id).map((instanceId) => ({ instanceId })),
+    };
+  });
+
+  const board = flowBoard.buildFlowBoard({
+    members, labels, teamId, config, github, events, prRecords,
+    sessions: _flowBoardSessions(members), pools, now,
+  });
+  const lane = loadAdmissionLane(teamId);
+  const held = lane.held.map((h) => ({
+    id: admissionControl.heldIdentity(h.agentId, h.entry),
+    agentId: h.agentId,
+    ticket: h.ticket,
+    heldAt: h.heldAt,
+  }));
+  return {
+    teamId,
+    generatedAt: new Date(now).toISOString(),
+    repos: [...repoToken.keys()],
+    // Every repo unreachable (or rate-limited) — the caller keeps showing the
+    // last good snapshot rather than an empty board.
+    githubUnreachable: repoToken.size > 0 && reached === 0,
+    warnings,
+    config,
+    held,
+    ...board,
+  };
+}
+
+// The PR-link log's reader lives in the admin console (`admin-console/api/
+// pr-events-log.js`); the orchestrator only ever wrote it. A local mirror of
+// that reader over the same directory — day files, one JSON record per line.
+function _readPrEventRecords() {
+  const dir = prEventsLog.PR_EVENTS_LOG_DIR;
+  let files = [];
+  try {
+    // The log is kept indefinitely; the board only needs the recent past
+    // (a PR still open after a quarter is a human's, not a flow's, problem).
+    files = fs.readdirSync(dir).filter((f) => /^pr-events-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)).sort().slice(-90);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const f of files) {
+    let content = "";
+    try {
+      content = fs.readFileSync(path.join(dir, f), "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of content.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        out.push(JSON.parse(line));
+      } catch {
+        /* torn line */
+      }
+    }
+  }
+  return out;
+}
+
+// Single-flight + short TTL per team: every viewer of the board shares one
+// sweep, and a page load triggers at most one (AC11). On a failed or
+// unreachable sweep the last good snapshot is served, flagged stale.
+const FLOW_BOARD_TTL_MS = 15_000;
+const _flowBoardCache = new Map(); // teamId -> { at, result, inflight }
+
+async function getTeamFlowBoard(teamId, { refresh = false } = {}) {
+  let entry = _flowBoardCache.get(teamId);
+  if (!entry) {
+    entry = { at: 0, result: null, inflight: null };
+    _flowBoardCache.set(teamId, entry);
+  }
+  if (entry.inflight) return entry.inflight;
+  if (!refresh && entry.result && Date.now() - entry.at < FLOW_BOARD_TTL_MS) return entry.result;
+  entry.inflight = (async () => {
+    try {
+      const result = await computeTeamFlowBoard(teamId);
+      if (result.githubUnreachable && entry.result) {
+        return {
+          ...entry.result,
+          stale: true,
+          warning: `GitHub is unreachable — showing the last known state from ${entry.result.generatedAt}.`,
+          warnings: result.warnings,
+        };
+      }
+      const fresh = { ...result, stale: false, warning: result.githubUnreachable ? "GitHub is unreachable — only running sessions are shown." : null };
+      entry.result = fresh;
+      entry.at = Date.now();
+      return fresh;
+    } catch (err) {
+      if (entry.result) {
+        return { ...entry.result, stale: true, warning: `Could not refresh (${err.message}) — showing the last known state from ${entry.result.generatedAt}.` };
+      }
+      throw err;
+    } finally {
+      entry.inflight = null;
+    }
+  })();
+  return entry.inflight;
+}
+
 // ── Agent instance pools: reap (#2246, epic #2251 Phase 1) ──────────────────
 //
 // D4: a slot is held until completion; the *container* is reaped when its run
@@ -2647,6 +3066,12 @@ async function poolReapSweepTeam(teamId, now = Date.now()) {
       }
     }
   }
+  // #2573: a finished drain switches its role off.
+  try {
+    settlePoolDrains(teamId);
+  } catch (err) {
+    console.warn(`[AgentPool] ${teamId}: drain settle failed: ${err.message}`);
+  }
   // Gap 4: prune archived pool session logs past retainLogsMs. Best-effort,
   // same tick — a failure here never blocks the reap above.
   try {
@@ -2790,8 +3215,8 @@ async function admissionSweepTeam(teamId) {
   });
   const promoted = admissionControl.promoteHeld({ lane: reconciled.lane, wipLimit });
 
-  // Enqueue FIRST, persist the lane second — the same ordering the
-  // internal-channel emit uses (concept §4.2 step 3). A crash between the two
+  // Enqueue FIRST, persist the lane second — the same ordering the label
+  // fast-path and wake-agent use (the hand-off first, bookkeeping second). A crash between the two
   // re-delivers a dispatch the queue already holds, which the claim label and
   // the poller's own re-delivery tolerate; the reverse order would drop it from
   // the hold queue without ever putting it anywhere, and losing work is the one
@@ -9118,6 +9543,31 @@ async function agentGitPush(id, env, body = {}) {
   return _repoGitQueue(repo.repoPath, () => _agentGitPushLocked(id, repo, req, gitEnv, body));
 }
 
+// #2571: record which agent is pushing which (repo, branch, head) so the GitHub
+// poller can attribute the resulting PushEvent (all agents share one PAT, so the
+// event's actor cannot). Recorded BEFORE the push, from the local branch head
+// the push is about to publish, so no poll can see the event ahead of its
+// record; a failed push leaves a harmless entry for a sha never on the remote.
+// Best-effort — attribution only matters to triggers with a `pushedBy` filter.
+async function _recordAgentPush(id, repo, branch, run) {
+  try {
+    const repoFull = prEventsLog.repoFullName(repo.url);
+    if (!repoFull) return;
+    const head = (await run(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim();
+    const cfg = loadAgentConfig(id) || {};
+    pushAttribution.defaultStore().record({
+      repo: repoFull,
+      branch,
+      head,
+      agentId: id,
+      teamId: pushAttribution.teamOf(cfg),
+      poolOf: cfg.poolInstance ? cfg.poolOf || null : null,
+    });
+  } catch (err) {
+    console.warn(`[Orchestrator] push attribution for ${id} (${branch}) not recorded: ${err.message}`);
+  }
+}
+
 async function _agentGitPushLocked(id, repo, req, gitEnv, body) {
   const run = (args, timeout = 30_000) =>
     _execRepo("git", args, { cwd: repo.repoPath, env: gitEnv, timeout });
@@ -9137,6 +9587,7 @@ async function _agentGitPushLocked(id, repo, req, gitEnv, body) {
   if (req.setUpstream) pushArgs.push("--set-upstream");
   pushArgs.push(req.remote, branch);
 
+  await _recordAgentPush(id, repo, branch, run);
   try {
     const stdout = await run(pushArgs);
     // PR-link record (#655 §4.2): a bare branch push carries no PR number, but
@@ -9230,6 +9681,7 @@ async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body, gi
   }
 
   // Ensure the branch exists on the remote before gh reads it.
+  await _recordAgentPush(id, repo, head, run);
   try {
     await run(["push", "--set-upstream", "origin", head]);
   } catch (err) {
@@ -10019,8 +10471,8 @@ function resolveAdmissionFlow(agentId) {
 }
 
 function enqueuePending(agentId, entry, { admissionChecked = false, decision = null } = {}) {
-  // The gate sits here rather than at each of the five producers (poller
-  // fan-out, flow-emit, the label fast-path, wake-agent, the hook server)
+  // The gate sits here rather than at each of the four producers (poller
+  // fan-out, the label fast-path, wake-agent, the hook server)
   // because this function is the queue's single writer: one seam cannot be
   // bypassed by a producer added later. `admissionChecked` is the promotion
   // path re-entering with a dispatch the lane has already admitted.
@@ -10050,7 +10502,7 @@ function enqueuePending(agentId, entry, { admissionChecked = false, decision = n
         }
         // TRUE, not false: the dispatch is durably recorded and WILL fire. A
         // `false` here means "nothing anywhere has this event" (#2030) and would
-        // make an `aee-emit` producer report a delivery failure for work that is
+        // make an `aee-wake` producer report a delivery failure for work that is
         // merely queued behind a full lane.
         return true;
       }
@@ -10080,17 +10532,18 @@ function enqueuePending(agentId, entry, { admissionChecked = false, decision = n
     console.error(`[Orchestrator] Cannot enqueue pending for ${agentId}: ${err.message}`);
     // Additive (#2030): report the failure so a caller that has no other trace
     // to fall back on can refuse rather than confirm. Every pre-existing caller
-    // ignores the return value and is unaffected — a label emit still has its
-    // mirrored GitHub label as evidence, but a direct hand-off leaves nothing
+    // ignores the return value and is unaffected — a label hand-off still has
+    // its GitHub label as evidence, but a direct hand-off leaves nothing
     // anywhere, so "enqueued" must not be reported for a write that failed.
     return false;
   }
   return true;
 }
 
-// #1173: pick the GitHub token an internal-channel emit uses to mirror its
-// label — the first environment whose repositories contain the repo, the same
-// first-env-wins rule the poller's plan applies. null when no env covers it.
+// #1173: pick the GitHub token the orchestrator uses for its own REST calls on
+// a repo (label stamps, title/PR-detail fetches) — the first environment whose
+// repositories contain the repo, the same first-env-wins rule the poller's
+// plan applies. null when no env covers it.
 function resolveRepoGithubTokenId(repoFullName) {
   const { parseRepoFullName } = require("./github-poller");
   const { githubApiBase, DEFAULT_GITHUB_API_BASE } = require("./github-api-base");
@@ -10148,10 +10601,9 @@ async function _lookupPoolReworkRef(repoFullName, itemKey) {
   }
 }
 
-// #1173: mirror a label onto an issue/PR after an internal-channel delivery.
-// Decoration only — the wake already went through the queue, so every failure
-// here becomes a returned warning, never a delivery failure (concept §4.2
-// step 3: enqueue first, stamp second). The add endpoint doesn't reliably
+// #1173: apply a label onto an issue/PR on the platform's behalf (today: the
+// pool reaper's `needs-human`). Best-effort — every failure here becomes a
+// returned warning, never a thrown error. The add endpoint doesn't reliably
 // auto-create labels, so on a failed add the label is created (422 = already
 // exists, e.g. a lost race — fine) and the add retried once, mirroring the
 // runner's claim-swap behavior.
@@ -10184,7 +10636,7 @@ async function stampMirrorLabel(repoFullName, number, label, warnings) {
     if (!resp.ok) {
       await fetch(`${base}/repos/${repoFullName}/labels`, {
         method: "POST", headers,
-        body: JSON.stringify({ name: label, color: "ededed", description: "internal-channel mirror label" }),
+        body: JSON.stringify({ name: label, color: "ededed", description: "label applied by the platform" }),
       }).catch(() => {});
       resp = await addLabel();
     }
@@ -14479,6 +14931,8 @@ async function main() {
   // carries the `teamId` the D6 owner resolution keys on (#2077).
   migrateOwnershipModel();
   backfillTriggerHorizonStamps();
+  // After the horizon backfill, so a rewrite here never moves a horizon.
+  migrateDataFlowProducerFilters();
 
   const orchestrator = new Orchestrator();
   // Module-level handle for free-function callers that need instance methods
@@ -16054,91 +16508,6 @@ async function main() {
       return;
     }
 
-    // ── Internal-channel emit (#1173, epic #1172) ─────────────────────────
-    // A producer agent announces "label L set on issue/PR #n of repo R"
-    // (via the `aee-emit` CLI) and the wake is delivered directly to every
-    // `transport: 'internal'` listener — enqueue FIRST, then mirror the label
-    // onto GitHub as decoration (best-effort). Internal-transport triggers
-    // are excluded from the poller plan (`pollerSubscribes`), so the mirror
-    // stamp can never double-deliver. docs/internal-channels-concept.md §4.2.
-    if (req.method === 'POST' && req.url === '/internal/flow-emit') {
-      let body = '';
-      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
-      req.on('end', async () => {
-        let parsed;
-        try {
-          parsed = flowEmit.validateEmitRequest(JSON.parse(body || '{}'));
-        } catch (err) {
-          parsed = { ok: false, error: err.message };
-        }
-        if (!parsed.ok) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: parsed.error }));
-          return;
-        }
-        try {
-          const { agentId, repo, label, target } = parsed.value;
-          const key = flowEmit.eventKeyForKind(target.kind);
-          const agents = listAgentIds().map((aid) => ({
-            agentId: aid,
-            enabled: loadAgentConfig(aid)?.enabled !== false,
-            triggers: loadTriggers(aid),
-          }));
-          const listeners = flowEmit.matchInternalListeners(
-            { repo, label, kind: target.kind }, agents);
-          // #1897 AC8: resolve the title best-effort so the notice isn't blank.
-          // #2114: also carry the PR's closesIssues (from the same fetch) so the
-          // admission gate keys this hand-off to the issue's ticket, not a new one.
-          const { title, closesIssues } = await fetchWorkItemDetail(repo, target.kind, target.number);
-          const ghEvent = flowEmit.buildSyntheticEvent({
-            repo, label, kind: target.kind, number: target.number, title, closesIssues,
-            producerId: agentId,
-            eventId: `int:${crypto.randomBytes(6).toString('hex')}`,
-            now: new Date().toISOString(),
-          });
-          for (const l of listeners) {
-            enqueuePending(l.agentId, flowEmit.buildPendingEntry(l.triggerId, key, ghEvent));
-            console.log(
-              `[Orchestrator] flow-emit: ${repo}#${target.number} +${label} ` +
-              `by ${agentId} → agent=${l.agentId} trigger=${l.triggerId}`);
-          }
-          const warnings = [];
-          const labelStamped = await stampMirrorLabel(repo, target.number, label, warnings);
-          // Same transparency log the poller writes, tagged with the delivery
-          // path — internal and polled events share one operator timeline.
-          githubEventLog.record({
-            ...githubEventLog.buildEventEntry({
-              ghEvent, repoFullName: repo, key,
-              outcomes: listeners.map((l) => ({
-                agentId: l.agentId, triggerId: l.triggerId,
-                status: 'delivered', reason: null, digest: false,
-              })),
-            }),
-            source: 'internal',
-            emittedBy: agentId,
-          });
-          if (listeners.length === 0) {
-            console.log(
-              `[Orchestrator] flow-emit: ${repo}#${target.number} +${label} ` +
-              `by ${agentId} matched no internal listener (label ${labelStamped ? 'stamped' : 'NOT stamped'})`);
-          }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            ok: true,
-            matched: listeners.length,
-            listeners,
-            labelStamped,
-            warnings,
-          }));
-        } catch (err) {
-          console.error(`[Orchestrator] flow-emit error: ${err.message}`);
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: err.message }));
-        }
-      });
-      return;
-    }
-
     // ── Direct agent-to-agent hand-off (#2030) ────────────────────────────
     // A producer agent says "dear agent, take this over" (via the `aee-wake`
     // CLI) and the wake is delivered straight into the target's durable queue
@@ -16178,7 +16547,7 @@ async function main() {
             res.end(JSON.stringify({ ok: false, reason: resolved.reason }));
             return;
           }
-          // Enqueue first, log second — the same ordering flow-emit uses: the
+          // Enqueue first, log second — the same ordering the label fast-path uses: the
           // hand-off is what must not be lost, and the log is best-effort.
           const enqueued = enqueuePending(resolved.agentId, wakeAgent.buildWakeEntry({
             from: fromAgentId, note, teamId: resolved.teamId,
@@ -16339,7 +16708,7 @@ async function main() {
     // POLLER-SUBSCRIBED listener directly and leave a dedup marker so the
     // poller drops the later duplicate. The label itself is unchanged on GitHub
     // (the human already applied it) — this path does NOT stamp any label. The
-    // target trigger stays transport:'github' (no config change).
+    // target trigger needs no config change.
     //
     // #2247: the same wake half is reused by the Flow Supervisor's auto-dispatch
     // — see `wakeGithubLabelListeners` below, which THIS handler is now a thin
@@ -18682,6 +19051,70 @@ async function main() {
       return;
     }
 
+    // GET /internal/teams/:teamId/flow-board — the lean Flow Control board
+    // (#2573): stages from the flow graph, one row per work item a team agent
+    // took part in, running sessions, pools and human blocks. Served from a
+    // per-team single-flight cache (`?refresh=1` forces a new sweep); on a
+    // GitHub outage the last good snapshot comes back flagged `stale`.
+    // Maintenance-gated like `tickets`: the sweep is a poll.
+    const flowBoardMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/?]+)\/flow-board(\?.*)?$/);
+    if (flowBoardMatch) {
+      const teamId = decodeURIComponent(flowBoardMatch[1]);
+      const refresh = /[?&]refresh=1(?:&|$)/.test(flowBoardMatch[2] || '');
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') {
+            return sendJson(res, 404, { error: 'agent team not found' });
+          }
+          const maint = readMaintenanceState();
+          if (maint && maint.active) {
+            return sendJson(res, 200, {
+              teamId, maintenance: true, stages: [], rows: [], needsHuman: [], sessions: [], pools: [],
+              generatedAt: new Date().toISOString(),
+            });
+          }
+          const result = await getTeamFlowBoard(teamId, { refresh });
+          return sendJson(res, 200, { maintenance: false, ...result });
+        } catch (err) {
+          console.error(`[Orchestrator] flow-board error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // GET/POST /internal/teams/:teamId/flow-board-config — the optional
+    // per-team column configuration (rename/merge/hide stages, done
+    // retention). Without one, the automatic derivation applies.
+    const flowBoardConfigMatch = (req.method === 'GET' || req.method === 'POST') &&
+      req.url.match(/^\/internal\/teams\/([^/?]+)\/flow-board-config(?:\?.*)?$/);
+    if (flowBoardConfigMatch) {
+      const teamId = decodeURIComponent(flowBoardConfigMatch[1]);
+      const cfg = loadAgentConfig(teamId);
+      if (!cfg || cfg.role !== 'team') {
+        return sendJson(res, 404, { error: 'agent team not found' });
+      }
+      if (req.method === 'GET') return sendJson(res, 200, { teamId, config: loadFlowBoardConfig(teamId) });
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 50_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const config = flowBoard.normalizeBoardConfig(parsed && parsed.config);
+          const p = flowBoardConfigPath(teamId);
+          fs.mkdirSync(path.dirname(p), { recursive: true });
+          fs.writeFileSync(p, JSON.stringify(config, null, 2));
+          _flowBoardCache.delete(teamId);
+          return sendJson(res, 200, { teamId, config });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      });
+      return;
+    }
+
     // GET /internal/teams/:teamId/pool-control — board data for #2250 Phase 5:
     // every pooled role's live pause/drain state + instance count, plus the
     // team's admission-lane `held` entries (each carrying an `id` — the same
@@ -18697,7 +19130,7 @@ async function main() {
         if (!cfg || cfg.role !== 'team') {
           return sendJson(res, 404, { error: 'agent team not found' });
         }
-        const control = loadPoolControl(teamId);
+        const control = settlePoolDrains(teamId);
         const roles = _teamPooledRoles(teamId).map((role) => {
           const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
           return {
@@ -19837,6 +20270,8 @@ async function main() {
     triggersPath: (agentId) => controlOrPoolPath(agentId, 'triggers.json'),
     onMergedPr: postPrTokenComment, // #678 Phase 3 item 2: PR-merge token comment
     labelMarkers: labelDedupMarkers, // #1858 internal fast-path dedup (shared with the label-applied endpoint)
+    // #2571: who pushed a (repo, ref, head) — recorded by gh-as-agent push/pr.
+    lookupPushProducer: (q) => pushAttribution.defaultStore().lookup(q),
   });
   githubPollerRef = ghPoller; // #2525: the manual re-fire re-arms through it; #2537: repo status
   ghPoller.start();

@@ -1,383 +1,316 @@
-// Pure view helpers for the Flow Control board (#2116, concept
-// `docs/flow-control-concept.md` §4.4). Dependency-free so it unit-tests under
-// `node --test` in the `admin-console-src` job — the JSX page cannot be
-// imported there (#651).
+// Pure view helpers for the Flow Control board (#2573, concept
+// `docs/flow-control-concept.md` Amendment 3). Dependency-free so it
+// unit-tests under `node --test` in the `admin-console-src` job — the JSX page
+// cannot be imported there (#651).
 //
-// The board's whole reason to exist is §4.1's promise: **state comes from
-// evidence, not from labels**. The 2026-09-08 stall (§1) was invisible because
-// the labels said "done" while GitHub said "open and conflicting". So this
-// module reads the reconciler's derived `state` / `blocker` fields and NEVER
-// looks at `ticket.labels` — `flow-control-view.test.js` proves that by
-// deleting the labels array and asserting the card is unchanged.
+// The board answers one question — who is working on what, and where does a
+// person have to step in. Every decision (which items appear, the stages, the
+// row's position, the human-block reason) is made server-side by
+// `orchestrator/flow-board.js`; this module only turns that response into
+// display strings. It never reads a GitHub label.
 //
-// Input is one element of the ledger's `tickets[]`
-// (`orchestrator/ticket-reconciler.js`, `buildTicketLedger`):
-//   { ticketId, repo, kind, number, title, url, epicId, lane, state,
-//     stateSince, ageInStateMs, ownerAgentId, blocker, blockers, reasonDetail,
-//     needsHuman, severity, prNumber, prState, prLinkage, labels, anomalies,
-//     recurrence, evidence }
-
-// Reused rather than re-derived: the board's age column and severity stripe must
-// read identically to the Anomalies panel's. The explicit `.js` matters —
-// `node --test` resolves ESM strictly, where Vite would tolerate the bare path.
-import { formatAge, severityColor } from './flow-anomalies-view.js';
+// Input is the `GET /api/teams/:teamId/flow-board` response:
+//   { stages[{id,label,roles}], rows[], needsHuman[], sessions[], pools[],
+//     held[], config, canManage, generatedAt, stale, warning, maintenance }
 
 // ---------------------------------------------------------------------------
-// Vocabulary — mirrored from the reconciler.
+// Durations
 // ---------------------------------------------------------------------------
 
-// The lifecycle swimlanes, in flow order. The browser bundle cannot import from
-// `orchestrator/`, so the state list is duplicated here; the drift guard in
-// `flow-control-view.test.js` reads `TICKET_STATES` out of
-// `orchestrator/ticket-reconciler.js` and fails if the two ever disagree. Order
-// matters twice: it is the left-to-right column order, and `stageIndex()` uses
-// it as a progress ordinal.
-const LIFECYCLE_STAGES = Object.freeze([
-  { state: 'backlog', label: 'Backlog', blurb: 'No flow label yet — nothing has picked this up.' },
-  { state: 'refining', label: 'Refining', blurb: 'Parked on a human gate before dispatch.' },
-  { state: 'ready', label: 'Ready', blurb: 'Dispatched on an entry label, not yet claimed.' },
-  { state: 'in-dev', label: 'In dev', blurb: 'Claimed by the producing agent; no review yet.' },
-  { state: 'in-review', label: 'In review', blurb: 'A PR exists and a reviewing stage is active.' },
-  { state: 'rework', label: 'Rework', blurb: 'Changes were requested — back with the author.' },
-  { state: 'doc', label: 'Doc', blurb: 'One hop before the terminal stage.' },
-  { state: 'mergeable', label: 'Mergeable', blurb: 'The deepest active stage reaches a terminal consumer.' },
-  { state: 'done', label: 'Done', blurb: 'Merged, or the issue is closed.' },
-]);
+// "4m", "3h 10m", "2d 5h" — compact enough for a table cell, precise enough
+// that two rows can be compared at a glance.
+export function formatDuration(ms) {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return '';
+  const min = Math.floor(ms / 60000);
+  if (min < 1) return 'under 1m';
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return min % 60 ? `${h}h ${min % 60}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  return h % 24 ? `${d}d ${h % 24}h` : `${d}d`;
+}
 
-const TICKET_STATES = Object.freeze(LIFECYCLE_STAGES.map((s) => s.state));
+// Time elapsed since an ISO timestamp, or '' when it is missing or unparseable.
+export function since(iso, now = Date.now()) {
+  const t = Date.parse(iso || '');
+  if (!Number.isFinite(t)) return '';
+  return formatDuration(Math.max(0, now - t));
+}
 
-// Blocker presentation. Keyed by the reconciler's `BLOCKER_CODES`; the same test
-// asserts this table covers every code the reconciler can emit, so a new code
-// can never ship as a bare slug on a badge. Severity is NOT mirrored — each
-// ticket carries its own `severity` / `needsHuman`, so there is no second home
-// for that decision.
-const BLOCKERS = Object.freeze({
-  superseded: { label: 'Superseded', blurb: 'The changes are already in main — this looks like a duplicate.' },
-  'claimed-done-not-merged': { label: 'Claimed done', blurb: 'A stage claimed completion but set none of its outgoing labels.' },
-  conflict: { label: 'Conflict', blurb: 'The PR conflicts with its base branch.' },
-  'stale-base': { label: 'Stale base', blurb: 'It text-merges but fails against the current main.' },
-  'ci-red': { label: 'CI red', blurb: 'Required checks are failing.' },
-  'approved-not-merged': { label: 'Approved, not merged', blurb: 'Approved and green, but still sitting open.' },
-  orphaned: { label: 'Orphaned', blurb: 'The active label has no listener — the flow itself is wrong.' },
-  unclaimed: { label: 'Unclaimed', blurb: 'The wake was never claimed — it may have been lost.' },
-  stalled: { label: 'Stalled', blurb: 'No activity past the threshold; the run likely died.' },
-  'needs-human': { label: 'Needs a human', blurb: 'Waiting on a human gate.' },
+// The header's "Updated 12s ago". Seconds matter here: with a 30 s refresh the
+// operator wants to see the counter reset.
+export function updatedAgo(iso, now = Date.now()) {
+  const t = Date.parse(iso || '');
+  if (!Number.isFinite(t)) return '';
+  const s = Math.max(0, Math.floor((now - t) / 1000));
+  if (s < 5) return 'Updated just now';
+  if (s < 60) return `Updated ${s}s ago`;
+  return `Updated ${formatDuration(s * 1000)} ago`;
+}
+
+// ---------------------------------------------------------------------------
+// Work items
+// ---------------------------------------------------------------------------
+
+// `o/r#12` → `#12` when the whole board is one repository; the full ref
+// otherwise, so two repos' #12 never read the same.
+export function itemRef(repo, number, singleRepo) {
+  if (number == null) return '';
+  return singleRepo || !repo ? `#${number}` : `${repo}#${number}`;
+}
+
+function prLinks(prs, singleRepo) {
+  return (Array.isArray(prs) ? prs : []).map((p) => ({
+    key: `${p.repo}#${p.number}`,
+    label: `PR ${itemRef(p.repo, p.number, singleRepo)}`,
+    url: p.url || null,
+    state: p.state || 'open',
+  }));
+}
+
+const STATUS_TEXT = {
+  working: 'working',
+  queued: 'up next',
+  idle: 'waiting',
+  ready: 'released',
+  done: 'done',
+};
+
+// One board row: title, links, the progress steps and the current stage with
+// its time in stage. `stages` is the board's own stage list, so the step count
+// is exactly the team's hand-off chain.
+export function rowView(row, stages, { now = Date.now(), singleRepo = true } = {}) {
+  const list = Array.isArray(stages) ? stages : [];
+  const current = Number.isInteger(row.stageIndex) ? row.stageIndex : list.findIndex((s) => s.id === row.stageId);
+  const steps = list.map((s, i) => ({
+    id: s.id,
+    label: s.label,
+    state: i < current || row.done ? 'past' : i === current ? 'current' : 'future',
+  }));
+  const stage = list[current] || null;
+  return {
+    id: row.id,
+    title: row.title || '(untitled)',
+    url: row.url || null,
+    ref: row.issue ? itemRef(row.issue.repo, row.issue.number, singleRepo) : '',
+    issueUrl: row.issue ? row.issue.url || row.url || null : null,
+    prs: prLinks(row.prs, singleRepo),
+    steps,
+    stageLabel: stage ? stage.label : '',
+    status: row.status,
+    statusText: STATUS_TEXT[row.status] || '',
+    agentId: row.agentId || null,
+    inStage: since(row.since, now),
+    done: !!row.done,
+    blocked: !!row.needsHuman,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Area ① — who is working right now
+// ---------------------------------------------------------------------------
+
+export function sessionView(s, { now = Date.now(), singleRepo = true } = {}) {
+  const item = s.issue
+    ? itemRef(s.issue.repo, s.issue.number, singleRepo)
+    : Array.isArray(s.prs) && s.prs[0]
+      ? `PR ${itemRef(s.prs[0].repo, s.prs[0].number, singleRepo)}`
+      : '';
+  return {
+    id: s.id || s.agentId,
+    role: s.roleLabel || s.roleId || s.agentId,
+    instance: s.instance != null ? `#${s.instance}` : null,
+    agentId: s.agentId,
+    item,
+    title: s.title || null,
+    running: since(s.startedAt, now),
+  };
+}
+
+// Tooltips a newcomer can act on: what happens to running work, what happens
+// to new work, and how to undo it. `help-topics/flow-control.md` quotes the
+// same three facts — `flow-control-view.test.js` keeps the two in step.
+export const POOL_ACTION_TOOLTIPS = Object.freeze({
+  pause: 'Pause: running instances finish their current work. New work waits in a queue and starts when you click Resume.',
+  drain: 'Drain: running instances finish their current work, new work waits, and the role switches itself Off once the last one is done. Click Switch on to start it again.',
+  resume: 'Resume: start taking new work again. Anything that waited while paused starts now.',
+  switchOn: 'Switch on: start taking new work again. Anything that waited while the role was off starts now.',
 });
 
-function stageInfo(state) {
-  return LIFECYCLE_STAGES.find((s) => s.state === state)
-    || { state: state || 'unknown', label: state || 'Unknown', blurb: '' };
-}
-
-function stageIndex(state) {
-  return TICKET_STATES.indexOf(state);
-}
-
-function blockerInfo(code) {
-  return BLOCKERS[code] || { label: code, blurb: '' };
-}
-
-// ---------------------------------------------------------------------------
-// Deep links (AC3).
-// ---------------------------------------------------------------------------
-
-// Best-effort GitHub URL from an `owner/name` repo, for the one case the ledger
-// cannot supply a link itself. Same shape and same reasoning as
-// `GithubEventLog.jsx`'s `issueUrl`: returns null when the repo is not a usable
-// `owner/name`, so the reference degrades to plain text rather than to a broken
-// link.
-function synthesizeUrl(repo, kind, number) {
-  if (typeof repo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(repo)) return null;
-  if (!Number.isFinite(Number(number))) return null;
-  return `https://github.com/${repo}/${kind === 'pr' ? 'pull' : 'issues'}/${Number(number)}`;
-}
-
-// The ledger records the item's own `url` and puts the *other* object's URL in
-// `evidence` (the reconciler pushes `{type:'issue'|'pr', text, url}` there).
-// Prefer whatever GitHub actually returned; only synthesize when neither is
-// available, and never invent an issue that does not exist.
-function deepLinks(t) {
-  const evidence = Array.isArray(t.evidence) ? t.evidence : [];
-  const fromEvidence = (type) => {
-    const hit = evidence.find((e) => e && e.type === type && e.url);
-    return hit ? hit.url : null;
-  };
-
-  const issueUrl = t.kind === 'issue'
-    ? (t.url || fromEvidence('issue') || synthesizeUrl(t.repo, 'issue', t.number))
-    : fromEvidence('issue');
-
-  let prUrl = t.kind === 'pr'
-    ? (t.url || fromEvidence('pr'))
-    : fromEvidence('pr');
-  if (!prUrl && t.prNumber != null) prUrl = synthesizeUrl(t.repo, 'pr', t.prNumber);
-
-  return { issueUrl: issueUrl || null, prUrl: prUrl || null };
-}
-
-// ---------------------------------------------------------------------------
-// Cards.
-// ---------------------------------------------------------------------------
-
-// One ledger row → one render-ready card. Every field here is derived from a
-// reconciler-computed field; `t.labels` is deliberately never read.
-function ticketCard(t) {
-  const stage = stageInfo(t.state);
-  const blocker = t.blocker ? blockerInfo(t.blocker) : null;
-  const { issueUrl, prUrl } = deepLinks(t);
-  const severity = t.severity || 'info';
-  return {
-    ticketId: t.ticketId || null,
-    kind: t.kind || null,
-    number: t.number ?? null,
-    ref: t.number == null ? '' : `${t.kind === 'pr' ? 'PR ' : ''}#${t.number}`,
-    title: t.title || '',
-    repo: t.repo || null,
-    state: t.state || null,
-    stateLabel: stage.label,
-    stateBlurb: stage.blurb,
-    owner: t.ownerAgentId || null,
-    lane: t.lane || null,
-    age: formatAge(t.ageInStateMs),
-    stateSince: t.stateSince || null,
-    blocker: t.blocker || null,
-    blockerLabel: blocker ? blocker.label : null,
-    blockerBlurb: blocker ? blocker.blurb : null,
-    reasonDetail: t.reasonDetail || null,
-    severity,
-    color: severityColor(severity),
-    needsHuman: t.needsHuman === true,
-    epicId: t.epicId ?? null,
-    prNumber: t.prNumber ?? null,
-    prState: t.prState || null,
-    recurrence: t.recurrence ?? null,
-    issueUrl,
-    prUrl,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Swimlanes.
-// ---------------------------------------------------------------------------
-
-// Group the ledger into one lane per lifecycle stage. Empty lanes are kept by
-// default: an empty column is information (it shows the shape of the flow and
-// where work is NOT), which is the point of a board over a list.
-//
-// Order within a lane is the ledger's own — `compareTickets` already sorts
-// most-actionable-first (blocked before healthy, then by blocker rank, then by
-// how long it has been stuck), so re-sorting here would only throw that away.
-// Any ticket whose state is not a known stage lands in a trailing `other` lane
-// rather than being dropped.
-function groupIntoLanes(tickets, { includeEmpty = true } = {}) {
-  const rows = Array.isArray(tickets) ? tickets : [];
-  const byState = new Map(TICKET_STATES.map((s) => [s, []]));
-  const other = [];
-  for (const t of rows) {
-    if (!t) continue;
-    const card = ticketCard(t);
-    if (byState.has(card.state)) byState.get(card.state).push(card);
-    else other.push(card);
+// One pooled role: occupancy, the plain-language state and the buttons that
+// apply to it. `running` → Pause + Drain; `paused` → Resume; `draining` and
+// `off` → Switch on (the same "back to running" write, named for what the
+// operator sees).
+export function poolView(p) {
+  const busy = Number.isFinite(p.busy) ? p.busy : 0;
+  const occupancy = p.capacity != null ? `${busy} of ${p.capacity} busy` : `${busy} busy`;
+  const held = Number.isFinite(p.held) && p.held > 0 ? p.held : 0;
+  const waiting = held ? ` · ${held} waiting` : '';
+  let stateText;
+  let actions;
+  switch (p.state) {
+    case 'paused':
+      stateText = `Paused${busy ? `, ${busy} still running` : ''}${waiting}`;
+      actions = ['resume'];
+      break;
+    case 'draining':
+      stateText = `Draining, ${busy} still running${waiting}`;
+      actions = ['switchOn'];
+      break;
+    case 'off':
+      stateText = `Off${waiting}`;
+      actions = ['switchOn'];
+      break;
+    default:
+      stateText = null;
+      actions = ['pause', 'drain'];
   }
-  const lanes = LIFECYCLE_STAGES.map((s) => ({
-    state: s.state,
-    label: s.label,
-    blurb: s.blurb,
-    tickets: byState.get(s.state),
-    count: byState.get(s.state).length,
-    blocked: byState.get(s.state).filter((c) => c.blocker).length,
-  }));
-  if (other.length) {
-    lanes.push({ state: 'other', label: 'Other', blurb: 'A state this console does not know yet.', tickets: other, count: other.length, blocked: other.filter((c) => c.blocker).length });
+  return {
+    key: p.roleId || p.agentId,
+    roleId: p.roleId,
+    label: p.label || p.roleId,
+    occupancy,
+    state: p.state || 'running',
+    stateText,
+    actions: actions.map((a) => ({
+      id: a,
+      label: { pause: 'Pause', drain: 'Drain', resume: 'Resume', switchOn: 'Switch on' }[a],
+      tooltip: POOL_ACTION_TOOLTIPS[a],
+      nextState: a === 'pause' ? 'paused' : a === 'drain' ? 'draining' : 'running',
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Area ② — where a person is needed
+// ---------------------------------------------------------------------------
+
+export function needsYouView(entry, { now = Date.now(), singleRepo = true } = {}) {
+  const ref = entry.issue
+    ? itemRef(entry.issue.repo, entry.issue.number, singleRepo)
+    : Array.isArray(entry.prs) && entry.prs[0]
+      ? `PR ${itemRef(entry.prs[0].repo, entry.prs[0].number, singleRepo)}`
+      : '';
+  return {
+    id: entry.id,
+    ref,
+    title: entry.title || '(untitled)',
+    url: entry.url || null,
+    reason: entry.reason || (entry.needsHuman && entry.needsHuman.reason) || '',
+    waiting: since(entry.since || (entry.needsHuman && entry.needsHuman.since), now),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The whole board
+// ---------------------------------------------------------------------------
+
+export const EMPTY_TEXT = 'Nothing in progress';
+
+// Everything the page renders, in render order. Area ② is `null` when empty
+// so the page simply does not mount it (AC8).
+export function boardView(data, now = Date.now()) {
+  const d = data || {};
+  const repos = Array.isArray(d.repos) ? d.repos : [];
+  const opts = { now, singleRepo: repos.length <= 1 };
+  const stages = Array.isArray(d.stages) ? d.stages : [];
+  const rows = (Array.isArray(d.rows) ? d.rows : []).map((r) => rowView(r, stages, opts));
+  const needs = (Array.isArray(d.needsHuman) ? d.needsHuman : []).map((n) => needsYouView(n, opts));
+  return {
+    stages,
+    roles: Array.isArray(d.roles) ? d.roles : [],
+    sessions: (Array.isArray(d.sessions) ? d.sessions : []).map((s) => sessionView(s, opts)),
+    pools: (Array.isArray(d.pools) ? d.pools : []).map(poolView),
+    held: Array.isArray(d.held) ? d.held : [],
+    needsYou: needs.length ? needs : null,
+    rows,
+    empty: rows.length === 0,
+    emptyText: EMPTY_TEXT,
+    warning: d.warning || null,
+    stale: !!d.stale,
+    partial: Array.isArray(d.warnings) ? d.warnings : [],
+    noRepos: !d.maintenance && repos.length === 0 && d.generatedAt != null,
+    maintenance: !!d.maintenance,
+    canManage: !!d.canManage,
+    doneRetentionHours: d.doneRetentionHours ?? (d.config && d.config.doneRetentionHours) ?? null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Auto-refresh preference — remembered per user
+// ---------------------------------------------------------------------------
+
+export const AUTO_REFRESH_MS = 30_000;
+const AUTO_REFRESH_PREFIX = 'flowControl.autoRefresh.';
+
+// Per-username key, matching `agentChat.coachmark.<id>.<username>`; a missing
+// username (the env single-admin) falls back to a shared `anon` bucket.
+export function autoRefreshKey(username) {
+  return `${AUTO_REFRESH_PREFIX}${username || 'anon'}`;
+}
+
+function resolveStore(store) {
+  if (store) return store;
+  return typeof window !== 'undefined' ? window.localStorage : null;
+}
+
+// On unless the user switched it off — the board is a live view.
+export function readAutoRefresh(username, store) {
+  const ls = resolveStore(store);
+  if (!ls) return true;
+  try {
+    return ls.getItem(autoRefreshKey(username)) !== 'off';
+  } catch {
+    return true;
   }
-  return includeEmpty ? lanes : lanes.filter((l) => l.count > 0);
 }
 
-// ---------------------------------------------------------------------------
-// Epic roll-up.
-// ---------------------------------------------------------------------------
-
-// The four buckets of the cross-lane roll-up ("Epic #2041: 3 done · 1 blocked ·
-// 2 in progress · 4 waiting"). Mutually exclusive and exhaustive by
-// construction — `bucketFor` returns exactly one, and the test asserts the four
-// counts sum to `total` for every state × blocker combination.
-//
-// Precedence is deliberate: `done` beats `blocked`, because a blocker recorded
-// against merged work is history, not a call to action.
-function bucketFor(card) {
-  if (card.state === 'done') return 'done';
-  if (card.blocker) return 'blocked';
-  if (['in-dev', 'in-review', 'rework', 'doc', 'mergeable'].includes(card.state)) return 'inProgress';
-  return 'waiting';
-}
-
-function epicRollups(tickets) {
-  const cards = (Array.isArray(tickets) ? tickets : []).filter(Boolean).map(ticketCard);
-  const byEpic = new Map();
-  for (const card of cards) {
-    if (card.epicId == null) continue;
-    if (!byEpic.has(card.epicId)) {
-      byEpic.set(card.epicId, { epicId: card.epicId, total: 0, done: 0, blocked: 0, inProgress: 0, waiting: 0, needsHuman: 0, tickets: [] });
-    }
-    const roll = byEpic.get(card.epicId);
-    roll.total += 1;
-    roll[bucketFor(card)] += 1;
-    if (card.needsHuman) roll.needsHuman += 1;
-    roll.tickets.push(card);
+export function writeAutoRefresh(username, on, store) {
+  const ls = resolveStore(store);
+  if (!ls) return;
+  try {
+    ls.setItem(autoRefreshKey(username), on ? 'on' : 'off');
+  } catch {
+    /* ignore — the worst case is the default next visit */
   }
-  // Most-blocked first, then largest, then by epic number so two renders of the
-  // same ledger are identical.
-  return [...byEpic.values()].sort((a, b) => (b.blocked - a.blocked) || (b.total - a.total) || (a.epicId - b.epicId));
-}
-
-// A one-line summary of a roll-up, in the concept's own wording. Zero buckets
-// are dropped so a healthy epic reads "4 done" rather than "4 done · 0 blocked
-// · 0 in progress · 0 waiting".
-function rollupSummary(roll) {
-  return [
-    [roll.done, 'done'],
-    [roll.blocked, 'blocked'],
-    [roll.inProgress, 'in progress'],
-    [roll.waiting, 'waiting'],
-  ].filter(([n]) => n > 0).map(([n, word]) => `${n} ${word}`).join(' · ');
 }
 
 // ---------------------------------------------------------------------------
-// Header.
+// Column configuration (optional, per team)
 // ---------------------------------------------------------------------------
 
-// Counts for the board header, plus the two banner conditions the panel shares
-// with FlowAnomaliesPanel (maintenance pauses the sweep; a repo-less team has
-// nothing to sweep).
-function boardSummary(data) {
-  const tickets = data && Array.isArray(data.tickets) ? data.tickets.filter(Boolean) : [];
-  const cards = tickets.map(ticketCard);
+// The editable form of the config: one entry per role in the order the graph
+// derives (`roles` from the board response — before any rename/merge/hide, so
+// a hidden or merged role can be brought back). Ready and Done are fixed frames
+// and never appear here.
+export function configFormRows(roles, config) {
+  const cfg = (config && config.stages) || {};
+  return (Array.isArray(roles) ? roles : []).map((r) => {
+    const c = cfg[r.id] || {};
+    return {
+      id: r.id,
+      derivedLabel: r.label || r.id,
+      label: c.label || '',
+      hidden: !!c.hidden,
+      mergeInto: c.mergeInto || '',
+    };
+  });
+}
+
+// Back to the stored shape; empty fields are dropped so "no config" stays the
+// automatic derivation.
+export function configFromForm(formRows, doneRetentionHours) {
+  const stages = {};
+  for (const r of Array.isArray(formRows) ? formRows : []) {
+    const entry = {};
+    if (r.label && r.label.trim()) entry.label = r.label.trim();
+    if (r.hidden) entry.hidden = true;
+    if (r.mergeInto && r.mergeInto !== r.id) entry.mergeInto = r.mergeInto;
+    if (Object.keys(entry).length) stages[r.id] = entry;
+  }
+  const hours = Number(doneRetentionHours);
   return {
-    total: cards.length,
-    blocked: cards.filter((c) => c.blocker).length,
-    needsHuman: cards.filter((c) => c.needsHuman).length,
-    done: cards.filter((c) => c.state === 'done').length,
-    epics: epicRollups(tickets).length,
-    swept: data && Number.isFinite(data.swept) ? data.swept : null,
-    generatedAt: (data && data.generatedAt) || null,
-    maintenance: !!(data && data.maintenance),
-    noRepos: !!(data && !data.maintenance && Array.isArray(data.repos) && data.repos.length === 0),
-    errors: data && Array.isArray(data.errors) ? data.errors : [],
+    doneRetentionHours: Number.isFinite(hours) && hours >= 0 ? hours : 24,
+    stages,
   };
 }
-
-// ---------------------------------------------------------------------------
-// Pool controls (#2250 Phase 5, epic #2251) — render-ready rows for the
-// board's pause/resume/drain buttons (one per pooled role) and its
-// "Force dispatch" list (one per held admission-lane entry). Input is the
-// `GET /api/teams/<id>/pool-control` response: `{ roles: [{roleId, agentId,
-// displayName, maxInstances, liveInstanceCount, state}], held: [{id, agentId,
-// ticket, heldAt}] }` (`orchestrator.js`'s pool-control route).
-// ---------------------------------------------------------------------------
-
-const POOL_STATES = Object.freeze(['running', 'paused', 'draining']);
-
-function poolRoleRow(r) {
-  return {
-    roleId: r.roleId || '',
-    agentId: r.agentId || null,
-    displayName: r.displayName || r.roleId || '',
-    maxInstances: Number.isInteger(r.maxInstances) ? r.maxInstances : null,
-    liveInstanceCount: Number.isFinite(r.liveInstanceCount) ? r.liveInstanceCount : 0,
-    state: POOL_STATES.includes(r.state) ? r.state : 'running',
-  };
-}
-
-// Alphabetical by role id so the panel's order is stable across refreshes
-// (the server has no inherent order — it walks the filesystem).
-function poolControlRows(data) {
-  const roles = data && Array.isArray(data.roles) ? data.roles : [];
-  return roles.map(poolRoleRow).sort((a, b) => a.roleId.localeCompare(b.roleId));
-}
-
-// A held entry's `ticket` is already `repo#number` (`admission-control.js`'s
-// `objectKey`); split back out only for display — `id` (`heldIdentity`)
-// remains the sole thing the Force-dispatch POST is keyed on.
-function heldRow(h) {
-  const m = /^(.*)#(\d+)$/.exec((h && h.ticket) || '');
-  return {
-    id: (h && h.id) || null,
-    agentId: (h && h.agentId) || null,
-    repo: m ? m[1] : null,
-    number: m ? Number(m[2]) : null,
-    ticket: (h && h.ticket) || null,
-    heldAt: (h && h.heldAt) || null,
-  };
-}
-
-// Oldest-held first — the entry that has been waiting longest is the one an
-// operator is most likely to want to force through.
-function heldRows(data) {
-  const held = data && Array.isArray(data.held) ? data.held : [];
-  return held.map(heldRow).sort((a, b) => String(a.heldAt || '').localeCompare(String(b.heldAt || '')));
-}
-
-// ---------------------------------------------------------------------------
-// Pool instance lanes (#2273, epic #2251) — render-ready rows for the read-
-// only "Live surface" panel: per pooled role, its live/held instances as
-// lanes. Input is the `GET /api/teams/<id>/pool-lanes` response: `{ roles: [
-// {roleId, agentId, displayName, maxInstances, lanes: [{instanceId, ticketId,
-// repo, number, epicId, status, spawnedAt, sameEpicAs}]}] }`
-// (`orchestrator.js`'s pool-lanes route, backed by the pure
-// `pool-instance-lanes.js`).
-// ---------------------------------------------------------------------------
-
-const LANE_STATUSES = Object.freeze(['running', 'held-same-epic', 'timed-out']);
-
-function laneRow(l) {
-  return {
-    instanceId: (l && l.instanceId) || null,
-    ticketId: (l && l.ticketId) || '',
-    repo: (l && l.repo) || null,
-    number: Number.isFinite(l && l.number) ? l.number : null,
-    epicId: l && l.epicId != null ? l.epicId : null,
-    status: LANE_STATUSES.includes(l && l.status) ? l.status : 'running',
-    spawnedAt: (l && l.spawnedAt) || null,
-    sameEpicAs: (l && l.sameEpicAs) || null,
-  };
-}
-
-// One row per pooled role (alphabetical, matching `poolControlRows`), each
-// carrying its own lanes in the pure module's stable ticketId order.
-function poolLaneRoleRows(data) {
-  const roles = data && Array.isArray(data.roles) ? data.roles : [];
-  return roles
-    .map((r) => ({
-      roleId: (r && r.roleId) || '',
-      agentId: (r && r.agentId) || null,
-      displayName: (r && r.displayName) || (r && r.roleId) || '',
-      maxInstances: Number.isInteger(r && r.maxInstances) ? r.maxInstances : null,
-      lanes: (r && Array.isArray(r.lanes) ? r.lanes : []).map(laneRow),
-    }))
-    .sort((a, b) => a.roleId.localeCompare(b.roleId));
-}
-
-export {
-  LIFECYCLE_STAGES,
-  TICKET_STATES,
-  BLOCKERS,
-  stageInfo,
-  stageIndex,
-  blockerInfo,
-  synthesizeUrl,
-  deepLinks,
-  ticketCard,
-  groupIntoLanes,
-  bucketFor,
-  epicRollups,
-  rollupSummary,
-  boardSummary,
-  POOL_STATES,
-  poolRoleRow,
-  poolControlRows,
-  heldRow,
-  heldRows,
-  LANE_STATUSES,
-  laneRow,
-  poolLaneRoleRows,
-};

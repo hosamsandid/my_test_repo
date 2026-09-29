@@ -109,6 +109,12 @@ own row.
 Each row shows its **current stage**, whether an agent is **working** on it or
 it is **up next**, and the **time in that stage** — not the item's total age.
 
+Rows read like the pipeline, **top to bottom**: **Ready** first, then each
+stage in hand-off order. Within a stage the item that entered it most recently
+is on top, so an item that moves on appears at the top of the next stage's
+block. **Done** items sit at the bottom, the most recently finished first. An
+item that needs you keeps its place in this order.
+
 ## Changing the columns
 
 Team Admins can open **Columns** to adjust the automatic stages for their

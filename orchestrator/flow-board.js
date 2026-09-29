@@ -536,11 +536,15 @@ function buildFlowBoard(args = {}) {
       needsHuman,
     });
   }
-  // Furthest along first (nearest to Done), then the longest waiting; done last.
+  // Work flows top to bottom: Ready first, then each stage in hand-off order;
+  // within a stage the item that entered it most recently on top (a missing
+  // `since` counts as oldest); done last, most recently done first. Id breaks
+  // ties so a refresh on unchanged data keeps the order.
+  const sinceKey = (r) => toMs(r.since) ?? -Infinity;
   out.sort((a, b) =>
     (a.done ? 1 : 0) - (b.done ? 1 : 0) ||
-    b.stageIndex - a.stageIndex ||
-    (toMs(a.since) || now) - (toMs(b.since) || now) ||
+    a.stageIndex - b.stageIndex ||
+    (sinceKey(b) > sinceKey(a) ? 1 : sinceKey(b) < sinceKey(a) ? -1 : 0) ||
     a.id.localeCompare(b.id),
   );
 

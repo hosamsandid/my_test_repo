@@ -50,7 +50,7 @@ test('the Event column stays on the shared eventLabel helper', () => {
   // `handoff.wake` reads as "direct hand-off" only because eventLabel is the
   // single source of truth for event wording — a local map here would drift
   // from the trigger editor's.
-  assert.match(src, /import \{ eventLabel \} from '\.\/agent-chat\/trigger-summary'/);
+  assert.match(src, /import \{ eventLabel\b[^}]*\} from '\.\/agent-chat\/trigger-summary'/);
   assert.match(src, /const friendly = eventLabel\(v\)/);
   assert.doesNotMatch(src, /'handoff\.wake'/,
     'the page must not hard-code the event key — the pure module owns it');

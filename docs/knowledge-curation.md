@@ -211,6 +211,12 @@ extend mode with the matched target. Gates apply exactly as for auto-promotion
 (`team>team` only — `team>global` / `agent>team` are never auto-extended) and the extension
 counts against the **same** `maxAutoPromotionsPerPass` cap as the create-new promotions.
 
+> **Superseded for teams with domains (#2592).** Once a team has domains (and
+> `knowledgeCuration.domainRouting` is not `false`), the collector runs the domain → skill
+> pipeline instead: none of the auto-extend / create-new / theme steps above run, and every
+> converged lesson grows its domain's one skill (see `docs/skill-aggregation-concept.md` §3.6).
+> A team with no domains keeps the flow described here.
+
 `convergenceThreshold` is reused from `knowledgeConvergence` (the same maturity
 bar that raises a card is the bar that auto-promotes) — no second threshold to
 keep in sync.

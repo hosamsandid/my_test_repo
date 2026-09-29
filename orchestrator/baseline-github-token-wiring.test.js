@@ -173,3 +173,17 @@ test('the effective-credentials endpoint reuses the spawn-path describe function
   assert.match(SRC, /\/internal\\\/agents\\\/\(\[\^\/\]\+\)\\\/effective-credentials\$\//);
   assert.match(SRC, /\.\.\.describeAgentBaselineCredentials\(cfg\)/);
 });
+
+// #2560 AC7: the console's effective-identity endpoints must describe through the
+// SAME describeBaseline* functions the spawn bake uses — never a second resolver.
+test('#2560 the effective-credentials endpoints go through describeAgentBaselineCredentials', () => {
+  const effective = region("const effectiveCredsMatch = req.method === 'GET'", '\n      return;\n    }\n');
+  assert.match(effective, /describeAgentBaselineCredentials\(cfg\)/);
+  const owners = region("const ownerBaselineMatch = req.method === 'GET'", '\n      return;\n    }\n');
+  assert.match(owners, /describeAgentBaselineCredentials\(cfg\)/);
+  assert.match(owners, /described\.github\.ownerId !== userId && described\.ssh\.ownerId !== userId/);
+  const both = region('function describeAgentBaselineCredentials(', '\n}');
+  assert.match(both, /github: describeBaselineGithubToken\(cfg, env\)/);
+  assert.match(both, /ssh: describeBaselineSshKey\(cfg, baselineSharedSshKeyId\(env\)\)/);
+  assert.match(materializeAgentSshKeyBody(), /const sharedSshKeyId = baselineSharedSshKeyId\(env\);/);
+});

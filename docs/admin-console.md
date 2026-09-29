@@ -217,8 +217,8 @@ than the one that was asked for. This replaces the old workaround of creating a
 member and immediately disabling it, which produced a *paused* agent — the clone
 and the container had already happened — rather than a stub; that workaround was
 removed in #1959 and this checkbox is what it was standing in for. The Agents page's **Add Member**, which stayed a bare immediately-materializing
-POST while both surfaces existed, went with that page in #1930 — so this dialog
-is now the only way a member is added from the console.
+POST while both surfaces existed, went with that page in #1930; the Flow
+editor's live-team **Add agent** has the same checkbox, off by default (#2558).
 
 ### Middle panel — Chat
 

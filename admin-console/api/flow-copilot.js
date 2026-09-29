@@ -229,7 +229,9 @@ function applyCopilotOps(base, ops) {
 // persisted (it would bloat the file; the user regenerates after a reload).
 
 const COPILOT_HISTORY_CAP = 20;
-const HISTORY_ENTRY_KEYS = ['role', 'content', 'summary', 'changes', 'lints', 'ok', 'status'];
+// `result` is a live-team apply's outcome text (#2556) — what landed, what
+// failed, what was not applied — so the history never loses a partial apply.
+const HISTORY_ENTRY_KEYS = ['role', 'content', 'summary', 'changes', 'lints', 'ok', 'status', 'result'];
 
 function sanitizeCopilotHistory(raw) {
   if (!isPlainObject(raw) || !Array.isArray(raw.messages)) return undefined;

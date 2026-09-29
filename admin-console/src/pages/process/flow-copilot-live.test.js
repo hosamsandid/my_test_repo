@@ -5,7 +5,7 @@ import {
   roleKeyOf, memberIdMap, bundleFingerprint, isStaleBase,
   diffLiveProposal, groupItems, describeLiveItem,
   planLiveApply, runLiveApply, summarizeLiveApply,
-  inProgressFor, gateWarnings,
+  inProgressFor, gateWarnings, liveConfirmModel, liveResultStatus,
 } from './flow-copilot-live.js';
 
 const LIVE = {
@@ -121,14 +121,14 @@ test('plan: registry first, create before wiring, humans after members, removals
     'remove Tester',
   ]);
   const create = plan.steps.find(s => s.label === 'create Documenter');
-  assert.deepEqual(create.body, { id: 'acme-documenter', displayName: 'Documenter', systemPromptOverride: 'Write docs.', sessionPolicy: 'persistent' });
+  assert.deepEqual(create.body, { id: 'acme-documenter', displayName: 'Documenter', systemPromptOverride: 'Write docs.', sessionPolicy: 'persistent', materialize: false }, 'a new agent is a stub by default, like the Add-agent dialog (#2558)');
   const wire = plan.steps.find(s => s.label === 'update Documenter');
   assert.equal(wire.url, '/api/agents/acme-documenter');
   assert.deepEqual(wire.body.dataFlow, { inputs: [], outputs: [], dependsOn: ['acme-developer'] }, 'role keys map back to member ids');
   assert.equal(wire.body.outcomes.options[0].actions[0].to, 'acme-reviewer');
   assert.equal(wire.body.stage, 'review');
   assert.equal(wire.body.systemPrompt, undefined, 'the prompt rode on the create');
-  assert.deepEqual(plan.steps.find(s => s.label === 'update Reviewer').body, { systemPrompt: 'Review it carefully.' });
+  assert.deepEqual(plan.steps.find(s => s.label === 'update Reviewer').body, { promptMode: 'exclusive', systemPrompt: 'Review it carefully.' });
   assert.equal(plan.steps.find(s => s.label === 'remove Tester').url, '/api/agents/tester');
   assert.deepEqual(plan.steps.find(s => s.label === 'humans').body, { humans: [] });
   assert.equal(plan.steps.find(s => s.label === 'delete trigger t1').url, '/api/agents/acme-developer/triggers/t1');
@@ -197,4 +197,60 @@ test('AC14: in-progress work comes from the ticket ledger; unknown when unreadab
   assert.deepEqual(inProgressFor(tickets, 'tester'), [{ label: 'Issue #7 Flaky', url: 'u', openPr: true }]);
   assert.deepEqual(inProgressFor([], 'tester'), []);
   assert.equal(inProgressFor(null, 'tester'), null);
+});
+
+test('liveConfirmModel separates removals (with in-progress work) from the grouped changes', () => {
+  const live = {
+    roles: [
+      { id: 'developer', displayName: 'Developer', sessionPolicy: 'persistent', systemPrompt: 'a', triggers: [] },
+      { id: 'tester', displayName: 'Tester', sessionPolicy: 'persistent', systemPrompt: 't', triggers: [] },
+    ],
+    humans: [{ id: 'po', name: 'Product owner' }],
+    labels: [{ name: 'ready', humanGate: true }],
+  };
+  const proposed = {
+    roles: [
+      { id: 'developer', displayName: 'Developer', sessionPolicy: 'per-invocation', systemPrompt: 'b', triggers: [] },
+      { id: 'documenter', displayName: 'Documenter', sessionPolicy: 'persistent', systemPrompt: 'd', triggers: [] },
+    ],
+    humans: [],
+    labels: [],
+  };
+  const tickets = [
+    { kind: 'issue', number: 7, title: 'Flaky test', url: 'https://x/7', state: 'in-progress', ownerAgentId: 'acme-tester' },
+    { kind: 'issue', number: 8, title: 'Done', state: 'done', ownerAgentId: 'acme-tester' },
+  ];
+  const m = liveConfirmModel(diffLiveProposal(live, proposed), { teamId: 'acme', memberIds: ['acme-developer', 'acme-tester'], tickets });
+  assert.deepEqual(m.groups.added.map(i => i.id), ['documenter']);
+  assert.deepEqual(m.groups.changed.map(i => i.id), ['developer']);
+  assert.deepEqual(m.groups.removed.map(i => i.key), ['label:removed:ready'], 'role and human removals are their own opt-in rows');
+  const tester = m.removals.find(r => r.key === 'role:removed:tester');
+  assert.deepEqual(tester.inProgress.map(w => w.label), ['Issue #7 Flaky test']);
+  assert.deepEqual(m.removals.find(r => r.key === 'human:removed:po').inProgress, []);
+  assert.equal(m.notApplied.length, 1);
+  assert.match(m.notApplied[0], /session policy/);
+  assert.equal(m.gates.length, 1, 'removing a human-gate label is flagged');
+  assert.equal(m.empty, false);
+
+  const unknown = liveConfirmModel(diffLiveProposal(live, proposed), { teamId: 'acme', memberIds: [], tickets: null });
+  assert.equal(unknown.removals.find(r => r.key === 'role:removed:tester').inProgress, null, 'unreadable ledger → unknown, not "no work"');
+});
+
+test('liveConfirmModel is empty when only unsupported changes remain', () => {
+  const live = { roles: [{ id: 'dev', sessionPolicy: 'persistent', triggers: [] }] };
+  const proposed = { roles: [{ id: 'dev', sessionPolicy: 'per-invocation', triggers: [] }] };
+  const m = liveConfirmModel(diffLiveProposal(live, proposed), { teamId: 't' });
+  assert.equal(m.empty, true);
+  assert.equal(m.notApplied.length, 1);
+});
+
+test('liveResultStatus never reports success for a partial or failed apply', () => {
+  assert.equal(liveResultStatus({ ok: true, applied: ['a'] }), 'applied');
+  assert.equal(liveResultStatus({ ok: false, applied: ['a'], failed: ['b'] }), 'partial');
+  assert.equal(liveResultStatus({ ok: false, applied: [], failed: ['b'] }), 'failed');
+});
+
+test('plan: materializeNow provisions the new agents instead of stubbing them', () => {
+  const plan = planLiveApply(diffLiveProposal(LIVE, proposal()), { teamId: 'acme', memberIds: MEMBERS, materializeNow: true });
+  assert.equal(plan.steps.find(s => s.label === 'create Documenter').body.materialize, true);
 });

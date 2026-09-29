@@ -21,6 +21,8 @@
 // cross-role reference (dependsOn, parent, channel.from, outcome wakeAgent.to,
 // human consume.from) names a role key. `memberIdMap` maps them back.
 
+import { ADD_ROLE_MATERIALIZE_DEFAULT, addRoleMaterializeBody } from './add-role-materialize.js';
+
 // ── shared helpers ───────────────────────────────────────────────────────────
 
 export function stableStringify(x) {
@@ -257,7 +259,10 @@ function rolePortBody(before, after, toMember) {
   if (differs('displayName')) body.displayName = after.displayName || after.id;
   // A live member's prompt edit is its own ("exclusive") prompt — the same
   // write the node inspector's prompt field makes.
-  if (differs('systemPrompt')) body.systemPrompt = str(after.systemPrompt);
+  if (differs('systemPrompt')) {
+    body.promptMode = 'exclusive';
+    body.systemPrompt = str(after.systemPrompt);
+  }
   if (differs('outcomes')) body.outcomes = after.outcomes ? mapOutcomes(after.outcomes, toMember) : null;
   if (differs('stage')) body.stage = str(after.stage);
   if (differs('dependsOn') || differs('inputs') || differs('outputs')) {
@@ -298,10 +303,11 @@ function triggerSteps(memberId, before, after, itemKey) {
  *   6. opted-in removals last (AC14) — nothing added above depends on them
  *
  * @param diff  diffLiveProposal() result
- * @param ctx   { teamId, memberIds, selectedRemovals: Set<itemKey> | string[] }
+ * @param ctx   { teamId, memberIds, selectedRemovals: Set<itemKey> | string[],
+ *                materializeNow?: boolean — new agents are stubs unless true }
  * @returns {{ steps: object[], notApplied: object[], skippedRemovals: object[] }}
  */
-export function planLiveApply(diff, { teamId, memberIds, selectedRemovals } = {}) {
+export function planLiveApply(diff, { teamId, memberIds, selectedRemovals, materializeNow = ADD_ROLE_MATERIALIZE_DEFAULT } = {}) {
   const { items, live, proposed } = diff;
   const picked = new Set(selectedRemovals || []);
   const toMember = memberIdMap(teamId, memberIds);
@@ -338,6 +344,9 @@ export function planLiveApply(diff, { teamId, memberIds, selectedRemovals } = {}
         id: toMember(it.id), displayName: r.displayName || it.id,
         ...(str(r.systemPrompt).trim() ? { systemPromptOverride: r.systemPrompt } : {}),
         ...(r.sessionPolicy ? { sessionPolicy: r.sessionPolicy } : {}),
+        // Stub or provision now — the flow editor's Add-agent choice (#2558),
+        // always explicit because the route's default is materialize-now.
+        ...addRoleMaterializeBody({ materializeNow }),
       },
       itemKeys: [it.key], label: `create ${r.displayName || it.id}`,
     });
@@ -459,4 +468,52 @@ export function inProgressFor(tickets, memberId) {
  */
 export function gateWarnings(items) {
   return arr(items).filter(it => it.gate).map(describeLiveItem);
+}
+
+/** New agents a live apply adds are stubs unless the user opts in (#2558's default). */
+export const NEW_AGENTS_NOW_DEFAULT = ADD_ROLE_MATERIALIZE_DEFAULT;
+
+// ── confirmation + card view-model (AC4/AC6/AC14) ────────────────────────────
+
+/**
+ * Everything the Apply confirmation shows, derived once: the applicable
+ * changes grouped (removals excluded — each is its own opt-in row), the
+ * removal rows with the member's in-progress work (null = the ledger could not
+ * be read), what will NOT be applied, and gate warnings.
+ *
+ * @param diff     diffLiveProposal() result
+ * @param opts     { teamId, memberIds, tickets } — tickets as returned by
+ *                 GET /api/teams/:id/tickets, or null when unreadable
+ */
+export function liveConfirmModel(diff, { teamId, memberIds, tickets } = {}) {
+  const items = arr(diff && diff.items);
+  const toMember = memberIdMap(teamId, memberIds);
+  const applicable = items.filter(it => it.applicable && !it.removal);
+  const removals = items.filter(it => it.applicable && it.removal).map(it => ({
+    key: it.key,
+    label: describeLiveItem(it),
+    // Only an agent owns ledger work; a named human role never does.
+    inProgress: it.entity === 'role' ? inProgressFor(tickets, toMember(it.id)) : [],
+  }));
+  const notApplied = items.filter(it => !it.applicable)
+    .map(it => `${describeLiveItem(it)}${it.reason ? ` — ${it.reason}` : ''}`);
+  const notes = items.filter(it => it.note).map(it => `${describeLiveItem(it)}: ${it.note}`);
+  return {
+    groups: groupItems(applicable),
+    removals,
+    notApplied,
+    notes,
+    gates: gateWarnings(items),
+    empty: applicable.length === 0 && removals.length === 0,
+  };
+}
+
+/**
+ * The committed card's status after an apply — 'applied' only when nothing
+ * failed; 'partial' when some changes landed and some failed; 'failed' when
+ * nothing landed (AC7: never claim success on a partial apply).
+ */
+export function liveResultStatus(summary) {
+  if (!summary || summary.ok) return 'applied';
+  return arr(summary.applied).length ? 'partial' : 'failed';
 }

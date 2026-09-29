@@ -31,7 +31,10 @@ export function toApiMessages(entries) {
       const content = typeof e.summary === 'string' && e.summary.trim()
         ? e.summary
         : '(proposal without summary)';
-      out.push({ role: 'assistant', content });
+      // A live-team apply's outcome (#2556) rides along, so the next turn
+      // knows which changes actually landed on the team.
+      const result = typeof e.result === 'string' && e.result.trim() ? `\n\n[Apply result]\n${e.result}` : '';
+      out.push({ role: 'assistant', content: content + result });
     }
   }
   return out;
@@ -180,6 +183,7 @@ export function toPersistedMessages(entries) {
         ...(Array.isArray(e.lints) && e.lints.length ? { lints: e.lints } : {}),
         ok: !!e.ok,
         status: e.status === 'proposed' ? 'superseded' : (e.status || 'superseded'),
+        ...(typeof e.result === 'string' && e.result ? { result: e.result } : {}),
       };
     })
     .slice(-PERSISTED_HISTORY_CAP);
@@ -201,6 +205,7 @@ export function hydrateMessages(persisted, nextId) {
         // A persisted proposal has no bundle to apply — it can never be
         // actionable again, whatever was stored.
         status: m.status === 'proposed' ? 'superseded' : (m.status || 'superseded'),
+        ...(typeof m.result === 'string' && m.result ? { result: m.result } : {}),
         bundle: null, hasPreview: true,
       }));
 }

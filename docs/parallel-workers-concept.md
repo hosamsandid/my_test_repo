@@ -943,42 +943,28 @@ member.
   instance still disappears from the sub-list the moment the pool reaper (or a
   manual teardown) removes it, exactly as it already did.
 
-## Amendment 10 — the `AEE_POOLS_ENABLED` feature flag (#2302)
+## Amendment 10 — the `AEE_POOLS_ENABLED` feature flag (#2302, **removed**)
 
-Everything above (Amendments 1–9) shipped visible and reachable by default.
-#2302 adds a boot-time kill switch — `AEE_POOLS_ENABLED`, **off by default** —
-because the mechanism still needs teardown/reaping polish before it is
-production-ready: `admin-console/api/pools-mode.js` mirrors `auth-mode.js`'s
-own `AUTH_ENABLED` resolver exactly (same `ON_TOKENS`/`OFF_TOKENS`, same
-read-once-at-boot pattern), and `GET /api/pools-mode` feeds a one-shot
-`PoolsFeatureProvider` context (no polling — the flag can't change without a
-restart, unlike Maintenance Mode).
+> **Superseded.** #2302 added a boot-time kill switch — `AEE_POOLS_ENABLED`,
+> off by default — that hid the Parallelism button/panel and rendered the
+> per-role Scaling section disabled with a "Coming Soon" badge. It has since
+> been **removed entirely** and the feature is permanently on. The flag turned
+> out to hide the *only* surface that configured `wipLimit`, while admission
+> control (#2114) enforced that limit regardless — so a deployment with the
+> flag off (the default) enforced a WIP cap nobody could see or change, which
+> silently froze a flow whose lane filled up (the incident that motivated the
+> removal). `admin-console/api/pools-mode.js`, `GET /api/pools-mode`, the
+> `PoolsFeatureProvider` context, and `ComingSoonBadge.jsx` were deleted; the
+> Parallelism panel and Scaling section now always render. `wipLimit` is also
+> editable directly from **Team Settings** (Agent Chat → Settings), reusing the
+> same `ParallelismPanel` and its `PUT /api/agents/:teamId` write path. An empty
+> limit means *unbegrenzt* — admission control engages only when a number is
+> set (`limitInForce` already treats absent/0 as "no limit").
 
-Flag off (the default) hides vs. disables, deliberately per-surface:
-
-- **Flow Editor toolbar** (`ProcessCanvas.jsx`): the **Parallelism**
-  button/panel (Amendment 2/6/8's board) disappear entirely — this surface
-  configures `wipLimit`/`autoDispatch`, which stay meaningless until pooling
-  itself is on.
-- **Per-role Scaling section** (Amendment 7's shared `ScalingSection.jsx`, in
-  both Agent Chat Settings and the Flow Editor's `NodeInspector`): stays
-  **visible but inert** — every input and the Save button disabled
-  (`ScalingSection`'s new `disabled` prop folds into its existing `blocked`
-  check) — plus a "Coming Soon" badge (`ComingSoonBadge.jsx`) next to the
-  "Scaling" label — rather than vanishing, so the feature isn't forgotten and
-  a role's already-persisted `pool` config stays visible.
-
-**Not wired: docker-compose passthrough.** Every other boot flag documented
-in `.env.example` (`AUTH_ENABLED`, `AUTH_SESSION_SECRET`,
-`AUTH_COOKIE_SECURE`, …) has a matching `"${VAR:-}"` line in the
-`admin-console` service's `environment:` block in `docker-compose.yml` — the
-container has no `env_file`, so a var only reaches `process.env` there if it
-is listed explicitly. `AEE_POOLS_ENABLED` was added to `.env.example`
-(documentation fix, #2302 follow-up) but **not** to `docker-compose.yml`, so
-on a standard compose deployment setting it in `.env` currently has no
-effect — the flag reads as unset (off) regardless. Flagging here rather than
-patching `docker-compose.yml` silently, since that is a deployment-manifest
-change outside a docs fix.
+Historical note: the flag was documented in `.env.example` but never wired into
+`docker-compose.yml`'s env passthrough, so on a standard compose deployment it
+read as unset (off) regardless — one more reason it was a confusing lever rather
+than a working one.
 
 ## Amendment 11 — Agent Chat left-rail live refresh (#2311)
 
@@ -1037,9 +1023,9 @@ up until the user manually reloaded. #2311 makes that sentence true.
   (a bad deep link) still bounces to `/chats` exactly as before.
 - **Scope**: Agent Chat rail only (D4) — the pure `roster-diff.js` module has
   no Agent Chat import and could back another live list later, but nothing
-  else was wired to it. Independent of `AEE_POOLS_ENABLED` (Amendment 10):
-  the refresh mechanism is roster-generic and always on; with pooling off
-  there simply are no pool instances for it to reveal.
+  else was wired to it. The refresh mechanism is roster-generic and always on;
+  when a team has no pooled roles there simply are no pool instances for it to
+  reveal.
 - **Not done**: no highlight/flash animation on a newly-appeared row (D3) —
   judged not worth the added state/timer risk for a cosmetic nice-to-have.
 

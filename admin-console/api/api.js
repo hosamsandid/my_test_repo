@@ -132,6 +132,7 @@ const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const extractTemplate = require('./extract-template');
 const { runCopilot, isCopilotAborted, classifyTurnFailure, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
+const { copilotHistoryAccess, readTeamCopilotHistory, writeTeamCopilotHistory } = require('./team-copilot-history');
 const { httpPostStreamText } = require('./anthropic-transport');
 const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
@@ -9449,6 +9450,43 @@ app.get('/api/process/template', (req, res) => {
     // The Flow Supervisor's opt-in (#2247) rides along on the team agent, same as above.
     autoDispatch: teamAutoDispatch,
   }));
+});
+
+/* ─── Live-team Copilot history (#2556, AC11/AC16) ─────────────────────
+ * The chat a live team's Copilot panel shows, shared by everyone who may
+ * edit the team and hidden from everyone else. Stored beside (not inside) the
+ * team agent's config.json — see team-copilot-history.js — so persisting a
+ * turn never re-derives triggers or respawns a member. Both verbs use the
+ * live-edit gate (canManageAgent on the team agent), the same one every
+ * Apply write already passes through. */
+function teamCopilotHistoryGate(req, res) {
+  const { teamId } = req.params;
+  if (!AGENT_ID_RE.test(teamId)) { res.status(400).json({ error: 'Invalid team id' }); return null; }
+  const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
+  const scope = getScope(req);
+  const meta = teamCfg ? agentMetaForScope(teamCfg) : null;
+  const access = copilotHistoryAccess({
+    teamCfg,
+    visible: !!meta && visibleAgent(scope, meta),
+    canEdit: !!meta && canManageAgent(scope, meta),
+  });
+  if (access === 'not-found') { res.status(404).json({ error: 'Team not found' }); return null; }
+  if (access === 'forbidden') { res.status(403).json({ error: 'forbidden', code: 'forbidden' }); return null; }
+  return teamId;
+}
+
+app.get('/api/teams/:teamId/copilot-history', apiLimiter, (req, res) => {
+  const teamId = teamCopilotHistoryGate(req, res);
+  if (!teamId) return;
+  res.json({ messages: readTeamCopilotHistory(AGENTS_DIR, teamId) });
+});
+
+app.put('/api/teams/:teamId/copilot-history', apiLimiter, (req, res) => {
+  const teamId = teamCopilotHistoryGate(req, res);
+  if (!teamId) return;
+  const messages = writeTeamCopilotHistory(AGENTS_DIR, teamId, req.body, writeJsonAtomic);
+  if (!messages) return res.status(400).json({ error: 'body must be { messages: [...] }' });
+  res.json({ messages });
 });
 
 /* ─── Flow Copilot (#1068/#1070, spec #1047) ────────────────────────────

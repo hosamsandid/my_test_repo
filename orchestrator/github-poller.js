@@ -1532,6 +1532,21 @@ class GitHubPoller {
     });
   }
 
+  // #2525: arm one wake key from OUTSIDE a poll — the manual "Fire again"
+  // re-delivers a dropped wake and must leave the edge dedup exactly as a normal
+  // delivery would, so a later duplicate of the same label is still dropped as
+  // `wake-already-armed` (AC10). Mutates the same per-repo `armed` object a tick
+  // holds a reference to, so an in-flight tick's own save keeps it too. No-op
+  // when the edge dedup is switched off (AEE_WAKE_EDGE_DEDUP=0).
+  armWake({ repo, triggerId, kind, number, label }) {
+    if (!this._wakeEdgeDedup || !repo || !triggerId || !label || number == null) return false;
+    const repoState = this.state[repo] || (this.state[repo] = {});
+    if (!repoState.armed || typeof repoState.armed !== 'object') repoState.armed = {};
+    wakeArmory.arm(repoState.armed, wakeArmory.armedKey({ triggerId, kind, number, label }), Date.now());
+    this._saveState();
+    return true;
+  }
+
   _loadState() {
     try {
       if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) || {};

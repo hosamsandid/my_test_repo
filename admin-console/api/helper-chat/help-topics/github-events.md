@@ -105,7 +105,7 @@ Three consequences that surprise people:
 
 ### The poller is not the only writer
 
-Three other things write rows here, which is why this stays one honest timeline of
+Four other things write rows here, which is why this stays one honest timeline of
 every wake rather than a log of one delivery mechanism:
 
 - **Internal-channel hand-offs.** A hand-off on an internal channel
@@ -119,6 +119,7 @@ every wake rather than a log of one delivery mechanism:
   *only* record. Such a row has no repository or work item and honestly shows
   `—` there; it reads **direct hand-off** in the Event column, with the sender's
   note in the Title column.
+- **Fire again** (an agent's Events tab) writes a *delivered · fired again* row.
 
 Each row carries a `source` marking which writer produced it, but **the table
 never renders it** — so a poller row and an internal-fast-path row that arrived by
@@ -141,6 +142,7 @@ legend — this is the longer version.
 | **dropped (horizon)** | The event is older than that subscriber's subscription window (its activation time plus a short grace). | Expected right after wiring or reactivating a trigger. A new agent deliberately does not react to history that predates it. |
 | **dropped (label-filter)** | The event carried a label this trigger does not subscribe to. | No — that is label routing working. |
 | **dropped (internal-dedup)** | The wake was already delivered on the internal fast path; this is GitHub telling us about the same label a second time. | No. |
+| **dropped (wake-already-armed)** | Already woken for this label on this item; a repeat does not wake it again until the label is removed and re-added. | Usually no. Re-fire a lost hand-off from the agent's Events tab. |
 | **nobody's listening** | No trigger subscribed to this event **type** at all. | Maybe. If something should have reacted, the wiring is missing — add or fix the `github-event` trigger on the target agent. |
 
 A `delivered` or `digested` chip may carry the **wake label** in brackets: the
@@ -174,7 +176,7 @@ Work down the row, in this order:
 3. **Is there a chip for the agent you expected?** No chip means the agent's
    trigger did not even match the event *type*.
 4. **Is the chip a drop?** The reason names the layer that stopped it —
-   horizon, label filter, or throttle.
+   horizon, label filter, throttle or a dedup.
 5. **Delivered but nothing happened?** Delivery is not execution. Open the
    session from the chip and read it there.
 6. **Delivered, but the agent has not started yet?** Look in the Pending queue —

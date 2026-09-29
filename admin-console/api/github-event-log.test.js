@@ -106,3 +106,80 @@ test('queryEntries returns [] when the log directory does not exist', () => {
   assert.deepEqual(eventLog.queryEntries({}), []);
   process.env.GITHUB_EVENT_LOG_DIR = before;
 });
+
+// ── #2525: agent-scoped Events tab ──────────────────────────────────────────
+
+const DEV = 'developer';
+const armedDrop = {
+  ts: '2026-09-28T10:00:00.000Z', eventId: '100', repo: 'org/repo', event: 'issues.labeled', label: 'ready',
+  workItem: { kind: 'issue', number: 7, title: 'T', url: 'u' },
+  outcomes: [
+    { agentId: DEV, triggerId: 't1', status: 'dropped', reason: 'wake-already-armed', digest: false, wakeLabel: 'ready' },
+    { agentId: DEV, triggerId: 't2', status: 'dropped', reason: 'label-filter', digest: false },
+    { agentId: 'reviewer', triggerId: 'r1', status: 'delivered', reason: null, digest: false },
+  ],
+};
+const refireRow = {
+  ts: '2026-09-28T11:00:00.000Z', eventId: 'refire:abc', repo: 'org/repo', event: 'issues.labeled', label: 'ready',
+  workItem: { kind: 'issue', number: 7 }, source: 'manual-refire', refiredBy: 'ana',
+  refireOf: { eventId: '100', reason: 'wake-already-armed', ts: armedDrop.ts },
+  outcomes: [{ agentId: DEV, triggerId: 't1', status: 'delivered', reason: null, digest: false, wakeLabel: 'ready' }],
+};
+
+test('projectAgentRows (#2525): one row per trigger outcome of this agent only, newest first', () => {
+  const rows = eventLog.projectAgentRows([armedDrop, refireRow], DEV);
+  assert.deepEqual(rows.map(r => [r.eventId, r.triggerId, r.status]), [
+    ['refire:abc', 't1', 'delivered'],
+    ['100', 't1', 'dropped'],
+    ['100', 't2', 'dropped'],
+  ]);
+  assert.equal(new Set(rows.map(r => r.key)).size, 3, 'row keys are unique');
+  assert.deepEqual(eventLog.projectAgentRows([armedDrop], 'nobody'), []);
+});
+
+test('projectAgentRows (#2525): a re-fired drop carries who/when; the other trigger does not', () => {
+  const rows = eventLog.projectAgentRows([armedDrop, refireRow], DEV);
+  const t1 = rows.find(r => r.eventId === '100' && r.triggerId === 't1');
+  const t2 = rows.find(r => r.eventId === '100' && r.triggerId === 't2');
+  assert.deepEqual(t1.refired, { eventId: 'refire:abc', by: 'ana', at: '2026-09-28T11:00:00.000Z' });
+  assert.equal(t2.refired, null);
+  const re = rows.find(r => r.eventId === 'refire:abc');
+  assert.equal(re.source, 'manual-refire');
+  assert.equal(re.refiredBy, 'ana');
+  assert.equal(re.refireOf.eventId, '100');
+});
+
+test('projectAgentRows (#2525): an internal-dedup drop names its earlier twin delivery', () => {
+  const twin = {
+    ts: '2026-09-28T09:00:00.000Z', eventId: 'label-fastpath:x', repo: 'org/repo', event: 'issues.labeled', label: 'ready',
+    workItem: { kind: 'issue', number: 7 }, source: 'internal',
+    outcomes: [{ agentId: DEV, triggerId: 't1', status: 'delivered', wakeLabel: 'ready' }],
+  };
+  const dedup = {
+    ...armedDrop, eventId: '101',
+    outcomes: [{ agentId: DEV, triggerId: 't1', status: 'dropped', reason: 'internal-dedup', wakeLabel: 'ready' }],
+  };
+  const rows = eventLog.projectAgentRows([twin, dedup], DEV);
+  assert.deepEqual(rows.find(r => r.eventId === '101').twin,
+    { eventId: 'label-fastpath:x', triggerId: 't1', ts: '2026-09-28T09:00:00.000Z' });
+  assert.equal(rows.find(r => r.eventId === 'label-fastpath:x').twin, null);
+});
+
+test('queryAgentEntries (#2525): filters by agent before capping and honours the window', () => {
+  fs.rmSync(TMP, { recursive: true, force: true });
+  fs.mkdirSync(TMP, { recursive: true });
+  const noise = Array.from({ length: 30 }, (_, i) => ({
+    ts: `2026-09-28T12:${String(i).padStart(2, '0')}:00.000Z`, eventId: `n${i}`, repo: 'org/repo', event: 'push',
+    outcomes: [{ agentId: 'other', triggerId: 'o', status: 'delivered' }],
+  }));
+  writeDay('2026-09-20', [{ ...armedDrop, ts: '2026-09-20T10:00:00.000Z', eventId: 'old' }]);
+  writeDay('2026-09-28', [armedDrop, refireRow, ...noise]);
+  const now = Date.parse('2026-09-29T00:00:00Z');
+  const rows = eventLog.queryAgentEntries({ agentId: DEV, limit: 3, now });
+  assert.deepEqual(rows.map(r => r.eventId), ['refire:abc', '100', '100'], 'noise never crowds out the agent rows; the 7-day default window excludes old');
+  const wide = eventLog.queryAgentEntries({ agentId: DEV, since: '2026-09-01T00:00:00Z', now });
+  assert.ok(wide.some(r => r.eventId === 'old'));
+  const narrow = eventLog.queryAgentEntries({ agentId: DEV, since: '2026-09-28T10:30:00Z', now });
+  assert.deepEqual(narrow.map(r => r.eventId), ['refire:abc']);
+  assert.deepEqual(eventLog.queryAgentEntries({ agentId: '' }), []);
+});

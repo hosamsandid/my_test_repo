@@ -128,6 +128,11 @@ const WORK_PLANE_ROUTES = Object.freeze([
   { method: 'post', path: '/api/agents/:id/triggers', cls: MUTATION_CLASS.MANAGE },
   { method: 'put', path: '/api/agents/:id/triggers/:triggerId', cls: MUTATION_CLASS.MANAGE },
   { method: 'delete', path: '/api/agents/:id/triggers/:triggerId', cls: MUTATION_CLASS.MANAGE },
+
+  // ── GitHub-event activity (#2525) — viewing allowed, "Fire again" is a
+  // manual trigger fire and therefore Team-Admin-only (MANUAL_FIRE_RULE) ────
+  { method: 'get', path: '/api/agents/:agentId/github-events', cls: MUTATION_CLASS.READ },
+  { method: 'post', path: '/api/agents/:agentId/github-events/refire', cls: MUTATION_CLASS.MANAGE },
 ]);
 
 /**
@@ -136,16 +141,19 @@ const WORK_PLANE_ROUTES = Object.freeze([
  * direction ("no unclassified route in these families") means something precise
  * rather than "no route we happened to think of".
  *
- * Bounded to the three families §6's rows name. The chat/session family is
+ * Bounded to the three families §6's rows name, plus `github-events` (#2525),
+ * whose "Fire again" is the first real manual trigger-firing route. The chat/session family is
  * `chat`-class throughout — allowed for a member, and left ungated by this
  * ticket because its tenant half is #1459 §2's and its D9 half is a no-op —
  * so scanning it would add ~20 entries that assert nothing this ticket changes.
  */
-const SCANNED_FAMILIES = Object.freeze(['workspace', 'context', 'triggers']);
+const SCANNED_FAMILIES = Object.freeze(['workspace', 'context', 'triggers', 'github-events']);
 
 /**
- * AC3's rule, recorded rather than implemented: **there is no manual
- * trigger-firing route in api.js today.** Verified across the whole file —
+ * AC3's rule, recorded rather than implemented: **there was no manual
+ * trigger-firing route in api.js when this was written** (#2525's "Fire again",
+ * `POST …/github-events/refire`, is the first, and is classified `manage` in
+ * the table above per this rule). Verified across the whole file —
  * nothing under `/api/agents/:id/triggers/*` fires a trigger, and the only
  * `…/run` route is the hill-climb pass. §6 states the rule pre-emptively, and
  * the reason it must be pre-emptive is a real asymmetry: firing a trigger

@@ -29,6 +29,7 @@ const {
   validateOutcomes, normalizeOutcomes, isAuthoredOutcomes, substituteOutcomes,
   outcomesToGithub, outcomeWakePairs,
 } = require('./outcomes');
+const { branchFilterError, parseBranchFilter } = require('./branch-filter');
 
 const VERSION = 1;
 
@@ -475,8 +476,8 @@ function claimError(claim, labelFilter, type) {
  * cannot drift between enforcement points.
  *
  * Rules: exactly ONE event per github-event trigger (the 2026-07-05 migration,
- * whose absence server-side let the #987 two-event regression persist), and a
- * well-formed claim (`claimError`). `prev` is the stored trigger on an update:
+ * whose absence server-side let the #987 two-event regression persist), a
+ * usable push `branchFilter` (#2570) and a well-formed claim (`claimError`). `prev` is the stored trigger on an update:
  * a pre-existing multi-event trigger passing through UNCHANGED is tolerated
  * (the LegacyMultiEventNote migration flow keeps working); changing the events
  * of one must shrink it to a single event.
@@ -494,6 +495,10 @@ function rawTriggerError(t, prev) {
       return `a github-event trigger carries exactly ONE event (got ${events.length}: ${events.join(', ')}) — create one trigger per event`;
     }
   }
+  // Push branch filter (#2570): an entry that can never name a branch is
+  // rejected rather than silently matching nothing.
+  const bfe = branchFilterError(t.branchFilter);
+  if (bfe) return bfe;
   return claimError(t.claim, t.labelFilter, t.type);
 }
 
@@ -614,6 +619,10 @@ function bundleTrigger(t) {
   if (t.type === 'github-event') {
     out.events = Array.isArray(t.events) ? t.events : [];
     if (t.labelFilter) out.labelFilter = t.labelFilter;
+    // Push branch filter (#2570) — part of the listener's wiring; dropping it
+    // on export would silently widen the trigger to every branch.
+    const branches = parseBranchFilter(t.branchFilter);
+    if (branches.length) out.branchFilter = branches;
     // Claim (#958) — carried on the portable bundle so the claim survives
     // export → materialise → edit-as-draft. Derived listeners get it re-stamped
     // by the expanders anyway; a hand-authored claim would otherwise be lost.
@@ -1077,6 +1086,8 @@ function templateToCustomRoles(bundle) {
       enabled: t.enabled !== false,
       events: t.events,
       labelFilter: t.labelFilter,
+      // Push branch filter (#2570) — read by the poller from the member config.
+      ...(parseBranchFilter(t.branchFilter).length ? { branchFilter: parseBranchFilter(t.branchFilter) } : {}),
       // Claim (#958) — MUST survive into the member config: this is the field the
       // container runtime (`_claim_plan` in agent-entrypoint.py, #957) reads to
       // swap the wake label for `<wake>:wip`. Dropping it here made the whole

@@ -576,10 +576,16 @@ const TOPIC_CONTENT = [
       'What the GitHub Event Log is',
       'Processed events',
       'Outcomes',
+      // #2537: the Repositories status area above the event table.
+      'Repository status',
       'Pending queue',
     ],
     concepts: [
       'observational',
+      'Listening',
+      'Waiting for first poll',
+      'Rate limited',
+      'Token from',
       'Processed events',
       'Pending queue',
       'delivered',

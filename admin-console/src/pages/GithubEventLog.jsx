@@ -17,6 +17,7 @@ import { eventLabel, eventFilterText } from './agent-chat/trigger-summary';
 import { workItemTypeLabel } from './github-event-log-type';
 import { isHandoffRow, handoffNote, handoffNoteDisplay, handoffTitleHint } from './github-event-handoff-view';
 import { GITHUB_EVENTS_HELP_SECTIONS } from './github-events-help-sections';
+import GithubRepoStatus from './GithubRepoStatus';
 
 /* ── Time-range presets ────────────────────────────────────────────── */
 const RANGE_PRESETS = [
@@ -321,6 +322,11 @@ function ProcessedEventsView() {
 
   const url = `/api/github-events?since=${encodeURIComponent(since)}&limit=2000`;
   const { data, loading, error, refetch } = useApi(url);
+  // Repository status (#2537): fetched here so the one Refresh button reloads
+  // both the status area and the table.
+  const repoStatus = useApi('/api/github-events/repo-status');
+  const refetchRepoStatus = repoStatus.refetch;
+  const refreshAll = useCallback(() => { refetch(); refetchRepoStatus(); }, [refetch, refetchRepoStatus]);
 
   // Flatten the work-item fields onto each row (#1827) so the DataTable's
   // text filter and sort — both key-based (row[col.key]) — reach the number
@@ -428,7 +434,7 @@ function ProcessedEventsView() {
         <select value={rangeKey} onChange={e => setRangeKey(e.target.value)} style={controlStyle}>
           {RANGE_PRESETS.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
         </select>
-        <button onClick={refetch} style={{ ...controlStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
+        <button onClick={refreshAll} style={{ ...controlStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
         </button>
         <PageHelpButton
@@ -439,6 +445,8 @@ function ProcessedEventsView() {
         />
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
+
+      <GithubRepoStatus data={repoStatus.data} error={repoStatus.error} />
 
       {loading ? (
         <div style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />

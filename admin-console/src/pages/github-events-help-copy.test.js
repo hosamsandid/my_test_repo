@@ -140,6 +140,7 @@ test('the chapter slugs are derived from the headings, not hand-written', () => 
   assert.equal(sectionSlug('Processed events'), GITHUB_EVENTS_HELP_SECTIONS.processed);
   assert.equal(sectionSlug('Outcomes'), GITHUB_EVENTS_HELP_SECTIONS.outcomes);
   assert.equal(sectionSlug('Pending queue'), GITHUB_EVENTS_HELP_SECTIONS.pending);
+  assert.equal(sectionSlug('Repository status'), GITHUB_EVENTS_HELP_SECTIONS.repoStatus);
 });
 
 test('the topic keeps one clearly-headed chapter per area of the page', () => {
@@ -163,6 +164,22 @@ test('AC4: each surface mounts a "?" pointed at its own chapter', () => {
       `${what} must deep-link to the ${key} chapter (never a hand-written slug)`,
     );
   }
+});
+
+// #2537: the Repositories status area is its own component file, mounted on
+// the Processed events tab above the table, with a "?" on its own chapter.
+const repoStatusSrc = readFileSync(
+  fileURLToPath(new URL('./GithubRepoStatus.jsx', import.meta.url)),
+  'utf8',
+);
+
+test('#2537: the Repositories area sits above the event table and carries its own "?"', () => {
+  assert.match(processedView, /<GithubRepoStatus\b[\s\S]*<DataTable\b/, 'status area must render before the table');
+  assert.ok(repoStatusSrc.includes('PageHelpButton'));
+  assert.ok(repoStatusSrc.includes('GITHUB_EVENTS_HELP_SECTIONS.repoStatus'));
+  // One Refresh reloads both the table and the status area (AC10).
+  assert.match(processedView, /onClick=\{refreshAll\}/);
+  assert.match(processedView, /refetch\(\);\s*refetchRepoStatus\(\)/);
 });
 
 test('AC4: the outcomes "?" sits with the legend it deepens, not loose in the tab', () => {

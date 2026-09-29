@@ -15,6 +15,7 @@ askPrompts:
   - "Why does an event say nobody's listening?"
   - "Why is the Pending queue not draining?"
   - "How far back does this log go?"
+  - "Why is a repository marked not listening?"
 ---
 
 ## What the GitHub Event Log is
@@ -184,17 +185,47 @@ Work down the row, in this order:
 
 ### When a repository is polled, and when it is not
 
-A repository is polled only if **both** are true:
+A repository is polled only if **all** are true:
 
-- some environment carries a **GitHub token** for it, and
-- at least one **enabled** agent has an **enabled** `github-event` trigger on it.
+- it is in a Working Environment's **Repositories** (a repository attached only
+  to one agent is not polled),
+- that environment carries a **GitHub token** whose file is readable, and
+- at least one **enabled** agent has an **enabled** `github-event` trigger on it
+  (internal-channel label listeners do not count — they never need the poller).
 
-A repository nobody subscribes to, or one whose only subscriber is a disabled
-agent, produces **no rows at all** — not even *nobody's listening*, which is
-reported only for a repository that *is* polled. Silence on this page is
-therefore ambiguous on its own: it can mean "nothing happened" or "we were never
-looking". Check the environment's token and the trigger's enabled state before
-concluding the event was lost.
+A repository that fails any of these produces **no rows at all** — not even
+*nobody's listening*, which is reported only for a repository that *is* polled.
+Silence in the table is therefore ambiguous on its own; the **Repositories**
+area above it answers "were we even looking?" — see the next chapter.
+
+## Repository status
+
+The **Repositories** area directly above the event table lists every repository
+the platform knows about — from Working Environments, from agents' own
+repositories and from `github-event` triggers — one row per repository, with
+the poller's own verdict. The summary line counts **listening**, **failing** and
+**not listening**; click a count to show only that group. The area opens by
+itself when something is failing and stays collapsed when everything listens.
+**Refresh** reloads it together with the table; the verdict is at most one poll
+cycle (~30 s) old.
+
+| Status | What it means | What to do |
+|---|---|---|
+| **Listening** | The poller fetches this repository's events every cycle. *Waiting for first poll* right after a start or a change. | Nothing. |
+| **Failing** | The poller tries, but GitHub refuses or does not answer. The row shows the last error (HTTP status and message), since when, the number of failed attempts and the next retry. **Rate limited** is a failing variant. | Bad credentials (401) or no access (403/404): fix or rotate the token on **GitHub Tokens**. Rate limited: wait for the retry. |
+| **Not listening — no token** | No environment listing the repository has a usable GitHub token: none is set, the id is invalid, or the token file is missing or empty. | Set a token on the environment's **Repositories** tab, or re-add it on **GitHub Tokens**. |
+| **Not listening — no trigger** | A token exists, but no enabled agent has an enabled trigger on it. Often intentional. Ignored triggers are named with the reason (agent disabled, trigger disabled, internal channel, no events). | Add or enable a trigger on the agent's **Triggers** tab — only if you want events. |
+| **Not listening — not in an environment** | Only an agent's own repository or a trigger names it; the poller watches Working Environment repositories only. | Add it to the environment's **Repositories**. |
+| **Not listening — unsupported repository** | The URL is not a GitHub `owner/name` repository (another host, or a typo in a trigger). | Correct the URL or the trigger's repository. |
+
+**Token from** names the environment whose token the poller uses — the first
+one listing the repository with a token — and how many other environments list
+it too. Token values are never shown.
+
+Unlike the event table, this area **is scoped**: a System Admin sees every
+repository; everyone else sees only repositories of their own teams'
+environments and agents. A Working Environment's *GitHub integration* banner
+uses the same verdict.
 
 ## Pending queue
 

@@ -183,3 +183,13 @@ test('queryAgentEntries (#2525): filters by agent before capping and honours the
   assert.deepEqual(narrow.map(r => r.eventId), ['refire:abc']);
   assert.deepEqual(eventLog.queryAgentEntries({ agentId: '' }), []);
 });
+
+test('projectAgentRows (#2570): a push row carries its ref so a branch-filter drop can name the branch', () => {
+  const push = {
+    ts: '2026-09-29T10:00:00.000Z', eventId: 'p1', repo: 'o/r', event: 'push', ref: 'refs/heads/agent-knowledge',
+    outcomes: [{ agentId: 'dev', triggerId: 'on-push', status: 'dropped', reason: 'branch-filter' }],
+  };
+  const [row] = eventLog.projectAgentRows([push], 'dev');
+  assert.equal(row.ref, 'refs/heads/agent-knowledge');
+  assert.equal(row.reason, 'branch-filter');
+});

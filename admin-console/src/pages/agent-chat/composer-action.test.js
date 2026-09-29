@@ -66,3 +66,17 @@ test('missing/partial input object does not throw → Send, disabled', () => {
   assert.deepEqual(decideComposerAction(), { mode: 'send', enabled: false });
   assert.deepEqual(decideComposerAction({}), { mode: 'send', enabled: false });
 });
+
+test('idle with text but an attachment still uploading → Send, disabled (#2567 AC11)', () => {
+  assert.deepEqual(
+    decideComposerAction({ busy: false, canStop: true, hasText: true, disabled: false, stopBusy: false, uploading: true }),
+    { mode: 'send', enabled: false },
+  );
+});
+
+test('busy while uploading → Stop stays available (upload gates Send only)', () => {
+  assert.deepEqual(
+    decideComposerAction({ busy: true, canStop: true, hasText: true, disabled: false, stopBusy: false, uploading: true }),
+    { mode: 'stop', enabled: true },
+  );
+});

@@ -182,7 +182,8 @@ Your **personal** SSH keys and GitHub tokens sit on the same **SSH Keys** and
 like a Team Admin — and only its owner ever sees it listed.
 
 A personal credential has exactly one owner and is not linked to an environment:
-the runtime picks it up from the agent's owner instead (see the last chapter).
+the runtime picks it up from the person chatting, or — for automatic work —
+from the team's current Team Admin instead (see the last chapter).
 Its owner may rename, **replace** (rotate) and delete it. Delete is permanent and
 affects only you: agents relying on it fail to authenticate until you add a
 replacement.
@@ -257,44 +258,54 @@ Token* field to it, which restarts that environment's agents for the same reason
 **Which credential an agent actually uses** is decided **per operation class**,
 because attribution and transport differ:
 
-- **Attributed writes** — commits, pull requests, reviews, HTTPS pushes — prefer
-  the agent owner's **personal** credential, then team, then system. These carry a
-  human's name, so they should run under that human's identity.
+- **Interactive attributed writes** — a commit push, a pull request or a
+  review the agent makes while a person is chatting with it — use the **chat
+  sender's own personal** credential. If the person chatting has none (or a PAT
+  without the `repo` / `workflow` scope), the write is **refused** with an
+  actionable message rather than silently made under someone else's name.
+- **Automatic work and in-container actions** — every cron, GitHub-event and loop
+  run, and every `gh`/`git` call the agent makes directly (commenting on an issue,
+  reviewing a pull request) — use the container's own `GH_TOKEN`/`GITHUB_TOKEN`
+  and SSH identity. That is resolved in this order: the **current Team Admin's
+  personal** credential, else the **team** credential configured on the team's
+  environment, else a **global service** credential. That order is a
+  **preference among tiers**, and it never refuses — automatic work always has a
+  working path. A run never reads the owner from whoever caused the event.
 - **Reads** — clones, the repository probe, SSH-only transport — are happy with a
   shared team/system credential; nobody is misattributed.
 - **Event polling** of a repository always uses a shared team/system token: the
   poller is per-repository infrastructure, not per-human.
 
-"The agent's owner" is a single, deterministic human: for a team member it is the
-parent Agent Team's owner, so a team operated by several people still writes under
-exactly one identity no matter which event woke the run. A cron or GitHub-event
-run reads that owner from the stored configuration, never from whoever caused the
-event.
+"The current Team Admin" is a single, deterministic human: when a team has
+several, it is the **earliest-promoted** one; for a team member it is the parent
+Agent Team's admin. After a Team Admin change the successor's credential applies
+with no edit. So a team whose Team Admin adds a personal GitHub token or SSH key
+starts acting on GitHub **as that Team Admin** for its automatic work — the team
+credential stays configured but is **not in use** while it is overridden.
 
-`personal → team → system` is a **preference among tiers, not a fallback for a
-missing personal credential.** When an attributed write prefers the personal tier
-and the owner has none — or has a PAT without the `repo` / `workflow` scope — the
-run is **refused** with an actionable message instead of silently acting under a
-shared identity. An agent that carries no owner at all keeps using the shared
-credential exactly as before and is never refused, so an environment that has
-never used the personal tier behaves as it always did.
+The change takes effect at the agents' **next start** (the next enable or
+respawn): the token and key are baked into a container when it starts, so a
+running agent keeps the old one until then.
+
+**Seeing it in the console.** Agent Chat → **Settings** → **Repositories** shows an
+**Effective GitHub identity** box for the team: for the GitHub token and the SSH
+key, whether the Team Admin's personal credential, the team credential or a global
+service credential is in use (or *None configured*), and — for a personal one —
+the Team Admin's display name. A team credential that is overridden is marked
+*not in use*. Nobody except its owner sees anything else about a personal
+credential: no id, name, token preview or fingerprint. When a Team Admin adds a
+personal token or key on the **GitHub Tokens** / **SSH Keys** page, the console
+tells them which of their teams will now use it; when they delete it, which teams
+fall back to the team credential — or to nothing.
 
 There is a **second** reason a personal tier refuses, and it is not about the
 credential's scopes: if the owner is **no longer a user on this platform** —
 their account was deleted — their personal token stays on disk and still works,
 but an attributed write under a departed person's name is refused rather than
-allowed to continue. That refusal carries a *different* instruction, because
-nobody can add a personal token for an account that no longer exists: finish the
-offboarding, delete the orphaned credential and **revoke it at GitHub**. Reads
-are unaffected — a clone or a poll may still use a shared credential, so one
-stale index entry never takes a whole flow offline.
-
-**The same preference now reaches the token an agent's container is actually
-started with.** `GH_TOKEN`/`GITHUB_TOKEN` and the per-repository SSH identity —
-what a `gh`/`git` call the agent runs directly (commenting on an issue,
-reviewing a pull request) authenticates with — no longer come straight from the
-environment's own fields: if the team's current Team Admin has a personal SSH
-key or GitHub token, agents in that environment start using it automatically on
-their **next spawn**, with no environment edit and no restart needed beyond the
-ordinary next enable/respawn. An environment whose admin has never added a
-personal credential behaves exactly as before.
+allowed to continue, and automatic work skips it and falls back to the team
+credential (the **Effective GitHub identity** box flags it as a problem). That
+refusal carries a *different* instruction, because nobody can add a personal
+token for an account that no longer exists: finish the offboarding, delete the
+orphaned credential and **revoke it at GitHub**. Reads are unaffected — a clone or
+a poll may still use a shared credential, so one stale index entry never takes a
+whole flow offline.

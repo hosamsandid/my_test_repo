@@ -3915,6 +3915,39 @@ def _postcondition_verdict(kind, facts: dict | None) -> tuple[bool, str]:
     return True, ""
 
 
+def _branch_filter_error(raw) -> str | None:
+    """Push-trigger branch filter (#2570) — a mirror of `branchFilterError` in
+    admin-console/api/branch-filter.js (matching lives in
+    orchestrator/branch-filter.js; keep them in sync). None/absent/blank = no
+    filter (valid). Otherwise a comma-separated string or a list of strings
+    whose entries could each name a branch."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str) and not (
+        isinstance(raw, list) and all(isinstance(v, str) for v in raw)
+    ):
+        return "branchFilter must be a comma-separated string or an array of branch names"
+    parts = raw.split(",") if isinstance(raw, str) else [p for v in raw for p in v.split(",")]
+    seen: list[str] = []
+    for part in parts:
+        entry = part.strip()
+        if not entry or entry in seen:
+            continue
+        seen.append(entry)
+        if re.search(r"[\s\x00-\x1f\x7f]", entry):
+            why = "contains whitespace or a control character"
+        elif entry.startswith("/") or entry.endswith("/"):
+            why = 'must not start or end with "/"'
+        elif "//" in entry:
+            why = 'must not contain "//"'
+        elif "***" in entry:
+            why = 'only "*" and "**" are wildcards'
+        else:
+            continue
+        return f'branchFilter entry "{entry}" {why}'
+    return None
+
+
 def _nonconformant_trigger_reason(trigger) -> str | None:
     """Raw-layer wiring guard (#1006, concept §4.8) — a DOCUMENTED MIRROR of
     `rawTriggerError` in admin-console/api/process-template.js (the orchestrator
@@ -3936,6 +3969,9 @@ def _nonconformant_trigger_reason(trigger) -> str | None:
             f"it listens on {len(events)} events ({', '.join(map(str, events))}) — "
             "a github-event trigger carries exactly ONE event; create one trigger per event"
         )
+    branch_error = _branch_filter_error(trigger.get("branchFilter"))
+    if branch_error:
+        return branch_error
     claim = trigger.get("claim")
     if claim is None:
         return None

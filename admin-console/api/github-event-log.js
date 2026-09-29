@@ -130,6 +130,7 @@ function projectAgentRows(entries, agentId) {
         repo: e.repo || null,
         event: e.event || null,
         label: e.label || null,
+        ref: e.ref || null,
         actor: e.actor || null,
         workItem: e.workItem || null,
         source: e.source || null,

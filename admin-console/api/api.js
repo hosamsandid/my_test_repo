@@ -114,6 +114,7 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
+const { normalizeBranchFilter } = require('./branch-filter');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
@@ -6323,6 +6324,9 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   // here (route-level), mirroring validateProcessTemplate's bundle check.
   const tpe = triggerTransportError(newTrigger);
   if (tpe) return res.status(400).json({ error: tpe });
+  // Push branch filter (#2570): persisted in its normalized array form (or
+  // absent = every branch), validated by rawTriggerError above.
+  normalizeBranchFilter(newTrigger);
   // At most one active chat-launched loop per agent (#1020 AC8). A launched
   // loop is a one-off run; a second launch while one runs would race two
   // runners, so reject it — the composer reflects the running state and
@@ -6379,6 +6383,9 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   // Internal-channel transport (#1174) — same route-level check as POST.
   const tpe = triggerTransportError(merged);
   if (tpe) return res.status(400).json({ error: tpe });
+  // Push branch filter (#2570) — normalized as on POST; a blank/null value
+  // clears a stored filter.
+  normalizeBranchFilter(merged);
   if (merged.type === 'github-event') {
     const now = new Date().toISOString();
     // Refresh the activation horizon on a disable→enable flip so a

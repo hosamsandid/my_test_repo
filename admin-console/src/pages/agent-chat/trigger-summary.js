@@ -4,6 +4,8 @@
 // readout (`TemplateReadonly` in NodeInspector.jsx) so the friendly event
 // wording has a single source of truth (#778).
 
+import { parseBranchFilter } from './branch-filter.js';
+
 // Subset of GitHub Events API event types most useful for agent workflows.
 // (The Events API does not emit every webhook action — e.g. pull_request
 // has opened/closed/reopened but not synchronize. It also splits closed
@@ -230,7 +232,11 @@ export function summarizeGithubEventTrigger(trigger) {
   const label = trigger?.labelFilter && eventsAreLabelFilterable(raw)
     ? String(trigger.labelFilter)
     : null;
-  return { events, label };
+  // #2570: the push branch filter only applies to the `push` event, so it is
+  // shown only when the trigger listens on push. null = every branch.
+  const branchList = raw.includes('push') ? parseBranchFilter(trigger?.branchFilter) : [];
+  const branches = branchList.length ? branchList.join(', ') : null;
+  return { events, label, branches };
 }
 
 // The claim payload a TriggersPanel save carries (#1006): the raw layer follows

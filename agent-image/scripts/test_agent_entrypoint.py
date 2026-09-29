@@ -4460,6 +4460,19 @@ class NonconformantTriggerReasonTest(unittest.TestCase):
             {"type": "cron", "events": ["a", "b"]}))
         self.assertIsNone(entrypoint._nonconformant_trigger_reason("not-a-dict"))
 
+    def test_branch_filter_validated_like_the_console(self):
+        # #2570 — mirror of branchFilterError in admin-console/api/branch-filter.js.
+        base = {"type": "github-event", "events": ["push"]}
+        for ok in (None, "", " , ", [], "main, feature/*", ["release-*", "**"], "v1.?"):
+            self.assertIsNone(entrypoint._nonconformant_trigger_reason({**base, "branchFilter": ok}), ok)
+        self.assertEqual(entrypoint._branch_filter_error("main, /"),
+                         'branchFilter entry "/" must not start or end with "/"')
+        self.assertIn("whitespace", entrypoint._nonconformant_trigger_reason(
+            {**base, "branchFilter": ["my branch"]}))
+        self.assertIn('"//"', entrypoint._branch_filter_error("a//b"))
+        self.assertIn("wildcards", entrypoint._branch_filter_error("***"))
+        self.assertIn("comma-separated", entrypoint._branch_filter_error(42))
+
 
 class BuildScopedKnowledge(unittest.TestCase):
     """#917 task-scoped knowledge resolver — the single-writer middle layer

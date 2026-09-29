@@ -31,6 +31,9 @@ function fixture() {
       { id: 'env-b', name: 'Env B', githubTokenId: null, repositories: [{ url: 'git@github.com:acme/no-token.git' }, { url: 'git@github.com:acme/shared.git' }] },
       { id: 'env-c', name: 'Env C', githubTokenId: '../../etc/passwd', repositories: [{ url: 'git@github.com:acme/bad-token-id.git' }] },
       { id: 'env-d', name: 'Env D', githubTokenId: 'tok-missing', repositories: [{ url: 'git@github.com:acme/token-file-missing.git' }] },
+      // #2528: environments that only supply tokens to agent-scoped repositories.
+      { id: 'env-e', name: 'Env E', githubTokenId: 'tok-a', repositories: [] },
+      { id: 'env-f', name: 'Env F', githubTokenId: 'tok-f', repositories: [] },
     ],
     agents: [
       {
@@ -57,8 +60,38 @@ function fixture() {
         triggers: [trig({ id: 'z', repo: 'acme/no-trigger' })],
       },
       {
+        // No Working Environment → its agent-scoped repo has no token source.
         id: 'reader', config: { name: 'Reader', agentRepositories: [{ url: 'git@github.com:acme/agent-only.git' }] },
-        triggers: null,
+        triggers: [trig({ id: 'ao', repo: 'acme/agent-only' })],
+      },
+      // #2528: agent-scoped repositories, polled with the agent's environment token.
+      {
+        id: 'scoped-b', config: {
+          name: 'Scoped B', environmentId: 'env-f',
+          agentRepositories: [{ url: 'git@github.com:acme/agent-listening.git' }, { url: 'https://github.com/acme/listening.git' }],
+        },
+        triggers: [trig({ id: 'sb', repo: 'acme/agent-listening' }), trig({ id: 'sbl', repo: 'acme/listening' })],
+      },
+      {
+        id: 'scoped-a', config: {
+          name: 'Scoped A', environmentId: 'env-e',
+          agentRepositories: [{ url: 'git@github.com:acme/agent-listening.git' }, { url: 'git@github.com:acme/agent-idle.git' }],
+        },
+        triggers: [],
+      },
+      {
+        id: 'scoped-no-token', config: {
+          name: 'Scoped NT', environmentId: 'env-b',
+          agentRepositories: [{ url: 'git@github.com:acme/agent-no-token.git' }, { url: 'git@example.org:acme/agent-elsewhere.git' }],
+        },
+        triggers: [trig({ id: 'snt', repo: 'acme/agent-no-token' })],
+      },
+      {
+        id: 'scoped-off', config: {
+          name: 'Scoped Off', enabled: false, environmentId: 'env-e',
+          agentRepositories: [{ url: 'git@github.com:acme/agent-disabled.git' }],
+        },
+        triggers: [trig({ id: 'so', repo: 'acme/agent-disabled' })],
       },
     ],
   };
@@ -111,7 +144,12 @@ test('every case of the status model is covered by the fixture', () => {
     'acme/token-file-missing': STATUS.NO_TOKEN, // in the plan, token file unreadable
     'acme/unreadable': STATUS.LISTENING,
     'acme/no-trigger': STATUS.NO_TRIGGER,
-    'acme/agent-only': STATUS.NOT_IN_ENVIRONMENT,
+    'acme/agent-only': STATUS.NO_TOKEN,
+    'acme/agent-listening': STATUS.LISTENING,
+    'acme/agent-idle': STATUS.NO_TRIGGER,
+    'acme/agent-no-token': STATUS.NO_TOKEN,
+    'acme/agent-disabled': STATUS.NO_TRIGGER,
+    'git@example.org:acme/agent-elsewhere.git': STATUS.UNSUPPORTED,
     'acme/only-trigger': STATUS.NOT_IN_ENVIRONMENT,
     'git@git.example.com:acme/elsewhere.git': STATUS.UNSUPPORTED,
     'not a repo': STATUS.UNSUPPORTED,
@@ -185,9 +223,10 @@ test('unsupported hosts name the host; non-github hosts are allowed only off the
 
 test('relatedAgentIds covers env users, agentRepositories and trigger owners (visibility input)', () => {
   const { byRepo } = build();
-  assert.deepEqual(byRepo.get('acme/listening').relatedAgentIds, ['dev', 'sleepy']);
+  assert.deepEqual(byRepo.get('acme/listening').relatedAgentIds, ['dev', 'scoped-b', 'sleepy']);
   assert.deepEqual(byRepo.get('acme/agent-only').relatedAgentIds, ['reader']);
-  assert.deepEqual(byRepo.get('acme/no-token').relatedAgentIds, ['dev']);
+  assert.deepEqual(byRepo.get('acme/agent-listening').relatedAgentIds, ['scoped-a', 'scoped-b']);
+  assert.deepEqual(byRepo.get('acme/no-token').relatedAgentIds, ['dev', 'scoped-no-token']);
 });
 
 test('the poller tick and the status snapshot read the same inputs', () => {
@@ -228,4 +267,87 @@ test('describePollError: status, GitHub message, rate limiting', () => {
   assert.equal(describePollError(Object.assign(new Error('x'), { status: 429 })).rateLimited, true);
   assert.equal(describePollError(Object.assign(new Error('x'), { status: 403, githubMessage: 'Resource not accessible' })).rateLimited, false);
   assert.deepEqual(describePollError(new Error('timeout')), { status: null, message: 'timeout', rateLimited: false });
+});
+
+// ── #2528: agent-scoped repositories are polled ──────────────────────────────
+
+test('#2528 AC1: an agent-scoped repo is in the plan with its agent’s environment token', () => {
+  const { plan, byRepo } = build();
+  assert.ok(plan.has('acme/agent-listening'));
+  // Two agents in different environments attach it: one entry, the first
+  // agent by id (scoped-a → env-e) supplies the token — deterministic.
+  assert.deepEqual({ ...plan.get('acme/agent-listening'), subscribers: undefined }, { tokenId: 'tok-a', envId: 'env-e', subscribers: undefined });
+  assert.deepEqual(plan.get('acme/agent-listening').subscribers.map((s) => s.triggerId), ['sb']);
+  const r = byRepo.get('acme/agent-listening');
+  assert.equal(r.tokenEnvironment.id, 'env-e');
+  assert.equal(r.tokenEnvironment.name, 'Env E');
+  assert.deepEqual(r.agentRepositoryAgents.map((a) => [a.id, a.environment && a.environment.id]), [['scoped-b', 'env-f'], ['scoped-a', 'env-e']]);
+});
+
+test('#2528 AC1: agent order does not change which token wins', () => {
+  const inputs = fixture();
+  const reversed = { ...inputs, agents: [...inputs.agents].reverse() };
+  assert.equal(computePollPlan(reversed).get('acme/agent-listening').envId, 'env-e');
+});
+
+test('#2528 AC8/edge: a repo in an environment AND agent-scoped keeps the environment token, one entry', () => {
+  const { plan } = build();
+  const e = plan.get('acme/listening');
+  assert.equal(e.envId, 'env-a');
+  assert.equal(e.tokenId, 'tok-a');
+  assert.deepEqual(e.subscribers.map((s) => s.triggerId).sort(), ['l', 'sbl']);
+});
+
+test('#2528 AC8: environment-repo entries are unchanged by agent-scoped repositories', () => {
+  const inputs = fixture();
+  const withScoped = computePollPlan(inputs);
+  const without = computePollPlan({
+    ...inputs,
+    agents: inputs.agents.map((a) => ({ ...a, config: a.config && { ...a.config, agentRepositories: [] } })),
+  });
+  for (const [repo, entry] of without) {
+    assert.ok(withScoped.has(repo), repo);
+    assert.equal(withScoped.get(repo).tokenId, entry.tokenId, repo);
+    assert.equal(withScoped.get(repo).envId, entry.envId, repo);
+  }
+  const added = [...withScoped.keys()].filter((k) => !without.has(k)).sort();
+  assert.deepEqual(added, ['acme/agent-listening']);
+});
+
+test('#2528 AC3: no environment, or an environment without a token → No token, never Not in an environment', () => {
+  const { plan, byRepo } = build();
+  for (const repo of ['acme/agent-only', 'acme/agent-no-token']) {
+    assert.equal(plan.has(repo), false, repo);
+    assert.equal(byRepo.get(repo).status, STATUS.NO_TOKEN, repo);
+  }
+  assert.equal(byRepo.get('acme/agent-only').agentRepositoryAgents[0].environment, null);
+  assert.equal(byRepo.get('acme/agent-no-token').agentRepositoryAgents[0].environment.tokenState, 'none');
+});
+
+test('#2528 edge: a disabled agent’s agent-scoped repo gets no subscriber; the trigger says why', () => {
+  const { plan, byRepo } = build();
+  assert.equal(plan.has('acme/agent-disabled'), false);
+  const r = byRepo.get('acme/agent-disabled');
+  assert.equal(r.status, STATUS.NO_TRIGGER);
+  assert.equal(r.triggers[0].ignoredReason, 'agent-disabled');
+  assert.equal(r.tokenEnvironment.id, 'env-e');
+});
+
+test('#2528 edge: a detached agent-scoped repo stops being polled; its trigger is reported not attached', () => {
+  const inputs = fixture();
+  inputs.agents = inputs.agents.map((a) => (a.id === 'scoped-a' || a.id === 'scoped-b')
+    ? { ...a, config: { ...a.config, agentRepositories: [] } } : a);
+  const plan = computePollPlan(inputs);
+  assert.equal(plan.has('acme/agent-listening'), false);
+  const rows = buildRepoStatusView({ ...inputs, plan, state, firstTickDone: true, tokenReadable: readable });
+  assert.equal(rows.find((r) => r.repo === 'acme/agent-listening').status, STATUS.NOT_IN_ENVIRONMENT);
+});
+
+test('#2528: an invalid environment token id never becomes an agent-scoped token source', () => {
+  const inputs = fixture();
+  inputs.agents.push({ id: 'scoped-bad', config: { environmentId: 'env-c', agentRepositories: [{ url: 'git@github.com:acme/agent-bad.git' }] }, triggers: [trig({ repo: 'acme/agent-bad' })] });
+  const plan = computePollPlan(inputs);
+  assert.equal(plan.has('acme/agent-bad'), false);
+  const rows = buildRepoStatusView({ ...inputs, plan, state: {}, firstTickDone: true, tokenReadable: readable });
+  assert.equal(rows.find((r) => r.repo === 'acme/agent-bad').status, STATUS.NO_TOKEN);
 });

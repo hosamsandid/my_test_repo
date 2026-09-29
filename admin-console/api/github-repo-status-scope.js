@@ -41,7 +41,11 @@ function scopeRepoStatus(rows, { all = false, visibleAgentIds = new Set(), visib
       tokenEnvironment,
       environments,
       hiddenEnvironmentCount,
-      agentRepositoryAgents: (rest.agentRepositoryAgents || []).filter((a) => visibleAgentIds.has(a.id)),
+      // #2528: a visible agent's own environment (its poll-token source) is
+      // visible too; anything else is dropped rather than named.
+      agentRepositoryAgents: (rest.agentRepositoryAgents || [])
+        .filter((a) => visibleAgentIds.has(a.id))
+        .map((a) => ({ ...a, environment: a.environment && envVisible(a.environment) ? scrubEnv(a.environment) : null })),
       triggers: (rest.triggers || []).filter((t) => visibleAgentIds.has(t.agentId)),
     });
   }

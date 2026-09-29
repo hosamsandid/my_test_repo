@@ -20,7 +20,9 @@ export const STATUS_META = {
   'no-token': { label: 'Not listening — no token', group: 'not-listening', tone: 'warning' },
   // Often intentional (AC7): a neutral marker, not a warning.
   'no-trigger': { label: 'Not listening — no trigger', group: 'not-listening', tone: 'neutral' },
-  'not-in-environment': { label: 'Not listening — not in an environment', group: 'not-listening', tone: 'warning' },
+  // #2528: agent-scoped repositories are polled too — this status now only
+  // means "named by a trigger, but no environment or agent has it attached".
+  'not-in-environment': { label: 'Not listening — repository not attached', group: 'not-listening', tone: 'warning' },
   unsupported: { label: 'Not listening — unsupported repository', group: 'not-listening', tone: 'warning' },
 };
 
@@ -198,12 +200,20 @@ export function describeRow(row, nowMs) {
         push(TOKENS_LINK);
         push(environmentLink(tokenEnv));
       } else {
-        const envs = r.environments || [];
+        // #2528: an agent-scoped repository is polled with its agent's
+        // environment's token — those environments count here too.
+        const envs = [...(r.environments || [])];
+        const envless = [];
+        for (const a of r.agentRepositoryAgents || []) {
+          if (!a.environment) envless.push(a.name || a.id);
+          else if (!envs.some((e) => e.id === a.environment.id)) envs.push(a.environment);
+        }
         const invalid = envs.filter((e) => e.tokenState === 'invalid-id');
         const none = envs.filter((e) => e.tokenState === 'none');
         const bits = [];
         if (none.length) bits.push(`${none.length === 1 ? 'Environment' : 'Environments'} ${quoted(none.map(envName))} ${none.length === 1 ? 'has' : 'have'} no GitHub token`);
         if (invalid.length) bits.push(`${quoted(invalid.map(envName))} ${invalid.length === 1 ? 'has' : 'have'} an invalid GitHub token id`);
+        if (envless.length) bits.push(`${envless.length === 1 ? 'Agent' : 'Agents'} ${quoted(envless)} ${envless.length === 1 ? 'is' : 'are'} not bound to an environment to take a GitHub token from`);
         text = bits.length ? bits.join('; ') : 'No environment you can see that lists this repository has a GitHub token';
         envs.forEach((e) => push(environmentLink(e)));
       }
@@ -217,14 +227,13 @@ export function describeRow(row, nowMs) {
       break;
     }
     case 'not-in-environment': {
-      const holders = (r.agentRepositoryAgents || []).map((a) => a.name || a.id);
+      // #2528: agent-scoped repositories are polled, so this is a repository
+      // only a trigger names (e.g. it was detached from the agent since).
       const triggerOwners = [...new Set((r.triggers || []).map((t) => t.agentName || t.agentId))];
-      if (holders.length) {
-        text = `Only attached to ${holders.length === 1 ? 'agent' : 'agents'} ${quoted(holders)} — the poller only watches environment repositories`;
-      } else if (triggerOwners.length) {
-        text = `Only named by a trigger of ${quoted(triggerOwners)} — no environment lists this repository`;
+      if (triggerOwners.length) {
+        text = `Only named by a trigger of ${quoted(triggerOwners)} — no environment or agent has this repository attached`;
       } else {
-        text = 'No environment lists this repository';
+        text = 'No environment or agent has this repository attached';
       }
       (r.triggers || []).forEach((t) => push(agentTriggersLink(t.agentId, t.agentName)));
       break;

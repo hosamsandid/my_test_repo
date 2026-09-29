@@ -1705,12 +1705,22 @@ function pollerSubscribes(t) {
 //   agents       — [{ id, config, triggers, triggersMtime }]; config null = stub
 //                  agent (allowed through), triggers null = none/unreadable.
 //
+// Agent-scoped repositories (`config.agentRepositories`, #2067) are token
+// sources too (#2528): they carry no credential of their own by design, so —
+// exactly like the agent's HTTPS git push (#2464) — they use the agent's
+// Working Environment `githubTokenId`. Environment repositories are mapped
+// first, so a repo that is also in an environment keeps that environment's
+// token (no change for env repos); among agents, the first by id wins.
+//
 // Returns Map<repoFullName, { tokenId, envId, subscribers }>. A repo is in the
 // plan only when it has a token AND at least one subscriber.
 function computePollPlan({ environments = [], agents = [], allowNonGithubHost = false } = {}, { onInvalidTokenId } = {}) {
   const repoToToken = new Map();
+  const envById = new Map();
   for (const env of environments) {
-    if (!env || !env.githubTokenId) continue;
+    if (!env) continue;
+    if (env.id && !envById.has(env.id)) envById.set(env.id, env);
+    if (!env.githubTokenId) continue;
     if (!isValidTokenId(env.githubTokenId)) {
       if (onInvalidTokenId) onInvalidTokenId(env);
       continue;
@@ -1720,6 +1730,15 @@ function computePollPlan({ environments = [], agents = [], allowNonGithubHost = 
       const fullName = parseRepoFullName(r?.url, { allowNonGithubHost });
       if (!fullName) continue;
       if (!repoToToken.has(fullName)) repoToToken.set(fullName, { tokenId: env.githubTokenId, envId: env.id });
+    }
+  }
+  for (const agent of [...agents].sort((a, b) => String(a?.id).localeCompare(String(b?.id)))) {
+    const source = agentScopedTokenSource(agent, envById);
+    if (!source) continue;
+    for (const r of agent.config.agentRepositories) {
+      const fullName = parseRepoFullName(r?.url, { allowNonGithubHost });
+      if (!fullName) continue;
+      if (!repoToToken.has(fullName)) repoToToken.set(fullName, source);
     }
   }
 
@@ -1769,6 +1788,18 @@ function computePollPlan({ environments = [], agents = [], allowNonGithubHost = 
     }
   }
   return plan;
+}
+
+// #2528: the token an agent's agent-scoped repositories are polled with — its
+// Working Environment's `githubTokenId`, the same fallback its HTTPS git push
+// uses. null when the agent has no such repositories, no environment, or the
+// environment has no (valid) token id.
+function agentScopedTokenSource(agent, envById) {
+  const list = agent?.config?.agentRepositories;
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const env = agent.config.environmentId ? envById.get(agent.config.environmentId) : null;
+  if (!env || !env.githubTokenId || !isValidTokenId(env.githubTokenId)) return null;
+  return { tokenId: env.githubTokenId, envId: env.id };
 }
 
 // #2537: can the poller actually use this token? Mirrors the early returns in

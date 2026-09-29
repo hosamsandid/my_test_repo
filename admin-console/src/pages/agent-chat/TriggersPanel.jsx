@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { Link } from 'react-router';
 import { RefreshCw, Clock, CalendarClock, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch, Repeat, Puzzle } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
 import SidePanel from '../../components/SidePanel';
@@ -25,6 +26,7 @@ import {
   isStandingSubscription,
 } from './trigger-summary.js';
 import { DOW_LABELS, parseCronState, buildCron, describeCron } from './cron-format.js';
+import { triggerRepoOptions, environmentRepoOptions, triggerRepoWarning } from './trigger-repo-status.js';
 import {
   STOP_CONDITIONS,
   TOKEN_BUDGET_PRESETS,
@@ -60,17 +62,6 @@ function isDataFlowTrigger(t) {
 // `GITHUB_EVENT_OPTIONS` / `LABEL_FILTERABLE_EVENTS` (the friendly event
 // wording + which events carry a label) now live in ./trigger-summary.js so
 // the card summary and the Flow canvas readout share one source of truth (#778).
-
-// Mirrors orchestrator/github-poller.js — extracts owner/repo from the
-// repository URL stored in the working environment.
-function parseRepoFullName(url) {
-  if (!url) return null;
-  const ssh   = String(url).match(/^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/);
-  if (ssh)   return `${ssh[1]}/${ssh[2]}`;
-  const https = String(url).match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
-  if (https) return `${https[1]}/${https[2]}`;
-  return null;
-}
 
 /* ── Toggle switch ──────────────────────────────────────────────────── */
 function ToggleSwitch({ checked, onChange }) {
@@ -309,7 +300,7 @@ function DateTimePicker({ value, onChange }) {
 // former EmitsSection/EmitsEditor and their emit-suggestions/emits endpoints are
 // gone; the trigger row no longer renders an emits chip or edit button.
 
-function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onToggled }) {
+function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onToggled, repoWarning = null }) {
   const [toggling, setToggling] = useState(false);
   const [scriptPanelName, setScriptPanelName] = useState(null);
   const preCheckScriptName = scriptNameFromPath(trigger.preCheckScript);
@@ -421,6 +412,34 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
                 </strong>
               </>
             )}
+          </span>
+        </div>
+      )}
+
+      {/* #2528: the same verdict as the GitHub Event Log's Repositories status
+          area — shown where the trigger is authored. */}
+      {repoWarning && (
+        <div
+          role="status"
+          style={{
+            display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+            padding: 'var(--eb-space-2)',
+            background: 'var(--eb-status-warning-bg)',
+            border: '1px solid var(--eb-status-warning)',
+            borderRadius: 'var(--eb-radius-sm)',
+            fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5,
+          }}
+        >
+          <AlertCircle size={12} style={{ color: 'var(--eb-status-warning)', flexShrink: 0, marginTop: 2 }} />
+          <span style={{ overflowWrap: 'anywhere' }}>
+            <strong style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>{repoWarning.label}</strong>
+            {' — '}{repoWarning.text}
+            {repoWarning.links.map((l) => (
+              <React.Fragment key={l.to}>
+                {' · '}
+                <Link to={l.to} style={{ color: 'var(--eb-accent, var(--eb-status-info))' }}>{l.label}</Link>
+              </React.Fragment>
+            ))}
           </span>
         </div>
       )}
@@ -677,9 +696,10 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   const legacyEvents = Array.isArray(initialValues?.events) && !startedAsDataFlow
     ? initialValues.events : [];
 
-  // Repos available to this agent — sourced from the agent's working
-  // environment. Only fetched when github-event is the active type; a draft
-  // has no environment, so the lookup is skipped entirely.
+  // Repos available to this agent — its working environment's repositories
+  // plus its agent-scoped ones (#2528: the poller listens to both). Only
+  // fetched when github-event is the active type; a draft has no environment,
+  // so the lookup is skipped entirely.
   const [availableRepos, setAvailableRepos] = useState(isDraftMode ? [] : null); // null = not loaded
   useEffect(() => {
     if (isDraftMode) return undefined;
@@ -689,29 +709,37 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       try {
         const agent = await apiCall('GET', `/api/agents/${agentId}`);
         const envId = agent?.environmentId;
-        let repos = [];
+        let envRepositories = [];
         if (envId) {
           const env = await apiCall('GET', `/api/environments/${envId}`);
-          const list = Array.isArray(env?.repositories) ? env.repositories : [];
-          repos = list
-            .map(r => ({ url: r?.url, fullName: parseRepoFullName(r?.url) }))
-            .filter(r => r.fullName);
+          envRepositories = Array.isArray(env?.repositories) ? env.repositories : [];
         }
+        const repos = triggerRepoOptions({
+          envRepositories,
+          agentRepositories: agent?.agentRepositories,
+          currentRepo: initialValues?.repo,
+        });
         if (!cancelled) setAvailableRepos(repos);
       } catch {
         if (!cancelled) setAvailableRepos([]);
       }
     })();
     return () => { cancelled = true; };
-  }, [form.type, agentId, availableRepos, isDraftMode]);
+  }, [form.type, agentId, availableRepos, isDraftMode, initialValues?.repo]);
+
+  // A data-flow dependency always lives on the team repo — never an
+  // agent-scoped one.
+  const dataFlowRepos = availableRepos === null ? null : environmentRepoOptions(availableRepos);
 
   // Auto-pick the repo when the env has exactly one — a data-flow dependency
   // always lives on the team repo, so the user shouldn't have to choose.
   useEffect(() => {
-    if (Array.isArray(availableRepos) && availableRepos.length === 1 && !form.repo) {
-      setForm(f => (f.repo ? f : { ...f, repo: availableRepos[0].fullName }));
+    if (!Array.isArray(availableRepos)) return;
+    const pool = form.type === 'data-flow' ? environmentRepoOptions(availableRepos) : availableRepos;
+    if (pool.length === 1 && !form.repo) {
+      setForm(f => (f.repo ? f : { ...f, repo: pool[0].fullName }));
     }
-  }, [availableRepos, form.repo]);
+  }, [availableRepos, form.repo, form.type]);
 
   // Plugin-event picker inputs — the installed registry plus this agent's
   // effective plugin grant, fetched once, only while plugin-event is the
@@ -1365,7 +1393,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
               Repository
             </div>
-            {availableRepos === null ? (
+            {dataFlowRepos === null ? (
               <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)', padding: 'var(--eb-space-2)' }}>
                 <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', marginRight: 6, verticalAlign: 'middle' }} />
                 Loading repositories…
@@ -1373,7 +1401,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
             ) : (
               <select value={form.repo} onChange={e => set('repo', e.target.value)} style={{ ...FIELD_STYLE, width: '100%' }}>
                 <option value="">— Select a repository —</option>
-                {availableRepos.map(r => <option key={r.fullName} value={r.fullName}>{r.fullName}</option>)}
+                {dataFlowRepos.map(r => <option key={r.fullName} value={r.fullName}>{r.fullName}</option>)}
               </select>
             )}
           </div>
@@ -1406,7 +1434,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                 fontSize: 'var(--eb-text-xs)',
                 color: 'var(--eb-status-warning)',
               }}>
-                The agent's environment has no GitHub repositories with a parsable URL. Add one on the team's <strong>Settings</strong> tab first.
+                Neither the agent's environment nor the agent itself has a GitHub repository with a parsable URL. Add one on the team's <strong>Settings</strong> tab (or attach one to this agent) first.
               </div>
             ) : (
               <select
@@ -1415,8 +1443,9 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                 style={{ ...FIELD_STYLE, width: '100%' }}
               >
                 <option value="">— Select a repository —</option>
+                {/* #2528: agent-scoped repositories read "— this agent only". */}
                 {availableRepos.map(r => (
-                  <option key={r.fullName} value={r.fullName}>{r.fullName}</option>
+                  <option key={r.fullName} value={r.fullName}>{r.label}</option>
                 ))}
               </select>
             )}
@@ -1702,13 +1731,24 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
   const [saving, setSaving]             = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
 
+  // #2528: the GitHub poller's per-repository status (the Event Log's
+  // Repositories area) — drives the "not listening" notice on github-event
+  // rows. Live agents only; a failed read just shows no notice.
+  const [repoStatusRows, setRepoStatusRows] = useState(null);
+
   const fetchTriggers = useCallback(async (id) => {
     if (!id) { setTriggers([]); return; }
     setLoading(true);
     setError(null);
     try {
       const data = await ops.listTriggers(id);
-      setTriggers(Array.isArray(data) ? data : []);
+      const list = Array.isArray(data) ? data : [];
+      setTriggers(list);
+      if (ops.mode !== 'draft' && list.some((t) => t && t.type === 'github-event')) {
+        apiCall('GET', '/api/github-events/repo-status')
+          .then((body) => setRepoStatusRows(Array.isArray(body?.repos) ? body.repos : null))
+          .catch(() => setRepoStatusRows(null));
+      }
     } catch (e) {
       setError(e.message);
     } finally {
@@ -1878,6 +1918,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
             onEdit={setEditTarget}
             onDeleted={setDeleteTarget}
             onToggled={afterRowMutation}
+            repoWarning={isDraft ? null : triggerRepoWarning(t, repoStatusRows, { agentId })}
           />
         ))}
       </div>

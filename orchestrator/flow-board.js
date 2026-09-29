@@ -1,4 +1,4 @@
-// Flow Control board (#2573, concept `docs/flow-control-concept.md` Amendment 4).
+// Flow Control board (#2573, concept `docs/flow-control-concept.md` Amendment 3).
 //
 // A pure, fs-free module: it turns a team's flow graph plus one cheap GitHub
 // snapshot and the platform's own logs into the lean "who is working on what"
@@ -335,9 +335,11 @@ function isDependabot(item) {
   return login.startsWith('dependabot');
 }
 
-// `trigger:<tid>:gh:<eventId>` → eventId (the poller's correlation id shape).
+// `trigger:<tid>:gh:<eventId>` → eventId (the runner's correlation id shape).
+// Everything after `:gh:` — platform-minted ids contain a colon themselves
+// (`int:<hex>` flow-emit, `intlbl:<hex>` label fast-path, `refire:<hex>`).
 function eventIdFromCorrelation(correlationId) {
-  const m = /:gh:([^:]+)$/.exec(str(correlationId));
+  const m = /:gh:(.+)$/.exec(str(correlationId));
   return m ? m[1] : null;
 }
 

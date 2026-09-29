@@ -138,6 +138,32 @@ test('buildFlowBoard: issue and the PR the woken agent opened form one row, no C
   assert.ok(b.rows.find((r) => r.id === 'o/r#71'));
 });
 
+test('buildFlowBoard: a non-pooled role woken by a platform-minted event id (int:/intlbl:/refire:) links its PR to the issue', () => {
+  for (const eventId of ['int:abcdef012345', 'intlbl:0123abcd', 'refire:feedbeef']) {
+    const b = board({
+      github: { issues: [issue(8, { updatedAt: iso(90) })], prs: [pr(80, { labels: ['ready-for-review'] })] },
+      events: [{ ...delivered(8, 't-developer', 90), eventId }],
+      prRecords: [{ kind: 'pr-created', agentId: 't-developer', repo: 'o/r', prNumber: 80, correlationId: `trigger:t-ready:gh:${eventId}`, ts: iso(60) }],
+    });
+    assert.deepEqual(b.rows.map((r) => r.id), ['o/r#8'], eventId);
+    assert.deepEqual(b.rows[0].prs.map((p) => p.number), [80]);
+    assert.equal(b.rows[0].stageId, 't-reviewer');
+    assert.deepEqual(b.needsHuman, []);
+  }
+});
+
+test('buildFlowBoard: an idle "last woke here" never outranks an agent queued on another item of the row', () => {
+  const ev = delivered(10, 't-developer', 120);
+  const b = board({
+    github: { issues: [issue(10)], prs: [pr(100, { labels: ['ready-for-review'] })] },
+    events: [ev, delivered(10, 't-merger', 90)],
+    prRecords: [{ kind: 'pr-created', agentId: 't-developer', repo: 'o/r', prNumber: 100, correlationId: `trigger:t:gh:${ev.eventId}`, ts: iso(100) }],
+  });
+  assert.equal(b.rows.length, 1);
+  assert.equal(b.rows[0].stageId, 't-reviewer');
+  assert.equal(b.rows[0].status, 'queued');
+});
+
 test('buildFlowBoard: several PRs for one issue — one row, stage follows the most advanced open PR', () => {
   const b = board({
     github: {
@@ -256,6 +282,9 @@ test('buildFlowBoard: pools report busy of capacity, state and held work', () =>
 test('eventIdFromCorrelation / markerAgents / checksState', () => {
   assert.equal(fb.eventIdFromCorrelation('trigger:t1:gh:12345'), '12345');
   assert.equal(fb.eventIdFromCorrelation('dm:x'), null);
+  assert.equal(fb.eventIdFromCorrelation('trigger:t1:gh:int:abc123'), 'int:abc123');
+  assert.equal(fb.eventIdFromCorrelation('trigger:t1:gh:intlbl:abc123'), 'intlbl:abc123');
+  assert.equal(fb.eventIdFromCorrelation('trigger:t1:gh:refire:abc123'), 'refire:abc123');
   assert.deepEqual(fb.markerAgents('a <!-- agent: t-dev --> b <!-- agent: t-rev -->'), ['t-dev', 't-rev']);
   assert.equal(fb.checksState('FAILURE'), 'failing');
   assert.equal(fb.checksState('PENDING'), 'pending');

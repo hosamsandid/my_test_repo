@@ -2446,7 +2446,7 @@ async function computeTeamTicketLedger(teamId, { now = Date.now() } = {}) {
   };
 }
 
-// ── Flow Control board (#2573, concept Amendment 4) ─────────────────────────
+// ── Flow Control board (#2573, concept Amendment 3) ─────────────────────────
 //
 // The lean "who is working on what" board. Unlike the ticket ledger above
 // (≈7 GitHub calls per open PR, sequential), this is ONE list sweep per repo —

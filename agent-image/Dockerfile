@@ -92,6 +92,15 @@ RUN chmod +x /opt/ace/scripts/aee-artifact \
 RUN chmod +x /opt/ace/scripts/gh-as-agent \
     && ln -sf /opt/ace/scripts/gh-as-agent /usr/local/bin/gh-as-agent
 
+# `gh` itself is wrapped (#2559): /usr/local/bin precedes /usr/bin on PATH, so
+# agents' `gh …` reaches `aee-gh`, which forwards a live chat turn's GitHub
+# WRITES to the orchestrator to run under the chat sender's personal token (the
+# secret never enters the container) and execs the real /usr/bin/gh for
+# everything else — reads, local commands and every autonomous run.
+ENV AEE_REAL_GH=/usr/bin/gh
+RUN chmod +x /opt/ace/scripts/aee-gh \
+    && ln -sf /opt/ace/scripts/aee-gh /usr/local/bin/gh
+
 # `knowledge` — record + query the shared team Knowledge Base (Shared Agent
 # Learning). On PATH so agents call it directly: `knowledge search` (offline
 # search over the synced working copy) and `knowledge add` (append a durable,

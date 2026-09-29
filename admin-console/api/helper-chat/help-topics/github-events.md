@@ -74,7 +74,7 @@ Each row reads left to right as *when · where · what · who · what happened*:
 | **Title** | The title of that PR or issue. |
 | **Event** | The event in plain language rather than the raw API key. A push / create / delete row appends the branch or tag it touched; a row nobody was listening to appends the event's own label. |
 | **Actor** | The GitHub account that caused the event. |
-| **Outcomes** | One chip per subscriber whose event-type filter matched — the next chapter is entirely about these. |
+| **Outcomes** | One line per subscriber whose event-type filter matched, its status shown by a small leading marker — the next chapter is entirely about these. |
 
 Older rows are never backfilled. A column that was added after a row was
 written simply shows `—` for it, rather than a value invented after the fact.
@@ -125,18 +125,18 @@ Each row carries a `source` marking which writer produced it, but **the table
 never renders it** — so a poller row and an internal-fast-path row that arrived by
 different routes look identical here. A direct hand-off is the one you can pick
 out, because its Event cell reads *direct hand-off*. The
-`dropped (internal-dedup)` chip described in the next chapter is the only visible
+`dropped (internal-dedup)` outcome described in the next chapter is the only visible
 trace of the fast path.
 
 ## Outcomes
 
-One row per event; one chip per subscriber whose event-type filter matched. The
-same explanations are on the page as chip tooltips and in the collapsible
+One row per event; one outcome line per subscriber whose event-type filter
+matched. The same explanations are on the page as outcome tooltips and in the collapsible
 legend — this is the longer version.
 
 | Outcome | What happened | Should you worry? |
 |---|---|---|
-| **delivered → agent** | The event matched a trigger and a session ran. Click the chip to open that session. | No. |
+| **delivered → agent** | The event matched a trigger and a session ran. Click the outcome to open that session. | No. |
 | **digested → agent** | Part of a burst (more than 3 events on the same PR / issue / branch in one poll) folded into **one** summary wake. **Lossless** — the agent still receives every event inside the digest. | No. One session instead of many is the point. |
 | **dropped (throttle)** | The per-conversation rate cap was hit — by default 5 events per hour per agent per PR / issue / branch. | Usually healthy loop-protection: an agent's own commits and comments re-trigger it. Worry only if a genuinely new event failed to wake someone. |
 | **dropped (horizon)** | The event is older than that subscriber's subscription window (its activation time plus a short grace). | Expected right after wiring or reactivating a trigger. A new agent deliberately does not react to history that predates it. |
@@ -145,15 +145,15 @@ legend — this is the longer version.
 | **dropped (wake-already-armed)** | Already woken for this label on this item; a repeat does not wake it again until the label is removed and re-added. | Usually no. Re-fire a lost hand-off from the agent's Events tab. |
 | **nobody's listening** | No trigger subscribed to this event **type** at all. | Maybe. If something should have reacted, the wiring is missing — add or fix the `github-event` trigger on the target agent. |
 
-A `delivered` or `digested` chip may carry the **wake label** in brackets: the
+A `delivered` or `digested` outcome may carry the **wake label** in brackets: the
 label that actually satisfied the subscriber's filter. No bracket means the
 listener takes any label.
 
 *One caveat about digests as currently recorded:* the fold itself is real and
 lossless, but a folded event is written to the log as **`delivered`** with a
 separate digest marker rather than as a `digest` status — so today a digested
-burst reads as a run of ordinary `delivered` chips, and following one of those
-chips to "the session it started" can land on nothing, because a digest posts a
+burst reads as a run of ordinary `delivered` outcomes, and following one of those
+outcomes to "the session it started" can land on nothing, because a digest posts a
 single plain message instead of starting one session per event. If a burst looks
 like several deliveries but you only find one summary message, that is what you
 are looking at.
@@ -173,12 +173,12 @@ Work down the row, in this order:
    action.
 2. **Does the row say *nobody's listening*?** → no trigger subscribes to that
    event type. A wiring problem, not a delivery problem.
-3. **Is there a chip for the agent you expected?** No chip means the agent's
+3. **Is there an outcome for the agent you expected?** None means the agent's
    trigger did not even match the event *type*.
-4. **Is the chip a drop?** The reason names the layer that stopped it —
+4. **Is the outcome a drop?** The reason names the layer that stopped it —
    horizon, label filter, throttle or a dedup.
 5. **Delivered but nothing happened?** Delivery is not execution. Open the
-   session from the chip and read it there.
+   session from the outcome and read it there.
 6. **Delivered, but the agent has not started yet?** Look in the Pending queue —
    the entry may still be waiting for the agent.
 

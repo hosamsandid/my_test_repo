@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt, deriveClaim, claimLabelFor, claimError, channelAutoClaim, CLAIM_SUFFIX, completedLabelFor, COMPLETED_SUFFIX, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, expandWakeHandoffs, isWakeHandoffTrigger, wakeTriggerId, POSTCONDITIONS, cleanPostcondition, strictestPostcondition, channelPostcondition } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, normalizeLegacyReview, expandDataFlowSteps, stampDerivedActivation, emptyDraftBundle, roleKeyOf, slugifyDraft, deriveUniqueDraftId, outcomesBlock, stripOutcomesBlock, applyDerivedPromptBlocks, cleanWakePrompt, deriveClaim, claimLabelFor, claimError, channelAutoClaim, CLAIM_SUFFIX, completedLabelFor, COMPLETED_SUFFIX, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, expandWakeHandoffs, isWakeHandoffTrigger, wakeTriggerId, POSTCONDITIONS, cleanPostcondition, strictestPostcondition, channelPostcondition } = require('./process-template');
 
 // A tiny stand-in for the on-disk draft store: an id is "taken" iff present.
 const existsIn = (set) => (id) => set.has(id);
@@ -317,6 +317,74 @@ test('autoDispatch: enabled:false is treated as not configured (dropped on build
   assert.equal('autoDispatch' in b, false);
   assert.equal(normalizeAutoDispatch({ enabled: false }), null);
   assert.equal(normalizeAutoDispatch(undefined), null);
+});
+
+// ── coerceImportBundle (#2579): robust import ────────────────────────────────
+
+test('coerceImportBundle: disables autoDispatch when no role is pooled, and the result validates', () => {
+  // Exactly the shape a pre-#2579 leaky export produced: wipLimit + autoDispatch
+  // survived, the pooled role did not.
+  const raw = {
+    processTemplateVersion: 1,
+    wipLimit: 20,
+    autoDispatch: { enabled: true, contentionPolicy: 'epic-serial' },
+    roles: [{ id: 'developer', systemPrompt: 'p' }],
+  };
+  // Precondition: the raw bundle is exactly what the strict validator rejects.
+  assert.equal(validateProcessTemplate(raw).ok, false);
+
+  const { bundle, warnings } = coerceImportBundle(raw);
+  assert.equal('autoDispatch' in bundle, false);
+  assert.equal(bundle.wipLimit, 20); // wipLimit is preserved as a plain WIP limit
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /pooling/i);
+  assert.equal(validateProcessTemplate(bundle).ok, true);
+});
+
+test('coerceImportBundle: disables autoDispatch when a pooled role exists but wipLimit is missing', () => {
+  const raw = {
+    processTemplateVersion: 1,
+    autoDispatch: { enabled: true },
+    roles: [{ id: 'developer', systemPrompt: 'p', pool: { enabled: true } }],
+  };
+  const { bundle, warnings } = coerceImportBundle(raw);
+  assert.equal('autoDispatch' in bundle, false);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /WIP limit/i);
+});
+
+test('coerceImportBundle: leaves a consistent pooled+autoDispatch bundle untouched and warning-free', () => {
+  const raw = pooledRoleWithWipLimit({ autoDispatch: { enabled: true, contentionPolicy: 'epic-serial' } });
+  const { bundle, warnings } = coerceImportBundle(raw);
+  assert.equal(warnings.length, 0);
+  assert.deepEqual(bundle, raw); // no repair applied
+  assert.equal(validateProcessTemplate(bundle).ok, true);
+});
+
+test('coerceImportBundle: does not mutate its input', () => {
+  const raw = {
+    processTemplateVersion: 1,
+    wipLimit: 5,
+    autoDispatch: { enabled: true },
+    roles: [{ id: 'r', systemPrompt: 'p' }],
+  };
+  const snapshot = JSON.parse(JSON.stringify(raw));
+  coerceImportBundle(raw);
+  assert.deepEqual(raw, snapshot);
+});
+
+test('coerceImportBundle: a bundle with autoDispatch already off is untouched', () => {
+  const raw = { processTemplateVersion: 1, roles: [{ id: 'r', systemPrompt: 'p' }], autoDispatch: { enabled: false } };
+  const { bundle, warnings } = coerceImportBundle(raw);
+  assert.equal(warnings.length, 0);
+  assert.deepEqual(bundle, raw);
+});
+
+test('coerceImportBundle: tolerates non-object input without throwing', () => {
+  assert.deepEqual(coerceImportBundle(null), { bundle: null, warnings: [] });
+  assert.deepEqual(coerceImportBundle(undefined), { bundle: undefined, warnings: [] });
+  const arr = [1, 2];
+  assert.deepEqual(coerceImportBundle(arr), { bundle: arr, warnings: [] });
 });
 
 test('autoDispatch: an unimplemented selection/contentionPolicy is refused, not silently ignored', () => {

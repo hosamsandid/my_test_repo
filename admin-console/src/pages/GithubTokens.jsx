@@ -23,6 +23,7 @@ import {
 import { environmentsUsingGithubToken, usageCountLabel, usageTooltip } from './credential-usage';
 import { CREDENTIALS_HELP_SECTIONS } from './credentials-help-sections.js';
 import { usePageActions } from '../context/PageActionsContext';
+import { loadPersonalCredentialChangeNotice } from './effective-identity-view.js';
 
 const inputStyle = {
   width: '100%',
@@ -297,6 +298,14 @@ export default function GithubTokens() {
   const [rotateToken, setRotateToken] = useState('');
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [actionError, setActionError] = useState(null);
+  // #2560: which of the caller's teams a personal credential they just added
+  // (or deleted) now moves — the Team Admin's personal credential overrides the
+  // team's own for automatic work and in-container GitHub actions.
+  const [baselineNotice, setBaselineNotice] = useState(null);
+  const announceBaselineChange = (entry, action) => {
+    if (entry?.scope !== 'personal') return;
+    loadPersonalCredentialChangeNotice(url => apiCall('GET', url), { kind: 'github', action }).then(setBaselineNotice);
+  };
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
 
@@ -401,7 +410,8 @@ export default function GithubTokens() {
   async function handleSave({ name, id, token, scope, teamId, assignedTeamIds, identity }) {
     setSaving(true); setFormError(null);
     try {
-      await apiCall('POST', '/api/github-tokens', { name, id, token, scope, teamId, assignedTeamIds, identity });
+      const created = await apiCall('POST', '/api/github-tokens', { name, id, token, scope, teamId, assignedTeamIds, identity });
+      announceBaselineChange(created, 'added');
       setCreating(false);
       refetch();
     } catch (e) {
@@ -440,6 +450,7 @@ export default function GithubTokens() {
   async function handleDelete() {
     try {
       await apiCall('DELETE', `/api/github-tokens/${deleteTarget.id}`);
+      announceBaselineChange(deleteTarget, 'deleted');
       setDeleteTarget(null);
       refetch();
     } catch (e) {
@@ -495,6 +506,12 @@ export default function GithubTokens() {
         />
       </p>
 
+      {baselineNotice && (
+        <div role="status" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
+          {baselineNotice}
+          <button onClick={() => setBaselineNotice(null)} style={{ marginLeft: 'var(--eb-space-3)', background: 'none', border: 'none', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}>Dismiss</button>
+        </div>
+      )}
       {actionError && (
         <div role="alert" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-error-bg)', border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
           {actionError}

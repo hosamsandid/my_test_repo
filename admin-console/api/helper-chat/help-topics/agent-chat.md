@@ -529,12 +529,13 @@ time it passes and every `cron` whose time it crosses.
 ### A GitHub event fires regardless of who caused it
 
 A GitHub-event or data-flow wake does **not** know whether the change is relevant
-to this agent, and it fires for **the agent's own pushes** too. So the wake
-instruction should tell the agent to `git pull` first, decide whether the change
-concerns it, and answer `[PASS]` when there is nothing to do. There is
-deliberately **no source filtering** anywhere in the delivery path — loop
-protection is frequency-based (a per-conversation throttle and a burst digest),
-so relevance is the agent's job, not the trigger's.
+to this agent, and it fires for **the agent's own pushes** too, unless a push
+trigger's **Pushed by** filter names the producers (a Flow-editor data-flow
+hand-off names its upstream). So the wake instruction should tell the agent to
+`git pull`, decide whether the change concerns it, and answer `[PASS]` when there
+is nothing to do. Beyond that filter there is **no source filtering** — loop
+protection is frequency-based (throttle and burst digest), so relevance is the
+agent's job.
 
 A label listener can additionally **claim** its wake label on fire (`ready` →
 `ready:wip`), which makes work-in-progress visible on GitHub and is rolled back

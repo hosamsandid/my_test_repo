@@ -161,7 +161,7 @@ single plain message instead of starting one session per event. If a burst looks
 like several deliveries but you only find one summary message, that is what you
 are looking at.
 
-**There is no source filtering.** Every agent shares one GitHub token, so an
+**There is no source filtering** (one exception below). Every agent shares one GitHub token, so an
 event caused by an agent looks exactly like an event caused by a human, and a
 trigger fires on either. The identity stamps `gh-as-agent` writes are for
 humans reading GitHub, not for delivery decisions — the only thing standing

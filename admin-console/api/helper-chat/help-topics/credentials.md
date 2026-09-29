@@ -258,15 +258,14 @@ Token* field to it, which restarts that environment's agents for the same reason
 **Which credential an agent actually uses** is decided **per operation class**,
 because attribution and transport differ:
 
-- **Interactive attributed writes** — a commit push or a pull request the
-  agent makes while a person is chatting with it — use the **chat
-  sender's own personal** credential. If the person chatting has none (or a PAT
-  without the `repo` / `workflow` scope), the write is **refused** with an
-  actionable message rather than silently made under someone else's name.
-- **Automatic work and in-container actions** — every cron, GitHub-event and loop
-  run, and every `gh`/`git` call the agent makes directly (commenting on an issue,
-  reviewing a pull request) — use the container's own `GH_TOKEN`/`GITHUB_TOKEN`
-  and SSH identity. That is resolved in this order: the **current Team Admin's
+- **Attributed writes** — anything the agent writes to GitHub while a team
+  member chats with it: a push, a pull request, an issue, a comment, a review, a
+  label change — use the **chat sender's own personal** credential. If they have
+  none (or a PAT without the `repo` / `workflow` scope), the write is **refused**
+  with an actionable message, never made under someone else's name.
+- **Automatic work** — every cron, GitHub-event and loop run, plus reads and
+  chats from a sender outside the agent's team — uses the container's own
+  `GH_TOKEN`/`GITHUB_TOKEN` and SSH identity. That is resolved in this order: the **current Team Admin's
   personal** credential, else the **team** credential configured on the team's
   environment, else a **global service** credential. That order is a
   **preference among tiers**, and it never refuses — automatic work always has a

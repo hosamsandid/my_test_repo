@@ -31,10 +31,18 @@ function world({ senders = {}, tokens = {} } = {}) {
         const p = a.includes("=@") ? a.split("=@")[1] : a;
         if (p.startsWith(cwd) && fs.existsSync(p)) files[a] = fs.readFileSync(p, "utf8");
       }
-      calls.push({ args, cwd, env, files });
-      return { exitCode: 0, stdout: `https://github.com/o/r/issues/1 ${env.GH_TOKEN}\n`, stderr: "" };
+      const token = hostsToken(env);
+      calls.push({ args, cwd, env, files, token });
+      return { exitCode: 0, stdout: `https://github.com/o/r/issues/1 ${token}\n`, stderr: "" };
     },
   };
+}
+
+// The token gh would authenticate with: the one in its per-call hosts.yml.
+function hostsToken(env) {
+  const yml = fs.readFileSync(path.join(env.GH_CONFIG_DIR, "hosts.yml"), "utf8");
+  const m = /^github\.com:\n\s+oauth_token: (".*")$/m.exec(yml);
+  return m ? JSON.parse(m[1]) : null;
 }
 
 function refusal(code, message) {
@@ -59,8 +67,7 @@ test("AC1/AC2: a trusted sender's write runs gh under THEIR personal token", asy
   }
   assert.equal(w.calls.length, 5);
   for (const c of w.calls) {
-    assert.equal(c.env.GH_TOKEN, "ghp_B");
-    assert.equal(c.env.GITHUB_TOKEN, "ghp_B");
+    assert.equal(c.token, "ghp_B");
     assert.equal(c.env.GH_REPO, "o/r");
     assert.equal(c.env.GH_PROMPT_DISABLED, "1");
   }
@@ -101,7 +108,7 @@ test("AC6: consecutive turns from different members each use their own token (re
   // Rotation: the stored secret changes between turns — the next call reads the new one.
   tokens["tok-a"] = "ghp_A2";
   await cgw.runChatGithubWrite({ body: { args: ["issue", "create"], actingSender: "@a:local" }, ...w });
-  assert.deepEqual(w.calls.map((c) => c.env.GH_TOKEN), ["ghp_A", "ghp_B", "ghp_A2"]);
+  assert.deepEqual(w.calls.map((c) => c.token), ["ghp_A", "ghp_B", "ghp_A2"]);
 });
 
 test("an unreadable resolved credential fails closed with noGithubToken", async () => {
@@ -135,16 +142,44 @@ test("body files are materialised into a private temp dir that is removed afterw
 test("the gh env carries no ambient orchestrator secrets and a fresh config dir", () => {
   const env = cgw.buildGhEnv({
     baseEnv: { PATH: "/usr/bin", HTTPS_PROXY: "http://p", GH_ENTERPRISE_TOKEN: "x", INTERNAL_API_TOKEN: "y", GH_TOKEN: "ambient" },
-    token: "ghp_B",
     repo: null,
     home: "/tmp/h",
   });
-  assert.equal(env.GH_TOKEN, "ghp_B");
+  assert.equal(env.GH_TOKEN, undefined, "not even the ambient one");
   assert.equal(env.HTTPS_PROXY, "http://p");
   assert.equal(env.GH_CONFIG_DIR, path.join("/tmp/h", "gh-config"));
   assert.equal(env.GH_ENTERPRISE_TOKEN, undefined);
   assert.equal(env.INTERNAL_API_TOKEN, undefined);
   assert.equal(env.GH_REPO, undefined);
+});
+
+test("review B1: the token never reaches gh's environment — only its private hosts.yml", async () => {
+  // gh's jq engine reads the process environment (`--jq '$ENV.GH_TOKEN|@base64'`),
+  // which literal-string redaction cannot catch; so the env must not hold it.
+  const w = world({ senders: { "@b:local": "tok-b" }, tokens: { "tok-b": "ghp_SECRET" } });
+  let seen;
+  w.execGh = async (args, { cwd, env }) => {
+    const cfg = path.join(env.GH_CONFIG_DIR, "hosts.yml");
+    seen = { env, hosts: fs.readFileSync(cfg, "utf8"), mode: fs.statSync(cfg).mode & 0o777, cwd };
+    return { exitCode: 0, stdout: JSON.stringify(env), stderr: "" };
+  };
+  const r = await cgw.runChatGithubWrite({
+    body: { args: ["api", "/rate_limit", "-X", "POST", "--jq", "$ENV.GH_TOKEN|@base64"], actingSender: "@b:local" },
+    ...w,
+  });
+  assert.equal(r.mode, "attributed");
+  assert.equal(seen.env.GH_TOKEN, undefined);
+  assert.equal(seen.env.GITHUB_TOKEN, undefined);
+  for (const v of Object.values(seen.env)) assert.ok(!String(v).includes("ghp_SECRET"), "no env value holds the token");
+  assert.ok(seen.env.GH_CONFIG_DIR.startsWith(seen.cwd), "config dir lives in the per-call temp dir");
+  assert.match(seen.hosts, /^github\.com:\n\s+oauth_token: "ghp_SECRET"\n/, "only github.com gets the token");
+  assert.equal(seen.mode, 0o600);
+  assert.equal(fs.existsSync(seen.cwd), false, "and it is removed with the temp dir");
+});
+
+test("buildGhEnv takes no token at all", () => {
+  const env = cgw.buildGhEnv({ baseEnv: { PATH: "/usr/bin" }, token: "ghp_X", repo: "o/r", home: "/tmp/h" });
+  assert.ok(!JSON.stringify(env).includes("ghp_X"));
 });
 
 test("parseGhWriteRequest refuses commands that would run, persist or read something on the orchestrator", () => {

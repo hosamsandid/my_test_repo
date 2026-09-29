@@ -256,7 +256,19 @@ function materializeArgs(args, files, dir, { fs = nodeFs, path = nodePath } = {}
   return out;
 }
 
-function buildGhEnv({ baseEnv = process.env, token, repo, home }) {
+// The token reaches gh only through the per-call config dir's hosts.yml, never
+// its environment: gh's jq engine exposes the process environment (`$ENV`,
+// `env`), so `gh api --jq '$ENV.GH_TOKEN|@base64'` would hand the secret back
+// past the literal-string redaction. hosts.yml holds `github.com` alone, so a
+// `-R <other-host>/o/r` never receives it either.
+function writeGhHostsConfig(configDir, token, { fs = nodeFs, path = nodePath } = {}) {
+  fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
+  // A JSON string is a valid YAML double-quoted scalar, whatever the token holds.
+  const yml = `github.com:\n    oauth_token: ${JSON.stringify(String(token))}\n    git_protocol: https\n`;
+  fs.writeFileSync(path.join(configDir, "hosts.yml"), yml, { mode: 0o600 });
+}
+
+function buildGhEnv({ baseEnv = process.env, repo, home }) {
   const env = {};
   for (const k of PASSTHROUGH_ENV) {
     if (baseEnv[k] != null) env[k] = baseEnv[k];
@@ -264,10 +276,9 @@ function buildGhEnv({ baseEnv = process.env, token, repo, home }) {
   Object.assign(env, {
     HOME: home,
     // A fresh config dir per call: no aliases, extensions or stored hosts.yml
-    // credentials from anywhere else can take part.
+    // credentials from anywhere else can take part. It holds the token
+    // (writeGhHostsConfig) — no GH_TOKEN/GITHUB_TOKEN here, on purpose.
     GH_CONFIG_DIR: nodePath.join(home, "gh-config"),
-    GH_TOKEN: token,
-    GITHUB_TOKEN: token,
     GH_PROMPT_DISABLED: "1",
     GH_NO_UPDATE_NOTIFIER: "1",
     NO_COLOR: "1",
@@ -361,7 +372,8 @@ async function runChatGithubWrite({
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "aee-gh-"));
   try {
     const args = materializeArgs(req.args, req.files, dir, { fs, path });
-    const env = buildGhEnv({ baseEnv, token, repo: req.repo, home: dir });
+    const env = buildGhEnv({ baseEnv, repo: req.repo, home: dir });
+    writeGhHostsConfig(env.GH_CONFIG_DIR, token, { fs, path });
     const r = await exec(args, { cwd: dir, env });
     // Defence in depth: the secret never goes back to the container, even if
     // some gh output were to echo it.
@@ -384,6 +396,7 @@ module.exports = {
   parseGhWriteRequest,
   materializeArgs,
   buildGhEnv,
+  writeGhHostsConfig,
   readGithubToken,
   execGh,
   runChatGithubWrite,

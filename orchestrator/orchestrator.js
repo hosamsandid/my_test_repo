@@ -5908,8 +5908,7 @@ function materializeAgentSshKey(id, env, childEnv, cfg) {
   const agentCfgPath = path.join(agentSshDir, "config");
   const agentKnownHosts = path.join(agentSshDir, "known_hosts");
 
-  const repos = Array.isArray(env?.repositories) ? env.repositories : [];
-  const sharedSshKeyId = repos.find((r) => r && r.sshKeyId)?.sshKeyId;
+  const sharedSshKeyId = baselineSharedSshKeyId(env);
   // Baseline resolution (#2177/#2212, epic #2166 B5) — mirrors the GH_TOKEN
   // bake above: prefer the team's current team-admin's personal SSH key over
   // the environment's raw shared deploy key, so a directly-run `git`/`gh`
@@ -6239,21 +6238,24 @@ function resolveAttributedSshKey(id, sharedSshKeyId, operation, actingSenderMatr
 function resolveBaselineGithubTokenId(cfg, env) {
   const sharedCredentialId = env?.githubTokenId || null;
   if (!cfg) return sharedCredentialId;
-  const ownerId = credentialResolution.resolveBaselineOwnerId(cfg, { loadAgentConfig, ...loadBaselineDeps() });
-  const tokenIndex = loadGithubTokenIndex();
-  const liveUserGate = loadLiveUserGate();
-  const personal = credentialResolution.findPersonalCredentialState(tokenIndex, ownerId, undefined, liveUserGate);
-  const decision = credentialResolution.resolveCredential({
-    operation: "spawn",
-    ownerId,
-    personalCredential: personal.entry,
-    personalCredentialPresent: personal.present,
-    personalCredentialOrphaned: personal.orphaned,
-    sharedCredentialId,
+  return describeBaselineGithubToken(cfg, env).credentialId;
+}
+
+// The full baseline decision behind `resolveBaselineGithubTokenId` — tier,
+// baseline owner, orphan state (#2560). The spawn-time bake above and the
+// console's effective-identity display (`GET /internal/agents/:id/effective-
+// credentials`) both go through here, so what the console shows is what the
+// container is started with.
+function describeBaselineGithubToken(cfg, env) {
+  return credentialResolution.describeBaselineCredential({
+    cfg,
+    loadAgentConfig,
+    ...loadBaselineDeps(),
+    index: loadGithubTokenIndex(),
+    liveUsers: loadLiveUserGate(),
+    sharedCredentialId: env?.githubTokenId || null,
     kind: "GitHub token",
-    globalServiceCredentialId: credentialResolution.selectGlobalServiceCredentialId(tokenIndex),
   });
-  return decision.credentialId || null;
 }
 
 // SSH-key sibling of `resolveBaselineGithubTokenId` (#2212 review finding —
@@ -6266,21 +6268,39 @@ function resolveBaselineGithubTokenId(cfg, env) {
 // first repo carrying one), not "any key somewhere on the environment".
 function resolveBaselineSshKeyId(cfg, sharedSshKeyId) {
   if (!cfg) return sharedSshKeyId || null;
-  const ownerId = credentialResolution.resolveBaselineOwnerId(cfg, { loadAgentConfig, ...loadBaselineDeps() });
-  const keyIndex = loadSshKeyIndex();
-  const liveUserGate = loadLiveUserGate();
-  const personal = credentialResolution.findPersonalCredentialState(keyIndex, ownerId, undefined, liveUserGate);
-  const decision = credentialResolution.resolveCredential({
-    operation: "spawn",
-    ownerId,
-    personalCredential: personal.entry,
-    personalCredentialPresent: personal.present,
-    personalCredentialOrphaned: personal.orphaned,
+  return describeBaselineSshKey(cfg, sharedSshKeyId).credentialId;
+}
+
+// SSH-key sibling of `describeBaselineGithubToken` (#2560).
+function describeBaselineSshKey(cfg, sharedSshKeyId) {
+  return credentialResolution.describeBaselineCredential({
+    cfg,
+    loadAgentConfig,
+    ...loadBaselineDeps(),
+    index: loadSshKeyIndex(),
+    liveUsers: loadLiveUserGate(),
     sharedCredentialId: sharedSshKeyId || null,
     kind: "SSH key",
-    globalServiceCredentialId: credentialResolution.selectGlobalServiceCredentialId(keyIndex),
   });
-  return decision.credentialId || null;
+}
+
+// The environment's own ("team") SSH key the baseline falls back to: the first
+// repository carrying one — the key `materializeAgentSshKey` has always picked.
+function baselineSharedSshKeyId(env) {
+  const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+  return repos.find((r) => r && r.sshKeyId)?.sshKeyId || null;
+}
+
+// Both baseline credentials of one agent, described (#2560) — what the
+// console's effective-identity display renders for a team.
+function describeAgentBaselineCredentials(cfg) {
+  const env = cfg?.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  return {
+    teamId: resolveAgentTeam(cfg),
+    environmentId: env?.id || null,
+    github: describeBaselineGithubToken(cfg, env),
+    ssh: describeBaselineSshKey(cfg, baselineSharedSshKeyId(env)),
+  };
 }
 
 // ── Shared team Knowledge Base (Shared Agent Learning, Phase 1) ──────────────
@@ -16450,6 +16470,63 @@ async function main() {
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }
       });
+      return;
+    }
+
+    // ── Effective baseline GitHub identity (#2560) ────────────────────────
+    // Which GitHub token / SSH key an agent's container is started with, and
+    // from which tier (Team Admin's personal credential / the environment's
+    // own / a global service credential / none) — computed by the SAME
+    // `describeBaseline*` functions the spawn path uses. Returns credential
+    // ids and the baseline owner's user id only; the console decides what a
+    // given caller may see of that (never another person's secret metadata).
+    const effectiveCredsMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/effective-credentials$/);
+    if (effectiveCredsMatch) {
+      const id = decodeURIComponent(effectiveCredsMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      try {
+        const cfg = loadAgentConfig(id);
+        if (!cfg) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'agent not found' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, agentId: id, ...describeAgentBaselineCredentials(cfg) }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+      return;
+    }
+
+    // The teams whose baseline identity a given human currently IS (#2560):
+    // every `role: 'team'` agent whose resolved baseline owner is `:userId`,
+    // with both credentials described. The console calls this right after
+    // that human adds or deletes a personal GitHub token / SSH key to tell
+    // them which teams now use it — or what those teams fell back to.
+    const ownerBaselineMatch = req.method === 'GET' && req.url.match(/^\/internal\/owners\/([^/]+)\/baseline-teams$/);
+    if (ownerBaselineMatch) {
+      const userId = decodeURIComponent(ownerBaselineMatch[1]);
+      try {
+        const teams = [];
+        for (const aid of listAgentIds()) {
+          const cfg = loadAgentConfig(aid);
+          if (!cfg || cfg.role !== 'team') continue;
+          const described = describeAgentBaselineCredentials(cfg);
+          if (described.github.ownerId !== userId && described.ssh.ownerId !== userId) continue;
+          teams.push({ agentId: aid, displayName: cfg.displayName || aid, ...described });
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, teams }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
       return;
     }
 

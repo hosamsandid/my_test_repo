@@ -13,6 +13,7 @@ const {
   resolveAgentOwnerId,
   resolveEffectiveOwnerId,
   resolveBaselineOwnerId,
+  describeBaselineCredential,
   isActingSenderTrusted,
   findPersonalCredential,
   findPersonalCredentialState,
@@ -725,19 +726,18 @@ test("selectOrphanedOwnerIds: an UNKNOWN live-user gate sweeps nothing", () => {
 // keeps resolving to itself when nobody has a personal credential, and
 // AUTOMATICALLY starts resolving to the team's current team-admin's personal
 // credential the moment one exists, with no redeploy and no data migration.
+//
+// Since #2560 the composition lives in the pure `describeBaselineCredential`
+// (the wrappers in orchestrator.js only feed it), so these helpers call THAT —
+// every B5 case below is now also a case of the function the console's
+// effective-identity display runs.
 function resolveBaselineGithubTokenIdForTest({ cfg, users, memberships, tokenIndex, sharedCredentialId }) {
-  const ownerId = resolveBaselineOwnerId(cfg, { users, memberships });
-  const personal = findPersonalCredentialState(tokenIndex || [], ownerId);
-  const decision = resolveCredential({
-    operation: "spawn",
-    ownerId,
-    personalCredential: personal.entry,
-    personalCredentialPresent: personal.present,
-    personalCredentialOrphaned: personal.orphaned,
+  return describeBaselineCredential({
+    cfg, users, memberships,
+    index: tokenIndex || [],
     sharedCredentialId: sharedCredentialId || null,
     kind: "GitHub token",
-  });
-  return decision.credentialId || null;
+  }).credentialId;
 }
 
 test("B5 migration: an existing shared/system binding is unchanged when nobody has a personal credential", () => {
@@ -830,18 +830,12 @@ test("B5 migration: an owner whose personal credential is present but rejected b
 // agnostic.
 function resolveBaselineSshKeyIdForTest({ cfg, users, memberships, keyIndex, sharedSshKeyId }) {
   if (!cfg) return sharedSshKeyId || null;
-  const ownerId = resolveBaselineOwnerId(cfg, { users, memberships });
-  const personal = findPersonalCredentialState(keyIndex || [], ownerId);
-  const decision = resolveCredential({
-    operation: "spawn",
-    ownerId,
-    personalCredential: personal.entry,
-    personalCredentialPresent: personal.present,
-    personalCredentialOrphaned: personal.orphaned,
+  return describeBaselineCredential({
+    cfg, users, memberships,
+    index: keyIndex || [],
     sharedCredentialId: sharedSshKeyId || null,
     kind: "SSH key",
-  });
-  return decision.credentialId || null;
+  }).credentialId;
 }
 
 test("B5 migration (SSH): an existing shared/env deploy key is unchanged when nobody has a personal SSH key", () => {
@@ -1028,4 +1022,141 @@ test("resolveCredential: a no-owner read/clone uses the global service credentia
     globalServiceCredentialId: "tok-global",
   });
   assert.deepEqual(decision, { tier: "shared", credentialId: "tok-global" });
+});
+
+// ── #2560: the effective baseline credential, DESCRIBED ─────────────────────
+// The console shows per team WHICH tier the container's GitHub token / SSH key
+// comes from and on whose behalf. `describeBaselineCredential` is the same
+// function the spawn path resolves through (see the B5 helpers above), so these
+// pin the display source against the runtime answer (AC7).
+
+const SQUAD = { role: "team", id: "squad", ownerId: "u-creator" };
+const SQUAD_USERS = [{ id: "u-admin" }, { id: "u-creator" }];
+const SQUAD_MEMBERS = [
+  { userId: "u-admin", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" },
+  { userId: "u-creator", teamId: "squad", role: "team-member", createdAt: "2020-02-01" },
+];
+
+test("#2560 describeBaselineCredential: a Team Admin WITH a personal credential → source personal, owner = that admin", () => {
+  const d = describeBaselineCredential({
+    cfg: SQUAD, users: SQUAD_USERS, memberships: SQUAD_MEMBERS,
+    index: [{ id: "tok-admin", scope: "personal", userId: "u-admin" }],
+    sharedCredentialId: "tok-team",
+  });
+  assert.equal(d.source, "personal");
+  assert.equal(d.credentialId, "tok-admin");
+  assert.equal(d.ownerId, "u-admin");
+  assert.equal(d.sharedCredentialId, "tok-team", "the overridden team binding is still reported so the UI can mark it 'not in use'");
+  assert.equal(d.personalOrphaned, false);
+});
+
+test("#2560 describeBaselineCredential: a Team Admin WITHOUT a personal credential → source team", () => {
+  const d = describeBaselineCredential({
+    cfg: SQUAD, users: SQUAD_USERS, memberships: SQUAD_MEMBERS,
+    // A different member's personal token is never the baseline.
+    index: [{ id: "tok-creator", scope: "personal", userId: "u-creator" }],
+    sharedCredentialId: "tok-team",
+  });
+  assert.equal(d.source, "team");
+  assert.equal(d.credentialId, "tok-team");
+  assert.equal(d.ownerId, "u-admin");
+  assert.equal(d.personalPresent, false);
+});
+
+test("#2560 describeBaselineCredential: display source === runtime credential for every tier (AC7)", () => {
+  const cases = [
+    { index: [{ id: "tok-admin", scope: "personal", userId: "u-admin" }], shared: "tok-team" },
+    { index: [], shared: "tok-team" },
+    { index: [{ id: "tok-global", global: true, scope: "system", identity: "service" }], shared: null },
+    { index: [], shared: null },
+  ];
+  for (const c of cases) {
+    const d = describeBaselineCredential({
+      cfg: SQUAD, users: SQUAD_USERS, memberships: SQUAD_MEMBERS, index: c.index, sharedCredentialId: c.shared,
+    });
+    const ownerId = resolveBaselineOwnerId(SQUAD, { users: SQUAD_USERS, memberships: SQUAD_MEMBERS });
+    const personal = findPersonalCredentialState(c.index, ownerId);
+    const runtime = resolveCredential({
+      operation: "spawn", ownerId,
+      personalCredential: personal.entry,
+      personalCredentialPresent: personal.present,
+      personalCredentialOrphaned: personal.orphaned,
+      sharedCredentialId: c.shared,
+      globalServiceCredentialId: selectGlobalServiceCredentialId(c.index),
+    });
+    assert.equal(d.credentialId, runtime.credentialId || null);
+  }
+});
+
+test("#2560 describeBaselineCredential: no env binding → a global service credential is reported as source global", () => {
+  const d = describeBaselineCredential({
+    cfg: SQUAD, users: SQUAD_USERS, memberships: SQUAD_MEMBERS,
+    index: [{ id: "tok-global", global: true, scope: "system", identity: "service" }],
+    sharedCredentialId: null,
+  });
+  assert.equal(d.source, "global");
+  assert.equal(d.credentialId, "tok-global");
+});
+
+test("#2560 describeBaselineCredential: nothing at any tier → source none", () => {
+  const d = describeBaselineCredential({ cfg: SQUAD, users: SQUAD_USERS, memberships: SQUAD_MEMBERS, index: [], kind: "SSH key" });
+  assert.equal(d.source, "none");
+  assert.equal(d.credentialId, null);
+});
+
+test("#2560 describeBaselineCredential: a succession moves the described owner with no config edit (AC6)", () => {
+  const memberships = [
+    { userId: "u-admin", teamId: "squad", role: "team-member", createdAt: "2020-01-01" },
+    { userId: "u-creator", teamId: "squad", role: "team-admin", createdAt: "2020-02-01" },
+  ];
+  const d = describeBaselineCredential({
+    cfg: SQUAD, users: SQUAD_USERS, memberships,
+    index: [{ id: "tok-admin", scope: "personal", userId: "u-admin" }],
+    sharedCredentialId: "tok-team",
+  });
+  assert.equal(d.ownerId, "u-creator");
+  assert.equal(d.source, "team", "the demoted admin's personal token no longer drives the team");
+});
+
+test("#2560 describeBaselineCredential: several Team Admins → the earliest-promoted one is described", () => {
+  const memberships = [
+    { userId: "u-creator", teamId: "squad", role: "team-admin", createdAt: "2020-03-01" },
+    { userId: "u-admin", teamId: "squad", role: "team-admin", createdAt: "2020-01-01" },
+  ];
+  const d = describeBaselineCredential({
+    cfg: SQUAD, users: SQUAD_USERS, memberships,
+    index: [
+      { id: "tok-creator", scope: "personal", userId: "u-creator" },
+      { id: "tok-admin", scope: "personal", userId: "u-admin" },
+    ],
+    sharedCredentialId: "tok-team",
+  });
+  assert.equal(d.ownerId, "u-admin");
+  assert.equal(d.credentialId, "tok-admin");
+});
+
+test("#2560 describeBaselineCredential: an orphaned personal credential is reported (problem state) and falls back to team", () => {
+  // The baseline owner resolves from the static ownerId (no live membership),
+  // whose account is gone — the live-user gate knows only u-admin.
+  const d = describeBaselineCredential({
+    cfg: { role: "team", id: "squad", ownerId: "u-gone" },
+    users: [{ id: "u-admin" }],
+    memberships: [],
+    index: [{ id: "tok-gone", scope: "personal", userId: "u-gone" }],
+    liveUsers: buildLiveUserGate([{ id: "u-admin" }]),
+    sharedCredentialId: "tok-team",
+  });
+  assert.equal(d.ownerId, "u-gone");
+  assert.equal(d.personalPresent, true);
+  assert.equal(d.personalOrphaned, true);
+  assert.equal(d.source, "team");
+  assert.equal(d.credentialId, "tok-team");
+});
+
+test("#2560 describeBaselineCredential: a cfg-less spawn reports the raw binding, like the runtime", () => {
+  assert.deepEqual(
+    describeBaselineCredential({ cfg: null, index: [], sharedCredentialId: "tok-team" }).credentialId,
+    "tok-team",
+  );
+  assert.equal(describeBaselineCredential({ cfg: null, index: [] }).source, "none");
 });

@@ -3280,6 +3280,34 @@ class NewSession(unittest.TestCase):
     def test_correlation_id_defaults_to_none(self):
         s = entrypoint._new_session("dm", room_id="!r:local")
         self.assertIsNone(s["correlationId"])
+        self.assertIsNone(s["workItem"])
+
+    def test_work_item_recorded(self):
+        wi = {"repo": "o/r", "kind": "issue", "number": 7}
+        s = entrypoint._new_session("trigger", work_item=wi)
+        self.assertEqual(s["workItem"], wi)
+
+
+class SessionWorkItem(unittest.TestCase):
+    """#2573: a GitHub-triggered session names the issue/PR it works on."""
+
+    def test_issue_event(self):
+        gh = {"repo": "o/r", "payload": {"issue": {"number": 5}}}
+        self.assertEqual(entrypoint._session_work_item(gh),
+                         {"repo": "o/r", "kind": "issue", "number": 5})
+
+    def test_pr_event_wins(self):
+        gh = {"repo": "o/r", "payload": {"pull_request": {"number": 9}, "issue": {"number": 9}}}
+        self.assertEqual(entrypoint._session_work_item(gh),
+                         {"repo": "o/r", "kind": "pr", "number": 9})
+
+    def test_issue_comment_on_pr_is_pr(self):
+        gh = {"repo": "o/r", "payload": {"issue": {"number": 4, "pull_request": {"url": "x"}}}}
+        self.assertEqual(entrypoint._session_work_item(gh)["kind"], "pr")
+
+    def test_non_github_or_push(self):
+        self.assertIsNone(entrypoint._session_work_item(None))
+        self.assertIsNone(entrypoint._session_work_item({"repo": "o/r", "payload": {"ref": "refs/heads/x"}}))
 
 
 class SessionPointerResumeFlag(unittest.TestCase):

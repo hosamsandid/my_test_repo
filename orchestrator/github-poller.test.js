@@ -1834,6 +1834,83 @@ test("armWake (#2525): no-op without a wake label or with the edge dedup switche
   assert.equal(poller.armWake({ repo: "org/repo", triggerId: "t", kind: "issue", number: 1, label: "ready" }), false);
 });
 
+// ── #2571: optional "pushed by agent" producer filter on push triggers ──────
+
+const { computePollPlan } = require("./github-poller");
+
+function producerPoller(ledger) {
+  // ledger: { "<ref>@<head>": {agentId, teamId, poolOf?} }
+  return new GitHubPoller({
+    lookupPushProducer: ({ repo, ref, head }) => {
+      assert.equal(repo, "org/repo");
+      return ledger[`${ref}@${head}`] || null;
+    },
+  });
+}
+
+const filteredSub = (over = {}) => pushSub({ agentId: "t1-dev", triggerId: "dev-on-push-t1-spec", pushedBy: ["t1-spec"], teamId: "t1", ...over });
+
+test("_fanOutBatch (#2571 AC2/AC10): a push by the named upstream wakes the consumer exactly once", async () => {
+  const poller = producerPoller({ "refs/heads/feat/x@abc1234def": { agentId: "t1-spec", teamId: "t1" } });
+  const { enqueued, recorded } = await runBatch(poller, [[prOpenedEvent("pr-1")], [pushEvent("real-1")]], [filteredSub()]);
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0].agentId, "t1-dev");
+  assert.equal(recorded.find((r) => r.eventId === "prpush:pr-1").outcomes[0].status, "delivered");
+  assert.equal(recorded.find((r) => r.eventId === "real-1").outcomes[0].reason, "push-duplicate");
+});
+
+test("_fanOutBatch (#2571 AC2/AC8): pushes by another agent or an unknown producer are dropped with the producer named", async () => {
+  const poller = producerPoller({ "refs/heads/feat/x@other": { agentId: "t1-review", teamId: "t1" } });
+  const { enqueued, recorded } = await runBatch(poller, [[
+    pushEvent("by-other", { head: "other" }),
+    pushEvent("by-human", { head: "human" }),
+  ]], [filteredSub()]);
+  assert.equal(enqueued.length, 0);
+  const other = recorded.find((r) => r.eventId === "by-other").outcomes[0];
+  assert.deepEqual([other.status, other.reason, other.producer], ["dropped", "producer-filter", "t1-review"]);
+  const human = recorded.find((r) => r.eventId === "by-human").outcomes[0];
+  assert.deepEqual([human.status, human.reason, human.producer], ["dropped", "producer-filter", null]);
+});
+
+test("_fanOutBatch (#2571 AC3/AC4): other-team producer never matches; a pool instance of the named role does", async () => {
+  const poller = producerPoller({
+    "refs/heads/feat/x@t2": { agentId: "t1-spec", teamId: "t2" },
+    "refs/heads/feat/x@pool": { agentId: "t1-spec-i42", teamId: "t1", poolOf: "t1-spec" },
+  });
+  const { enqueued, recorded } = await runBatch(poller, [[
+    pushEvent("t2", { head: "t2" }),
+    pushEvent("pool", { head: "pool" }),
+  ]], [filteredSub()]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["pool"]);
+  assert.equal(recorded.find((r) => r.eventId === "t2").outcomes[0].reason, "producer-filter");
+});
+
+test("_fanOutBatch (#2571 AC1): no filter = any push fires, and the ledger is never consulted", async () => {
+  const poller = new GitHubPoller({ lookupPushProducer: () => { throw new Error("must not look up"); } });
+  const { enqueued } = await runBatch(poller, [[pushEvent("h1", { head: "h1" })]], [pushSub()]);
+  assert.equal(enqueued.length, 1);
+});
+
+test("_fanOutBatch (#2571): a filtered and an unfiltered subscriber on one push get independent outcomes", async () => {
+  const poller = producerPoller({});
+  const { enqueued } = await runBatch(poller, [[pushEvent("h1", { head: "h1" })]], [filteredSub(), pushSub()]);
+  assert.deepEqual(enqueued.map((e) => e.agentId), ["builder"]);
+});
+
+test("computePollPlan (#2571): carries the trigger's pushedBy filter and the owner's Agent Team", () => {
+  const plan = computePollPlan({
+    environments: [{ id: "env1", githubTokenId: "tok1", repositories: [{ url: "git@github.com:org/repo.git" }] }],
+    agents: [
+      { id: "t1-dev", config: { parentTeamId: "t1" }, triggers: [
+        { id: "a", type: "github-event", repo: "org/repo", events: ["push"], pushedBy: ["t1-spec", " "], prompt: "p" },
+        { id: "b", type: "github-event", repo: "org/repo", events: ["push"], pushedBy: [], prompt: "p" },
+      ] },
+    ],
+  });
+  const subs = plan.get("org/repo").subscribers;
+  assert.deepEqual(subs.map((s) => [s.triggerId, s.pushedBy, s.teamId]), [["a", ["t1-spec"], "t1"], ["b", null, "t1"]]);
+});
+
 // ── Push branch filter (#2570) ───────────────────────────────────────────────
 
 test("computePollPlan (#2570): carries the parsed branchFilter, null when empty", () => {

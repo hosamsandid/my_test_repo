@@ -33,6 +33,7 @@ const { parseCloses } = require('./pr-events-log');
 const { resolveGithubApiTarget, githubApiBase, DEFAULT_GITHUB_API_BASE } = require('./github-api-base');
 const wakeArmory = require('./wake-armory');
 const { canonicalEventKey, listensTo } = require('./event-key-aliases');
+const pushAttribution = require('./push-attribution');
 const { parseBranchFilter, pushBranch, branchFilterMatches } = require('./branch-filter');
 
 // Poll cadence. Fixed 30s in production; overridable via
@@ -565,9 +566,15 @@ function requestWithDeadline(makeRequest, { deadlineMs = REQUEST_DEADLINE_MS } =
 }
 
 class GitHubPoller {
-  constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath, onMergedPr, labelMarkers } = {}) {
+  constructor({ loadEnvironment, listEnvironmentIds, enqueuePending, triggersPath, onMergedPr, labelMarkers, lookupPushProducer } = {}) {
     this.loadEnvironment = loadEnvironment;
     this.listEnvironmentIds = listEnvironmentIds;
+    // #2571: who pushed a (repo, ref, head)? The orchestrator records every
+    // push it makes for an agent (push-attribution.js); a trigger with a
+    // `pushedBy` producer filter only fires on a push attributed to one of the
+    // named agents. Absent in unit tests → every push is "producer unknown",
+    // which only matters to triggers that set a filter.
+    this.lookupPushProducer = typeof lookupPushProducer === 'function' ? lookupPushProducer : () => null;
     // #1858: shared dedup-marker store for the internal label fast-path. When a
     // human-applied label was already delivered internally (via the Admin
     // Console → /internal/github-label-applied), the later Events-API delivery
@@ -915,10 +922,11 @@ class GitHubPoller {
     // subscriber + conversation, to be grouped in phase 2. Events arrive
     // oldest-first (caller sorted), so per-group order stays causal.
     //
-    // There is deliberately NO source/origin filtering here: a trigger fires on
-    // any matching event regardless of who caused it (human, another agent, or
-    // the subscriber itself). The only backstop against a self-triggering loop
-    // is the frequency-based Layer-3 throttle + burst digest in phase 2.
+    // There is NO source/origin filtering here unless a push trigger opts into
+    // a producer filter (`pushedBy`, #2571): otherwise a trigger fires on any
+    // matching event regardless of who caused it (human, another agent, or the
+    // subscriber itself). The only backstop against a self-triggering loop is
+    // the frequency-based Layer-3 throttle + burst digest in phase 2.
     //
     // `eventLogEntries` (#469) accumulates one entry per event for the
     // event-transparency log, keyed by event id — populated here with the
@@ -957,6 +965,9 @@ class GitHubPoller {
       // subscription-independently so the order of arrival never matters.
       const synthesizedFrom = key === 'push' ? ghEvent.payload?.synthesizedFrom : null;
       let pushDuplicate = false;
+      // #2571: the producer of this push, looked up lazily — only a subscriber
+      // with a `pushedBy` filter needs it. `undefined` = not looked up yet.
+      let pushProducer;
       if (key === 'push') {
         const hk = pushHeadKey(ghEvent);
         if (hk) {
@@ -1042,6 +1053,34 @@ class GitHubPoller {
           outcome.status = 'dropped';
           outcome.reason = 'push-duplicate';
           continue;
+        }
+
+        // Producer filter (#2571): a push trigger naming `pushedBy` agents fires
+        // only on a push the platform recorded as made by one of them (or a pool
+        // instance of one), from the subscriber's own Agent Team. A human push,
+        // a raw `git push`, a knowledge-base sync or a branch deletion carries no
+        // record — "producer unknown" — and is dropped too.
+        if (key === 'push' && sub.pushedBy) {
+          if (pushProducer === undefined) {
+            try {
+              pushProducer = this.lookupPushProducer({
+                repo: repoFullName,
+                ref: ghEvent.payload?.ref,
+                head: ghEvent.payload?.head,
+              }) || null;
+            } catch { pushProducer = null; }
+          }
+          const verdict = pushAttribution.producerFilterVerdict(sub.pushedBy, sub.teamId, pushProducer);
+          if (!verdict.ok) {
+            console.log(
+              `[GH-Poller] producer-filter: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+              `(pushed by ${verdict.producer || 'unknown'}, filter [${sub.pushedBy.join(', ')}])`,
+            );
+            outcome.status = 'dropped';
+            outcome.reason = 'producer-filter';
+            outcome.producer = verdict.producer;
+            continue;
+          }
         }
 
         // Self-caused claim label (#1376 follow-up): after this trigger fires,
@@ -1333,12 +1372,14 @@ class GitHubPoller {
           ghEvent: ghEventForLog,
           repoFullName,
           key: entry.key,
-          outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest, wakeLabel, wipLimit }) => {
+          outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest, wakeLabel, wipLimit, producer }) => {
             const o = { agentId, triggerId, status, reason, digest };
             if (wakeLabel !== undefined) o.wakeLabel = wakeLabel;
             // Held-by-WIP outcomes carry the flow's limit so the log row can read
             // "held (WIP n)" rather than a bare "held".
             if (wipLimit !== undefined) o.wipLimit = wipLimit;
+            // A producer-filter drop names who pushed (null = unknown), #2571.
+            if (producer !== undefined) o.producer = producer;
             return o;
           }),
         }),
@@ -1832,6 +1873,10 @@ function computePollPlan({ environments = [], agents = [], allowNonGithubHost = 
         // must never re-wake the trigger — see the self-claim-label drop in
         // `_fanOutBatch`. null when the trigger declares no claim.
         claimAdd: (t.claim && typeof t.claim.add === 'string' && t.claim.add.trim()) || null,
+        // #2571: optional "pushed by agent" producer filter on push triggers
+        // (null = any push) and the subscriber's Agent Team it is scoped to.
+        pushedBy: pushAttribution.normalizePushedBy(t.pushedBy),
+        teamId: pushAttribution.teamOf(agent.config),
         // Optional branch filter for `push` events (#2570): the parsed pattern
         // list, or null for no filter (every branch — legacy behaviour).
         branchFilter: branchFilter.length ? branchFilter : null,

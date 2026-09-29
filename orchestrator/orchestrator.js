@@ -105,6 +105,7 @@ const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assessConversionEligibility, planTeamConversion, planTeamOfOneCreation } = require("./team-conversion");
 const teamOfOneMigration = require("./team-of-one-migration");
+const pushAttribution = require("./push-attribution");
 const { nextAvailableAgentId, suggestFreeAgentId } = require("./agent-id-resolution");
 const { syncAgentRepoPlan, summarizeRepoResults, repoDivergence } = require("./repo-sync");
 // Agent-scoped repositories (#2067): a repository attached to ONE agent,
@@ -1478,6 +1479,46 @@ function backfillTriggerHorizonStamps() {
   }
   if (stamped > 0) {
     console.log(`[Orchestrator] Backfilled history-horizon stamps onto github-event triggers for ${stamped} agent(s)`);
+  }
+}
+
+// #2571 AC6: derived data-flow triggers (Flow-editor hand-offs, `dataFlow:
+// true`) that predate the "pushed by agent" producer filter get one naming
+// exactly their upstream, so a push by another role, another Agent Team on the
+// same repo, a human or a knowledge-base sync stops waking them. Manually-
+// authored push triggers (no `dataFlow` marker) are never touched, nor is a
+// trigger that already carries a `pushedBy` (even an explicit `[]` = any push).
+// Idempotent; runs on every start.
+function migrateDataFlowProducerFilters() {
+  const teamCache = new Map();
+  const teamOfAgent = (agentId) => {
+    if (!teamCache.has(agentId)) teamCache.set(agentId, pushAttribution.teamOf(loadAgentConfig(agentId)));
+    return teamCache.get(agentId);
+  };
+  let migrated = 0;
+  for (const id of listAgentIds()) {
+    const p = controlOrPoolPath(id, "triggers.json");
+    if (!fs.existsSync(p)) continue;
+    const teamId = teamOfAgent(id);
+    if (!teamId) continue;
+    let triggers, mtimeIso;
+    try {
+      triggers = JSON.parse(fs.readFileSync(p, "utf8"));
+      mtimeIso = fs.statSync(p).mtime.toISOString();
+    } catch (err) {
+      console.error(`[Orchestrator] Producer-filter migration: skipping ${id}: ${err.message}`);
+      continue;
+    }
+    const { triggers: next, changed } = pushAttribution.migrateDataFlowProducerFilter(triggers, {
+      memberId: id, teamId, teamOfAgent, horizon: mtimeIso,
+    });
+    if (changed.length === 0) continue;
+    saveTriggers(id, next);
+    migrated++;
+    console.log(`[Orchestrator] Producer filter set on data-flow trigger(s) of ${id}: ${changed.join(", ")}`);
+  }
+  if (migrated > 0) {
+    console.log(`[Orchestrator] Producer-filter migration updated ${migrated} agent(s)`);
   }
 }
 
@@ -9502,6 +9543,31 @@ async function agentGitPush(id, env, body = {}) {
   return _repoGitQueue(repo.repoPath, () => _agentGitPushLocked(id, repo, req, gitEnv, body));
 }
 
+// #2571: record which agent is pushing which (repo, branch, head) so the GitHub
+// poller can attribute the resulting PushEvent (all agents share one PAT, so the
+// event's actor cannot). Recorded BEFORE the push, from the local branch head
+// the push is about to publish, so no poll can see the event ahead of its
+// record; a failed push leaves a harmless entry for a sha never on the remote.
+// Best-effort — attribution only matters to triggers with a `pushedBy` filter.
+async function _recordAgentPush(id, repo, branch, run) {
+  try {
+    const repoFull = prEventsLog.repoFullName(repo.url);
+    if (!repoFull) return;
+    const head = (await run(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim();
+    const cfg = loadAgentConfig(id) || {};
+    pushAttribution.defaultStore().record({
+      repo: repoFull,
+      branch,
+      head,
+      agentId: id,
+      teamId: pushAttribution.teamOf(cfg),
+      poolOf: cfg.poolInstance ? cfg.poolOf || null : null,
+    });
+  } catch (err) {
+    console.warn(`[Orchestrator] push attribution for ${id} (${branch}) not recorded: ${err.message}`);
+  }
+}
+
 async function _agentGitPushLocked(id, repo, req, gitEnv, body) {
   const run = (args, timeout = 30_000) =>
     _execRepo("git", args, { cwd: repo.repoPath, env: gitEnv, timeout });
@@ -9521,6 +9587,7 @@ async function _agentGitPushLocked(id, repo, req, gitEnv, body) {
   if (req.setUpstream) pushArgs.push("--set-upstream");
   pushArgs.push(req.remote, branch);
 
+  await _recordAgentPush(id, repo, branch, run);
   try {
     const stdout = await run(pushArgs);
     // PR-link record (#655 §4.2): a bare branch push carries no PR number, but
@@ -9614,6 +9681,7 @@ async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body, gi
   }
 
   // Ensure the branch exists on the remote before gh reads it.
+  await _recordAgentPush(id, repo, head, run);
   try {
     await run(["push", "--set-upstream", "origin", head]);
   } catch (err) {
@@ -14863,6 +14931,8 @@ async function main() {
   // carries the `teamId` the D6 owner resolution keys on (#2077).
   migrateOwnershipModel();
   backfillTriggerHorizonStamps();
+  // After the horizon backfill, so a rewrite here never moves a horizon.
+  migrateDataFlowProducerFilters();
 
   const orchestrator = new Orchestrator();
   // Module-level handle for free-function callers that need instance methods
@@ -20200,6 +20270,8 @@ async function main() {
     triggersPath: (agentId) => controlOrPoolPath(agentId, 'triggers.json'),
     onMergedPr: postPrTokenComment, // #678 Phase 3 item 2: PR-merge token comment
     labelMarkers: labelDedupMarkers, // #1858 internal fast-path dedup (shared with the label-applied endpoint)
+    // #2571: who pushed a (repo, ref, head) — recorded by gh-as-agent push/pr.
+    lookupPushProducer: (q) => pushAttribution.defaultStore().lookup(q),
   });
   githubPollerRef = ghPoller; // #2525: the manual re-fire re-arms through it; #2537: repo status
   ghPoller.start();

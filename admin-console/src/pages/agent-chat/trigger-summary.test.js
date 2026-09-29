@@ -7,6 +7,9 @@ import {
   summarizeGithubEventTrigger,
   summarizeLoopTrigger,
   claimBodyFor,
+  pushedByIds,
+  pushedByBodyFor,
+  summarizePushSchedule,
   summarizeLoopEdge,
   hasClaim,
   summarizeClaimEdge,
@@ -278,4 +281,35 @@ test('plugin.event reads in plain language and is not a subscribable github even
   assert.equal(eventLabel('plugin.event'), 'plugin event');
   assert.equal(GITHUB_EVENT_OPTIONS.some(o => o.value === 'plugin.event'), false);
   assert.equal(INTERNAL_EVENT_LABELS.has('plugin.event'), true);
+});
+
+// ── #2571: "pushed by agent" producer filter ────────────────────────────────
+
+test('pushedByIds: clean de-duplicated list, [] when unset (#2571)', () => {
+  assert.deepEqual(pushedByIds({}), []);
+  assert.deepEqual(pushedByIds({ pushedBy: [' t1-spec', 't1-spec', '', 3] }), ['t1-spec']);
+});
+
+test('pushedByBodyFor: picked agents are sent; plain push with none stays field-less (AC1/AC7)', () => {
+  assert.deepEqual(pushedByBodyFor({ isPush: true, selected: ['a', 'a', 'b'], isEdit: false }), ['a', 'b']);
+  assert.equal(pushedByBodyFor({ isPush: true, isDataFlow: false, selected: [], isEdit: false }), undefined);
+  assert.equal(pushedByBodyFor({ isPush: true, selected: [], isEdit: true, priorPushedBy: undefined }), undefined);
+});
+
+test('pushedByBodyFor: clearing a stored filter or a data-flow filter sends [] (explicit any push)', () => {
+  assert.deepEqual(pushedByBodyFor({ isPush: true, selected: [], isEdit: true, priorPushedBy: ['a'] }), []);
+  assert.deepEqual(pushedByBodyFor({ isPush: true, isDataFlow: true, selected: [], isEdit: false }), []);
+});
+
+test('pushedByBodyFor: switching away from push clears a stored filter', () => {
+  assert.equal(pushedByBodyFor({ isPush: false, selected: ['a'], isEdit: true, priorPushedBy: ['a'] }), null);
+  assert.equal(pushedByBodyFor({ isPush: false, selected: [], isEdit: true, priorPushedBy: undefined }), undefined);
+  assert.equal(pushedByBodyFor({ isPush: false, selected: ['a'], isEdit: false }), undefined);
+});
+
+test('summarizePushSchedule: names the producers when a filter is set (AC9)', () => {
+  const nameOf = (id) => ({ 't1-spec': 'Specifier' })[id];
+  assert.equal(summarizePushSchedule({ repo: 'o/r', pushedBy: ['t1-spec'] }, nameOf), 'wakes on push from Specifier to o/r');
+  assert.equal(summarizePushSchedule({ repo: 'o/r', pushedBy: ['t1-spec', 't1-x'] }, nameOf), 'wakes on push from Specifier, t1-x to o/r');
+  assert.equal(summarizePushSchedule({ pushedBy: [] }), 'wakes on push to the team repo');
 });

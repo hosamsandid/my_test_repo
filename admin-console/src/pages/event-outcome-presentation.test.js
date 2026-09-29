@@ -136,3 +136,10 @@ test('AC7: long unbroken tokens wrap inside the column (#1898)', () => {
   assert.doesNotMatch(outcomeBlock + noMatchBlock, /whiteSpace: 'nowrap'/);
   assert.match(src, /key: 'outcomes', label: 'Outcomes', sortable: false, wrap: true/);
 });
+
+test('#2571 AC8: a producer-filter drop reads who pushed, or that the producer is unknown', () => {
+  assert.equal(outcomeLabel({ status: 'dropped', reason: 'producer-filter', producer: 't1-review', agentId: 't1-dev' }),
+    'dropped (pushed by `t1-review`, not in producer filter) → t1-dev');
+  assert.equal(outcomeLabel({ status: 'dropped', reason: 'producer-filter', producer: null, agentId: 't1-dev' }),
+    'dropped (producer unknown) → t1-dev');
+});

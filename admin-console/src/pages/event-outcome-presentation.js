@@ -29,6 +29,15 @@ export const OUTCOME_TONES = {
 // means any-label listener; undefined means a legacy row or a drop before the
 // label gate (history-horizon). Show it only when it's a real string.
 // `refired` marks a delivery made by a manual "Fire again" (#2525).
+// #2571: the readable reason of a producer-filter drop — who pushed (or that
+// nobody the platform knows did: a human, a raw `git push`, a knowledge-base
+// sync, a branch deletion).
+export function producerFilterText(producer) {
+  return typeof producer === 'string' && producer
+    ? `pushed by \`${producer}\`, not in producer filter`
+    : 'producer unknown';
+}
+
 export function outcomeLabel(outcome, { refired = false } = {}) {
   const o = outcome && typeof outcome === 'object' ? outcome : {};
   const wakeSuffix = typeof o.wakeLabel === 'string' ? ` (${o.wakeLabel})` : '';
@@ -42,6 +51,7 @@ export function outcomeLabel(outcome, { refired = false } = {}) {
     const wip = o.wipLimit != null ? ` ${o.wipLimit}` : '';
     return `held (WIP${wip})${wakeSuffix} → ${target}`;
   }
+  if (o.reason === 'producer-filter') return `dropped (${producerFilterText(o.producer)}) → ${target}`;
   return `dropped (${o.reason || 'unknown'})${wakeSuffix} → ${target}`;
 }
 

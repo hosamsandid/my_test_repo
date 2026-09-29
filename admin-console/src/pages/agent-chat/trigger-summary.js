@@ -253,6 +253,40 @@ export function claimBodyFor({ labelFilter, events, claimOn, isEdit }) {
   return isEdit ? null : undefined;
 }
 
+// The optional "pushed by agent" producer filter on a push trigger (#2571), as
+// a clean id list — `[]` when unset (= any push).
+export function pushedByIds(trigger) {
+  const raw = Array.isArray(trigger?.pushedBy) ? trigger.pushedBy : [];
+  return [...new Set(raw.filter(v => typeof v === 'string' && v.trim()).map(v => v.trim()))];
+}
+
+// The `pushedBy` field for a saved trigger body (#2571). Pure mirror of the
+// TriggerForm decision:
+//   - not (or no longer) a push trigger → `null` on edit when a filter was
+//     stored (the backend rejects a filter on a non-push trigger), else omitted;
+//   - agents picked → that list;
+//   - nothing picked → `[]` (explicit "any push") when a filter was stored or
+//     the trigger is a data-flow hand-off, so the reconciler / start-up
+//     migration never silently re-adds a filter the author removed; a plain
+//     push trigger with no filter stays field-less.
+// Returns the value to assign to `body.pushedBy`, or undefined to omit it.
+export function pushedByBodyFor({ isPush, isDataFlow, selected, isEdit, priorPushedBy }) {
+  const hadField = Array.isArray(priorPushedBy);
+  if (!isPush) return (isEdit && hadField) ? null : undefined;
+  const ids = pushedByIds({ pushedBy: selected });
+  if (ids.length) return ids;
+  if (isDataFlow || (isEdit && hadField)) return [];
+  return undefined;
+}
+
+// Card schedule for a push trigger (#2571 AC9): "wakes on push from Specifier
+// to owner/repo". `nameOf(id)` resolves a display name (falls back to the id).
+export function summarizePushSchedule(trigger, nameOf = (id) => id) {
+  const names = pushedByIds(trigger).map(id => nameOf(id) || id);
+  const from = names.length ? ` from ${names.join(', ')}` : '';
+  return `wakes on push${from} to ${trigger?.repo || 'the team repo'}`;
+}
+
 // A chat-launched loop (#1020): a one-off "run until done" started from the
 // composer, not a standing subscription. It is a `loop`-type trigger tagged
 // `launched: true` while it runs (the runtime removes it on any terminal

@@ -165,11 +165,21 @@ single plain message instead of starting one session per event. If a burst looks
 like several deliveries but you only find one summary message, that is what you
 are looking at.
 
-**There is no source filtering.** Every agent shares one GitHub token, so an
+**There is no source filtering** (one exception below). Every agent shares one GitHub token, so an
 event caused by an agent looks exactly like an event caused by a human, and a
 trigger fires on either. The identity stamps `gh-as-agent` writes are for
 humans reading GitHub, not for delivery decisions — the only thing standing
 between two agents and an infinite ping-pong is the throttle above.
+
+The one exception is a push trigger's optional **producer filter** ("Pushed
+by" on the trigger form, `pushedBy` on the trigger). A data-flow hand-off drawn
+in the Flow editor gets it automatically, naming its upstream agent. The
+platform records who pushed what when an agent pushes through `gh-as-agent
+push`/`pr`, and a filtered trigger then fires only on pushes by the named agents
+of its own Agent Team, or by a pool instance of a named role. Any other push is
+logged as **dropped (pushed by `x`, not in producer filter)**. A push by a
+human, a raw `git push` or a branch deletion is logged as **dropped (producer
+unknown)**. An empty filter means any push.
 
 ### Reading a "my agent never woke up" case
 

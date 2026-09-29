@@ -443,9 +443,12 @@ token (replaces webhooks for local stacks).
 - Matched events → `pending-triggers.json` (drained every 5s). Event keys
   `<type>.<action>` (e.g. `pull_request.opened`); bare `push`. Some actions are
   omitted by the API (no `pull_request.synchronize`).
-- **Loop protection is frequency-only, no source filtering**: a per-`(agent,
-  conversation)` throttle (default 5/h) + a per-poll burst-cap digest. A trigger
-  fires on any matching event, including self-caused.
+- **Loop protection is frequency-only, no source filtering unless a producer
+  filter is set**: a per-`(agent, conversation)` throttle (default 5/h) + a
+  per-poll burst-cap digest. A trigger fires on any matching event, including
+  self-caused. Exception: a push trigger's optional `pushedBy` (same-team agent
+  ids, set automatically on Flow-editor data-flow hand-offs) fires only on pushes
+  the platform recorded via `gh-as-agent push`/`pr` (`push-attribution.js`).
 - Resilience: hard request deadline + stall watchdog (self-heals a stuck poll).
 - **Event-transparency log** (`github-event-log.js`): every fresh event recorded
   (delivered / dropped / digest / no-subscriber) → `GET /api/github-events`, the

@@ -116,6 +116,12 @@ test('EventsPanel reads the agent-scoped endpoint and gates Fire again on canRef
   assert.match(PANEL, /\?session=\$\{encodeURIComponent\(correlationId\)\}/);
 });
 
+test('#2571 AC8: a producer-filter drop names who pushed, or says the producer is unknown; never re-firable', () => {
+  assert.match(dropReasonText({ ...drop('producer-filter'), producer: 't1-review' }), /^Pushed by `t1-review`, not in producer filter/);
+  assert.match(dropReasonText({ ...drop('producer-filter'), producer: null }), /^Producer unknown/);
+  assert.equal(canRefire(drop('producer-filter'), { canManage: true }), false);
+});
+
 test('#2570: a branch-filter drop names the pushed branch (or tag) in plain language', () => {
   assert.equal(dropReasonText(drop('branch-filter', { ref: 'refs/heads/agent-knowledge' })),
     "Branch 'agent-knowledge' is not in this trigger's branch filter, so the push was ignored.");

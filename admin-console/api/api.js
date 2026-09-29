@@ -114,9 +114,11 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
+const { applyPushedBy } = require('./push-producer-filter');
 const { normalizeBranchFilter } = require('./branch-filter');
 const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
+const { rederiveTeamDataFlow } = require('./derived-data-flow');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
 const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
 const { presentEffectiveIdentity } = require('./effective-github-identity');
@@ -2440,15 +2442,6 @@ function memberRepoFullName(cfg) {
   } catch { return null; }
 }
 
-// A derived data-flow trigger is one the `expandDataFlowSteps` derivation owns:
-// it carries the `dataFlow` marker and the canonical `<consumer>-on-push-<up>`
-// id. Manually-authored data-flow triggers (arbitrary ids) don't match and are
-// preserved untouched by reconciliation. Kept in sync with process-template.js.
-function isDerivedDataFlowTrigger(t, memberId) {
-  return t && t.dataFlow === true && typeof t.id === 'string'
-    && t.id.startsWith(`${memberId}-on-push-`);
-}
-
 // Re-derive the functional data-flow push triggers for a whole team from its
 // members' declarative ports (`dataFlow.{dependsOn,inputs,outputs}`), mirroring
 // what `expandDataFlowSteps` does at materialise time. This is what makes a live
@@ -2470,18 +2463,10 @@ async function reconcileTeamDataFlow(teamId) {
   }
   if (members.length === 0) return;
 
-  // Strip the previously-derived triggers so expandDataFlowSteps regenerates the
-  // full current set from the ports (a plain no-op leaves stale ones behind).
-  const roles = members.map(m => ({
-    id: m.id,
-    displayName: m.displayName,
-    inputs: Array.isArray(m.df.inputs) ? m.df.inputs : [],
-    outputs: Array.isArray(m.df.outputs) ? m.df.outputs : [],
-    dependsOn: Array.isArray(m.df.dependsOn) ? m.df.dependsOn : [],
-    triggers: m.triggers.filter(t => !isDerivedDataFlowTrigger(t, m.id)),
-  }));
-  const expanded = expandDataFlowSteps({ roles }).roles;
-  const byId = new Map(expanded.map(r => [r.id, r]));
+  // Strip the previously-derived triggers (full-id AND role-key ids) so
+  // expandDataFlowSteps regenerates the full current set from the ports (a plain
+  // no-op leaves stale ones behind) — see derived-data-flow.js.
+  const derived = rederiveTeamDataFlow(teamId, members);
   const norm = (arr) => JSON.stringify([...arr].sort((a, b) => (a.id < b.id ? -1 : 1)));
 
   for (const m of members) {
@@ -2490,10 +2475,7 @@ async function reconcileTeamDataFlow(teamId) {
     // (#446). Content-compare (order-insensitive on id) so we write when the
     // wiring OR its preserved activatedAt genuinely changed — but skip a pure
     // no-op, which would bump triggers.json mtime for nothing.
-    const next = injectDerivedTriggerRepo(
-      stampDerivedActivation(byId.get(m.id)?.triggers || [], m.triggers),
-      m.repo,
-    );
+    const next = injectDerivedTriggerRepo(derived.get(m.id) || [], m.repo);
     if (norm(next) === norm(m.triggers)) continue;
     try { await putTriggers(m.id, next); notifyAgentReload(m.id); }
     catch { /* best-effort — never break the originating request */ }
@@ -6279,6 +6261,12 @@ app.get('/api/scripts/:name', apiLimiter, async (req, res) => {
 // new full array and PUTs it through the orchestrator, which persists it and
 // signals the agent (SIGUSR2) to re-pull. We read the current array via
 // controlOrAgentPath so it works on both the shared and isolated layouts.
+// #2571: the producer filter's same-team check reads agent configs by id.
+function readAgentConfigForFilter(agentId) {
+  if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) return null;
+  return readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+}
+
 async function putTriggers(agentId, triggers) {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   const r = await fetch(
@@ -6320,6 +6308,14 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   // Push branch filter (#2570): persisted in its normalized array form (or
   // absent = every branch), validated by rawTriggerError above.
   normalizeBranchFilter(newTrigger);
+  // "Pushed by agent" producer filter (#2571): same-team agent ids on push
+  // triggers only.
+  const pbf = applyPushedBy(newTrigger, { ownerId: id, lookupAgent: readAgentConfigForFilter });
+  if (pbf.error) return res.status(400).json({ error: pbf.error });
+  if (pbf.trigger !== newTrigger) {
+    delete newTrigger.pushedBy;
+    Object.assign(newTrigger, pbf.trigger);
+  }
   // At most one active chat-launched loop per agent (#1020 AC8). A launched
   // loop is a one-off run; a second launch while one runs would race two
   // runners, so reject it — the composer reflects the running state and
@@ -6379,6 +6375,13 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   // Push branch filter (#2570) — normalized as on POST; a blank/null value
   // clears a stored filter.
   normalizeBranchFilter(merged);
+  // Producer filter (#2571) — same route-level check as POST; `null` clears it.
+  const pbf = applyPushedBy(merged, { ownerId: id, lookupAgent: readAgentConfigForFilter });
+  if (pbf.error) return res.status(400).json({ error: pbf.error });
+  if (pbf.trigger !== merged) {
+    delete merged.pushedBy;
+    Object.assign(merged, pbf.trigger);
+  }
   if (merged.type === 'github-event') {
     const now = new Date().toISOString();
     // Refresh the activation horizon on a disable→enable flip so a

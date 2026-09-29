@@ -2680,3 +2680,74 @@ test('#2113: the post-condition round-trips export -> materialise', () => {
   assert.equal(mt.claim.postcondition, 'merged', 'lost on materialise');
   assert.equal(mt.claim.add, 'ready-to-merge:wip');
 });
+
+// ── #2571: "pushed by agent" producer filter on derived data-flow triggers ──
+
+test('expandDataFlowSteps (#2571 AC5): the derived push trigger is filtered to exactly its upstream', () => {
+  const out = expandDataFlowSteps({ roles: [
+    { id: 'spec', outputs: [{ name: 'spec.md' }], triggers: [] },
+    { id: 'dev', inputs: [{ name: 'spec.md' }], dependsOn: ['arch'], triggers: [] },
+    { id: 'arch', triggers: [] },
+  ] });
+  const dev = out.roles.find(r => r.id === 'dev');
+  const byId = Object.fromEntries(dev.triggers.map(t => [t.id, t]));
+  assert.deepEqual(byId['dev-on-push-spec'].pushedBy, ['spec']);
+  assert.deepEqual(byId['dev-on-push-arch'].pushedBy, ['arch']);
+  // The consumer never names itself.
+  for (const t of dev.triggers) assert.ok(!t.pushedBy.includes('dev'));
+});
+
+test('expandDataFlowSteps (#2571 AC5): re-pointing / removing the edge re-derives the filter (strip + regenerate)', () => {
+  const roles = (dep) => [
+    { id: 'a', triggers: [] }, { id: 'b', triggers: [] },
+    { id: 'dev', dependsOn: dep, triggers: [] },
+  ];
+  const first = expandDataFlowSteps({ roles: roles(['a']) }).roles.find(r => r.id === 'dev').triggers;
+  assert.deepEqual(first.map(t => [t.id, t.pushedBy]), [['dev-on-push-a', ['a']]]);
+  const repointed = expandDataFlowSteps({ roles: roles(['b']) }).roles.find(r => r.id === 'dev').triggers;
+  assert.deepEqual(repointed.map(t => [t.id, t.pushedBy]), [['dev-on-push-b', ['b']]]);
+  assert.deepEqual(expandDataFlowSteps({ roles: roles([]) }).roles.find(r => r.id === 'dev').triggers, []);
+});
+
+test('expandDataFlowSteps (#2571 AC6): an older derived trigger without a filter gets one; an authored one is kept', () => {
+  const legacy = { id: 'dev-on-push-a', type: 'github-event', events: ['push'], dataFlow: true, prompt: 'p' };
+  const out = expandDataFlowSteps({ roles: [
+    { id: 'a', triggers: [] },
+    { id: 'dev', dependsOn: ['a'], triggers: [legacy] },
+  ] }).roles.find(r => r.id === 'dev').triggers;
+  assert.deepEqual(out, [{ ...legacy, pushedBy: ['a'] }]);
+  const authored = { ...legacy, pushedBy: [] };
+  const kept = expandDataFlowSteps({ roles: [
+    { id: 'a', triggers: [] },
+    { id: 'dev', dependsOn: ['a'], triggers: [authored] },
+  ] }).roles.find(r => r.id === 'dev').triggers;
+  assert.deepEqual(kept, [authored]);
+});
+
+test('pushedBy (#2571): export → templateToCustomRoles → materialise maps role ids ↔ member ids', () => {
+  const b = buildProcessTemplate({ name: 'x', level: 'live', teamId: 'acme', roles: [
+    { id: 'acme-spec', displayName: 'Specifier', triggers: [] },
+    { id: 'acme-dev', displayName: 'Dev', dataFlow: { dependsOn: ['acme-spec'] }, triggers: [
+      { id: 'acme-dev-on-push-acme-spec', type: 'github-event', events: ['push'], dataFlow: true, pushedBy: ['acme-spec'], prompt: 'p' },
+      { id: 'manual', type: 'github-event', events: ['push'], pushedBy: ['acme-spec', 'acme-dev'], prompt: 'p' },
+    ] },
+  ] });
+  const dev = b.roles.find(r => r.id === 'dev');
+  assert.deepEqual(dev.triggers.map(t => t.pushedBy), [['spec'], ['spec', 'dev']]);
+  const cr = templateToCustomRoles(b).find(r => r.id === 'dev');
+  assert.deepEqual(cr.triggers.map(t => t.pushedBy), [['spec'], ['spec', 'dev']]);
+  const member = buildMemberFromTemplate(
+    { ...cr, triggers: cr.triggers.map(t => ({ ...t, promptTemplate: t.prompt })) },
+    { teamId: 'beta', memberId: 'beta-dev', vars: { repoFullName: 'o/r' } },
+  );
+  assert.deepEqual(member.triggers.map(t => t.pushedBy), [['beta-spec'], ['beta-spec', 'beta-dev']]);
+});
+
+test('pushedBy (#2571 AC1): a push trigger without a filter round-trips without one', () => {
+  const b = buildProcessTemplate({ name: 'x', level: 'live', teamId: 'acme', roles: [
+    { id: 'acme-dev', triggers: [{ id: 'p', type: 'github-event', events: ['push'], prompt: 'p' }] },
+  ] });
+  assert.equal('pushedBy' in b.roles[0].triggers[0], false);
+  const member = buildMemberFromTemplate(templateToCustomRoles(b)[0], { teamId: 'acme', memberId: 'acme-dev' });
+  assert.equal('pushedBy' in member.triggers[0], false);
+});

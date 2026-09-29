@@ -131,8 +131,9 @@ way two agents are wired in the Flow editor. These are optional arrays on a role
 - **These ports are the single source of truth.** At materialise time
   (`expandDataFlowSteps`) and on every live edit (`reconcileTeamDataFlow`) each
   matched producer→consumer pair derives one `github-event`/`push` trigger
-  `<consumer>-on-push-<upstream>` (`dataFlow: true`) that **wakes** the consumer
-  when the upstream pushes. It is a notification, **not** a start-gate: nothing
+  `<consumer>-on-push-<upstream>` (`dataFlow: true`, `pushedBy: [<upstream>]`) that
+  **wakes** the consumer only when the upstream itself pushes (via `gh-as-agent`;
+  other pushes to the repo are dropped, #2571). It is a notification, **not** a start-gate: nothing
   blocks the consumer from running before that. The derived trigger's prompt
   tells the consumer to `git pull` and resolve its inputs from the manifest.
 - **Optional `wakePrompt` override (#868).** A `channels[]` entry and a data-flow

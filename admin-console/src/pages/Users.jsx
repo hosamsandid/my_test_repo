@@ -3,10 +3,9 @@ import { useSearchParams } from 'react-router';
 import { Plus, Pencil, Trash2, ShieldCheck, KeyRound, Users2, AlertTriangle } from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
 import { useAuth } from '../auth/AuthContext';
-import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import DataTable from '../components/DataTable';
 import PageHelpButton from '../components/PageHelpButton';
-import CredentialOwnership from '../components/CredentialOwnership';
+import EnvironmentOwnership from '../components/EnvironmentOwnership';
 import { ADMINISTRATION_HELP_SECTIONS } from './administration-help-sections.js';
 import { useHelpSubject } from '../context/HelperChatContext.jsx';
 import { OVERLAY_USER_EDIT, OVERLAY_USER_DELETE, OVERLAY_TEAM_DELETE } from '../context/page-help-view.js';
@@ -671,8 +670,8 @@ function Section({ title, children, right }) {
 // `{scope, teamId, assignedTeamIds}` tier a credential does, and a bare
 // `{ teamId }` normalizes to `scope: 'team'` server-side — so that one click
 // would silently un-share a shared environment. The row therefore states the
-// tier and edits it AS a tier, through the same `CredentialOwnership` control
-// the Working Environments form uses (no second copy of the tier semantics).
+// tier and edits it AS a tier, through the shared `EnvironmentOwnership` control
+// (no second copy of the tier semantics).
 function EnvironmentOwnershipRow({ env, teams, teamNames, onSaved, onError }) {
   const [editing, setEditing] = useState(false);
   const [ownership, setOwnership] = useState(() => ownershipFromRecord(env, { isSysAdmin: true }));
@@ -720,7 +719,7 @@ function EnvironmentOwnershipRow({ env, teams, teamNames, onSaved, onError }) {
 
       {editing && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-2)', borderTop: '1px solid var(--eb-border-default)' }}>
-          <CredentialOwnership
+          <EnvironmentOwnership
             value={ownership}
             onChange={setOwnership}
             teams={teams}
@@ -748,8 +747,8 @@ function EnvironmentOwnershipRow({ env, teams, teamNames, onSaved, onError }) {
   );
 }
 
-// The delete-only governance view over PERSONAL resources (#2360, §6/§12.7),
-// behind AEE_RESOURCE_ACCESS_V2. A System Admin sees every personal
+// The delete-only governance view over PERSONAL resources (#2360, §6/§12.7).
+// A System Admin sees every personal
 // provider / SSH key / GitHub token MASKED — name, owner, created, and a
 // non-secret discriminator only, NEVER the secret — and may DELETE one
 // (canDeleteCredential's break-glass) but never see-secret or use it. Delete
@@ -810,7 +809,6 @@ function PersonalResourcesSection({ onError }) {
 }
 
 function ResourcesTab() {
-  const resourceAccessV2 = useResourceAccessV2();
   const { data: teams, loading: lt, error: et } = useApi('/api/admin/teams');
   const { data: agents, loading: laAgents, refetch: refetchAgents } = useApi('/api/agents');
   const { data: environments, refetch: refetchEnvs } = useApi('/api/environments');
@@ -923,9 +921,8 @@ function ResourcesTab() {
             />
           ))}
         </Section>
-        {/* The delete-only personal-resource governance view (#2360) — only
-            when the unified model is on; the endpoint 404s otherwise. */}
-        {resourceAccessV2 && <PersonalResourcesSection onError={setActionError} />}
+        {/* The delete-only personal-resource governance view (#2360). */}
+        <PersonalResourcesSection onError={setActionError} />
       </div>
     </div>
   );

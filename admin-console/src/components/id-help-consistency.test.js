@@ -31,7 +31,6 @@ const ID_HINT_PAGES = [
   'SshKeys.jsx',
   'GithubTokens.jsx',
   'McpServers.jsx',
-  'MyCredentials.jsx',
   'EnvironmentTemplates.jsx',
   join('process', 'NodeInspector.jsx'),
 ];

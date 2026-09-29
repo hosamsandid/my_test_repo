@@ -40,6 +40,9 @@ export const REDIRECTS = {
   // tab). The System-Admin catalog that replaced its other half is the NEW
   // `/environment-templates` route, not a redirect target.
   '/environments': '/chats',
+  // `/my-credentials` joined them in #2445: the page is dissolved and its
+  // personal self-service folded into SSH Keys / GitHub Tokens.
+  '/my-credentials': '/ssh-keys',
 };
 
 // Dynamic routes collapse to a canonical parent for topic resolution. A null

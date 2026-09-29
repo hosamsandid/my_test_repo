@@ -3,7 +3,7 @@
  * timestamp.
  *
  * The credential/connection pages (GitHub Tokens, SSH Keys, MCP Servers,
- * Model Providers, My Credentials) each stored an ISO timestamp and showed it
+ * Model Providers) each stored an ISO timestamp and showed it
  * as a raw machine string ("8/13/2026, 4:20:48 PM") — hard to scan and, worse,
  * reimplemented slightly differently on each page (some guarded an invalid
  * date, some didn't). This module is the single source of truth so every page

@@ -6,8 +6,6 @@ import { documentTitleForPath } from './route-title';
 import Login from './pages/Login';
 import { useAuth } from './auth/AuthContext';
 import { useHelperChat } from './context/HelperChatContext';
-import { canAccessCredentialPages } from './pages/credential-scope-view';
-import { useResourceAccessV2 } from './context/ResourceAccessContext';
 
 // Getting Started was retired (#1874): its six concept cards and CTAs are now the
 // Help panel's Overview face. An old bookmark should not land on a blank route, so
@@ -49,34 +47,6 @@ function AdminRoute({ children }) {
   return children;
 }
 
-// Route guard for the credential pages (SSH Keys, GitHub Tokens, #798; Model
-// Providers, #800). Unlike AdminRoute these are open to any Team Admin (of ≥1
-// team) as well as System Admins, so a team can self-serve its own credentials
-// / model providers. A plain Team Member (or a user in no team) is bounced to
-// /chats. The API is independently scoped, so this is UX, not the security
-// boundary.
-function CredentialRoute({ children, openUnderV2 = false }) {
-  const { user } = useAuth();
-  const v2 = useResourceAccessV2();
-  // #2360: under AEE_RESOURCE_ACCESS_V2 the SSH Keys / GitHub Tokens pages are
-  // consolidated and open to every authenticated user (personal self-service
-  // folds in; rows are `visibleCredential`-filtered server-side). `openUnderV2`
-  // opts a route into that; /models keeps the admin gate for now. Off the flag,
-  // or for a route that doesn't opt in, the legacy Team-Admin gate is unchanged.
-  if (openUnderV2 && v2) return children;
-  if (!canAccessCredentialPages(user)) return <Navigate to="/chats" replace />;
-  return children;
-}
-
-// My Credentials is dissolved under v2 (#2360): its personal self-service folds
-// into the now-open SSH Keys page. An old link/bookmark redirects there; off the
-// flag the standalone page still renders.
-function MyCredentialsRoute() {
-  const v2 = useResourceAccessV2();
-  if (v2) return <Navigate to="/ssh-keys" replace />;
-  return <MyCredentials />;
-}
-
 const AgentChat           = lazy(() => import('./pages/AgentChat'));
 const QuickStart          = lazy(() => import('./pages/QuickStart'));
 const Create              = lazy(() => import('./pages/Create'));
@@ -84,7 +54,6 @@ const TeamSetup           = lazy(() => import('./pages/TeamSetup'));
 const EnvironmentTemplates  = lazy(() => import('./pages/EnvironmentTemplates'));
 const SshKeys             = lazy(() => import('./pages/SshKeys'));
 const GithubTokens        = lazy(() => import('./pages/GithubTokens'));
-const MyCredentials       = lazy(() => import('./pages/MyCredentials'));
 const SkillsRegistry      = lazy(() => import('./pages/SkillsRegistry'));
 const RoleTemplates       = lazy(() => import('./pages/RoleTemplates'));
 const GithubEventLog      = lazy(() => import('./pages/GithubEventLog'));
@@ -167,16 +136,20 @@ export default function App() {
           {/* System-Admin curated copy-source catalog that replaced the other
               half of the old page (curating a shared environment). */}
           <Route path="/environment-templates" element={<AdminRoute><EnvironmentTemplates /></AdminRoute>} />
-          <Route path="/ssh-keys"     element={<CredentialRoute openUnderV2><SshKeys /></CredentialRoute>} />
-          <Route path="/github-tokens" element={<CredentialRoute openUnderV2><GithubTokens /></CredentialRoute>} />
-          {/* Self-service personal credentials (#1568) — open to any authenticated
-              human, NOT gated on credAdmin (the personal tier is owner-only). */}
-          <Route path="/my-credentials" element={<MyCredentialsRoute />} />
+          {/* #2360: the credential pages (SSH Keys, GitHub Tokens, Model
+              Providers) are open to every authenticated user — personal
+              self-service folds in; rows are filtered server-side
+              (`visibleCredential` / `providerReadVisible`). */}
+          <Route path="/ssh-keys"     element={<SshKeys />} />
+          <Route path="/github-tokens" element={<GithubTokens />} />
+          {/* The former My Credentials page folded into SSH Keys (#2360); an old
+              link or bookmark lands there. */}
+          <Route path="/my-credentials" element={<Navigate to="/ssh-keys" replace />} />
           <Route path="/skills"       element={<SkillsRegistry />} />
           <Route path="/role-templates" element={<AdminRoute><RoleTemplates /></AdminRoute>} />
           <Route path="/github-events" element={<GithubEventLog />} />
           <Route path="/token-usage"  element={<AdminRoute><TokenUsage /></AdminRoute>} />
-          <Route path="/models"       element={<CredentialRoute openUnderV2><ModelRegistry /></CredentialRoute>} />
+          <Route path="/models"       element={<ModelRegistry />} />
           <Route path="/mcp"          element={<AdminRoute><McpServers /></AdminRoute>} />
           <Route path="/plugins"      element={<AdminRoute><Plugins /></AdminRoute>} />
           {/* A granted UI plugin is viewable by any team member with the grant —

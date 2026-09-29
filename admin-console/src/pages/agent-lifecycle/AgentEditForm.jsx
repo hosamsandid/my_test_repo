@@ -55,10 +55,9 @@ import {
   buildInitialForm, buildEditSubmit, hasOwnSkills, poolSectionError,
 } from './agent-edit-form-model.js';
 import { TEAM_CONFIG_TABS, ENV_TAB_IDS, resolveTeamConfigTab } from './team-config-tabs-view.js';
-import { parallelismSummary } from '../process/parallelism-view.js';
+import { parallelismSummary, hasPooledMember } from '../process/parallelism-view.js';
 import ScalingSection from '../process/ScalingSection';
-import ComingSoonBadge from '../../components/ComingSoonBadge';
-import { usePoolsEnabled } from '../../context/PoolsFeatureContext';
+import ParallelismPanel from '../process/ParallelismPanel';
 
 // #2236: which help chapter each tab's "?" opens, and the tab's own label for
 // the button's title. General/Skills/Plugins point at the same field-by-field
@@ -407,7 +406,6 @@ export default function AgentEditForm({
 }) {
   // A preserved draft (#1929 AC6) wins over the config-derived defaults, so
   // returning to a half-edited form finds it exactly as it was left.
-  const poolsEnabled = usePoolsEnabled();
   const [form, setForm] = useState(() => initialForm || buildInitialForm(agent));
   const update = (key, val) => setForm(f => {
     const next = { ...f, [key]: val };
@@ -442,6 +440,14 @@ export default function AgentEditForm({
     : '';
 
   const isTeam = agent.role === 'team';
+  // Team-axis Parallelism (wipLimit + Flow Supervisor) is now configurable
+  // directly from Team Settings, not only the Flow editor. The panel writes
+  // through PUT /api/agents/:teamId; onImmediateApply refetches so the summary
+  // reflects the new value. `hasPooledMember` gates the auto-dispatch toggle's
+  // prerequisite, mirroring how the Flow editor computes it.
+  const [parallelismOpen, setParallelismOpen] = useState(false);
+  const { data: teamAgentsForPool } = useApi(isTeam ? '/api/agents' : null);
+  const hasPooledRole = hasPooledMember(teamAgentsForPool || [], agent.id);
   const activeTab = isTeam ? resolveTeamConfigTab(teamConfigTab) : null;
   const setTeamTab = (id) => { if (onTeamConfigTabChange) onTeamConfigTabChange(id); };
   // The outer Save/Cancel button batches exactly the fields General and
@@ -569,20 +575,36 @@ export default function AgentEditForm({
         </div>
       )}
 
-      {/* #2272 AC3: a compact, read-only echo of the team-axis Parallelism
-          panel (Flow editor → Parallelism) — `wipLimit`/`autoDispatch` already
-          ride on this same `agent` config object, no separate fetch. Editing
-          happens in the Flow editor, not here — this is the "team view"
-          summary the design doc's A2.2 asks for, not a second edit surface. */}
+      {/* Team-axis Parallelism, now editable from Team Settings (not only the
+          Flow editor). `wipLimit`/`autoDispatch` ride on this same `agent`
+          config object; the ParallelismPanel writes through PUT
+          /api/agents/:teamId and, via onImmediateApply, triggers a refetch so
+          the summary below reflects the saved value. An empty limit is
+          "unbegrenzt" — admission control only engages when a number is set. */}
       {isTeam && activeTab === 'general' && (
         <div>
-          <div style={labelStyle}>Parallelism (read-only)</div>
-          <div style={{ ...inputStyle, color: 'var(--eb-text-muted)', background: 'var(--eb-bg-app)', lineHeight: 1.6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--eb-space-2)' }}>
+            <div style={labelStyle}>Parallelism (Work-in-Progress)</div>
+            <SecondaryBtn onClick={() => setParallelismOpen(true)}>Edit</SecondaryBtn>
+          </div>
+          <div style={{ ...inputStyle, color: 'var(--eb-text-secondary)', background: 'var(--eb-bg-app)', lineHeight: 1.6 }}>
             {parallelismSummary({ wipLimit: agent.wipLimit, autoDispatch: agent.autoDispatch }).map((line) => (
               <div key={line}>{line}</div>
             ))}
           </div>
-          <div style={helpTextStyle}>Edit in the Flow editor's Parallelism panel.</div>
+          <div style={helpTextStyle}>
+            How many tickets this flow works on at once. Leave the limit empty for no cap (unbegrenzt).
+          </div>
+          {parallelismOpen && (
+            <ParallelismPanel
+              teamId={agent.id}
+              wipLimit={Number.isInteger(agent.wipLimit) ? agent.wipLimit : null}
+              autoDispatch={agent.autoDispatch || null}
+              hasPooledRole={hasPooledRole}
+              onClose={() => setParallelismOpen(false)}
+              onChanged={() => { if (onImmediateApply) onImmediateApply({ kind: 'parallelism' }); }}
+            />
+          )}
         </div>
       )}
 
@@ -651,16 +673,12 @@ export default function AgentEditForm({
           <div style={{ paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
               <div style={labelStyle}>Scaling</div>
-              {/* #2302: the pools feature is gated off by default — keep the
-                  section visible but inert until an operator opts in. */}
-              {!poolsEnabled && <ComingSoonBadge title="Agent-pool autoscaling is not yet enabled on this platform." />}
             </div>
             <ScalingSection
               draft={form.poolDraft}
               onChange={v => update('poolDraft', v)}
               parentWipLimit={parentTeam?.wipLimit}
               error={scalingError}
-              disabled={!poolsEnabled}
             />
           </div>
 

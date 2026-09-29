@@ -401,13 +401,13 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   only actually-changed rows re-render — a spawned/reaped/renamed instance (or
   any other roster change) now appears/disappears/updates within ~5s with no
   manual reload, instead of only at the next navigation or filter toggle.
-  **`AEE_POOLS_ENABLED`** (#2302, default off — `pools-mode.js`, mirrors
-  `AUTH_ENABLED`): hides the Parallelism button/panel entirely and renders the
-  per-role Scaling section disabled with a "Coming Soon" badge until an
-  operator opts in; not yet wired into `docker-compose.yml`'s env passthrough
-  (see Amendment 10). A headless runtime (D7) and provider-health-aware
-  admission (D9) remain undesigned. Detail: `docs/parallel-workers-concept.md`
-  Amendment 10.
+  The Parallelism/Scaling surface is **always on** — the former
+  `AEE_POOLS_ENABLED` kill switch (#2302) and its `pools-mode.js` module were
+  removed; `wipLimit` is configurable both in the Flow editor's Parallelism
+  panel and directly in **Team Settings** (Agent Chat → Settings), with an
+  empty limit meaning *unbegrenzt* (admission control engages only when a
+  number is set). A headless runtime (D7) and provider-health-aware admission
+  (D9) remain undesigned. Detail: `docs/parallel-workers-concept.md`.
 
 ### GitHub poller
 

@@ -88,6 +88,12 @@ export function restartNoticeText(info) {
     return 'Repositories updated. The workspace changed immediately; the agent is told about it '
       + 'from its next run on. The conversation above is unaffected.';
   }
+  if (info && info.kind === 'parallelism') {
+    // wipLimit / Flow-Supervisor changes are control-plane only — the admission
+    // tick reads them live, so nothing respawns and no session is interrupted.
+    return 'Parallelism updated. It takes effect on the next admission sweep; '
+      + 'no agent restart is needed.';
+  }
   // Agent pools (#2271) used to apply immediately through ScalingSection's own
   // Save and reported here as `kind: 'pool'`; #2295 folded Scaling into this
   // form's one batched Save, so it is covered by `savedNoticeText` now, not

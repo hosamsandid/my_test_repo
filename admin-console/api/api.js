@@ -69,7 +69,6 @@ const { resolveGlobalFlag: resolveEnvGlobalFlag, isGlobalEnvironment, isGlobalCr
 const { isTemplateEnvironment, resolveTemplateFlag, copyEnvironmentStructure } = require('./environment-template');
 const { validateCloneSource, describeClonedCredentialNeeds } = require('./team-clone');
 const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
-const { resolvePoolsEnabled, poolsModeLogLine } = require('./pools-mode');
 const { resolveResourceAccessV2, resourceAccessModeLogLine } = require('./resource-access-mode');
 // One-time migration of legacy records onto the unified model (#2359). Pure
 // classifier; the routes below supply the store reads/writes + the gate.
@@ -287,10 +286,6 @@ const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 // upgrades keeps today's behaviour (every principal is the implicit System
 // Admin) until an operator activates multi-user mode explicitly. See auth-mode.js.
 const AUTH_ENABLED = resolveAuthEnabled(process.env);
-// Agent-pool parallelism/autoscaling kill switch (#2302). Off by default —
-// the mechanism still needs teardown/reaping polish, so an upgraded stack
-// keeps the UI visible-but-disabled until an operator opts in explicitly.
-const POOLS_ENABLED = resolvePoolsEnabled(process.env);
 // Unified resource-access model switch (#2356, concept #2349). Off by default —
 // the redesign (PR4–PR7) lands "dark" behind this flag so an upgraded stack
 // keeps today's scoping/visibility/runtime resolution until an operator opts in
@@ -2149,14 +2144,6 @@ app.post('/api/maintenance-mode/activate', (req, res) => {
 app.post('/api/maintenance-mode/deactivate', (req, res) => {
   maintenanceMode.deactivate();
   res.json(maintenanceMode.getStatus());
-});
-
-/* ─── Agent pools feature flag (#2302) ──────────────────────────────── */
-// Read once at boot from AEE_POOLS_ENABLED; the SPA fetches this once to
-// decide whether to show the Parallelism surface or the disabled/"Coming
-// Soon" treatment of the Scaling controls.
-app.get('/api/pools-mode', (req, res) => {
-  res.json({ enabled: POOLS_ENABLED });
 });
 
 /* ─── Unified resource-access feature flag (#2356) ───────────────────── */
@@ -21373,7 +21360,6 @@ app.listen(4000, '0.0.0.0', () => {
   // warn when named user records exist, since each of them signs in with full
   // visibility while the flag is off.
   console.log(`[Admin] ${authModeLogLine(process.env)}`);
-  console.log(`[Admin] ${poolsModeLogLine(process.env)}`);
   console.log(`[Admin] ${resourceAccessModeLogLine(process.env)}`);
   try {
     const warning = singleUserElevationWarning(readJsonFile(USERS_INDEX, []), process.env);

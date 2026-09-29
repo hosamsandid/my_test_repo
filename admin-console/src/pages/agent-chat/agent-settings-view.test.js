@@ -88,6 +88,15 @@ test('#2067: a repository change never claims a restart the conversation did not
   assert.equal(notice, restartNoticeText({ kind: 'agent-repositories', respawned: true }));
 });
 
+test('a parallelism change reads as control-plane only — no restart, no context-folder wording', () => {
+  const notice = restartNoticeText({ kind: 'parallelism' });
+  assert.match(notice, /Parallelism updated/);
+  assert.match(notice, /admission sweep/);
+  assert.doesNotMatch(notice, /re-provisioned|fresh session|context folder/i);
+  // `respawned` is meaningless on this path and must not flip the wording.
+  assert.equal(notice, restartNoticeText({ kind: 'parallelism', respawned: true }));
+});
+
 test('the unsaved banner only speaks when there is something unsaved', () => {
   assert.equal(unsavedDraftNotice(false), '');
   assert.match(unsavedDraftNotice(true), /Unsaved changes/);

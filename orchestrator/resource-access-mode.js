@@ -20,7 +20,7 @@
 //
 // **Why ON is now the default.** While the PR chain (PR4–PR7) was landing, the
 // flag defaulted OFF so the changes stayed "dark" — merged but inert — exactly
-// like AUTH_ENABLED / AEE_POOLS_ENABLED. Now that the model is complete and has
+// like AUTH_ENABLED. Now that the model is complete and has
 // been exercised end to end, the default flips: the reviewed behaviour ships by
 // default, and an operator who needs the old world opts OUT with a recognised OFF
 // token (0/false/no/off).

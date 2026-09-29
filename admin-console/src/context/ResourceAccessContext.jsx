@@ -3,7 +3,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 // Unified resource-access feature flag (#2360): a thin client mirror of the
 // server-side AEE_RESOURCE_ACCESS_V2 boot flag (GET /api/resource-access-mode).
 // The value is fixed for the lifetime of the server process, so this fetches
-// once on mount rather than polling. Direct sibling of PoolsFeatureContext.
+// once on mount rather than polling.
 //
 // Starts OFF until the fetch resolves — the same fail-safe default: a page load
 // landing before the first response briefly sees the legacy (scope-tabs)

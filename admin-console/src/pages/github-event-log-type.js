@@ -3,8 +3,9 @@
  * The PR/issue kind is already persisted on each entry as `workItem.kind`
  * (#1827). This maps it to the short, always-visible label the Type column
  * shows — `PR` for a pull request, `Issue` for an issue — driven purely by the
- * stored kind, so it is correct even when the Event column shows a raw fallback
- * key (e.g. `pull_request_review.created`).
+ * stored kind, so it is correct even for an event key the Event column can only
+ * show as its raw fallback (an unknown or hand-edited key — every key the poller
+ * emits has a plain-language name since #2535).
  *
  * Returns `null` for a row with no work item (push / create / delete / release)
  * or a legacy row written before `workItem` was persisted (no `kind`) — the

@@ -470,7 +470,8 @@ error-level findings cannot be applied — steer with another message instead.
 On a **live team** the Copilot edits the team itself. **Apply to team…** first
 opens a confirmation listing each change (added, changed, removed) and anything
 *not applied*; confirmed changes reach the running agents immediately. Each
-removal is its own opt-in checkbox. If the team changed meanwhile, Apply is
+removal is its own opt-in checkbox. New roles are added as stubs unless you
+tick *Materialize now*. If the team changed meanwhile, Apply is
 blocked — **Regenerate**. Only editors can chat and apply; they share the
 history. **Edit as draft** stays available, but *Extend team* only adds roles
 that don't exist yet.

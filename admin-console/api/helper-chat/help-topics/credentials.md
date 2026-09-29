@@ -258,8 +258,8 @@ Token* field to it, which restarts that environment's agents for the same reason
 **Which credential an agent actually uses** is decided **per operation class**,
 because attribution and transport differ:
 
-- **Interactive attributed writes** — a commit push, a pull request or a
-  review the agent makes while a person is chatting with it — use the **chat
+- **Interactive attributed writes** — a commit push or a pull request the
+  agent makes while a person is chatting with it — use the **chat
   sender's own personal** credential. If the person chatting has none (or a PAT
   without the `repo` / `workflow` scope), the write is **refused** with an
   actionable message rather than silently made under someone else's name.

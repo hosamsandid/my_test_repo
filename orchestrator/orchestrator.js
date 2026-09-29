@@ -93,6 +93,7 @@ const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require("./prom
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const credentialResolution = require("./credential-resolution");
+const chatGithubWrite = require("./chat-github-write");
 // §14 / E10 (#2360): pure policy for a personal provider used as a team default
 // across the team-of-one → multi-user transition. Byte-mirrored in admin-console.
 const { personalDefaultTransitionRisk } = require("./provider-lend-policy");
@@ -6542,6 +6543,19 @@ function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) 
     throw e;
   }
   return { githubTokenId: decision.credentialId };
+}
+
+// The credential a live chat turn's in-container `gh` WRITE runs under
+// (#2559) — issues, comments, reviews, labels, `gh api` writes, forwarded by
+// the agent image's `gh` shim. An untrusted/unresolvable sender keeps the
+// container's baseline identity (`{ baseline: true }`, the shim then runs `gh`
+// locally exactly as before), mirroring push/PR's non-refusing path for such a
+// sender. A trusted sender goes through the SAME resolution push/PR use, as the
+// `review` attributed operation: their personal token, or the refusal.
+function resolveChatGithubWriteToken(id, env, actingSenderMatrixId) {
+  const cfg = loadAgentConfig(id) || {};
+  if (resolveActingSenderUserId(actingSenderMatrixId, cfg) == null) return { baseline: true };
+  return resolveAttributedGithubToken(id, env, "review", actingSenderMatrixId);
 }
 
 // SSH-key sibling of `resolveAttributedGithubToken` (#2175 B3) — the "SSH
@@ -17965,6 +17979,61 @@ async function main() {
             status = 409;
           }
           console.warn(`[Orchestrator] git ${gitPushMatch ? 'push' : 'pr'} for ${id}: ${msg}`);
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(payload));
+        }
+      });
+      return;
+    }
+
+    // ── Chat-attributed `gh` write (#2559) ──────────────────────────────────
+    // The agent image's `gh` shim forwards a live chat turn's GitHub WRITE here
+    // so it runs under the chat sender's personal credential without that
+    // secret ever entering the container (see chat-github-write.js). Agent-
+    // facing allowlist, `own` scope — same as git/push and git/pr.
+    const ghWriteMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/github\/gh$/);
+    if (ghWriteMatch) {
+      const id = decodeURIComponent(ghWriteMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', async () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* {} */ }
+        try {
+          const cfg = loadAgentConfig(id);
+          if (!cfg) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: `Agent '${id}' not found` }));
+            return;
+          }
+          const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+          const result = await chatGithubWrite.runChatGithubWrite({
+            body: parsed,
+            resolveToken: (sender) => resolveChatGithubWriteToken(id, env, sender),
+            readToken: (tokenId) => chatGithubWrite.readGithubToken(GH_TOKENS_DIR, tokenId),
+          });
+          if (result.mode === 'attributed') {
+            // The validated command only — never `gh api`'s agent-supplied endpoint.
+            console.log(`[Orchestrator] chat gh ${chatGithubWrite.commandKey(parsed.args).slice(0, 80)} for ${id} → exit ${result.exitCode}`);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          const msg = errorMessage(err);
+          // Same status/code contract as git/push and git/pr: 424 + stable code
+          // for the personal-credential refusal (nothing was written).
+          const payload = { ok: false, error: msg };
+          let status = 500;
+          if (err && err.personalCredentialRequired) {
+            status = 424;
+            payload.code = err.refusalCode || 'personal-credential-required';
+          } else if (err && err.noGithubToken) {
+            status = 424;
+            payload.code = 'no-github-token';
+          } else if (err && err.badRequest) {
+            status = 400;
+          }
+          console.warn(`[Orchestrator] chat gh write for ${id}: ${msg}`);
           res.writeHead(status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(payload));
         }

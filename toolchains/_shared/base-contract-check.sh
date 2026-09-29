@@ -103,6 +103,14 @@ for bin in git gh node python3 claude; do
   if [ -n "$resolved" ]; then say ok "$bin -> $resolved"; else say FAIL "$bin does not resolve"; status=1; fi
 done
 
+# `gh` must be the aee-gh wrapper (#2559): a variant that puts a raw gh first on
+# PATH would post chat-turn writes under the container's token instead of the
+# chat sender's.
+case "$(readlink -f "$(command -v gh 2>/dev/null)" 2>/dev/null)" in
+  /opt/ace/scripts/aee-gh) say ok "gh is the aee-gh wrapper" ;;
+  *) say FAIL "gh does not resolve to /opt/ace/scripts/aee-gh"; status=1 ;;
+esac
+
 # The Claude CLI is pinned in the base; a variant that reinstalled or upgraded
 # it has forked the base contract even though every name still resolves.
 if [ -n "${AEE_EXPECT_CLAUDE_VERSION:-}" ]; then

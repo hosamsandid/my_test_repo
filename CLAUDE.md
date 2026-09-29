@@ -183,6 +183,10 @@ SSH keys and GitHub tokens, tiered like all resources (personal / team / system)
   (`isActingSenderTrusted`); an autonomous run uses the team's current Team Admin
   as **baseline** (`resolveBaselineOwnerId`). The container's spawn-time bake also
   resolves through the baseline (`resolveBaselineGithubTokenId`/`SshKeyId`).
+  In a chat turn, `gh` writes (issue/PR/review/label, writing `gh api`) go
+  through the `aee-gh` wrapper to `POST /internal/agents/:id/github/gh`
+  (`orchestrator/chat-github-write.js`), which runs them under the sender's
+  personal token — the token never enters the container.
 - **Offboarding** (`offboardOwner`): deleting a human pauses their agents and
   deletes their personal credentials before removing the record.
 - Self-service: personal keys/tokens live on the **SSH Keys** / **GitHub Tokens**

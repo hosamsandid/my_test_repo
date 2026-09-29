@@ -90,6 +90,24 @@ When you see it, the branch is already on the remote: surface the message to the
 user (the environment needs a PAT attached) or open the PR yourself with plain
 `gh pr create --head <branch>`. Do **not** retry with a raw `git push`.
 
+### `gh` writes in a chat turn run as the person chatting
+
+The `gh` on your PATH is a thin wrapper (`/opt/ace/scripts/aee-gh`) around the
+real CLI (`/usr/bin/gh`). While a team member is chatting with you, an issue,
+pull-request or label **write** (`gh issue create/comment/edit/close`,
+`gh pr create/comment/review/edit/merge`, `gh label …`, a writing `gh api`
+call) is forwarded to the orchestrator and runs there under that member's
+personal GitHub token, so it is authored as them. Reads, other `gh` commands
+(`release`, `gist`, `secret`, `workflow`, …) and every triggered run use your
+container's own token as before.
+If the write is refused (`personal-credential-required` /
+`personal-credential-orphaned`), nothing was written: tell the person to add a
+personal GitHub token — do not retry with `/usr/bin/gh` or `curl`. Forwarded
+commands don't see your checkout: name issues/PRs by number, pass bodies with
+`--body`/`--body-file`, and keep each option and its value as separate
+arguments (`-F file`, not `-Ffile`) — the orchestrator refuses options it does
+not know, `--editor`/`--web` and `gh api --hostname`.
+
 ## Task Management
 
 Work items are tracked as GitHub issues. Use `gh issue list` to find one and

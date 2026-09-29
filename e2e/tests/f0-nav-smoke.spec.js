@@ -40,7 +40,8 @@ const NAV_PAGES = [
   { label: 'Administration',       breadcrumb: 'Administration' },
   { label: 'Skills',               breadcrumb: 'Skills Registry' },
   { label: 'Agent Templates',      breadcrumb: 'Agent Templates' },
-  { label: 'My Credentials',       breadcrumb: 'My Credentials' },
+  // No 'My Credentials' entry: #2445 dissolved it into SSH Keys / GitHub
+  // Tokens (open to every user); /my-credentials now redirects to /ssh-keys.
   { label: 'GitHub Event Log',     breadcrumb: 'GitHub Event Log' },
   { label: 'Token Usage',          breadcrumb: 'Token Usage' },
   { label: 'Model Providers',      breadcrumb: 'Model Providers' },

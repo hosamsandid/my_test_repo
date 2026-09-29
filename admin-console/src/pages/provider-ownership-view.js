@@ -32,11 +32,11 @@ export function providerTeamSetOf(ep) {
 
 // Co-owned management (#2360, decision A) — client mirror of api.js
 // canManageProvider: a team provider is manageable by the admin of ANY of its
-// teams (or a System Admin / the legacy owning-team rule). `v2` gates the
-// co-owned widening. UX only — the API re-checks.
-export function canManageProviderClient(ep, caller = {}, v2 = false) {
+// teams (or a System Admin / the legacy owning-team rule). UX only — the API
+// re-checks.
+export function canManageProviderClient(ep, caller = {}) {
   if (canManageCredentialClient(ep, caller)) return true;
-  if (v2 && ep && ep.scope === 'team') {
+  if (ep && ep.scope === 'team') {
     const admin = caller.adminTeamIds || [];
     return providerTeamSetOf(ep).some(id => admin.includes(id));
   }
@@ -116,7 +116,7 @@ export function providerOwnershipFromRecord(rec) {
 // the edit dialog (Personal / Team(s) / Global), derived from the record through
 // `providerOwnershipFromRecord` so the row and the dialog can never disagree
 // (#2360 follow-up: the table still rendered the old System/Team/Personal
-// `credentialScopeLabel`). `names` is an id→display-name map for the team set.
+// credential scope label). `names` is an id→display-name map for the team set.
 // Returns `{ scope, label, detail }`; pure — unit-tested here.
 export function providerScopeLabel(rec, names = {}) {
   const { scope, teamIds } = providerOwnershipFromRecord(rec);

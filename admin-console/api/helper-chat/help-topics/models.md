@@ -198,12 +198,11 @@ route-missing status.
 **A subscription (OAuth) provider skips `/v1/models` altogether.** Its token is
 honoured only on Anthropic's Claude Code *messages* flow, and the model-list
 route always answers a subscription token with `401 invalid x-api-key`. So both
-buttons go straight to the `count_tokens` probe against `api.anthropic.com` —
-never `/v1/models`, and not as a fallback but as the only path — and **Discover
-models** always asks you to enter the model name(s) manually, because a
-subscription token cannot enumerate models over HTTP at all. The same `count_tokens`
-probe backs the background health poller, so a subscription provider is no longer
-falsely flagged red on the **Health** column either.
+buttons go straight to a free `/v1/messages` probe against `api.anthropic.com`
+(a placeholder model that `404`s after auth, so nothing is billed; not
+`count_tokens`, which rejects OAuth tokens) — the only path — and **Discover
+models** always asks you to enter the model name(s) manually. The same probe
+backs the health poller, so the **Health** column stays green.
 
 **A probe always names the credential it used**, in a line under the two buttons,
 because a `401` means something completely different depending on which one it

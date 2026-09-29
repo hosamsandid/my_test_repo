@@ -185,7 +185,10 @@ SSH keys and GitHub tokens, tiered like all resources (personal / team / system)
   resolves through the baseline (`resolveBaselineGithubTokenId`/`SshKeyId`).
 - **Offboarding** (`offboardOwner`): deleting a human pauses their agents and
   deletes their personal credentials before removing the record.
-- Self-service: **My Credentials** (`/my-credentials`). Full spec: `docs/credentials.md`.
+- Self-service: personal keys/tokens live on the **SSH Keys** / **GitHub Tokens**
+  pages (open to every user; `/my-credentials` redirects there). Unified
+  identity + scope model: `docs/unified-resource-access-concept.md`. Full spec:
+  `docs/credentials.md`.
 
 ### MCP Servers
 

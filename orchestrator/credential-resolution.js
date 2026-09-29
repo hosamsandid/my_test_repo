@@ -128,12 +128,10 @@ function selectGlobalServiceCredentialId(index) {
 }
 
 // The credential id the SHARED (service) tier resolves to: the env's own binding
-// if it has one, else — under AEE_RESOURCE_ACCESS_V2 (#2357) — a global service
-// credential, else null. Off the flag this is byte-identical to the historical
-// `sharedCredentialId || null`, so an un-opted-in stack is unchanged.
-function resolveSharedServiceId(sharedCredentialId, globalServiceCredentialId, resourceAccessV2) {
+// if it has one, else a global service credential (#2357), else null.
+function resolveSharedServiceId(sharedCredentialId, globalServiceCredentialId) {
   if (sharedCredentialId) return String(sharedCredentialId);
-  if (resourceAccessV2 && globalServiceCredentialId) return String(globalServiceCredentialId);
+  if (globalServiceCredentialId) return String(globalServiceCredentialId);
   return null;
 }
 
@@ -388,16 +386,13 @@ function resolveCredential({
   kind = "GitHub token",
   interactive = false,
   globalServiceCredentialId = null,
-  resourceAccessV2 = false,
 }) {
   const attributed = operationPrefersPersonal(operation);
   // The SHARED tier is a SERVICE credential (unified model §8, #2357): the env's
-  // own binding, else — under AEE_RESOURCE_ACCESS_V2 — a global service
-  // credential. Off the flag this is exactly the historical `sharedCredentialId
-  // || null`, so nothing changes until an operator opts in. The refuse-on-missing
-  // rule is untouched: a global service fallback only ever fills a "shared" slot
-  // that was already reachable, never rescues an attributed write that must 424.
-  const sharedId = resolveSharedServiceId(sharedCredentialId, globalServiceCredentialId, resourceAccessV2);
+  // own binding, else a global service credential. The refuse-on-missing rule is
+  // untouched: a global service fallback only ever fills a "shared" slot that was
+  // already reachable, never rescues an attributed write that must 424.
+  const sharedId = resolveSharedServiceId(sharedCredentialId, globalServiceCredentialId);
 
   // No owner → the personal tier never applies. Use the shared team/system
   // credential exactly as today, and NEVER refuse (AC8). Until #2077 this was
@@ -540,7 +535,7 @@ function buildRefusal(ownerId, kind) {
     code: "personal-credential-required",
     message:
       `Refusing to run an attributed GitHub write under a shared identity: this agent's owner ` +
-      `(${ownerId}) has no usable personal ${kind}. Add one on the My Credentials page ` +
+      `(${ownerId}) has no usable personal ${kind}. Add one on the SSH Keys / GitHub Tokens page ` +
       `(a GitHub token needs the repo/workflow scope) and re-run — the run will NOT fall back ` +
       `to a team or system credential (personal credentials, refuse-on-missing).`,
   };

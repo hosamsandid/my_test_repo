@@ -18,29 +18,28 @@ function routeBody(opening) {
   return SRC.slice(start, end);
 }
 
-// ── oauth-not-team enforcement (deferred from PR2, gated) ───────────────────
+// ── oauth-not-team enforcement (deferred from PR2) ──────────────────────────
 
-test('POST /api/llm-endpoints refuses a team-shared subscription behind the flag', () => {
+test('POST /api/llm-endpoints refuses a team-shared subscription', () => {
   const body = routeBody("app.post('/api/llm-endpoints'");
   assert.match(
     body,
-    /if \(RESOURCE_ACCESS_V2 && isOauth && !globalGate\.global && ownership\.scope !== 'personal'\)/,
-    'a subscription must be personal or global, never team-shared — only behind the flag',
+    /if \(isOauth && !globalGate\.global && ownership\.scope !== 'personal'\)/,
+    'a subscription must be personal or global, never team-shared',
   );
   assert.match(body, /code: 'oauth-not-team'/);
 });
 
 test('PUT /api/llm-endpoints applies the same oauth rule to the effective auth type', () => {
   const body = routeBody("app.put('/api/llm-endpoints/:id'");
-  assert.match(body, /if \(RESOURCE_ACCESS_V2 && isOauth && !globalGate\.global && ownership\.scope !== 'personal'\)/);
+  assert.match(body, /if \(isOauth && !globalGate\.global && ownership\.scope !== 'personal'\)/);
   assert.match(body, /code: 'oauth-not-team'/);
 });
 
 // ── governance: the masked personal-resources view ─────────────────────────
 
-test('GET /api/admin/personal-resources is flag-gated, System-Admin-only, and masked', () => {
+test('GET /api/admin/personal-resources is System-Admin-only and masked', () => {
   const body = routeBody("app.get('/api/admin/personal-resources'");
-  assert.match(body, /if \(!RESOURCE_ACCESS_V2\)/, 'dark when the unified model is off');
   assert.match(body, /if \(!scope\.all\)/, 'System-Admin-only');
   assert.match(body, /listPersonalResources\(\{/);
   // The masking is delegated to the pure module — the route must not hand-build
@@ -50,7 +49,7 @@ test('GET /api/admin/personal-resources is flag-gated, System-Admin-only, and ma
 
 // ── Agent-Team re-key: providerUsableByTeam matches the agent-team id (#2360) ──
 
-test('providerUsableByTeam adds an agent-team team-service match behind the flag, keeping the legacy tenant match', () => {
+test('providerUsableByTeam adds an agent-team team-service match, keeping the legacy tenant match', () => {
   const start = SRC.indexOf('function providerUsableByTeam(');
   assert.ok(start > 0, 'providerUsableByTeam not found');
   const body = SRC.slice(start, SRC.indexOf('\n}', start));
@@ -58,7 +57,7 @@ test('providerUsableByTeam adds an agent-team team-service match behind the flag
   assert.match(body, /credentialVisibleToTeam\(ep, teamId\)/);
   // The re-key + multi-team: a team provider serves a SET of agent teams
   // (teamIds, falling back to teamId); usable if agentTeamId is in the set.
-  assert.match(body, /if \(!RESOURCE_ACCESS_V2 \|\| !agentTeamId\) return false;/);
+  assert.match(body, /if \(!agentTeamId\) return false;/);
   assert.match(body, /ep\.scope === 'team'/);
   assert.match(body, /Array\.isArray\(ep\.teamIds\)/);
   assert.match(body, /set\.map\(String\)\.includes\(String\(agentTeamId\)\)/);
@@ -83,9 +82,9 @@ test('teamHumanMemberCount counts squad memberships fresh (no cache)', () => {
   assert.match(body, /filter\(m => m && m\.teamId === teamId\)\.length/);
 });
 
-test('model-options surfaces the soft personalProviderNotice behind the flag', () => {
+test('model-options surfaces the soft personalProviderNotice', () => {
   const body = routeBody("app.get('/api/agents/:id/model-options'");
-  assert.match(body, /RESOURCE_ACCESS_V2 && endpoint/);
+  assert.match(body, /const providerRisk = endpoint\n/);
   assert.match(body, /personalDefaultTransitionRisk\(\{ provider: endpoint, humanMemberCount: teamHumanMemberCount\(resolveAgentTeam\(cfg\)\) \}\)/);
   assert.match(body, /personalProviderNotice: providerRisk/);
 });
@@ -103,13 +102,13 @@ test('providerUsableAtCreation covers global / own-personal / new-squad team, by
   assert.match(body, /ep\.scope === 'team'/);
 });
 
-test('pickDefaultLlmBinding is gated and falls back to endpoints[0]', () => {
+test('pickDefaultLlmBinding prefers a creator-usable provider and falls back to endpoints[0]', () => {
   const start = SRC.indexOf('function pickDefaultLlmBinding(');
   const body = SRC.slice(start, SRC.indexOf('\n}', start));
   // Legacy blind pick is the untouched default.
   assert.match(body, /let ep = endpoints\[0\];/);
-  // The preference is dark unless the flag is on AND a creator context is given.
-  assert.match(body, /if \(RESOURCE_ACCESS_V2 && pref && pref\.creatorUserId\)/);
+  // The preference applies only when a creator context is given.
+  assert.match(body, /if \(pref && pref\.creatorUserId\)/);
   assert.match(body, /endpoints\.find\(e => providerUsableAtCreation\(e, pref\)\)/);
 });
 
@@ -121,12 +120,12 @@ test('every team/agent creation site passes a creatorUserId preference', () => {
 
 // ── Multi-team providers: co-owned management + team-set + clone auto-append (#2360) ──
 
-test('canManageProvider is co-owned: any team in the set (flagged), else legacy', () => {
+test('canManageProvider is co-owned: any team in the set, else canManageCredential', () => {
   const start = SRC.indexOf('function canManageProvider(');
   assert.ok(start > 0, 'canManageProvider not found');
   const body = SRC.slice(start, SRC.indexOf('\n}', start));
   assert.match(body, /if \(scope && scope\.all\) return true;/);
-  assert.match(body, /RESOURCE_ACCESS_V2 && ep && ep\.scope === 'team'/);
+  assert.match(body, /if \(ep && ep\.scope === 'team'\)/);
   assert.match(body, /providerTeamSet\(ep\)\.some\(t => canManageTeam\(scope, t\)\)/);
 });
 

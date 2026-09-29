@@ -118,6 +118,7 @@ const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
 const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
 const { scopeRepoStatus, findRepoStatus } = require('./github-repo-status-scope');
+const { scopePendingQueue } = require('./pending-queue-scope');
 const { checkGithubTokenRequirement } = require('./env-token-requirement');
 const { pairRepositorySshKeyChanges } = require('./repo-sshkey-pairing');
 const { buildCredentialDescriptor } = require('./credential-descriptor');
@@ -639,9 +640,15 @@ app.get('/api/github-events/repo-status', async (req, res) => {
 // PROCESSED events); this surfaces the UPSTREAM live queue of entries enqueued
 // but not yet drained by the agent. All three are thin proxies to the
 // orchestrator, which owns the per-agent pending-triggers.json files and runs
-// the read/cancel in its single event loop (race-free, no file lock). Gated by
-// the auth gate mounted above, consistent with the other agent-internal
-// endpoints (AC11).
+// the read/cancel in its single event loop (race-free, no file lock).
+//
+// AUTHORIZED since #2119 (Flow Control §4.6): the queue is an operator surface,
+// so it carries the same management bar as the #2102 reassignment below. The
+// list is cut to the agents (and WIP lanes) the caller may manage
+// (`pending-queue-scope.js`); detail and cancel refuse an agent the caller may
+// not manage (`resolveManageableAgentDir`). A Team Member no longer sees their
+// team's queue — its payloads are trigger prompts and raw webhook bodies, and
+// cancelling an entry silently drops work.
 //
 //  - GET  /api/pending-queue                    → aggregated, read-only view (AC1/AC3)
 //  - GET  /api/agents/:id/pending/:entryId       → full entry incl. payload (detail on demand)
@@ -653,7 +660,13 @@ app.get('/api/pending-queue', async (req, res) => {
   try {
     const r = await fetch(`${orchestratorUrl}/internal/pending-queue`);
     const body = await r.json().catch(() => ({ ok: false, error: 'invalid orchestrator response' }));
-    return res.status(r.status).json(body);
+    if (!r.ok || !body || body.ok !== true) return res.status(r.status).json(body);
+    const scope = getScope(req);
+    return res.status(r.status).json(scopePendingQueue(body, {
+      canManageAgentId: (agentId) => AGENT_ID_RE.test(agentId) && canManageAgent(
+        scope, agentMetaForScope(readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null) || {})),
+      canManageTeamId: (teamId) => canManageTeam(scope, teamId),
+    }));
   } catch (err) {
     return res.status(502).json({ ok: false, error: `orchestrator unreachable: ${err.message}` });
   }
@@ -664,6 +677,7 @@ app.get('/api/agents/:id/pending/:entryId', async (req, res) => {
   if (!AGENT_ID_RE.test(id) || !PENDING_ENTRY_ID_RE.test(entryId)) {
     return res.status(400).json({ ok: false, error: 'Invalid agent id or entry id' });
   }
+  if (!resolveManageableAgentDir(req, res, id)) return;
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/pending/${encodeURIComponent(entryId)}`);
@@ -679,6 +693,7 @@ app.delete('/api/agents/:id/pending/:entryId', async (req, res) => {
   if (!AGENT_ID_RE.test(id) || !PENDING_ENTRY_ID_RE.test(entryId)) {
     return res.status(400).json({ ok: false, error: 'Invalid agent id or entry id' });
   }
+  if (!resolveManageableAgentDir(req, res, id)) return;
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/pending/${encodeURIComponent(entryId)}`, { method: 'DELETE' });
@@ -696,22 +711,15 @@ app.delete('/api/agents/:id/pending/:entryId', async (req, res) => {
 //  - GET  /api/agents/:id/pending/:entryId/reassign-targets → eligible targets
 //  - POST /api/agents/:id/pending/:entryId/reassign          → move it
 //
-// UNLIKE the three read/cancel routes above, these are AUTHORIZED. A
+// Like the three read/cancel routes above (#2119), these are AUTHORIZED. A
 // reassignment injects work into another agent's queue — operator-initiated
 // trigger firing at a distance — and #2041 §7/D9 already decided that manually
 // firing a trigger is Team-Admin-only, on the reasoning that an autonomous run
-// is not attributable to a person the way a chat message is. So the capability
-// does not ship ungated, even though its read/cancel neighbours currently are.
+// is not attributable to a person the way a chat message is.
 //
 // The gate runs on BOTH agents (AC5): managing the source is the right to take
 // the entry away, managing the target is the right to make it run something.
 // Holding one is not holding the other.
-//
-// The pre-existing absence of authorization on `GET /api/pending-queue` and the
-// cancel route is real and out of scope here — it belongs to the #2041 P2
-// enforcement sweep, which owns the ungated-route inventory. FLAGGED FOR THE P2
-// OWNER: any signed-in user can currently read every agent's queue and cancel
-// any entry in it.
 function resolveManageableAgentDir(req, res, id) {
   if (!AGENT_ID_RE.test(id)) {
     res.status(400).json({ ok: false, error: 'Invalid agent id' });

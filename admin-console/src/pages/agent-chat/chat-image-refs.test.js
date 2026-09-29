@@ -93,7 +93,7 @@ test('a lone image reference whose filename contains a space is a single ref seg
   ]);
 });
 
-test('the de-dupe shape `image (2).png` (space + parens, minted by our own server) previews', () => {
+test('the legacy de-dupe shape `image (2).png` (space + parens, pre-#2568 uploads) still previews', () => {
   const segs = parseMessageSegments('@chat-uploads/image (2).png');
   assert.deepEqual(segs, [
     { type: 'ref', raw: '@chat-uploads/image (2).png', path: 'chat-uploads/image (2).png' },
@@ -150,4 +150,22 @@ test('hasImageRef is false for a plain-text-only segment list', () => {
 
 test('hasImageRef is true once at least one ref segment is present', () => {
   assert.equal(hasImageRef(parseMessageSegments('@a.png')), true);
+});
+
+/* ── timestamped pasted-image names (#2568) ───────────────────────────── */
+
+test('a timestamped pasted-image name is a single ref segment', () => {
+  const segs = parseMessageSegments('@chat-uploads/image-20260929-164912.png');
+  assert.deepEqual(segs, [
+    { type: 'ref', raw: '@chat-uploads/image-20260929-164912.png', path: 'chat-uploads/image-20260929-164912.png' },
+  ]);
+});
+
+test('the `-<n>` de-dupe shape of several pastes in one message stays separate', () => {
+  const segs = parseMessageSegments('@chat-uploads/image-20260929-164912.png @chat-uploads/image-20260929-164912-2.png');
+  assert.deepEqual(segs, [
+    { type: 'ref', raw: '@chat-uploads/image-20260929-164912.png', path: 'chat-uploads/image-20260929-164912.png' },
+    { type: 'text', value: ' ' },
+    { type: 'ref', raw: '@chat-uploads/image-20260929-164912-2.png', path: 'chat-uploads/image-20260929-164912-2.png' },
+  ]);
 });

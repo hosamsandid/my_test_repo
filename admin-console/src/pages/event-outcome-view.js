@@ -28,6 +28,12 @@ export const OUTCOME_LEGEND = [
     whatToDo: 'Nothing to do — no event is lost; the agent still receives every event inside the digest.',
   },
   {
+    key: 'held',
+    term: 'held (WIP) → <agent>',
+    meaning: "The event matched a trigger, but the flow's Work-in-Progress limit was full, so the dispatch is waiting for a free slot rather than running yet.",
+    whatToDo: 'Nothing is lost — it fires automatically as capacity frees. To see or force it, open the Pending queue tab or the Flow Control board. Raise the flow’s WIP limit in Team Settings if work is waiting too long.',
+  },
+  {
     key: 'throttle',
     term: 'dropped (throttle)',
     meaning: "The per-conversation rate cap was hit (default 5 events/hour), so further reactions on this PR / issue / branch were dropped.",
@@ -86,6 +92,7 @@ export function outcomeLegendKey(outcome) {
   if (!outcome || typeof outcome !== 'object') return null;
   if (outcome.status === 'delivered') return 'delivered';
   if (outcome.status === 'digest') return 'digest';
+  if (outcome.status === 'held') return 'held';
   const reason = outcome.reason || '';
   if (LEGEND_BY_KEY[reason]) return reason;
   return 'drop-unknown';

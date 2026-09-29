@@ -396,9 +396,9 @@ your earlier choice stays marked.
 
 The rail on the right holds everything about the agent that is not the
 conversation. Toggle it with **Cmd/Ctrl+Shift+L** or the chevron in its tab
-strip; it can also collapse to a strip of icons. Two of its tabs are
-conditional: **Outcomes** appears only for an agent that belongs to a team, and
-**Settings** only when you are allowed to manage that agent.
+strip; it can also collapse to a strip of icons. Three of its tabs are
+conditional: **Events** (agents with a GitHub-event trigger), **Outcomes**
+(team members) and **Settings** (if you may manage the agent).
 
 This rail is an **ordinary-agent** surface. Selecting a **team** in the left
 list — its own row, not one of its members — does not open a narrower version
@@ -501,8 +501,8 @@ switch / update / discard actions.
 
 ### The other tabs
 
-**Triggers**, **Outcomes**, **Knowledge** and **Settings** are the remaining
-tabs; each has its own chapter below.
+**Triggers**, **Events**, **Outcomes**, **Knowledge** and **Settings** are the
+remaining tabs; each has its own chapter below.
 
 ## Triggers — when the agent wakes on its own
 
@@ -609,6 +609,14 @@ A loop holds the workspace for its whole duration, not between iterations:
 - A long loop with many queued chat messages sheds the newest ones with a visible
   notice rather than flooding the room when it ends.
 - Maintenance Mode pauses both firing and draining.
+
+## Events — what reached the agent from GitHub
+
+GitHub events that reached this agent's triggers (up to 7 days) and the outcome — delivered (**Session** opens the run), digested or
+dropped with the reason. On a *wake-already-armed*, *throttle* or
+*internal-dedup* drop an agent manager can **Fire again**: the agent is woken
+now with the same prompt. Refused if the item is merged/closed, the wake label
+is gone, or it was already re-fired.
 
 ## Outcomes — what the agent signals when a run ends
 

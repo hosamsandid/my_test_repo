@@ -2095,6 +2095,10 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
       // materialised trigger or the listener silently reverts to poller
       // delivery. Suffix/var substitution never touches it (not a label).
       if (tr.transport === 'internal') out.transport = 'internal';
+      // Push branch filter (#2570) — carried like templateToCustomRoles does,
+      // or a filtered push trigger silently widens back to every branch.
+      const branches = parseBranchFilter(tr.branchFilter);
+      if (branches.length) out.branchFilter = branches;
       // Data-flow (agent dependency) marker so the trigger UI renders it as an
       // editable "push from <upstream>" hand-off rather than a raw push (#379).
       if (tr.dataFlow) out.dataFlow = true;

@@ -5,7 +5,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { parseBranchFilter, branchFilterError, normalizeBranchFilter } = require('./branch-filter');
-const { rawTriggerError, buildProcessTemplate, templateToCustomRoles } = require('./process-template');
+const { rawTriggerError, buildProcessTemplate, templateToCustomRoles, buildMemberFromTemplate } = require('./process-template');
 const extract = require('./extract-template');
 
 test('parseBranchFilter: comma split, trim, drop empties and duplicates (AC3)', () => {
@@ -59,4 +59,20 @@ test('the branch filter survives template export → materialise and template ex
     id: 'builder', displayName: 'Builder', prompt: 'p', skills: [], triggers: roles[0].triggers, includeTriggers: true,
   });
   assert.deepEqual(tpl.triggers[0].branchFilter, ['main', 'release/**']);
+  // …and a member created from that extracted template keeps it (review B1).
+  const member = buildMemberFromTemplate(tpl, {
+    teamId: 'beta', memberId: 'beta-builder', memberDisplayName: 'Builder',
+    vars: { repoFullName: 'beta/app', teamName: 'Beta', agentId: 'beta-builder' },
+  });
+  const push = member.triggers.find(x => x.id === 'on-push');
+  assert.equal(push.repo, 'beta/app');
+  assert.deepEqual(push.branchFilter, ['main', 'release/**']);
+});
+
+test('buildMemberFromTemplate: no branch filter on the template → none on the member', () => {
+  const member = buildMemberFromTemplate({
+    displayName: 'Builder',
+    triggers: [{ id: 'on-push', type: 'github-event', events: ['push'], branchFilter: ' , ' }],
+  }, { teamId: 'beta', memberId: 'beta-builder', vars: { repoFullName: 'beta/app' } });
+  assert.equal('branchFilter' in member.triggers[0], false);
 });

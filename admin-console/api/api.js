@@ -115,7 +115,7 @@ const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, 
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
 const { normalizeBranchFilter } = require('./branch-filter');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
 const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
@@ -6616,12 +6616,15 @@ app.get('/api/process/graph', (req, res) => {
 // Build a graph from an imported bundle (no persistence) so the canvas can
 // render it as a blueprint (#334). Reuses the same pure builder.
 app.post('/api/process/graph', (req, res) => {
-  const raw = req.body && req.body.processTemplate;
+  // Repair safe cross-field inconsistencies before validating (#2579) so a
+  // small, mechanically-fixable defect in an imported bundle no longer hard-fails
+  // the render; `coercions` surfaces every repair applied.
+  const { bundle: coerced, warnings: coercions } = coerceImportBundle(req.body && req.body.processTemplate);
   // Drafts (#345) may be empty works-in-progress.
-  const v = validateProcessTemplate(raw, { allowEmptyRoles: true });
+  const v = validateProcessTemplate(coerced, { allowEmptyRoles: true });
   if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
   // Map legacy pr-review roles (#347) onto the #380 channel ports so old drafts render.
-  const bundle = liftTriggerEmits(normalizeLegacyReview(raw));
+  const bundle = liftTriggerEmits(normalizeLegacyReview(coerced));
   const agents = bundle.roles.map(r => ({
     id: r.id, role: 'template', displayName: r.displayName || r.id,
     sessionPolicy: r.sessionPolicy || 'persistent',
@@ -6639,6 +6642,8 @@ app.post('/api/process/graph', (req, res) => {
     // The bundle's own registries are the authority: labels for gate/brake
     // classification (#928), humans for the named-role bindings (#987).
     humans: Array.isArray(bundle.humans) ? bundle.humans : [],
+    // Auto-repairs applied on import (#2579) — non-fatal, surfaced to the client.
+    ...(coercions.length ? { coercions } : {}),
     ...buildProcessGraph(agents, { labels: bundle.labels, humans: bundle.humans }),
   });
 });
@@ -9402,11 +9407,14 @@ app.post('/api/teams/:teamId/enable', apiLimiter, async (req, res) => {
  * (roles may carry inputs/outputs/dependsOn) through the unified model so the
  * draft editor renders label + dependency + artifact edges and unified lints. */
 app.post('/api/flows/graph', (req, res) => {
-  const raw = req.body && req.body.processTemplate;
-  const v = validateProcessTemplate(raw, { allowEmptyRoles: true });
+  // Repair safe cross-field inconsistencies before validating (#2579) so an
+  // imported bundle with a small, mechanically-fixable defect still renders
+  // instead of hard-failing; `coercions` reports every repair applied.
+  const { bundle: coerced, warnings: coercions } = coerceImportBundle(req.body && req.body.processTemplate);
+  const v = validateProcessTemplate(coerced, { allowEmptyRoles: true });
   if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
   // Map legacy pr-review roles (#347) onto the #380 channel ports so old drafts render.
-  const bundle = liftTriggerEmits(normalizeLegacyReview(raw));
+  const bundle = liftTriggerEmits(normalizeLegacyReview(coerced));
   const flow = processTemplateToUnified(bundle);
   const bundleHumans = Array.isArray(bundle.humans) ? bundle.humans : [];
   res.json({
@@ -9416,6 +9424,8 @@ app.post('/api/flows/graph', (req, res) => {
     // The bundle's own registries drive gate/brake classification (#928) and the
     // named human-role bindings (#987).
     humans: bundleHumans,
+    // Auto-repairs applied on import (#2579) — non-fatal, surfaced to the client.
+    ...(coercions.length ? { coercions } : {}),
     ...buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels, humans: bundleHumans }),
   });
 });
@@ -10412,12 +10422,16 @@ app.post('/api/process/drafts', apiLimiter, (req, res) => {
   // Seed from an imported bundle if provided, else an empty skeleton.
   let bundle = emptyDraftBundle(name);
   if (req.body?.processTemplate) {
-    const v = validateProcessTemplate(req.body.processTemplate, { allowEmptyRoles: true });
+    // Repair safe cross-field inconsistencies before validating (#2579) so an
+    // older/leaky export still seeds a draft instead of being rejected; the
+    // draft is then persisted already-consistent.
+    const { bundle: coerced } = coerceImportBundle(req.body.processTemplate);
+    const v = validateProcessTemplate(coerced, { allowEmptyRoles: true });
     if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
     // Strip the access fields off an imported bundle (#2068): an exported and
     // re-imported draft belongs to the importer, and must never carry a foreign
     // access set in.
-    bundle = { ...draftAccess.stripAccessFields(req.body.processTemplate), name };
+    bundle = { ...draftAccess.stripAccessFields(coerced), name };
   }
   // AC1 — `createdBy` is resolved from the authenticated caller, never from the
   // request body (the `PUT /api/me/preferences` rule), and the access set starts
@@ -16589,7 +16603,15 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // They are resolved exactly like catalog templates by the materialisation
   // loop below (var substitution over prompt + triggers).
   let customRolesRaw = Array.isArray(body.customRoles) ? body.customRoles : [];
+  let importCoercions = [];
   if (body.processTemplate) {
+    // Repair safe cross-field inconsistencies before validating (#2579) and reuse
+    // the coerced bundle for EVERY downstream read (stages/labels/humans/wipLimit/
+    // autoDispatch below), so an older/leaky export materialises consistently
+    // instead of being rejected outright.
+    const coerced = coerceImportBundle(body.processTemplate);
+    body.processTemplate = coerced.bundle;
+    importCoercions = coerced.warnings;
     const v = validateProcessTemplate(body.processTemplate);
     if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
     // Expand GitHub channels (#380) into consumer github-event triggers + the
@@ -17075,7 +17097,10 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         .filter(p => !toCreate.some(c => c.memberId === p.memberId))
         .map(p => p.memberId),
       dms: created.dms,
-      ...(suffixWarnings.length ? { warnings: suffixWarnings } : {}),
+      // Suffix collisions + any import auto-repairs (#2579) share the one
+      // non-fatal `warnings` channel.
+      ...((suffixWarnings.length || importCoercions.length)
+        ? { warnings: [...importCoercions, ...suffixWarnings] } : {}),
     });
 
     // Phase E — label provisioning (best-effort, after response sent).
@@ -17312,7 +17337,13 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // Inline roles (parity with POST /api/teams): either `customRoles` or a whole
   // `processTemplate` bundle (Process Canvas import / wizard Process step, #422).
   let customRolesRaw = Array.isArray(body.customRoles) ? body.customRoles : [];
+  let importCoercions = [];
   if (body.processTemplate) {
+    // Repair safe cross-field inconsistencies before validating (#2579), reusing
+    // the coerced bundle for every downstream read — parity with POST /api/teams.
+    const coerced = coerceImportBundle(body.processTemplate);
+    body.processTemplate = coerced.bundle;
+    importCoercions = coerced.warnings;
     const v = validateProcessTemplate(body.processTemplate);
     if (!v.ok) return fail(400, `Invalid processTemplate: ${v.error}`);
     customRolesRaw = templateToCustomRoles(
@@ -17844,7 +17875,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           .filter(p => !toCreate.some(c => c.memberId === p.memberId))
           .map(p => p.memberId),
         dms: created.dms,
-        ...(suffixWarnings.length ? { warnings: [...suffixWarnings, ...provWarn] } : (provWarn.length ? { warnings: provWarn } : {})),
+        // Import auto-repairs (#2579) + suffix collisions + label-provisioning
+        // warnings all share the one non-fatal `warnings` channel.
+        ...((importCoercions.length || suffixWarnings.length || provWarn.length)
+          ? { warnings: [...importCoercions, ...suffixWarnings, ...provWarn] } : {}),
       },
     });
     res.end();

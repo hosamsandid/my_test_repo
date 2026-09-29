@@ -949,6 +949,50 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
   return { ok: true };
 }
 
+// Best-effort, non-destructive repair of an imported bundle's SAFE cross-field
+// inconsistencies (#2579), so a small, mechanically-fixable defect — typically
+// from an older or leaky export — no longer hard-fails the whole import at
+// `validateProcessTemplate`. Returns a NEW bundle (deep-cloned; the input is
+// never mutated) plus a list of human-readable `warnings`, one per repair
+// applied, so nothing is fixed silently.
+//
+// The bar for a repair here is deliberately high: only an inconsistency with a
+// SINGLE obviously-safe, intent-free resolution is touched. Anything that would
+// require guessing what the author meant (e.g. inventing WHICH role should be
+// pooled) is left alone for the validator to reject — a robust import must not
+// become a bundle-mangling import. Pure; no IO. Callers run this BEFORE
+// `validateProcessTemplate` and then validate/use the returned bundle.
+function coerceImportBundle(raw) {
+  const warnings = [];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { bundle: raw, warnings };
+  const bundle = JSON.parse(JSON.stringify(raw));
+
+  // autoDispatch (the Flow Supervisor) only times POOLED roles and piggybacks on
+  // the flow's own `wipLimit`. A bundle that enables it with no pooled role — or
+  // no `wipLimit` — describes a supervisor with nothing to dispatch, which the
+  // strict validator refuses. The only intent-free repair is to turn the inert
+  // supervisor OFF (we cannot know which role the author meant to pool). This is
+  // exactly the shape a pre-#2579 export produced when it dropped a member's
+  // `pool`: `wipLimit` + `autoDispatch.enabled` survived, the pooled role did
+  // not. Dropping the whole `autoDispatch` block (rather than setting
+  // `enabled:false`) matches what `normalizeAutoDispatch` would do with it on the
+  // next export anyway, so the repaired bundle stays clean and round-trips.
+  if (bundle.autoDispatch && typeof bundle.autoDispatch === 'object' && !Array.isArray(bundle.autoDispatch)
+      && bundle.autoDispatch.enabled === true) {
+    const hasPooledRole = Array.isArray(bundle.roles)
+      && bundle.roles.some(r => r && r.pool && typeof r.pool === 'object' && r.pool.enabled === true);
+    const hasWipLimit = Number.isInteger(bundle.wipLimit) && bundle.wipLimit >= 1;
+    if (!hasPooledRole || !hasWipLimit) {
+      delete bundle.autoDispatch;
+      warnings.push(!hasPooledRole
+        ? 'Auto-dispatch (Flow Supervisor) was turned off on import: no role has pooling enabled, so the supervisor would have had nothing to dispatch. If that was unintended, enable pooling on a role (e.g. the Developer) and turn auto-dispatch back on.'
+        : 'Auto-dispatch (Flow Supervisor) was turned off on import: the flow has no WIP limit set, which both pooling and the supervisor require.');
+    }
+  }
+
+  return { bundle, warnings };
+}
+
 // An empty draft skeleton (#344).
 function emptyDraftBundle(name) {
   return {
@@ -2094,7 +2138,7 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
 }
 
 module.exports = {
-  buildProcessTemplate, validateProcessTemplate, templateToCustomRoles,
+  buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles,
   buildMemberFromTemplate, liftTriggerEmits,
   expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview,
   // Direct agent-to-agent hand-off (#2031): the derived consumer listener.

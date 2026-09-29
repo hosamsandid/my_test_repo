@@ -358,8 +358,12 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   `wipLimit` enforced at dispatch (`admission-control.js`); a read-only **ticket
   ledger** deriving true state from GitHub evidence (`ticket-reconciler.js`);
   the `/flow-control` board (**reachable from the sidebar** — the #2147 removal
-  was reversed for WIP transparency). A dispatch the lane **holds** behind a
-  full `wipLimit` also surfaces in the **GitHub Event Log → Pending queue** tab
+  was reversed for WIP transparency), rebuilt by #2573 as a "who is working on
+  what" view: stages derived from the team's flow graph, only items a team
+  agent touched, running sessions, pools and human blocks — one pure builder
+  (`flow-board.js`) behind `GET /api/teams/:teamId/flow-board` (single-flight
+  cached sweep; optional per-team `flow-board.json` column config). A dispatch
+  the lane **holds** behind a full `wipLimit` also surfaces in the **GitHub Event Log → Pending queue** tab
   (`aggregateHeldDispatches` folds each team lane's `held[]` into
   `/api/pending-queue`), so held work is never invisible — it used to log
   "delivered" yet appear nowhere.
@@ -398,10 +402,11 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   safety net. **Board controls** (Phase 5 #2250): the Flow Control board
   (`/flow-control`) gets a per-role Pause/Drain/Resume (a runtime toggle,
   `pool-control.json`, kept out of the `pool` bundle field — blocks only NEW
-  spawns, an existing instance runs to completion) and a per-held-entry Force
+  spawns, an existing instance runs to completion; a drain settles to `off`
+  once the last instance is gone, #2573) and a per-held-entry Force
   dispatch (`admissionControl.forcePromoteHeld`, promotes past `wipLimit` for
-  that one entry). **Pool instance lanes** (#2273): a read-only third board
-  panel, per pooled role's live instances tagged running / held-same-epic /
+  that one entry). **Pool instance lanes** (#2273): a read-only endpoint (its
+  board panel was folded into "Working now" by #2573), per pooled role's live instances tagged running / held-same-epic /
   timed-out (`pool-instance-lanes.js`, pure, no new persistence — derived
   from live instance configs + the ticket ledger). **Agent Chat rail
   sub-grouping** (#2297): the same live instances, nested under their role as a
@@ -589,7 +594,7 @@ Process step lands on the template/draft gallery; role templates under
 | `orchestrator/repo-sync.js` / `agent-repositories.js` | Repository propagation core; agent-scoped repositories |
 | `orchestrator/plugin-*.js` / `broker-sdk/` | Plugin machinery (manifest, scope tokens, grants, sync, runtime, registry) + broker obligations SDK |
 | `orchestrator/flow-anomaly-detector.js` / `hill-climb-*.js` | Flow stall classifier; hill-climbing metrics/cards/verdict loop |
-| `orchestrator/admission-control.js` / `ticket-reconciler.js` | Per-flow WIP limit at dispatch; read-only GitHub-evidence ticket ledger |
+| `orchestrator/admission-control.js` / `ticket-reconciler.js` / `flow-board.js` | Per-flow WIP limit at dispatch; read-only GitHub-evidence ticket ledger; the Flow Control board derivation |
 | `orchestrator/internal-auth.js` | `:4002` gate: token classes + agent route allowlist |
 | `orchestrator/setup.sh` | Register the admin Matrix user, print the access token |
 | `agent-image/` | Per-agent image `as-agent:latest`; live runtime `scripts/agent-entrypoint.py` |

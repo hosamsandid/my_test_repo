@@ -160,6 +160,7 @@ const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit, p
 const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor, normalizeGrantList } = require("./plugin-grants");
 const { planWorkspaceSync, planCliRefresh } = require("./plugin-sync");
 const { resolveAgentStateDir } = require("./agent-state-dir");
+const mcpSeed = require("./mcp-seed");
 const { resolveScopeId } = require("./plugin-scope");
 const pluginRegistry = require("./plugin-registry");
 const pluginRuntime = require("./plugin-runtime");
@@ -4550,8 +4551,8 @@ function seedAgentWorkspace(id, env, opts = {}) {
   // 3. Patch absolute /workspace/ paths in seeded memory
   patchSeededPaths(dest);
 
-  // 4. Materialize MCP server config into the agent's own .claude/settings.json.
-  //    Team-members may override the team-env's MCP list — pass `opts.mcpServersOverride`
+  // 4. Materialize MCP server config into the agent's own `.mcp.json` (+ its
+  //    approval in .claude/settings.json — see seedAgentMcpServers). Team-members may override the team-env's MCP list — pass `opts.mcpServersOverride`
   //    (an array of { serverId, credentialId }) to use it instead of `env.mcpServers`.
   //    The override is verbatim, no merge.
   const mcpRefs = Array.isArray(opts.mcpServersOverride)
@@ -4637,119 +4638,59 @@ function seedAgentWorkspace(id, env, opts = {}) {
   return { seeded: true, warnings, clones };
 }
 
-// For each {serverId, credentialId} ref attached to the environment (or its
-// team-member override), load the server.json template, substitute the
-// `${credential}` placeholder with the secret read from the credentials store,
-// and write the merged stanza into the agent's own `.claude/settings.json`
-// under `mcpServers[<serverId>]`. Per-agent isolation: pool-level MCP config
-// is no longer consulted at runtime.
+// Materialize an agent's MCP servers into its workspace (#2289): each
+// {serverId, credentialId} ref (the environment's list, or a team-member's
+// verbatim override) is resolved against the registry and the credentials
+// store, and the stanzas are RECONCILED into `.mcp.json` + the
+// `enabledMcpjsonServers` approval list in `.claude/settings.json` — the two
+// files Claude Code actually reads (it ignores `mcpServers` in settings.json).
+// Reconciling means a dropped server is removed and an empty set applies, while
+// entries the platform never seeded are left alone; see mcp-seed.js. Used by
+// the one-time seed and by every later re-application (applyAgentMcp).
 function seedAgentMcpServers(dest, mcpRefs, warnings) {
-  const seeded = [];
-  if (!Array.isArray(mcpRefs) || mcpRefs.length === 0) return seeded;
+  return writeAgentMcp(dest, mcpRefs, warnings).seeded;
+}
 
-  const settingsPath = path.join(dest, ".claude", "settings.json");
-  let settings = {};
-  try {
-    if (fs.existsSync(settingsPath)) {
-      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) || {};
-    }
-  } catch (err) {
-    warnings.push(`mcp: cannot parse existing .claude/settings.json — overwriting (${err.message})`);
-    settings = {};
+function writeAgentMcp(dest, mcpRefs, warnings) {
+  const { stanzas } = mcpSeed.buildMcpStanzas(mcpRefs, {
+    serversDir: MCP_SERVERS_DIR,
+    credentialsKeysDir: MCP_CREDENTIALS_KEYS_DIR,
+  }, warnings);
+  return mcpSeed.writeAgentMcpConfig(dest, stanzas, warnings, { stateDir: resolveAgentStateDir(dest) });
+}
+
+// Re-apply one agent's effective MCP set to its live workspace (#2289 D2):
+// rewrite the two files on the pool subpath, then mirror them into the agent's
+// dedicated volume when it has one. No restart — `claude` re-reads both files
+// on its next turn. A stub has no workspace yet and picks the set up at its
+// first seed; that is reported, not treated as an error.
+async function applyAgentMcp(id) {
+  const cfg = loadAgentConfig(id);
+  if (!cfg) return { id, status: "failed", detail: "agent not found" };
+  if (!cfg.token) return { id, status: "pending" };
+  const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  const warnings = [];
+  const write = writeAgentMcp(agentDir(id), mcpSeed.effectiveMcpRefs(cfg, env), warnings);
+  for (const w of warnings) console.warn(`[Orchestrator] MCP apply warning for ${id}: ${w}`);
+  const reseed = write.ok ? await reseedAgent(id, mcpSeed.MCP_RESEED_PATHS) : null;
+  const outcome = mcpSeed.describeApplyOutcome(id, write, reseed);
+  console.log(`[Orchestrator] MCP apply ${id}: ${outcome.status}${outcome.servers ? ` (${outcome.servers.join(",") || "none"})` : ""}`);
+  return { ...outcome, warnings };
+}
+
+// An environment's MCP list changed (#2289 D3): re-apply it to every
+// materialized agent bound to the environment, except those carrying their own
+// override (left untouched). Each agent's effective set is re-derived from its
+// config at apply time, so an override created meanwhile still wins.
+async function applyEnvironmentMcp(envId) {
+  const plan = mcpSeed.planEnvironmentMcpApply(listAgentConfigs(), envId);
+  const outcomes = [];
+  for (const { id, action } of plan) {
+    if (action !== "apply") { outcomes.push({ id, status: action }); continue; }
+    try { outcomes.push(await applyAgentMcp(id)); }
+    catch (err) { outcomes.push({ id, status: "failed", detail: err.message }); }
   }
-  if (!settings.mcpServers || typeof settings.mcpServers !== "object") settings.mcpServers = {};
-
-  for (const ref of mcpRefs) {
-    const serverId = ref?.serverId;
-    const credId = ref?.credentialId || null;
-    if (!serverId || !/^[a-z0-9-]+$/.test(serverId)) {
-      warnings.push(`mcp: invalid serverId in env ref: ${JSON.stringify(ref)}`);
-      continue;
-    }
-    const serverPath = path.join(MCP_SERVERS_DIR, serverId, "server.json");
-    let server;
-    try {
-      server = JSON.parse(fs.readFileSync(serverPath, "utf8"));
-    } catch (err) {
-      warnings.push(`mcp: server '${serverId}' not found in registry (${err.message})`);
-      continue;
-    }
-
-    let secret = "";
-    if (credId) {
-      if (!/^[a-z0-9-]+$/.test(credId)) {
-        warnings.push(`mcp: invalid credentialId for server '${serverId}': ${credId}`);
-        continue;
-      }
-      try {
-        secret = fs.readFileSync(path.join(MCP_CREDENTIALS_KEYS_DIR, credId), "utf8").trim();
-      } catch (err) {
-        warnings.push(`mcp: cannot read credential '${credId}' for server '${serverId}' (${err.message})`);
-        continue;
-      }
-    }
-
-    // Different transports carry the substitution template under different
-    // keys: stdio servers get `env` (process environment), http/sse servers
-    // get `headers` (HTTP request headers). The substitution mechanics are
-    // identical — only the destination key changes.
-    const transport = server.transport || "stdio";
-    if (!["stdio", "http", "sse"].includes(transport)) {
-      warnings.push(`mcp: server '${serverId}' has unsupported transport '${transport}'`);
-      continue;
-    }
-    const tplKey = transport === "stdio" ? "env" : "headers";
-    const template = (server[tplKey] && typeof server[tplKey] === "object") ? server[tplKey] : {};
-
-    const resolved = {};
-    let placeholderUsed = false;
-    for (const [k, v] of Object.entries(template)) {
-      if (typeof v !== "string") { resolved[k] = v; continue; }
-      if (v.includes("${credential}")) {
-        placeholderUsed = true;
-        if (!secret) {
-          warnings.push(`mcp: server '${serverId}' ${tplKey} key '${k}' uses \${credential} but no credential is bound`);
-          // Drop the key rather than leak the literal placeholder into the agent.
-          continue;
-        }
-        resolved[k] = v.split("${credential}").join(secret);
-      } else {
-        resolved[k] = v;
-      }
-    }
-    if (!placeholderUsed && credId) {
-      warnings.push(`mcp: server '${serverId}' has a credential bound but no \${credential} placeholder in ${tplKey} — credential ignored`);
-    }
-
-    // Stanza shape per Claude Code's MCP config schema:
-    //   stdio   → { command, args, env }                  (no `type` field — stdio is the default)
-    //   http    → { type: "http", url, headers }
-    //   sse     → { type: "sse",  url, headers }
-    let stanza;
-    if (transport === "stdio") {
-      stanza = {
-        command: server.command,
-        args: Array.isArray(server.args) ? server.args : [],
-        env: resolved,
-      };
-    } else {
-      stanza = {
-        type: transport,
-        url: server.url,
-        headers: resolved,
-      };
-    }
-    settings.mcpServers[serverId] = stanza;
-    seeded.push(serverId);
-  }
-
-  try {
-    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-  } catch (err) {
-    warnings.push(`mcp: cannot write .claude/settings.json (${err.message})`);
-  }
-  return seeded;
+  return { envId, ...mcpSeed.summarizeMcpApply(outcomes) };
 }
 
 // Clone every repository attached to an environment. Errors are pushed to the
@@ -12489,7 +12430,7 @@ class Orchestrator {
       // No-op when the dedicated volume is absent (#185 item 5).
       if (PER_AGENT_VOLUME) {
         await reseedPerAgentVolume(
-          id, ['CLAUDE.md', 'AGENT-PROMPT.md', '.claude/settings.json', 'skills'],
+          id, ['CLAUDE.md', 'AGENT-PROMPT.md', '.claude/settings.json', '.mcp.json', 'skills'],
         ).catch(err => console.warn(`[Orchestrator] re-enable reseed ${id}: ${err.message}`));
       }
       startAgentProcess(updated);
@@ -16710,6 +16651,40 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Re-apply MCP servers (#2289) ──────────────────────────────────────
+    // After the admin changes an agent's own MCP override, or an environment's
+    // MCP list, it asks us to rewrite the affected workspaces' `.mcp.json` +
+    // settings approval and mirror them into running agents' volumes — no
+    // restart, the change lands on each agent's next turn. The response is the
+    // per-agent outcome (applied / stored / pending / keptOverride / failed),
+    // which the admin passes back to the console rather than swallowing.
+    const mcpApplyMatch = req.method === 'POST'
+      && req.url.match(/^\/internal\/(agents|environments)\/([^/]+)\/apply-mcp$/);
+    if (mcpApplyMatch) {
+      const kind = mcpApplyMatch[1];
+      const targetId = decodeURIComponent(mcpApplyMatch[2]);
+      req.resume();
+      req.on('end', async () => {
+        if (!isSafePathSeg(targetId)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'bad id' }));
+          return;
+        }
+        try {
+          const result = kind === 'agents'
+            ? { agentId: targetId, ...mcpSeed.summarizeMcpApply([await applyAgentMcp(targetId)]) }
+            : await applyEnvironmentMcp(targetId);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          console.error(`[Orchestrator] MCP apply for ${kind}/${targetId} failed: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }
       });

@@ -43,6 +43,7 @@ const pluginScopeToken = require("./plugin-scope-token");
 const labelFastPath = require("./github-label-fastpath");
 const { LabelDedupMarkers } = require("./label-dedup-markers");
 const githubEventLog = require("./github-event-log");
+const githubRefire = require("./github-refire");
 const internalAuth = require("./internal-auth");
 
 // Internal-API authentication for :4002 (#1456, GOV-PLATFORM-2). Resolved ONCE
@@ -1882,6 +1883,139 @@ async function wakeGithubLabelListeners({ repo, number, kind, label, actor, sour
       `[Orchestrator] label-fastpath: ${repo}#${number} +${label} matched no poller listener`);
   }
   return { listeners };
+}
+
+// ── Manual "Fire again" for a dropped GitHub wake (#2525) ─────────────────
+// The poller instance, published once it is constructed at startup so the
+// re-fire can re-arm its wake key (null until then / in unit tests).
+let githubPollerRef = null;
+// In-flight re-fires, keyed (event, agent, trigger). The concurrent half of the
+// at-most-once guarantee (AC9): a double-click or two users clicking at once
+// hit this before any await. The persisted half is the logged re-fire row.
+const githubRefireInFlight = new Set();
+
+// The raw issue/PR object (state, merged, labels, title, body) for the re-fire's
+// state check (AC8). Null on any failure — the caller refuses rather than
+// guesses.
+async function fetchWorkItemRaw(repoFullName, kind, number) {
+  try {
+    const tokenId = resolveRepoGithubTokenId(repoFullName);
+    if (!tokenId) return null;
+    const token = fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim();
+    const apiPath = kind === "pr"
+      ? `/repos/${repoFullName}/pulls/${number}`
+      : `/repos/${repoFullName}/issues/${number}`;
+    return await _flowGithubGetJson(apiPath, token);
+  } catch (err) {
+    console.error(`[Orchestrator] refire: state fetch failed for ${repoFullName}#${number}: ${err.message}`);
+    return null;
+  }
+}
+
+// Is the session a twin delivery started still running or still queued? An
+// `internal-dedup` drop whose twin is live must not be re-fired (#2525 edge
+// case) — the agent is already working on exactly this wake.
+function githubTwinStillActive(agentId, twin) {
+  if (!twin) return false;
+  const correlationId = githubRefire.triggerCorrelationId(twin.triggerId, twin.eventId);
+  try {
+    const reg = JSON.parse(fs.readFileSync(agentStatePath(agentId, "running-sessions.json"), "utf8"));
+    if (Array.isArray(reg) && reg.some((r) => r && r.correlationId === correlationId)) return true;
+  } catch { /* no running sessions */ }
+  try {
+    const pending = JSON.parse(fs.readFileSync(pendingPath(agentId), "utf8"));
+    if (Array.isArray(pending) && pending.some((e) => e && e.github && String(e.github.eventId) === twin.eventId)) return true;
+  } catch { /* nothing queued */ }
+  return false;
+}
+
+// Re-deliver one dropped (event, agent, trigger) wake. Returns `{status, body}`.
+// A human override: enqueued straight onto the agent's queue (so no poller gate
+// — throttle, edge dedup, internal dedup — can drop it), touching no other
+// event's throttle bucket or dedup marker (AC5b).
+async function refireGithubEvent({ agentId, eventId, triggerId, actor }) {
+  const lockKey = githubRefire.refireKey({ eventId, agentId, triggerId });
+  if (githubRefireInFlight.has(lockKey)) {
+    return { status: 409, body: { ok: false, code: "in-progress", error: "This event is already being fired again." } };
+  }
+  githubRefireInFlight.add(lockKey);
+  try {
+    const entries = githubEventLog.readEntries();
+    const found = githubRefire.findDroppedOutcome(entries, { eventId, agentId, triggerId });
+    const prior = githubRefire.findPriorRefire(entries, { eventId, agentId, triggerId });
+    const trigger = (loadTriggers(agentId) || []).find((t) => t && t.id === triggerId) || null;
+    const plan = githubRefire.planRefire({
+      found, prior, trigger,
+      agentEnabled: loadAgentConfig(agentId)?.enabled !== false,
+      retentionCutoffMs: Date.now() - githubEventLog.RETENTION_DAYS * 24 * 60 * 60 * 1000,
+    });
+    if (!plan.ok) return { status: plan.status, body: { ok: false, code: plan.code, error: plan.error, refire: plan.refire || null } };
+    const { entry, outcome } = found;
+    const { wakeLabel, workItem } = plan;
+
+    if (outcome.reason === "internal-dedup") {
+      const twin = githubRefire.findTwinDelivery(entries, { entry, agentId, triggerId, wakeLabel });
+      if (githubTwinStillActive(agentId, twin)) {
+        return {
+          status: 409,
+          body: {
+            ok: false, code: "twin-active", twin,
+            error: "The earlier delivery of this wake is still running (or queued) — open that session instead of firing again.",
+          },
+        };
+      }
+    }
+
+    const detail = await fetchWorkItemRaw(entry.repo, workItem.kind, workItem.number);
+    const state = githubRefire.checkItemState(detail, { kind: workItem.kind, wakeLabel });
+    if (!state.ok) return { status: state.status, body: { ok: false, code: state.code, error: state.error } };
+
+    const now = new Date().toISOString();
+    const title = typeof detail.title === "string" && detail.title ? detail.title : null;
+    const closesIssues = workItem.kind === "pr"
+      ? prEventsLog.parseCloses(detail.body, detail.head && detail.head.ref)
+      : [];
+    const key = entry.event;
+    const ghEvent = githubRefire.buildRefireEvent({
+      entry, wakeLabel, title, closesIssues, actor,
+      eventId: `refire:${crypto.randomBytes(6).toString("hex")}`,
+      now,
+    });
+    const logFields = githubRefire.buildRefireLogFields({ entry, outcome, actor });
+    const ok = enqueuePending(agentId, githubRefire.buildRefirePendingEntry({
+      triggerId, key, ghEvent, wakeLabel, refireOf: logFields.refireOf,
+    }));
+    if (!ok) {
+      return { status: 500, body: { ok: false, code: "enqueue-failed", error: "Could not queue the wake for the agent." } };
+    }
+    // Keep the edge dedup as a normal delivery leaves it (AC10): the wake label
+    // is present (checked above), so it is armed — a later duplicate of the
+    // same label is still dropped as `wake-already-armed`.
+    if (githubPollerRef && wakeLabel && typeof key === "string" && key.endsWith(".labeled")) {
+      githubPollerRef.armWake({ repo: entry.repo, triggerId, kind: workItem.kind, number: workItem.number, label: wakeLabel });
+    }
+    const logEntry = {
+      ...githubEventLog.buildEventEntry({
+        ghEvent, repoFullName: entry.repo, key,
+        outcomes: [{ agentId, triggerId, status: "delivered", reason: null, digest: false, wakeLabel }],
+      }),
+      ...logFields,
+    };
+    githubEventLog.record(logEntry);
+    console.log(
+      `[Orchestrator] refire: ${entry.repo}#${workItem.number} ${key} (${eventId}, was ${outcome.reason}) ` +
+      `→ agent=${agentId} trigger=${triggerId} by ${actor || "console"} as ${ghEvent.id}`);
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        refire: githubRefire.refireSummary(logEntry),
+        correlationId: githubRefire.triggerCorrelationId(triggerId, ghEvent.id),
+      },
+    };
+  } finally {
+    githubRefireInFlight.delete(lockKey);
+  }
 }
 
 function _flowLiftEmits(cfgEmits, triggers) {
@@ -16224,6 +16358,45 @@ async function main() {
       return;
     }
 
+    // ── Manual "Fire again" (#2525) ───────────────────────────────────────
+    // POST /internal/agents/:id/github-events/refire { eventId, triggerId, actor }.
+    // The console calls this from the agent's Events tab after its own
+    // manage-gate (AC7); `actor` is stamped there from the session.
+    const refireMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/github-events\/refire$/);
+    if (refireMatch) {
+      const id = decodeURIComponent(refireMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 100_000) req.destroy(); });
+      req.on('end', async () => {
+        let parsed;
+        try {
+          parsed = githubRefire.validateRefireRequest(JSON.parse(body || '{}'));
+        } catch (err) {
+          parsed = { ok: false, error: err.message };
+        }
+        if (!parsed.ok) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: parsed.error }));
+          return;
+        }
+        try {
+          const { status, body: out } = await refireGithubEvent({ agentId: id, ...parsed.value });
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(out));
+        } catch (err) {
+          console.error(`[Orchestrator] refire error: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
     // ── Team roster for the loop verifier (#933) ──────────────────────────
     // A team loop agent with an empty `verify` reads its sibling roster to
     // enforce a *different* verifier (concept §4.6 decision 1). Read-only.
@@ -19540,6 +19713,7 @@ async function main() {
     onMergedPr: postPrTokenComment, // #678 Phase 3 item 2: PR-merge token comment
     labelMarkers: labelDedupMarkers, // #1858 internal fast-path dedup (shared with the label-applied endpoint)
   });
+  githubPollerRef = ghPoller; // #2525: the manual re-fire re-arms through it
   ghPoller.start();
 
   // ============================================================

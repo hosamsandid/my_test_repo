@@ -6135,6 +6135,48 @@ app.get('/api/agents/:agentId/context/download', apiLimiter, async (req, res) =>
   res.end(buf);
 });
 
+/* ─── Agent GitHub-event activity (#2525) ───────────────────────────── */
+
+// The Agent Chat "Events" tab: every GitHub event that reached THIS agent's
+// subscriptions — delivered, digested or dropped with its reason. Filtered
+// server-side over the whole window (AC11), never a client filter over the
+// global log's newest-N page. Read-class: a Team Member may view it (D9).
+app.get('/api/agents/:agentId/github-events', (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  res.json(githubEventLog.queryAgentEntries({
+    agentId,
+    since: req.query.since,
+    until: req.query.until,
+    limit: Number(req.query.limit) || undefined,
+  }));
+});
+
+// "Fire again" on a dropped wake (#2525 AC5): re-delivers a `wake-already-armed`
+// / `throttle` / `internal-dedup` drop with the same trigger prompt. Firing a
+// trigger is Team-Admin-only (MANUAL_FIRE_RULE, team-member-boundary.js), so it
+// carries requireAgentManage. Every decision — refirability, item state, the
+// at-most-once lock — lives in the orchestrator; the console only stamps the
+// authenticated actor (never the body's say-so) and proxies.
+app.post('/api/agents/:agentId/github-events/refire', apiLimiter, requireAgentManage, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ ok: false, error: 'Invalid agent id' });
+  const { eventId, triggerId } = req.body || {};
+  const actor = (req.user && (req.user.username || req.user.email || req.user.sub)) || null;
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/github-events/refire`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eventId, triggerId, actor }),
+    });
+    const body = await r.json().catch(() => ({ ok: false, error: 'invalid orchestrator response' }));
+    return res.status(r.status).json(body);
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
 /* ─── Agent Triggers ────────────────────────────────────────────────── */
 
 app.get('/api/agents/:id/triggers', (req, res) => {

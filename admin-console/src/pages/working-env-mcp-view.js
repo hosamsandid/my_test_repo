@@ -9,8 +9,10 @@
 //
 // This module is the pure half of the picker EnvironmentTemplates.jsx now
 // renders: the form ⇄ wire conversions, the "did the user actually touch it"
-// gate, the per-row hints that mirror the seeder's two silent-drop rules, and
-// the seed-time caveat. Kept React-free so it is unit-tested directly
+// gate, the per-row hints that mirror the seeder's two silent-drop rules, the
+// change notice, and — since #2289, where the same rows also back a
+// team-member's own MCP set (components/McpServerRows.jsx) — the row edits and
+// the per-agent report of what a save applied. Kept React-free so it is unit-tested directly
 // (working-env-mcp-view.test.js), the same split as toolchain-select-view.js
 // and working-env-submit-state.js beside it.
 //
@@ -115,8 +117,9 @@ export function mcpRowHint(row, servers) {
   if (!server) {
     return {
       tone: 'warn',
-      message: `No MCP server '${serverId}' is registered — it may have been removed. `
-        + 'Agents created from this environment will skip it.',
+      message: `No MCP server '${serverId}' is registered — it may have been removed, or `
+        + 'it is not visible to you. Saving keeps the entry, but an agent is only given '
+        + 'servers that are registered, so it is skipped until it is registered again.',
     };
   }
   const hasCredential = Boolean(asId(row?.credentialId));
@@ -138,16 +141,16 @@ export function mcpRowHint(row, servers) {
 }
 
 /**
- * The seed-time caveat (AC3), shown only once the selection actually differs
- * from what is stored — the same "warn before the click, not after" shape as
- * toolchainChangeWarning, and for the same reason: a warning that is always on
- * screen stops being read.
+ * The change notice (AC3 of #2051), shown only once the selection actually
+ * differs from what is stored — the same "warn before the click, not after"
+ * shape as toolchainChangeWarning, and for the same reason: a warning that is
+ * always on screen stops being read.
  *
- * Unlike a toolchain change, saving here does NOT recreate anything: the pair is
- * substituted into the agent's own `.claude/settings.json` by seedAgentMcpServers
- * when the agent is first created, and no respawn path re-seeds it. So the
- * honest wording is "existing agents keep what they have", not "agents will
- * restart".
+ * Since #2289 a save re-applies the set to every agent bound to the
+ * environment (the orchestrator rewrites the agent's `.mcp.json`, read afresh
+ * on its next turn — no recreate, no restart), except a member that carries its
+ * own MCP servers. So the notice says what will happen, not what the operator
+ * has to do; the per-agent outcome follows the save (mcpApplySummary).
  *
  * @returns {string|null}
  */
@@ -156,13 +159,68 @@ export function mcpChangeNotice({ isEdit = false, initial = null, rows = [], age
   if (sameMcpSelection(initial?.mcpServers, mcpWireRows(rows))) return null;
   const n = Number(agentCount) || 0;
   if (n > 0) {
-    return `Saving stores the new pairing, but MCP configuration is written into an agent's `
-      + `own settings when the agent is first created and is never re-applied. The `
-      + `${n} agent${n === 1 ? '' : 's'} already using this environment keep${n === 1 ? 's' : ''} `
-      + `the set ${n === 1 ? 'it was' : 'they were'} created with — recreate an agent to give it the new one.`;
+    return `Saving applies the new set to the ${n} agent${n === 1 ? '' : 's'} using this environment `
+      + 'from ' + (n === 1 ? 'its' : 'their') + ' next turn — no restart. A member with its own '
+      + 'MCP servers keeps them.';
   }
-  return 'Saving stores the new pairing. It is written into an agent\'s own settings when the '
-    + 'agent is first created, so it applies to agents created from now on.';
+  return 'Saving stores the new set. Agents that use this environment get it when they are created.';
+}
+
+// ── Row edits (#2289) ────────────────────────────────────────────────────────
+//
+// The same three edits on every surface that renders the picker. Choosing a
+// different server clears the credential: a credential is chosen FOR a server,
+// and keeping one across a server change would silently pair it with another.
+
+export function updateMcpRow(rows, idx, key, val) {
+  const next = (Array.isArray(rows) ? rows : []).slice();
+  if (idx < 0 || idx >= next.length) return next;
+  next[idx] = key === 'serverId'
+    ? { serverId: val, credentialId: '' }
+    : { ...next[idx], [key]: val };
+  return next;
+}
+
+export function addMcpRow(rows) {
+  return [...(Array.isArray(rows) ? rows : []), { serverId: '', credentialId: '' }];
+}
+
+export function removeMcpRow(rows, idx) {
+  return (Array.isArray(rows) ? rows : []).filter((_, i) => i !== idx);
+}
+
+/**
+ * What a save applied, from the `mcpApply` report `PUT /api/agents/:id` and
+ * `PUT /api/environments/:id` return when the MCP set changed (#2289 AC10).
+ * Every agent the change concerned is named in exactly one line; nothing is
+ * summarised away.
+ *
+ * @param mcpApply  the report, or undefined when the save did not touch MCP
+ * @returns {{tone: 'ok'|'warn', lines: string[]} | null}
+ */
+export function mcpApplySummary(mcpApply) {
+  if (!mcpApply || typeof mcpApply !== 'object') return null;
+  if (mcpApply.ok === false) {
+    return {
+      tone: 'warn',
+      lines: [`The MCP change was saved but not applied: ${mcpApply.error || 'unknown error'}. Save again to retry.`],
+    };
+  }
+  const list = v => (Array.isArray(v) ? v : []);
+  const names = ids => ids.join(', ');
+  const lines = [];
+  const applied = list(mcpApply.applied);
+  const stored = list(mcpApply.stored);
+  const pending = list(mcpApply.pending);
+  const kept = list(mcpApply.keptOverride);
+  const failed = list(mcpApply.failed).filter(f => f && f.id);
+  if (applied.length) lines.push(`MCP servers applied to ${names(applied)} — in effect from the next turn.`);
+  if (stored.length) lines.push(`Not running: ${names(stored)} — the new set is in place for when it next starts.`);
+  if (pending.length) lines.push(`Not created yet: ${names(pending)} — gets the new set when it is created.`);
+  if (kept.length) lines.push(`Kept its own MCP servers: ${names(kept)}.`);
+  for (const f of failed) lines.push(`Not applied to ${f.id}: ${f.error || 'failed'}.`);
+  if (!lines.length) return null;
+  return { tone: failed.length ? 'warn' : 'ok', lines };
 }
 
 /**
@@ -186,4 +244,8 @@ export default {
   mcpRowHint,
   mcpChangeNotice,
   mcpServerLabel,
+  updateMcpRow,
+  addMcpRow,
+  removeMcpRow,
+  mcpApplySummary,
 };

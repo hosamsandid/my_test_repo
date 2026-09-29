@@ -58,8 +58,13 @@ test('the team panel reuses the same pure decision modules the Working Environme
   assert.match(src, /toolchainOptions/);
   assert.match(src, /toolchainChangeWarning/);
   assert.match(src, /from '\.\.\/working-env-mcp-view\.js'/);
-  assert.match(src, /mcpRowHint/);
   assert.match(src, /mcpChangeNotice/);
+  assert.match(src, /mcpApplySummary\(saved\?\.mcpApply\)/, 'the per-agent apply report is shown after a save (#2289)');
+  // The rows themselves are the one shared picker (#2289), which carries the
+  // per-row hint — the same control a team-member's own MCP set renders.
+  assert.match(src, /import McpServerRows from '\.\.\/\.\.\/components\/McpServerRows'/);
+  assert.match(src, /<McpServerRows\b/);
+  assert.match(read('../../components/McpServerRows.jsx'), /mcpRowHint\(/);
   assert.match(src, /from '\.\.\/working-env-repo-diff\.js'/);
   assert.match(src, /classifyRepositoryChanges/);
   assert.match(src, /from '\.\.\/working-env-submit-state\.js'/);

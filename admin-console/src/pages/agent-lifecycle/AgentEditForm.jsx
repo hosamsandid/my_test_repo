@@ -45,6 +45,7 @@ import SyncReposPanel from '../../components/SyncReposPanel';
 import AgentRepositoriesPanel from '../agent-chat/AgentRepositoriesPanel';
 import TeamEnvironmentPanel from '../agent-chat/TeamEnvironmentPanel';
 import ShareTeamPanel from '../agent-chat/ShareTeamPanel.jsx';
+import McpServerRows from '../../components/McpServerRows';
 import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from '../agent-chat/agent-chat-help-sections.js';
 import { effectiveGrantFor } from '../plugin-grant-view.js';
@@ -54,6 +55,7 @@ import {
 import {
   buildInitialForm, buildEditSubmit, hasOwnSkills, poolSectionError,
 } from './agent-edit-form-model.js';
+import { inheritedMcpPreview, switchMcpMode, memberMcpBlockers } from './member-mcp-view.js';
 import { TEAM_CONFIG_TABS, ENV_TAB_IDS, resolveTeamConfigTab } from './team-config-tabs-view.js';
 import { parallelismSummary, hasPooledMember } from '../process/parallelism-view.js';
 import ScalingSection from '../process/ScalingSection';
@@ -412,7 +414,13 @@ export default function AgentEditForm({
     if (onFormChange) onFormChange(next);
     return next;
   });
-  const canSubmit = !!form.displayName;
+  // A change that sets several keys at once (the MCP mode switch pre-fills
+  // its rows, #2289 D1) — reported to the host like any other edit.
+  const updateForm = (fn) => setForm(f => {
+    const next = fn(f);
+    if (onFormChange && next !== f) onFormChange(next);
+    return next;
+  });
   // #2295 AC11: Scaling's own validation (mirrors ScalingSection's old
   // save()) now blocks this form's ONE Save button rather than a second one
   // of its own — set on click, cleared on the next edit anywhere in the form.
@@ -438,6 +446,19 @@ export default function AgentEditForm({
   const parentTeamPrompt = parentTeamUrl && parentTeam?.role === 'team'
     ? (parentTeam.systemPromptTemplate || '')
     : '';
+
+  // A team-member's own MCP servers (#2289): the same picker as the team's
+  // MCP servers tab, over the same registry reads, plus the environment the
+  // member inherits from — for the Inherit preview and the Custom pre-fill.
+  const isMember = agent.role === 'team-member';
+  const { data: mcpServerData, loading: mcpServersLoading } = useApi(isMember ? '/api/mcp-servers' : null);
+  const { data: mcpCredentialData } = useApi(isMember ? '/api/mcp-credentials' : null);
+  const mcpEnvId = isMember ? (agent.environmentId || parentTeam?.environmentId || null) : null;
+  const { data: mcpEnv, loading: mcpEnvLoading } = useApi(
+    mcpEnvId ? `/api/environments/${encodeURIComponent(mcpEnvId)}` : null,
+  );
+  const mcpBlockers = isMember ? memberMcpBlockers(form.inheritMcp, form.mcpRows) : [];
+  const canSubmit = !!form.displayName && mcpBlockers.length === 0;
 
   const isTeam = agent.role === 'team';
   // Team-axis Parallelism (wipLimit + Flow Supervisor) is now configurable
@@ -704,17 +725,38 @@ export default function AgentEditForm({
           <InheritOrCustom
             label="MCP Servers"
             inherit={form.inheritMcp}
-            onToggle={v => update('inheritMcp', v)}
-            inheritedPreview={
-              parentTeam && parentTeam.environmentId
-                ? `(team env: ${parentTeam.environmentId})`
-                : ''
-            }
+            onToggle={v => updateForm(f => switchMcpMode(f, v, mcpEnv))}
+            // D1: Custom starts from a copy of the inherited set, so it
+            // cannot be chosen before that set is known.
+            customDisabled={form.inheritMcp && !!mcpEnvId && !mcpEnv}
+            inheritedPreview={inheritedMcpPreview({
+              env: mcpEnv || null,
+              loading: !!mcpEnvId && (mcpEnvLoading || !mcpEnv),
+              servers: mcpServerData || [],
+              credentials: mcpCredentialData || [],
+            })}
             inheritedLabel="Inherited from team's environment"
-            customValue={form.mcpOverrideText}
-            onCustomChange={v => update('mcpOverrideText', v)}
-            customPlaceholder={'one per line: serverId[:credentialId]\ne.g. wiki:wiki-team-a'}
             customMultiline
+            renderCustom={() => (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+                <div style={helpTextStyle}>
+                  This agent's own set replaces the team environment's. Saving applies it from the
+                  agent's next turn — no restart. With no rows, the agent has no MCP servers.
+                </div>
+                <McpServerRows
+                  rows={form.mcpRows}
+                  onChange={rows => update('mcpRows', rows)}
+                  servers={mcpServerData || []}
+                  credentials={mcpCredentialData || []}
+                  loading={mcpServersLoading}
+                />
+                {mcpBlockers.map(b => (
+                  <div key={b.field} role="alert" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
+                    {b.message}
+                  </div>
+                ))}
+              </div>
+            )}
           />
         </>
       )}
@@ -763,6 +805,11 @@ export default function AgentEditForm({
               Scaling: {scalingError}
             </div>
           )}
+          {mcpBlockers.map(b => (
+            <div key={b.field} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
+              MCP Servers: {b.message}
+            </div>
+          ))}
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
             <PrimaryBtn
               onClick={() => {
@@ -863,7 +910,7 @@ function PromptModeControl({ mode, onModeChange, teamPrompt, text, onTextChange 
 }
 
 function InheritOrCustom({
-  label, inherit, onToggle,
+  label, inherit, onToggle, customDisabled = false,
   inheritedPreview, inheritedLabel,
   customValue, onCustomChange, customMultiline, customPlaceholder,
   renderCustom,
@@ -876,7 +923,7 @@ function InheritOrCustom({
           <input type="radio" checked={inherit} onChange={() => onToggle(true)} /> Inherit from team
         </label>
         <label style={radioLabelStyle}>
-          <input type="radio" checked={!inherit} onChange={() => onToggle(false)} /> Custom
+          <input type="radio" checked={!inherit} disabled={customDisabled} onChange={() => onToggle(false)} /> Custom
         </label>
       </div>
       {inherit ? (

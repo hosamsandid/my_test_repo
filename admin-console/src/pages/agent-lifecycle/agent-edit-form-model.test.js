@@ -45,7 +45,7 @@ test('a missing config field becomes an empty control, never undefined', () => {
   assert.deepEqual(form.skills, []);
   assert.equal(form.systemPromptTemplate, '');
   assert.equal(form.promptOverride, '');
-  assert.equal(form.mcpOverrideText, '');
+  assert.deepEqual(form.mcpRows, []);
 });
 
 test('a tolerant call on nothing at all still yields a usable form', () => {
@@ -71,7 +71,7 @@ test('only a team-member can be inheriting — a standalone agent never is', () 
   assert.equal(form.promptMode, PROMPT_MODES.INHERIT, 'the field exists but is unused off-role');
 });
 
-test('the MCP override serialises one entry per line, credential optional', () => {
+test('the MCP override becomes picker rows, a missing credential an empty choice (#2289)', () => {
   const form = buildInitialForm({
     ...member,
     mcpServersOverride: [
@@ -79,7 +79,11 @@ test('the MCP override serialises one entry per line, credential optional', () =
       { serverId: 'graph', credentialId: null },
     ],
   });
-  assert.equal(form.mcpOverrideText, 'wiki:wiki-team-a\ngraph');
+  assert.deepEqual(form.mcpRows, [
+    { serverId: 'wiki', credentialId: 'wiki-team-a' },
+    { serverId: 'graph', credentialId: '' },
+  ]);
+  assert.ok(!('mcpOverrideText' in form), 'the free-text field is gone');
 });
 
 test('the legacy systemPrompt-presence inference still resolves a mode', () => {
@@ -126,15 +130,32 @@ test('additional mode sends the addition alone, exclusive the whole text', () =>
   assert.equal(buildEditSubmit(member, excl).promptMode, PROMPT_MODES.EXCLUSIVE);
 });
 
-test('a bare MCP line keeps a null credential so the API can name what is missing', () => {
+test('Custom MCP rows are sent as {serverId, credentialId} refs, no credential as null (#2289)', () => {
   const form = {
     ...buildInitialForm(member),
     inheritMcp: false,
-    mcpOverrideText: '  wiki:wiki-team-a \n\n graph \n',
+    mcpRows: [
+      { serverId: 'wiki', credentialId: 'wiki-team-a' },
+      { serverId: 'graph', credentialId: '' },
+    ],
   };
   assert.deepEqual(buildEditSubmit(member, form).mcpServersOverride, [
     { serverId: 'wiki', credentialId: 'wiki-team-a' },
     { serverId: 'graph', credentialId: null },
+  ]);
+});
+
+test('an empty Custom MCP set is sent as [] — "no servers", distinct from inherit (AC8)', () => {
+  const custom = { ...buildInitialForm(member), inheritMcp: false, mcpRows: [] };
+  assert.deepEqual(buildEditSubmit(member, custom).mcpServersOverride, []);
+  const inherit = { ...custom, inheritMcp: true, mcpRows: [{ serverId: 'wiki', credentialId: '' }] };
+  assert.equal(buildEditSubmit(member, inherit).mcpServersOverride, null, 'rows are not sent in Inherit');
+});
+
+test('a ref to a server the editor cannot see survives a round trip unchanged', () => {
+  const hidden = { ...member, mcpServersOverride: [{ serverId: 'team-b-only', credentialId: 'cred-b' }] };
+  assert.deepEqual(buildEditSubmit(hidden, buildInitialForm(hidden)).mcpServersOverride, [
+    { serverId: 'team-b-only', credentialId: 'cred-b' },
   ]);
 });
 
@@ -243,10 +264,16 @@ test('every batched field is watched — none can be edited unnoticed', () => {
     inheritSkills: false,
     skillsOverride: ['jcl'],
     inheritMcp: false,
-    mcpOverrideText: 'wiki',
+    mcpRows: [{ serverId: 'wiki', credentialId: '' }],
     poolDraft: { ...base.poolDraft, enabled: true },
   };
   for (const [key, value] of Object.entries(edits)) {
+    // Rows are only sent (and so only unsaved) in Custom mode.
+    if (key === 'mcpRows') {
+      const custom = { ...member, mcpServersOverride: [] };
+      assert.equal(isFormDirty(custom, { ...buildInitialForm(custom), mcpRows: value }), true, 'editing mcpRows must read as unsaved');
+      continue;
+    }
     assert.equal(
       isFormDirty(member, { ...base, [key]: value }), true,
       `editing ${key} must read as unsaved`,
@@ -256,6 +283,18 @@ test('every batched field is watched — none can be edited unnoticed', () => {
   // buildInitialForm without one here shows up as a gap rather than as a
   // silently discarded draft.
   assert.deepEqual(Object.keys(base).sort(), Object.keys(edits).sort());
+});
+
+test('MCP rows in Inherit mode are not a change; in Custom they compare exactly (#2289)', () => {
+  const base = buildInitialForm(member);
+  const prefilled = [{ serverId: 'wiki', credentialId: '' }];
+  // Custom → pre-filled → back to Inherit: nothing would be sent, nothing is unsaved.
+  assert.equal(isFormDirty(member, { ...base, inheritMcp: true, mcpRows: prefilled }), false);
+  const custom = { ...member, mcpServersOverride: [{ serverId: 'wiki', credentialId: null }] };
+  const cform = buildInitialForm(custom);
+  assert.equal(isFormDirty(custom, { ...cform, mcpRows: [{ serverId: 'wiki', credentialId: '' }] }), false);
+  assert.equal(isFormDirty(custom, { ...cform, mcpRows: [{ serverId: 'wiki', credentialId: 'c1' }] }), true);
+  assert.equal(isFormDirty(custom, { ...cform, mcpRows: [] }), true);
 });
 
 test('list fields compare by content, so re-selecting the same skills is clean', () => {

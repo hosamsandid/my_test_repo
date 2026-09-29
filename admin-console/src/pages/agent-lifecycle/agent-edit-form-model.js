@@ -18,6 +18,8 @@
  */
 import { PROMPT_MODES, resolvePromptMode } from '../prompt-mode-view.js';
 import { scalingDraftFromPool, scalingSaveDecision } from '../process/scaling-view.js';
+import { initialMcpRows } from '../working-env-mcp-view.js';
+import { memberMcpSubmitValue, sameMcpRows } from './member-mcp-view.js';
 
 /**
  * Roles whose skills live on the agent construct itself, rather than being
@@ -49,15 +51,11 @@ export function buildInitialForm(agent) {
   // (explicit `promptMode`, else legacy systemPrompt-presence inference).
   const promptMode = isMember ? resolvePromptMode(a) : PROMPT_MODES.INHERIT;
 
-  // MCP overrides are stored as [{serverId, credentialId|null}, ...]. We
-  // serialize them for editing as one entry per line — `serverId:credentialId`,
-  // or just `serverId` when no credential is bound; trades polish for less form
-  // scaffolding.
-  const mcpOverrideText = Array.isArray(a.mcpServersOverride)
-    ? a.mcpServersOverride
-        .map(m => (m.credentialId ? `${m.serverId}:${m.credentialId}` : m.serverId))
-        .join('\n')
-    : '';
+  // MCP overrides are stored as [{serverId, credentialId|null}, ...] and
+  // edited as the picker's form rows (#2289 — they used to be a free-text
+  // "serverId:credentialId" per line). An inheriting member starts with no
+  // rows; switching to Custom pre-fills them (member-mcp-view.js, D1).
+  const mcpRows = initialMcpRows({ mcpServers: a.mcpServersOverride });
 
   return {
     displayName: a.displayName || '',
@@ -74,7 +72,7 @@ export function buildInitialForm(agent) {
     inheritSkills: isMember && !Array.isArray(a.skillsOverride),
     skillsOverride: Array.isArray(a.skillsOverride) ? a.skillsOverride : [],
     inheritMcp: isMember && !Array.isArray(a.mcpServersOverride),
-    mcpOverrideText,
+    mcpRows,
     // Scaling (#2271, folded into this form's one Save by #2295 AC11/AC12 —
     // ScalingSection is now a controlled draft, not a second Save button).
     // Only a team-member carries `pool`; a blank/disabled draft off-role is
@@ -125,20 +123,11 @@ export function buildEditSubmit(agent, form, opts = {}) {
       ? null
       : form.promptOverride;
     submit.skillsOverride = form.inheritSkills ? null : form.skillsOverride;
-    // MCP override: parse "serverId[:credentialId]" lines into the
-    // {serverId, credentialId} array shape the API expects. Empty / bare
-    // server lines are kept (credentialId null) so the API can return a
-    // clear "credential missing" error instead of silently dropping them.
-    submit.mcpServersOverride = form.inheritMcp
-      ? null
-      : form.mcpOverrideText
-          .split('\n')
-          .map(s => s.trim())
-          .filter(Boolean)
-          .map(line => {
-            const [serverId, credentialId] = line.split(':').map(p => p.trim());
-            return { serverId, credentialId: credentialId || null };
-          });
+    // MCP override (#2289): null = inherit (the key is cleared), else the
+    // picker rows in the {serverId, credentialId} shape the API stores — an
+    // empty Custom set stays [] ("no MCP servers"). Blank/duplicate rows are
+    // blocked before this is called (memberMcpBlockers).
+    submit.mcpServersOverride = memberMcpSubmitValue(form.inheritMcp, form.mcpRows);
     // Scaling (#2271/#2295 AC11) — the section's own component no longer PUTs
     // for itself; its draft folds into this same body. A caller that skipped
     // `poolSectionError` and calls this with an invalid draft gets `pool`
@@ -206,7 +195,9 @@ export function isFormDirty(agent, form) {
     || base.inheritSkills !== form.inheritSkills
     || !sameList(base.skillsOverride, form.skillsOverride)
     || base.inheritMcp !== form.inheritMcp
-    || base.mcpOverrideText !== form.mcpOverrideText
+    // Rows only matter in Custom: in Inherit they are not sent, so a Custom
+    // pre-fill left behind by flipping back to Inherit is not a change.
+    || (!form.inheritMcp && !sameMcpRows(base.mcpRows, form.mcpRows))
     || !samePoolDraft(base.poolDraft, form.poolDraft)
   );
 }

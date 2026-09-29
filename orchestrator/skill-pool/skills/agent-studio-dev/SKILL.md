@@ -183,19 +183,16 @@ exits) — it never parses the Bash command — and **hard-ends the turn** the m
 it appears, so nothing runs after the question. That kill costs the turn its
 `result` event/usage record, but the session stays `--resume`-able. Call
 `aee-ask` from the main session, never from a Task sub-agent.
-The older delivery (#1712) re-supplies an **identically-shaped**
-`AskUserQuestion` from a bundled, dependency-free stdio MCP server
-(`agent-image/scripts/ask-user-mcp.py`, registered via `--mcp-config` in
-`agent-entrypoint.py`, reaching the model as `mcp__aee-ask__AskUserQuestion`,
-intercepted on its `tool_use`); the enterprise managed policy refuses MCP
-servers, so the image sets `AEE_DISABLE_ASK_MCP=1` and skips it. Either way the
-runner renders the question(s) into a readable chat
-message with clickable quick-reply buttons (#1663) and posts that as the turn's
+`aee-ask` is the only mechanism: the runner registers no MCP server for it
+(the former bundled `AskUserQuestion` MCP server was removed in #1719, and
+`_base_claude_args` passes no `--mcp-config`); MCP servers from an
+environment's `settings.json` still load as usual. The runner renders the
+question(s) into a readable chat with clickable quick-reply buttons (#1663) and posts that as the turn's
 terminal message, dropping any trailing model text. The user's chosen option (or
 free-text) then continues the resumed session as a new turn. A `multiSelect`
 question renders as toggles plus Submit and resumes with every selected label
 (#2523; it used to degrade to the plain text body). (Issue #447 added the original
-interception; #1712 made the tool actually reachable.) Plain-text questions in
+interception; #1712's MCP delivery was retired by #1719.) Plain-text questions in
 your reply still work too.
 
 ---

@@ -528,7 +528,7 @@ uncovered). Key pieces:
 - `Message` — sanitised markdown (`react-markdown` + gfm + pretty-code +
   `rehype-sanitize`); quick-reply cards for `AskUserQuestion`-shaped
   questions (raised headlessly via the `aee-ask` CLI → per-turn sentinel file,
-  #2523; the `ask-user-mcp.py` path is policy-blocked); inline image
+  #2523 — the only mechanism since #1719 removed the MCP path); inline image
   thumbnails; hover-revealed "Copy link" builds the `?msg=` deep-link above
   (#2310, plain text bubbles only).
 - `MessageInput` — composer, send-keybinding preset, per-agent drafts,

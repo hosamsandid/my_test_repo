@@ -16,6 +16,12 @@ import {
   bundleSizeLevel,
 } from './flow-copilot-view';
 import { decideCopilotAction, applyFailureNotice } from './flow-copilot-turn';
+import {
+  diffLiveProposal, groupItems, describeLiveItem, isStaleBase,
+  liveConfirmModel, planLiveApply, runLiveApply, summarizeLiveApply, liveResultStatus,
+  NEW_AGENTS_NOW_DEFAULT,
+} from './flow-copilot-live';
+import LiveApplyDialog from './LiveApplyDialog';
 
 // FlowCopilotPanel (#1069, spec #1047) — the docked chat rail of the Flow
 // Editor. The user describes (or iterates on) a flow in free text; every turn
@@ -41,8 +47,14 @@ import { decideCopilotAction, applyFailureNotice } from './flow-copilot-turn';
 // its phase and its finished-but-unapplied proposal come from the provider,
 // scoped to this panel's `scope`.
 //
+// On a LIVE team (#2556) the same chat runs against the team's exported
+// bundle. A proposal is never swapped in: Apply opens a confirmation
+// (LiveApplyDialog) and then replays the diff as the per-field writes a person
+// makes on the live canvas (flow-copilot-live.js) — no new write path. The
+// history is the team's shared `copilot-history`, readable only by editors.
+//
 // Props:
-//   mode            — 'draft' (chat) | 'team' (notice + Edit-as-draft bridge only)
+//   mode            — 'draft' | 'team' (live team, #2556)
 //   scope           — the flow this panel is bound to (`draft:<id>` or a team id).
 //                     A turn and its proposal are bound to it, so a proposal is
 //                     never offered against another bundle (AC5).
@@ -54,11 +66,17 @@ import { decideCopilotAction, applyFailureNotice } from './flow-copilot-turn';
 //                     write (PUT …/drafts/:id) carrying the history along
 //   onPersistHistory— (persistedMessages) => void; best-effort history-only write
 //   onEditAsDraft   — team mode: run the existing editAsDraft() bridge
+//   canEdit         — team mode: true | false (read-only, AC8) | null (still checking)
+//   history         — team mode: the team's persisted { messages } (undefined while loading)
+//   live            — team mode transport: { teamId, memberIds, fetchCurrent() → bundle,
+//                     fetchTickets() → tickets|null, call(step), onApplied() }
 //   onClose         — close the panel (parent also clears the preview)
 //   actionsRef      — ref the parent's proposal banner uses: { apply, discard, ok } | null
 export default function FlowCopilotPanel({
   mode, scope, bundle, autoFocus, onPreview, onApplyBundle, onPersistHistory, onEditAsDraft, onClose, actionsRef,
+  canEdit, history, live,
 }) {
+  const isTeam = mode === 'team';
   const copilot = useFlowCopilot();
   const view = copilot ? copilot.viewFor(scope) : null;
   const running = !!(view && view.running);
@@ -71,6 +89,8 @@ export default function FlowCopilotPanel({
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState(null);
   const [model, setModel] = useState(null);
+  // Live-team Apply confirmation (#2556) — see LiveApplyDialog for the shape.
+  const [confirm, setConfirm] = useState(null);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const idRef = useRef(0);
@@ -97,19 +117,29 @@ export default function FlowCopilotPanel({
     if (autoFocus && textareaRef.current) textareaRef.current.focus();
   }, [autoFocus]);
 
-  // Hydrate the chat once from the draft's persisted history (#1071). Guarded
-  // by a ref: the bundle prop updates on every draft write (including our own
-  // history persists) and must never re-hydrate over live state.
+  // Hydrate the chat once from the persisted history — the draft's (#1071), or
+  // on a live team the team's shared history (#2556). Guarded by a ref: the
+  // bundle prop updates on every draft write (including our own history
+  // persists) and must never re-hydrate over live state.
   const hydratedRef = useRef(false);
   useEffect(() => {
-    if (mode !== 'draft' || hydratedRef.current || !bundle) return;
+    if (hydratedRef.current) return;
+    if (mode === 'draft' && !bundle) return;
+    if (isTeam && history === undefined) return;
     hydratedRef.current = true;
-    const initial = hydrateMessages(bundle.copilot, nextId);
+    const initial = hydrateMessages(isTeam ? history : bundle.copilot, nextId);
     if (initial.length) {
       messagesRef.current = initial;
       setMessages(initial);
     }
-  }, [mode, bundle]);
+  }, [mode, isTeam, bundle, history]);
+
+  // A live proposal's change list, grouped (AC3) — diffed against the bundle
+  // the turn was generated from, which is what Apply checks the team against.
+  const liveItems = useMemo(
+    () => (isTeam && pending && pending.baseBundle ? diffLiveProposal(pending.baseBundle, pending.bundle).items : null),
+    [isTeam, pending],
+  );
 
   // The transient rows of the CURRENT turn, rendered after the durable history.
   // They live in the provider, so they are rebuilt identically on every remount
@@ -169,27 +199,110 @@ export default function FlowCopilotPanel({
     onPersistHistory(toPersistedMessages([...messagesRef.current, ...turnRows(pending)]));
   }, [pending, onPersistHistory, turnRows]);
 
-  const send = useCallback((text) => {
+  const canChat = mode === 'draft' || (isTeam && canEdit === true);
+
+  // `withBundle` lets a live-team regenerate (AC15) send against the team's
+  // freshly exported state rather than the prop, which may not have caught up.
+  const send = useCallback((text, withBundle) => {
     const trimmed = (text || '').trim();
-    if (!trimmed || mode !== 'draft' || !bundle || !copilot) return;
+    const sendBundle = withBundle || bundle;
+    if (!trimmed || !canChat || !sendBundle || !copilot) return;
     // A running turn owns the tab (AC4) — the composer's own decision already
     // refuses this, and startTurn refuses it again server-of-last-resort.
-    const history = [...messagesRef.current, { role: 'user', content: trimmed }];
+    const turnHistory = [...messagesRef.current, { role: 'user', content: trimmed }];
     setComposer('');
     setApplyError(null);
     copilot.startTurn({
       scope,
-      flowName: (bundle && bundle.name) || '',
+      flowName: (sendBundle && sendBundle.name) || '',
       userText: trimmed,
-      apiMessages: toApiMessages(history),
-      bundle,
+      apiMessages: toApiMessages(turnHistory),
+      bundle: sendBundle,
     });
-  }, [mode, bundle, copilot, scope]);
+  }, [canChat, bundle, copilot, scope]);
 
   /** Stop the running turn (AC8) — inert once pressed, the `stopBusy` rule. */
   const stop = useCallback(() => { if (copilot) copilot.stopTurn(); }, [copilot]);
 
+  // Commit the pending turn into the durable history with a final status (and
+  // on a live team the apply result), persist it, and release the proposal.
+  const commitPending = useCallback((status, extra) => {
+    const committed = turnRows(pending).map(r => (
+      { ...r, id: nextId(), ...(r.role === 'assistant' ? { status, bundle: null, ...extra } : {}) }
+    ));
+    const next = [...messagesRef.current, ...committed];
+    messagesRef.current = next;
+    setMessages(next);
+    if (onPersistHistory) onPersistHistory(toPersistedMessages(next));
+    copilot.resolvePending(pending.id);
+    if (onPreview) onPreview(null);
+  }, [pending, onPersistHistory, onPreview, copilot, turnRows]);
+
+  // Live team, step 1 (AC4/AC15): refuse on a team that moved since the turn
+  // was generated, otherwise open the confirmation with in-progress work.
+  const openLiveConfirm = useCallback(async () => {
+    if (!pending || !pending.ok || !live || canEdit !== true) return;
+    setApplyError(null);
+    setConfirm({ phase: 'checking', selected: new Set(), newAgentsNow: NEW_AGENTS_NOW_DEFAULT });
+    try {
+      const current = await live.fetchCurrent();
+      if (isStaleBase(pending.baseBundle, current)) {
+        setConfirm(c => c && { ...c, phase: 'stale', current });
+        return;
+      }
+      const tickets = await live.fetchTickets();
+      const diff = diffLiveProposal(pending.baseBundle, pending.bundle);
+      const cm = liveConfirmModel(diff, { teamId: live.teamId, memberIds: live.memberIds, tickets });
+      setConfirm(c => c && { ...c, phase: 'ready', diff, model: cm });
+    } catch (e) {
+      setConfirm(c => c && { ...c, phase: 'error', error: `Could not read the team's current state: ${(e && e.message) || 'request failed'}. Nothing was applied.` });
+    }
+  }, [pending, live, canEdit]);
+
+  // Live team, step 2: re-check staleness, then run the writes. Each failed
+  // write is reported; the card never claims success on a partial apply (AC7).
+  const confirmLiveApply = useCallback(async () => {
+    if (!confirm || confirm.phase !== 'ready' || !pending) return;
+    setConfirm(c => ({ ...c, phase: 'applying' }));
+    setApplying(true);
+    try {
+      let current;
+      try { current = await live.fetchCurrent(); }
+      catch (e) {
+        setConfirm(c => ({ ...c, phase: 'error', error: `Could not re-check the team: ${(e && e.message) || 'request failed'}. Nothing was applied.` }));
+        return;
+      }
+      if (isStaleBase(pending.baseBundle, current)) {
+        setConfirm(c => ({ ...c, phase: 'stale', current }));
+        return;
+      }
+      const plan = planLiveApply(confirm.diff, {
+        teamId: live.teamId, memberIds: live.memberIds,
+        selectedRemovals: confirm.selected, materializeNow: confirm.newAgentsNow,
+      });
+      const result = await runLiveApply(plan, live.call);
+      const summary = summarizeLiveApply(confirm.diff, result);
+      commitPending(liveResultStatus(summary), { result: summary.text });
+      setConfirm(null);
+      try { await live.onApplied(); } catch { /* the refresh is best-effort */ }
+    } finally {
+      setApplying(false);
+    }
+  }, [confirm, pending, live, commitPending]);
+
+  // AC15: the proposal is out of date — retire it and ask again from the
+  // team's current state, with the same instruction.
+  const regenerate = useCallback(() => {
+    if (!pending || !confirm) return;
+    const text = pending.userText;
+    const current = confirm.current;
+    commitPending('superseded');
+    setConfirm(null);
+    send(text, current);
+  }, [pending, confirm, commitPending, send]);
+
   const apply = useCallback(async () => {
+    if (isTeam) { openLiveConfirm(); return; }
     if (!pending || !pending.ok || applying) return;
     setApplying(true);
     setApplyError(null);
@@ -212,7 +325,7 @@ export default function FlowCopilotPanel({
     } finally {
       setApplying(false);
     }
-  }, [pending, applying, onApplyBundle, onPreview, copilot, scope, turnRows]);
+  }, [isTeam, openLiveConfirm, pending, applying, onApplyBundle, onPreview, copilot, scope, turnRows]);
 
   const discard = useCallback(() => {
     if (!pending) return;
@@ -254,7 +367,7 @@ export default function FlowCopilotPanel({
     flowName: view ? view.turnFlowName : '',
     stopping: view ? view.stopping : false,
     hasText: !!composer.trim(),
-    canSend: mode === 'draft' && !!bundle,
+    canSend: canChat && !!bundle,
   });
   const busy = running;
 
@@ -298,28 +411,26 @@ export default function FlowCopilotPanel({
         }}><X size={16} /></button>
       </div>
 
-      {mode === 'team' ? (
-        /* Live team: chat editing always goes through a draft — no direct
-           mutation path exists (live ops write ports only, by design). */
+      {isTeam && canEdit !== true ? (
+        /* Live team without edit rights (AC8/AC16) — or still checking. The
+           shared history is not readable either; Edit as draft stays open to
+           anyone who can see the team. */
         <div style={{ padding: 'var(--eb-space-4)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
           <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
-            Copilot edits a <strong>draft copy</strong> of this team — a live team is never changed
-            directly from chat. Open the draft to start; your changes flow back to the team through
-            the usual <em>Create team…</em> step, which extends the team it came from.
+            {canEdit === false
+              ? <>You can view this team but not edit it, so the Copilot cannot change it. You can still
+                open a <strong>draft copy</strong> and chat there.</>
+              : 'Checking your access to this team…'}
           </p>
-          <button onClick={onEditAsDraft} style={{
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-            background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
-            borderRadius: 'var(--eb-radius-md)', padding: '8px 14px', fontFamily: 'inherit',
-            fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
-          }}><Boxes size={14} /> Edit as draft</button>
+          {canEdit === false && <EditAsDraftButton onClick={onEditAsDraft} primary />}
         </div>
       ) : (
         <>
+          {isTeam && <LiveTeamNotice onEditAsDraft={onEditAsDraft} />}
           {/* Message list */}
           <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 'var(--eb-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
             {rendered.length === 0 && !busy && (
-              <EmptyState onPick={(p) => { setComposer(p); if (textareaRef.current) textareaRef.current.focus(); }} />
+              <EmptyState live={isTeam} onPick={(p) => { setComposer(p); if (textareaRef.current) textareaRef.current.focus(); }} />
             )}
             {rendered.map(m => (
               m.role === 'user' ? <UserBubble key={m.id} entry={m} />
@@ -330,7 +441,9 @@ export default function FlowCopilotPanel({
                     // every committed card is a status line (#1069's rule,
                     // now with one obvious owner).
                     actionable={m.status === 'proposed'}
-                    applying={applying}
+                    live={isTeam}
+                    liveItems={m.status === 'proposed' ? liveItems : null}
+                    applying={applying || !!confirm}
                     onApply={apply}
                     onDiscard={discard}
                   />
@@ -402,19 +515,43 @@ export default function FlowCopilotPanel({
               }}>
                 {/* AC4: a refused second turn states the reason rather than
                     silently queueing or running in parallel. */}
-                {action.refusal || 'Every answer is a proposal — nothing changes the draft until you apply it.'}
+                {action.refusal || (isTeam
+                  ? 'Every answer is a proposal — nothing reaches the live team until you confirm Apply.'
+                  : 'Every answer is a proposal — nothing changes the draft until you apply it.')}
               </span>
               {bundle && <BundleSizeHint bundle={bundle} />}
             </div>
           </div>
         </>
       )}
+      <LiveApplyDialog
+        confirm={confirm}
+        onToggleRemoval={(key) => setConfirm(c => {
+          const selected = new Set(c.selected);
+          if (selected.has(key)) selected.delete(key); else selected.add(key);
+          return { ...c, selected };
+        })}
+        onToggleNewAgentsNow={() => setConfirm(c => ({ ...c, newAgentsNow: !c.newAgentsNow }))}
+        onConfirm={confirmLiveApply}
+        // Cancel keeps the proposal (AC4) — only the dialog closes.
+        onCancel={() => setConfirm(null)}
+        onRegenerate={regenerate}
+      />
       <style>{'@keyframes eb-copilot-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }'}</style>
     </div>
   );
 }
 
-function EmptyState({ onPick }) {
+function EmptyState({ live, onPick }) {
+  if (live) {
+    return (
+      <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
+        Describe a change to this team in plain language — e.g. “add a security reviewer after the
+        code review” or “make the tester wait for the reviewer”. The Copilot proposes it on the
+        canvas; you review the change list and confirm before anything reaches the running agents.
+      </p>
+    );
+  }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
       <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.5 }}>
@@ -434,6 +571,41 @@ function EmptyState({ onPick }) {
   );
 }
 
+// Live team lead (AC9/AC10): says what Apply does here, and keeps the draft
+// round-trip reachable — with the one thing people get wrong about it.
+function LiveTeamNotice({ onEditAsDraft }) {
+  return (
+    <div style={{
+      padding: 'var(--eb-space-2) var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)',
+      fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.5, flexShrink: 0,
+    }}>
+      You are editing the <strong>live team</strong>: an applied proposal changes the running agents.
+      Prefer to experiment first? <EditAsDraftButton onClick={onEditAsDraft} /> — but note that
+      <em> Extend team</em> only adds roles that don't exist yet; changes to existing roles in the draft
+      do not reach the team.
+    </div>
+  );
+}
+
+function EditAsDraftButton({ onClick, primary }) {
+  if (primary) {
+    return (
+      <button onClick={onClick} style={{
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+        background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)', border: 'none',
+        borderRadius: 'var(--eb-radius-md)', padding: '8px 14px', fontFamily: 'inherit',
+        fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)', cursor: 'pointer',
+      }}><Boxes size={14} /> Edit as draft</button>
+    );
+  }
+  return (
+    <button onClick={onClick} style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4, background: 'none', border: 'none', padding: 0,
+      color: 'var(--eb-accent-primary)', fontFamily: 'inherit', fontSize: 'inherit', cursor: 'pointer',
+    }}><Boxes size={12} /> Edit as draft</button>
+  );
+}
+
 function UserBubble({ entry }) {
   return (
     <div style={{ alignSelf: 'flex-end', maxWidth: '90%' }}>
@@ -450,7 +622,7 @@ function UserBubble({ entry }) {
 // The per-turn proposal card: summary + change list + lint report +
 // Apply/Discard. Only the LATEST proposed card is actionable; applied /
 // discarded / superseded cards collapse to a status line.
-function ProposalCard({ entry, actionable, applying, onApply, onDiscard }) {
+function ProposalCard({ entry, actionable, live, liveItems, applying, onApply, onDiscard }) {
   const errors = entry.lints.filter(l => l.severity === 'error');
   const canApply = actionable && entry.ok && entry.status === 'proposed';
   return (
@@ -464,7 +636,9 @@ function ProposalCard({ entry, actionable, applying, onApply, onDiscard }) {
         <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', lineHeight: 1.5 }}>{entry.summary}</div>
       )}
 
-      {entry.changes.length > 0 && (
+      {liveItems ? (
+        <LiveChangeList items={liveItems} />
+      ) : entry.changes.length > 0 && (
         <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-4)', display: 'flex', flexDirection: 'column', gap: 2 }}>
           {entry.changes.map((c, i) => (
             <li key={i} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', lineHeight: 1.4 }}>
@@ -515,7 +689,7 @@ function ProposalCard({ entry, actionable, applying, onApply, onDiscard }) {
             {applying && actionable
               ? <Loader2 size={13} style={{ animation: 'eb-copilot-spin 1s linear infinite' }} />
               : <Check size={13} />}
-            Apply to draft
+            {live ? 'Apply to team…' : 'Apply to draft'}
           </button>
           <button
             onClick={onDiscard}
@@ -537,8 +711,46 @@ function ProposalCard({ entry, actionable, applying, onApply, onDiscard }) {
           {entry.status === 'applied' && <><Check size={12} style={{ color: 'var(--eb-status-success, #16a34a)' }} /> Applied ✓</>}
           {entry.status === 'discarded' && 'Discarded'}
           {entry.status === 'superseded' && 'Superseded by a newer proposal'}
+          {entry.status === 'partial' && <><AlertTriangle size={12} style={{ color: 'var(--eb-status-warning)' }} /> Partly applied — see below</>}
+          {entry.status === 'failed' && <><AlertTriangle size={12} style={{ color: 'var(--eb-status-error)' }} /> Not applied</>}
         </div>
       )}
+
+      {entry.result && (
+        <div style={{
+          fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', whiteSpace: 'pre-wrap', lineHeight: 1.45,
+          borderTop: '1px solid var(--eb-border-default)', paddingTop: 'var(--eb-space-2)',
+        }}>{entry.result}</div>
+      )}
+    </div>
+  );
+}
+
+// A live proposal's change list (AC3): added / changed / removed, each entity
+// named; anything a live team cannot take is marked as such (AC6).
+function LiveChangeList({ items }) {
+  const g = groupItems(items);
+  if (!items.length) {
+    return <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>No change to the team.</div>;
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {['added', 'changed', 'removed'].map(k => g[k].length > 0 && (
+        <div key={k}>
+          <div style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-text-muted)' }}>
+            {k === 'added' ? 'Added' : k === 'changed' ? 'Changed' : 'Removed'}
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-4)', display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {g[k].map(it => (
+              <li key={it.key} style={{ fontSize: 'var(--eb-text-xs)', color: it.applicable ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)', lineHeight: 1.4 }}>
+                {describeLiveItem(it)}
+                {!it.applicable && <em> — not applied ({it.reason})</em>}
+                {it.removal && <em> — only if you tick it</em>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
     </div>
   );
 }

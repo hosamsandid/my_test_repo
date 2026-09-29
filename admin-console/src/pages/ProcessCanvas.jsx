@@ -633,12 +633,73 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     catch { /* best-effort */ }
   }, [persistDraft]);
 
+  // Flow Copilot on the LIVE team (#2556). Loaded when the panel opens: the
+  // team's portable bundle (what the chat edits and what Apply re-checks
+  // against), and the shared chat history — whose GET doubles as the edit-
+  // rights probe, since it uses the same canManageAgent gate as every write.
+  // A 403 means read-only (AC8); the history stays hidden (AC16).
+  const [liveCopilot, setLiveCopilot] = useState(null); // { bundle, canEdit, history }
+  const liveTeamCopilot = copilotOpen && isTeamScope && !imported;
+  const fetchLiveBundle = useCallback(async () => {
+    const res = await fetch(`/api/process/template?team=${encodeURIComponent(scope)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }, [scope]);
+  const loadLiveCopilot = useCallback(async () => {
+    let canEdit = true;
+    let history = { messages: [] };
+    try { history = await apiCall('GET', `/api/teams/${encodeURIComponent(scope)}/copilot-history`); }
+    catch (e) { if (e && (e.status === 403 || e.status === 404)) canEdit = false; }
+    let bundle = null;
+    try { bundle = await fetchLiveBundle(); } catch { /* the panel stays unable to send */ }
+    setLiveCopilot({ bundle, canEdit, history: canEdit ? history : { messages: [] } });
+  }, [scope, fetchLiveBundle]);
+  // Reloaded on every open, so a reopened panel hydrates the history as the
+  // last close (or another editor) left it, not as it was on first open (AC11).
+  useEffect(() => {
+    if (!liveTeamCopilot) { setLiveCopilot(null); return; }
+    if (!liveCopilot) loadLiveCopilot();
+  }, [liveTeamCopilot, liveCopilot, loadLiveCopilot]);
+  const persistLiveCopilotHistory = useCallback(async (persistedMessages) => {
+    try { await apiCall('PUT', `/api/teams/${encodeURIComponent(scope)}/copilot-history`, { messages: persistedMessages || [] }); }
+    catch { /* best-effort, like the draft history */ }
+  }, [scope]);
+  // The live apply transport: every step is an EXISTING route (AC8) — the
+  // generic ones via apiCall, trigger creation via liveOps so a github-event
+  // trigger gets the agent's repo filled in exactly as on the canvas.
+  const liveCopilotTransport = useMemo(() => ({
+    teamId: scope,
+    memberIds: Array.isArray(agents) ? agents.filter(a => a.parentTeamId === scope).map(a => a.id) : [],
+    fetchCurrent: fetchLiveBundle,
+    fetchTickets: async () => {
+      try {
+        const r = await apiCall('GET', `/api/teams/${encodeURIComponent(scope)}/tickets`);
+        return Array.isArray(r && r.tickets) ? r.tickets : null;
+      } catch { return null; }
+    },
+    call: (step) => (step.op === 'createTrigger'
+      ? liveOps.createTrigger(step.memberId, step.body)
+      : apiCall(step.method, step.url, step.body)),
+    onApplied: async () => {
+      setProposal(null);
+      refetch();
+      refetchAgents();
+      try {
+        const bundle = await fetchLiveBundle();
+        setLiveCopilot(c => (c ? { ...c, bundle } : c));
+      } catch { /* the next open reloads it */ }
+    },
+  }), [scope, agents, fetchLiveBundle, refetch, refetchAgents]);
+
   // Canvas diff-highlighting (#1071 item 2): the proposal's node-level delta
   // vs. the current draft — added green, modified amber, removed in the banner.
-  const proposalDiff = useMemo(
-    () => (proposal && isDraft ? proposalNodeDiff(draftBundle, proposal.bundle) : null),
-    [proposal, isDraft, draftBundle],
-  );
+  // On a live team the base is the team's exported bundle (#2556).
+  const proposalDiff = useMemo(() => {
+    if (!proposal) return null;
+    if (isDraft) return proposalNodeDiff(draftBundle, proposal.bundle);
+    if (isTeamScope && liveCopilot && liveCopilot.bundle) return proposalNodeDiff(liveCopilot.bundle, proposal.bundle);
+    return null;
+  }, [proposal, isDraft, draftBundle, isTeamScope, liveCopilot]);
 
   // Overlay the diff outlines on the freshly-rendered `.bp-node` cards — the
   // same decorate-after-setData pattern as the anomaly badges above.
@@ -952,7 +1013,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             Proposal from Copilot ({proposal.graph?.nodes?.length || 0} nodes
             {proposalDiff && (proposalDiff.added.length || proposalDiff.modified.length)
               ? ` · ${proposalDiff.added.length} added · ${proposalDiff.modified.length} modified`
-              : ''}) — review it, then Apply or Discard.
+              : ''}) — {isTeamScope
+              ? 'review it; Apply asks you to confirm before anything reaches the running agents.'
+              : 'review it, then Apply or Discard.'}
             {proposalDiff && proposalDiff.removed.length > 0 && (
               <> <span style={{ color: 'var(--eb-status-error)' }}>
                 Removes: {proposalDiff.removed.map(r => r.name).join(', ')}.
@@ -1273,20 +1336,24 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     </div>
 
     {/* Flow Copilot rail (#1069). Draft scope chats against the open draft;
-        team scope only offers the Edit-as-draft bridge (no direct live-team
-        mutation, by design). Closing drops the canvas PREVIEW only — since
+        team scope (#2556) chats against the live team's exported bundle and
+        applies through a confirmation, replaying the diff as the canvas's own
+        live writes. Closing drops the canvas PREVIEW only — since
         #2087 the turn and its unapplied proposal live in the app-level
         FlowCopilotProvider, so reopening the panel finds them again. */}
     {copilotOpen && (isDraft || (isTeamScope && !imported)) && (
       <FlowCopilotPanel
         mode={isDraft ? 'draft' : 'team'}
         scope={scope}
-        bundle={draftBundle}
+        bundle={isDraft ? draftBundle : liveCopilot?.bundle}
         autoFocus={autoOpenCopilot}
         onPreview={setProposal}
         onApplyBundle={applyCopilotBundle}
-        onPersistHistory={persistCopilotHistory}
+        onPersistHistory={isDraft ? persistCopilotHistory : persistLiveCopilotHistory}
         onEditAsDraft={() => editAsDraft(true)}
+        canEdit={liveCopilot ? liveCopilot.canEdit : null}
+        history={liveCopilot ? liveCopilot.history : undefined}
+        live={isDraft ? undefined : liveCopilotTransport}
         onClose={() => { setCopilotOpen(false); setProposal(null); }}
         actionsRef={copilotActionsRef}
       />

@@ -467,17 +467,16 @@ You keep steering it: follow-up messages refine the proposal rather than
 starting over. Each proposal is checked before you can accept it, and one with
 error-level findings cannot be applied — steer with another message instead.
 
-On a **live team** the Copilot still works, but it never edits the team
-directly: it opens the team as a draft and continues the conversation there.
-That is deliberate — a chat turn is not something that should reach running
-agents.
+On a **live team** the Copilot edits the team itself. **Apply to team…** first
+opens a confirmation listing each change (added, changed, removed) and anything
+*not applied*; confirmed changes reach the running agents immediately. Each
+removal is its own opt-in checkbox. If the team changed meanwhile, Apply is
+blocked — **Regenerate**. Only editors can chat and apply; they share the
+history. **Edit as draft** stays available, but *Extend team* only adds roles
+that don't exist yet.
 
-A large flow can take a while, and a single generation that runs too long
-would otherwise fail outright. When that happens the Copilot generates the
-flow in two steps on its own — the roles first, then the wiring that connects
-them — and shows *Generating in parts…* while it does; you do nothing
-differently and the result is the same proposal, checked the same way. If a
-turn still cannot finish in time, the error card says so in plain language and
-suggests describing the flow in smaller parts or switching to a faster assist
-model under **Settings → Model**, with the raw technical detail tucked behind a
-*Technical detail* expander rather than shown as the headline.
+A large flow can take a while. If one generation would run too long, the
+Copilot builds it in two steps — roles first, then the wiring — showing
+*Generating in parts…*; the result is the same checked proposal. If a turn
+still times out, the error card suggests smaller requests or a faster assist
+model under **Settings → Model**, with the raw detail behind *Technical detail*.

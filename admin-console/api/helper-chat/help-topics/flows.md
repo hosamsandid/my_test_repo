@@ -210,6 +210,13 @@ from the design rather than another way to change it. Buttons that do not apply
 to the current scope are not shown at all, and a button that is disabled says
 why on hover.
 
+On a live team, **Add agent** has a **Materialize now** checkbox, **off** by
+default: the new agent is created as a **stub** — prompt and triggers only, no
+repository cloned, nothing running — so sketching in another role stays fast.
+It appears under *Not materialized yet* in Agent Chat, where **Materialize**
+provisions it later. Tick the box to provision it right away; the button reads
+*Add agent (stub)* while it is off, and a note after adding says which happened.
+
 ## Wiring hand-offs: the edge chooser
 
 Agents do not call each other. An agent finishes with an **Outcome**, the

@@ -238,6 +238,7 @@ left this one alone — different surface, different act.
 The same choice is offered for a single member added to a live team (#1958): Agent Chat's
 **Add member…** carries its own **Materialize now** checkbox — ticked by default here,
 because one member is not dozens — so a stub can also be created long after its team was.
+The Flow editor's live-team **Add agent** has it unticked (#2558).
 
 ---
 

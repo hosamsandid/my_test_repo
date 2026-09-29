@@ -841,6 +841,16 @@ function requireUsageAdmin(req, res) {
   return scope;
 }
 
+// Registered agents that are NOT auto-scaled pool instances (#2585): the
+// `agent` grouping folds instance usage into the main agent, and this list
+// keeps a look-alike id (a hand-created `…-i<n>` member) from being folded.
+function usageNonInstanceAgentIds() {
+  return listAgentDirs().filter((id) => {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    return !(cfg && cfg.poolInstance);
+  });
+}
+
 app.get('/api/usage/summary', (req, res) => {
   const scope = requireUsageAdmin(req, res);
   if (!scope) return;
@@ -852,7 +862,9 @@ app.get('/api/usage/summary', (req, res) => {
   const secondaryGroupBy = req.query.secondaryGroupBy;
   let records = usageLog.readRecords({ since });
   records = narrowUsageRecords(records, scope, usageTeamParam(req));
-  res.json(summarize(records, { since, until, groupBy, secondaryGroupBy }));
+  res.json(summarize(records, {
+    since, until, groupBy, secondaryGroupBy, nonInstanceAgentIds: usageNonInstanceAgentIds(),
+  }));
 });
 
 // Flat export of the statistics view (#656 phase 3): one row per invocation ×
@@ -870,6 +882,7 @@ function sendExport(req, res, kind, records, prEvents) {
     records, prEvents,
     since: since || null, until: until || null,
     groupBy: req.query.groupBy, secondaryGroupBy: req.query.secondaryGroupBy,
+    nonInstanceAgentIds: kind === 'summary' ? usageNonInstanceAgentIds() : null,
   });
   const stamp = new Date().toISOString().slice(0, 10);
   res.setHeader('Content-Type', out.contentType);

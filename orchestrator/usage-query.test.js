@@ -168,3 +168,26 @@ test('#2137: normalizeAgentGroupBy returns undefined for anything withheld or un
     assert.equal(normalizeAgentGroupBy(bad), undefined, String(bad));
   }
 });
+
+// #2585 AC9: an agent's own figure includes its auto-scaled pool instances.
+test('scope self includes the agent\'s pool instances (legacy and stamped), never look-alikes', () => {
+  const t = { input: 1, output: 0, cacheCreationInput: 0, cacheReadInput: 0 };
+  const recs = [
+    rec('team-a-dev', 'team-a', t, '2026-07-16T09:00:00Z'),
+    rec('team-a-dev-i12', 'team-a', t, '2026-07-16T09:00:00Z'),
+    { ...rec('team-a-dev-i13', 'team-a', t, '2026-07-16T09:00:00Z'), poolOf: 'team-a-dev' },
+    { ...rec('team-a-dev-i14', 'team-a', t, '2026-07-16T09:00:00Z'), poolOf: null },
+    rec('team-a-dev-i15', 'team-a', t, '2026-07-16T09:00:00Z'),
+    rec('team-a-dev-conflicts', 'team-a', t, '2026-07-16T09:00:00Z'),
+    rec('team-b-dev-i12', 'team-b', t, '2026-07-16T09:00:00Z'),
+  ];
+  const out = buildUsageQuery(recs, {
+    scope: 'self', agentId: 'team-a-dev', teamId: 'team-a', groupBy: 'agent',
+    nonInstanceAgentIds: ['team-a-dev-i15'],
+  });
+  assert.equal(out.totals.invocations, 3);
+  assert.deepEqual(out.groups.map((g) => [g.key, g.invocations]), [['team-a-dev', 3]]);
+  // An instance querying itself still sees its own records.
+  const self = scopeRecords(recs, { scope: 'self', agentId: 'team-a-dev-i12' });
+  assert.deepEqual(self.map((r) => r.agentId), ['team-a-dev-i12']);
+});

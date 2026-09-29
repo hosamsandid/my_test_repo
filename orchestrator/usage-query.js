@@ -19,7 +19,7 @@
 //      canonical, guarded by usage-summary.test.js), so there is exactly one
 //      aggregation implementation. No dollar figures ever ride along.
 
-const { summarize, TOKEN_CLASSES } = require('./usage-summary');
+const { summarize, agentKeyOf, TOKEN_CLASSES } = require('./usage-summary');
 
 const SCOPES = new Set(['self', 'team']);
 
@@ -50,11 +50,14 @@ function normalizeAgentGroupBy(groupBy) {
 }
 
 // Filter records to the caller's scope. Pure, fail-closed:
-//   self → only records the agent itself produced (agentId === agentId).
+//   self → only records the agent itself produced (agentId === agentId), plus
+//          those of its auto-scaled pool instances (#2585: folded exactly as
+//          the console's `agent` grouping folds them, see agentKeyOf), so an
+//          agent's own figure matches its row on the Token Usage page.
 //   team → only records of the agent's resolved team (teamId === teamId).
 // A falsy agentId (self) or falsy teamId (team — unknown/teamless agent) can
 // match nothing, so the result is empty rather than the whole store.
-function scopeRecords(records, { scope, agentId, teamId } = {}) {
+function scopeRecords(records, { scope, agentId, teamId, nonInstanceAgentIds } = {}) {
   const s = normalizeScope(scope);
   const list = Array.isArray(records) ? records : [];
   if (s === 'team') {
@@ -63,7 +66,10 @@ function scopeRecords(records, { scope, agentId, teamId } = {}) {
   }
   // self
   if (!agentId) return [];
-  return list.filter((r) => r && r.agentId === agentId);
+  const nonInstanceIds = nonInstanceAgentIds instanceof Set
+    ? nonInstanceAgentIds
+    : (Array.isArray(nonInstanceAgentIds) ? new Set(nonInstanceAgentIds) : null);
+  return list.filter((r) => r && (r.agentId === agentId || agentKeyOf(r, nonInstanceIds) === agentId));
 }
 
 // Build the full read-only usage response for an agent query. Pure — scope the
@@ -74,11 +80,14 @@ function scopeRecords(records, { scope, agentId, teamId } = {}) {
 //
 // `teamId` is the caller agent's resolved team (or null when unresolved); the
 // IO shell resolves it fail-closed (unknown agent → null → team scope empty).
-function buildUsageQuery(records, { scope, agentId, teamId, since, until, groupBy } = {}) {
+//
+// `nonInstanceAgentIds` (optional, #2585) lists registered agents that are not
+// pool instances, so neither the self scope nor the `agent` grouping folds them.
+function buildUsageQuery(records, { scope, agentId, teamId, since, until, groupBy, nonInstanceAgentIds } = {}) {
   const s = normalizeScope(scope);
   const scopedTeamId = s === 'team' ? (teamId || null) : null;
-  const scoped = scopeRecords(records, { scope: s, agentId, teamId });
-  const summary = summarize(scoped, { since, until, groupBy: normalizeAgentGroupBy(groupBy) });
+  const scoped = scopeRecords(records, { scope: s, agentId, teamId, nonInstanceAgentIds });
+  const summary = summarize(scoped, { since, until, groupBy: normalizeAgentGroupBy(groupBy), nonInstanceAgentIds });
   return {
     scope: s,
     agentId: agentId || null,

@@ -154,8 +154,8 @@ function summaryPivotColumns(groupBy, secondaryGroupBy) {
   return cols;
 }
 
-function summaryPivotRows(records, { since = null, until = null, groupBy, secondaryGroupBy } = {}) {
-  const summary = summarize(records, { since, until, groupBy, secondaryGroupBy });
+function summaryPivotRows(records, { since = null, until = null, groupBy, secondaryGroupBy, nonInstanceAgentIds = null } = {}) {
+  const summary = summarize(records, { since, until, groupBy, secondaryGroupBy, nonInstanceAgentIds });
   const secondary = summary.secondaryGroupBy || null;
   const rows = [];
   for (const g of summary.groups) {
@@ -254,7 +254,9 @@ function workItemRows(usageRecords, prEvents, { since = null, until = null } = {
 // ── Public serialize entry point ─────────────────────────────────────────────
 // kind: 'summary' | 'work-items'; format: 'csv' | 'json'. Returns the response
 // body plus the content type and a filename stem (no extension) for the route.
-function serialize(kind, format, { records, prEvents, since = null, until = null, groupBy = null, secondaryGroupBy = null } = {}) {
+function serialize(kind, format, {
+  records, prEvents, since = null, until = null, groupBy = null, secondaryGroupBy = null, nonInstanceAgentIds = null,
+} = {}) {
   const fmt = FORMATS.has(format) ? format : 'csv';
   let columns;
   let rows;
@@ -263,7 +265,8 @@ function serialize(kind, format, { records, prEvents, since = null, until = null
     rows = workItemRows(records, prEvents, { since, until });
   } else if (typeof groupBy === 'string' && GROUP_BY.has(groupBy)) {
     // #2440: follow the on-screen grouping (aggregated pivot, one/two levels).
-    ({ columns, rows } = summaryPivotRows(records, { since, until, groupBy, secondaryGroupBy }));
+    // #2585: grouped by agent, pool instances fold exactly as on screen.
+    ({ columns, rows } = summaryPivotRows(records, { since, until, groupBy, secondaryGroupBy, nonInstanceAgentIds }));
   } else {
     columns = SUMMARY_COLUMNS;
     rows = summaryRows(records, { since, until });

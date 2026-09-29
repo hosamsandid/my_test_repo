@@ -89,9 +89,9 @@ test('AC5: only a caller who manages BOTH agents may reassign between them', () 
 });
 
 test('AC5: a plain Team Member of the source team may not reassign at all', () => {
-  // Read/cancel on this route family is currently ungated, so a member CAN
-  // cancel — but injecting work into an agent's queue starts an autonomous run,
-  // which #2041 §7/D9 holds to the Team-Admin bar.
+  // Injecting work into an agent's queue starts an autonomous run, which
+  // #2041 §7/D9 holds to the Team-Admin bar. (Since #2119 a member may not
+  // read or cancel the queue either — same predicate.)
   const scope = scopeFor('member-alpha@example.com');
   assert.equal(canManageAgent(scope, SOURCE), false);
   assert.equal(canManageAgent(scope, TARGET), false);
@@ -155,11 +155,22 @@ test('the entry id and both agent ids are validated before anything is proxied',
   assert.match(body, /AGENT_ID_RE\.test\(targetAgentId\)/);
 });
 
-test('the ungated read/cancel neighbours are flagged for the #2041 P2 owner, not silently left', () => {
-  // This ticket must not ADD an ungated route; it does not retrofit the
-  // existing ones. Recording that in the source is what keeps the gap from
-  // reading as an oversight by whoever next opens this file.
-  const block = SRC.slice(at('Pending-queue reassignment (#2102)'), at('Token-usage statistics'));
-  assert.match(block, /FLAGGED FOR THE P2/);
-  assert.match(block, /#2041/);
+test('#2119: the read/cancel neighbours carry the same management gate', () => {
+  // The #2041 P2 gap this file used to flag is closed: detail and cancel refuse
+  // an agent the caller may not manage, through the same helper as reassign.
+  for (const method of ['get', 'delete']) {
+    const route = at(`app.${method}('/api/agents/:id/pending/:entryId', async`);
+    const body = SRC.slice(route, route + 700);
+    assert.match(body, /resolveManageableAgentDir\(req, res, id\)/,
+      `${method.toUpperCase()} /api/agents/:id/pending/:entryId must be gated`);
+    assert.ok(body.indexOf('resolveManageableAgentDir') < body.indexOf('fetch('),
+      'the gate must run before anything is proxied to the orchestrator');
+  }
+  // And the aggregated list is cut to what the caller may manage.
+  const list = at("app.get('/api/pending-queue'");
+  const listBody = SRC.slice(list, list + 1200);
+  assert.match(listBody, /scopePendingQueue\(body, \{/);
+  assert.match(listBody, /canManageAgentId: \(agentId\) => AGENT_ID_RE\.test\(agentId\) && canManageAgent\(/);
+  assert.match(listBody, /canManageTeamId: \(teamId\) => canManageTeam\(scope, teamId\)/);
+  assert.doesNotMatch(SRC, /FLAGGED FOR THE P2 OWNER/, 'the stale flag must not outlive the gap');
 });

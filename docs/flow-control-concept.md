@@ -316,10 +316,12 @@ without my having to trace everything again."*
 
 ### 4.6 Authorization & hardening
 
-The pending-queue read/cancel routes are currently ungated (flagged in-code for
-the #2041 P2 sweep); as operator surfaces they must be gated
-(`canManageAgent`/`canManageTeam` per `admin-console/api/scope.js`, the pattern
-`performReassign` already follows on both source and target). Every supervisor
+The pending-queue read/cancel routes were ungated (flagged in-code for the #2041
+P2 sweep); as operator surfaces they are now gated (#2119): the aggregated list
+is cut to the agents the caller may manage (`canManageAgent`) and the WIP lanes
+of teams they may manage (`canManageTeam`, the Force-dispatch gate), and
+detail/cancel refuse an unmanageable agent — the pattern `performReassign`
+already follows on both source and target (`admin-console/api/scope.js`). Every supervisor
 action rides an already-audited hand-off route; the whole subsystem is
 maintenance-gated.
 

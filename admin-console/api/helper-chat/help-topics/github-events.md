@@ -53,10 +53,12 @@ the agent's own session first.
 
 ### Who can see it
 
-The page is **not team-scoped** — every signed-in user sees the events of every
-polled repository and every agent, and any signed-in user can cancel any
-agent's queued entry (the cancellation itself is recorded in the audit trail).
-Treat repository and agent names here as visible to all console users.
+**Processed events** is **not team-scoped** — every signed-in user sees the
+events of every polled repository and every agent. Treat repository and agent
+names there as visible to all console users. The **Pending queue** is: it lists
+only the agents you may manage (Team Admin of their team, or System Admin), and
+only they can open or cancel an entry (the cancellation is recorded in the audit
+trail). A Team Member sees an empty queue.
 
 ## Processed events
 

@@ -2752,18 +2752,27 @@ async function admissionSweepTeam(teamId) {
     }
     repos.push(repo);
 
-    // Which in-flight tickets an open PR references. Deliberately the LOOSE
-    // `prsForIssue` linkage (a `#n` mention or an issue number in the branch),
-    // not the strict closing-keyword parse the poller stamps onto an event
-    // payload: the two directions have opposite safe sides. On the event side a
-    // strict link decides which lane slot a dispatch takes, so a false positive
-    // would merge two genuinely separate tickets; here a false positive only
-    // keeps a ticket in flight LONGER, which is the conservative direction for a
-    // WIP limit. `prsForIssue`'s own header states the same fail-safe reasoning.
+    // Which in-flight tickets an open PR CLOSES. This uses the STRICT
+    // `parseCloses` (closes/fixes/resolves #N in the body + `issue-N` in the
+    // head branch) — the SAME parse the poller stamps onto an event payload and
+    // that `entryTicketRef` keys a lane slot on at admit time. Keep-alive and
+    // admit therefore agree on what "a PR belongs to a ticket" means.
+    //
+    // The earlier LOOSE `prsForIssue` linkage (any `#n` mention anywhere in the
+    // body) was catastrophic here, not conservative: a Dependabot PR inlines
+    // upstream changelogs full of foreign `owner/repo#N` references (e.g.
+    // `actions/checkout#2521`), which matched local tickets and pinned them in
+    // the lane forever — freezing the whole flow with no free slot. A WIP limit
+    // that can be frozen by an unrelated dependency bump is worse than one that
+    // occasionally releases a ticket early, so the safe side is the strict parse
+    // (verified against the real #2516 body — see admission-control tests).
     const ticketNumbers = lane.inFlight.filter((t) => t.repo === repo).map((t) => t.number);
     const prByNumber = new Map();
     for (const pr of Array.isArray(openPrs) ? openPrs : []) prByNumber.set(Number(pr.number), pr);
-    const closesFor = (pr) => ticketNumbers.filter((n) => flowAnomalySweep.prsForIssue([pr], n).length > 0);
+    const closesFor = (pr) => {
+      const closes = prEventsLog.parseCloses(pr && pr.body, pr && pr.head && pr.head.ref);
+      return ticketNumbers.filter((n) => closes.includes(n));
+    };
 
     for (const it of Array.isArray(issues) ? issues : []) {
       const kind = flowAnomalySweep.objectKind(it);

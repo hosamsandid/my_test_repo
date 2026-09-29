@@ -10,7 +10,7 @@ import {
 
 test('OUTCOME_LEGEND covers every rendered outcome with meaning + whatToDo', () => {
   const keys = OUTCOME_LEGEND.map(e => e.key);
-  for (const expected of ['delivered', 'digest', 'throttle', 'history-horizon', 'label-filter', 'no-match']) {
+  for (const expected of ['delivered', 'digest', 'held', 'throttle', 'history-horizon', 'label-filter', 'no-match']) {
     assert.ok(keys.includes(expected), `legend missing ${expected}`);
   }
   for (const entry of OUTCOME_LEGEND) {
@@ -21,9 +21,16 @@ test('OUTCOME_LEGEND covers every rendered outcome with meaning + whatToDo', () 
 test('outcomeLegendKey maps statuses and drop reasons', () => {
   assert.equal(outcomeLegendKey({ status: 'delivered' }), 'delivered');
   assert.equal(outcomeLegendKey({ status: 'digest' }), 'digest');
+  assert.equal(outcomeLegendKey({ status: 'held', reason: 'wip', wipLimit: 3 }), 'held');
   assert.equal(outcomeLegendKey({ status: 'dropped', reason: 'throttle' }), 'throttle');
   assert.equal(outcomeLegendKey({ status: 'dropped', reason: 'history-horizon' }), 'history-horizon');
   assert.equal(outcomeLegendKey({ status: 'dropped', reason: 'label-filter' }), 'label-filter');
+});
+
+test('a held-by-WIP outcome reads as held (not delivered, not dropped) with an actionable tooltip', () => {
+  const t = outcomeTooltip({ status: 'held', reason: 'wip', wipLimit: 3 });
+  assert.match(t, /Work-in-Progress limit/);
+  assert.match(t, /fires automatically|force it|Pending queue|Flow Control/);
 });
 
 test('outcomeLegendKey falls back to a generic drop for unknown reasons', () => {

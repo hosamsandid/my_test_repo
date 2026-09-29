@@ -699,6 +699,55 @@ test("_fanOutBatch: wakeLabel on outcome = subscriber's labelFilter, not collaps
   }
 });
 
+test("_fanOutBatch: a dispatch the WIP lane HOLDS is recorded 'held', not 'delivered' (label-fix)", async () => {
+  // The event-log used to record 'delivered' unconditionally, even when
+  // admission control held the dispatch behind a full wipLimit — so the log
+  // claimed a session ran when none did, and the chip dead-ended on "no
+  // session". The poller now reads the admission verdict from the enqueue
+  // decision and records the TRUE outcome.
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    // Simulate the orchestrator's enqueuePending holding this dispatch: it fills
+    // the decision out-parameter exactly as the real one does on a full lane.
+    poller._enqueuePending = (agentId, entry, decision) => {
+      if (decision) { decision.held = true; decision.reason = 'wip'; decision.wipLimit = 3; decision.ticketKey = 'org/repo#1846'; }
+    };
+
+    const ghEvent = {
+      id: "held-1",
+      actor: { login: "thorsten" },
+      created_at: new Date().toISOString(),
+      type: "IssuesEvent",
+      repo: { name: "org/repo" },
+      payload: {
+        action: "labeled",
+        label: { name: "ready" },
+        issue: { number: 1846, title: "Test", html_url: "https://github.com/org/repo/issues/1846" },
+      },
+    };
+    const subscribers = [{
+      agentId: "developer",
+      triggerId: "trigger-ready",
+      events: new Set(["issues.labeled"]),
+      labelFilter: "ready",
+      horizon: null,
+    }];
+
+    await poller._fanOutBatch("org/repo", [ghEvent], subscribers, "tok");
+
+    assert.equal(recorded.length, 1);
+    const [o] = recorded[0].outcomes;
+    assert.equal(o.status, "held", "a held dispatch must record status 'held', never 'delivered'");
+    assert.equal(o.reason, "wip");
+    assert.equal(o.wipLimit, 3, "the flow's wipLimit rides on the outcome so the chip reads 'held (WIP 3)'");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
 // ── #2151: the pending entry itself carries the stamp, not just the event-log
 // outcome — this is what the trigger-fired notice and the Pending queue read.
 test("_fanOutBatch: the pending entry is stamped with the matched wakeLabel, not the collapsed payload.label.name (#2151)", async () => {

@@ -14,6 +14,14 @@ export const OUTCOME_TONES = {
   digest: { marker: '◆', markerColor: 'var(--eb-status-info)', textColor: 'var(--eb-text-primary)' },
   dropped: { marker: '○', markerColor: 'var(--eb-text-muted)', textColor: 'var(--eb-text-secondary)' },
   noMatch: { marker: '⚠', markerColor: 'var(--eb-status-warning)', textColor: 'var(--eb-text-primary)' },
+  // A dispatch the flow's WIP lane HELD: neither delivered (no session ran) nor
+  // dropped (nothing is lost — it fires when capacity frees), so it needs its
+  // own tone rather than falling through to `dropped`, which would read as
+  // "gone". Warning-coloured like `noMatch` because both mean "look at this",
+  // but a distinct marker shape — since #2524 the shape is the primary carrier
+  // of status, so sharing a colour costs no legibility. Half-filled reads as
+  // "recorded, not yet run".
+  held: { marker: '◐', markerColor: 'var(--eb-status-warning)', textColor: 'var(--eb-text-primary)' },
 };
 
 // Label text is exactly the pre-#2524 chip wording (content is out of scope).
@@ -27,6 +35,13 @@ export function outcomeLabel(outcome, { refired = false } = {}) {
   const target = o.agentName || o.agentId;
   if (o.status === 'delivered') return `delivered${refired ? ' · fired again' : ''}${wakeSuffix} → ${target}`;
   if (o.status === 'digest') return `digested${wakeSuffix} → ${target}`;
+  // `held (WIP n)` — the limit that is holding it, so the operator can act on
+  // the row without opening another view. A missing wipLimit degrades to a bare
+  // `held (WIP)` rather than printing "undefined".
+  if (o.status === 'held') {
+    const wip = o.wipLimit != null ? ` ${o.wipLimit}` : '';
+    return `held (WIP${wip})${wakeSuffix} → ${target}`;
+  }
   return `dropped (${o.reason || 'unknown'})${wakeSuffix} → ${target}`;
 }
 
@@ -34,6 +49,7 @@ export function outcomeTone(outcome) {
   const status = outcome && typeof outcome === 'object' ? outcome.status : undefined;
   if (status === 'delivered') return 'delivered';
   if (status === 'digest') return 'digest';
+  if (status === 'held') return 'held';
   return 'dropped';
 }
 

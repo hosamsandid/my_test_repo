@@ -1262,8 +1262,18 @@ class GitHubPoller {
         const payload = enrichedPayloads.get(it.ghEvent.id);
         const ghEvent = payload === it.ghEvent.payload ? it.ghEvent : { ...it.ghEvent, payload };
 
-        this._enqueue(it.agentId, it.triggerId, it.key, ghEvent, it.outcome.wakeLabel);
-        it.outcome.status = 'delivered';
+        const decision = this._enqueue(it.agentId, it.triggerId, it.key, ghEvent, it.outcome.wakeLabel);
+        // The dispatch is durably recorded either way; whether it RAN or is
+        // waiting behind a full WIP lane is the difference between "delivered"
+        // and "held" — record the true one so the GitHub Event Log never claims
+        // a held dispatch was delivered (which then dead-ends on "no session").
+        if (decision && decision.held) {
+          it.outcome.status = 'held';
+          it.outcome.reason = 'wip';
+          if (decision.wipLimit != null) it.outcome.wipLimit = decision.wipLimit;
+        } else {
+          it.outcome.status = 'delivered';
+        }
       }
     }
 
@@ -1303,9 +1313,12 @@ class GitHubPoller {
           ghEvent: ghEventForLog,
           repoFullName,
           key: entry.key,
-          outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest, wakeLabel }) => {
+          outcomes: entry.outcomes.map(({ agentId, triggerId, status, reason, digest, wakeLabel, wipLimit }) => {
             const o = { agentId, triggerId, status, reason, digest };
             if (wakeLabel !== undefined) o.wakeLabel = wakeLabel;
+            // Held-by-WIP outcomes carry the flow's limit so the log row can read
+            // "held (WIP n)" rather than a bare "held".
+            if (wipLimit !== undefined) o.wipLimit = wipLimit;
             return o;
           }),
         }),
@@ -1345,8 +1358,17 @@ class GitHubPoller {
   // routes to the control plane under volume isolation); otherwise writes the
   // agent's pool file directly. enqueuePending stamps receivedAt, so callers
   // pass the entry without it.
-  _enqueuePending(agentId, entry) {
-    if (this.enqueuePending) { this.enqueuePending(agentId, entry); return; }
+  // `decision`, when passed, is an out-parameter the orchestrator's
+  // enqueuePending fills with the admission verdict (`held`, `wipLimit`,
+  // `ticketKey`) so the caller can log the TRUE outcome — "held (WIP)" vs
+  // "delivered" — instead of assuming delivery. The local-file fallback never
+  // runs admission control, so a held verdict is impossible there; `decision`
+  // is simply left untouched (its `held` reads falsy).
+  _enqueuePending(agentId, entry, decision) {
+    if (this.enqueuePending) {
+      this.enqueuePending(agentId, entry, decision ? { decision } : undefined);
+      return;
+    }
     const pendingPath = path.join(AGENTS_DIR, agentId, 'pending-triggers.json');
     let pending = [];
     try {
@@ -1380,8 +1402,17 @@ class GitHubPoller {
       },
     };
     if (wakeLabel !== undefined) entry.wakeLabel = wakeLabel;
-    this._enqueuePending(agentId, entry);
-    console.log(`[GH-Poller] Queued ${key} (${ghEvent.id}) → agent=${agentId} trigger=${triggerId}`);
+    const decision = {};
+    this._enqueuePending(agentId, entry, decision);
+    if (decision.held) {
+      console.log(
+        `[GH-Poller] Held ${key} (${ghEvent.id}) → agent=${agentId} trigger=${triggerId} ` +
+        `(wipLimit ${decision.wipLimit}${decision.ticketKey ? `, ${decision.ticketKey}` : ''})`,
+      );
+    } else {
+      console.log(`[GH-Poller] Queued ${key} (${ghEvent.id}) → agent=${agentId} trigger=${triggerId}`);
+    }
+    return decision;
   }
 
   // #496: best-effort GET of an arbitrary GitHub API resource (used to fetch

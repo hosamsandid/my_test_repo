@@ -63,6 +63,31 @@ test('AC4: delivered, digested and dropped stay visually distinct (marker shape 
   );
 });
 
+// A dispatch held behind a full WIP lane must not read as `dropped`. The
+// upstream change this back-ports expressed the same thing as an amber chip
+// branch in GithubEventLog.jsx; #2524 moved that mapping here, so the `held`
+// tone lives in OUTCOME_TONES instead. Without it `outcomeTone` falls through
+// to 'dropped' and the row says "dropped (wip)" — i.e. lost — for work that is
+// merely waiting, which is worse than the false "delivered" being fixed.
+test('a held-by-WIP outcome is its own tone, never dropped, and names the limit', () => {
+  const held = { status: 'held', reason: 'wip', wipLimit: 3, agentId: 'developer' };
+  assert.equal(outcomeTone(held), 'held');
+  assert.equal(outcomeLabel(held), 'held (WIP 3) → developer');
+  assert.deepEqual(outcomePresentation(held), { tone: 'held', label: 'held (WIP 3) → developer', ...OUTCOME_TONES.held });
+  // wakeLabel suffix and agentName resolution behave as for every other status.
+  assert.equal(
+    outcomeLabel({ status: 'held', wipLimit: 1, wakeLabel: 'ready', agentId: 'a', agentName: 'Alpha' }),
+    'held (WIP 1) (ready) → Alpha',
+  );
+  // A record from an older orchestrator carries no wipLimit — degrade, never print "undefined".
+  assert.equal(outcomeLabel({ status: 'held', agentId: 'a' }), 'held (WIP) → a');
+  // Distinct from every other marker shape, so the column stays readable.
+  const markers = ['delivered', 'digest', 'dropped', 'noMatch', 'held'].map(k => OUTCOME_TONES[k].marker);
+  assert.equal(new Set(markers).size, 5, 'held needs its own marker shape');
+  assert.match(OUTCOME_TONES.held.markerColor, /^var\(--eb-/);
+  assert.match(OUTCOME_TONES.held.textColor, /^var\(--eb-text-/);
+});
+
 test('AC8: the no-match indicator is warning-toned plain text', () => {
   assert.equal(NO_MATCH_LABEL, "nobody's listening");
   assert.equal(OUTCOME_TONES.noMatch.markerColor, 'var(--eb-status-warning)');

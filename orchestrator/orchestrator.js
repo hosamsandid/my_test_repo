@@ -10057,12 +10057,19 @@ function resolveAdmissionFlow(agentId) {
   return wipLimit === null ? null : { teamId, wipLimit };
 }
 
-function enqueuePending(agentId, entry, { admissionChecked = false } = {}) {
+function enqueuePending(agentId, entry, { admissionChecked = false, decision = null } = {}) {
   // The gate sits here rather than at each of the five producers (poller
   // fan-out, flow-emit, the label fast-path, wake-agent, the hook server)
   // because this function is the queue's single writer: one seam cannot be
   // bypassed by a producer added later. `admissionChecked` is the promotion
   // path re-entering with a dispatch the lane has already admitted.
+  //
+  // `decision`, when passed, is an out-parameter the caller reads to log the
+  // TRUE outcome of this dispatch — `held` (waiting behind a full WIP lane) vs
+  // delivered — with `wipLimit`/`ticketKey` for the message. The return value
+  // stays a plain boolean (see the held branch's note), so this is purely
+  // additive: no existing caller is affected.
+  if (decision) decision.held = false;
   if (!admissionChecked) {
     const flow = resolveAdmissionFlow(agentId);
     if (flow) {
@@ -10074,6 +10081,12 @@ function enqueuePending(agentId, entry, { admissionChecked = false } = {}) {
           `[Admission] ${flow.teamId}: held dispatch for ${agentId} (${d.ticketKey}) — ` +
           `wipLimit ${flow.wipLimit} reached; it fires when capacity frees`,
         );
+        if (decision) {
+          decision.held = true;
+          decision.reason = 'wip';
+          decision.wipLimit = flow.wipLimit;
+          decision.ticketKey = d.ticketKey;
+        }
         // TRUE, not false: the dispatch is durably recorded and WILL fire. A
         // `false` here means "nothing anywhere has this event" (#2030) and would
         // make an `aee-emit` producer report a delivery failure for work that is

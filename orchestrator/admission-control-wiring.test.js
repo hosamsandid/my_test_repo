@@ -40,7 +40,7 @@ const CHECKS = {
   // The gate must run BEFORE the queue write, or a dispatch is already in
   // `pending-triggers.json` by the time it is "held".
   'gate-precedes-queue-write'(src) {
-    const body = slice(src, 'function enqueuePending(agentId, entry', 'function resolveRepoGithubTokenId', 4000);
+    const body = slice(src, 'function enqueuePending(agentId, entry', 'function resolveRepoGithubTokenId', 5000);
     const gate = body.indexOf('admissionControl.admit(');
     const write = body.indexOf('pending.push(');
     return gate !== -1 && write !== -1 && gate < write;
@@ -49,7 +49,7 @@ const CHECKS = {
   // The promotion path must be able to re-enter without being re-gated, or a
   // promoted dispatch would be held again forever.
   'promotion-bypass-exists'(src) {
-    return /function enqueuePending\(agentId, entry, \{ admissionChecked = false \} = \{\}\)/.test(src)
+    return /function enqueuePending\(agentId, entry, \{ admissionChecked = false(?:, decision = null)? \} = \{\}\)/.test(src)
       && /if \(!admissionChecked\) \{/.test(src)
       && /enqueuePending\(r\.agentId, r\.entry, \{ admissionChecked: true \}\)/.test(src);
   },
@@ -58,7 +58,7 @@ const CHECKS = {
   // `aee-emit` producer (#2030) report a delivery failure for work that will
   // fire as soon as capacity frees.
   'hold-reports-enqueued'(src) {
-    const body = slice(src, 'if (!d.admit) {', 'const p = pendingPath(agentId);', 900);
+    const body = slice(src, 'if (!d.admit) {', 'const p = pendingPath(agentId);', 1200);
     return /return true;/.test(body) && !/return false;/.test(body);
   },
 

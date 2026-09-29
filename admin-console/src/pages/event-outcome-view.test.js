@@ -5,6 +5,7 @@ import {
   outcomeLegendKey,
   outcomeTooltip,
   noMatchTooltip,
+  refireNote,
 } from './event-outcome-view.js';
 
 test('OUTCOME_LEGEND covers every rendered outcome with meaning + whatToDo', () => {
@@ -55,4 +56,20 @@ test('noMatchTooltip explains the no-subscriber case with an action', () => {
   const t = noMatchTooltip();
   assert.match(t, /No trigger subscribed/);
   assert.match(t, /add or fix a github-event trigger/);
+});
+
+test('#2525: the legend explains every drop reason the poller stamps', () => {
+  const keys = OUTCOME_LEGEND.map(e => e.key);
+  for (const r of ['wake-already-armed', 'internal-dedup', 'self-claim-label', 'push-duplicate', 'throttle', 'label-filter', 'history-horizon']) {
+    assert.ok(keys.includes(r), `legend missing ${r}`);
+    assert.equal(outcomeLegendKey({ status: 'dropped', reason: r }), r);
+  }
+});
+
+test('#2525: refireNote names who fired a manual re-fire row again', () => {
+  assert.equal(refireNote({ source: 'manual-refire', refiredBy: 'ana', refireOf: { reason: 'throttle' } }),
+    'Fired again by ana after a throttle drop.');
+  assert.equal(refireNote({ source: 'manual-refire' }), 'Fired again.');
+  assert.equal(refireNote({ source: 'internal' }), null);
+  assert.equal(refireNote(null), null);
 });

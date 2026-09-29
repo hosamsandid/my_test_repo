@@ -55,6 +55,8 @@ The built-in GitHub poller queries the GitHub Events API every 30 seconds for al
 
 **The first push to a new branch arrives as the pull request it opens.** The Events API reports no `PushEvent` (and often no `CreateEvent`) for the push that creates a branch — only later pushes to the existing branch surface as `push`. So the poller turns every `pull_request.opened` / `pull_request.reopened` whose head branch lives in the same repository (not a fork) into an extra `push` event for that head branch and commit, logged as its own `push` row (event id `prpush:<id>`, payload `ref`/`head` plus `synthesizedFrom` and the PR number). Push wakes are de-duplicated per repository on branch + head commit: whichever of the PR-derived push and a real `PushEvent` for the same commit arrives first wakes `push` triggers, and the other is logged as dropped (`push-duplicate`). A trigger that also listens to the originating `pull_request.*` event is not woken a second time by the derived push. History horizon, throttle and burst digest apply as for any event. A branch pushed without opening a PR is still not detected — GitHub reports nothing for it.
 
+Re-fire a dropped wake from Agent Chat → **Events** (#2525).
+
 ## Operational note: host clock skew (Podman machine)
 
 On macOS/Windows the stack runs inside a Podman VM, and containers inherit **that

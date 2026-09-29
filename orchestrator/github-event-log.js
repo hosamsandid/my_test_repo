@@ -101,12 +101,37 @@ function cleanupOldEntries(now = Date.now(), retentionDays = RETENTION_DAYS) {
   }
 }
 
+// Read every entry still inside the retention window, oldest file first.
+// Needed by the manual re-fire (#2525), which must look up the dropped entry,
+// any earlier re-fire of it and — for `internal-dedup` — the twin delivery.
+// Retention bounds this to RETENTION_DAYS files. Best-effort: [] on any error.
+function readEntries() {
+  const out = [];
+  try {
+    const files = fs.readdirSync(EVENT_LOG_DIR)
+      .filter((f) => /^github-events-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
+      .sort();
+    for (const f of files) {
+      let content = '';
+      try { content = fs.readFileSync(path.join(EVENT_LOG_DIR, f), 'utf8'); } catch { continue; }
+      for (const ln of content.split('\n')) {
+        if (!ln.trim()) continue;
+        try { out.push(JSON.parse(ln)); } catch { /* skip corrupt line */ }
+      }
+    }
+  } catch {
+    // Directory doesn't exist yet — nothing logged.
+  }
+  return out;
+}
+
 module.exports = {
   EVENT_LOG_DIR,
   RETENTION_DAYS,
   buildEventEntry,
   extractWorkItem,
   record,
+  readEntries,
   expiredDayFiles,
   cleanupOldEntries,
 };

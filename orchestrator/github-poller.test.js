@@ -1712,3 +1712,62 @@ test("_fanOutBatch (#2529 AC5): the synthetic push goes through the throttle and
   assert.equal(enqueued.length, 1);
   assert.equal(enqueued[0].entry.kind, "github-digest");
 });
+
+// ── #2525: the manual "Fire again" re-arms the wake key from outside a poll, so
+// the protections still hold afterwards (AC10).
+
+test("armWake (#2525): a re-fired wake stays armed — the next duplicate label event is dropped 'wake-already-armed'", async () => {
+  const origRecord = githubEventLog.record;
+  const recorded = [];
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    poller._saveState = () => {};
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const armed = poller.armWake({
+      repo: "org/repo", triggerId: "t1785499525109689", kind: "issue", number: 2525, label: "ready",
+    });
+    assert.equal(armed, true);
+
+    const dup = labeledIssueEvent("2525-dup", "next-wave", ["next-wave", "ready"], 2525);
+    await poller._fanOutBatch("org/repo", [dup], readyDeveloperSub(), "tok");
+
+    assert.equal(enqueued.length, 0, "the duplicate is not delivered after a re-fire");
+    const outcome = recorded.flatMap((e) => e.outcomes || []).find((o) => o.agentId === "developer");
+    assert.equal(outcome.status, "dropped");
+    assert.equal(outcome.reason, "wake-already-armed");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("armWake (#2525): a later genuine remove -> re-add still fires (the re-fire does not pin the arm)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    poller._saveState = () => {};
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+    poller.armWake({ repo: "org/repo", triggerId: "t1785499525109689", kind: "issue", number: 2526, label: "ready" });
+
+    const removed = unlabeledIssueEvent("2526-rm", "ready", ["next-wave"], 2526);
+    const readded = labeledIssueEvent("2526-add", "ready", ["next-wave", "ready"], 2526);
+    await poller._fanOutBatch("org/repo", [removed, readded], readyDeveloperSub(), "tok");
+
+    assert.equal(enqueued.length, 1);
+    assert.equal(enqueued[0].entry.github.eventId, "2526-add");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("armWake (#2525): no-op without a wake label or with the edge dedup switched off", () => {
+  const poller = new GitHubPoller();
+  poller._saveState = () => { throw new Error("must not save"); };
+  assert.equal(poller.armWake({ repo: "org/repo", triggerId: "t", kind: "issue", number: 1, label: null }), false);
+  poller._wakeEdgeDedup = false;
+  assert.equal(poller.armWake({ repo: "org/repo", triggerId: "t", kind: "issue", number: 1, label: "ready" }), false);
+});

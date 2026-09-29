@@ -46,6 +46,30 @@ export const OUTCOME_LEGEND = [
     whatToDo: 'Normal label-routing — the trigger only wakes on its configured label. No action needed unless the label wiring itself is wrong.',
   },
   {
+    key: 'wake-already-armed',
+    term: 'dropped (wake-already-armed)',
+    meaning: 'The agent was already woken for this label on this item; a repeat of the same label is ignored until the label is removed and re-applied.',
+    whatToDo: "Usually healthy — it stops an agent's own claim swap from waking it twice. If a real hand-off was lost, use Fire again on the agent's Events tab in Agent Chat.",
+  },
+  {
+    key: 'internal-dedup',
+    term: 'dropped (internal-dedup)',
+    meaning: 'The console or supervisor already woke the agent for this label directly, so the poller skipped its own copy of the same event.',
+    whatToDo: 'Nothing to do — the wake was delivered once already.',
+  },
+  {
+    key: 'self-claim-label',
+    term: 'dropped (self-claim-label)',
+    meaning: "The label is an agent's own ':wip' claim label, not a hand-off.",
+    whatToDo: 'Nothing to do.',
+  },
+  {
+    key: 'push-duplicate',
+    term: 'dropped (push-duplicate)',
+    meaning: 'A duplicate of a push the poller had already seen.',
+    whatToDo: 'Nothing to do.',
+  },
+  {
     key: 'no-match',
     term: "nobody's listening",
     meaning: 'No trigger subscribed to this event type at all, so nobody was woken.',
@@ -86,4 +110,14 @@ export function outcomeTooltip(outcome) {
 export function noMatchTooltip() {
   const entry = LEGEND_BY_KEY['no-match'];
   return `${entry.meaning} ${entry.whatToDo}`;
+}
+
+// A row written by "Fire again" on an agent's Events tab (#2525): the sentence
+// the delivered chip's tooltip leads with, naming who re-fired which drop.
+// Null for every other row.
+export function refireNote(entry) {
+  if (!entry || entry.source !== 'manual-refire') return null;
+  const by = entry.refiredBy ? ` by ${entry.refiredBy}` : '';
+  const of = entry.refireOf && entry.refireOf.reason ? ` after a ${entry.refireOf.reason} drop` : '';
+  return `Fired again${by}${of}.`;
 }

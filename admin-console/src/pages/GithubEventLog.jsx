@@ -12,7 +12,7 @@ import {
   kindLabel, kindTooltip, entryDetail, entryHoverDetail, labelChip, totalPending,
   pendingRowMenu, reassignPickerState, reassignTargetLabel, pendingReassignError, pendingReassignSuccess,
 } from './pending-queue-view';
-import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip } from './event-outcome-view';
+import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip, refireNote } from './event-outcome-view';
 import { eventLabel, eventFilterText } from './agent-chat/trigger-summary';
 import { workItemTypeLabel } from './github-event-log-type';
 import { isHandoffRow, handoffNote, handoffNoteDisplay, handoffTitleHint } from './github-event-handoff-view';
@@ -41,7 +41,7 @@ const controlStyle = {
 // (a protection layer did its job on purpose, not an error), digest =
 // info (bundled, not lost), no matching trigger = warning (worth an
 // admin's attention — "nobody's listening" per issue #469 AC #4).
-function OutcomeChip({ outcome, eventId, onOpenSession }) {
+function OutcomeChip({ outcome, eventId, onOpenSession, refireNote = null }) {
   let bg, color, label;
   // wakeLabel is set when the subscriber's labelFilter matched (#1846). null
   // means any-label listener; undefined means a legacy row or a drop before
@@ -50,7 +50,7 @@ function OutcomeChip({ outcome, eventId, onOpenSession }) {
   if (outcome.status === 'delivered') {
     bg = 'var(--eb-status-success-bg)';
     color = 'var(--eb-status-success)';
-    label = `delivered${wakeSuffix} → ${outcome.agentName || outcome.agentId}`;
+    label = `delivered${refireNote ? ' · fired again' : ''}${wakeSuffix} → ${outcome.agentName || outcome.agentId}`;
   } else if (outcome.status === 'digest') {
     bg = 'var(--eb-status-info-bg)';
     color = 'var(--eb-status-info)';
@@ -82,7 +82,7 @@ function OutcomeChip({ outcome, eventId, onOpenSession }) {
   // Only a `delivered` outcome that carries a triggerId maps to a real Claude
   // session, so only those become an activatable control (AC1/AC2). Everything
   // else stays a plain, non-interactive status chip.
-  const explain = outcomeTooltip(outcome);
+  const explain = refireNote ? `${refireNote} ${outcomeTooltip(outcome)}` : outcomeTooltip(outcome);
   const correlationId = buildTriggerCorrelationId(outcome.triggerId, eventId);
   if (isSessionOutcome(outcome) && correlationId && onOpenSession) {
     return (
@@ -393,7 +393,7 @@ function ProcessedEventsView() {
       return (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
           {list.map((o, i) => (
-            <OutcomeChip key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} />
+            <OutcomeChip key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} refireNote={refireNote(row)} />
           ))}
         </div>
       );

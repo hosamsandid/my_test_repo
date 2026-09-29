@@ -4225,6 +4225,13 @@ function enrichUsageRecord(agentId, record) {
     }
     out.roleId = roleId || cfg.role || null;
   }
+  // Pool instance → main agent (#2585), stamped from the orchestrator's own
+  // config and always written (self-asserted values are overwritten): the
+  // Token Usage `agent` grouping folds instances under `poolOf`, and an explicit
+  // `null` keeps a look-alike id (`…-i<n>` that is no instance) from folding
+  // even after that agent is gone. Instances are reaped, so this is the only
+  // point where the link is still known for certain.
+  out.poolOf = cfg.poolInstance && typeof cfg.poolOf === "string" && cfg.poolOf ? cfg.poolOf : null;
   if (out.provider == null) {
     const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
     // A per-agent provider override wins over the environment binding.
@@ -16394,7 +16401,12 @@ async function main() {
         const cfg = loadAgentConfig(id);
         const teamId = cfg ? agentKnowledgeTeamId(cfg) : null;
         const records = usageLog.readRecords({ since });
-        const result = usageQuery.buildUsageQuery(records, { scope, agentId: id, teamId, since, until, groupBy });
+        // Registered non-instance agents are never folded into another
+        // agent's figure (#2585), even when their id looks like an instance's.
+        const nonInstanceAgentIds = listAgentConfigs()
+          .filter(({ cfg: c }) => !(c && c.poolInstance))
+          .map(({ id: aid }) => aid);
+        const result = usageQuery.buildUsageQuery(records, { scope, agentId: id, teamId, since, until, groupBy, nonInstanceAgentIds });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (err) {

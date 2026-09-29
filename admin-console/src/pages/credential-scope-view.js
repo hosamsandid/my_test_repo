@@ -49,33 +49,10 @@ export function teamsById(teams) {
   return map;
 }
 
-// Human-readable scope/ownership descriptor for the table.
-//   system, assigned    → { scope:'system', label:'System', teams:[names], detail:'a, b' }
-//   system, unassigned  → { scope:'system', label:'System', teams:[], detail:'Unassigned' }
-//   team                → { scope:'team',   label:'Team',   teams:[name], detail:'name' }
-export function credentialScopeLabel(cred, names = {}) {
-  const c = normalizeCredential(cred);
-  if (c.scope === 'personal') {
-    return { scope: 'personal', label: 'Personal', teams: [], detail: 'Private to you' };
-  }
-  if (c.scope === 'system') {
-    const teamNames = c.assignedTeamIds.map(id => names[id] || id);
-    return {
-      scope: 'system',
-      label: 'System',
-      teams: teamNames,
-      detail: teamNames.length ? teamNames.join(', ') : 'Unassigned',
-    };
-  }
-  const name = names[c.teamId] || c.teamId;
-  return { scope: 'team', label: 'Team', teams: [name], detail: name };
-}
-
-// The consolidated "Ownership" table descriptor (#2360, under AEE_RESOURCE_ACCESS_V2)
-// — the credential twin of provider-ownership-view's `providerScopeLabel`. It renders
-// the SAME taxonomy the create/edit dialog shows so the row and the dialog can never
-// disagree. Unlike the legacy `credentialScopeLabel` column it folds in the identity
-// axis (a personal credential is `human` → "Personal"; an explicit private service
+// The "Ownership" table descriptor (#2360) — the credential twin of
+// provider-ownership-view's `providerScopeLabel`. It renders the SAME taxonomy the
+// create/edit dialog shows so the row and the dialog can never disagree. It folds
+// in the identity axis (a personal credential is `human` → "Personal"; an explicit private service
 // credential → "Personal" + a "Service credential" note) and it honours a global
 // service credential. `detail` is '' when it would merely repeat the pill
 // (personal-human, global), mirroring `providerScopeShowsDetail` (#2405). Pure —
@@ -95,31 +72,23 @@ export function credentialOwnershipLabel(cred, names = {}) {
   return { scope: 'team', label: 'Team', detail: name };
 }
 
-// Which scopes may the caller create? System Admins may create both; a Team
-// Admin may only create team-scoped credentials.
-export function creatableScopes({ isSysAdmin }) {
-  return isSysAdmin ? ['system', 'team'] : ['team'];
-}
-
-// The initial ownership state for the create form, given the caller's role and
-// the teams they administer. Under AEE_RESOURCE_ACCESS_V2 (`v2`) the state also
-// carries the `identity` stamp — a create form defaults to a team `service`
-// credential, matching the default `team` scope (a `human` secret is
-// Personal-only). Off the flag the shape is byte-identical to before.
-export function defaultOwnership({ isSysAdmin, adminTeamIds = [], v2 = false } = {}) {
-  // Under v2 the SSH/GitHub-token pages are open to EVERY authenticated user
-  // (#2360 consolidation): a caller who administers no team and is not a System
-  // Admin can only ever create a PERSONAL credential, so default them straight to
-  // a personal/human one — the form opens ready instead of on a team picker they
-  // can't fill. Off the flag this branch is unreachable (the pages stay
-  // admin-gated) and the returned shape is byte-identical to before.
-  if (v2 && !isSysAdmin && adminTeamIds.length === 0) {
+// The initial ownership state for the credential create form, given the
+// caller's role and the teams they administer. The state carries the `identity`
+// stamp — a create form defaults to a team `service` credential, matching the
+// default `team` scope (a `human` secret is Personal-only).
+export function defaultOwnership({ isSysAdmin, adminTeamIds = [] } = {}) {
+  // The SSH/GitHub-token pages are open to EVERY authenticated user (#2360
+  // consolidation): a caller who administers no team and is not a System Admin
+  // can only ever create a PERSONAL credential, so default them straight to a
+  // personal/human one — the form opens ready instead of on a team picker they
+  // can't fill.
+  if (!isSysAdmin && adminTeamIds.length === 0) {
     return { scope: 'personal', teamId: null, assignedTeamIds: [], identity: IDENTITY_HUMAN };
   }
   const base = isSysAdmin
     ? { scope: 'team', teamId: DEFAULT_TEAM_ID, assignedTeamIds: [] }
     : { scope: 'team', teamId: adminTeamIds[0] || '', assignedTeamIds: [] };
-  return v2 ? { ...base, identity: IDENTITY_SERVICE } : base;
+  return { ...base, identity: IDENTITY_SERVICE };
 }
 
 // The initial ownership state for an EDIT form: the record's own tier, made
@@ -131,30 +100,32 @@ export function defaultOwnership({ isSysAdmin, adminTeamIds = [], v2 = false } =
 //
 // Falls back to `defaultOwnership` when there is no record (the create case), so
 // one call site serves both modes.
-export function ownershipFromRecord(record, { isSysAdmin, adminTeamIds = [], v2 = false, kind } = {}) {
-  if (!record || typeof record !== 'object') return defaultOwnership({ isSysAdmin, adminTeamIds, v2 });
+//
+// `kind` names a secret-bearing record (`'credential'` / `'provider'`): its edit
+// form opens on the record's stamped identity (falling back to the per-kind
+// inference for a legacy record) — immutable, so the control shows it read-only,
+// but the state still needs to carry it for the payload. An environment / MCP
+// server has no identity axis, so its callers pass no `kind` and get the bare
+// tier triple.
+export function ownershipFromRecord(record, { isSysAdmin, adminTeamIds = [], kind } = {}) {
+  if (!record || typeof record !== 'object') return defaultOwnership({ isSysAdmin, adminTeamIds });
   const c = normalizeCredential(record);
-  // Under v2 the edit form opens on the record's stamped identity (falling back
-  // to the per-kind inference for a legacy record) — immutable, so the control
-  // shows it read-only, but the state still needs to carry it for the payload.
-  const withIdentity = (own) => (v2 ? { ...own, identity: defaultIdentity(kind, record) } : own);
+  const withIdentity = (own) => (kind ? { ...own, identity: defaultIdentity(kind, record) } : own);
   if (c.scope === 'system') return withIdentity({ scope: 'system', teamId: '', assignedTeamIds: [...c.assignedTeamIds] });
   if (c.scope === 'personal') return withIdentity({ scope: 'personal', teamId: '', assignedTeamIds: [], userId: c.userId });
   return withIdentity({ scope: 'team', teamId: c.teamId || '', assignedTeamIds: [] });
 }
 
 // Reduce an ownership state to the minimal API payload for a create/patch body.
-// Under AEE_RESOURCE_ACCESS_V2 (`v2`) the payload also carries `identity` (the
-// server honours it only where legal — a personal credential marked `service`),
-// and a `personal` scope round-trips as its own tier (the owner is filled from
-// the session server-side). Off the flag the payload is byte-identical to before.
-export function ownershipPayload(own, { v2 = false } = {}) {
+// A state that carries `identity` (a credential form) sends it (the server
+// honours it only where legal — a personal credential marked `service`); an
+// environment / MCP-server state has none, so none is sent. A `personal` scope
+// round-trips as its own tier (the owner is filled from the session server-side).
+export function ownershipPayload(own) {
   const o = own || {};
-  const identity = (v2 && (o.identity === IDENTITY_HUMAN || o.identity === IDENTITY_SERVICE))
+  const identity = (o.identity === IDENTITY_HUMAN || o.identity === IDENTITY_SERVICE)
     ? { identity: o.identity } : {};
   if (o.scope === 'personal') {
-    // Only meaningful under v2 (the create forms offer personal only then); off
-    // the flag this branch is unreachable from the legacy scope-tabs.
     return { scope: 'personal', ...identity };
   }
   if (o.scope === 'system') {

@@ -5,7 +5,7 @@
 // (membership-sweep.test.js, credential-resolution.test.js); what neither can
 // see is whether orchestrator.js actually (a) deletes personal MODEL PROVIDERS
 // on offboarding (E2), (b) reconciles orphaned personal providers, and (c) runs
-// the membership-removal binding sweep — gated behind the flag — on removal
+// the membership-removal binding sweep on removal
 // (E1). orchestrator.js boots HTTP listeners on require, so it cannot be
 // imported; this reads its source (the acting-sender-wiring.test.js technique).
 
@@ -53,9 +53,9 @@ test('reconcileOrphanedOffboardings includes the provider index in detection and
   assert.match(body, /\[llmEndpoints, 'model-provider'\]/);
 });
 
-// ── E1: membership-removal binding sweep, gated ─────────────────────────────
+// ── E1: membership-removal binding sweep ────────────────────────────────────
 
-test('the memberships DELETE arm runs the sweep ONLY behind AEE_RESOURCE_ACCESS_V2, best-effort', () => {
+test('the memberships DELETE arm runs the sweep, best-effort', () => {
   // maxSpan bumped 2200 → 2500 for #2360: the personal-oauth lend-block guard
   // (`personalOauthLendBlockOnMembershipAdd`) added to the sibling POST arm grew
   // this whole-route region to 2383 chars. The growth is legitimate and lives in
@@ -64,9 +64,9 @@ test('the memberships DELETE arm runs the sweep ONLY behind AEE_RESOURCE_ACCESS_
   const body = region("if (collection === 'memberships' && !resourceId)", 'sendJson(res, 404', 2500);
   // The removal happens first and unconditionally…
   assert.match(body, /const removed = teamsStore\.removeMembership\(/);
-  // …then the sweep, gated by the flag AND the live singleton, in a try/catch so
+  // …then the sweep, gated by the live singleton, in a try/catch so
   // a sweep failure never fails the (already-succeeded) removal.
-  assert.match(body, /if \(RESOURCE_ACCESS_V2 && orchestratorSingleton\) \{/);
+  assert.match(body, /if \(orchestratorSingleton\) \{/);
   assert.match(body, /sweep = await orchestratorSingleton\.sweepMembershipBindings\(memberTeamId, memberUserId\);/);
   assert.match(body, /\.\.\.\(sweep \? \{ sweep \} : \{\}\)/, 'the sweep summary rides along in the response when it ran');
 });

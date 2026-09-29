@@ -26,6 +26,7 @@
 
 const {
   pollerSubscribes,
+  listensTo,
   labelFilterMatches,
   effectiveHorizon,
   passesHorizon,
@@ -85,7 +86,7 @@ function triggerAccepts(trigger, { eventKey, ghEvent, repo, triggersMtime }) {
   // its plan is keyed on `t.repo` (`_buildPollPlan`), so the repo binding is
   // structural there and has to be an explicit gate here.
   if (repo && trigger.repo !== repo) return { ok: false, reason: 'repo-mismatch' };
-  if (!eventKey || !trigger.events.includes(eventKey)) {
+  if (!eventKey || !listensTo(trigger.events, eventKey)) {
     return { ok: false, reason: 'event-not-subscribed' };
   }
   if (!passesHorizon(ghEvent && ghEvent.created_at, effectiveHorizon(trigger, triggersMtime), GRACE_MS)) {

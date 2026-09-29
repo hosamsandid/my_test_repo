@@ -32,7 +32,6 @@ test('providerReadVisible exists and unions the caller\'s MEMBER teams on top of
   assert.ok(start > 0, 'providerReadVisible must be declared in api.js');
   const body = SRC.slice(start, SRC.indexOf('\nfunction ', start + 1));
   assert.match(body, /if \(providerVisible\(scope, ep\)\) return true;/, 'must build ON TOP of providerVisible');
-  assert.match(body, /RESOURCE_ACCESS_V2/, 'the widening must be gated behind the flag');
   assert.match(body, /scope\.teamIds/, 'must key on the caller\'s member team set');
   assert.match(body, /ep\.teamIds|ep\.teamId/, 'must match a team provider\'s team set');
   assert.match(body, /ep\.assignedTeamIds/, 'must match a legacy system provider\'s assigned teams');

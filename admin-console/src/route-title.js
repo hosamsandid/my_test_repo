@@ -28,7 +28,6 @@ export const ROUTE_TITLES = {
   '/models': 'Model Providers',
   '/ssh-keys': 'SSH Keys',
   '/github-tokens': 'GitHub Tokens',
-  '/my-credentials': 'My Credentials',
   '/mcp': 'MCP Servers',
   // No `/environments`: #2170 retired the page and made the route a redirect.
   '/environment-templates': 'Environment Templates',

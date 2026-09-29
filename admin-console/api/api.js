@@ -70,7 +70,6 @@ const { isTemplateEnvironment, resolveTemplateFlag, copyEnvironmentStructure } =
 const { validateCloneSource, describeClonedCredentialNeeds } = require('./team-clone');
 const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
 const { resolvePoolsEnabled, poolsModeLogLine } = require('./pools-mode');
-const { resolveResourceAccessV2, resourceAccessModeLogLine } = require('./resource-access-mode');
 // One-time migration of legacy records onto the unified model (#2359). Pure
 // classifier; the routes below supply the store reads/writes + the gate.
 const resourceMigration = require('./resource-migration');
@@ -291,11 +290,6 @@ const AUTH_ENABLED = resolveAuthEnabled(process.env);
 // the mechanism still needs teardown/reaping polish, so an upgraded stack
 // keeps the UI visible-but-disabled until an operator opts in explicitly.
 const POOLS_ENABLED = resolvePoolsEnabled(process.env);
-// Unified resource-access model switch (#2356, concept #2349). Off by default —
-// the redesign (PR4–PR7) lands "dark" behind this flag so an upgraded stack
-// keeps today's scoping/visibility/runtime resolution until an operator opts in
-// explicitly. See resource-access-mode.js.
-const RESOURCE_ACCESS_V2 = resolveResourceAccessV2(process.env);
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 
@@ -1176,13 +1170,12 @@ function applyCredentialPatch({ res, cred, scope, body, inUse, label }) {
       const env = loadEnvironment(inUse);
       const envTeam = (env && env.teamId) || 'default';
       const candidate = { ...cred, scope: next.scope, teamId: next.teamId, assignedTeamIds: next.assignedTeamIds };
-      // A GLOBAL SERVICE credential (#2357, behind AEE_RESOURCE_ACCESS_V2) is
-      // reachable by every team, so reassigning INTO global can never orphan a
-      // referencing environment — widen the guard to admit it, mirroring the
-      // global-provider composition at the provider call sites (never in the
-      // generic predicate). Legacy behaviour unchanged while the flag is off.
+      // A GLOBAL SERVICE credential (#2357) is reachable by every team, so
+      // reassigning INTO global can never orphan a referencing environment —
+      // widen the guard to admit it, mirroring the global-provider composition
+      // at the provider call sites (never in the generic predicate).
       if (!credentialVisibleToTeam(candidate, envTeam)
-          && !(RESOURCE_ACCESS_V2 && isGlobalCredential(candidate))) {
+          && !isGlobalCredential(candidate)) {
         res.status(409).json({
           error: `${label} is used by environment '${inUse}' (team '${envTeam}'); reassignment would orphan it. Detach it first.`,
         });
@@ -2157,14 +2150,6 @@ app.post('/api/maintenance-mode/deactivate', (req, res) => {
 // Soon" treatment of the Scaling controls.
 app.get('/api/pools-mode', (req, res) => {
   res.json({ enabled: POOLS_ENABLED });
-});
-
-/* ─── Unified resource-access feature flag (#2356) ───────────────────── */
-// Read once at boot from AEE_RESOURCE_ACCESS_V2; the SPA fetches this once to
-// decide whether to render the redesigned identity/scope credential surfaces
-// (PR7) or the current tier controls. Off by default — the redesign lands dark.
-app.get('/api/resource-access-mode', (req, res) => {
-  res.json({ enabled: RESOURCE_ACCESS_V2 });
 });
 
 /* ─── Client error telemetry (#1974) ────────────────────────────────── */
@@ -5379,8 +5364,7 @@ const requireAgentManage = createAgentManageGate({
 function providerVisible(scope, ep) {
   return isGlobalProvider(ep) || visibleCredential(scope, ep);
 }
-// READ visibility for the Model Providers LIST + single read GET (#2360, behind
-// AEE_RESOURCE_ACCESS_V2). The page is opened to every authenticated user, so a
+// READ visibility for the Model Providers LIST + single read GET (#2360). The page is opened to every authenticated user, so a
 // caller must see the providers they can actually USE — on top of `providerVisible`
 // (global + own personal + team/system they ADMINISTER), also the team/system
 // providers of teams they are a MEMBER of (their agents run on these), READ-ONLY.
@@ -5389,10 +5373,10 @@ function providerVisible(scope, ep) {
 // (`maskLlmEndpointForCaller` keys the token mask on `visibleCredential`, not on
 // this), and the client renders a non-manageable row read-only (a lock, no
 // edit/delete — `canManageProviderClient`). The mutating/action routes stay on
-// `providerVisible` (manage). Off the flag this IS `providerVisible`.
+// `providerVisible` (manage).
 function providerReadVisible(scope, ep) {
   if (providerVisible(scope, ep)) return true;
-  if (!RESOURCE_ACCESS_V2 || !scope || !ep) return false;
+  if (!scope || !ep) return false;
   const member = scope.teamIds; // Set of the caller's member team ids (squad ids)
   if (!member || member.size === 0) return false;
   const inMember = (id) => member.has(String(id));
@@ -5409,7 +5393,7 @@ function providerReadVisible(scope, ep) {
 }
 function providerUsableByTeam(ep, teamId, agentTeamId) {
   if (isGlobalProvider(ep) || credentialVisibleToTeam(ep, teamId)) return true;
-  // Unified resource access model (§7/§8, #2357) — behind AEE_RESOURCE_ACCESS_V2.
+  // Unified resource access model (§7/§8, #2357).
   // A team may also consume a member's PERSONAL provider as a live LEND (personal
   // api-key gateway, or a subscription seat) while that member belongs to the
   // team. This is the third arm of "usable by team T", and it is what fixes the
@@ -5417,7 +5401,6 @@ function providerUsableByTeam(ep, teamId, agentTeamId) {
   // (this set, via usableEndpointsForTeam) and the team-settings default dropdown
   // (PR7, same set) now compute the identical selectable set, so a provider the
   // team's agents already run on can no longer be missing as the team default.
-  // Dark until the operator opts in; legacy behaviour is byte-identical otherwise.
   //
   // The lend's membership check is keyed on the AGENT TEAM (squad) id
   // (`resolveAgentTeam`), NOT `teamId` — which is the vestigial credential-axis
@@ -5427,7 +5410,7 @@ function providerUsableByTeam(ep, teamId, agentTeamId) {
   // tenant space would silently never match. `credentialVisibleToTeam` above
   // keeps using `teamId` — that is how legacy team-scoped providers are stamped,
   // unchanged.
-  if (!RESOURCE_ACCESS_V2 || !agentTeamId) return false;
+  if (!agentTeamId) return false;
   // #2360 re-key + multi-team: a TEAM-scoped provider belongs to a SET of AGENT
   // teams (`teamIds`, falling back to the legacy single `teamId`) and is usable
   // by any agent in any of them — this is what makes "Team = the Agent Team(s)"
@@ -5468,10 +5451,10 @@ function providerTeamSet(ep) {
 // Co-owned management (#2360, decision A): a team provider is manageable by the
 // admin of ANY team in its set (or a System Admin) — so a cloned team's admin can
 // manage a provider shared with them too. Non-team providers defer to
-// canManageCredential. Gated by the flag; off it, legacy (primary-only) behaviour.
+// canManageCredential.
 function canManageProvider(scope, ep) {
   if (scope && scope.all) return true;
-  if (RESOURCE_ACCESS_V2 && ep && ep.scope === 'team') {
+  if (ep && ep.scope === 'team') {
     return providerTeamSet(ep).some(t => canManageTeam(scope, t));
   }
   return canManageCredential(scope, ep);
@@ -5482,10 +5465,10 @@ function canManageProvider(scope, ep) {
 // the team can actually use it — the whole point of "a clone keeps a working
 // provider without duplicating it". Best-effort + idempotent + dangling-safe: a
 // stale team id (team creation later fails) simply never matches at consumption,
-// so it is harmless; a failure here never blocks team creation. Gated by the
-// flag; global/personal providers are left untouched (global already serves all).
+// so it is harmless; a failure here never blocks team creation. Global/personal
+// providers are left untouched (global already serves all).
 function ensureTeamOnEnvProvider(env, teamAgentId) {
-  if (!RESOURCE_ACCESS_V2 || !env || !env.llmEndpointId || !teamAgentId) return;
+  if (!env || !env.llmEndpointId || !teamAgentId) return;
   try {
     const list = listLlmEndpoints();
     const ep = list.find(e => e.id === env.llmEndpointId);
@@ -5589,7 +5572,7 @@ app.get('/api/agents/:id/model-options', (req, res) => {
   // 'block' = a subscription seat that shouldn't back a multi-user team (a legacy
   // state — new ones are refused at membership-add). null otherwise. UX only —
   // never gates the run. `resolveAgentTeam(cfg)` is the squad id the lend is keyed on.
-  const providerRisk = (RESOURCE_ACCESS_V2 && endpoint)
+  const providerRisk = endpoint
     ? personalDefaultTransitionRisk({ provider: endpoint, humanMemberCount: teamHumanMemberCount(resolveAgentTeam(cfg)) })
     : null;
   res.json({
@@ -12860,7 +12843,7 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
   // onto the entry for team scope.
   let providerTeamIds = null;
   const wantGlobalBody = req.body?.global === true;
-  if (RESOURCE_ACCESS_V2 && !wantGlobalBody && req.body?.scope === 'team') {
+  if (!wantGlobalBody && req.body?.scope === 'team') {
     const setRes = resolveProviderTeamSet(scope, req.body, req.body.teamId);
     if (setRes.error) return res.status(setRes.status || 400).json({ error: setRes.error, ...(setRes.code ? { code: setRes.code } : {}) });
     ownership = { scope: 'team', teamId: setRes.teamIds[0], assignedTeamIds: [] };
@@ -12877,14 +12860,10 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
   const globalGate = resolveGlobalFlag({ wantGlobal: req.body?.global, currentGlobal: false, scopeAll: scope.all, isOauth, hasSingleUserAck: complianceAck === true });
   if (globalGate.error) return res.status(globalGate.status).json({ error: globalGate.error, code: globalGate.code });
   if (globalGate.global) { ownership = { scope: 'system', teamId: null, assignedTeamIds: [] }; providerTeamIds = null; }
-  // #2360 (behind AEE_RESOURCE_ACCESS_V2): a subscription (oauth) provider acts
-  // as ONE person, so it must be Personal, or Global via the single-user escape
-  // hatch — NEVER team-shared (concept §5 / E9: lending one seat to a team would
-  // silently share it). This was deferred from PR2 #2353 because refusing
-  // team/system oauth before the form offered personal/global would have broken
-  // the subscription-create flow; PR7 offers those, so the rule is enforced now.
-  // Off the flag, the legacy flow is unchanged.
-  if (RESOURCE_ACCESS_V2 && isOauth && !globalGate.global && ownership.scope !== 'personal') {
+  // #2360: a subscription (oauth) provider acts as ONE person, so it must be
+  // Personal, or Global via the single-user escape hatch — NEVER team-shared
+  // (concept §5 / E9: lending one seat to a team would silently share it).
+  if (isOauth && !globalGate.global && ownership.scope !== 'personal') {
     return res.status(400).json({
       error: 'A subscription (oauth) provider must be personal or global, never team-shared.',
       code: 'oauth-not-team',
@@ -12995,64 +12974,36 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   let ownership = { scope: cur.scope, teamId: cur.teamId, assignedTeamIds: cur.assignedTeamIds };
   let nextTeamIds = Array.isArray(current.teamIds) ? current.teamIds.map(String) : undefined;
 
-  if (RESOURCE_ACCESS_V2) {
-    // New model: the desired TIER (personal / team / global) from the ownership
-    // payload. Changing the tier stays System-Admin-only (canReassignCredential);
-    // but editing a team provider's SET while STAYING team-scoped is co-owned
-    // self-service (the manage gate above already authorised the caller).
-    const currentTier = current.global === true ? 'global' : (cur.scope === 'personal' ? 'personal' : 'team');
-    const desiredTier = (b.global === true) ? 'global'
-      : (b.scope === 'personal') ? 'personal'
-      : ('scope' in b ? 'team' : currentTier);
-    if (desiredTier !== currentTier && !canReassignCredential(scope)) {
-      return res.status(403).json({ error: "forbidden: only a System Admin may change a provider's ownership tier", code: 'forbidden' });
-    }
-    if (desiredTier === 'personal') {
-      // #2358/#2360 (bug): a personal provider MUST carry its owner's userId, or
-      // it matches nobody in the owner-only visibility filter — it vanishes from
-      // the list AND becomes unmanageable (personal has no admin bypass). This
-      // branch built the ownership object by hand and dropped the owner, so
-      // `next.userId` below fell back through `ownership.userId (undefined) ||
-      // current.userId (null for a former team/global provider) || null` to null.
-      // Resolve it the same way the create path does: stamp the acting caller,
-      // reject a foreign owner, and validate the user exists.
-      try { ownership = resolveCredentialOwnership({ scope: 'personal', userId: b.userId }, scope.userId); }
-      catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
-      nextTeamIds = undefined;
-    }
-    else if (desiredTier === 'global') { ownership = { scope: 'system', teamId: null, assignedTeamIds: [] }; nextTeamIds = undefined; }
-    else {
-      const setRes = resolveProviderTeamSet(scope, b, b.teamId || cur.teamId);
-      if (setRes.error) return res.status(setRes.status || 400).json({ error: setRes.error, ...(setRes.code ? { code: setRes.code } : {}) });
-      ownership = { scope: 'team', teamId: setRes.teamIds[0], assignedTeamIds: [] };
-      nextTeamIds = setRes.teamIds;
-    }
-  } else {
-    // Legacy (flag off): any ownership field is an admin-only reassign, unchanged.
-    const reassigning = ('scope' in b) || ('teamId' in b) || ('assignedTeamIds' in b);
-    if (reassigning) {
-      if (!canReassignCredential(scope)) {
-        return res.status(403).json({ error: 'forbidden: only a System Admin may reassign a provider', code: 'forbidden' });
-      }
-      try {
-        ownership = resolveCredentialOwnership({
-          scope: 'scope' in b ? b.scope : cur.scope,
-          teamId: b.teamId,
-          assignedTeamIds: b.assignedTeamIds,
-        });
-      } catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
-      const inUse = llmEndpointInUse(current.id);
-      if (inUse) {
-        const env = loadEnvironment(inUse);
-        const envTeam = (env && env.teamId) || 'default';
-        const candidate = { ...current, scope: ownership.scope, teamId: ownership.teamId, assignedTeamIds: ownership.assignedTeamIds };
-        if (!providerUsableByTeam(candidate, envTeam)) {
-          return res.status(409).json({
-            error: `Provider is used by environment '${inUse}' (team '${envTeam}'); reassignment would orphan it. Detach it first.`,
-          });
-        }
-      }
-    }
+  // New model: the desired TIER (personal / team / global) from the ownership
+  // payload. Changing the tier stays System-Admin-only (canReassignCredential);
+  // but editing a team provider's SET while STAYING team-scoped is co-owned
+  // self-service (the manage gate above already authorised the caller).
+  const currentTier = current.global === true ? 'global' : (cur.scope === 'personal' ? 'personal' : 'team');
+  const desiredTier = (b.global === true) ? 'global'
+    : (b.scope === 'personal') ? 'personal'
+    : ('scope' in b ? 'team' : currentTier);
+  if (desiredTier !== currentTier && !canReassignCredential(scope)) {
+    return res.status(403).json({ error: "forbidden: only a System Admin may change a provider's ownership tier", code: 'forbidden' });
+  }
+  if (desiredTier === 'personal') {
+    // #2358/#2360 (bug): a personal provider MUST carry its owner's userId, or
+    // it matches nobody in the owner-only visibility filter — it vanishes from
+    // the list AND becomes unmanageable (personal has no admin bypass). This
+    // branch built the ownership object by hand and dropped the owner, so
+    // `next.userId` below fell back through `ownership.userId (undefined) ||
+    // current.userId (null for a former team/global provider) || null` to null.
+    // Resolve it the same way the create path does: stamp the acting caller,
+    // reject a foreign owner, and validate the user exists.
+    try { ownership = resolveCredentialOwnership({ scope: 'personal', userId: b.userId }, scope.userId); }
+    catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+    nextTeamIds = undefined;
+  }
+  else if (desiredTier === 'global') { ownership = { scope: 'system', teamId: null, assignedTeamIds: [] }; nextTeamIds = undefined; }
+  else {
+    const setRes = resolveProviderTeamSet(scope, b, b.teamId || cur.teamId);
+    if (setRes.error) return res.status(setRes.status || 400).json({ error: setRes.error, ...(setRes.code ? { code: setRes.code } : {}) });
+    ownership = { scope: 'team', teamId: setRes.teamIds[0], assignedTeamIds: [] };
+    nextTeamIds = setRes.teamIds;
   }
 
   // The effective auth type after this update. Switching to subscription auth
@@ -13100,7 +13051,7 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   // #2360: same oauth rule as the create path — a subscription provider must be
   // personal or global, never team-shared. Applies to the EFFECTIVE auth type
   // after this update, so switching an existing team provider to oauth is caught.
-  if (RESOURCE_ACCESS_V2 && isOauth && !globalGate.global && ownership.scope !== 'personal') {
+  if (isOauth && !globalGate.global && ownership.scope !== 'personal') {
     return res.status(400).json({
       error: 'A subscription (oauth) provider must be personal or global, never team-shared.',
       code: 'oauth-not-team',
@@ -13257,17 +13208,13 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
 
 // ── Unified-access migration (#2359): dry-run report + admin-confirmed apply ──
 //
-// System-Admin-only and gated by AEE_RESOURCE_ACCESS_V2 (the redesign lands
-// dark). The report is READ-ONLY — it enumerates every legacy record still on
+// System-Admin-only. The report is READ-ONLY — it enumerates every legacy record still on
 // the removed `system`+assignedTeamIds axis or lacking an `identity`, with an
 // auto-suggested identity + tier. NOTHING changes until an admin POSTs a
 // per-record decision (decision §12.8), and `identity` is immutable once set
 // (§12.5, enforced in resource-migration.js). An un-migrated record keeps
 // resolving through the existing read-compat path meanwhile.
 app.get('/api/resource-migration', (req, res) => {
-  if (!RESOURCE_ACCESS_V2) {
-    return res.status(404).json({ error: 'not found', code: 'resource-access-v2-disabled' });
-  }
   const scope = getScope(req);
   if (!scope.all) return res.status(403).json({ error: 'forbidden: the resource migration is System-Admin-only', code: 'forbidden' });
   res.json(resourceMigration.planResourceMigration({
@@ -13278,9 +13225,6 @@ app.get('/api/resource-migration', (req, res) => {
 });
 
 app.post('/api/resource-migration/apply', apiLimiter, (req, res) => {
-  if (!RESOURCE_ACCESS_V2) {
-    return res.status(404).json({ error: 'not found', code: 'resource-access-v2-disabled' });
-  }
   const scope = getScope(req);
   if (!scope.all) return res.status(403).json({ error: 'forbidden: the resource migration is System-Admin-only', code: 'forbidden' });
   const decisions = Array.isArray(req.body && req.body.decisions) ? req.body.decisions : null;
@@ -13325,13 +13269,10 @@ app.post('/api/resource-migration/apply', apiLimiter, (req, res) => {
 // (canDeleteCredential, PR3) but never see-secret / use. This lists every
 // personal resource MASKED (name, owner, created, fingerprint/authType — never
 // the secret) so the admin can decide to delete one via the existing per-kind
-// DELETE routes (which already gate on canDeleteCredential). System-Admin-only,
-// behind the flag. Read-only + secret-free — no discovery of a secret, only of
+// DELETE routes (which already gate on canDeleteCredential). System-Admin-only.
+// Read-only + secret-free — no discovery of a secret, only of
 // its existence, exactly what §6 allows.
 app.get('/api/admin/personal-resources', (req, res) => {
-  if (!RESOURCE_ACCESS_V2) {
-    return res.status(404).json({ error: 'not found', code: 'resource-access-v2-disabled' });
-  }
   const scope = getScope(req);
   if (!scope.all) return res.status(403).json({ error: 'forbidden: the governance Resources view is System-Admin-only', code: 'forbidden' });
   res.json({
@@ -13476,10 +13417,23 @@ function llmProbeTarget(baseUrl, token, authType) {
 // of declaring the whole provider broken. See llm-probe-fallback.js for the
 // (unit-tested, pure) response classification.
 async function probeMessagesFallback(baseUrl, headers, system = null, opts = {}) {
-  const url = buildCountTokensUrl(baseUrl);
+  // Route choice: the api-key Azure fallback (#2306) uses the free count_tokens
+  // route. Subscription-OAuth (#2448) MUST use the real /v1/messages route —
+  // Anthropic accepts JWT/OAuth bearer tokens there but rejects them on
+  // count_tokens with "401 jwt auth is not yet supported on count_tokens",
+  // which the classifier would otherwise mis-read as a rejected token. The
+  // messages route stays free here because the intentionally-invalid placeholder
+  // model 404s during model resolution — after auth is validated, before any
+  // inference — so no tokens are ever billed (a 404 not_found_error is treated
+  // as auth-OK by classifyMessagesFallback under { oauth: true }).
+  const useMessages = Boolean(opts.messagesRoute);
+  const url = useMessages ? buildMessagesUrl(baseUrl) : buildCountTokensUrl(baseUrl);
   const payload = {
     model: PROBE_PLACEHOLDER_MODEL,
     messages: [{ role: 'user', content: 'ping' }],
+    // /v1/messages requires max_tokens; count_tokens rejects it. Kept tiny — the
+    // placeholder model 404s before generation, so the value is never exercised.
+    ...(useMessages ? { max_tokens: 1 } : {}),
     // Subscription-OAuth probes present the Claude Code identity so they
     // authenticate exactly like real CLI traffic (#2448); the api-key Azure
     // fallback (#2306) passes no system and its payload is unchanged.
@@ -13505,7 +13459,7 @@ async function probeLlmEndpointTest(baseUrl, token, authType) {
   // count_tokens messages route the OAuth flow actually authenticates.
   if (isOauthAuthType(normalizeAuthType(authType))) {
     const headers = token ? oauthProbeHeaders(token) : {};
-    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true });
+    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true, messagesRoute: true });
     return {
       ok: fallback.ok,
       url: fallback.url,
@@ -13553,7 +13507,7 @@ async function probeLlmEndpointDiscover(baseUrl, token, authType) {
     // treated as auth-OK regardless of body shape — otherwise Discover could
     // report "check the Base URL" while Test reports success for the same valid
     // provider (and the Base URL isn't even operator-editable for OAuth).
-    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true });
+    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true, messagesRoute: true });
     return oauthDiscoverResult(fallback);
   }
   const { url, headers } = llmProbeTarget(baseUrl, token, authType);
@@ -16175,20 +16129,20 @@ function providerUsableAtCreation(ep, { creatorUserId, teamId } = {}) {
 // default model (or, as a backstop, the first entry in its catalogue) becomes
 // the env-level default. The user can change either later.
 //
-// §14 / E10 follow-up (behind AEE_RESOURCE_ACCESS_V2): a blind `endpoints[0]`
+// §14 / E10 follow-up: a blind `endpoints[0]`
 // could bind a provider the creator/team cannot actually use — a FOREIGN personal
 // provider (whose token the team would then silently run on: the orchestrator has
 // no runtime lend-gate), or a stranger's subscription. When a preference context
 // is supplied, prefer — in registry order, so an operator's intended ordering
 // still wins among usable ones — the first endpoint USABLE by the creator at
 // creation (`providerUsableAtCreation`), and only fall back to `endpoints[0]` when
-// none is usable (never make creation worse than today). Flag OFF, or no context,
-// is byte-identical to the legacy blind pick.
+// none is usable (never make creation worse than today). No context is the
+// legacy blind pick.
 function pickDefaultLlmBinding(pref) {
   const endpoints = listLlmEndpoints();
   if (endpoints.length === 0) return { llmEndpointId: null, defaultModelId: null };
   let ep = endpoints[0];
-  if (RESOURCE_ACCESS_V2 && pref && pref.creatorUserId) {
+  if (pref && pref.creatorUserId) {
     const usable = endpoints.find(e => providerUsableAtCreation(e, pref));
     if (usable) ep = usable;
     else console.warn(`[api] no model provider is usable by the creator of '${pref.teamId || 'agent'}' — falling back to the first registered endpoint`);
@@ -17962,10 +17916,9 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     assignedTeamIds: ownership.assignedTeamIds,
     ...(ownership.userId ? { userId: ownership.userId } : {}),
     // Identity class (unified access model §2): a personal key is one person's
-    // identity (human); a team/system key is a shared service credential. Behind
-    // AEE_RESOURCE_ACCESS_V2 the client may mark a personal key `service` (a
-    // private bot key) — resolveStampedIdentity enforces the legal combos (#2360).
-    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity, v2: RESOURCE_ACCESS_V2 }),
+    // identity (human); a team/system key is a shared service credential. The
+    // client may mark a personal key `service` (a private bot key) — resolveStampedIdentity enforces the legal combos (#2360).
+    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity }),
     fingerprint: sshKeyFingerprint(trimmed),
     createdAt: new Date().toISOString(),
   };
@@ -18022,8 +17975,8 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
     assignedTeamIds: ownership.assignedTeamIds,
     ...(ownership.userId ? { userId: ownership.userId } : {}),
     // Identity class (unified access model §2): personal → human, else service;
-    // behind AEE_RESOURCE_ACCESS_V2 a personal key may be marked service (#2360).
-    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity, v2: RESOURCE_ACCESS_V2 }),
+    // a personal key may be marked service (#2360).
+    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity }),
     fingerprint: sshFingerprintFromPubBlob(pubBlob),
     createdAt: new Date().toISOString(),
   };
@@ -18190,9 +18143,8 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
     ...(ownership.userId ? { userId: ownership.userId } : {}),
     // Identity class (unified access model §2): a personal token is one person's
     // identity (human); a team/system token is a shared service credential (e.g. a
-    // machine-user PAT). Behind AEE_RESOURCE_ACCESS_V2 the client may mark a
-    // personal token `service` (a private bot PAT) — legal combos enforced (#2360).
-    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity, v2: RESOURCE_ACCESS_V2 }),
+    // machine-user PAT). The client may mark a personal token `service` (a private bot PAT) — legal combos enforced (#2360).
+    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity }),
     preview: githubTokenPreview(trimmed),
     fingerprint: githubTokenFingerprint(trimmed),
     createdAt: new Date().toISOString(),
@@ -21374,7 +21326,6 @@ app.listen(4000, '0.0.0.0', () => {
   // visibility while the flag is off.
   console.log(`[Admin] ${authModeLogLine(process.env)}`);
   console.log(`[Admin] ${poolsModeLogLine(process.env)}`);
-  console.log(`[Admin] ${resourceAccessModeLogLine(process.env)}`);
   try {
     const warning = singleUserElevationWarning(readJsonFile(USERS_INDEX, []), process.env);
     if (warning) console.warn(`[Admin] ${warning}`);

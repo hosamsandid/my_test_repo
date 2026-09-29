@@ -28,6 +28,7 @@
 // (queue write, marker store, event log) stays in orchestrator.js.
 
 const { eventKeyForKind, TARGET_KINDS } = require('./flow-emit');
+const { listensTo } = require('./event-key-aliases');
 
 // Validate the request body into `{ok: true, value}` or `{ok: false, error}`.
 // Shape: { repo: "owner/name", number, kind?: issue|pr (default issue), label,
@@ -74,7 +75,7 @@ function matchPollerListeners({ repo, label, kind }, agents) {
       if (!t || t.type !== 'github-event' || t.enabled === false) continue;
       if (t.transport === 'internal') continue; // poller-subscribed listeners only
       if (t.repo !== repo) continue;
-      if (!Array.isArray(t.events) || !t.events.includes(key)) continue;
+      if (!Array.isArray(t.events) || !listensTo(t.events, key)) continue;
       const filter = typeof t.labelFilter === 'string' && t.labelFilter.trim();
       if (filter && filter !== label) continue;
       out.push({ agentId: a.agentId, triggerId: t.id });

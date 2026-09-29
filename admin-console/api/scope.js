@@ -483,9 +483,7 @@ function credentialVisibleToTeam(cred, teamId) {
 // Pure: `isMemberOfTeam(userId, teamId)` is the injected membership gate (the
 // same shape credential-resolution.js's `hasMembership` takes), so this module
 // stays IO-free. Composed at the consume call sites (api.js `providerUsableByTeam`
-// and the SSH/GitHub binding pickers) ONLY behind AEE_RESOURCE_ACCESS_V2 — like
-// every other reach-widening in this redesign it stays dark until an operator
-// opts in. A non-personal credential, an ownerless one, or a missing/absent
+// and the SSH/GitHub binding pickers). A non-personal credential, an ownerless one, or a missing/absent
 // membership gate all read as "not lent" (fail closed).
 function personalLendToTeam(cred, teamId, isMemberOfTeam) {
   const c = normalizeCredential(cred);

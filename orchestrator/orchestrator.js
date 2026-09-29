@@ -94,13 +94,6 @@ const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require("./prom
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const credentialResolution = require("./credential-resolution");
-// Unified resource-access model switch (#2356, epic #2361, concept #2349).
-// Off by default: the redesign's runtime resolution (the global service
-// credential fallback below) and lifecycle sweeps (PR5) stay dark until an
-// operator opts in — an upgraded stack keeps today's behaviour byte-identical.
-// See resource-access-mode.js (byte-mirrored in admin-console/api).
-const { resolveResourceAccessV2, resourceAccessModeLogLine } = require("./resource-access-mode");
-const RESOURCE_ACCESS_V2 = resolveResourceAccessV2(process.env);
 // §14 / E10 (#2360): pure policy for a personal provider used as a team default
 // across the team-of-one → multi-user transition. Byte-mirrored in admin-console.
 const { personalDefaultTransitionRisk } = require("./provider-lend-policy");
@@ -451,7 +444,7 @@ function readLlmEndpointRecord(id) {
   }
 }
 
-// §14 / E10 (behind AEE_RESOURCE_ACCESS_V2): adding a SECOND human to a squad
+// §14 / E10: adding a SECOND human to a squad
 // whose shared model-provider default is a personal SUBSCRIPTION (oauth) seat
 // would silently share a single-user seat (E9, Anthropic Consumer Terms) — a
 // HARD refusal at the membership boundary. A personal API-KEY default is only
@@ -459,7 +452,7 @@ function readLlmEndpointRecord(id) {
 // Returns { message } to refuse, or null to proceed. Fail-open: any read error
 // (or a non-squad human team) skips the guard — it must never break a legit add.
 function personalOauthLendBlockOnMembershipAdd(teamId, newUserId) {
-  if (!RESOURCE_ACCESS_V2 || !teamId || !newUserId) return null;
+  if (!teamId || !newUserId) return null;
   try {
     const current = teamsStore.listMemberships({ teamId });
     const already = current.some(m => m && m.userId === newUserId);
@@ -6164,13 +6157,11 @@ function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) 
     sharedCredentialId: env?.githubTokenId || null,
     kind: "GitHub token",
     interactive,
-    // Unified model §8 (#2357, behind AEE_RESOURCE_ACCESS_V2): a global service
+    // Unified model §8 (#2357): a global service
     // token is the last-resort service fallback when the env has no binding.
     // Never rescues an attributed write that must 424 — it only fills a "shared"
     // slot that was already reachable.
-    globalServiceCredentialId: RESOURCE_ACCESS_V2
-      ? credentialResolution.selectGlobalServiceCredentialId(tokenIndex) : null,
-    resourceAccessV2: RESOURCE_ACCESS_V2,
+    globalServiceCredentialId: credentialResolution.selectGlobalServiceCredentialId(tokenIndex),
   });
   if (decision.refuse) {
     const e = new Error(decision.refuse.message);
@@ -6207,10 +6198,8 @@ function resolveAttributedSshKey(id, sharedSshKeyId, operation, actingSenderMatr
     kind: "SSH key",
     interactive,
     // Unified model §8 (#2357): a global service deploy key is the last-resort
-    // service fallback when the repo/env carries no key (behind the flag).
-    globalServiceCredentialId: RESOURCE_ACCESS_V2
-      ? credentialResolution.selectGlobalServiceCredentialId(keyIndex) : null,
-    resourceAccessV2: RESOURCE_ACCESS_V2,
+    // service fallback when the repo/env carries no key.
+    globalServiceCredentialId: credentialResolution.selectGlobalServiceCredentialId(keyIndex),
   });
   if (decision.refuse) {
     const e = new Error(decision.refuse.message);
@@ -6262,9 +6251,7 @@ function resolveBaselineGithubTokenId(cfg, env) {
     personalCredentialOrphaned: personal.orphaned,
     sharedCredentialId,
     kind: "GitHub token",
-    globalServiceCredentialId: RESOURCE_ACCESS_V2
-      ? credentialResolution.selectGlobalServiceCredentialId(tokenIndex) : null,
-    resourceAccessV2: RESOURCE_ACCESS_V2,
+    globalServiceCredentialId: credentialResolution.selectGlobalServiceCredentialId(tokenIndex),
   });
   return decision.credentialId || null;
 }
@@ -6291,9 +6278,7 @@ function resolveBaselineSshKeyId(cfg, sharedSshKeyId) {
     personalCredentialOrphaned: personal.orphaned,
     sharedCredentialId: sharedSshKeyId || null,
     kind: "SSH key",
-    globalServiceCredentialId: RESOURCE_ACCESS_V2
-      ? credentialResolution.selectGlobalServiceCredentialId(keyIndex) : null,
-    resourceAccessV2: RESOURCE_ACCESS_V2,
+    globalServiceCredentialId: credentialResolution.selectGlobalServiceCredentialId(keyIndex),
   });
   return decision.credentialId || null;
 }
@@ -12774,9 +12759,8 @@ class Orchestrator {
   // reset to INHERIT (env default / .env / a global service credential — never
   // "set but dead"), the affected agents respawned, and the reset logged. The
   // RESOURCE is KEPT — still theirs, still usable in their other teams; only the
-  // BINDING is thrown out. Gated by AEE_RESOURCE_ACCESS_V2 at the caller (the
-  // memberships DELETE arm) — off the flag this never runs and removal behaves
-  // exactly as today. Best-effort per item; a summary is returned for the caller.
+  // BINDING is thrown out. Called from the memberships DELETE arm. Best-effort
+  // per item; a summary is returned for the caller.
   //
   // Writing environment.json here is the one place the orchestrator writes an
   // env file (normally console-owned) — deliberate, and the same class of
@@ -14388,13 +14372,13 @@ async function handleTeamsAdminApi(req, res) {
           // team's last admin, and validated by the store.
           successorUserId: parsed.searchParams.get('successorUserId') || undefined,
         });
-        // #2358 E1 (behind AEE_RESOURCE_ACCESS_V2): the lend ends when the owner
+        // #2358 E1: the lend ends when the owner
         // leaves the team. Sweep any team binding that pointed at one of their
         // personal resources, reset it to inherit, and respawn the affected
         // agents. Best-effort — a sweep failure never fails the removal (which
         // already succeeded above); it is logged and surfaced in the response.
         let sweep = null;
-        if (RESOURCE_ACCESS_V2 && orchestratorSingleton) {
+        if (orchestratorSingleton) {
           try {
             sweep = await orchestratorSingleton.sweepMembershipBindings(memberTeamId, memberUserId);
           } catch (err) {
@@ -19579,9 +19563,6 @@ async function main() {
   internalApi.listen(4002, '0.0.0.0', () =>
     console.log('[Orchestrator] Internal API listening on :4002')
   );
-  // Surface the unified resource-access mode at boot so it is never a guess
-  // (mirrors the admin-console boot log; #2356/#2357).
-  console.log(`[Orchestrator] ${resourceAccessModeLogLine(process.env)}`);
 
   // ============================================================
   // Webhook server — receives HTTP triggers from external systems

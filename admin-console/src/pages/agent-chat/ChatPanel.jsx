@@ -1236,7 +1236,7 @@ export default function ChatPanel({
   const providerWarning = providerWarningText(modelOptions?.endpointHealth, modelOptions?.endpointName);
   // §14 / E10: a non-blocking advisory when this team runs on a member's personal
   // provider (a lend). { text, tone } or null; carried on the same model-options
-  // snapshot. Only present behind AEE_RESOURCE_ACCESS_V2 for a multi-human squad.
+  // snapshot. Only present for a multi-human squad.
   const personalNotice = personalProviderNoticeText(modelOptions?.personalProviderNotice);
 
   // #2382: the actionable context-fill nudge, derived from the SAME unified fill

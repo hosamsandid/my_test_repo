@@ -8,8 +8,8 @@ import { topicSections, sectionSlug } from '../context/page-help-view.js';
 
 // ─── #1993 (epic #1981) Credentials per-surface help guard ───────────────────
 //
-// The Credentials topic is the epic's first MULTI-ROUTE one: /ssh-keys,
-// /github-tokens and /my-credentials all resolve to the same file, and each page
+// The Credentials topic is the epic's first MULTI-ROUTE one: /ssh-keys and
+// /github-tokens both resolve to the same file, and each page
 // now deep-links its "?" to the chapter written for it. Two things can rot
 // silently and neither throws at runtime:
 //
@@ -42,7 +42,6 @@ function sourceOf(file) {
 const PAGES = [
   ['SshKeys.jsx', 'sshKeys', 'the SSH Keys page header'],
   ['GithubTokens.jsx', 'githubTokens', 'the GitHub Tokens page header'],
-  ['MyCredentials.jsx', 'myCredentials', 'the My Credentials page header'],
 ];
 
 const topicBody = readFileSync(
@@ -69,7 +68,7 @@ test('the chapter slugs are derived from the headings, not hand-written', () => 
     sectionSlug('Why both an SSH key and a GitHub token'),
     CREDENTIALS_HELP_SECTIONS.whyBoth,
   );
-  assert.equal(sectionSlug('My Credentials'), CREDENTIALS_HELP_SECTIONS.myCredentials);
+  assert.equal(sectionSlug('Personal credentials'), CREDENTIALS_HELP_SECTIONS.personalCredentials);
   assert.equal(
     sectionSlug('Rotation and runtime resolution'),
     CREDENTIALS_HELP_SECTIONS.rotation,
@@ -78,7 +77,7 @@ test('the chapter slugs are derived from the headings, not hand-written', () => 
 
 test('the six areas the ticket names are top-level chapters, not sub-headings', () => {
   const h2 = topicSections(topicBody).filter(s => s.level === 2).map(s => s.slug);
-  for (const key of ['whyBoth', 'sshKeys', 'githubTokens', 'myCredentials', 'tiers', 'rotation']) {
+  for (const key of ['whyBoth', 'sshKeys', 'githubTokens', 'personalCredentials', 'tiers', 'rotation']) {
     assert.ok(
       h2.includes(CREDENTIALS_HELP_SECTIONS[key]),
       `"${CREDENTIALS_HELP_SECTIONS[key]}" must stay a "## " chapter — the panel scrolls `
@@ -142,7 +141,6 @@ test('the one-time-secret warnings still sit in the dialogs that need them', () 
     ['SshKeys.jsx', 'will never be shown again'],
     ['GithubTokens.jsx', 'Copy the token value immediately — GitHub will not show it again'],
     ['GithubTokens.jsx', 'never be shown again — only a preview and fingerprint remain'],
-    ['MyCredentials.jsx', 'never shown again'],
   ];
   for (const [file, phrase] of kept) {
     assert.ok(
@@ -172,32 +170,3 @@ test('the classic and fine-grained scope checklists stay on the GitHub Tokens pa
   }
 });
 
-test('the rotation warning stays on the panel whose button causes the restart', () => {
-  // My Credentials is the only surface with a rotate-in-place action, and the
-  // restart it triggers cuts off in-flight work — the consequence has to be next
-  // to the button, per the E8/E11 rule the epic inherits.
-  const page = sourceOf('MyCredentials.jsx');
-  assert.ok(page.includes('interrupts any in-flight work'), 'the rotate restart warning is gone');
-  assert.ok(page.includes('rotate at a quiet moment'), 'the rotate-when-quiet advice is gone');
-});
-
-test('the single-admin explanation stays on My Credentials, and its "?" still works there', () => {
-  // The ticket's edge case: the env single-admin cannot own personal credentials
-  // and sees a note instead of the tables. The note must stay, and the "?" must
-  // NOT be inside the canOwn branch — that reader is exactly the one who needs
-  // the chapter explaining why. Anchored on the ordering: the button appears in
-  // the source before the `!canOwn ?` branch opens.
-  const page = sourceOf('MyCredentials.jsx');
-  assert.ok(
-    page.includes('Personal credentials need a per-user account'),
-    'the single-admin explanatory note is gone',
-  );
-  const buttonAt = page.indexOf('<PageHelpButton');
-  const branchAt = page.indexOf('!canOwn ?');
-  assert.ok(buttonAt > -1 && branchAt > -1, 'expected both the "?" and the canOwn branch');
-  assert.ok(
-    buttonAt < branchAt,
-    'the "?" moved inside the canOwn branch — the single-admin, who cannot own '
-    + 'personal credentials, would lose the chapter that explains why',
-  );
-});

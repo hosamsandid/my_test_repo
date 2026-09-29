@@ -171,7 +171,7 @@ function eligibleTargets(entry, candidates) {
 // the target's trigger, so an operator cannot hand an agent an event that
 // predates its own subscription window.)
 //
-// `source: 'internal'` matches the flow-emit / wake-agent entries so log
+// `source: 'internal'` matches the label fast-path / wake-agent entries so log
 // readers can tell the delivery path apart (docs/direct-agent-handoff-concept.md).
 //
 // `wakeLabel` is re-stamped from the TARGET's own `labelFilter` (#2151), never

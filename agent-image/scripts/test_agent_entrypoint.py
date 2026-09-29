@@ -833,7 +833,7 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
 
     async def test_null_stamp_falls_through_to_payload_label_for_any_label_listener(self):
         """#2151 AC2: a filter-less (any-label) listener's stamped wakeLabel is
-        `None` (poller/flow-emit convention) — the notice must still fall
+        `None` (poller/label fast-path convention) — the notice must still fall
         through to `payload.label.name`, unchanged behaviour."""
         scheduler, client = self._scheduler()
         trigger = {"id": "t-ignore", "type": "github-event"}
@@ -850,7 +850,7 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         self.assertIn("`ux`", body)
 
     async def test_internal_delivery_stays_byte_identical_when_stamp_agrees(self):
-        """#2151 AC3: flow-emit / label-fastpath synthetic events stamp
+        """#2151 AC3: label-fastpath synthetic events stamp
         wakeLabel equal to their own payload.label.name — the notice must be
         unaffected either way."""
         scheduler, client = self._scheduler()
@@ -1039,7 +1039,7 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
     # -- #1897: unified issue/PR notice with abbreviated link ------------------
 
     async def test_pr_notice_shows_number_regardless_of_delivery_path(self):
-        """AC1: a PR notice shows `#N` even from an internal-transport delivery
+        """AC1: a PR notice shows `#N` even from a synthetic (label fast-path) delivery
         whose synthetic payload carries a number + url (and here a title)."""
         scheduler, client = self._scheduler()
         trigger = {"id": "t1", "type": "github-event"}

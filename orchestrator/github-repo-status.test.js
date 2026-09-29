@@ -51,7 +51,6 @@ function fixture() {
           trig({ id: 'typo', repo: 'not a repo' }),
           // Not counted — each for its own reason.
           trig({ id: 'off', repo: 'acme/no-trigger', enabled: false }),
-          trig({ id: 'int', repo: 'acme/no-trigger', transport: 'internal' }),
           trig({ id: 'noev', repo: 'acme/no-trigger', events: [] }),
         ],
       },
@@ -182,9 +181,21 @@ test('ignored triggers say why they are not counted', () => {
   const { byRepo } = build();
   const r = byRepo.get('acme/no-trigger');
   const reasons = Object.fromEntries(r.triggers.map((t) => [t.triggerId, t.ignoredReason]));
-  assert.deepEqual(reasons, { off: 'trigger-disabled', int: 'internal', noev: 'no-events', z: 'agent-disabled' });
+  assert.deepEqual(reasons, { off: 'trigger-disabled', noev: 'no-events', z: 'agent-disabled' });
   assert.ok(r.triggers.every((t) => t.counted === false));
   assert.equal(r.tokenEnvironment.id, 'env-a');
+});
+
+test('#2578: a trigger carrying a legacy transport field is counted — the repo is Listening', () => {
+  const inputs = fixture();
+  inputs.agents[0].triggers.push(trig({ id: 'legacy', repo: 'acme/no-trigger', transport: 'internal' }));
+  const plan = computePollPlan(inputs);
+  const rows = buildRepoStatusView({ ...inputs, plan, state, firstTickDone: true, tokenReadable: readable });
+  const r = rows.find((x) => x.repo === 'acme/no-trigger');
+  assert.equal(r.status, STATUS.LISTENING);
+  const t = r.triggers.find((x) => x.triggerId === 'legacy');
+  assert.equal(t.counted, true);
+  assert.equal(t.ignoredReason, null);
 });
 
 test('Failing rows carry the last error, its start, the failure count and the next retry', () => {

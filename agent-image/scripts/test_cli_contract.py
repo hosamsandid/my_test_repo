@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Shared CLI-contract conformance test (#1522).
 
-Exercises the six built-in agent CLIs — `aee-artifact`, `aee-emit`,
-`aee-wake`, `aee-ask`, `knowledge`, `gh-as-agent` — against the one shared contract documented in
+Exercises the five built-in agent CLIs — `aee-artifact`, `aee-wake`,
+`aee-ask`, `knowledge`, `gh-as-agent` — against the one shared contract documented in
 `docs/cli-contract.md` (concept `docs/plugin-system-concept.md` §4.5):
 
   * Discovery: `--help` / `-h` / `help` / bare invocation → exit 0 with the
@@ -36,7 +36,6 @@ SCRIPTS = Path(__file__).resolve().parent
 # exec bit or a shebang lookup.
 CLIS = {
     "aee-artifact": [sys.executable, str(SCRIPTS / "aee-artifact")],
-    "aee-emit": [sys.executable, str(SCRIPTS / "aee-emit")],
     "aee-wake": [sys.executable, str(SCRIPTS / "aee-wake")],
     "aee-ask": [sys.executable, str(SCRIPTS / "aee-ask")],
     "knowledge": [sys.executable, str(SCRIPTS / "knowledge")],
@@ -50,7 +49,7 @@ DEAD_ORCH = "http://127.0.0.1:9"
 
 def run(cli, args, env_extra=None, cwd=None):
     env = dict(os.environ)
-    # AGENT_ID is a precondition for gh-as-agent/aee-emit; set a conformant one
+    # AGENT_ID is a precondition for gh-as-agent/aee-wake; set a conformant one
     # so we test the *contract* paths, not the missing-identity guard.
     env["AGENT_ID"] = "contract-test"
     if env_extra:
@@ -87,7 +86,6 @@ class UsageErrors(unittest.TestCase):
 
     def test_missing_required_args(self):
         cases = [
-            ("aee-emit", ["ready"]),            # label but no --issue/--pr target
             ("aee-wake", ["--to"]),             # --to with no value
             ("aee-ask", ["Which?"]),            # question but no --option
             ("aee-artifact", ["add", "only-name"]),  # missing <path>
@@ -129,14 +127,6 @@ class JsonOutput(unittest.TestCase):
             rows = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["artifact"], "Design")
-
-    def test_aee_emit_json_usage_error(self):
-        # --json is honoured even on the error path: a JSON error object, exit 2.
-        code, out, _ = run("aee-emit", ["--json"])
-        self.assertEqual(code, 2)
-        obj = json.loads(out.strip())
-        self.assertFalse(obj["ok"])
-        self.assertIn("error", obj)
 
     def test_aee_wake_json_usage_error(self):
         code, out, _ = run("aee-wake", ["--json"])
@@ -197,29 +187,14 @@ class UnreachableBackend(unittest.TestCase):
         self.assertFalse(json.loads(out.strip())["ok"])
 
     def test_aee_wake_unreachable(self):
-        # #2030: target-LESS, so unlike aee-emit this needs no git clone at all
-        # — there is no repo to resolve a hand-off against.
+        # #2030: target-LESS, so this needs no git clone at all — there is no
+        # repo to resolve a hand-off against.
         code, out, _err = run(
             "aee-wake", ["--to", "some-reviewer", "--json"],
             env_extra={"ORCHESTRATOR_INTERNAL_URL": DEAD_ORCH},
         )
         self.assertEqual(code, 3, "unreachable orchestrator must be exit 3")
         self.assertFalse(json.loads(out.strip())["ok"])
-
-    def test_aee_emit_unreachable(self):
-        with tempfile.TemporaryDirectory() as d:
-            subprocess.run(["git", "init", "-q"], cwd=d, check=True)
-            subprocess.run(
-                ["git", "remote", "add", "origin", "https://example.com/o/r.git"],
-                cwd=d, check=True,
-            )
-            code, out, _err = run(
-                "aee-emit", ["ready", "--issue", "1", "--json"],
-                env_extra={"ORCHESTRATOR_INTERNAL_URL": DEAD_ORCH},
-                cwd=d,
-            )
-            self.assertEqual(code, 3, "unreachable orchestrator must be exit 3")
-            self.assertFalse(json.loads(out.strip())["ok"])
 
 
 if __name__ == "__main__":

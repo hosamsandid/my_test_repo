@@ -73,7 +73,6 @@ function agentName(agent) {
 function ignoredReason(agent, t) {
   if (agent?.config?.enabled === false) return 'agent-disabled';
   if (t.enabled === false) return 'trigger-disabled';
-  if (t.transport === 'internal') return 'internal';
   if (!Array.isArray(t.events) || t.events.length === 0) return 'no-events';
   return pollerSubscribes(t) ? null : 'invalid';
 }

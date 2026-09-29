@@ -157,7 +157,7 @@ const AGREEMENT_CASES = [
     trigger: trigger({ id: "t-e", enabled: false }),
   },
   {
-    name: "internal transport → refused (never poller-subscribed)",
+    name: "legacy transport field → accepted (poller-subscribed since #2578)",
     agentId: "reviewer-f",
     trigger: trigger({ id: "t-f", transport: "internal" }),
   },
@@ -179,8 +179,7 @@ test("AC1: eligibleTargets agrees with the poller's own fan-out on every case", 
   // absent here — which is itself part of the verdict.
   const subscribers = AGREEMENT_CASES
     .filter((c) => c.trigger.type === "github-event"
-      && c.trigger.enabled !== false
-      && c.trigger.transport !== "internal")
+      && c.trigger.enabled !== false)
     .map((c) => ({
       agentId: c.agentId,
       triggerId: c.trigger.id,

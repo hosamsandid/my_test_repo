@@ -10,16 +10,13 @@
 // its `pending-triggers.json`; auditability comes from a `source: 'internal'`
 // event-log row rather than from a repo the human can read.
 //
-// This is a NEW endpoint, not an extension of `/internal/flow-emit`
-// (concept §5.2): `validateEmitRequest`'s required `label` + `target` are
-// load-bearing for every one of its callers, and the two paths differ both in
-// their authorization model (§6 — same-team only, which the #1172 path has no
-// equivalent of) and in what they write to GitHub (nothing vs a mirrored
-// label). Widening `flow-emit` would put two mutually-exclusive request shapes
-// behind one validator, which is the exact ambiguity `TARGET_KINDS` exists to
-// avoid.
+// It was designed as a separate endpoint from the label-carrying hand-off
+// (concept §5.2) because the two differ both in their authorization model
+// (§6 — same-team only) and in what they write to GitHub (nothing vs a
+// label). Labelled hand-offs are now ordinary poller-delivered GitHub labels
+// (the internal transport was removed in #2578); this target-less path stays.
 //
-// Like `flow-emit.js` this module is fs-free so the delivery contract is
+// Like `github-label-fastpath.js` this module is fs-free so the delivery contract is
 // unit-testable (`node --test`): request validation, target resolution and the
 // queue-entry shape. All I/O (queue write, event log) stays in orchestrator.js.
 
@@ -149,11 +146,11 @@ function resolveWakeTarget({ fromAgentId, toRoleId }, agents) {
 // The pending-queue entry for one hand-off. `kind: 'wake-agent'` is what routes
 // it to the `_handle_pending_entry` branch that runs the target through the
 // ordinary `_execute` chokepoint (so it inherits the `WorkspaceGate` AND the
-// #611 backstop — §5.3/§8). `source: 'internal'` matches the flow-emit entry so
+// #611 backstop — §5.3/§8). `source: 'internal'` matches the label fast-path entry so
 // log readers and operators can tell the delivery path apart.
 //
 // `receivedAt` + `id` are stamped by `enqueuePending`, not here — the same
-// division `buildPendingEntry` keeps in flow-emit.js.
+// division `buildPendingEntry` keeps in github-label-fastpath.js.
 function buildWakeEntry({ from, note, teamId }) {
   return {
     kind: 'wake-agent',

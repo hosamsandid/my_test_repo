@@ -163,15 +163,16 @@ test('a same-ticket hand-off is admitted with the lane full — the flow does no
   assert.equal(later.reason, 'same-ticket');
 });
 
-test('#2114 regression: a synthetic internal PR hand-off carries closesIssues, so it admits same-ticket rather than deadlocking', () => {
+test('#2114 regression: a synthetic PR hand-off carries closesIssues, so it admits same-ticket rather than deadlocking', () => {
   // The prior admission-control tests hand-craft `closesIssues` via prEntry(),
   // so they never exercised the real synthetic-event builders. This drives the
-  // exact reviewer repro: an internal-transport reviewer-wake (developer → PR →
-  // reviewer) is the FIRST admission-gated reference to PR 77, built by
-  // flow-emit's real `buildSyntheticEvent`/`buildPendingEntry`, with issue 42
-  // already occupying the only slot.
-  const flowEmit = require('./flow-emit');
-  const key = flowEmit.eventKeyForKind('pr');
+  // exact reviewer repro: a synthetic reviewer-wake (developer → PR →
+  // reviewer, e.g. a label fast-path / Flow Supervisor dispatch) is the FIRST
+  // admission-gated reference to PR 77, built by the label fast-path's real
+  // `buildSyntheticEvent`/`buildPendingEntry`, with issue 42 already occupying
+  // the only slot.
+  const fastPath = require('./github-label-fastpath');
+  const key = fastPath.eventKeyForKind('pr');
   const iso = new Date(T0).toISOString();
   const admitted = ac.admit({ lane: ac.emptyLane(), wipLimit: 1, agentId: 'dev', entry: issueEntry(42), now: T0 });
 
@@ -179,25 +180,25 @@ test('#2114 regression: a synthetic internal PR hand-off carries closesIssues, s
   // producers built before this fix): mis-keys as a brand-new ticket and is held
   // forever, deadlocking the flow (the first ticket never finishes because its
   // finisher is stuck in the hold queue).
-  const bugEvent = flowEmit.buildSyntheticEvent({
+  const bugEvent = fastPath.buildSyntheticEvent({
     repo: REPO, label: 'ready-for-review', kind: 'pr', number: 77,
-    producerId: 'dev', eventId: 'int:bug', now: iso,
+    actor: 'dev', eventId: 'intlbl:bug', now: iso,
   });
   const held = ac.admit({ lane: admitted.lane, wipLimit: 1, agentId: 'reviewer',
-    entry: flowEmit.buildPendingEntry('t-bug', key, bugEvent), now: T0 + 60_000 });
+    entry: fastPath.buildPendingEntry('t-bug', key, bugEvent), now: T0 + 60_000 });
   assert.equal(held.admit, false, 'without closesIssues the hand-off is wrongly a new ticket (the bug)');
 
   // The FIXED shape — the caller now threads the strict `closesIssues` (parsed
   // from the PR body/branch it already fetched) into the builder, so admission
   // keys the hand-off to issue 42's ticket and lets it through.
-  const fixedEvent = flowEmit.buildSyntheticEvent({
+  const fixedEvent = fastPath.buildSyntheticEvent({
     repo: REPO, label: 'ready-for-review', kind: 'pr', number: 77, closesIssues: [42],
-    producerId: 'dev', eventId: 'int:fix', now: iso,
+    actor: 'dev', eventId: 'intlbl:fix', now: iso,
   });
   assert.deepEqual(fixedEvent.payload.pull_request.closesIssues, [42],
     'the builder propagates closesIssues onto the PR subject');
   const handoff = ac.admit({ lane: admitted.lane, wipLimit: 1, agentId: 'reviewer',
-    entry: flowEmit.buildPendingEntry('t-fix', key, fixedEvent), now: T0 + 60_000 });
+    entry: fastPath.buildPendingEntry('t-fix', key, fixedEvent), now: T0 + 60_000 });
   assert.equal(handoff.admit, true, 'with closesIssues the hand-off resolves to the issue ticket');
   assert.equal(handoff.reason, 'same-ticket');
   assert.equal(handoff.lane.inFlight.length, 1, 'still one ticket in flight — no deadlock');
@@ -326,8 +327,9 @@ test('reconcile: the unverified mark clears once the repo is swept again', () =>
 });
 
 test('reconcile: the grace window holds a just-admitted ticket GitHub has not caught up with', () => {
-  // An internal-channel emit mirrors its label asynchronously; without the grace
-  // window the tick between the emit and the mirror would open the lane.
+  // A dispatch is admitted before GitHub's view (and the admission sweep's
+  // snapshot) reflects its label; without the grace window the next tick would
+  // open the lane.
   const snapshot = { repos: [REPO], objects: [] };
   const fresh = ac.reconcileInFlight({ lane: laneWith(42), snapshot, activeLabels: ACTIVE, now: T0 + 1000 });
   assert.equal(fresh.lane.inFlight.length, 1, 'inside the grace window');

@@ -129,17 +129,18 @@ any server.
 ## Environment pairing and the seed-time merge
 
 The pairing lives on the **environment** record as a list of
-*server + optional credential* references, and that list is what the seed step
-reads. When an agent's workspace is created, the orchestrator walks the pairs
-and, for each one, reads the server entry and the bound secret, replaces every
-`${credential}` occurrence in the template with that secret, and writes the
-resulting stanza into **that agent's own `.claude/settings.json`** under
-`mcpServers.<server id>`.
+*server + optional credential* references. For each pair the orchestrator reads the server entry and the bound
+secret, replaces every `${credential}` occurrence in the template with that
+secret, and writes the resulting stanza into **that agent's own `.mcp.json`**
+(at the root of its workspace) under `mcpServers.<server id>`. It also lists the
+server in the agent's `.claude/settings.json` under `enabledMcpjsonServers`, so
+the agent's CLI loads it without asking for approval.
 
-The file is **merged, not replaced** — other settings the agent already has
-survive, and each server is keyed by its id. Every agent gets its own
-substituted copy, so two agents sharing one server entry can hold different
-secrets.
+The files are **reconciled, not replaced**: the platform records which servers
+it wrote, adds and updates those, and removes one only when it wrote it and it
+is no longer in the set. Entries you added by hand, and every other setting,
+are left alone. Every agent gets its own substituted copy, so two agents sharing
+one server entry can hold different secrets.
 
 Three cases are worth knowing:
 
@@ -154,25 +155,34 @@ Three cases are worth knowing:
   be read, that pair is skipped entirely with a warning and the server does not
   appear in the agent's config at all.
 
-Substitution happens **once, at seed time**. Editing a server template, adding a
-credential or changing an environment's pairs does **not** reach into the
-workspaces of agents that already exist — those keep the config they were seeded
-with. Only agents seeded afterwards pick the change up, and an existing agent
-picks it up when its workspace is re-seeded. Even for an agent that has the
-config, a newly registered server becomes available on its **next invocation**,
-not inside a session that is already running.
+**Saving a changed pairing applies it.** Changing an environment's pairs
+re-applies the new set to every agent that uses the environment, and changing a
+member's own set (below) re-applies it to that member — no recreate and no
+restart: it is in effect from the agent's **next turn** (a turn already running
+finishes with the old set). A
+member with its own MCP servers keeps them when the environment changes. After
+the save, the form lists what happened per agent: applied, not running (the set
+is in place for when it next starts), not created yet, kept its own servers, or
+not applied — with the reason. If it could not be applied, save again to retry.
+
+Editing a server **template** or a **credential's secret** is not re-applied by
+itself: it reaches an agent the next time its set is applied (a pairing change,
+or a new agent).
 
 Note where the pairing is visible today:
 
 - The environment **form pairs them directly**: an *MCP servers*
   section on the create/edit form adds, edits and removes `{server, credential}`
   rows, and warns about a missing-credential or unused-credential pair as you
-  choose it. Because the pair is substituted at seed time, that form also states
-  that a change reaches only agents created afterwards.
+  choose it. Once the selection differs from what is stored, it says how many
+  agents the save will apply it to.
 - The **Agent Team wizard** shows the inherited pairs read-only in its Knowledge
   step ("Knowledge sources") and again on the review step.
-- A single `team-member` agent can **override** the inherited list on its own
-  agent form (*MCP Servers* → Custom, one `serverId[:credentialId]` per line).
+- A single `team-member` agent can **override** the inherited list in its
+  Settings tab (*MCP Servers* → Custom) with the same server + credential picker.
+  Switching to Custom starts from a copy of the inherited set; Custom with no
+  rows means the agent has no MCP servers. *Inherit* lists the pairs it
+  currently inherits.
 
 ## Deleting a server or a credential
 

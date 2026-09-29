@@ -200,9 +200,14 @@ environment that pairs them.
   (`transport: stdio|http|sse` + command/args/env or url/headers).
   Credentials at `/workspace/mcp-credentials/`; `env`/`headers` support
   `${credential}`, substituted per-agent at seed time.
-- **Per-agent isolation**: at seed time the merged stanza is written into the
-  agent's own `.claude/settings.json` under `mcpServers[<serverId>]`; a member's
-  `mcpServersOverride` replaces the env set. No pool-wide MCP config.
+- **Per-agent isolation** (`orchestrator/mcp-seed.js`): the stanzas go into the
+  agent's own workspace `.mcp.json` + `enabledMcpjsonServers` in
+  `.claude/settings.json` (the CLI ignores `settings.mcpServers`), reconciled
+  against a `.agent-studio/seeded-mcp.json` manifest so only platform-written
+  entries are ever removed. A member's `mcpServersOverride` replaces the env set
+  (`[]` = none). Saving an env/override change re-applies it via
+  `POST /internal/{environments,agents}/:id/apply-mcp` (next turn, no respawn).
+  No pool-wide MCP config.
 
 ### Plugins (governed capability extensions)
 

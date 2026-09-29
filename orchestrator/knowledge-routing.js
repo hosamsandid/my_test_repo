@@ -249,7 +249,10 @@ function buildBatchClassificationRequest(unrouted, domains) {
     '[{"lesson": 1, "domain": "<domain-id>"|null}, ...]',
     'No preamble, no code fences.',
   ].join('\n');
-  return { max_tokens: 1024, messages: [{ role: 'user', content: instruction }] };
+  // ~24 output tokens per lesson; a fixed 1024 overflowed at ~60 lessons and fell
+  // back to the heuristic for the whole backlog (review S2).
+  const maxTokens = Math.min(16384, Math.max(1024, 128 + 24 * lessons.length));
+  return { max_tokens: maxTokens, messages: [{ role: 'user', content: instruction }] };
 }
 
 /**

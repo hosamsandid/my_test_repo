@@ -31,7 +31,11 @@ const DOMAIN_CARD_SOURCE = 'domain-skill';
 const QUEUED_STATUS = 'domain-queued';
 
 // Statuses that mean "this cluster is already decided — don't classify it again".
-const SETTLED_STATUSES = new Set(['promoted', 'dismissed', 'digest-only', 'superseded']);
+// `digest-only` is NOT one of them: in domain mode the #779 digest gate does not run,
+// and a row it parked before the team had domains is routed like any new lesson.
+const SETTLED_STATUSES = new Set(['promoted', 'dismissed', 'superseded']);
+// Rows that still stand for a pending lesson — the ones a regrown cluster replaces.
+const PENDING_LESSON_STATUSES = new Set([QUEUED_STATUS, 'unrouted']);
 
 function _str(v) { return typeof v === 'string' && v.trim() ? v.trim() : ''; }
 function _ts(now) { return _str(now) || new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'); }
@@ -55,7 +59,14 @@ function isDomainCard(row) {
  * Split this pass's candidates (toCandidate rows of CONVERGED clusters) into the
  * ones that still need classifying and the ones already decided.
  *
- *  - promoted / dismissed / digest-only / superseded rows: decided, left alone;
+ *  - promoted / dismissed / superseded rows: decided, left alone;
+ *  - `digest-only` rows (parked by the #779 gate before the team had domains):
+ *    classified like a new lesson;
+ *  - a cluster that GREW since it was routed gets a new id but keeps its
+ *    canonicalId: the older pending row(s) of that canonicalId are listed in
+ *    `supersede`, and if the older row sits in a live domain the grown cluster
+ *    joins that domain directly (`regrown`) instead of being classified again —
+ *    so one lesson is one queued row however often it grows;
  *  - `domain-queued` rows whose domain still exists: decided;
  *  - `domain-queued` rows whose domain was removed: re-classified;
  *  - `unrouted` rows classified against the CURRENT domain list (`domainsVersion`,
@@ -65,20 +76,40 @@ function isDomainCard(row) {
  *    the domain queue (`migrate`) so the domain ends up with one card;
  *  - any other open card (a pre-#2592 lesson card): left as it is.
  *
- * @returns {{ toClassify: object[], migrate: object[], claimedCanonicalIds: Set<string> }}
+ * @returns {{ toClassify: object[], migrate: object[], regrown: object[], supersede: object[],
+ *             claimedCanonicalIds: Set<string> }}
+ *   regrown:   { candidate, domainId, via } — re-queue into the older row's domain
+ *   supersede: { id, supersededBy } — older pending rows the grown cluster replaces
  */
 function planRoutingInputs(candidates, rows, { domainIds, domainsVersion } = {}) {
-  const byId = new Map((Array.isArray(rows) ? rows : []).filter((r) => r && r.id).map((r) => [r.id, r]));
+  const list = (Array.isArray(rows) ? rows : []).filter((r) => r && r.id);
+  const byId = new Map(list.map((r) => [r.id, r]));
+  const pendingByCanonical = new Map();
+  for (const r of list) {
+    if (!PENDING_LESSON_STATUSES.has(r.status) || !_str(r.canonicalId)) continue;
+    if (!pendingByCanonical.has(r.canonicalId)) pendingByCanonical.set(r.canonicalId, []);
+    pendingByCanonical.get(r.canonicalId).push(r);
+  }
   const live = domainIds instanceof Set ? domainIds : new Set(_ids(domainIds));
   const toClassify = [];
   const migrate = [];
+  const regrown = [];
+  const supersede = [];
   const claimed = new Set();
   for (const c of Array.isArray(candidates) ? candidates : []) {
     if (!c || !c.id) continue;
     if (c.canonicalId) claimed.add(c.canonicalId);
     const row = byId.get(c.id);
-    if (!row) { toClassify.push(c); continue; }
+    if (!row) {
+      const older = (_str(c.canonicalId) && pendingByCanonical.get(c.canonicalId) || []).filter((r) => r.id !== c.id);
+      for (const r of older) supersede.push({ id: r.id, supersededBy: c.id });
+      const home = older.find((r) => r.status === QUEUED_STATUS && live.has(r.domainId));
+      if (home) regrown.push({ candidate: c, domainId: home.domainId, via: home.routedVia });
+      else toClassify.push(c);
+      continue;
+    }
     if (SETTLED_STATUSES.has(row.status)) continue;
+    if (row.status === 'digest-only') { toClassify.push(c); continue; }
     if (row.status === QUEUED_STATUS) {
       if (!live.has(row.domainId)) toClassify.push(c);
       continue;
@@ -93,7 +124,7 @@ function planRoutingInputs(candidates, rows, { domainIds, domainsVersion } = {})
     }
     // Some other tracked card (open/stale lesson card from before #2592) — leave it.
   }
-  return { toClassify, migrate, claimedCanonicalIds: claimed };
+  return { toClassify, migrate, regrown, supersede, claimedCanonicalIds: claimed };
 }
 
 // Shape a routed lesson into its parked row.
@@ -159,6 +190,9 @@ function bundleLessons(domain, rows, { teamId } = {}) {
     if (_str(r.kind) && !kinds.includes(r.kind)) kinds.push(r.kind);
   }
   const agents = lessonAgents(list);
+  // A lesson is counted once per canonicalId, so two rows of the same (grown)
+  // cluster can never inflate the first-skill threshold or the card count.
+  const lessonKeys = new Set(list.map((r) => _str(r.canonicalId) || r.id).filter(Boolean));
   const d = domain && typeof domain === 'object' ? domain : {};
   return {
     teamId: _str(teamId) || (list[0] && list[0].teamId) || null,
@@ -169,7 +203,7 @@ function bundleLessons(domain, rows, { teamId } = {}) {
     members,
     convergence: agents,
     convergenceCount: agents.length,
-    lessonCount: list.length,
+    lessonCount: lessonKeys.size,
     lessonIds: list.map((r) => r.id).filter(Boolean),
     domainId: d.id || null,
     text: _str(d.name) || _str(d.id) || 'Team knowledge',
@@ -230,7 +264,8 @@ function planDomainSkillWork(queuedRows, domains, {
 /**
  * Build (or refresh) a domain's single open card from its planned work item.
  * A card the operator dismissed, or that went stale, stays that way until a NEW
- * lesson joins the domain; then it re-opens with the full pending list.
+ * lesson joins the domain; then it re-opens with the full pending list. An
+ * accepted (promoted) card re-opens whenever lessons are still queued for it.
  */
 function buildDomainCard(item, { teamId, now, prior, gateReason } = {}) {
   const ts = _ts(now);
@@ -240,7 +275,10 @@ function buildDomainCard(item, { teamId, now, prior, gateReason } = {}) {
   const priorLessons = new Set(_ids(p && p.lessonIds));
   const grew = b.lessonIds.some((id) => !priorLessons.has(id));
   const sameShape = p && !grew && p.mode === item.mode && p.domainName === (d.name || d.id);
-  if (p && p.status !== 'open' && !grew) return p; // respect dismissed/stale until new evidence
+  // Respect a dismissed/stale card until new evidence. A PROMOTED card is different:
+  // the operator accepted it, so queued lessons still planned for this domain are
+  // leftovers the skill did not cover — the card re-opens for them (review S1).
+  if (p && p.status !== 'open' && p.status !== 'promoted' && !grew) return p;
   const card = {
     ...(p || {}),
     id: domainCardId(d.id),
@@ -267,7 +305,7 @@ function buildDomainCard(item, { teamId, now, prior, gateReason } = {}) {
     raisedAt: sameShape ? (p.raisedAt || ts) : ts,
   };
   if (_str(gateReason)) card.gateReason = gateReason;
-  if (grew && p) { delete card.dismissReason; delete card.dismissedAt; delete card.staleAt; }
+  if (p && p.status !== 'open') { delete card.dismissReason; delete card.dismissedAt; delete card.staleAt; delete card.resolvedAt; }
   return card;
 }
 

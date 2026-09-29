@@ -123,6 +123,12 @@ test('buildBatchClassificationRequest: numbers domains + lessons', () => {
   assert.ok(c.includes('JSON array'));
 });
 
+test('buildBatchClassificationRequest: max_tokens scales with the batch (review S2)', () => {
+  assert.equal(R.buildBatchClassificationRequest([cand('c1', 'x')], DOMAINS).max_tokens, 1024);
+  const many = Array.from({ length: 200 }, (_, i) => cand(`c${i}`, `lesson ${i}`));
+  assert.ok(R.buildBatchClassificationRequest(many, DOMAINS).max_tokens >= 200 * 24);
+});
+
 test('applyBatchClassification: parses valid response, ignores bad domain ids', () => {
   const unrouted = [cand('c1', 'x'), cand('c2', 'y'), cand('c3', 'z')];
   const text = '[{"lesson":1,"domain":"dev-workflow"},{"lesson":2,"domain":null},{"lesson":3,"domain":"nope"}]';

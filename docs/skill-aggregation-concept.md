@@ -145,8 +145,12 @@ bump — the existing version/lineage machinery already carries this.
 Once a team has domains (`orchestrator/knowledge-domain-skills.js`, driven by the collector's
 `_runDomainSkillPipeline`), no lesson-named team skill is created at autonomy ≥2:
 
-- **Routing.** Only *converged* clusters are routed (digest routing runs first, so a
-  convention/fact below the digest-only bar never reaches here). All new clusters are classified
+- **Routing.** Only *converged* clusters (≥2 agents) are routed. The #779 digest gate does not
+  run in domain mode — it only exists to stop per-lesson cards, which domain mode never raises — so
+  a 2–3-agent convention/fact is routed like any other lesson, and a row the gate parked as
+  `digest-only` before the team had domains is re-classified. A lesson that grows (another agent
+  records it) gets a new row id but keeps its `canonicalId`: it stays in its domain, replaces its
+  older row (`superseded`), and counts once towards the threshold. All new clusters are classified
   in **one batched LLM call per pass**, with the §3.3 heuristic as fallback; the method (`llm` /
   `heuristic` / `vocab`) is recorded on the row. A routed lesson is parked as `domain-queued`;
   a lesson that fits no domain is `unrouted` — digest only, counted towards a new-domain proposal,
@@ -165,7 +169,9 @@ Once a team has domains (`orchestrator/knowledge-domain-skills.js`, driven by th
   ids into provenance) rather than claiming it on a name match.
 - **Budget.** Adding a domain, splitting one, or confirming a proposal at or over the soft skill
   budget answers `409 over-budget` until the operator confirms; declining changes nothing.
-- **Taxonomy edits.** *Rename* keeps the domain id, so the skill (and its card) stays the same.
+- **Taxonomy edits.** *Rename* keeps the domain id, so the skill and its card stay the same. The
+  card label follows the new name (the API re-reads the taxonomy); the skill's directory name and
+  its SKILL.md title keep the name the skill was created under.
   *Remove* leaves the skill as an ordinary unassigned team skill; the domain's queued lessons
   are re-classified. *Merge/split* yield one skill per resulting domain via Consolidate (§4).
 - **Consolidate.** A domain with ≥2 member skills merges them into a playbook; a domain with a

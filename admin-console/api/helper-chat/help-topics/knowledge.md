@@ -161,7 +161,7 @@ an individual playbook readable as it accumulates.
 With domains, converged lessons grow their domain's one skill instead of new
 ones: automatically at autonomy 3 with the team-skill gate automatic, else via
 one card per domain. A first skill needs 3 lessons from 2 agents (adjustable).
-Lessons fitting no domain stay digest-only; renaming keeps the skill, removing
+Lessons fitting no domain stay digest-only; renaming relabels the card, not the skill; removing
 leaves it as a team skill.
 
 ## Configuration: forgetting, assist model and storage

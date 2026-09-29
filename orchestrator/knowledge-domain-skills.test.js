@@ -47,6 +47,44 @@ test('planRoutingInputs: new clusters are classified; settled + current rows are
   assert.equal(out.claimedCanonicalIds.size, 7);
 });
 
+test('planRoutingInputs: a legacy digest-only row is classified like a new lesson (review B1)', () => {
+  const out = S.planRoutingInputs([lesson('dig')], [{ id: 'dig', status: 'digest-only' }], { domainIds: [DEV.id], domainsVersion: 'v1' });
+  assert.deepEqual(out.toClassify.map((c) => c.id), ['dig']);
+});
+
+test('planRoutingInputs: a grown cluster replaces its older row and stays in its domain (review B2)', () => {
+  const old = queued('old', DEV.id, { entryIds: ['e1', 'e2'] });
+  const grown = { ...lesson('grown', { entryIds: ['e1', 'e2', 'e3'] }) };
+  const out = S.planRoutingInputs([grown], [old], { domainIds: [DEV.id], domainsVersion: 'v1' });
+  assert.deepEqual(out.toClassify, [], 'no second LLM classification for the same lesson');
+  assert.deepEqual(out.regrown.map((g) => [g.candidate.id, g.domainId, g.via]), [['grown', DEV.id, 'llm']]);
+  assert.deepEqual(out.supersede, [{ id: 'old', supersededBy: 'grown' }]);
+  // Its domain was removed → classify afresh, still superseding the older row.
+  const gone = S.planRoutingInputs([grown], [old], { domainIds: [REVIEW.id], domainsVersion: 'v1' });
+  assert.deepEqual(gone.toClassify.map((c) => c.id), ['grown']);
+  assert.deepEqual(gone.regrown, []);
+  assert.deepEqual(gone.supersede, [{ id: 'old', supersededBy: 'grown' }]);
+  // A settled row of the same canonicalId is left alone.
+  const done = S.planRoutingInputs([grown], [{ ...old, status: 'promoted' }], { domainIds: [DEV.id], domainsVersion: 'v1' });
+  assert.deepEqual(done.supersede, []);
+  assert.deepEqual(done.toClassify.map((c) => c.id), ['grown']);
+});
+
+test('bundleLessons: a grown cluster (same canonicalId, superset entryIds) counts as ONE lesson (review B2)', () => {
+  const rows = [
+    queued('old', DEV.id, { entryIds: ['e1', 'e2'] }),
+    queued('grown', DEV.id, { entryIds: ['e1', 'e2', 'e3'] }),
+    queued('other', DEV.id, { entryIds: ['f1', 'f2'] }),
+  ];
+  const b = S.bundleLessons(DEV, rows);
+  assert.equal(b.lessonCount, 2);
+  assert.deepEqual(b.lessonIds, ['old', 'grown', 'other'], 'every row is still settled by provenance');
+  const plan = S.planDomainSkillWork(rows.slice(0, 2).concat(queued('x', DEV.id, { entryIds: ['e1', 'e4'] })), [DEV], {
+    existingSkillNames: [], autoApply: true,
+  });
+  assert.equal(plan.waiting[0].reason, 'below-threshold', 'three rows of ONE lesson do not meet the 3-lesson bar');
+});
+
 test('queuedRow strips per-lesson card fields; unroutedRow records the taxonomy version', () => {
   const q = S.queuedRow({ ...lesson('x'), matchedSkill: { name: 'lesson-x' }, extendMode: true, autoDrafted: true }, { domainId: DEV.id, via: 'vocab', now: NOW });
   assert.equal(q.status, 'domain-queued');
@@ -158,6 +196,21 @@ test('reconcileDomainCards: a dismissed card stays dismissed until a NEW lesson 
   assert.equal(reopened.dismissedAt, undefined);
 });
 
+test('reconcileDomainCards: an accepted card re-opens for lessons its skill did not cover (review S1)', () => {
+  const rows = ['a', 'b', 'c'].map((id) => queued(id, DEV.id));
+  const items = S.planDomainSkillWork(rows, [DEV], {}).cards;
+  const first = S.reconcileDomainCards(rows, items, { now: NOW });
+  // Accepted: a and b settled by provenance, c (added while the dialog was open) left queued.
+  const accepted = first.map((r) => (S.isDomainCard(r) ? { ...r, status: 'promoted', resolvedAt: NOW }
+    : r.id === 'c' ? r : { ...r, status: 'promoted' }));
+  const left = accepted.filter((r) => r.status === 'domain-queued');
+  const items2 = S.planDomainSkillWork(left, [DEV], { threshold: { minLessons: 1, minAgents: 1 } }).cards;
+  const card = S.reconcileDomainCards(accepted, items2, { now: NOW }).find(S.isDomainCard);
+  assert.equal(card.status, 'open');
+  assert.deepEqual(card.lessonIds, ['c']);
+  assert.equal(card.resolvedAt, undefined);
+});
+
 test('reconcileDomainCards: an open card with no work left is superseded', () => {
   const rows = ['a', 'b', 'c'].map((id) => queued(id, DEV.id));
   const store = S.reconcileDomainCards(rows, S.planDomainSkillWork(rows, [DEV], {}).cards, { now: NOW });
@@ -224,4 +277,44 @@ test('foldIntoSkill: provenance is unioned even when no new statement is added (
   assert.equal(grown.added, 1);
   assert.equal(grown.provenance.amendmentsSinceDistillation, 3);
   assert.match(grown.skillMd, /squash before merge/);
+});
+
+// --- end to end over the pure cores (review S4) ------------------------------
+
+test('pipeline: 2-agent conventions the digest gate would park reach the domain threshold (review B1, S4)', () => {
+  const C = require('./knowledge-convergence');
+  const cluster = (key, n, agents = ['dev-1', 'rev-1']) => {
+    const memberIds = Array.from({ length: n }, (_, i) => `${key}-${i}`);
+    return {
+      kind: 'convention', canonicalId: memberIds[0], memberIds,
+      members: memberIds.map((id, i) => ({ id, originAgent: agents[i % agents.length], text: `${key} rule` })),
+      convergence: agents, convergenceCount: agents.length, text: `${key} rule`,
+    };
+  };
+  const clusters = [cluster('lint', 2), cluster('squash', 2), cluster('tests', 2)];
+  // What the #779 gate does to them (why domain mode must not sit behind it):
+  const routed = C.planDigestRouting(clusters, [], { threshold: 2, graduateAtAgents: 4, teamId: 't1', now: NOW });
+  assert.equal(routed.candidateClusters.length, 0, 'every 2-agent convention is digest-only for the gate');
+  // Domain mode routes the converged clusters themselves.
+  const cands = clusters.filter((c) => C.crossesConvergence(c, 2)).map((c) => C.toCandidate(c, { teamId: 't1', now: NOW }));
+  const inputs = S.planRoutingInputs(cands, routed.rows, { domainIds: [DEV.id], domainsVersion: 'v1' });
+  assert.equal(inputs.toClassify.length, 3, 'legacy digest-only rows are re-classified');
+  const rows = inputs.toClassify.map((c) => S.queuedRow(c, { domainId: DEV.id, via: 'llm', now: NOW }));
+  assert.ok(rows.every((r) => r.status === 'domain-queued'));
+  const plan = S.planDomainSkillWork(rows, [DEV], { existingSkillNames: [], autoApply: true });
+  assert.equal(plan.apply.length, 1, '3 lessons from 2 agents create the domain skill');
+  assert.equal(plan.apply[0].mode, 'create');
+  assert.equal(plan.apply[0].bundle.lessonCount, 3);
+
+  // The lint cluster grows (a third entry): one row replaces the other, count stays 3.
+  const grownCluster = cluster('lint', 3);
+  const grownCand = C.toCandidate(grownCluster, { teamId: 't1', now: NOW });
+  assert.notEqual(grownCand.id, rows[0].id, 'growth changes the stable id');
+  const again = S.planRoutingInputs([grownCand], rows, { domainIds: [DEV.id], domainsVersion: 'v1' });
+  assert.deepEqual(again.supersede, [{ id: rows[0].id, supersededBy: grownCand.id }]);
+  const next = rows.map((r) => (r.id === rows[0].id ? { ...r, status: 'superseded' } : r))
+    .concat(again.regrown.map((g) => S.queuedRow(g.candidate, { domainId: g.domainId, via: g.via, now: NOW })));
+  const queuedNow = next.filter((r) => r.status === S.QUEUED_STATUS);
+  assert.equal(queuedNow.length, 3);
+  assert.equal(S.bundleLessons(DEV, queuedNow).lessonCount, 3);
 });

@@ -8357,8 +8357,24 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
   // #2592: true once the domain → skill pipeline owns this team's skill growth.
   let domainMode = false;
   if (level >= 2) {
-    const { digestRouting, graduateAtAgents } = knowledgeCurationConfig(env);
-    if (digestRouting) {
+    // #2592: resolve the team's domains FIRST. In domain mode every converged
+    // cluster belongs to the domain pipeline — including a 2–3-agent convention/fact
+    // the #779 digest gate would otherwise park as digest-only, so the first-skill
+    // threshold (default >=3 lessons from >=2 agents) actually sees them. The digest
+    // gate only runs for a team without domains (the pre-#2592 flow).
+    const { domainRouting, skillBudget, digestRouting, graduateAtAgents } = knowledgeCurationConfig(env);
+    let domains = [];
+    if (domainRouting) {
+      try {
+        domains = ensureTeamDomains(teamId, now);
+      } catch (err) {
+        console.warn(`[Orchestrator] domain list for '${teamId}' failed: ${err.message}`);
+        domains = [];
+      }
+    }
+    domainMode = domains.length > 0;
+
+    if (digestRouting && !domainMode) {
       try {
         const routed = knowledgeConvergence.planDigestRouting(eligibleClusters, curCandidates, {
           threshold: convergenceThreshold, graduateAtAgents, teamId, now,
@@ -8376,27 +8392,22 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     }
 
     // #2592 domain → skill pipeline (supersedes the #780 per-lesson amendment
-    // cards): once the team has domains, every converged candidate cluster is routed
-    // to a domain and grows that domain's ONE living skill (auto-applied at level 3
+    // cards): once the team has domains, every converged cluster is routed to a
+    // domain and grows that domain's ONE living skill (auto-applied at level 3
     // with an `auto` team>team gate, else one card per domain). In this mode no
     // lesson-named path runs at all (AC5) — see _runDomainSkillPipeline. A team with
     // no domains keeps the pre-#2592 flow below.
-    const { domainRouting, skillBudget } = knowledgeCurationConfig(env);
-    if (domainRouting) {
+    if (domainMode) {
       try {
-        const domains = ensureTeamDomains(teamId, now);
-        if (domains.length > 0) {
-          domainMode = true;
-          // entry tags[] feed the routing heuristic.
-          const tagsByEntryId = {};
-          for (const e of shardEntries) {
-            if (e && e.id && Array.isArray(e.tags) && e.tags.length) tagsByEntryId[e.id] = e.tags;
-          }
-          domainRoutedCanonicalIds = await _runDomainSkillPipeline(teamId, env, domains, candidateClusters, {
-            level, convergenceThreshold, skillBudget, now, tagsByEntryId,
-          });
-          curCandidates = readKnowledgeCandidates(teamId);
+        // entry tags[] feed the routing heuristic.
+        const tagsByEntryId = {};
+        for (const e of shardEntries) {
+          if (e && e.id && Array.isArray(e.tags) && e.tags.length) tagsByEntryId[e.id] = e.tags;
         }
+        domainRoutedCanonicalIds = await _runDomainSkillPipeline(teamId, env, domains, eligibleClusters, {
+          level, convergenceThreshold, skillBudget, now, tagsByEntryId,
+        });
+        curCandidates = readKnowledgeCandidates(teamId);
       } catch (err) {
         console.warn(`[Orchestrator] domain skill pipeline for '${teamId}' failed: ${err.message}`);
       }
@@ -9159,6 +9170,15 @@ async function _runDomainSkillPipeline(teamId, env, domains, clusters, {
   // Legacy per-lesson amendment cards fold into their domain's queue.
   for (const m of inputs.migrate) {
     byId.set(m.id, knowledgeDomainSkills.queuedRow(m, { domainId: m.domainId, via: m.routedVia, now }));
+  }
+  // A grown cluster (new id, same canonicalId) stays in its domain and replaces its
+  // older pending row, so the queue holds one row per lesson (review B2).
+  for (const g of inputs.regrown) {
+    byId.set(g.candidate.id, knowledgeDomainSkills.queuedRow(g.candidate, { domainId: g.domainId, via: g.via, now }));
+  }
+  for (const s of inputs.supersede) {
+    const prev = byId.get(s.id);
+    if (prev) byId.set(s.id, { ...prev, status: "superseded", supersededBy: s.supersededBy, supersededAt: now });
   }
   rows = [...byId.values()];
 
@@ -18424,7 +18444,8 @@ async function main() {
             }
             // #2592 (AC3/AC8): accepting a domain card settles the queued lessons
             // it listed — but only those whose ids are now in the written skill's
-            // provenance. The rest stay queued and re-surface on the next pass.
+            // provenance. The rest stay queued; on the next pass the (promoted)
+            // domain card re-opens for them (buildDomainCard).
             let next = list;
             if (!dismiss && !undismiss && p.skill && typeof p.skill.name === 'string') {
               const cards = list.filter((c) => c && idList.includes(c.id) && knowledgeDomainSkills.isDomainCard(c));

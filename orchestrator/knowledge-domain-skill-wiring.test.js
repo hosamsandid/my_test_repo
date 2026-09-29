@@ -116,3 +116,19 @@ test("Consolidate: accepting a domain queues its pending lessons and ignores non
   assert.match(src, /runConvergenceCollector\(teamId, null, \{ force: true \}\)/);
   assert.match(SRC, /const CONSOLIDATION_NON_LESSON_SOURCES = new Set\(\[knowledgeDomainSkills\.DOMAIN_CARD_SOURCE, 'domain-proposal', 'decay'\]\);/);
 });
+
+test("in domain mode the digest gate does not run and the pipeline sees every converged cluster (review B1)", () => {
+  const collector = SRC.slice(SRC.indexOf("let domainMode = false;"), SRC.indexOf("const themeClusters ="));
+  assert.match(collector, /domainMode = domains\.length > 0;/);
+  assert.match(collector, /if \(digestRouting && !domainMode\) \{/, "planDigestRouting is skipped in domain mode");
+  assert.ok(collector.indexOf("domainMode = domains.length > 0;") < collector.indexOf("planDigestRouting("),
+    "domains are resolved before the digest gate");
+  assert.match(collector, /_runDomainSkillPipeline\(teamId, env, domains, eligibleClusters, \{/,
+    "the pipeline gets eligibleClusters, not the digest-filtered candidateClusters");
+});
+
+test("a grown cluster replaces its older pending row in the pipeline (review B2)", () => {
+  const src = fn("_runDomainSkillPipeline", { async: true });
+  assert.match(src, /for \(const g of inputs\.regrown\) \{\s*byId\.set\(g\.candidate\.id, knowledgeDomainSkills\.queuedRow\(g\.candidate, \{ domainId: g\.domainId, via: g\.via, now \}\)\);/);
+  assert.match(src, /for \(const s of inputs\.supersede\) \{[\s\S]*?status: "superseded", supersededBy: s\.supersededBy/);
+});

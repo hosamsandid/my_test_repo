@@ -16,6 +16,19 @@ import { loadDraft, saveDraft, clearDraft } from './message-draft.js';
 import { decideComposerAction } from './composer-action.js';
 import { commandQuery, filterCommands, commandInsertion, nextIndex } from './command-palette.js';
 import { apiCall } from '../../hooks/useApi.js';
+import ComposerAttachments from './ComposerAttachments.jsx';
+import {
+  partitionFiles,
+  createAttachment,
+  addAttachments,
+  markUploading,
+  markUploaded,
+  markFailed,
+  removeAttachment,
+  anyUploading,
+  removeRefToken,
+  pruneToDraft,
+} from './composer-attachments.js';
 
 // OS-aware modifier idiom (shared with RightRail.jsx): Cmd on Mac, Ctrl else.
 const IS_MAC = isMacPlatform();
@@ -35,6 +48,15 @@ const IS_MAC = isMacPlatform();
  * `@chat-uploads/<name>` reference is inserted into the draft at the caret —
  * the agent's cwd is its workspace root, so that token resolves to a file it
  * can open.
+ *
+ * Image previews (#2567): each attached raster image also gets a card in a
+ * tray above the input row, shown from the local file straight away, with
+ * uploading / uploaded / failed (Retry) states and a Remove control. Images
+ * upload one request each so every card has its own outcome; other files are
+ * uploaded as one batch, as before. The tray follows the draft: deleting an
+ * uploaded image's `@chat-uploads/<name>` token drops its card, removing the
+ * card drops the token, and a send clears it. Send is blocked while any
+ * attachment is still uploading. Model: composer-attachments.js.
  *
  * Auto-resize: line height ~20 px, min 1 row, max 8 rows; we measure via
  * scrollHeight after each input event and clamp.
@@ -157,6 +179,41 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
   // Enter is consumed by the IME to commit the candidate.
   const composingRef = useRef(false);
 
+  // Image attachments of the current draft (#2567). The list holds the
+  // serialisable card state; the local File and its object URL live in
+  // `attachmentFiles` (id → { file, previewUrl }) and are released when a card
+  // goes away. The composer remounts per agent, so nothing leaks across agents.
+  const [attachments, setAttachments] = useState([]);
+  const attachmentFiles = useRef(new Map());
+  const nextAttachmentId = useRef(0);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    const files = attachmentFiles.current;
+    return () => {
+      mountedRef.current = false;
+      for (const { previewUrl } of files.values()) revokePreviewUrl(previewUrl);
+      files.clear();
+    };
+  }, []);
+
+  function releaseAttachment(id) {
+    const entry = attachmentFiles.current.get(id);
+    if (!entry) return;
+    revokePreviewUrl(entry.previewUrl);
+    attachmentFiles.current.delete(id);
+  }
+
+  // AC10: an uploaded image whose token the user deleted from the text loses
+  // its card. Runs after the render that changed either side, so a freshly
+  // inserted token and its 'uploaded' mark (set in the same batch) agree.
+  useEffect(() => {
+    const next = pruneToDraft(attachments, value);
+    if (next === attachments) return;
+    for (const a of attachments) if (!next.includes(a)) releaseAttachment(a.id);
+    setAttachments(next);
+  }, [value, attachments]);
+
   const handleTranscription = React.useCallback((text) => {
     setValue(prev => {
       if (!prev.trim()) return text;
@@ -198,9 +255,12 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
 
   function submit() {
     const text = value.trim();
-    if (!text || disabled) return;
+    if (!text || disabled || attachmentsUploading) return;
     onSend(text);
     setValue('');
+    // The sent draft's attachment previews go with it (AC9).
+    for (const a of attachments) releaseAttachment(a.id);
+    setAttachments([]);
     // Drop the persisted draft immediately so the composer doesn't re-populate
     // after a send (AC2). The value effect would also clear it, but doing it
     // here keeps intent explicit and avoids relying on effect timing.
@@ -275,8 +335,51 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
   async function doUpload(files) {
     const list = Array.from(files || []);
     if (!onUpload || disabled || list.length === 0) return;
-    const uploaded = await onUpload(list);
-    if (Array.isArray(uploaded) && uploaded.length) insertRefs(uploaded);
+    const { images, others } = partitionFiles(list);
+    // Cards appear before any upload starts (AC2), in attach order (AC7).
+    const added = images.map(file => {
+      const id = ++nextAttachmentId.current;
+      attachmentFiles.current.set(id, { file, previewUrl: createPreviewUrl(file) });
+      return createAttachment(id, file);
+    });
+    if (added.length) setAttachments(prev => addAttachments(prev, added));
+    if (others.length) {
+      const uploaded = await onUpload(others);
+      if (Array.isArray(uploaded) && uploaded.length) insertRefs(uploaded);
+    }
+    // One request per image, sequentially, so each card gets its own outcome
+    // and the references land in attach order.
+    for (const a of added) await uploadAttachment(a.id);
+  }
+
+  async function uploadAttachment(id) {
+    const entry = attachmentFiles.current.get(id);
+    if (!entry || !onUpload) return;
+    const uploaded = await onUpload([entry.file]);
+    // Removed while uploading, or the composer unmounted (agent switch):
+    // drop the result rather than insert a reference nobody asked for.
+    if (!mountedRef.current || !attachmentFiles.current.has(id)) return;
+    const first = Array.isArray(uploaded) ? uploaded[0] : null;
+    if (first?.ref) {
+      insertRefs([first]);
+      setAttachments(prev => markUploaded(prev, id, first.ref));
+    } else {
+      setAttachments(prev => markFailed(prev, id));
+    }
+  }
+
+  function retryAttachment(id) {
+    if (!onUpload || disabled) return;
+    setAttachments(prev => markUploading(prev, id));
+    uploadAttachment(id);
+  }
+
+  function removeAttachmentCard(id) {
+    const card = attachments.find(a => a.id === id);
+    releaseAttachment(id);
+    setAttachments(prev => removeAttachment(prev, id));
+    // AC6: an uploaded image's reference leaves the draft with its card.
+    if (card?.status === 'uploaded' && card.ref) setValue(prev => removeRefToken(prev, card.ref));
   }
 
   // Cross-panel "Reference in chat" (#1699): the workspace browser pushes a
@@ -337,6 +440,8 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
     ? `Message ${agentDisplayName}…  (${sendHint})`
     : `Message…  (${sendHint})`;
   const canAttach = !!onUpload && !disabled && !uploading;
+  // AC11: no send while any attachment (batch or image card) is uploading.
+  const attachmentsUploading = uploading || anyUploading(attachments);
   // The loop control is a launcher only (#1427): stopping a running loop moves
   // to the unified Stop button in the primary-action position, so the loop
   // button is disabled whenever the agent is already busy (a turn or a loop is
@@ -352,6 +457,7 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
     hasText: !!value.trim(),
     disabled,
     stopBusy,
+    uploading: attachmentsUploading,
   });
   const showStop = primary.mode === 'stop';
 
@@ -371,6 +477,12 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
       {loopRunning && loopTrigger && (
         <LoopSummaryCard trigger={loopTrigger} progress={loopProgress} />
       )}
+      <ComposerAttachments
+        attachments={attachments.map(a => ({ ...a, previewUrl: attachmentFiles.current.get(a.id)?.previewUrl ?? null }))}
+        agentId={agentId}
+        onRemove={removeAttachmentCard}
+        onRetry={retryAttachment}
+      />
       <div
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
@@ -764,6 +876,23 @@ export default function MessageInput({ onSend, disabled = false, agentId = null,
       </div>
     </div>
   );
+}
+
+// Local preview of an attached image (#2567 AC2) — never fetched from the
+// server. Null where the browser offers no object URLs; the card then shows
+// its neutral file face.
+function createPreviewUrl(file) {
+  try {
+    return typeof URL !== 'undefined' && URL.createObjectURL ? URL.createObjectURL(file) : null;
+  } catch {
+    return null;
+  }
+}
+
+function revokePreviewUrl(url) {
+  if (url) {
+    try { URL.revokeObjectURL(url); } catch { /* already released */ }
+  }
 }
 
 function autoResize(el) {

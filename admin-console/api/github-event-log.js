@@ -138,6 +138,8 @@ function projectAgentRows(entries, agentId) {
         reason: o.reason || null,
         digest: !!o.digest,
         wakeLabel,
+        // #2571: who pushed, on a producer-filter drop (null = unknown).
+        ...(o.reason === 'producer-filter' ? { producer: typeof o.producer === 'string' ? o.producer : null } : {}),
         refiredBy: e.refiredBy || null,
         refireOf: e.refireOf || null,
         refired: ref ? { eventId: String(ref.eventId), by: ref.refiredBy || null, at: ref.ts || null } : null,

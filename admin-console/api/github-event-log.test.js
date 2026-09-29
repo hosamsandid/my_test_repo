@@ -183,3 +183,13 @@ test('queryAgentEntries (#2525): filters by agent before capping and honours the
   assert.deepEqual(narrow.map(r => r.eventId), ['refire:abc']);
   assert.deepEqual(eventLog.queryAgentEntries({ agentId: '' }), []);
 });
+
+test('projectAgentRows (#2571): a producer-filter drop carries who pushed (null = unknown)', () => {
+  const push = (eventId, producer) => ({
+    ts: '2026-09-29T10:00:00.000Z', eventId, repo: 'org/repo', event: 'push',
+    outcomes: [{ agentId: DEV, triggerId: 'p', status: 'dropped', reason: 'producer-filter', digest: false, producer }],
+  });
+  const rows = eventLog.projectAgentRows([push('1', 't1-review'), push('2', null)], DEV);
+  assert.deepEqual(rows.map(r => r.producer), ['t1-review', null]);
+  assert.equal('producer' in eventLog.projectAgentRows([armedDrop], DEV)[0], false);
+});

@@ -7,6 +7,7 @@
 // EventsPanel.jsx only renders what these helpers return.
 
 import { buildTriggerCorrelationId } from '../github-event-session.js';
+import { producerFilterText } from '../event-outcome-presentation.js';
 
 // The only drops a human may override (mirrors orchestrator/github-refire.js
 // REFIRABLE_REASONS — the server re-checks, this only decides whether to offer).
@@ -61,6 +62,10 @@ export function dropReasonText(row) {
       return 'The event is older than this trigger — it happened before the trigger was activated.';
     case 'push-duplicate':
       return 'A duplicate of a push already seen, so it was ignored.';
+    case 'producer-filter': {
+      const why = producerFilterText(row && row.producer);
+      return `${why.charAt(0).toUpperCase()}${why.slice(1)} — this trigger only wakes on pushes by the agents it names.`;
+    }
     default:
       return reason ? `Dropped (${reason}).` : 'Dropped.';
   }

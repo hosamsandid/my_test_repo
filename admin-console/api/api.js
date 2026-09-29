@@ -114,6 +114,7 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
+const { applyPushedBy } = require('./push-producer-filter');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
@@ -6283,6 +6284,12 @@ app.get('/api/scripts/:name', apiLimiter, async (req, res) => {
 // new full array and PUTs it through the orchestrator, which persists it and
 // signals the agent (SIGUSR2) to re-pull. We read the current array via
 // controlOrAgentPath so it works on both the shared and isolated layouts.
+// #2571: the producer filter's same-team check reads agent configs by id.
+function readAgentConfigForFilter(agentId) {
+  if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) return null;
+  return readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+}
+
 async function putTriggers(agentId, triggers) {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   const r = await fetch(
@@ -6323,6 +6330,14 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   // here (route-level), mirroring validateProcessTemplate's bundle check.
   const tpe = triggerTransportError(newTrigger);
   if (tpe) return res.status(400).json({ error: tpe });
+  // "Pushed by agent" producer filter (#2571): same-team agent ids on push
+  // triggers only.
+  const pbf = applyPushedBy(newTrigger, { ownerId: id, lookupAgent: readAgentConfigForFilter });
+  if (pbf.error) return res.status(400).json({ error: pbf.error });
+  if (pbf.trigger !== newTrigger) {
+    delete newTrigger.pushedBy;
+    Object.assign(newTrigger, pbf.trigger);
+  }
   // At most one active chat-launched loop per agent (#1020 AC8). A launched
   // loop is a one-off run; a second launch while one runs would race two
   // runners, so reject it — the composer reflects the running state and
@@ -6379,6 +6394,13 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   // Internal-channel transport (#1174) — same route-level check as POST.
   const tpe = triggerTransportError(merged);
   if (tpe) return res.status(400).json({ error: tpe });
+  // Producer filter (#2571) — same route-level check as POST; `null` clears it.
+  const pbf = applyPushedBy(merged, { ownerId: id, lookupAgent: readAgentConfigForFilter });
+  if (pbf.error) return res.status(400).json({ error: pbf.error });
+  if (pbf.trigger !== merged) {
+    delete merged.pushedBy;
+    Object.assign(merged, pbf.trigger);
+  }
   if (merged.type === 'github-event') {
     const now = new Date().toISOString();
     // Refresh the activation horizon on a disable→enable flip so a

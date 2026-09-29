@@ -115,3 +115,9 @@ test('EventsPanel reads the agent-scoped endpoint and gates Fire again on canRef
   assert.match(PANEL, /inFlightRef\.current\) return;/, 'double-click guard');
   assert.match(PANEL, /\?session=\$\{encodeURIComponent\(correlationId\)\}/);
 });
+
+test('#2571 AC8: a producer-filter drop names who pushed, or says the producer is unknown; never re-firable', () => {
+  assert.match(dropReasonText({ ...drop('producer-filter'), producer: 't1-review' }), /^Pushed by `t1-review`, not in producer filter/);
+  assert.match(dropReasonText({ ...drop('producer-filter'), producer: null }), /^Producer unknown/);
+  assert.equal(canRefire(drop('producer-filter'), { canManage: true }), false);
+});

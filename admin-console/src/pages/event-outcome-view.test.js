@@ -80,3 +80,8 @@ test('#2525: refireNote names who fired a manual re-fire row again', () => {
   assert.equal(refireNote({ source: 'internal' }), null);
   assert.equal(refireNote(null), null);
 });
+
+test('#2571: the legend explains the producer-filter drop', () => {
+  assert.equal(outcomeLegendKey({ status: 'dropped', reason: 'producer-filter' }), 'producer-filter');
+  assert.match(outcomeTooltip({ status: 'dropped', reason: 'producer-filter' }), /pushed by/);
+});

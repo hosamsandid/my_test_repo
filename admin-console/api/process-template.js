@@ -609,7 +609,7 @@ function remapChannel(ch, teamId) {
 // Slim a trigger for the bundle: keep what defines the wiring + behaviour, drop
 // team-specific/runtime cruft (repo is re-applied at materialise time; secrets
 // never live on triggers).
-function bundleTrigger(t) {
+function bundleTrigger(t, teamId) {
   const out = { id: t.id, type: t.type, enabled: t.enabled !== false };
   if (t.type === 'github-event') {
     out.events = Array.isArray(t.events) ? t.events : [];
@@ -628,6 +628,9 @@ function bundleTrigger(t) {
     // dropping it would silently turn an internal listener back into a
     // poller-delivered one on re-materialise. Only the non-default is carried.
     if (t.transport === 'internal') out.transport = 'internal';
+    // "Pushed by agent" producer filter (#2571) — member ids reduced to the
+    // portable role ids (mapped back to `<team>-<role>` at materialise).
+    if (Array.isArray(t.pushedBy)) out.pushedBy = t.pushedBy.map(id => roleKeyOf(id, teamId));
   } else if (t.type === 'cron') {
     out.cron = t.cron || null;
   } else if (t.type === 'once') {
@@ -764,7 +767,7 @@ function buildProcessTemplate({ name, level, teamId, roles, gates, labels, stage
       // trigger, so an exported #2031 listener would survive as hand-authored
       // and keep naming whichever producer happened to wire it at export time
       // (#2031; the `channel` half is the #380 precedent this follows).
-      triggers: (r.triggers || []).filter(t => !t.channel && !isWakeHandoffTrigger(t)).map(bundleTrigger),
+      triggers: (r.triggers || []).filter(t => !t.channel && !isWakeHandoffTrigger(t)).map(t => bundleTrigger(t, teamId)),
     })),
     gates: (gates || []).map(g => ({ label: g.label })),
     labels: (labels || []).map(l => ({ name: l.name, humanGate: !!l.humanGate, brake: !!l.brake })),
@@ -1088,6 +1091,9 @@ function templateToCustomRoles(bundle) {
       // leave the listener poller-delivered and the producer's `aee-emit`
       // waking nobody.
       ...(t.transport === 'internal' ? { transport: 'internal' } : {}),
+      // "Pushed by agent" producer filter (#2571) — role ids, mapped to member
+      // ids by buildMemberFromTemplate.
+      ...(Array.isArray(t.pushedBy) ? { pushedBy: t.pushedBy.slice() } : {}),
       cron: t.cron,
       at: t.at,
       // Trigger-level emits removed (#783) — label hand-offs ride on role `emits`.
@@ -1996,7 +2002,16 @@ function expandDataFlowSteps(bundle) {
 
     for (const [upId, artifacts] of upstream) {
       const triggerId = `${b.id}-on-push-${upId}`;
-      if (b.triggers.some(t => t.id === triggerId)) continue; // idempotent
+      const existing = b.triggers.find(t => t.id === triggerId);
+      if (existing) { // idempotent
+        // #2571: a bundle exported before the producer filter existed carries
+        // the derived trigger without one — give it the upstream now. An
+        // explicit array (even `[]` = any push) is an authored choice and kept.
+        if (existing.dataFlow === true && !Array.isArray(existing.pushedBy)) {
+          b.triggers = b.triggers.map(t => (t === existing ? { ...t, pushedBy: [upId] } : t));
+        }
+        continue;
+      }
       const list = [...artifacts.values()].sort((x, y) => x.key.localeCompare(y.key));
       b.triggers.push({
         id: triggerId,
@@ -2006,6 +2021,11 @@ function expandDataFlowSteps(bundle) {
         // editable "push from <upstream>" hand-off) rather than a raw push
         // trigger. The poller ignores unknown fields. (#379)
         dataFlow: true,
+        // "Pushed by agent" producer filter (#2571): the hand-off is FROM this
+        // upstream, so only its pushes wake the consumer — not another role's,
+        // a human's, a knowledge-base sync's or another Agent Team's on the same
+        // repo. Role ids here; buildMemberFromTemplate maps them to member ids.
+        pushedBy: [upId],
         // No `claim` (#958): a data-flow step wakes on `push`, not on a label, so
         // there is no wake label to take over. The claim convention applies to
         // LABEL listeners only — asserted by test rather than left implicit.
@@ -2084,6 +2104,11 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
       // materialised trigger or the listener silently reverts to poller
       // delivery. Suffix/var substitution never touches it (not a label).
       if (tr.transport === 'internal') out.transport = 'internal';
+      // "Pushed by agent" producer filter (#2571): role ids → member ids, like
+      // `dependsOn` below, so the poller matches the team's own members only.
+      if (Array.isArray(tr.pushedBy)) {
+        out.pushedBy = tr.pushedBy.filter(r => typeof r === 'string' && r).map(r => `${teamId}-${r}`);
+      }
       // Data-flow (agent dependency) marker so the trigger UI renders it as an
       // editable "push from <upstream>" hand-off rather than a raw push (#379).
       if (tr.dataFlow) out.dataFlow = true;

@@ -1,9 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  kindLabel, kindTooltip, entryDetail, entryHoverDetail, labelChip, totalPending,
+  kindLabel, kindTooltip, entryDetail, entryHoverDetail, labelChip, totalPending, totalHeld,
   pendingRowMenu, reassignPickerState, reassignTargetLabel, pendingReassignError, pendingReassignSuccess,
 } from './pending-queue-view.js';
+
+test('totalHeld reads heldTotal, falls back to summing held groups, and is 0 for an old payload', () => {
+  assert.equal(totalHeld({ heldTotal: 4 }), 4);
+  assert.equal(totalHeld({ held: [{ entries: [1, 2] }, { entries: [3] }] }), 3);
+  // An older orchestrator with no `held` field must read as zero, never NaN/throw.
+  assert.equal(totalHeld({ agents: [], total: 0 }), 0);
+  assert.equal(totalHeld(null), 0);
+});
 
 test('kindLabel maps known kinds and falls back gracefully', () => {
   assert.equal(kindLabel('github'), 'GitHub event');

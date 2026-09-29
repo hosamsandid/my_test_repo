@@ -4,7 +4,7 @@ import {
   Users, Zap, Sparkles, Server,
   ChevronLeft, ChevronRight, ChevronDown,
   Boxes, Key, MessageCircle, Github, GitBranch,
-  Rocket, Users2, Wand2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle,
+  Rocket, Users2, Wand2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle, Gauge,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
@@ -137,9 +137,12 @@ const NAV_GROUPS = [
     // "build a team, then fill it in" reading order — Flows first, then the
     // templates, skills and knowledge a team draws on.
     { path: '/flows',        label: 'Flows',               Icon: GitBranch },
-    // Flow Control's nav entry is removed here (#2147, step 1 of 2) — the page,
-    // route, help and backend all stay; only the sidebar entry goes. #2145 is
-    // step 2, re-shipping the board as an installable, team-grantable plugin.
+    // Flow Control board — restored to the sidebar for WIP transparency: it is
+    // the one place that shows which tickets are in flight, which dispatches are
+    // held behind a full WIP limit, and the Force-dispatch action. (It had been
+    // hidden under #2147 pending a re-ship as a plugin (#2145); with admission
+    // control always on, an operator needs a reachable view of what it holds.)
+    { path: '/flow-control', label: 'Flow Control',        Icon: Gauge },
     { path: '/role-templates', label: 'Agent Templates',   Icon: UserCog, adminOnly: true },
     { path: '/skills',       label: 'Skills',              Icon: Zap },
     { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },

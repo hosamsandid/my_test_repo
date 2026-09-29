@@ -352,7 +352,12 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
 - **Flow Control** (`docs/flow-control-concept.md`): a declarative per-flow
   `wipLimit` enforced at dispatch (`admission-control.js`); a read-only **ticket
   ledger** deriving true state from GitHub evidence (`ticket-reconciler.js`);
-  the `/flow-control` board (no nav entry).
+  the `/flow-control` board (**reachable from the sidebar** — the #2147 removal
+  was reversed for WIP transparency). A dispatch the lane **holds** behind a
+  full `wipLimit` also surfaces in the **GitHub Event Log → Pending queue** tab
+  (`aggregateHeldDispatches` folds each team lane's `held[]` into
+  `/api/pending-queue`), so held work is never invisible — it used to log
+  "delivered" yet appear nowhere.
 - **Agent Pools** (epic #2251, `docs/parallel-workers-concept.md`): a role opts
   into `pool: {enabled: true, …}` (bundle field, sibling of `wipLimit`) to become
   a template — one wake spawns an item-keyed ephemeral instance

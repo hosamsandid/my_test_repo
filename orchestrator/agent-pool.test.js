@@ -235,6 +235,26 @@ test('planPoolDispatch: paused/draining refuses a NEW spawn but still reuses an 
   }
 });
 
+test('planPoolDispatch: off refuses even a reuse — nothing runs until switched on (#2573)', () => {
+  assert.deepEqual(
+    pool.planPoolDispatch({
+      teamId: 't', roleId: 'developer', pool: POOL, itemKey: 7, controlState: 'off',
+      existingInstanceIds: ['t-developer-i7'],
+    }),
+    { action: 'refuse', reason: 'off', instanceId: 't-developer-i7' },
+  );
+});
+
+test('normalizePoolControl keeps off; settleDrain turns a finished drain off (#2573)', () => {
+  const control = pool.normalizePoolControl({ developer: { state: 'off' } });
+  assert.equal(pool.poolControlState(control, 'developer'), 'off');
+  assert.equal(pool.settleDrain('draining', 0), 'off');
+  assert.equal(pool.settleDrain('draining', 2), 'draining');
+  assert.equal(pool.settleDrain('draining', NaN), 'draining');
+  assert.equal(pool.settleDrain('paused', 0), 'paused');
+  assert.equal(pool.settleDrain('running', 0), 'running');
+});
+
 test('planPoolDispatch: an omitted controlState defaults to running (back-compat)', () => {
   assert.deepEqual(
     pool.planPoolDispatch({ teamId: 't', roleId: 'developer', pool: POOL, itemKey: 7 }),

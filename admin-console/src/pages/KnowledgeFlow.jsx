@@ -1065,6 +1065,7 @@ function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
   const [selected, setSelected] = useState(() => new Set()); // ids picked for merge
   const [merging, setMerging] = useState(null);    // { name, scope }
   const [splitting, setSplitting] = useState(null); // { id, name, parts:[{name,scope}] }
+  const [overBudgetAsk, setOverBudgetAsk] = useState(null); // { budget, added, resolve }
   const list = Array.isArray(domains) ? domains : [];
 
   // Post an op. `reload:false` (bootstrap) skips onChanged since nothing is persisted.
@@ -1072,12 +1073,24 @@ function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
   // `assistFetch` injects the header-selected assist model (#1214: the `bootstrap`
   // op runs an LLM synthesis in the orchestrator, so it must carry the selection;
   // the other ops are deterministic and ignore the header server-side).
+  // #2592 (AC10): every domain grows into one skill, so adding domains at or over
+  // the soft skill budget answers 409 `over-budget` — ask, and only on an explicit
+  // yes re-send with `overBudgetConfirmed`. Declining leaves the taxonomy untouched.
   const post = useCallback((body, { reload = true } = {}) => {
     setBusy(true); setErr('');
-    return assistFetch('/api/knowledge/domains', {
+    const send = (extra) => assistFetch('/api/knowledge/domains', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ teamId, ...body }),
-    }).then(r => r.json().catch(() => ({}))).then((out) => {
+      body: JSON.stringify({ teamId, ...body, ...extra }),
+    }).then(r => r.json().catch(() => ({})));
+    return send({}).then((out) => {
+      if (!out || out.error !== 'over-budget') return out;
+      return new Promise((resolve) => {
+        setOverBudgetAsk({ budget: out.budget || {}, added: out.added || 1, resolve });
+      }).then((ok) => {
+        if (!ok) throw new Error('Not added — over the skill budget');
+        return send({ overBudgetConfirmed: true });
+      });
+    }).then((out) => {
       if (!out || out.ok !== true) throw new Error((out && out.error) || 'failed');
       if (reload && onChanged) onChanged();
       return out;
@@ -1164,7 +1177,10 @@ function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
             marginBottom: 'var(--eb-space-2)',
           }}>
             A <strong style={{ color: 'var(--eb-text-secondary)' }}>domain</strong> is a theme this team’s
-            lessons cluster into — e.g. “JCL conversion”. Changing them is always a human decision.
+            lessons cluster into — e.g. “JCL conversion”. Each domain grows into exactly one team skill:
+            converged lessons are routed to their domain and extend its skill (the first version once enough
+            lessons agree). Lessons that fit no domain stay in the digest only. Renaming a domain keeps its
+            skill; removing one re-routes its waiting lessons. Changing domains is always a human decision.
             <PageHelpButton
               label="What domains are for"
               size={12}
@@ -1352,6 +1368,19 @@ function DomainsPanel({ teamId, domains, budget, lessons, onChanged }) {
           )}
         </div>
       )}
+      <ConfirmDialog
+        open={!!overBudgetAsk}
+        title="Over the skill budget"
+        variant="warning"
+        confirmLabel="Add anyway"
+        message={overBudgetAsk ? (
+          `This team is at its skill budget (${overBudgetAsk.budget.used ?? '?'} of ${overBudgetAsk.budget.cap ?? '?'} skills). `
+          + `Every domain grows into its own skill, so adding ${overBudgetAsk.added === 1 ? 'this domain' : `${overBudgetAsk.added} domains`} `
+          + 'will exceed it. Add anyway? (Merging into an existing domain keeps the team within budget.)'
+        ) : ''}
+        onConfirm={() => { overBudgetAsk.resolve(true); setOverBudgetAsk(null); }}
+        onCancel={() => { if (overBudgetAsk) overBudgetAsk.resolve(false); setOverBudgetAsk(null); }}
+      />
     </div>
   );
 }
@@ -1428,9 +1457,10 @@ function ConsolidationPanel({ teamId, domains, onChanged, signal }) {
   const skip = (domainId) => run(() => call({ op: 'advance', domainId, status: 'skipped' }));
   const routeRemaining = () => run(() => call({ op: 'route-remaining' }), true);
 
-  // Open the per-domain review. A ≥2-member domain synthesises a playbook draft via
-  // /api/skills/merge-draft (persists nothing); a 0/1-member domain has nothing to
-  // merge, so accepting only records the decision.
+  // Open the per-domain review. A ≥2-member domain (or a one-member fold into the
+  // domain skill, #2592) synthesises a draft via /api/skills/merge-draft (persists
+  // nothing); a domain with no skill to move only records the decision — the
+  // orchestrator then queues its pending lessons for the domain skill.
   const openReview = (dom) => {
     const merge = mergeForDomain(planData && planData.merges, dom.domainId);
     if (!merge) { setReview({ domainId: dom.domainId, name: dom.name, skill: dom.skill, merge: null, draft: '' }); return; }
@@ -1550,8 +1580,10 @@ function ConsolidationPanel({ teamId, domains, onChanged, signal }) {
                         {r.memberCount} skill{r.memberCount === 1 ? '' : 's'} · {r.candidateCount} cand.
                       </span>
                       {r.mergeable
-                        ? <span title="Two or more skills — a playbook will be synthesised" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)' }}>→ playbook</span>
-                        : <span title="Fewer than two skills — nothing to merge" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>—</span>}
+                        ? (r.fold
+                          ? <span title="One skill — it is folded into the domain skill" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)' }}>→ domain skill</span>
+                          : <span title="Two or more skills — a playbook will be synthesised" style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-accent-primary)' }}>→ playbook</span>)
+                        : <span title={r.candidateCount > 0 ? 'No skill to merge — its pending lessons go to the domain skill on accept' : 'Nothing to merge'} style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)' }}>—</span>}
                     </div>
                   ))}
                   {fold && (fold.unassignedSkills + fold.unassignedCandidates) > 0 && (
@@ -1644,13 +1676,15 @@ function ConsolidationPanel({ teamId, domains, onChanged, signal }) {
             <div style={{ padding: 'var(--eb-space-4)', overflow: 'auto', flex: 1 }}>
               {review.merge ? (
                 <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginBottom: 'var(--eb-space-2)' }}>
-                  Folding {review.merge.sources.length} skills into <code>{review.skill}</code>:{' '}
+                  Folding {review.merge.sources.length} skill{review.merge.sources.length === 1 ? '' : 's'} into <code>{review.skill}</code>:{' '}
                   {review.merge.sources.map(s => s.name).join(', ')}. The source skills are archived with lineage
                   (reversible) and grants swap atomically on accept.
                 </div>
               ) : (
                 <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-muted)' }}>
-                  This domain has fewer than two member skills — there is no playbook to synthesise. Accepting only records it as reviewed.
+                  This domain has no other skill to fold into <code>{review.skill}</code>. Accepting records it as reviewed
+                  and hands the domain's pending lessons to its one domain skill (created or extended by the next pass, or
+                  raised as the domain's card when the team&gt;team gate is not auto).
                 </div>
               )}
               {review.loading && <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-sm)' }}>Synthesising the playbook…</div>}
@@ -3519,6 +3553,8 @@ function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, onAddMer
   // #919: a decay card proposes RETIRING an unused lesson (never promoting) —
   // its primary action archives via the same path as the manual Retire button.
   const decay = suggestion.source === 'decay';
+  // #2592: one card per knowledge domain — creates or updates THE domain's skill.
+  const domainCard = suggestion.source === 'domain-skill';
   const evidence = decay && suggestion.evidence && typeof suggestion.evidence === 'object' ? suggestion.evidence : null;
   const dismissed = suggestion.status === 'dismissed';
   const stale = suggestion.status === 'stale';
@@ -3552,12 +3588,23 @@ function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, onAddMer
               ? 'Several distinct but related lessons about one topic — review to combine them into a single reusable skill.'
               : 'This knowledge looks important enough to become a reusable skill. Review it to promote — or dismiss it.'}
           style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning)', cursor: 'help' }}>
-          {decay ? 'Retire suggestion — unused lesson' : related ? 'Related lessons — suggested skill' : 'Suggested skill'}
+          {decay ? 'Retire suggestion — unused lesson' : domainCard ? `${suggestion.mode === 'extend' ? 'Update' : 'Create'} domain skill` : related ? 'Related lessons — suggested skill' : 'Suggested skill'}
         </span>
+        {suggestion.domainName && (
+          <span
+            title={domainCard
+              ? `Accepting this card ${suggestion.mode === 'extend' ? 'extends' : 'creates'} the skill of the “${suggestion.domainName}” domain (${suggestion.domainSkill}) — every domain grows into exactly one skill.`
+              : `This lesson was routed to the “${suggestion.domainName}” knowledge domain.`}
+            style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', cursor: 'help' }}>
+            → {suggestion.domainName}
+          </span>
+        )}
         <span
           style={{ marginLeft: 'auto', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', cursor: 'help' }}
           title={decay
             ? 'How long this lesson has gone unretrieved (searches and digest builds both count as use)'
+            : domainCard
+              ? `${suggestion.lessonCount} pending lesson(s) of this domain from ${suggestion.convergenceCount} agent(s)`
             : related
               ? `${suggestion.lessonCount} related lessons from ${suggestion.convergenceCount} agent(s) — they belong to one topic`
               : suggestion.source === 'agent-nominated'
@@ -3565,7 +3612,7 @@ function SuggestionCard({ suggestion, onReview, onDismiss, onUndismiss, onAddMer
                 : `${suggestion.convergenceCount} agents learned this independently`}>
           {decay
             ? (evidence ? `unused ${evidence.unusedDays}d` : 'unused')
-            : related
+            : related || domainCard
               ? `${suggestion.lessonCount} lessons · ${suggestion.convergenceCount} agent${suggestion.convergenceCount === 1 ? '' : 's'}`
               : `${suggestion.convergenceCount}× learned${suggestion.source === 'agent-nominated' ? ' · nominated' : ''}`}
         </span>
@@ -4120,6 +4167,31 @@ function ConfigurePanel({ teamId, gates, onClose, onChanged }) {
         </div>
       </PanelSection>
 
+      {/* First domain skill threshold (#2592) — how much converged evidence a
+          knowledge domain needs before its (one) skill is first written. Once the
+          skill exists, every further routed lesson extends it. */}
+      <PanelSection
+        title="First domain skill"
+        blurb="Each knowledge domain grows into exactly one team skill. Its first version is only written once enough converged lessons have been routed to the domain — below that, lessons wait in the domain’s queue (they stay in the digest meanwhile). After the skill exists, every new lesson of the domain extends it.">
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
+          {[[2, 2], [3, 2], [5, 2], [5, 3]].map(([minLessons, minAgents]) => {
+            const cur = gates.domainSkillThreshold || { minLessons: 3, minAgents: 2 };
+            const active = cur.minLessons === minLessons && cur.minAgents === minAgents;
+            const isDefault = minLessons === 3 && minAgents === 2;
+            return (
+              <Chip
+                key={`${minLessons}-${minAgents}`}
+                active={active}
+                title={`Write a domain’s first skill once ≥${minLessons} lessons from ≥${minAgents} agents are routed to it${isDefault ? ' (default)' : ''}`}
+                onClick={() => !active && busy !== 'domain-threshold'
+                  && call('domain-threshold', '/api/knowledge/domain-skill-threshold', { teamId, minLessons, minAgents })}>
+                ≥{minLessons} lessons · ≥{minAgents} agents{isDefault ? ' · default' : ''}
+              </Chip>
+            );
+          })}
+        </div>
+      </PanelSection>
+
       {/* Assist model (#1213) — the provider the team's AUTONOMOUS synthesis
           (curator auto-promotion + skill distillation) bills against. These runs
           have no user session, so the console's per-user assist selector can't
@@ -4552,7 +4624,7 @@ const resultNotice = (result) => (
 /* ── Promotion dialog (unchanged mechanics: draft → confirm → promote) ────────── */
 
 function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
-  const [name, setName] = useState(suggestion.draft?.name || '');
+  const [name, setName] = useState((suggestion.source === 'domain-skill' && suggestion.domainSkill) || suggestion.draft?.name || '');
   const [skillMd, setSkillMd] = useState(suggestion.draft?.skillMd || '');
   const [tier, setTier] = useState('team');
   const [busy, setBusy] = useState('');
@@ -4571,6 +4643,10 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
   // with that skill pre-selected — the operator can always switch back.
   const [mode, setMode] = useState(suggestion.matchedSkill ? 'extend' : 'create');
   const [targetName, setTargetName] = useState(suggestion.matchedSkill?.name || '');
+  // #2592: a domain card lands in exactly ONE place — the domain's team skill
+  // (created when missing, extended when present). The target is fixed; the server
+  // rejects any other name/tier for it.
+  const domainSkill = suggestion.source === 'domain-skill' ? (suggestion.domainSkill || null) : null;
   const [skills, setSkills] = useState([]); // all eligible skills (every source/tier)
 
   // #921: the *name field* is the single source of truth for the draft's
@@ -4588,7 +4664,7 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
   // lessons are distinct and the skill is their synthesis (manual OR the
   // collector's related-theme card).
   const manual = !suggestion.id;
-  const aggregated = manual || suggestion.source === 'related';
+  const aggregated = manual || suggestion.source === 'related' || !!domainSkill;
   const memberTexts = useMemo(() => {
     const seen = new Set();
     const out = [];
@@ -4865,6 +4941,14 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
           )}
         </div>
 
+        {domainSkill ? (
+          <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', lineHeight: 1.5 }}>
+            → <strong>{suggestion.domainName || domainSkill}</strong>{' '}
+            <span style={{ color: 'var(--eb-text-muted)' }}>
+              ({mode === 'extend' ? 'updates' : 'creates'} the team skill <code>{domainSkill}</code> — one skill per domain)
+            </span>
+          </div>
+        ) : (<>
         <label style={lbl}>Add this knowledge to</label>
         <div style={{ display: 'flex', gap: 'var(--eb-space-2)' }}>
           <Chip active={mode === 'create'} title="Create a brand-new skill from this knowledge" onClick={() => setMode('create')}>Create a new skill</Chip>
@@ -4878,8 +4962,9 @@ function PromotionDialog({ suggestion, teamId, teamSkills, onClose, onDone }) {
           <Chip active={tier === 'team'} title="Only this team’s agents load it" onClick={() => setTier('team')}>Team skill — this team only</Chip>
           <Chip active={tier === 'global'} title="Agents in every team load it" onClick={() => setTier('global')}>Global skill — all teams</Chip>
         </div>
+        </>)}
 
-        {mode === 'create' ? (
+        {domainSkill ? null : mode === 'create' ? (
           <>
             <label style={lbl}>Skill name</label>
             <input value={name} onChange={e => setName(e.target.value)} style={inp} />

@@ -67,8 +67,29 @@ test('buildConsolidationMerge: ≥2 members → merge input for planMerge; <2 �
   assert.equal(merge.sources.length, 3);
   assert.deepEqual(merge.sources[0], { tier: 'team', teamId: 'agent-studio', name: 'a' });
   assert.deepEqual(merge.target, { tier: 'team', teamId: 'agent-studio', name: 'dev-workflow' });
-  assert.equal(buildConsolidationMerge({ domainId: 'x', memberSkills: ['only'] }, { teamId: 't' }), null);
   assert.equal(buildConsolidationMerge({ domainId: 'x', memberSkills: [] }, { teamId: 't' }), null);
+});
+
+test('planConsolidation: a domain\'s own skill is always its member (#2592)', () => {
+  const plan = planConsolidation(DOMAINS, [
+    { name: 'review-practice', tier: 'team', entryIds: [] },
+    { name: 'dev-workflow-branching', tier: 'team', entryIds: [] },
+  ], []);
+  const rev = plan.domains.find((d) => d.domainId === 'review-practice');
+  assert.deepEqual(rev.memberSkills, ['review-practice']);
+  assert.equal(buildConsolidationMerge(rev, { teamId: 't' }), null, 'already the one domain skill');
+});
+
+test('buildConsolidationMerge: ONE member skill folds into the domain skill (#2592 AC11)', () => {
+  const fold = buildConsolidationMerge({ domainId: 'x', memberSkills: ['only'] }, { teamId: 't' });
+  assert.equal(fold.fold, true);
+  assert.deepEqual(fold.sources, [{ tier: 'team', teamId: 't', name: 'only' }]);
+  assert.deepEqual(fold.target, { tier: 'team', teamId: 't', name: 'x' });
+  assert.equal(fold.retireSources, true);
+  // The only member already IS the domain skill → nothing to fold.
+  assert.equal(buildConsolidationMerge({ domainId: 'x', memberSkills: ['x'] }, { teamId: 't' }), null);
+  // Two or more members stay an ordinary merge (no fold flag).
+  assert.equal(buildConsolidationMerge({ domainId: 'x', memberSkills: ['a', 'b'] }, { teamId: 't' }).fold, undefined);
 });
 
 test('buildConsolidationMerge: feeds a well-formed multi-source merge (AC3 accept path)', () => {

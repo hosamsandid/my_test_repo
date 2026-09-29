@@ -7576,6 +7576,18 @@ app.get('/api/knowledge/stream', (req, res) => {
 
 const KNOWLEDGE_SUGGESTIONS_DIR = path.join(WORKSPACE, 'knowledge-suggestions');
 
+// #2592: domainId → current display name, from the team's domain taxonomy
+// (/workspace/teams/<teamId>/knowledge-domains.json, owned by the orchestrator).
+function readTeamDomainNames(teamId) {
+  const out = new Map();
+  if (!AGENT_ID_RE.test(teamId)) return out;
+  const doc = readJsonFile(path.join(WORKSPACE, 'teams', path.basename(teamId), 'knowledge-domains.json'), null);
+  for (const d of (doc && Array.isArray(doc.domains) ? doc.domains : [])) {
+    if (d && typeof d.id === 'string' && typeof d.name === 'string' && d.name) out.set(d.id, d.name);
+  }
+  return out;
+}
+
 function readCandidateStore(teamId) {
   if (!AGENT_ID_RE.test(teamId)) return [];
   const arr = readJsonFile(path.join(KNOWLEDGE_SUGGESTIONS_DIR, `${path.basename(teamId)}.json`), []);
@@ -7597,9 +7609,21 @@ app.get('/api/knowledge/promotion-suggestions', (req, res) => {
   // existing team-tier skill (the default promotion home), so the dialog can
   // pre-select "extend" with that target. Default stays "create new" (null).
   const eligible = eligibleExtendSkills(scope, teamId, 'team');
+  // #2592: current domain names (a renamed domain relabels its card without waiting
+  // for the next collector pass).
+  const domainNames = readTeamDomainNames(teamId);
   const suggestions = rows.map(c => {
     const view = knowledgeSuggestions.promotionSuggestionView(c, c.draft);
-    view.matchedSkill = knowledgeSuggestions.matchExistingSkill(c, eligible);
+    if (knowledgeSuggestions.isDomainCard(c)) {
+      // A domain card targets THE domain skill — never a text-matched neighbour.
+      // The skill may have appeared since the card was raised → extend it.
+      const onDisk = view.domainSkill && eligible.find(s => s && s.name === view.domainSkill);
+      view.matchedSkill = onDisk ? { name: view.domainSkill, tier: 'team' } : null;
+      view.mode = onDisk ? 'extend' : 'create';
+    } else {
+      view.matchedSkill = knowledgeSuggestions.matchExistingSkill(c, eligible);
+    }
+    if (view.domainId && domainNames.has(view.domainId)) view.domainName = domainNames.get(view.domainId);
     if (c.dismissReason) view.dismissReason = c.dismissReason;
     if (c.dismissedAt) view.dismissedAt = c.dismissedAt;
     if (c.staleAt) view.staleAt = c.staleAt;
@@ -7889,6 +7913,13 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     const v = knowledgeSuggestions.validateExtension(req.body);
     if (!v.ok) return res.status(400).json({ error: v.error });
 
+    // #2592: a domain card may only extend its own domain skill.
+    const dc = knowledgeSuggestions.checkDomainCardTarget(
+      req.body.suggestionId ? readCandidateStore(teamId).find(c => c && c.id === req.body.suggestionId) : null,
+      { name: v.targetName, to: v.to },
+    );
+    if (!dc.ok) return res.status(400).json({ error: dc.error });
+
     const target = resolveExtendTarget(teamId, v.to, v.targetName);
     if (target.error) return res.status(target.notFound ? 404 : 400).json({ error: target.error });
 
@@ -7984,6 +8015,12 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     ? readCandidateStore(teamId).find(c => c && c.id === req.body.suggestionId) || null
     : null)
     || (v.from === 'team' ? adHocCandidate(teamId, v.entryIds) : null);
+
+  // #2592: a domain card may only create its own domain skill (never a lesson-named one).
+  const dc = knowledgeSuggestions.checkDomainCardTarget(
+    req.body.suggestionId ? cand : null, { name: v.name, to: v.to },
+  );
+  if (!dc.ok) return res.status(400).json({ error: dc.error });
 
   // Destination dir by target tier (same containment guards as promote-to-global).
   let dstDir;
@@ -8431,6 +8468,7 @@ app.get('/api/knowledge/gates', (req, res) => {
     repositories: teamRepositories(env),
     githubTokenId: env && typeof env.githubTokenId === 'string' ? env.githubTokenId : '',
     decayHorizonDays: knowledgeSuggestions.resolveDecayHorizonDays(env), // #919
+    domainSkillThreshold: knowledgeSuggestions.resolveDomainSkillThreshold(env), // #2592
   });
 });
 
@@ -8452,6 +8490,31 @@ app.put('/api/knowledge/decay', apiLimiter, async (req, res) => {
     const out = await r.json().catch(() => ({}));
     if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'decay config update failed' });
     res.json({ ok: true, decayHorizonDays: days });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// Set the per-team first-skill threshold of the domain → skill pipeline (#2592,
+// AC12): a domain's FIRST skill needs >= minLessons converged lessons from
+// >= minAgents distinct agents. Same per-team knowledge-config writer as decay.
+app.put('/api/knowledge/domain-skill-threshold', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  const minLessons = Number(req.body?.minLessons);
+  const minAgents = Number(req.body?.minAgents);
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!Number.isInteger(minLessons) || minLessons < 1 || minLessons > 100) return res.status(400).json({ error: 'minLessons must be an integer 1..100' });
+  if (!Number.isInteger(minAgents) || minAgents < 1 || minAgents > 50) return res.status(400).json({ error: 'minAgents must be an integer 1..50' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/config`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, config: { domainSkillThreshold: { minLessons, minAgents } } }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'threshold update failed' });
+    res.json({ ok: true, domainSkillThreshold: { minLessons, minAgents } });
   } catch (err) {
     res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
   }
@@ -8553,6 +8616,12 @@ app.post('/api/knowledge/domains', apiLimiter, async (req, res) => {
       body: JSON.stringify(forward),
     });
     const out = await r.json().catch(() => ({}));
+    // #2592 (AC10): growing the taxonomy at/over the skill budget needs an explicit
+    // confirmation — pass the 409 through so the panel can ask and re-send with
+    // `overBudgetConfirmed: true`. Nothing was written.
+    if (r.status === 409 && out && out.error === 'over-budget') {
+      return res.status(409).json({ ok: false, error: 'over-budget', added: out.added, budget: out.budget });
+    }
     if (!r.ok || !out.ok) return res.status(400).json({ error: (out && out.error) || 'domain op failed' });
     const payload = { ok: true, doc: out.doc, budget: out.budget, proposed: out.proposed, fallback: out.fallback };
     if (assistTarget) payload.meta = assistMeta(assistTarget); // "which key paid for this" (#1211 §4.5)

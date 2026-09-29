@@ -91,6 +91,8 @@ test('knowledgeCurationConfig: default cap + autoThemeMinLessons, clamp, legacy 
     domainRouting: true, skillBudget: 12, synthesizeSkills: false,
     // #781: distillation cadence.
     distillAfterAmendments: 5,
+    // #2592: a domain's FIRST skill needs ≥3 lessons from ≥2 agents (per team).
+    domainSkillThreshold: { minLessons: 3, minAgents: 2 },
   });
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 7 } }).maxAutoPromotionsPerPass, 7);
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { maxAutoPromotionsPerPass: 0 } }).maxAutoPromotionsPerPass, 3);

@@ -150,6 +150,7 @@ function planSupersessions(candidates, { now } = {}) {
   const list = Array.isArray(candidates) ? candidates : [];
   const nowIso = new Date(typeof now === 'number' ? now : Date.parse(now || '') || Date.now()).toISOString();
   const open = list.filter((c) => c && c.status === 'open' && c.source !== 'domain-proposal'
+    && c.source !== 'domain-skill' // #2592: one card per domain — never retired by another card
     && Array.isArray(c.entryIds) && c.entryIds.length > 0);
   const sets = new Map(open.map((c) => [c.id, _entryIdSet(c)]));
   const supersededBy = new Map(); // subsumed id -> superseder id
@@ -184,15 +185,15 @@ function planSupersessions(candidates, { now } = {}) {
 /**
  * Hard backstop: if the number of `open` cards exceeds `maxOpen`, evict the
  * lowest-evidence (then oldest, then id) cards to `stale` until at the cap. The
- * domain-proposal singleton and amendment (`extendMode`) cards are never evicted —
- * they are decidable, low-noise, and the singleton is the whole point of FIX-A. Pure;
- * deterministic; idempotent (a store already at/under the cap rewrites nothing).
+ * domain-proposal singleton, per-domain skill cards (#2592) and amendment
+ * (`extendMode`) cards are never evicted — they are decidable, low-noise, and the
+ * singleton is the whole point of FIX-A. Pure; deterministic; idempotent (a store already at/under the cap rewrites nothing).
  */
 function planOpenCap(candidates, { now, maxOpen = DEFAULT_MAX_OPEN_SUGGESTIONS } = {}) {
   const list = Array.isArray(candidates) ? candidates : [];
   const cap = Number.isFinite(maxOpen) && maxOpen >= 1 ? Math.floor(maxOpen) : DEFAULT_MAX_OPEN_SUGGESTIONS;
   const nowIso = new Date(typeof now === 'number' ? now : Date.parse(now || '') || Date.now()).toISOString();
-  const isProtected = (c) => c.source === 'domain-proposal' || c.extendMode === true;
+  const isProtected = (c) => c.source === 'domain-proposal' || c.source === 'domain-skill' || c.extendMode === true;
   const openCount = list.filter((c) => c && c.status === 'open').length;
   if (openCount <= cap) return { evicted: [], next: list, changed: false };
   const evictable = list.filter((c) => c && c.status === 'open' && !isProtected(c));

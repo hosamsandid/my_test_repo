@@ -34,12 +34,22 @@ function tokens(text) {
     .filter((t) => t.length >= 4);
 }
 
-// The vocabulary of a domain: the meaningful tokens of its name + scope + roles.
-// This is what the heuristic matches a lesson's text/tags against.
+// Generic words that appear in many domain names but say nothing about a lesson's
+// topic ("Team practice", "General workflow notes"). They never count as a match.
+const GENERIC_VOCAB = new Set([
+  'team', 'teams', 'general', 'misc', 'other', 'others', 'common', 'shared', 'stuff',
+  'things', 'practice', 'practices', 'knowledge', 'lesson', 'lessons', 'notes',
+  'with', 'from', 'that', 'this', 'into', 'when', 'your', 'their', 'about',
+]);
+
+// The vocabulary of a domain: the meaningful tokens of its NAME only. #2592 (G4):
+// scope ("team"/"global") and role words ("developer", "reviewer") used to be part
+// of the vocabulary, so any lesson that merely mentioned a role — most of them —
+// routed to whichever domain listed that role first. Name tokens minus generic
+// words are the topic signal; everything else is left to the batched LLM pass.
 function domainVocabulary(domain) {
   const d = domain && typeof domain === 'object' ? domain : {};
-  const parts = [d.name, d.scope, ...(Array.isArray(d.roles) ? d.roles : [])];
-  return new Set(parts.flatMap((p) => tokens(p)));
+  return new Set(tokens(d.name).filter((t) => !GENERIC_VOCAB.has(t)));
 }
 
 // ---------------------------------------------------------------------------
@@ -91,16 +101,22 @@ function classifyCandidateToDomain(candidate, domains, {
     if (Array.isArray(t)) tags.push(...t);
   }
   let best = null;
+  let tied = false;
   const skillMap = skillEntryIdsByDomain && typeof skillEntryIdsByDomain === 'object' ? skillEntryIdsByDomain : {};
   for (const domain of list) {
     if (!domain || typeof domain.id !== 'string') continue;
     const s = scoreCandidateToDomain(c, domain, { skillEntryIds: skillMap[domain.id], tags });
-    if (s.score >= floor && (!best || s.score > best.score)) {
+    if (s.score < floor) continue;
+    if (best && s.score === best.score) { tied = true; continue; }
+    if (!best || s.score > best.score) {
       const via = s.idOverlap > 0 ? 'lineage' : (s.tagOverlap > 0 && s.vocabOverlap === 0 ? 'tag' : 'vocab');
       best = { domainId: domain.id, skill: domainSkillName(domain), score: s.score, via };
+      tied = false;
     }
   }
-  return best;
+  // #2592 (G4): a tie between two domains is not a decision — it used to go to
+  // whichever domain was listed first. Leave the lesson unrouted instead.
+  return tied ? null : best;
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +249,10 @@ function buildBatchClassificationRequest(unrouted, domains) {
     '[{"lesson": 1, "domain": "<domain-id>"|null}, ...]',
     'No preamble, no code fences.',
   ].join('\n');
-  return { max_tokens: 1024, messages: [{ role: 'user', content: instruction }] };
+  // ~24 output tokens per lesson; a fixed 1024 overflowed at ~60 lessons and fell
+  // back to the heuristic for the whole backlog (review S2).
+  const maxTokens = Math.min(16384, Math.max(1024, 128 + 24 * lessons.length));
+  return { max_tokens: maxTokens, messages: [{ role: 'user', content: instruction }] };
 }
 
 /**
@@ -278,6 +297,78 @@ function applyBatchClassification(text, unrouted, domains) {
     }
   });
   return { amendments, stillUnrouted };
+}
+
+// ---------------------------------------------------------------------------
+// One-pass classification: lineage → one batched LLM call → heuristic fallback
+// ---------------------------------------------------------------------------
+
+/**
+ * Classify this pass's candidates against the team's domains (#2592, AC6). The
+ * transport is injected, so this stays free of IO:
+ *
+ *   1. Lineage first — a lesson whose entry ids already sit in a domain skill's
+ *      provenance goes back to that domain without asking anyone.
+ *   2. Everything else goes into ONE batched LLM request (`classify(request)` →
+ *      response text, or null). A usable answer routes each lesson (`via:'llm'`);
+ *      a lesson the model placed nowhere stays unrouted (`via:'llm'`).
+ *   3. When there is no transport, the call throws, or the answer can't be parsed,
+ *      the whole remainder falls back to the keyword heuristic (`via` =
+ *      tag/vocab, unrouted `via:'heuristic'`).
+ *
+ * Every candidate comes back exactly once, in `routed` or `unrouted`, with the
+ * method that decided it — the caller persists it per cluster.
+ *
+ * @returns {Promise<{ routed: object[], unrouted: object[], method: string, llmCalls: number }>}
+ *   routed:   [{ candidate, domainId, skill, via }]
+ *   unrouted: [{ candidate, via }]
+ *   method:   'none' | 'lineage' | 'llm' | 'heuristic' (how the non-lineage rest was decided)
+ */
+async function classifyClustersToDomains(candidates, domains, {
+  classify, skillEntryIdsByDomain, tagsByEntryId, floor = 1,
+} = {}) {
+  const list = (Array.isArray(candidates) ? candidates : []).filter((c) => c && typeof c === 'object');
+  const doms = (Array.isArray(domains) ? domains : []).filter((d) => d && typeof d.id === 'string');
+  const routed = [];
+  const unrouted = [];
+  if (list.length === 0) return { routed, unrouted, method: 'none', llmCalls: 0 };
+  if (doms.length === 0) {
+    for (const candidate of list) unrouted.push({ candidate, via: 'none' });
+    return { routed, unrouted, method: 'none', llmCalls: 0 };
+  }
+
+  const skillMap = skillEntryIdsByDomain && typeof skillEntryIdsByDomain === 'object' ? skillEntryIdsByDomain : {};
+  const rest = [];
+  for (const candidate of list) {
+    let best = null;
+    for (const d of doms) {
+      const { idOverlap } = scoreCandidateToDomain(candidate, d, { skillEntryIds: skillMap[d.id] });
+      if (idOverlap > 0 && (!best || idOverlap > best.n)) best = { d, n: idOverlap };
+    }
+    if (best) routed.push({ candidate, domainId: best.d.id, skill: domainSkillName(best.d), via: 'lineage' });
+    else rest.push(candidate);
+  }
+  if (rest.length === 0) return { routed, unrouted, method: 'lineage', llmCalls: 0 };
+
+  let parsed = null;
+  let llmCalls = 0;
+  if (typeof classify === 'function') {
+    llmCalls = 1;
+    let text = null;
+    try { text = await classify(buildBatchClassificationRequest(rest, doms)); } catch { text = null; }
+    parsed = text ? applyBatchClassification(text, rest, doms) : null;
+  }
+  if (parsed) {
+    for (const a of parsed.amendments) routed.push({ candidate: a.candidate, domainId: a.domainId, skill: a.skill, via: 'llm' });
+    for (const candidate of parsed.stillUnrouted) unrouted.push({ candidate, via: 'llm' });
+    return { routed, unrouted, method: 'llm', llmCalls };
+  }
+  for (const candidate of rest) {
+    const m = classifyCandidateToDomain(candidate, doms, { skillEntryIdsByDomain: skillMap, tagsByEntryId, floor });
+    if (m) routed.push({ candidate, domainId: m.domainId, skill: m.skill, via: m.via });
+    else unrouted.push({ candidate, via: 'heuristic' });
+  }
+  return { routed, unrouted, method: 'heuristic', llmCalls };
 }
 
 // ---------------------------------------------------------------------------
@@ -358,4 +449,6 @@ module.exports = {
   reconcileDomainProposal,
   buildBatchClassificationRequest,
   applyBatchClassification,
+  classifyClustersToDomains,
+  GENERIC_VOCAB,
 };

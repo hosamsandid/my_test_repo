@@ -159,11 +159,14 @@ function slugifySkillName(text, kind = 'fact') {
 const KIND_HEADINGS = { fact: 'Facts', convention: 'Conventions', entity: 'Entities' };
 function buildHeuristicSkillDraft(candidate) {
   const c = candidate && typeof candidate === 'object' ? candidate : {};
-  const name = slugifySkillName(c.text, c.kind);
-  const title = (c.text || 'Team knowledge').trim();
+  // #2592: a domain card drafts THE domain's skill — named after the domain, never
+  // after the card's "Create skill X — N pending lessons" line.
+  const domainTarget = domainCardTarget(c);
+  const name = domainTarget || slugifySkillName(c.text, c.kind);
+  const title = (domainTarget ? (c.domainName || domainTarget) : (c.text || 'Team knowledge')).trim();
   const members = Array.isArray(c.members) ? c.members : [];
   const convergence = Array.isArray(c.convergence) ? c.convergence : [];
-  const aggregated = c.source === 'related' || c.source === 'manual';
+  const aggregated = c.source === 'related' || c.source === 'manual' || !!domainTarget;
 
   // Deduplicate statements, remembering each one's kind so an aggregated draft
   // can be lightly grouped (the best a dependency-free, no-LLM path can do —
@@ -894,6 +897,24 @@ function resolveDecayHorizonDays(env) {
   return n;
 }
 
+// #2592 (AC12): the first-skill threshold of the domain → skill pipeline — a
+// domain's FIRST skill needs >= minLessons converged lessons from >= minAgents
+// distinct agents. Mirror of the orchestrator's knowledge-store
+// normalizeDomainSkillThreshold (+ the team override winning over the global knob).
+const DEFAULT_DOMAIN_SKILL_THRESHOLD = Object.freeze({ minLessons: 3, minAgents: 2 });
+function resolveDomainSkillThreshold(env) {
+  const e = env && typeof env === 'object' ? env : {};
+  const raw = (e.domainSkillThreshold && typeof e.domainSkillThreshold === 'object')
+    ? e.domainSkillThreshold
+    : ((e.knowledgeCuration && e.knowledgeCuration.domainSkillThreshold) || {});
+  const lessons = Number(raw.minLessons);
+  const agents = Number(raw.minAgents);
+  return {
+    minLessons: Number.isInteger(lessons) && lessons >= 1 && lessons <= 100 ? lessons : DEFAULT_DOMAIN_SKILL_THRESHOLD.minLessons,
+    minAgents: Number.isInteger(agents) && agents >= 1 && agents <= 50 ? agents : DEFAULT_DOMAIN_SKILL_THRESHOLD.minAgents,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Per-team knowledge config overlay (#570)
 // ---------------------------------------------------------------------------
@@ -901,7 +922,7 @@ function resolveDecayHorizonDays(env) {
 // The four knowledge-config groups keyed PER TEAM (#570) instead of on the
 // shared environment. Mirror of the orchestrator's knowledge-store.TEAM_KNOWLEDGE_KEYS
 // (the two runtimes never cross-require, so the list is duplicated verbatim).
-const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore', 'skillResyncMode', 'decayHorizonDays'];
+const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore', 'skillResyncMode', 'decayHorizonDays', 'domainSkillThreshold'];
 
 // Overlay a team's persisted knowledge-config overrides onto a base environment,
 // producing the env-shaped object the pure readers (teamAutonomyLevel /
@@ -958,6 +979,46 @@ function normalizeWizardKnowledgeConfig(input) {
 // View assembly (candidate + draft → the /promotion-suggestions row the UI gets)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Domain → skill cards (#2592)
+// ---------------------------------------------------------------------------
+
+// The orchestrator raises at most ONE open card per domain (source 'domain-skill',
+// id `ds-<domainId>`). Mirror of orchestrator/knowledge-domain-skills.js
+// DOMAIN_CARD_SOURCE (the two runtimes never cross-require).
+const DOMAIN_CARD_SOURCE = 'domain-skill';
+
+function isDomainCard(c) {
+  return !!c && typeof c === 'object' && c.source === DOMAIN_CARD_SOURCE;
+}
+
+// The skill a domain card must land in (the domain skill's name), or null when the
+// row is not a domain card / carries no usable name. Accepting a domain card may
+// only create or extend THIS skill — never a lesson-named one.
+function domainCardTarget(c) {
+  if (!isDomainCard(c)) return null;
+  const name = typeof c.domainSkill === 'string' ? c.domainSkill.trim() : '';
+  return name && SKILL_NAME_RE.test(name) ? name : null;
+}
+
+/**
+ * Guard an operator's accept of a domain card (#2592, AC3/AC5): the write must go
+ * to the team-tier domain skill — create it when missing, extend it when present —
+ * and nowhere else. Non-domain rows pass through unchecked.
+ *
+ * @param {object|null} card   the stored suggestion row (or null)
+ * @param {{ name?: string, to?: string }} target  the requested skill name + tier
+ * @returns {{ ok: true } | { ok: false, error: string }}
+ */
+function checkDomainCardTarget(card, { name, to } = {}) {
+  if (!isDomainCard(card)) return { ok: true };
+  const want = domainCardTarget(card);
+  if (!want) return { ok: false, error: 'domain card has no domain skill' };
+  if (to !== 'team') return { ok: false, error: 'a domain card promotes into the team-tier domain skill' };
+  if (name !== want) return { ok: false, error: `a domain card may only create or extend the domain skill '${want}'` };
+  return { ok: true };
+}
+
 function promotionSuggestionView(candidate, draft) {
   const c = candidate && typeof candidate === 'object' ? candidate : {};
   const d = draft && typeof draft === 'object' ? draft : buildHeuristicSkillDraft(c);
@@ -980,6 +1041,16 @@ function promotionSuggestionView(candidate, draft) {
     // #918: at least one member of this cluster was linked by embedding cosine
     // alone (not word overlap) — the card shows a sanity-check hint.
     ...(c.semanticMatch ? { semanticMatch: true } : {}),
+    // #2592: domain routing. Every routed card names its domain; a domain card
+    // also names the domain skill it creates/extends and the lessons it bundles.
+    domainId: typeof c.domainId === 'string' && c.domainId ? c.domainId : null,
+    domainName: typeof c.domainName === 'string' && c.domainName ? c.domainName : null,
+    domainSkill: domainCardTarget(c),
+    ...(isDomainCard(c) ? {
+      mode: c.mode === 'extend' ? 'extend' : 'create',
+      lessonIds: Array.isArray(c.lessonIds) ? c.lessonIds : [],
+      routedVia: typeof c.routedVia === 'string' ? c.routedVia : null,
+    } : {}),
     draft: {
       name: d.name,
       skillMd: d.skillMd,
@@ -1020,8 +1091,14 @@ module.exports = {
   resolvePromotionGates,
   resolveSkillResyncMode,
   resolveDecayHorizonDays,
+  resolveDomainSkillThreshold,
+  DEFAULT_DOMAIN_SKILL_THRESHOLD,
   DEFAULT_DECAY_HORIZON_DAYS,
   promotionSuggestionView,
+  DOMAIN_CARD_SOURCE,
+  isDomainCard,
+  domainCardTarget,
+  checkDomainCardTarget,
   TEAM_KNOWLEDGE_KEYS,
   mergeTeamKnowledgeConfig,
   normalizeWizardKnowledgeConfig,

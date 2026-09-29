@@ -294,7 +294,7 @@ the agent, not a person); the broker forwards it to
 run, the sender's team trust (re-checked on every call) and the stored
 personal credential. The old `AEE_ACTING_SENDER` env var plays no part.
 
-Every broker audit line records `identity` (the member's user id, or `service`)
+Every broker audit line records `identity` (the member's user id, or `service-account`)
 and `interactive`. `aee-jira whoami` shows both.
 
 Known limits: two Claude runs active at once in one agent make the identity
@@ -326,6 +326,7 @@ with the service account.
 | a call returns `personal-credential-rejected` | Jira refused the sender's personal token (401) — expired or revoked | the sender renews it on Plugin Tokens |
 | a call returns `untrusted-sender` | the chat message came from someone not trusted for this agent | share the team with that person, or ask a member |
 | a call returns `no-active-run` / `ambiguous-run` / `run-key-revoked` | the call is not inside exactly one run the runner declared, or something in the container requested a second run key | respawn the agent; do not run `aee-jira` from background processes that outlive the turn |
+| a chat turn returns `no-site` | the sender has a personal credential, but the team has no Jira site set | Team Admin sets the site on the Plugins page |
 | an automated run returns `no-service-account` | the team has no service-account credential set | Team Admin sets it on the Plugins page |
 | broker log: `Jira rejected the credential (401)` | the e-mail and token aren't the same Atlassian identity, or the token was revoked | regenerate a **classic** token while signed in as the intended account |
 | `projects` returns nothing but the account sees projects in a browser | a **scoped** API token missing `read:jira-work` | use a classic (unscoped) token |

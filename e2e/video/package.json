@@ -29,7 +29,7 @@
     "@revideo/cli": "0.11.0",
     "@revideo/ui": "^0.10.4",
     "@types/node": "^26.6.2",
-    "cross-env": "^7.0.3",
+    "cross-env": "^10.1.0",
     "patch-package": "^8.0.0",
     "tsx": "^4.19.0",
     "typescript": "7.0.2"

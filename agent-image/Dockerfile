@@ -100,13 +100,21 @@ RUN chmod +x /opt/ace/scripts/gh-as-agent \
 RUN chmod +x /opt/ace/scripts/knowledge \
     && ln -sf /opt/ace/scripts/knowledge /usr/local/bin/knowledge
 
+# `aee-emit` — DEPRECATED compatibility shim (#2578), kept for one release so
+# agents whose authored prompts still say `aee-emit` keep handing off. It no
+# longer talks to the orchestrator: it just applies the label on the issue / PR
+# (`gh … --add-label`, creating the label if missing) and the GitHub poller
+# delivers it like any other label. Remove in the release after #2578.
+RUN chmod +x /opt/ace/scripts/aee-emit \
+    && ln -sf /opt/ace/scripts/aee-emit /usr/local/bin/aee-emit
+
 # `aee-wake` — hand off directly to a wired same-team agent (#2030). The
 # target-LESS alternative to a label hand-off: no label, no issue/PR, no GitHub
 # trace, so the platform's own event log is the audit trail. Fails LOUD
 # (exit 1) on an unknown / self / cross-team target — a `wakeAgent` target is
 # an explicitly wired role, so reaching nobody is a wiring bug rather than an
 # ambiguous outcome. (Labelled hand-offs are plain GitHub labels delivered by
-# the poller; the `aee-emit` internal-channel CLI was removed in #2578.)
+# the poller; `aee-emit` survives only as the deprecated shim above.)
 RUN chmod +x /opt/ace/scripts/aee-wake \
     && ln -sf /opt/ace/scripts/aee-wake /usr/local/bin/aee-wake
 

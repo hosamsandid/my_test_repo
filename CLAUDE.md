@@ -315,8 +315,9 @@ else queues FIFO.
   listener (≤ one poll interval, ~30 s). The label on GitHub is the single
   source of truth; a human re-applying it wakes the listener the same way. The
   `transport: 'internal'` path (`aee-emit`, `/internal/flow-emit`) was removed
-  in #2578; a legacy `transport` field is ignored on import and stripped from
-  existing agents by a startup sweep.
+  in #2578 (`aee-emit` remains one release as a deprecated shim that just
+  applies the label); a legacy `transport` field is ignored on import and
+  stripped from existing agents by a startup sweep.
 - Results post to `trigger.roomId` or the DM room; no room yet → skipped;
   `[PASS]` suppresses output.
 - **Session policy**: `per-invocation` → triggered runs start fresh (no

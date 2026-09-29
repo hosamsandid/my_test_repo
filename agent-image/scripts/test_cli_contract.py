@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Shared CLI-contract conformance test (#1522).
 
-Exercises the five built-in agent CLIs — `aee-artifact`, `aee-wake`,
-`aee-ask`, `knowledge`, `gh-as-agent` — against the one shared contract documented in
+Exercises the six built-in agent CLIs — `aee-artifact`, `aee-emit`
+(deprecated shim, #2578), `aee-wake`, `aee-ask`, `knowledge`, `gh-as-agent` — against the one shared contract documented in
 `docs/cli-contract.md` (concept `docs/plugin-system-concept.md` §4.5):
 
   * Discovery: `--help` / `-h` / `help` / bare invocation → exit 0 with the
@@ -36,6 +36,7 @@ SCRIPTS = Path(__file__).resolve().parent
 # exec bit or a shebang lookup.
 CLIS = {
     "aee-artifact": [sys.executable, str(SCRIPTS / "aee-artifact")],
+    "aee-emit": [sys.executable, str(SCRIPTS / "aee-emit")],
     "aee-wake": [sys.executable, str(SCRIPTS / "aee-wake")],
     "aee-ask": [sys.executable, str(SCRIPTS / "aee-ask")],
     "knowledge": [sys.executable, str(SCRIPTS / "knowledge")],
@@ -86,6 +87,7 @@ class UsageErrors(unittest.TestCase):
 
     def test_missing_required_args(self):
         cases = [
+            ("aee-emit", ["ready"]),            # label but no --issue/--pr target
             ("aee-wake", ["--to"]),             # --to with no value
             ("aee-ask", ["Which?"]),            # question but no --option
             ("aee-artifact", ["add", "only-name"]),  # missing <path>
@@ -127,6 +129,14 @@ class JsonOutput(unittest.TestCase):
             rows = [json.loads(ln) for ln in out.splitlines() if ln.strip()]
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["artifact"], "Design")
+
+    def test_aee_emit_json_usage_error(self):
+        # --json is honoured even on the error path: a JSON error object, exit 2.
+        code, out, _ = run("aee-emit", ["--json"])
+        self.assertEqual(code, 2)
+        obj = json.loads(out.strip())
+        self.assertFalse(obj["ok"])
+        self.assertIn("error", obj)
 
     def test_aee_wake_json_usage_error(self):
         code, out, _ = run("aee-wake", ["--json"])
@@ -194,6 +204,64 @@ class UnreachableBackend(unittest.TestCase):
             env_extra={"ORCHESTRATOR_INTERNAL_URL": DEAD_ORCH},
         )
         self.assertEqual(code, 3, "unreachable orchestrator must be exit 3")
+        self.assertFalse(json.loads(out.strip())["ok"])
+
+
+class AeeEmitShim(unittest.TestCase):
+    """#2578: `aee-emit` is a deprecated shim — it keeps its old surface but
+    only applies the label on GitHub (`gh … --add-label`), creating the label
+    when it is missing. A fake `gh` on PATH records every call."""
+
+    FAKE_GH = """#!/bin/sh
+echo "$*" >> "$GH_LOG"
+case "$1 $2" in
+  "pr edit"|"issue edit")
+    if [ -n "$GH_FAIL_FIRST_EDIT" ] && [ ! -f "$GH_LOG.edited" ]; then
+      touch "$GH_LOG.edited"; echo "label not found" >&2; exit 1
+    fi ;;
+  "label create") [ -n "$GH_LABEL_FAIL" ] && exit 1 ;;
+esac
+[ -n "$GH_ALWAYS_FAIL" ] && { echo "HTTP 403" >&2; exit 1; }
+exit 0
+"""
+
+    def _run(self, args, **env):
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "init", "-q"], cwd=d, check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", "git@github.com:o/r.git"],
+                cwd=d, check=True,
+            )
+            bin_dir = Path(d) / "bin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text(self.FAKE_GH)
+            gh.chmod(0o755)
+            log = Path(d) / "gh.log"
+            extra = {"PATH": f"{bin_dir}:{os.environ.get('PATH', '')}", "GH_LOG": str(log), **env}
+            code, out, err = run("aee-emit", args, env_extra=extra, cwd=d)
+            calls = log.read_text().splitlines() if log.exists() else []
+            return code, out, err, calls
+
+    def test_applies_label_via_gh(self):
+        code, out, err, calls = self._run(["qa:approved", "--pr", "7", "--json"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(calls, ["pr edit 7 --add-label qa:approved -R o/r"])
+        obj = json.loads(out.strip())
+        self.assertTrue(obj["ok"])
+        self.assertEqual(obj["ref"], "o/r#7")
+        self.assertIn("deprecated", err)
+
+    def test_creates_missing_label_then_retries(self):
+        code, _out, err, calls = self._run(["ready", "--issue", "42"], GH_FAIL_FIRST_EDIT="1")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(calls[0], "issue edit 42 --add-label ready -R o/r")
+        self.assertTrue(calls[1].startswith("label create ready "))
+        self.assertEqual(calls[2], calls[0])
+
+    def test_gh_failure_is_domain_error(self):
+        code, out, _err, _calls = self._run(["ready", "--issue", "42", "--json"], GH_ALWAYS_FAIL="1")
+        self.assertEqual(code, 1)
         self.assertFalse(json.loads(out.strip())["ok"])
 
 

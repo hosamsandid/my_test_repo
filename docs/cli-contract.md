@@ -7,6 +7,7 @@ the agent image (`agent-image/scripts/`) and always on `PATH`:
 |---|---|
 | `knowledge` | Record and query the shared team Knowledge Base |
 | `aee-artifact` | Register / resolve mission artifacts by logical name |
+| `aee-emit` | *Deprecated shim (#2578), removed next release* — applies a label on an issue / PR; use `gh … --add-label` instead |
 | `gh-as-agent` | Do git / GitHub actions stamped with this agent's identity |
 | `aee-ask` | Put a structured decision to the human and pause the turn (quick-reply card) |
 

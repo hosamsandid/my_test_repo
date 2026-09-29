@@ -27,6 +27,8 @@ export const GITHUB_EVENTS_HELP_SECTIONS = {
   outcomes: 'outcomes',
   // 4 — the actionable backlog and why it stops draining
   pending: 'pending-queue',
+  // 5 — the Repositories status area: listening / failing / not listening (#2537)
+  repoStatus: 'repository-status',
 };
 
 export default GITHUB_EVENTS_HELP_SECTIONS;

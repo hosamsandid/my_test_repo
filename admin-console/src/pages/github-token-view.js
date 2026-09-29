@@ -1,12 +1,10 @@
 // Pure, framework-free helper that gives a user *immediate* feedback on the
-// GitHub token they are pasting, before they submit the form. Two different
-// pages let you store a GitHub token — the admin "GitHub Tokens" page
-// (GithubTokens.jsx) and the personal "My Credentials" page (MyCredentials.jsx)
-// — and until now each accepted the secret blind: a stray line break, a copied
-// "ghp_…" placeholder, or the wrong string only surfaced as a late server
+// GitHub token they are pasting, before they submit the form. The GitHub Tokens
+// page (GithubTokens.jsx) used to accept the secret blind: a stray line break, a
+// copied "ghp_…" placeholder, or the wrong string only surfaced as a late server
 // error. `classifyGithubToken` reads the raw textarea value and returns a small
-// verdict object both pages render identically, so the guidance is consistent
-// and a first-time user gets a green "recognised" tick (or a plain-language
+// verdict object the form renders, so the guidance is consistent and a
+// first-time user gets a green "recognised" tick (or a plain-language
 // warning) the moment they paste.
 //
 // It is a hint, never a hard gate: an "unknown" verdict must NOT block submit

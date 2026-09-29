@@ -11,8 +11,7 @@ import { PROVIDER_GUIDANCE_COPY } from './quickstart-view.js';
 // quickstart-view.test.js; what CANNOT be reached from there is the JSX that
 // wires them — and the wiring is where the dead end lived. A `<Link to="/models">`
 // rendered outside the `canAddProvider` branch is a dead end again for anyone
-// `canAccessCredentialPages` turns away (App.jsx's CredentialRoute silently
-// redirects them to /chats), and a field left `disabled={submitting}` re-opens
+// who cannot add a provider for the target team, and a field left `disabled={submitting}` re-opens
 // the "type a name, then fail on submit" path. Both are one careless edit away
 // and neither shows up in any pure test, so they are asserted here (the #651
 // convention: JSX stays uncovered, its wiring is guarded by reading it).

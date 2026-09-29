@@ -63,6 +63,10 @@ const REDIRECTS = {
   // replaced the page's other half is the NEW `/environment-templates` route
   // (below), not a redirect target.
   '/environments': '/chats',
+  // #2445: the My Credentials page is dissolved — personal self-service folds
+  // into the SSH Keys / GitHub Tokens pages, and an old link lands on SSH Keys,
+  // whose topic (`credentials.md`) already covers the personal tier.
+  '/my-credentials': '/ssh-keys',
 };
 
 // Dynamic routes collapse to a canonical parent for topic resolution, exactly as
@@ -103,7 +107,6 @@ const PAGE_ROUTES = new Set([
   '/environment-templates',
   '/ssh-keys',
   '/github-tokens',
-  '/my-credentials',
   '/skills',
   '/role-templates',
   '/github-events',
@@ -134,6 +137,7 @@ const ALLOWLIST = new Set([
   '/chats/:agentId',
   '/plugins/:id/view',
   '/environments',
+  '/my-credentials',
 ]);
 
 // ── the shrinking exception list (E16 #1891, concept §3.4) ───────────────────

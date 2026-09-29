@@ -4,9 +4,8 @@ import { classifyGithubToken } from '../pages/github-token-view';
 
 /**
  * Live "does this look like a GitHub token" feedback shown directly under a
- * token textarea. Both credential forms (admin GitHub Tokens page and personal
- * My Credentials page) render this same component so the guidance — and its
- * wording — stay identical. Purely informational: it never blocks submit.
+ * token textarea. The GitHub Tokens create and replace forms render this same
+ * component so the guidance — and its wording — stay identical. Purely informational: it never blocks submit.
  *
  * Renders nothing until the user has typed something (kind === 'empty').
  */

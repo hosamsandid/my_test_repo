@@ -16,7 +16,6 @@ import { OVERLAY_SKILL_DETAIL, OVERLAY_SKILLS_MERGE } from '../context/page-help
 import { SKILLS_HELP_SECTIONS } from './skills-help-sections.js';
 import { isPublishEligible } from './skill-publish-view.js';
 import { useAuth } from '../auth/AuthContext';
-import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import { adminTeamIdsOf, teamsById } from './credential-scope-view.js';
 import { writableSkillTargets, defaultSkillTarget } from './skill-target-view.js';
 import { planLineageResync, copyResyncKind, summarizeResyncResults } from './skill-lineage-resync.js';
@@ -2059,20 +2058,18 @@ export default function SkillsRegistry() {
   // #2307 AC11-14: the Import-to and +New Skill target selectors offer only
   // targets the signed-in caller may actually write to.
   const { user } = useAuth();
-  const resourceAccessV2 = useResourceAccessV2();
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
   const caller = { isSysAdmin, adminTeamIds };
-  // #2393/#2360 re-key: under the flag, every team picker on this page means an
-  // AGENT TEAM (a role:'team' agent), not the legacy human access-scope "Team"
-  // collection — matching the rest of the console (ModelRegistry, Users, SSH
-  // Keys, GitHub Tokens, the team env panel). Off the flag this is byte-identical
-  // to before (teams = the legacy human-team list).
+  // #2393/#2360 re-key: every team picker on this page means an AGENT TEAM (a
+  // role:'team' agent), not the legacy human access-scope "Team" collection —
+  // matching the rest of the console (ModelRegistry, Users, SSH Keys, GitHub
+  // Tokens, the team env panel).
   const humanTeams = Array.isArray(allTeams) ? allTeams : [];
   const agentTeams = (Array.isArray(allAgents) ? allAgents : [])
     .filter(a => a && a.role === 'team')
     .map(a => ({ id: a.id, name: a.displayName || a.id }));
-  const teams = resourceAccessV2 ? agentTeams : humanTeams;
+  const teams = agentTeams;
   // Merged id→name lookup so a team-tier skill stamped with a legacy id still
   // renders a readable name (AC3), mirroring ModelRegistry's merged `names`.
   const teamNames = { ...teamsById(humanTeams), ...teamsById(agentTeams) };

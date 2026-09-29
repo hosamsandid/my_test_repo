@@ -18,11 +18,11 @@ test('the pure transition policy is required from the byte-mirrored module', () 
   assert.match(SRC, /const \{ personalDefaultTransitionRisk \} = require\("\.\/provider-lend-policy"\);/);
 });
 
-test('personalOauthLendBlockOnMembershipAdd is flag-gated and fails open', () => {
+test('personalOauthLendBlockOnMembershipAdd fails open', () => {
   const start = SRC.indexOf('function personalOauthLendBlockOnMembershipAdd(');
   assert.ok(start > 0, 'personalOauthLendBlockOnMembershipAdd not found');
   const body = SRC.slice(start, SRC.indexOf('\n}', start));
-  assert.match(body, /if \(!RESOURCE_ACCESS_V2 \|\| !teamId \|\| !newUserId\) return null;/);
+  assert.match(body, /if \(!teamId \|\| !newUserId\) return null;/);
   // The transition fires only once the squad would have ≥2 humans.
   assert.match(body, /if \(after < 2\) return null;/);
   // Single-sourced through the pure policy; only a 'block' refuses.

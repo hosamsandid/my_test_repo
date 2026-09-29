@@ -15,7 +15,6 @@ import { classifyRepositoryChanges, hasRepositoryChanges } from '../working-env-
 import { describeWorkingEnvSubmitState } from '../working-env-submit-state.js';
 import { providerOptionLabel } from '../provider-option-view.js';
 import { personalProviderNoticeText } from '../provider-health-view.js';
-import { useResourceAccessV2 } from '../../context/ResourceAccessContext';
 import { initialTeamEnvForm, teamEnvSubmitBody } from './team-environment-view.js';
 import { describeCredentialRef } from '../credential-ref-legibility.js';
 
@@ -201,20 +200,18 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
   const mcpServers = mcpServerData || [];
   const mcpCredentials = mcpCredentialData || [];
 
-  // Dropdown-consistency fix (#2360, §7): under AEE_RESOURCE_ACCESS_V2 the team
-  // default-provider list is the TEAM-USABLE set (global ∪ own-personal ∪
+  // Dropdown-consistency fix (#2360, §7): the team default-provider list is the TEAM-USABLE set (global ∪ own-personal ∪
   // team-service ∪ live member lends), sourced from the team agent's
   // model-options — the SAME endpoint the chat picker uses — so the two compute
-  // an identical set by construction. Off the flag it stays /api/llm-endpoints
-  // (today's caller-visibility list), unchanged. A currently-bound provider that
+  // an identical set by construction (falling back to /api/llm-endpoints until
+  // the model-options snapshot arrives). A currently-bound provider that
   // is not in the selectable set is shown read-only ("set — not selectable")
   // rather than blind-cleared (the credential-ref-legibility pattern).
-  const v2 = useResourceAccessV2();
-  const { data: modelOptionsData } = useApi(v2 && agent?.id ? `/api/agents/${agent.id}/model-options` : null);
-  const providerList = (v2 && Array.isArray(modelOptionsData?.endpoints)) ? modelOptionsData.endpoints : llmEndpoints;
+  const { data: modelOptionsData } = useApi(agent?.id ? `/api/agents/${agent.id}/model-options` : null);
+  const providerList = Array.isArray(modelOptionsData?.endpoints) ? modelOptionsData.endpoints : llmEndpoints;
   const boundProviderMissing = !!form.llmEndpointId && !providerList.some(e => e.id === form.llmEndpointId);
   // §14 / E10: a non-blocking advisory when the team default is a member's personal
-  // provider (a lend). { text, tone } or null; only present (v2, multi-human squad).
+  // provider (a lend). { text, tone } or null; only present for a multi-human squad.
   const personalNotice = personalProviderNoticeText(modelOptionsData?.personalProviderNotice);
 
   const toolchainRows = toolchainOptions(toolchainData?.toolchains, toolchainData?.runtime);

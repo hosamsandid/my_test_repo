@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 const read = (name) => readFileSync(fileURLToPath(new URL(`./${name}`, import.meta.url)), 'utf8');
 
-const PAGES = ['SshKeys.jsx', 'GithubTokens.jsx', 'MyCredentials.jsx'];
+const PAGES = ['SshKeys.jsx', 'GithubTokens.jsx'];
 
 for (const page of PAGES) {
   const src = read(page);

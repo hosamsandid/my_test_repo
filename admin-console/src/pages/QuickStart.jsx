@@ -20,8 +20,8 @@ import {
 // (#2084). One component for all three occurrences, so the role-aware
 // link/no-link decision cannot be made differently in one place than another —
 // a link to /models is a dead end for anyone who cannot add a provider for the
-// team this agent will live in — both a plain member (CredentialRoute silently
-// redirects them to /chats) and a Team Admin of some *other* team, who can open
+// team this agent will live in — both a plain member (who can open /models but
+// only manage their own personal providers there) and a Team Admin of some *other* team, who can open
 // /models but only sees their own team's settings, not the default team the
 // QuickStart agent lands in (#2084). `isAdminForTeam(user, DEFAULT_TEAM_ID)` is
 // the honest gate.

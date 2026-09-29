@@ -81,8 +81,8 @@ function isGlobalEnvironment(entry) {
 // (a hand-edited or stale `{scope:'team', global:true}` or a since-reclassified
 // record is not global), exactly like isGlobalProvider / isGlobalEnvironment.
 //
-// Composed ONLY at the SSH/GitHub call sites, and ONLY behind the
-// AEE_RESOURCE_ACCESS_V2 flag (this widens the reach of a SECRET) — NEVER inside
+// Composed ONLY at the SSH/GitHub call sites (this widens the reach of a
+// SECRET) — NEVER inside
 // scope.js's generic `visibleCredential` / `credentialVisibleToTeam`, which also
 // gate the personal/team tiers where a stray `global: true` must stay inert
 // (#2136 finding 2 applies here identically). Providers have their own

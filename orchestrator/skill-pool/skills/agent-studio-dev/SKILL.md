@@ -187,7 +187,7 @@ it appears, so nothing runs after the question. That kill costs the turn its
 (the former bundled `AskUserQuestion` MCP server was removed in #1719, and
 `_base_claude_args` passes no `--mcp-config`); MCP servers from an
 environment's `settings.json` still load as usual. The runner renders the
-question(s) into a readable chat with clickable quick-reply buttons (#1663) and posts that as the turn's
+question(s) into a readable chat message with clickable quick-reply buttons (#1663) and posts that as the turn's
 terminal message, dropping any trailing model text. The user's chosen option (or
 free-text) then continues the resumed session as a new turn. A `multiSelect`
 question renders as toggles plus Submit and resumes with every selected label

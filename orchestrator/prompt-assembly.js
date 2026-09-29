@@ -516,8 +516,8 @@ function backgroundTasksSection(autonomous) {
 
 // Human decision prompts (#2523) — ALWAYS emitted, because `aee-ask` is baked
 // into every agent image. Claude Code strips its built-in AskUserQuestion tool
-// in headless mode and the managed policy blocks the MCP server that used to
-// re-supply it, so without this nudge agents ask in plain prose, which nothing
+// in headless mode and the MCP server that used to re-supply it was removed
+// (#1719), so without this nudge agents ask in plain prose, which nothing
 // downstream can detect, render as a quick-reply card, or route. The caveat
 // about nobody reading in real time is autonomous-only, mirroring the
 // Background tasks section's split.

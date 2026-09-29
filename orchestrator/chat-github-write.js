@@ -37,15 +37,125 @@ const nodePath = require("node:path");
 const nodeOs = require("node:os");
 const { spawn } = require("node:child_process");
 
-// The `gh` command groups this route will run. Everything else is refused —
-// the argv comes from the agent, and groups like `extension`, `alias`,
-// `config` or `auth` would execute or persist something on the ORCHESTRATOR
-// rather than call the GitHub API. Kept in step with FORWARD_GROUPS in
+// The `gh` commands this route runs, with every option each one may carry.
+// The argv comes from the agent and runs on the ORCHESTRATOR, so it is treated
+// as data, never as paths: anything not listed here is refused — whole groups
+// that do local I/O or take positional file arguments (`gist`, `release`,
+// `repo`, `run download`, `secret`, `extension`, `config`, …), options that
+// read a file (`--body-file`, `--attach`, `gh api --input`/`-F k=@…`) unless
+// that argument is one of the request's declared `files`, and options that
+// open an editor/browser or send the token elsewhere (`--editor`, `--web`,
+// `gh api --hostname`). Kept in step with FORWARD_COMMANDS in
 // agent-image/scripts/aee-gh (the shim only forwards these).
-const ALLOWED_GROUPS = new Set([
-  "issue", "pr", "label", "api", "release", "repo", "workflow", "run",
-  "project", "gist", "variable", "secret", "cache", "ruleset",
-]);
+//
+// Spec syntax: `-s/--long` boolean · `…=` takes a value · `…=@` takes a
+// local file (must be declared) · `…=f` is `gh api`'s `-F` field (a file only
+// when its value is `@…`).
+const REPO_FLAG = ["-R/--repo="];
+const BODY = ["-b/--body=", "-F/--body-file=@", "--attach=@"];
+const COMMENT_FLAGS = [...BODY, "--create-if-none", "--delete-last", "--edit-last", "--yes"];
+const COMMAND_SPECS = {
+  "issue create": [...BODY, "-a/--assignee=", "--blocked-by=", "--blocking=", "-l/--label=",
+    "-m/--milestone=", "--parent=", "-p/--project=", "--recover=@", "-T/--template=", "-t/--title=", "--type="],
+  "issue edit": [...BODY, "--add-assignee=", "--add-blocked-by=", "--add-blocking=", "--add-label=",
+    "--add-project=", "--add-sub-issue=", "-m/--milestone=", "--parent=", "--remove-assignee=",
+    "--remove-blocked-by=", "--remove-blocking=", "--remove-label=", "--remove-project=",
+    "--remove-sub-issue=", "-t/--title=", "--type=", "--remove-milestone", "--remove-parent", "--remove-type"],
+  "issue comment": COMMENT_FLAGS,
+  "issue close": ["-c/--comment=", "--duplicate-of=", "-r/--reason="],
+  "issue reopen": ["-c/--comment="],
+  "issue delete": ["--yes"],
+  "issue lock": ["-r/--reason="],
+  "issue unlock": [],
+  "issue transfer": [],
+  "issue pin": [],
+  "issue unpin": [],
+  "pr create": [...BODY, "-a/--assignee=", "-B/--base=", "-d/--draft", "--dry-run", "-f/--fill",
+    "--fill-first", "--fill-verbose", "-H/--head=", "-l/--label=", "-m/--milestone=",
+    "--no-maintainer-edit", "-p/--project=", "--recover=@", "-r/--reviewer=", "-t/--title="],
+  "pr comment": COMMENT_FLAGS,
+  "pr review": ["-b/--body=", "-F/--body-file=@", "-a/--approve", "-c/--comment", "-r/--request-changes"],
+  "pr edit": [...BODY, "--add-assignee=", "--add-label=", "--add-project=", "--add-reviewer=",
+    "-B/--base=", "-m/--milestone=", "--remove-assignee=", "--remove-label=", "--remove-project=",
+    "--remove-reviewer=", "-t/--title=", "--remove-milestone"],
+  "pr close": ["-c/--comment=", "-d/--delete-branch"],
+  "pr reopen": ["-c/--comment="],
+  "pr merge": ["-b/--body=", "-F/--body-file=@", "--admin", "-A/--author-email=", "--auto",
+    "-d/--delete-branch", "--disable-auto", "--match-head-commit=", "-m/--merge", "-r/--rebase",
+    "-s/--squash", "-t/--subject="],
+  "pr ready": ["--undo"],
+  "pr update-branch": ["--rebase"],
+  "pr revert": ["-b/--body=", "-F/--body-file=@", "-d/--draft", "-t/--title="],
+  "pr lock": ["-r/--reason="],
+  "pr unlock": [],
+  "label create": ["-c/--color=", "-d/--description=", "-f/--force"],
+  "label edit": ["-c/--color=", "-d/--description=", "-n/--name="],
+  "label delete": ["--yes"],
+  "label clone": ["-f/--force"],
+  api: ["--allow-escape-sequences", "--cache=", "-F/--field=f", "-H/--header=", "-i/--include",
+    "--input=@", "-q/--jq=", "-X/--method=", "--paginate", "-p/--preview=", "-f/--raw-field=",
+    "--silent", "--slurp", "-t/--template="],
+};
+
+// "-s/--long=@" → Map { "-s" → "file", "--long" → "file" }
+function compileSpec(entries) {
+  const kinds = { "": "bool", "=": "value", "=@": "file", "=f": "field" };
+  const m = new Map();
+  for (const e of [...entries, ...REPO_FLAG]) {
+    const [, names, suffix] = e.match(/^([^=]+)(=[@f]?)?$/);
+    for (const n of names.split("/")) m.set(n, kinds[suffix || ""]);
+  }
+  return m;
+}
+
+const COMMANDS = new Map(Object.entries(COMMAND_SPECS).map(([k, v]) => [k, compileSpec(v)]));
+
+// `issue comment` → "issue comment"; every `gh api …` → "api".
+function commandKey(args) {
+  return args[0] === "api" ? "api" : `${args[0]} ${args[1] || ""}`;
+}
+
+// Walk argv against the command's spec. Returns Map<argIndex, prefix> of the
+// arguments that name a local file (each must be a declared file), or throws.
+function checkArgs(args) {
+  const key = commandKey(args);
+  const spec = COMMANDS.get(key);
+  if (!spec) throw badRequest(`gh ${key.slice(0, 80)} is not a GitHub write this route runs`);
+  const fileSlots = new Map();
+  for (let i = key === "api" ? 1 : 2; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--") throw badRequest(`gh ${key}: '--' is not accepted`);
+    if (!(a.startsWith("-") && a.length > 1)) {
+      // Positionals are issue/PR numbers, URLs, branch or label names — data
+      // to gh. `gh api`'s endpoint must be a path on the token's own host.
+      if (key === "api" && a.includes("://")) throw badRequest("gh api: the endpoint must be a path, not a URL");
+      continue;
+    }
+    let flag = a;
+    let attached = null;
+    if (a.startsWith("--")) {
+      const eq = a.indexOf("=");
+      if (eq > 0) { flag = a.slice(0, eq); attached = a.slice(eq + 1); }
+    } else if (a.length !== 2) {
+      throw badRequest(`gh ${key}: pass '${a.slice(0, 2)}' and its value as separate arguments`);
+    }
+    const kind = spec.get(flag);
+    if (!kind) throw badRequest(`gh ${key}: option '${flag.slice(0, 40)}' is not accepted on this route`);
+    if (attached !== null) {
+      if (kind !== "value") throw badRequest(`gh ${key}: pass '${flag}' and its value as separate arguments`);
+      continue;
+    }
+    if (kind === "bool") continue;
+    if (++i >= args.length) throw badRequest(`gh ${key}: '${flag}' needs a value`);
+    const v = args[i];
+    if (kind === "file") fileSlots.set(i, "");
+    if (kind === "field") {
+      const eq = v.indexOf("=");
+      if (eq >= 0 && v[eq + 1] === "@") fileSlots.set(i, `${v.slice(0, eq)}=@`);
+    }
+  }
+  return fileSlots;
+}
 
 const MAX_ARGS = 200;
 const MAX_ARG_CHARS = 64 * 1024;
@@ -88,9 +198,7 @@ function parseGhWriteRequest(body) {
       throw badRequest("every gh argument must be a string");
     }
   }
-  if (!ALLOWED_GROUPS.has(args[0])) {
-    throw badRequest(`gh '${args[0]}' is not a GitHub write this route runs`);
-  }
+  const fileSlots = checkArgs(args);
 
   let repo = null;
   if (b.repo != null && b.repo !== "") {
@@ -120,9 +228,19 @@ function parseGhWriteRequest(body) {
     const buf = Buffer.from(content, "base64");
     total += buf.length;
     if (total > MAX_FILE_BYTES_TOTAL) throw badRequest("attached files are too large");
+    if (!fileSlots.has(index) || fileSlots.get(index) !== prefix) {
+      throw badRequest("file index must point at an argument that names a file");
+    }
     seen.add(index);
     return { index, prefix, content: buf };
   });
+  // Every file-naming argument must be one of the files sent along — an
+  // undeclared one would make gh read that path on the orchestrator.
+  for (const index of fileSlots.keys()) {
+    if (!seen.has(index)) {
+      throw badRequest(`gh ${commandKey(args)}: argument ${index} names a local file that was not sent along`);
+    }
+  }
 
   return { args: args.slice(), files, repo };
 }
@@ -261,7 +379,8 @@ async function runChatGithubWrite({
 }
 
 module.exports = {
-  ALLOWED_GROUPS,
+  COMMANDS,
+  commandKey,
   parseGhWriteRequest,
   materializeArgs,
   buildGhEnv,

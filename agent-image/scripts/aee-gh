@@ -3,9 +3,10 @@
 real GitHub CLI; agents keep typing `gh …`.
 
 What it changes: during a LIVE CHAT TURN (the runtime sets `AEE_ACTING_SENDER`
-to the human who sent the message) a GitHub WRITE — `gh issue create/comment/
-edit/close`, `gh pr comment/review`, `gh label …`, `gh api` with a writing
-method, … — is not run with the container's baked `GH_TOKEN` (the team's
+to the human who sent the message) an issue, pull-request or label WRITE —
+`gh issue create/comment/edit/close/…`, `gh pr create/comment/review/edit/
+merge/…`, `gh label create/edit/delete/clone`, `gh api` with a writing method
+(FORWARD_COMMANDS below) — is not run with the container's baked `GH_TOKEN` (the team's
 baseline identity) but forwarded to the orchestrator, which runs it under the
 chat sender's own personal GitHub token. That token never enters the container.
 
@@ -19,14 +20,20 @@ chat sender's own personal GitHub token. That token never enters the container.
 
 Everything else runs the real `gh` locally, byte-for-byte as before: every
 autonomous run (cron, GitHub event, loop, hand-off — no `AEE_ACTING_SENDER`),
-every read (`view`, `list`, `status`, `diff`, `checks`, `gh api` GETs, …) and
-local-only commands (`auth`, `config`, `alias`, `extension`, …).
+every read (`view`, `list`, `status`, `diff`, `checks`, `gh api` GETs, …),
+local-only commands (`auth`, `config`, `alias`, `extension`, …) and the other
+write groups (`release`, `gist`, `repo`, `secret`, `variable`, `workflow`,
+`run`, …), which keep the container's identity and their stdin.
 
 Forwarded commands run without your checkout: the repository is passed from
-`-R/--repo`, `GH_REPO` or the current directory's `origin` remote, and files
-named by `--body-file`, `-F/--body-file`, `--notes-file`, `gh api --input` and
-`gh api -F key=@file` (or `-` for stdin) are sent along. Name PRs/issues by
-number — a forwarded `gh pr comment` without one cannot see your current branch.
+`-R/--repo`, `GH_REPO` or the current directory's `origin` remote, files named
+by `-F/--body-file`, `--attach`, `--recover`, `gh api --input` and
+`gh api -F key=@file` (or `-` for stdin) are sent along, and `gh pr create`
+gets `--head <current branch>` unless you gave one. The orchestrator accepts
+only each command's known options (no `--editor`/`--web`, no
+`gh api --hostname`); anything else is refused and nothing is written. Name
+PRs/issues by number — a forwarded `gh pr comment` without one cannot see your
+current branch.
 
 Exit codes: the real `gh`'s own code for a command that ran · 1 when the write
 was refused or could not be forwarded (nothing was written).
@@ -46,25 +53,24 @@ ORCH = (os.environ.get("ORCHESTRATOR_INTERNAL_URL")
         or "http://orchestrator:4002").rstrip("/")
 TIMEOUT_SEC = 90
 
-# Groups the orchestrator runs for a chat turn (kept in step with
-# ALLOWED_GROUPS in orchestrator/chat-github-write.js). Anything outside this
-# set is local-only (auth, config, alias, extension, completion, …) or not a
-# repository write, and runs the real `gh` locally.
-FORWARD_GROUPS = {
-    "issue", "pr", "label", "api", "release", "repo", "workflow", "run",
-    "project", "gist", "variable", "secret", "cache", "ruleset",
-}
-
-# Subcommands that only read from GitHub (or only touch the local checkout).
-READ_VERBS = {
-    "view", "list", "ls", "status", "diff", "checks", "download", "watch",
-    "get", "field-list", "item-list", "check", "clone", "checkout", "verify",
-    "browse",
+# The `group verb` commands the orchestrator runs for a chat turn (kept in step
+# with COMMAND_SPECS in orchestrator/chat-github-write.js, which also
+# allowlists each command's options), plus every writing `gh api` call. Any
+# other command — reads, local-only groups (auth, config, alias, extension, …)
+# and writes the orchestrator does not run for a chat turn (release, gist,
+# repo, secret, variable, workflow, run, …) — runs the real `gh` locally.
+FORWARD_COMMANDS = {
+    "issue create", "issue edit", "issue comment", "issue close", "issue reopen",
+    "issue delete", "issue lock", "issue unlock", "issue transfer", "issue pin",
+    "issue unpin",
+    "pr create", "pr comment", "pr review", "pr edit", "pr close", "pr reopen",
+    "pr merge", "pr ready", "pr update-branch", "pr revert", "pr lock", "pr unlock",
+    "label create", "label edit", "label delete", "label clone",
 }
 
 # Flags whose value is a local file the forwarded command must carry along.
 # `-F` means `--body-file` everywhere except `gh api`, where it is a field.
-BODY_FILE_FLAGS = {"--body-file", "-F", "--notes-file"}
+BODY_FILE_FLAGS = {"--body-file", "-F", "--attach", "--recover"}
 API_FILE_FLAGS = {"--input"}
 API_FIELD_FLAGS = {"-F", "--field"}
 API_RAW_FIELD_FLAGS = {"-f", "--raw-field"}
@@ -175,17 +181,11 @@ def is_forwarded_write(args, stdin_data=None) -> bool:
     """Whether this `gh` invocation is a GitHub write the chat-turn path forwards."""
     if not args or args[0].startswith("-"):
         return False
-    group = args[0]
-    if group not in FORWARD_GROUPS:
-        return False
-    if group == "api":
-        return api_is_write(args[1:], stdin_data)
-    verb = next((a for a in args[1:] if not a.startswith("-")), None)
-    if verb is None or verb in READ_VERBS:
-        return False
     if any(a in ("-h", "--help") for a in args[1:]):
         return False
-    return True
+    if args[0] == "api":
+        return api_is_write(args[1:], stdin_data)
+    return len(args) > 1 and f"{args[0]} {args[1]}" in FORWARD_COMMANDS
 
 
 def _file_refs(args):
@@ -198,9 +198,10 @@ def _file_refs(args):
         a, v = args[i], args[i + 1]
         if is_api and a in API_FILE_FLAGS:
             refs.append((i + 1, "", v))
-        elif is_api and a in API_FIELD_FLAGS and "=@" in v:
-            key, path = v.split("=@", 1)
-            refs.append((i + 1, f"{key}=@", path))
+        elif is_api and a in API_FIELD_FLAGS and v.partition("=")[2].startswith("@"):
+            # gh splits a field at the FIRST `=`; only then does `@` mean a file.
+            key, _, value = v.partition("=")
+            refs.append((i + 1, f"{key}=@", value[1:]))
         elif not is_api and a in BODY_FILE_FLAGS:
             refs.append((i + 1, "", v))
         else:
@@ -230,8 +231,10 @@ def collect_files(args, stdin_data=None):
 
 
 def _normalise(args):
-    """Split `--flag=value` for the file-carrying flags into `--flag value` so
-    every file reference occupies exactly one argument slot."""
+    """Split `--flag=value` for the file-carrying flags into `--flag value`, and
+    an attached `-Fvalue` / `-XMETHOD` into two arguments, so every file
+    reference occupies exactly one argument slot (the orchestrator refuses the
+    attached forms)."""
     out = []
     for a in args:
         if a.startswith("--") and "=" in a:
@@ -239,8 +242,25 @@ def _normalise(args):
             if flag in BODY_FILE_FLAGS | API_FILE_FLAGS | API_FIELD_FLAGS:
                 out.extend([flag, value])
                 continue
+        elif a[:2] in ("-F", "-X") and len(a) > 2:
+            out.extend([a[:2], a[2:]])
+            continue
         out.append(a)
     return out
+
+
+def _with_head(args):
+    """A forwarded `gh pr create` cannot see the checkout, so name the current
+    branch as `--head` unless the agent already did."""
+    if args[:2] != ["pr", "create"] or any(
+            a in ("-H", "--head") or a.startswith("--head=") for a in args):
+        return args
+    try:
+        branch = subprocess.run(["git", "branch", "--show-current"], capture_output=True,
+                                text=True, timeout=10).stdout.strip()
+    except Exception:
+        branch = ""
+    return [*args, "--head", branch] if branch else args
 
 
 def _repo_from_args(args):
@@ -334,7 +354,7 @@ def main(argv):
     stdin_data = sys.stdin.buffer.read() if _needs_stdin(args) else None
     if not is_forwarded_write(args, stdin_data):
         run_local(argv, stdin_data)
-    result = forward(args, sender, stdin_data)
+    result = forward(_with_head(args), sender, stdin_data)
     if not result or result.get("mode") == "baseline":
         run_local(argv, stdin_data)
     sys.stdout.write(result.get("stdout") or "")

@@ -75,6 +75,15 @@ class Classification(unittest.TestCase):
             "--version",
             "issue",
             "issue create --help",
+            # B1/B2: writes the orchestrator does not run keep the baseline,
+            # locally — with their stdin.
+            "release create v9 notes.md",
+            "gist create f.txt",
+            "secret set FOO",
+            "variable set FOO",
+            "repo create o/new",
+            "workflow run ci.yml",
+            "issue -R o/r create",
         ]:
             with self.subTest(argv=argv):
                 self.assertFalse(G.is_forwarded_write(G._normalise(argv.split())))
@@ -102,6 +111,25 @@ class Classification(unittest.TestCase):
         self.assertTrue(G._needs_stdin(args))
         # `-f` is a raw field — never a file, even with an @.
         self.assertEqual(G._file_refs(["api", "x", "-f", "body=@/tmp/c"]), [])
+        # gh splits a field at the first `=`: `a=b=@c` is a literal.
+        self.assertEqual(G._file_refs(["api", "x", "-F", "a=b=@c"]), [])
+        args = G._normalise(["pr", "comment", "7", "--attach=/tmp/d", "--recover", "/tmp/e"])
+        self.assertEqual(G._file_refs(args), [(4, "", "/tmp/d"), (6, "", "/tmp/e")])
+
+    def test_attached_short_values_are_split(self):
+        # The orchestrator refuses attached forms; the shim sends them apart.
+        self.assertEqual(G._normalise(["api", "x", "-Fbody=@/tmp/c", "-XPATCH"]),
+                         ["api", "x", "-F", "body=@/tmp/c", "-X", "PATCH"])
+        self.assertEqual(G._normalise(["issue", "create", "-F/tmp/b"]),
+                         ["issue", "create", "-F", "/tmp/b"])
+
+    def test_forward_commands_match_the_route(self):
+        # Drift guard, mirrored by chat-github-write.test.js.
+        src = (SCRIPT.parent.parent.parent / "orchestrator" / "chat-github-write.js").read_text()
+        block = src[src.index("const COMMAND_SPECS = {"):src.index("\n};", src.index("const COMMAND_SPECS = {"))]
+        import re as _re
+        route = set(_re.findall(r'^  "([a-z]+ [a-z-]+)":', block, _re.M))
+        self.assertEqual(route, G.FORWARD_COMMANDS)
 
     def test_repo_from_remote(self):
         self.assertEqual(G._repo_from_remote_url("git@github.com:Org/repo.git\n"), "Org/repo")
@@ -141,7 +169,7 @@ class EndToEnd(unittest.TestCase):
         cls.fake_gh = os.path.join(cls.tmp, "real-gh")
         # The "real" gh: echoes what it was asked and under which token.
         with open(cls.fake_gh, "w") as fh:
-            fh.write("#!/bin/sh\necho \"LOCAL $* token=$GH_TOKEN\"\ncat >/dev/null\n")
+            fh.write("#!/bin/sh\necho \"LOCAL $* token=$GH_TOKEN\"\necho \"STDIN=$(cat)\"\n")
         os.chmod(cls.fake_gh, 0o755)
 
     @classmethod
@@ -165,7 +193,7 @@ class EndToEnd(unittest.TestCase):
         env.pop("AEE_ACTING_SENDER", None)
         if sender is not None:
             env["AEE_ACTING_SENDER"] = sender
-        return subprocess.run([sys.executable, str(SCRIPT), *args], input=stdin,
+        return subprocess.run([sys.executable, str(SCRIPT), *args], input=stdin or "",
                               capture_output=True, text=True, env=env, cwd=self.tmp, timeout=30)
 
     def test_autonomous_run_never_forwards(self):
@@ -205,6 +233,31 @@ class EndToEnd(unittest.TestCase):
         # The agent-identity stamp travels inside the body (loop protection).
         self.assertIn("<!-- agent: team-x-dev -->", base64.b64decode(f["content"]).decode())
         self.assertNotIn("GH_TOKEN", json.dumps(req["body"]))
+
+    def test_chat_turn_secret_set_keeps_its_stdin(self):
+        # B2: `secret set` is not forwarded — it runs the real gh locally with
+        # the caller's stdin intact (never an empty secret).
+        p = self.run_gh(["secret", "set", "FOO"], stdin="s3cret-value")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("LOCAL secret set FOO token=baseline-token", p.stdout)
+        self.assertIn("STDIN=s3cret-value", p.stdout)
+        self.assertEqual(_Orch.requests, [])
+
+    def test_pr_create_is_forwarded_with_the_current_branch(self):
+        _Orch.response = (200, {"ok": True, "mode": "attributed", "exitCode": 0,
+                                "stdout": "https://github.com/o/r/pull/3\n", "stderr": ""})
+        repo = tempfile.mkdtemp()
+        subprocess.run(["git", "init", "-q", "-b", "feat/x", repo], check=True)
+        env_cwd, self.tmp = self.tmp, repo
+        try:
+            p = self.run_gh(["pr", "create", "--title", "T", "--body", "b"])
+            q = self.run_gh(["pr", "create", "--title", "T", "--body", "b", "--head", "other"])
+        finally:
+            self.tmp = env_cwd
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(q.returncode, 0, q.stderr)
+        self.assertEqual(_Orch.requests[0]["body"]["args"][-2:], ["--head", "feat/x"])
+        self.assertEqual(_Orch.requests[1]["body"]["args"][-2:], ["--head", "other"])
 
     def test_forwarded_exit_code_is_relayed(self):
         _Orch.response = (200, {"ok": True, "mode": "attributed", "exitCode": 1, "stdout": "",

@@ -18001,7 +18001,8 @@ async function main() {
             readToken: (tokenId) => chatGithubWrite.readGithubToken(GH_TOKENS_DIR, tokenId),
           });
           if (result.mode === 'attributed') {
-            console.log(`[Orchestrator] chat gh ${parsed.args[0]} ${parsed.args[1] || ''} for ${id} → exit ${result.exitCode}`);
+            // The validated command only — never `gh api`'s agent-supplied endpoint.
+            console.log(`[Orchestrator] chat gh ${chatGithubWrite.commandKey(parsed.args).slice(0, 80)} for ${id} → exit ${result.exitCode}`);
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result));

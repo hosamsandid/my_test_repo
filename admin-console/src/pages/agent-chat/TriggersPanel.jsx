@@ -25,6 +25,9 @@ import {
   transportBodyFor,
   isStandingSubscription,
 } from './trigger-summary.js';
+import {
+  branchFilterFormError, branchFilterToInput, branchFilterBody, BRANCH_FILTER_PLACEHOLDER, BRANCH_FILTER_HELP,
+} from './branch-filter.js';
 import { DOW_LABELS, parseCronState, buildCron, describeCron } from './cron-format.js';
 import { triggerRepoOptions, environmentRepoOptions, triggerRepoWarning } from './trigger-repo-status.js';
 import {
@@ -404,6 +407,14 @@ function TriggerRow({ trigger, agentId, ops = liveOps, onEdit, onDeleted, onTogg
             <strong style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>
               {ghSummary.events.length ? ghSummary.events.join(', ') : 'No event'}
             </strong>
+            {ghSummary.branches && (
+              <>
+                {' · branches: '}
+                <strong style={{ color: 'var(--eb-text-primary)', fontWeight: 'var(--eb-font-medium)' }}>
+                  {ghSummary.branches}
+                </strong>
+              </>
+            )}
             {ghSummary.label && (
               <>
                 {' · label '}
@@ -619,6 +630,9 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     // Empty string = match any label (legacy behavior). The poller treats
     // missing or empty as no filter, so the wire format is `string | undefined`.
     labelFilter: initialValues?.labelFilter ?? '',
+    // Optional push branch filter (#2570), edited as a comma-separated string and
+    // stored as an array. Empty = every branch.
+    branchFilter: branchFilterToInput(initialValues?.branchFilter),
     secret:      initialValues?.secret      ?? (initialType === 'http' ? '' : generateSecret()),
     description: initialValues?.description ?? '',
     prompt:      initialValues?.prompt      ?? '',
@@ -669,6 +683,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   const isDataFlow = form.type === 'data-flow';
   const showLabelFilter = form.type === 'github-event'
     && form.events.some(e => LABEL_FILTERABLE_EVENTS.has(e));
+  const showBranchFilter = form.type === 'github-event' && form.events.includes('push');
   // Delivery selector (#1189): a real label listener (label event + a filter),
   // and NOT a human gate/brake — a person sets those on GitHub, so only the
   // poller can see them (mirrors the edge dialog's rule). The gate check needs
@@ -871,6 +886,8 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     if (form.type === 'github-event') {
       if (!form.repo && !isDraftMode) { setFormError('Repository is required.'); return; }
       if (form.events.length === 0) { setFormError('Select the event this trigger reacts to.'); return; }
+      const branchError = showBranchFilter ? branchFilterFormError(form.branchFilter) : null;
+      if (branchError) { setFormError(branchError); return; }
     }
     if (isDataFlow) {
       if (!form.repo && !isDraftMode) { setFormError('A repository is required (the team repo agents push to).'); return; }
@@ -945,6 +962,9 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       // path clear an existing filter when the user blanks the field.
       const lf = (form.labelFilter || '').trim();
       body.labelFilter = (showLabelFilter && lf) ? lf : null;
+      // Branch filter (#2570): an array, or `null` so an edit clears it when
+      // the field is blanked or the event is no longer push.
+      body.branchFilter = branchFilterBody(form.branchFilter, { show: showBranchFilter });
       // Claim stamping (#1006): the raw layer follows the same convention as
       // the engine paths — a `.labeled` label listener claims its wake label
       // unless the author opted out. On edit, `null` clears a stored claim;
@@ -1485,6 +1505,24 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
               </div>
             )}
           </div>
+
+          {showBranchFilter && (
+            <div>
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
+                Branches
+              </div>
+              <input
+                type="text"
+                value={form.branchFilter}
+                onChange={e => set('branchFilter', e.target.value)}
+                placeholder={BRANCH_FILTER_PLACEHOLDER}
+                style={{ ...FIELD_STYLE, width: '100%' }}
+              />
+              <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
+                {BRANCH_FILTER_HELP}
+              </div>
+            </div>
+          )}
 
           {showLabelFilter && (
             <div>

@@ -115,3 +115,11 @@ test('EventsPanel reads the agent-scoped endpoint and gates Fire again on canRef
   assert.match(PANEL, /inFlightRef\.current\) return;/, 'double-click guard');
   assert.match(PANEL, /\?session=\$\{encodeURIComponent\(correlationId\)\}/);
 });
+
+test('#2570: a branch-filter drop names the pushed branch (or tag) in plain language', () => {
+  assert.equal(dropReasonText(drop('branch-filter', { ref: 'refs/heads/agent-knowledge' })),
+    "Branch 'agent-knowledge' is not in this trigger's branch filter, so the push was ignored.");
+  assert.match(dropReasonText(drop('branch-filter', { ref: 'refs/tags/v1.2' })), /^Tag 'v1\.2' is not/);
+  assert.match(dropReasonText(drop('branch-filter', {})), /^This branch is not/);
+  assert.equal(canRefire(drop('branch-filter'), { canManage: true }), false);
+});

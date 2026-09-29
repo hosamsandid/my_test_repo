@@ -469,14 +469,14 @@ error-level findings cannot be applied — steer with another message instead.
 
 On a **live team** the Copilot edits the team itself. **Apply to team…** first
 opens a confirmation listing each change (added, changed, removed) and anything
-*not applied*; confirmed changes reach the running agents immediately. Each
-removal is its own opt-in checkbox. New roles are added as stubs unless you
+*not applied*; confirmed changes reach running agents at once. Each
+removal is its own opt-in checkbox. New roles become stubs unless you
 tick *Materialize now*. If the team changed meanwhile, Apply is
 blocked — **Regenerate**. Only editors can chat and apply; they share the
 history. **Edit as draft** stays available, but *Extend team* only adds roles
 that don't exist yet.
 
-A large flow can take a while. If one generation would run too long, the
+A large flow can take a while. If a generation would run too long, the
 Copilot builds it in two steps — roles first, then the wiring — showing
 *Generating in parts…*; the result is the same checked proposal. If a turn
 still times out, the error card suggests smaller requests or a faster assist

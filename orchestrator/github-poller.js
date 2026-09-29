@@ -33,6 +33,7 @@ const { parseCloses } = require('./pr-events-log');
 const { resolveGithubApiTarget, githubApiBase, DEFAULT_GITHUB_API_BASE } = require('./github-api-base');
 const wakeArmory = require('./wake-armory');
 const { canonicalEventKey, listensTo } = require('./event-key-aliases');
+const { parseBranchFilter, pushBranch, branchFilterMatches } = require('./branch-filter');
 
 // Poll cadence. Fixed 30s in production; overridable via
 // AEE_GITHUB_POLL_INTERVAL_MS (#711) so the E2E stack can tighten it — the
@@ -1113,6 +1114,25 @@ class GitHubPoller {
           }
         }
 
+        // Branch filter for `push` events (#2570). Content routing like the
+        // label filter: a push to a branch the trigger does not list is dropped
+        // here, before any wake. Scoped to `push` only — a trigger that also
+        // listens to other events is unaffected for those (AC9). A tag push has
+        // no branch, so a non-empty filter never matches it. The log entry's
+        // `ref` already names the branch, so the outcome needs no copy of it.
+        if (key === 'push' && sub.branchFilter) {
+          const branch = pushBranch(ghEvent);
+          if (!branchFilterMatches(branch, sub.branchFilter)) {
+            console.log(
+              `[GH-Poller] branch-filter: ${key} (${ghEvent.id}) → ${sub.agentId} dropped ` +
+              `(ref='${ghEvent.payload?.ref ?? '?'}', want='${sub.branchFilter.join(', ')}')`,
+            );
+            outcome.status = 'dropped';
+            outcome.reason = 'branch-filter';
+            continue;
+          }
+        }
+
         // Record the matched wake label per-outcome (#1846). This is the label
         // that actually satisfied this subscriber's filter — which may differ
         // from payload.label.name when the Events API collapses a multi-label
@@ -1787,6 +1807,7 @@ function computePollPlan({ environments = [], agents = [], allowNonGithubHost = 
       const source = repoToToken.get(t.repo);
       if (!source) continue;
 
+      const branchFilter = parseBranchFilter(t.branchFilter);
       let bucket = plan.get(t.repo);
       if (!bucket) {
         bucket = { tokenId: source.tokenId, envId: source.envId, subscribers: [] };
@@ -1815,6 +1836,9 @@ function computePollPlan({ environments = [], agents = [], allowNonGithubHost = 
         // must never re-wake the trigger — see the self-claim-label drop in
         // `_fanOutBatch`. null when the trigger declares no claim.
         claimAdd: (t.claim && typeof t.claim.add === 'string' && t.claim.add.trim()) || null,
+        // Optional branch filter for `push` events (#2570): the parsed pattern
+        // list, or null for no filter (every branch — legacy behaviour).
+        branchFilter: branchFilter.length ? branchFilter : null,
       });
     }
   }

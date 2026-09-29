@@ -756,7 +756,7 @@ belongs to this team):
 | **Repositories** | Zero or more repos, cloned into a member's workspace when that member is created. Each row can bind its own SSH key for a private SSH URL; a private HTTPS URL needs the *GitHub Token* select instead. Selecting an SSH key on a row whose URL is a `github.com` HTTPS (or bare) URL rewrites it to its canonical `git@github.com:org/repo.git` SSH form so the reachability check and clone use the key — non-github and already-SSH URLs are left as typed. Mark a repository *Read-only* to clone it for reference only — it is still cloned, but members are told not to commit or push to it. |
 | **Model provider** | Optional override — members start on this provider and its default model instead of the global `.env` fallback. |
 | **Toolchain** | Optional — which container image members are spawned from, picked from the System-Admin-registered list. Absent means the default image. |
-| **MCP servers** | Optional server + credential pairs from the MCP registry, materialised into each member's `.claude/settings.json` at seed time. |
+| **MCP servers** | Optional server + credential pairs from the MCP registry, applied to members on save, from their next turn. |
 | **Additional context** | Optional text appended to every member's `CLAUDE.md`. |
 
 **Skills** and **Plugins** carry the team's own grant — the same fields the

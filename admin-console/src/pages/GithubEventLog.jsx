@@ -571,6 +571,7 @@ const REFUSAL_COPY = {
   'event-not-subscribed': 'does not subscribe to this event type',
   'history-horizon': "the event predates its trigger's subscription window",
   'label-filter': 'its trigger subscribes to a different label',
+  'branch-filter': 'its trigger only reacts to pushes on other branches',
 };
 
 /* ── Label chip for a pending entry (#2101 AC7) ───────────────────

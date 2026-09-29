@@ -20,6 +20,7 @@ const {
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
+const { chatUploadBaseName, uniqueFileName } = require('./chat-upload-name');
 const internalAuthClient = require('./internal-auth-client');
 const githubEventLog = require('./github-event-log');
 const clientErrorLog = require('./client-error-log');
@@ -113,10 +114,12 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
+const { normalizeBranchFilter } = require('./branch-filter');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
 const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
+const { presentEffectiveIdentity } = require('./effective-github-identity');
 const { scopeRepoStatus, findRepoStatus } = require('./github-repo-status-scope');
 const { scopePendingQueue } = require('./pending-queue-scope');
 const { checkGithubTokenRequirement } = require('./env-token-requirement');
@@ -2763,6 +2766,35 @@ function notifyAgentReseed(agentId, paths) {
   }).catch(() => {});
 }
 
+// Apply an MCP server change to where the agent reads it (#2289). Unlike the
+// best-effort notifiers around it this one is AWAITED: the save response
+// reports, per agent, whether the change landed (applied / stored until the
+// agent next starts / pending until it is materialised / kept its own override
+// / failed and why), so the console never claims a change it could not make.
+// `kind` is 'agents' (one agent) or 'environments' (every agent bound to it).
+// An unreachable orchestrator is reported as a failure, never thrown.
+async function applyMcpChange(kind, id) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/${kind}/${encodeURIComponent(id)}/apply-mcp`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(30_000),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body.ok) return { ok: false, error: body.error || `orchestrator returned ${r.status}` };
+    return {
+      ok: true,
+      applied: body.applied || [],
+      stored: body.stored || [],
+      pending: body.pending || [],
+      keptOverride: body.keptOverride || [],
+      failed: body.failed || [],
+    };
+  } catch (err) {
+    return { ok: false, error: `could not reach the orchestrator (${err.message})` };
+  }
+}
+
 // Best-effort: after an environment's spawn-time credentials change (today: the
 // GitHub PAT it points at), ask the orchestrator to respawn the running agents
 // bound to that env so they pick up the new credential. The token is baked into
@@ -3331,6 +3363,9 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // Team-member inheritance toggles. `null` means "switch to inherit"
   // (delete the field); a string / array means "set the override".
   let promptOverrideChanged = false;
+  // #2289: an MCP override change (incl. switching back to inherit) is applied
+  // to the agent's workspace below, not left for a re-creation that never comes.
+  const mcpOverrideBefore = JSON.stringify(fresh.mcpServersOverride ?? null);
   if (fresh.role === 'team-member') {
     // System-prompt mode (#1511). An explicit `promptMode` selects one of the
     // three modes; an older client that sends only `systemPrompt` is mapped the
@@ -3503,7 +3538,11 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // (#185 Phase 2). On the shared volume the agent re-reads config.json on its
   // next action anyway, so this is just a harmless idempotent re-sync there.
   notifyAgentReload(id);
-  res.json({ id, ...fresh });
+  // Awaited after the write so the report reflects what the agent now reads.
+  const mcpApply = JSON.stringify(fresh.mcpServersOverride ?? null) !== mcpOverrideBefore
+    ? await applyMcpChange('agents', id)
+    : undefined;
+  res.json({ id, ...fresh, ...(mcpApply ? { mcpApply } : {}) });
 });
 
 /* ─── Reset agent to stub state ─────────────────────────────────────── */
@@ -6286,6 +6325,9 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   // here (route-level), mirroring validateProcessTemplate's bundle check.
   const tpe = triggerTransportError(newTrigger);
   if (tpe) return res.status(400).json({ error: tpe });
+  // Push branch filter (#2570): persisted in its normalized array form (or
+  // absent = every branch), validated by rawTriggerError above.
+  normalizeBranchFilter(newTrigger);
   // At most one active chat-launched loop per agent (#1020 AC8). A launched
   // loop is a one-off run; a second launch while one runs would race two
   // runners, so reject it — the composer reflects the running state and
@@ -6342,6 +6384,9 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   // Internal-channel transport (#1174) — same route-level check as POST.
   const tpe = triggerTransportError(merged);
   if (tpe) return res.status(400).json({ error: tpe });
+  // Push branch filter (#2570) — normalized as on POST; a blank/null value
+  // clears a stored filter.
+  normalizeBranchFilter(merged);
   if (merged.type === 'github-event') {
     const now = new Date().toISOString();
     // Refresh the activation horizon on a disable→enable flip so a
@@ -15012,6 +15057,66 @@ app.get('/api/environments/:id/github-health', apiLimiter, async (req, res) => {
   res.json({ envId: env.id, tokenId: env.githubTokenId || null, repos: out, rollUp: rollUpGithubHealth(out) });
 });
 
+// #2560: the EFFECTIVE baseline GitHub token / SSH key of an agent (in practice a
+// team) — whose credential its containers are started with, for every
+// autonomous run and every in-container `gh`/`git` call. The decision comes
+// from the orchestrator's own spawn-time resolver (describeBaselineCredential),
+// so this display cannot drift from the runtime; effective-github-identity.js
+// only redacts it for the caller (never another person's personal-credential
+// metadata). Same visibility as the agent itself.
+app.get('/api/agents/:id/effective-credentials', apiLimiter, async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  const scope = getScope(req);
+  if (!cfg || !visibleAgent(scope, agentMetaForScope(cfg))) return res.status(404).json({ error: 'Agent not found' });
+  let described;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/agents/${encodeURIComponent(id)}/effective-credentials`);
+    described = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(resp.status === 404 ? 404 : 502).json({ error: described.error || 'orchestrator error' });
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+  res.json({ agentId: id, teamId: described.teamId || null, environmentId: described.environmentId || null, ...presentEffectiveIdentityFor(scope, described) });
+});
+
+// #2560 AC4/AC5: the Agent Teams whose baseline identity the CALLER currently is
+// (they are its current Team Admin), each with both credentials as the runtime
+// now resolves them. The personal GitHub Tokens / SSH Keys pages call this right
+// after the caller adds or deletes a personal credential to say which teams now
+// use it — or what those teams fell back to. Always the caller's own teams.
+app.get('/api/me/baseline-teams', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  if (!scope?.userId) return res.json({ teams: [] });
+  let data;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/owners/${encodeURIComponent(scope.userId)}/baseline-teams`);
+    data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(502).json({ error: data.error || 'orchestrator error' });
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+  const teams = (Array.isArray(data.teams) ? data.teams : []).map((t) => ({
+    agentId: t.agentId,
+    displayName: t.displayName || t.agentId,
+    ...presentEffectiveIdentityFor(scope, t),
+  }));
+  res.json({ teams });
+});
+
+function presentEffectiveIdentityFor(scope, described) {
+  const users = usersById();
+  const ghNames = new Map(listGithubTokens().map((t) => [t.id, t.name || null]));
+  const sshNames = new Map(listSshKeys().map((k) => [k.id, k.name || null]));
+  return presentEffectiveIdentity(described, {
+    callerUserId: scope?.userId || null,
+    userLabel: (uid) => users.get(uid)?.displayName || null,
+    githubName: (cid) => ghNames.get(cid) || null,
+    sshName: (cid) => sshNames.get(cid) || null,
+  });
+}
+
 app.post('/api/environments', heavyLimiter, (req, res) => {
   // `skills` is accepted-and-discarded: the skill grant is team-owned
   // (orchestrator/skill-grants.js) and lives on the agent constructs — the
@@ -15429,6 +15534,7 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
     }
   }
   if (githubTokenId !== undefined) env.githubTokenId = githubTokenId || null;
+  const prevMcpServers = JSON.stringify(env.mcpServers || []);
   if (mcpServers !== undefined) {
     try {
       env.mcpServers = normalizeMcpServersInput(mcpServers);
@@ -15461,6 +15567,13 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   }
   env.updatedAt = new Date().toISOString();
   saveEnvironment(env.id, env);
+  // #2289: an MCP set change reaches every bound agent now — rewritten into its
+  // workspace, read on its next turn — instead of only agents created later.
+  // Awaited, and run before any respawn below so a restarted container starts
+  // on the new set; the per-agent outcome goes back in the response.
+  const mcpApply = JSON.stringify(env.mcpServers || []) !== prevMcpServers
+    ? await applyMcpChange('environments', env.id)
+    : undefined;
   // Spawn-time bindings (GitHub PAT, LLM provider/model, the container image) are
   // baked into each agent container at start, so a change only takes effect on
   // respawn. Respawn the env's running agents whenever any of them changed —
@@ -15493,7 +15606,7 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   // AC7: the save is already committed at this point. Whatever the caller does
   // with `previousRepositories` — offer, decline, crash — the environment stays
   // persisted exactly as submitted; no path here rolls it back.
-  res.json({ ...env, previousRepositories: prevRepositories });
+  res.json({ ...env, previousRepositories: prevRepositories, ...(mcpApply ? { mcpApply } : {}) });
 });
 
 app.delete('/api/environments/:id', apiLimiter, (req, res) => {
@@ -20935,28 +21048,14 @@ app.post('/api/agents/:agentId/context/upload', heavyLimiter, requireAgentIdPara
   res.json({ uploaded, ...(errors.length ? { errors } : {}) });
 });
 
-// Return a filename that doesn't yet exist in `dir`, appending " (n)" before
-// the extension on collision so a second upload of `report.pdf` becomes
-// `report (2).pdf` rather than clobbering the first. The " ()" chars are within
-// the upload filename allowlist, so the result is still a legal workspace name.
-function uniqueFileName(dir, name) {
-  if (!fs.existsSync(path.join(dir, name))) return name;
-  const ext = path.extname(name);
-  const base = name.slice(0, name.length - ext.length);
-  for (let n = 2; n < 10000; n++) {
-    const candidate = `${base} (${n})${ext}`;
-    if (!fs.existsSync(path.join(dir, candidate))) return candidate;
-  }
-  return `${base} (${Date.now()})${ext}`;
-}
-
 // Chat attachments: files dropped or picked directly in the chat composer land
 // in a dedicated, server-controlled `chat-uploads/` directory (the client can't
 // choose the path) and are referenced in the message body as
 // `@chat-uploads/<name>`. The agent's cwd is its workspace root, so that token
 // resolves to a file it can open. Mirrors the workspace/upload handler's multer
-// config + filename sanitisation, but auto-creates the target dir and de-dupes
-// colliding names.
+// config + filename sanitisation, but auto-creates the target dir, renames
+// generic pasted-image names to a UTC timestamp and de-dupes colliding names
+// with a `-<n>` suffix (chat-upload-name.js, #2568).
 const CHAT_UPLOADS_DIR = 'chat-uploads';
 app.post('/api/agents/:agentId/chat-upload', heavyLimiter, requireAgentIdParam, uploadFiles, (req, res) => {
   const { agentId } = req.params;
@@ -20995,13 +21094,15 @@ app.post('/api/agents/:agentId/chat-upload', heavyLimiter, requireAgentIdParam, 
 
   const uploaded = [];
   const errors = [];
+  const now = new Date();
   for (const file of req.files) {
-    const safeName = path.basename(file.originalname).replace(/[^\w\-. ()[\]]/g, '_').trim();
-    if (!safeName) {
+    const safeName = path.basename(file.originalname || '').replace(/[^\w\-. ()[\]]/g, '_').trim();
+    const baseName = chatUploadBaseName(safeName, file.mimetype, now);
+    if (!baseName) {
       errors.push({ name: file.originalname, error: 'Invalid filename' });
       continue;
     }
-    const finalName = uniqueFileName(targetDir, safeName);
+    const finalName = uniqueFileName(targetDir, baseName);
     const destPath = path.join(targetDir, finalName);
     // Defence-in-depth: the dest must stay strictly inside the agent root.
     if (!destPath.startsWith(agentRoot + path.sep)) {

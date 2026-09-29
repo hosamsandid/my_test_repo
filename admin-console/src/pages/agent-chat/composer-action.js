@@ -21,9 +21,12 @@
 //              aborted even while the textarea itself is disabled.
 //   stopBusy — a stop request is already in flight (gates Stop only), so a
 //              double-press can't fire two aborts.
+//   uploading — an attachment upload is still in flight (gates Send only,
+//              #2567 AC11): the draft must not leave before its references
+//              are in it.
 //
 // Returns { mode: 'send' | 'stop', enabled: boolean }.
-export function decideComposerAction({ busy, canStop, hasText, disabled, stopBusy } = {}) {
+export function decideComposerAction({ busy, canStop, hasText, disabled, stopBusy, uploading } = {}) {
   if (busy && canStop) {
     // Stop mode: enabled unless an abort is already running. Independent of the
     // composer's `disabled` state — the whole point is to abort mid-turn, when
@@ -31,6 +34,6 @@ export function decideComposerAction({ busy, canStop, hasText, disabled, stopBus
     return { mode: 'stop', enabled: !stopBusy };
   }
   // Send mode (idle): the historic behaviour — enabled only with text and an
-  // enabled composer.
-  return { mode: 'send', enabled: !disabled && !!hasText };
+  // enabled composer, and never while an attachment is still uploading.
+  return { mode: 'send', enabled: !disabled && !!hasText && !uploading };
 }

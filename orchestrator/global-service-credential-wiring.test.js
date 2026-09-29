@@ -33,11 +33,9 @@ function region(openingLine, endNeedle) {
 const WRAPPERS = [
   ['resolveAttributedGithubToken', 'function resolveAttributedGithubToken(', 'tokenIndex'],
   ['resolveAttributedSshKey', 'function resolveAttributedSshKey(', 'keyIndex'],
-  ['resolveBaselineGithubTokenId', 'function resolveBaselineGithubTokenId(', 'tokenIndex'],
-  ['resolveBaselineSshKeyId', 'function resolveBaselineSshKeyId(', 'keyIndex'],
 ];
 
-test('every attributed/baseline resolver threads the global-service scan into resolveCredential', () => {
+test('every attributed resolver threads the global-service scan into resolveCredential', () => {
   for (const [name, opening, indexVar] of WRAPPERS) {
     const body = region(opening, '\n}');
     // The global-service id must be scanned from the SAME index array already
@@ -45,4 +43,25 @@ test('every attributed/baseline resolver threads the global-service scan into re
     assert.match(body, new RegExp(`globalServiceCredentialId: credentialResolution\\.selectGlobalServiceCredentialId\\(${indexVar}\\),`),
       `${name} must forward the global-service id scanned from the already-loaded ${indexVar}`);
   }
+});
+
+// #2560 moved the baseline composition into the pure `describeBaselineCredential`,
+// which scans the global-service id from the index it is handed itself (unit-
+// tested in credential-resolution.test.js: "no env binding → … source global").
+// What stays fs-bound — and so guarded here — is that each baseline wrapper hands
+// it the full, already-loaded index of the right kind.
+test('every baseline resolver hands the full credential index to describeBaselineCredential (global-service scan inside)', () => {
+  for (const [name, opening, indexLoad] of [
+    ['describeBaselineGithubToken', 'function describeBaselineGithubToken(', 'loadGithubTokenIndex'],
+    ['describeBaselineSshKey', 'function describeBaselineSshKey(', 'loadSshKeyIndex'],
+  ]) {
+    const body = region(opening, '\n}');
+    assert.match(body, /credentialResolution\.describeBaselineCredential\(\{/, `${name} must use the shared pure core`);
+    assert.match(body, new RegExp(`index: ${indexLoad}\\(\\),`), `${name} must pass the ${indexLoad}() index`);
+  }
+  const core = fs.readFileSync(path.join(__dirname, 'credential-resolution.js'), 'utf8');
+  const start = core.indexOf('function describeBaselineCredential(');
+  const body = core.slice(start, core.indexOf('\n}\n', start));
+  assert.match(body, /const globalServiceCredentialId = selectGlobalServiceCredentialId\(index\);/);
+  assert.match(body, /\n\s+globalServiceCredentialId,\n\s+\}\);/, 'the scanned id must reach resolveCredential');
 });

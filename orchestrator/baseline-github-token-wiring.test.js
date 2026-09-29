@@ -44,25 +44,33 @@ const baselineResolver = () => region('function resolveBaselineGithubTokenId(', 
 const baselineSshResolver = () => region('function resolveBaselineSshKeyId(', '\n}');
 const materializeAgentSshKeyBody = () => region('function materializeAgentSshKey(', '\n}\n');
 
-test('resolveBaselineGithubTokenId exists and is composed from the same three pure calls the attributed resolvers use', () => {
+// #2560 moved the composition itself (baseline owner → personal credential →
+// never-refusing `resolveCredential`) into the pure, unit-tested
+// `credentialResolution.describeBaselineCredential`, so the console's
+// effective-identity display and the spawn-time bake share ONE decision. These
+// guards now pin the delegation chain instead of the three inline calls.
+const describeGithub = () => region('function describeBaselineGithubToken(', '\n}');
+const describeSsh = () => region('function describeBaselineSshKey(', '\n}');
+
+test('resolveBaselineGithubTokenId delegates to describeBaselineGithubToken — the same decision the console displays (#2560)', () => {
   const src = baselineResolver();
-  assert.match(
-    src,
-    /credentialResolution\.resolveBaselineOwnerId\(/,
-    'must resolve WHO through the team-admin baseline, not a static/effective-owner call meant for a live chat turn',
-  );
+  assert.match(src, /return describeBaselineGithubToken\(cfg, env\)\.credentialId;/);
   assert.doesNotMatch(
     src,
     /credentialResolution\.resolveEffectiveOwnerId\(/,
     'a container spawn has no acting sender — resolveEffectiveOwnerId would be reaching for interactive-only machinery',
   );
-  assert.match(src, /const tokenIndex = loadGithubTokenIndex\(\);/);
-  assert.match(src, /credentialResolution\.findPersonalCredentialState\(tokenIndex, ownerId, undefined, liveUserGate\)/);
-  assert.match(src, /credentialResolution\.resolveCredential\(\{/);
-  // The operation must be OUTSIDE ATTRIBUTED_OPERATIONS so this can never
-  // refuse — a spawn/clone must always have a working path.
-  assert.doesNotMatch(src, /operation:\s*"(commit|pr|review|push-https|push-ssh)"/);
-  assert.match(src, /sharedCredentialId,?\s*\n?\s*kind: "GitHub token"/);
+});
+
+test('describeBaselineGithubToken composes the shared pure describeBaselineCredential over the token index', () => {
+  const src = describeGithub();
+  assert.match(src, /credentialResolution\.describeBaselineCredential\(\{/);
+  assert.match(src, /\.\.\.loadBaselineDeps\(\)/, 'must resolve WHO through the current team-admin snapshot');
+  assert.match(src, /index: loadGithubTokenIndex\(\),/);
+  assert.match(src, /liveUsers: loadLiveUserGate\(\),/);
+  assert.match(src, /sharedCredentialId: env\?\.githubTokenId \|\| null,/);
+  assert.match(src, /kind: "GitHub token"/);
+  assert.doesNotMatch(src, /operation:/, 'the operation is fixed to the never-refusing "spawn" inside the pure core');
 });
 
 test('resolveBaselineGithubTokenId falls back to the raw env.githubTokenId when there is no cfg (AC8/"migrate existing bindings")', () => {
@@ -101,23 +109,15 @@ test('startAgentProcess injects GH_TOKEN/GITHUB_TOKEN via resolveBaselineGithubT
 // raw shared deploy key directly. These mirror the GitHub-token guards above
 // for the SSH-key sibling.
 
-test('resolveBaselineSshKeyId is composed from the same three pure calls the attributed resolvers use, and can never refuse', () => {
-  const src = baselineSshResolver();
-  assert.match(
-    src,
-    /credentialResolution\.resolveBaselineOwnerId\(/,
-    'must resolve WHO through the team-admin baseline, not a static/effective-owner call meant for a live chat turn',
-  );
-  assert.doesNotMatch(
-    src,
-    /credentialResolution\.resolveEffectiveOwnerId\(/,
-    'a container spawn has no acting sender — resolveEffectiveOwnerId would be reaching for interactive-only machinery',
-  );
-  assert.match(src, /const keyIndex = loadSshKeyIndex\(\);/);
-  assert.match(src, /credentialResolution\.findPersonalCredentialState\(keyIndex, ownerId, undefined, liveUserGate\)/);
-  assert.match(src, /credentialResolution\.resolveCredential\(\{/);
-  assert.doesNotMatch(src, /operation:\s*"(commit|pr|review|push-https|push-ssh)"/);
-  assert.match(src, /sharedCredentialId:\s*sharedSshKeyId \|\| null,?\s*\n?\s*kind: "SSH key"/);
+test('resolveBaselineSshKeyId delegates to describeBaselineSshKey, which composes the shared pure core over the key index', () => {
+  assert.match(baselineSshResolver(), /return describeBaselineSshKey\(cfg, sharedSshKeyId\)\.credentialId;/);
+  const src = describeSsh();
+  assert.match(src, /credentialResolution\.describeBaselineCredential\(\{/);
+  assert.match(src, /\.\.\.loadBaselineDeps\(\)/);
+  assert.match(src, /index: loadSshKeyIndex\(\),/);
+  assert.match(src, /liveUsers: loadLiveUserGate\(\),/);
+  assert.match(src, /sharedCredentialId:\s*sharedSshKeyId \|\| null,\s*\n?\s*kind: "SSH key"/);
+  assert.doesNotMatch(src, /operation:/);
 });
 
 test('resolveBaselineSshKeyId falls back to the raw shared sshKeyId when there is no cfg (AC8/"migrate existing bindings")', () => {
@@ -133,8 +133,13 @@ test('materializeAgentSshKey resolves its key through resolveBaselineSshKeyId, n
   const src = materializeAgentSshKeyBody();
   assert.match(
     src,
-    /const sharedSshKeyId = repos\.find\(\(r\) => r && r\.sshKeyId\)\?\.sshKeyId;/,
-    'the per-repo shared key is still discovered the same way — only what feeds the actual bake changes',
+    /const sharedSshKeyId = baselineSharedSshKeyId\(env\);/,
+    'the per-repo shared key is discovered by the helper the effective-identity display uses too (#2560)',
+  );
+  assert.match(
+    region('function baselineSharedSshKeyId(', '\n}'),
+    /repos\.find\(\(r\) => r && r\.sshKeyId\)\?\.sshKeyId/,
+    'still the first repository carrying a key — only what feeds the actual bake changes',
   );
   assert.match(
     src,
@@ -157,4 +162,28 @@ test('startAgentProcess threads cfg into materializeAgentSshKey so the baseline 
     /materializeAgentSshKey\(id, env, childEnv, config\);/,
     'materializeAgentSshKey needs the agent config to resolve a baseline owner — calling it with 3 args silently reverts to the raw shared key',
   );
+});
+
+// #2560: the console's effective-identity endpoint must describe what the spawn
+// path bakes — the same describe functions and the same shared-key discovery.
+test('the effective-credentials endpoint reuses the spawn-path describe functions (#2560 AC7)', () => {
+  const src = region('function describeAgentBaselineCredentials(', '\n}');
+  assert.match(src, /github: describeBaselineGithubToken\(cfg, env\),/);
+  assert.match(src, /ssh: describeBaselineSshKey\(cfg, baselineSharedSshKeyId\(env\)\),/);
+  assert.match(SRC, /\/internal\\\/agents\\\/\(\[\^\/\]\+\)\\\/effective-credentials\$\//);
+  assert.match(SRC, /\.\.\.describeAgentBaselineCredentials\(cfg\)/);
+});
+
+// #2560 AC7: the console's effective-identity endpoints must describe through the
+// SAME describeBaseline* functions the spawn bake uses — never a second resolver.
+test('#2560 the effective-credentials endpoints go through describeAgentBaselineCredentials', () => {
+  const effective = region("const effectiveCredsMatch = req.method === 'GET'", '\n      return;\n    }\n');
+  assert.match(effective, /describeAgentBaselineCredentials\(cfg\)/);
+  const owners = region("const ownerBaselineMatch = req.method === 'GET'", '\n      return;\n    }\n');
+  assert.match(owners, /describeAgentBaselineCredentials\(cfg\)/);
+  assert.match(owners, /described\.github\.ownerId !== userId && described\.ssh\.ownerId !== userId/);
+  const both = region('function describeAgentBaselineCredentials(', '\n}');
+  assert.match(both, /github: describeBaselineGithubToken\(cfg, env\)/);
+  assert.match(both, /ssh: describeBaselineSshKey\(cfg, baselineSharedSshKeyId\(env\)\)/);
+  assert.match(materializeAgentSshKeyBody(), /const sharedSshKeyId = baselineSharedSshKeyId\(env\);/);
 });

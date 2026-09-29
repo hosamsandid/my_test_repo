@@ -70,7 +70,24 @@ export function describeWorkingEnvSubmitState(form = {}) {
       message: 'Give every added repository a URL, or remove the empty row.',
     });
   }
-  // Same shape for the MCP picker rows (#2051): an "Add MCP server" click leaves
+  reasons.push(...describeMcpRowBlockers(mcpServers));
+
+  return { canSubmit: reasons.length === 0, reasons };
+}
+
+/**
+ * The MCP picker rows' own blockers, in form order. Shared by every surface
+ * that renders the picker — the Working Environment form, the team's MCP tab
+ * and a team-member's Custom MCP set (#2289) — so the same rows are blocked
+ * for the same reasons everywhere, inline, before the API sees them.
+ *
+ * @param rows  array of { serverId, credentialId } picker rows
+ * @returns {Array<{field: string, message: string}>}
+ */
+export function describeMcpRowBlockers(rows) {
+  const mcpServers = Array.isArray(rows) ? rows : [];
+  const reasons = [];
+  // Like an empty repository row (#2051): an "Add MCP server" click leaves
   // a blank row behind, and the API silently DROPS an entry with no serverId
   // (normalizeMcpServersInput), so a user who picked a credential but forgot the
   // server would otherwise save and lose it without a word.
@@ -82,7 +99,7 @@ export function describeWorkingEnvSubmitState(form = {}) {
     });
   }
   // Nothing on the server side dedupes: `mcpServers` is stored in order and the
-  // seeder writes one stanza per entry into the agent's settings, so a repeated
+  // seeder writes one stanza per entry into the agent's .mcp.json, so a repeated
   // server means the later row silently wins. Block it here rather than let the
   // form express something whose outcome it cannot show.
   const duplicateMcp = firstDuplicate(mcpServers.map(r => String(r?.serverId ?? '').trim()).filter(Boolean));
@@ -92,6 +109,5 @@ export function describeWorkingEnvSubmitState(form = {}) {
       message: `List each MCP server once — '${duplicateMcp}' is added twice.`,
     });
   }
-
-  return { canSubmit: reasons.length === 0, reasons };
+  return reasons;
 }

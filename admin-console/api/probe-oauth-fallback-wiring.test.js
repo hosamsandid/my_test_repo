@@ -43,8 +43,11 @@ function func(src, marker) {
   return stripComments(src.slice(start, end));
 }
 
+// `messagesRoute: true` keeps the OAuth probe on /v1/messages — Anthropic
+// rejects JWT/OAuth bearer tokens on count_tokens ("401 jwt auth is not yet
+// supported on count_tokens"), so both paths must probe the messages route.
 const OAUTH_FIXED_BASE_CALL =
-  /probeMessagesFallback\(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, \{ oauth: true \}\)/;
+  /probeMessagesFallback\(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, \{ oauth: true, messagesRoute: true \}\)/;
 
 const CHECKS = {
   /** Test-connection's OAuth branch classifies the fixed-base 404 as auth-OK. */
@@ -72,15 +75,15 @@ const MUTATIONS = [
     fires: 'discoverPassesOauthFlag',
     // Re-introduce the original #2460 bug: Discover loses the flag.
     apply: (s) => s.replace(
-      "const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true });\n    return oauthDiscoverResult(fallback);",
-      "const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM);\n    return oauthDiscoverResult(fallback);",
+      "const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true, messagesRoute: true });\n    return oauthDiscoverResult(fallback);",
+      "const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { messagesRoute: true });\n    return oauthDiscoverResult(fallback);",
     ),
   },
   {
     fires: 'testPassesOauthFlag',
     apply: (s) => s.replace(
-      "const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true });\n    return {",
-      "const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM);\n    return {",
+      "const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true, messagesRoute: true });\n    return {",
+      "const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { messagesRoute: true });\n    return {",
     ),
   },
 ];

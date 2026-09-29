@@ -13417,10 +13417,23 @@ function llmProbeTarget(baseUrl, token, authType) {
 // of declaring the whole provider broken. See llm-probe-fallback.js for the
 // (unit-tested, pure) response classification.
 async function probeMessagesFallback(baseUrl, headers, system = null, opts = {}) {
-  const url = buildCountTokensUrl(baseUrl);
+  // Route choice: the api-key Azure fallback (#2306) uses the free count_tokens
+  // route. Subscription-OAuth (#2448) MUST use the real /v1/messages route —
+  // Anthropic accepts JWT/OAuth bearer tokens there but rejects them on
+  // count_tokens with "401 jwt auth is not yet supported on count_tokens",
+  // which the classifier would otherwise mis-read as a rejected token. The
+  // messages route stays free here because the intentionally-invalid placeholder
+  // model 404s during model resolution — after auth is validated, before any
+  // inference — so no tokens are ever billed (a 404 not_found_error is treated
+  // as auth-OK by classifyMessagesFallback under { oauth: true }).
+  const useMessages = Boolean(opts.messagesRoute);
+  const url = useMessages ? buildMessagesUrl(baseUrl) : buildCountTokensUrl(baseUrl);
   const payload = {
     model: PROBE_PLACEHOLDER_MODEL,
     messages: [{ role: 'user', content: 'ping' }],
+    // /v1/messages requires max_tokens; count_tokens rejects it. Kept tiny — the
+    // placeholder model 404s before generation, so the value is never exercised.
+    ...(useMessages ? { max_tokens: 1 } : {}),
     // Subscription-OAuth probes present the Claude Code identity so they
     // authenticate exactly like real CLI traffic (#2448); the api-key Azure
     // fallback (#2306) passes no system and its payload is unchanged.
@@ -13446,7 +13459,7 @@ async function probeLlmEndpointTest(baseUrl, token, authType) {
   // count_tokens messages route the OAuth flow actually authenticates.
   if (isOauthAuthType(normalizeAuthType(authType))) {
     const headers = token ? oauthProbeHeaders(token) : {};
-    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true });
+    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true, messagesRoute: true });
     return {
       ok: fallback.ok,
       url: fallback.url,
@@ -13494,7 +13507,7 @@ async function probeLlmEndpointDiscover(baseUrl, token, authType) {
     // treated as auth-OK regardless of body shape — otherwise Discover could
     // report "check the Base URL" while Test reports success for the same valid
     // provider (and the Base URL isn't even operator-editable for OAuth).
-    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true });
+    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true, messagesRoute: true });
     return oauthDiscoverResult(fallback);
   }
   const { url, headers } = llmProbeTarget(baseUrl, token, authType);

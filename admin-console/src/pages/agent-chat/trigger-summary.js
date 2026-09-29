@@ -253,21 +253,6 @@ export function claimBodyFor({ labelFilter, events, claimOn, isEdit }) {
   return isEdit ? null : undefined;
 }
 
-// Delivery-transport field for a saved github-event trigger body (#1189). Pure
-// mirror of the TriggerForm decision so it is unit-testable:
-//   - a label listener (`showTransport`) writes an EXPLICIT value — 'github'
-//     too, never omitted, so toggling internal → github clears a stored
-//     'internal' on the PUT `{...prev, ...body}` merge;
-//   - a trigger that is not (or no longer) a label listener but carried a stale
-//     transport gets it cleared to 'github' on edit;
-//   - a plain non-label trigger keeps no transport key (undefined drops).
-// Returns the value to assign to `body.transport`, or undefined to omit it.
-export function transportBodyFor({ showTransport, transport, isEdit, priorTransport }) {
-  if (showTransport) return transport === 'internal' ? 'internal' : 'github';
-  if (isEdit && priorTransport) return 'github';
-  return undefined;
-}
-
 // A chat-launched loop (#1020): a one-off "run until done" started from the
 // composer, not a standing subscription. It is a `loop`-type trigger tagged
 // `launched: true` while it runs (the runtime removes it on any terminal

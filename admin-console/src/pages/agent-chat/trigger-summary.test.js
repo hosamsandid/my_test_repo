@@ -7,7 +7,6 @@ import {
   summarizeGithubEventTrigger,
   summarizeLoopTrigger,
   claimBodyFor,
-  transportBodyFor,
   summarizeLoopEdge,
   hasClaim,
   summarizeClaimEdge,
@@ -255,35 +254,6 @@ test('isStandingSubscription: the chat Triggers list excludes every loop (#1020 
   assert.equal(isStandingSubscription({ type: 'loop' }), false);
   assert.equal(isStandingSubscription({ type: 'loop', launched: true }), false);
   assert.equal(isStandingSubscription(null), false);
-});
-
-/* ── #1189: delivery-transport body for a github-event label listener ────── */
-
-test('transportBodyFor: a label listener writes an explicit value (github too, to clear on toggle-off)', () => {
-  assert.equal(
-    transportBodyFor({ showTransport: true, transport: 'internal', isEdit: true, priorTransport: undefined }),
-    'internal');
-  // Toggling internal → github must write 'github' explicitly so the PUT merge
-  // clears a stored 'internal' rather than leaving it in place.
-  assert.equal(
-    transportBodyFor({ showTransport: true, transport: 'github', isEdit: true, priorTransport: 'internal' }),
-    'github');
-});
-
-test('transportBodyFor: a plain non-label trigger keeps no transport key', () => {
-  assert.equal(
-    transportBodyFor({ showTransport: false, transport: 'github', isEdit: false, priorTransport: undefined }),
-    undefined);
-});
-
-test('transportBodyFor: a no-longer-label listener with a stale transport is cleared to github on edit', () => {
-  assert.equal(
-    transportBodyFor({ showTransport: false, transport: 'github', isEdit: true, priorTransport: 'internal' }),
-    'github');
-  // …but a create with no label listener still omits it.
-  assert.equal(
-    transportBodyFor({ showTransport: false, transport: 'internal', isEdit: false, priorTransport: undefined }),
-    undefined);
 });
 
 // ── platform-synthesized event keys (#2032) ─────────────────────────────────

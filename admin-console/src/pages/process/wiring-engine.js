@@ -99,7 +99,7 @@ async function ensureArtifactOutcome(ops, roleId, artifact) {
  * the outcome (outcome-port drags already declare the emit, #828). Idempotent:
  * an existing matching listener/outcome is reused, never duplicated.
  */
-export async function wireLabelHandoff({ ops }, { from, to, label, target = 'issues', action = 'labeled', prompt, labels, emitSource = true, autoClaim, repo, fromName, toName, transport }) {
+export async function wireLabelHandoff({ ops }, { from, to, label, target = 'issues', action = 'labeled', prompt, labels, emitSource = true, autoClaim, repo, fromName, toName }) {
   const l = String(label || '').trim();
   if (!l) throw new Error('label is required');
   const event = `${target}.${action}`;
@@ -115,10 +115,6 @@ export async function wireLabelHandoff({ ops }, { from, to, label, target = 'iss
       labelFilter: l,
       enabled: true,
       ...(claim ? { claim } : {}),
-      // Internal-channel delivery (#1174): the listener is excluded from the
-      // poller and woken by /internal/flow-emit (the producer runs `aee-emit`).
-      // Never offered for human gates/brakes — a person sets those on GitHub.
-      ...(transport === 'internal' && !humanLabel ? { transport: 'internal' } : {}),
       description: humanLabel
         ? `Wait for human gate \`${l}\``
         : `Wake when \`${l}\` is ${handoffVerb(action)} ${handoffTargetNoun(target)} (from ${fromName || from})`,
@@ -136,17 +132,11 @@ export async function wireLabelHandoff({ ops }, { from, to, label, target = 'iss
  * source's outcomes in sync on a label rename. `humanSource` marks a human-set
  * label — there is no emitter to rewrite.
  */
-export async function updateLabelHandoff({ ops }, { from, to, triggerId, label, newLabel, target = 'issues', action = 'labeled', prompt, humanSource, transport }) {
+export async function updateLabelHandoff({ ops }, { from, to, triggerId, label, newLabel, target = 'issues', action = 'labeled', prompt, humanSource }) {
   const next = String(newLabel || '').trim();
   if (!next) throw new Error('label is required');
   const event = `${target}.${action}`;
-  // Delivery toggle (#1174): an explicit 'github' is written (not omitted) so
-  // flipping internal → github actually clears the exclusion on the merged
-  // trigger; absent = caller didn't touch delivery, leave the field alone.
-  await ops.updateTrigger(to, triggerId, {
-    events: [event], labelFilter: next, prompt,
-    ...(transport === 'internal' || transport === 'github' ? { transport } : {}),
-  });
+  await ops.updateTrigger(to, triggerId, { events: [event], labelFilter: next, prompt });
   if (next !== label && !humanSource && ops.getRoleOutcomes && ops.setRoleOutcomes) {
     const cur = await ops.getRoleOutcomes(from);
     if (cur) {

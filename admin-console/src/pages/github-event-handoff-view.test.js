@@ -36,8 +36,9 @@ test('the event key matches the writer', () => {
 
 test('isHandoffRow keys on the event, not on source: internal', () => {
   assert.equal(isHandoffRow(row()), true);
-  // An `aee-emit` internal label channel (#1173) carries the SAME source and is
-  // an ordinary labelled row with a repo and a work item.
+  // Other platform-written rows (and labelled rows logged before #2578 removed
+  // the internal transport) carry the SAME source and are ordinary labelled
+  // rows with a repo and a work item.
   assert.equal(isHandoffRow(row({
     event: 'issues.labeled', source: 'internal', repo: 'o/r', handoff: undefined,
   })), false);

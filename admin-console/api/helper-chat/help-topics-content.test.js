@@ -105,9 +105,10 @@ const TOPIC_CONTENT = [
       'improvement cards',
       // Delivery: the third human touchpoint, which is neither gate nor brake.
       'delivery',
-      // Internal vs poller delivery, the choice the label edge dialog offers.
-      'aee-emit',
+      // Every label hand-off is poller-delivered (#2578 removed the internal
+      // delivery choice); the topic must still say so.
       'poller',
+      'source of truth',
       // #1984 corrections to what the page actually shows today — each of these
       // contradicts a premise the ticket or an older doc still carried, so a
       // reword must not quietly restore the old reading.

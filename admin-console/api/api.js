@@ -136,6 +136,7 @@ const agentTemplateStore = require('./agent-templates-store');
 const extractTemplate = require('./extract-template');
 const { runCopilot, isCopilotAborted, classifyTurnFailure, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
 const { httpPostStreamText } = require('./anthropic-transport');
+const { planInternalTransportMigration } = require('./internal-transport-migration');
 const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
@@ -3337,12 +3338,6 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         // reconcileTeamGithubChannels re-stamps the claim the author just turned
         // off. Only the non-default is persisted.
         ...(c.autoClaim === false ? { autoClaim: false } : {}),
-        // Internal-channel transport (#1194) — must survive the live port write so
-        // reconcileTeamGithubChannels re-derives an internal (poller-excluded)
-        // listener. Only meaningful on a labelled, non-human channel; anything else
-        // stays poller-delivered, so a stray `transport` on those is dropped here.
-        ...(c.transport === 'internal' && typeof c.label === 'string' && c.label.trim() && c.gate !== 'human'
-          ? { transport: 'internal' } : {}),
       }));
     if (norm.length) fresh.channels = norm; else delete fresh.channels;
     channelsChanged = true;
@@ -6319,11 +6314,9 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   // direct API) can persist a non-conformant listener unchallenged again.
   const te = rawTriggerError(newTrigger);
   if (te) return res.status(400).json({ error: te });
-  // Internal-channel transport (#1174): a mistyped value would silently leave
-  // the listener poller-delivered while the producer runs `aee-emit` — checked
-  // here (route-level), mirroring validateProcessTemplate's bundle check.
-  const tpe = triggerTransportError(newTrigger);
-  if (tpe) return res.status(400).json({ error: tpe });
+  // A legacy `transport` is tolerated and dropped (the internal transport was
+  // removed in #2578 — every label listener is poller-delivered).
+  delete newTrigger.transport;
   // Push branch filter (#2570): persisted in its normalized array form (or
   // absent = every branch), validated by rawTriggerError above.
   normalizeBranchFilter(newTrigger);
@@ -6380,9 +6373,9 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   // UNCHANGED (the LegacyMultiEventNote migration flow keeps working).
   const te = rawTriggerError(merged, prev);
   if (te) return res.status(400).json({ error: te });
-  // Internal-channel transport (#1174) — same route-level check as POST.
-  const tpe = triggerTransportError(merged);
-  if (tpe) return res.status(400).json({ error: tpe });
+  // Legacy `transport` (#2578) — dropped as on POST, including one lingering
+  // on the stored trigger, so an edit never re-persists it.
+  delete merged.transport;
   // Push branch filter (#2570) — normalized as on POST; a blank/null value
   // clears a stored filter.
   normalizeBranchFilter(merged);
@@ -6467,22 +6460,6 @@ app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) =
   }
   res.status(204).end();
 });
-
-// Internal-channel transport (#1174): value + shape hygiene for a trigger write.
-// The failure mode of a bad value is silent (the listener stays in the poller
-// plan and `aee-emit` wakes nobody), so it is rejected, not tolerated. Kept
-// route-level — the bundle-side twin lives in validateProcessTemplate.
-function triggerTransportError(t) {
-  if (t.transport === undefined) return null;
-  if (t.transport !== 'internal' && t.transport !== 'github') {
-    return "transport must be 'internal' or 'github'";
-  }
-  if (t.transport === 'internal'
-      && !(t.type === 'github-event' && typeof t.labelFilter === 'string' && t.labelFilter.trim())) {
-    return "transport 'internal' requires a github-event label listener (labelFilter)";
-  }
-  return null;
-}
 
 // A trigger write on a team member changes WHO CONSUMES its siblings' labels —
 // re-render the team's generated Outcomes blocks (#1007). Best-effort: a
@@ -21416,6 +21393,45 @@ function sweepExportStaging() {
   if (swept > 0) console.log(`[Admin] Swept ${swept} leftover export staging dir(s)`);
 }
 
+// Startup sweep for the removed internal transport (#2578). Drops the dead
+// `transport` field from every agent's config.json `channels[]` and
+// triggers.json, then re-reconciles each affected team so its derived listeners
+// and `## Outcomes` blocks (which used to tell producers to run `aee-emit`) are
+// re-rendered. The decision is the pure planInternalTransportMigration; this is
+// only the I/O. Best-effort and idempotent: a failed putTriggers (e.g. the
+// orchestrator is still starting) is counted, not thrown, and a rerun — the
+// retry below or the next start — picks up whatever is left.
+async function sweepInternalTransport() {
+  const agents = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    let prompt = null;
+    try { prompt = fs.readFileSync(path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md'), 'utf8'); } catch { /* none */ }
+    agents.push({ id, cfg, triggers, prompt });
+  }
+  const plan = planInternalTransportMigration(agents);
+  let failed = 0;
+  for (const { id, cfg } of plan.configs) {
+    try { writeJsonAtomic(path.join(AGENTS_DIR, id, 'config.json'), cfg); } catch { failed++; }
+  }
+  for (const { id, triggers } of plan.triggers) {
+    try { await putTriggers(id, triggers); notifyAgentReload(id); } catch { failed++; }
+  }
+  for (const teamId of plan.teamIds) {
+    try {
+      await reconcileTeamGithubChannels(teamId);
+      await reconcileTeamOutcomes(teamId);
+    } catch { failed++; }
+  }
+  if (plan.configs.length || plan.triggers.length || plan.teamIds.length) {
+    console.log(`[Admin] Internal-transport sweep (#2578): ${plan.configs.length} config(s), `
+      + `${plan.triggers.length} trigger file(s), ${plan.teamIds.length} team(s) re-reconciled`
+      + (failed ? `, ${failed} write(s) failed — retried later` : ''));
+  }
+  return { failed };
+}
+
 app.listen(4000, '0.0.0.0', () => {
   console.log('[Admin] Listening on :4000');
   // State the authorization mode explicitly (#1457) — and, in single-user mode,
@@ -21429,5 +21445,12 @@ app.listen(4000, '0.0.0.0', () => {
   try { backfillSkillManifests(); } catch (err) { console.error(`[Admin] Skill manifest backfill failed: ${err.message}`); }
   try { sweepExportStaging(); } catch (err) { console.error(`[Admin] Export staging sweep failed: ${err.message}`); }
   try { backfillDraftAccess(); } catch (err) { console.error(`[Admin] Draft access backfill failed: ${err.message}`); }
+  // Async (triggers go through the orchestrator). The orchestrator may still be
+  // starting beside us, so a sweep with failed writes is retried once a minute
+  // later; anything still left is picked up on the next start.
+  const logSweepError = (err) => console.error(`[Admin] Internal-transport sweep failed: ${err.message}`);
+  sweepInternalTransport().then(({ failed }) => {
+    if (failed) setTimeout(() => { sweepInternalTransport().catch(logSweepError); }, 60_000).unref();
+  }).catch(logSweepError);
   try { startLlmHealthPoller(); } catch (err) { console.error(`[Admin] Model Provider health poller failed to start: ${err.message}`); }
 });

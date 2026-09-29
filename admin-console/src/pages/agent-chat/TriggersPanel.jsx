@@ -15,14 +15,12 @@ import {
   conditionsFromFilter, conditionsToFilter, payloadFilterSummary, conditionsHeading,
 } from './plugin-event-filter.js';
 import { liveOps } from '../process/edit-adapters';
-import { isGateLabel, isBrakeLabel } from '../process/label-flags';
 import {
   GITHUB_EVENT_OPTIONS,
   LABEL_FILTERABLE_EVENTS,
   summarizeGithubEventTrigger,
   summarizeLoopTrigger,
   claimBodyFor,
-  transportBodyFor,
   isStandingSubscription,
 } from './trigger-summary.js';
 import {
@@ -599,7 +597,7 @@ function pickDefaultVerifier(siblings) {
 // `onRemove` renders a delete affordance (the flow editor's ⏰ edge needs it);
 // `allowTypeChange` unlocks the Type selector on edit (the flow editor permits
 // turning a schedule into a different trigger kind, re-deriving the edge).
-export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false, allowLoopType = true, lockType = null, submitLabel = null, labels = null }) {
+export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues, agentId, ops = liveOps, allowTypeChange = false, allowLoopType = true, lockType = null, submitLabel = null }) {
   const isEdit = !!initialValues;
   const typeLocked = isEdit && !allowTypeChange;
   // Loop-launch mode (#1020): the composer launcher reuses this form pinned to
@@ -664,10 +662,6 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
     // when it fires — ON by default for new listeners (the platform convention
     // the engine/channel paths follow); an edit reflects the stored state.
     claimOn:       isEdit ? !!initialValues?.claim : true,
-    // Delivery transport (#1189): 'internal' delivers the wake over the
-    // orchestrator queue (label mirrored to GitHub); 'github' is poller
-    // delivery. Only meaningful for a label listener — see `showTransport`.
-    transport:     initialValues?.transport === 'internal' ? 'internal' : 'github',
     // ── plugin-event fields (Jira plan §4B) ──────────────────────────────
     // `pluginId` names which granted plugin may fire this listener; the
     // optional `eventFilter` is the broker's own event name (opaque to the
@@ -684,16 +678,6 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   const showLabelFilter = form.type === 'github-event'
     && form.events.some(e => LABEL_FILTERABLE_EVENTS.has(e));
   const showBranchFilter = form.type === 'github-event' && form.events.includes('push');
-  // Delivery selector (#1189): a real label listener (label event + a filter),
-  // and NOT a human gate/brake — a person sets those on GitHub, so only the
-  // poller can see them (mirrors the edge dialog's rule). The gate check needs
-  // the label registry; when it isn't provided (e.g. Agent-Chat), fall open and
-  // show the selector — the backend still rejects an invalid transport.
-  const trimmedFilter = (form.labelFilter || '').trim();
-  const gateLikeFilter = labels
-    ? (isGateLabel(labels, trimmedFilter) || isBrakeLabel(labels, trimmedFilter))
-    : false;
-  const showTransport = showLabelFilter && !!trimmedFilter && !gateLikeFilter;
   const [copyDone, setCopyDone] = useState(null); // 'path' | 'secret' | null
   const [secretVisible, setSecretVisible] = useState(!isEdit);
   const [formError, setFormError] = useState(null);
@@ -972,12 +956,6 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       body.claim = claimBodyFor({
         labelFilter: body.labelFilter, events: form.events, claimOn: form.claimOn, isEdit,
       });
-      // Delivery transport (#1189) — pure decision in trigger-summary.js so it
-      // stays unit-tested; undefined omits the key for a plain non-label trigger.
-      const tp = transportBodyFor({
-        showTransport, transport: form.transport, isEdit, priorTransport: initialValues?.transport,
-      });
-      if (tp !== undefined) body.transport = tp;
     }
     await onSave(body);
   }
@@ -1544,26 +1522,6 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
                   <input type="checkbox" checked={form.claimOn} onChange={e => set('claimOn', e.target.checked)} />
                   Claim the wake label on fire (<code>{form.labelFilter.trim()}</code> → <code>{form.labelFilter.trim()}:wip</code>) — makes work-in-progress visible on GitHub
                 </label>
-              )}
-              {showTransport && (
-                <div style={{ marginTop: 'var(--eb-space-3)' }}>
-                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', fontWeight: 'var(--eb-font-medium)', marginBottom: 'var(--eb-space-1)' }}>
-                    Delivery
-                  </div>
-                  <select
-                    value={form.transport}
-                    onChange={e => set('transport', e.target.value)}
-                    style={{ ...FIELD_STYLE, width: '100%' }}
-                  >
-                    <option value="github">Via GitHub events — the poller delivers the wake (~30s)</option>
-                    <option value="internal">Direct (internal) — label mirrored to GitHub</option>
-                  </select>
-                  <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
-                    {form.transport === 'internal'
-                      ? <>The wake is delivered directly by the orchestrator (no polling latency, no lost events); the producer announces the label with <code>aee-emit</code>, and it is still stamped on GitHub as visible status.</>
-                      : <>The wake rides the GitHub Events API, delivered by the poller.</>}
-                  </div>
-                </div>
               )}
               <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-muted)', marginTop: 'var(--eb-space-1)', lineHeight: 1.5 }}>
                 Tip: hand-offs between agents are easier to wire and edit in the <a href="/flows" style={{ color: 'var(--eb-accent-primary)' }}>Flow Editor</a>.

@@ -30,6 +30,8 @@ const {
   outcomesToGithub, outcomeWakePairs,
 } = require('./outcomes');
 const { branchFilterError, parseBranchFilter } = require('./branch-filter');
+// Legacy `transport` (#2578) — tolerated on input and dropped, never validated.
+const { withoutTransport } = require('./internal-transport-migration');
 
 const VERSION = 1;
 
@@ -534,18 +536,6 @@ function channelPostcondition(ch) {
   return cleanPostcondition(ch && ch.postcondition);
 }
 
-// A channel opts its derived listener into internal delivery (#1194) only when it
-// is a **labelled, non-human** channel. `transport: 'internal'` on an unlabelled
-// channel (artifact-open — that is artifact creation, a real GitHub write) or a
-// `gate: 'human'` channel (a person applies the label in the GitHub UI, only the
-// poller can see it) is meaningless, so it is treated as absent everywhere. Same
-// shape as `channelAutoClaim`: the port carries the intent, the expander decides.
-function channelIsInternal(ch) {
-  return !!(ch && ch.transport === 'internal'
-    && typeof ch.label === 'string' && ch.label.trim()
-    && ch.gate !== 'human');
-}
-
 // Remap the role references a `wakeAgent` action carries (#2030). A direct
 // hand-off addresses a ROLE (`developer`) in a portable bundle and a MEMBER
 // (`acme-developer`) on a live team, exactly like a channel's `from` — so the
@@ -597,13 +587,6 @@ function remapChannel(ch, teamId) {
     // Claim opt-out (#958) — only the non-default is carried, so a bundle stays
     // free of `autoClaim: true` noise on every channel.
     ...(channelAutoClaim(ch) ? {} : { autoClaim: false }),
-    // Internal-channel transport (#1194) — a labelled channel may opt its derived
-    // listener into internal delivery (poller-excluded, woken by `aee-emit`). Only
-    // the non-default is carried, and only where it is meaningful: a labelled,
-    // non-human channel. Dropping it would silently turn the listener back into a
-    // poller-delivered one on re-materialise (same reason as the trigger-level
-    // carry in bundleTrigger).
-    ...(channelIsInternal(ch) ? { transport: 'internal' } : {}),
     // Verify-before-claim (#2113) — carried so an exported team round-trips the
     // declaration; dropping it would silently downgrade the claim back to
     // tracking the run instead of the outcome.
@@ -633,10 +616,6 @@ function bundleTrigger(t) {
       const pc = cleanPostcondition(t.claim.postcondition);
       if (pc) out.claim.postcondition = pc;
     }
-    // Internal-channel transport (#1174) — part of the wiring, must round-trip:
-    // dropping it would silently turn an internal listener back into a
-    // poller-delivered one on re-materialise. Only the non-default is carried.
-    if (t.transport === 'internal') out.transport = 'internal';
   } else if (t.type === 'cron') {
     out.cron = t.cron || null;
   } else if (t.type === 'once') {
@@ -805,15 +784,6 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
       if (!t || typeof t !== 'object') continue;
       const te = allowEmptyRoles ? claimError(t.claim, t.labelFilter, t.type) : rawTriggerError(t);
       if (te) return { ok: false, error: `role ${r.id}: trigger ${t.id || '(unnamed)'}: ${te}` };
-      // Internal-channel transport (#1174): a mistyped value would silently
-      // fall back to poller delivery, so the shape is checked, not tolerated.
-      if (t.transport !== undefined && t.transport !== 'internal' && t.transport !== 'github') {
-        return { ok: false, error: `role ${r.id}: trigger ${t.id || '(unnamed)'}: transport must be 'internal' or 'github'` };
-      }
-      if (t.transport === 'internal'
-          && !(t.type === 'github-event' && typeof t.labelFilter === 'string' && t.labelFilter.trim())) {
-        return { ok: false, error: `role ${r.id}: trigger ${t.id || '(unnamed)'}: transport 'internal' requires a github-event label listener (labelFilter)` };
-      }
     }
     if (r.outcomes !== undefined) {
       // The bundle's own label registry is the gate authority (#928) — an outcome
@@ -838,24 +808,11 @@ function validateProcessTemplate(b, { allowEmptyRoles = false } = {}) {
         if (c.wakePrompt !== undefined && typeof c.wakePrompt !== 'string') {
           return { ok: false, error: `role ${r.id}: channel wakePrompt must be a string` };
         }
-        // Internal-channel transport (#1194): a mistyped value would silently fall
-        // back to poller delivery, so the shape is checked, not tolerated — and
-        // `internal` is only meaningful on a labelled, non-human channel (an
-        // unlabelled/human-gated channel stays poller-delivered by design).
-        if (c.transport !== undefined && c.transport !== 'internal' && c.transport !== 'github') {
-          return { ok: false, error: `role ${r.id}: channel transport must be 'internal' or 'github'` };
-        }
-        if (c.transport === 'internal' && !(typeof c.label === 'string' && c.label.trim())) {
-          return { ok: false, error: `role ${r.id}: channel transport 'internal' requires a label (an unlabelled channel stays poller-delivered)` };
-        }
-        if (c.transport === 'internal' && c.gate === 'human') {
-          return { ok: false, error: `role ${r.id}: channel transport 'internal' is not allowed on a human-approval gate (a person applies the label on GitHub)` };
-        }
-        // Post-condition (#2113, §4.2) — checked, not tolerated, for exactly the
-        // `transport` reason above: a mistyped kind would be silently dropped by
-        // `cleanPostcondition` and the author would believe the claim is verified
-        // while it still completes on run completion. That is the very failure
-        // this ticket removes, so it must not be reachable by a typo.
+        // Post-condition (#2113, §4.2) — checked, not tolerated: a mistyped kind
+        // would be silently dropped by `cleanPostcondition` and the author would
+        // believe the claim is verified while it still completes on run
+        // completion. That is the very failure this ticket removes, so it must
+        // not be reachable by a typo.
         if (c.postcondition !== undefined && c.postcondition !== null) {
           if (!channelPostcondition(c)) {
             const allowed = POSTCONDITIONS.map(k => `'${k}'`).join(', ');
@@ -1079,7 +1036,9 @@ function templateToCustomRoles(bundle) {
     // PRs/issues. The functional consumer triggers are already expanded by
     // expandGithubChannels before this runs.
     ...(r.github && (r.github.producesPr || r.github.producesIssue) ? { github: r.github } : {}),
-    ...(Array.isArray(r.channels) && r.channels.length ? { channels: r.channels } : {}),
+    // A legacy channel `transport` (the internal transport was removed in #2578)
+    // is dropped here rather than rejected, so an old bundle still materialises.
+    ...(Array.isArray(r.channels) && r.channels.length ? { channels: r.channels.map(withoutTransport) } : {}),
     triggers: (r.triggers || []).map(t => ({
       id: t.id,
       type: t.type,
@@ -1093,20 +1052,13 @@ function templateToCustomRoles(bundle) {
       // swap the wake label for `<wake>:wip`. Dropping it here made the whole
       // feature a silent no-op at runtime even though the graph rendered it.
       ...(t.claim ? { claim: t.claim } : {}),
-      // Internal-channel transport (#1174) — MUST survive for the same reason:
-      // the poller excludes `transport: 'internal'` triggers from its plan and
-      // /internal/flow-emit only matches them; dropping the field here would
-      // leave the listener poller-delivered and the producer's `aee-emit`
-      // waking nobody.
-      ...(t.transport === 'internal' ? { transport: 'internal' } : {}),
       cron: t.cron,
       at: t.at,
       // Trigger-level emits removed (#783) — label hand-offs ride on role `emits`.
       dataFlow: t.dataFlow,
       channel: t.channel,
       // Derived-hand-off marker (#2031) — MUST survive for the same reason as
-      // `claim`/`transport` above, though the failure is quieter than either:
-      // it is what `expandWakeHandoffs` and `reconcileTeamWakeHandoffs` key on
+      // `claim` above, though the failure is quieter: it is what `expandWakeHandoffs` and `reconcileTeamWakeHandoffs` key on
       // to strip and regenerate this listener. Dropped, a materialised listener
       // reads as HAND-AUTHORED forever, so removing the last hand-off leaves it
       // standing, re-pointing one leaves a stale sibling, and a re-imported
@@ -1222,12 +1174,6 @@ function outcomesWiringContext(roleId, { roles = [], humans = [], labels = [] } 
   const nameOf = (r) => r.displayName || r.name || r.id;
   const producerOutcomes = (r) => (r && (r.outcomes || (r.cfg && r.cfg.outcomes))) || null;
   const consumersByLabel = {};
-  // Labels with ≥1 `transport: 'internal'` listener (#1174). One internal
-  // listener is enough to flip the producer instruction to `aee-emit`: the
-  // emit delivers internally AND mirrors the label onto GitHub, so any
-  // remaining poller-delivered listener of the same label still fires — the
-  // reverse (a plain `gh` label) can never wake the internal one.
-  const internalLabels = new Set();
   for (const r of roles) {
     if (!r || r.id === roleId) continue;
     for (const t of (Array.isArray(r.triggers) ? r.triggers : [])) {
@@ -1235,7 +1181,6 @@ function outcomesWiringContext(roleId, { roles = [], humans = [], labels = [] } 
       const lf = typeof t.labelFilter === 'string' ? t.labelFilter.trim() : '';
       if (!lf) continue;
       (consumersByLabel[lf] = consumersByLabel[lf] || []).push(nameOf(r));
-      if (t.transport === 'internal') internalLabels.add(lf);
     }
   }
   const reviewers = {};
@@ -1283,7 +1228,6 @@ function outcomesWiringContext(roleId, { roles = [], humans = [], labels = [] } 
     consumersByLabel,
     reviewers,
     gateLabels,
-    ...(internalLabels.size ? { internalLabels: [...internalLabels].sort() } : {}),
     ...(hasWake ? { wakeTargets } : {}),
   };
 }
@@ -1309,14 +1253,7 @@ function outcomeActionClause(option, wiring) {
       const consumers = wiring && wiring.consumersByLabel && wiring.consumersByLabel[label];
       const who = consumers && consumers.length
         ? ` — this wakes **${[...new Set(consumers)].join('**, **')}**` : '';
-      // Internal-channel label (#1174): the hand-off is delivered by the
-      // orchestrator, so the instruction is `aee-emit` (which also mirrors the
-      // label onto GitHub) — a plain `gh` label would wake nobody internal.
-      const internal = wiring && Array.isArray(wiring.internalLabels)
-        && wiring.internalLabels.includes(label);
-      parts.push(internal
-        ? `announce label \`${label}\` over the internal channel: run \`aee-emit "${label}" --issue <n>\` (or \`--pr <n>\`)${who ? `${who} directly` : ''}`
-        : `apply label \`${label}\`${who}`);
+      parts.push(`apply label \`${label}\`${who}`);
     } else if (a.type === 'openPr') {
       parts.push('open a pull request'); opensPr = true;
     } else if (a.type === 'openIssue') {
@@ -1400,19 +1337,10 @@ function outcomesBlock(outcomes, wiring) {
   // one — which silently breaks the flow.
   if (anyLabel) {
     body.push('', 'Outcome labels are exact contracts: apply each label **verbatim as written above**, never a similar-sounding label that happens to exist in the repository. If the label does not exist yet, create it first (`gh label create "<label>" --color FBCA04 --description "flow outcome label"`), then apply it — downstream listeners match the exact string, so a near-miss label wakes nobody.');
-    // Internal-channel labels (#1174): the aee-emit instruction is repeated as
-    // a hard rule, because the failure mode (agent falls back to `gh` and the
-    // hand-off silently reaches nobody) is invisible on GitHub — the label
-    // looks set either way.
-    if (wiring && Array.isArray(wiring.internalLabels) && wiring.internalLabels.length) {
-      const ints = wiring.internalLabels.map(l => `\`${l}\``).join(', ');
-      body.push('', `The label${wiring.internalLabels.length > 1 ? 's' : ''} ${ints} ${wiring.internalLabels.length > 1 ? 'are' : 'is'} delivered over the **internal channel**: always announce ${wiring.internalLabels.length > 1 ? 'them' : 'it'} with \`aee-emit\`, never with \`gh issue edit --add-label\` — a manually applied label is only visible decoration and wakes no internal listener. \`aee-emit\` also mirrors the label onto GitHub for you, so it needs no separate \`gh\` step and no \`gh label create\`.`);
-    }
   }
-  // Direct hand-off (#2030, §4.3): one tail paragraph, mirroring the
-  // internal-channel hard rule above, because the failure mode is equally
-  // invisible — there is no label on this edge, so nothing on GitHub shows
-  // whether the hand-off happened.
+  // Direct hand-off (#2030, §4.3): one tail paragraph, because the failure
+  // mode is invisible — there is no label on this edge, so nothing on GitHub
+  // shows whether the hand-off happened.
   if (anyWake) {
     body.push('', 'A direct hand-off is delivered inside the platform: always announce it with `aee-wake`, never by applying a label — there is no label on this edge, and nothing on GitHub will show that the hand-off did or did not happen.');
   }
@@ -1610,7 +1538,7 @@ function expandGithubChannels(bundle, _opts = {}) {
       const human = ch.gate === 'human';
       const key = `${artifact}::${label}`;
       let g = groups.get(key);
-      if (!g) { g = { artifact, label, human: false, wakePrompt: '', autoClaim: true, internal: true, postcondition: '', sources: [] }; groups.set(key, g); }
+      if (!g) { g = { artifact, label, human: false, wakePrompt: '', autoClaim: true, postcondition: '', sources: [] }; groups.set(key, g); }
       // Claim opt-out (#958): several channels consolidate into ONE derived
       // listener, and the claim is a property of that single listener — so an
       // explicit opt-out on any contributing channel wins, mirroring the
@@ -1626,15 +1554,6 @@ function expandGithubChannels(bundle, _opts = {}) {
       // the same label is degenerate — treat as gated, matching the old behaviour
       // where the labelled trigger already reacted to the label change).
       g.human = g.human || human;
-      // Internal delivery (#1194): several channels consolidate into ONE derived
-      // listener, and a listener is either poller-excluded or not — so it may go
-      // internal only when EVERY contributing channel opted in. A lone
-      // poller-delivered producer in the group would otherwise be dropped by the
-      // poller exclusion (its plain `gh` label never reaches an internal-only
-      // listener); the safe fallback is poller delivery, where the internal
-      // producer's `aee-emit` still mirrors the label onto GitHub and the poller
-      // picks it up. Mirrors the anomaly detector's all-or-nothing edge rule.
-      g.internal = g.internal && channelIsInternal(ch);
       // Optional authored wake-prompt override (#868): several channels can
       // consolidate into one derived listener, so the first non-empty override in
       // insertion order wins the slot (deterministic; the graph shows one edge).
@@ -1649,18 +1568,11 @@ function expandGithubChannels(bundle, _opts = {}) {
       const producerNames = g.sources.map(s => byId.get(s)?.displayName || s);
       const producerLabel = producerNames.join(', ') || 'an upstream';
       const claim = g.autoClaim ? deriveClaim(g.label, g.postcondition) : null;
-      // Internal-channel transport (#1194): only a labelled, non-human,
-      // all-opted-in group delivers internally (deriveClaim/channelIsInternal
-      // guarantee a label is present). The poller then excludes this listener and
-      // `/internal/flow-emit` wakes it — the runtime, anomaly detector and
-      // producer-instruction plumbing all key off this one field, unchanged.
-      const internal = !!g.label && !g.human && g.internal;
       b.triggers.push({
         id,
         type: 'github-event',
         events,
         ...(g.label ? { labelFilter: g.label } : {}),
-        ...(internal ? { transport: 'internal' } : {}),
         // Derived claim (#958, concept §3.4) — zero authoring cost: every derived
         // LABEL listener takes over its wake label as `<wake>:wip` when it fires.
         // An unlabelled channel listener (PR/issue opened) has no wake label to
@@ -1798,9 +1710,9 @@ function expandWakeHandoffs(bundle) {
       id,
       type: 'wake-agent',
       enabled: true,
-      // No `repo`, no `events`, no `labelFilter`, no `claim`, no `transport`: a
-      // direct hand-off has no GitHub event behind it and no label to claim, and
-      // it is internal by construction. `pollerSubscribes` requires
+      // No `repo`, no `events`, no `labelFilter`, no `claim`: a direct hand-off
+      // has no GitHub event behind it and no label to claim, and it is
+      // platform-delivered by construction. `pollerSubscribes` requires
       // `type === 'github-event'`, so this listener is invisible to the poller
       // without needing to say so — which is also why it needs no
       // `stampDerivedActivation` horizon (the poller's history horizon is the
@@ -2090,11 +2002,6 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
         const c = deriveClaim(out.labelFilter, tr.claim.postcondition);
         if (c) out.claim = c;
       }
-      // Internal-channel transport (#1174): the runtime field the poller
-      // exclusion and /internal/flow-emit matching read — must land on the
-      // materialised trigger or the listener silently reverts to poller
-      // delivery. Suffix/var substitution never touches it (not a label).
-      if (tr.transport === 'internal') out.transport = 'internal';
       // Push branch filter (#2570) — carried like templateToCustomRoles does,
       // or a filtered push trigger silently widens back to every branch.
       const branches = parseBranchFilter(tr.branchFilter);
@@ -2180,7 +2087,7 @@ function buildMemberFromTemplate(template, { teamId, memberId, memberDisplayName
     ...(t.pool && typeof t.pool === 'object' ? { pool: t.pool } : {}),
     ...(t.github && (t.github.producesPr || t.github.producesIssue) ? { github: t.github } : {}),
     ...(Array.isArray(t.channels) && t.channels.length
-      ? { channels: t.channels.map((c) => ({ ...c, from: `${teamId}-${c.from}` })) }
+      ? { channels: t.channels.map((c) => ({ ...withoutTransport(c), from: `${teamId}-${c.from}` })) }
       : {}),
     ...(materialize !== undefined ? { materialize } : {}),
   };

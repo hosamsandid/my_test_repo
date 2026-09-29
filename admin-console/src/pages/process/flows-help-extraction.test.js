@@ -359,13 +359,8 @@ test('no point-of-decision microcopy was traded for a "?"', () => {
   ]) {
     assert.ok(edges.includes(phrase), `"${phrase}" is a per-tile one-liner and must stay on the page`);
   }
-  // The Delivery selector's own explainer — the live consequence of a choice.
-  for (const phrase of [
-    'Via GitHub events — the poller delivers the wake',
-    'Direct (internal) — label mirrored to GitHub',
-  ]) {
-    assert.ok(edges.includes(phrase), `"${phrase}" is the Delivery selector's copy`);
-  }
+  // The Delivery selector was removed with the internal transport (#2578).
+  assert.ok(!edges.includes('Direct (internal)'), 'the internal Delivery option must stay gone');
   // The dynamic Inputs / Outcomes hints.
   for (const phrase of [
     'exactly one — the agent picks exactly one outcome per run (a switch).',
@@ -440,7 +435,7 @@ test('#2031: the chooser chapter documents the direct hand-off and its limits', 
   // The three limits a reader would otherwise discover as a validation error.
   assert.match(topicBody, /same team/, 'the same-team limit');
   assert.match(topicBody, /never a person/, 'a human role has no queue to deliver to');
-  assert.match(topicBody, /internal by construction/, 'no Delivery selector, and why');
+  assert.match(topicBody, /delivered by\s+the platform itself/, 'no GitHub path, unlike a label (#2578)');
   // And the two non-obvious facts about the note + the derived instruction.
   assert.match(topicBody, /context to\s+check/, 'the note is context, not instructions');
   assert.match(topicBody, /one per\s+agent, not one per incoming arrow/);

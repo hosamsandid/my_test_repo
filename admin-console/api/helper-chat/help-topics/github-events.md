@@ -242,6 +242,13 @@ hover, together with the repository and the raw event key, so support can still
 find a delivery in the poller's log without the row implying the number means
 anything to you.
 
+**Submitted reviews.** GitHub's Events API calls a submitted pull-request
+review `pull_request_review.created`; triggers subscribe to *PR review
+submitted* (`pull_request_review.submitted`). The poller now records such a
+review under `pull_request_review.submitted` and wakes those triggers once
+each. Older rows keep the raw key `pull_request_review.created` on the hover —
+both read *PR review submitted* in the row.
+
 The queue holds more than GitHub events: a folded **GitHub digest**, a
 **throttle warning** (the heads-up DM sent the first time a cap is hit), a
 **hand-over message** the console composed for an agent, a **loop

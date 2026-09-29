@@ -97,11 +97,25 @@ test('No trigger links each involved agent’s Triggers tab and names ignored tr
   assert.deepEqual(d.links.map((l) => l.to), ['/chats/sleepy?rail=triggers']);
 });
 
-test('Not in an environment names the agent-scoped holder; unsupported names the host', () => {
-  const d = describeRow({ repo: 'acme/a', status: 'not-in-environment', environments: [], agentRepositoryAgents: [{ id: 'reader', name: 'Reader' }], triggers: [] }, NOW);
-  assert.match(d.text, /Only attached to agent “Reader”/);
+test('Not attached names the trigger owner; unsupported names the host', () => {
+  const d = describeRow({ repo: 'acme/a', status: 'not-in-environment', environments: [], agentRepositoryAgents: [], triggers: [{ agentId: 'reader', agentName: 'Reader' }] }, NOW);
+  assert.match(d.text, /Only named by a trigger of “Reader” — no environment or agent has this repository attached/);
+  assert.deepEqual(d.links.map((l) => l.to), ['/chats/reader?rail=triggers']);
+  assert.doesNotMatch(d.text, /only watches environment repositories/);
   const u = describeRow({ repo: 'git@git.example.com:a/b.git', status: 'unsupported', host: 'git.example.com', environments: [], triggers: [] }, NOW);
   assert.match(u.text, /Host “git.example.com” is not supported/);
+});
+
+test('#2528 No token on an agent-scoped repository names the agent’s environment (or its missing one)', () => {
+  const envNone = { id: 'env-x', name: 'Env X', tokenId: null, tokenState: 'none', teamId: 'team-x' };
+  const d = describeRow({
+    repo: 'acme/own', status: 'no-token', tokenEnvironment: null, environments: [],
+    agentRepositoryAgents: [{ id: 'dev', name: 'Dev', environment: envNone }, { id: 'lone', name: 'Lone', environment: null }],
+    triggers: [],
+  }, NOW);
+  assert.match(d.text, /Environment “Env X” has no GitHub token/);
+  assert.match(d.text, /Agent “Lone” is not bound to an environment/);
+  assert.deepEqual(d.links.map((l) => l.to), ['/chats/team-x?tab=repositories']);
 });
 
 test('token source never shows a token value, and hides another team’s environment', () => {

@@ -16,7 +16,8 @@
 //
 // The repository set is the union of
 //   1. every Working Environment's `repositories`,
-//   2. every agent's `agentRepositories` (#2067 — never polled today, #2528),
+//   2. every agent's `agentRepositories` (#2067 — polled with the agent's
+//      Working Environment token since #2528, see computePollPlan),
 //   3. the `repo` of every github-event trigger, on any agent, enabled or not,
 // one row per `owner/name` (or per raw URL/name when it can't be parsed).
 //
@@ -25,7 +26,8 @@
 //   failing             failing        in the plan, last poll(s) failed
 //   no-token            not-listening  no usable GitHub token
 //   no-trigger          not-listening  token ok, no counted subscriber
-//   not-in-environment  not-listening  only in agentRepositories / a trigger
+//   not-in-environment  not-listening  only named by a trigger — neither an
+//                                      environment nor an agent lists it
 //   unsupported         not-listening  unparseable URL / unsupported host
 // ============================================================
 
@@ -119,6 +121,16 @@ function buildRepoStatusView({
     return tokenReadable(tokenId) ? 'ok' : 'unreadable';
   };
 
+  const envById = new Map();
+  for (const env of environments) if (env && env.id && !envById.has(env.id)) envById.set(env.id, env);
+  const envEntry = (env) => ({
+    id: env.id,
+    name: env.name || env.id,
+    tokenId: env.githubTokenId || null,
+    tokenState: tokenStateOf(env.githubTokenId),
+    teamId: envTeam.get(env.id) || null,
+  });
+
   // 1. Working Environment repositories.
   for (const env of environments) {
     if (!env) continue;
@@ -129,13 +141,7 @@ function buildRepoStatusView({
       const target = row(key);
       if (!parsed) { target.parsed = false; target.host = repoHost(r.url); }
       if (target.environments.some((e) => e.id === env.id)) continue;
-      target.environments.push({
-        id: env.id,
-        name: env.name || env.id,
-        tokenId: env.githubTokenId || null,
-        tokenState: tokenStateOf(env.githubTokenId),
-        teamId: envTeam.get(env.id) || null,
-      });
+      target.environments.push(envEntry(env));
       for (const id of envAgents.get(env.id) || []) target.related.add(id);
     }
   }
@@ -150,7 +156,9 @@ function buildRepoStatusView({
       const target = row(key);
       if (!parsed) { target.parsed = false; target.host = repoHost(r.url); }
       if (!target.agentRepositoryAgents.some((x) => x.id === a.id)) {
-        target.agentRepositoryAgents.push({ id: a.id, name: agentName(a) });
+        // #2528: the agent's Working Environment supplies the poll token.
+        const env = a.config?.environmentId ? envById.get(a.config.environmentId) : null;
+        target.agentRepositoryAgents.push({ id: a.id, name: agentName(a), environment: env ? envEntry(env) : null });
       }
       target.related.add(a.id);
     }
@@ -181,8 +189,15 @@ function buildRepoStatusView({
     let tokenEnvironment = null;
     let waitingForFirstPoll = false;
 
+    // Every environment that could supply a token: the ones listing the repo,
+    // then the agent-scoped holders' environments in the plan's order (by id).
+    const tokenCandidates = [
+      ...r.environments,
+      ...[...r.agentRepositoryAgents].sort((x, y) => x.id.localeCompare(y.id)).map((x) => x.environment).filter(Boolean),
+    ];
+
     if (entry) {
-      tokenEnvironment = r.environments.find((e) => e.id === entry.envId)
+      tokenEnvironment = tokenCandidates.find((e) => e.id === entry.envId)
         || { id: entry.envId || null, name: entry.envId || null, tokenId: entry.tokenId, tokenState: tokenStateOf(entry.tokenId), teamId: null };
       if (tokenEnvironment.tokenState !== 'ok') {
         // _pollRepo returns early without counting a failure — never Listening.
@@ -195,13 +210,13 @@ function buildRepoStatusView({
       }
     } else if (!r.parsed) {
       status = STATUS.UNSUPPORTED;
-    } else if (r.environments.length === 0) {
+    } else if (r.environments.length === 0 && r.agentRepositoryAgents.length === 0) {
       status = STATUS.NOT_IN_ENVIRONMENT;
-    } else if (!r.environments.some((e) => e.tokenId && isValidTokenId(e.tokenId))) {
+    } else if (!tokenCandidates.some((e) => e.tokenId && isValidTokenId(e.tokenId))) {
       status = STATUS.NO_TOKEN;
     } else {
       status = STATUS.NO_TRIGGER;
-      const first = r.environments.find((e) => e.tokenId && isValidTokenId(e.tokenId));
+      const first = tokenCandidates.find((e) => e.tokenId && isValidTokenId(e.tokenId));
       tokenEnvironment = first || null;
     }
 

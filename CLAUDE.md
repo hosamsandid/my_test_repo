@@ -420,7 +420,8 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
 ### GitHub poller
 
 `orchestrator/github-poller.js` polls the Events API every 30s for every repo in
-an env with a `githubTokenId` (replaces webhooks for local stacks).
+an env with a `githubTokenId`, plus agent-scoped repos via their agent's env
+token (replaces webhooks for local stacks).
 - Repo discovery walks all envs; one token per repo. Bandwidth: page-1
   `If-None-Match` (304s are free); pagination on bursts. Cursor = per-repo
   sliding **seen-id set** (`state.json`), not a timestamp; first poll baselines.

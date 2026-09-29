@@ -74,6 +74,9 @@ is the scope and what follows from it:
   push` / `gh-as-agent pr` deliver to it exactly as to an environment repository,
   reusing the same SSH key or GitHub token (#2464). When the environment also has
   repositories, `--repo <name>` is required to disambiguate.
+- A **`github-event` trigger** on it fires like one on an environment repository:
+  the poller watches it with this environment's GitHub token (#2528), and the
+  trigger editor offers it marked *this agent only*.
 - Only a user who may **manage** the agent can attach or remove one; a chat-only
   user sees the list but no action.
 - Removing it **deletes the working copy**, and the confirmation names the

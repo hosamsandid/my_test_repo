@@ -389,7 +389,8 @@ const TOPIC_CONTENT = [
     // #1883 lifted the MCP Servers intro box (the three-part servers /
     // credentials / Working-Environment-pairing model) and the "where does
     // 'required' come from" InfoTip, and adds what neither said: the seed-time
-    // merge into the agent's own settings.json, the dropped-key behaviour when
+    // merge into the agent's own settings.json (since #2289: `.mcp.json`,
+    // reconciled and re-applied on save), the dropped-key behaviour when
     // nothing is bound, the per-transport field split, and where the pairing is
     // actually visible today.
     //
@@ -414,16 +415,16 @@ const TOPIC_CONTENT = [
       '${credential}',
       'requiresCredential',
       'rotated',
-      'seed time',
+      '.mcp.json',
       '.claude/settings.json',
-      'merged, not replaced',
+      'reconciled, not replaced',
       'dropped',
       'stdio',
       'sse',
       'mutually exclusive',
       'Default server',
       'fingerprint',
-      'next invocation',
+      'next turn',
       'Detach it there first',
     ],
   },

@@ -5,6 +5,7 @@ import PageHelpButton from '../../components/PageHelpButton';
 import { AGENT_CHAT_HELP_SECTIONS } from './agent-chat-help-sections.js';
 import AgentEditForm from '../agent-lifecycle/AgentEditForm.jsx';
 import { isFormDirty } from '../agent-lifecycle/agent-edit-form-model.js';
+import { mcpApplySummary } from '../working-env-mcp-view.js';
 import {
   savedNoticeText, restartNoticeText, unsavedDraftNotice,
   putDraft, getDraft, dropDraft,
@@ -107,10 +108,13 @@ export default function AgentSettingsPanel({
     setSaveError(null);
     setNotice('');
     try {
-      await apiCall('PUT', `/api/agents/${encodeURIComponent(agent.id)}`, body);
+      const saved = await apiCall('PUT', `/api/agents/${encodeURIComponent(agent.id)}`, body);
       draftsRef.current = dropDraft(draftsRef.current, agent.id);
       setDirty(false);
-      setNotice(savedNoticeText(agent));
+      // #2289: an MCP change is applied to the agent by the save itself — say
+      // what happened to it (or that it did not) under the usual notice.
+      const mcpReport = mcpApplySummary(saved?.mcpApply);
+      setNotice([savedNoticeText(agent), ...(mcpReport ? mcpReport.lines : [])].join('\n'));
       // Re-read first, THEN remount: the form derives its fields from `agent`
       // on mount only, so bumping the epoch before the reload would rebuild it
       // from the pre-save config and hide any normalisation the API applied.
@@ -242,7 +246,7 @@ export default function AgentSettingsPanel({
                 border: '1px solid var(--eb-border-default)',
                 borderRadius: 'var(--eb-radius-md)',
                 fontSize: 'var(--eb-text-xs)', lineHeight: 1.5,
-                color: 'var(--eb-text-muted)',
+                color: 'var(--eb-text-muted)', whiteSpace: 'pre-line',
               }}>
                 {notice}
               </div>

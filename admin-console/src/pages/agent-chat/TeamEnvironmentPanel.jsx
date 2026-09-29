@@ -1,16 +1,14 @@
 import React, { useState } from 'react';
-import { Plus, X, AlertTriangle, Info, Loader2, Github, Layers } from 'lucide-react';
+import { Plus, AlertTriangle, Info, Loader2, Github, Layers } from 'lucide-react';
 import { useApi, apiCall } from '../../hooks/useApi';
 // One repository card for the whole console (#2067): rendering it here rather
 // than a second, differently-worded card is what stops this surface and the
 // Working Environments form from drifting apart on the same field.
 import RepositoryCard from '../../components/RepositoryCard';
 import RepoPropagationDialog from '../../components/RepoPropagationDialog';
-import IconButton from '../../components/IconButton';
-import OptionList from '../../components/OptionList';
-import OptionRow from '../../components/OptionRow';
+import McpServerRows from '../../components/McpServerRows';
 import { toolchainOptions, toolchainEmptyState, toolchainChangeWarning } from '../toolchain-select-view.js';
-import { mcpRowHint, mcpChangeNotice, mcpServerLabel } from '../working-env-mcp-view.js';
+import { mcpChangeNotice, mcpApplySummary } from '../working-env-mcp-view.js';
 import { classifyRepositoryChanges, hasRepositoryChanges } from '../working-env-repo-diff.js';
 import { describeWorkingEnvSubmitState } from '../working-env-submit-state.js';
 import { providerOptionLabel } from '../provider-option-view.js';
@@ -184,6 +182,8 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [notice, setNotice] = useState('');
+  // #2289: what the save did to the agents' MCP servers (mcpApplySummary), or null.
+  const [mcpReport, setMcpReport] = useState(null);
   // #2323: set when a save is blocked for a repo-backed env with no GitHub token;
   // holds the server message and drives the reference-only opt-out prompt.
   const [tokenWarn, setTokenWarn] = useState(null);
@@ -255,22 +255,6 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
     setForm(f => ({ ...f, repositories: f.repositories.filter((_, i) => i !== idx) }));
   };
 
-  const updateMcp = (idx, key, val) => {
-    setForm(f => {
-      const next = f.mcpServers.slice();
-      next[idx] = key === 'serverId'
-        ? { serverId: val, credentialId: '' }
-        : { ...next[idx], [key]: val };
-      return { ...f, mcpServers: next };
-    });
-  };
-  const addMcp = () => {
-    setForm(f => ({ ...f, mcpServers: [...f.mcpServers, { serverId: '', credentialId: '' }] }));
-  };
-  const removeMcp = (idx) => {
-    setForm(f => ({ ...f, mcpServers: f.mcpServers.filter((_, i) => i !== idx) }));
-  };
-
   const updateEndpoint = (newId) => {
     setForm(f => {
       if (newId === f.llmEndpointId) return f;
@@ -294,7 +278,7 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
     // reference-only opt-out below — strict-check it so an `onClick={() => save()}`
     // (event) or any truthy leak can never silently acknowledge.
     const ack = acknowledgeNoToken === true;
-    setSaving(true); setSaveError(null); setNotice('');
+    setSaving(true); setSaveError(null); setNotice(''); setMcpReport(null);
     if (!ack) setTokenWarn(null);
     try {
       const body = teamEnvSubmitBody(baseline, form);
@@ -304,6 +288,7 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
       setBaseline(saved);
       setForm(initialTeamEnvForm(saved));
       setNotice('Saved.');
+      setMcpReport(mcpApplySummary(saved?.mcpApply));
       const agents = Array.isArray(saved?.agents) ? saved.agents : (Array.isArray(baseline?.agents) ? baseline.agents : []);
       const diff = classifyRepositoryChanges(saved?.previousRepositories, saved?.repositories);
       if (agents.length > 0 && hasRepositoryChanges(diff)) {
@@ -354,6 +339,14 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
       )}
       {notice && !saveError && (
         <div style={{ ...helpTextStyle, color: 'var(--eb-status-success)' }}>{notice}</div>
+      )}
+      {mcpReport && !saveError && (
+        <div role={mcpReport.tone === 'warn' ? 'alert' : undefined} style={mcpReport.tone === 'warn' ? warnBoxStyle : helpTextStyle}>
+          {mcpReport.tone === 'warn' && (
+            <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-status-warning)' }} />
+          )}
+          <div>{mcpReport.lines.map((line, i) => <div key={i}>{line}</div>)}</div>
+        </div>
       )}
 
       {tab === 'repositories' && (
@@ -573,67 +566,13 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
 
       {tab === 'mcp' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
-          {form.mcpServers.length > 0 && (
-            <OptionList>
-              {form.mcpServers.map((row, idx) => {
-                const hint = mcpRowHint(row, mcpServers);
-                const unknownServer = row.serverId && !mcpServers.some(s => s.id === row.serverId);
-                return (
-                  <OptionRow
-                    key={idx}
-                    expandedContent={hint ? <div>{hint.message}</div> : null}
-                    header={
-                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)' }}>
-                        <div style={{ flex: 1, minWidth: 0, display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
-                          <div style={{ flex: '1 1 180px', minWidth: 0 }}>
-                            <div style={labelStyle}>Server</div>
-                            <select value={row.serverId} onChange={e => updateMcp(idx, 'serverId', e.target.value)} style={inputStyle}>
-                              <option value="">— choose a server —</option>
-                              {mcpServers.map(s => <option key={s.id} value={s.id}>{mcpServerLabel(s.id, mcpServers)}</option>)}
-                              {unknownServer && <option value={row.serverId}>{mcpServerLabel(row.serverId, mcpServers)}</option>}
-                            </select>
-                          </div>
-                          <div style={{ flex: '1 1 180px', minWidth: 0 }}>
-                            <div style={labelStyle}>Credential</div>
-                            <select
-                              value={row.credentialId}
-                              onChange={e => updateMcp(idx, 'credentialId', e.target.value)}
-                              disabled={!row.serverId}
-                              style={{ ...inputStyle, opacity: row.serverId ? 1 : 0.5 }}
-                            >
-                              <option value="">— no credential —</option>
-                              {mcpCredentials.map(c => (
-                                <option key={c.id} value={c.id}>
-                                  {c.name}{c.serverId === row.serverId ? ' (default for this server)' : ''}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          {hint && (
-                            <AlertTriangle
-                              size={13}
-                              title={hint.message}
-                              style={{ flexShrink: 0, marginTop: 20, color: hint.tone === 'warn' ? 'var(--eb-status-warning)' : 'var(--eb-text-muted)' }}
-                            />
-                          )}
-                        </div>
-                        <div style={{ flexShrink: 0, paddingTop: 18 }}>
-                          <IconButton icon={X} label="Remove MCP server" danger onClick={() => removeMcp(idx)} size={12} />
-                        </div>
-                      </div>
-                    }
-                  />
-                );
-              })}
-            </OptionList>
-          )}
-          {mcpServersLoading ? null : mcpServers.length === 0 ? (
-            <div style={helpTextStyle}>No MCP servers are registered yet.</div>
-          ) : (
-            <button type="button" onClick={addMcp} style={dashedButtonStyle}>
-              <Plus size={13} /> Add MCP server
-            </button>
-          )}
+          <McpServerRows
+            rows={form.mcpServers}
+            onChange={rows => update('mcpServers', rows)}
+            servers={mcpServers}
+            credentials={mcpCredentials}
+            loading={mcpServersLoading}
+          />
           {mcpNotice && (
             <div role="alert" style={warnBoxStyle}>
               <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1, color: 'var(--eb-status-warning)' }} />

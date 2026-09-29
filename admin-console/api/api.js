@@ -2763,6 +2763,35 @@ function notifyAgentReseed(agentId, paths) {
   }).catch(() => {});
 }
 
+// Apply an MCP server change to where the agent reads it (#2289). Unlike the
+// best-effort notifiers around it this one is AWAITED: the save response
+// reports, per agent, whether the change landed (applied / stored until the
+// agent next starts / pending until it is materialised / kept its own override
+// / failed and why), so the console never claims a change it could not make.
+// `kind` is 'agents' (one agent) or 'environments' (every agent bound to it).
+// An unreachable orchestrator is reported as a failure, never thrown.
+async function applyMcpChange(kind, id) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/${kind}/${encodeURIComponent(id)}/apply-mcp`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(30_000),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body.ok) return { ok: false, error: body.error || `orchestrator returned ${r.status}` };
+    return {
+      ok: true,
+      applied: body.applied || [],
+      stored: body.stored || [],
+      pending: body.pending || [],
+      keptOverride: body.keptOverride || [],
+      failed: body.failed || [],
+    };
+  } catch (err) {
+    return { ok: false, error: `could not reach the orchestrator (${err.message})` };
+  }
+}
+
 // Best-effort: after an environment's spawn-time credentials change (today: the
 // GitHub PAT it points at), ask the orchestrator to respawn the running agents
 // bound to that env so they pick up the new credential. The token is baked into
@@ -3331,6 +3360,9 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // Team-member inheritance toggles. `null` means "switch to inherit"
   // (delete the field); a string / array means "set the override".
   let promptOverrideChanged = false;
+  // #2289: an MCP override change (incl. switching back to inherit) is applied
+  // to the agent's workspace below, not left for a re-creation that never comes.
+  const mcpOverrideBefore = JSON.stringify(fresh.mcpServersOverride ?? null);
   if (fresh.role === 'team-member') {
     // System-prompt mode (#1511). An explicit `promptMode` selects one of the
     // three modes; an older client that sends only `systemPrompt` is mapped the
@@ -3503,7 +3535,11 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // (#185 Phase 2). On the shared volume the agent re-reads config.json on its
   // next action anyway, so this is just a harmless idempotent re-sync there.
   notifyAgentReload(id);
-  res.json({ id, ...fresh });
+  // Awaited after the write so the report reflects what the agent now reads.
+  const mcpApply = JSON.stringify(fresh.mcpServersOverride ?? null) !== mcpOverrideBefore
+    ? await applyMcpChange('agents', id)
+    : undefined;
+  res.json({ id, ...fresh, ...(mcpApply ? { mcpApply } : {}) });
 });
 
 /* ─── Reset agent to stub state ─────────────────────────────────────── */
@@ -15452,6 +15488,7 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
     }
   }
   if (githubTokenId !== undefined) env.githubTokenId = githubTokenId || null;
+  const prevMcpServers = JSON.stringify(env.mcpServers || []);
   if (mcpServers !== undefined) {
     try {
       env.mcpServers = normalizeMcpServersInput(mcpServers);
@@ -15484,6 +15521,13 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   }
   env.updatedAt = new Date().toISOString();
   saveEnvironment(env.id, env);
+  // #2289: an MCP set change reaches every bound agent now — rewritten into its
+  // workspace, read on its next turn — instead of only agents created later.
+  // Awaited, and run before any respawn below so a restarted container starts
+  // on the new set; the per-agent outcome goes back in the response.
+  const mcpApply = JSON.stringify(env.mcpServers || []) !== prevMcpServers
+    ? await applyMcpChange('environments', env.id)
+    : undefined;
   // Spawn-time bindings (GitHub PAT, LLM provider/model, the container image) are
   // baked into each agent container at start, so a change only takes effect on
   // respawn. Respawn the env's running agents whenever any of them changed —
@@ -15516,7 +15560,7 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   // AC7: the save is already committed at this point. Whatever the caller does
   // with `previousRepositories` — offer, decline, crash — the environment stays
   // persisted exactly as submitted; no path here rolls it back.
-  res.json({ ...env, previousRepositories: prevRepositories });
+  res.json({ ...env, previousRepositories: prevRepositories, ...(mcpApply ? { mcpApply } : {}) });
 });
 
 app.delete('/api/environments/:id', apiLimiter, (req, res) => {

@@ -9,6 +9,10 @@ import {
   mcpRowHint,
   mcpChangeNotice,
   mcpServerLabel,
+  updateMcpRow,
+  addMcpRow,
+  removeMcpRow,
+  mcpApplySummary,
 } from './working-env-mcp-view.js';
 
 const SERVERS = [
@@ -187,17 +191,19 @@ test('mcpChangeNotice: silent while the selection is unchanged', () => {
   );
 });
 
-test('mcpChangeNotice: a change with existing agents names them and says what to do', () => {
+test('mcpChangeNotice: a change with existing agents says it is applied to them, without a restart (#2289)', () => {
   const notice = mcpChangeNotice({
     isEdit: true,
     initial: { mcpServers: [] },
     rows: [{ serverId: 'wiki', credentialId: '' }],
     agentCount: 3,
   });
-  assert.match(notice, /3 agents/);
-  assert.match(notice, /recreate an agent/);
-  // It must NOT promise a restart — nothing respawns on an MCP change.
-  assert.doesNotMatch(notice, /restart/i);
+  assert.match(notice, /applies the new set to the 3 agents/);
+  assert.match(notice, /their next turn/);
+  assert.match(notice, /no restart/);
+  assert.match(notice, /own MCP servers keeps them/, 'names the override exception (D3)');
+  // AC12: no surface tells an operator to recreate an agent any more.
+  assert.doesNotMatch(notice, /recreate/i);
 });
 
 test('mcpChangeNotice: singular agent reads correctly', () => {
@@ -207,19 +213,76 @@ test('mcpChangeNotice: singular agent reads correctly', () => {
     rows: [{ serverId: 'wiki', credentialId: '' }],
     agentCount: 1,
   });
-  assert.match(notice, /1 agent already/);
-  assert.match(notice, /keeps the set it was created with/);
+  assert.match(notice, /the 1 agent using this environment from its next turn/);
+  assert.doesNotMatch(notice, /recreate/i);
 });
 
-test('mcpChangeNotice: with no agents yet it does not threaten an interruption', () => {
+test('mcpChangeNotice: with no agents yet it says new agents get it', () => {
   const notice = mcpChangeNotice({
     isEdit: true,
     initial: { mcpServers: [] },
     rows: [{ serverId: 'wiki', credentialId: '' }],
     agentCount: 0,
   });
-  assert.match(notice, /agents created from now on/);
-  assert.doesNotMatch(notice, /recreate/);
+  assert.match(notice, /get it when they are created/);
+  assert.doesNotMatch(notice, /recreate/i);
+});
+
+test('mcpRowHint: an unregistered server says it is kept but skipped — no recreate advice (#2289)', () => {
+  const hint = mcpRowHint({ serverId: 'gone', credentialId: '' }, SERVERS);
+  assert.equal(hint.tone, 'warn');
+  assert.match(hint.message, /No MCP server 'gone' is registered/);
+  assert.match(hint.message, /Saving keeps the entry/);
+  assert.doesNotMatch(hint.message, /recreate|created from this environment/i);
+});
+
+// ── row edits (#2289) ───────────────────────────────────────────────────────
+
+test('updateMcpRow: changing the server clears the credential; changing the credential keeps the server', () => {
+  const rows = [{ serverId: 'wiki', credentialId: 'c1' }, { serverId: 'clock', credentialId: '' }];
+  assert.deepEqual(updateMcpRow(rows, 0, 'serverId', 'clock')[0], { serverId: 'clock', credentialId: '' });
+  assert.deepEqual(updateMcpRow(rows, 0, 'credentialId', 'c2')[0], { serverId: 'wiki', credentialId: 'c2' });
+  assert.deepEqual(rows[0], { serverId: 'wiki', credentialId: 'c1' }, 'input not mutated');
+  assert.deepEqual(updateMcpRow(rows, 5, 'serverId', 'x'), rows, 'out-of-range index is a no-op');
+});
+
+test('addMcpRow / removeMcpRow', () => {
+  assert.deepEqual(addMcpRow([]), [{ serverId: '', credentialId: '' }]);
+  assert.deepEqual(addMcpRow(undefined), [{ serverId: '', credentialId: '' }]);
+  const rows = [{ serverId: 'a', credentialId: '' }, { serverId: 'b', credentialId: '' }];
+  assert.deepEqual(removeMcpRow(rows, 0), [{ serverId: 'b', credentialId: '' }]);
+  assert.deepEqual(removeMcpRow(rows, 1), [{ serverId: 'a', credentialId: '' }]);
+});
+
+// ── mcpApplySummary (#2289 AC10) ────────────────────────────────────────────
+
+test('mcpApplySummary: nothing to say when the save did not touch MCP', () => {
+  assert.equal(mcpApplySummary(undefined), null);
+  assert.equal(mcpApplySummary({ ok: true, applied: [], stored: [], pending: [], keptOverride: [], failed: [] }), null);
+});
+
+test('mcpApplySummary: every agent is named in exactly one line', () => {
+  const s = mcpApplySummary({
+    ok: true, applied: ['a1', 'a2'], stored: ['s1'], pending: ['p1'], keptOverride: ['k1'], failed: [],
+  });
+  assert.equal(s.tone, 'ok');
+  assert.equal(s.lines.length, 4);
+  assert.match(s.lines[0], /applied to a1, a2 — in effect from the next turn/);
+  assert.match(s.lines[1], /Not running: s1/);
+  assert.match(s.lines[2], /Not created yet: p1/);
+  assert.match(s.lines[3], /Kept its own MCP servers: k1/);
+});
+
+test('mcpApplySummary: a per-agent failure warns and keeps its reason', () => {
+  const s = mcpApplySummary({ ok: true, applied: ['a'], failed: [{ id: 'b', error: 'cannot parse existing .mcp.json' }] });
+  assert.equal(s.tone, 'warn');
+  assert.match(s.lines.at(-1), /Not applied to b: cannot parse existing \.mcp\.json/);
+});
+
+test('mcpApplySummary: an unreachable orchestrator is reported, not swallowed', () => {
+  const s = mcpApplySummary({ ok: false, error: 'could not reach the orchestrator (timeout)' });
+  assert.equal(s.tone, 'warn');
+  assert.match(s.lines[0], /saved but not applied: could not reach the orchestrator/);
 });
 
 // ── mcpServerLabel ──────────────────────────────────────────────────────────

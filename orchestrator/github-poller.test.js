@@ -1820,3 +1820,79 @@ test("armWake (#2525): no-op without a wake label or with the edge dedup switche
   poller._wakeEdgeDedup = false;
   assert.equal(poller.armWake({ repo: "org/repo", triggerId: "t", kind: "issue", number: 1, label: "ready" }), false);
 });
+
+// ── Push branch filter (#2570) ───────────────────────────────────────────────
+
+test("computePollPlan (#2570): carries the parsed branchFilter, null when empty", () => {
+  const { computePollPlan } = require("./github-poller");
+  const trig = (id, extra) => ({ id, type: "github-event", enabled: true, repo: "acme/r", events: ["push"], ...extra });
+  const plan = computePollPlan({
+    allowNonGithubHost: false,
+    environments: [{ id: "env", githubTokenId: "tok", repositories: [{ url: "git@github.com:acme/r.git" }] }],
+    agents: [{
+      id: "dev", config: { environmentId: "env" }, triggersMtime: null,
+      triggers: [
+        trig("list", { branchFilter: ["main", "feature/*"] }),
+        trig("csv", { branchFilter: " main , dev ,," }),
+        trig("blank", { branchFilter: " , " }),
+        trig("none"),
+      ],
+    }],
+  });
+  const byId = new Map(plan.get("acme/r").subscribers.map((s) => [s.triggerId, s.branchFilter]));
+  assert.deepEqual(byId.get("list"), ["main", "feature/*"]);
+  assert.deepEqual(byId.get("csv"), ["main", "dev"]);
+  assert.equal(byId.get("blank"), null);
+  assert.equal(byId.get("none"), null);
+});
+
+test("_fanOutBatch (#2570 AC6): a push to a branch outside the filter is dropped before any wake and logged with its ref", async () => {
+  const poller = new GitHubPoller();
+  const sub = pushSub({ branchFilter: ["main", "feature/*"] });
+  const { recorded, enqueued } = await runBatch(poller, [[
+    pushEvent("kb", { ref: "refs/heads/agent-knowledge", head: "h1" }),
+    pushEvent("main", { ref: "refs/heads/main", head: "h2" }),
+    pushEvent("feat", { ref: "refs/heads/feature/login", head: "h3" }),
+    pushEvent("deep", { ref: "refs/heads/feature/a/b", head: "h4" }),
+    pushEvent("tag", { ref: "refs/tags/v1.0", head: "h5" }),
+  ]], [sub]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["main", "feat"]);
+  const row = (id) => recorded.find((r) => r.eventId === id);
+  assert.equal(row("kb").outcomes[0].status, "dropped");
+  assert.equal(row("kb").outcomes[0].reason, "branch-filter");
+  assert.equal(row("kb").ref, "refs/heads/agent-knowledge");
+  assert.equal(row("deep").outcomes[0].reason, "branch-filter");
+  assert.equal(row("tag").outcomes[0].reason, "branch-filter");
+});
+
+test("_fanOutBatch (#2570 AC2): no filter keeps firing on every branch and on tags", async () => {
+  const poller = new GitHubPoller();
+  const { enqueued } = await runBatch(poller, [[
+    pushEvent("kb", { ref: "refs/heads/agent-knowledge", head: "h1" }),
+    pushEvent("tag", { ref: "refs/tags/v1.0", head: "h2" }),
+  ]], [pushSub()]);
+  assert.equal(enqueued.length, 2);
+});
+
+test("_fanOutBatch (#2570 AC9): the branch filter only gates push, never the trigger's other events", async () => {
+  const poller = new GitHubPoller();
+  const sub = pushSub({ events: new Set(["push", "issues.opened"]), branchFilter: ["main"] });
+  const issueOpened = {
+    id: "io-1", actor: { login: "dev" }, created_at: new Date().toISOString(), type: "IssuesEvent",
+    repo: { name: "org/repo" },
+    payload: { action: "opened", issue: { number: 7, title: "x", html_url: "https://github.com/org/repo/issues/7" } },
+  };
+  const { enqueued } = await runBatch(poller, [[
+    issueOpened, pushEvent("kb", { ref: "refs/heads/agent-knowledge", head: "h1" }),
+  ]], [sub]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["io-1"]);
+});
+
+test("_fanOutBatch (#2570 edge case): the synthetic PR-open push is matched on its head branch", async () => {
+  const poller = new GitHubPoller();
+  const { enqueued } = await runBatch(poller, [[prOpenedEvent("pr-1")]], [pushSub({ branchFilter: ["main"] })]);
+  assert.equal(enqueued.length, 0);
+  const poller2 = new GitHubPoller();
+  const r2 = await runBatch(poller2, [[prOpenedEvent("pr-2")]], [pushSub({ branchFilter: ["**"] })]);
+  assert.equal(r2.enqueued.length, 1);
+});

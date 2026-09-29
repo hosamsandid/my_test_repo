@@ -10257,7 +10257,57 @@ function aggregatePendingQueue() {
     });
     total += entries.length;
   }
-  return { agents: groups, total };
+  // Held-by-WIP dispatches (#2114) live in each team's admission lane, NOT in
+  // any agent's pending-triggers.json — so before this they were invisible in
+  // the Pending queue even though the GitHub Event Log logged them "delivered".
+  // Surface them here as a first-class section so a dispatch held behind a full
+  // lane is never invisible: an operator can see WHICH agent's WHICH ticket is
+  // waiting, and on which flow's limit.
+  const held = aggregateHeldDispatches();
+  return {
+    agents: groups,
+    total,
+    held: held.groups,
+    heldTotal: held.total,
+  };
+}
+
+// Every admission-lane `held[]` entry across all teams, grouped by the agent it
+// is held for and carrying the flow's wipLimit + the ticket it belongs to. The
+// `entry.id` each held entry already carries (stamped at hold time) is what the
+// board's Force-dispatch acts on; `heldIdentity` is the board's own key.
+function aggregateHeldDispatches() {
+  const byAgent = new Map();
+  let total = 0;
+  for (const teamId of listAgentIds().sort()) {
+    let teamCfg = null;
+    try { teamCfg = loadAgentConfig(teamId); } catch { continue; }
+    if (!teamCfg || teamCfg.role !== "team") continue;
+    const wipLimit = admissionControl.limitInForce(teamCfg.wipLimit);
+    const lane = loadAdmissionLane(teamId);
+    const heldEntries = Array.isArray(lane.held) ? lane.held : [];
+    for (const h of heldEntries) {
+      if (!h || !h.entry || typeof h.agentId !== "string") continue;
+      let cur = byAgent.get(h.agentId);
+      if (!cur) {
+        let name = h.agentId;
+        try { name = (loadAgentConfig(h.agentId) || {}).name || h.agentId; } catch { /* stub/ephemeral */ }
+        cur = { agentId: h.agentId, agentName: name, teamId, wipLimit, count: 0, entries: [] };
+        byAgent.set(h.agentId, cur);
+      }
+      cur.entries.push({
+        ...pendingQueue.summarizeEntry(h.entry),
+        heldByWip: true,
+        wipLimit,
+        ticket: typeof h.ticket === "string" ? h.ticket : null,
+        heldAt: typeof h.heldAt === "string" ? h.heldAt : null,
+        forceId: admissionControl.heldIdentity(h.agentId, h.entry),
+      });
+      cur.count += 1;
+      total += 1;
+    }
+  }
+  return { groups: [...byAgent.values()], total };
 }
 
 // The full (un-summarised) entry for on-demand detail — includes the GitHub

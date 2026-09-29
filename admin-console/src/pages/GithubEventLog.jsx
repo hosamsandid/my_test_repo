@@ -9,7 +9,7 @@ import RowContextMenu from '../components/RowContextMenu';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { buildTriggerCorrelationId, isSessionOutcome } from './github-event-session';
 import {
-  kindLabel, kindTooltip, entryDetail, entryHoverDetail, labelChip, totalPending,
+  kindLabel, kindTooltip, entryDetail, entryHoverDetail, labelChip, totalPending, totalHeld,
   pendingRowMenu, reassignPickerState, reassignTargetLabel, pendingReassignError, pendingReassignSuccess,
 } from './pending-queue-view';
 import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip, refireNote } from './event-outcome-view';
@@ -735,14 +735,81 @@ function AgentPendingGroup({ group, onCancel, onReassign, busyId }) {
   );
 }
 
+/* ── Held-by-WIP group (#2114 transparency) ─────────────────────────────
+   A dispatch the poller "delivered" but the admission lane HELD because the
+   team's wipLimit was reached. These never reach an agent's pending file, so
+   they were invisible in this tab before — the exact "delivered here, nothing
+   when I click the agent" gap. Read-only: the one place that mutates a held
+   dispatch (Force dispatch) is the Flow Control board, linked below. */
+function HeldByWipGroup({ group, onOpenBoard }) {
+  const rows = useMemo(() => (group.entries || []).map(e => ({
+    ...e,
+    workItemNumber: e.workItem && e.workItem.number != null ? e.workItem.number : null,
+    workItemTitle: e.workItem ? e.workItem.title : null,
+  })), [group.entries]);
+
+  const COLS = [
+    { key: 'kind', label: 'Kind', sortable: false, render: v => <KindBadge kind={v} />, filterValue: v => kindLabel(v) },
+    { key: 'workItemNumber', label: 'Work item', wrap: true, render: (_v, row) => (
+      <PendingWorkItemCell workItem={row.workItem} repo={row.repo} />
+    ) },
+    { key: 'workItemTitle', label: 'Title', wrap: true, render: v => <TitleCell title={v} /> },
+    { key: 'detail', label: 'Details', sortable: false, wrap: true, render: (_v, row) => {
+      const d = entryDetail(row);
+      const chip = row.label ? <PendingLabelChip label={row.label} /> : null;
+      if (!d && !chip) return <span style={{ color: 'var(--eb-text-secondary)' }}>—</span>;
+      return (
+        <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 'var(--eb-space-2)', flexWrap: 'wrap', fontSize: 'var(--eb-text-xs)' }}>
+          {d && <span>{d}</span>}
+          {chip}
+        </span>
+      );
+    } },
+    { key: 'heldAt', label: 'Held since', render: v => <WhenCell iso={v} /> },
+  ];
+
+  return (
+    <div style={{
+      border: '1px solid var(--eb-status-warning, #d97706)',
+      borderRadius: 'var(--eb-radius-lg)',
+      padding: 'var(--eb-space-3)',
+      display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--eb-space-2)' }}>
+        <span style={{ fontWeight: 'var(--eb-font-semibold)' }}>{group.agentName || group.agentId}</span>
+        {group.agentName && group.agentName !== group.agentId && (
+          <span style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)' }}>{group.agentId}</span>
+        )}
+        <span style={{ marginLeft: 'auto', color: 'var(--eb-status-warning, #d97706)', fontSize: 'var(--eb-text-sm)' }}>
+          {group.count} held · WIP limit {group.wipLimit ?? '—'}
+        </span>
+      </div>
+      <DataTable columns={COLS} data={rows} pageSize={10} getRowKey={(r) => r.id} emptyText="No held entries." />
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+        Waiting for a free slot on this flow&apos;s WIP limit. It fires automatically when capacity frees, or you can{' '}
+        <button
+          type="button"
+          onClick={onOpenBoard}
+          style={{ background: 'none', border: 'none', padding: 0, color: 'var(--eb-accent, #2563eb)', cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}
+        >
+          force-dispatch it on the Flow Control board
+        </button>.
+      </div>
+    </div>
+  );
+}
+
 /* ── Live pending-queue view (fed by /api/pending-queue) ───────────── */
 function PendingQueueView() {
+  const navigate = useNavigate();
   const { data, loading, error, refetch } = useApi('/api/pending-queue');
   const [busyId, setBusyId] = useState(null);
   const [notice, setNotice] = useState(null);
 
   const groups = (data && Array.isArray(data.agents)) ? data.agents : [];
   const total = totalPending(data);
+  const heldGroups = (data && Array.isArray(data.held)) ? data.held : [];
+  const heldCount = totalHeld(data);
 
   const onCancel = useCallback(async (agentId, entryId) => {
     if (!agentId || !entryId) return;
@@ -825,13 +892,18 @@ function PendingQueueView() {
           style={{ flexShrink: 0 }}
         />
         {!loading && <span style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>{total} entr{total === 1 ? 'y' : 'ies'} waiting</span>}
+        {!loading && heldCount > 0 && (
+          <span style={{ color: 'var(--eb-status-warning, #d97706)', fontSize: 'var(--eb-text-sm)' }}>
+            · {heldCount} held by WIP limit
+          </span>
+        )}
         {notice && <span style={{ color: noticeColor, fontSize: 'var(--eb-text-sm)' }}>{notice.text}</span>}
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
 
       {loading ? (
         <div style={{ height: 160, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />
-      ) : groups.length === 0 ? (
+      ) : (groups.length === 0 && heldGroups.length === 0) ? (
         <div style={{
           padding: 'var(--eb-space-6)',
           textAlign: 'center',
@@ -852,6 +924,20 @@ function PendingQueueView() {
               busyId={busyId}
             />
           ))}
+          {heldGroups.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
+              <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning, #d97706)' }}>
+                Held by WIP limit
+              </div>
+              <p style={{ margin: 0, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                These dispatches were accepted but are waiting for a free slot on their flow&apos;s Work-in-Progress limit.
+                They fire automatically as capacity frees — nothing is lost.
+              </p>
+              {heldGroups.map(g => (
+                <HeldByWipGroup key={`held-${g.agentId}`} group={g} onOpenBoard={() => navigate('/flow-control')} />
+              ))}
+            </div>
+          )}
         </div>
       )}
       {reassign && (

@@ -95,6 +95,12 @@ test('mergeForDomain returns the ≥2-source merge, null for <2 / missing', () =
   assert.equal(mergeForDomain([{ domainId: 'z', merge: { sources: [{ name: 'only' }] } }], 'z'), null);
 });
 
+test('mergeForDomain accepts a one-source fold into the domain skill (#2592)', () => {
+  const fold = { sources: [{ name: 'only' }], target: { name: 'z' }, fold: true };
+  assert.equal(mergeForDomain([{ domainId: 'z', merge: fold }], 'z'), fold);
+  assert.equal(mergeForDomain([{ domainId: 'z', merge: { ...fold, sources: [] } }], 'z'), null);
+});
+
 test('planDomainRows annotates counts + mergeable, preserves order', () => {
   const rows = planDomainRows(PLAN, MERGES);
   assert.deepEqual(rows.map((r) => r.domainId), ['ci', 'review', 'empty']);

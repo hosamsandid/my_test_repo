@@ -84,12 +84,15 @@ export function mergeForDomain(merges, domainId) {
   const hit = list.find((m) => m && m.domainId === domainId);
   if (!hit) return null;
   const merge = hit.merge || hit;
-  if (!merge || !Array.isArray(merge.sources) || merge.sources.length < 2) return null;
+  // A one-member domain folds its only skill into the domain skill (#2592).
+  const min = merge && merge.fold === true ? 1 : 2;
+  if (!merge || !Array.isArray(merge.sources) || merge.sources.length < min) return null;
   return merge;
 }
 
 // Annotate every plan domain with display counts + whether it will drive a
-// skill-merge (≥2 members) or is a record-only accept (0/1 member). Deterministic
+// skill-merge (≥2 members, or a one-member fold into the domain skill — #2592) or
+// is a record-only accept (no member skill to move). Deterministic
 // (plan order preserved).
 export function planDomainRows(plan, merges) {
   const domains = plan && Array.isArray(plan.domains) ? plan.domains : [];
@@ -105,6 +108,7 @@ export function planDomainRows(plan, merges) {
       memberCount: memberSkills.length,
       candidateCount: candidateIds.length,
       mergeable: !!mergeForDomain(merges, d.domainId),
+      fold: !!(mergeForDomain(merges, d.domainId) || {}).fold,
     };
   });
 }

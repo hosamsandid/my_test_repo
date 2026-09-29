@@ -370,6 +370,35 @@ function skillBudgetState(skillNames, { cap = DEFAULT_SKILL_BUDGET } = {}) {
   return { cap: capN, used, remaining: Math.max(0, capN - used), over: used >= capN };
 }
 
+// How many domains an operator op would ADD (#2592, AC10): add → 1, split → the
+// extra parts, confirm → the growth of the list. Rename/merge/remove never add.
+function domainsAddedByOp(doc, op, payload = {}) {
+  const current = doc && Array.isArray(doc.domains) ? doc.domains.length : 0;
+  const p = payload && typeof payload === 'object' ? payload : {};
+  if (op === 'add') return 1;
+  if (op === 'split') {
+    const parts = Array.isArray(p.parts) ? p.parts.filter((x) => x && typeof x.name === 'string' && x.name.trim()).length : 0;
+    return Math.max(0, parts - 1);
+  }
+  if (op === 'confirm') {
+    const next = Array.isArray(p.domains) ? p.domains.length : 0;
+    return Math.max(0, next - current);
+  }
+  return 0;
+}
+
+// Every domain grows into exactly one skill, so a new domain is a future skill.
+// Growing the taxonomy needs an explicit confirmation when the team is already at
+// (or would go over) its soft skill budget — counting both living skills and
+// domains that will become one. Declining changes nothing.
+function domainGrowthNeedsConfirmation(doc, op, payload, budget) {
+  const added = domainsAddedByOp(doc, op, payload);
+  if (added <= 0 || !budget || !Number.isInteger(budget.cap)) return { needed: false, added };
+  const domainCount = doc && Array.isArray(doc.domains) ? doc.domains.length : 0;
+  const needed = !!budget.over || Math.max(budget.used || 0, domainCount) + added > budget.cap;
+  return { needed, added };
+}
+
 module.exports = {
   SKILL_NAME_RE,
   SCOPES,
@@ -392,4 +421,6 @@ module.exports = {
   buildBootstrapRequest,
   parseBootstrapResponse,
   skillBudgetState,
+  domainsAddedByOp,
+  domainGrowthNeedsConfirmation,
 };

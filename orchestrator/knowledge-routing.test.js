@@ -17,10 +17,13 @@ function cand(id, text, entryIds = [id], convergence = ['a', 'b']) {
   return { id, text, entryIds, convergence, kind: 'convention' };
 }
 
-test('domainVocabulary: tokens from name + scope + roles', () => {
+test('domainVocabulary: meaningful name tokens only — no role/scope/generic words (#2592 G4)', () => {
   const v = R.domainVocabulary(makeDomain({ name: 'Dev workflow', roles: ['developer'], now: NOW }));
   assert.ok(v.has('workflow'));
-  assert.ok(v.has('developer'));
+  assert.ok(!v.has('developer'), 'role words must not route lessons');
+  assert.ok(!v.has('team'));
+  const g = R.domainVocabulary(makeDomain({ name: 'Team practice notes', now: NOW }));
+  assert.equal(g.size, 0, 'generic words never count as a topic');
 });
 
 test('classifyCandidateToDomain: vocab match routes to best domain', () => {
@@ -120,6 +123,12 @@ test('buildBatchClassificationRequest: numbers domains + lessons', () => {
   assert.ok(c.includes('JSON array'));
 });
 
+test('buildBatchClassificationRequest: max_tokens scales with the batch (review S2)', () => {
+  assert.equal(R.buildBatchClassificationRequest([cand('c1', 'x')], DOMAINS).max_tokens, 1024);
+  const many = Array.from({ length: 200 }, (_, i) => cand(`c${i}`, `lesson ${i}`));
+  assert.ok(R.buildBatchClassificationRequest(many, DOMAINS).max_tokens >= 200 * 24);
+});
+
 test('applyBatchClassification: parses valid response, ignores bad domain ids', () => {
   const unrouted = [cand('c1', 'x'), cand('c2', 'y'), cand('c3', 'z')];
   const text = '[{"lesson":1,"domain":"dev-workflow"},{"lesson":2,"domain":null},{"lesson":3,"domain":"nope"}]';
@@ -206,4 +215,75 @@ test('reconcileDomainProposal leaves non-proposal rows untouched', () => {
   );
   assert.ok(rows.find((r) => r.id === 'c1'));
   assert.ok(rows.find((r) => r.id === 'c2'));
+});
+
+// --- #2592: ties + one batched LLM call per pass with heuristic fallback -------
+
+test('classifyCandidateToDomain: a tie between two domains routes nowhere (#2592 G4)', () => {
+  const doms = [
+    makeDomain({ name: 'Build pipeline', now: NOW }),
+    makeDomain({ name: 'Release pipeline', now: NOW }),
+  ];
+  assert.equal(R.classifyCandidateToDomain(cand('c1', 'keep the pipeline green'), doms), null);
+  // A clear winner still routes.
+  const m = R.classifyCandidateToDomain(cand('c2', 'the release pipeline must tag'), doms);
+  assert.equal(m.domainId, 'release-pipeline');
+});
+
+test('classifyCandidateToDomain: a role word in the lesson no longer routes it (#2592 G4)', () => {
+  assert.equal(R.classifyCandidateToDomain(cand('c1', 'the developer should run tests first'), DOMAINS), null);
+});
+
+test('classifyClustersToDomains: ONE batched LLM call routes every cluster, method recorded (AC6)', async () => {
+  const calls = [];
+  const classify = async (req) => {
+    calls.push(req);
+    return '[{"lesson":1,"domain":"review-practice"},{"lesson":2,"domain":null}]';
+  };
+  const out = await R.classifyClustersToDomains(
+    [cand('c1', 'approve only after CI'), cand('c2', 'unrelated lesson text')],
+    DOMAINS,
+    { classify },
+  );
+  assert.equal(calls.length, 1, 'exactly one call per pass');
+  assert.equal(out.llmCalls, 1);
+  assert.equal(out.method, 'llm');
+  assert.deepEqual(out.routed.map((r) => [r.candidate.id, r.domainId, r.via]), [['c1', 'review-practice', 'llm']]);
+  assert.deepEqual(out.unrouted.map((u) => [u.candidate.id, u.via]), [['c2', 'llm']]);
+});
+
+test('classifyClustersToDomains: LLM failure / garbage / no transport → keyword heuristic (AC6)', async () => {
+  const lessons = [cand('c1', 'code review for pull requests'), cand('c2', 'nothing matching here')];
+  for (const classify of [
+    async () => { throw new Error('down'); },
+    async () => 'I cannot help with that',
+    async () => null,
+    undefined,
+  ]) {
+    const out = await R.classifyClustersToDomains(lessons, DOMAINS, { classify });
+    assert.equal(out.method, 'heuristic');
+    assert.equal(out.llmCalls, classify ? 1 : 0);
+    assert.deepEqual(out.routed.map((r) => [r.candidate.id, r.domainId, r.via]), [['c1', 'review-practice', 'vocab']]);
+    assert.deepEqual(out.unrouted.map((u) => [u.candidate.id, u.via]), [['c2', 'heuristic']]);
+  }
+});
+
+test('classifyClustersToDomains: lineage first, no LLM call when everything is lineage-routed', async () => {
+  let n = 0;
+  const out = await R.classifyClustersToDomains(
+    [cand('c1', 'anything', ['e1'])],
+    DOMAINS,
+    { classify: async () => { n += 1; return '[]'; }, skillEntryIdsByDomain: { 'dev-workflow': ['e1'] } },
+  );
+  assert.equal(n, 0);
+  assert.equal(out.method, 'lineage');
+  assert.deepEqual(out.routed.map((r) => [r.domainId, r.via]), [['dev-workflow', 'lineage']]);
+});
+
+test('classifyClustersToDomains: no domains → everything unrouted, no call', async () => {
+  let n = 0;
+  const out = await R.classifyClustersToDomains([cand('c1', 'x')], [], { classify: async () => { n += 1; } });
+  assert.equal(n, 0);
+  assert.equal(out.method, 'none');
+  assert.deepEqual(out.unrouted.map((u) => u.via), ['none']);
 });

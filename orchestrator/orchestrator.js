@@ -78,8 +78,12 @@ const knowledgeConvergence = require("./knowledge-convergence");
 const knowledgeCurator = require("./knowledge-curator");
 const knowledgeDomains = require("./knowledge-domains");
 const knowledgeRouting = require("./knowledge-routing");
+const knowledgeDomainSkills = require("./knowledge-domain-skills");
 const knowledgeDistillation = require("./knowledge-distillation");
 const knowledgeConsolidation = require("./knowledge-consolidation");
+// Candidate-store rows that are not lesson content: never assigned to a domain or
+// folded into a domain skill by Consolidate (#2592).
+const CONSOLIDATION_NON_LESSON_SOURCES = new Set([knowledgeDomainSkills.DOMAIN_CARD_SOURCE, 'domain-proposal', 'decay']);
 const knowledgeCleanup = require("./knowledge-cleanup");
 const knowledgeRetrieval = require("./knowledge-retrieval");
 const knowledgeDecay = require("./knowledge-decay");
@@ -7431,6 +7435,17 @@ function writeTeamKnowledgeConfig(teamId, patch) {
     clean.decayHorizonDays = days;
   }
 
+  // #2592 (AC12): the first-skill threshold of the domain → skill pipeline.
+  if ('domainSkillThreshold' in src) {
+    const raw = src.domainSkillThreshold;
+    if (!raw || typeof raw !== 'object') throw new Error('domainSkillThreshold must be an object');
+    const lessons = Number(raw.minLessons);
+    const agents = Number(raw.minAgents);
+    if (!Number.isInteger(lessons) || lessons < 1 || lessons > 100) throw new Error('domainSkillThreshold.minLessons must be an integer 1..100');
+    if (!Number.isInteger(agents) || agents < 1 || agents > 50) throw new Error('domainSkillThreshold.minAgents must be an integer 1..50');
+    clean.domainSkillThreshold = { minLessons: lessons, minAgents: agents };
+  }
+
   if (!Object.keys(clean).length) throw new Error('no valid knowledge-config keys in patch');
   writeTeamKnowledgeOverrides(teamId, clean);
   return clean;
@@ -8359,9 +8374,27 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
   // #780: canonicalIds routed to a domain (amendment) or parked unrouted this pass —
   // excluded from the single-lesson candidate path so they don't also raise a card.
   let domainRoutedCanonicalIds = new Set();
+  // #2592: true once the domain → skill pipeline owns this team's skill growth.
+  let domainMode = false;
   if (level >= 2) {
-    const { digestRouting, graduateAtAgents } = knowledgeCurationConfig(env);
-    if (digestRouting) {
+    // #2592: resolve the team's domains FIRST. In domain mode every converged
+    // cluster belongs to the domain pipeline — including a 2–3-agent convention/fact
+    // the #779 digest gate would otherwise park as digest-only, so the first-skill
+    // threshold (default >=3 lessons from >=2 agents) actually sees them. The digest
+    // gate only runs for a team without domains (the pre-#2592 flow).
+    const { domainRouting, skillBudget, digestRouting, graduateAtAgents } = knowledgeCurationConfig(env);
+    let domains = [];
+    if (domainRouting) {
+      try {
+        domains = ensureTeamDomains(teamId, now);
+      } catch (err) {
+        console.warn(`[Orchestrator] domain list for '${teamId}' failed: ${err.message}`);
+        domains = [];
+      }
+    }
+    domainMode = domains.length > 0;
+
+    if (digestRouting && !domainMode) {
       try {
         const routed = knowledgeConvergence.planDigestRouting(eligibleClusters, curCandidates, {
           threshold: convergenceThreshold, graduateAtAgents, teamId, now,
@@ -8378,38 +8411,25 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
       }
     }
 
-    // #780 domain routing (skill-aggregation Phase 2): classify each remaining
-    // candidate cluster against the team's persistent domains. A cluster that fits
-    // a domain becomes an AMENDMENT review card ("Add to <skill>") instead of a new
-    // micro-skill; a cluster that fits no domain is parked in the UNROUTED pool and
-    // never spawns its own skill — only accumulated mass raises a new-domain
-    // proposal (always a review card, budget-aware). Both classes are excluded from
-    // the single-lesson candidate + create-new auto-promotion paths below, so the
-    // inbox shows a few decidable amendments rather than dozens of new-skill cards.
-    // No-op for a team with no confirmed domains (routing bias only kicks in once a
-    // taxonomy exists) — existing teams are unaffected until they seed/bootstrap.
-    const { domainRouting, skillBudget } = knowledgeCurationConfig(env);
-    if (domainRouting) {
+    // #2592 domain → skill pipeline (supersedes the #780 per-lesson amendment
+    // cards): once the team has domains, every converged cluster is routed to a
+    // domain and grows that domain's ONE living skill (auto-applied at level 3
+    // with an `auto` team>team gate, else one card per domain). In this mode no
+    // lesson-named path runs at all (AC5) — see _runDomainSkillPipeline. A team with
+    // no domains keeps the pre-#2592 flow below.
+    if (domainMode) {
       try {
-        const domains = ensureTeamDomains(teamId, now);
-        if (domains.length > 0 && candidateClusters.length > 0) {
-          // entry tags[] (read by nothing before #780) feed the routing heuristic.
-          const tagsByEntryId = {};
-          for (const e of shardEntries) {
-            if (e && e.id && Array.isArray(e.tags) && e.tags.length) tagsByEntryId[e.id] = e.tags;
-          }
-          domainRoutedCanonicalIds = _routeDomains(teamId, env, domains, candidateClusters, {
-            skillBudget, now, tagsByEntryId,
-          });
-          if (domainRoutedCanonicalIds.size > 0) {
-            candidateClusters = candidateClusters.filter(
-              (c) => c && !domainRoutedCanonicalIds.has(c.canonicalId),
-            );
-            curCandidates = readKnowledgeCandidates(teamId);
-          }
+        // entry tags[] feed the routing heuristic.
+        const tagsByEntryId = {};
+        for (const e of shardEntries) {
+          if (e && e.id && Array.isArray(e.tags) && e.tags.length) tagsByEntryId[e.id] = e.tags;
         }
+        domainRoutedCanonicalIds = await _runDomainSkillPipeline(teamId, env, domains, eligibleClusters, {
+          level, convergenceThreshold, skillBudget, now, tagsByEntryId,
+        });
+        curCandidates = readKnowledgeCandidates(teamId);
       } catch (err) {
-        console.warn(`[Orchestrator] domain routing for '${teamId}' failed: ${err.message}`);
+        console.warn(`[Orchestrator] domain skill pipeline for '${teamId}' failed: ${err.message}`);
       }
     }
   }
@@ -8423,7 +8443,17 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     ? eligibleClusters.filter((c) => c && !domainRoutedCanonicalIds.has(c.canonicalId))
     : eligibleClusters;
 
-  if (level >= 3) {
+  if (domainMode) {
+    // #2592: the pipeline above already created/extended/raised everything; only the
+    // level-3 distillation of grown skills still runs (AC9).
+    if (level >= 3) {
+      try {
+        await autoDistillStep(teamId, env, { now });
+      } catch (err) {
+        console.warn(`[Orchestrator] auto-distill for '${teamId}' failed: ${err.message}`);
+      }
+    }
+  } else if (level >= 3) {
     // #779: the per-pass cap is shared across auto-extend + convergence promotions +
     // theme promotions. Auto-extend runs FIRST and claims its matched clusters so
     // they don't also spawn a brand-new skill; then create-new promotion on the
@@ -8459,7 +8489,7 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     // #780 AC4: resolve each theme's best-matching domain so it is named after the
     // domain (not a lesson-slug). Read-only — never seeds domains here; when the
     // team has no taxonomy the resolver is null and naming stays lesson-slug (the
-    // backward-compatible no-op). Reuses the same heuristic classifier as _routeDomains.
+    // backward-compatible no-op). Reuses the same heuristic domain classifier.
     let resolveThemeDomain = null;
     try {
       const themeDomains = readTeamDomainsDoc(teamId).domains;
@@ -8903,10 +8933,13 @@ async function autoPromoteStep(teamId, env, clusters, candidates, { convergenceT
       continue;
     }
     const promotedCand = { ...item.candidate, status: "promoted", resolvedAt: now, promotedBy: "curator" };
-    // Idempotent: never clobber an existing skill — just settle the candidate so
-    // it is not retried every pass.
+    // Idempotent: never clobber an existing skill. #2592 (G6): fold the lesson into
+    // it instead, and settle the candidate only once its ids are in that skill's
+    // provenance — never on the strength of a name match alone.
     if (fs.existsSync(path.join(dir, "SKILL.md"))) {
-      byId.set(item.candidate.id, promotedCand);
+      if (_foldIntoExistingSkill(teamId, item.name, item.candidate, now)) {
+        byId.set(item.candidate.id, { ...promotedCand, extendedInto: item.name });
+      }
       continue;
     }
     const prov = knowledgeCurator.curatorSkillProvenance({
@@ -8959,6 +8992,36 @@ async function autoPromoteStep(teamId, env, clusters, candidates, { convergenceT
     }]);
   }
   return promotedSkills.length;
+}
+
+// #2592 (G6): fold a candidate into an EXISTING team skill without a separate
+// review — heuristic append of any new statements + provenance union (the counter
+// only moves when content was added). Returns true only when every one of the
+// candidate's entry ids is in the skill's provenance afterwards, i.e. when the
+// caller may mark it promoted (AC8).
+function _foldIntoExistingSkill(teamId, name, candidate, now) {
+  const doc = _readTeamSkillDoc(teamId, name);
+  if (!doc) return false;
+  let domain = null;
+  try {
+    domain = readTeamDomainsDoc(teamId).domains.find((d) => knowledgeDomains.domainSkillName(d) === name) || null;
+  } catch { domain = null; }
+  const fold = knowledgeDomainSkills.foldIntoSkill({
+    existingMd: doc.skillMd, existingProv: doc.provenance, candidate, name, domain, teamId, now,
+  });
+  try {
+    if (fold.added) {
+      fs.writeFileSync(path.join(doc.dir, "SKILL.md"), fold.skillMd.endsWith("\n") ? fold.skillMd : fold.skillMd + "\n");
+    }
+    fs.writeFileSync(path.join(doc.dir, "provenance.json"), JSON.stringify(fold.provenance, null, 2));
+    if (fold.added) skillManifest.stampSkillDir(doc.dir, { name, by: "curator", action: "extended", now });
+  } catch (err) {
+    console.warn(`[Orchestrator] fold into existing skill '${name}' (team ${teamId}) failed: ${err.message}`);
+    return false;
+  }
+  const covered = new Set(Array.isArray(fold.provenance.entryIds) ? fold.provenance.entryIds : []);
+  const ids = Array.isArray(candidate && candidate.entryIds) ? candidate.entryIds : [];
+  return ids.length > 0 && ids.every((id) => covered.has(id));
 }
 
 // Shared finalize for a batch of curator auto-promotions (convergence clusters or
@@ -9039,9 +9102,12 @@ function autoPromoteThemesStep(teamId, env, clusters, candidates, { relatedThres
       continue;
     }
     const promotedCand = { ...item.candidate, status: "promoted", resolvedAt: now, promotedBy: "curator" };
-    // Idempotent: never clobber an existing skill — just settle the candidate.
+    // Idempotent: never clobber an existing skill. #2592 (G6): fold into it and
+    // settle only once the theme's ids are in its provenance.
     if (fs.existsSync(path.join(dir, "SKILL.md"))) {
-      byId.set(item.candidate.id, promotedCand);
+      if (_foldIntoExistingSkill(teamId, item.name, item.candidate, now)) {
+        byId.set(item.candidate.id, { ...promotedCand, extendedInto: item.name });
+      }
       continue;
     }
     const prov = knowledgeCurator.curatorThemeSkillProvenance({
@@ -9074,76 +9140,189 @@ function autoPromoteThemesStep(teamId, env, clusters, candidates, { relatedThres
 // provenance.json (the same lineage signal admin-console eligibleExtendSkills uses).
 // Best-effort + tolerant: an unreadable dir/provenance yields an empty entryIds set,
 // never throws. Returns [] when the team has no skill pool yet.
-// #780: route this pass's candidate clusters against the team's domains. Persists
-// amendment review cards ("Add to <skill>"), unrouted-pool rows, and a new-domain
-// proposal card (budget-aware); emits the `domain-routing` feed event. Returns the
-// set of canonicalIds it claimed (amendments + unrouted) so the caller excludes
-// them from the single-lesson candidate + create-new auto-promotion paths — the
-// core flood-reduction move. Best-effort: any failure leaves the pass untouched.
-function _routeDomains(teamId, env, domains, candidateClusters, { skillBudget, now, tagsByEntryId } = {}) {
-  const claimed = new Set();
-  const cands = (Array.isArray(candidateClusters) ? candidateClusters : [])
-    .map((c) => knowledgeConvergence.toCandidate(c, { teamId, now }));
-  if (cands.length === 0) return claimed;
+// #2592: the domain → skill pipeline — every domain grows into exactly ONE living
+// skill. Replaces the #780 per-lesson amendment cards:
+//
+//   1. Only CONVERGED clusters are routed (AC7). Each new / re-evaluable one is
+//      classified by lineage, then ONE batched LLM call per pass for the rest, with
+//      the keyword heuristic as the fallback (AC6); the method is kept per row.
+//   2. Routed lessons are parked `domain-queued`; lessons no domain fits are parked
+//      `unrouted` (digest only, D5) and feed the singleton new-domain proposal.
+//   3. Per domain: extend its skill if it exists, else create it once the first-
+//      skill threshold is met (D2). Level 3 + an `auto` team>team gate applies that
+//      directly (shared per-pass cap); otherwise ONE open card per domain (D1).
+//   4. A queued lesson is only settled once its ids are in the skill's provenance (AC8).
+//
+// Returns the set of canonicalIds it claimed so the caller keeps them out of every
+// lesson-named path. Best-effort per step; a failure leaves the rows for next pass.
+async function _runDomainSkillPipeline(teamId, env, domains, clusters, {
+  level, convergenceThreshold, skillBudget, now, tagsByEntryId,
+} = {}) {
+  const converged = (Array.isArray(clusters) ? clusters : [])
+    .filter((c) => c && knowledgeConvergence.crossesConvergence(c, convergenceThreshold));
+  const cands = converged.map((c) => knowledgeConvergence.toCandidate(c, { teamId, now }));
+  const domainsVersion = readTeamDomainsDoc(teamId).updatedAt || null;
+  const domainIds = new Set(domains.map((d) => d.id));
+
+  let rows = readKnowledgeCandidates(teamId);
+  const inputs = knowledgeDomainSkills.planRoutingInputs(cands, rows, { domainIds, domainsVersion });
 
   const existingSkills = readTeamSkillsForMatch(teamId);
   const skillEntryIdsByDomain = {};
   for (const d of domains) {
-    const sn = knowledgeDomains.domainSkillName(d);
-    const sk = existingSkills.find((s) => s.name === sn);
+    const sk = existingSkills.find((s) => s.name === knowledgeDomains.domainSkillName(d));
     if (sk) skillEntryIdsByDomain[d.id] = sk.entryIds;
   }
-  const budget = knowledgeDomains.skillBudgetState(existingSkills.map((s) => s.name), { cap: skillBudget });
-
-  const plan = knowledgeRouting.planDomainRouting(cands, domains, {
+  const binding = resolveAssistBindingForTeam(teamId); // #1213: team-billed provider
+  const routing = await knowledgeRouting.classifyClustersToDomains(inputs.toClassify, domains, {
+    classify: (request) => _synthesizeSkillMd(env, request, binding),
     skillEntryIdsByDomain,
     tagsByEntryId: tagsByEntryId || {},
-    budgetOver: budget.over,
-    teamId,
-    now,
   });
 
-  const rows = readKnowledgeCandidates(teamId);
   const byId = new Map(rows.filter((r) => r && r.id).map((r) => [r.id, r]));
-  const tracked = (id) => {
-    const r = byId.get(id);
-    return r && ['open', 'promoted', 'dismissed'].includes(r.status);
-  };
+  for (const r of routing.routed) {
+    byId.set(r.candidate.id, knowledgeDomainSkills.queuedRow(r.candidate, { domainId: r.domainId, via: r.via, now }));
+  }
+  for (const u of routing.unrouted) {
+    byId.set(u.candidate.id, knowledgeDomainSkills.unroutedRow(u.candidate, { via: u.via, domainsVersion, now }));
+  }
+  // Legacy per-lesson amendment cards fold into their domain's queue.
+  for (const m of inputs.migrate) {
+    byId.set(m.id, knowledgeDomainSkills.queuedRow(m, { domainId: m.domainId, via: m.routedVia, now }));
+  }
+  // A grown cluster (new id, same canonicalId) stays in its domain and replaces its
+  // older pending row, so the queue holds one row per lesson (review B2).
+  for (const g of inputs.regrown) {
+    byId.set(g.candidate.id, knowledgeDomainSkills.queuedRow(g.candidate, { domainId: g.domainId, via: g.via, now }));
+  }
+  for (const s of inputs.supersede) {
+    const prev = byId.get(s.id);
+    if (prev) byId.set(s.id, { ...prev, status: "superseded", supersededBy: s.supersededBy, supersededAt: now });
+  }
+  rows = [...byId.values()];
 
-  for (const a of plan.amendments) {
-    if (a.candidate && a.candidate.canonicalId) claimed.add(a.candidate.canonicalId);
-    if (tracked(a.candidate.id)) continue;
-    byId.set(a.candidate.id, {
-      ...a.candidate,
-      status: 'open',
-      source: 'convergence',
-      autoDrafted: true,
-      extendMode: true,
-      domainId: a.domainId,
-      routedVia: a.via,
-      matchedSkill: { name: a.skill, tier: 'team' },
-    });
-  }
-  for (const c of plan.unrouted) {
-    if (c && c.canonicalId) claimed.add(c.canonicalId);
-    if (tracked(c.id)) continue;
-    // Parked pool row (never rendered as an open card) — accumulates toward a
-    // new-domain proposal; keyed by the same stable id so a grown set re-evaluates.
-    byId.set(c.id, { ...c, status: 'unrouted', routedAt: now });
-  }
-  // FIX-A: keep at most ONE open new-domain proposal card (a singleton per team,
-  // upserted; operator dismissal respected; legacy dp-<hash> pile collapsed). The
-  // decision is a pure, unit-tested helper in knowledge-routing.
-  const reconciledRows = knowledgeRouting.reconcileDomainProposal([...byId.values()], {
-    proposal: plan.newDomainProposal,
-    teamId,
-    teamSegment: knowledgeFeed.safeTeamSegment(teamId),
-    now,
+  // New-domain proposal over the whole unrouted pool (budget-aware, §3.5).
+  const budget = knowledgeDomains.skillBudgetState(existingSkills.map((s) => s.name), { cap: skillBudget });
+  const unroutedPool = rows.filter((r) => r && r.status === "unrouted");
+  const proposal = unroutedPool.length && knowledgeRouting.newDomainQualifies(unroutedPool)
+    ? { unrouted: unroutedPool, budgetBlocked: !!budget.over, reason: budget.over ? "over-budget" : "mass-threshold" }
+    : null;
+  rows = knowledgeRouting.reconcileDomainProposal(rows, {
+    proposal, teamId, teamSegment: knowledgeFeed.safeTeamSegment(teamId), now,
   });
+  writeKnowledgeCandidates(teamId, rows);
+  if (routing.routed.length || routing.unrouted.length || proposal) {
+    appendKnowledgeEvents([{
+      type: "domain-routing", ts: now, teamId,
+      method: routing.method, llmCalls: routing.llmCalls,
+      amendmentCount: routing.routed.length, unroutedCount: routing.unrouted.length,
+      newDomainProposed: !!proposal, budgetBlocked: proposal ? proposal.budgetBlocked : false,
+      samples: routing.routed.slice(0, 5).map((r) => ({ id: r.candidate.id, skill: r.skill, via: r.via, text: r.candidate.text })),
+    }]);
+  }
 
-  writeKnowledgeCandidates(teamId, reconciledRows);
-  if (plan.batch) appendKnowledgeEvents([plan.batch]);
-  return claimed;
+  // Per-domain work: apply (level 3 + auto gate) or one card per domain.
+  const gates = resolvePromotionGates(env);
+  const autoApply = level >= 3 && gates["team>team"] === "auto";
+  const { maxAutoPromotionsPerPass, domainSkillThreshold, synthesizeSkills } = knowledgeCurationConfig(env);
+  const plan = knowledgeDomainSkills.planDomainSkillWork(
+    rows.filter((r) => r && r.status === knowledgeDomainSkills.QUEUED_STATUS), domains, {
+      existingSkillNames: new Set(existingSkills.map((s) => s.name)),
+      threshold: domainSkillThreshold,
+      autoApply,
+      cap: maxAutoPromotionsPerPass,
+    });
+
+  const created = [];
+  const extended = [];
+  for (const item of plan.apply) {
+    try {
+      const res = await _applyDomainSkillWork(teamId, env, item, { now, binding, synthesizeSkills });
+      if (!res) continue;
+      const settle = knowledgeDomainSkills.settleCoveredRows(readKnowledgeCandidates(teamId), item.bundle.lessonIds, res.entryIds, {
+        resolvedAt: now, promotedBy: "curator",
+        ...(res.mode === "create" ? { promotedInto: item.skillName } : { extendedInto: item.skillName }),
+      });
+      writeKnowledgeCandidates(teamId, settle.rows);
+      if (settle.uncovered.length) {
+        console.warn(`[Orchestrator] domain skill '${item.skillName}' (team ${teamId}): ${settle.uncovered.length} lesson(s) not in provenance — left queued`);
+      }
+      (res.mode === "create" ? created : extended).push({ name: item.skillName, entryIds: item.bundle.entryIds });
+    } catch (err) {
+      console.warn(`[Orchestrator] domain skill '${item.skillName}' for team ${teamId} failed: ${err.message}`);
+    }
+  }
+  writeKnowledgeCandidates(teamId, knowledgeDomainSkills.reconcileDomainCards(readKnowledgeCandidates(teamId), plan.cards, {
+    teamId, now, gateReason: level >= 3 ? "gated" : undefined,
+  }));
+  _finalizePromotedSkills(teamId, env, created, now);
+  _finalizeExtendedSkills(teamId, env, extended, now);
+  return inputs.claimedCanonicalIds;
+}
+
+// Write one domain's skill: create it (domain-named, provenance = every lesson id)
+// or fold the queued lessons into it. Returns { mode, entryIds } — the provenance
+// ids now on disk — or null when nothing could be written.
+async function _applyDomainSkillWork(teamId, env, item, { now, binding, synthesizeSkills } = {}) {
+  const name = item.skillName;
+  const dir = _teamSkillDir(teamId, name);
+  if (!dir) {
+    console.warn(`[Orchestrator] domain skill: unsafe skill dir for '${name}'`);
+    return null;
+  }
+  const writeDoc = (md, prov) => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "SKILL.md"), md.endsWith("\n") ? md : md + "\n");
+    fs.writeFileSync(path.join(dir, "provenance.json"), JSON.stringify(prov, null, 2));
+  };
+  const doc = _readTeamSkillDoc(teamId, name);
+  if (!doc) {
+    const draft = knowledgeDomainSkills.domainSkillDraft(item.domain, item.bundle);
+    const synth = await _resolveSkillMd(env, {
+      heuristicMd: draft.skillMd,
+      request: knowledgeCurator.buildSkillSynthesisRequest(item.bundle, { domain: item.domain }),
+      synthesize: synthesizeSkills,
+      frontmatter: { name, description: draft.description },
+      binding,
+    });
+    const prov = knowledgeDomainSkills.domainSkillProvenance({ teamId, domain: item.domain, bundle: item.bundle, now });
+    writeDoc(synth.skillMd, prov);
+    try { skillManifest.stampSkillDir(dir, { name, by: "curator", action: "promoted", now, note: synth.note || undefined }); }
+    catch (err) { console.warn(`[Orchestrator] domain skill: stamp '${name}' failed: ${err.message}`); }
+    return { mode: "create", entryIds: prov.entryIds };
+  }
+  const fold = knowledgeDomainSkills.foldIntoSkill({
+    existingMd: doc.skillMd, existingProv: doc.provenance, candidate: item.bundle,
+    name, domain: item.domain, teamId, now,
+  });
+  let md = fold.skillMd;
+  let synthesised = false;
+  if (fold.added && synthesizeSkills) {
+    const synth = await _resolveSkillMd(env, {
+      heuristicMd: fold.skillMd,
+      request: knowledgeCurator.buildSkillExtensionSynthesisRequest(doc.skillMd, item.bundle, { domain: item.domain }),
+      synthesize: true,
+      frontmatter: { name, description: fold.description },
+      binding,
+    });
+    md = synth.skillMd;
+    synthesised = synth.synthesised === true;
+  }
+  if (fold.added) {
+    writeDoc(md, fold.provenance);
+    const n = item.bundle.lessonCount;
+    try {
+      skillManifest.stampSkillDir(dir, {
+        name, by: "curator", action: "extended", now,
+        note: `folded ${n} ${n === 1 ? "lesson" : "lessons"} (${synthesised ? "LLM-synthesised" : "heuristic, un-synthesised"})`,
+      });
+    } catch (err) { console.warn(`[Orchestrator] domain skill: stamp '${name}' failed: ${err.message}`); }
+  } else {
+    // Nothing new to say, but the lessons now belong to this skill (AC8).
+    fs.writeFileSync(path.join(dir, "provenance.json"), JSON.stringify(fold.provenance, null, 2));
+  }
+  return { mode: "extend", entryIds: fold.provenance.entryIds };
 }
 
 // #780 §3.3: best-effort LLM synthesis transport for a SKILL.md write. Uses the
@@ -9303,9 +9482,12 @@ async function autoExtendStep(teamId, env, clusters, candidates, existingSkills,
     // frontmatter on extension; an existing description is preserved (E5).
     const ext = knowledgeCurator.curatorSkillExtension(doc.skillMd, item.candidate, { name: item.target.name });
     if (!ext.added) {
-      // No genuinely new content (all lessons already present) — settle the
-      // candidate as promoted so it isn't retried, but write nothing.
-      byId.set(item.candidate.id, { ...item.candidate, status: "promoted", resolvedAt: now, promotedBy: "curator", extendedInto: item.target.name });
+      // No genuinely new content (all lessons already present). #2592 (G6): the
+      // lesson still has to end up in the skill's provenance before it may be
+      // marked promoted — union the ids, leave the document alone.
+      if (_foldIntoExistingSkill(teamId, item.target.name, item.candidate, now)) {
+        byId.set(item.candidate.id, { ...item.candidate, status: "promoted", resolvedAt: now, promotedBy: "curator", extendedInto: item.target.name });
+      }
       continue;
     }
     const prov = knowledgeCurator.curatorExtendProvenance({
@@ -18413,7 +18595,25 @@ async function main() {
               touched = list[i];
               wrote = true;
             }
-            if (wrote) writeKnowledgeCandidates(teamId, list);
+            // #2592 (AC3/AC8): accepting a domain card settles the queued lessons
+            // it listed — but only those whose ids are now in the written skill's
+            // provenance. The rest stay queued; on the next pass the (promoted)
+            // domain card re-opens for them (buildDomainCard).
+            let next = list;
+            if (!dismiss && !undismiss && p.skill && typeof p.skill.name === 'string') {
+              const cards = list.filter((c) => c && idList.includes(c.id) && knowledgeDomainSkills.isDomainCard(c));
+              const doc = cards.length ? _readTeamSkillDoc(teamId, p.skill.name) : null;
+              const provIds = doc && Array.isArray(doc.provenance.entryIds) ? doc.provenance.entryIds : [];
+              for (const card of cards) {
+                const settle = knowledgeDomainSkills.settleCoveredRows(next, card.lessonIds, provIds, {
+                  resolvedAt: new Date().toISOString(), promotedBy: 'operator',
+                  ...(isExtend ? { extendedInto: p.skill.name } : { promotedInto: p.skill.name }),
+                });
+                next = settle.rows;
+                wrote = wrote || settle.settled.length > 0;
+              }
+            }
+            if (wrote) writeKnowledgeCandidates(teamId, next);
           } else if (!dismiss && !undismiss && entryIds.length > 0) {
             // Promotion without a stored suggestion (manual combine, agent→team
             // lift): record a synthetic promoted row so the collector's promoted
@@ -18528,6 +18728,17 @@ async function main() {
             res.end(JSON.stringify({ ok: true, doc, budget: budgetOf(), ...extra }));
           };
           const doc = readTeamDomainsDoc(teamId);
+          // #2592 (AC10): every domain becomes one skill — growing the taxonomy at
+          // or over the soft skill budget needs an explicit confirmation. Without it
+          // nothing is written; the console asks and re-sends with the flag.
+          if (p.overBudgetConfirmed !== true) {
+            const gate = knowledgeDomains.domainGrowthNeedsConfirmation(doc, op, p, budgetOf());
+            if (gate.needed) {
+              res.writeHead(409, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'over-budget', added: gate.added, budget: budgetOf() }));
+              return;
+            }
+          }
           let r;
           switch (op) {
             case 'read':
@@ -18630,7 +18841,10 @@ async function main() {
           const buildPlan = () => {
             const domains = readTeamDomainsDoc(teamId).domains;
             const skills = readTeamSkillsForMatch(teamId);
-            const openCands = (readKnowledgeCandidates(teamId) || []).filter((c) => c && c.status === 'open');
+            // #2592: a domain card, a new-domain proposal or a decay card is not lesson
+            // content to fold — only real lesson cards are assigned to domains.
+            const openCands = (readKnowledgeCandidates(teamId) || []).filter((c) => c && c.status === 'open'
+              && !CONSOLIDATION_NON_LESSON_SOURCES.has(c.source));
             const skillEntryIdsByDomain = {};
             for (const d of domains) {
               const sk = skills.find((s) => s.name === knowledgeDomains.domainSkillName(d));
@@ -18666,7 +18880,25 @@ async function main() {
             appendKnowledgeEvents([knowledgeConsolidation.consolidationEvent(stepStatus, {
               teamId, domain: dom ? { id: dom.domainId, name: dom.name } : null, skill: dom ? dom.skill : null, now,
             })]);
-            return ok({ state });
+            // #2592 AC11: an accepted domain also folds its pending lesson cards into
+            // the domain skill — they are parked on the domain's queue and the
+            // collector pass creates/extends the ONE domain skill (or raises the
+            // domain's single card when the team>team gate is not `auto`).
+            let queued = 0;
+            if (stepStatus === 'accepted' && dom && Array.isArray(dom.candidateIds) && dom.candidateIds.length) {
+              const want = new Set(dom.candidateIds);
+              const rows = readKnowledgeCandidates(teamId).map((r) => {
+                if (!r || !want.has(r.id) || r.status !== 'open' || CONSOLIDATION_NON_LESSON_SOURCES.has(r.source)) return r;
+                queued += 1;
+                return knowledgeDomainSkills.queuedRow(r, { domainId: dom.domainId, via: 'consolidation', now });
+              });
+              if (queued > 0) {
+                writeKnowledgeCandidates(teamId, rows);
+                runConvergenceCollector(teamId, null, { force: true })
+                  .catch((err) => console.warn(`[Orchestrator] consolidation fold collector for '${teamId}' failed: ${err.message}`));
+              }
+            }
+            return ok({ state, queued });
           }
           if (op === 'route-remaining') {
             const prev = readConsolidationState(teamId);

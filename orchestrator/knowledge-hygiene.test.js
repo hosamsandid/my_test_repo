@@ -215,3 +215,23 @@ test('evidenceScore rewards more agents/lessons and recency', () => {
 test('DEFAULT_MAX_OPEN_SUGGESTIONS constant', () => {
   assert.strictEqual(DEFAULT_MAX_OPEN_SUGGESTIONS, 40);
 });
+
+// ── #2592: the one-card-per-domain card is never retired by hygiene ─────────
+
+test('planSupersessions never retires a domain-skill card (one card per domain)', () => {
+  const cands = [
+    { id: 'ds-dev', status: 'open', kind: 'convention', source: 'domain-skill', entryIds: ['a', 'b'] },
+    { id: 'ds-ops', status: 'open', kind: 'convention', source: 'domain-skill', entryIds: ['a', 'b', 'c'] },
+  ];
+  const r = planSupersessions(cands, { now: NOW });
+  assert.strictEqual(r.superseded.length, 0);
+});
+
+test('planOpenCap never evicts a domain-skill card', () => {
+  const cands = [
+    { id: 'ds-dev', status: 'open', source: 'domain-skill', entryIds: ['a'], raisedAt: '2020-01-01T00:00:00Z' },
+    { id: 'x', status: 'open', source: 'convergence', entryIds: ['b', 'c'], convergence: ['p', 'q'], raisedAt: NOW },
+  ];
+  const r = planOpenCap(cands, { now: NOW, maxOpen: 1 });
+  assert.deepStrictEqual(r.evicted.map((c) => c.id), ['x']);
+});

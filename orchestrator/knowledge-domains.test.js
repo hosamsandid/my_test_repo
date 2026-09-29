@@ -159,3 +159,29 @@ test('skillBudgetState: over when used >= cap', () => {
   // default cap
   assert.equal(D.skillBudgetState([]).cap, D.DEFAULT_SKILL_BUDGET);
 });
+
+// --- #2592 AC10: growing the taxonomy at/over the skill budget needs confirmation ---
+
+test('domainsAddedByOp: add → 1, split → extra parts, confirm → growth; others add nothing', () => {
+  const doc = { domains: [{ id: 'a' }, { id: 'b' }] };
+  assert.equal(D.domainsAddedByOp(doc, 'add', { domain: { name: 'x' } }), 1);
+  assert.equal(D.domainsAddedByOp(doc, 'split', { parts: [{ name: 'p' }, { name: 'q' }, { name: ' ' }] }), 1);
+  assert.equal(D.domainsAddedByOp(doc, 'confirm', { domains: [{}, {}, {}, {}] }), 2);
+  assert.equal(D.domainsAddedByOp(doc, 'confirm', { domains: [{}] }), 0);
+  for (const op of ['rename', 'merge', 'remove', 'read', 'seed', 'bootstrap']) assert.equal(D.domainsAddedByOp(doc, op, {}), 0);
+});
+
+test('domainGrowthNeedsConfirmation: below budget passes; at/over budget (skills OR domains) needs confirmation', () => {
+  const doc = { domains: [{ id: 'a' }, { id: 'b' }] };
+  const roomy = D.skillBudgetState(['s1'], { cap: 5 });
+  assert.equal(D.domainGrowthNeedsConfirmation(doc, 'add', {}, roomy).needed, false);
+  // Skills at the cap.
+  const full = D.skillBudgetState(['s1', 's2', 's3'], { cap: 3 });
+  assert.deepEqual(D.domainGrowthNeedsConfirmation(doc, 'add', {}, full), { needed: true, added: 1 });
+  // Domains (future skills) would exceed the cap even though few skills exist yet.
+  const tight = D.skillBudgetState([], { cap: 2 });
+  assert.equal(D.domainGrowthNeedsConfirmation(doc, 'add', {}, tight).needed, true);
+  // Ops that add nothing never need confirmation.
+  assert.equal(D.domainGrowthNeedsConfirmation(doc, 'remove', { id: 'a' }, full).needed, false);
+  assert.equal(D.domainGrowthNeedsConfirmation(doc, 'rename', { id: 'a', name: 'z' }, full).needed, false);
+});

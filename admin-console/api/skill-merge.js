@@ -83,7 +83,11 @@ function planMerge(input, opts = {}) {
   const b = input && typeof input === 'object' ? input : {};
 
   const rawSources = Array.isArray(b.sources) ? b.sources : [];
-  if (rawSources.length < 2) return { ok: false, error: 'merge requires at least two sources' };
+  // A single-source "fold" (#2592) moves one skill into a DIFFERENT target — the
+  // Consolidate step that folds a domain's only member skill into the domain skill.
+  // Opt-in only; an ordinary merge still needs two or more sources.
+  const fold = b.fold === true;
+  if (rawSources.length < (fold ? 1 : 2)) return { ok: false, error: 'merge requires at least two sources' };
 
   const sources = [];
   const seen = new Set();
@@ -108,6 +112,10 @@ function planMerge(input, opts = {}) {
     const teamId = typeof t.teamId === 'string' ? t.teamId.trim() : '';
     if (!res.teamIdRe.test(teamId)) return { ok: false, error: 'teamId required for a team target' };
     target.teamId = teamId;
+  }
+
+  if (fold && sources.length === 1 && refKey(sources[0]) === refKey(target)) {
+    return { ok: false, error: 'a fold needs a target different from its source' };
   }
 
   const draft = typeof b.draft === 'string' ? b.draft : '';

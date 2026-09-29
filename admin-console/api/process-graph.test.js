@@ -57,6 +57,8 @@ test('classifyKind reads the label-registry flags', () => {
   assert.equal(classifyKind('human-decision-required', reg), 'brake');
   assert.equal(classifyKind('ready-for-review', reg), 'agent');
   assert.equal(classifyKind('pull_request_review.submitted', reg), 'review');
+  // #2536: the poller-sourced (Events API) form classifies identically.
+  assert.equal(classifyKind('pull_request_review.created', reg), 'review');
 });
 
 test("classifyKind reads a channel's gate: 'human' flag", () => {

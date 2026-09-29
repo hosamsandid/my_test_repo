@@ -16,6 +16,8 @@
 // event/queue-entry shapes. All I/O (queue write, REST stamp, event log)
 // stays in orchestrator.js.
 
+const { listensTo } = require('./event-key-aliases');
+
 const TARGET_KINDS = ['issue', 'pr'];
 
 // The poller event key a target kind maps to. An emit is always a "labeled"
@@ -79,7 +81,7 @@ function matchInternalListeners({ repo, label, kind }, agents) {
       if (!t || t.type !== 'github-event' || t.enabled === false) continue;
       if (t.transport !== 'internal') continue;
       if (t.repo !== repo) continue;
-      if (!Array.isArray(t.events) || !t.events.includes(key)) continue;
+      if (!Array.isArray(t.events) || !listensTo(t.events, key)) continue;
       const filter = typeof t.labelFilter === 'string' && t.labelFilter.trim();
       if (filter && filter !== label) continue;
       out.push({ agentId: a.agentId, triggerId: t.id });

@@ -30,6 +30,7 @@ const githubEventLog = require('./github-event-log');
 const { parseCloses } = require('./pr-events-log');
 const { resolveGithubApiTarget, githubApiBase, DEFAULT_GITHUB_API_BASE } = require('./github-api-base');
 const wakeArmory = require('./wake-armory');
+const { canonicalEventKey, listensTo } = require('./event-key-aliases');
 
 // Poll cadence. Fixed 30s in production; overridable via
 // AEE_GITHUB_POLL_INTERVAL_MS (#711) so the E2E stack can tighten it — the
@@ -165,11 +166,14 @@ const TYPE_KEY = {
   CommitCommentEvent: 'commit_comment',
 };
 
+// The key is canonicalised (#2536): an Events-API action whose webhook name
+// differs (PullRequestReviewEvent `created` → `submitted`) reports the name the
+// trigger editor offers. See event-key-aliases.js.
 function eventKey(ev) {
   const base = TYPE_KEY[ev.type] || (ev.type || '').replace(/Event$/, '').toLowerCase();
   if (!base) return null;
   const action = ev.payload?.action;
-  return action ? `${base}.${action}` : base;
+  return canonicalEventKey(action ? `${base}.${action}` : base);
 }
 
 // Conversation key for the Layer-3 throttle: groups events that belong to
@@ -440,7 +444,16 @@ function passesHorizon(eventCreatedAt, horizonIso, graceMs) {
 function selectFreshEvents(events, seenArr, seenMax) {
   const list = Array.isArray(events) ? events : [];
   const seen = new Set(Array.isArray(seenArr) ? seenArr : []);
-  const fresh = list.filter(e => e && e.id != null && !seen.has(String(e.id)));
+  // #2536: an id listed twice in one fetch (a burst shifting an event across
+  // the page boundary during backfill) is still ONE event — deliver it once.
+  const freshIds = new Set();
+  const fresh = list.filter((e) => {
+    if (!e || e.id == null) return false;
+    const s = String(e.id);
+    if (seen.has(s) || freshIds.has(s)) return false;
+    freshIds.add(s);
+    return true;
+  });
 
   const nextSeen = [];
   const added = new Set();
@@ -908,7 +921,7 @@ class GitHubPoller {
     // event-transparency log, keyed by event id — populated here with the
     // per-subscriber gate outcomes, then finalised with phase 2's digest/
     // throttle/delivered outcomes below, and written out once at the end.
-    // A subscriber that doesn't listen to this event type at all (`!sub.events.has(key)`)
+    // A subscriber that doesn't listen to this event type at all (`!listensTo(sub.events, key)`)
     // is NOT recorded as an outcome — that's the "no one is listening" case
     // (AC #4), distinct from "someone listened but a gate dropped it" (AC #3).
     const deliverables = [];
@@ -991,11 +1004,13 @@ class GitHubPoller {
       }
 
       for (const sub of subscribers) {
-        if (!sub.events.has(key)) continue;
+        // #2536: alias-aware — a trigger stored with either form of the review
+        // key matches, and one listing both still yields a single outcome.
+        if (!listensTo(sub.events, key)) continue;
         // #2529: a trigger that also listens to the originating PR event is
         // already woken by it — the synthetic push would wake it twice for the
         // same moment. Not an outcome: the real PR event row records its wake.
-        if (synthesizedFrom && sub.events.has(synthesizedFrom)) continue;
+        if (synthesizedFrom && listensTo(sub.events, synthesizedFrom)) continue;
 
         const outcome = { agentId: sub.agentId, triggerId: sub.triggerId, status: 'pending', reason: null, digest: false };
         logEntry.outcomes.push(outcome);
@@ -1673,6 +1688,7 @@ function pollerSubscribes(t) {
 module.exports = {
   GitHubPoller,
   pollerSubscribes,
+  listensTo,
   parseRepoFullName,
   prApiUrlToHtmlUrl,
   eventKey,

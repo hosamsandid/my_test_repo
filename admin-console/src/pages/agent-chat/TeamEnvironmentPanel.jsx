@@ -17,6 +17,7 @@ import { providerOptionLabel } from '../provider-option-view.js';
 import { personalProviderNoticeText } from '../provider-health-view.js';
 import { initialTeamEnvForm, teamEnvSubmitBody } from './team-environment-view.js';
 import { describeCredentialRef } from '../credential-ref-legibility.js';
+import { describeEffectiveCredential } from '../effective-identity-view.js';
 
 /**
  * Team Settings — the five environment tabs of the flat configuration row
@@ -77,7 +78,7 @@ export default function TeamEnvironmentPanel({ agent, tab }) {
   // 403 anyway (`canManageEnvironment`). This is the common shape after #2052 —
   // a single agent on a reused shared environment, converted into a team of one.
   if (env.canManage === false) {
-    return <ReadOnlyEnvSummary env={env} tab={tab} />;
+    return <ReadOnlyEnvSummary env={env} agent={agent} tab={tab} />;
   }
 
   return <TeamEnvironmentFields env={env} agent={agent} onSaved={refetch} tab={tab} />;
@@ -87,7 +88,7 @@ export default function TeamEnvironmentPanel({ agent, tab }) {
 // field group at a time, matching whichever of the five environment tabs is
 // selected (#2236; each tab renders its own explanation rather than one
 // combined read-only page).
-function ReadOnlyEnvSummary({ env, tab }) {
+function ReadOnlyEnvSummary({ env, agent, tab }) {
   const repositories = Array.isArray(env.repositories) ? env.repositories : [];
   const mcpServers = Array.isArray(env.mcpServers) ? env.mcpServers : [];
   const rowStyle = {
@@ -120,7 +121,10 @@ function ReadOnlyEnvSummary({ env, tab }) {
 
   let content = null;
   if (tab === 'repositories') {
-    content = section('Repositories', repositories.length === 0 ? none : (
+    content = (
+      <>
+        <EffectiveGithubIdentity agentId={agent?.id} />
+        {section('Repositories', repositories.length === 0 ? none : (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-0-5)' }}>
         {repositories.map((r, i) => (
           <div key={i} style={rowStyle}>
@@ -130,7 +134,9 @@ function ReadOnlyEnvSummary({ env, tab }) {
           </div>
         ))}
       </div>
-    ));
+        ))}
+      </>
+    );
   } else if (tab === 'provider') {
     content = section('Model provider', (
       <div style={rowStyle}>
@@ -359,6 +365,10 @@ function TeamEnvironmentFields({ env, agent, onSaved, tab }) {
           {/* #2324: live GitHub-integration health — is the token valid for each
               repo, and is anything listening? Reflects the SAVED state. */}
           <GithubHealthBadge envId={baseline.id} />
+          {/* #2560: whose token / key the team's containers actually start with
+              — the Team Admin's personal credential overrides the ones below.
+              Keyed on the saved record so a save re-resolves it. */}
+          <EffectiveGithubIdentity key={baseline.githubTokenId || ''} agentId={agent?.id} />
           {form.repositories.map((repo, idx) => (
             <RepositoryCard
               key={idx}
@@ -847,6 +857,56 @@ function GithubHealthBadge({ envId }) {
           <code>{r.fullName || r.url}</code>: {r.label}{r.detail ? ` — ${r.detail}` : ''}
         </div>
       ))}
+    </div>
+  );
+}
+
+// #2560: the EFFECTIVE baseline GitHub token / SSH key of this team — the tier
+// the orchestrator's spawn-time resolver actually picks (GET
+// /api/agents/:id/effective-credentials), so a Team Admin's personal credential
+// that overrides the team's own is visible instead of silent. The server has
+// already redacted another person's personal credential to name + kind.
+function EffectiveGithubIdentity({ agentId }) {
+  const { data, error } = useApi(
+    agentId ? `/api/agents/${encodeURIComponent(agentId)}/effective-credentials` : null,
+  );
+  if (!agentId || error || !data) return null;
+  const rows = [data.github, data.ssh].filter(Boolean).map((v) => ({ v, d: describeEffectiveCredential(v) }));
+  if (rows.length === 0) return null;
+  return (
+    <div role="status" aria-label="Effective GitHub identity" style={{
+      display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+      padding: 'var(--eb-space-2) var(--eb-space-3)', borderRadius: 'var(--eb-radius-md)',
+      background: 'var(--eb-bg-elevated)', fontSize: 'var(--eb-text-sm)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', fontWeight: 'var(--eb-font-medium)' }}>
+        <Info size={13} />
+        <span>Effective GitHub identity</span>
+      </div>
+      {rows.map(({ v, d }) => (
+        <div key={v.kind} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-0-5)' }}>
+          <div>
+            <span style={{ color: 'var(--eb-text-muted)' }}>{v.kindLabel}: </span>
+            <span style={{ color: d.tone === 'warning' ? 'var(--eb-status-warning, var(--eb-status-error))' : 'var(--eb-text-primary)' }}>
+              {d.headline}
+            </span>
+          </div>
+          <div style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' }}>{d.detail}</div>
+          {d.teamNote && (
+            <div style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' }}>{d.teamNote}</div>
+          )}
+          {d.problem && (
+            <div style={warnBoxStyle}>
+              <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: '2px' }} />
+              <span>{d.problem}</span>
+            </div>
+          )}
+        </div>
+      ))}
+      <div style={{ color: 'var(--eb-text-muted)', fontSize: 'var(--eb-text-xs)' }}>
+        Used for automatic runs and the agents' own <code>gh</code>/<code>git</code> calls; a change takes effect at the
+        agents' next start. An interactive push or pull request uses the chatting person's own personal credential.
+      </div>
     </div>
   );
 }

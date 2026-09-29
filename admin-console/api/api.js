@@ -117,6 +117,7 @@ const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, bu
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
 const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
+const { presentEffectiveIdentity } = require('./effective-github-identity');
 const { scopeRepoStatus, findRepoStatus } = require('./github-repo-status-scope');
 const { scopePendingQueue } = require('./pending-queue-scope');
 const { checkGithubTokenRequirement } = require('./env-token-requirement');
@@ -14973,6 +14974,66 @@ app.get('/api/environments/:id/github-health', apiLimiter, async (req, res) => {
   }
   res.json({ envId: env.id, tokenId: env.githubTokenId || null, repos: out, rollUp: rollUpGithubHealth(out) });
 });
+
+// #2560: the EFFECTIVE baseline GitHub token / SSH key of an agent (in practice a
+// team) — whose credential its containers are started with, for every
+// autonomous run and every in-container `gh`/`git` call. The decision comes
+// from the orchestrator's own spawn-time resolver (describeBaselineCredential),
+// so this display cannot drift from the runtime; effective-github-identity.js
+// only redacts it for the caller (never another person's personal-credential
+// metadata). Same visibility as the agent itself.
+app.get('/api/agents/:id/effective-credentials', apiLimiter, async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  const scope = getScope(req);
+  if (!cfg || !visibleAgent(scope, agentMetaForScope(cfg))) return res.status(404).json({ error: 'Agent not found' });
+  let described;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/agents/${encodeURIComponent(id)}/effective-credentials`);
+    described = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(resp.status === 404 ? 404 : 502).json({ error: described.error || 'orchestrator error' });
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+  res.json({ agentId: id, teamId: described.teamId || null, environmentId: described.environmentId || null, ...presentEffectiveIdentityFor(scope, described) });
+});
+
+// #2560 AC4/AC5: the Agent Teams whose baseline identity the CALLER currently is
+// (they are its current Team Admin), each with both credentials as the runtime
+// now resolves them. The personal GitHub Tokens / SSH Keys pages call this right
+// after the caller adds or deletes a personal credential to say which teams now
+// use it — or what those teams fell back to. Always the caller's own teams.
+app.get('/api/me/baseline-teams', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  if (!scope?.userId) return res.json({ teams: [] });
+  let data;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/owners/${encodeURIComponent(scope.userId)}/baseline-teams`);
+    data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(502).json({ error: data.error || 'orchestrator error' });
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+  const teams = (Array.isArray(data.teams) ? data.teams : []).map((t) => ({
+    agentId: t.agentId,
+    displayName: t.displayName || t.agentId,
+    ...presentEffectiveIdentityFor(scope, t),
+  }));
+  res.json({ teams });
+});
+
+function presentEffectiveIdentityFor(scope, described) {
+  const users = usersById();
+  const ghNames = new Map(listGithubTokens().map((t) => [t.id, t.name || null]));
+  const sshNames = new Map(listSshKeys().map((k) => [k.id, k.name || null]));
+  return presentEffectiveIdentity(described, {
+    callerUserId: scope?.userId || null,
+    userLabel: (uid) => users.get(uid)?.displayName || null,
+    githubName: (cid) => ghNames.get(cid) || null,
+    sshName: (cid) => sshNames.get(cid) || null,
+  });
+}
 
 app.post('/api/environments', heavyLimiter, (req, res) => {
   // `skills` is accepted-and-discarded: the skill grant is team-owned

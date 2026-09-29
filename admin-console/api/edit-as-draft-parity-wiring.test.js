@@ -57,6 +57,17 @@ const CHECKS = {
       'roleEntries must carry the channels port so the exported bundle round-trips channel edges');
   },
 
+  /** The exported ROLE carries the pool port (buildProcessTemplate serializes it). */
+  exportedRoleCarriesPool(src) {
+    const r = templateRoute(src);
+    // Same location as channels above: the roleEntries.push, before graphAgents.
+    // Without it a pooled role exports as unpooled and a team with autoDispatch +
+    // wipLimit re-imports as an invalid bundle (#2579).
+    const roleEntriesPush = r.slice(0, r.indexOf('graphAgents.push'));
+    assert.match(roleEntriesPush, /cfg\.pool && typeof cfg\.pool === 'object' \? \{ pool: cfg\.pool \}/,
+      'roleEntries must carry the pool port so an exported pooled role round-trips (#2579)');
+  },
+
   /** Both materialise paths expand humans consume `from` to member ids. */
   materialiseExpandsHumanConsumes(src) {
     const s = stripComments(src);
@@ -83,8 +94,17 @@ for (const [name, check] of Object.entries(CHECKS)) {
 const MUTATIONS = [
   {
     fires: 'exportedRoleCarriesChannels',
+    // Remove only the channels line (the pool line, #2579, now follows it before
+    // the closing `});`), so this mutation isolates the channels check.
     apply: (s) => s.replace(
-      '      ...(Array.isArray(cfg.channels) && cfg.channels.length ? { channels: cfg.channels } : {}),\n    });',
+      '      ...(Array.isArray(cfg.channels) && cfg.channels.length ? { channels: cfg.channels } : {}),\n',
+      '',
+    ),
+  },
+  {
+    fires: 'exportedRoleCarriesPool',
+    apply: (s) => s.replace(
+      "      ...(cfg.pool && typeof cfg.pool === 'object' ? { pool: cfg.pool } : {}),\n    });",
       '    });',
     ),
   },

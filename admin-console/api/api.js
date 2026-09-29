@@ -119,6 +119,7 @@ const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, bu
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
 const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
+const { scopeRepoStatus, findRepoStatus } = require('./github-repo-status-scope');
 const { checkGithubTokenRequirement } = require('./env-token-requirement');
 const { pairRepositorySshKeyChanges } = require('./repo-sshkey-pairing');
 const { buildCredentialDescriptor } = require('./credential-descriptor');
@@ -592,6 +593,56 @@ app.get('/api/github-events', (req, res) => {
     ...e,
     outcomes: (e.outcomes || []).map((o) => ({ ...o, agentName: agentName(o.agentId) })),
   })));
+});
+
+// #2537: the GitHub poller's per-repository status — is each repository the
+// platform knows about being listened to, and if not, why. The orchestrator
+// builds it from the poller's own plan + runtime state (one source of truth);
+// here it is only cut down to what the caller may see (AC9, pure
+// github-repo-status-scope.js). Read-only; no GitHub request is made.
+async function fetchPollerRepoStatus() {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  const r = await fetch(`${orchestratorUrl}/internal/github-poller/repo-status`);
+  const body = await r.json().catch(() => null);
+  if (!r.ok || !body || body.ok !== true) {
+    throw new Error((body && body.error) || `orchestrator returned ${r.status}`);
+  }
+  return body;
+}
+
+app.get('/api/github-events/repo-status', async (req, res) => {
+  let body;
+  try {
+    body = await fetchPollerRepoStatus();
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: `poller status unavailable: ${err.message}` });
+  }
+  const scope = getScope(req);
+  let repos;
+  if (scope.all) {
+    repos = scopeRepoStatus(body.repos, { all: true });
+  } else {
+    const visibleAgentIds = new Set();
+    const visibleEnvIds = new Set();
+    for (const id of listAgentDirs()) {
+      const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+      if (!cfg || !visibleAgent(scope, agentMetaForScope(cfg))) continue;
+      visibleAgentIds.add(id);
+      if (cfg.environmentId) visibleEnvIds.add(cfg.environmentId);
+    }
+    for (const envId of listEnvironmentIds()) {
+      const env = loadEnvironment(envId);
+      if (env && visibleEnvironment(scope, env)) visibleEnvIds.add(env.id);
+    }
+    repos = scopeRepoStatus(body.repos, { visibleAgentIds, visibleEnvIds });
+  }
+  res.json({
+    ok: true,
+    generatedAt: body.generatedAt,
+    pollIntervalMs: body.pollIntervalMs,
+    lastTickAt: body.lastTickAt,
+    repos,
+  });
 });
 
 // Pending-triggers dispatch queue — operator visibility & control (#724).
@@ -14913,22 +14964,6 @@ function readGithubTokenValue(tokenId) {
   catch { return null; }
 }
 
-// #2324: does any ENABLED agent bound to this env carry an ENABLED github-event
-// trigger for `fullName`? Polled and internal listeners both gate on the repo, so
-// both count. Mirrors the poller's subscriber test without importing it.
-function envHasRepoSubscriber(envId, fullName) {
-  let dirs = [];
-  try { dirs = listAgentDirs(); } catch { return false; }
-  for (const id of dirs) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    if (!cfg || cfg.environmentId !== envId || cfg.enabled === false) continue;
-    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
-    if (!Array.isArray(triggers)) continue;
-    if (triggers.some(t => t && t.type === 'github-event' && t.enabled !== false && t.repo === fullName)) return true;
-  }
-  return false;
-}
-
 // #2324: a cheap authenticated probe of one repo. Returns { status, rateLimited }.
 // Any network/timeout error → status undefined (classifier → 'unknown'), never a throw.
 async function probeGithubRepo(fullName, token) {
@@ -14954,7 +14989,7 @@ async function probeGithubRepo(fullName, token) {
 }
 
 // #2324 (epic #2325): the GitHub-integration health of an environment's repos —
-// token present? valid? a subscriber? — so the console can show WHY events aren't
+// token present? valid? polled by the poller (#2537)? — so the console can show WHY events aren't
 // arriving instead of the operator having to read the poller log. Same visibility
 // as reading the environment; the token value never leaves the server.
 app.get('/api/environments/:id/github-health', apiLimiter, async (req, res) => {
@@ -14968,17 +15003,23 @@ app.get('/api/environments/:id/github-health', apiLimiter, async (req, res) => {
   const repos = Array.isArray(env.repositories) ? env.repositories.filter((r) => r && r.url) : [];
   const hasToken = !!env.githubTokenId;
   const token = hasToken ? readGithubTokenValue(env.githubTokenId) : null;
+  // #2537 AC8: "events are polled" comes from the poller's own status, not a
+  // console-side estimate. Unavailable → null → the classifier says so.
+  let pollerRepos = null;
+  if (repos.length > 0) {
+    try { pollerRepos = (await fetchPollerRepoStatus()).repos; } catch { pollerRepos = null; }
+  }
   const out = [];
   for (const r of repos) {
     let fullName = null;
     try { const p = parseGitHubUrl(r.url); fullName = `${p.org}/${p.repo}`; } catch { /* unparseable url */ }
-    const hasSubscriber = fullName ? envHasRepoSubscriber(env.id, fullName) : null;
+    const pollerStatus = findRepoStatus(pollerRepos, fullName || r.url);
     let probeStatus; let rateLimited = false;
     if (hasToken && token && fullName) {
       const probe = await probeGithubRepo(fullName, token);
       probeStatus = probe.status; rateLimited = probe.rateLimited;
     }
-    out.push({ url: r.url, fullName, ...classifyGithubHealth({ hasToken, hasSubscriber, probeStatus, rateLimited }) });
+    out.push({ url: r.url, fullName, ...classifyGithubHealth({ hasToken, probeStatus, rateLimited, pollerStatus, envId: env.id }) });
   }
   res.json({ envId: env.id, tokenId: env.githubTokenId || null, repos: out, rollUp: rollUpGithubHealth(out) });
 });

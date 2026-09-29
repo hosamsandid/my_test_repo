@@ -16503,6 +16503,26 @@ async function main() {
       return;
     }
 
+    // ── GitHub repository status (#2537) ──────────────────────────────────
+    // Read-only, unscoped: per repository, is the poller listening and if not,
+    // why. Built from the poller's own plan + runtime state; the console
+    // applies the viewer's visibility. Never carries a token value.
+    if (req.method === 'GET' && req.url.split('?')[0] === '/internal/github-poller/repo-status') {
+      try {
+        if (!githubPollerRef) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'GitHub poller not started' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, ...githubPollerRef.repoStatusSnapshot() }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+      return;
+    }
+
     // ── Pending-queue reassignment (#2102) ────────────────────────────────
     // GET  …/pending/:entryId/reassign-targets → which same-team agents would
     //      accept this queued event, derived from the poller's own predicates.
@@ -19713,7 +19733,7 @@ async function main() {
     onMergedPr: postPrTokenComment, // #678 Phase 3 item 2: PR-merge token comment
     labelMarkers: labelDedupMarkers, // #1858 internal fast-path dedup (shared with the label-applied endpoint)
   });
-  githubPollerRef = ghPoller; // #2525: the manual re-fire re-arms through it
+  githubPollerRef = ghPoller; // #2525: the manual re-fire re-arms through it; #2537: repo status
   ghPoller.start();
 
   // ============================================================

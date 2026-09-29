@@ -20,7 +20,9 @@
 //      so the agent-runner picks them up via its existing 5s drain.
 //
 // State (`state.json`) holds per-repo `etag`, `seen` (event-id set, capped
-// at SEEN_MAX), `lastPolledAt`.
+// at SEEN_MAX), `lastPolledAt` (last successful poll), and — for the
+// repository status view (#2537) — `lastEventAt`, `lastError`/`lastErrorAt`,
+// `failingSince`, and the `tokenId`/`tokenEnvId` the repo is polled with.
 // ============================================================
 
 const fs = require('fs');
@@ -598,6 +600,8 @@ class GitHubPoller {
     this.throttleBuckets = this._loadThrottleState();
     this.timer = null;
     this.running = false;
+    // #2537: when the last tick finished (null until the first one has).
+    this.lastTickAt = null;
     // Stall-watchdog bookkeeping for the `running` guard above.
     this.tickProgressAt = 0;
     this.tickGeneration = 0;
@@ -666,107 +670,97 @@ class GitHubPoller {
       // Only the newest tick may release the guard.
       if (this.tickGeneration === generation) {
         this.running = false;
+        // #2537: until the first tick has run, the status view says "waiting
+        // for first poll" instead of trusting state carried over from before.
+        this.lastTickAt = new Date().toISOString();
       }
     }
   }
 
   // Walks environments → (repo → tokenId), then agents → subscribers per repo.
   // Repos referenced by environments without a (valid) token are skipped —
-  // we have no way to authenticate the poll.
+  // we have no way to authenticate the poll. The decision itself is the pure
+  // `computePollPlan` below (#2537): the repository status view builds its
+  // "is this repo polled?" answer from the very same function, so the two can
+  // never disagree.
   _buildPollPlan() {
-    const repoToToken = new Map();
-    const envIds = this.listEnvironmentIds();
-    for (const envId of envIds) {
-      const env = this.loadEnvironment(envId);
-      if (!env || !env.githubTokenId) continue;
-      if (!isValidTokenId(env.githubTokenId)) {
-        console.error(`[GH-Poller] env=${env.id} has invalid githubTokenId '${env.githubTokenId}' — skipping its repos`);
-        continue;
-      }
-      const repos = Array.isArray(env.repositories) ? env.repositories : [];
-      const allowNonGithubHost = usingNonDefaultApiBase();
-      for (const r of repos) {
-        const fullName = parseRepoFullName(r?.url, { allowNonGithubHost });
-        if (!fullName) continue;
-        if (!repoToToken.has(fullName)) repoToToken.set(fullName, env.githubTokenId);
-      }
-    }
-
-    const plan = new Map();
-    if (!fs.existsSync(AGENTS_DIR)) return plan;
-    for (const agentId of fs.readdirSync(AGENTS_DIR)) {
-      // Skip disabled agents — do not enqueue events for them. The agent's
-      // process may have been stopped; enqueueing would only accumulate a
-      // backlog that fires in a burst on re-enable.
-      try {
-        const agentCfg = JSON.parse(
-          fs.readFileSync(path.join(AGENTS_DIR, agentId, 'config.json'), 'utf8'),
-        );
-        if (agentCfg?.enabled === false) continue;
-      } catch { /* no config.json = new/stub agent, allow through */ }
-
-      const triggersPath = this.triggersPath(agentId);
-      if (!fs.existsSync(triggersPath)) continue;
-      let triggers;
-      let triggersMtime = null;
-      try {
-        triggers = JSON.parse(fs.readFileSync(triggersPath, 'utf8'));
-        // mtime is the legacy fallback for the per-trigger history horizon
-        // (see `createdAt` below) — pre-existing triggers from before the
-        // horizon was introduced have no stamp, but the file's mtime is a
-        // reasonable proxy for "when this agent's triggers landed".
-        triggersMtime = fs.statSync(triggersPath).mtime.toISOString();
-      } catch {
-        continue;
-      }
-      if (!Array.isArray(triggers)) continue;
-
-      for (const t of triggers) {
-        if (!pollerSubscribes(t)) continue;
-        const tokenId = repoToToken.get(t.repo);
-        if (!tokenId) continue;
-
-        let bucket = plan.get(t.repo);
-        if (!bucket) {
-          bucket = { tokenId, subscribers: [] };
-          plan.set(t.repo, bucket);
-        }
-        bucket.subscribers.push({
-          agentId,
-          triggerId: t.id,
-          events: new Set(t.events),
-          // Per-subscriber history horizon: events older than this stamp (minus
-          // a grace window, see GRACE_MS) are dropped before any other layer
-          // fires, so a freshly-added or just-reactivated agent never reacts to
-          // activity that predates it (e.g. PRs already open when the team was
-          // set up, or the backlog that accrued while a trigger was disabled).
-          // Prefers activatedAt → createdAt → triggers.json mtime (legacy).
-          horizon: effectiveHorizon(t, triggersMtime),
-          // Optional exact-match filter on payload.label.name for *.labeled
-          // and *.unlabeled events. Empty / null / undefined = no filter
-          // (legacy behavior — fire on any label change). When set, the
-          // poller drops events whose label name doesn't match before they
-          // ever wake the agent — saves a Claude invocation per unrelated
-          // label change.
-          labelFilter: (typeof t.labelFilter === 'string' && t.labelFilter.trim()) || null,
-          // The trigger's own claim label (#957/#958): the `<wake>:wip` label the
-          // claim swap ADDS after this trigger fires. Its own `*.labeled` event
-          // must never re-wake the trigger — see the self-claim-label drop in
-          // `_fanOutBatch`. null when the trigger declares no claim.
-          claimAdd: (t.claim && typeof t.claim.add === 'string' && t.claim.add.trim()) || null,
-        });
-      }
-    }
-    return plan;
+    return computePollPlan(this._readPlanInputs(), {
+      onInvalidTokenId: (env) => console.error(`[GH-Poller] env=${env.id} has invalid githubTokenId '${env.githubTokenId}' — skipping its repos`),
+    });
   }
 
-  async _pollRepo(repoFullName, { tokenId, subscribers }) {
+  // The fs half of the poll plan: every environment record, and every agent
+  // directory with its config and triggers.json (null when missing/unreadable).
+  // Disabled agents are included (with `enabled: false`) — the plan skips them,
+  // the status view explains that it did.
+  _readPlanInputs() {
+    const environments = [];
+    for (const envId of this.listEnvironmentIds()) {
+      const env = this.loadEnvironment(envId);
+      if (env) environments.push(env);
+    }
+    const agents = [];
+    if (fs.existsSync(AGENTS_DIR)) {
+      for (const agentId of fs.readdirSync(AGENTS_DIR)) {
+        let config = null;
+        try {
+          config = JSON.parse(fs.readFileSync(path.join(AGENTS_DIR, agentId, 'config.json'), 'utf8'));
+        } catch { /* no config.json = new/stub agent, allow through */ }
+        let triggers = null;
+        let triggersMtime = null;
+        const triggersPath = this.triggersPath(agentId);
+        try {
+          if (fs.existsSync(triggersPath)) {
+            triggers = JSON.parse(fs.readFileSync(triggersPath, 'utf8'));
+            // mtime is the legacy fallback for the per-trigger history horizon
+            // (see `effectiveHorizon`) — pre-existing triggers from before the
+            // horizon was introduced have no stamp, but the file's mtime is a
+            // reasonable proxy for "when this agent's triggers landed".
+            triggersMtime = fs.statSync(triggersPath).mtime.toISOString();
+          }
+        } catch {
+          triggers = null;
+          triggersMtime = null;
+        }
+        agents.push({ id: agentId, config, triggers, triggersMtime });
+      }
+    }
+    return { environments, agents, allowNonGithubHost: usingNonDefaultApiBase() };
+  }
+
+  // #2537: the per-repository status the GitHub Event Log shows — built from the
+  // same inputs and the same `computePollPlan` as a tick, plus the live
+  // per-repo runtime state. Read-only; issues no GitHub request.
+  repoStatusSnapshot() {
+    const { buildRepoStatusView } = require('./github-repo-status');
+    const inputs = this._readPlanInputs();
+    const plan = computePollPlan(inputs);
+    return {
+      generatedAt: new Date().toISOString(),
+      pollIntervalMs: POLL_INTERVAL_MS,
+      lastTickAt: this.lastTickAt || null,
+      repos: buildRepoStatusView({
+        ...inputs,
+        plan,
+        state: this.state,
+        firstTickDone: !!this.lastTickAt,
+        tokenReadable: tokenFileReadable,
+        now: Date.now(),
+      }),
+    };
+  }
+
+  async _pollRepo(repoFullName, { tokenId, envId, subscribers }) {
     const repoState = this.state[repoFullName] || {};
 
     // Honor a previously set backoff: skip silently until skipUntil passes.
     if (repoState.skipUntil && new Date(repoState.skipUntil).getTime() > Date.now()) {
       return;
     }
+
+    // #2537: which environment's token this repo is polled with.
+    repoState.tokenId = tokenId;
+    repoState.tokenEnvId = envId || null;
 
     if (!isValidTokenId(tokenId)) {
       console.error(`[GH-Poller] ${repoFullName}: invalid tokenId '${tokenId}' — skipping`);
@@ -796,6 +790,12 @@ class GitHubPoller {
       );
       repoState.consecutiveFailures = failures;
       repoState.skipUntil = new Date(Date.now() + delayMs).toISOString();
+      // #2537: keep the last error (and when the failure streak began) so the
+      // repository status view can show it — not only the console.
+      const nowIso = new Date().toISOString();
+      repoState.lastError = describePollError(err);
+      repoState.lastErrorAt = nowIso;
+      if (!repoState.failingSince) repoState.failingSince = nowIso;
       this.state[repoFullName] = repoState;
       this._saveState();
       const minutes = Math.round(delayMs / 60_000);
@@ -814,6 +814,7 @@ class GitHubPoller {
       delete repoState.consecutiveFailures;
       delete repoState.skipUntil;
     }
+    delete repoState.failingSince;
 
     repoState.lastPolledAt = new Date().toISOString();
 
@@ -879,6 +880,7 @@ class GitHubPoller {
     repoState.seen = nextSeen;
 
     if (fresh.length > 0) {
+      repoState.lastEventAt = new Date().toISOString(); // #2537: last event received
       // GitHub returns newest-first; process oldest-first so triggers fire
       // in causal order. Events without a timestamp sort last (stable).
       fresh.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
@@ -1525,7 +1527,15 @@ class GitHubPoller {
           }
           if (res.statusCode !== 200) {
             const body = Buffer.concat(chunks).toString().slice(0, 200);
-            reject(new Error(`HTTP ${res.statusCode}: ${body}`));
+            const err = new Error(`HTTP ${res.statusCode}: ${body}`);
+            // #2537: structured facts for the repository status view.
+            err.status = res.statusCode;
+            err.rateLimitRemaining = res.headers['x-ratelimit-remaining'];
+            try {
+              const parsed = JSON.parse(Buffer.concat(chunks).toString());
+              if (parsed && typeof parsed.message === 'string') err.githubMessage = parsed.message;
+            } catch { /* non-JSON body — keep the raw text */ }
+            reject(err);
             return;
           }
           try {
@@ -1685,8 +1695,114 @@ function pollerSubscribes(t) {
   return true;
 }
 
+// The poll plan as a pure function of its inputs (#2537) — the one place that
+// decides "is this repository polled, with which token, for whom". The poller's
+// tick and the repository status view both call it.
+//
+//   environments — environment records in listEnvironmentIds() order. The FIRST
+//                  environment with a valid `githubTokenId` that lists a repo
+//                  supplies its token.
+//   agents       — [{ id, config, triggers, triggersMtime }]; config null = stub
+//                  agent (allowed through), triggers null = none/unreadable.
+//
+// Returns Map<repoFullName, { tokenId, envId, subscribers }>. A repo is in the
+// plan only when it has a token AND at least one subscriber.
+function computePollPlan({ environments = [], agents = [], allowNonGithubHost = false } = {}, { onInvalidTokenId } = {}) {
+  const repoToToken = new Map();
+  for (const env of environments) {
+    if (!env || !env.githubTokenId) continue;
+    if (!isValidTokenId(env.githubTokenId)) {
+      if (onInvalidTokenId) onInvalidTokenId(env);
+      continue;
+    }
+    const repos = Array.isArray(env.repositories) ? env.repositories : [];
+    for (const r of repos) {
+      const fullName = parseRepoFullName(r?.url, { allowNonGithubHost });
+      if (!fullName) continue;
+      if (!repoToToken.has(fullName)) repoToToken.set(fullName, { tokenId: env.githubTokenId, envId: env.id });
+    }
+  }
+
+  const plan = new Map();
+  for (const agent of agents) {
+    // Skip disabled agents — do not enqueue events for them. The agent's
+    // process may have been stopped; enqueueing would only accumulate a
+    // backlog that fires in a burst on re-enable.
+    if (agent?.config?.enabled === false) continue;
+    const triggers = agent?.triggers;
+    if (!Array.isArray(triggers)) continue;
+
+    for (const t of triggers) {
+      if (!pollerSubscribes(t)) continue;
+      const source = repoToToken.get(t.repo);
+      if (!source) continue;
+
+      let bucket = plan.get(t.repo);
+      if (!bucket) {
+        bucket = { tokenId: source.tokenId, envId: source.envId, subscribers: [] };
+        plan.set(t.repo, bucket);
+      }
+      bucket.subscribers.push({
+        agentId: agent.id,
+        triggerId: t.id,
+        events: new Set(t.events),
+        // Per-subscriber history horizon: events older than this stamp (minus
+        // a grace window, see GRACE_MS) are dropped before any other layer
+        // fires, so a freshly-added or just-reactivated agent never reacts to
+        // activity that predates it (e.g. PRs already open when the team was
+        // set up, or the backlog that accrued while a trigger was disabled).
+        // Prefers activatedAt → createdAt → triggers.json mtime (legacy).
+        horizon: effectiveHorizon(t, agent.triggersMtime || null),
+        // Optional exact-match filter on payload.label.name for *.labeled
+        // and *.unlabeled events. Empty / null / undefined = no filter
+        // (legacy behavior — fire on any label change). When set, the
+        // poller drops events whose label name doesn't match before they
+        // ever wake the agent — saves a Claude invocation per unrelated
+        // label change.
+        labelFilter: (typeof t.labelFilter === 'string' && t.labelFilter.trim()) || null,
+        // The trigger's own claim label (#957/#958): the `<wake>:wip` label the
+        // claim swap ADDS after this trigger fires. Its own `*.labeled` event
+        // must never re-wake the trigger — see the self-claim-label drop in
+        // `_fanOutBatch`. null when the trigger declares no claim.
+        claimAdd: (t.claim && typeof t.claim.add === 'string' && t.claim.add.trim()) || null,
+      });
+    }
+  }
+  return plan;
+}
+
+// #2537: can the poller actually use this token? Mirrors the early returns in
+// `_pollRepo` (invalid id, unreadable file, empty file) without ever handing the
+// value out.
+function tokenFileReadable(tokenId) {
+  if (!isValidTokenId(tokenId)) return false;
+  try {
+    return fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), 'utf8').trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// #2537: the short, persisted description of a failed poll — HTTP status (null
+// for a network error), a one-line message, and whether GitHub was rate
+// limiting. GitHub's JSON error body carries a `message`; prefer it over the
+// raw "HTTP 401: {...}" text.
+function describePollError(err) {
+  const status = Number.isInteger(err?.status) ? err.status : null;
+  let message = err?.githubMessage || null;
+  if (!message) message = String(err?.message || 'unknown error');
+  message = message.replace(/\s+/g, ' ').trim().slice(0, 160);
+  const rateLimited = status === 429
+    || (status === 403 && (err?.rateLimitRemaining === '0' || /rate limit/i.test(message)));
+  return { status, message, rateLimited };
+}
+
 module.exports = {
   GitHubPoller,
+  computePollPlan,
+  tokenFileReadable,
+  describePollError,
+  isValidTokenId,
   pollerSubscribes,
   listensTo,
   parseRepoFullName,

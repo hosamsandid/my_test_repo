@@ -29,6 +29,7 @@
 //     sidecar: { image, env?, capabilities?, internalPort },  // required unless commands present
 //     cli: { name, entrypoint, runtime },                     // required unless commands present
 //     credentials?: [ { key, description?, required?, secret? } ],
+//     personalCredentials?: [ { key, description?, required?, secret? } ],  // per-person tier (#2562)
 //     platforms?: [ "podman" | "kubernetes" | "any" ],
 //     scopes?: [ "team" | "agent" ],           // granularities the broker honours
 //     defaultScopeGranularity?: "team" | "agent",  // grant default within scopes (§4.4/§10)
@@ -109,6 +110,36 @@ function isValidCapability(cap) {
 
 // Validate + normalize a manifest. Returns { ok, errors, manifest } — `manifest`
 // is the normalized shape when ok, else null. Never throws.
+// Validate one credential-field list (`credentials` / `personalCredentials`).
+// Pushes human-readable errors onto `errors` (prefixed with `label`) and
+// returns the normalised entries; `undefined` is the empty list.
+function parseCredentialList(list, label, errors) {
+  const out = [];
+  if (list === undefined) return out;
+  if (!Array.isArray(list)) {
+    errors.push(`${label} must be an array`);
+    return out;
+  }
+  const seen = new Set();
+  for (const c of list) {
+    if (!isPlainObject(c) || !isNonEmptyString(c.key)) {
+      errors.push(`each ${label === 'credentials' ? 'credential' : `${label} entry`} must be an object with a non-empty key`);
+      continue;
+    }
+    if (seen.has(c.key)) { errors.push(`duplicate ${label === 'credentials' ? 'credential' : label} key: ${c.key}`); continue; }
+    seen.add(c.key);
+    const entry = { key: c.key.trim(), required: c.required === true };
+    if (isNonEmptyString(c.description)) entry.description = c.description.trim();
+    // A field is secret by default (write-only, masked). A plugin author may
+    // opt one out with `secret: false` (#2449) — then the Admin Console shows
+    // its real stored value; only the explicit opt-out is carried, so every
+    // existing manifest stays byte-identical.
+    if (c.secret === false) entry.secret = false;
+    out.push(entry);
+  }
+  return out;
+}
+
 function validatePluginManifest(input) {
   const errors = [];
   if (!isPlainObject(input)) {
@@ -298,30 +329,13 @@ function validatePluginManifest(input) {
   }
 
   // ── credentials (optional) ───────────────────────────────────────────────
-  let credentials = [];
-  if (input.credentials !== undefined) {
-    if (!Array.isArray(input.credentials)) {
-      errors.push('credentials must be an array');
-    } else {
-      const seen = new Set();
-      for (const c of input.credentials) {
-        if (!isPlainObject(c) || !isNonEmptyString(c.key)) {
-          errors.push('each credential must be an object with a non-empty key');
-          continue;
-        }
-        if (seen.has(c.key)) { errors.push(`duplicate credential key: ${c.key}`); continue; }
-        seen.add(c.key);
-        const entry = { key: c.key.trim(), required: c.required === true };
-        if (isNonEmptyString(c.description)) entry.description = c.description.trim();
-        // A field is secret by default (write-only, masked). A plugin author may
-        // opt one out with `secret: false` (#2449) — then the Admin Console shows
-        // its real stored value; only the explicit opt-out is carried, so every
-        // existing manifest stays byte-identical.
-        if (c.secret === false) entry.secret = false;
-        credentials.push(entry);
-      }
-    }
-  }
+  const credentials = parseCredentialList(input.credentials, 'credentials', errors);
+  // ── personalCredentials (optional, #2562) ────────────────────────────────
+  // The per-PERSON half of a credential-bearing plugin: fields each human
+  // stores for themselves (Jira: their Atlassian e-mail + API token), used for
+  // that person's chat turns instead of the team's service account. Same entry
+  // shape as `credentials[]`; absent → the plugin has no personal tier.
+  const personalCredentials = parseCredentialList(input.personalCredentials, 'personalCredentials', errors);
 
   // ── events (optional) ────────────────────────────────────────────────────
   // The plugin's event vocabulary — what an event-source plugin may send to
@@ -597,6 +611,7 @@ function validatePluginManifest(input) {
   };
   if (sidecar && Object.keys(sidecar).length > 0) manifest.sidecar = sidecar;
   if (cli) manifest.cli = cli;
+  if (personalCredentials.length > 0) manifest.personalCredentials = personalCredentials;
   if (commands !== undefined) manifest.commands = commands;
   if (pluginFetch) manifest.fetch = pluginFetch;
   if (defaultScopeGranularity) manifest.defaultScopeGranularity = defaultScopeGranularity;

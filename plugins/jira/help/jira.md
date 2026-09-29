@@ -101,6 +101,12 @@ the broker cannot tell agents apart (one scope token per team), so a
 teammate's queued events stay queued only as long as each agent drains just
 what it was woken for.
 
+## Whose Jira account is used
+
+In a chat, `aee-jira` runs as the **sender**, with their own token from
+**Plugin Tokens** (`/plugin-tokens`); without one it is refused. The team's
+service account is used only for watching and automated runs.
+
 ## When a transition does not wake the agent
 
 Check in this order:

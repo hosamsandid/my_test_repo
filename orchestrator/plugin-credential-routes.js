@@ -143,7 +143,71 @@ function createPluginCredentialWiring(deps) {
     return true;
   }
 
-  return { grantedTeamScopeIds, pushDeclaredScopeCredentials, handleCredentialRoute };
+  // Handle the per-PERSON store (#2562):
+  //   GET    /internal/users/:userId/plugin-credentials            — every installed
+  //          plugin that declares personalCredentials[], with THIS user's metadata
+  //   PUT    /internal/users/:userId/plugin-credentials/:pluginId  — { values }
+  //   DELETE /internal/users/:userId/plugin-credentials/:pluginId
+  // Metadata only, never raw values. The console proxy pins `:userId` to the
+  // signed-in caller (there is no admin path to another person's document);
+  // nothing is pushed to a broker — personal values leave the orchestrator
+  // only through the per-call credential grant.
+  async function handlePersonalCredentialRoute(req, res, { sendJson, readBody }) {
+    const m = (req.url || '').split('?')[0]
+      .match(/^\/internal\/users\/([^/]+)\/plugin-credentials(?:\/([^/]+))?$/);
+    if (!m) return false;
+    const userId = decodeURIComponent(m[1]);
+    const pluginId = m[2] ? decodeURIComponent(m[2]) : null;
+    const describe = (id, manifest) => ({
+      pluginId: id,
+      name: manifest.name || id,
+      credentials: manifest.personalCredentials.map((c) => ({
+        key: c.key, required: c.required === true, description: c.description || null, secret: c.secret !== false,
+      })),
+      ...credentialStore.personalMeta(id, userId, manifest.personalCredentials),
+    });
+
+    try {
+      if (req.method === 'GET' && !pluginId) {
+        let installed = {};
+        try { installed = pluginRegistry.installedManifests() || {}; } catch { installed = {}; }
+        const plugins = Object.entries(installed)
+          .filter(([, mf]) => mf && Array.isArray(mf.personalCredentials) && mf.personalCredentials.length > 0)
+          .map(([id, mf]) => describe(id, mf));
+        sendJson(res, 200, { userId, plugins });
+        return true;
+      }
+      if ((req.method === 'PUT' || req.method === 'DELETE') && pluginId) {
+        const entry = pluginRegistry.readPluginManifest(pluginId);
+        const manifest = entry && entry.ok ? entry.manifest : null;
+        if (!manifest || !Array.isArray(manifest.personalCredentials) || manifest.personalCredentials.length === 0) {
+          sendJson(res, 404, { error: `Plugin '${pluginId}' is not installed or declares no personal credentials` });
+          return true;
+        }
+        if (req.method === 'DELETE') {
+          credentialStore.deletePersonal(pluginId, userId);
+          sendJson(res, 200, { ok: true, ...describe(pluginId, manifest) });
+          return true;
+        }
+        let payload;
+        try { payload = await readBody(req); } catch {
+          sendJson(res, 400, { error: 'Invalid JSON body' });
+          return true;
+        }
+        const r = credentialStore.writePersonal(pluginId, userId, payload && payload.values, manifest.personalCredentials);
+        if (!r.ok) { sendJson(res, 400, { error: r.errors.join('; '), errors: r.errors }); return true; }
+        sendJson(res, 200, { ok: true, ...describe(pluginId, manifest) });
+        return true;
+      }
+    } catch (err) {
+      sendJson(res, /invalid (userId|pluginId)/.test(err.message) ? 400 : 500, { error: err.message });
+      return true;
+    }
+    sendJson(res, 404, { error: 'not found' });
+    return true;
+  }
+
+  return { grantedTeamScopeIds, pushDeclaredScopeCredentials, handleCredentialRoute, handlePersonalCredentialRoute };
 }
 
 module.exports = { createPluginCredentialWiring };

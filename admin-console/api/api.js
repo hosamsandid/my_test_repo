@@ -15161,6 +15161,36 @@ app.get('/api/me/baseline-teams', apiLimiter, async (req, res) => {
   res.json({ teams });
 });
 
+// #2562: the caller's OWN personal plugin credentials (Jira: their e-mail + API
+// token, used when THEY chat with an agent). The user id always comes from the
+// session — there is no route that names another user, so nobody (System Admins
+// included) can read or change someone else's. The orchestrator returns
+// metadata only (set/unset, a preview, when); values are never read back.
+async function proxyMyPluginCredentials(req, res, method, pluginId) {
+  const scope = getScope(req);
+  if (!scope?.userId) return res.status(403).json({ error: 'Personal plugin credentials need a signed-in user' });
+  const url = `${ORCH_URL()}/internal/users/${encodeURIComponent(scope.userId)}/plugin-credentials`
+    + (pluginId ? `/${encodeURIComponent(pluginId)}` : '');
+  try {
+    const opts = { method };
+    if (method === 'PUT') {
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = JSON.stringify({ values: (req.body && typeof req.body.values === 'object' && req.body.values) || {} });
+    }
+    const resp = await fetch(url, opts);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(resp.status === 400 || resp.status === 404 ? resp.status : 502).json({ error: data.error || 'orchestrator error' });
+    const { userId: _omit, ...rest } = data;
+    res.json(rest);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+}
+
+app.get('/api/me/plugin-credentials', apiLimiter, (req, res) => proxyMyPluginCredentials(req, res, 'GET', null));
+app.put('/api/me/plugin-credentials/:pluginId', apiLimiter, (req, res) => proxyMyPluginCredentials(req, res, 'PUT', req.params.pluginId));
+app.delete('/api/me/plugin-credentials/:pluginId', apiLimiter, (req, res) => proxyMyPluginCredentials(req, res, 'DELETE', req.params.pluginId));
+
 function presentEffectiveIdentityFor(scope, described) {
   const users = usersById();
   const ghNames = new Map(listGithubTokens().map((t) => [t.id, t.name || null]));

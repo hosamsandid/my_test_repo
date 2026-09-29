@@ -224,6 +224,9 @@ test("an agent reaches its own telemetry, knowledge, triggers, ticket and git ro
     ["POST", "/internal/agents/team-x-developer/git/push"],
     ["POST", "/internal/agents/team-x-developer/git/pr"],
     ["POST", "/internal/agents/team-x-developer/github/gh"],
+    ["POST", "/internal/agents/team-x-developer/run-key"],
+    ["POST", "/internal/agents/team-x-developer/runs"],
+    ["POST", "/internal/agents/team-x-developer/runs/end"],
   ];
   for (const [method, url] of own) {
     const d = decide(method, url, asAgent());
@@ -526,12 +529,33 @@ test("observe mode tags a plugin-scope violation without acting on it", () => {
   assert.match(line, /verdict=would-deny/);
 });
 
-test("the plugin allowlist is exactly one route", () => {
-  assert.equal(ia.PLUGIN_SCOPE_ROUTES.length, 1);
+test("the plugin allowlist is exactly the event ingest and the credential grant", () => {
+  assert.equal(ia.PLUGIN_SCOPE_ROUTES.length, 2);
+  assert.deepEqual(
+    ia.PLUGIN_SCOPE_ROUTES.map((r) => `${r.method} ${r.pattern.source}`).sort(),
+    ["POST ^\\/internal\\/plugin-credential-grant$", "POST ^\\/internal\\/plugin-event$"],
+  );
   for (const route of ia.PLUGIN_SCOPE_ROUTES) {
     const src = route.pattern.source;
     assert.ok(src.startsWith("^\\/internal\\/"), `anchored at /internal/: ${src}`);
     assert.ok(src.endsWith("$"), `anchored at the end: ${src}`);
     assert.ok(!src.includes(".*"), `no wildcard segment: ${src}`);
   }
+});
+
+test("#2562: the per-person credential routes are control-plane only; the grant is plugin-scope only", () => {
+  for (const [method, url] of [
+    ["GET", "/internal/users/alice/plugin-credentials"],
+    ["PUT", "/internal/users/alice/plugin-credentials/jira"],
+    ["DELETE", "/internal/users/alice/plugin-credentials/jira"],
+  ]) {
+    assert.equal(decide(method, url, asAgent()).allowed, false, `agent must not reach ${method} ${url}`);
+    assert.equal(decide(method, url, asPlugin(), PLUGIN_CONFIG).allowed, false, `plugin must not reach ${method} ${url}`);
+    assert.equal(decide(method, url, asConsole()).allowed, true);
+  }
+  assert.equal(decide("POST", "/internal/plugin-credential-grant", asPlugin(), PLUGIN_CONFIG).allowed, true);
+  assert.equal(decide("POST", "/internal/plugin-credential-grant", asAgent()).allowed, false);
+  // an agent reaches only ITS OWN run-identity routes
+  assert.equal(decide("POST", "/internal/agents/team-y-developer/run-key", asAgent()).allowed, false);
+  assert.equal(decide("POST", "/internal/agents/team-y-developer/runs", asAgent()).allowed, false);
 });

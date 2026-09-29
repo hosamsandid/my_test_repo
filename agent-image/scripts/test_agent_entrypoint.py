@@ -4400,6 +4400,113 @@ class GhSwapLabels(unittest.TestCase):
         run.assert_not_called()
 
 
+class PluginRunIdentity(unittest.TestCase):
+    """#2562 — the runner declares every Claude run with its in-memory run key."""
+
+    def setUp(self):
+        self._saved_key = entrypoint._PLUGIN_RUN_KEY
+        entrypoint._PLUGIN_RUN_KEY = None
+
+    def tearDown(self):
+        entrypoint._PLUGIN_RUN_KEY = self._saved_key
+
+    def _env(self, **extra):
+        return patch.dict(os.environ, {"AGENT_ID": "team-a-dev", "AEE_AGENT_CALLER_TOKEN": "aeecall1.x.y", **extra})
+
+    def test_declaration_is_chat_only_when_the_dm_handler_named_the_event(self):
+        self.assertEqual(entrypoint._plugin_run_declaration({"chatEvent": {"roomId": "!r", "eventId": "$e"}}),
+                         {"kind": "chat", "roomId": "!r", "eventId": "$e"})
+        # a requestedBy / AEE_ACTING_SENDER-style claim alone is NOT a chat run
+        self.assertEqual(entrypoint._plugin_run_declaration({"requestedBy": {"matrixUserId": "@a:hs"}}),
+                         {"kind": "autonomous"})
+        self.assertEqual(entrypoint._plugin_run_declaration({"chatEvent": {"roomId": "!r", "eventId": None}}),
+                         {"kind": "autonomous"})
+        self.assertEqual(entrypoint._plugin_run_declaration(None), {"kind": "autonomous"})
+
+    def test_the_declaration_never_carries_a_sender(self):
+        body = entrypoint._plugin_run_declaration({"chatEvent": {"roomId": "!r", "eventId": "$e", "sender": "@mallory:hs"},
+                                                   "requestedBy": {"matrixUserId": "@mallory:hs"}})
+        self.assertNotIn("sender", json.dumps(body))
+        self.assertNotIn("mallory", json.dumps(body))
+
+    def test_key_is_fetched_once_and_kept_out_of_env(self):
+        calls = []
+
+        def post(route, body, timeout=10):
+            calls.append((route, body))
+            return 200, {"ok": True, "key": "K" * 64}
+
+        with self._env(), patch.object(entrypoint, "_plugin_identity_post", post), \
+                patch.object(entrypoint, "_make_non_dumpable", return_value=True) as nd:
+            self.assertTrue(entrypoint._acquire_plugin_run_key())
+            nd.assert_called_once()
+            self.assertEqual(calls, [("/run-key", {})])
+            self.assertEqual(entrypoint._PLUGIN_RUN_KEY, "K" * 64)
+            self.assertNotIn("K" * 64, "".join(os.environ.values()))
+
+    def test_a_refused_key_is_final_and_only_a_refused_connection_is_retried(self):
+        answers = [ConnectionRefusedError(), (409, {"ok": False, "reason": "key-already-issued"})]
+        calls = []
+
+        def post(route, body, timeout=10):
+            calls.append(route)
+            a = answers.pop(0)
+            if isinstance(a, BaseException):
+                raise a
+            return a
+
+        with self._env(), patch.object(entrypoint, "_plugin_identity_post", post), \
+                patch.object(entrypoint, "_make_non_dumpable", return_value=True), \
+                patch.object(entrypoint.time, "sleep"):
+            self.assertFalse(entrypoint._acquire_plugin_run_key(attempts=5))
+        self.assertEqual(calls, ["/run-key", "/run-key"])  # no third ask after an answer
+        self.assertIsNone(entrypoint._PLUGIN_RUN_KEY)
+
+    def test_no_caller_token_means_no_key_request(self):
+        with patch.dict(os.environ, {"AGENT_ID": "a", "AEE_AGENT_CALLER_TOKEN": ""}), \
+                patch.object(entrypoint, "_plugin_identity_post") as post:
+            self.assertFalse(entrypoint._acquire_plugin_run_key())
+            post.assert_not_called()
+
+    def test_every_claude_run_is_declared_and_ended_even_when_it_fails(self):
+        entrypoint._PLUGIN_RUN_KEY = "k"
+        calls = []
+
+        def post(route, body, timeout=10):
+            calls.append((route, body))
+            return (200, {"ok": True, "runId": "run-1"}) if route == "/runs" else (200, {"ok": True})
+
+        with self._env(), patch.object(entrypoint, "_plugin_identity_post", post), \
+                patch.object(entrypoint, "_call_claude_once_inner", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                entrypoint._call_claude_once("p", "!r", "$e", None, None, 10,
+                                             {"chatEvent": {"roomId": "!r", "eventId": "$e"}})
+        self.assertEqual(calls, [
+            ("/runs", {"key": "k", "kind": "chat", "roomId": "!r", "eventId": "$e"}),
+            ("/runs/end", {"key": "k", "runId": "run-1"}),
+        ])
+
+    def test_a_failed_declaration_never_blocks_the_run(self):
+        entrypoint._PLUGIN_RUN_KEY = "k"
+        with self._env(), patch.object(entrypoint, "_plugin_identity_post", return_value=(403, {"reason": "bad-run-key"})), \
+                patch.object(entrypoint, "_call_claude_once_inner", return_value=("ok", None)) as inner:
+            self.assertEqual(entrypoint._call_claude_once("p", "!r", "c", None, None, 10, {}), ("ok", None))
+            inner.assert_called_once()
+
+    def test_without_a_key_nothing_is_declared(self):
+        with patch.object(entrypoint, "_plugin_identity_post") as post, \
+                patch.object(entrypoint, "_call_claude_once_inner", return_value=("ok", None)):
+            entrypoint._call_claude_once("p", "!r", "c", None, None, 10, {})
+            post.assert_not_called()
+
+    def test_dm_handler_names_the_triggering_event(self):
+        src = Path(_MODULE_PATH).read_text()
+        self.assertIn('dm_run_context["chatEvent"] = {"roomId": room_id, "eventId": getattr(event, "event_id", None)}', src)
+        # the key is requested in main(), before the listener (and any run) starts
+        main_body = src[src.index("def main() -> None:"):]
+        self.assertLess(main_body.index("_acquire_plugin_run_key()"), main_body.index("asyncio.run(run_dm_listener())"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -4,7 +4,7 @@ import {
   Users, Zap, Sparkles, Server,
   ChevronLeft, ChevronRight, ChevronDown,
   Boxes, Key, MessageCircle, Github, GitBranch,
-  Rocket, Users2, Wand2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle, Gauge,
+  Rocket, Users2, Wand2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle, Gauge, KeyRound,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
@@ -160,6 +160,9 @@ const NAV_GROUPS = [
     { path: '/models',        label: 'Model Providers',      Icon: Sparkles },
     { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key },
     { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github },
+    // #2562: every member's OWN plugin credentials (Jira: e-mail + API token
+    // used when they chat with an agent) — always self-service, never adminOnly.
+    { path: '/plugin-tokens', label: 'Plugin Tokens',        Icon: KeyRound },
     { path: '/mcp',           label: 'MCP Servers',          Icon: Server,   adminOnly: true },
     { path: '/github-events', label: 'GitHub Event Log',     Icon: History },
   ]},

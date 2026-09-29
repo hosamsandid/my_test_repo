@@ -6,9 +6,15 @@ seeded into a granted agent's workspace at `.agent-studio/bin/` and reads its
 broker endpoint + per-scope token from `.agent-studio/plugins/jira.json` (0600,
 written at grant time by plugin-sync.js).
 
-All privilege lives in the broker (plugins/jira/broker/server.js), which holds
-the team's Jira credential and makes every Jira call server-side. This CLI is a
-privilege-less client that just carries the scope token.
+All privilege lives in the broker (plugins/jira/broker/server.js), which makes
+every Jira call server-side. This CLI is a privilege-less client that just
+carries the scope token and the agent's caller token.
+
+Whose Jira account a call runs as (#2562): in a CHAT turn, the person who wrote
+the message — their own Jira e-mail + API token, stored in the Admin Console
+under Connections → Plugin Tokens. Without one every subcommand is refused and
+nothing is sent to Jira. In an AUTOMATED run (schedule, event, loop, hand-off)
+the team's service account is used.
 
 Reads:
 
@@ -269,6 +275,13 @@ def _call(cfg, path, method="GET", body=None):
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = "Bearer %s" % token
+    # Which AGENT is calling (#2562) — set by the platform at container start.
+    # The broker forwards it so the platform can pick the credential: the chat
+    # sender's own Jira token in a chat turn, the team's service account in an
+    # automated run. It names an agent, never a person.
+    caller = os.environ.get("AEE_AGENT_CALLER_TOKEN", "")
+    if caller:
+        headers["X-AEE-Agent-Token"] = caller
     data = None
     if body is not None:
         data = json.dumps(body).encode()

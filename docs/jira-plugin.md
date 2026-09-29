@@ -43,9 +43,19 @@ Jira Cloud                          the broker sidecar (aee-plugin-jira)
   │                                   │        an <external-event source="plugin:jira">
 ```
 
-The credential (`{site-url, email, api-token}`) lives **only** in the broker
-sidecar's memory, pushed there per-team by the orchestrator. It never reaches
-your browser or an agent container.
+Two credential tiers (#2562):
+
+- **Service account** — the team credential (`{site-url, email, api-token}`),
+  pushed per-team into the broker sidecar's memory. Used **only** by the poller
+  and by automated runs (schedules, loops, GitHub/plugin events, hand-offs).
+- **Personal** — each member's own `{email, api-token}` (the site stays the
+  team's). Used for **every** `aee-jira` call made during a chat turn that
+  member started, so reads see their Jira permissions and writes are authored
+  by them. The orchestrator hands it to the broker **per call** and the broker
+  does not keep it.
+
+Neither ever reaches your browser or an agent container. See
+[Whose Jira account is used](#whose-jira-account-is-used).
 
 ---
 
@@ -67,10 +77,12 @@ On the same page, the Jira card's team-assign control — or a per-agent grant o
 Agent Chat → **Settings** → plugins. The grant is what seeds `aee-jira` into the
 agent workspace and makes the broker hold that team's credential.
 
-### 3. Set the team's Jira credential (Team Admin)
+### 3. Set the team's Jira service account (Team Admin)
 
 The **Credentials** section on the Jira card (`/plugins`): three fields per
-granted team.
+granted team. The e-mail and token are the **service account** — used for
+automated runs and watching projects only, never for a chat turn (see
+[Whose Jira account is used](#whose-jira-account-is-used)).
 
 | Field | |
 |---|---|
@@ -90,6 +102,14 @@ one. The non-secret fields (`site-url`, `email`, `readable-custom-fields`,
 `writable-custom-fields`) show their real, editable value so you can adjust them
 without retyping. Changing any of them takes effect on the next reconcile, no
 restart.
+
+### 3a. Every member adds a personal credential
+
+Chat turns use the sender's own Jira account. Each member opens **Connections →
+Plugin Tokens** (`/plugin-tokens`) and saves their Atlassian e-mail and a
+classic API token. It is self-service only: nobody else — System Admins
+included — can read or set it; the page shows set/unset, a preview and when it
+was saved. Deleting a user account deletes their personal credentials.
 
 ### 4. Configure which projects to watch
 
@@ -254,6 +274,36 @@ Two records, for two audiences:
 
 ---
 
+## Whose Jira account is used
+
+| Run | Account | Without it |
+|---|---|---|
+| a chat message from a team member | that member's **personal** credential — never the service account | every subcommand (incl. `whoami`, `inbox`) is refused with a pointer to Plugin Tokens; nothing is sent to Jira |
+| a chat message from someone who is not trusted for the agent (not a member of its team) | none | refused (`untrusted-sender`) |
+| schedules, loops, GitHub / plugin events, hand-offs from other agents | the team **service account** | refused (`no-service-account`) |
+
+The identity is decided server-side and cannot be forged from inside the
+container. The agent runner fetches a per-container run key from the
+orchestrator once at startup and keeps it in non-dumpable memory — a second
+request revokes it. It then declares every Claude run as `chat` (naming the
+Matrix room and event) or `autonomous`. For a chat run the orchestrator reads
+the event from the homeserver and takes the sender from there. Each `aee-jira`
+call carries the agent's caller token (`AEE_AGENT_CALLER_TOKEN`, which names
+the agent, not a person); the broker forwards it to
+`POST /internal/plugin-credential-grant`. That route checks the one active
+run, the sender's team trust (re-checked on every call) and the stored
+personal credential. The old `AEE_ACTING_SENDER` env var plays no part.
+
+Every broker audit line records `identity` (the member's user id, or `service`)
+and `interactive`. `aee-jira whoami` shows both.
+
+Known limits: two Claude runs active at once in one agent make the identity
+ambiguous, so calls are refused; an agent container started before this
+version is refused until it is respawned; the console's Jira board still reads
+with the service account.
+
+---
+
 ## Limits
 
 - **No claim-label analogue.** Nothing in Jira marks an issue "picked up" the way
@@ -272,7 +322,11 @@ Two records, for two audiences:
 |---|---|---|
 | `aee-jira` exits 3 `not-granted` | the plugin isn't granted to this agent | grant it (Plugins page or agent Settings) |
 | `aee-jira` exits 3 `broker-unreachable` | the sidecar isn't running, or you're on Kubernetes | `podman ps \| grep aee-plugin-jira`; on k8s the CLI is expected to fail (see platforms note) |
-| a write / read returns `no-credential` | the team has no Jira credential set | Team Admin sets it on the Plugins page |
+| a call returns `personal-credential-required` | a chat turn, and the sender has no personal Jira credential | the sender adds it under Connections → Plugin Tokens |
+| a call returns `personal-credential-rejected` | Jira refused the sender's personal token (401) — expired or revoked | the sender renews it on Plugin Tokens |
+| a call returns `untrusted-sender` | the chat message came from someone not trusted for this agent | share the team with that person, or ask a member |
+| a call returns `no-active-run` / `ambiguous-run` / `run-key-revoked` | the call is not inside exactly one run the runner declared, or something in the container requested a second run key | respawn the agent; do not run `aee-jira` from background processes that outlive the turn |
+| an automated run returns `no-service-account` | the team has no service-account credential set | Team Admin sets it on the Plugins page |
 | broker log: `Jira rejected the credential (401)` | the e-mail and token aren't the same Atlassian identity, or the token was revoked | regenerate a **classic** token while signed in as the intended account |
 | `projects` returns nothing but the account sees projects in a browser | a **scoped** API token missing `read:jira-work` | use a classic (unscoped) token |
 | a transition "no transition to X" | X isn't reachable from the issue's current status, or the name doesn't match | the error lists the available transitions; use one of those target names |

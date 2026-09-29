@@ -170,6 +170,7 @@ const { resolveScopeGithubCredentials, buildTeamFlowLabels } = require("./plugin
 // manifest's `credentials[]` real: a Team Admin sets values in the console,
 // stored 0600, pushed to the broker server-side — no secret in code or env.
 const { PluginCredentialStore } = require("./plugin-credential-store");
+const pluginRunIdentity = require("./plugin-run-identity");
 const { createPluginCredentialWiring } = require("./plugin-credential-routes");
 const { assertGranularityGrantable, defaultGranularity } = require("./plugin-manifest");
 const pluginReconcile = require("./plugin-reconcile");
@@ -666,6 +667,20 @@ function startAgentProcess(config) {
   // respawn paths (env credential change, owner credential change, single-agent
   // respawn) go through startAgentProcess, and changing the secret invalidates
   // every outstanding token at once.
+  // Plugin caller identity (#2562): a new container generation forgets the
+  // previous run key and every run it declared, and the container gets the
+  // HMAC caller token its plugin CLIs send ("this is agent <id>" — never a
+  // person; see plugin-run-identity.js). Signed with the plugin registry
+  // secret, so it works whether or not INTERNAL_API_TOKEN is armed.
+  pluginRunRegistry.resetAgent(id);
+  try {
+    const callerToken = pluginRunIdentity.mintCallerToken(id, pluginRuntime.signingSecret());
+    if (callerToken) childEnv.AEE_AGENT_CALLER_TOKEN = callerToken;
+  } catch (err) {
+    delete childEnv.AEE_AGENT_CALLER_TOKEN;
+    console.warn(`[Orchestrator] no plugin caller token for ${id}: ${err.message}`);
+  }
+
   const agentInternalToken = internalAuth.mintAgentToken(id, internalAuthConfig.agentTokenSecret);
   if (agentInternalToken) childEnv.AEE_INTERNAL_TOKEN = agentInternalToken;
   else delete childEnv.AEE_INTERNAL_TOKEN;
@@ -862,6 +877,7 @@ function startAgentProcess(config) {
 function stopAgentProcess(id) {
   const proc = agentProcesses.get(id);
   if (!proc) return;
+  pluginRunRegistry.resetAgent(id); // #2562 — the container's run key dies with it
   proc.kill('SIGTERM');
   agentProcesses.delete(id);
   console.log(`[Orchestrator] Stopped process for agent ${id}`);
@@ -4417,6 +4433,10 @@ const pluginCredentialWiring = createPluginCredentialWiring({
   log: (m) => console.warn(m),
 });
 const { pushDeclaredScopeCredentials } = pluginCredentialWiring;
+// Which run (chat turn → whose, or autonomous) each agent's plugin calls belong
+// to (#2562). In memory on purpose: an orchestrator restart respawns every
+// container, and each new runner fetches a fresh key.
+const pluginRunRegistry = new pluginRunIdentity.RunRegistry();
 
 // Re-seed any granted plugin CLI whose workspace copy no longer matches the
 // registry (plugin-sync.js `planCliRefresh`). The grant sync copies the CLI
@@ -13451,6 +13471,9 @@ class Orchestrator {
       ...this._deletePersonalCredentials(loadSshKeyIndex(), SSH_KEYS_INDEX, SSH_KEYS_DIR, target, 'ssh-key'),
       ...this._deletePersonalCredentials(loadGithubTokenIndex(), path.join(GH_TOKENS_DIR, 'index.json'), GH_TOKENS_DIR, target, 'github-token'),
       ...this._deletePersonalCredentials(loadLlmEndpointsIndex(), LLM_ENDPOINTS_INDEX, LLM_KEYS_DIR, target, 'model-provider', (e) => e.authTokenId),
+      // Personal PLUGIN credentials (#2562 — e.g. their own Jira token): one
+      // document per plugin, keyed by the user id.
+      ...pluginCredentialStore.deleteAllPersonalForUser(target).map((pluginId) => ({ id: pluginId, kind: 'plugin-credential' })),
     ];
 
     if (paused.length || deletedCredentials.length) {
@@ -16627,6 +16650,128 @@ async function main() {
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }
       });
+      return;
+    }
+
+    // ── plugin run identity (#2562) ─────────────────────────────────────────
+    // The agent RUNNER's side of "who is this plugin call acting for": it
+    // fetches its per-container run key once (first request per container
+    // generation wins, a second one revokes it) and declares every Claude run
+    // it starts. A chat declaration names only the Matrix event; the sender is
+    // read from the homeserver here. Every route also requires the agent's
+    // caller token for `:id`. Pure core + rationale: plugin-run-identity.js.
+    const runKeyMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/run-key$/);
+    const runBeginMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/runs$/);
+    const runEndMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/runs\/end$/);
+    if (runKeyMatch || runBeginMatch || runEndMatch) {
+      const id = decodeURIComponent((runKeyMatch || runBeginMatch || runEndMatch)[1]);
+      let callerAgent = null;
+      try {
+        callerAgent = pluginRunIdentity.verifyCallerToken(
+          String(req.headers['x-aee-agent-caller'] || ''), pluginRuntime.signingSecret());
+      } catch { callerAgent = null; }
+      if (callerAgent !== id) {
+        sendJson(res, 401, { ok: false, reason: 'bad-caller-token' });
+        return;
+      }
+      readBody(req).then(async (body) => {
+        const payload = body && typeof body === 'object' ? body : {};
+        if (runKeyMatch) {
+          const r = pluginRunRegistry.issueKey(id);
+          if (!r.ok) console.warn(`[Orchestrator] run-key for ${id} refused (${r.reason}) — plugin identity revoked until the agent restarts`);
+          return sendJson(res, r.ok ? 200 : 409, r.ok ? { ok: true, key: r.key } : { ok: false, reason: r.reason });
+        }
+        if (runEndMatch) {
+          const r = pluginRunRegistry.end(id, payload.key, payload.runId);
+          return sendJson(res, r.ok || r.reason === undefined ? 200 : 403, r);
+        }
+        let run = { kind: payload.kind };
+        if (payload.kind === 'chat') {
+          const cfg = loadAgentConfig(id);
+          const roomId = typeof payload.roomId === 'string' ? payload.roomId : '';
+          const eventId = typeof payload.eventId === 'string' ? payload.eventId : '';
+          if (!cfg || !cfg.token || !roomId || !eventId) return sendJson(res, 400, { ok: false, reason: 'bad-chat-run' });
+          let event = null;
+          try {
+            const r = await fetch(
+              `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`,
+              { headers: { Authorization: `Bearer ${cfg.token}` }, signal: AbortSignal.timeout(10_000) });
+            event = r.ok ? await r.json() : null;
+          } catch { event = null; }
+          const decided = pluginRunIdentity.chatSenderFromEvent(event, { roomId, agentMatrixId: cfg.userId, now: Date.now() });
+          if (!decided.ok) {
+            console.warn(`[Orchestrator] chat run declaration for ${id} refused: ${decided.reason}`);
+            return sendJson(res, 403, decided);
+          }
+          run = { kind: 'chat', roomId, eventId, sender: decided.sender };
+        }
+        const r = pluginRunRegistry.begin(id, payload.key, run);
+        return sendJson(res, r.ok ? 200 : 403, r);
+      }).catch((err) => { if (!res.headersSent) sendJson(res, 400, { ok: false, error: err.message }); });
+      return;
+    }
+
+    // POST /internal/plugin-credential-grant (#2562), Authorization: Bearer
+    // <plugin scope token>, body { callerToken }. A broker with a per-person
+    // credential tier asks, for ONE CLI call, which credential it may use:
+    // the team's service account (autonomous run) or the chat sender's own
+    // (a chat turn) — or a refusal. Everything is re-derived per call: the
+    // run, the sender's team membership, the stored personal values. Personal
+    // values are returned for this one call and never pushed or cached.
+    if (req.method === 'POST' && req.url === '/internal/plugin-credential-grant') {
+      const auth = req.headers['authorization'] || '';
+      const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7) : '';
+      let scope = null;
+      try { scope = pluginScopeToken.verify(token, pluginRuntime.signingSecret()); } catch { scope = null; }
+      if (!scope || !scope.pluginId || !scope.scopeId) {
+        sendJson(res, 401, { ok: false, code: 'bad-token' });
+        return;
+      }
+      readBody(req).then((body) => {
+        const { pluginId, scopeId } = scope;
+        let agentId = null;
+        try { agentId = pluginRunIdentity.verifyCallerToken(String((body && body.callerToken) || ''), pluginRuntime.signingSecret()); } catch { agentId = null; }
+        if (!agentId) {
+          return sendJson(res, 403, {
+            ok: false, code: 'caller-token-required',
+            message: 'Refused: this call carries no valid agent identity. The plugin CLI in this workspace may be outdated — it is refreshed on the next plugin reconcile.',
+          });
+        }
+        const cfg = loadAgentConfig(agentId);
+        let grant = null;
+        try { grant = cfg ? pluginGrantFor(effectivePlugins(cfg, loadAgentConfig), pluginId) : null; } catch { grant = null; }
+        if (!grant || resolveScopeId(cfg, grant.scopeGranularity) !== scopeId) {
+          return sendJson(res, 403, { ok: false, code: 'caller-not-in-scope', message: `Refused: agent ${agentId} is not granted ${pluginId} in this scope.` });
+        }
+        const entry = pluginRegistry.readPluginManifest(pluginId);
+        const manifest = entry && entry.ok ? entry.manifest : null;
+        const active = pluginRunRegistry.active(agentId);
+        let senderUserId = null;
+        let personalValues = null;
+        if (active.ok && active.run.kind === 'chat') {
+          // Fresh trust check on EVERY call — a sender removed from the team
+          // mid-turn is refused on their next action.
+          senderUserId = resolveActingSenderUserId(active.run.sender, cfg);
+          if (senderUserId) {
+            try { personalValues = (pluginCredentialStore.readPersonal(pluginId, senderUserId) || {}).values || null; }
+            catch { personalValues = null; }
+          }
+        }
+        const d = pluginRunIdentity.decideCredentialGrant({
+          active,
+          senderUserId,
+          personalValues,
+          personalKeys: (manifest && manifest.personalCredentials) || [],
+          pluginName: (manifest && manifest.name) || pluginId,
+        });
+        const who = d.ok ? (d.mode === 'personal' ? `person ${d.userId}` : 'service account') : `refused (${d.code})`;
+        console.log(`[Orchestrator] plugin-credential-grant ${pluginId}/${scopeId} agent=${agentId} → ${who}`);
+        if (!d.ok) return sendJson(res, d.status, { ok: false, code: d.code, message: d.message, agentId });
+        return sendJson(res, 200, {
+          ok: true, mode: d.mode, interactive: d.interactive, agentId,
+          ...(d.mode === 'personal' ? { userId: d.userId, values: d.values } : {}),
+        });
+      }).catch((err) => { if (!res.headersSent) sendJson(res, 400, { ok: false, error: err.message }); });
       return;
     }
 
@@ -19844,6 +19989,16 @@ async function main() {
     if (/^\/internal\/plugins\/[^/]+\/credentials(?:\/[^/]+)?$/.test((req.url || '').split('?')[0])) {
       pluginCredentialWiring
         .handleCredentialRoute(req, res, { sendJson, readBody })
+        .catch((err) => { if (!res.headersSent) sendJson(res, 500, { error: err.message }); });
+      return;
+    }
+
+    // GET /internal/users/:userId/plugin-credentials, PUT/DELETE
+    // …/plugin-credentials/:pluginId — a person's OWN plugin credentials
+    // (#2562). The console proxy pins :userId to the signed-in caller.
+    if (/^\/internal\/users\/[^/]+\/plugin-credentials(?:\/[^/]+)?$/.test((req.url || '').split('?')[0])) {
+      pluginCredentialWiring
+        .handlePersonalCredentialRoute(req, res, { sendJson, readBody })
         .catch((err) => { if (!res.headersSent) sendJson(res, 500, { error: err.message }); });
       return;
     }

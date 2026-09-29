@@ -52,7 +52,18 @@ poller's, in `broker-sdk/event-cursor.js` (`github-poller.js` is untouched).
 
 ## Credentials
 
-Each granted team's Jira credential (`site-url` / `email` / `api-token`) is set
+**Two tiers (#2562).** Every `/cli/*` call first asks the orchestrator
+`POST /internal/plugin-credential-grant` (this broker's scope token + the
+agent's `X-AEE-Agent-Token` caller token) whose account it runs under —
+`defaultGrantResolver`, swappable in tests via `_setGrantResolver`. A **chat**
+turn gets the sender's personal `email` / `api-token` for that one call (site
+and custom-field lists stay the team's); an **automated** run gets `service`
+mode and uses the team credential below. A refusal is returned as-is with no
+Jira call. The orchestrator being unreachable gives 503 `grant-unavailable`.
+Audit lines carry `identity` and `interactive`. The console UI (`/ui/*`) and
+the poller always use the service account.
+
+Each granted team's Jira **service-account** credential (`site-url` / `email` / `api-token`) is set
 by a **Team Admin** on the **Plugins** page (the Credentials section on the Jira
 card). Values are written `0600` server-side
 (`/workspace/plugins/_credentials/jira/<teamId>.json`), never read back (preview

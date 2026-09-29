@@ -87,3 +87,13 @@ test('pruneAuditLines drops old + unparseable-ts records', () => {
   ];
   assert.deepEqual(pruneAuditLines(records, 3600_000, now), [{ ts: '2026-08-07T11:59:00Z' }]);
 });
+
+test('buildPluginAuditLine carries identity + interactive when given (#2562), omits them otherwise', () => {
+  const base = { ts: '2026-09-30T00:00:00Z', pluginId: 'jira', scopeId: 'team-1', agentId: 'team-1-dev', subcommand: 'comment' };
+  assert.deepEqual(buildPluginAuditLine({ ...base, identity: 'alice', interactive: true }),
+    { ...base, outcome: 'ok', identity: 'alice', interactive: true });
+  assert.deepEqual(buildPluginAuditLine({ ...base, identity: 'service-account', interactive: 'yes' }),
+    { ...base, outcome: 'ok', identity: 'service-account', interactive: false });
+  assert.equal('identity' in buildPluginAuditLine({ ...base, interactive: true }), false);
+  assert.equal('interactive' in buildPluginAuditLine(base), false);
+});

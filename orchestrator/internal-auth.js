@@ -293,6 +293,13 @@ const AGENT_ROUTES = [
   // Chat-attributed `gh` writes (#2559, the `gh` shim) — same reasoning.
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/github\/gh$/, scope: "own" },
 
+  // Plugin run identity (#2562): the runner's per-container run key and its
+  // run declarations. The handler additionally requires the agent's caller
+  // token for the same :id.
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/run-key$/, scope: "own" },
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/runs$/, scope: "own" },
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/runs\/end$/, scope: "own" },
+
   // THE ONE CROSS-AGENT ROUTE. The loop verifier (#933) hands its verify request
   // to a SIBLING's queue, so `own` would break every loop with a `verify.agentId`
   // gate. Left as `peer` rather than silently narrowed; the route's own same-team
@@ -321,6 +328,8 @@ const AGENT_ROUTES = [
 // wake-agent — is a control-plane concern and stays refused.
 const PLUGIN_SCOPE_ROUTES = [
   { method: "POST", pattern: /^\/internal\/plugin-event$/ },
+  // #2562: a broker asks which credential ONE agent CLI call may use.
+  { method: "POST", pattern: /^\/internal\/plugin-credential-grant$/ },
 ];
 
 // Strip the query string and decode each path segment, so an allowlist entry

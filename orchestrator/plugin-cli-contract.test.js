@@ -640,11 +640,11 @@ test('aee-jira: attachment add of a real file against an unreachable broker → 
   assert.equal(obj.result.uploaded, 0);
 });
 
-function runJiraAsync(args, workspace) {
+function runJiraAsync(args, workspace, extraEnv = {}) {
   const { spawn } = require('node:child_process');
   return new Promise((resolve) => {
     const child = spawn('python3', [JIRA_CLI, ...args], {
-      env: { ...process.env, AEE_WORKSPACE: workspace },
+      env: { ...process.env, AEE_WORKSPACE: workspace, ...extraEnv },
     });
     let stdout = '';
     let stderr = '';
@@ -675,6 +675,35 @@ test('aee-jira: a broker 4xx surfaces its `message`, not just the bare `error` c
     const obj = JSON.parse(r.stdout.trim());
     assert.equal(obj.ok, false);
     assert.match(obj.message, /--consume <event-id>/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('aee-jira forwards the agent caller token (#2562) and surfaces a refusal message verbatim', async () => {
+  const http = require('node:http');
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    seen.push(req.headers['x-aee-agent-token']);
+    res.statusCode = 424;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({
+      code: 'personal-credential-required',
+      error: 'You have no personal Jira credential yet. … Connections → Plugin Tokens (/plugin-tokens) … Nothing was sent to Jira.',
+    }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const ws = grantedJiraWorkspace(`http://127.0.0.1:${port}/`);
+    const r = await runJiraAsync(['projects', '--json'], ws, { AEE_AGENT_CALLER_TOKEN: 'aeecall1.YWdlbnQ.sig' });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.deepEqual(seen, ['aeecall1.YWdlbnQ.sig']);
+    const obj = JSON.parse(r.stdout.trim());
+    assert.match(obj.message, /\/plugin-tokens/);
+    // without the env var no header is sent (the broker then refuses)
+    await runJiraAsync(['projects', '--json'], ws, { AEE_AGENT_CALLER_TOKEN: '' });
+    assert.equal(seen[1], undefined);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

@@ -897,6 +897,130 @@ def _internal_headers(extra: dict | None = None) -> dict:
     return headers
 
 
+# ---- plugin run identity (#2562) ----
+#
+# A plugin broker that holds per-PERSON credentials (Jira) must know whether a
+# CLI call belongs to a chat turn — and whose — or to an autonomous run, in a
+# way nothing inside this container can forge (the Claude subprocess and every
+# Bash command it runs share this container). The runner is the only process
+# that reads Matrix, so it DECLARES each Claude run to the orchestrator with a
+# per-container RUN KEY:
+#
+#   • fetched ONCE, in main(), before any Claude run exists; the orchestrator
+#     hands out one key per container generation and revokes it on any second
+#     request — so a copy a tool call tries to mint later only disables plugin
+#     identity (fail closed), it never yields a working key;
+#   • kept in this process's memory only — never env, never disk — and the
+#     process is marked non-dumpable so a same-user child cannot read it via
+#     /proc/<pid>/mem (residual assumption: no CAP_SYS_PTRACE in the container);
+#   • a chat declaration names only the Matrix room + event; the orchestrator
+#     reads the SENDER from the homeserver itself.
+#
+# Every step is best-effort for the run: a failed declaration never blocks a
+# turn, it only means plugin calls in that turn are refused.
+_PLUGIN_RUN_KEY: str | None = None
+_PR_SET_DUMPABLE = 4
+
+
+def _make_non_dumpable() -> bool:
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) == 0
+    except Exception:  # noqa: BLE001 — non-Linux / no libc: nothing to harden
+        return False
+
+
+def _plugin_identity_post(route: str, body: dict, timeout: float = 10) -> tuple[int, dict]:
+    """POST to an agent-scoped plugin-identity route. → (status, json). A
+    connection that never reached the orchestrator raises ConnectionRefusedError;
+    every other failure comes back as (0, {})."""
+    caller = os.environ.get("AEE_AGENT_CALLER_TOKEN", "")
+    agent_id = os.environ.get("AGENT_ID", "")
+    base = os.environ.get("ORCHESTRATOR_INTERNAL_URL", "http://localhost:4002").rstrip("/")
+    url = f"{base}/internal/agents/{urllib.parse.quote(agent_id, safe='')}{route}"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        method="POST",
+        headers=_internal_headers({"Content-Type": "application/json", "X-AEE-Agent-Caller": caller}),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode() or "{}")
+        except ValueError:
+            return e.code, {}
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, ConnectionRefusedError):
+            raise e.reason
+        return 0, {}
+    except (OSError, ValueError):
+        return 0, {}
+
+
+def _acquire_plugin_run_key(attempts: int = 5, delay_sec: float = 2.0) -> bool:
+    """Fetch this container's run key — once. Retried ONLY while the connection
+    is refused outright (the request provably never arrived); any answer, and
+    any ambiguous failure, is final: asking again would revoke the key."""
+    global _PLUGIN_RUN_KEY
+    if not os.environ.get("AEE_AGENT_CALLER_TOKEN") or not os.environ.get("AGENT_ID"):
+        return False
+    _make_non_dumpable()
+    for i in range(max(1, attempts)):
+        try:
+            status, out = _plugin_identity_post("/run-key", {})
+        except ConnectionRefusedError:
+            if i + 1 < attempts:
+                time.sleep(delay_sec)
+            continue
+        key = out.get("key") if status == 200 and isinstance(out, dict) else None
+        if isinstance(key, str) and key:
+            _PLUGIN_RUN_KEY = key
+            return True
+        print(f"[Runner] plugin run key refused (HTTP {status} {out.get('reason') if isinstance(out, dict) else ''}) "
+              "— plugin calls that need a person's identity will be refused", file=sys.stderr)
+        return False
+    print("[Runner] plugin run key: orchestrator unreachable", file=sys.stderr)
+    return False
+
+
+def _plugin_run_declaration(run_context: dict | None) -> dict:
+    """The declaration body for one Claude run: `chat` iff the run context
+    names the Matrix event that started it (set only by the DM handler),
+    otherwise `autonomous` (triggers, loops, hand-offs, consolidation)."""
+    chat = run_context.get("chatEvent") if isinstance(run_context, dict) else None
+    if isinstance(chat, dict) and chat.get("roomId") and chat.get("eventId"):
+        return {"kind": "chat", "roomId": str(chat["roomId"]), "eventId": str(chat["eventId"])}
+    return {"kind": "autonomous"}
+
+
+def _plugin_run_begin(run_context: dict | None) -> str | None:
+    if not _PLUGIN_RUN_KEY:
+        return None
+    body = {"key": _PLUGIN_RUN_KEY, **_plugin_run_declaration(run_context)}
+    try:
+        status, out = _plugin_identity_post("/runs", body)
+    except ConnectionRefusedError:
+        status, out = 0, {}
+    run_id = out.get("runId") if status == 200 and isinstance(out, dict) else None
+    if not run_id:
+        print(f"[Runner] plugin run declaration ({body['kind']}) refused: HTTP {status} "
+              f"{out.get('reason') if isinstance(out, dict) else ''}", file=sys.stderr)
+    return run_id
+
+
+def _plugin_run_end(run_id: str | None) -> None:
+    if not run_id or not _PLUGIN_RUN_KEY:
+        return
+    try:
+        _plugin_identity_post("/runs/end", {"key": _PLUGIN_RUN_KEY, "runId": run_id})
+    except ConnectionRefusedError:
+        pass
+
+
 _push_client: _StatePushClient | None = None
 
 # ---- durable usage-record spool (#654) ----
@@ -3291,6 +3415,19 @@ def _enqueue_bg_orphan_correction(agent_id: str, room_id: str,
 def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                       resume_id: str | None, blueprint_id: str | None,
                       timeout_sec: int, run_context: dict | None = None) -> tuple[str, str | None]:
+    """Run claude once, declared to the orchestrator as a chat or autonomous
+    run for its whole lifetime (#2562 — see _plugin_run_begin)."""
+    plugin_run_id = _plugin_run_begin(run_context)
+    try:
+        return _call_claude_once_inner(prompt, room_id, correlation_id, resume_id,
+                                       blueprint_id, timeout_sec, run_context)
+    finally:
+        _plugin_run_end(plugin_run_id)
+
+
+def _call_claude_once_inner(prompt: str, room_id: str, correlation_id: str,
+                            resume_id: str | None, blueprint_id: str | None,
+                            timeout_sec: int, run_context: dict | None = None) -> tuple[str, str | None]:
     """Run claude once. Returns (final_text, observed_session_id).
 
     Raises CalledProcessError on non-zero exit. Sets module-level
@@ -7638,6 +7775,10 @@ async def run_dm_listener() -> None:
             # to a platform account at ingest; a trigger/loop run leaves the key
             # absent, which is what makes it fall back to the agent's owner.
             dm_run_context["requestedBy"] = {"matrixUserId": sender}
+            # Plugin identity (#2562): the Matrix event that started this turn.
+            # Only the event is named; the orchestrator reads its sender from
+            # the homeserver, so nothing here can choose whose credential runs.
+            dm_run_context["chatEvent"] = {"roomId": room_id, "eventId": getattr(event, "event_id", None)}
             try:
                 # claude invocation is blocking — run it off the event loop so
                 # matrix-nio can keep syncing (otherwise no follow-on messages
@@ -8069,6 +8210,9 @@ def main() -> None:
     ).parse_args()
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    # Before any Claude run can exist (#2562): the one run-key request.
+    _acquire_plugin_run_key()
 
     asyncio.run(run_dm_listener())
 

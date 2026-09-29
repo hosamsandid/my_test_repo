@@ -627,3 +627,27 @@ test('events: the jira reference manifest declares status_changed with toStatus'
   assert.ok(ev, 'jira declares status_changed');
   assert.ok(ev.payload.some((p) => p.key === 'toStatus' && p.example), 'toStatus with an example');
 });
+
+test('personalCredentials (#2562): optional per-person fields, validated like credentials; absent when not declared', () => {
+  assert.equal('personalCredentials' in validatePluginManifest(base()).manifest, false);
+  const ok = validatePluginManifest({
+    ...base(),
+    personalCredentials: [{ key: 'email', required: true, secret: false }, { key: 'api-token', required: true }],
+  });
+  assert.equal(ok.ok, true, ok.errors.join('; '));
+  assert.deepEqual(ok.manifest.personalCredentials.map((c) => c.key), ['email', 'api-token']);
+  assert.equal(ok.manifest.personalCredentials[0].secret, false);
+  const dup = validatePluginManifest({ ...base(), personalCredentials: [{ key: 'a' }, { key: 'a' }] });
+  assert.equal(dup.ok, false);
+  assert.equal(validatePluginManifest({ ...base(), personalCredentials: 'nope' }).ok, false);
+});
+
+test('the jira reference manifest declares personal e-mail + api-token and labels the team credential a service account', () => {
+  const raw = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'plugins', 'jira', 'plugin.json'), 'utf8'));
+  const { ok, manifest } = validatePluginManifest(raw);
+  assert.equal(ok, true);
+  assert.deepEqual(manifest.personalCredentials.map((c) => [c.key, c.required]), [['email', true], ['api-token', true]]);
+  for (const key of ['email', 'api-token']) {
+    assert.match(manifest.credentials.find((c) => c.key === key).description, /^Service account \(used for automated runs and watching projects only\)/);
+  }
+});

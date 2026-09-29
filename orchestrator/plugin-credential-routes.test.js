@@ -139,3 +139,67 @@ test('a non-credentials URL is not handled (returns false)', async () => {
   const handled = await wiring.handleCredentialRoute({ method: 'GET', url: '/internal/plugins/jira/granted-agents' }, fakeRes(), { sendJson, readBody: readBodyOf({}) });
   assert.equal(handled, false);
 });
+
+// ── personal credentials (#2562) ────────────────────────────────────────────
+
+const PERSONAL = [{ key: 'email', required: true, secret: false }, { key: 'api-token', required: true }];
+
+function personalHarness() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pcr-personal-'));
+  const credentialStore = new PluginCredentialStore({ dir });
+  const pushes = [];
+  const jira = { id: 'jira', name: 'Jira', credentials: JIRA_CREDS, personalCredentials: PERSONAL };
+  const wiring = createPluginCredentialWiring({
+    listAgentIds: () => [],
+    loadAgentConfig: () => null,
+    pluginRegistry: {
+      installedManifests: () => ({ jira, other: { id: 'other', credentials: [] } }),
+      readPluginManifest: (id) => (id === 'jira' ? { ok: true, manifest: jira } : id === 'other' ? { ok: true, manifest: { id: 'other', credentials: [] } } : { ok: false }),
+    },
+    pluginRuntime: { pushScopeCredentials: async (m, scopes) => { pushes.push({ id: m.id, scopes }); } },
+    effectivePlugins: () => [],
+    pluginGrantFor: () => null,
+    resolveScopeId: () => null,
+    credentialStore,
+  });
+  return { wiring, credentialStore, pushes };
+}
+
+async function personalCall(wiring, method, url, body) {
+  const res = fakeRes();
+  const handled = await wiring.handlePersonalCredentialRoute({ method, url }, res, { sendJson, readBody: readBodyOf(body) });
+  return { handled, status: res._status, body: res._body };
+}
+
+test('personal routes: GET lists only plugins with a personal tier, metadata only; PUT/DELETE are self-service', async () => {
+  const { wiring, credentialStore, pushes } = personalHarness();
+  let r = await personalCall(wiring, 'GET', '/internal/users/alice/plugin-credentials');
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.plugins.map((p) => p.pluginId), ['jira']);
+  assert.equal(r.body.plugins[0].complete, false);
+
+  r = await personalCall(wiring, 'PUT', '/internal/users/alice/plugin-credentials/jira', { values: { email: 'a@b.c', 'api-token': 'ATATT-very-secret' } });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.complete, true);
+  assert.equal(JSON.stringify(r.body).includes('ATATT-very-secret'), false, 'the token is never echoed');
+  assert.equal(credentialStore.readPersonal('jira', 'alice').values['api-token'], 'ATATT-very-secret');
+  assert.deepEqual(pushes, [], 'personal values are never pushed to a broker');
+
+  // another user sees their OWN (empty) document, never alice's
+  r = await personalCall(wiring, 'GET', '/internal/users/bob/plugin-credentials');
+  assert.equal(r.body.plugins[0].complete, false);
+
+  r = await personalCall(wiring, 'DELETE', '/internal/users/alice/plugin-credentials/jira');
+  assert.equal(r.status, 200);
+  assert.equal(credentialStore.readPersonal('jira', 'alice'), null);
+});
+
+test('personal routes: unknown plugin / no personal tier → 404; bad ids → 400; other paths are not handled', async () => {
+  const { wiring } = personalHarness();
+  assert.equal((await personalCall(wiring, 'PUT', '/internal/users/alice/plugin-credentials/other', { values: {} })).status, 404);
+  assert.equal((await personalCall(wiring, 'PUT', '/internal/users/alice/plugin-credentials/nope', { values: {} })).status, 404);
+  assert.equal((await personalCall(wiring, 'GET', '/internal/users/..%2F..%2Fetc/plugin-credentials')).status, 400);
+  const bad = await personalCall(wiring, 'PUT', '/internal/users/alice/plugin-credentials/jira', { values: { email: 5 } });
+  assert.equal(bad.status, 400);
+  assert.equal((await personalCall(wiring, 'GET', '/internal/users/alice/other')).handled, false);
+});

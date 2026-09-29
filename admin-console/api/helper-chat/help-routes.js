@@ -107,6 +107,7 @@ const PAGE_ROUTES = new Set([
   '/environment-templates',
   '/ssh-keys',
   '/github-tokens',
+  '/plugin-tokens',
   '/skills',
   '/role-templates',
   '/github-events',

@@ -117,6 +117,7 @@ const knowledgeLinks = require('./knowledge-links');
 const { applyPushedBy } = require('./push-producer-filter');
 const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
+const { rederiveTeamDataFlow } = require('./derived-data-flow');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
 const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
 const { presentEffectiveIdentity } = require('./effective-github-identity');
@@ -2439,15 +2440,6 @@ function memberRepoFullName(cfg) {
   } catch { return null; }
 }
 
-// A derived data-flow trigger is one the `expandDataFlowSteps` derivation owns:
-// it carries the `dataFlow` marker and the canonical `<consumer>-on-push-<up>`
-// id. Manually-authored data-flow triggers (arbitrary ids) don't match and are
-// preserved untouched by reconciliation. Kept in sync with process-template.js.
-function isDerivedDataFlowTrigger(t, memberId) {
-  return t && t.dataFlow === true && typeof t.id === 'string'
-    && t.id.startsWith(`${memberId}-on-push-`);
-}
-
 // Re-derive the functional data-flow push triggers for a whole team from its
 // members' declarative ports (`dataFlow.{dependsOn,inputs,outputs}`), mirroring
 // what `expandDataFlowSteps` does at materialise time. This is what makes a live
@@ -2469,18 +2461,10 @@ async function reconcileTeamDataFlow(teamId) {
   }
   if (members.length === 0) return;
 
-  // Strip the previously-derived triggers so expandDataFlowSteps regenerates the
-  // full current set from the ports (a plain no-op leaves stale ones behind).
-  const roles = members.map(m => ({
-    id: m.id,
-    displayName: m.displayName,
-    inputs: Array.isArray(m.df.inputs) ? m.df.inputs : [],
-    outputs: Array.isArray(m.df.outputs) ? m.df.outputs : [],
-    dependsOn: Array.isArray(m.df.dependsOn) ? m.df.dependsOn : [],
-    triggers: m.triggers.filter(t => !isDerivedDataFlowTrigger(t, m.id)),
-  }));
-  const expanded = expandDataFlowSteps({ roles }).roles;
-  const byId = new Map(expanded.map(r => [r.id, r]));
+  // Strip the previously-derived triggers (full-id AND role-key ids) so
+  // expandDataFlowSteps regenerates the full current set from the ports (a plain
+  // no-op leaves stale ones behind) — see derived-data-flow.js.
+  const derived = rederiveTeamDataFlow(teamId, members);
   const norm = (arr) => JSON.stringify([...arr].sort((a, b) => (a.id < b.id ? -1 : 1)));
 
   for (const m of members) {
@@ -2489,10 +2473,7 @@ async function reconcileTeamDataFlow(teamId) {
     // (#446). Content-compare (order-insensitive on id) so we write when the
     // wiring OR its preserved activatedAt genuinely changed — but skip a pure
     // no-op, which would bump triggers.json mtime for nothing.
-    const next = injectDerivedTriggerRepo(
-      stampDerivedActivation(byId.get(m.id)?.triggers || [], m.triggers),
-      m.repo,
-    );
+    const next = injectDerivedTriggerRepo(derived.get(m.id) || [], m.repo);
     if (norm(next) === norm(m.triggers)) continue;
     try { await putTriggers(m.id, next); notifyAgentReload(m.id); }
     catch { /* best-effort — never break the originating request */ }

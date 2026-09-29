@@ -11,6 +11,7 @@
 // run, with the HTTP transport injected.
 //
 //   diffLiveProposal(live, proposed)      grouped, named change items (AC3/AC14)
+//   carryUnauthored(live, proposed)       keep what the copilot cannot author (autoDispatch, hillClimb, pool)
 //   planLiveApply(diff, ctx)              ordered write steps + "not applied" (AC6)
 //   runLiveApply(plan, call)              sequential, continues past failures (AC7)
 //   summarizeLiveApply(diff, result)      what the result message says
@@ -107,16 +108,49 @@ function fieldValue(role, f) {
   return v === undefined || v === '' ? null : v;
 }
 
+// The trigger PUT route merges the body over the stored trigger
+// (`{ ...prev, ...body }`), so a key the proposal DROPS from an existing
+// trigger (labelFilter, claim, transport, prompt, …) is never cleared. Such a
+// trigger only counts as changed when the merged result differs, and the
+// dropped keys are reported as not applied (`dropped`) instead of claimed.
 function triggerChanges(before, after) {
   const b = new Map(authoredTriggers(before).map(t => [t.id, t]));
   const a = new Map(authoredTriggers(after).map(t => [t.id, t]));
-  const out = { added: [], changed: [], removed: [] };
+  const out = { added: [], changed: [], removed: [], dropped: [] };
   for (const [id, t] of a) {
-    if (!b.has(id)) out.added.push(t);
-    else if (!same(b.get(id), t)) out.changed.push(t);
+    if (!b.has(id)) { out.added.push(t); continue; }
+    const prev = b.get(id);
+    if (!same(prev, { ...prev, ...t })) out.changed.push(t);
+    const keys = Object.keys(prev).filter(k => prev[k] !== undefined && t[k] === undefined);
+    if (keys.length) out.dropped.push({ id, keys });
   }
   for (const [id, t] of b) if (!a.has(id)) out.removed.push(t);
   return out;
+}
+
+// Fields the copilot cannot author: its sanitizer (api/flow-copilot.js
+// BUNDLE_KEYS / ROLE_KEYS) strips them from every proposal, so their absence
+// there means "not expressed", never "removed". Carrying the live value over
+// keeps a copilot turn from switching off the Flow Supervisor, flagging the
+// hill-climb collector, or un-pooling a role.
+const UNAUTHORED_TEAM_KEYS = ['autoDispatch', 'hillClimb'];
+const UNAUTHORED_ROLE_KEYS = ['pool'];
+
+export function carryUnauthored(live, proposed) {
+  const L = live || {};
+  const P = { ...(proposed || {}) };
+  for (const k of UNAUTHORED_TEAM_KEYS) if (P[k] === undefined && L[k] !== undefined) P[k] = L[k];
+  if (Array.isArray(P.roles)) {
+    const lr = new Map(arr(L.roles).filter(r => r && r.id).map(r => [r.id, r]));
+    P.roles = P.roles.map((r) => {
+      const before = r && lr.get(r.id);
+      if (!before) return r;
+      const out = { ...r };
+      for (const k of UNAUTHORED_ROLE_KEYS) if (out[k] === undefined && before[k] !== undefined) out[k] = before[k];
+      return out;
+    });
+  }
+  return P;
 }
 
 const gateLabels = (b) => new Set(arr(b && b.labels).filter(l => l && l.humanGate).map(l => l.name));
@@ -132,7 +166,7 @@ const gateLabels = (b) => new Set(arr(b && b.labels).filter(l => l && l.humanGat
  */
 export function diffLiveProposal(live, proposed) {
   const L = live || {};
-  const P = proposed || {};
+  const P = carryUnauthored(L, proposed);
   const items = [];
   const push = (it) => items.push({ applicable: true, ...it, key: `${it.entity}:${it.group}:${it.id}` });
 
@@ -154,6 +188,13 @@ export function diffLiveProposal(live, proposed) {
     const tc = triggerChanges(before, r);
     if (tc.added.length || tc.changed.length || tc.removed.length) fields.push('triggers');
     if (fields.length) push({ group: 'changed', entity: 'role', id, name, fields: fields.map(f => ROLE_FIELD_LABELS[f]) });
+    if (tc.dropped.length) {
+      push({
+        group: 'changed', entity: 'role', id: `${id}#triggerSettings`, name, fields: ['triggers'],
+        applicable: false,
+        reason: `removing a trigger setting is not supported on a live team (${tc.dropped.map(d => `${d.keys.join(', ')} on ${d.id}`).join('; ')}) — edit the trigger in the Triggers tab`,
+      });
+    }
     if (fieldValue(before, 'sessionPolicy') !== fieldValue(r, 'sessionPolicy')) {
       push({
         group: 'changed', entity: 'role', id: `${id}#sessionPolicy`, name, fields: ['session policy'],

@@ -1,12 +1,17 @@
 // Flow Copilot on a live team (#2556) — diff → plan → run, pure.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import {
   roleKeyOf, memberIdMap, bundleFingerprint, isStaleBase,
   diffLiveProposal, groupItems, describeLiveItem,
   planLiveApply, runLiveApply, summarizeLiveApply,
   inProgressFor, gateWarnings, liveConfirmModel, liveResultStatus,
 } from './flow-copilot-live.js';
+
+// The server-side copilot pipeline (sanitize → ops) every live proposal passes
+// through — used below so the tests see exactly the keys a real turn keeps.
+const { applyCopilotOps, sanitizeBundle } = createRequire(import.meta.url)('../../../api/flow-copilot.js');
 
 const LIVE = {
   processTemplateVersion: 1, name: 'Acme', level: 'live',
@@ -253,4 +258,80 @@ test('liveResultStatus never reports success for a partial or failed apply', () 
 test('plan: materializeNow provisions the new agents instead of stubbing them', () => {
   const plan = planLiveApply(diffLiveProposal(LIVE, proposal()), { teamId: 'acme', memberIds: MEMBERS, materializeNow: true });
   assert.equal(plan.steps.find(s => s.label === 'create Documenter').body.materialize, true);
+});
+
+// ── review #2565 B1: fields the copilot sanitizer strips ─────────────────────
+
+const POOLED_LIVE = () => {
+  const l = clone(LIVE);
+  l.wipLimit = 2;
+  l.autoDispatch = { enabled: true, contentionPolicy: 'epic-serial' };
+  l.hillClimb = { enabled: true, windowDays: 7 };
+  l.roles[0].pool = { enabled: true, maxInstances: 3 };
+  return l;
+};
+
+test('B1: a real copilot turn (applyCopilotOps) does not switch off the supervisor, hill-climb or a pool', () => {
+  const live = POOLED_LIVE();
+  const proposed = applyCopilotOps(live, [{ op: 'patchRole', id: 'reviewer', patch: { displayName: 'Code Reviewer' } }]);
+  assert.equal(proposed.autoDispatch, undefined, 'precondition: the sanitizer strips autoDispatch');
+  assert.equal(proposed.roles[0].pool, undefined, 'precondition: the sanitizer strips a role pool');
+  const diff = diffLiveProposal(live, proposed);
+  assert.deepEqual(diff.items.map(it => it.key), ['role:changed:reviewer']);
+  assert.deepEqual(diff.items[0].fields, ['name']);
+  const plan = planLiveApply(diff, { teamId: 'acme', memberIds: MEMBERS });
+  assert.deepEqual(plan.notApplied, []);
+  for (const st of plan.steps) {
+    assert.ok(!('autoDispatch' in (st.body || {})), `${st.label} must not write autoDispatch`);
+    assert.ok(!('pool' in (st.body || {})), `${st.label} must not write pool`);
+  }
+});
+
+test('B1: a whole-bundle reply (sanitizeBundle) carries the unauthored fields over too', () => {
+  const live = POOLED_LIVE();
+  const proposed = sanitizeBundle(clone(live));
+  assert.deepEqual(diffLiveProposal(live, proposed).items, []);
+});
+
+// ── review #2565 B2: a trigger setting the proposal drops ────────────────────
+
+const GH_LIVE = () => {
+  const l = clone(LIVE);
+  l.roles[1].triggers = [{
+    id: 'rv', type: 'github-event', enabled: true, events: ['pull_request.labeled'], labelFilter: 'ready-for-review',
+    claim: { remove: 'ready-for-review', add: 'ready-for-review:wip' }, prompt: 'Review.',
+  }];
+  return l;
+};
+
+test('B2: dropping a trigger setting is reported as not applied, never claimed applied', async () => {
+  const live = GH_LIVE();
+  const proposed = clone(live);
+  delete proposed.roles[1].triggers[0].labelFilter;
+  delete proposed.roles[1].triggers[0].claim;
+  const diff = diffLiveProposal(live, proposed);
+  assert.deepEqual(diff.items.map(it => [it.key, it.applicable]), [['role:changed:reviewer#triggerSettings', false]]);
+  assert.match(diff.items[0].reason, /labelFilter, claim on rv/);
+  const plan = planLiveApply(diff, { teamId: 'acme', memberIds: MEMBERS });
+  assert.deepEqual(plan.steps, [], 'no PUT that the route would merge back to the old value');
+  const cm = liveConfirmModel(diff, { teamId: 'acme', memberIds: MEMBERS, tickets: [] });
+  assert.equal(cm.notApplied.length, 1);
+  assert.match(cm.notApplied[0], /not supported on a live team/);
+  const summary = summarizeLiveApply(diff, await runLiveApply(plan, async () => {}));
+  assert.deepEqual(summary.applied, []);
+  assert.match(summary.text, /Not applied[\s\S]*labelFilter, claim on rv/);
+});
+
+test('B2: a dropped setting next to a real edit — the edit applies, the drop is listed', () => {
+  const live = GH_LIVE();
+  const proposed = clone(live);
+  delete proposed.roles[1].triggers[0].labelFilter;
+  proposed.roles[1].triggers[0].prompt = 'Review carefully.';
+  const diff = diffLiveProposal(live, proposed);
+  assert.deepEqual(diff.items.map(it => [it.key, it.applicable]), [
+    ['role:changed:reviewer', true], ['role:changed:reviewer#triggerSettings', false],
+  ]);
+  const plan = planLiveApply(diff, { teamId: 'acme', memberIds: MEMBERS });
+  assert.deepEqual(plan.steps.map(s => s.label), ['update trigger rv']);
+  assert.deepEqual(plan.notApplied.map(it => it.key), ['role:changed:reviewer#triggerSettings']);
 });

@@ -60,7 +60,7 @@ export function isImageRefCandidate(path) {
 // A token is an '@' at start-of-string or after whitespace, and its path runs
 // up to and including the FIRST image extension. Anchoring on the extension —
 // not on the first whitespace — is what lets a workspace filename contain a
-// space, e.g. `image (2).png` minted by the upload de-dupe or `my screenshot.png`
+// space, e.g. `image (2).png` minted by the pre-#2568 upload de-dupe or `my screenshot.png`
 // from a browser (#2453). A whitespace-then-'@' pre-empts an unclosed token, so
 // `@a.png @b.png` still yields two refs. The scan is a single linear pass with
 // O(1) work per character (no backtracking regex — js/polynomial-redos safe).

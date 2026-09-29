@@ -20,6 +20,7 @@ const {
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
+const { chatUploadBaseName, uniqueFileName } = require('./chat-upload-name');
 const internalAuthClient = require('./internal-auth-client');
 const githubEventLog = require('./github-event-log');
 const clientErrorLog = require('./client-error-log');
@@ -20958,28 +20959,14 @@ app.post('/api/agents/:agentId/context/upload', heavyLimiter, requireAgentIdPara
   res.json({ uploaded, ...(errors.length ? { errors } : {}) });
 });
 
-// Return a filename that doesn't yet exist in `dir`, appending " (n)" before
-// the extension on collision so a second upload of `report.pdf` becomes
-// `report (2).pdf` rather than clobbering the first. The " ()" chars are within
-// the upload filename allowlist, so the result is still a legal workspace name.
-function uniqueFileName(dir, name) {
-  if (!fs.existsSync(path.join(dir, name))) return name;
-  const ext = path.extname(name);
-  const base = name.slice(0, name.length - ext.length);
-  for (let n = 2; n < 10000; n++) {
-    const candidate = `${base} (${n})${ext}`;
-    if (!fs.existsSync(path.join(dir, candidate))) return candidate;
-  }
-  return `${base} (${Date.now()})${ext}`;
-}
-
 // Chat attachments: files dropped or picked directly in the chat composer land
 // in a dedicated, server-controlled `chat-uploads/` directory (the client can't
 // choose the path) and are referenced in the message body as
 // `@chat-uploads/<name>`. The agent's cwd is its workspace root, so that token
 // resolves to a file it can open. Mirrors the workspace/upload handler's multer
-// config + filename sanitisation, but auto-creates the target dir and de-dupes
-// colliding names.
+// config + filename sanitisation, but auto-creates the target dir, renames
+// generic pasted-image names to a UTC timestamp and de-dupes colliding names
+// with a `-<n>` suffix (chat-upload-name.js, #2568).
 const CHAT_UPLOADS_DIR = 'chat-uploads';
 app.post('/api/agents/:agentId/chat-upload', heavyLimiter, requireAgentIdParam, uploadFiles, (req, res) => {
   const { agentId } = req.params;
@@ -21018,13 +21005,15 @@ app.post('/api/agents/:agentId/chat-upload', heavyLimiter, requireAgentIdParam, 
 
   const uploaded = [];
   const errors = [];
+  const now = new Date();
   for (const file of req.files) {
-    const safeName = path.basename(file.originalname).replace(/[^\w\-. ()[\]]/g, '_').trim();
-    if (!safeName) {
+    const safeName = path.basename(file.originalname || '').replace(/[^\w\-. ()[\]]/g, '_').trim();
+    const baseName = chatUploadBaseName(safeName, file.mimetype, now);
+    if (!baseName) {
       errors.push({ name: file.originalname, error: 'Invalid filename' });
       continue;
     }
-    const finalName = uniqueFileName(targetDir, safeName);
+    const finalName = uniqueFileName(targetDir, baseName);
     const destPath = path.join(targetDir, finalName);
     // Defence-in-depth: the dest must stay strictly inside the agent root.
     if (!destPath.startsWith(agentRoot + path.sep)) {

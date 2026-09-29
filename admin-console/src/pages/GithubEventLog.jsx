@@ -14,7 +14,7 @@ import {
 } from './pending-queue-view';
 import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip, refireNote } from './event-outcome-view';
 import { OUTCOME_TONES, NO_MATCH_LABEL, outcomePresentation } from './event-outcome-presentation';
-import { eventLabel } from './agent-chat/trigger-summary';
+import { eventLabel, eventFilterText } from './agent-chat/trigger-summary';
 import { workItemTypeLabel } from './github-event-log-type';
 import { isHandoffRow, handoffNote, handoffNoteDisplay, handoffTitleHint } from './github-event-handoff-view';
 import { GITHUB_EVENTS_HELP_SECTIONS } from './github-events-help-sections';
@@ -382,7 +382,7 @@ function ProcessedEventsView() {
       // #2442: the raw event key ("pull_request.opened") is no longer shown — only
       // the friendly name ("PR opened"). Search the friendly name, keeping the raw
       // key matchable too so an operator who knows the API vocabulary still finds it.
-      filterValue: (v) => [eventLabel(v), typeof v === 'string' ? v : ''].filter(Boolean).join(' ') },
+      filterValue: eventFilterText },
     { key: 'actor', label: 'Actor', render: v => v || '—' },
     { key: 'outcomes', label: 'Outcomes', sortable: false, wrap: true, render: (v, row) => {
       if (row.noMatchingTrigger) return <NoMatchLine />;

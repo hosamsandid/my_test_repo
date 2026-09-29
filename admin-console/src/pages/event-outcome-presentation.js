@@ -20,11 +20,12 @@ export const OUTCOME_TONES = {
 // wakeLabel is set when the subscriber's labelFilter matched (#1846). null
 // means any-label listener; undefined means a legacy row or a drop before the
 // label gate (history-horizon). Show it only when it's a real string.
-export function outcomeLabel(outcome) {
+// `refired` marks a delivery made by a manual "Fire again" (#2525).
+export function outcomeLabel(outcome, { refired = false } = {}) {
   const o = outcome && typeof outcome === 'object' ? outcome : {};
   const wakeSuffix = typeof o.wakeLabel === 'string' ? ` (${o.wakeLabel})` : '';
   const target = o.agentName || o.agentId;
-  if (o.status === 'delivered') return `delivered${wakeSuffix} → ${target}`;
+  if (o.status === 'delivered') return `delivered${refired ? ' · fired again' : ''}${wakeSuffix} → ${target}`;
   if (o.status === 'digest') return `digested${wakeSuffix} → ${target}`;
   return `dropped (${o.reason || 'unknown'})${wakeSuffix} → ${target}`;
 }
@@ -36,9 +37,9 @@ export function outcomeTone(outcome) {
   return 'dropped';
 }
 
-export function outcomePresentation(outcome) {
+export function outcomePresentation(outcome, opts) {
   const tone = outcomeTone(outcome);
-  return { tone, label: outcomeLabel(outcome), ...OUTCOME_TONES[tone] };
+  return { tone, label: outcomeLabel(outcome, opts), ...OUTCOME_TONES[tone] };
 }
 
 export const NO_MATCH_LABEL = "nobody's listening";

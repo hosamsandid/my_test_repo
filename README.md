@@ -150,7 +150,7 @@ make logs
 Then:
 
 6. Open **http://localhost:4000** and log in (default `admin` / `admin` — change it in `.env`).
-7. The **Setup Wizard** walks you through connecting a Model Provider, adding an SSH key and GitHub token, defining a Working Environment, and creating your first agent — or jump straight to **Agent Team Wizard** to stand up a whole process.
+7. You land directly in the console. Connect a Model Provider under **Connections → Model Providers**, add an SSH key and GitHub token on their own pages under **Connections** if your agents work on repositories, then stand up a whole process with the **Agent Team Wizard**.
 8. Open the agent in **Agent Chat**, send it a message, and watch the session log stream on the right.
 
 You now have a live, persistent AI agent running inside your own infrastructure.

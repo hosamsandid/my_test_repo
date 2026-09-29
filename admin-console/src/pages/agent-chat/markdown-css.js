@@ -3,7 +3,7 @@
  *
  * Single source of truth so every surface that renders agent markdown — the
  * chat bubble, the trigger-notice card (NoticeMessage), the loop cards, the
- * Helper Chat panel and the setup wizard — renders it byte-for-byte the same:
+ * Helper Chat panel — renders it byte-for-byte the same:
  * same compact paragraph/heading/blockquote spacing so block-level markdown
  * can't blow up a card. Injected once document-level by `ensureAgentChatMdCss`
  * in `Message.jsx` (#1676).

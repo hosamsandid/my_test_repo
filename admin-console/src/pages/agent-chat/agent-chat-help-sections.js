@@ -29,6 +29,8 @@ export const AGENT_CHAT_HELP_SECTIONS = {
   workspace: 'workspace-browsing-the-files',
   // 6 — the panels that already had chapters
   triggers: 'triggers-when-the-agent-wakes-on-its-own',
+  // the GitHub-event activity tab and its "Fire again" (#2525)
+  events: 'events-what-reached-the-agent-from-github',
   // the plugin-event form's two filters (Which event / Only when…)
   pluginEvent: 'plugin-event-which-event-vs-only-when',
   outcomes: 'outcomes-what-the-agent-signals-when-a-run-ends',

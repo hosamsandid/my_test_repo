@@ -1,9 +1,9 @@
 import React from 'react';
 
 // ModeToggle — the shared "pick one of two modes" control for every
-// generate-or-paste key form (My Credentials, the admin SSH Keys page, the
-// first-run Setup Wizard). Two ordinary bordered buttons read as two
-// independent actions ("do X" / "do Y"), which is misleading here: choosing
+// generate-or-paste key form (My Credentials, the admin SSH Keys page). Two
+// ordinary bordered buttons read as two independent actions ("do X" /
+// "do Y"), which is misleading here: choosing
 // either option only switches the form into that mode — nothing is generated
 // or saved until the form's own primary submit button (further down, still
 // the only solid/filled button) is pressed. Rendering the two options as one

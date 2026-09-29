@@ -12,7 +12,7 @@ import {
   kindLabel, kindTooltip, entryDetail, entryHoverDetail, labelChip, totalPending,
   pendingRowMenu, reassignPickerState, reassignTargetLabel, pendingReassignError, pendingReassignSuccess,
 } from './pending-queue-view';
-import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip } from './event-outcome-view';
+import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip, refireNote } from './event-outcome-view';
 import { OUTCOME_TONES, NO_MATCH_LABEL, outcomePresentation } from './event-outcome-presentation';
 import { eventLabel } from './agent-chat/trigger-summary';
 import { workItemTypeLabel } from './github-event-log-type';
@@ -67,14 +67,14 @@ function OutcomeMarker({ marker, color }) {
   return <span aria-hidden="true" style={{ ...outcomeMarkerStyle, color }}>{marker}</span>;
 }
 
-function OutcomeLine({ outcome, eventId, onOpenSession }) {
+function OutcomeLine({ outcome, eventId, onOpenSession, refireNote = null }) {
   const [hover, setHover] = useState(false);
-  const { label, marker, markerColor, textColor } = outcomePresentation(outcome);
+  const { label, marker, markerColor, textColor } = outcomePresentation(outcome, { refired: !!refireNote });
 
   // Only a `delivered` outcome that carries a triggerId maps to a real Claude
   // session, so only those become an activatable control (AC1/AC2). Everything
   // else stays plain, non-interactive text.
-  const explain = outcomeTooltip(outcome);
+  const explain = refireNote ? `${refireNote} ${outcomeTooltip(outcome)}` : outcomeTooltip(outcome);
   const correlationId = buildTriggerCorrelationId(outcome.triggerId, eventId);
   if (isSessionOutcome(outcome) && correlationId && onOpenSession) {
     return (
@@ -391,7 +391,7 @@ function ProcessedEventsView() {
       return (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, minWidth: 0 }}>
           {list.map((o, i) => (
-            <OutcomeLine key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} />
+            <OutcomeLine key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} refireNote={refireNote(row)} />
           ))}
         </div>
       );

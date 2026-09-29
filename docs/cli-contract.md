@@ -9,6 +9,7 @@ the agent image (`agent-image/scripts/`) and always on `PATH`:
 | `aee-artifact` | Register / resolve mission artifacts by logical name |
 | `aee-emit` | Announce a label hand-off over the internal channel |
 | `gh-as-agent` | Do git / GitHub actions stamped with this agent's identity |
+| `aee-ask` | Put a structured decision to the human and pause the turn (quick-reply card) |
 
 These stay **baked into the image** — they are flow primitives, never
 toggleable plugins (see `plugin-system-concept.md` §7). What they *do* share

@@ -21,8 +21,8 @@ import { useSessionsActive } from './SessionsActiveContext';
 import { hasActiveTriggerSessionForRoom } from './sessions-active';
 import {
   ASK_QUESTION_FIELD, ASK_ANSWER_FIELD,
-  buildAnswerContent, buildMultiAnswerContent, multiAnswerText,
-  indexAskAnswers, questionState,
+  buildAnswerContent, buildMultiAnswerContent, buildSelectionAnswerContent,
+  multiAnswerText, indexAskAnswers, questionState,
 } from './ask-question-view.js';
 import LearningBadge from '../../components/LearningBadge';
 import PageHelpButton from '../../components/PageHelpButton';
@@ -1102,7 +1102,11 @@ export default function ChatPanel({
    * Multi-question (#1799 AC4): the card collects intermediate choices
    * client-side (no message sent) and calls back here only after the last
    * question with { isMulti: true, answers: [{questionId,optionId,label}…] }.
-   * We then send one consolidated reply and resume the session.
+   * We then send one consolidated reply and resume the session. A
+   * multi-select step's entry carries `optionIds`/`labels` instead (#2523).
+   *
+   * Lone multi-select question (#2523): the card toggles options and calls
+   * back on Submit with { isMultiSelect: true, answer }.
    *
    * Selection is final in both cases (AC5/AC6): the optimistic reply lands
    * after the question, so `questionState` immediately marks the card inert.
@@ -1120,6 +1124,13 @@ export default function ChatPanel({
       const { answers } = optOrConsolidated;
       const extra = buildMultiAnswerContent(questionEventId, answers);
       handleSend(multiAnswerText(answers), extra);
+    } else if (optOrConsolidated?.isMultiSelect && optOrConsolidated.answer) {
+      // A lone multi-select question (#2523): every selected option, sent once
+      // on Submit. The body joins the labels; the runtime resumes the session
+      // from the structured `labels`.
+      const { answer } = optOrConsolidated;
+      if (!Array.isArray(answer.labels) || answer.labels.length === 0) return;
+      handleSend(answer.label, buildSelectionAnswerContent(questionEventId, answer));
     } else {
       // Single-question (unchanged).
       const option = optOrConsolidated;

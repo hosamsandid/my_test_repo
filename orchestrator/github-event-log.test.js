@@ -299,3 +299,12 @@ test('cleanupOldEntries does not throw when the log directory does not exist yet
   fs.rmSync(TMP, { recursive: true, force: true });
   assert.doesNotThrow(() => eventLog.cleanupOldEntries());
 });
+
+test('readEntries (#2525) returns every recorded entry across day files, skipping corrupt lines', () => {
+  fs.rmSync(TMP, { recursive: true, force: true });
+  fs.mkdirSync(TMP, { recursive: true });
+  fs.writeFileSync(path.join(TMP, 'github-events-2026-09-27.jsonl'), '{"eventId":"a","ts":"2026-09-27T10:00:00Z"}\nnot json\n');
+  fs.writeFileSync(path.join(TMP, 'github-events-2026-09-28.jsonl'), '{"eventId":"b","ts":"2026-09-28T10:00:00Z"}\n');
+  fs.writeFileSync(path.join(TMP, 'unrelated.txt'), 'x');
+  assert.deepEqual(eventLog.readEntries().map((e) => e.eventId), ['a', 'b']);
+});

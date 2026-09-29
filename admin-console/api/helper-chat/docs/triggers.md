@@ -53,6 +53,10 @@ The built-in GitHub poller queries the GitHub Events API every 30 seconds for al
 
 **Loop protection is frequency-based, not origin-based.** There is deliberately **no** source filtering: a trigger fires on any matching event regardless of who caused it — a human, another agent, or the subscribing agent itself. The backstops are the per-conversation throttle (default 5 events/hour per agent per PR / issue / branch) and the burst digest (more than 3 events on one conversation in a single poll fold into one lossless summary wake). Agents that act via the `gh-as-agent` wrapper do stamp commits with `<agentId>@agents.local` and PR/review bodies with `<!-- agent: <id> -->`, but those markers are attribution for humans reading GitHub — the poller does not read them. See the **GitHub Event Log** page (and its help topic) for what happened to each individual event.
 
+**The first push to a new branch arrives as the pull request it opens.** The Events API reports no `PushEvent` (and often no `CreateEvent`) for the push that creates a branch — only later pushes to the existing branch surface as `push`. So the poller turns every `pull_request.opened` / `pull_request.reopened` whose head branch lives in the same repository (not a fork) into an extra `push` event for that head branch and commit, logged as its own `push` row (event id `prpush:<id>`, payload `ref`/`head` plus `synthesizedFrom` and the PR number). Push wakes are de-duplicated per repository on branch + head commit: whichever of the PR-derived push and a real `PushEvent` for the same commit arrives first wakes `push` triggers, and the other is logged as dropped (`push-duplicate`). A trigger that also listens to the originating `pull_request.*` event is not woken a second time by the derived push. History horizon, throttle and burst digest apply as for any event. A branch pushed without opening a PR is still not detected — GitHub reports nothing for it.
+
+Re-fire a dropped wake from Agent Chat → **Events** (#2525).
+
 ## Operational note: host clock skew (Podman machine)
 
 On macOS/Windows the stack runs inside a Podman VM, and containers inherit **that

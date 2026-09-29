@@ -13,10 +13,11 @@
  * `admin-console-src` CI job and stay unit-tested; `Message.jsx` /
  * `ChatPanel.jsx` are thin renderers over these (the #651 convention).
  *
- * MVP is single-choice (D1): the runtime already excludes `multiSelect`
- * questions from the interactive payload, so a payload that reaches here is
- * always single-select. We still defend against a malformed payload by
- * normalising it and dropping anything unusable.
+ * A `multiSelect: true` question (#2523, superseding the single-choice-only
+ * MVP of D1) renders as toggleable options plus an explicit Submit; its answer
+ * carries every selected option as `optionIds` / `labels` (plus a joined
+ * `label` for display). Single-choice questions are unchanged. We still defend
+ * against a malformed payload by normalising it and dropping anything unusable.
  */
 
 /** The message-content field the runtime attaches the structured question to. */
@@ -31,6 +32,7 @@ export const ASK_ANSWER_FIELD = 'io.aee.ask-answer';
  *
  * @param {*} raw
  * @returns {{questions: Array<{questionId: string, header?: string, question?: string,
+ *            multiSelect?: true,
  *            options: Array<{optionId: string, label: string, description?: string}>}>}|null}
  */
 export function normalizeAskQuestion(raw) {
@@ -65,6 +67,7 @@ export function normalizeAskQuestion(raw) {
     if (header) entry.header = header;
     const text = typeof q.question === 'string' ? q.question.trim() : '';
     if (text) entry.question = text;
+    if (q.multiSelect === true) entry.multiSelect = true;
     outQuestions.push(entry);
   });
 
@@ -90,6 +93,84 @@ export function buildAnswerContent(questionEventId, option) {
   };
   if (option.questionId) answer.questionId = option.questionId;
   return { [ASK_ANSWER_FIELD]: answer };
+}
+
+/**
+ * Toggle one option in a multi-select question's draft selection (#2523).
+ * Returns a new array; the input is never mutated.
+ *
+ * @param {string[]} selectedIds
+ * @param {string} optionId
+ * @returns {string[]}
+ */
+export function toggleSelection(selectedIds, optionId) {
+  const ids = Array.isArray(selectedIds) ? selectedIds : [];
+  return ids.includes(optionId) ? ids.filter(id => id !== optionId) : [...ids, optionId];
+}
+
+/**
+ * The answer entry for a submitted multi-select question (#2523): every
+ * selected option in the card's own option order (not click order), or null
+ * when nothing is selected — Submit stays disabled until at least one is.
+ * `label` joins the labels for display and for the visible reply body; the
+ * runtime rebuilds the resume prompt from `labels`, so a comma inside a label
+ * stays unambiguous.
+ *
+ * @param {{questionId: string, options: Array<{optionId: string, label: string}>}} q
+ * @param {string[]} selectedIds
+ * @returns {{questionId: string, optionIds: string[], labels: string[], label: string}|null}
+ */
+export function buildSelectionAnswer(q, selectedIds) {
+  const ids = Array.isArray(selectedIds) ? selectedIds : [];
+  const chosen = (q?.options || []).filter(o => ids.includes(o.optionId));
+  if (chosen.length === 0) return null;
+  const labels = chosen.map(o => o.label);
+  return {
+    questionId: q.questionId,
+    optionIds: chosen.map(o => o.optionId),
+    labels,
+    label: labels.join(', '),
+  };
+}
+
+/**
+ * Build the `io.aee.ask-answer` content for a submitted single multi-select
+ * question (#2523), correlated by `questionEventId` like every other answer.
+ *
+ * @param {string} questionEventId
+ * @param {{questionId: string, optionIds: string[], labels: string[], label: string}} answer
+ * @returns {{'io.aee.ask-answer': object}}
+ */
+export function buildSelectionAnswerContent(questionEventId, answer) {
+  return {
+    [ASK_ANSWER_FIELD]: {
+      questionEventId,
+      questionId: answer.questionId,
+      optionIds: answer.optionIds,
+      labels: answer.labels,
+      label: answer.label,
+    },
+  };
+}
+
+/**
+ * Whether an answer record chose `optionId` of `questionId` — covers a
+ * single-choice answer (`optionId`), a multi-select answer (`optionIds`), and
+ * an entry of a consolidated multi-question answer (either shape).
+ *
+ * @param {object|null} answer
+ * @param {string} questionId
+ * @param {string} optionId
+ * @returns {boolean}
+ */
+export function answerChoosesOption(answer, questionId, optionId) {
+  if (!answer || typeof answer !== 'object') return false;
+  if (Array.isArray(answer.answers)) {
+    return answer.answers.some(a => a && a.questionId === questionId &&
+      answerChoosesOption(a, questionId, optionId));
+  }
+  if (Array.isArray(answer.optionIds)) return answer.optionIds.includes(optionId);
+  return answer.optionId === optionId;
 }
 
 /**
@@ -164,7 +245,8 @@ export function indexAskAnswers(messages) {
  * @param {number} args.messageCount     messages.length
  * @param {object|undefined} args.answer  the matching answer record, if any
  * @param {boolean} [args.disabled]      composer disabled (sending / offline)
- * @returns {{answerable: boolean, answeredOptionId: string|null, answeredLabel: string|null}}
+ * @returns {{answerable: boolean, answeredOptionId: string|null, answeredLabel: string|null,
+ *            answeredOptionIds: string[]|null, multiAnswers: Array|null}}
  */
 export function questionState({ index, messageCount, answer, disabled = false }) {
   const isLast = index === messageCount - 1;
@@ -173,6 +255,8 @@ export function questionState({ index, messageCount, answer, disabled = false })
     answerable: isLast && !answered && !disabled,
     answeredOptionId: answered && typeof answer.optionId === 'string' ? answer.optionId : null,
     answeredLabel: answered && typeof answer.label === 'string' ? answer.label : null,
+    // Populated when a single multi-select question was answered (#2523).
+    answeredOptionIds: answered && Array.isArray(answer.optionIds) ? answer.optionIds : null,
     // Populated when a consolidated multi-question reply was sent (AC4 shape).
     multiAnswers: answered && Array.isArray(answer.answers) ? answer.answers : null,
   };

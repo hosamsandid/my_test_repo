@@ -159,9 +159,8 @@ infrastructure risk — see §9).
 ### 4.4 Readiness
 
 The compose file defines **no healthchecks** (`depends_on: service_started` only). The
-harness's global-setup therefore polls: `GET /api/setup/status` (admin-console up),
-login round-trip (auth up), a `/api/agents` list (orchestrator `:4002` reachable via the
-console proxy), and conduwuit's `/_matrix/client/versions`. Adding real compose
+harness's global-setup therefore polls: login round-trip (admin-console + auth up), a
+`/api/agents` list (orchestrator `:4002` reachable via the console proxy), and conduwuit's `/_matrix/client/versions`. Adding real compose
 healthchecks is a small, separately-ticketed product improvement (per the ticket's
 scope rule), not a prerequisite.
 

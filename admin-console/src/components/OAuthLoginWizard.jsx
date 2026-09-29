@@ -43,9 +43,9 @@ const buttonGhost = {
 
 /* ────────────── subscription OAuth login wizard ──────────────
  *
- * Single source of truth for the `claude setup-token` login flow, shared by
- * the Model Providers page (ModelRegistry) and the first-run Setup Wizard so
- * the two surfaces can never drift.
+ * Single source of truth for the `claude setup-token` login flow, used by the
+ * Model Providers page (ModelRegistry). Kept as its own component so any
+ * further surface that offers the login reuses it rather than drifting.
  *
  * Walks the operator through `claude setup-token`, executed by the
  * orchestrator: start → open the authorize URL in the browser → paste the

@@ -1426,3 +1426,348 @@ test("_fanOutBatch: window dedup drops EVERY echo of one apply, not just the fir
     githubEventLog.record = origRecord;
   }
 });
+
+// ── #2529: the branch-creating first push reaches `['push']` via pull_request.opened ─
+//
+// The Events API emits no PushEvent for the push that creates a branch; the PR
+// opened from it is the only signal. The poller synthesises a push-class event
+// from it and de-dups push wakes per (ref, head sha).
+
+const {
+  synthesizePrOpenPush,
+  expandPrOpenPushes,
+  pushHeadKey,
+  gcPushHeads,
+  PUSH_HEADS_MAX,
+} = require("./github-poller");
+
+// The Events API's real (slimmed) PullRequestEvent shape (#2529 review B1):
+// `repo.name` is `owner/name`, but `head.repo` / `base.repo` are
+// `{ id, name: <SHORT name>, url }` — no `full_name`.
+const REPO_ID = 1001;
+const REPO_API_URL = "https://api.github.com/repos/org/repo";
+const sameRepo = { id: REPO_ID, name: "repo", url: REPO_API_URL };
+
+function prOpenedEvent(id, { action = "opened", number = 42, ref = "feat/x", sha = "abc1234def", headRepo = sameRepo, createdAt } = {}) {
+  return {
+    id,
+    actor: { login: "dev" },
+    created_at: createdAt || new Date().toISOString(),
+    type: "PullRequestEvent",
+    repo: { id: REPO_ID, name: "org/repo", url: REPO_API_URL },
+    payload: {
+      action,
+      number,
+      pull_request: {
+        number,
+        url: `https://api.github.com/repos/org/repo/pulls/${number}`,
+        head: { ref, sha, repo: headRepo || undefined },
+        base: { ref: "main", sha: "base000", repo: sameRepo },
+      },
+    },
+  };
+}
+
+// Captured verbatim from the live Events API (this PR's own
+// `pull_request.opened`, #2530) — pins the production shape end to end.
+const REAL_PR_OPENED = {
+  id: "15937106102",
+  type: "PullRequestEvent",
+  actor: { id: 1, login: "thorsten-a-maier_accent" },
+  repo: {
+    id: 1225674781,
+    name: "AccentureCodeFoundry/314092_agent-execution-environment",
+    url: "https://api.github.com/repos/AccentureCodeFoundry/314092_agent-execution-environment",
+  },
+  payload: {
+    action: "opened",
+    number: 2530,
+    pull_request: {
+      id: 4666725854,
+      number: 2530,
+      url: "https://api.github.com/repos/AccentureCodeFoundry/314092_agent-execution-environment/pulls/2530",
+      head: {
+        ref: "feat/2529-pr-open-push-wake",
+        sha: "4f1f84aee1c61a2e8f22ac49a155a4bc5be42294",
+        repo: {
+          id: 1225674781,
+          name: "314092_agent-execution-environment",
+          url: "https://api.github.com/repos/AccentureCodeFoundry/314092_agent-execution-environment",
+        },
+      },
+      base: {
+        ref: "main",
+        sha: "2fc34a8dfe19208ffd420ab0843cbdd3ced2f517",
+        repo: {
+          id: 1225674781,
+          name: "314092_agent-execution-environment",
+          url: "https://api.github.com/repos/AccentureCodeFoundry/314092_agent-execution-environment",
+        },
+      },
+    },
+  },
+  public: false,
+  created_at: "2026-09-28T16:51:59Z",
+};
+
+function pushEvent(id, { ref = "refs/heads/feat/x", head = "abc1234def", createdAt } = {}) {
+  return {
+    id,
+    actor: { login: "dev" },
+    created_at: createdAt || new Date().toISOString(),
+    type: "PushEvent",
+    repo: { name: "org/repo" },
+    payload: { ref, head, before: "0000000" },
+  };
+}
+
+const pushSub = (over = {}) => ({
+  agentId: "builder", triggerId: "t-push",
+  events: new Set(["push"]), labelFilter: null, horizon: null,
+  ...over,
+});
+
+async function runBatch(poller, batches, subscribers) {
+  const recorded = [];
+  const enqueued = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+  poller._enrichPullRequestPayload = async (_k, payload) => payload;
+  poller._checkAndIncThrottle = () => ({ drop: false });
+  poller._saveThrottleState = () => {};
+  try {
+    for (const batch of batches) await poller._fanOutBatch("org/repo", batch, subscribers, "tok");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+  return { recorded, enqueued };
+}
+
+test("synthesizePrOpenPush: opened/reopened map to a push carrying head ref/sha and the PR", () => {
+  for (const action of ["opened", "reopened"]) {
+    const s = synthesizePrOpenPush(prOpenedEvent("pr-1", { action }));
+    assert.equal(s.id, "prpush:pr-1");
+    assert.equal(s.type, "PushEvent");
+    assert.equal(s.payload.ref, "refs/heads/feat/x");
+    assert.equal(s.payload.head, "abc1234def");
+    assert.equal(s.payload.synthesizedFrom, `pull_request.${action}`);
+    assert.equal(s.payload.pull_request.number, 42);
+    assert.equal(s.payload.pull_request.html_url, "https://github.com/org/repo/pull/42");
+  }
+});
+
+test("synthesizePrOpenPush: other PR actions, non-PR events, fork heads and missing heads yield null", () => {
+  assert.equal(synthesizePrOpenPush(prOpenedEvent("a", { action: "closed" })), null);
+  assert.equal(synthesizePrOpenPush(prOpenedEvent("b", { action: "labeled" })), null);
+  assert.equal(synthesizePrOpenPush(pushEvent("c")), null);
+  assert.equal(synthesizePrOpenPush(prOpenedEvent("d", {
+    headRepo: { id: 2002, name: "fork", url: "https://api.github.com/repos/someone/fork" } })), null);
+  assert.equal(synthesizePrOpenPush(prOpenedEvent("e", { sha: "" })), null);
+  assert.equal(synthesizePrOpenPush(null), null);
+  // A reduced head without repo info is treated as same-repo.
+  assert.ok(synthesizePrOpenPush(prOpenedEvent("f", { headRepo: null })));
+});
+
+test("synthesizePrOpenPush (review B1): a same-repo head whose SHORT name differs from repo.name still synthesizes", () => {
+  const ev = prOpenedEvent("g");
+  assert.notEqual(ev.payload.pull_request.head.repo.name, ev.repo.name); // "repo" vs "org/repo"
+  assert.ok(synthesizePrOpenPush(ev));
+  // …and the captured live event does too.
+  const s = synthesizePrOpenPush(REAL_PR_OPENED);
+  assert.ok(s, "the real Events API payload must synthesize a push");
+  assert.equal(s.payload.ref, "refs/heads/feat/2529-pr-open-push-wake");
+  assert.equal(s.payload.head, "4f1f84aee1c61a2e8f22ac49a155a4bc5be42294");
+});
+
+test("synthesizePrOpenPush (review B1): a fork with the SAME short name but another id yields null", () => {
+  const fork = { id: 2002, name: "repo", url: "https://api.github.com/repos/someone/repo" };
+  assert.equal(synthesizePrOpenPush(prOpenedEvent("h", { headRepo: fork })), null);
+  // Id beats url: same id is same repo even if the url differs (renamed repo).
+  assert.ok(synthesizePrOpenPush(prOpenedEvent("i", { headRepo: { ...sameRepo, url: "https://api.github.com/repos/org/renamed" } })));
+  // Url fallback when ids are missing on either side.
+  assert.ok(synthesizePrOpenPush(prOpenedEvent("j", { headRepo: { name: "repo", url: REPO_API_URL } })));
+  assert.equal(synthesizePrOpenPush(prOpenedEvent("k", { headRepo: { name: "repo", url: fork.url } })), null);
+});
+
+test("expandPrOpenPushes: inserts the synthetic push right after its PR event", () => {
+  const out = expandPrOpenPushes([pushEvent("p0", { head: "zzz" }), prOpenedEvent("pr-1"), pushEvent("p2", { head: "yyy" })]);
+  assert.deepEqual(out.map((e) => e.id), ["p0", "pr-1", "prpush:pr-1", "p2"]);
+});
+
+test("pushHeadKey / gcPushHeads: keyed on ref+sha; TTL and cap bound the memory", () => {
+  assert.equal(pushHeadKey(pushEvent("p")), "refs/heads/feat/x@abc1234def");
+  assert.equal(pushHeadKey({ payload: { ref: "refs/heads/x" } }), null);
+  const now = Date.now();
+  const heads = { old: now - 8 * 24 * 60 * 60 * 1000, fresh: now, junk: "x" };
+  gcPushHeads(heads, now);
+  assert.deepEqual(Object.keys(heads), ["fresh"]);
+  const many = {};
+  for (let i = 0; i < PUSH_HEADS_MAX + 5; i++) many[`k${i}`] = now - (PUSH_HEADS_MAX + 5 - i);
+  gcPushHeads(many, now);
+  assert.equal(Object.keys(many).length, PUSH_HEADS_MAX);
+  assert.ok(!("k0" in many) && `k${PUSH_HEADS_MAX + 4}` in many, "the oldest are evicted first");
+});
+
+test("_fanOutBatch (#2529 AC1): a PR-opening push fires a ['push'] trigger once, logged as a delivered push row", async () => {
+  const poller = new GitHubPoller();
+  const { recorded, enqueued } = await runBatch(poller, [[prOpenedEvent("pr-1")]], [pushSub()]);
+
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0].entry.github.event, "push");
+  assert.equal(enqueued[0].entry.github.eventId, "prpush:pr-1");
+  assert.equal(enqueued[0].entry.github.payload.ref, "refs/heads/feat/x");
+  assert.equal(enqueued[0].entry.github.payload.head, "abc1234def");
+
+  const pushRow = recorded.find((r) => r.event === "push");
+  assert.equal(pushRow.ref, "refs/heads/feat/x");
+  assert.equal(pushRow.outcomes.length, 1);
+  assert.equal(pushRow.outcomes[0].status, "delivered");
+  // The original PR row is still logged (nobody listening to it here).
+  const prRow = recorded.find((r) => r.event === "pull_request.opened");
+  assert.equal(prRow.noMatchingTrigger, true);
+});
+
+test("_fanOutBatch (#2529 AC1, review B1): the captured live pull_request.opened fires a ['push'] trigger", async () => {
+  const poller = new GitHubPoller();
+  const { recorded, enqueued } = await runBatch(poller, [[REAL_PR_OPENED]], [pushSub()]);
+
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0].entry.github.event, "push");
+  assert.equal(enqueued[0].entry.github.eventId, "prpush:15937106102");
+  assert.equal(enqueued[0].entry.github.payload.ref, "refs/heads/feat/2529-pr-open-push-wake");
+  const pushRow = recorded.find((r) => r.event === "push");
+  assert.equal(pushRow.outcomes[0].status, "delivered");
+});
+
+test("_fanOutBatch (#2529 AC2): a later real PushEvent for the same head is dropped as a duplicate — across batches", async () => {
+  const poller = new GitHubPoller();
+  const { recorded, enqueued } = await runBatch(poller, [[prOpenedEvent("pr-1")], [pushEvent("real-1")]], [pushSub()]);
+  assert.equal(enqueued.length, 1, "only the PR-opening push wakes the trigger");
+  const realRow = recorded.find((r) => r.eventId === "real-1");
+  assert.equal(realRow.outcomes[0].status, "dropped");
+  assert.equal(realRow.outcomes[0].reason, "push-duplicate");
+});
+
+test("_fanOutBatch (#2529 AC2): a PR opened on a head a real push already delivered does not re-fire", async () => {
+  const poller = new GitHubPoller();
+  const { enqueued, recorded } = await runBatch(poller, [[pushEvent("real-1"), prOpenedEvent("pr-1")]], [pushSub()]);
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0].entry.github.eventId, "real-1");
+  assert.equal(recorded.find((r) => r.eventId === "prpush:pr-1").outcomes[0].reason, "push-duplicate");
+});
+
+test("_fanOutBatch (#2529 AC3): subsequent pushes with new heads to the existing branch keep firing", async () => {
+  const poller = new GitHubPoller();
+  const { enqueued } = await runBatch(poller, [
+    [prOpenedEvent("pr-1")],
+    [pushEvent("real-2", { head: "second" })],
+    [pushEvent("real-3", { head: "third" })],
+  ], [pushSub()]);
+  assert.deepEqual(enqueued.map((e) => e.entry.github.eventId), ["prpush:pr-1", "real-2", "real-3"]);
+});
+
+test("_fanOutBatch (#2529 AC4): a pull_request.opened trigger fires once on the PR event, never on the synthetic push", async () => {
+  const poller = new GitHubPoller();
+  const prSub = { agentId: "reviewer", triggerId: "t-pr", events: new Set(["pull_request.opened"]), labelFilter: null, horizon: null };
+  // A single trigger listening to both keys is already woken by the PR event.
+  const bothSub = { agentId: "both", triggerId: "t-both", events: new Set(["push", "pull_request.opened"]), labelFilter: null, horizon: null };
+  const { enqueued, recorded } = await runBatch(poller, [[prOpenedEvent("pr-1")]], [prSub, pushSub(), bothSub]);
+
+  const wakes = enqueued.map((e) => `${e.agentId}:${e.entry.github.event}`).sort();
+  assert.deepEqual(wakes, ["both:pull_request.opened", "builder:push", "reviewer:pull_request.opened"]);
+  assert.deepEqual(recorded.find((r) => r.event === "push").outcomes.map((o) => o.agentId), ["builder"]);
+});
+
+test("_fanOutBatch (#2529 AC5): the synthetic push still honours the history horizon", async () => {
+  const poller = new GitHubPoller();
+  const sub = pushSub({ horizon: new Date().toISOString() });
+  const old = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { enqueued, recorded } = await runBatch(poller, [[prOpenedEvent("pr-old", { createdAt: old })]], [sub]);
+  assert.equal(enqueued.length, 0, "a pre-existing PR must not wake a brand-new push trigger");
+  assert.equal(recorded.find((r) => r.event === "push").outcomes[0].reason, "history-horizon");
+});
+
+test("_fanOutBatch (#2529 AC5): the synthetic push goes through the throttle and burst digest", async () => {
+  const throttled = new GitHubPoller();
+  const r1 = await runBatch(throttled, [[]], [pushSub()]);
+  assert.equal(r1.enqueued.length, 0);
+  throttled._checkAndIncThrottle = () => ({ drop: true, count: 6, threshold: 5, windowEndsAt: "x" });
+  const recorded = [];
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    await throttled._fanOutBatch("org/repo", [prOpenedEvent("pr-t")], [pushSub()], "tok");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+  assert.equal(recorded.find((r) => r.event === "push").outcomes[0].reason, "throttle");
+
+  const burst = new GitHubPoller();
+  const prs = [];
+  for (let i = 0; i < BURST_CAP + 1; i++) {
+    prs.push(prOpenedEvent(`pr-b${i}`, { number: 7, ref: "feat/burst", sha: `sha${i}`, action: i % 2 ? "reopened" : "opened" }));
+  }
+  const { enqueued } = await runBatch(burst, [prs], [pushSub()]);
+  assert.equal(enqueued.length, 1);
+  assert.equal(enqueued[0].entry.kind, "github-digest");
+});
+
+// ── #2525: the manual "Fire again" re-arms the wake key from outside a poll, so
+// the protections still hold afterwards (AC10).
+
+test("armWake (#2525): a re-fired wake stays armed — the next duplicate label event is dropped 'wake-already-armed'", async () => {
+  const origRecord = githubEventLog.record;
+  const recorded = [];
+  githubEventLog.record = (entry) => recorded.push(entry);
+  try {
+    const poller = new GitHubPoller();
+    poller._saveState = () => {};
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+
+    const armed = poller.armWake({
+      repo: "org/repo", triggerId: "t1785499525109689", kind: "issue", number: 2525, label: "ready",
+    });
+    assert.equal(armed, true);
+
+    const dup = labeledIssueEvent("2525-dup", "next-wave", ["next-wave", "ready"], 2525);
+    await poller._fanOutBatch("org/repo", [dup], readyDeveloperSub(), "tok");
+
+    assert.equal(enqueued.length, 0, "the duplicate is not delivered after a re-fire");
+    const outcome = recorded.flatMap((e) => e.outcomes || []).find((o) => o.agentId === "developer");
+    assert.equal(outcome.status, "dropped");
+    assert.equal(outcome.reason, "wake-already-armed");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("armWake (#2525): a later genuine remove -> re-add still fires (the re-fire does not pin the arm)", async () => {
+  const origRecord = githubEventLog.record;
+  githubEventLog.record = () => {};
+  try {
+    const poller = new GitHubPoller();
+    poller._saveState = () => {};
+    const enqueued = [];
+    poller._enqueuePending = (agentId, entry) => enqueued.push({ agentId, entry });
+    poller.armWake({ repo: "org/repo", triggerId: "t1785499525109689", kind: "issue", number: 2526, label: "ready" });
+
+    const removed = unlabeledIssueEvent("2526-rm", "ready", ["next-wave"], 2526);
+    const readded = labeledIssueEvent("2526-add", "ready", ["next-wave", "ready"], 2526);
+    await poller._fanOutBatch("org/repo", [removed, readded], readyDeveloperSub(), "tok");
+
+    assert.equal(enqueued.length, 1);
+    assert.equal(enqueued[0].entry.github.eventId, "2526-add");
+  } finally {
+    githubEventLog.record = origRecord;
+  }
+});
+
+test("armWake (#2525): no-op without a wake label or with the edge dedup switched off", () => {
+  const poller = new GitHubPoller();
+  poller._saveState = () => { throw new Error("must not save"); };
+  assert.equal(poller.armWake({ repo: "org/repo", triggerId: "t", kind: "issue", number: 1, label: null }), false);
+  poller._wakeEdgeDedup = false;
+  assert.equal(poller.armWake({ repo: "org/repo", triggerId: "t", kind: "issue", number: 1, label: "ready" }), false);
+});

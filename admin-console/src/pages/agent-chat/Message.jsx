@@ -382,6 +382,7 @@ function Message({
           answerable={!!questionAnswerable}
           answeredOptionId={questionAnswer?.answeredOptionId ?? null}
           answeredLabel={questionAnswer?.answeredLabel ?? null}
+          answeredOptionIds={questionAnswer?.answeredOptionIds ?? null}
           answeredMulti={questionAnswer?.multiAnswers ?? null}
           onAnswer={(opt) => onAnswerQuestion?.(message.event_id, opt, q)}
           time={formatMessageTime(message.ts)}

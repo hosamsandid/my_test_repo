@@ -38,6 +38,12 @@ test('label wording is unchanged from the pre-#2524 chips', () => {
   assert.equal(outcomeLabel(null), 'dropped (unknown) → undefined');
 });
 
+test('a manually re-fired delivery keeps the "fired again" note (#2525)', () => {
+  assert.equal(outcomeLabel({ status: 'delivered', agentId: 'a', wakeLabel: 'ready' }, { refired: true }), 'delivered · fired again (ready) → a');
+  assert.equal(outcomePresentation({ status: 'delivered', agentId: 'a' }, { refired: true }).label, 'delivered · fired again → a');
+  assert.equal(outcomeLabel({ status: 'dropped', reason: 'throttle', agentId: 'a' }, { refired: true }), 'dropped (throttle) → a');
+});
+
 test('AC4: delivered, digested and dropped stay visually distinct (marker shape AND colour)', () => {
   assert.equal(outcomeTone({ status: 'delivered' }), 'delivered');
   assert.equal(outcomeTone({ status: 'digest' }), 'digest');
@@ -93,7 +99,7 @@ test('AC5: a delivered session outcome stays a clickable, link-styled button wit
 });
 
 test('AC6: each outcome keeps its explanatory hover tooltip', () => {
-  assert.match(outcomeBlock, /const explain = outcomeTooltip\(outcome\)/);
+  assert.match(outcomeBlock, /const explain = refireNote \? `\$\{refireNote\} \$\{outcomeTooltip\(outcome\)\}` : outcomeTooltip\(outcome\)/);
   assert.match(outcomeBlock, /title=\{`\$\{explain\}\\n\\nClick to open the session this event triggered\.`\}/);
   assert.match(outcomeBlock, /title=\{explain \|\| undefined\}/);
 });

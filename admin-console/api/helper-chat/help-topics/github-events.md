@@ -85,11 +85,19 @@ There is no webhook into this stack, so the orchestrator **polls** the GitHub
 Events API every ~30 s for every repository that appears in a Working
 Environment carrying a **GitHub token**.
 
-Two consequences that surprise people:
+Three consequences that surprise people:
 
 - **The Events API is lossy by design.** It does not emit every action — most
   notably there is no `pull_request.synchronize`, so "a new commit was pushed to
   the PR" is not an event you can subscribe to.
+- **The first push to a new branch shows up as its pull request.** GitHub
+  reports no push for the push that creates a branch, so when a pull request is
+  opened (or reopened) from a branch of the same repository, the poller adds a
+  **push** row of its own for that branch and head commit. If GitHub also
+  reports a real push for the same branch and commit, whichever of the two
+  arrives second is logged as **dropped (push-duplicate)** — a push trigger
+  wakes only once per commit. A branch pushed without opening a pull request
+  still produces no row.
 - **An event is fresh if its id has not been seen before**, not if it is recent.
   The poller keeps a per-repository set of **seen ids**, so a re-polled page
   costs nothing and nothing is delivered twice. The very first poll after a
@@ -97,7 +105,7 @@ Two consequences that surprise people:
 
 ### The poller is not the only writer
 
-Three other things write rows here, which is why this stays one honest timeline of
+Four other things write rows here, which is why this stays one honest timeline of
 every wake rather than a log of one delivery mechanism:
 
 - **Internal-channel hand-offs.** A hand-off on an internal channel
@@ -111,6 +119,7 @@ every wake rather than a log of one delivery mechanism:
   *only* record. Such a row has no repository or work item and honestly shows
   `—` there; it reads **direct hand-off** in the Event column, with the sender's
   note in the Title column.
+- **Fire again** (an agent's Events tab) writes a *delivered · fired again* row.
 
 Each row carries a `source` marking which writer produced it, but **the table
 never renders it** — so a poller row and an internal-fast-path row that arrived by
@@ -133,6 +142,7 @@ legend — this is the longer version.
 | **dropped (horizon)** | The event is older than that subscriber's subscription window (its activation time plus a short grace). | Expected right after wiring or reactivating a trigger. A new agent deliberately does not react to history that predates it. |
 | **dropped (label-filter)** | The event carried a label this trigger does not subscribe to. | No — that is label routing working. |
 | **dropped (internal-dedup)** | The wake was already delivered on the internal fast path; this is GitHub telling us about the same label a second time. | No. |
+| **dropped (wake-already-armed)** | Already woken for this label on this item; a repeat does not wake it again until the label is removed and re-added. | Usually no. Re-fire a lost hand-off from the agent's Events tab. |
 | **nobody's listening** | No trigger subscribed to this event **type** at all. | Maybe. If something should have reacted, the wiring is missing — add or fix the `github-event` trigger on the target agent. |
 
 A `delivered` or `digested` chip may carry the **wake label** in brackets: the
@@ -166,7 +176,7 @@ Work down the row, in this order:
 3. **Is there a chip for the agent you expected?** No chip means the agent's
    trigger did not even match the event *type*.
 4. **Is the chip a drop?** The reason names the layer that stopped it —
-   horizon, label filter, or throttle.
+   horizon, label filter, throttle or a dedup.
 5. **Delivered but nothing happened?** Delivery is not execution. Open the
    session from the chip and read it there.
 6. **Delivered, but the agent has not started yet?** Look in the Pending queue —

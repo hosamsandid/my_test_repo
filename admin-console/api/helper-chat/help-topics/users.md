@@ -6,7 +6,6 @@ summary: The one System-Admin surface — the human user records that can sign i
 seeAlso:
   - { label: "Agent Chat", to: "/chats" }
   - { label: "Environment Templates", to: "/environment-templates" }
-  - { label: "My Credentials", to: "/my-credentials" }
   - { label: "SSH Keys", to: "/ssh-keys" }
 askPrompts:
   - "What is the Subject and can I change it later?"

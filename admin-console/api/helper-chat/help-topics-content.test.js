@@ -429,7 +429,7 @@ const TOPIC_CONTENT = [
   },
   {
     id: 'credentials',
-    routes: ['/ssh-keys', '/github-tokens', '/my-credentials'],
+    routes: ['/ssh-keys', '/github-tokens'],
     // #1884 lifted the intro boxes and the FOUR duplicated "why both an SSH key
     // and a GitHub token" notes (SSH Keys, GitHub Tokens, My Credentials and two
     // onboarding steps since removed). The topic additionally records what
@@ -439,15 +439,16 @@ const TOPIC_CONTENT = [
     //
     // #1993 (epic #1981) widened it into a per-surface reference. This is the
     // first MULTI-ROUTE topic, so the chapters matter more here than anywhere
-    // else: three pages share one file, and without them a reader arriving from
+    // else: several pages share one file, and without them a reader arriving from
     // GitHub Tokens landed at the top of an explanation opening with SSH.
-    // Chapters 2/3/4 are the deep-link targets of the three page headers;
-    // 1/5/6 are the cross-page story and carry no "?" of their own.
+    // Chapters 2/3 are the deep-link targets of the two page headers; 1/4/5/6
+    // are the cross-page story (4 since #2445 folded My Credentials into both
+    // pages) and carry no "?" of their own.
     chapters: [
       'Why both an SSH key and a GitHub token',
       'SSH keys',
       'GitHub tokens',
-      'My Credentials',
+      'Personal credentials',
       'Ownership tiers and privacy',
       'Rotation and runtime resolution',
     ],

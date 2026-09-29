@@ -114,6 +114,25 @@ const DEFAULT_DECAY_HORIZON_DAYS = 60;
 // to an integer >= 1.
 const DEFAULT_DISTILL_AFTER_AMENDMENTS = 5;
 
+// #2592 domain → skill pipeline. A domain's FIRST skill is only written once its
+// queued lessons reach this mass (≥ minLessons converged lessons from ≥ minAgents
+// distinct agents); after that every routed lesson extends the one skill. A team
+// sets it on its own knowledge config (`domainSkillThreshold`, a per-team key);
+// `knowledgeCuration.domainSkillThreshold` on the environment is the fallback.
+const DEFAULT_DOMAIN_SKILL_THRESHOLD = Object.freeze({ minLessons: 3, minAgents: 2 });
+
+// Clamp a { minLessons, minAgents } threshold: integers, lessons 1..100, agents
+// 1..50; a missing/invalid value falls back to its default.
+function normalizeDomainSkillThreshold(raw) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const lessons = Number(r.minLessons);
+  const agents = Number(r.minAgents);
+  return {
+    minLessons: Number.isInteger(lessons) && lessons >= 1 && lessons <= 100 ? lessons : DEFAULT_DOMAIN_SKILL_THRESHOLD.minLessons,
+    minAgents: Number.isInteger(agents) && agents >= 1 && agents <= 50 ? agents : DEFAULT_DOMAIN_SKILL_THRESHOLD.minAgents,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Ids / clock (injectable so tests are deterministic)
 // ---------------------------------------------------------------------------
@@ -649,6 +668,12 @@ function knowledgeCurationConfig(env) {
   if (!Number.isInteger(distillAfterAmendments) || distillAfterAmendments < 1) {
     distillAfterAmendments = DEFAULT_DISTILL_AFTER_AMENDMENTS;
   }
+  // #2592: the per-team value (a TEAM_KNOWLEDGE_KEYS override) wins over the env's.
+  const domainSkillThreshold = normalizeDomainSkillThreshold(
+    env && env.domainSkillThreshold && typeof env.domainSkillThreshold === 'object'
+      ? env.domainSkillThreshold
+      : raw.domainSkillThreshold,
+  );
   return {
     maxAutoPromotionsPerPass: cap,
     autoThemeMinLessons,
@@ -660,6 +685,7 @@ function knowledgeCurationConfig(env) {
     skillBudget,
     synthesizeSkills,
     distillAfterAmendments,
+    domainSkillThreshold,
   };
 }
 
@@ -697,7 +723,7 @@ function buildHarvestHint(autonomyLevel) {
 // onto one set of values. They now live in a per-team overrides document; this
 // list is the single authority for which keys are team-owned (used by both the
 // orchestrator writers and the admin-console read path).
-const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore', 'skillResyncMode', 'decayHorizonDays'];
+const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore', 'skillResyncMode', 'decayHorizonDays', 'domainSkillThreshold'];
 
 // Overlay a team's knowledge-config overrides onto its environment, producing an
 // env-shaped object the existing pure readers (knowledgeAutonomyLevel,
@@ -758,6 +784,8 @@ module.exports = {
   DEFAULT_EXTEND_CONFIDENCE_FLOOR,
   DEFAULT_SKILL_BUDGET,
   DEFAULT_DISTILL_AFTER_AMENDMENTS,
+  DEFAULT_DOMAIN_SKILL_THRESHOLD,
+  normalizeDomainSkillThreshold,
   PROMOTION_TRANSITIONS,
   GATE_MODES,
   DEFAULT_PROMOTION_GATES,

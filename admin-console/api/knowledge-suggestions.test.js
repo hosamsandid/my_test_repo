@@ -450,7 +450,7 @@ test('matchExistingSkill: entry-id lineage beats name overlap; null when no sign
 test('TEAM_KNOWLEDGE_KEYS covers exactly the per-team groups', () => {
   assert.deepEqual(
     [...TEAM_KNOWLEDGE_KEYS].sort(),
-    ['decayHorizonDays', 'knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore', 'skillResyncMode'],
+    ['decayHorizonDays', 'domainSkillThreshold', 'knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore', 'skillResyncMode'],
   );
 });
 

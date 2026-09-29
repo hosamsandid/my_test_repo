@@ -901,7 +901,7 @@ function resolveDecayHorizonDays(env) {
 // The four knowledge-config groups keyed PER TEAM (#570) instead of on the
 // shared environment. Mirror of the orchestrator's knowledge-store.TEAM_KNOWLEDGE_KEYS
 // (the two runtimes never cross-require, so the list is duplicated verbatim).
-const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore', 'skillResyncMode', 'decayHorizonDays'];
+const TEAM_KNOWLEDGE_KEYS = ['knowledgeAutonomy', 'knowledgeReview', 'knowledgePromotionGates', 'knowledgeStore', 'skillResyncMode', 'decayHorizonDays', 'domainSkillThreshold'];
 
 // Overlay a team's persisted knowledge-config overrides onto a base environment,
 // producing the env-shaped object the pure readers (teamAutonomyLevel /

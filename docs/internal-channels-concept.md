@@ -4,10 +4,11 @@
 > described an opt-in `transport: 'internal'` delivery for label hand-offs:
 > the producer ran `aee-emit`, `POST /internal/flow-emit` queued the consumer
 > directly, the GitHub poller ignored that listener, and the label on GitHub was
-> only mirrored as decoration. The whole path — `aee-emit`, `/internal/flow-emit`,
+> only mirrored as decoration. The whole path — `/internal/flow-emit`,
 > `orchestrator/flow-emit.js`, the channel/trigger `transport` field, the edge
 > dialog's *Delivery* choice and the dotted internal-edge style — has been
-> removed. The original text is in git history.
+> removed; `aee-emit` survives one release as a deprecated shim that just applies
+> the label on GitHub. The original text is in git history.
 
 ## Why it was retired
 
@@ -46,4 +47,5 @@ A legacy `transport` key on a channel port, trigger, bundle or template is
 ignored on import (dropped, not rejected). On startup the admin API sweeps every
 agent once, drops `transport` from its `channels[]` and `triggers.json`, and
 re-renders the affected teams' derived listeners and `## Outcomes` prompt
-blocks, so no agent is still told to run `aee-emit`.
+blocks, so no agent is still told to run `aee-emit`. An agent whose own authored
+prompt still names `aee-emit` keeps working through the shim until it is removed.

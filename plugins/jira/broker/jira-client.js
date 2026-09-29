@@ -1062,11 +1062,12 @@ async function transitionIssue(cred, issueKey, { toStatus, env } = {}) {
 //
 // The write counterpart of the #2416 custom-field read: set an allow-listed
 // custom field (e.g. "Team") on an issue. Three guards, in order:
-//   1. allow-list — the field's human name MUST be in the team's
-//      `writable-custom-fields` list, else it is REFUSED (403). An EMPTY list
-//      means NO field is writable — the safe default until a Team Admin opts a
-//      field in (a writable field is strictly more dangerous than a readable one,
-//      so unlike the read allow-list this gate is mandatory, never a default set).
+//   1. allow-list — an EMPTY `writable-custom-fields` list means UNRESTRICTED:
+//      any custom field the account can see is writable (#2449 flipped the
+//      original #2417 deny-by-default). A NON-EMPTY list restricts writes to the
+//      named fields; any other field is REFUSED (403). Operator note: filling the
+//      list in is recommended where agents should only touch specific fields — a
+//      writable field is strictly more dangerous than a readable one.
 //   2. name → id resolution via the (cached) field catalog — an unknown name is a
 //      400 with the offending name, never a silently-dropped write.
 //   3. value shaping per the field's schema type — a Team / select / user field is
@@ -1203,13 +1204,12 @@ async function setCustomField(cred, issueKey, { fieldName, value, jsonValue, all
 // fails BEFORE any issue exists (no orphan epic):
 //   1. shape validation — a missing project / epic summary / story summary is a
 //      400 up front.
-//   2. custom-field allow-list — EVERY custom field named anywhere (epic or a
-//      story) MUST be on the team's `writable-custom-fields` list, exactly like
-//      `setCustomField` (#2417): the same fields (Team, Story Points) an admin
-//      sanctioned for a set are the ones creatable here. A non-listed field is a
-//      403 before anything is created. The Epic-link field the broker sets to
-//      wire a Story to its Epic is structural, NOT a user-named field, so it is
-//      exempt from the allow-list.
+//   2. custom-field allow-list — the same gate as `setCustomField` (#2417,
+//      #2449): an EMPTY `writable-custom-fields` list means unrestricted; a
+//      NON-EMPTY list means EVERY custom field named anywhere (epic or a story)
+//      must be on it, and a non-listed field is a 403 before anything is
+//      created. The Epic-link field the broker sets to wire a Story to its Epic
+//      is structural, NOT a user-named field, so it is exempt from the allow-list.
 //   3. name → id + schema resolution via the (cached) field catalog — an unknown
 //      custom-field name is a 400 up front.
 // The epic is created first (its key is needed to link the stories); then each

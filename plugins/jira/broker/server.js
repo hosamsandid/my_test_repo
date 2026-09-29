@@ -114,7 +114,7 @@ function resolveCredential(scopeId) {
     .split(',').map((s) => s.trim()).filter(Boolean);
   // Optional admin allow-list of WRITABLE custom fields (#2417): a comma list of
   // human field names ("Team") an agent may set via `aee-jira set-field`. Empty =
-  // no field is writable (the safe default — a write is stricter than a read).
+  // any custom field is writable (#2449); a non-empty list restricts writes to it.
   const writableCustomFields = String(v['writable-custom-fields'] || '')
     .split(',').map((s) => s.trim()).filter(Boolean);
   return { siteUrl, email, apiToken, readableCustomFields, writableCustomFields };
@@ -499,8 +499,8 @@ async function handleCli(req, res, cliPath) {
   // ── issue creation: one Epic + N child Stories (#2424) ───────────────────
   // The plugin's first CREATE. The CLI sends `{ project, epic, stories[], issueTypes? }`;
   // the broker creates the epic then each story (linked to it), gating every
-  // named custom field on the team's `writable-custom-fields` allow-list (#2417)
-  // BEFORE anything is created. A per-story failure after the epic exists is
+  // named custom field on the team's `writable-custom-fields` allow-list when it
+  // is non-empty (#2417/#2449) BEFORE anything is created. A per-story failure after the epic exists is
   // reported, not fatal (jira.createEpicWithStories). Role-gated like the other
   // writes (D3); the Jira token stays server-side.
   if (cliPath === '/create-epic' && req.method === 'POST') {

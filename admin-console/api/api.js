@@ -10333,6 +10333,30 @@ async function proxyPluginCredentialWrite(req, res, method) {
 app.put('/api/plugins/:id/credentials/:scopeId', apiLimiter, (req, res) => proxyPluginCredentialWrite(req, res, 'PUT'));
 app.delete('/api/plugins/:id/credentials/:scopeId', apiLimiter, (req, res) => proxyPluginCredentialWrite(req, res, 'DELETE'));
 
+// POST /api/plugins/:id/credentials/:scopeId/test — "does the saved credential
+// work?" (#2640). Same Team-Admin gate as a write: the broker spends that
+// team's credential on one vendor read, so a viewer who cannot manage the team
+// must not trigger it. The answer is a status line (`result`), never a value.
+app.post('/api/plugins/:id/credentials/:scopeId/test', apiLimiter, async (req, res) => {
+  const id = req.params.id;
+  const scopeId = req.params.scopeId;
+  if (!PLUGIN_ID_RE.test(id)) return res.status(400).json({ error: 'invalid plugin id' });
+  const gate = pluginCredView.assertCanWriteScope(scopeId, (t) => canManageTeam(getScope(req), t));
+  if (!gate.ok) return res.status(gate.status).json({ error: gate.error });
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  let resp;
+  try {
+    resp = await fetch(
+      `${orchestratorUrl}/internal/plugins/${encodeURIComponent(id)}/credentials/${encodeURIComponent(scopeId)}/test`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+    );
+  } catch (err) {
+    return res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+  const body = await resp.json().catch(() => ({}));
+  return res.status(resp.status).json(body);
+});
+
 // ALL /plugins/:id/ui and /plugins/:id/ui/* — the UI proxy. NOT under /api, so
 // the session gate is applied explicitly (a session-less request is refused
 // here, before anything plugin-specific runs). Streamed rather than buffered so

@@ -17,13 +17,36 @@
 //   listAgentIds()                     → string[]
 //   loadAgentConfig(id)                → config | null
 //   pluginRegistry                     → { installedManifests, readPluginManifest }
-//   pluginRuntime                      → { pushScopeCredentials }
+//   pluginRuntime                      → { pushScopeCredentials, testScopeCredential }
 //   effectivePlugins(cfg, loadCfg)     → grant list
 //   pluginGrantFor(grants, pluginId)   → grant | null
 //   resolveScopeId(cfg, granularity)   → scopeId | null
 //   credentialStore                    → PluginCredentialStore
 //   log(msg)                           → optional
 const { PLUGIN_ID_RE } = require('./plugin-credential-store');
+
+// The broker's answer to `POST /internal/test-scope-credential` (#2640), reduced
+// to the fields the Credentials form shows. An allow-list, not a pass-through:
+// whatever a broker puts in its body, only these reach the console — so a
+// buggy broker cannot echo a credential value to the browser.
+function shapeCredentialTest(r) {
+  const at = new Date().toISOString();
+  const fail = (state, message) => ({ ok: false, state, message, account: null, httpStatus: null, checkedAt: at });
+  if (!r || r.supported === false) return fail('unsupported', 'Plugin brokers do not run on this platform, so the credential cannot be tested.');
+  if (r.status === 404) return fail('not-testable', 'This plugin cannot test its credential.');
+  if (r.error || !r.status) return fail('broker-unreachable', 'The plugin\'s broker is not reachable, so the credential could not be tested.');
+  if (!r.ok || !r.body || typeof r.body !== 'object') return fail('broker-error', `The plugin's broker could not run the check (HTTP ${r.status}).`);
+  const b = r.body;
+  const str = (v, max) => (typeof v === 'string' && v ? v.slice(0, max) : null);
+  return {
+    ok: b.ok === true,
+    state: str(b.state, 40) || (b.ok === true ? 'connected' : 'error'),
+    message: str(b.message, 300) || (b.ok === true ? 'The credential works.' : 'The credential did not work.'),
+    account: str(b.account, 200),
+    httpStatus: Number.isInteger(b.httpStatus) ? b.httpStatus : null,
+    checkedAt: str(b.checkedAt, 40) || at,
+  };
+}
 
 function createPluginCredentialWiring(deps) {
   const {
@@ -74,16 +97,18 @@ function createPluginCredentialWiring(deps) {
     }
   }
 
-  // Handle GET/PUT/DELETE /internal/plugins/:id/credentials[/:scopeId].
+  // Handle GET/PUT/DELETE /internal/plugins/:id/credentials[/:scopeId], and
+  // POST /internal/plugins/:id/credentials/:scopeId/test (#2640).
   // `sendJson(res, status, obj)` and `readBody(req)` (→ parsed object, rejects on
   // bad JSON) are injected (orchestrator internals). Returns true if it handled
   // the request, false to fall through.
   async function handleCredentialRoute(req, res, { sendJson, readBody }) {
     const m = (req.url || '').split('?')[0]
-      .match(/^\/internal\/plugins\/([^/]+)\/credentials(?:\/([^/]+))?$/);
+      .match(/^\/internal\/plugins\/([^/]+)\/credentials(?:\/([^/]+)(\/test)?)?$/);
     if (!m) return false;
     const pluginId = decodeURIComponent(m[1]);
     const scopeId = m[2] ? decodeURIComponent(m[2]) : null;
+    const isTest = !!m[3];
 
     const entry = pluginRegistry.readPluginManifest(pluginId);
     if (!entry.ok || !entry.manifest) {
@@ -110,6 +135,25 @@ function createPluginCredentialWiring(deps) {
           ...credentialStore.meta(pluginId, sid, declared),
         })),
       });
+      return true;
+    }
+
+    // "Does the saved credential work?" — the broker makes one cheap read with
+    // what it holds and answers a status line. Always 200 with a result the form
+    // can show next to the scope (an unreachable broker is a result too).
+    if (isTest) {
+      if (req.method !== 'POST') { sendJson(res, 405, { error: 'method not allowed' }); return true; }
+      if (!grantedScopes.includes(scopeId)) {
+        sendJson(res, 409, { error: `Plugin '${pluginId}' is not granted to scope '${scopeId}'` });
+        return true;
+      }
+      let r;
+      try {
+        r = await pluginRuntime.testScopeCredential(entry.manifest, scopeId);
+      } catch (err) {
+        r = { ok: false, error: err.message };
+      }
+      sendJson(res, 200, { pluginId, scopeId, result: shapeCredentialTest(r) });
       return true;
     }
 
@@ -240,4 +284,4 @@ function createPluginCredentialWiring(deps) {
   return { grantedTeamScopeIds, pushDeclaredScopeCredentials, handleCredentialRoute, handlePersonalCredentialRoute };
 }
 
-module.exports = { createPluginCredentialWiring };
+module.exports = { createPluginCredentialWiring, shapeCredentialTest };

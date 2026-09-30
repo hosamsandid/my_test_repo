@@ -107,6 +107,14 @@ one. The non-secret fields (`site-url`, `email`, `readable-custom-fields`,
 without retyping. Changing any of them takes effect on the next reconcile, no
 restart.
 
+Every Save is followed by a check of the stored credential, and **Test
+connection** runs the same check on demand (Team Admins of that team only): the
+broker reads the service account's own profile once (`GET /rest/api/3/myself`)
+and the form shows e.g. *Connected as Jira Bot* or *Token rejected (401) — check
+the service-account e-mail and API token*. With only the site set it checks that
+the site is reachable. The token never reaches the browser. **Clear** removes
+every stored value for the team and asks for confirmation first (#2640).
+
 ### 3a. Every member adds a personal credential
 
 Chat turns use the sender's own Jira account. Each member opens **Connections →
@@ -360,7 +368,7 @@ with the service account.
 | a call returns `no-active-run` / `ambiguous-run` / `run-key-revoked` | the call is not inside exactly one run the runner declared (e.g. a second Claude run in the same agent overlapped a chat turn — the call is refused rather than guessed), or something in the container requested a second run key | respawn the agent; do not run `aee-jira` from background processes that outlive the turn |
 | a chat turn returns `no-site` | the sender has a personal credential, but the team has no Jira site set | Team Admin sets the site in Agent Chat → Settings → Plugins (or a System Admin on the Plugins page) |
 | an automated run returns `no-service-account` | the team has no service-account credential set | Team Admin sets it in Agent Chat → Settings → Plugins (or a System Admin on the Plugins page) |
-| broker log: `Jira rejected the credential (401)` | the e-mail and token aren't the same Atlassian identity, or the token was revoked | regenerate a **classic** token while signed in as the intended account |
+| broker log: `Jira rejected the credential (401)` | the e-mail and token aren't the same Atlassian identity, or the token was revoked | regenerate a **classic** token while signed in as the intended account; **Test connection** in the credential form confirms the fix |
 | `projects` returns nothing but the account sees projects in a browser | a **scoped** API token missing `read:jira-work` | use a classic (unscoped) token |
 | a transition "no transition to X" | X isn't reachable from the issue's current status, or the name doesn't match | the error lists the available transitions; use one of those target names |
 | the poll log shows `fetch failed` once then recovers | a stale keep-alive socket in the long-running broker | expected — the client retries transport failures once |

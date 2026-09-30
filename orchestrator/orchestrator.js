@@ -20454,10 +20454,11 @@ async function main() {
     }
 
     // GET/PUT/DELETE /internal/plugins/:id/credentials[/:scopeId] — the generic
-    // per-scope plugin credential store (Jira plan §5). The console proxy applies
+    // per-scope plugin credential store (Jira plan §5) — and POST
+    // …/:scopeId/test, "does it work?" (#2640). The console proxy applies
     // the Team-Admin-of-that-scope gate (§D2); this layer enforces only that the
     // scope is one the plugin is actually granted to. All logic in the module.
-    if (/^\/internal\/plugins\/[^/]+\/credentials(?:\/[^/]+)?$/.test((req.url || '').split('?')[0])) {
+    if (/^\/internal\/plugins\/[^/]+\/credentials(?:\/[^/]+(?:\/test)?)?$/.test((req.url || '').split('?')[0])) {
       pluginCredentialWiring
         .handleCredentialRoute(req, res, { sendJson, readBody })
         .catch((err) => { if (!res.headersSent) sendJson(res, 500, { error: err.message }); });

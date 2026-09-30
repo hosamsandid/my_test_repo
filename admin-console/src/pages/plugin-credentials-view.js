@@ -182,3 +182,55 @@ export function selectScopes(scopes, onlyScopeId) {
   if (!onlyScopeId) return list;
   return list.filter((s) => s && s.scopeId === onlyScopeId);
 }
+
+// ── "Clear" confirmation and "Test connection" (#2640) ──────────────────────
+
+// Button / dialog labels, shared with the JSX source guard.
+export const CREDENTIAL_ACTION_LABELS = {
+  clear: 'Clear',
+  clearConfirm: 'Clear credential',
+  test: 'Test connection',
+  testing: 'Testing…',
+};
+
+// Is anything stored for this scope? (Clear and Test only make sense then.)
+export function hasStoredCredential(scope) {
+  return Object.values((scope && scope.keys) || {}).some((k) => k && k.set);
+}
+
+// What the "Clear" confirmation names: the team and the stored fields that will
+// be removed (by their display label, in manifest order). One click on Clear
+// used to delete everything at once — including a service-account token someone
+// else set, which the console cannot restore.
+export function clearConfirmation(scope, descriptors, pluginName) {
+  const team = (scope && (scope.teamName || scope.scopeId)) || 'this team';
+  const name = pluginName || 'plugin';
+  const keys = (Array.isArray(descriptors) ? descriptors : []).filter((d) => d.set).map((d) => d.label || d.key);
+  return {
+    title: `Clear the ${name} credential for ${team}?`,
+    keys,
+    message: `This removes ${keys.length ? keys.join(', ') : 'every stored value'} for ${team}.`
+      + `${scope && scope.setBy ? ` They were last set by ${scope.setBy}.` : ''}`
+      + ' Agents stop using them at once, and the console cannot restore them — secret values would have to be entered again.',
+  };
+}
+
+// The test result's colour. `ok` → green; a result that says the check could
+// not run at all (no broker support, nothing set) → muted; any failure → danger.
+const NEUTRAL_TEST_STATES = new Set(['not-configured', 'not-testable', 'unsupported']);
+export function credentialTestTone(result) {
+  if (!result) return 'muted';
+  if (result.ok === true) return 'ok';
+  if (NEUTRAL_TEST_STATES.has(result.state)) return 'muted';
+  return 'danger';
+}
+
+// The line shown next to the scope, e.g. "Connected as Jira Bot." or
+// "Token rejected (401) — …". An automatic check right after Save stays silent
+// when the plugin simply cannot test (a broker without the endpoint), so a
+// plugin that never offered a check does not nag on every save.
+export function credentialTestLine(result, { auto = false } = {}) {
+  if (!result || typeof result.message !== 'string' || !result.message) return null;
+  if (auto && (result.state === 'not-testable' || result.state === 'unsupported')) return null;
+  return result.message;
+}

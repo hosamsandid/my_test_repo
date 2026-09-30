@@ -497,10 +497,14 @@ console's own version format (short hash + `-dirty`, commit timestamp):
   pool plugin; install copies it into the registry.
 - **Surface** — the orchestrator probes every live sidecar's `/healthz`
   (`orchestrator/plugin-build-info.js`) and returns `brokerBuild` from
-  `GET /internal/plugins`; `GET /api/plugins` adds `sourceBuild` (registry for
-  installed, pool for available). The Plugins page shows both and a mismatch
-  hint when the running broker's commit differs from the installed files'
-  (`plugin-registry-view.js` `buildIdentity`). Unknown identities are shown as
+  `GET /internal/plugins`, plus `imageBuild` — the OCI labels of
+  `manifest.sidecar.image` in the local store (libpod image inspect; `null` on
+  Kubernetes, whose node cache is out of reach). `GET /api/plugins` adds
+  `sourceBuild` (registry for installed, pool for available). The Plugins page
+  shows all three (`plugin-registry-view.js` `buildIdentity`) with two hints:
+  running broker ≠ image (the image was rebuilt under a live sidecar — the
+  registry files do not move on a rebuild, so only this comparison catches it)
+  and running broker ≠ installed files. Unknown identities are shown as
   "unknown", never blank.
 
 Refreshing the pool, "update available" offers and recreating sidecars on an

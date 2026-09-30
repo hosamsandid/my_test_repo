@@ -143,9 +143,9 @@ function UninstallDialogBody() {
   );
 }
 
-// Build identity (#2646): which commit the installed files and the running
-// broker came from, in the console's own version format. Every value and hint
-// comes from plugin-registry-view.js buildIdentity().
+// Build identity (#2646): which commit the installed files, the running broker
+// and the broker image came from, in the console's own version format. Every
+// value and hint comes from plugin-registry-view.js buildIdentity().
 function BuildIdentity({ build }) {
   const mono = { fontFamily: 'var(--eb-font-mono)' };
   return (
@@ -154,17 +154,21 @@ function BuildIdentity({ build }) {
       {build.broker && (
         <span>Running broker: <code style={mono}>{build.broker.text}</code></span>
       )}
+      {build.image && (
+        <span>Broker image: <code style={mono}>{build.image.text}</code></span>
+      )}
       {build.fetched && <span>Fetched from: <code style={mono}>{build.fetched}</code></span>}
-      {build.mismatch && (
+      {build.hints.map((hint) => (
         <span
+          key={hint.text}
           role="status"
-          title={build.mismatchDetail}
+          title={hint.detail}
           style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: STATUS_TONE.warn, fontWeight: 600 }}
         >
           <AlertTriangle size={12} aria-hidden="true" />
-          {build.mismatchHint}
+          {hint.text}
         </span>
-      )}
+      ))}
     </div>
   );
 }

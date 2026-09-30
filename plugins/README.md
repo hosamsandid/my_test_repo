@@ -89,11 +89,14 @@ building the broker image, seeding the registry, installing, then granting:
    can hold real privilege (e.g. `podman-sandbox` mounts the host Podman
    socket). **Install still grants nothing to any agent.**
 
-   Each card shows the **Installed files** and **Running broker** build
-   identities. **"Running broker differs from installed plugin"** means the
-   live sidecar was started from another commit than the installed files — a
-   rebuilt `:latest` image does not replace a running sidecar; it keeps the old
-   image until the sidecar container is recreated.
+   Each card shows the **Installed files**, **Running broker** and **Broker
+   image** build identities (the last read from the image labels in the local
+   store; *unknown* on Kubernetes). **"Running broker differs from its image"**
+   means the image was rebuilt under a running sidecar — a rebuilt `:latest`
+   image does not replace a running sidecar; it keeps the old image until the
+   sidecar container is recreated. **"Running broker differs from installed
+   plugin"** means the live sidecar runs another commit than the installed
+   manifest and CLI; reinstalling brings them back in step.
 
 4. **Grant** the plugin to a team or agent (Team Admin) — from the Agents edit
    form's plugin picker, or `POST /api/agents/:id/plugins/activate`. Only then

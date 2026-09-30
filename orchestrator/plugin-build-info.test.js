@@ -2,7 +2,9 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizeBuildInfo, probeBrokerBuild, probeRunningBrokerBuilds } = require('./plugin-build-info');
+const {
+  normalizeBuildInfo, probeBrokerBuild, probeRunningBrokerBuilds, imageBuildFromInspect, inspectSidecarImageBuilds,
+} = require('./plugin-build-info');
 
 const okResponse = (body) => ({ ok: true, json: async () => body });
 
@@ -57,4 +59,52 @@ test('probeRunningBrokerBuilds: probes only running broker-bearing plugins', asy
   );
   assert.deepEqual(probed, ['http://aee-plugin-jira:4009/healthz']);
   assert.deepEqual(out, { jira: { commit: 'abc1234', dirty: '', commitTime: '' } });
+});
+
+// ─── the image a recreated sidecar would run (AC8) ──────────────────────────
+
+const LABELS = {
+  'org.opencontainers.image.revision': 'bbbbbbb',
+  'aee.build.dirty': 'dirty',
+  'aee.build.commit-time': '2026-09-30T21:08:25+02:00',
+};
+
+test('imageBuildFromInspect: reads the OCI build labels (top-level or Config)', () => {
+  const want = { commit: 'bbbbbbb', dirty: 'dirty', commitTime: '2026-09-30T21:08:25+02:00' };
+  assert.deepEqual(imageBuildFromInspect({ Labels: LABELS }), want);
+  assert.deepEqual(imageBuildFromInspect({ Labels: null, Config: { Labels: LABELS } }), want);
+});
+
+test('imageBuildFromInspect: unlabelled image → unknown; no body → null', () => {
+  // busybox / a pre-#2646 image: inspected fine, just no build.
+  assert.deepEqual(imageBuildFromInspect({ Labels: { maintainer: 'x' } }), { commit: 'unknown', dirty: '', commitTime: '' });
+  assert.deepEqual(imageBuildFromInspect({}), { commit: 'unknown', dirty: '', commitTime: '' });
+  assert.deepEqual(imageBuildFromInspect({ Labels: { 'org.opencontainers.image.revision': 'unknown' } }), { commit: 'unknown', dirty: '', commitTime: '' });
+  assert.equal(imageBuildFromInspect(null), null);
+  assert.equal(imageBuildFromInspect('no such image'), null);
+  assert.equal(imageBuildFromInspect([]), null);
+});
+
+test('inspectSidecarImageBuilds: every installed broker image, running or not', async () => {
+  const entries = [
+    { id: 'jira', ok: true, manifest: { id: 'jira', sidecar: { image: 'localhost/aee-plugin-jira:latest', internalPort: 4009 } } },
+    { id: 'gke', ok: true, manifest: { id: 'gke', sidecar: { image: 'localhost/aee-plugin-gke:latest', internalPort: 4007 } } },
+    { id: 'gone', ok: true, manifest: { id: 'gone', sidecar: { image: 'localhost/aee-plugin-gone:latest', internalPort: 4010 } } },
+    { id: 'boom', ok: true, manifest: { id: 'boom', sidecar: { image: 'localhost/aee-plugin-boom:latest', internalPort: 4011 } } },
+    { id: 'spec-kit', ok: true, manifest: { id: 'spec-kit' } },
+    { id: 'broken', ok: false, manifest: null, errors: ['invalid JSON'] },
+  ];
+  const asked = [];
+  const out = await inspectSidecarImageBuilds(entries, async (image) => {
+    asked.push(image);
+    if (image.includes('gone')) return null;             // not in the local store / Kubernetes
+    if (image.includes('boom')) throw new Error('socket'); // runtime down
+    return { Labels: { ...LABELS, 'aee.build.dirty': '' } };
+  });
+  assert.deepEqual(asked, [
+    'localhost/aee-plugin-jira:latest', 'localhost/aee-plugin-gke:latest',
+    'localhost/aee-plugin-gone:latest', 'localhost/aee-plugin-boom:latest',
+  ]);
+  const build = { commit: 'bbbbbbb', dirty: '', commitTime: '2026-09-30T21:08:25+02:00' };
+  assert.deepEqual(out, { jira: build, gke: build, gone: null, boom: null });
 });

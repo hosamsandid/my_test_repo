@@ -8,8 +8,8 @@
 // #1741). Install copies the pool dir verbatim, so the REGISTRY copy keeps the
 // commit its manifest + CLI were installed from, even after the pool moves on.
 // GET /api/plugins returns it as `sourceBuild` next to the running broker's
-// `brokerBuild` (probed by the orchestrator), and the Plugins page compares the
-// two.
+// `brokerBuild` (probed by the orchestrator) and `imageBuild` (the broker
+// image's labels), and the Plugins page compares them.
 //
 // A pool or registry copy seeded before #2646 has no file → null → the page
 // says "unknown". Plugins installed that way keep working unchanged.

@@ -10096,6 +10096,8 @@ app.get('/api/plugins', apiLimiter, async (req, res) => {
   // #2646: the build each live broker reports — probed by the orchestrator,
   // which owns sidecar truth on both runtimes.
   const brokerBuilds = {};
+  // …and the build of the image a recreated sidecar would run (AC8).
+  const imageBuilds = {};
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const resp = await fetch(`${orchestratorUrl}/internal/plugins`);
@@ -10104,6 +10106,7 @@ app.get('/api/plugins', apiLimiter, async (req, res) => {
       for (const p of body.plugins || []) {
         running[p.id] = !!p.sidecarRunning;
         brokerBuilds[p.id] = p.brokerBuild || null;
+        imageBuilds[p.id] = p.imageBuild || null;
       }
     }
   } catch { /* orchestrator unreachable — report unknown rather than false */ }
@@ -10119,6 +10122,7 @@ app.get('/api/plugins', apiLimiter, async (req, res) => {
         sidecarRunning: running[p.id] ?? null,
         sourceBuild: readPluginBuildInfo(REGISTRY_PLUGINS_DIR, p.id),
         brokerBuild: brokerBuilds[p.id] ?? null,
+        imageBuild: imageBuilds[p.id] ?? null,
         ...(iv ? { installedVersion: iv } : {}),
       };
     }),
@@ -10128,6 +10132,7 @@ app.get('/api/plugins', apiLimiter, async (req, res) => {
       sidecarRunning: false,
       sourceBuild: readPluginBuildInfo(POOL_PLUGINS_DIR, p.id),
       brokerBuild: null,
+      imageBuild: null,
     })),
     canManage: !!getScope(req).all,
   });

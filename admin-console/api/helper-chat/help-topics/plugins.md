@@ -187,7 +187,7 @@ in the same format as Agent Studio's own version (About page and sidebar footer)
 A build made from a working tree with uncommitted changes carries a `-dirty`
 suffix, just like the console's own version.
 
-An installed plugin can show two identities, because they can differ:
+An installed plugin can show up to three identities, because they can differ:
 
 - **Installed files** — the manifest and command-line tool in the registry, i.e.
   the plugin source as it was when it was installed (`make seed-plugins` stamps
@@ -195,15 +195,27 @@ An installed plugin can show two identities, because they can differ:
   plugin shows the same line as **Source**.
 - **Running broker** — the build the live broker container reports about
   itself. This is what is really running, even if a newer image has been built
-  since. Command-only plugins have no broker and show no such line. A plugin
-  fetched from GitHub at install time (such as spec-kit) also shows **Fetched
-  from** — the upstream repository, ref and fetch time.
+  since.
+- **Broker image** — the build of the broker image the sidecar would be
+  recreated from, read from the image's labels. It moves on as soon as the image
+  is rebuilt. On Kubernetes the image sits in a node's cache and cannot be read,
+  so this line says *unknown (image not inspectable)*.
 
-When the running broker's commit differs from the installed files' commit, the
-card shows **"Running broker differs from installed plugin"**. The broker
-container keeps running the image it was started from; building a new image
-alone does not replace it. The hint disappears once the sidecar container is
-recreated from the matching build.
+Command-only plugins have no broker and show neither broker line. A plugin
+fetched from GitHub at install time (such as spec-kit) also shows **Fetched
+from** — the upstream repository, ref and fetch time.
+
+Two hints flag a difference:
+
+- **"Running broker differs from its image"** — the broker image was rebuilt,
+  but the running sidecar container still runs the old build. Building a new
+  image alone does not replace a running sidecar; it keeps the old image until
+  the sidecar container is recreated, and then the hint disappears.
+- **"Running broker differs from installed plugin"** — the broker runs another
+  commit than the installed files (the manifest and CLI). Reinstalling the
+  plugin brings them back in step.
+
+A hint only appears when both sides are known; a `-dirty` difference counts.
 
 Whatever cannot be determined is labelled **unknown** instead of left blank:
 a plugin seeded or an image built before build identities existed, a stack built

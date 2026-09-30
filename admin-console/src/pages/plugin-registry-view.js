@@ -145,14 +145,19 @@ export function sidecarStatus(entry) {
 
 // ─── build identity (#2646) ─────────────────────────────────────────────────
 //
-// Two identities per plugin, because they can differ: the INSTALLED FILES
-// (manifest + CLI, `sourceBuild` from the seeded build-info.json) and the
-// RUNNING BROKER (`brokerBuild`, what the live sidecar reports on /healthz).
-// Every "we don't know" case is spelled out — never an empty or guessed value.
+// Three identities per broker plugin, because they can differ: the INSTALLED
+// FILES (manifest + CLI, `sourceBuild` from the seeded build-info.json), the
+// RUNNING BROKER (`brokerBuild`, what the live sidecar reports on /healthz) and
+// the BROKER IMAGE (`imageBuild`, the labels of the image a recreated sidecar
+// would run). Every "we don't know" case is spelled out — never an empty or
+// guessed value.
 
 export const BROKER_MISMATCH_HINT = 'Running broker differs from installed plugin';
 export const BROKER_MISMATCH_DETAIL =
-  'The broker container was started from a different commit than the installed plugin files. It keeps running that image until its sidecar container is recreated — rebuilding the image alone does not replace it.';
+  'The broker container was started from a different commit than the installed plugin files. Reinstalling the plugin (or re-seeding the pool and reinstalling) brings the files and the broker back in step.';
+export const BROKER_IMAGE_MISMATCH_HINT = 'Running broker differs from its image';
+export const BROKER_IMAGE_MISMATCH_DETAIL =
+  'The broker image was rebuilt, but the running sidecar container still runs the old build. It keeps doing so until the sidecar is recreated — rebuilding the image alone does not replace it.';
 export const UNKNOWN_BUILD = 'unknown';
 
 // One `{ commit, dirty, commitTime }` → `{ known, hash, time, text }`, formatted
@@ -185,25 +190,42 @@ export function fetchedVersionText(installedVersion) {
   return when ? `${where}, fetched ${when}` : where;
 }
 
+const unknownLine = (state, text) => ({ state, known: false, hash: UNKNOWN_BUILD, time: UNKNOWN_BUILD, text });
+
+// An installed plugin that has a broker at all (command-only plugins and pool
+// entries get no broker / image line).
+function hasBroker(entry) {
+  return !!(entry && entry.installed && entry.manifest && entry.manifest.sidecar);
+}
+
 // The running broker's identity line, or null for a plugin without a broker
 // (command-only, or not installed).
 export function brokerBuildLine(entry) {
-  const manifest = entry && entry.manifest;
-  if (!entry || !entry.installed || !manifest || !manifest.sidecar) return null;
+  if (!hasBroker(entry)) return null;
+  const manifest = entry.manifest;
   if (entry.sidecarRunning === true) {
     const d = describeBuild(entry.brokerBuild);
     if (d.known) return { state: 'known', ...d };
-    if (!isAgentStudioImage(manifest.sidecar.image)) {
-      return { state: 'external', known: false, hash: UNKNOWN_BUILD, time: UNKNOWN_BUILD, text: 'unknown (external image)' };
-    }
+    if (!isAgentStudioImage(manifest.sidecar.image)) return unknownLine('external', 'unknown (external image)');
     // Running, but no usable build reported: an image built before #2646 or
     // without git metadata.
-    return { state: 'unknown', known: false, hash: UNKNOWN_BUILD, time: UNKNOWN_BUILD, text: 'unknown (image reports no build)' };
+    return unknownLine('unknown', 'unknown (image reports no build)');
   }
-  if (entry.sidecarRunning === false) {
-    return { state: 'not-running', known: false, hash: UNKNOWN_BUILD, time: UNKNOWN_BUILD, text: 'unknown (broker not running)' };
-  }
-  return { state: 'unknown', known: false, hash: UNKNOWN_BUILD, time: UNKNOWN_BUILD, text: 'unknown (broker status unknown)' };
+  if (entry.sidecarRunning === false) return unknownLine('not-running', 'unknown (broker not running)');
+  return unknownLine('unknown', 'unknown (broker status unknown)');
+}
+
+// The broker image's identity line — what a recreated sidecar would run — or
+// null for a plugin without a broker.
+export function imageBuildLine(entry) {
+  if (!hasBroker(entry)) return null;
+  const d = describeBuild(entry.imageBuild);
+  if (d.known) return { state: 'known', ...d };
+  if (!isAgentStudioImage(entry.manifest.sidecar.image)) return unknownLine('external', 'unknown (external image)');
+  // An inspected image without build labels vs. an image the platform could
+  // not inspect (not in the local store, Kubernetes node cache).
+  if (entry.imageBuild && typeof entry.imageBuild === 'object') return unknownLine('unknown', 'unknown (image reports no build)');
+  return unknownLine('unavailable', 'unknown (image not inspectable)');
 }
 
 // Everything the card's build block renders.
@@ -211,17 +233,24 @@ export function buildIdentity(entry) {
   const installed = !!(entry && entry.installed);
   const files = describeBuild(entry && entry.sourceBuild);
   const broker = brokerBuildLine(entry);
+  const image = imageBuildLine(entry);
   // Compare the formatted labels, so "abc1234" vs "abc1234-dirty" counts as a
-  // difference too — a dirty build can hold anything.
-  const mismatch = !!(broker && broker.known && files.known && broker.hash !== files.hash);
+  // difference too — a dirty build can hold anything. A side that is unknown is
+  // not evidence of a difference: no hint then.
+  const differs = (a, b) => !!(a && a.known && b && b.known && a.hash !== b.hash);
+  const hints = [];
+  // AC8: the image was rebuilt under a still-running old sidecar.
+  if (differs(broker, image)) hints.push({ text: BROKER_IMAGE_MISMATCH_HINT, detail: BROKER_IMAGE_MISMATCH_DETAIL });
+  // AC5: the broker runs another commit than the installed files.
+  if (differs(broker, files)) hints.push({ text: BROKER_MISMATCH_HINT, detail: BROKER_MISMATCH_DETAIL });
   return {
     // "Installed files" for an installed plugin; "Source" for a pool entry.
     filesLabel: installed ? 'Installed files' : 'Source',
     files,
     broker,
-    mismatch,
-    mismatchHint: mismatch ? BROKER_MISMATCH_HINT : '',
-    mismatchDetail: mismatch ? BROKER_MISMATCH_DETAIL : '',
+    image,
+    mismatch: hints.length > 0,
+    hints,
     fetched: installed ? fetchedVersionText(entry.installedVersion) : '',
   };
 }

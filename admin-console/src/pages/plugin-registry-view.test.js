@@ -168,8 +168,12 @@ import {
   isAgentStudioImage,
   fetchedVersionText,
   brokerBuildLine,
+  imageBuildLine,
   buildIdentity,
   BROKER_MISMATCH_HINT,
+  BROKER_MISMATCH_DETAIL,
+  BROKER_IMAGE_MISMATCH_HINT,
+  BROKER_IMAGE_MISMATCH_DETAIL,
 } from './plugin-registry-view.js';
 import { absoluteWhen } from '../components/format-when.js';
 import fs from 'node:fs';
@@ -243,15 +247,13 @@ test('buildIdentity: running broker on another commit → mismatch hint', () => 
   assert.strictEqual(b.files.text, 'bbbbbbb · 2026-09-30 21:08 +0200');
   assert.strictEqual(b.broker.text, 'aaaaaaa · 2026-09-29 08:05 +0000');
   assert.strictEqual(b.mismatch, true);
-  assert.strictEqual(b.mismatchHint, BROKER_MISMATCH_HINT);
-  assert.ok(b.mismatchDetail.length > 0);
+  assert.deepStrictEqual(b.hints, [{ text: BROKER_MISMATCH_HINT, detail: BROKER_MISMATCH_DETAIL }]);
 });
 
 test('buildIdentity: same commit → no hint; dirty vs clean counts as different', () => {
   const same = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: NEW, brokerBuild: { ...NEW } });
   assert.strictEqual(same.mismatch, false);
-  assert.strictEqual(same.mismatchHint, '');
-  assert.strictEqual(same.mismatchDetail, '');
+  assert.deepStrictEqual(same.hints, []);
   const dirty = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: NEW, brokerBuild: { ...NEW, dirty: 'dirty' } });
   assert.strictEqual(dirty.mismatch, true);
 });
@@ -265,11 +267,60 @@ test('buildIdentity: no mismatch hint when either side is unknown', () => {
   assert.strictEqual(noBroker.mismatch, false);
 });
 
+test('imageBuildLine: the image a recreated sidecar would run', () => {
+  const entry = (extra) => ({ installed: true, manifest: brokerManifest(), sidecarRunning: true, ...extra });
+  const known = imageBuildLine(entry({ imageBuild: NEW }));
+  assert.strictEqual(known.state, 'known');
+  assert.strictEqual(known.text, 'bbbbbbb · 2026-09-30 21:08 +0200');
+  // Also shown when the broker is not running — the next start uses it.
+  assert.strictEqual(imageBuildLine(entry({ sidecarRunning: false, imageBuild: NEW })).text, known.text);
+  assert.strictEqual(imageBuildLine(entry({ imageBuild: { commit: 'unknown', dirty: '', commitTime: '' } })).text, 'unknown (image reports no build)');
+  assert.strictEqual(imageBuildLine(entry({ imageBuild: null })).text, 'unknown (image not inspectable)');
+  assert.strictEqual(imageBuildLine(entry({})).text, 'unknown (image not inspectable)');
+  assert.strictEqual(imageBuildLine({ installed: true, manifest: brokerManifest('busybox:latest'), imageBuild: { commit: 'unknown' } }).text, 'unknown (external image)');
+  assert.strictEqual(imageBuildLine({ installed: true, manifest: manifest({ id: 'spec-kit', sidecar: undefined }) }), null);
+  assert.strictEqual(imageBuildLine({ installed: false, manifest: brokerManifest(), imageBuild: NEW }), null);
+  assert.strictEqual(imageBuildLine(null), null);
+});
+
+// AC8: `make plugin-images` on a new commit while the old sidecar keeps
+// running. The registry files are untouched by a rebuild, so files and broker
+// agree — only the image moved on. The page must show the old running commit
+// and the hint until the sidecar is recreated.
+test('buildIdentity: image rebuilt under a running old sidecar → image mismatch hint', () => {
+  const b = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: OLD, brokerBuild: OLD, imageBuild: NEW });
+  assert.strictEqual(b.broker.text, 'aaaaaaa · 2026-09-29 08:05 +0000');
+  assert.strictEqual(b.image.text, 'bbbbbbb · 2026-09-30 21:08 +0200');
+  assert.strictEqual(b.mismatch, true);
+  assert.deepStrictEqual(b.hints, [{ text: BROKER_IMAGE_MISMATCH_HINT, detail: BROKER_IMAGE_MISMATCH_DETAIL }]);
+  // …and the hint clears once the sidecar is recreated from the new image.
+  const recreated = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: OLD, brokerBuild: NEW, imageBuild: NEW });
+  assert.deepStrictEqual(recreated.hints.map((h) => h.text), [BROKER_MISMATCH_HINT]);
+  const inStep = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: NEW, brokerBuild: NEW, imageBuild: NEW });
+  assert.strictEqual(inStep.mismatch, false);
+});
+
+test('buildIdentity: broker differs from both image and files → both hints', () => {
+  const b = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: NEW, brokerBuild: OLD, imageBuild: NEW });
+  assert.deepStrictEqual(b.hints.map((h) => h.text), [BROKER_IMAGE_MISMATCH_HINT, BROKER_MISMATCH_HINT]);
+  const dirtyImage = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: null, brokerBuild: NEW, imageBuild: { ...NEW, dirty: 'dirty' } });
+  assert.deepStrictEqual(dirtyImage.hints.map((h) => h.text), [BROKER_IMAGE_MISMATCH_HINT]);
+});
+
+test('buildIdentity: no image hint when the broker or the image is unknown', () => {
+  const notRunning = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: false, sourceBuild: NEW, brokerBuild: null, imageBuild: OLD });
+  assert.strictEqual(notRunning.mismatch, false);
+  const noImage = buildIdentity({ installed: true, manifest: brokerManifest(), sidecarRunning: true, sourceBuild: OLD, brokerBuild: OLD, imageBuild: null });
+  assert.strictEqual(noImage.mismatch, false);
+  assert.strictEqual(noImage.image.text, 'unknown (image not inspectable)');
+});
+
 test('buildIdentity: available plugin shows its pool source only', () => {
   const b = buildIdentity({ installed: false, manifest: brokerManifest(), sidecarRunning: false, sourceBuild: NEW, installedVersion: { repo: 'x/y', ref: 'main' } });
   assert.strictEqual(b.filesLabel, 'Source');
   assert.strictEqual(b.files.text, 'bbbbbbb · 2026-09-30 21:08 +0200');
   assert.strictEqual(b.broker, null);
+  assert.strictEqual(b.image, null);
   assert.strictEqual(b.fetched, '');
 });
 
@@ -296,7 +347,8 @@ test('Plugins.jsx renders the build identity block', () => {
   assert.match(src, /\{build\.filesLabel\}: <code style=\{mono\}>\{build\.files\.text\}<\/code>/);
   assert.match(src, /\{build\.broker && \(\s*<span>Running broker: <code style=\{mono\}>\{build\.broker\.text\}<\/code><\/span>/);
   assert.match(src, /\{build\.fetched && <span>Fetched from: <code style=\{mono\}>\{build\.fetched\}<\/code><\/span>\}/);
-  assert.match(src, /\{build\.mismatch && \(/);
-  assert.match(src, /title=\{build\.mismatchDetail\}/);
-  assert.match(src, /\{build\.mismatchHint\}\s*<\/span>/);
+  assert.match(src, /\{build\.image && \(\s*<span>Broker image: <code style=\{mono\}>\{build\.image\.text\}<\/code><\/span>/);
+  assert.match(src, /\{build\.hints\.map\(\(hint\) => \(/);
+  assert.match(src, /title=\{hint\.detail\}/);
+  assert.match(src, /\{hint\.text\}\s*<\/span>/);
 });

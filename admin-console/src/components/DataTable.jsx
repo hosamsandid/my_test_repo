@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import { ChevronUp, ChevronDown, ChevronsUpDown, ChevronLeft, ChevronRight } from 'lucide-react';
-import { resolveEmptyState, filterPlaceholder, rowMatchesFilter } from './data-table-view.js';
+import { resolveEmptyState, filterPlaceholder, rowMatchesFilter, PAGINATION_LABELS } from './data-table-view.js';
 
 /**
  * DataTable — Reusable table with sort, filter, pagination.
@@ -264,14 +264,14 @@ export default function DataTable({
             Showing {safePage * pageSize + 1}-{Math.min((safePage + 1) * pageSize, sorted.length)} of {sorted.length}
           </span>
           <div style={{ display: 'flex', gap: 'var(--eb-space-1)' }}>
-            <PaginationBtn onClick={() => setPage(p => Math.max(0, p - 1))} disabled={safePage === 0}>
-              <ChevronLeft size={14} />
+            <PaginationBtn onClick={() => setPage(p => Math.max(0, p - 1))} disabled={safePage === 0} label={PAGINATION_LABELS.prev}>
+              <ChevronLeft size={14} aria-hidden="true" />
             </PaginationBtn>
             <span style={{ padding: '0 var(--eb-space-2)', lineHeight: '28px' }}>
               {safePage + 1} / {totalPages}
             </span>
-            <PaginationBtn onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} disabled={safePage >= totalPages - 1}>
-              <ChevronRight size={14} />
+            <PaginationBtn onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} disabled={safePage >= totalPages - 1} label={PAGINATION_LABELS.next}>
+              <ChevronRight size={14} aria-hidden="true" />
             </PaginationBtn>
           </div>
         </div>
@@ -280,11 +280,16 @@ export default function DataTable({
   );
 }
 
-function PaginationBtn({ onClick, disabled, children }) {
+// Icon-only button: `label` is required so it has an accessible name
+// (aria-label) and a hover tooltip (title) — #2617, WCAG 4.1.2.
+function PaginationBtn({ onClick, disabled, label, children }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={disabled}
+      aria-label={label}
+      title={label}
       style={{
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         width: 28, height: 28,

@@ -397,6 +397,9 @@ the same option.
   the engine writes: every `github-event` trigger has exactly **one** event
   (`rawTriggerError` — the strict bundle validator now rejects multi-event
   triggers at materialise; drafts stay saveable for the migration flow), every
+  `cron` trigger has a schedule the agent can run (`cronExpressionError` in
+  `trigger-validate.js`, #2626; the Flow graph lints an invalid one as *never
+  fires*), every
   label listener **claims** its wake label (`{ remove: <label>, add:
   "<label>:wip" }`, optionally with a `postcondition` — see below), and every
   produced artifact either has an in-flow consumer

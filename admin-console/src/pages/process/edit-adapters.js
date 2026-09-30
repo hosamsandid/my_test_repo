@@ -19,6 +19,7 @@ import {
   humanAfterConsumeAdd, humanAfterConsumeRemove, humanAfterEmitAdd, humanAfterEmitRemove,
 } from './humans-registry-ops';
 import { parseGitHubUrl } from '../../components/repository-url-view.js';
+import { triggerPath } from '../agent-chat/trigger-issues.js';
 
 // owner/repo from a repository URL, for a canvas-created github-event trigger.
 // Delegates to the shared `parseGitHubUrl` (#2345) rather than keep a partial
@@ -117,8 +118,10 @@ export const liveOps = {
     }
     return apiCall('POST', `/api/agents/${roleId}/triggers`, b);
   },
-  updateTrigger: (roleId, tid, body) => apiCall('PUT', `/api/agents/${roleId}/triggers/${tid}`, body),
-  deleteTrigger: (roleId, tid) => apiCall('DELETE', `/api/agents/${roleId}/triggers/${tid}`),
+  // `position` (optional, #2626) addresses one row of a legacy duplicated id —
+  // the index the GET annotates on such rows; without it the first match.
+  updateTrigger: (roleId, tid, body, position) => apiCall('PUT', triggerPath(roleId, tid, position), body),
+  deleteTrigger: (roleId, tid, position) => apiCall('DELETE', triggerPath(roleId, tid, position)),
   // Trigger-level `emits` was removed (#783) — label hand-offs live on the agent
   // level (setRoleEmits below), so there is no per-trigger setEmits any more.
   // Display name (#692) — safe on a live agent: it is display-only and does not

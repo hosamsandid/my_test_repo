@@ -4922,11 +4922,14 @@ class TriggerScheduler:
         # refreshed on every sync, so a runner fires with the latest edit (#2627).
         self._cron_tasks: dict[str, dict] = {}
         self._loop_tasks: dict[str, dict] = {}  # loop triggerId -> {"task": Task, "trigger": dict} (#932)
-        # Trigger ids already warned about as duplicates (#2627) — one warning each.
-        self._duplicate_notified: set[str] = set()
         # Raw-layer guard (#1006): trigger ids already flagged as deviating
         # from the wiring rules — each gets ONE advisory DM, never a repeat.
         self._nonconformant_notified: set[str] = set()
+        # Triggers the scheduler SKIPS (#2626) — an invalid cron expression
+        # (keyed "cron:<id>:<expr>", so a re-broken fix is reported again) or a
+        # second enabled trigger sharing an id ("dup:<id>"). One advisory DM
+        # each, like the nonconformant guard; stderr alone reached nobody.
+        self._skipped_notified: set[str] = set()
         self._loop_done: set[str] = set()  # loop triggers that reached a terminal state this lifetime (#932)
         # Chat-launched loops (#1020): a loop launched from the composer is a
         # one-off "run until done", NOT a standing subscription. It carries
@@ -5330,10 +5333,15 @@ class TriggerScheduler:
         # cron/once ids the scheduler is handling this tick — their status
         # entries keep nextFireAt/invalid; every other entry drops them (#2628).
         status_ids: set[str] = set()
-        seen_ids: set[str] = set()
         # Checked once per tick (not per overdue once-trigger) — a single
         # HTTP round-trip to the orchestrator covers the whole batch.
         maintenance_active = await self._maintenance_active()
+        # Enabled trigger ids seen this pass (#2626). Every per-id structure
+        # (_cron_tasks, _loop_tasks, _running) assumes ids are unique; with two
+        # enabled entries sharing one, each sync would cancel and reschedule
+        # the other. The FIRST wins (the console API edits/deletes the first
+        # match too); later ones are skipped and reported once.
+        seen_ids: set[str] = set()
 
         for trigger in triggers:
             if not isinstance(trigger, dict):
@@ -5345,13 +5353,13 @@ class TriggerScheduler:
                 continue
             # Duplicate ids (#2627): the task maps are keyed by id, so two
             # triggers sharing one would cancel and reschedule each other on
-            # every sync. The first one wins; the rest are skipped with a
-            # single warning.
+            # every sync. The first one wins; the rest are skipped, and the
+            # user is told once (#2626).
             if tid in seen_ids:
-                if tid not in self._duplicate_notified:
-                    self._duplicate_notified.add(tid)
-                    print(f"[Runner:{self._agent_id}] duplicate trigger id {tid} "
-                          f"— only the first one is scheduled", file=sys.stderr)
+                await self._notify_skipped_trigger(
+                    f"dup:{tid}", tid,
+                    "another enabled trigger already uses this id, so only the first one runs — "
+                    "give each trigger its own id")
                 continue
             seen_ids.add(tid)
 
@@ -5387,11 +5395,12 @@ class TriggerScheduler:
                     print(f"[Runner:{self._agent_id}] Trigger updated: {tid}",
                           file=sys.stderr)
                 if not self._croniter.is_valid(expr):
-                    print(f"[Runner:{self._agent_id}] Invalid cron: {expr} ({tid})",
-                          file=sys.stderr)
                     self._set_trigger_status(
                         tid, invalid=f"Invalid cron expression `{expr}`",
                         nextFireAt=None)
+                    await self._notify_skipped_trigger(
+                        f"cron:{tid}:{expr}", tid,
+                        f"its cron expression `{expr}` is not valid, so it never fires")
                     continue
                 self._set_trigger_status(tid, invalid=None)
                 # Copy the trigger dict so later edits to triggers.json don't
@@ -5845,6 +5854,28 @@ class TriggerScheduler:
             )
         except Exception as exc:
             print(f"[Runner:{self._agent_id}] nonconformant-trigger DM failed: {exc}",
+                  file=sys.stderr)
+
+    async def _notify_skipped_trigger(self, key: str, tid: str, reason: str) -> None:
+        """One-time advisory DM for a trigger the scheduler skips (#2626) —
+        an invalid cron or a duplicate id. Unlike a wiring deviation (#1006)
+        the trigger does NOT run, so the message says so. `key` de-duplicates
+        across the 60 s sync ticks. Best-effort, like the nonconformant DM."""
+        if key in self._skipped_notified:
+            return
+        self._skipped_notified.add(key)
+        print(f"[Runner:{self._agent_id}] trigger {tid} skipped: {reason}", file=sys.stderr)
+        room_id = _load_dm_room_id()
+        if not room_id:
+            return
+        try:
+            await self._send_formatted(
+                room_id,
+                f"⚠️ **Trigger `{tid}` is not scheduled** — {reason}.\n\n"
+                "Fix it in the Triggers panel or `triggers.json`.",
+            )
+        except Exception as exc:
+            print(f"[Runner:{self._agent_id}] skipped-trigger DM failed: {exc}",
                   file=sys.stderr)
 
     async def _post_loop_outcome(self, trigger: dict, outcome: str,

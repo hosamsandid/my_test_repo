@@ -1084,7 +1084,11 @@ function computeLints(nodes, edges, classifier) {
       lints.push({
         code: 'raw-trigger-nonconformant', severity: 'info', nodeId: n.id,
         ...(t.id ? { triggerIds: [t.id] } : {}),
-        message: `\`${n.id}\` trigger ${t.id ? `\`${t.id}\`` : '(unnamed)'} deviates from the wiring rules: ${te}. It still runs — edit it to conform.`,
+        // An invalid cron (#2626) is not a tolerated deviation: the agent's
+        // scheduler skips it, so the lint must not claim it still runs.
+        message: t.type === 'cron'
+          ? `\`${n.id}\` trigger ${t.id ? `\`${t.id}\`` : '(unnamed)'} never fires: ${te}. Fix the schedule.`
+          : `\`${n.id}\` trigger ${t.id ? `\`${t.id}\`` : '(unnamed)'} deviates from the wiring rules: ${te}. It still runs — edit it to conform.`,
       });
     }
   }

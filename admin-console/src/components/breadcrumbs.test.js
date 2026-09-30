@@ -15,6 +15,13 @@ test('dynamic routes keep their existing labels', () => {
   assert.equal(breadcrumbFor('/plugins/netzplan/view'), 'Plugins / netzplan');
 });
 
+test('a plugin viewer reads its display name when known (#2650)', () => {
+  const titles = { 'patterns-catalog': 'Patterns Catalog' };
+  assert.equal(breadcrumbFor('/plugins/patterns-catalog/view', titles), 'Plugins / Patterns Catalog');
+  assert.equal(breadcrumbFor('/plugins/patterns-catalog/view/', titles), 'Plugins / Patterns Catalog');
+  assert.equal(breadcrumbFor('/plugins/nope-xyz/view', titles), 'Plugins / nope-xyz');
+});
+
 test('unknown paths read "Page not found", never the raw pathname (#2615)', () => {
   for (const p of ['/does-not-exist-xyz', '/chat', '/chats/a/b', '/plugins/x', '/plugins/x/view/extra']) {
     assert.equal(breadcrumbFor(p), NOT_FOUND_LABEL, p);
@@ -54,4 +61,10 @@ test('App.jsx ends its route table with the NotFound catch-all', () => {
     .replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
   assert.match(app, /const NotFound\s*=\s*lazy\(\(\) => import\('\.\/pages\/NotFound'\)\)/);
   assert.match(app, /<Route path="\*" element=\{<NotFound \/>\} \/>\s*<\/Routes>/);
+});
+
+test('Shell passes the installed plugin titles to the breadcrumb (#2650)', () => {
+  const shell = readFileSync(fileURLToPath(new URL('./Shell.jsx', import.meta.url)), 'utf8');
+  assert.match(shell, /\{breadcrumbFor\(location\.pathname, pluginTitles\)\}/);
+  assert.match(shell, /setPluginTitles\(pluginTitleMap\(installed\)\)/);
 });

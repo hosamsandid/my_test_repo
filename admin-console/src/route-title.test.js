@@ -40,6 +40,21 @@ test('a plugin viewer keeps the plugin id', () => {
   assert.equal(pageNameForPath('/plugins'), 'Plugins');
 });
 
+test('a plugin viewer reads its display name when known (#2650)', () => {
+  const titles = { 'patterns-catalog': 'Patterns Catalog' };
+  assert.equal(pageNameForPath('/plugins/patterns-catalog/view', titles), 'Plugins / Patterns Catalog');
+  assert.equal(documentTitleForPath('/plugins/patterns-catalog/view', titles), 'Plugins / Patterns Catalog · Agent Studio');
+  // an id without an entry falls back to the raw id
+  assert.equal(pageNameForPath('/plugins/other/view', titles), 'Plugins / other');
+});
+
+test('a trailing slash resolves like the bare path (#2650)', () => {
+  assert.equal(pageNameForPath('/plugins/patterns-catalog/view/'), 'Plugins / patterns-catalog');
+  assert.equal(documentTitleForPath('/plugins/patterns-catalog/view//'), 'Plugins / patterns-catalog · Agent Studio');
+  assert.equal(pageNameForPath('/token-usage/'), 'Token Usage');
+  assert.equal(pageNameForPath('/'), 'Agent Chat');
+});
+
 test('unknown / unauthenticated routes fall back to the bare app name, never a raw path', () => {
   assert.equal(pageNameForPath('/login'), null);
   assert.equal(documentTitleForPath('/login'), APP_NAME);

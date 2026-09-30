@@ -59,6 +59,53 @@ export function consumerCandidates(node, peers) {
     .map(p => ({ id: p.id, name: p.displayName || p.id }));
 }
 
+// ── where a setLabel lands: Issue vs Pull Request (#2629) ────────────────────
+// Client mirror of `setLabelTarget` in api/outcomes.js (CommonJS, shipped in a
+// different image — not importable here). GitHub reports a PR label as
+// `pull_request.labeled` and an issue label as `issues.labeled`; a consumer on
+// the wrong one never wakes. Resolution order: the action's explicit `target`,
+// then an openPr/openIssue in the same outcome, then the one object kind the
+// producer's github-event triggers react to; otherwise null (unknown).
+export const LABEL_TARGETS = ['issue', 'pr'];
+
+export function triggerObjectKind(triggers) {
+  const kinds = new Set();
+  for (const t of (Array.isArray(triggers) ? triggers : [])) {
+    if (!t || t.type !== 'github-event' || !Array.isArray(t.events)) continue;
+    for (const e of t.events) {
+      const obj = String(e || '').split('.')[0];
+      if (obj === 'issues') kinds.add('issue');
+      else if (obj.startsWith('pull_request')) kinds.add('pr');
+    }
+  }
+  return kinds.size === 1 ? [...kinds][0] : null;
+}
+
+export function setLabelTarget(option, action, producerTriggers) {
+  if (action && LABEL_TARGETS.includes(action.target)) return action.target;
+  const art = rowArtifact(option);
+  if (art) return art;
+  return triggerObjectKind(producerTriggers);
+}
+
+// The target of the first outcome on `node` that sets `label` — for an
+// outcome-port drag, which carries the label but not the action (#2629).
+export function nodeLabelTarget(node, label) {
+  const l = String(label || '').trim();
+  for (const o of (Array.isArray(node?.outcomes?.options) ? node.outcomes.options : [])) {
+    const a = (Array.isArray(o?.actions) ? o.actions : [])
+      .find(x => x && x.type === 'setLabel' && typeof x.label === 'string' && x.label.trim() === l);
+    if (a) return setLabelTarget(o, a, node.triggers);
+  }
+  return triggerObjectKind(node?.triggers);
+}
+
+// The wiring engine's event prefix for a target. Unknown keeps the engine's
+// historical `issues` default — the row's "Applies to" picker shows that guess.
+export function labelTargetKind(target) {
+  return target === 'pr' ? 'pull_request' : 'issues';
+}
+
 /**
  * What wiring does picking `targetId` on this row need?
  *   setLabel action  → a label hand-off (listener on the target; the emit
@@ -67,9 +114,13 @@ export function consumerCandidates(node, peers) {
  * A row with both prefers the label — the explicit signal. `null` for a
  * terminal row (nothing to wire).
  */
-export function wireConsumerSpec(option) {
+export function wireConsumerSpec(option, node) {
   const labels = rowLabels(option);
-  if (labels.length) return { kind: 'label', label: labels[0] };
+  if (labels.length) {
+    // #2629: the listener's event follows where the label lands (PR vs issue).
+    const action = option.actions.find(a => a && a.type === 'setLabel' && typeof a.label === 'string' && a.label.trim());
+    return { kind: 'label', label: labels[0], target: labelTargetKind(setLabelTarget(option, action, node?.triggers)) };
+  }
   const artifact = rowArtifact(option);
   if (artifact) return { kind: 'channel', artifact };
   return null;

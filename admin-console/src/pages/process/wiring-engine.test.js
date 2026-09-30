@@ -35,6 +35,27 @@ test('wireLabelHandoff: single-event claimed listener + outcome, idempotent', as
   assert.deepEqual(ba.outcomes.options[0].actions, [{ type: 'setLabel', label: 'ready' }]);
 });
 
+test('#2629: wireLabelHandoff for a PR label listens on pull_request.labeled and records target pr', async () => {
+  const state = await onBoth(async (ctx) => {
+    await wireLabelHandoff(ctx, {
+      from: 'ba', to: 'dev', label: 'needs-conflict-resolution', target: 'pull_request', prompt: 'x',
+    });
+  });
+  const t = state.roles.dev.triggers[0];
+  assert.deepEqual(t.events, ['pull_request.labeled']);
+  assert.equal(t.labelFilter, 'needs-conflict-resolution');
+  assert.deepEqual(state.roles.ba.outcomes.options[0].actions,
+    [{ type: 'setLabel', label: 'needs-conflict-resolution', target: 'pr' }]);
+});
+
+test('#2629: an explicit issue target is recorded on the emit too', async () => {
+  const state = await onBoth(async (ctx) => {
+    await wireLabelHandoff(ctx, { from: 'ba', to: 'dev', label: 'go', target: 'issues', prompt: 'x' });
+  });
+  assert.deepEqual(state.roles.dev.triggers[0].events, ['issues.labeled']);
+  assert.deepEqual(state.roles.ba.outcomes.options[0].actions, [{ type: 'setLabel', label: 'go', target: 'issue' }]);
+});
+
 test('wireLabelHandoff: claim rules — opt-out, unlabeled, PR kind', async () => {
   const state = await onBoth(async (ctx) => {
     await wireLabelHandoff(ctx, { from: 'ba', to: 'dev', label: 'a', autoClaim: false, prompt: 'x' });

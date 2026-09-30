@@ -17,6 +17,11 @@ export function handoffTargetNoun(target) {
 
 // The auto-generated wake-up instruction. `fromLabel` / `toLabel` are the
 // already-resolved display names (name || id) of the source and destination.
+// The repo clause is omitted while the repo is unknown (a draft resolves it at
+// materialise time) — nothing would ever substitute a `<repo>` stand-in (#2665).
+// The `<Describe …>` line is a placeholder the operator must replace; the
+// dialogs refuse to save it (handoff-validation.js).
 export function defaultListenerPrompt({ label, verb, targetNoun, repo, fromLabel, toLabel }) {
-  return `\`${label || '<label>'}\` was ${verb} ${targetNoun} in \`${repo || '<repo>'}\` by ${fromLabel}. The event payload above has the details.\n\n<Describe what ${toLabel} should do.> Reply \`[PASS]\` if there's nothing to do.`;
+  const where = repo ? ` in \`${repo}\`` : '';
+  return `\`${label || '<label>'}\` was ${verb} ${targetNoun}${where} by ${fromLabel}. The event payload above has the details.\n\n<Describe what ${toLabel} should do.> Reply \`[PASS]\` if there's nothing to do.`;
 }

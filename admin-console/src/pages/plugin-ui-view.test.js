@@ -95,5 +95,11 @@ test('PluginUiPage mounts no iframe while the lookup is pending', () => {
 });
 
 test('PluginUiPage sets the tab title from the display name', () => {
-  assert.match(jsx, /documentTitleForPath\(pathname, pluginTitlesFor\(id, view\.title\)\)/);
+  // Match the whole statement, condition included, so a changed guard fails.
+  assert.match(jsx, /if \(view\.status === 'ready'\) document\.title = documentTitleForPath\(pathname, pluginTitlesFor\(id, view\.title\)\);/);
+});
+
+test('PluginUiPage falls back to the best-effort iframe when the lookup fails', () => {
+  // A network error resolves to null -> the `unknown` state, never a page stuck loading.
+  assert.match(jsx, /\.catch\(\(\) => null\)\s*\.then\(\(body\) => \{ if \(!cancelled\) setResolved\(\{ \.\.\.resolvePluginUi\(body, id\), id \}\); \}\);/);
 });

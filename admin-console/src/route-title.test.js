@@ -48,6 +48,15 @@ test('a plugin viewer reads its display name when known (#2650)', () => {
   assert.equal(pageNameForPath('/plugins/other/view', titles), 'Plugins / other');
 });
 
+test('a plugin id named like a built-in object property reads as the raw id (#2650)', () => {
+  for (const titles of [{ 'patterns-catalog': 'Patterns Catalog' }, {}, undefined]) {
+    for (const id of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf']) {
+      assert.equal(pageNameForPath(`/plugins/${id}/view`, titles), `Plugins / ${id}`);
+      assert.equal(documentTitleForPath(`/plugins/${id}/view`, titles), `Plugins / ${id} · Agent Studio`);
+    }
+  }
+});
+
 test('a trailing slash resolves like the bare path (#2650)', () => {
   assert.equal(pageNameForPath('/plugins/patterns-catalog/view/'), 'Plugins / patterns-catalog');
   assert.equal(documentTitleForPath('/plugins/patterns-catalog/view//'), 'Plugins / patterns-catalog · Agent Studio');

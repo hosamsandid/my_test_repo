@@ -22,6 +22,14 @@ test('a plugin viewer reads its display name when known (#2650)', () => {
   assert.equal(breadcrumbFor('/plugins/nope-xyz/view', titles), 'Plugins / nope-xyz');
 });
 
+test('a plugin id named like a built-in object property reads as the raw id (#2650)', () => {
+  for (const titles of [{ 'patterns-catalog': 'Patterns Catalog' }, {}, undefined]) {
+    for (const id of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf']) {
+      assert.equal(breadcrumbFor(`/plugins/${id}/view`, titles), `Plugins / ${id}`);
+    }
+  }
+});
+
 test('unknown paths read "Page not found", never the raw pathname (#2615)', () => {
   for (const p of ['/does-not-exist-xyz', '/chat', '/chats/a/b', '/plugins/x', '/plugins/x/view/extra']) {
     assert.equal(breadcrumbFor(p), NOT_FOUND_LABEL, p);

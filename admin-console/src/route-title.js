@@ -45,6 +45,12 @@ export const ROUTE_TITLES = {
   '/about': 'About',
 };
 
+// Own keys only: a plain-object map would resolve ids like `constructor` or
+// `toString` to built-in functions and print their source (#2650).
+function pluginTitleOf(pluginTitles, id) {
+  return (pluginTitles && Object.hasOwn(pluginTitles, id) && pluginTitles[id]) || id;
+}
+
 // Resolve a pathname to a human page name, handling the dynamic child routes the
 // same way the breadcrumb does: `/plugins/:id/view` carries its id so two plugin
 // tabs stay distinguishable, while `/chats/:agentId` deliberately does not (#1921
@@ -65,7 +71,7 @@ export function pageNameForPath(pathname, pluginTitles = {}) {
   // already highlighted in the page's left-rail list.
   if (pathname.startsWith('/chats/')) return ROUTE_TITLES['/chats'];
   const pluginView = pathname.match(/^\/plugins\/([^/]+)\/view$/);
-  if (pluginView) return `Plugins / ${(pluginTitles && pluginTitles[pluginView[1]]) || pluginView[1]}`;
+  if (pluginView) return `Plugins / ${pluginTitleOf(pluginTitles, pluginView[1])}`;
   return null;
 }
 

@@ -322,8 +322,9 @@ const AGENT_ROUTES = [
 // ── The plugin-facing allowlist ─────────────────────────────────────────────
 //
 // A broker sidecar holds a scope token for ONE (pluginId, scopeId) and may use
-// it for exactly one thing on this surface: waking the agents that plugin is
-// granted to in that scope. The route re-verifies the token itself to derive
+// it for waking the agents that plugin is granted to in that scope, and — with
+// its reserved grant token only — for asking whose credential an agent CLI call
+// may use (below). The route re-verifies the token itself to derive
 // {pluginId, scopeId} for the fan-out, so this gate is the first line and the
 // handler the second. Everything else — the credential push, the team roster,
 // wake-agent — is a control-plane concern and stays refused.

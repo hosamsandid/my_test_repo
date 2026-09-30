@@ -481,8 +481,9 @@ token (replaces webhooks for local stacks).
   the top of the `internalApi` handler. `INTERNAL_API_TOKEN` = control-plane
   (admin console); each agent gets a derived per-agent `AEE_INTERNAL_TOKEN` (HMAC
   over the agent id) allowlisted to its own routes (`AGENT_ROUTES`); a plugin
-  broker's scope token is the `plugin-scope` class, allowlisted to exactly
-  `POST /internal/plugin-event` (`PLUGIN_SCOPE_ROUTES`). Rollout ladder
+  broker's scope token is the `plugin-scope` class, allowlisted to
+  `POST /internal/plugin-event` plus `POST /internal/plugin-credential-grant`
+  (reserved `_grant-<scopeId>` token only) (`PLUGIN_SCOPE_ROUTES`). Rollout ladder
   `INTERNAL_AUTH_MODE=observe|warn|enforce` (default `observe`). Concept:
   `docs/governance-concept.md` §3.5.
 

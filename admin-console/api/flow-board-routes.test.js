@@ -40,3 +40,11 @@ test('POST /api/teams/:teamId/flow-board-config is gated on canManageTeam', () =
   assert.match(body, /if \(!canManageTeam\(scope, teamId\)\) return denyAdmin\(res, 'You may not manage this team'\)/);
   assert.match(body, /\/flow-board-config`/);
 });
+
+test('POST /api/teams/:teamId/flow-board-removed is gated on canManageTeam and validates its body (#2637)', () => {
+  const body = routeBody("app.post('/api/teams/:teamId/flow-board-removed'", 'app.');
+  assert.match(body, /AGENT_ID_RE\.test\(teamId\)/);
+  assert.match(body, /if \(!canManageTeam\(scope, teamId\)\) return denyAdmin\(res, 'You may not manage this team'\)/);
+  assert.match(body, /action !== 'remove' && action !== 'restore'/);
+  assert.match(body, /\/flow-board-removed`/);
+});

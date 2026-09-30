@@ -2720,6 +2720,27 @@ function loadFlowBoardConfig(teamId) {
   }
 }
 
+// Rows a person took off the board (#2637), per team, beside the column
+// config so every viewer shares them and they survive a restart. The GitHub
+// item itself is never touched.
+function flowBoardRemovedPath(teamId) {
+  return controlOrPoolPath(teamId, "flow-board-removed.json");
+}
+
+function loadFlowBoardRemoved(teamId) {
+  try {
+    return flowBoard.normalizeRemoved(JSON.parse(fs.readFileSync(flowBoardRemovedPath(teamId), "utf8")));
+  } catch {
+    return {};
+  }
+}
+
+function saveFlowBoardRemoved(teamId, removed) {
+  const p = flowBoardRemovedPath(teamId);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(removed, null, 2));
+}
+
 async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
   const teamCfg = loadAgentConfig(teamId) || {};
   const labels = Array.isArray(teamCfg.labels) ? teamCfg.labels : [];
@@ -2739,12 +2760,14 @@ async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
     ),
   );
   let reached = 0;
+  const reachedRepos = new Set();
   for (const r of swept) {
     if (r.error) {
       warnings.push(`${r.repo}: ${r.error}`);
       continue;
     }
     reached++;
+    reachedRepos.add(r.repo);
     github.issues.push(...r.issues);
     github.prs.push(...r.prs);
     warnings.push(...r.warnings);
@@ -2785,10 +2808,23 @@ async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
     };
   });
 
-  const board = flowBoard.buildFlowBoard({
+  const removed = loadFlowBoardRemoved(teamId);
+  const { removalsToPrune, ...board } = flowBoard.buildFlowBoard({
     members, labels, teamId, config, github, events, prRecords,
-    sessions: _flowBoardSessions(members), pools, now,
+    sessions: _flowBoardSessions(members), pools, removed, now,
   });
+  // Drop removals that were revived or whose row left the snapshot — but only
+  // for a repo this sweep actually reached, so an outage never forgets them.
+  const prune = removalsToPrune.filter((id) => reachedRepos.has(id.slice(0, id.lastIndexOf("#"))));
+  if (prune.length) {
+    const current = loadFlowBoardRemoved(teamId);
+    for (const id of prune) delete current[id];
+    try {
+      saveFlowBoardRemoved(teamId, current);
+    } catch (err) {
+      console.warn(`[Orchestrator] flow-board: could not prune removals for ${teamId}: ${err.message}`);
+    }
+  }
   const lane = loadAdmissionLane(teamId);
   const held = lane.held.map((h) => ({
     id: admissionControl.heldIdentity(h.agentId, h.entry),
@@ -19689,6 +19725,54 @@ async function main() {
           fs.writeFileSync(p, JSON.stringify(config, null, 2));
           _flowBoardCache.delete(teamId);
           return sendJson(res, 200, { teamId, config });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      });
+      return;
+    }
+
+    // POST /internal/teams/:teamId/flow-board-removed — "Remove from board" and
+    // its undo (#2637). Body `{ action: "remove"|"restore", rowId }`. A row
+    // can only be removed while no agent is working on it or queued for it;
+    // the check reads the board itself, so it is the same rule the page shows.
+    const flowBoardRemovedMatch = req.method === 'POST' &&
+      req.url.match(/^\/internal\/teams\/([^/?]+)\/flow-board-removed(?:\?.*)?$/);
+    if (flowBoardRemovedMatch) {
+      const teamId = decodeURIComponent(flowBoardRemovedMatch[1]);
+      const cfg = loadAgentConfig(teamId);
+      if (!cfg || cfg.role !== 'team') {
+        return sendJson(res, 404, { error: 'agent team not found' });
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 10_000) req.destroy(); });
+      req.on('end', async () => {
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const rowId = typeof parsed.rowId === 'string' ? parsed.rowId.trim() : '';
+          if (!rowId) return sendJson(res, 400, { error: 'rowId is required' });
+          let removed;
+          if (parsed.action === 'restore') {
+            removed = loadFlowBoardRemoved(teamId);
+            delete removed[rowId];
+          } else if (parsed.action === 'remove') {
+            const board = await getTeamFlowBoard(teamId);
+            // Read after the board: computing it may have pruned the store.
+            removed = loadFlowBoardRemoved(teamId);
+            const row = (board.rows || []).find((r) => r.id === rowId);
+            if (!row) return sendJson(res, 404, { error: 'That item is not on the board' });
+            if (!row.removable) return sendJson(res, 409, { error: 'An agent is working on this item or is up next — it stays on the board' });
+            const keys = [
+              ...(row.issue ? [`${row.issue.repo}#${row.issue.number}`] : []),
+              ...(row.prs || []).map((p) => `${p.repo}#${p.number}`),
+            ];
+            removed[rowId] = { removedAt: new Date().toISOString(), keys };
+          } else {
+            return sendJson(res, 400, { error: 'action must be "remove" or "restore"' });
+          }
+          saveFlowBoardRemoved(teamId, removed);
+          _flowBoardCache.delete(teamId);
+          return sendJson(res, 200, { teamId, rowId, action: parsed.action });
         } catch (err) {
           return sendJson(res, 400, { error: err.message });
         }

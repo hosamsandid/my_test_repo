@@ -7,13 +7,17 @@
 //
 // Three decisions live here, each golden-testable:
 //   1. `deriveFlowStages` — the board's columns come from the Flow Editor graph
-//      (one stage per agent role in hand-off order, framed by Ready and Done),
+//      (one stage per agent role in hand-off order, framed by Draft and Done),
 //      never from fixed label names, so any vocabulary works.
 //   2. Involvement — a work item appears only if a team agent took part (woken
 //      by an event on it, created it, pushed to it, or it was released into the
 //      flow), which is what keeps Dependabot PRs and the untouched backlog out.
 //   3. Position — each row's current stage (the role working now, or the role
 //      woken next) and, when nothing will move it without a person, why.
+//
+// Plus one operator override (#2637): a person may take a row off the board
+// ("Remove from board"). The removal lasts until new flow activity on the row
+// — `removalRevived` decides that — and never touches the GitHub item.
 
 'use strict';
 
@@ -23,7 +27,9 @@
 const CLAIM_SUFFIX = ':wip';
 const COMPLETED_SUFFIX = ':completed';
 
-const READY = 'ready';
+// Stage 0 holds what nobody released yet and no agent is on (#2637): a
+// released item already sits at the role it wakes, as "up next".
+const DRAFT = 'draft';
 const DONE = 'done';
 
 const DEFAULT_DONE_RETENTION_HOURS = 24;
@@ -263,7 +269,7 @@ function normalizeBoardConfig(raw) {
 }
 
 /**
- * The board's columns: Ready, one stage per role in flow order, Done — with the
+ * The board's columns: Draft, one stage per role in flow order, Done — with the
  * team's optional renames/merges/hides applied. Returns `{ stages, stageOf }`
  * where `stageOf(roleId)` maps a role to the index of the column it shows in
  * (a hidden role shows in the nearest visible stage before it; a merged role
@@ -274,7 +280,7 @@ function deriveFlowStages(members, { labels = [], teamId = null, config = null }
   const graph = buildRoleGraph(members, { labels, teamId });
   const ordered = orderRoles(graph);
 
-  const stages = [{ id: READY, label: 'Ready', roles: [] }];
+  const stages = [{ id: DRAFT, label: 'Draft', roles: [] }];
   const roleStage = new Map();
   const resolveMerge = (id) => {
     const seen = new Set();
@@ -293,7 +299,7 @@ function deriveFlowStages(members, { labels = [], teamId = null, config = null }
     stages.push({ id, label: c.label || graph.roles.get(id).displayName, roles: [id] });
   }
   // Pass 2: merged roles join their target; hidden ones fall back to the
-  // nearest visible stage before them (Ready when there is none).
+  // nearest visible stage before them (Draft when there is none).
   let lastVisible = 0;
   for (const id of ordered) {
     if (roleStage.has(id)) { lastVisible = roleStage.get(id); continue; }
@@ -357,6 +363,7 @@ function eventIdFromCorrelation(correlationId) {
  * @param {Array}  args.prRecords pr-events-log records (pr-created / branch-pushed)
  * @param {Array}  args.sessions  [{ agentId, session }] running sessions of the team's agents
  * @param {Array}  args.pools     [{ agentId, roleId, displayName, maxInstances, state, changedAt, held, instances:[{instanceId, busy}] }]
+ * @param {object} args.removed   rows a person took off the board (see normalizeRemoved)
  * @param {number} args.now
  */
 function buildFlowBoard(args = {}) {
@@ -368,6 +375,7 @@ function buildFlowBoard(args = {}) {
   const roleOf = makeRoleResolver(members);
   const displayName = (roleId) => (graph.roles.get(roleId) || {}).displayName || roleId;
   const retentionMs = config.doneRetentionHours * 3600 * 1000;
+  const removed = normalizeRemoved(args.removed);
 
   // --- the GitHub snapshot, keyed `<repo>#<n>` -----------------------------
   const items = new Map();
@@ -391,6 +399,7 @@ function buildFlowBoard(args = {}) {
   const firstSeen = new Map(); // key -> ms
   const links = new Map(); // pr key -> issue key
   const eventItem = new Map(); // eventId -> key
+  const prCreated = new Map(); // pr key -> ms a team agent opened it
   const seen = (key, ms) => {
     if (ms == null) return;
     if (!firstSeen.has(key) || firstSeen.get(key) > ms) firstSeen.set(key, ms);
@@ -419,6 +428,7 @@ function buildFlowBoard(args = {}) {
       const key = itemKey(r.repo, r.prNumber);
       involved.add(key);
       seen(key, toMs(r.ts));
+      if (toMs(r.ts) != null) prCreated.set(key, Math.max(prCreated.get(key) || 0, toMs(r.ts)));
       // Which issue this PR belongs to, from the flow itself: the event that
       // woke the run that opened it, else the pool instance's own item, else
       // an explicit closing reference. `Closes #n` is never required.
@@ -492,6 +502,9 @@ function buildFlowBoard(args = {}) {
   }
 
   const out = [];
+  const removedRows = [];
+  const matchedRemovals = new Set();
+  const revived = [];
   for (const row of rows.values()) {
     const keys = [row.issueKey, ...row.prKeys].filter(Boolean);
     if (!keys.some((k) => involved.has(k))) continue;
@@ -515,6 +528,26 @@ function buildFlowBoard(args = {}) {
       ? { stageIndex: stages.length - 1, status: 'done', roleId: null, agentId: null, since: doneAt }
       : placeRow({ keys, items, working, wakes, firstSeen, graph, stageOf, stages, now });
 
+    const removal = findRemoval(removed, row.key, keys);
+    if (removal) {
+      matchedRemovals.add(removal.id);
+      if (removalRevived({ removal: removal.entry, keys, position, wakes, prCreated })) {
+        revived.push(removal.id);
+      } else {
+        const issueRef = issue ? { repo: issue.repo, number: issue.number } : null;
+        removedRows.push({
+          id: row.key,
+          removalId: removal.id,
+          title: (issue && issue.title) || (prs[0] && prs[0].title) || row.key,
+          url: (issue && issue.url) || (prs[0] && prs[0].url) || null,
+          issue: issueRef,
+          prs: prs.map((p) => ({ repo: p.repo, number: p.number })),
+          removedAt: removal.entry.removedAt,
+        });
+        continue;
+      }
+    }
+
     const needsHuman = isDone ? null : humanBlock({ keys, items, graph, position, now });
     out.push({
       id: row.key,
@@ -534,9 +567,11 @@ function buildFlowBoard(args = {}) {
       since: position.since != null ? new Date(position.since).toISOString() : null,
       done: isDone,
       needsHuman,
+      // An agent working on it or queued for it keeps it on the board (#2637 AC5).
+      removable: position.status !== 'working' && position.status !== 'queued',
     });
   }
-  // Work flows top to bottom: Ready first, then each stage in hand-off order;
+  // Work flows top to bottom: Draft first, then each stage in hand-off order;
   // within a stage the item that entered it most recently on top (a missing
   // `since` counts as oldest); done last, most recently done first. Id breaks
   // ties so a refresh on unchanged data keeps the order.
@@ -604,13 +639,65 @@ function buildFlowBoard(args = {}) {
     sessions,
     pools,
     doneRetentionHours: config.doneRetentionHours,
+    removed: removedRows.sort((a, b) => (toMs(b.removedAt) || 0) - (toMs(a.removedAt) || 0) || a.id.localeCompare(b.id)),
+    // Stored removals that no longer hide anything: revived by flow activity,
+    // or their row is gone from the snapshot (closed and aged out, deleted,
+    // no longer swept). The orchestrator drops them from the store (AC11).
+    removalsToPrune: [...revived, ...Object.keys(removed).filter((id) => !matchedRemovals.has(id) && !revived.includes(id))],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Remove from board (#2637).
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize the per-team removal store (`flow-board-removed.json`):
+ *   { "<row id>": { removedAt: ISO, keys: ["<repo>#<n>", …] } }
+ * The row id is the row's own key (`<repo>#<n>` of its issue, or of its PR for
+ * a PR-only row); `keys` are every item the row held when it was removed, so
+ * a row that re-forms around another of its items is still recognised.
+ */
+function normalizeRemoved(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [id, v] of Object.entries(raw)) {
+    if (!str(id) || !v || typeof v !== 'object' || toMs(v.removedAt) == null) continue;
+    const keys = (Array.isArray(v.keys) ? v.keys : []).filter((k) => str(k));
+    out[id] = { removedAt: new Date(toMs(v.removedAt)).toISOString(), keys: keys.includes(id) ? keys : [id, ...keys] };
+  }
+  return out;
+}
+
+function findRemoval(removed, rowKey, keys) {
+  if (removed[rowKey]) return { id: rowKey, entry: removed[rowKey] };
+  for (const [id, entry] of Object.entries(removed)) {
+    if (entry.keys.some((k) => keys.includes(k))) return { id, entry };
+  }
+  return null;
+}
+
+/**
+ * Whether a removed row has had new flow activity since it was removed (AC8):
+ * an agent working on it or woken for it (session, claim or wake label), an
+ * event delivered to a team agent on any of its items, or a team agent opening
+ * a PR for it. Edits, comments and cross-references only bump `updatedAt`,
+ * which is deliberately not consulted.
+ */
+function removalRevived({ removal, keys, position, wakes, prCreated }) {
+  if (position.status === 'working' || position.status === 'queued') return true;
+  const at = toMs(removal.removedAt);
+  for (const key of keys) {
+    if ((wakes.get(key) || []).some((w) => w.ts != null && w.ts > at)) return true;
+    if (prCreated.has(key) && prCreated.get(key) > at) return true;
+  }
+  return false;
 }
 
 // Where a row stands: the most advanced of its items' positions. Evidence in
 // order of strength — a running session (working), a claim label (working),
 // a wake label (woken next), the last delivered wake (idle at that role),
-// else Ready.
+// else Draft — nobody released it and no agent is on it.
 function placeRow({ keys, items, working, wakes, firstSeen, graph, stageOf, stages, now }) {
   const cands = [];
   const push = (roleId, status, since, agentId = null) => {
@@ -647,7 +734,7 @@ function placeRow({ keys, items, working, wakes, firstSeen, graph, stageOf, stag
     return live.length ? live[0] : cands[0];
   }
   const since = Math.min(...keys.map((k) => firstSeen.get(k) || toMs((items.get(k) || {}).updatedAt) || now));
-  return { stageIndex: 0, status: 'ready', roleId: null, agentId: null, since: Number.isFinite(since) ? since : null };
+  return { stageIndex: 0, status: DRAFT, roleId: null, agentId: null, since: Number.isFinite(since) ? since : null };
 }
 
 function lastWakeTs(wakes, key, roleId) {
@@ -701,6 +788,7 @@ module.exports = {
   buildRoleGraph,
   orderRoles,
   normalizeBoardConfig,
+  normalizeRemoved,
   deriveFlowStages,
   makeRoleResolver,
   eventIdFromCorrelation,

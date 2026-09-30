@@ -14,6 +14,7 @@ askPrompts:
   - "How long do finished items stay on the board?"
   - "Can I rename or merge the stages?"
   - "What does Force dispatch do?"
+  - "What does Draft mean, and how do I remove an item from the board?"
 ---
 
 ## What the Flow Control board shows
@@ -99,7 +100,7 @@ spelled out, together with how long it has been waiting:
 
 ## The stages
 
-The columns come from the team's own flow on the **Flows** page: **Ready**,
+The columns come from the team's own flow on the **Flows** page: **Draft**,
 then one stage per role in hand-off order, then **Done**. A team with a
 different flow gets different stages; nothing depends on label names. A role
 that appears on several paths is shown once, at its first position, and pooled
@@ -113,7 +114,13 @@ own row.
 Each row shows its **current stage**, whether an agent is **working** on it or
 it is **up next**, and the **time in that stage** — not the item's total age.
 
-Rows read like the pipeline, **top to bottom**: **Ready** first, then each
+**Draft** holds items a team agent created or took part in that no person has
+released yet and no agent is working on or queued for — for example a concept
+ticket. They read **awaiting release**: a person has to review the item and
+release it (add the label the first role wakes on, e.g. `ready`). A released
+item never sits in Draft — it shows at the role it wakes, as **up next**.
+
+Rows read like the pipeline, **top to bottom**: **Draft** first, then each
 stage in hand-off order. Within a stage the item that entered it most recently
 is on top, so an item that moves on appears at the top of the next stage's
 block. An item that needs you keeps its place in this order. Finished items
@@ -127,3 +134,21 @@ team: **rename** a stage, **merge** it into another one (its items are then
 shown there), or **hide** it (its items appear in the stage before it). The
 same dialog sets how long finished items stay in **Recently completed**.
 Without a saved configuration the stages are derived automatically.
+
+## Removing items from the board
+
+Team Admins see **Remove from board** on every row no agent is working on or
+queued for — typically a long-lived concept ticket in **Draft**. Before
+anything happens the board asks you to confirm: only the board entry is
+removed — the GitHub ticket stays unchanged (no closing, no labels, no edits).
+The row disappears right away, for every viewer of the team's board, and stays
+removed across reloads and restarts.
+
+A removed item **comes back on its own** as soon as the flow picks it up
+again: a wake or claim label is added, a team agent is woken on it, starts a
+run on it or opens a pull request for it. Edits, comments and cross-references
+do not bring it back.
+
+**Removed (n)** next to **Columns** lists the removed items; **Restore** puts
+one back at its current stage. Entries for items that are closed, deleted or no
+longer part of the board's GitHub snapshot are cleaned up automatically.

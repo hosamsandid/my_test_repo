@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Link } from 'react-router';
 import { RefreshCw, Clock, CalendarClock, Loader2, AlertCircle, Plus, Pencil, Trash2, Globe, Copy, Eye, EyeOff, Github, Terminal, FileCode2, GitBranch, Repeat, Puzzle } from 'lucide-react';
 import { apiCall } from '../../hooks/useApi';
@@ -30,7 +30,9 @@ import {
   branchFilterFormError, branchFilterToInput, branchFilterBody, BRANCH_FILTER_PLACEHOLDER, BRANCH_FILTER_HELP,
   knowledgeBranchNote, knowledgeBranchesForRepo,
 } from './branch-filter.js';
-import { DOW_LABELS, parseCronState, buildCron, describeCron } from './cron-format.js';
+import {
+  DOW_LABELS, parseCronState, buildCron, describeCron, switchCronMode, validateCronState, cronExpressionError, inCronTime,
+} from './cron-format.js';
 import { triggerIssue, triggerRowKey } from './trigger-issues.js';
 import { triggerRepoOptions, environmentRepoOptions, triggerRepoWarning } from './trigger-repo-status.js';
 import {
@@ -154,26 +156,64 @@ const FIELD_STYLE = {
   outline: 'none',
 };
 
+// Inline field error under the schedule inputs.
+function CronFieldError({ children }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
+      <AlertCircle size={11} style={{ flexShrink: 0 }} /> {children}
+    </div>
+  );
+}
+
+const ERROR_BORDER = { border: '1px solid var(--eb-status-error)' };
+
+// `onChange(cron, error)` — `error` is the first validation message (or null),
+// so the form can refuse to save an invalid schedule (#2625).
 function CronBuilder({ value, onChange }) {
   const [s, setS] = useState(() => parseCronState(value));
+  // The builder's mode is local UI state: `value` is re-parsed only when it
+  // changes from OUTSIDE (e.g. the form re-seeds). Re-parsing our own
+  // emissions made Custom bounce back to Daily and flipped the mode while an
+  // expression was being typed (#2625).
+  const lastEmitted = useRef(value);
+  useEffect(() => {
+    if (value === lastEmitted.current) return;
+    lastEmitted.current = value;
+    setS(parseCronState(value));
+  }, [value]);
 
-  // Keep internal state in sync when value changes externally (e.g. edit panel reopened)
-  useEffect(() => { setS(parseCronState(value)); }, [value]);
-
-  function upd(patch) {
-    setS(prev => {
-      const next = { ...prev, ...patch };
-      onChange(buildCron(next));
-      return next;
-    });
+  function emit(next) {
+    const cron = buildCron(next);
+    const v = validateCronState(next);
+    lastEmitted.current = cron;
+    onChange(cron, v.ok ? null : Object.values(v.errors)[0]);
   }
 
-  const timeVal = `${String(parseInt(s.hour)||0).padStart(2,'0')}:${String(parseInt(s.minute)||0).padStart(2,'0')}`;
-  const setTime = v => { const [h, m] = (v || '00:00').split(':'); upd({ hour: h || '0', minute: m || '0' }); };
+  function upd(patch) {
+    const next = { ...s, ...patch };
+    setS(next);
+    emit(next);
+  }
+
+  function changeMode(mode) {
+    const next = switchCronMode(s, mode);
+    setS(next);
+    emit(next);
+  }
+
+  const { errors } = validateCronState(s);
+  const timeVal = inCronTime(s) ? `${String(Number(s.hour)).padStart(2, '0')}:${String(Number(s.minute)).padStart(2, '0')}` : '';
+  // A cleared time input stays empty (and is flagged) instead of becoming 00:00.
+  const setTime = v => { const [h = '', m = ''] = (v || '').split(':'); upd({ hour: h, minute: m }); };
+  const timeInput = (
+    <input type="time" value={timeVal} onChange={e => setTime(e.target.value)}
+      aria-invalid={!!errors.time}
+      style={{ ...FIELD_STYLE, ...(errors.time ? ERROR_BORDER : {}) }} />
+  );
 
   const description = describeCron(s);
   const cronStr = buildCron(s);
-  const customEmpty = s.mode === 'custom' && !s.raw.trim();
+  const fieldError = Object.values(errors)[0];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
@@ -182,7 +222,7 @@ function CronBuilder({ value, onChange }) {
       </div>
 
       {/* Frequency */}
-      <select value={s.mode} onChange={e => upd({ mode: e.target.value })} style={{ ...FIELD_STYLE, width: '100%' }}>
+      <select value={s.mode} onChange={e => changeMode(e.target.value)} style={{ ...FIELD_STYLE, width: '100%' }}>
         <option value="minutely">Every N minutes</option>
         <option value="hourly">Hourly</option>
         <option value="daily">Daily</option>
@@ -195,21 +235,23 @@ function CronBuilder({ value, onChange }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', flexWrap: 'wrap', fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', minHeight: 34 }}>
         {s.mode === 'minutely' && (<>
           Every
-          <input type="number" min={1} max={59} value={s.interval}
+          <input type="number" min={1} max={59} step={1} value={s.interval}
             onChange={e => upd({ interval: e.target.value })}
-            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center' }} />
+            aria-invalid={!!errors.interval}
+            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center', ...(errors.interval ? ERROR_BORDER : {}) }} />
           minutes
         </>)}
 
         {s.mode === 'hourly' && (<>
           At minute
-          <input type="number" min={0} max={59} value={s.minute}
+          <input type="number" min={0} max={59} step={1} value={s.minute}
             onChange={e => upd({ minute: e.target.value })}
-            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center' }} />
+            aria-invalid={!!errors.minute}
+            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center', ...(errors.minute ? ERROR_BORDER : {}) }} />
         </>)}
 
         {s.mode === 'daily' && (<>
-          At <input type="time" value={timeVal} onChange={e => setTime(e.target.value)} style={FIELD_STYLE} />
+          At {timeInput}
         </>)}
 
         {s.mode === 'weekly' && (<>
@@ -217,37 +259,36 @@ function CronBuilder({ value, onChange }) {
           <select value={s.dow} onChange={e => upd({ dow: e.target.value })} style={FIELD_STYLE}>
             {DOW_LABELS.map((d, i) => <option key={i} value={String(i)}>{d}</option>)}
           </select>
-          at <input type="time" value={timeVal} onChange={e => setTime(e.target.value)} style={FIELD_STYLE} />
+          at {timeInput}
         </>)}
 
         {s.mode === 'monthly' && (<>
           Day
-          <input type="number" min={1} max={31} value={s.dom}
+          <input type="number" min={1} max={31} step={1} value={s.dom}
             onChange={e => upd({ dom: e.target.value })}
-            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center' }} />
-          of every month at <input type="time" value={timeVal} onChange={e => setTime(e.target.value)} style={FIELD_STYLE} />
+            aria-invalid={!!errors.dom}
+            style={{ ...FIELD_STYLE, width: 60, textAlign: 'center', ...(errors.dom ? ERROR_BORDER : {}) }} />
+          of every month at {timeInput}
         </>)}
 
         {s.mode === 'custom' && (
           <input type="text" value={s.raw} onChange={e => upd({ raw: e.target.value })}
             placeholder="* * * * *  (min  hour  day  month  weekday)"
+            aria-invalid={!!errors.raw}
             style={{
               ...FIELD_STYLE, flex: 1,
               fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)',
-              ...(customEmpty ? { border: '1px solid var(--eb-status-error)' } : {}),
+              ...(errors.raw ? ERROR_BORDER : {}),
             }} />
         )}
       </div>
 
-      {/* Inline error for empty custom expression */}
-      {customEmpty && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-status-error)' }}>
-          <AlertCircle size={11} style={{ flexShrink: 0 }} /> Cron expression is required.
-        </div>
-      )}
+      {/* Inline validation error — the form refuses to save while one shows */}
+      {fieldError && <CronFieldError>{fieldError}</CronFieldError>}
 
-      {/* Summary */}
-      {s.mode !== 'custom' && cronStr && (
+      {/* Summary — a custom expression has no plain-language wording, so it
+          just confirms the expression is valid. */}
+      {!fieldError && cronStr && (
         <div style={{
           display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)',
           padding: 'var(--eb-space-2) var(--eb-space-3)',
@@ -256,7 +297,7 @@ function CronBuilder({ value, onChange }) {
         }}>
           <Clock size={11} style={{ color: 'var(--eb-accent-primary)', flexShrink: 0 }} />
           <span style={{ color: 'var(--eb-accent-primary)', fontWeight: 'var(--eb-font-medium)', flex: 1 }}>
-            {description}
+            {description || 'Valid custom schedule'}
           </span>
           <code style={{ color: 'var(--eb-text-muted)', fontFamily: 'var(--eb-font-mono)' }}>
             {cronStr}
@@ -756,6 +797,11 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
   const [secretVisible, setSecretVisible] = useState(!isEdit);
   const [formError, setFormError] = useState(null);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  // The schedule builder's validation message (#2625): seeded from the stored
+  // expression, then reported by CronBuilder with every change. Blocks saving.
+  const [cronError, setCronError] = useState(() => cronExpressionError(form.cron));
+  const cronInvalid = form.type === 'cron' && !!cronError;
+  const submitDisabled = saving || cronInvalid;
   // One event per trigger: the select replaces the whole events array. Legacy
   // triggers may still carry several — surfaced via the notice below, and the
   // extra events are only dropped when the user saves.
@@ -982,7 +1028,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
 
   async function submit() {
     setFormError(null);
-    if (form.type === 'cron' && !form.cron.trim()) { setFormError('Cron expression is required.'); return; }
+    if (form.type === 'cron' && cronError) { setFormError(`Schedule: ${cronError}`); return; }
     if (form.type === 'once' && !form.at.trim())   { setFormError('Run-at timestamp is required.'); return; }
     if (form.type === 'github-event') {
       if (!form.repo && !isDraftMode) { setFormError('Repository is required.'); return; }
@@ -1081,7 +1127,13 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       priorPushedBy: initialValues?.pushedBy,
     });
     if (pb !== undefined) body.pushedBy = pb;
-    await onSave(body);
+    // A failed save (409 / 4xx / 5xx) shows the server's message here and keeps
+    // the form open — never an unhandled rejection (#2625).
+    try {
+      await onSave(body);
+    } catch (e) {
+      setFormError(e?.message || 'Could not save the trigger.');
+    }
   }
 
   return (
@@ -1128,7 +1180,7 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
       )}
 
       {form.type === 'cron' && (
-        <CronBuilder value={form.cron} onChange={v => set('cron', v)} />
+        <CronBuilder value={form.cron} onChange={(v, err) => { set('cron', v); setCronError(err); }} />
       )}
 
       {form.type === 'once' && (
@@ -1810,15 +1862,16 @@ export function TriggerForm({ onSave, onCancel, onRemove, saving, initialValues,
         )}
         <button
           onClick={submit}
-          disabled={saving}
+          disabled={submitDisabled}
+          title={cronInvalid ? 'Fix the schedule first.' : undefined}
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
             padding: 'var(--eb-space-2) var(--eb-space-4)',
             background: 'var(--eb-accent-primary)', color: 'var(--eb-text-inverted)',
             border: 'none', borderRadius: 'var(--eb-radius-md)',
             fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-medium)',
-            cursor: saving ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
-            opacity: saving ? 0.7 : 1,
+            cursor: submitDisabled ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+            opacity: submitDisabled ? 0.7 : 1,
           }}
         >
           {saving && <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />}
@@ -1904,6 +1957,7 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
     return () => clearInterval(timer);
   }, [agentId, active, isDraft, fetchTriggers]);
 
+  // Save errors propagate to TriggerForm's submit(), which shows them inline.
   async function handleSave(body) {
     setSaving(true);
     try {
@@ -1911,8 +1965,6 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
       setAddOpen(false);
       fetchTriggers(agentId);
       onChanged?.();
-    } catch (e) {
-      throw e;
     } finally {
       setSaving(false);
     }
@@ -1925,8 +1977,6 @@ export default function TriggersPanel({ agentId, active, onChanged, ops: opsProp
       setEditTarget(null);
       fetchTriggers(agentId);
       onChanged?.();
-    } catch (e) {
-      throw e;
     } finally {
       setSaving(false);
     }

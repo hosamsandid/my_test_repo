@@ -73,7 +73,7 @@ test('the chapters are top-level, not sub-headings', () => {
   }
   // The empty/degraded-board material is deliberately a `###` inside chapter 1 —
   // this catches a stray top-level chapter splitting a deep-link target in two.
-  assert.equal(h2.length, 6, `expected exactly the six chapters, got ${h2.join(' · ')}`);
+  assert.equal(h2.length, 7, `expected exactly the seven chapters, got ${h2.join(' · ')}`);
 });
 
 test('each board surface mounts a "?" pointed at its own chapter', () => {
@@ -127,14 +127,15 @@ test('one read, and the removed surfaces stay removed (AC10, AC11)', () => {
   }
 });
 
-test('every write targets a pool control or the column configuration', () => {
+test('every write targets a pool control, the column configuration or a board removal', () => {
   const mutations = page.match(/apiCall\('(POST|PUT|PATCH|DELETE)', `[^`]*`/g) || [];
-  assert.equal(mutations.length, 3, `expected three writes, got ${mutations.join(' | ')}`);
+  assert.equal(mutations.length, 5, `expected five writes, got ${mutations.join(' | ')}`);
   for (const call of mutations) {
     assert.ok(
       /\/pool-control\/\$\{encodeURIComponent\(roleId\)\}`$/.test(call)
         || /\/force-dispatch`$/.test(call)
-        || /\/flow-board-config`$/.test(call),
+        || /\/flow-board-config`$/.test(call)
+        || /\/flow-board-removed`$/.test(call),
       `unexpected mutating call in the Flow Control board: ${call}`,
     );
   }

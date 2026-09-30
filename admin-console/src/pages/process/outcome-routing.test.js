@@ -252,4 +252,7 @@ test('#2629: nodeLabelTarget resolves the target of the outcome that sets a drag
   assert.equal(nodeLabelTarget(merger, 'on-pr'), 'pr');
   assert.equal(nodeLabelTarget(merger, 'plain'), 'issue');
   assert.equal(nodeLabelTarget(null, 'x'), null);
+  // No outcome sets the dragged label → fall back to the node's own triggers (review S2).
+  assert.equal(nodeLabelTarget(merger, 'unlisted'), 'issue');
+  assert.equal(nodeLabelTarget({ id: 'm', triggers: prWoken }, 'unlisted'), 'pr');
 });

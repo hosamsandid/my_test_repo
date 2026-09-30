@@ -160,12 +160,34 @@ function createPluginCredentialWiring(deps) {
     if (!m) return false;
     const userId = decodeURIComponent(m[1]);
     const pluginId = m[2] ? decodeURIComponent(m[2]) : null;
+    // Whether a team the plugin is granted to has its interactive CONNECTION set
+    // (Jira: `site-url`). A personal token is useless in chat until that exists,
+    // so the page can warn up front instead of the user discovering it as a
+    // second refusal. Optimistic across granted scopes: if ANY granted team has
+    // it, we don't warn (avoids a false alarm for a member of a configured team);
+    // we warn only when NO granted team has set it. `null` when the plugin
+    // declares no interactive team connection (no site-gate applies).
+    const teamConnectionOf = (id, manifest) => {
+      const interactiveKeys = (Array.isArray(manifest.credentials) ? manifest.credentials : [])
+        .filter((c) => Array.isArray(c.requiredFor) && c.requiredFor.includes('interactive'))
+        .map((c) => c.key);
+      if (interactiveKeys.length === 0) return null;
+      let granted = [];
+      try { granted = grantedTeamScopeIds(id); } catch { granted = []; }
+      const configured = granted.some((sid) => {
+        let vals = {};
+        try { vals = (credentialStore.read(id, sid) || {}).values || {}; } catch { vals = {}; }
+        return interactiveKeys.every((k) => typeof vals[k] === 'string' && vals[k].trim());
+      });
+      return { keys: interactiveKeys, granted: granted.length > 0, configured };
+    };
     const describe = (id, manifest) => ({
       pluginId: id,
       name: manifest.name || id,
       credentials: manifest.personalCredentials.map((c) => ({
-        key: c.key, required: c.required === true, description: c.description || null, secret: c.secret !== false,
+        key: c.key, label: c.label || c.key, required: c.required === true, description: c.description || null, secret: c.secret !== false,
       })),
+      teamConnection: teamConnectionOf(id, manifest),
       ...credentialStore.personalMeta(id, userId, manifest.personalCredentials),
     });
 

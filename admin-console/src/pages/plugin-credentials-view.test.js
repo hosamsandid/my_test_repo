@@ -4,12 +4,22 @@ import assert from 'node:assert/strict';
 import {
   fieldType,
   fieldDescriptors,
+  groupDescriptors,
+  groupHeading,
+  groupNecessity,
   scopeStatusLabel,
   scopeStatusTone,
   buildCredentialSubmit,
   isCredentialDraftDirty,
   selectScopes,
 } from './plugin-credentials-view.js';
+
+// The Jira-shaped manifest after #jira-setup-ux: grouped + requiredFor-tagged.
+const JIRA_CREDS = [
+  { key: 'site-url', label: 'Jira site', group: 'connection', requiredFor: ['interactive', 'automated'], required: true, secret: false },
+  { key: 'email', label: 'Service-account e-mail', group: 'service-account', requiredFor: ['automated'], secret: false },
+  { key: 'api-token', label: 'Service-account API token', group: 'service-account', requiredFor: ['automated'] },
+];
 
 const CREDS = [
   { key: 'site-url', required: true, description: 'Jira site' },
@@ -78,6 +88,59 @@ test('scopeStatusLabel / tone: not-configured → incomplete → configured', ()
   const done = { complete: true, setBy: 'alice', setAt: '2026-09-08T00:00:00Z', keys: {} };
   assert.equal(scopeStatusTone(done), 'ok');
   assert.match(scopeStatusLabel(done), /set by alice/);
+});
+
+test('fieldDescriptors: carries label / group / requiredFor and falls back to the key', () => {
+  const [site, , plain] = fieldDescriptors([
+    { key: 'site-url', label: 'Jira site', group: 'connection', requiredFor: ['interactive'] },
+    { key: 'x', label: 'X', group: 'g' },
+    { key: 'bare' },
+  ], {});
+  assert.equal(site.label, 'Jira site');
+  assert.equal(site.group, 'connection');
+  assert.deepEqual(site.requiredFor, ['interactive']);
+  assert.equal(plain.label, 'bare'); // no manifest label → the key
+  assert.equal(plain.group, '');
+  assert.deepEqual(plain.requiredFor, []);
+});
+
+test('groupDescriptors: buckets fields by group in first-seen order with a necessity line', () => {
+  const groups = groupDescriptors(JIRA_CREDS, {});
+  assert.deepEqual(groups.map((g) => g.group), ['connection', 'service-account']);
+  assert.equal(groups[0].heading, 'Connection');
+  assert.equal(groups[0].necessity.tone, 'req');
+  assert.match(groups[0].necessity.text, /Required for all use/);
+  assert.equal(groups[1].heading, 'Service account');
+  assert.equal(groups[1].necessity.tone, 'opt');
+  assert.match(groups[1].necessity.text, /Only for automated runs/);
+  assert.equal(groups[1].fields.length, 2);
+});
+
+test('groupHeading / groupNecessity: sensible fallbacks', () => {
+  assert.equal(groupHeading('service-account'), 'Service account');
+  assert.equal(groupHeading('some-other'), 'Some other'); // title-cased slug
+  assert.equal(groupHeading(''), 'Settings');
+  assert.equal(groupNecessity([{ requiredFor: ['interactive'] }]).tone, 'req');
+  assert.equal(groupNecessity([{ requiredFor: [] }]).tone, 'opt');
+  assert.equal(groupNecessity([{ required: true, requiredFor: [] }]).tone, 'req');
+});
+
+test('scopeStatusLabel: requiredFor-aware — honest connection vs service-account state', () => {
+  // nothing set → not connected
+  const none = { keys: {} };
+  assert.match(scopeStatusLabel(none, JIRA_CREDS), /Not connected/);
+  assert.equal(scopeStatusTone(none, JIRA_CREDS), 'muted');
+
+  // site set, no service account → chat works, automation unavailable (non-blocking)
+  const siteOnly = { keys: { 'site-url': { set: true } } };
+  assert.match(scopeStatusLabel(siteOnly, JIRA_CREDS), /interactive chat works/i);
+  assert.match(scopeStatusLabel(siteOnly, JIRA_CREDS), /Service account not set/);
+  assert.equal(scopeStatusTone(siteOnly, JIRA_CREDS), 'ok');
+
+  // everything set → automated ready
+  const full = { setBy: 'alice', keys: { 'site-url': { set: true }, email: { set: true }, 'api-token': { set: true } } };
+  assert.match(scopeStatusLabel(full, JIRA_CREDS), /automated runs ready/);
+  assert.equal(scopeStatusTone(full, JIRA_CREDS), 'ok');
 });
 
 test('buildCredentialSubmit: blank keeps (omit), blank-on-stored clears (""), new value sent', () => {

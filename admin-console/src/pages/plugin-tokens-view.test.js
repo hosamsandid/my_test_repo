@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
-  describePluginTokenStatus, initialFormValues, valuesToSubmit, submitBlockers,
+  describePluginTokenStatus, teamConnectionNote, initialFormValues, valuesToSubmit, submitBlockers,
 } from './plugin-tokens-view.js';
 
 // #2562 — the Plugin Tokens page (a member's own Jira e-mail + API token).
@@ -23,6 +23,19 @@ test('status: set / incomplete / unset', () => {
   assert.match(describePluginTokenStatus(unset).label, /refused/);
   const partial = { ...unset, keys: { ...unset.keys, email: { set: true, value: 'me@x.io' } } };
   assert.equal(describePluginTokenStatus(partial).state, 'incomplete');
+});
+
+test('teamConnectionNote: warns only when no granted team has the site set', () => {
+  // no teamConnection field (older payload / no site concept) → no note
+  assert.equal(teamConnectionNote(set), null);
+  // granted but site not configured anywhere → warn, pointing at Team Settings
+  const noSite = { ...set, teamConnection: { granted: true, configured: false } };
+  assert.match(teamConnectionNote(noSite), /site isn't set yet/);
+  assert.match(teamConnectionNote(noSite), /Team Admin/);
+  // configured somewhere → suppress (avoids a false alarm)
+  assert.equal(teamConnectionNote({ ...set, teamConnection: { granted: true, configured: true } }), null);
+  // not granted to any of the caller's teams → a distinct note
+  assert.match(teamConnectionNote({ ...set, teamConnection: { granted: false, configured: false } }), /not granted to any of your teams/);
 });
 
 test('form: non-secret values pre-fill, secrets never do', () => {

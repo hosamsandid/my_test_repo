@@ -28,6 +28,12 @@ The Jira **site** and the team's service account stay team settings — a Team
 Admin configures them in **Agent Chat → Settings → Plugins** (a System Admin can
 also reach them on the Plugins registry page).
 
+Your token alone is not enough: the team's Jira **site** must also be set. If it
+is not, this page shows a warning on the plugin's card — add your token here and
+ask your Team Admin to set the site. The first time you ask an agent to use Jira,
+its reply lists **everything** still missing at once (your token, the team site,
+or both) and who fixes each, so you are not sent from one error to the next.
+
 ## Chat turns vs automated runs
 
 | Run | Jira account used |

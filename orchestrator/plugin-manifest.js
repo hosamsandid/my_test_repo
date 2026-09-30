@@ -28,8 +28,8 @@
 //     id, name, description,
 //     sidecar: { image, env?, capabilities?, internalPort },  // required unless commands present
 //     cli: { name, entrypoint, runtime },                     // required unless commands present
-//     credentials?: [ { key, description?, required?, secret? } ],
-//     personalCredentials?: [ { key, description?, required?, secret? } ],  // per-person tier (#2562)
+//     credentials?: [ { key, description?, required?, secret?, label?, group?, requiredFor? } ],
+//     personalCredentials?: [ { key, description?, required?, secret?, label?, group?, requiredFor? } ],  // per-person tier (#2562)
 //     platforms?: [ "podman" | "kubernetes" | "any" ],
 //     scopes?: [ "team" | "agent" ],           // granularities the broker honours
 //     defaultScopeGranularity?: "team" | "agent",  // grant default within scopes (§4.4/§10)
@@ -113,6 +113,9 @@ function isValidCapability(cap) {
 // Validate one credential-field list (`credentials` / `personalCredentials`).
 // Pushes human-readable errors onto `errors` (prefixed with `label`) and
 // returns the normalised entries; `undefined` is the empty list.
+// The run modes a credential field may be marked `requiredFor`.
+const CREDENTIAL_MODES = ['interactive', 'automated'];
+
 function parseCredentialList(list, label, errors) {
   const out = [];
   if (list === undefined) return out;
@@ -135,6 +138,25 @@ function parseCredentialList(list, label, errors) {
     // its real stored value; only the explicit opt-out is carried, so every
     // existing manifest stays byte-identical.
     if (c.secret === false) entry.secret = false;
+    // Presentation + conditional-need metadata (optional, all backward
+    // compatible — a manifest that omits them renders exactly as before):
+    //   label       — a human display name (else the UI falls back to the key)
+    //   group       — a slug the UI groups fields under (e.g. a "connection"
+    //                 block vs. a "service-account" block)
+    //   requiredFor — which run modes actually need this field at runtime
+    //                 ('interactive' chat turns, 'automated' triggered runs).
+    //                 Lets a form say "only for automated runs" instead of a
+    //                 blanket `required`, and lets the grant gate a chat turn on
+    //                 exactly the connection fields interactive use needs.
+    if (isNonEmptyString(c.label)) entry.label = c.label.trim();
+    if (isNonEmptyString(c.group)) entry.group = c.group.trim();
+    if (c.requiredFor !== undefined) {
+      if (!Array.isArray(c.requiredFor) || c.requiredFor.some((m) => !CREDENTIAL_MODES.includes(m))) {
+        errors.push(`${label} entry ${c.key}: requiredFor must be an array of ${CREDENTIAL_MODES.join('/')}`);
+      } else if (c.requiredFor.length) {
+        entry.requiredFor = [...new Set(c.requiredFor)];
+      }
+    }
     out.push(entry);
   }
   return out;

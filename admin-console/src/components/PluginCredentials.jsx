@@ -3,6 +3,7 @@ import { KeyRound, ChevronDown, ChevronRight } from 'lucide-react';
 import { apiCall } from '../hooks/useApi';
 import {
   fieldDescriptors,
+  groupDescriptors,
   scopeStatusLabel,
   scopeStatusTone,
   buildCredentialSubmit,
@@ -39,6 +40,10 @@ function ScopeFields({ pluginId, credentials, scope, onSaved }) {
     () => fieldDescriptors(credentials, (scope && scope.keys) || {}),
     [credentials, scope],
   );
+  const groups = React.useMemo(
+    () => groupDescriptors(credentials, (scope && scope.keys) || {}),
+    [credentials, scope],
+  );
   const dirty = isCredentialDraftDirty(draft, descriptors);
   const canManage = !!(scope && scope.canManage);
 
@@ -73,7 +78,7 @@ function ScopeFields({ pluginId, credentials, scope, onSaved }) {
     <div style={{ marginTop: 'var(--eb-space-2)', padding: 'var(--eb-space-3)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', background: 'var(--eb-bg-app)' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
         <span style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 600 }}>{scope.teamName || scope.scopeId}</span>
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: TONE[scopeStatusTone(scope)] }}>{scopeStatusLabel(scope)}</span>
+        <span style={{ fontSize: 'var(--eb-text-xs)', color: TONE[scopeStatusTone(scope, credentials)] }}>{scopeStatusLabel(scope, credentials)}</span>
       </div>
 
       {!canManage ? (
@@ -82,26 +87,36 @@ function ScopeFields({ pluginId, credentials, scope, onSaved }) {
         </div>
       ) : (
         <>
-          <div style={{ marginTop: 'var(--eb-space-2)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-            {descriptors.map((d) => (
-              <label key={d.key} style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 'var(--eb-text-xs)' }}>
-                <span style={{ color: 'var(--eb-text-secondary)' }}>
-                  {d.key}{d.required ? ' *' : ''}{d.description ? <span style={{ color: 'var(--eb-text-muted)' }}> — {d.description}</span> : null}
-                </span>
-                <input
-                  type={d.type}
-                  autoComplete="off"
-                  value={draft[d.key] !== undefined ? draft[d.key] : (d.secret ? '' : d.storedValue)}
-                  placeholder={d.placeholder}
-                  disabled={busy}
-                  onChange={(e) => setDraft((p) => ({ ...p, [d.key]: e.target.value }))}
-                  style={{
-                    padding: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
-                    border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
-                    background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-primary)',
-                  }}
-                />
-              </label>
+          <div style={{ marginTop: 'var(--eb-space-2)', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-3)' }}>
+            {groups.map((g) => (
+              <div key={g.group || '_'} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+                {g.group ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <span style={{ fontSize: 'var(--eb-text-xs)', fontWeight: 600, color: 'var(--eb-text-secondary)' }}>{g.heading}</span>
+                    <span style={{ fontSize: 'var(--eb-text-xs)', color: g.necessity.tone === 'req' ? 'var(--eb-text-secondary)' : 'var(--eb-text-muted)' }}>{g.necessity.text}</span>
+                  </div>
+                ) : null}
+                {g.fields.map((d) => (
+                  <label key={d.key} style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 'var(--eb-text-xs)' }}>
+                    <span style={{ color: 'var(--eb-text-secondary)' }}>
+                      {d.label}{d.required ? ' *' : ''}{d.description ? <span style={{ color: 'var(--eb-text-muted)' }}> — {d.description}</span> : null}
+                    </span>
+                    <input
+                      type={d.type}
+                      autoComplete="off"
+                      value={draft[d.key] !== undefined ? draft[d.key] : (d.secret ? '' : d.storedValue)}
+                      placeholder={d.placeholder}
+                      disabled={busy}
+                      onChange={(e) => setDraft((p) => ({ ...p, [d.key]: e.target.value }))}
+                      style={{
+                        padding: 'var(--eb-space-2)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+                        border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
+                        background: 'var(--eb-bg-elevated)', color: 'var(--eb-text-primary)',
+                      }}
+                    />
+                  </label>
+                ))}
+              </div>
             ))}
           </div>
 

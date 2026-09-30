@@ -4,12 +4,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { absoluteWhen } from '../../components/format-when.js';
 import {
   formatDuration,
   since,
   updatedAgo,
   itemRef,
   rowView,
+  doneTitle,
   sessionView,
   poolView,
   needsYouView,
@@ -102,6 +104,62 @@ test('rowView: a PR-only row has no issue ref; a done row marks every step past'
   assert.equal(pr.ref, '');
   assert.equal(pr.issueUrl, null);
   assert.ok(pr.steps.every((s) => s.state === 'past'));
+});
+
+// ── #2643: time since completion on done rows ─────────────────────────────────
+
+const doneRow = (over = {}) => row({ stageId: 'done', stageIndex: 3, status: 'done', done: true, ...over });
+
+test('rowView: a done row shows the time since completion, in the same format as other rows (AC1)', () => {
+  const v = rowView(doneRow({ since: ago(135) }), STAGES, { now: NOW });
+  assert.equal(v.inStage, '2h 15m');
+  assert.equal(v.inStage, since(ago(135), NOW));
+});
+
+test('rowView: a PR-only done row shows the time since its merge/close (AC2)', () => {
+  const v = rowView(doneRow({ issue: null, since: ago(7) }), STAGES, { now: NOW });
+  assert.equal(v.inStage, '7m');
+});
+
+test('rowView: hovering a done row\'s value gives the absolute completion time (AC3)', () => {
+  const at = ago(135);
+  const v = rowView(doneRow({ since: at }), STAGES, { now: NOW });
+  assert.equal(v.inStageTitle, `Finished ${absoluteWhen(at)}`);
+  assert.ok(absoluteWhen(at));
+  assert.equal(doneTitle(doneRow({ since: at })), v.inStageTitle);
+});
+
+test('rowView: a done row without a usable completion time stays empty — no placeholder, no NaN (AC4)', () => {
+  for (const bad of [undefined, null, '', 'not-a-date']) {
+    const v = rowView(doneRow({ since: bad }), STAGES, { now: NOW });
+    assert.equal(v.inStage, '', `since=${bad}`);
+    assert.equal(v.inStageTitle, '', `since=${bad}`);
+  }
+});
+
+test('rowView: rows that are not done keep their value and get no tooltip (AC5)', () => {
+  const v = rowView(row(), STAGES, { now: NOW });
+  assert.equal(v.inStage, '1h 15m');
+  assert.equal(v.inStageTitle, '');
+  assert.equal(doneTitle(null), '');
+});
+
+test('rowView: done edge cases — just inside retention, and a completion slightly in the future', () => {
+  assert.equal(rowView(doneRow({ since: ago(23 * 60 + 59) }), STAGES, { now: NOW }).inStage, '23h 59m');
+  const future = rowView(doneRow({ since: ago(-2) }), STAGES, { now: NOW });
+  assert.equal(future.inStage, 'under 1m');
+});
+
+test('rowView: the value follows the injected now, so each refresh advances it (AC6)', () => {
+  const r = doneRow({ since: ago(10) });
+  assert.equal(rowView(r, STAGES, { now: NOW }).inStage, '10m');
+  assert.equal(rowView(r, STAGES, { now: NOW + 30 * 60_000 }).inStage, '40m');
+});
+
+test('BoardRow renders In stage for done rows too, with the view\'s tooltip (#651 source guard)', () => {
+  const jsx = fs.readFileSync(path.join(here, '..', 'FlowControl.jsx'), 'utf8');
+  assert.doesNotMatch(jsx, /row\.done \? '' : row\.inStage/);
+  assert.match(jsx, /title=\{row\.inStageTitle\}/);
 });
 
 test('rowView: the step list is exactly the team\'s own stages — no fixed vocabulary', () => {

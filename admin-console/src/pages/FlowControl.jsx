@@ -551,7 +551,9 @@ function BoardRow({ row, canManage, busy, onRemove }) {
         <div style={{ color: 'var(--eb-text-primary)' }}>{row.stageLabel}</div>
         <div style={mutedStyle}>{row.statusText}</div>
       </td>
-      <td style={{ ...cellStyle, whiteSpace: 'nowrap', ...mutedStyle }}>{row.done ? '' : row.inStage}</td>
+      <td style={{ ...cellStyle, whiteSpace: 'nowrap', ...mutedStyle }}>
+        {row.inStageTitle ? <span title={row.inStageTitle}>{row.inStage}</span> : row.inStage}
+      </td>
       {canManage && (
         <td style={{ ...cellStyle, whiteSpace: 'nowrap', textAlign: 'right' }}>
           {row.removable && (

@@ -83,6 +83,38 @@ test('cronExpressionError matches croniter on L and n#k', () => {
   }
 });
 
+// #2661: well-formed but never fires — croniter's is_valid takes these, its
+// get_next never finds a run, so the agent would silently never schedule them.
+test('cronExpressionError rejects a day of month no selected month has', () => {
+  for (const cron of [
+    '0 9 30 2 *', '0 9 31 2 *', '0 9 30 FEB *', '0 9 31 4 *', '0 9 31 APR,JUN *', '0 9 31 9,11 *',
+    '0 9 30-L 2 *', '0 9 30,31 2 *', '0 9 30/1 2 *', '0 9 31 4-4 *',
+  ]) {
+    assert.match(cronExpressionError(cron), /Day 3\d never occurs in the selected month\(s\), so this schedule never fires\./, cron);
+  }
+  assert.match(cronExpressionError('0 9 31 4 *'), /^Day 31 never occurs/);
+  // One listed month (or leap-year Feb 29) that has the day is enough.
+  for (const cron of [
+    '0 9 29 2 *', '0 9 31 4,5 *', '0 9 31 4-5 *', '0 9 31 */2 *', '0 9 30 2-3 *', '0 9 1,30 2 *',
+    '0 9 L 2 *', '0 9 29-L 2 *', '0 9 30 * *', '0 9 31 * *',
+  ]) {
+    assert.equal(cronExpressionError(cron), null, cron);
+  }
+  // A restricted weekday ORs in, so the schedule still fires.
+  assert.equal(cronExpressionError('0 9 30 2 1'), null);
+});
+
+test('cronExpressionError rejects n#k with a restricted day of month', () => {
+  for (const cron of [
+    '0 9 15 * 1#2', '0 9 8 * 1#1', '0 9 L * 1#2', '0 9 1-30 * 1#2', '0 9 15 * 1#2,3#1', '0 9 */2 * MON#1',
+  ]) {
+    assert.match(cronExpressionError(cron), /cannot be combined with a restricted day of month.*never fires/, cron);
+  }
+  for (const cron of ['0 9 * * 1#2', '0 9 */1 * 1#2', '0 9 1-31 * 1#2', '0 9 1-L * 1#2', '0 9 * 2 1#2']) {
+    assert.equal(cronExpressionError(cron), null, cron);
+  }
+});
+
 test('validateCronState flags empty / out-of-range preset fields per input', () => {
   const base = parseCronState('0 9 * * *');
   const bad = (patch) => validateCronState({ ...base, ...patch });

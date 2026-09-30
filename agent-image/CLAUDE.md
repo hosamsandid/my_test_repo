@@ -26,9 +26,9 @@ you were given. A triggered run may have nobody reading in real time.
 What you hand back is an **outcome**: a commit, a pull request, an issue comment, a
 registered artifact, or a label that wakes the next agent in the flow. Your own
 generated `CLAUDE.md` names the outcomes you are responsible for and the exact label
-each one uses. Labels delivered over the internal channel are announced with
-`aee-emit`, not by editing labels on GitHub. If you finish without producing an
-outcome, nothing downstream picks the work up.
+each one uses — apply it on GitHub (`gh issue edit <n> --add-label …` /
+`gh pr edit <n> --add-label …`); the platform picks it up from there. If you
+finish without producing an outcome, nothing downstream picks the work up.
 
 ## Commit Convention
 
@@ -90,6 +90,24 @@ When you see it, the branch is already on the remote: surface the message to the
 user (the environment needs a PAT attached) or open the PR yourself with plain
 `gh pr create --head <branch>`. Do **not** retry with a raw `git push`.
 
+### `gh` writes in a chat turn run as the person chatting
+
+The `gh` on your PATH is a thin wrapper (`/opt/ace/scripts/aee-gh`) around the
+real CLI (`/usr/bin/gh`). While a team member is chatting with you, an issue,
+pull-request or label **write** (`gh issue create/comment/edit/close`,
+`gh pr create/comment/review/edit/merge`, `gh label …`, a writing `gh api`
+call) is forwarded to the orchestrator and runs there under that member's
+personal GitHub token, so it is authored as them. Reads, other `gh` commands
+(`release`, `gist`, `secret`, `workflow`, …) and every triggered run use your
+container's own token as before.
+If the write is refused (`personal-credential-required` /
+`personal-credential-orphaned`), nothing was written: tell the person to add a
+personal GitHub token — do not retry with `/usr/bin/gh` or `curl`. Forwarded
+commands don't see your checkout: name issues/PRs by number, pass bodies with
+`--body`/`--body-file`, and keep each option and its value as separate
+arguments (`-F file`, not `-Ffile`) — the orchestrator refuses options it does
+not know, `--editor`/`--web` and `gh api --hostname`.
+
 ## Task Management
 
 Work items are tracked as GitHub issues. Use `gh issue list` to find one and
@@ -148,6 +166,22 @@ aee-artifact list "Functional Design"      # all matching entries
 
 If the upstream pushed but never registered an artifact you expect, do not guess
 a path — tell the user it is missing and stop.
+
+## Asking the human (`aee-ask`)
+
+When you need the human to decide something before you can continue, do not ask
+in prose — call `aee-ask`, which shows the question in Agent Chat as a quick-reply
+card, then **end your turn immediately**:
+
+```
+aee-ask "Which base branch?" --header Branch --option "main::default" --option "release::hotfix line"
+aee-ask "Which checks should run?" --multi --option unit --option "e2e::slow"
+```
+
+The human's answer arrives as your next message. If `aee-ask` rejects its
+arguments (exit 2), nothing was asked — fix them and call it again.
+The runner ends the whole turn the moment a question is queued, so call
+`aee-ask` from your own session, never from a Task sub-agent.
 
 ## Shared team knowledge (`knowledge`)
 
@@ -223,7 +257,7 @@ read-only endpoint across that boundary (just like `knowledge`). It is
 **token counts only — never a money figure**, and it can never write or delete a
 usage record.
 
-Your own usage:
+Your own usage (a pooled role's figure includes its auto-scaled instances):
 
 ```
 usage me

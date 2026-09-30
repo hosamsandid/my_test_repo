@@ -131,8 +131,9 @@ way two agents are wired in the Flow editor. These are optional arrays on a role
 - **These ports are the single source of truth.** At materialise time
   (`expandDataFlowSteps`) and on every live edit (`reconcileTeamDataFlow`) each
   matched producer→consumer pair derives one `github-event`/`push` trigger
-  `<consumer>-on-push-<upstream>` (`dataFlow: true`) that **wakes** the consumer
-  when the upstream pushes. It is a notification, **not** a start-gate: nothing
+  `<consumer>-on-push-<upstream>` (`dataFlow: true`, `pushedBy: [<upstream>]`) that
+  **wakes** the consumer only when the upstream itself pushes (via `gh-as-agent`;
+  other pushes to the repo are dropped, #2571). It is a notification, **not** a start-gate: nothing
   blocks the consumer from running before that. The derived trigger's prompt
   tells the consumer to `git pull` and resolve its inputs from the manifest.
 - **Optional `wakePrompt` override (#868).** A `channels[]` entry and a data-flow
@@ -254,8 +255,8 @@ the same option.
   `wakeHandoff: true` (the marker that makes it strippable and regenerable),
   `id` = `<consumerId>-on-handoff`, and `sources` recording which producers hand
   off to it — informational only, like a channel trigger's. It carries no
-  `events`, `labelFilter`, `claim`, `transport` or `activatedAt`: there is no
-  GitHub event behind it, no label to claim, it is internal by construction, and
+  `events`, `labelFilter`, `claim` or `activatedAt`: there is no
+  GitHub event behind it, no label to claim, and
   nothing polls it so there is no history horizon to preserve.
   **Exactly one per consumer**, not one per producer or per outcome — the
   producer cannot know the consumer's trigger id, so none is stamped on the queue
@@ -263,7 +264,7 @@ the same option.
   finds; a second would be authored, materialised and never fire. A
   **hand-authored** listener (one without the `wakeHandoff` marker) is therefore
   left alone and suppresses the derivation for that role.
-- **Same team only**, and stricter than the internal label channel (which has no
+- **Same team only**, and stricter than a labelled channel (which has no
   team gate): a cross-team `to` is refused with `403 cross-team` at delivery. The
   check is an **integrity constraint on the flow graph, not authentication** —
   even with the #1456 gate authenticating the *caller*, the producer's identity
@@ -290,7 +291,11 @@ the same option.
   than letting a second one route around it. A ticket is released when GitHub
   shows nothing open for it — its PR merged and its issue closed, or its issue
   left open carrying no active flow label and no PR, which is a flow that dropped
-  the ticket and would otherwise freeze the lane forever.
+  the ticket and would otherwise freeze the lane forever. An open PR counts
+  towards a ticket only if it *closes* it — `Closes`/`Fixes`/`Resolves #N` in its
+  body, or an `issue-N` head branch, the same parse that keys the ticket at
+  admission; a bare `#N` mention (e.g. a changelog inlined into a Dependabot PR)
+  does not hold the lane.
 
 - **Wiring is `outcomes` ↔ `labelFilter`.** An edge *A → label L → B* exists when
   a `setLabel` action in role `A`'s `outcomes` port names `L` (#831), and a
@@ -301,7 +306,7 @@ the same option.
 - **GitHub channels (#380) are declarative ports.** `github.{producesPr,producesIssue}`
   marks what a role opens (drives the node badge/ports and appends the producer
   instruction block to its prompt at materialise). A consumer's `channels` entry
-  `{artifact, from, label?, gate?, transport?}` declares *A opens a PR/issue that wakes B* —
+  `{artifact, from, label?, gate?}` declares *A opens a PR/issue that wakes B* —
   optionally only when `label` is present, and `gate: "human"` means a **human**
   applies that label (the inline approval gate on the edge). At materialise (and
   on live edits, via `reconcileTeamGithubChannels`) `expandGithubChannels` derives
@@ -316,13 +321,12 @@ the same option.
   beside a derived one — raise the advisory `duplicate-listener` lint. This
   supersedes the old `kind: "pr-review"` construct; legacy `pr-review` roles are
   normalised onto channels on import (`normalizeLegacyReview`).
-  **`transport: 'internal'` (#1194):** a labelled, non-human channel port may carry
-  `transport: 'internal'` to opt its derived `<artifact>.labeled` listener into direct
-  delivery (poller-excluded, woken by `aee-emit`). Listeners over a consolidated
-  `(artifact, label)` group go internal only when **every** contributing channel opted
-  in — a lone poller producer keeps the whole listener on the poller. Unlabelled
-  channels (`*.opened`) and `gate: 'human'` channels stay poller-delivered. Concept:
-  `docs/internal-channels-concept.md` §4.6.
+  **Every derived listener is poller-delivered (#2578):** the producer applies the
+  label on GitHub and the GitHub poller wakes the consumer within one poll interval
+  (~30 s); a human re-applying the label wakes it the same way — the label on GitHub
+  is the single source of truth. The former `transport: 'internal'` opt-in (#1194,
+  direct delivery via `aee-emit`) was removed: a legacy `transport` key on a channel
+  port or trigger is **ignored on import** (dropped, not rejected).
 - **Gate-ness is configuration, not a naming convention (#928).** `labels[]` is
   the authoritative registry: `humanGate: true` makes a label a human approval
   gate, `brake: true` makes it pause the loop — whatever the label is *called*.

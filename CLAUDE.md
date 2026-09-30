@@ -183,9 +183,16 @@ SSH keys and GitHub tokens, tiered like all resources (personal / team / system)
   (`isActingSenderTrusted`); an autonomous run uses the team's current Team Admin
   as **baseline** (`resolveBaselineOwnerId`). The container's spawn-time bake also
   resolves through the baseline (`resolveBaselineGithubTokenId`/`SshKeyId`).
+  In a chat turn, `gh` writes (issue/PR/review/label, writing `gh api`) go
+  through the `aee-gh` wrapper to `POST /internal/agents/:id/github/gh`
+  (`orchestrator/chat-github-write.js`), which runs them under the sender's
+  personal token — the token never enters the container.
 - **Offboarding** (`offboardOwner`): deleting a human pauses their agents and
   deletes their personal credentials before removing the record.
-- Self-service: **My Credentials** (`/my-credentials`). Full spec: `docs/credentials.md`.
+- Self-service: personal keys/tokens live on the **SSH Keys** / **GitHub Tokens**
+  pages (open to every user; `/my-credentials` redirects there). Unified
+  identity + scope model: `docs/unified-resource-access-concept.md`. Full spec:
+  `docs/credentials.md`.
 
 ### MCP Servers
 
@@ -197,9 +204,14 @@ environment that pairs them.
   (`transport: stdio|http|sse` + command/args/env or url/headers).
   Credentials at `/workspace/mcp-credentials/`; `env`/`headers` support
   `${credential}`, substituted per-agent at seed time.
-- **Per-agent isolation**: at seed time the merged stanza is written into the
-  agent's own `.claude/settings.json` under `mcpServers[<serverId>]`; a member's
-  `mcpServersOverride` replaces the env set. No pool-wide MCP config.
+- **Per-agent isolation** (`orchestrator/mcp-seed.js`): the stanzas go into the
+  agent's own workspace `.mcp.json` + `enabledMcpjsonServers` in
+  `.claude/settings.json` (the CLI ignores `settings.mcpServers`), reconciled
+  against a `.agent-studio/seeded-mcp.json` manifest so only platform-written
+  entries are ever removed. A member's `mcpServersOverride` replaces the env set
+  (`[]` = none). Saving an env/override change re-applies it via
+  `POST /internal/{environments,agents}/:id/apply-mcp` (next turn, no respawn).
+  No pool-wide MCP config.
 
 ### Plugins (governed capability extensions)
 
@@ -306,15 +318,22 @@ else queues FIFO.
   label-swap with optional `postcondition`), `wake-agent` (direct agent-to-agent
   hand-off, queue-fired), `loop` (re-arms on completion; `maxIterations` required;
   optional `verify` gate; fresh context per iteration).
-- **`transport: 'internal'`**: a label listener excluded from the poller and woken
-  directly by `POST /internal/flow-emit` (`aee-emit`); label mirrored to GitHub as
-  decoration only.
+- **Labelled hand-offs** are always poller-delivered: the producer applies the
+  label on GitHub (`gh issue|pr edit --add-label`), the poller wakes the
+  listener (≤ one poll interval, ~30 s). The label on GitHub is the single
+  source of truth; a human re-applying it wakes the listener the same way. The
+  `transport: 'internal'` path (`aee-emit`, `/internal/flow-emit`) was removed
+  in #2578 (`aee-emit` remains one release as a deprecated shim that just
+  applies the label); a legacy `transport` field is ignored on import and
+  stripped from existing agents by a startup sweep.
 - Results post to `trigger.roomId` or the DM room; no room yet → skipped;
   `[PASS]` suppresses output.
 - **Session policy**: `per-invocation` → triggered runs start fresh (no
   `--resume`), don't move the session pointer; absent = `persistent` (legacy).
+  A pool instance (`poolInstance: true`) instead resumes its DM pointer from
+  every non-loop trigger and chat turn — one session per instance (#2595).
 - Concepts: `docs/triggers.md`, `docs/loop-triggers-concept.md`,
-  `docs/internal-channels-concept.md`, `docs/direct-agent-handoff-concept.md`,
+  `docs/direct-agent-handoff-concept.md`,
   `docs/process-template-format.md`.
 
 ### Process Canvas / Flows
@@ -353,7 +372,16 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
 - **Flow Control** (`docs/flow-control-concept.md`): a declarative per-flow
   `wipLimit` enforced at dispatch (`admission-control.js`); a read-only **ticket
   ledger** deriving true state from GitHub evidence (`ticket-reconciler.js`);
-  the `/flow-control` board (no nav entry).
+  the `/flow-control` board (**reachable from the sidebar** — the #2147 removal
+  was reversed for WIP transparency), rebuilt by #2573 as a "who is working on
+  what" view: stages derived from the team's flow graph, only items a team
+  agent touched, running sessions, pools and human blocks — one pure builder
+  (`flow-board.js`) behind `GET /api/teams/:teamId/flow-board` (single-flight
+  cached sweep; optional per-team `flow-board.json` column config). A dispatch
+  the lane **holds** behind a full `wipLimit` also surfaces in the **GitHub Event Log → Pending queue** tab
+  (`aggregateHeldDispatches` folds each team lane's `held[]` into
+  `/api/pending-queue`), so held work is never invisible — it used to log
+  "delivered" yet appear nowhere.
 - **Agent Pools** (epic #2251, `docs/parallel-workers-concept.md`): a role opts
   into `pool: {enabled: true, …}` (bundle field, sibling of `wipLimit`) to become
   a template — one wake spawns an item-keyed ephemeral instance
@@ -389,10 +417,11 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   safety net. **Board controls** (Phase 5 #2250): the Flow Control board
   (`/flow-control`) gets a per-role Pause/Drain/Resume (a runtime toggle,
   `pool-control.json`, kept out of the `pool` bundle field — blocks only NEW
-  spawns, an existing instance runs to completion) and a per-held-entry Force
+  spawns, an existing instance runs to completion; a drain settles to `off`
+  once the last instance is gone, #2573) and a per-held-entry Force
   dispatch (`admissionControl.forcePromoteHeld`, promotes past `wipLimit` for
-  that one entry). **Pool instance lanes** (#2273): a read-only third board
-  panel, per pooled role's live instances tagged running / held-same-epic /
+  that one entry). **Pool instance lanes** (#2273): a read-only endpoint (its
+  board panel was folded into "Working now" by #2573), per pooled role's live instances tagged running / held-same-epic /
   timed-out (`pool-instance-lanes.js`, pure, no new persistence — derived
   from live instance configs + the ticket ledger). **Agent Chat rail
   sub-grouping** (#2297): the same live instances, nested under their role as a
@@ -405,27 +434,31 @@ Agents + triggers form an **orchestration graph**, authored in **Flows**
   only actually-changed rows re-render — a spawned/reaped/renamed instance (or
   any other roster change) now appears/disappears/updates within ~5s with no
   manual reload, instead of only at the next navigation or filter toggle.
-  **`AEE_POOLS_ENABLED`** (#2302, default off — `pools-mode.js`, mirrors
-  `AUTH_ENABLED`): hides the Parallelism button/panel entirely and renders the
-  per-role Scaling section disabled with a "Coming Soon" badge until an
-  operator opts in; not yet wired into `docker-compose.yml`'s env passthrough
-  (see Amendment 10). A headless runtime (D7) and provider-health-aware
-  admission (D9) remain undesigned. Detail: `docs/parallel-workers-concept.md`
-  Amendment 10.
+  The Parallelism/Scaling surface is **always on** — the former
+  `AEE_POOLS_ENABLED` kill switch (#2302) and its `pools-mode.js` module were
+  removed; `wipLimit` is configurable both in the Flow editor's Parallelism
+  panel and directly in **Team Settings** (Agent Chat → Settings), with an
+  empty limit meaning *unbegrenzt* (admission control engages only when a
+  number is set). A headless runtime (D7) and provider-health-aware admission
+  (D9) remain undesigned. Detail: `docs/parallel-workers-concept.md`.
 
 ### GitHub poller
 
 `orchestrator/github-poller.js` polls the Events API every 30s for every repo in
-an env with a `githubTokenId` (replaces webhooks for local stacks).
+an env with a `githubTokenId`, plus agent-scoped repos via their agent's env
+token (replaces webhooks for local stacks).
 - Repo discovery walks all envs; one token per repo. Bandwidth: page-1
   `If-None-Match` (304s are free); pagination on bursts. Cursor = per-repo
   sliding **seen-id set** (`state.json`), not a timestamp; first poll baselines.
 - Matched events → `pending-triggers.json` (drained every 5s). Event keys
   `<type>.<action>` (e.g. `pull_request.opened`); bare `push`. Some actions are
   omitted by the API (no `pull_request.synchronize`).
-- **Loop protection is frequency-only, no source filtering**: a per-`(agent,
-  conversation)` throttle (default 5/h) + a per-poll burst-cap digest. A trigger
-  fires on any matching event, including self-caused.
+- **Loop protection is frequency-only, no source filtering unless a producer
+  filter is set**: a per-`(agent, conversation)` throttle (default 5/h) + a
+  per-poll burst-cap digest. A trigger fires on any matching event, including
+  self-caused. Exception: a push trigger's optional `pushedBy` (same-team agent
+  ids, set automatically on Flow-editor data-flow hand-offs) fires only on pushes
+  the platform recorded via `gh-as-agent push`/`pr` (`push-attribution.js`).
 - Resilience: hard request deadline + stall watchdog (self-heals a stuck poll).
 - **Event-transparency log** (`github-event-log.js`): every fresh event recorded
   (delivered / dropped / digest / no-subscriber) → `GET /api/github-events`, the
@@ -454,8 +487,9 @@ an env with a `githubTokenId` (replaces webhooks for local stacks).
   the top of the `internalApi` handler. `INTERNAL_API_TOKEN` = control-plane
   (admin console); each agent gets a derived per-agent `AEE_INTERNAL_TOKEN` (HMAC
   over the agent id) allowlisted to its own routes (`AGENT_ROUTES`); a plugin
-  broker's scope token is the `plugin-scope` class, allowlisted to exactly
-  `POST /internal/plugin-event` (`PLUGIN_SCOPE_ROUTES`). Rollout ladder
+  broker's scope token is the `plugin-scope` class, allowlisted to
+  `POST /internal/plugin-event` plus `POST /internal/plugin-credential-grant`
+  (reserved `_grant-<scopeId>` token only) (`PLUGIN_SCOPE_ROUTES`). Rollout ladder
   `INTERNAL_AUTH_MODE=observe|warn|enforce` (default `observe`). Concept:
   `docs/governance-concept.md` §3.5.
 
@@ -503,8 +537,9 @@ uncovered). Key pieces:
   message, falling back to the normal default position with a notice if the
   id can't be found.
 - `Message` — sanitised markdown (`react-markdown` + gfm + pretty-code +
-  `rehype-sanitize`); quick-reply cards for `AskUserQuestion`
-  (`ask-user-mcp.py` re-supplies it in headless mode); inline image
+  `rehype-sanitize`); quick-reply cards for `AskUserQuestion`-shaped
+  questions (raised headlessly via the `aee-ask` CLI → per-turn sentinel file,
+  #2523 — the only mechanism since #1719 removed the MCP path); inline image
   thumbnails; hover-revealed "Copy link" builds the `?msg=` deep-link above
   (#2310, plain text bubbles only).
 - `MessageInput` — composer, send-keybinding preset, per-agent drafts,
@@ -536,7 +571,7 @@ consumers: `GET /api/helper/page-help` (the panel's "This page" face +
 `breadcrumbs.js`; the `docs/**` corpus is vendored under `helper-chat/docs/`
 (parity-tested). Coverage is a CI ratchet (`help-coverage.test.js`,
 `help-baseline.test.js`): a page route with no topic and no named owner fails.
-Non-route contexts (`modal:*`, `wizard:*#step`) are addressable via
+Non-route contexts (`modal:*`, `/team-setup#<step>`) are addressable via
 `useHelpSubject`. Concept: `docs/context-help-system-concept.md`.
 
 ### Agent Team Wizard
@@ -578,7 +613,7 @@ Process step lands on the template/draft gallery; role templates under
 | `orchestrator/repo-sync.js` / `agent-repositories.js` | Repository propagation core; agent-scoped repositories |
 | `orchestrator/plugin-*.js` / `broker-sdk/` | Plugin machinery (manifest, scope tokens, grants, sync, runtime, registry) + broker obligations SDK |
 | `orchestrator/flow-anomaly-detector.js` / `hill-climb-*.js` | Flow stall classifier; hill-climbing metrics/cards/verdict loop |
-| `orchestrator/admission-control.js` / `ticket-reconciler.js` | Per-flow WIP limit at dispatch; read-only GitHub-evidence ticket ledger |
+| `orchestrator/admission-control.js` / `ticket-reconciler.js` / `flow-board.js` | Per-flow WIP limit at dispatch; read-only GitHub-evidence ticket ledger; the Flow Control board derivation |
 | `orchestrator/internal-auth.js` | `:4002` gate: token classes + agent route allowlist |
 | `orchestrator/setup.sh` | Register the admin Matrix user, print the access token |
 | `agent-image/` | Per-agent image `as-agent:latest`; live runtime `scripts/agent-entrypoint.py` |

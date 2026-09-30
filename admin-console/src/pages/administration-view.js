@@ -17,7 +17,7 @@
 //     verbatim (it was already pure and covered); `agentTeamTenant` came with
 //     the page and collapsed with it — nothing read it but its own test.
 
-import { credentialScopeLabel, normalizeCredential, ownershipPayload, isGlobalRecord } from './credential-scope-view.js';
+import { normalizeCredential, ownershipPayload, isGlobalRecord } from './credential-scope-view.js';
 
 /* ── Tabs ──────────────────────────────────────────────────────────────── */
 
@@ -205,7 +205,7 @@ export function groupAgentsForOwnership(agents) {
 // nobody), so the distinction has to be made here rather than left for a
 // reader to infer from an empty team list.
 export function environmentTierSummary(env, teamNames = {}) {
-  const tier = credentialScopeLabel(env, teamNames);
+  const tier = normalizeCredential(env);
   if (tier.scope === 'system') {
     if (isGlobalRecord(env)) {
       // Wording matches the Model Providers page (#2136) so the two read as
@@ -222,8 +222,8 @@ export function environmentTierSummary(env, teamNames = {}) {
       scope: 'system',
       global: false,
       label: 'Shared',
-      detail: tier.teams.length
-        ? tier.teams.join(', ')
+      detail: tier.assignedTeamIds.length
+        ? tier.assignedTeamIds.map(id => teamNames[id] || id).join(', ')
         // Not a hypothetical: an unassigned shared record is reachable by no
         // team at all, only by a System Admin — worth saying plainly on the one
         // page that can fix it. Deliberately NEVER shown for a global record
@@ -238,7 +238,7 @@ export function environmentTierSummary(env, teamNames = {}) {
     // a team the reader could then reassign.
     return { scope: 'personal', global: false, label: 'Personal', detail: 'Unsupported tier for an environment' };
   }
-  return { scope: 'team', global: false, label: 'Team', detail: tier.detail };
+  return { scope: 'team', global: false, label: 'Team', detail: teamNames[tier.teamId] || tier.teamId };
 }
 
 // Alias for MCP servers (#2158 AC7 — "one shared tier-summary helper serving

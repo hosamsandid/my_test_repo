@@ -71,7 +71,19 @@ poller's, in `broker-sdk/event-cursor.js` (`github-poller.js` is untouched).
 
 ## Credentials
 
-Each granted team's Jira credential (`site-url` / `email` / `api-token`) is set
+**Two tiers (#2562).** Every `/cli/*` call first asks the orchestrator
+`POST /internal/plugin-credential-grant` (this broker's reserved `_grant-<scopeId>`
+token — `grantScopeId`, never the team token agents hold — + the
+agent's `X-AEE-Agent-Token` caller token) whose account it runs under —
+`defaultGrantResolver`, swappable in tests via `_setGrantResolver`. A **chat**
+turn gets the sender's personal `email` / `api-token` for that one call (site
+and custom-field lists stay the team's); an **automated** run gets `service`
+mode and uses the team credential below. A refusal is returned as-is with no
+Jira call. The orchestrator being unreachable gives 503 `grant-unavailable`.
+Audit lines carry `identity` and `interactive`. The console UI (`/ui/*`) and
+the poller always use the service account.
+
+Each granted team's Jira **service-account** credential (`site-url` / `email` / `api-token`) is set
 by a **Team Admin** on the **Plugins** page (the Credentials section on the Jira
 card). Values are written `0600` server-side
 (`/workspace/plugins/_credentials/jira/<teamId>.json`), never read back (preview
@@ -106,7 +118,8 @@ match; the inbox holds all of them.
 ## Writes — role-gated, not confirmation-gated (D3)
 
 `aee-jira comment` / `transition` / `update` / `set-field` / `attachment add` /
-`create-epic` / `sprint create` / `sprint bulk-create` POST through the broker. `set-field` sets one custom field (#2417): the broker
+`create-epic` / `sprint create` / `sprint bulk-create` / `sprint close` /
+`sprint start` / `sprint advance` POST through the broker. `set-field` sets one custom field (#2417): the broker
 gates it three ways — (1) if the team's `writable-custom-fields` allow-list is
 non-empty, the field's name must be on it, else 403 (empty = every field
 writable); (2) the
@@ -161,6 +174,25 @@ sprint). Every sprint is created as a Jira *future* sprint (a plain create yield
 one; a Scrum board has only one active sprint), each create is a write never
 retried on a transport failure, and a per-sprint failure is reported (not fatal —
 the dates are precomputed, not chained on Jira's responses), like `create-epic`.
+
+`sprint close` / `sprint start` / `sprint advance` (#2491) close the state gap #2450
+left: nothing could flip a sprint's `state`. They POST `state` to
+`/rest/agile/1.0/sprint/{id}` (a full update — the existing name/dates/goal are
+re-sent so they are not cleared). `closeSprint` transitions the board's active
+sprint (`--sprint-id` overrides) `active`→`closed` and reports `incompleteIssues`,
+the count of issues still open at close time (`GET .../sprint/{id}/issue?fields=status`,
+`statusCategory != done`) — best-effort, degrades to `null` on failure (never
+breaks the close), since the plain `state:"closed"` call leaves those issues on
+the now-closed sprint (there is no move-to-backlog dialog for an agent). `startSprint`
+transitions the earliest `future` sprint (`--sprint-id` overrides) `future`→`active`,
+refusing a second active sprint (Jira's one-active rule — a clean 409 naming the
+already-active sprint rather than the raw API error) and a dateless sprint (Jira
+rejects that). `advanceSprint` is the roll-over: it closes then starts, over ONE
+board resolution + ONE sprint-list read, reporting each phase as a `{ ok, … }`
+object — a missing active sprint is a `skipped` close (a first-ever activation is
+valid), any other phase error is a failure; the combined `failed` flag drives the
+CLI's exit 1. Each transition is a write, never retried on a transport failure (a
+retry after Jira accepted the first would double-apply).
 
 Before the credential
 is touched, `broker-policy.authorizeWrite` runs the manifest's `policy` rule

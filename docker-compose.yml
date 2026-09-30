@@ -126,12 +126,6 @@ services:
       INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:-}"
       INTERNAL_AUTH_MODE: "${INTERNAL_AUTH_MODE:-}"
       INTERNAL_AGENT_TOKEN_SECRET: "${INTERNAL_AGENT_TOKEN_SECRET:-}"
-      # Unified resource-access model switch (#2356, concept #2349). Off by
-      # default = today's credential scoping/runtime resolution, unchanged; the
-      # redesign (PR4–PR7) lands dark behind this flag. Passed to BOTH services
-      # because it gates orchestrator runtime code (credential resolution,
-      # offboarding) as well as the admin-console predicates. See .env.example.
-      AEE_RESOURCE_ACCESS_V2: "${AEE_RESOURCE_ACCESS_V2:-}"
     depends_on:
       conduwuit:
         condition: service_started
@@ -192,10 +186,6 @@ services:
       # behaviour (every principal is the implicit System Admin, team scoping
       # is a no-op); "true" enforces per-membership scoping. See .env.example.
       AUTH_ENABLED: "${AUTH_ENABLED:-}"
-      # Unified resource-access model switch (#2356, concept #2349). Off by
-      # default; the redesign (PR4–PR7) lands dark behind this flag. See the
-      # orchestrator service above and .env.example.
-      AEE_RESOURCE_ACCESS_V2: "${AEE_RESOURCE_ACCESS_V2:-}"
       # Control-plane credential for the orchestrator's :4002 API (#1456).
       # Must match the orchestrator's value. The console never mints per-agent
       # tokens, so it deliberately does NOT get INTERNAL_AGENT_TOKEN_SECRET.

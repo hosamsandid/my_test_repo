@@ -4,8 +4,6 @@ import { BrowserRouter } from 'react-router';
 import App from './App';
 import { AuthProvider } from './auth/AuthContext';
 import { MaintenanceModeProvider } from './context/MaintenanceModeContext';
-import { PoolsFeatureProvider } from './context/PoolsFeatureContext';
-import { ResourceAccessProvider } from './context/ResourceAccessContext';
 import { ModelSelectionProvider } from './context/ModelSelectionContext';
 import { AgentStatusesProvider } from './context/AgentStatusesContext.jsx';
 import { AgentBackNotificationProvider } from './context/AgentBackNotificationContext.jsx';
@@ -50,8 +48,6 @@ createRoot(document.getElementById('root')).render(
     <AuthProvider>
       <ModelSelectionProvider>
         <MaintenanceModeProvider>
-          <PoolsFeatureProvider>
-           <ResourceAccessProvider>
             {/* Shared agent-status poll (#1677): one /api/agents/statuses request
                 per interval feeds the Shell badge, Agent-Chat list and
                 Maintenance Mode. */}
@@ -76,8 +72,6 @@ createRoot(document.getElementById('root')).render(
               </TranscriptionSessionProvider>
              </AgentBackNotificationProvider>
             </AgentStatusesProvider>
-           </ResourceAccessProvider>
-          </PoolsFeatureProvider>
         </MaintenanceModeProvider>
       </ModelSelectionProvider>
     </AuthProvider>

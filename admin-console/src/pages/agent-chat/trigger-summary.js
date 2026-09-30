@@ -4,6 +4,8 @@
 // readout (`TemplateReadonly` in NodeInspector.jsx) so the friendly event
 // wording has a single source of truth (#778).
 
+import { parseBranchFilter } from './branch-filter.js';
+
 // Subset of GitHub Events API event types most useful for agent workflows.
 // (The Events API does not emit every webhook action — e.g. pull_request
 // has opened/closed/reopened but not synchronize. It also splits closed
@@ -53,14 +55,65 @@ export const INTERNAL_EVENT_LABELS = new Map([
   ['plugin.event', 'plugin event'],
 ]);
 
+// Display-only names for the remaining keys the GitHub poller can write to the
+// Event Log (#2535): its `TYPE_KEY` event types × the Events API's actions,
+// plus the few event types it has no `TYPE_KEY` entry for but still keys by
+// their lower-cased type (`member`, `public`, `gollum`). Deliberately NOT part
+// of GITHUB_EVENT_OPTIONS, for the same reason as INTERNAL_EVENT_LABELS: that
+// array is the trigger editor's `<select>`, and reading an event's name must
+// never silently add it to what a trigger can subscribe to.
+export const DISPLAY_EVENT_LABELS = new Map([
+  // The Events API reports a submitted review as `created`; webhooks (and the
+  // trigger editor) call the same action `submitted`.
+  ['pull_request_review.created',          'PR review submitted'],
+  ['pull_request.edited',                  'PR edited'],
+  ['pull_request.synchronize',             'PR updated with new commits'],
+  ['pull_request.assigned',                'PR assigned'],
+  ['pull_request.unassigned',              'PR unassigned'],
+  ['pull_request.review_requested',        'PR review requested'],
+  ['pull_request.review_request_removed',  'PR review request removed'],
+  ['issue_comment.edited',                 'Issue / PR comment edited'],
+  ['issue_comment.deleted',                'Issue / PR comment deleted'],
+  ['issues.reopened',                      'Issue reopened'],
+  ['issues.edited',                        'Issue edited'],
+  ['issues.assigned',                      'Issue assigned'],
+  ['issues.unassigned',                    'Issue unassigned'],
+  ['create',                               'Branch or tag created'],
+  ['delete',                               'Branch or tag deleted'],
+  ['fork',                                 'Repository forked'],
+  ['watch.started',                        'Repository starred'],
+  ['commit_comment.created',               'Commit comment'],
+  ['release.created',                      'Release created'],
+  ['release.edited',                       'Release edited'],
+  ['release.prereleased',                  'Pre-release published'],
+  ['release.released',                     'Release released'],
+  ['release.unpublished',                  'Release unpublished'],
+  ['release.deleted',                      'Release deleted'],
+  ['member.added',                         'Collaborator added'],
+  ['public',                               'Repository made public'],
+  ['gollum',                               'Wiki updated'],
+]);
+
 const EVENT_LABELS = new Map(GITHUB_EVENT_OPTIONS.map(o => [o.value, o.label]));
 
 // Friendly label for an event key (e.g. `issues.labeled` → "Issue labeled"),
-// falling back to the raw key for keys not in either map so an unknown or
+// falling back to the raw key for keys not in any map so an unknown or
 // hand-edited event never renders blank.
 export function eventLabel(value) {
   if (!value) return '';
-  return EVENT_LABELS.get(value) || INTERNAL_EVENT_LABELS.get(value) || String(value);
+  return EVENT_LABELS.get(value)
+    || INTERNAL_EVENT_LABELS.get(value)
+    || DISPLAY_EVENT_LABELS.get(value)
+    || String(value);
+}
+
+// Search text for an event key (#2442): the friendly name the Event column
+// shows, plus the raw key so an operator who knows the API vocabulary still
+// finds the row. Never repeats the key when it is its own fallback label.
+export function eventFilterText(value) {
+  const raw = typeof value === 'string' ? value : '';
+  const friendly = eventLabel(value);
+  return [...new Set([friendly, raw].filter(Boolean))].join(' ');
 }
 
 // Whether any of the given event keys carries a `payload.label.name` that a
@@ -179,7 +232,11 @@ export function summarizeGithubEventTrigger(trigger) {
   const label = trigger?.labelFilter && eventsAreLabelFilterable(raw)
     ? String(trigger.labelFilter)
     : null;
-  return { events, label };
+  // #2570: the push branch filter only applies to the `push` event, so it is
+  // shown only when the trigger listens on push. null = every branch.
+  const branchList = raw.includes('push') ? parseBranchFilter(trigger?.branchFilter) : [];
+  const branches = branchList.length ? branchList.join(', ') : null;
+  return { events, label, branches };
 }
 
 // The claim payload a TriggersPanel save carries (#1006): the raw layer follows
@@ -196,19 +253,38 @@ export function claimBodyFor({ labelFilter, events, claimOn, isEdit }) {
   return isEdit ? null : undefined;
 }
 
-// Delivery-transport field for a saved github-event trigger body (#1189). Pure
-// mirror of the TriggerForm decision so it is unit-testable:
-//   - a label listener (`showTransport`) writes an EXPLICIT value — 'github'
-//     too, never omitted, so toggling internal → github clears a stored
-//     'internal' on the PUT `{...prev, ...body}` merge;
-//   - a trigger that is not (or no longer) a label listener but carried a stale
-//     transport gets it cleared to 'github' on edit;
-//   - a plain non-label trigger keeps no transport key (undefined drops).
-// Returns the value to assign to `body.transport`, or undefined to omit it.
-export function transportBodyFor({ showTransport, transport, isEdit, priorTransport }) {
-  if (showTransport) return transport === 'internal' ? 'internal' : 'github';
-  if (isEdit && priorTransport) return 'github';
+// The optional "pushed by agent" producer filter on a push trigger (#2571), as
+// a clean id list — `[]` when unset (= any push).
+export function pushedByIds(trigger) {
+  const raw = Array.isArray(trigger?.pushedBy) ? trigger.pushedBy : [];
+  return [...new Set(raw.filter(v => typeof v === 'string' && v.trim()).map(v => v.trim()))];
+}
+
+// The `pushedBy` field for a saved trigger body (#2571). Pure mirror of the
+// TriggerForm decision:
+//   - not (or no longer) a push trigger → `null` on edit when a filter was
+//     stored (the backend rejects a filter on a non-push trigger), else omitted;
+//   - agents picked → that list;
+//   - nothing picked → `[]` (explicit "any push") when a filter was stored or
+//     the trigger is a data-flow hand-off, so the reconciler / start-up
+//     migration never silently re-adds a filter the author removed; a plain
+//     push trigger with no filter stays field-less.
+// Returns the value to assign to `body.pushedBy`, or undefined to omit it.
+export function pushedByBodyFor({ isPush, isDataFlow, selected, isEdit, priorPushedBy }) {
+  const hadField = Array.isArray(priorPushedBy);
+  if (!isPush) return (isEdit && hadField) ? null : undefined;
+  const ids = pushedByIds({ pushedBy: selected });
+  if (ids.length) return ids;
+  if (isDataFlow || (isEdit && hadField)) return [];
   return undefined;
+}
+
+// Card schedule for a push trigger (#2571 AC9): "wakes on push from Specifier
+// to owner/repo". `nameOf(id)` resolves a display name (falls back to the id).
+export function summarizePushSchedule(trigger, nameOf = (id) => id) {
+  const names = pushedByIds(trigger).map(id => nameOf(id) || id);
+  const from = names.length ? ` from ${names.join(', ')}` : '';
+  return `wakes on push${from} to ${trigger?.repo || 'the team repo'}`;
 }
 
 // A chat-launched loop (#1020): a one-off "run until done" started from the

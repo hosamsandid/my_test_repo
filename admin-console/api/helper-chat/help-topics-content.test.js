@@ -105,9 +105,10 @@ const TOPIC_CONTENT = [
       'improvement cards',
       // Delivery: the third human touchpoint, which is neither gate nor brake.
       'delivery',
-      // Internal vs poller delivery, the choice the label edge dialog offers.
-      'aee-emit',
+      // Every label hand-off is poller-delivered (#2578 removed the internal
+      // delivery choice); the topic must still say so.
       'poller',
+      'source of truth',
       // #1984 corrections to what the page actually shows today — each of these
       // contradicts a premise the ticket or an older doc still carried, so a
       // reword must not quietly restore the old reading.
@@ -389,7 +390,8 @@ const TOPIC_CONTENT = [
     // #1883 lifted the MCP Servers intro box (the three-part servers /
     // credentials / Working-Environment-pairing model) and the "where does
     // 'required' come from" InfoTip, and adds what neither said: the seed-time
-    // merge into the agent's own settings.json, the dropped-key behaviour when
+    // merge into the agent's own settings.json (since #2289: `.mcp.json`,
+    // reconciled and re-applied on save), the dropped-key behaviour when
     // nothing is bound, the per-transport field split, and where the pairing is
     // actually visible today.
     //
@@ -414,40 +416,41 @@ const TOPIC_CONTENT = [
       '${credential}',
       'requiresCredential',
       'rotated',
-      'seed time',
+      '.mcp.json',
       '.claude/settings.json',
-      'merged, not replaced',
+      'reconciled, not replaced',
       'dropped',
       'stdio',
       'sse',
       'mutually exclusive',
       'Default server',
       'fingerprint',
-      'next invocation',
+      'next turn',
       'Detach it there first',
     ],
   },
   {
     id: 'credentials',
-    routes: ['/ssh-keys', '/github-tokens', '/my-credentials'],
+    routes: ['/ssh-keys', '/github-tokens'],
     // #1884 lifted the intro boxes and the FOUR duplicated "why both an SSH key
-    // and a GitHub token" notes (SSH Keys, GitHub Tokens, My Credentials and the
-    // SetupWizard's two credential steps). The topic additionally records what
+    // and a GitHub token" notes (SSH Keys, GitHub Tokens, My Credentials and two
+    // onboarding steps since removed). The topic additionally records what
     // no box said: the three ownership tiers, the strict personal privacy
     // guarantee, the per-operation-class runtime resolution order with
     // refuse-on-missing, and the rotate-in-place vs create-new-and-repoint split.
     //
     // #1993 (epic #1981) widened it into a per-surface reference. This is the
     // first MULTI-ROUTE topic, so the chapters matter more here than anywhere
-    // else: three pages share one file, and without them a reader arriving from
+    // else: several pages share one file, and without them a reader arriving from
     // GitHub Tokens landed at the top of an explanation opening with SSH.
-    // Chapters 2/3/4 are the deep-link targets of the three page headers;
-    // 1/5/6 are the cross-page story and carry no "?" of their own.
+    // Chapters 2/3 are the deep-link targets of the two page headers; 1/4/5/6
+    // are the cross-page story (4 since #2445 folded My Credentials into both
+    // pages) and carry no "?" of their own.
     chapters: [
       'Why both an SSH key and a GitHub token',
       'SSH keys',
       'GitHub tokens',
-      'My Credentials',
+      'Personal credentials',
       'Ownership tiers and privacy',
       'Rotation and runtime resolution',
     ],
@@ -530,33 +533,32 @@ const TOPIC_CONTENT = [
   {
     id: 'flow-control',
     routes: ['/flow-control'],
-    // #2116 (epic #2112 Flow Control §4.4) — a NET-NEW topic: there was no box
-    // to extract, because the page did not exist. The four chapters below are
-    // each the landing target of a "?" on the matching board surface, so the
-    // headings are load-bearing rather than decorative.
+    // #2116 introduced the topic; #2573 rebuilt the board as a "who is working
+    // on what" view. Each chapter is the landing target of a "?" on the
+    // matching board surface, so the headings are load-bearing.
     chapters: [
       'What the Flow Control board shows',
-      'The lifecycle stages',
-      'Blockers and what to do about them',
-      'The epic roll-up',
+      'Who is working right now',
+      'Pause, Drain and Switch on',
+      'Where you are needed',
+      'The stages',
+      'Changing the columns',
     ],
-    // The load-bearing claim of the whole subsystem is that state comes from
-    // GitHub evidence and not from labels — a reword that softens it would make
-    // the board look like every other label-driven view, which is precisely the
-    // failure §4.1 exists to prevent. The read-only property is pinned for the
-    // same reason: the ledger mutates nothing, and a topic promising a repair
-    // button would be promising a later phase's feature.
+    // The load-bearing claims: only work the team touched appears, the stages
+    // come from the team's own flow (no label vocabulary), and Pause differs
+    // from Drain — a reword that blurs any of these misleads the operator.
     concepts: [
-      'the fact wins',
-      'Claimed done',
-      'read-only',
-      'Superseded',
-      'Stale base',
-      'Orphaned',
-      'time in the current stage',
-      'An empty',
+      'Only work the team took part in appears',
+      'Dependabot',
+      'Nothing in progress',
+      'every 30 seconds',
       'Maintenance mode',
-      'mutually exclusive',
+      'GitHub unreachable',
+      'nothing depends on label names',
+      'one row',
+      'time in that stage',
+      'switches itself Off',
+      'Draining, n still running',
     ],
   },
   {
@@ -576,10 +578,16 @@ const TOPIC_CONTENT = [
       'What the GitHub Event Log is',
       'Processed events',
       'Outcomes',
+      // #2537: the Repositories status area above the event table.
+      'Repository status',
       'Pending queue',
     ],
     concepts: [
       'observational',
+      'Listening',
+      'Waiting for first poll',
+      'Rate limited',
+      'Token from',
       'Processed events',
       'Pending queue',
       'delivered',

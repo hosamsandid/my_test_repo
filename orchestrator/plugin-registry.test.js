@@ -90,6 +90,19 @@ test('unreadable and malformed manifests report errors instead of throwing', () 
   assert.match(readPluginManifest('broken', dir).errors[0], /invalid JSON/);
 });
 
+test('readPluginManifest refuses an id that is not a single registry directory name', () => {
+  const dir = tmpRegistry();
+  const outside = path.join(dir, '..', `escape-${path.basename(dir)}`);
+  fs.mkdirSync(outside, { recursive: true });
+  fs.writeFileSync(path.join(outside, 'plugin.json'), JSON.stringify({ id: 'x' }));
+  for (const id of [`../escape-${path.basename(dir)}`, 'a/b', '..', '.', '_secret', '', undefined]) {
+    const entry = readPluginManifest(id, dir);
+    assert.equal(entry.ok, false, `id ${String(id)}`);
+    assert.deepEqual(entry.errors, ['invalid plugin id']);
+  }
+  fs.rmSync(outside, { recursive: true, force: true });
+});
+
 test('installedManifests fails closed — an invalid plugin is not installed for the privileged paths', () => {
   const dir = tmpRegistry();
   writePlugin(dir, 'good', validManifest('good'));

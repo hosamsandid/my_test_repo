@@ -85,8 +85,13 @@ function planConsolidation(domains, skills, candidates, {
   const unassignedSkills = [];
   const unassignedCandidates = [];
 
+  // A domain's own skill always belongs to that domain (#2592) — so a domain whose
+  // skill already exists folds its other members INTO it (never a 1-source fold onto
+  // an existing target), whatever the lexical classifier would say.
+  const domainBySkill = new Map([...byId.values()].map((d) => [d.skill, d]));
   for (const skill of Array.isArray(skills) ? skills : []) {
     if (!skill || typeof skill.name !== 'string' || !skill.name) continue;
+    if (domainBySkill.has(skill.name)) { domainBySkill.get(skill.name).memberSkills.push(skill.name); continue; }
     const match = doms.length ? classifyCandidateToDomain(_skillAsCandidate(skill), doms, opts) : null;
     if (match && byId.has(match.domainId)) byId.get(match.domainId).memberSkills.push(skill.name);
     else unassignedSkills.push(skill.name);
@@ -109,19 +114,24 @@ function planConsolidation(domains, skills, candidates, {
  * synthesises one domain playbook from all member micro-skills. Pure. The member
  * skills are TEAM-tier (a consolidation runs within one team); the target is the
  * domain-named team skill. retireSources:true so the accept archives + grant-swaps.
- * Returns null when a domain has fewer than 2 members (merge needs ≥ 2 — a single
- * member is left as-is or handled as an amendment).
+ * A domain with ONE member skill named differently from the domain skill becomes a
+ * single-source `fold: true` merge (#2592) — so the domain still ends up with exactly
+ * one skill. Returns null when there is nothing to merge: no members, or the only
+ * member already IS the domain skill.
  */
 function buildConsolidationMerge(domainStep, { teamId } = {}) {
   const step = domainStep && typeof domainStep === 'object' ? domainStep : {};
   const members = Array.isArray(step.memberSkills) ? step.memberSkills.filter(Boolean) : [];
-  if (members.length < 2) return null;
   const target = domainSkillName({ id: step.domainId, skill: step.skill, name: step.name });
-  return {
+  if (members.length === 0) return null;
+  if (members.length === 1 && members[0] === target) return null;
+  const merge = {
     sources: members.map((name) => ({ tier: 'team', teamId, name })),
     target: { tier: 'team', teamId, name: target },
     retireSources: true,
   };
+  if (members.length === 1) merge.fold = true;
+  return merge;
 }
 
 // ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ export const OUTCOME_LEGEND = [
   {
     key: 'delivered',
     term: 'delivered → <agent>',
-    meaning: 'The event matched a trigger and woke that agent — a session ran.',
+    meaning: 'The event matched a trigger and woke that agent — a session ran. For an auto-scaled role it names the per-ticket instance that ran it (e.g. "Developer · #2562").',
     whatToDo: 'Nothing to do. Click a delivered chip to open the session it started.',
   },
   {
@@ -26,6 +26,12 @@ export const OUTCOME_LEGEND = [
     term: 'digested → <agent>',
     meaning: 'Part of a burst was folded into one summary wake, so a spike of events becomes a single session instead of many.',
     whatToDo: 'Nothing to do — no event is lost; the agent still receives every event inside the digest.',
+  },
+  {
+    key: 'held',
+    term: 'held (WIP) → <agent>',
+    meaning: "The event matched a trigger, but the flow's Work-in-Progress limit was full, so the dispatch is waiting for a free slot rather than running yet.",
+    whatToDo: 'Nothing is lost — it fires automatically as capacity frees. To see or force it, open the Pending queue tab or the Flow Control board. Raise the flow’s WIP limit in Team Settings if work is waiting too long.',
   },
   {
     key: 'throttle',
@@ -46,6 +52,42 @@ export const OUTCOME_LEGEND = [
     whatToDo: 'Normal label-routing — the trigger only wakes on its configured label. No action needed unless the label wiring itself is wrong.',
   },
   {
+    key: 'branch-filter',
+    term: 'dropped (branch-filter)',
+    meaning: "A push went to a branch (or tag) the trigger's branch filter does not list.",
+    whatToDo: "Normal branch routing — the trigger only wakes on pushes to its configured branches. Widen the trigger's Branches field if this branch should wake the agent.",
+  },
+  {
+    key: 'wake-already-armed',
+    term: 'dropped (wake-already-armed)',
+    meaning: 'The agent was already woken for this label on this item; a repeat of the same label is ignored until the label is removed and re-applied.',
+    whatToDo: "Usually healthy — it stops an agent's own claim swap from waking it twice. If a real hand-off was lost, use Fire again on the agent's Events tab in Agent Chat.",
+  },
+  {
+    key: 'internal-dedup',
+    term: 'dropped (internal-dedup)',
+    meaning: 'The console or supervisor already woke the agent for this label directly, so the poller skipped its own copy of the same event.',
+    whatToDo: 'Nothing to do — the wake was delivered once already.',
+  },
+  {
+    key: 'self-claim-label',
+    term: 'dropped (self-claim-label)',
+    meaning: "The label is an agent's own ':wip' claim label, not a hand-off.",
+    whatToDo: 'Nothing to do.',
+  },
+  {
+    key: 'push-duplicate',
+    term: 'dropped (push-duplicate)',
+    meaning: 'A duplicate of a push the poller had already seen.',
+    whatToDo: 'Nothing to do.',
+  },
+  {
+    key: 'producer-filter',
+    term: 'dropped (producer filter)',
+    meaning: "The push trigger only wakes on pushes by the agents in its \"pushed by\" filter, and this push was made by another agent — or by a producer the platform could not attribute (a human, a raw git push, a knowledge-base sync).",
+    whatToDo: 'Nothing to do if that is intended. Otherwise widen or clear the filter on the trigger.',
+  },
+  {
     key: 'no-match',
     term: "nobody's listening",
     meaning: 'No trigger subscribed to this event type at all, so nobody was woken.',
@@ -62,6 +104,7 @@ export function outcomeLegendKey(outcome) {
   if (!outcome || typeof outcome !== 'object') return null;
   if (outcome.status === 'delivered') return 'delivered';
   if (outcome.status === 'digest') return 'digest';
+  if (outcome.status === 'held') return 'held';
   const reason = outcome.reason || '';
   if (LEGEND_BY_KEY[reason]) return reason;
   return 'drop-unknown';
@@ -76,6 +119,9 @@ export function outcomeTooltip(outcome) {
     const reason = (outcome && outcome.reason) || 'unknown';
     return `Dropped by a protection layer (${reason}). Not one of the standard reasons — check the orchestrator logs if unexpected.`;
   }
+  if (key === 'held' && typeof outcome.reason === 'string' && outcome.reason.startsWith('pool-')) {
+    return "The event matched a trigger of an auto-scaled role, but the role is paused, draining or off, so no instance took the work yet. Nothing is lost — it is delivered once the role resumes (Flow Control).";
+  }
   const entry = LEGEND_BY_KEY[key];
   return `${entry.meaning} ${entry.whatToDo}`;
 }
@@ -86,4 +132,14 @@ export function outcomeTooltip(outcome) {
 export function noMatchTooltip() {
   const entry = LEGEND_BY_KEY['no-match'];
   return `${entry.meaning} ${entry.whatToDo}`;
+}
+
+// A row written by "Fire again" on an agent's Events tab (#2525): the sentence
+// the delivered chip's tooltip leads with, naming who re-fired which drop.
+// Null for every other row.
+export function refireNote(entry) {
+  if (!entry || entry.source !== 'manual-refire') return null;
+  const by = entry.refiredBy ? ` by ${entry.refiredBy}` : '';
+  const of = entry.refireOf && entry.refireOf.reason ? ` after a ${entry.refireOf.reason} drop` : '';
+  return `Fired again${by}${of}.`;
 }

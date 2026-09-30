@@ -6,9 +6,15 @@ seeded into a granted agent's workspace at `.agent-studio/bin/` and reads its
 broker endpoint + per-scope token from `.agent-studio/plugins/jira.json` (0600,
 written at grant time by plugin-sync.js).
 
-All privilege lives in the broker (plugins/jira/broker/server.js), which holds
-the team's Jira credential and makes every Jira call server-side. This CLI is a
-privilege-less client that just carries the scope token.
+All privilege lives in the broker (plugins/jira/broker/server.js), which makes
+every Jira call server-side. This CLI is a privilege-less client that just
+carries the scope token and the agent's caller token.
+
+Whose Jira account a call runs as (#2562): in a CHAT turn, the person who wrote
+the message — their own Jira e-mail + API token, stored in the Admin Console
+under Connections → Plugin Tokens. Without one every subcommand is refused and
+nothing is sent to Jira. In an AUTOMATED run (schedule, event, loop, hand-off)
+the team's service account is used.
 
 Reads:
 
@@ -34,6 +40,9 @@ ticket is routine and reversible):
     aee-jira create-epic --project KAN --file plan.json   # create one Epic and its child Stories in one operation
     aee-jira sprint create --board "Team Scrum Board" --name "Sprint 12" --start 2026-10-26 --end 2026-11-01
     aee-jira sprint bulk-create --board "Team Scrum Board" --name-template "Acc2.0 {MMM}_{weekOfMonth}" --until 2026-12-31
+    aee-jira sprint close --board "Team Scrum Board"     # complete the board's active sprint
+    aee-jira sprint start --board "Team Scrum Board"     # activate the board's next future sprint
+    aee-jira sprint advance --board "Team Scrum Board"   # close the active sprint, then start the next future one
 
 `create-epic` turns one ask into its breakdown: it creates a single Epic and N
 Stories underneath it (each linked to the Epic) in the named project, in one
@@ -82,6 +91,17 @@ running Mon 26.10-Sun 01.11 with template "Acc2.0 {MMM}_{weekOfMonth}" is
 "Acc2.0 Oct_4", and the following Mon 02.11-Sun 08.11 is "Acc2.0 Nov_1". Every
 sprint is created as a Jira "future" sprint (a board has only one active
 sprint); the result reports each sprint's id, or a per-sprint error.
+
+`sprint close` / `sprint start` / `sprint advance` transition a sprint's state.
+`sprint close` completes the board's active sprint (`--sprint-id` overrides which
+one) and reports the count of issues left incomplete — these stay on the closed
+sprint (there is no move-to-backlog dialog for an agent). `sprint start` activates
+the board's next future sprint (the earliest-starting one, `--sprint-id`
+overrides); it refuses to add a second active sprint (a board has only one) and a
+dateless sprint (Jira rejects that). `sprint advance` is the roll-over in one
+call: it closes the active sprint, then starts the next future one, reporting each
+half separately so a partial result (e.g. closed but no future sprint to start) is
+visible — the CLI exits 1 on such a partial, while still printing both outcomes.
 
 `set-field` sets ONE custom field. Any custom field is writable by default; if an
 admin set a non-empty `writable-custom-fields` allow-list, a field not on that
@@ -255,6 +275,13 @@ def _call(cfg, path, method="GET", body=None):
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = "Bearer %s" % token
+    # Which AGENT is calling (#2562) — set by the platform at container start.
+    # The broker forwards it so the platform can pick the credential: the chat
+    # sender's own Jira token in a chat turn, the team's service account in an
+    # automated run. It names an agent, never a person.
+    caller = os.environ.get("AEE_AGENT_CALLER_TOKEN", "")
+    if caller:
+        headers["X-AEE-Agent-Token"] = caller
     data = None
     if body is not None:
         data = json.dumps(body).encode()
@@ -467,7 +494,7 @@ def build_parser():
         help='JSON payload describing {"epic": {...}, "stories": [...]}; omit or use "-" to read stdin',
     )
 
-    p_sprint = sub.add_parser("sprint", parents=[common], help="manage a Scrum board's sprints (list / create / bulk-create)")
+    p_sprint = sub.add_parser("sprint", parents=[common], help="manage a Scrum board's sprints (list / create / bulk-create / close / start / advance)")
     sprint_sub = p_sprint.add_subparsers(dest="sprint_cmd")
 
     p_sprint_list = sprint_sub.add_parser("list", parents=[common], help="list a board's sprints (resolved by board name)")
@@ -502,6 +529,25 @@ def build_parser():
         help="first sprint's start date; overrides continue-from-latest, and is required when the board has no sprints yet",
     )
     p_sprint_bulk.add_argument("--goal", help="optional goal applied to every created sprint")
+
+    p_sprint_close = sprint_sub.add_parser("close", parents=[common], help="complete (close) the board's active sprint")
+    p_sprint_close.add_argument("--board", required=True, help='the Scrum board name')
+    p_sprint_close.add_argument("--project", help="project key/id to disambiguate the board name")
+    p_sprint_close.add_argument("--sprint-id", dest="sprint_id", help="close this sprint id instead of the board's active one")
+
+    p_sprint_start = sprint_sub.add_parser("start", parents=[common], help="start (activate) the board's next future sprint")
+    p_sprint_start.add_argument("--board", required=True, help='the Scrum board name')
+    p_sprint_start.add_argument("--project", help="project key/id to disambiguate the board name")
+    p_sprint_start.add_argument("--sprint-id", dest="sprint_id", help="start this sprint id instead of the earliest future one")
+
+    p_sprint_advance = sprint_sub.add_parser(
+        "advance", parents=[common],
+        help="roll the board over: close the active sprint, then start the next future one (both reported)",
+    )
+    p_sprint_advance.add_argument("--board", required=True, help='the Scrum board name')
+    p_sprint_advance.add_argument("--project", help="project key/id to disambiguate the board name")
+    p_sprint_advance.add_argument("--close-id", dest="close_id", help="close this sprint id instead of the board's active one")
+    p_sprint_advance.add_argument("--start-id", dest="start_id", help="start this sprint id instead of the earliest future one")
 
     return parser
 
@@ -637,11 +683,37 @@ def main(argv=None):
                 body["start"] = args.start
             if args.goal:
                 body["goal"] = args.goal
+        elif sprint_cmd == "close":
+            path, method = "/sprint/close", "POST"
+            body = {"board": args.board}
+            if args.project:
+                body["project"] = args.project
+            if args.sprint_id:
+                body["sprintId"] = args.sprint_id
+        elif sprint_cmd == "start":
+            path, method = "/sprint/start", "POST"
+            body = {"board": args.board}
+            if args.project:
+                body["project"] = args.project
+            if args.sprint_id:
+                body["sprintId"] = args.sprint_id
+        elif sprint_cmd == "advance":
+            path, method = "/sprint/advance", "POST"
+            body = {"board": args.board}
+            if args.project:
+                body["project"] = args.project
+            if args.close_id:
+                body["closeSprintId"] = args.close_id
+            if args.start_id:
+                body["startSprintId"] = args.start_id
         else:
             emit({"ok": False, "error": "usage",
                   "message": "usage: aee-jira sprint list --board <name>\n"
                              "       aee-jira sprint create --board <name> --name <name> --start <date> --end <date>\n"
-                             "       aee-jira sprint bulk-create --board <name> --name-template <tmpl> --until <date>"}, as_json)
+                             "       aee-jira sprint bulk-create --board <name> --name-template <tmpl> --until <date>\n"
+                             "       aee-jira sprint close --board <name> [--sprint-id <id>]\n"
+                             "       aee-jira sprint start --board <name> [--sprint-id <id>]\n"
+                             "       aee-jira sprint advance --board <name> [--close-id <id>] [--start-id <id>]"}, as_json)
             return EXIT_USAGE
     else:
         parser.print_help()
@@ -669,6 +741,12 @@ def main(argv=None):
     # sprint bulk-create is likewise one operation with per-sprint outcomes: a
     # per-sprint failure surfaces exit 1 while still printing the per-sprint map.
     if args.cmd == "sprint" and getattr(args, "sprint_cmd", None) == "bulk-create" \
+            and isinstance(result, dict) and result.get("failed"):
+        return EXIT_DOMAIN_ERROR
+    # sprint advance is a two-phase op (close + start): a partial roll-over
+    # (e.g. closed but no future sprint to start) surfaces exit 1 while still
+    # printing both phase outcomes above.
+    if args.cmd == "sprint" and getattr(args, "sprint_cmd", None) == "advance" \
             and isinstance(result, dict) and result.get("failed"):
         return EXIT_DOMAIN_ERROR
     return EXIT_OK

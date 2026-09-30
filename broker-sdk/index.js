@@ -17,7 +17,7 @@
 // Mirrors the pure-module discipline of process-template.js / prompt-assembly
 // .js — no framework, no dependencies, unit-tested in isolation.
 
-const { mint, verify, verifyScopeToken } = require('./scope-token');
+const { mint, verify, verifyScopeToken, grantScopeId } = require('./scope-token');
 const { OWNER_LABEL_KEY, ownerLabelArg, isOwned, filterOwned, scopeFilter } = require('./scope-filter');
 const {
   OUTCOMES,
@@ -63,6 +63,7 @@ module.exports = {
   mint,
   verify,
   verifyScopeToken,
+  grantScopeId,
   // scope filtering (§4.6 ownership labels)
   OWNER_LABEL_KEY,
   ownerLabelArg,

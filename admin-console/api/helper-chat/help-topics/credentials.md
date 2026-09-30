@@ -1,12 +1,11 @@
 ---
 id: credentials
-routes: ["/ssh-keys", "/github-tokens", "/my-credentials"]
+routes: ["/ssh-keys", "/github-tokens"]
 title: Credentials & GitHub access
 summary: Agents reach Git and GitHub with two different credentials — an SSH key for repository transport and a GitHub token for API actions and writes — kept apart on purpose so a leak of either has a narrow blast radius.
 seeAlso:
   - { label: "SSH Keys", to: "/ssh-keys" }
   - { label: "GitHub Tokens", to: "/github-tokens" }
-  - { label: "My Credentials", to: "/my-credentials" }
   - { label: "Environment Templates", to: "/environment-templates" }
   - { label: "Administration", to: "/users" }
   - { label: "GitHub Event Log", to: "/github-events" }
@@ -18,13 +17,13 @@ askPrompts:
   - "Why can't I delete this SSH key?"
   - "What scopes does a GitHub token need?"
   - "Should this key belong to a team or to me personally?"
-  - "Why does My Credentials say I can't have personal credentials?"
+  - "Where do I manage my own personal SSH key or GitHub token?"
 ---
 
-Three pages share this one explanation — **SSH Keys**, **GitHub Tokens** and
-**My Credentials** — because they are three views of the same subject. The "?" on
-each page opens the chapter written for that page; the chapters either side of it
-are the shared story, one scroll away.
+Two pages share this one explanation — **SSH Keys** and **GitHub Tokens** —
+because they are two views of the same subject. The "?" on each page opens the
+chapter written for that page; the chapters either side of it are the shared
+story, one scroll away.
 
 ## Why both an SSH key and a GitHub token
 
@@ -60,15 +59,14 @@ costs you everything at once — the blast-radius argument in one sentence.
 
 ## SSH keys
 
-The **SSH Keys** page holds the shared **team** and **system** keys: the private
-keys that authenticate git transport for the repositories your Working
-Environments clone. Personal keys are deliberately not listed here — they live on
-**My Credentials** — so the two tiers never blur together in one table. The page
-itself is reachable by a System Admin or a Team Admin of at least one access
-scope; which rows you may then edit or delete follows the tier table below.
+The **SSH Keys** page holds every key you may see: your own **personal** keys
+plus the **team** and **system** keys you manage — the private keys that
+authenticate git transport for the repositories your environments clone. The page
+is open to every signed-in user; which rows you see, edit or delete follows the
+tier table below (nobody ever sees another person's personal key).
 
 The table shows **ID** (what an environment refers to, and the filename the
-secret is stored under), **Name**, **Scope / Teams**, **Fingerprint**, **Added**
+secret is stored under), **Name**, **Ownership**, **Fingerprint**, **Added**
 and **Used by**, plus a rename/reassign pencil and a delete bin per row.
 
 **Adding a key — two ways.** *New Key* opens a panel with two tabs:
@@ -114,13 +112,13 @@ workspace's SSH agent accordingly.
 
 ## GitHub tokens
 
-The **GitHub Tokens** page holds the shared **team** and **system** GitHub
-Personal Access Tokens. A token is injected as `GH_TOKEN` and `GITHUB_TOKEN` into
-every agent process of the environment it is linked to, so the agents in
-one environment share one token instead of each carrying their own. Personal
-tokens are filtered out here and managed on **My Credentials**.
+The **GitHub Tokens** page holds your own **personal** GitHub Personal Access
+Tokens plus the **team** and **system** tokens you manage. A shared token is
+injected as `GH_TOKEN` and `GITHUB_TOKEN` into every agent process of the
+environment it is linked to, so the agents in one environment share one token
+instead of each carrying their own.
 
-The table shows **ID**, **Name**, **Scope / Teams**, **Token** (a masked preview:
+The table shows **ID**, **Name**, **Ownership**, **Token** (a masked preview:
 prefix plus the last four characters), **Fingerprint**, **Added** and **Used by**,
 plus the edit and delete actions.
 
@@ -163,8 +161,7 @@ repositories.
 
 **Editing.** The Edit panel renames a token and — for a System Admin — changes
 which scope or team owns it. It cannot change the secret: a token value is set
-once, at creation. Rotation therefore works differently here than on the personal
-tier; see the last chapter.
+once, at creation. To replace it, use **Replace value**; see the last chapter.
 
 **Deleting** behaves exactly as for SSH keys: blocked while an environment
 still references the token, with **Used by** and the delete dialog naming the
@@ -177,49 +174,23 @@ with an agent-identity marker, but that stamp is attribution for humans reading
 GitHub — the poller does not read it. Feedback loops are bounded by frequency
 instead: a per-conversation rate throttle and a burst digest.
 
-## My Credentials
+## Personal credentials
 
-**My Credentials** is the self-service page where any authenticated human manages
-their **own** personal SSH key and GitHub token. It has no admin gate — a plain
-Team Member reaches it just like a Team Admin — because everything it shows is
-already private to the person looking at it.
+Your **personal** SSH keys and GitHub tokens sit on the same **SSH Keys** and
+**GitHub Tokens** pages as the shared ones, marked **Personal** in the
+**Ownership** column. Any signed-in human can add one — a plain Team Member just
+like a Team Admin — and only its owner ever sees it listed.
 
-The page has two sections, one per credential kind, each with its own table and a
-*New key* / *New token* button:
+A personal credential has exactly one owner and is not linked to an environment:
+the runtime picks it up from the person chatting, or — for automatic work —
+from the team's current Team Admin instead (see the last chapter).
+Its owner may rename, **replace** (rotate) and delete it. Delete is permanent and
+affects only you: agents relying on it fail to authenticate until you add a
+replacement.
 
-| Section | Columns |
-|---|---|
-| Personal SSH key | **Name**, **Fingerprint**, **Added** |
-| Personal GitHub token | **Name**, **Token** (masked preview), **Fingerprint**, **Added** |
-
-There is no *Scope / Teams* column and no *Used by* column: a personal credential
-has exactly one owner and is not linked to an environment at all — the
-runtime picks it up from the agent's owner instead (see the last chapter).
-
-Each row offers three actions:
-
-- **Rename** — a name-only change; the secret is untouched.
-- **Rotate** — replace the secret while keeping the same id, name and owner. For
-  an SSH key you can either paste a replacement private key or have the server
-  generate a fresh keypair and show you the new public key once, exactly as at
-  creation. Remember to update the public half on GitHub, and to re-run
-  **Configure SSO** for a SAML SSO org.
-- **Delete** — permanent, and it affects only you. Agents relying on that
-  credential fail to authenticate until you add a replacement.
-
-Creating a personal credential works like the admin pages minus the ownership
-picker: the owner is always the signed-in caller, forced server-side, and cannot
-be set to somebody else. Personal SSH keys are **account-wide** — one key covers
-all of your repositories; per-repository personal deploy keys are not offered.
-
-**Everyone who can sign in can own one.** The personal tier needs a real user
-record to hang ownership on, and every principal that can sign in now has one —
-including the first administrator, which is itself an ordinary System-Admin
-record seeded at first boot. There used to be an exception: a login that came
-straight from the deployment's configuration and had no record behind it, which
-is why the page still carries a "Personal credentials need a per-user account"
-explanation pointing at the shared **SSH Keys** and **GitHub Tokens** pages. It
-is a fail-closed guard now rather than a state you can be in.
+When you create one, the owner is always you — forced server-side, never
+somebody else. Personal SSH keys are **account-wide**: one key covers all of your
+repositories; per-repository personal deploy keys are not offered.
 
 ## Ownership tiers and privacy
 
@@ -228,7 +199,7 @@ may manage it and which page it appears on:
 
 | Tier | Who may create it | Who can see and manage it | Shown on |
 |---|---|---|---|
-| **Personal** | Any authenticated human, for themselves | **Only the owner** — no other human, *including a System Admin* | **My Credentials** |
+| **Personal** | Any authenticated human, for themselves | **Only the owner** — no other human, *including a System Admin* | **SSH Keys** / **GitHub Tokens** (owner only) |
 | **Team** | Team Admin of that access scope (or a System Admin) | Team Admins of that scope; System Admins | **SSH Keys** / **GitHub Tokens** |
 | **System** | System Admin only | System Admins, plus Team Admins of the scopes it is assigned to | **SSH Keys** / **GitHub Tokens** |
 
@@ -236,9 +207,9 @@ A team credential names one access scope. A system credential instead carries a
 list of **assigned teams**, which is how a house-wide token is shared with the
 teams that should have it without becoming visible to everyone (assign it to no
 team and it stays visible to System Admins only). Both are chosen in the create
-panel and shown afterwards in the **Scope / Teams** column. Only a System Admin
-may move a credential between scopes later, so a Team Admin editing one sees a
-note where the ownership editor would be — and a Team Admin only ever sees
+panel and shown afterwards in the **Ownership** column. Only a System Admin
+may move a credential between scopes later, so a Team Admin editing one sees the
+ownership editor read-only — and a Team Admin only ever sees
 edit/delete actions on **team** credentials of a scope they administer, never on a
 system one.
 
@@ -246,8 +217,6 @@ Personal privacy is strict and has **no administrator break-glass**: there is no
 override that lets anyone list, read or manage another person's personal
 credential, ownership is fixed at creation, and a personal credential can never be
 converted into a team or system one (or back) — create a fresh credential instead.
-The admin pages filter personal entries out of their tables, so the two tiers stay
-visually and navigationally distinct.
 
 **Offboarding follows the same rule.** When a human is deactivated or removed,
 their agents are first **paused** — disabled in place, not wiped, so in-flight
@@ -266,8 +235,8 @@ restarted** so they pick up the new value immediately. Only the *fan-out* differ
 between tiers, because a personal secret is held per owner and a team/system
 secret per Working Environment:
 
-- **Personal** keys and tokens rotate in place using the *Rotate* action on My
-  Credentials. Afterwards the owner's affected running agents are restarted; only
+- **Personal** keys and tokens rotate in place using the same **Replace key** /
+  **Replace value** action on their row. Afterwards the owner's affected running agents are restarted; only
   yours, never anyone else's.
 - **Team and system** keys and tokens rotate in place using the **Replace value**
   (GitHub token) / **Replace key** (SSH key) action — the circular-arrows icon on
@@ -289,44 +258,55 @@ Token* field to it, which restarts that environment's agents for the same reason
 **Which credential an agent actually uses** is decided **per operation class**,
 because attribution and transport differ:
 
-- **Attributed writes** — commits, pull requests, reviews, HTTPS pushes — prefer
-  the agent owner's **personal** credential, then team, then system. These carry a
-  human's name, so they should run under that human's identity.
+- **Attributed writes** — what the agent writes with `gh-as-agent` or `gh`
+  while a team member chats with it: a push, a pull request, an issue, a
+  comment, a review, a label change, a `gh api` write — use the **chat
+  sender's own personal** credential. If they have none (or a PAT without the
+  `repo` / `workflow` scope), the write is **refused** with an actionable
+  message, never made under someone else's name.
+- **Automatic work** — every cron, GitHub-event and loop run, plus reads, other
+  `gh` commands (releases, secrets, workflows, …) and chats from a sender
+  outside the agent's team — uses the container's own
+  `GH_TOKEN`/`GITHUB_TOKEN` and SSH identity. That is resolved in this order: the **current Team Admin's
+  personal** credential, else the **team** credential configured on the team's
+  environment, else a **global service** credential. That order is a
+  **preference among tiers**, and it never refuses — automatic work always has a
+  working path. A run never reads the owner from whoever caused the event.
 - **Reads** — clones, the repository probe, SSH-only transport — are happy with a
   shared team/system credential; nobody is misattributed.
 - **Event polling** of a repository always uses a shared team/system token: the
   poller is per-repository infrastructure, not per-human.
 
-"The agent's owner" is a single, deterministic human: for a team member it is the
-parent Agent Team's owner, so a team operated by several people still writes under
-exactly one identity no matter which event woke the run. A cron or GitHub-event
-run reads that owner from the stored configuration, never from whoever caused the
-event.
+"The current Team Admin" is a single, deterministic human: when a team has
+several, it is the **earliest-promoted** one; for a team member it is the parent
+Agent Team's admin. After a Team Admin change the successor's credential applies
+with no edit. So a team whose Team Admin adds a personal GitHub token or SSH key
+starts acting on GitHub **as that Team Admin** for its automatic work — the team
+credential stays configured but is **not in use** while it is overridden.
 
-`personal → team → system` is a **preference among tiers, not a fallback for a
-missing personal credential.** When an attributed write prefers the personal tier
-and the owner has none — or has a PAT without the `repo` / `workflow` scope — the
-run is **refused** with an actionable message instead of silently acting under a
-shared identity. An agent that carries no owner at all keeps using the shared
-credential exactly as before and is never refused, so an environment that has
-never used the personal tier behaves as it always did.
+The change takes effect at the agents' **next start** (the next enable or
+respawn): the token and key are baked into a container when it starts, so a
+running agent keeps the old one until then.
+
+**Seeing it in the console.** Agent Chat → **Settings** → **Repositories** shows an
+**Effective GitHub identity** box for the team: for the GitHub token and the SSH
+key, whether the Team Admin's personal credential, the team credential or a global
+service credential is in use (or *None configured*), and — for a personal one —
+the Team Admin's display name. A team credential that is overridden is marked
+*not in use*. Nobody except its owner sees anything else about a personal
+credential: no id, name, token preview or fingerprint. When a Team Admin adds a
+personal token or key on the **GitHub Tokens** / **SSH Keys** page, the console
+tells them which of their teams will now use it; when they delete it, which teams
+fall back to the team credential — or to nothing.
 
 There is a **second** reason a personal tier refuses, and it is not about the
 credential's scopes: if the owner is **no longer a user on this platform** —
 their account was deleted — their personal token stays on disk and still works,
 but an attributed write under a departed person's name is refused rather than
-allowed to continue. That refusal carries a *different* instruction, because
-nobody can add a personal token for an account that no longer exists: finish the
-offboarding, delete the orphaned credential and **revoke it at GitHub**. Reads
-are unaffected — a clone or a poll may still use a shared credential, so one
-stale index entry never takes a whole flow offline.
-
-**The same preference now reaches the token an agent's container is actually
-started with.** `GH_TOKEN`/`GITHUB_TOKEN` and the per-repository SSH identity —
-what a `gh`/`git` call the agent runs directly (commenting on an issue,
-reviewing a pull request) authenticates with — no longer come straight from the
-environment's own fields: if the team's current Team Admin has a personal SSH
-key or GitHub token, agents in that environment start using it automatically on
-their **next spawn**, with no environment edit and no restart needed beyond the
-ordinary next enable/respawn. An environment whose admin has never added a
-personal credential behaves exactly as before.
+allowed to continue, and automatic work skips it and falls back to the team
+(or global service) credential (the **Effective GitHub identity** box flags it as a problem). That
+refusal carries a *different* instruction, because nobody can add a personal
+token for an account that no longer exists: finish the offboarding, delete the
+orphaned credential and **revoke it at GitHub**. Reads are unaffected — a clone or
+a poll may still use a shared credential, so one stale index entry never takes a
+whole flow offline.

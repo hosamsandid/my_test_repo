@@ -13,18 +13,17 @@ import PageHelpButton from '../components/PageHelpButton';
 import ModeToggle from '../components/ModeToggle';
 import useAutoDerivedId from '../hooks/useAutoDerivedId';
 import CredentialOwnership from '../components/CredentialOwnership';
-import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import ReassignPanel from '../components/CredentialReassignPanel';
 import { useAuth } from '../auth/AuthContext';
 import {
-  teamsById, credentialScopeLabel, credentialOwnershipLabel, defaultOwnership, ownershipPayload,
+  teamsById, credentialOwnershipLabel, defaultOwnership, ownershipPayload,
   canManageCredentialClient, canReassignCredentialClient, adminTeamIdsOf,
   isPersonalCredential,
 } from './credential-scope-view';
-import { adminManagedCredentials } from './my-credentials-view';
 import { environmentsUsingSshKey, usageCountLabel, usageTooltip } from './credential-usage';
 import { CREDENTIALS_HELP_SECTIONS } from './credentials-help-sections.js';
 import { usePageActions } from '../context/PageActionsContext';
+import { loadPersonalCredentialChangeNotice } from './effective-identity-view.js';
 
 const inputStyle = {
   width: '100%',
@@ -184,12 +183,11 @@ function PublicKeyReveal({ publicKey, onDone }) {
 
 function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, generated, onDoneGenerated,
                       teams, isSysAdmin, adminTeamIds }) {
-  const v2 = useResourceAccessV2();
   const [mode, setMode] = useState('generate');
   const [name, setName] = useState('');
   const [id, setId] = useState('');
   const [privateKey, setPrivateKey] = useState('');
-  const [ownership, setOwnership] = useState(() => defaultOwnership({ isSysAdmin, adminTeamIds, v2 }));
+  const [ownership, setOwnership] = useState(() => defaultOwnership({ isSysAdmin, adminTeamIds }));
   const { handleNameChange, handleIdChange, resetAutoDerive, isAutoDerived } = useAutoDerivedId({
     setName,
     setId,
@@ -215,7 +213,6 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
       teams={teams}
       isSysAdmin={isSysAdmin}
       adminTeamIds={adminTeamIds}
-      v2={v2}
     />
   );
 
@@ -274,7 +271,7 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
             <button
-              onClick={() => onSaveGenerate({ name: name.trim(), id: id.trim() || undefined, ...ownershipPayload(ownership, { v2 }) })}
+              onClick={() => onSaveGenerate({ name: name.trim(), id: id.trim() || undefined, ...ownershipPayload(ownership) })}
               disabled={saving || !canGenerate}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-1)',
@@ -376,7 +373,7 @@ function CreateForm({ onSavePaste, onSaveGenerate, onCancel, saving, error, gene
 
           <div style={{ display: 'flex', gap: 'var(--eb-space-2)', paddingTop: 'var(--eb-space-3)', borderTop: '1px solid var(--eb-border-default)' }}>
             <button
-              onClick={() => onSavePaste({ name: name.trim(), id: id.trim() || undefined, privateKey: privateKey.trim(), ...ownershipPayload(ownership, { v2 }) })}
+              onClick={() => onSavePaste({ name: name.trim(), id: id.trim() || undefined, privateKey: privateKey.trim(), ...ownershipPayload(ownership) })}
               disabled={saving || !canPaste}
               style={{
                 padding: 'var(--eb-space-2) var(--eb-space-4)',
@@ -420,25 +417,30 @@ export default function SshKeys() {
   const [rotateGenerated, setRotateGenerated] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [actionError, setActionError] = useState(null);
+  // #2560: which of the caller's teams a personal credential they just added
+  // (or deleted) now moves — the Team Admin's personal credential overrides the
+  // team's own for automatic work and in-container GitHub actions.
+  const [baselineNotice, setBaselineNotice] = useState(null);
+  const announceBaselineChange = (entry, action) => {
+    if (entry?.scope !== 'personal') return;
+    loadPersonalCredentialChangeNotice(url => apiCall('GET', url), { kind: 'ssh', action }).then(setBaselineNotice);
+  };
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState(null);
   const [generatedPublicKey, setGeneratedPublicKey] = useState(null);
 
   const teams = Array.isArray(teamsData) ? teamsData : [];
   const names = teamsById(teams);
-  const resourceAccessV2 = useResourceAccessV2();
-  // #2360 consolidation: under the flag this page is open to every authenticated
-  // user and shows EVERY credential the caller may see — their own personal rows
-  // (the dissolved "My Credentials" self-service folds in here) plus the
+  // #2360 consolidation: this page is open to every authenticated user and shows
+  // EVERY credential the caller may see — their own personal rows plus the
   // team/system rows they manage. The server already returns own-personal entries
-  // (visibleCredential), so this is a client-side unfilter. Off the flag we keep
-  // the admin-managed-only view and personal stays on the My Credentials page.
-  const rows = resourceAccessV2 ? (keys ?? []) : adminManagedCredentials(keys ?? []);
+  // (visibleCredential).
+  const rows = keys ?? [];
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
   // `userId` is required for the personal-tier manage check (canManageCredentialClient):
   // the OWNER of a personal row must get edit/rotate/delete, not a lock (mirrors
-  // ModelRegistry #2403). Harmless off the flag, where personal rows are filtered out.
+  // ModelRegistry #2403).
   const caller = { isSysAdmin, adminTeamIds, userId: user?.userId };
 
   // Which Working Environments reference each key (#1141). `envs` is null until
@@ -452,22 +454,21 @@ export default function SshKeys() {
     { key: 'id', label: 'ID', render: v => <span style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)' }}>{v}</span> },
     { key: 'name', label: 'Name' },
     {
-      // #2360: under v2 the column mirrors the create/edit dialog taxonomy
+      // #2360: the column mirrors the create/edit dialog taxonomy
       // (identity + Personal/Team/System/Global) via `credentialOwnershipLabel`,
-      // so the row and the dialog can never disagree. Off the flag it stays the
-      // legacy `credentialScopeLabel` "Scope / Teams" column (byte-identical).
-      key: '_scope', label: resourceAccessV2 ? 'Ownership' : 'Scope / Teams', sortable: false,
+      // so the row and the dialog can never disagree.
+      key: '_scope', label: 'Ownership', sortable: false,
       // #2442: `_scope` is synthetic (no `row['_scope']`), so filter on the text
       // this column actually displays — the ownership/scope label plus its detail
       // (which carries the team names), or "Global".
       filterValue: (_, row) => {
-        const s = resourceAccessV2 ? credentialOwnershipLabel(row, names) : credentialScopeLabel(row, names);
-        if (resourceAccessV2 && s.scope === 'global') return 'Global';
+        const s = credentialOwnershipLabel(row, names);
+        if (s.scope === 'global') return 'Global';
         return [s.label, s.detail].filter(Boolean).join(' ');
       },
       render: (_, row) => {
-        const s = resourceAccessV2 ? credentialOwnershipLabel(row, names) : credentialScopeLabel(row, names);
-        if (resourceAccessV2 && s.scope === 'global') {
+        const s = credentialOwnershipLabel(row, names);
+        if (s.scope === 'global') {
           return (
             <span style={{ fontSize: 'var(--eb-text-xs)' }} title="Available to every user and team — no team required">
               <span style={{
@@ -529,7 +530,8 @@ export default function SshKeys() {
   async function handleSavePaste({ name, id, privateKey, scope, teamId, assignedTeamIds, identity }) {
     setSaving(true); setFormError(null);
     try {
-      await apiCall('POST', '/api/ssh-keys', { name, id, privateKey, scope, teamId, assignedTeamIds, identity });
+      const created = await apiCall('POST', '/api/ssh-keys', { name, id, privateKey, scope, teamId, assignedTeamIds, identity });
+      announceBaselineChange(created, 'added');
       setCreating(false);
       refetch();
     } catch (e) {
@@ -544,6 +546,7 @@ export default function SshKeys() {
     try {
       const r = await apiCall('POST', '/api/ssh-keys/generate', { name, id, scope, teamId, assignedTeamIds, identity });
       setGeneratedPublicKey(r.publicKey);
+      announceBaselineChange(r, 'added');
       refetch();
     } catch (e) {
       setFormError(e.message);
@@ -574,6 +577,7 @@ export default function SshKeys() {
   async function handleDelete() {
     try {
       await apiCall('DELETE', `/api/ssh-keys/${deleteTarget.id}`);
+      announceBaselineChange(deleteTarget, 'deleted');
       setDeleteTarget(null);
       refetch();
     } catch (e) {
@@ -644,9 +648,7 @@ export default function SshKeys() {
         fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
       }}>
         <span>
-          {resourceAccessV2
-            ? 'Your SSH keys — personal, team and platform — the private keys that authenticate git transport for the repositories your environments clone.'
-            : 'Shared team and platform SSH keys — the private keys that authenticate git transport for the repositories your environments clone.'}
+          Your SSH keys — personal, team and platform — the private keys that authenticate git transport for the repositories your environments clone.
         </span>
         <PageHelpButton
           label="Why both an SSH key and a GitHub token?"
@@ -656,6 +658,12 @@ export default function SshKeys() {
         />
       </p>
 
+      {baselineNotice && (
+        <div role="status" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
+          {baselineNotice}
+          <button onClick={() => setBaselineNotice(null)} style={{ marginLeft: 'var(--eb-space-3)', background: 'none', border: 'none', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}>Dismiss</button>
+        </div>
+      )}
       {actionError && (
         <div role="alert" style={{ padding: 'var(--eb-space-3)', background: 'var(--eb-status-error-bg)', border: '1px solid var(--eb-status-error)', borderRadius: 'var(--eb-radius-md)', fontSize: 'var(--eb-text-sm)' }}>
           {actionError}
@@ -704,7 +712,6 @@ export default function SshKeys() {
             isSysAdmin={isSysAdmin}
             adminTeamIds={adminTeamIds}
             canReassign={canReassignCredentialClient(caller) && !isPersonalCredential(editTarget)}
-            v2={resourceAccessV2}
             onSave={handleEditSave}
             onCancel={() => { setEditTarget(null); setFormError(null); }}
             saving={saving}

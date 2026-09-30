@@ -450,7 +450,7 @@ test('matchExistingSkill: entry-id lineage beats name overlap; null when no sign
 test('TEAM_KNOWLEDGE_KEYS covers exactly the per-team groups', () => {
   assert.deepEqual(
     [...TEAM_KNOWLEDGE_KEYS].sort(),
-    ['decayHorizonDays', 'knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore', 'skillResyncMode'],
+    ['decayHorizonDays', 'domainSkillThreshold', 'knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore', 'skillResyncMode'],
   );
 });
 
@@ -689,4 +689,80 @@ test('#921 AC5: validatePromotion warns (never rejects) on a frontmatter-less bo
   const modern = validatePromotion({ ...base, skillMd: buildHeuristicSkillDraft(candidate()).skillMd });
   assert.equal(modern.ok, true);
   assert.deepEqual(modern.warnings, []);
+});
+
+// ── Domain → skill cards (#2592) ───────────────────────────────────────────────
+
+const {
+  isDomainCard, domainCardTarget, checkDomainCardTarget,
+  resolveDomainSkillThreshold, DEFAULT_DOMAIN_SKILL_THRESHOLD,
+} = require('./knowledge-suggestions');
+
+function domainCard(over = {}) {
+  return candidate({
+    id: 'ds-dev-workflow',
+    source: 'domain-skill',
+    text: 'Create skill Dev workflow — 3 pending lessons',
+    domainId: 'dev-workflow',
+    domainName: 'Dev workflow',
+    domainSkill: 'dev-workflow',
+    mode: 'create',
+    lessonIds: ['l1', 'l2', 'l3'],
+    lessonCount: 3,
+    ...over,
+  });
+}
+
+test('promotionSuggestionView: a domain card carries domainId, domain name, domain skill and its lessons (AC4)', () => {
+  const v = promotionSuggestionView(domainCard());
+  assert.equal(v.domainId, 'dev-workflow');
+  assert.equal(v.domainName, 'Dev workflow');
+  assert.equal(v.domainSkill, 'dev-workflow');
+  assert.equal(v.mode, 'create');
+  assert.deepEqual(v.lessonIds, ['l1', 'l2', 'l3']);
+  assert.equal(v.lessonCount, 3);
+  assert.equal(v.draft.name, 'dev-workflow', 'the draft is named after the domain, never the card line');
+  assert.match(v.draft.skillMd, /^# Dev workflow$/m);
+});
+
+test('promotionSuggestionView: a plain lesson card has no domain skill; a routed one keeps its domainId', () => {
+  const plain = promotionSuggestionView(candidate());
+  assert.equal(plain.domainId, null);
+  assert.equal(plain.domainSkill, null);
+  assert.equal(plain.mode, undefined);
+  const routed = promotionSuggestionView(candidate({ domainId: 'dev-workflow' }));
+  assert.equal(routed.domainId, 'dev-workflow');
+  assert.equal(routed.domainSkill, null);
+});
+
+test('domainCardTarget: only domain cards with a valid skill name have a target', () => {
+  assert.equal(isDomainCard(domainCard()), true);
+  assert.equal(isDomainCard(candidate()), false);
+  assert.equal(domainCardTarget(domainCard()), 'dev-workflow');
+  assert.equal(domainCardTarget(candidate({ domainSkill: 'dev-workflow' })), null);
+  assert.equal(domainCardTarget(domainCard({ domainSkill: '../evil' })), null);
+});
+
+test('checkDomainCardTarget: accepting a domain card may only create/extend the team domain skill (AC3/AC5)', () => {
+  assert.deepEqual(checkDomainCardTarget(domainCard(), { name: 'dev-workflow', to: 'team' }), { ok: true });
+  const lessonNamed = checkDomainCardTarget(domainCard(), { name: 'this-repo-unit-tests-pure-helper', to: 'team' });
+  assert.equal(lessonNamed.ok, false);
+  assert.match(lessonNamed.error, /dev-workflow/);
+  assert.equal(checkDomainCardTarget(domainCard(), { name: 'dev-workflow', to: 'global' }).ok, false);
+  assert.equal(checkDomainCardTarget(domainCard({ domainSkill: '' }), { name: 'x', to: 'team' }).ok, false);
+  // Non-domain rows are not constrained.
+  assert.deepEqual(checkDomainCardTarget(candidate(), { name: 'anything', to: 'global' }), { ok: true });
+  assert.deepEqual(checkDomainCardTarget(null, { name: 'anything', to: 'team' }), { ok: true });
+});
+
+test('resolveDomainSkillThreshold: defaults, team override wins, invalid values clamp to defaults (AC12)', () => {
+  assert.deepEqual(resolveDomainSkillThreshold({}), { minLessons: 3, minAgents: 2 });
+  assert.deepEqual(DEFAULT_DOMAIN_SKILL_THRESHOLD, { minLessons: 3, minAgents: 2 });
+  assert.deepEqual(resolveDomainSkillThreshold({ knowledgeCuration: { domainSkillThreshold: { minLessons: 5, minAgents: 3 } } }), { minLessons: 5, minAgents: 3 });
+  assert.deepEqual(resolveDomainSkillThreshold({
+    domainSkillThreshold: { minLessons: 2, minAgents: 1 },
+    knowledgeCuration: { domainSkillThreshold: { minLessons: 9, minAgents: 9 } },
+  }), { minLessons: 2, minAgents: 1 });
+  assert.deepEqual(resolveDomainSkillThreshold({ domainSkillThreshold: { minLessons: 0, minAgents: 2.5 } }), { minLessons: 3, minAgents: 2 });
+  assert.deepEqual(resolveDomainSkillThreshold(null), { minLessons: 3, minAgents: 2 });
 });

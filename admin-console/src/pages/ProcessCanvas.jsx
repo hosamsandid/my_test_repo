@@ -10,7 +10,6 @@ import FlowAnomaliesPanel from './process/FlowAnomaliesPanel';
 import ImprovementsPanel from './process/ImprovementsPanel';
 import ParallelismPanel from './process/ParallelismPanel';
 import { hasPooledMember } from './process/parallelism-view.js';
-import { usePoolsEnabled } from '../context/PoolsFeatureContext';
 import FlowCopilotPanel from './process/FlowCopilotPanel';
 import { useFlowCopilot } from '../context/FlowCopilotContext.jsx';
 import { proposalNodeDiff } from './process/flow-copilot-view';
@@ -26,6 +25,10 @@ import { liveOps, makeDraftOps } from './process/edit-adapters';
 import { capabilitiesFor, processMode, createTypesFor, sourceKindOf } from './process/connection-capabilities';
 import { toolbarTitle, STATUS_TITLES, draftStatusText, PROPOSAL_PENDING_REASON } from './process-toolbar-hints';
 import { CREATE_TEAM_LABEL, createdTeamNotice } from './process/create-team-copy.js';
+import {
+  ADD_ROLE_MATERIALIZE_DEFAULT, ADD_ROLE_MATERIALIZE_HINT, ADD_ROLE_MATERIALIZE_LABEL,
+  addRoleMaterializeBody, addRoleNotice, addRoleSubmitLabel,
+} from './process/add-role-materialize.js';
 import { FLOW_INTENTS } from './process/flows-rail-menu.js';
 import { downloadBundle } from './process/bundle-download.js';
 import { draftWriteError } from './process/draft-share-view.js';
@@ -180,7 +183,6 @@ function ModePill({ tone, icon: Icon, title, children }) {
 //                        team → draft bridge) can carry the flag.
 export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingImport, onImportConsumed, onImportClosed, pendingFocus = null, onFocusConsumed, autoOpenCopilot = false, pendingIntent = null, onIntentConsumed, draftReloadToken = 0 }) {
   const navigate = useCallback((s, opts) => { if (onNavigate) onNavigate(s, opts); }, [onNavigate]);
-  const poolsEnabled = usePoolsEnabled();
 
   const { data: agents, refetch: refetchAgents } = useApi('/api/agents');
   const teams = useMemo(
@@ -236,6 +238,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // with no clearing effect to keep in sync.
   const [refusedFor, setRefusedFor] = useState(null);
   const [addRoleOpen, setAddRoleOpen] = useState(false);
+  // Success notice after a live-team "Add agent" (#2558 AC6) — stub vs
+  // provisioned, as reported by the server. Tagged with the scope it was
+  // raised in so it never lingers onto another team's canvas.
+  const [addRoleResult, setAddRoleResult] = useState(null); // { scope, text }
   const [stagesOpen, setStagesOpen] = useState(false);
   const [labelsOpen, setLabelsOpen] = useState(false);
   const [humansOpen, setHumansOpen] = useState(false);
@@ -627,12 +633,73 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     catch { /* best-effort */ }
   }, [persistDraft]);
 
+  // Flow Copilot on the LIVE team (#2556). Loaded when the panel opens: the
+  // team's portable bundle (what the chat edits and what Apply re-checks
+  // against), and the shared chat history — whose GET doubles as the edit-
+  // rights probe, since it uses the same canManageAgent gate as every write.
+  // A 403 means read-only (AC8); the history stays hidden (AC16).
+  const [liveCopilot, setLiveCopilot] = useState(null); // { bundle, canEdit, history }
+  const liveTeamCopilot = copilotOpen && isTeamScope && !imported;
+  const fetchLiveBundle = useCallback(async () => {
+    const res = await fetch(`/api/process/template?team=${encodeURIComponent(scope)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }, [scope]);
+  const loadLiveCopilot = useCallback(async () => {
+    let canEdit = true;
+    let history = { messages: [] };
+    try { history = await apiCall('GET', `/api/teams/${encodeURIComponent(scope)}/copilot-history`); }
+    catch (e) { if (e && (e.status === 403 || e.status === 404)) canEdit = false; }
+    let bundle = null;
+    try { bundle = await fetchLiveBundle(); } catch { /* the panel stays unable to send */ }
+    setLiveCopilot({ bundle, canEdit, history: canEdit ? history : { messages: [] } });
+  }, [scope, fetchLiveBundle]);
+  // Reloaded on every open, so a reopened panel hydrates the history as the
+  // last close (or another editor) left it, not as it was on first open (AC11).
+  useEffect(() => {
+    if (!liveTeamCopilot) { setLiveCopilot(null); return; }
+    if (!liveCopilot) loadLiveCopilot();
+  }, [liveTeamCopilot, liveCopilot, loadLiveCopilot]);
+  const persistLiveCopilotHistory = useCallback(async (persistedMessages) => {
+    try { await apiCall('PUT', `/api/teams/${encodeURIComponent(scope)}/copilot-history`, { messages: persistedMessages || [] }); }
+    catch { /* best-effort, like the draft history */ }
+  }, [scope]);
+  // The live apply transport: every step is an EXISTING route (AC8) — the
+  // generic ones via apiCall, trigger creation via liveOps so a github-event
+  // trigger gets the agent's repo filled in exactly as on the canvas.
+  const liveCopilotTransport = useMemo(() => ({
+    teamId: scope,
+    memberIds: Array.isArray(agents) ? agents.filter(a => a.parentTeamId === scope).map(a => a.id) : [],
+    fetchCurrent: fetchLiveBundle,
+    fetchTickets: async () => {
+      try {
+        const r = await apiCall('GET', `/api/teams/${encodeURIComponent(scope)}/tickets`);
+        return Array.isArray(r && r.tickets) ? r.tickets : null;
+      } catch { return null; }
+    },
+    call: (step) => (step.op === 'createTrigger'
+      ? liveOps.createTrigger(step.memberId, step.body)
+      : apiCall(step.method, step.url, step.body)),
+    onApplied: async () => {
+      setProposal(null);
+      refetch();
+      refetchAgents();
+      try {
+        const bundle = await fetchLiveBundle();
+        setLiveCopilot(c => (c ? { ...c, bundle } : c));
+      } catch { /* the next open reloads it */ }
+    },
+  }), [scope, agents, fetchLiveBundle, refetch, refetchAgents]);
+
   // Canvas diff-highlighting (#1071 item 2): the proposal's node-level delta
   // vs. the current draft — added green, modified amber, removed in the banner.
-  const proposalDiff = useMemo(
-    () => (proposal && isDraft ? proposalNodeDiff(draftBundle, proposal.bundle) : null),
-    [proposal, isDraft, draftBundle],
-  );
+  // On a live team the base is the team's exported bundle (#2556).
+  const proposalDiff = useMemo(() => {
+    if (!proposal) return null;
+    if (isDraft) return proposalNodeDiff(draftBundle, proposal.bundle);
+    if (isTeamScope && liveCopilot && liveCopilot.bundle) return proposalNodeDiff(liveCopilot.bundle, proposal.bundle);
+    return null;
+  }, [proposal, isDraft, draftBundle, isTeamScope, liveCopilot]);
 
   // Overlay the diff outlines on the freshly-rendered `.bp-node` cards — the
   // same decorate-after-setData pattern as the anomaly badges above.
@@ -665,10 +732,17 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   // wizard's `<teamId>-<roleId>` scheme so a name that resolves to an existing
   // member surfaces as a clear 409 (E1) instead of silently overwriting. Skills
   // and MCP are left to inherit from the team/env — no overrides (AC4).
-  async function addLiveRole({ displayName, systemPrompt, templateId }) {
+  //
+  // #2558: `materializeNow` (the dialog's checkbox, default off) is always sent
+  // explicitly — off creates a stub (config + triggers only, no Matrix user,
+  // clone or container) that Agent Chat lists under "Not materialized yet".
+  async function addLiveRole({ displayName, systemPrompt, templateId, materializeNow }) {
     const slug = String(displayName || 'role').toLowerCase()
       .replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'role';
-    const body = { id: `${scope}-${slug}`, displayName: displayName.trim() };
+    const body = {
+      id: `${scope}-${slug}`, displayName: displayName.trim(),
+      ...addRoleMaterializeBody({ materializeNow }),
+    };
     if (templateId) {
       // Template-based add (#586, AC-5): the backend loads the template, resolves
       // the team's `{{vars}}` from its env, and materializes a member with the
@@ -680,7 +754,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     }
     const created = await apiCall('POST', `/api/agents/${encodeURIComponent(scope)}/members`, body);
     refetch(); // the graph now shows the new member as a live node (AC5)
-    return (created && created.id) || body.id;
+    const id = (created && created.id) || body.id;
+    setAddRoleResult({ scope, text: addRoleNotice({ ...(created || {}), id }) });
+    return id;
   }
 
   // Continue an imported blueprint as an editable draft instead of materializing
@@ -793,14 +869,10 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
               title={toolbarTitle('improvements')}>
               Improvements
             </ToolbarButton>
-            {/* #2302: agent pools still need teardown/reaping polish — the whole
-                surface is hidden (not just disabled) while the flag is off. */}
-            {poolsEnabled && (
-              <ToolbarButton onClick={() => setParallelismOpen(true)} icon={Gauge}
-                title={toolbarTitle('parallelism')}>
-                Parallelism
-              </ToolbarButton>
-            )}
+            <ToolbarButton onClick={() => setParallelismOpen(true)} icon={Gauge}
+              title={toolbarTitle('parallelism')}>
+              Parallelism
+            </ToolbarButton>
             <ToolbarButton onClick={() => setCopilotOpen(o => !o)} icon={Sparkles}
               title={toolbarTitle('copilot')}>Copilot</ToolbarButton>
             <ToolbarButton onClick={editAsDraft} icon={Boxes}
@@ -854,8 +926,35 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
           }}><X size={16} /></button>
         </div>
       )}
+      {imported && Array.isArray(imported.graph?.coercions) && imported.graph.coercions.length > 0 && (
+        <div style={{
+          marginBottom: 'var(--eb-space-3)', padding: 'var(--eb-space-2) var(--eb-space-3)', flexShrink: 0,
+          background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-status-warning)', borderRadius: 'var(--eb-radius-md)',
+          fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-1)' }}>
+            <AlertTriangle size={14} style={{ color: 'var(--eb-status-warning)' }} />
+            <strong>Auto-repaired on import ({imported.graph.coercions.length})</strong>
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 'var(--eb-space-4)' }}>
+            {imported.graph.coercions.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
+        </div>
+      )}
       {importError && (
         <div style={{ marginBottom: 'var(--eb-space-3)', color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>{importError}</div>
+      )}
+      {addRoleResult && addRoleResult.scope === scope && (
+        <div role="status" style={{
+          display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginBottom: 'var(--eb-space-3)',
+          padding: 'var(--eb-space-2) var(--eb-space-3)', flexShrink: 0,
+          background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+        }}>
+          <span style={{ flex: 1, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)' }}>{addRoleResult.text}</span>
+          <button type="button" aria-label="Dismiss" onClick={() => setAddRoleResult(null)} style={{
+            background: 'none', border: 'none', cursor: 'pointer', color: 'var(--eb-text-secondary)', padding: 0, display: 'inline-flex',
+          }}><X size={16} /></button>
+        </div>
       )}
 
       {/* Live-mode warning (#1125): the toolbar controls for a live team look
@@ -929,7 +1028,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             Proposal from Copilot ({proposal.graph?.nodes?.length || 0} nodes
             {proposalDiff && (proposalDiff.added.length || proposalDiff.modified.length)
               ? ` · ${proposalDiff.added.length} added · ${proposalDiff.modified.length} modified`
-              : ''}) — review it, then Apply or Discard.
+              : ''}) — {isTeamScope
+              ? 'review it; Apply asks you to confirm before anything reaches the running agents.'
+              : 'review it, then Apply or Discard.'}
             {proposalDiff && proposalDiff.removed.length > 0 && (
               <> <span style={{ color: 'var(--eb-status-error)' }}>
                 Removes: {proposalDiff.removed.map(r => r.name).join(', ')}.
@@ -1136,8 +1237,9 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
 
       {addRoleOpen && (isDraft || (isTeamScope && !imported)) && (
         <AddRoleDialog
+          live={!isDraft}
           onClose={() => setAddRoleOpen(false)}
-          onCreate={async ({ displayName, systemPrompt, templateId, template }) => {
+          onCreate={async ({ displayName, systemPrompt, templateId, template, materializeNow }) => {
             // Draft: append the role to the bundle — from scratch (free-form
             // prompt) or from a template (fields copied, {{vars}} raw, E2/AC-4).
             // Live team: materialize as a team-member immediately (#585), passing
@@ -1145,7 +1247,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
             // propagate so the dialog can surface them and stay open (AC7 / E1).
             const id = isDraft
               ? await draftOps.addRole({ displayName, systemPrompt, template })
-              : await addLiveRole({ displayName, systemPrompt, templateId });
+              : await addLiveRole({ displayName, systemPrompt, templateId, materializeNow });
             setAddRoleOpen(false);
             setSelectedId(id);
           }}
@@ -1188,7 +1290,7 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
         />
       )}
 
-      {parallelismOpen && poolsEnabled && isTeamScope && !imported && (
+      {parallelismOpen && isTeamScope && !imported && (
         <ParallelismPanel
           teamId={scope}
           wipLimit={Number.isInteger(parallelismTeamCfg?.wipLimit) ? parallelismTeamCfg.wipLimit : null}
@@ -1249,20 +1351,24 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
     </div>
 
     {/* Flow Copilot rail (#1069). Draft scope chats against the open draft;
-        team scope only offers the Edit-as-draft bridge (no direct live-team
-        mutation, by design). Closing drops the canvas PREVIEW only — since
+        team scope (#2556) chats against the live team's exported bundle and
+        applies through a confirmation, replaying the diff as the canvas's own
+        live writes. Closing drops the canvas PREVIEW only — since
         #2087 the turn and its unapplied proposal live in the app-level
         FlowCopilotProvider, so reopening the panel finds them again. */}
     {copilotOpen && (isDraft || (isTeamScope && !imported)) && (
       <FlowCopilotPanel
         mode={isDraft ? 'draft' : 'team'}
         scope={scope}
-        bundle={draftBundle}
+        bundle={isDraft ? draftBundle : liveCopilot?.bundle}
         autoFocus={autoOpenCopilot}
         onPreview={setProposal}
         onApplyBundle={applyCopilotBundle}
-        onPersistHistory={persistCopilotHistory}
+        onPersistHistory={isDraft ? persistCopilotHistory : persistLiveCopilotHistory}
         onEditAsDraft={() => editAsDraft(true)}
+        canEdit={liveCopilot ? liveCopilot.canEdit : null}
+        history={liveCopilot ? liveCopilot.history : undefined}
+        live={isDraft ? undefined : liveCopilotTransport}
         onClose={() => { setCopilotOpen(false); setProposal(null); }}
         actionsRef={copilotActionsRef}
       />
@@ -1271,8 +1377,11 @@ export function ProcessGraphPanel({ scope, onNavigate, onDraftsChanged, pendingI
   );
 }
 
-function AddRoleDialog({ onClose, onCreate }) {
+function AddRoleDialog({ live = false, onClose, onCreate }) {
   const [displayName, setDisplayName] = useState('');
+  // #2558: live team only — provision now, or create a stub (default) that is
+  // materialized later from Agent Chat. A draft role has nothing to provision.
+  const [materializeNow, setMaterializeNow] = useState(ADD_ROLE_MATERIALIZE_DEFAULT);
   const [systemPrompt, setSystemPrompt] = useState('');
   const [notes, setNotes] = useState('');
   const [busy, setBusy] = useState(false);
@@ -1351,9 +1460,10 @@ function AddRoleDialog({ onClose, onCreate }) {
     setBusy(true);
     setSubmitError(null);
     try {
+      const materialize = live ? { materializeNow } : {};
       await onCreate(mode === 'template'
-        ? { displayName: displayName.trim(), templateId: selectedTemplateId, template: fullTemplate }
-        : { displayName: displayName.trim(), systemPrompt });
+        ? { displayName: displayName.trim(), templateId: selectedTemplateId, template: fullTemplate, ...materialize }
+        : { displayName: displayName.trim(), systemPrompt, ...materialize });
     }
     catch (e) { setSubmitError(e.message || 'Failed to add agent'); }
     finally { setBusy(false); }
@@ -1503,6 +1613,19 @@ function AddRoleDialog({ onClose, onCreate }) {
           </label>
         )}
 
+        {/* #2558: same checkbox + hint as the Agent Chat rail's "Add member"
+            dialog, but defaulting off. Applies to both tabs. */}
+        {live && (
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--eb-space-2)',
+            fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', lineHeight: 1.4, cursor: 'pointer' }}>
+            <input type="checkbox" checked={materializeNow} disabled={busy}
+              onChange={e => setMaterializeNow(e.target.checked)} style={{ marginTop: 3 }} />
+            <span>
+              <strong style={{ color: 'var(--eb-text-primary)' }}>{ADD_ROLE_MATERIALIZE_LABEL}</strong> — {ADD_ROLE_MATERIALIZE_HINT}
+            </span>
+          </label>
+        )}
+
         {submitError && (
           <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-status-error, #d33)' }}>{submitError}</div>
         )}
@@ -1525,7 +1648,7 @@ function AddRoleDialog({ onClose, onCreate }) {
             cursor: addDisabled ? 'not-allowed' : 'pointer', opacity: addDisabled ? 0.6 : 1,
           }}>
             {busy && <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />}
-            {busy ? 'Adding…' : 'Add agent'}
+            {addRoleSubmitLabel({ busy, materializeNow, live })}
           </button>
         </div>
       </div>

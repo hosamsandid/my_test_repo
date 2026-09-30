@@ -19,7 +19,6 @@ import {
   providerScopeLabel, providerScopeShowsDetail,
 } from './provider-ownership-view';
 import { useAuth } from '../auth/AuthContext';
-import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import {
   teamsById,
   canReassignCredentialClient, adminTeamIdsOf,
@@ -292,15 +291,13 @@ function EndpointForm({ endpoint, onSave, onCancel, saving, error,
   const [oauthFlowId, setOauthFlowId] = useState(null);
   const [wizardOpen, setWizardOpen] = useState(false);
 
-  // The single-user subscription escape hatch (#2360, concept §9), behind
-  // AEE_RESOURCE_ACCESS_V2: an oauth (subscription) provider may be published
+  // The single-user subscription escape hatch (#2360, concept §9): an oauth (subscription) provider may be published
   // GLOBAL — runtime-only, agent runtime everywhere — iff the operator has
   // confirmed single-user use (complianceAck). The backend (PR2 #2353) already
   // accepts it; this unlocks the toggle the form disabled for every oauth
   // provider before. An existing oauth provider carries its recorded ack, so it
   // qualifies without re-confirming (mirrors the server PUT rule).
-  const resourceAccessV2 = useResourceAccessV2();
-  const oauthGlobalOk = resourceAccessV2 && isOauth
+  const oauthGlobalOk = isOauth
     && (complianceOk || (wasOauth && endpoint?.complianceAck?.singleUser === true));
 
   // The Ownership radio-card options + the selectable team set for this caller
@@ -1079,17 +1076,15 @@ export default function ModelRegistry() {
   const { data: teamsData } = useApi('/api/admin/teams');
   const { data: agentsData } = useApi('/api/agents');
   const { user } = useAuth();
-  const resourceAccessV2 = useResourceAccessV2();
   const humanTeams = Array.isArray(teamsData) ? teamsData : [];
-  // #2360 re-key: under the flag, "Team" means an AGENT TEAM (a role:'team'
-  // agent), not the vestigial human-team collection — so the Ownership dropdown
-  // lists agent teams. The table's name lookup merges both spaces so a legacy
-  // 'default'-stamped provider still resolves to a readable name. Off the flag
-  // this is byte-identical to before (teams = humanTeams).
+  // #2360 re-key: "Team" means an AGENT TEAM (a role:'team' agent), not the
+  // vestigial human-team collection — so the Ownership dropdown lists agent
+  // teams. The table's name lookup merges both spaces so a legacy
+  // 'default'-stamped provider still resolves to a readable name.
   const agentTeams = (Array.isArray(agentsData) ? agentsData : [])
     .filter(a => a && a.role === 'team')
     .map(a => ({ id: a.id, name: a.displayName || a.id }));
-  const teams = resourceAccessV2 ? agentTeams : humanTeams;
+  const teams = agentTeams;
   const names = { ...teamsById(humanTeams), ...teamsById(agentTeams) };
   const isSysAdmin = !!user?.admin;
   const adminTeamIds = adminTeamIdsOf(user);
@@ -1175,7 +1170,7 @@ export default function ModelRegistry() {
       // #2360 follow-up: the "Ownership" column mirrors the edit dialog's one-axis
       // taxonomy (Personal / Team(s) / Global) via `providerScopeLabel`, which is
       // built on the SAME `providerOwnershipFromRecord` the dialog opens with — so
-      // the row and the dialog can never disagree (the old `credentialScopeLabel`
+      // the row and the dialog can never disagree (the old credential scope label
       // showed a stale "System" for a team-assigned provider).
       key: '_scope', label: 'Ownership', sortable: false,
       // #2442: `_scope` is synthetic (no `row['_scope']`), so filter on the text
@@ -1347,7 +1342,7 @@ export default function ModelRegistry() {
         );
         // A Team Admin may see a system provider assigned to their team but not
         // manage it (#800) — show a lock, no edit/delete, matching the API gate.
-        if (!canManageProviderClient(row, caller, resourceAccessV2)) return (
+        if (!canManageProviderClient(row, caller)) return (
           <div style={{ display: 'flex', justifyContent: 'flex-end', color: 'var(--eb-text-muted)' }} title="System-scoped provider — only a System Admin can manage it. You may use it.">
             <Lock size={13} />
           </div>
@@ -1542,7 +1537,7 @@ export default function ModelRegistry() {
           // The .env row opens its read-only panel; a manageable provider opens
           // the editor. A visible-but-unmanageable system provider (Team Admin)
           // is not clickable — its lock already explains why (#800).
-          if (!row.readOnly && !canManageProviderClient(row, caller, resourceAccessV2)) return;
+          if (!row.readOnly && !canManageProviderClient(row, caller)) return;
           setEditing(row); setFormError(null);
         }}
       />

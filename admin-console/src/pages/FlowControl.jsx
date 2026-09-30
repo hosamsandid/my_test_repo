@@ -1,33 +1,37 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { AlertTriangle, RefreshCw, ExternalLink, CheckCircle2, Info, UserRound, Pause, Play, Waves, Zap, Clock, PauseCircle } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import {
+  AlertTriangle, RefreshCw, ExternalLink, Info, Pause, Play, Waves, Zap, Power, Columns, UserRound,
+} from 'lucide-react';
 import { useApi, apiCall } from '../hooks/useApi';
+import { useAuth } from '../auth/AuthContext';
 import PageHelpButton from '../components/PageHelpButton';
-import WhenCell from '../components/WhenCell';
+import Modal from '../components/Modal';
 import { usePageActions } from '../context/PageActionsContext';
 import {
-  groupIntoLanes, epicRollups, rollupSummary, boardSummary, poolControlRows, heldRows, poolLaneRoleRows,
+  boardView, updatedAgo, AUTO_REFRESH_MS, readAutoRefresh, writeAutoRefresh, configFormRows, configFromForm,
 } from './process/flow-control-view';
 import { FLOW_CONTROL_HELP_SECTIONS } from './flow-control-help-sections';
 
-// The Flow Control board (#2116, concept `docs/flow-control-concept.md` §4.4).
+// The Flow Control board (#2573, concept `docs/flow-control-concept.md`
+// Amendment 3): who is working on what, where a person is needed, and how far
+// each work item has come through the team's own flow.
 //
-// Swimlane by lifecycle stage over the #2115 ticket ledger: which ticket is
-// where, in what state, owned by whom. Every value on a card is a field the
-// reconciler DERIVED from GitHub evidence — this page never looks at a raw
-// label, which is what makes a false `Done` impossible (AC2, proven in
-// `process/flow-control-view.test.js` rather than claimed here).
+// One read — `GET /api/teams/:teamId/flow-board` — carries everything; the
+// stages, rows and human-block reasons are decided server-side by
+// `orchestrator/flow-board.js` and turned into strings by the pure
+// `flow-control-view.js`. The page itself decides nothing.
 //
-// The ledger itself stays read-only — no repair button touches it directly.
-// #2250 Phase 5 adds one *adjacent* mutation surface, the pool-control panel
-// below the board: pause/resume/drain a pooled role, and force-dispatch a
-// held ticket past the WIP limit. Both act on the admission lane / pool
-// runtime state, never on a ticket's derived state — the ledger's own honesty
-// guarantee (§4.1) is untouched.
+// The only writes are the pool controls (pause/drain/switch on, force
+// dispatch) and the optional per-team column configuration.
 
-const PAGE_DESCRIPTION = 'Which ticket is where, in what state, and who owns it — derived from GitHub, never from labels.';
+const PAGE_DESCRIPTION = 'Who is working on what, where you are needed, and how far each item has come.';
+
+const ACTION_ICONS = { pause: Pause, drain: Waves, resume: Play, switchOn: Power };
 
 export default function FlowControl() {
   const { data: agents } = useApi('/api/agents');
+  const { user } = useAuth();
+  const username = user?.username;
   const teams = useMemo(
     () => (Array.isArray(agents) ? agents.filter((a) => a.role === 'team') : []),
     [agents],
@@ -35,102 +39,121 @@ export default function FlowControl() {
 
   const [teamId, setTeamId] = useState('');
   const [state, setState] = useState({ loading: false, error: null, data: null });
-  const [poolState, setPoolState] = useState({ loading: false, error: null, data: null });
-  const [poolActionError, setPoolActionError] = useState(null);
-  const [laneState, setLaneState] = useState({ loading: false, error: null, data: null });
+  const [actionError, setActionError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(() => readAutoRefresh(username));
+  const [now, setNow] = useState(() => Date.now());
+  const [columnsOpen, setColumnsOpen] = useState(false);
+  const loadSeq = useRef(0);
 
   // Default to the first team once the list arrives; never override a choice.
   useEffect(() => {
     if (!teamId && teams.length > 0) setTeamId(teams[0].id);
   }, [teams, teamId]);
 
-  const load = useCallback(async () => {
+  // The preference is per user, and the user record can arrive after mount.
+  useEffect(() => { setAutoRefresh(readAutoRefresh(username)); }, [username]);
+
+  // `refresh` forces a new GitHub sweep; the timer reads the shared snapshot.
+  // A stale response (team switched meanwhile) is dropped by sequence number.
+  const load = useCallback(async (refresh = false) => {
     if (!teamId) return;
-    setState((s) => ({ ...s, loading: true, error: null }));
+    const seq = ++loadSeq.current;
+    setState((s) => ({ ...s, loading: true }));
     try {
-      const data = await apiCall('GET', `/api/teams/${encodeURIComponent(teamId)}/tickets`);
-      setState({ loading: false, error: null, data });
+      const data = await apiCall('GET', `/api/teams/${encodeURIComponent(teamId)}/flow-board${refresh ? '?refresh=1' : ''}`);
+      if (seq === loadSeq.current) setState({ loading: false, error: null, data });
     } catch (err) {
-      setState({ loading: false, error: err.message || 'Failed to load', data: null });
+      // Keep the last snapshot on screen; the error banner says it is old.
+      if (seq === loadSeq.current) setState((s) => ({ loading: false, error: err.message || 'Failed to load', data: s.data }));
     }
   }, [teamId]);
 
-  const loadPoolControl = useCallback(async () => {
-    if (!teamId) return;
-    setPoolState((s) => ({ ...s, loading: true, error: null }));
-    try {
-      const data = await apiCall('GET', `/api/teams/${encodeURIComponent(teamId)}/pool-control`);
-      setPoolState({ loading: false, error: null, data });
-    } catch (err) {
-      setPoolState({ loading: false, error: err.message || 'Failed to load', data: null });
-    }
-  }, [teamId]);
+  useEffect(() => {
+    setState({ loading: false, error: null, data: null });
+    load();
+  }, [load]);
 
-  const loadLanes = useCallback(async () => {
-    if (!teamId) return;
-    setLaneState((s) => ({ ...s, loading: true, error: null }));
-    try {
-      const data = await apiCall('GET', `/api/teams/${encodeURIComponent(teamId)}/pool-lanes`);
-      setLaneState({ loading: false, error: null, data });
-    } catch (err) {
-      setLaneState({ loading: false, error: err.message || 'Failed to load', data: null });
-    }
-  }, [teamId]);
+  useEffect(() => {
+    if (!autoRefresh || !teamId) return undefined;
+    const t = setInterval(() => {
+      if (typeof document === 'undefined' || !document.hidden) load();
+    }, AUTO_REFRESH_MS);
+    return () => clearInterval(t);
+  }, [autoRefresh, teamId, load]);
 
-  useEffect(() => { load(); loadPoolControl(); loadLanes(); }, [load, loadPoolControl, loadLanes]);
+  // Ticks the "updated … ago" and the durations between refreshes.
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(t);
+  }, []);
 
-  // Pause/resume/drain: fire the write, then refresh both panels — a role's
-  // state change can immediately change which held entries are meaningful,
-  // and the ticket ledger is cheap enough to just re-sweep rather than patch
-  // the previous snapshot in place.
-  const setRoleState = useCallback(async (roleId, nextState) => {
-    setPoolActionError(null);
-    try {
-      await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/pool-control/${encodeURIComponent(roleId)}`, { state: nextState });
-      await Promise.all([loadPoolControl(), load(), loadLanes()]);
-    } catch (err) {
-      setPoolActionError(err.message || 'Failed to update');
-    }
-  }, [teamId, loadPoolControl, load, loadLanes]);
+  const toggleAutoRefresh = useCallback(() => {
+    setAutoRefresh((on) => {
+      writeAutoRefresh(username, !on);
+      return !on;
+    });
+  }, [username]);
 
-  const forceDispatch = useCallback(async (id) => {
-    setPoolActionError(null);
+  const mutate = useCallback(async (fn, failText) => {
+    setActionError(null);
+    setBusy(true);
     try {
-      await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/force-dispatch`, { id });
-      await Promise.all([loadPoolControl(), load(), loadLanes()]);
+      await fn();
+      await load(true);
     } catch (err) {
-      setPoolActionError(err.message || 'Failed to force-dispatch');
+      setActionError(err.message || failText);
+    } finally {
+      setBusy(false);
     }
-  }, [teamId, loadPoolControl, load, loadLanes]);
+  }, [load]);
+
+  const setRoleState = useCallback((roleId, nextState) => mutate(
+    () => apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/pool-control/${encodeURIComponent(roleId)}`, { state: nextState }),
+    'Failed to update',
+  ), [teamId, mutate]);
+
+  const forceDispatch = useCallback((id) => mutate(
+    () => apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/force-dispatch`, { id }),
+    'Failed to force-dispatch',
+  ), [teamId, mutate]);
+
+  const saveColumns = useCallback((config) => mutate(
+    async () => {
+      await apiCall('POST', `/api/teams/${encodeURIComponent(teamId)}/flow-board-config`, { config });
+      setColumnsOpen(false);
+    },
+    'Failed to save the columns',
+  ), [teamId, mutate]);
+
+  const view = useMemo(() => boardView(state.data, now), [state.data, now]);
 
   // Hooks must run before any early return, so the portal is built here and
   // simply not mounted while the page renders its empty state.
-  const refreshAll = useCallback(() => { load(); loadPoolControl(); loadLanes(); }, [load, loadPoolControl, loadLanes]);
-
   const headerAction = usePageActions(
-    <button
-      onClick={refreshAll}
-      disabled={state.loading || !teamId}
-      title="Re-run the reconciler sweep"
-      style={{
-        display: 'inline-flex', alignItems: 'center', gap: 6, background: 'none',
-        border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-        padding: '4px 10px', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
-        color: 'var(--eb-text-primary)', cursor: state.loading || !teamId ? 'default' : 'pointer',
-      }}
-    >
-      <RefreshCw size={13} style={state.loading ? { animation: 'spin 1s linear infinite' } : undefined} />
-      Refresh
-    </button>,
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+      {state.data && (
+        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+          {updatedAgo(state.data.generatedAt, now)}
+        </span>
+      )}
+      <label
+        title="Refresh the board every 30 seconds"
+        style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', cursor: 'pointer' }}
+      >
+        <input type="checkbox" checked={autoRefresh} onChange={toggleAutoRefresh} />
+        Auto-refresh
+      </label>
+      <HeaderButton
+        icon={RefreshCw}
+        label="Refresh"
+        title="Fetch a new snapshot from GitHub now"
+        spin={state.loading}
+        disabled={state.loading || !teamId}
+        onClick={() => load(true)}
+      />
+    </div>,
   );
-
-  const data = state.data;
-  const summary = boardSummary(data);
-  const lanes = useMemo(() => groupIntoLanes(data && data.tickets), [data]);
-  const rollups = useMemo(() => epicRollups(data && data.tickets), [data]);
-  const poolRoles = useMemo(() => poolControlRows(poolState.data), [poolState.data]);
-  const held = useMemo(() => heldRows(poolState.data), [poolState.data]);
-  const laneRoles = useMemo(() => poolLaneRoleRows(laneState.data), [laneState.data]);
 
   return (
     <>
@@ -153,66 +176,67 @@ export default function FlowControl() {
 
         {teams.length === 0 ? (
           <Banner icon={Info}>
-            No Agent Team exists yet. The board reads one team&apos;s ticket ledger, so create a team
+            No Agent Team exists yet. The board shows one team&apos;s work, so create a team
             first — the Flows page is where a team&apos;s process is authored.
           </Banner>
         ) : (
           <>
-            <TeamPicker teams={teams} value={teamId} onChange={setTeamId} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)' }}>
+              <TeamPicker teams={teams} value={teamId} onChange={setTeamId} />
+              {view.canManage && (
+                <span style={{ marginLeft: 'auto' }}>
+                  <HeaderButton icon={Columns} label="Columns" title="Rename, merge or hide stages" onClick={() => setColumnsOpen(true)} />
+                </span>
+              )}
+            </div>
 
-            {data && data.maintenance && (
-              <Banner icon={Info}>Maintenance mode is active — the reconciler sweep is paused.</Banner>
+            {view.maintenance && (
+              <Banner icon={Info}>Maintenance mode is active — the board is paused.</Banner>
             )}
-            {summary.noRepos && (
+            {view.noRepos && (
               <Banner icon={Info}>
-                No GitHub repository is bound to this team&apos;s environment, so there is nothing to reconcile.
+                No GitHub repository is bound to this team&apos;s environment, so there is no work to show.
               </Banner>
             )}
-            {summary.errors.length > 0 && (
-              <Banner icon={AlertTriangle}>
-                Partial sweep — {summary.errors.length} error(s): {summary.errors.join('; ')}
+            {view.warning && <Banner icon={AlertTriangle} tone="warn">{view.warning}</Banner>}
+            {view.partial.length > 0 && (
+              <Banner icon={AlertTriangle} tone="warn">Partly loaded — {view.partial.join('; ')}</Banner>
+            )}
+            {state.error && (
+              <Banner icon={AlertTriangle} tone="error">
+                {state.error}{state.data ? ` — showing the state from ${updatedAgo(state.data.generatedAt, now).replace('Updated ', '')}.` : ''}
               </Banner>
             )}
-            {state.error && <Banner icon={AlertTriangle} tone="error">{state.error}</Banner>}
+            {actionError && <Banner icon={AlertTriangle} tone="error">{actionError}</Banner>}
 
-            {state.loading && !data && (
-              <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Reconciling…</p>
+            {state.loading && !state.data && (
+              <p style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>Loading…</p>
             )}
 
-            {data && !state.error && (
+            {state.data && !view.maintenance && (
               <>
-                <SummaryRow summary={summary} />
-                {poolActionError && <Banner icon={AlertTriangle} tone="error">{poolActionError}</Banner>}
-                {poolRoles.length > 0 && (
-                  <PoolControlPanel roles={poolRoles} onSetState={setRoleState} busy={poolState.loading} />
-                )}
-                {held.length > 0 && (
-                  <HeldPanel held={held} onForceDispatch={forceDispatch} busy={poolState.loading} />
-                )}
-                {laneRoles.some((r) => r.lanes.length > 0) && (
-                  <PoolLanesPanel roles={laneRoles} />
-                )}
-                {rollups.length > 0 && <EpicRollups rollups={rollups} />}
-                {summary.total === 0 && !data.maintenance && !summary.noRepos ? (
-                  <Banner icon={CheckCircle2} tone="ok">
-                    No open work items — nothing is in flight for this team.
-                  </Banner>
-                ) : (
-                  <Board lanes={lanes} />
-                )}
-                <p style={{ margin: 0, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-tertiary, var(--eb-text-secondary))' }}>
-                  Swept {summary.swept ?? 0} open item(s) · <WhenCell iso={summary.generatedAt} />
-                </p>
+                <WorkingNow view={view} busy={busy} onSetState={setRoleState} onForceDispatch={forceDispatch} />
+                {view.needsYou && <NeedsYou items={view.needsYou} />}
+                <InProgress view={view} />
               </>
             )}
           </>
         )}
       </div>
+      {columnsOpen && (
+        <ColumnsDialog
+          roles={view.roles}
+          config={state.data && state.data.config}
+          busy={busy}
+          onClose={() => setColumnsOpen(false)}
+          onSave={saveColumns}
+        />
+      )}
     </>
   );
 }
 
-/* ── team picker ───────────────────────────────────────────────────── */
+/* ── shared bits ───────────────────────────────────────────────────── */
 
 function TeamPicker({ teams, value, onChange }) {
   return (
@@ -233,140 +257,32 @@ function TeamPicker({ teams, value, onChange }) {
   );
 }
 
-/* ── header counts ─────────────────────────────────────────────────── */
-
-function SummaryRow({ summary }) {
-  const chips = [
-    { label: 'in flight', value: summary.total },
-    { label: 'blocked', value: summary.blocked, warn: summary.blocked > 0 },
-    { label: 'need a human', value: summary.needsHuman },
-    { label: 'done', value: summary.done },
-  ];
-  return (
-    <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
-      {chips.map((c) => (
-        <span
-          key={c.label}
-          style={{
-            fontSize: 'var(--eb-text-xs)', padding: '3px 8px', borderRadius: 'var(--eb-radius-sm)',
-            background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
-            color: c.warn ? 'var(--eb-status-warning, #d97706)' : 'var(--eb-text-secondary)',
-          }}
-        >
-          <strong style={{ color: 'var(--eb-text-primary)' }}>{c.value}</strong> {c.label}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-/* ── cross-lane epic roll-up ───────────────────────────────────────── */
-
-function EpicRollups({ rollups }) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-        <h2 style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 600 }}>
-          Epics
-        </h2>
-        <PageHelpButton
-          label="How the roll-up counts"
-          size={13}
-          section={FLOW_CONTROL_HELP_SECTIONS.epics}
-          style={{ padding: 0, flexShrink: 0 }}
-        />
-      </div>
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap' }}>
-        {rollups.map((r) => (
-          <span
-            key={r.epicId}
-            style={{
-              fontSize: 'var(--eb-text-xs)', padding: '4px 10px', borderRadius: 'var(--eb-radius-md)',
-              background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
-              color: 'var(--eb-text-secondary)',
-            }}
-          >
-            <strong style={{ color: 'var(--eb-text-primary)' }}>Epic #{r.epicId}</strong>: {rollupSummary(r)}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/* ── pool controls (#2250 Phase 5) ────────────────────────────────────── */
-
-// One row per pooled role: current pause/drain state + its live instance
-// count vs. `maxInstances`, and the button that changes it. A role already
-// `running` gets Pause + Drain; a paused/draining one gets Resume only —
-// there is deliberately no direct paused↔draining swap (resume, then pick
-// the other one, keeps the state machine to three states and two edges per
-// state instead of a matrix).
-function PoolControlPanel({ roles, onSetState, busy }) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-        <h2 style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 600 }}>
-          Pooled roles
-        </h2>
-        <PageHelpButton
-          label="What pause / drain / force dispatch do"
-          size={13}
-          section={FLOW_CONTROL_HELP_SECTIONS.poolControls}
-          style={{ padding: 0, flexShrink: 0 }}
-        />
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-        {roles.map((r) => (
-          <div
-            key={r.roleId}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
-              padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-bg-surface)',
-              border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-              fontSize: 'var(--eb-text-sm)',
-            }}
-          >
-            <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>{r.displayName}</span>
-            <span style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' }}>
-              {r.liveInstanceCount} running{r.maxInstances != null ? ` / up to ${r.maxInstances}` : ''}
-            </span>
-            <PoolStateBadge state={r.state} />
-            <div style={{ display: 'flex', gap: 'var(--eb-space-2)', marginLeft: 'auto' }}>
-              {r.state === 'running' ? (
-                <>
-                  <PoolButton icon={Pause} label="Pause" onClick={() => onSetState(r.roleId, 'paused')} disabled={busy} />
-                  <PoolButton icon={Waves} label="Drain" onClick={() => onSetState(r.roleId, 'draining')} disabled={busy} />
-                </>
-              ) : (
-                <PoolButton icon={Play} label="Resume" onClick={() => onSetState(r.roleId, 'running')} disabled={busy} />
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function PoolStateBadge({ state }) {
-  if (state === 'running') return null;
-  return (
-    <span style={{
-      fontSize: 'var(--eb-text-xs)', padding: '2px 8px', borderRadius: 'var(--eb-radius-sm)',
-      border: '1px solid var(--eb-status-warning, #d97706)', color: 'var(--eb-status-warning, #d97706)',
-    }}>
-      {state === 'paused' ? 'Paused' : 'Draining'}
-    </span>
-  );
-}
-
-function PoolButton({ icon: Icon, label, onClick, disabled }) {
+function HeaderButton({ icon: Icon, label, title, onClick, disabled, spin }) {
   return (
     <button
       onClick={onClick}
       disabled={disabled}
-      title={label}
+      title={title}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 6, background: 'none',
+        border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+        padding: '4px 10px', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+        color: 'var(--eb-text-primary)', cursor: disabled ? 'default' : 'pointer',
+      }}
+    >
+      <Icon size={13} style={spin ? { animation: 'spin 1s linear infinite' } : undefined} />
+      {label}
+    </button>
+  );
+}
+
+function SmallButton({ icon: Icon, label, title, onClick, disabled }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      aria-label={title}
       style={{
         display: 'inline-flex', alignItems: 'center', gap: 4, background: 'none',
         border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-sm)',
@@ -380,211 +296,28 @@ function PoolButton({ icon: Icon, label, onClick, disabled }) {
   );
 }
 
-// A held ticket is waiting on the team's `wipLimit`, not on anything wrong
-// with it — "Force dispatch" is the one place this board mutates a DISPATCH
-// (never the ledger's own derived state). Oldest-held first (`heldRows`).
-function HeldPanel({ held, onForceDispatch, busy }) {
+function AreaHeading({ children, section, helpLabel }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
       <h2 style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 600 }}>
-        Held on the WIP limit
+        {children}
       </h2>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-        {held.map((h) => (
-          <div
-            key={h.id}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
-              padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-bg-surface)',
-              border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-              fontSize: 'var(--eb-text-sm)',
-            }}
-          >
-            <span style={{ fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-primary)' }}>
-              {h.ticket || 'unknown ticket'}
-            </span>
-            {h.agentId && (
-              <code style={{ fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
-                {h.agentId}
-              </code>
-            )}
-            <span style={{ marginLeft: 'auto' }}>
-              <PoolButton icon={Zap} label="Force dispatch" onClick={() => onForceDispatch(h.id)} disabled={busy} />
-            </span>
-          </div>
-        ))}
-      </div>
+      <PageHelpButton label={helpLabel} size={13} section={section} style={{ padding: 0, flexShrink: 0 }} />
     </div>
   );
 }
 
-/* ── pool instance lanes (#2273) ──────────────────────────────────────── */
-
-// The read-only "Live surface" (concept Amendment 2 A2.2): per pooled role,
-// its live instances as lanes. Read-only by design — pause/drain/force-
-// dispatch already live in `PoolControlPanel`/`HeldPanel` above; this panel
-// never issues a mutation, only renders what those two (plus the ticket
-// ledger) already imply.
-function PoolLanesPanel({ roles }) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)' }}>
-        <h2 style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)', fontWeight: 600 }}>
-          Pool instance lanes
-        </h2>
-        <PageHelpButton
-          label="What running / held / timed-out mean"
-          size={13}
-          section={FLOW_CONTROL_HELP_SECTIONS.poolLanes}
-          style={{ padding: 0, flexShrink: 0 }}
-        />
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
-        {roles.filter((r) => r.lanes.length > 0).map((r) => (
-          <div key={r.roleId} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
-              {r.displayName}{r.maxInstances != null ? ` · up to ${r.maxInstances}` : ''}
-            </span>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
-              {r.lanes.map((l) => <PoolLaneRow key={l.ticketId} lane={l} />)}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-const LANE_STATUS_PRESENTATION = {
-  running: { icon: Play, label: 'Running', color: 'var(--eb-status-success, #16a34a)' },
-  'held-same-epic': { icon: PauseCircle, label: 'Held', color: 'var(--eb-status-warning, #d97706)' },
-  'timed-out': { icon: Clock, label: 'Timed out', color: 'var(--eb-status-error, #dc2626)' },
+const lineStyle = {
+  display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
+  padding: 'var(--eb-space-2) var(--eb-space-3)', background: 'var(--eb-bg-surface)',
+  border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
+  fontSize: 'var(--eb-text-sm)',
 };
 
-function PoolLaneRow({ lane }) {
-  const presentation = LANE_STATUS_PRESENTATION[lane.status] || LANE_STATUS_PRESENTATION.running;
-  const Icon = presentation.icon;
-  return (
-    <div
-      style={{
-        display: 'flex', alignItems: 'center', gap: 'var(--eb-space-3)',
-        padding: 'var(--eb-space-1) var(--eb-space-3)', background: 'var(--eb-bg-surface)',
-        border: '1px solid var(--eb-border-default)', borderRadius: 'var(--eb-radius-md)',
-        fontSize: 'var(--eb-text-sm)',
-      }}
-    >
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: presentation.color }}>
-        <Icon size={12} />
-        {presentation.label}
-      </span>
-      <code style={{ fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-primary)' }}>{lane.ticketId}</code>
-      {lane.status === 'held-same-epic' && lane.sameEpicAs && (
-        <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
-          same epic as <code style={{ fontFamily: 'var(--eb-font-mono)' }}>{lane.sameEpicAs}</code>
-        </span>
-      )}
-      {lane.instanceId && (
-        <code style={{ marginLeft: 'auto', fontFamily: 'var(--eb-font-mono)', fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
-          {lane.instanceId}
-        </code>
-      )}
-    </div>
-  );
-}
+const mutedStyle = { color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)' };
 
-/* ── the board ─────────────────────────────────────────────────────── */
-
-// One column per lifecycle stage, horizontally scrollable. Empty columns are
-// kept on purpose: where work is NOT is as informative as where it is, and it
-// is what makes the board a board rather than a filtered list.
-function Board({ lanes }) {
-  return (
-    <div style={{ display: 'flex', gap: 'var(--eb-space-3)', overflowX: 'auto', paddingBottom: 'var(--eb-space-2)' }}>
-      {lanes.map((lane) => (
-        <section
-          key={lane.state}
-          style={{
-            flex: '0 0 260px', display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
-            background: 'var(--eb-bg-surface)', border: '1px solid var(--eb-border-default)',
-            borderRadius: 'var(--eb-radius-md)', padding: 'var(--eb-space-3)',
-          }}
-        >
-          <header style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--eb-space-2)' }}>
-            <h3 style={{ margin: 0, fontSize: 'var(--eb-text-sm)', fontWeight: 600, color: 'var(--eb-text-primary)' }}>
-              {lane.label}
-            </h3>
-            <span style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
-              {lane.count}
-              {lane.blocked > 0 && <> · <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>{lane.blocked} blocked</span></>}
-            </span>
-            {lane.state === 'backlog' && (
-              <PageHelpButton
-                label="What the stages mean"
-                size={12}
-                section={FLOW_CONTROL_HELP_SECTIONS.states}
-                style={{ padding: 0, flexShrink: 0, marginLeft: 'auto' }}
-              />
-            )}
-          </header>
-          {lane.count === 0
-            ? <p style={{ margin: 0, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>—</p>
-            : lane.tickets.map((c) => <TicketCard key={c.ticketId} card={c} />)}
-        </section>
-      ))}
-    </div>
-  );
-}
-
-function TicketCard({ card }) {
-  return (
-    <article
-      style={{
-        background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
-        borderLeft: `3px solid ${card.blocker ? card.color : 'var(--eb-border-default)'}`,
-        borderRadius: 'var(--eb-radius-sm)', padding: 'var(--eb-space-2)',
-        display: 'flex', flexDirection: 'column', gap: 4,
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, fontSize: 'var(--eb-text-xs)' }}>
-        <span style={{ fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-secondary)' }}>{card.ref}</span>
-        {card.age && <span style={{ marginLeft: 'auto', color: 'var(--eb-text-secondary)' }} title="Age in this state">{card.age}</span>}
-      </div>
-
-      <div style={{ fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-primary)', lineHeight: 1.35 }}>
-        {card.title}
-      </div>
-
-      {card.blocker && (
-        <div title={card.reasonDetail || card.blockerBlurb || ''} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{
-            fontSize: 'var(--eb-text-xs)', padding: '1px 6px', borderRadius: 'var(--eb-radius-sm)',
-            border: `1px solid ${card.color}`, color: card.color,
-          }}>
-            {card.blockerLabel}
-          </span>
-          {card.needsHuman && (
-            <span title="Waiting on a person" style={{ display: 'inline-flex', color: 'var(--eb-text-secondary)' }}>
-              <UserRound size={12} />
-            </span>
-          )}
-        </div>
-      )}
-
-      {card.owner && (
-        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }} title="Owning agent">
-          <code style={{ fontFamily: 'var(--eb-font-mono)' }}>{card.owner}</code>
-        </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 'var(--eb-space-2)', fontSize: 'var(--eb-text-xs)' }}>
-        {card.issueUrl && <DeepLink href={card.issueUrl}>issue</DeepLink>}
-        {card.prUrl && <DeepLink href={card.prUrl}>{card.prNumber != null ? `PR #${card.prNumber}` : 'PR'}</DeepLink>}
-      </div>
-    </article>
-  );
-}
-
-function DeepLink({ href, children }) {
+function Link({ href, children }) {
+  if (!href) return <span>{children}</span>;
   return (
     <a
       href={href}
@@ -597,13 +330,245 @@ function DeepLink({ href, children }) {
   );
 }
 
+/* ── area ①: working now ───────────────────────────────────────────── */
+
+function WorkingNow({ view, busy, onSetState, onForceDispatch }) {
+  const nothing = view.sessions.length === 0 && view.pools.length === 0 && view.held.length === 0;
+  return (
+    <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+      <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.working} helpLabel="What Working now shows">Working now</AreaHeading>
+      {nothing && <p style={{ margin: 0, ...mutedStyle }}>No agent is running.</p>}
+      {view.sessions.map((s) => (
+        <div key={s.id} style={lineStyle}>
+          <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>
+            {s.role}{s.instance && <span style={mutedStyle}> {s.instance}</span>}
+          </span>
+          <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{s.item}</span>
+          {s.title && <span style={{ color: 'var(--eb-text-primary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</span>}
+          <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Running for">{s.running}</span>
+        </div>
+      ))}
+      {view.pools.map((p) => (
+        <div key={p.key} style={lineStyle}>
+          <span style={{ color: 'var(--eb-text-primary)', fontWeight: 500 }}>{p.label}</span>
+          <span style={mutedStyle}>{p.occupancy}</span>
+          {p.stateText && (
+            <span style={{
+              fontSize: 'var(--eb-text-xs)', padding: '2px 8px', borderRadius: 'var(--eb-radius-sm)',
+              border: '1px solid var(--eb-status-warning, #d97706)', color: 'var(--eb-status-warning, #d97706)',
+            }}>
+              {p.stateText}
+            </span>
+          )}
+          <span style={{ display: 'flex', gap: 'var(--eb-space-2)', marginLeft: 'auto', alignItems: 'center' }}>
+            {p.actions.map((a) => (
+              <SmallButton
+                key={a.id}
+                icon={ACTION_ICONS[a.id]}
+                label={a.label}
+                title={a.tooltip}
+                disabled={busy}
+                onClick={() => onSetState(p.roleId, a.nextState)}
+              />
+            ))}
+            <PageHelpButton label="Pause, Drain and Switch on" size={12} section={FLOW_CONTROL_HELP_SECTIONS.poolControls} style={{ padding: 0 }} />
+          </span>
+        </div>
+      ))}
+      {view.held.map((h) => (
+        <div key={h.id} style={lineStyle}>
+          <span style={mutedStyle}>Held — work-in-progress limit full</span>
+          <span style={{ fontFamily: 'var(--eb-font-mono)', color: 'var(--eb-text-primary)' }}>{h.ticket || 'unknown item'}</span>
+          <span style={{ marginLeft: 'auto' }}>
+            <SmallButton
+              icon={Zap}
+              label="Force dispatch"
+              title="Start this one now, past the team's limit on work in progress. The limit itself stays as it is."
+              disabled={busy}
+              onClick={() => onForceDispatch(h.id)}
+            />
+          </span>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+/* ── area ②: needs you ─────────────────────────────────────────────── */
+
+function NeedsYou({ items }) {
+  return (
+    <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+      <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.needsYou} helpLabel="What to do about each reason">
+        Needs you ({items.length})
+      </AreaHeading>
+      {items.map((n) => (
+        <div key={n.id} style={{ ...lineStyle, borderLeft: '3px solid var(--eb-status-warning, #d97706)' }}>
+          <UserRound size={13} style={{ flexShrink: 0, color: 'var(--eb-text-secondary)' }} />
+          <span style={{ fontFamily: 'var(--eb-font-mono)', ...mutedStyle }}>{n.ref}</span>
+          <Link href={n.url}>{n.title}</Link>
+          <span style={{ color: 'var(--eb-status-warning, #d97706)' }}>{n.reason}</span>
+          <span style={{ marginLeft: 'auto', ...mutedStyle }} title="Waiting for">{n.waiting}</span>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+/* ── area ③: in progress ───────────────────────────────────────────── */
+
+function InProgress({ view }) {
+  return (
+    <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)' }}>
+      <AreaHeading section={FLOW_CONTROL_HELP_SECTIONS.states} helpLabel="Where the stages come from">
+        In progress
+      </AreaHeading>
+      {view.empty ? (
+        <p style={{ margin: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>{view.emptyText}</p>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
+            <thead>
+              <tr style={{ textAlign: 'left', ...mutedStyle }}>
+                <th style={cellStyle}>Work item</th>
+                <th style={cellStyle}>Progress</th>
+                <th style={cellStyle}>Stage</th>
+                <th style={cellStyle}>In stage</th>
+              </tr>
+            </thead>
+            <tbody>
+              {view.rows.map((r) => <BoardRow key={r.id} row={r} />)}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+const cellStyle = { padding: 'var(--eb-space-2) var(--eb-space-3)', borderBottom: '1px solid var(--eb-border-default)', verticalAlign: 'top' };
+
+function BoardRow({ row }) {
+  return (
+    <tr style={{ opacity: row.done ? 0.65 : 1 }}>
+      <td style={cellStyle}>
+        <div style={{ color: 'var(--eb-text-primary)', lineHeight: 1.35 }}>
+          <Link href={row.url}>{row.title}</Link>
+        </div>
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', flexWrap: 'wrap', ...mutedStyle }}>
+          {row.ref && <Link href={row.issueUrl}>{row.ref}</Link>}
+          {row.prs.map((p) => (
+            <span key={p.key} style={p.state !== 'open' ? { textDecoration: p.state === 'closed' ? 'line-through' : 'none' } : undefined}>
+              <Link href={p.url}>{p.label}{p.state === 'merged' ? ' (merged)' : ''}</Link>
+            </span>
+          ))}
+        </div>
+      </td>
+      <td style={cellStyle}><StageProgress steps={row.steps} blocked={row.blocked} /></td>
+      <td style={cellStyle}>
+        <div style={{ color: 'var(--eb-text-primary)' }}>{row.stageLabel}</div>
+        <div style={mutedStyle}>{row.statusText}</div>
+      </td>
+      <td style={{ ...cellStyle, whiteSpace: 'nowrap', ...mutedStyle }}>{row.done ? '' : row.inStage}</td>
+    </tr>
+  );
+}
+
+// One dot per stage; the current one is labelled on hover and highlighted.
+function StageProgress({ steps, blocked }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+      {steps.map((s) => {
+        const color = s.state === 'current'
+          ? (blocked ? 'var(--eb-status-warning, #d97706)' : 'var(--eb-accent-primary)')
+          : s.state === 'past' ? 'var(--eb-status-success, #16a34a)' : 'var(--eb-border-default)';
+        return (
+          <span
+            key={s.id}
+            title={s.label}
+            style={{
+              width: s.state === 'current' ? 12 : 8, height: s.state === 'current' ? 12 : 8,
+              borderRadius: '50%', background: color, flexShrink: 0,
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/* ── column configuration ──────────────────────────────────────────── */
+
+function ColumnsDialog({ roles, config, busy, onClose, onSave }) {
+  const [rows, setRows] = useState(() => configFormRows(roles, config));
+  const [retention, setRetention] = useState(() => String((config && config.doneRetentionHours) ?? 24));
+  const patch = (id, change) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...change } : r)));
+  const inputStyle = {
+    padding: '3px 6px', background: 'var(--eb-bg-elevated)', border: '1px solid var(--eb-border-default)',
+    borderRadius: 'var(--eb-radius-sm)', color: 'var(--eb-text-primary)', fontSize: 'var(--eb-text-sm)', fontFamily: 'inherit',
+  };
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title="Board columns"
+      maxWidth={640}
+      footer={(
+        <div style={{ display: 'flex', gap: 'var(--eb-space-2)', justifyContent: 'flex-end' }}>
+          <HeaderButton icon={RefreshCw} label="Reset to automatic" title="Forget every change and derive the stages again" disabled={busy} onClick={() => onSave(configFromForm([], 24))} />
+          <HeaderButton icon={Columns} label="Save" title="Save the columns for this team" disabled={busy} onClick={() => onSave(configFromForm(rows, retention))} />
+        </div>
+      )}
+    >
+      <p style={{ marginTop: 0, fontSize: 'var(--eb-text-sm)', color: 'var(--eb-text-secondary)' }}>
+        The stages come from the team&apos;s flow. Rename, merge or hide them here; Ready and Done are always shown.
+        <PageHelpButton label="Changing the columns" size={12} section={FLOW_CONTROL_HELP_SECTIONS.columns} style={{ padding: 0, marginLeft: 4 }} />
+      </p>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--eb-text-sm)' }}>
+        <thead>
+          <tr style={{ textAlign: 'left', ...mutedStyle }}>
+            <th style={cellStyle}>Role</th>
+            <th style={cellStyle}>Show as</th>
+            <th style={cellStyle}>Merge into</th>
+            <th style={cellStyle}>Hide</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.id}>
+              <td style={cellStyle}>{r.derivedLabel}</td>
+              <td style={cellStyle}>
+                <input style={inputStyle} value={r.label} placeholder={r.derivedLabel} onChange={(e) => patch(r.id, { label: e.target.value })} />
+              </td>
+              <td style={cellStyle}>
+                <select style={inputStyle} value={r.mergeInto} onChange={(e) => patch(r.id, { mergeInto: e.target.value })}>
+                  <option value="">—</option>
+                  {rows.filter((o) => o.id !== r.id).map((o) => <option key={o.id} value={o.id}>{o.derivedLabel}</option>)}
+                </select>
+              </td>
+              <td style={cellStyle}>
+                <input type="checkbox" checked={r.hidden} onChange={(e) => patch(r.id, { hidden: e.target.checked })} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-3)', fontSize: 'var(--eb-text-sm)' }}>
+        Keep finished items in Done for
+        <input style={{ ...inputStyle, width: 70 }} type="number" min="0" value={retention} onChange={(e) => setRetention(e.target.value)} />
+        hours
+      </label>
+    </Modal>
+  );
+}
+
 /* ── banner ────────────────────────────────────────────────────────── */
 
 function Banner({ icon: Icon, tone, children }) {
   const color = tone === 'error'
     ? 'var(--eb-status-error, #dc2626)'
-    : tone === 'ok'
-      ? 'var(--eb-status-success, #16a34a)'
+    : tone === 'warn'
+      ? 'var(--eb-status-warning, #d97706)'
       : 'var(--eb-text-secondary)';
   return (
     <div style={{

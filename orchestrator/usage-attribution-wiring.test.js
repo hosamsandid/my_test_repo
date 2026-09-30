@@ -99,6 +99,16 @@ const CHECKS = {
       && /try \{ endpointIndex = JSON\.parse\(fs\.readFileSync\(LLM_ENDPOINTS_INDEX, "utf8"\)\); \} catch \{ endpointIndex = null; \}/.test(body);
   },
 
+  // #2585: the pool-instance → main-agent link is stamped from the
+  // orchestrator's own config, unconditionally — an instance is reaped later, so
+  // ingest is the only point it is still known, and a body-supplied `poolOf`
+  // must not let an agent book its spend onto another agent's row.
+  'pool-of-is-stamped-unconditionally-from-config'(src) {
+    const body = enrichBody(src);
+    return /\n  out\.poolOf = cfg\.poolInstance && /.test(body)
+      && !/out\.poolOf == null/.test(body);
+  },
+
   // The enrichment must run BEFORE the append, or the store holds an
   // unattributed record and nothing ever revisits it.
   'ingest-enriches-before-appending'(src) {
@@ -148,6 +158,10 @@ const MUTATIONS = [
   ['unreadable-stores-degrade-instead-of-throwing',
     '  try { users = teamsStore.listUsers(); } catch { users = []; }',
     '  users = teamsStore.listUsers();'],
+  // A self-asserted `poolOf` in the body now survives.
+  ['pool-of-is-stamped-unconditionally-from-config',
+    '  out.poolOf = cfg.poolInstance && ',
+    '  if (out.poolOf == null) out.poolOf = cfg.poolInstance && '],
   // The record is appended raw; the enrichment is dropped.
   ['ingest-enriches-before-appending',
     'usageLog.record(enrichUsageRecord(id, rec));',

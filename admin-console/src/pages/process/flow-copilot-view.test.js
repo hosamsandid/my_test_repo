@@ -356,3 +356,19 @@ test('an error event without a code still classifies (pre-#2131 server)', async 
     return true;
   });
 });
+
+test('a live-team apply result survives persist, hydrate and the API projection (#2556)', () => {
+  const result = 'Partly applied: 1 change(s) applied, 1 failed.';
+  const persisted = toPersistedMessages([
+    { id: 1, role: 'assistant', summary: 'Add a tester', ok: true, status: 'partial', result, bundle: { x: 1 } },
+  ]);
+  assert.deepEqual(persisted, [{ role: 'assistant', summary: 'Add a tester', ok: true, status: 'partial', result }]);
+  let n = 0;
+  const hydrated = hydrateMessages({ messages: persisted }, () => ++n);
+  assert.equal(hydrated[0].result, result);
+  assert.equal(hydrated[0].status, 'partial');
+  const api = toApiMessages(hydrated);
+  assert.equal(api[0].content, `Add a tester\n\n[Apply result]\n${result}`);
+  // A draft card without a result is unchanged.
+  assert.equal(toApiMessages([{ role: 'assistant', summary: 's' }])[0].content, 's');
+});

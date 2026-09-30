@@ -235,6 +235,26 @@ test('planPoolDispatch: paused/draining refuses a NEW spawn but still reuses an 
   }
 });
 
+test('planPoolDispatch: off refuses even a reuse — nothing runs until switched on (#2573)', () => {
+  assert.deepEqual(
+    pool.planPoolDispatch({
+      teamId: 't', roleId: 'developer', pool: POOL, itemKey: 7, controlState: 'off',
+      existingInstanceIds: ['t-developer-i7'],
+    }),
+    { action: 'refuse', reason: 'off', instanceId: 't-developer-i7' },
+  );
+});
+
+test('normalizePoolControl keeps off; settleDrain turns a finished drain off (#2573)', () => {
+  const control = pool.normalizePoolControl({ developer: { state: 'off' } });
+  assert.equal(pool.poolControlState(control, 'developer'), 'off');
+  assert.equal(pool.settleDrain('draining', 0), 'off');
+  assert.equal(pool.settleDrain('draining', 2), 'draining');
+  assert.equal(pool.settleDrain('draining', NaN), 'draining');
+  assert.equal(pool.settleDrain('paused', 0), 'paused');
+  assert.equal(pool.settleDrain('running', 0), 'running');
+});
+
 test('planPoolDispatch: an omitted controlState defaults to running (back-compat)', () => {
   assert.deepEqual(
     pool.planPoolDispatch({ teamId: 't', roleId: 'developer', pool: POOL, itemKey: 7 }),
@@ -371,4 +391,34 @@ test('reworkRefFromPayload: an unsafe-looking head.ref is refused, not merely pa
     pool.reworkRefFromPayload({ pull_request: { head: { ref: '--upload-pack=x' } } }),
     null,
   );
+});
+
+// ─── isArchivableSessionPath (#2595 AC10) ────────────────────────────────────
+
+test('isArchivableSessionPath: the transcript and its rotations are archived', () => {
+  assert.equal(pool.isArchivableSessionPath('/s/sessions'), true);
+  assert.equal(pool.isArchivableSessionPath('/s/sessions/!room:local.jsonl'), true);
+  assert.equal(pool.isArchivableSessionPath('/s/sessions/!room:local.1.jsonl'), true);
+});
+
+test('isArchivableSessionPath: the resumable session pointer is never archived', () => {
+  assert.equal(pool.isArchivableSessionPath('/s/sessions/!room:local.current.json'), false);
+});
+
+test('isArchivableSessionPath: the filter really drops the pointer from an fs.cpSync copy', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pool-archive-'));
+  try {
+    const src = path.join(root, 'sessions');
+    fs.mkdirSync(src);
+    fs.writeFileSync(path.join(src, '!r.jsonl'), '{}\n');
+    fs.writeFileSync(path.join(src, '!r.current.json'), '{"sessionId":"s1"}');
+    const dst = path.join(root, 'archive', 'sessions');
+    fs.cpSync(src, dst, { recursive: true, filter: pool.isArchivableSessionPath });
+    assert.deepEqual(fs.readdirSync(dst).sort(), ['!r.jsonl']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

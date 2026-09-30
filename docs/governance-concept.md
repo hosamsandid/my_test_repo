@@ -157,8 +157,8 @@ token classes** — (a) a **control-plane token** (`INTERNAL_API_TOKEN`, injecte
 admin-console container, sent as a bearer header by the proxy layer; grants the full
 `/internal/*` surface), (b) **per-agent tokens** minted at `startAgentProcess` and baked
 into the container env exactly like the PAT (valid only for the agent-facing allowlist —
-`/internal/agents/:id/claim`, `ticket*`, knowledge, usage ingest, `/internal/flow-emit`
-as producer, maintenance-mode read — and **only for the agent's own `:id`**), (c) a
+`/internal/agents/:id/claim`, `ticket*`, knowledge, usage ingest,
+maintenance-mode read — and **only for the agent's own `:id`**), (c) a
 **signaler token** for external event sources (`POST /internal/bp-events` — the ACE
 `bp-transition.py` caller; without this class, enforcement would break BP routing).
 Rollout via `INTERNAL_AUTH_MODE=observe|warn|enforce`: one observe week inventories
@@ -1079,7 +1079,7 @@ subject no longer exists.
 
 ### Three corrections §3.5 could not have known
 
-1. **The signaler class has no subject.** §3.5 justifies it with `POST /internal/bp-events` and the ACE `bp-transition.py` caller. That route was **deleted** by the BriefingPack removal (#1961/#2005) and `orchestrator/bp-removal-guard.test.js` asserts it stays gone; nothing in the repo posts BP events, and the webhook server on `:4003` — the only remaining external entry point — has authenticated per-trigger with `X-Hook-Secret` all along. The class was therefore **not implemented** at the time: a token class nothing can present is not a control, it is a hole with a name. Re-adding an external signaler means re-adding the class alongside it; `internal-auth.js` says so at the point where it would go. **Update (Jira event-source plugin):** the class now has a subject and is implemented as **`plugin-scope`** — a plugin broker presents its HMAC scope token (`plugin-scope-token.js`, signed with the registry's `/workspace/plugins/_secret`) and is allowlisted to exactly one route, `POST /internal/plugin-event` (`PLUGIN_SCOPE_ROUTES`). The secret is a file created on first use, so the adapter hands it to the config as a lazy getter rather than reading it at module load. Audit `callerKind` for this class is `plugin-scope(<pluginId>/<scopeId>)`.
+1. **The signaler class has no subject.** §3.5 justifies it with `POST /internal/bp-events` and the ACE `bp-transition.py` caller. That route was **deleted** by the BriefingPack removal (#1961/#2005) and `orchestrator/bp-removal-guard.test.js` asserts it stays gone; nothing in the repo posts BP events, and the webhook server on `:4003` — the only remaining external entry point — has authenticated per-trigger with `X-Hook-Secret` all along. The class was therefore **not implemented** at the time: a token class nothing can present is not a control, it is a hole with a name. Re-adding an external signaler means re-adding the class alongside it; `internal-auth.js` says so at the point where it would go. **Update (Jira event-source plugin):** the class now has a subject and is implemented as **`plugin-scope`** — a plugin broker presents its HMAC scope token (`plugin-scope-token.js`, signed with the registry's `/workspace/plugins/_secret`) and is allowlisted to exactly one route, `POST /internal/plugin-event` (`PLUGIN_SCOPE_ROUTES`). **Update (#2562):** a second route, `POST /internal/plugin-credential-grant`, is allowlisted only for the broker's reserved `_grant-<scopeId>` token (403 `grant-token-required` for a plain scope token, which every granted agent also holds). The secret is a file created on first use, so the adapter hands it to the config as a lazy getter rather than reading it at module load. Audit `callerKind` for this class is `plugin-scope(<pluginId>/<scopeId>)`.
 
 2. **`/internal/agents/:id/claim`, one of the four concrete paths in §3.5's allowlist, is also gone** — same removal. The allowlist was rebuilt from the live callers instead.
 

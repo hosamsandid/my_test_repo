@@ -55,6 +55,7 @@
 
 const crypto = require("crypto");
 const pluginScopeToken = require("./plugin-scope-token");
+const { scopeIdFromGrantScope } = require("./plugin-scope");
 
 const AUTH_MODES = ["observe", "warn", "enforce"];
 
@@ -239,7 +240,7 @@ function safeEqualStrings(a, b) {
 // ── The agent-facing allowlist ──────────────────────────────────────────────
 //
 // Derived by reading every caller that runs INSIDE an agent container
-// (`agent-image/scripts/`: agent-entrypoint.py, aee-emit, aee-wake, knowledge,
+// (`agent-image/scripts/`: agent-entrypoint.py, aee-wake, knowledge,
 // usage, gh-as-agent) rather than from the prose list in §3.5 — the prose names
 // "knowledge", "usage ingest" and "maintenance-mode read" as categories, and one
 // of its four concrete paths (`/internal/agents/:id/claim`) no longer exists.
@@ -290,6 +291,15 @@ const AGENT_ROUTES = [
   // credential, so `own` here is exactly what stops agent A pushing as agent B.
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/git\/push$/, scope: "own" },
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/git\/pr$/, scope: "own" },
+  // Chat-attributed `gh` writes (#2559, the `gh` shim) — same reasoning.
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/github\/gh$/, scope: "own" },
+
+  // Plugin run identity (#2562): the runner's per-container run key and its
+  // run declarations. The handler additionally requires the agent's caller
+  // token for the same :id.
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/run-key$/, scope: "own" },
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/runs$/, scope: "own" },
+  { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/runs\/end$/, scope: "own" },
 
   // THE ONE CROSS-AGENT ROUTE. The loop verifier (#933) hands its verify request
   // to a SIBLING's queue, so `own` would break every loop with a `verify.agentId`
@@ -298,9 +308,9 @@ const AGENT_ROUTES = [
   { method: "POST", pattern: /^\/internal\/agents\/([^/]+)\/enqueue-pending$/, scope: "peer" },
 
   // Routes with no agent id in the path. Each carries its own integrity check:
-  // flow-emit and wake-agent resolve + authorize the target themselves, and
+  // wake-agent resolves + authorizes the target itself, and
   // loop-verify/verdict is keyed on an opaque one-shot verify token.
-  { method: "POST", pattern: /^\/internal\/flow-emit$/, scope: "any" },
+  // (POST /internal/flow-emit was removed with the internal transport, #2578.)
   { method: "POST", pattern: /^\/internal\/wake-agent$/, scope: "any" },
   { method: "GET", pattern: /^\/internal\/loop-verify\/verdict$/, scope: "any" },
   { method: "POST", pattern: /^\/internal\/loop-verify\/verdict$/, scope: "any" },
@@ -312,13 +322,18 @@ const AGENT_ROUTES = [
 // ── The plugin-facing allowlist ─────────────────────────────────────────────
 //
 // A broker sidecar holds a scope token for ONE (pluginId, scopeId) and may use
-// it for exactly one thing on this surface: waking the agents that plugin is
-// granted to in that scope. The route re-verifies the token itself to derive
+// it for waking the agents that plugin is granted to in that scope, and — with
+// its reserved grant token only — for asking whose credential an agent CLI call
+// may use (below). The route re-verifies the token itself to derive
 // {pluginId, scopeId} for the fan-out, so this gate is the first line and the
 // handler the second. Everything else — the credential push, the team roster,
 // wake-agent — is a control-plane concern and stays refused.
 const PLUGIN_SCOPE_ROUTES = [
   { method: "POST", pattern: /^\/internal\/plugin-event$/ },
+  // #2562: a broker asks which credential ONE agent CLI call may use. Only with
+  // its reserved `_grant-<scopeId>` token: the plain scope token is also held by
+  // every granted agent, and this route returns a person's secret.
+  { method: "POST", pattern: /^\/internal\/plugin-credential-grant$/, grantScope: true },
 ];
 
 // Strip the query string and decode each path segment, so an allowlist entry
@@ -448,8 +463,12 @@ function decideInternalAuth({ method, url, headers = {}, config }) {
     if (pathname === null) {
       return { ...base, allowed: false, denied: enforcing, status: 403, reason: "unparseable-path" };
     }
-    if (!pluginRouteRule(method, pathname)) {
+    const pluginRule = pluginRouteRule(method, pathname);
+    if (!pluginRule) {
       return { ...base, allowed: false, denied: enforcing, status: 403, reason: "route-not-plugin-facing" };
+    }
+    if (pluginRule.grantScope && !scopeIdFromGrantScope(caller.scopeId)) {
+      return { ...base, allowed: false, denied: enforcing, status: 403, reason: "grant-token-required" };
     }
     return { ...base, allowed: true, denied: false, status: 0, reason: "plugin-allowlist" };
   }

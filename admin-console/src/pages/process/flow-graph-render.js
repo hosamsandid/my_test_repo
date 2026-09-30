@@ -57,10 +57,9 @@ export const EDGE_STYLES = {
   // gate listener (solid red) or a plain label hand-off (blue).
   handoff:    { color: '#e11d48', label: 'human decision', dashed: true },
   // Direct agent-to-agent hand-off (#2031): a `wakeAgent` outcome wakes a wired
-  // same-team role inside the platform. Indigo + SOLID — dotted already means
-  // "internal transport of a label", and this is not a label at all. The hue
-  // sits close to label-blue on purpose-of-necessity, so the chip's `↪` glyph is
-  // what carries the distinction. See wake-edge-view.js for the full rationale.
+  // same-team role inside the platform. Indigo + SOLID, like every other edge
+  // hue here. The hue sits close to label-blue on purpose-of-necessity, so the
+  // chip's `↪` glyph is what carries the distinction. See wake-edge-view.js for the full rationale.
   wake:       { color: WAKE_EDGE_COLOR, label: WAKE_EDGE_LEGEND },
 };
 
@@ -2014,11 +2013,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
         // structured outcome. Title the edge with the outcome, colour it like the
         // switch badge, and tag the hit payload so a click focuses the Routing tab.
         const isOutcome = e.on === 'label' && !!e.outcome;
-        // Internal-channel delivery (#1174, extended to labelled PR/issue channels
-        // in #1194): same hue as its label/outcome/github edge family, but dotted —
-        // the wake bypasses the GitHub poller (orchestrator queue), and the dot
-        // pattern is distinct from the 6-4 dash of actor edges.
-        const isInternal = (e.on === 'label' || e.on === 'github') && e.transport === 'internal';
         // Direct hand-off (#2031). Checked BEFORE `isOutcome` in every arm
         // below: a wake edge always carries an `outcome` (that is what edgeId
         // keys on), so the amber outcome-keyed styling would otherwise swallow
@@ -2030,9 +2024,9 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
             : (isWake ? EDGE_STYLES.wake.color
               : (isOutcome ? OUTCOME_EDGE_COLOR : (EXTRA_COLOR[e.on] || EDGE_STYLES.label.color))),
           width: isGithub ? 2 : 1.5,
-          // Solid: dotted means "internal transport of a label" (#1174), and a
-          // direct hand-off carries no label to transport.
-          dash: isInternal ? '2 3' : '',
+          // Solid: every label, outcome, channel and direct hand-off edge (the
+          // dotted internal-transport style was removed in #2578).
+          dash: '',
           opacity: 1,
           labelText: isGithub ? channelChipText(e)
             : (isWake ? wakeChipText(e, nodeDisplayName, outcomeOptionTitle,
@@ -2046,7 +2040,6 @@ export function initFlowGraph(viewport, { onSelectNode, onConnect, onConnectOutc
           gate: e.gate === 'human',
           hit: { from: e.from, to: e.to, label: e.label, on: e.on, kind: e.on,
             artifact: isGithub ? artifact : undefined, gate: e.gate, triggerId: e.triggerId,
-            ...(isInternal ? { transport: 'internal' } : {}),
             // Carry the `audience` tag (#1036): a github delivery to a NAMED
             // human role (unified-graph tags it `audience:'human'`) must reach
             // the human-aware review-gate editor via findReviewGate — dropping

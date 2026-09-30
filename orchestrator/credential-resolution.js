@@ -128,12 +128,10 @@ function selectGlobalServiceCredentialId(index) {
 }
 
 // The credential id the SHARED (service) tier resolves to: the env's own binding
-// if it has one, else — under AEE_RESOURCE_ACCESS_V2 (#2357) — a global service
-// credential, else null. Off the flag this is byte-identical to the historical
-// `sharedCredentialId || null`, so an un-opted-in stack is unchanged.
-function resolveSharedServiceId(sharedCredentialId, globalServiceCredentialId, resourceAccessV2) {
+// if it has one, else a global service credential (#2357), else null.
+function resolveSharedServiceId(sharedCredentialId, globalServiceCredentialId) {
   if (sharedCredentialId) return String(sharedCredentialId);
-  if (resourceAccessV2 && globalServiceCredentialId) return String(globalServiceCredentialId);
+  if (globalServiceCredentialId) return String(globalServiceCredentialId);
   return null;
 }
 
@@ -388,16 +386,13 @@ function resolveCredential({
   kind = "GitHub token",
   interactive = false,
   globalServiceCredentialId = null,
-  resourceAccessV2 = false,
 }) {
   const attributed = operationPrefersPersonal(operation);
   // The SHARED tier is a SERVICE credential (unified model §8, #2357): the env's
-  // own binding, else — under AEE_RESOURCE_ACCESS_V2 — a global service
-  // credential. Off the flag this is exactly the historical `sharedCredentialId
-  // || null`, so nothing changes until an operator opts in. The refuse-on-missing
-  // rule is untouched: a global service fallback only ever fills a "shared" slot
-  // that was already reachable, never rescues an attributed write that must 424.
-  const sharedId = resolveSharedServiceId(sharedCredentialId, globalServiceCredentialId, resourceAccessV2);
+  // own binding, else a global service credential. The refuse-on-missing rule is
+  // untouched: a global service fallback only ever fills a "shared" slot that was
+  // already reachable, never rescues an attributed write that must 424.
+  const sharedId = resolveSharedServiceId(sharedCredentialId, globalServiceCredentialId);
 
   // No owner → the personal tier never applies. Use the shared team/system
   // credential exactly as today, and NEVER refuse (AC8). Until #2077 this was
@@ -440,6 +435,79 @@ function resolveCredential({
   // still use the shared credential — the fallback chain applies only where a
   // shared credential is legitimately acceptable (AC2 second half / AC7).
   return { tier: "shared", credentialId: sharedId };
+}
+
+// ── The effective BASELINE credential, described (#2560) ─────────────────────
+// `resolveCredential` answers "which id"; the console also has to answer "from
+// which tier, and on whose behalf" — the Team Settings panel shows the effective
+// GitHub token / SSH key per team, and the personal-credential pages tell a Team
+// Admin which teams their new (or deleted) credential moves. Both must say
+// exactly what the runtime does, so this is the ONE composition the spawn-time
+// resolvers (`resolveBaselineGithubTokenId` / `resolveBaselineSshKeyId` in
+// orchestrator.js) and the display endpoint share: current Team Admin
+// (`resolveBaselineOwnerId`) → their personal credential
+// (`findPersonalCredentialState`, orphan-gated) → `resolveCredential` with the
+// never-refusing `operation: "spawn"`. The display cannot drift from the
+// runtime because it is not a second implementation of it.
+//
+// Returns `{ source, credentialId, ownerId, personalPresent, personalOrphaned,
+// sharedCredentialId, globalServiceCredentialId }`, `source` being one of:
+//   'personal' — the baseline owner's personal credential
+//   'team'     — the environment's own binding (`sharedCredentialId`)
+//   'global'   — a global service credential (no binding on the environment)
+//   'none'     — nothing at any tier
+// `credentialId` is the id the runtime injects (or null). A `null` cfg (a
+// not-yet-persisted config) keeps the pre-#2177 answer: the raw binding.
+function describeBaselineCredential({
+  cfg,
+  loadAgentConfig,
+  users,
+  memberships,
+  index,
+  liveUsers,
+  sharedCredentialId = null,
+  kind = "GitHub token",
+} = {}) {
+  const shared = sharedCredentialId ? String(sharedCredentialId) : null;
+  const globalServiceCredentialId = selectGlobalServiceCredentialId(index);
+  if (!cfg) {
+    return {
+      source: shared ? "team" : "none",
+      credentialId: shared,
+      ownerId: null,
+      personalPresent: false,
+      personalOrphaned: false,
+      sharedCredentialId: shared,
+      globalServiceCredentialId,
+    };
+  }
+  const ownerId = resolveBaselineOwnerId(cfg, { loadAgentConfig, users, memberships });
+  const personal = findPersonalCredentialState(index, ownerId, undefined, liveUsers);
+  const decision = resolveCredential({
+    operation: "spawn",
+    ownerId,
+    personalCredential: personal.entry,
+    personalCredentialPresent: personal.present,
+    personalCredentialOrphaned: personal.orphaned,
+    sharedCredentialId: shared,
+    kind,
+    globalServiceCredentialId,
+  });
+  const credentialId = decision.credentialId || null;
+  let source;
+  if (decision.tier === "personal") source = "personal";
+  else if (!credentialId) source = "none";
+  else if (shared && credentialId === shared) source = "team";
+  else source = "global";
+  return {
+    source,
+    credentialId,
+    ownerId,
+    personalPresent: personal.present,
+    personalOrphaned: personal.orphaned,
+    sharedCredentialId: shared,
+    globalServiceCredentialId,
+  };
 }
 
 // Owner-scoped respawn selection (#1570, Phase 4). Given already-loaded agent
@@ -540,7 +608,7 @@ function buildRefusal(ownerId, kind) {
     code: "personal-credential-required",
     message:
       `Refusing to run an attributed GitHub write under a shared identity: this agent's owner ` +
-      `(${ownerId}) has no usable personal ${kind}. Add one on the My Credentials page ` +
+      `(${ownerId}) has no usable personal ${kind}. Add one on the SSH Keys / GitHub Tokens page ` +
       `(a GitHub token needs the repo/workflow scope) and re-run — the run will NOT fall back ` +
       `to a team or system credential (personal credentials, refuse-on-missing).`,
   };
@@ -571,6 +639,7 @@ module.exports = {
   resolveAgentOwnerId,
   resolveEffectiveOwnerId,
   resolveBaselineOwnerId,
+  describeBaselineCredential,
   isActingSenderTrusted,
   findPersonalCredential,
   findPersonalCredentialState,

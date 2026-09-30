@@ -131,9 +131,33 @@ test('AC12 — the dialog no longer navigates away the instant the stream comple
   // It used to call onDone() + navigate() straight out of onComplete, which is
   // why nothing ever said what had happened.
   assert.doesNotMatch(dialog, /onComplete=\{\(\) => \{\s*onDone\?\.\(\);/);
-  assert.match(dialog, /onComplete=\{\(result\) => onCreated\?\.\(result\)\}/);
+  assert.match(dialog, /onComplete=\{\(result\) => \{ setCreatedResult\(result\); onCreated\?\.\(result\); \}\}/);
+  assert.doesNotMatch(dialog, /onComplete=[^\n]*navigate\(/);
   // The navigation is now an explicit click on the completion action.
-  assert.match(dialog, /completionAction=\{\([\s\S]{0,400}navigate\(`\/process\/\$\{encodeURIComponent\(values\.teamId\)\}`\)/);
+  assert.match(dialog, /completionAction=\{\([\s\S]{0,600}navigate\(path, \{ state \}\)/);
+});
+
+// ─── #2521: the way onward is Agent Chat, on the team's first agent ─────────
+
+test('#2521 AC1/AC5 — the completion action routes to Agent Chat, not the canvas', () => {
+  // One dialog serves both entry points (draft toolbar + import preview), so
+  // one assertion on it covers both.
+  assert.match(dialog, /agentChatTargetFor\(bundle, createdResult\?\.teamId \|\| values\.teamId\)/);
+  assert.match(dialog, /import \{ slugify, agentChatTargetFor \} from '\.\/launch-team\.js';/);
+});
+
+test('#2521 AC7 — the dialog offers no way back to the team canvas', () => {
+  assert.doesNotMatch(dialog, /navigate\(`\/process\//);
+  assert.doesNotMatch(dialog, /'\/process\//);
+});
+
+test('#2521 AC3 — the action label is the destination-naming constant', () => {
+  assert.match(dialog, />\{OPEN_IN_AGENT_CHAT_LABEL\}<\/button>/);
+  assert.doesNotMatch(dialog, /OPEN_TEAM_LABEL/);
+});
+
+test('#2521 AC4 — onDone still runs, before navigating', () => {
+  assert.match(dialog, /onClick=\{\(\) => \{\s*onDone\?\.\(\);\s*const \{ path, state \} = agentChatTargetFor\([^)]*\);\s*navigate\(path, \{ state \}\);/);
 });
 
 test('AC12 — the notice is derived from the created team, in the shared copy module', () => {

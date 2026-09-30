@@ -1,5 +1,8 @@
 import React, { useState } from 'react';
 import { Bot, Check } from 'lucide-react';
+import {
+  toggleSelection, buildSelectionAnswer, answerChoosesOption,
+} from './ask-question-view.js';
 
 /**
  * Quick-reply question card (#1663, #1799).
@@ -11,8 +14,12 @@ import { Bot, Check } from 'lucide-react';
  * questions' choices are held in component state. When the last question is
  * answered, all choices are sent together in one consolidated reply (AC4).
  * Progress is shown as "Question X of N" (AC5). Intermediate clicks never
- * post a message and never resume the session (AC3). multiSelect questions
- * fall through to plain text (unchanged, AC7).
+ * post a message and never resume the session (AC3).
+ *
+ * multiSelect questions (#2523): options toggle on click and an explicit
+ * Submit commits the selection (disabled until one is picked). A lone
+ * multi-select question calls `onAnswer({ isMultiSelect: true, answer })`;
+ * inside a multi-question card, Submit completes that step like a click does.
  *
  * Answerability is still determined externally by `questionState` in
  * `ask-question-view.js` (newest message + not already answered — AC6).
@@ -22,61 +29,91 @@ import { Bot, Check } from 'lucide-react';
  * @param {boolean} props.answerable              overall card is interactive
  * @param {?string} props.answeredOptionId        chosen option id (single-q answered)
  * @param {?string} props.answeredLabel           chosen label (single-q fallback match)
+ * @param {?string[]} props.answeredOptionIds     chosen option ids (single multi-select q answered)
  * @param {?Array}  props.answeredMulti           [{questionId,optionId,label}] (multi-q answered)
  * @param {(arg: object|{isMulti:boolean,answers:Array}) => void} props.onAnswer
  * @param {?string} props.time                    formatted timestamp
  */
 export default function AskQuestionCard({
   question, answerable, answeredOptionId = null, answeredLabel = null,
-  answeredMulti = null, onAnswer, time = null,
+  answeredOptionIds = null, answeredMulti = null, onAnswer, time = null,
 }) {
   const [openIdx, setOpenIdx] = useState(0);
   const [pendingAnswers, setPendingAnswers] = useState({});
+  // Draft selections of multi-select questions, keyed by questionId (#2523).
+  const [drafts, setDrafts] = useState({});
 
   if (!question || !Array.isArray(question.questions) || question.questions.length === 0) {
     return null;
   }
 
   const isMulti = question.questions.length > 1;
-  const answered = answeredMulti != null || answeredOptionId != null || answeredLabel != null;
+  const answered = answeredMulti != null || answeredOptionIds != null ||
+    answeredOptionId != null || answeredLabel != null;
 
-  // Determine if a specific option was chosen — covers all three cases:
-  // (a) consolidated multi-answer was sent, (b) locally-pending in active multi,
-  // (c) single-question answered.
+  // Determine if a specific option was chosen — covers every case:
+  // (a) consolidated multi-answer was sent, (b) a lone multi-select question
+  // was answered, (c) a multi-select draft, (d) locally-pending in active
+  // multi, (e) single-question answered.
   const isChosen = (q, opt) => {
     if (answeredMulti) {
-      return answeredMulti.some(
-        a => a.questionId === q.questionId && a.optionId === opt.optionId,
-      );
+      return answerChoosesOption({ answers: answeredMulti }, q.questionId, opt.optionId);
     }
+    if (answeredOptionIds) return answeredOptionIds.includes(opt.optionId);
+    if (q.multiSelect && !answered) return (drafts[q.questionId] || []).includes(opt.optionId);
     if (isMulti) {
-      const p = pendingAnswers[q.questionId];
-      return p != null && p.optionId === opt.optionId;
+      return answerChoosesOption(pendingAnswers[q.questionId], q.questionId, opt.optionId);
     }
     return (answeredOptionId != null && opt.optionId === answeredOptionId) ||
       (answeredOptionId == null && answeredLabel != null && opt.label === answeredLabel);
   };
 
+  // Complete one step of a multi-question card with `value` — a clicked
+  // option, or a submitted multi-select answer (`optionIds`/`labels`).
+  const commitStep = (q, qi, value) => {
+    const updated = { ...pendingAnswers, [q.questionId]: value };
+    const isLast = qi === question.questions.length - 1;
+    if (!isLast) {
+      // Intermediate question — hold locally, advance to the next (AC3).
+      setPendingAnswers(updated);
+      setOpenIdx(qi + 1);
+    } else {
+      // Last question — build and send the consolidated reply (AC4).
+      const answers = question.questions.map(qItem => {
+        const a = updated[qItem.questionId];
+        if (!a) return null;
+        return Array.isArray(a.optionIds)
+          ? { questionId: qItem.questionId, optionIds: a.optionIds, labels: a.labels, label: a.label }
+          : { questionId: qItem.questionId, optionId: a.optionId, label: a.label };
+      }).filter(Boolean);
+      onAnswer?.({ isMulti: true, answers });
+    }
+  };
+
   // Handle an option click.
   const handleOptionClick = (q, qi, opt) => {
     if (!answerable) return;
+    if (q.multiSelect) {
+      // Toggle only — nothing is sent until Submit (#2523).
+      setDrafts(prev => ({ ...prev, [q.questionId]: toggleSelection(prev[q.questionId], opt.optionId) }));
+      return;
+    }
     if (isMulti) {
-      const updated = { ...pendingAnswers, [q.questionId]: opt };
-      const isLast = qi === question.questions.length - 1;
-      if (!isLast) {
-        // Intermediate question — hold locally, advance to the next (AC3).
-        setPendingAnswers(updated);
-        setOpenIdx(qi + 1);
-      } else {
-        // Last question — build and send the consolidated reply (AC4).
-        const answers = question.questions.map(qItem => {
-          const a = updated[qItem.questionId];
-          return a ? { questionId: qItem.questionId, optionId: a.optionId, label: a.label } : null;
-        }).filter(Boolean);
-        onAnswer?.({ isMulti: true, answers });
-      }
+      commitStep(q, qi, opt);
     } else {
       onAnswer?.(opt);
+    }
+  };
+
+  // Submit a multi-select question's selection (#2523).
+  const handleSubmit = (q, qi) => {
+    if (!answerable) return;
+    const answer = buildSelectionAnswer(q, drafts[q.questionId]);
+    if (!answer) return;
+    if (isMulti) {
+      commitStep(q, qi, answer);
+    } else {
+      onAnswer?.({ isMultiSelect: true, answer });
     }
   };
 
@@ -145,6 +182,8 @@ export default function AskQuestionCard({
               answered={answered}
               isChosen={(opt) => isChosen(q, opt)}
               onAnswer={(opt) => handleOptionClick(q, qi, opt)}
+              canSubmit={(drafts[q.questionId] || []).length > 0}
+              onSubmit={() => handleSubmit(q, qi)}
             />
           ))}
         </div>
@@ -163,7 +202,7 @@ export default function AskQuestionCard({
   );
 }
 
-function QuestionBlock({ q, answerable, answered, isChosen, onAnswer }) {
+function QuestionBlock({ q, answerable, answered, isChosen, onAnswer, canSubmit, onSubmit }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-1)' }}>
       {q.header && (
@@ -171,6 +210,11 @@ function QuestionBlock({ q, answerable, answered, isChosen, onAnswer }) {
       )}
       {q.question && (
         <div style={{ color: 'var(--eb-text-primary)' }}>{q.question}</div>
+      )}
+      {q.multiSelect && answerable && (
+        <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+          Select one or more, then submit.
+        </div>
       )}
       {/* Options as a group of buttons; long lists wrap onto new rows. */}
       <div
@@ -232,6 +276,28 @@ function QuestionBlock({ q, answerable, answered, isChosen, onAnswer }) {
           );
         })}
       </div>
+      {q.multiSelect && answerable && (
+        <div>
+          <button
+            type="button"
+            disabled={!canSubmit}
+            onClick={canSubmit ? onSubmit : undefined}
+            style={{
+              padding: 'var(--eb-space-1) var(--eb-space-3)',
+              borderRadius: 'var(--eb-radius-md)',
+              border: '1px solid var(--eb-accent-primary)',
+              background: canSubmit ? 'var(--eb-accent-primary)' : 'var(--eb-bg-elevated)',
+              color: canSubmit ? 'var(--eb-text-inverted)' : 'var(--eb-text-muted)',
+              font: 'inherit',
+              fontSize: 'var(--eb-text-sm)',
+              fontWeight: 'var(--eb-font-medium)',
+              cursor: canSubmit ? 'pointer' : 'default',
+            }}
+          >
+            Submit
+          </button>
+        </div>
+      )}
     </div>
   );
 }

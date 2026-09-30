@@ -15,6 +15,7 @@ askPrompts:
   - "Why does an event say nobody's listening?"
   - "Why is the Pending queue not draining?"
   - "How far back does this log go?"
+  - "Why is a repository marked not listening?"
 ---
 
 ## What the GitHub Event Log is
@@ -52,10 +53,12 @@ the agent's own session first.
 
 ### Who can see it
 
-The page is **not team-scoped** — every signed-in user sees the events of every
-polled repository and every agent, and any signed-in user can cancel any
-agent's queued entry (the cancellation itself is recorded in the audit trail).
-Treat repository and agent names here as visible to all console users.
+**Processed events** is **not team-scoped** — every signed-in user sees the
+events of every polled repository and every agent. Treat repository and agent
+names there as visible to all console users. The **Pending queue** is: it lists
+only the agents you may manage (Team Admin of their team, or System Admin), and
+only they can open or cancel an entry (the cancellation is recorded in the audit
+trail). A Team Member sees an empty queue.
 
 ## Processed events
 
@@ -74,7 +77,7 @@ Each row reads left to right as *when · where · what · who · what happened*:
 | **Title** | The title of that PR or issue. |
 | **Event** | The event in plain language rather than the raw API key. A push / create / delete row appends the branch or tag it touched; a row nobody was listening to appends the event's own label. |
 | **Actor** | The GitHub account that caused the event. |
-| **Outcomes** | One chip per subscriber whose event-type filter matched — the next chapter is entirely about these. |
+| **Outcomes** | One line per subscriber whose event-type filter matched, its status shown by a small leading marker — the next chapter is entirely about these. |
 
 Older rows are never backfilled. A column that was added after a row was
 written simply shows `—` for it, rather than a value invented after the fact.
@@ -85,11 +88,19 @@ There is no webhook into this stack, so the orchestrator **polls** the GitHub
 Events API every ~30 s for every repository that appears in a Working
 Environment carrying a **GitHub token**.
 
-Two consequences that surprise people:
+Three consequences that surprise people:
 
 - **The Events API is lossy by design.** It does not emit every action — most
   notably there is no `pull_request.synchronize`, so "a new commit was pushed to
   the PR" is not an event you can subscribe to.
+- **The first push to a new branch shows up as its pull request.** GitHub
+  reports no push for the push that creates a branch, so when a pull request is
+  opened (or reopened) from a branch of the same repository, the poller adds a
+  **push** row of its own for that branch and head commit. If GitHub also
+  reports a real push for the same branch and commit, whichever of the two
+  arrives second is logged as **dropped (push-duplicate)** — a push trigger
+  wakes only once per commit. A branch pushed without opening a pull request
+  still produces no row.
 - **An event is fresh if its id has not been seen before**, not if it is recent.
   The poller keeps a per-repository set of **seen ids**, so a re-polled page
   costs nothing and nothing is delivered twice. The very first poll after a
@@ -100,59 +111,79 @@ Two consequences that surprise people:
 Three other things write rows here, which is why this stays one honest timeline of
 every wake rather than a log of one delivery mechanism:
 
-- **Internal-channel hand-offs.** A hand-off on an internal channel
-  (`transport: 'internal'`) is woken directly by the producer's `aee-emit`
-  instead of travelling through the Events API, and is recorded here too.
 - **Labels applied in the console.** A label a human applies through the GitHub
-  Issues plugin is delivered immediately on that fast path, and the poller's
+  Issues plugin is delivered immediately on an internal fast path, and the poller's
   later sighting of the same `*.labeled` event is dropped as a duplicate.
 - **Direct agent-to-agent hand-offs.** A `wakeAgent` hand-off wakes a teammate
   straight through the platform — no issue, PR or label — so this log is its
   *only* record. Such a row has no repository or work item and honestly shows
   `—` there; it reads **direct hand-off** in the Event column, with the sender's
   note in the Title column.
+- **Fire again** (an agent's Events tab) writes a *delivered · fired again* row.
 
 Each row carries a `source` marking which writer produced it, but **the table
 never renders it** — so a poller row and an internal-fast-path row that arrived by
 different routes look identical here. A direct hand-off is the one you can pick
 out, because its Event cell reads *direct hand-off*. The
-`dropped (internal-dedup)` chip described in the next chapter is the only visible
+`dropped (internal-dedup)` outcome described in the next chapter is the only visible
 trace of the fast path.
 
 ## Outcomes
 
-One row per event; one chip per subscriber whose event-type filter matched. The
-same explanations are on the page as chip tooltips and in the collapsible
+One row per event; one outcome line per subscriber whose event-type filter
+matched. The same explanations are on the page as outcome tooltips and in the collapsible
 legend — this is the longer version.
 
 | Outcome | What happened | Should you worry? |
 |---|---|---|
-| **delivered → agent** | The event matched a trigger and a session ran. Click the chip to open that session. | No. |
+| **delivered → agent** | The event matched a trigger and a session ran. Click the outcome to open that session. | No. |
 | **digested → agent** | Part of a burst (more than 3 events on the same PR / issue / branch in one poll) folded into **one** summary wake. **Lossless** — the agent still receives every event inside the digest. | No. One session instead of many is the point. |
 | **dropped (throttle)** | The per-conversation rate cap was hit — by default 5 events per hour per agent per PR / issue / branch. | Usually healthy loop-protection: an agent's own commits and comments re-trigger it. Worry only if a genuinely new event failed to wake someone. |
 | **dropped (horizon)** | The event is older than that subscriber's subscription window (its activation time plus a short grace). | Expected right after wiring or reactivating a trigger. A new agent deliberately does not react to history that predates it. |
 | **dropped (label-filter)** | The event carried a label this trigger does not subscribe to. | No — that is label routing working. |
+| **dropped (branch-filter)** | A push went to a branch (or a tag) that this trigger's **Branches** filter does not list. | No — that is branch routing working. Widen the filter if the branch should wake the agent. |
 | **dropped (internal-dedup)** | The wake was already delivered on the internal fast path; this is GitHub telling us about the same label a second time. | No. |
+| **dropped (wake-already-armed)** | Already woken for this label on this item; a repeat does not wake it again until the label is removed and re-added. | Usually no. Re-fire a lost hand-off from the agent's Events tab. |
 | **nobody's listening** | No trigger subscribed to this event **type** at all. | Maybe. If something should have reacted, the wiring is missing — add or fix the `github-event` trigger on the target agent. |
 
-A `delivered` or `digested` chip may carry the **wake label** in brackets: the
+A **dropped (branch-filter)** row comes from a *Push* trigger with a
+**Branches** filter (e.g. `main, feature/*`): `*` matches within one path
+segment, `**` also across `/`, names match exactly, and tag pushes never match.
+Empty means every branch. Widen the trigger's Branches field in Agent Chat →
+Triggers if the push should have woken the agent.
+
+A `delivered` or `digested` outcome may carry the **wake label** in brackets: the
 label that actually satisfied the subscriber's filter. No bracket means the
 listener takes any label.
+
+For a pooled role, `delivered` names and opens the ticket's instance
+(*Developer · #2562*); once it is removed, the click says so. **held (role
+paused)**: fires when the role resumes.
 
 *One caveat about digests as currently recorded:* the fold itself is real and
 lossless, but a folded event is written to the log as **`delivered`** with a
 separate digest marker rather than as a `digest` status — so today a digested
-burst reads as a run of ordinary `delivered` chips, and following one of those
-chips to "the session it started" can land on nothing, because a digest posts a
+burst reads as a run of ordinary `delivered` outcomes, and following one of those
+outcomes to "the session it started" can land on nothing, because a digest posts a
 single plain message instead of starting one session per event. If a burst looks
 like several deliveries but you only find one summary message, that is what you
 are looking at.
 
-**There is no source filtering.** Every agent shares one GitHub token, so an
+**There is no source filtering** (one exception below). Every agent shares one GitHub token, so an
 event caused by an agent looks exactly like an event caused by a human, and a
 trigger fires on either. The identity stamps `gh-as-agent` writes are for
 humans reading GitHub, not for delivery decisions — the only thing standing
 between two agents and an infinite ping-pong is the throttle above.
+
+The one exception is a push trigger's optional **producer filter** ("Pushed
+by" on the trigger form, `pushedBy` on the trigger). A data-flow hand-off drawn
+in the Flow editor gets it automatically, naming its upstream agent. The
+platform records who pushed what when an agent pushes through `gh-as-agent
+push`/`pr`, and a filtered trigger then fires only on pushes by the named agents
+of its own Agent Team, or by a pool instance of a named role. Any other push is
+logged as **dropped (pushed by `x`, not in producer filter)**. A push by a
+human, a raw `git push` or a branch deletion is logged as **dropped (producer
+unknown)**. An empty filter means any push.
 
 ### Reading a "my agent never woke up" case
 
@@ -163,28 +194,60 @@ Work down the row, in this order:
    action.
 2. **Does the row say *nobody's listening*?** → no trigger subscribes to that
    event type. A wiring problem, not a delivery problem.
-3. **Is there a chip for the agent you expected?** No chip means the agent's
+3. **Is there an outcome for the agent you expected?** None means the agent's
    trigger did not even match the event *type*.
-4. **Is the chip a drop?** The reason names the layer that stopped it —
-   horizon, label filter, or throttle.
+4. **Is the outcome a drop?** The reason names the layer that stopped it —
+   horizon, label filter, throttle or a dedup.
 5. **Delivered but nothing happened?** Delivery is not execution. Open the
-   session from the chip and read it there.
+   session from the outcome and read it there.
 6. **Delivered, but the agent has not started yet?** Look in the Pending queue —
    the entry may still be waiting for the agent.
 
 ### When a repository is polled, and when it is not
 
-A repository is polled only if **both** are true:
+A repository is polled only if **all** are true:
 
-- some environment carries a **GitHub token** for it, and
+- it is in a Working Environment's **Repositories**, or attached to an agent
+  as *this agent only*,
+- that environment — for an agent's own repository, the agent's environment —
+  carries a **GitHub token** whose file is readable, and
 - at least one **enabled** agent has an **enabled** `github-event` trigger on it.
 
-A repository nobody subscribes to, or one whose only subscriber is a disabled
-agent, produces **no rows at all** — not even *nobody's listening*, which is
-reported only for a repository that *is* polled. Silence on this page is
-therefore ambiguous on its own: it can mean "nothing happened" or "we were never
-looking". Check the environment's token and the trigger's enabled state before
-concluding the event was lost.
+A repository that fails any of these produces **no rows at all** — not even
+*nobody's listening*, which is reported only for a repository that *is* polled.
+Silence in the table is therefore ambiguous on its own; the **Repositories**
+area above it answers "were we even looking?" — see the next chapter.
+
+## Repository status
+
+The **Repositories** area directly above the event table lists every repository
+the platform knows about — from Working Environments, from agents' own
+repositories and from `github-event` triggers — one row per repository, with
+the poller's own verdict. The summary line counts **listening**, **failing** and
+**not listening**; click a count to show only that group. The area opens by
+itself when something is failing and stays collapsed when everything listens.
+**Refresh** reloads it together with the table; the verdict is at most one poll
+cycle (~30 s) old.
+
+| Status | What it means | What to do |
+|---|---|---|
+| **Listening** | The poller fetches this repository's events every cycle. *Waiting for first poll* right after a start or a change. | Nothing. |
+| **Failing** | The poller tries, but GitHub refuses or does not answer. The row shows the last error (HTTP status and message), since when, the number of failed attempts and the next retry. **Rate limited** is a failing variant. | Bad credentials (401) or no access (403/404): fix or rotate the token on **GitHub Tokens**. Rate limited: wait for the retry. |
+| **Not listening — no token** | No environment listing the repository — nor, for an agent's own repository, the agent's environment — has a usable GitHub token: none is set, the id is invalid, or the token file is missing or empty. | Set a token on the environment's **Repositories** tab, or re-add it on **GitHub Tokens**. |
+| **Not listening — no trigger** | A token exists, but no enabled agent has an enabled trigger on it. Often intentional. Ignored triggers are named with the reason (agent disabled, trigger disabled, no events). | Add or enable a trigger on the agent's **Triggers** tab — only if you want events. |
+| **Not listening — repository not attached** | Only a trigger names it: no environment lists it and no agent has it attached (e.g. it was removed from the agent). | Add it to the environment's **Repositories** or attach it to the agent. |
+| **Not listening — unsupported repository** | The URL is not a GitHub `owner/name` repository (another host, or a typo in a trigger). | Correct the URL or the trigger's repository. |
+
+**Token from** names the environment whose token the poller uses — the first
+one listing the repository with a token; for a repository attached only to an
+agent, that agent's environment — and how many other environments list it too.
+Token values are never shown. The same verdict appears on each `github-event`
+trigger in the agent's **Triggers** tab whose repository is not listened to.
+
+Unlike the event table, this area **is scoped**: a System Admin sees every
+repository; everyone else sees only repositories of their own teams'
+environments and agents. A Working Environment's *GitHub integration* banner
+uses the same verdict.
 
 ## Pending queue
 
@@ -231,6 +294,13 @@ internal id GitHub's Events API gave the event. It is now on the **Details**
 hover, together with the repository and the raw event key, so support can still
 find a delivery in the poller's log without the row implying the number means
 anything to you.
+
+**Submitted reviews.** GitHub's Events API calls a submitted pull-request
+review `pull_request_review.created`; triggers subscribe to *PR review
+submitted* (`pull_request_review.submitted`). The poller now records such a
+review under `pull_request_review.submitted` and wakes those triggers once
+each. Older rows keep the raw key `pull_request_review.created` on the hover —
+both read *PR review submitted* in the row.
 
 The queue holds more than GitHub events: a folded **GitHub digest**, a
 **throttle warning** (the heads-up DM sent the first time a cap is hit), a

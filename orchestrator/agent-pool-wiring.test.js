@@ -208,3 +208,11 @@ test("#2301: _pruneArchivedPoolLogs reads the archived-at.json stamp, not fs.sta
   assert.doesNotMatch(body, /statSync/);
   assert.match(body, /agentPool\.isArchiveExpired\(/);
 });
+
+test("#2595 AC10: gracefulPoolTeardown archives the transcript without the resumable session pointer", () => {
+  const start = SRC.indexOf("async function gracefulPoolTeardown(");
+  assert.ok(start > 0, "gracefulPoolTeardown not found");
+  const end = SRC.indexOf("function inspectAgentRepoDivergence(", start);
+  const body = SRC.slice(start, end);
+  assert.match(body, /fs\.cpSync\(sessionsDir, archiveDir, \{[^}]*filter: agentPool\.isArchivableSessionPath/);
+});

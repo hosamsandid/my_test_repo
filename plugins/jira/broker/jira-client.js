@@ -1097,11 +1097,12 @@ async function transitionIssue(cred, issueKey, { toStatus, env } = {}) {
 //
 // The write counterpart of the #2416 custom-field read: set an allow-listed
 // custom field (e.g. "Team") on an issue. Three guards, in order:
-//   1. allow-list — the field's human name MUST be in the team's
-//      `writable-custom-fields` list, else it is REFUSED (403). An EMPTY list
-//      means NO field is writable — the safe default until a Team Admin opts a
-//      field in (a writable field is strictly more dangerous than a readable one,
-//      so unlike the read allow-list this gate is mandatory, never a default set).
+//   1. allow-list — an EMPTY `writable-custom-fields` list means UNRESTRICTED:
+//      any custom field the account can see is writable (#2449 flipped the
+//      original #2417 deny-by-default). A NON-EMPTY list restricts writes to the
+//      named fields; any other field is REFUSED (403). Operator note: filling the
+//      list in is recommended where agents should only touch specific fields — a
+//      writable field is strictly more dangerous than a readable one.
 //   2. name → id resolution via the (cached) field catalog — an unknown name is a
 //      400 with the offending name, never a silently-dropped write.
 //   3. value shaping per the field's schema type — a Team / select / user field is
@@ -1238,13 +1239,12 @@ async function setCustomField(cred, issueKey, { fieldName, value, jsonValue, all
 // fails BEFORE any issue exists (no orphan epic):
 //   1. shape validation — a missing project / epic summary / story summary is a
 //      400 up front.
-//   2. custom-field allow-list — EVERY custom field named anywhere (epic or a
-//      story) MUST be on the team's `writable-custom-fields` list, exactly like
-//      `setCustomField` (#2417): the same fields (Team, Story Points) an admin
-//      sanctioned for a set are the ones creatable here. A non-listed field is a
-//      403 before anything is created. The Epic-link field the broker sets to
-//      wire a Story to its Epic is structural, NOT a user-named field, so it is
-//      exempt from the allow-list.
+//   2. custom-field allow-list — the same gate as `setCustomField` (#2417,
+//      #2449): an EMPTY `writable-custom-fields` list means unrestricted; a
+//      NON-EMPTY list means EVERY custom field named anywhere (epic or a story)
+//      must be on it, and a non-listed field is a 403 before anything is
+//      created. The Epic-link field the broker sets to wire a Story to its Epic
+//      is structural, NOT a user-named field, so it is exempt from the allow-list.
 //   3. name → id + schema resolution via the (cached) field catalog — an unknown
 //      custom-field name is a 400 up front.
 // The epic is created first (its key is needed to link the stories); then each
@@ -1747,6 +1747,225 @@ async function bulkCreateSprints(cred, { boardId, boardName, projectKeyOrId, nam
   };
 }
 
+// ── sprint lifecycle transitions (close / start / advance, #2491) ────────────
+//
+// #2450 could only CREATE sprints (always in Jira's "future" state); nothing
+// could flip a sprint's `state`. These three ops close the change of state:
+//   • closeSprint  — active → closed (complete the current sprint).
+//   • startSprint  — future → active (start the next sprint), refusing to add a
+//                    second active sprint (Jira allows only one per board).
+//   • advanceSprint — the combined roll-over: close the active one, then start
+//                     the next future one, reporting BOTH outcomes distinctly
+//                     (a partial success is not all-or-nothing).
+// All reuse #2450's board resolution and the Agile API; all are WRITES — never
+// retried (F6), a retry landing after Jira accepted the first would double-apply.
+// State is changed with a POST to `/rest/agile/1.0/sprint/{id}` (a full update),
+// so the sprint's existing name/dates/goal are re-sent to avoid clearing them.
+
+// GET one sprint by id → shaped (null if the response carries no id).
+async function getSprintById(base, auth, sprintId) {
+  const res = await requestJson({ base, path: `${AGILE_BASE}/sprint/${encodeURIComponent(sprintId)}`, authHeader: auth });
+  return shapeSprint(res);
+}
+
+// POST a sprint's new state. Re-sends the existing name/dates/goal alongside the
+// state so the full-update POST does not clear them. Returns the shaped sprint.
+async function postSprintState(base, auth, sprint, newState) {
+  const body = { state: newState };
+  if (sprint.name) body.name = sprint.name;
+  if (sprint.startDate) body.startDate = sprint.startDate;
+  if (sprint.endDate) body.endDate = sprint.endDate;
+  if (sprint.goal) body.goal = sprint.goal;
+  const res = await requestJson({
+    base, path: `${AGILE_BASE}/sprint/${encodeURIComponent(sprint.id)}`, method: 'POST', authHeader: auth, body,
+  });
+  return shapeSprint(res) || { ...sprint, state: newState };
+}
+
+// The board's single active sprint (Jira allows only one), or null.
+function activeSprintOf(sprints) {
+  return (Array.isArray(sprints) ? sprints : []).find((s) => s && s.state === 'active') || null;
+}
+
+// The board's next future sprint to activate: the earliest-starting one. Dated
+// sprints sort by start; an undated future sprint falls back to list order.
+function nextFutureSprint(sprints) {
+  const future = (Array.isArray(sprints) ? sprints : []).filter((s) => s && s.state === 'future');
+  if (future.length === 0) return null;
+  const dated = future.filter((s) => s.startDate)
+    .sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime());
+  return dated[0] || future[0];
+}
+
+// Count issues left INCOMPLETE (statusCategory != done) in a sprint. The plain
+// `state:"closed"` call does not move still-open issues (there is no dialog to
+// ask an agent) — they stay on the now-closed sprint — so the count is reported
+// back instead. Best-effort: a failure degrades to null (never breaks the close),
+// like the #2415 Epic Link lookup.
+async function countIncompleteSprintIssues(base, auth, sprintId) {
+  try {
+    let incomplete = 0;
+    let startAt = 0;
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const qs = new URLSearchParams({
+        startAt: String(startAt), maxResults: String(AGILE_PAGE_SIZE), fields: 'status',
+      });
+      const res = await requestJson({
+        base, path: `${AGILE_BASE}/sprint/${encodeURIComponent(sprintId)}/issue?${qs.toString()}`, authHeader: auth,
+      });
+      const issues = Array.isArray(res.issues) ? res.issues : [];
+      for (const it of issues) {
+        const cat = it && it.fields && it.fields.status && it.fields.status.statusCategory;
+        const key = cat && (cat.key || cat.colorName);
+        if (String(key || '').toLowerCase() !== 'done') incomplete += 1;
+      }
+      startAt += issues.length;
+      const total = typeof res.total === 'number' ? res.total : null;
+      if (issues.length === 0 || (total !== null && startAt >= total)) break;
+    }
+    return incomplete;
+  } catch {
+    return null;
+  }
+}
+
+// Close (complete) a board's active sprint (CLI `sprint close`). Resolves the
+// target: an explicit --sprint-id, else the board's single active sprint. Refuses
+// a sprint that is not active. Reports the count of issues left incomplete.
+async function closeSprint(cred, { boardId, boardName, projectKeyOrId, sprintId, env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const board = await resolveBoard(cred, { boardId, boardName, projectKeyOrId, env });
+  let target;
+  if (sprintId != null && String(sprintId).trim()) {
+    target = await getSprintById(base, auth, String(sprintId).trim());
+    if (!target) { const e = new Error(`sprint ${sprintId} not found`); e.status = 404; throw e; }
+  } else {
+    const { sprints } = await listBoardSprints(cred, { boardId: board.id, env });
+    target = activeSprintOf(sprints);
+    if (!target) {
+      const e = new Error(`board "${board.name || board.id}" has no active sprint to close`);
+      e.status = 409; throw e;
+    }
+  }
+  if (target.state !== 'active') {
+    const e = new Error(`sprint "${target.name}" (id ${target.id}) is ${target.state || 'not active'} — only an active sprint can be closed`);
+    e.status = 409; throw e;
+  }
+  const incompleteIssues = await countIncompleteSprintIssues(base, auth, target.id);
+  const closed = await postSprintState(base, auth, target, 'closed');
+  return { board: { id: board.id, name: board.name }, sprint: closed, incompleteIssues };
+}
+
+// Start (activate) a board's next future sprint (CLI `sprint start`). Resolves the
+// target: an explicit --sprint-id, else the earliest future sprint. Refuses a
+// sprint that is not future, a sprint with no dates (Jira rejects a dateless
+// activation), and a second active sprint on a board that already has one.
+async function startSprint(cred, { boardId, boardName, projectKeyOrId, sprintId, env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const board = await resolveBoard(cred, { boardId, boardName, projectKeyOrId, env });
+  // One read serves both the target lookup and the "already active?" guard.
+  const { sprints } = await listBoardSprints(cred, { boardId: board.id, env });
+  let target;
+  if (sprintId != null && String(sprintId).trim()) {
+    const id = String(sprintId).trim();
+    target = sprints.find((s) => s.id === id) || await getSprintById(base, auth, id);
+    if (!target) { const e = new Error(`sprint ${sprintId} not found`); e.status = 404; throw e; }
+  } else {
+    target = nextFutureSprint(sprints);
+    if (!target) {
+      const e = new Error(`board "${board.name || board.id}" has no future sprint to start`);
+      e.status = 409; throw e;
+    }
+  }
+  if (target.state !== 'future') {
+    const e = new Error(`sprint "${target.name}" (id ${target.id}) is ${target.state || 'not future'} — only a future sprint can be started`);
+    e.status = 409; throw e;
+  }
+  const alreadyActive = activeSprintOf(sprints);
+  if (alreadyActive && alreadyActive.id !== target.id) {
+    const e = new Error(`board "${board.name || board.id}" already has an active sprint ("${alreadyActive.name}", id ${alreadyActive.id}) — close it before starting another`);
+    e.status = 409; throw e;
+  }
+  if (!target.startDate || !target.endDate) {
+    const e = new Error(`sprint "${target.name}" (id ${target.id}) has no start/end date — set its dates before starting it`);
+    e.status = 400; throw e;
+  }
+  const started = await postSprintState(base, auth, target, 'active');
+  return { board: { id: board.id, name: board.name }, sprint: started };
+}
+
+// Advance the board (CLI `sprint advance`): close the active sprint, then start
+// the next future one — the weekly roll-over as one call. Both phases run and are
+// reported distinctly (`close` / `start`), so a partial outcome (e.g. closed but
+// no future sprint to start) is visible rather than all-or-nothing. `--close-id`
+// / `--start-id` override each target. A missing active sprint is a SKIP (not a
+// failure — a first-ever activation is valid); every other phase error is a
+// failure. Writes are never retried (F6).
+async function advanceSprint(cred, { boardId, boardName, projectKeyOrId, closeSprintId, startSprintId, env } = {}) {
+  const base = apiBaseFor(cred.siteUrl, env);
+  const auth = basicAuthHeader(cred.email, cred.apiToken);
+  const board = await resolveBoard(cred, { boardId, boardName, projectKeyOrId, env });
+  const { sprints } = await listBoardSprints(cred, { boardId: board.id, env });
+
+  // Phase 1 — close the active sprint (explicit id overrides).
+  let close;
+  let toClose;
+  if (closeSprintId != null && String(closeSprintId).trim()) {
+    const id = String(closeSprintId).trim();
+    toClose = sprints.find((s) => s.id === id) || await getSprintById(base, auth, id);
+  } else {
+    toClose = activeSprintOf(sprints);
+  }
+  if (!toClose) {
+    close = { ok: false, skipped: true, reason: 'no-active-sprint', error: `board "${board.name || board.id}" has no active sprint to close` };
+  } else if (toClose.state !== 'active') {
+    close = { ok: false, error: `sprint "${toClose.name}" (id ${toClose.id}) is ${toClose.state || 'not active'} — only an active sprint can be closed` };
+  } else {
+    try {
+      const incompleteIssues = await countIncompleteSprintIssues(base, auth, toClose.id);
+      const closed = await postSprintState(base, auth, toClose, 'closed');
+      close = { ok: true, sprint: closed, incompleteIssues };
+    } catch (err) {
+      close = { ok: false, error: err.message };
+    }
+  }
+
+  // Phase 2 — start the next future sprint (explicit id overrides). Runs even if
+  // phase 1 skipped or failed, so both outcomes surface.
+  let start;
+  let toStart;
+  if (startSprintId != null && String(startSprintId).trim()) {
+    const id = String(startSprintId).trim();
+    toStart = sprints.find((s) => s.id === id) || await getSprintById(base, auth, id);
+  } else {
+    toStart = nextFutureSprint(sprints);
+  }
+  // A sprint the close DID NOT clear still blocks a second activation (Jira's
+  // one-active rule). The just-closed sprint no longer counts.
+  const blockingActive = sprints.find((s) => s.state === 'active' && !(close.ok && close.sprint && s.id === close.sprint.id)) || null;
+  if (!toStart) {
+    start = { ok: false, error: `board "${board.name || board.id}" has no future sprint to start` };
+  } else if (toStart.state !== 'future') {
+    start = { ok: false, error: `sprint "${toStart.name}" (id ${toStart.id}) is ${toStart.state || 'not future'} — only a future sprint can be started` };
+  } else if (blockingActive) {
+    start = { ok: false, error: `board "${board.name || board.id}" still has an active sprint ("${blockingActive.name}", id ${blockingActive.id}) — cannot start another` };
+  } else if (!toStart.startDate || !toStart.endDate) {
+    start = { ok: false, error: `sprint "${toStart.name}" (id ${toStart.id}) has no start/end date — set its dates before starting it` };
+  } else {
+    try {
+      const started = await postSprintState(base, auth, toStart, 'active');
+      start = { ok: true, sprint: started };
+    } catch (err) {
+      start = { ok: false, error: err.message };
+    }
+  }
+
+  const failed = (!close.ok && !close.skipped) || !start.ok;
+  return { board: { id: board.id, name: board.name }, close, start, failed };
+}
+
 module.exports = {
   MAX_PAGES,
   PAGE_SIZE,
@@ -1817,4 +2036,10 @@ module.exports = {
   listBoardSprints,
   createSprint,
   bulkCreateSprints,
+  // sprint lifecycle transitions (#2491)
+  activeSprintOf,
+  nextFutureSprint,
+  closeSprint,
+  startSprint,
+  advanceSprint,
 };

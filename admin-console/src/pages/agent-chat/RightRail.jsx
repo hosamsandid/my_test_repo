@@ -1,9 +1,10 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronRight, ChevronLeft, FolderTree, CalendarClock, Activity, MoreHorizontal, Brain, Target, Settings } from 'lucide-react';
+import { ChevronRight, ChevronLeft, FolderTree, CalendarClock, Activity, MoreHorizontal, Brain, Target, Settings, Github } from 'lucide-react';
 import SessionsPanel from './SessionsPanel';
 import WorkspaceBrowser from './WorkspaceBrowser';
 import TriggersPanel from './TriggersPanel';
+import EventsPanel from './EventsPanel';
 import OutcomesPanel from './OutcomesPanel';
 import AgentKnowledgePanel from './AgentKnowledgePanel';
 import AgentSettingsPanel from './AgentSettingsPanel';
@@ -11,6 +12,8 @@ import { fitTabCount } from './rail-layout';
 import { useSessionsActive } from './SessionsActiveContext';
 import { activeSessionCount } from './sessions-active';
 import { settingsSubject } from './agent-settings-view';
+import { hasGithubEventTrigger } from './agent-events-view.js';
+import { apiCall } from '../../hooks/useApi';
 import { parseTabMap, tabForAgent, withAgentTab, DEFAULT_RAIL_TAB, displayTab, tabRequestAppliesToOwnAgent } from './rail-tab-memory';
 
 // #2267: was a single global "last active tab overall" key. Replaced with a
@@ -33,7 +36,7 @@ const IS_MAC = typeof navigator !== 'undefined'
   && /Mac|iP(?:hone|ad|od)/i.test(navigator.platform || navigator.userAgent || '');
 const TOGGLE_SHORTCUT = `${IS_MAC ? 'Cmd' : 'Ctrl'}+Shift+L`;
 
-const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'knowledge', 'settings'];
+const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'events', 'outcomes', 'knowledge', 'settings'];
 
 /**
  * Tabbed right rail for the agent chat page.
@@ -43,6 +46,9 @@ const TAB_KEYS = ['sessions', 'workspace', 'triggers', 'outcomes', 'knowledge', 
  *     shows that session's log + an in-tab Stop (merged Log+Sessions, #543)
  *   - "Workspace" — read-only file tree of /workspace/agents/<id>/
  *   - "Triggers"  — the agent's triggers.json
+ *   - "Events"    — the GitHub events that reached this agent's triggers, with
+ *     "Fire again" on a dropped wake (#2525). Only for an agent with at least
+ *     one GitHub-event trigger, hence `showEvents` gating the tab.
  *   - "Outcomes"  — read-only view of the agent's outcome options (#963); the
  *     outputs counterpart of Triggers, so it sits next to it. Team members only
  *     (an outcome is a hand-off), hence `agentTeamId` gating the tab.
@@ -98,6 +104,13 @@ export default function RightRail({
     overrideId: settingsAgentId,
   });
   const showSettings = settings.visible;
+  // Events (#2525 AC1): only for an agent with a GitHub-event trigger. `null`
+  // while the triggers load, so the fallback below never throws away a
+  // persisted Events tab before we know. Keyed by agent id so a switch never
+  // reads the PREVIOUS agent's answer (the rail is not remounted on a switch).
+  const [eventTriggerCheck, setEventTriggerCheck] = useState({ agentId: null, has: null });
+  const hasEventTrigger = eventTriggerCheck.agentId === agentId ? eventTriggerCheck.has : null;
+  const showEvents = hasEventTrigger === true;
   const [tab, setTab] = useState(() => tabForAgent(loadTabMap(), agentId, TAB_KEYS) || DEFAULT_RAIL_TAB);
 
   // Restore-then-persist, in that order, for the same reason they're one
@@ -146,9 +159,22 @@ export default function RightRail({
   // throw away a persisted Outcomes tab on every page load.
   useEffect(() => {
     if (!agentId) return;
+    if (hasEventTrigger === false && tab === 'events') setTab(DEFAULT_RAIL_TAB);
     if (!showOutcomes && tab === 'outcomes') setTab(DEFAULT_RAIL_TAB);
     if (!showSettings && tab === 'settings') setTab(DEFAULT_RAIL_TAB);
-  }, [agentId, showOutcomes, showSettings, tab]);
+  }, [agentId, hasEventTrigger, showOutcomes, showSettings, tab]);
+
+  // Whether the Events tab applies. Re-checked on agent switch and whenever the
+  // tab changes (so adding a GitHub-event trigger on the Triggers tab surfaces
+  // the Events tab the moment the user leaves it). A failed read hides the tab.
+  useEffect(() => {
+    if (!agentId) return undefined;
+    let cancelled = false;
+    apiCall('GET', `/api/agents/${encodeURIComponent(agentId)}/triggers`)
+      .then((triggers) => { if (!cancelled) setEventTriggerCheck({ agentId, has: hasGithubEventTrigger(triggers) }); })
+      .catch(() => { if (!cancelled) setEventTriggerCheck({ agentId, has: false }); });
+    return () => { cancelled = true; };
+  }, [agentId, tab]);
 
   // Session COUNT for the "Sessions" tab badge — regardless of which tab is
   // visible, and even while the rail is collapsed (the icon dot). Derived from
@@ -165,10 +191,11 @@ export default function RightRail({
     { key: 'sessions', Icon: Activity, label: 'Sessions', hint: 'Live and past runs — each session\'s log, cost and context usage', badge: sessionCount > 0 ? sessionCount : null },
     { key: 'workspace', Icon: FolderTree, label: 'Workspace', hint: 'Read-only file tree of this agent\'s workspace' },
     { key: 'triggers', Icon: CalendarClock, label: 'Triggers', hint: 'Schedules, one-shot and loop triggers that start runs' },
+    ...(showEvents ? [{ key: 'events', Icon: Github, label: 'Events', hint: 'GitHub events that reached this agent\'s triggers — delivered or dropped, and why' }] : []),
     ...(showOutcomes ? [{ key: 'outcomes', Icon: Target, label: 'Outcomes', hint: 'Hand-off outcomes and labels this team member can emit' }] : []),
     { key: 'knowledge', Icon: Brain, label: 'Knowledge', hint: 'The team knowledge this agent can read and add to' },
     ...(showSettings ? [{ key: 'settings', Icon: Settings, label: 'Settings', hint: 'This agent\'s configuration — prompt, skills, plugins, context folders, repositories' }] : []),
-  ], [sessionCount, showOutcomes, showSettings]);
+  ], [sessionCount, showEvents, showOutcomes, showSettings]);
 
   // The tab actually shown. Normally the open agent's own `tab`, but a Settings
   // override for a DIFFERENT agent (see the `openTabRequest` effect) is a
@@ -437,6 +464,11 @@ export default function RightRail({
         <div style={{ display: effectiveTab === 'triggers' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
           <TriggersPanel agentId={agentId} active={effectiveTab === 'triggers'} />
         </div>
+        {showEvents && (
+          <div style={{ display: effectiveTab === 'events' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+            <EventsPanel agentId={agentId} active={effectiveTab === 'events'} canManage={agentCanManage} />
+          </div>
+        )}
         {showOutcomes && (
           <div style={{ display: effectiveTab === 'outcomes' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
             <OutcomesPanel agentId={agentId} active={effectiveTab === 'outcomes'} />

@@ -50,8 +50,8 @@ export function useHelperChat() {
 // ─── useHelpSubject (E17 #1892, docs/helper-chat-concept.md §3.2) ────────────
 //
 // The hook a non-route help surface uses to say what the panel should answer for
-// while it is on screen: an overlay (the Settings dialog, the first-run wizard)
-// and/or a sub-state (the current wizard step). Publishes on mount and whenever
+// while it is on screen: an overlay (e.g. the Settings dialog) and/or
+// a sub-state (the current wizard step). Publishes on mount and whenever
 // the values change, retracts on unmount — so a dialog that closes automatically
 // hands help back to the page (or the step) underneath it, with no co-ordination
 // between the two components. Pass `active: false` to publish nothing (e.g. a

@@ -710,8 +710,8 @@ test('credentialVisibleToTeam: used for the reassignment-orphan guard', () => {
 
 // ── personalLendToTeam: the LIVE LEND (unified access model §7/§8, #2357) ────
 // A personal credential is consumable by team T iff its owner is a CURRENT
-// member of T. Composed at the consume call sites (behind AEE_RESOURCE_ACCESS_V2);
-// the flag-gating is the caller's job, this predicate is the pure primitive.
+// member of T. Composed at the consume call sites; this predicate is the pure
+// primitive.
 
 test('personalLendToTeam: a member\'s personal credential is lent to their team', () => {
   const isMember = (u, t) => u === 'u-alice' && t === 'payments';

@@ -8,7 +8,7 @@ import {
   MATERIALIZE_BRIDGE,
   DRAFT_STATUS_LEAD,
   DRAFT_NEXT_STEP,
-  OPEN_TEAM_LABEL,
+  OPEN_IN_AGENT_CHAT_LABEL,
   PROVISION_NOW_LABEL,
   PROVISION_NOW_HINT,
   draftStatusLine,
@@ -99,8 +99,9 @@ test('AC12 — a nameless result yields no notice rather than an empty quote', (
   assert.equal(createdTeamNotice('  Trimmed  '), createdTeamNotice('Trimmed'));
 });
 
-test('the confirmation offers a way onward', () => {
-  assert.equal(OPEN_TEAM_LABEL, 'Open team');
+test('the confirmation offers a way onward, named after its destination (#2521 AC3)', () => {
+  assert.equal(OPEN_IN_AGENT_CHAT_LABEL, 'Open in Agent Chat');
+  assert.match(OPEN_IN_AGENT_CHAT_LABEL, /Agent Chat/);
 });
 
 // ─── The member-level act keeps its own verb (#2053 AC13) ────────────────────

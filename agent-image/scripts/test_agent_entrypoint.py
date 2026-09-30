@@ -16,7 +16,9 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from datetime import datetime, timedelta
@@ -165,22 +167,26 @@ class AskUserQuestionPayload(unittest.TestCase):
         # An option with no description omits the key entirely.
         self.assertEqual(q["options"][1], {"optionId": "0:1", "label": "API key"})
 
-    def test_multiselect_excluded_from_interactive_payload(self):
-        # A multiSelect question is single-select-only in the MVP (D1/AC4):
-        # dropped from the structured payload (still in the text body).
-        self.assertIsNone(self.fn({"questions": [{
+    def test_multiselect_question_is_flagged_in_the_payload(self):
+        # #2523 (supersedes #1663 D1): a multiSelect question is carried with
+        # `multiSelect: true` so the UI renders toggles + Submit.
+        out = self.fn({"questions": [{
             "header": "H", "question": "Pick some", "multiSelect": True,
             "options": [{"label": "A"}, {"label": "B"}],
-        }]}))
+        }]})
+        q = out["questions"][0]
+        self.assertIs(q["multiSelect"], True)
+        self.assertEqual([o["label"] for o in q["options"]], ["A", "B"])
 
-    def test_multiselect_mixed_keeps_single_choice_only(self):
+    def test_multiselect_mixed_keeps_both_and_flags_only_the_multi_one(self):
         out = self.fn({"questions": [
             {"header": "Q1", "question": "One?", "options": [{"label": "A"}]},
             {"header": "Q2", "question": "Many?", "multiSelect": True,
              "options": [{"label": "B"}, {"label": "C"}]},
         ]})
-        self.assertEqual(len(out["questions"]), 1)
-        self.assertEqual(out["questions"][0]["questionId"], "q0")
+        self.assertEqual([q["questionId"] for q in out["questions"]], ["q0", "q1"])
+        self.assertNotIn("multiSelect", out["questions"][0])  # single-choice unchanged
+        self.assertIs(out["questions"][1]["multiSelect"], True)
 
     def test_option_ids_unique_across_questions(self):
         out = self.fn({"questions": [
@@ -207,42 +213,43 @@ class AskUserQuestionPayload(unittest.TestCase):
         self.assertIsNone(self.fn({"questions": [{}, {"options": []}]}))
 
 
-class AskUserQuestionReachable(unittest.TestCase):
-    """AskUserQuestion is offered headlessly via the bundled MCP server (#1712)."""
+class AskUserQuestionNoMcp(unittest.TestCase):
+    """aee-ask is the only structured-question mechanism (#1719): the runner
+    registers no MCP server for it, while a stray AskUserQuestion tool_use is
+    still intercepted (#447)."""
 
     def test_is_ask_user_question_tool_matches_bare_and_namespaced(self):
         fn = entrypoint._is_ask_user_question_tool
         self.assertTrue(fn("AskUserQuestion"))                       # built-in
-        self.assertTrue(fn("mcp__aee-ask__AskUserQuestion"))         # bundled MCP
         self.assertTrue(fn("mcp__other-server__AskUserQuestion"))    # any server
-        self.assertEqual(fn("mcp__aee-ask__AskUserQuestion"),
-                         entrypoint._is_ask_user_question_tool(entrypoint._ASK_USER_MCP_TOOL))
 
     def test_is_ask_user_question_tool_rejects_others(self):
         fn = entrypoint._is_ask_user_question_tool
         for bad in (None, "", 42, "Bash", "AskUserQuestionX",
-                    "AskUserQuestionExtra", "mcp__aee-ask__SomethingElse"):
+                    "AskUserQuestionExtra", "mcp__other-server__SomethingElse"):
             self.assertFalse(fn(bad))
 
-    def test_mcp_config_registers_bundled_server(self):
-        import json as _json
-        cfg = _json.loads(entrypoint._ask_user_mcp_config())
-        server = cfg["mcpServers"][entrypoint._ASK_USER_MCP_KEY]
-        self.assertEqual(server["command"], "python3")
-        self.assertEqual(server["args"], [str(entrypoint._ASK_USER_MCP_SERVER)])
-        # The namespaced tool name is derived from the same key.
-        self.assertEqual(entrypoint._ASK_USER_MCP_TOOL,
-                         f"mcp__{entrypoint._ASK_USER_MCP_KEY}__AskUserQuestion")
+    def test_base_claude_args_registers_no_ask_mcp_server(self):
+        # Regardless of any leftover opt-out flag in the environment, no run
+        # registers or allows an MCP-delivered AskUserQuestion ...
+        for env in ({}, {"AEE_DISABLE_ASK_MCP": "0"}, {"AEE_DISABLE_ASK_MCP": "1"}):
+            with patch.dict(os.environ, env):
+                args = entrypoint._base_claude_args("hi", "", None)
+            self.assertNotIn("--mcp-config", args)
+            allowed = [args[i + 1] for i, a in enumerate(args) if a == "--allowedTools"]
+            self.assertFalse(any("AskUserQuestion" in t or t.startswith("mcp__")
+                                 for t in allowed), allowed)
+            # ... and settings.json-provisioned MCP servers are not suppressed.
+            self.assertNotIn("--strict-mcp-config", args)
+        # Bash (which `aee-ask` runs through) stays allowed.
+        self.assertIn("Bash(*)", allowed)
 
-    def test_base_claude_args_offers_and_allows_the_tool(self):
-        args = entrypoint._base_claude_args("hi", "", None)
-        # The MCP server is registered ...
-        self.assertIn("--mcp-config", args)
-        cfg = args[args.index("--mcp-config") + 1]
-        self.assertIn(entrypoint._ASK_USER_MCP_KEY, cfg)
-        # ... and the namespaced tool is on the allow list.
-        allowed = {args[i + 1] for i, a in enumerate(args) if a == "--allowedTools"}
-        self.assertIn(entrypoint._ASK_USER_MCP_TOOL, allowed)
+    def test_bundled_mcp_server_is_gone(self):
+        scripts = Path(__file__).resolve().parent
+        self.assertFalse((scripts / "ask-user-mcp.py").exists())
+        for attr in ("_ask_user_mcp_config", "_ASK_USER_MCP_TOOL",
+                     "_ASK_USER_MCP_KEY", "_ASK_USER_MCP_SERVER", "_ASK_MCP_DISABLED"):
+            self.assertFalse(hasattr(entrypoint, attr), attr)
 
     def test_base_claude_args_keeps_prompt_off_argv(self):
         # #1727: the prompt is delivered on stdin, never as an argv argument, so
@@ -263,63 +270,9 @@ class AskUserQuestionReachable(unittest.TestCase):
         self.assertEqual(args[args.index("--append-system-prompt") + 1], "mem-hint")
 
 
-class AskUserMcpServer(unittest.TestCase):
-    """Drive the bundled ask-user-mcp.py stdio server over JSON-RPC."""
-
-    _SERVER = Path(__file__).resolve().parent / "ask-user-mcp.py"
-
-    def _rpc(self, requests):
-        import json as _json
-        proc = subprocess.run(
-            ["python3", str(self._SERVER)],
-            input="\n".join(_json.dumps(r) for r in requests) + "\n",
-            capture_output=True, text=True, timeout=15,
-        )
-        return [_json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
-
-    def test_initialize_advertises_tools_capability(self):
-        out = self._rpc([{"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                          "params": {}}])
-        self.assertEqual(out[0]["id"], 1)
-        self.assertIn("tools", out[0]["result"]["capabilities"])
-        self.assertEqual(out[0]["result"]["serverInfo"]["name"], "aee-ask")
-
-    def test_tools_list_exposes_ask_user_question_with_questions_schema(self):
-        out = self._rpc([{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}])
-        tools = out[0]["result"]["tools"]
-        self.assertEqual(len(tools), 1)
-        tool = tools[0]
-        self.assertEqual(tool["name"], "AskUserQuestion")
-        props = tool["inputSchema"]["properties"]
-        self.assertIn("questions", props)
-        # Shape must match what _format_ask_user_question / _payload consume.
-        qprops = props["questions"]["items"]["properties"]
-        self.assertEqual(set(qprops), {"header", "question", "options", "multiSelect"})
-
-    def test_tools_call_returns_non_error_stop_instruction(self):
-        out = self._rpc([{"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-                          "params": {"name": "AskUserQuestion",
-                                     "arguments": {"questions": [
-                                         {"question": "A or B?",
-                                          "options": [{"label": "A"}]}]}}}])
-        res = out[0]["result"]
-        self.assertNotIn("error", out[0])
-        text = res["content"][0]["text"]
-        self.assertIn("END YOUR TURN", text.upper())
-
-    def test_unknown_request_gets_error_notification_ignored(self):
-        out = self._rpc([
-            {"jsonrpc": "2.0", "method": "notifications/initialized"},   # ignored
-            {"jsonrpc": "2.0", "id": 9, "method": "no/such/method"},     # error
-        ])
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0]["id"], 9)
-        self.assertEqual(out[0]["error"]["code"], -32601)
-
-
 class AskUserQuestionInterceptEndToEnd(unittest.TestCase):
-    """The stream mapper + intercept predicate recognise the MCP-namespaced
-    tool_use the model actually emits, feeding the existing #447/#1663 render."""
+    """The stream mapper + intercept predicate recognise an MCP-namespaced
+    AskUserQuestion tool_use, feeding the existing #447/#1663 render."""
 
     def test_mapper_carries_namespaced_tool_name_and_intercept_matches(self):
         import json as _json
@@ -328,7 +281,7 @@ class AskUserQuestionInterceptEndToEnd(unittest.TestCase):
             "message": {"content": [{
                 "type": "tool_use",
                 "id": "toolu_1",
-                "name": "mcp__aee-ask__AskUserQuestion",
+                "name": "mcp__other-server__AskUserQuestion",
                 "input": {"questions": [{"header": "Deploy",
                                          "question": "Staging or prod first?",
                                          "options": [{"label": "Staging"},
@@ -339,11 +292,280 @@ class AskUserQuestionInterceptEndToEnd(unittest.TestCase):
                   if e.get("type") == "tool_use"]
         self.assertEqual(len(events), 1)
         ev = events[0]
-        self.assertEqual(ev["tool"], "mcp__aee-ask__AskUserQuestion")
+        self.assertEqual(ev["tool"], "mcp__other-server__AskUserQuestion")
         self.assertTrue(entrypoint._is_ask_user_question_tool(ev["tool"]))
         # The captured input renders through the existing helpers unchanged.
         self.assertIsNotNone(entrypoint._format_ask_user_question(ev["input"]))
         self.assertIsNotNone(entrypoint._ask_user_question_payload(ev["input"]))
+
+
+_AEE_ASK = Path(__file__).resolve().parent / "aee-ask"
+
+
+def _run_aee_ask(args, sentinel):
+    env = dict(os.environ)
+    env["AEE_ASK_FILE"] = str(sentinel)
+    return subprocess.run([sys.executable, str(_AEE_ASK), *args],
+                          capture_output=True, text=True, env=env, timeout=30)
+
+
+class AeeAskCli(unittest.TestCase):
+    """The `aee-ask` CLI facade (#2523): validates its own args and writes an
+    AskUserQuestion-shaped payload to the run-scoped sentinel file."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.sentinel = Path(self._tmp.name) / ".agent-studio" / "ask" / "t.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_ticket_example_writes_the_old_tool_input_shape(self):
+        proc = _run_aee_ask(["Which base branch?", "--header", "Branch",
+                             "--option", "main::default",
+                             "--option", "release::hotfix line"], self.sentinel)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("END YOUR TURN NOW", proc.stdout)
+        data = json.loads(self.sentinel.read_text(encoding="utf-8"))
+        self.assertEqual(data, {"questions": [{
+            "question": "Which base branch?",
+            "header": "Branch",
+            "options": [{"label": "main", "description": "default"},
+                        {"label": "release", "description": "hotfix line"}],
+        }]})
+        # Same card as the old MCP path: identical helpers, identical output.
+        payload = entrypoint._ask_user_question_payload(data)
+        self.assertEqual(payload["questions"][0]["header"], "Branch")
+        self.assertEqual([o["label"] for o in payload["questions"][0]["options"]],
+                         ["main", "release"])
+        self.assertIn("**main** — default", fmt(data))
+
+    def test_multi_sets_multiselect(self):
+        proc = _run_aee_ask(["Which checks?", "--multi", "--option", "unit",
+                             "--option", "e2e::slow"], self.sentinel)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(self.sentinel.read_text(encoding="utf-8"))
+        q = data["questions"][0]
+        self.assertIs(q["multiSelect"], True)
+        self.assertEqual(q["options"][0], {"label": "unit"})  # description optional
+        self.assertIn("pick more than one", fmt(data))
+
+    def test_invalid_input_fails_fast_and_queues_nothing(self):
+        cases = [
+            ["Which?"],                                   # no options
+            ["Which?", "--option", "::only a description"],  # empty label
+            ["Which?", "--option", ""],                   # empty option
+            ["Which?", "--option"],                       # missing value
+            ["--option", "a"],                            # no question
+            ["Which?", "--option", "a", "--option", "a"],  # duplicate label
+            ["Which?", "extra", "--option", "a"],         # unquoted question
+            ["Which?", "--option", "a", "--bogus"],       # unknown flag
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                proc = _run_aee_ask(args, self.sentinel)
+                self.assertEqual(proc.returncode, 2)
+                self.assertTrue(proc.stderr.strip())
+                self.assertNotIn("END YOUR TURN", proc.stdout)
+                self.assertFalse(self.sentinel.exists())
+
+    def test_a_second_call_in_the_same_turn_adds_a_question(self):
+        _run_aee_ask(["A?", "--option", "x"], self.sentinel)
+        _run_aee_ask(["B?", "--option", "y"], self.sentinel)
+        data = json.loads(self.sentinel.read_text(encoding="utf-8"))
+        self.assertEqual([q["question"] for q in data["questions"]], ["A?", "B?"])
+
+    def test_question_may_start_with_a_dash_after_double_dash(self):
+        proc = _run_aee_ask(["--option", "a", "--", "-x or -y?"], self.sentinel)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(self.sentinel.read_text(encoding="utf-8"))
+        self.assertEqual(data["questions"][0]["question"], "-x or -y?")
+
+
+# A stand-in for the `claude` CLI: emits stream-json for a turn in which the
+# model runs `aee-ask` through Bash (for real, against $AEE_ASK_FILE), then
+# behaves per FAKE_CLAUDE_MODE.
+_FAKE_CLAUDE = r'''#!/usr/bin/env python3
+import json, os, subprocess, sys, time
+sys.stdin.read()
+mode = os.environ.get("FAKE_CLAUDE_MODE", "obey")
+def out(obj):
+    sys.stdout.write(json.dumps(obj) + "\n"); sys.stdout.flush()
+def tool_use(tid, cmd):
+    out({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": tid,
+         "name": "Bash", "input": {"command": cmd}}]}})
+def tool_result(tid, text, err=False):
+    out({"type": "user", "message": {"content": [{"type": "tool_result",
+         "tool_use_id": tid, "content": text, "is_error": err}]}})
+out({"type": "system", "subtype": "init", "session_id": "sess-ask"})
+args = json.loads(os.environ["FAKE_ASK_ARGS"])
+tool_use("t1", "aee-ask ...")
+p = subprocess.run([sys.executable, os.environ["FAKE_AEE_ASK"], *args],
+                   capture_output=True, text=True)
+tool_result("t1", p.stdout + p.stderr, p.returncode != 0)
+if mode == "keep-working":
+    # The model's next API round-trip, then a follow-up tool. The runner must
+    # end the turn on the tool_result above, before this tool ever starts.
+    time.sleep(5)
+    open(os.environ["FAKE_FOLLOWUP_MARKER"], "w").close()
+    tool_use("t2", "rm -rf something")
+    out({"type": "result", "subtype": "success", "result": "did more work", "session_id": "sess-ask"})
+    sys.exit(0)
+out({"type": "assistant", "message": {"content": [{"type": "text", "text": "trailing prose?"}]}})
+out({"type": "result", "subtype": "success", "result": "Which branch do you want?",
+     "session_id": "sess-ask", "usage": {}})
+'''
+
+
+class AskAnswerPrompt(unittest.TestCase):
+    """A multi-select quick-reply answer resumes with every selection (#2523)."""
+    fn = staticmethod(entrypoint._ask_answer_prompt)
+    F = "io.aee.ask-answer"
+
+    def test_single_choice_answer_passes_the_body_through(self):
+        content = {self.F: {"questionEventId": "$q", "optionId": "0:0", "label": "main"}}
+        self.assertEqual(self.fn("main", content), "main")
+
+    def test_plain_messages_pass_through(self):
+        for content in (None, {}, {"body": "x"}, {self.F: "junk"}):
+            self.assertEqual(self.fn("hello", content), "hello")
+
+    def test_multi_select_answer_injects_every_selected_label(self):
+        content = {self.F: {"questionEventId": "$q", "questionId": "q0",
+                            "optionIds": ["0:0", "0:2"], "labels": ["unit", "e2e, slow"],
+                            "label": "unit, e2e, slow"}}
+        out = self.fn("unit, e2e, slow", content)
+        self.assertEqual(out, "My answer to your question (selected options):\n"
+                              "- unit\n- e2e, slow")
+
+    def test_multi_question_answer_with_a_multi_select_entry(self):
+        content = {self.F: {"questionEventId": "$q", "answers": [
+            {"questionId": "q0", "optionId": "0:1", "label": "release"},
+            {"questionId": "q1", "optionIds": ["1:0", "1:1"], "labels": ["unit", "e2e"],
+             "label": "unit, e2e"},
+        ]}}
+        out = self.fn("release\nunit, e2e", content)
+        self.assertEqual(out, "My answers to your questions (selected options, in question order):\n"
+                              "Question 1:\n- release\nQuestion 2:\n- unit\n- e2e")
+
+    def test_multi_question_answer_without_multi_select_passes_through(self):
+        content = {self.F: {"questionEventId": "$q", "answers": [
+            {"questionId": "q0", "optionId": "0:1", "label": "a"},
+            {"questionId": "q1", "optionId": "1:0", "label": "b"}]}}
+        self.assertEqual(self.fn("a\nb", content), "a\nb")
+
+    def test_malformed_selection_falls_back_to_the_body(self):
+        content = {self.F: {"questionEventId": "$q", "labels": [None, "  ", 3]}}
+        self.assertEqual(self.fn("body", content), "body")
+
+    def test_dm_handler_resumes_with_the_structured_answer(self):
+        src = Path(entrypoint.__file__).read_text(encoding="utf-8")
+        self.assertIn("_prepare_chat_prompt(_ask_answer_prompt(body, content),", src)
+
+
+class AeeAskEndToEnd(unittest.TestCase):
+    """CLI → sentinel → interception → terminal message (#2523 AC), driving the
+    real `_call_claude_once` against a fake `claude` that runs the real CLI."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.workdir = root / "agent"
+        self.workdir.mkdir()
+        bindir = root / "bin"
+        bindir.mkdir()
+        fake = bindir / "claude"
+        fake.write_text(_FAKE_CLAUDE.replace("#!/usr/bin/env python3",
+                                             f"#!{sys.executable}", 1), encoding="utf-8")
+        fake.chmod(0o755)
+        self.env = {
+            "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
+            "FAKE_AEE_ASK": str(_AEE_ASK),
+        }
+        self.events = []
+        self._patches = [
+            patch.dict(os.environ, self.env),
+            patch.object(entrypoint, "_agent_workdir", return_value=self.workdir),
+            patch.object(entrypoint, "_append_event",
+                         side_effect=lambda _r, ev: self.events.append(ev)),
+            patch.object(entrypoint, "_spool_usage_record"),
+            patch.object(entrypoint, "_build_memory_hint", return_value="hint"),
+            patch.object(entrypoint, "_resolve_repo_dir", return_value=None),
+            patch.object(entrypoint, "_resolve_model_arg", return_value=None),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self._patches):
+            p.stop()
+        self._tmp.cleanup()
+
+    def _run(self, ask_args, mode="obey"):
+        os.environ["FAKE_ASK_ARGS"] = json.dumps(ask_args)
+        os.environ["FAKE_CLAUDE_MODE"] = mode
+        ctx = {}
+        text, session = entrypoint._call_claude_once(
+            "hi", "!room:local", "corr-1", None, None, 60, run_context=ctx)
+        return text, session, ctx
+
+    def _no_sentinel_left(self):
+        ask_dir = self.workdir / ".agent-studio" / "ask"
+        return not ask_dir.exists() or not any(ask_dir.iterdir())
+
+    def test_question_becomes_the_terminal_message_with_the_card_payload(self):
+        args = ["Which base branch?", "--header", "Branch",
+                "--option", "main::default", "--option", "release::hotfix line"]
+        text, session, ctx = self._run(args)
+        expected = {"questions": [{"question": "Which base branch?", "header": "Branch",
+                                   "options": [{"label": "main", "description": "default"},
+                                               {"label": "release", "description": "hotfix line"}]}]}
+        # Trailing model prose / result text is discarded — the question wins.
+        self.assertEqual(text, fmt(expected))
+        self.assertNotIn("trailing prose", text)
+        self.assertEqual(ctx["_askQuestion"], entrypoint._ask_user_question_payload(expected))
+        self.assertEqual(session, "sess-ask")  # resumable session id captured
+        self.assertTrue(self._no_sentinel_left())
+
+    def test_multi_question_reaches_chat(self):
+        text, _s, ctx = self._run(["Which checks?", "--multi",
+                                   "--option", "unit", "--option", "e2e"])
+        self.assertIn("pick more than one", text)
+        q = ctx["_askQuestion"]["questions"][0]
+        self.assertIs(q["multiSelect"], True)  # rendered as toggles + Submit
+        self.assertEqual([o["label"] for o in q["options"]], ["unit", "e2e"])
+
+    def test_turn_is_hard_ended_before_any_follow_up_tool_runs(self):
+        marker = self.workdir / "followup-ran"
+        os.environ["FAKE_FOLLOWUP_MARKER"] = str(marker)
+        started = time.monotonic()
+        text, session, ctx = self._run(["Proceed?", "--option", "yes", "--option", "no"],
+                                       mode="keep-working")
+        # Ended on the sentinel's tool_result, not after the fake's 5s "API call".
+        self.assertLess(time.monotonic() - started, 4)
+        time.sleep(0.2)
+        self.assertFalse(marker.exists(), "a follow-up tool ran after aee-ask")
+        self.assertIn("Proceed?", text)
+        self.assertNotIn("did more work", text)
+        self.assertEqual(session, "sess-ask")
+        self.assertIsNotNone(ctx.get("_askQuestion"))
+        self.assertTrue(self._no_sentinel_left())
+
+    def test_invalid_ask_does_not_end_the_turn(self):
+        text, _s, ctx = self._run(["Which?"])  # no options → usage error
+        self.assertEqual(text, "Which branch do you want?")
+        self.assertNotIn("_askQuestion", ctx)
+
+    def test_each_invocation_gets_its_own_sentinel_path(self):
+        seen = []
+        real = entrypoint._ask_sentinel_path
+        with patch.object(entrypoint, "_ask_sentinel_path",
+                          side_effect=lambda i: seen.append(real(i)) or seen[-1]):
+            self._run(["A?", "--option", "x"])
+            self._run(["B?", "--option", "y"])
+        self.assertEqual(len(set(seen)), 2)
+        for path in seen:
+            self.assertTrue(str(path).startswith(str(self.workdir / ".agent-studio" / "ask")))
 
 
 class BuildHarvestHint(unittest.TestCase):
@@ -557,7 +779,7 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
 
     async def test_null_stamp_falls_through_to_payload_label_for_any_label_listener(self):
         """#2151 AC2: a filter-less (any-label) listener's stamped wakeLabel is
-        `None` (poller/flow-emit convention) — the notice must still fall
+        `None` (poller/label fast-path convention) — the notice must still fall
         through to `payload.label.name`, unchanged behaviour."""
         scheduler, client = self._scheduler()
         trigger = {"id": "t-ignore", "type": "github-event"}
@@ -574,7 +796,7 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
         self.assertIn("`ux`", body)
 
     async def test_internal_delivery_stays_byte_identical_when_stamp_agrees(self):
-        """#2151 AC3: flow-emit / label-fastpath synthetic events stamp
+        """#2151 AC3: label-fastpath synthetic events stamp
         wakeLabel equal to their own payload.label.name — the notice must be
         unaffected either way."""
         scheduler, client = self._scheduler()
@@ -763,7 +985,7 @@ class PostTriggerNotice(unittest.IsolatedAsyncioTestCase):
     # -- #1897: unified issue/PR notice with abbreviated link ------------------
 
     async def test_pr_notice_shows_number_regardless_of_delivery_path(self):
-        """AC1: a PR notice shows `#N` even from an internal-transport delivery
+        """AC1: a PR notice shows `#N` even from a synthetic (label fast-path) delivery
         whose synthetic payload carries a number + url (and here a title)."""
         scheduler, client = self._scheduler()
         trigger = {"id": "t1", "type": "github-event"}
@@ -3004,6 +3226,34 @@ class NewSession(unittest.TestCase):
     def test_correlation_id_defaults_to_none(self):
         s = entrypoint._new_session("dm", room_id="!r:local")
         self.assertIsNone(s["correlationId"])
+        self.assertIsNone(s["workItem"])
+
+    def test_work_item_recorded(self):
+        wi = {"repo": "o/r", "kind": "issue", "number": 7}
+        s = entrypoint._new_session("trigger", work_item=wi)
+        self.assertEqual(s["workItem"], wi)
+
+
+class SessionWorkItem(unittest.TestCase):
+    """#2573: a GitHub-triggered session names the issue/PR it works on."""
+
+    def test_issue_event(self):
+        gh = {"repo": "o/r", "payload": {"issue": {"number": 5}}}
+        self.assertEqual(entrypoint._session_work_item(gh),
+                         {"repo": "o/r", "kind": "issue", "number": 5})
+
+    def test_pr_event_wins(self):
+        gh = {"repo": "o/r", "payload": {"pull_request": {"number": 9}, "issue": {"number": 9}}}
+        self.assertEqual(entrypoint._session_work_item(gh),
+                         {"repo": "o/r", "kind": "pr", "number": 9})
+
+    def test_issue_comment_on_pr_is_pr(self):
+        gh = {"repo": "o/r", "payload": {"issue": {"number": 4, "pull_request": {"url": "x"}}}}
+        self.assertEqual(entrypoint._session_work_item(gh)["kind"], "pr")
+
+    def test_non_github_or_push(self):
+        self.assertIsNone(entrypoint._session_work_item(None))
+        self.assertIsNone(entrypoint._session_work_item({"repo": "o/r", "payload": {"ref": "refs/heads/x"}}))
 
 
 class SessionPointerResumeFlag(unittest.TestCase):
@@ -4150,6 +4400,113 @@ class GhSwapLabels(unittest.TestCase):
         run.assert_not_called()
 
 
+class PluginRunIdentity(unittest.TestCase):
+    """#2562 — the runner declares every Claude run with its in-memory run key."""
+
+    def setUp(self):
+        self._saved_key = entrypoint._PLUGIN_RUN_KEY
+        entrypoint._PLUGIN_RUN_KEY = None
+
+    def tearDown(self):
+        entrypoint._PLUGIN_RUN_KEY = self._saved_key
+
+    def _env(self, **extra):
+        return patch.dict(os.environ, {"AGENT_ID": "team-a-dev", "AEE_AGENT_CALLER_TOKEN": "aeecall1.x.y", **extra})
+
+    def test_declaration_is_chat_only_when_the_dm_handler_named_the_event(self):
+        self.assertEqual(entrypoint._plugin_run_declaration({"chatEvent": {"roomId": "!r", "eventId": "$e"}}),
+                         {"kind": "chat", "roomId": "!r", "eventId": "$e"})
+        # a requestedBy / AEE_ACTING_SENDER-style claim alone is NOT a chat run
+        self.assertEqual(entrypoint._plugin_run_declaration({"requestedBy": {"matrixUserId": "@a:hs"}}),
+                         {"kind": "autonomous"})
+        self.assertEqual(entrypoint._plugin_run_declaration({"chatEvent": {"roomId": "!r", "eventId": None}}),
+                         {"kind": "autonomous"})
+        self.assertEqual(entrypoint._plugin_run_declaration(None), {"kind": "autonomous"})
+
+    def test_the_declaration_never_carries_a_sender(self):
+        body = entrypoint._plugin_run_declaration({"chatEvent": {"roomId": "!r", "eventId": "$e", "sender": "@mallory:hs"},
+                                                   "requestedBy": {"matrixUserId": "@mallory:hs"}})
+        self.assertNotIn("sender", json.dumps(body))
+        self.assertNotIn("mallory", json.dumps(body))
+
+    def test_key_is_fetched_once_and_kept_out_of_env(self):
+        calls = []
+
+        def post(route, body, timeout=10):
+            calls.append((route, body))
+            return 200, {"ok": True, "key": "K" * 64}
+
+        with self._env(), patch.object(entrypoint, "_plugin_identity_post", post), \
+                patch.object(entrypoint, "_make_non_dumpable", return_value=True) as nd:
+            self.assertTrue(entrypoint._acquire_plugin_run_key())
+            nd.assert_called_once()
+            self.assertEqual(calls, [("/run-key", {})])
+            self.assertEqual(entrypoint._PLUGIN_RUN_KEY, "K" * 64)
+            self.assertNotIn("K" * 64, "".join(os.environ.values()))
+
+    def test_a_refused_key_is_final_and_only_a_refused_connection_is_retried(self):
+        answers = [ConnectionRefusedError(), (409, {"ok": False, "reason": "key-already-issued"})]
+        calls = []
+
+        def post(route, body, timeout=10):
+            calls.append(route)
+            a = answers.pop(0)
+            if isinstance(a, BaseException):
+                raise a
+            return a
+
+        with self._env(), patch.object(entrypoint, "_plugin_identity_post", post), \
+                patch.object(entrypoint, "_make_non_dumpable", return_value=True), \
+                patch.object(entrypoint.time, "sleep"):
+            self.assertFalse(entrypoint._acquire_plugin_run_key(attempts=5))
+        self.assertEqual(calls, ["/run-key", "/run-key"])  # no third ask after an answer
+        self.assertIsNone(entrypoint._PLUGIN_RUN_KEY)
+
+    def test_no_caller_token_means_no_key_request(self):
+        with patch.dict(os.environ, {"AGENT_ID": "a", "AEE_AGENT_CALLER_TOKEN": ""}), \
+                patch.object(entrypoint, "_plugin_identity_post") as post:
+            self.assertFalse(entrypoint._acquire_plugin_run_key())
+            post.assert_not_called()
+
+    def test_every_claude_run_is_declared_and_ended_even_when_it_fails(self):
+        entrypoint._PLUGIN_RUN_KEY = "k"
+        calls = []
+
+        def post(route, body, timeout=10):
+            calls.append((route, body))
+            return (200, {"ok": True, "runId": "run-1"}) if route == "/runs" else (200, {"ok": True})
+
+        with self._env(), patch.object(entrypoint, "_plugin_identity_post", post), \
+                patch.object(entrypoint, "_call_claude_once_inner", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                entrypoint._call_claude_once("p", "!r", "$e", None, None, 10,
+                                             {"chatEvent": {"roomId": "!r", "eventId": "$e"}})
+        self.assertEqual(calls, [
+            ("/runs", {"key": "k", "kind": "chat", "roomId": "!r", "eventId": "$e"}),
+            ("/runs/end", {"key": "k", "runId": "run-1"}),
+        ])
+
+    def test_a_failed_declaration_never_blocks_the_run(self):
+        entrypoint._PLUGIN_RUN_KEY = "k"
+        with self._env(), patch.object(entrypoint, "_plugin_identity_post", return_value=(403, {"reason": "bad-run-key"})), \
+                patch.object(entrypoint, "_call_claude_once_inner", return_value=("ok", None)) as inner:
+            self.assertEqual(entrypoint._call_claude_once("p", "!r", "c", None, None, 10, {}), ("ok", None))
+            inner.assert_called_once()
+
+    def test_without_a_key_nothing_is_declared(self):
+        with patch.object(entrypoint, "_plugin_identity_post") as post, \
+                patch.object(entrypoint, "_call_claude_once_inner", return_value=("ok", None)):
+            entrypoint._call_claude_once("p", "!r", "c", None, None, 10, {})
+            post.assert_not_called()
+
+    def test_dm_handler_names_the_triggering_event(self):
+        src = Path(_MODULE_PATH).read_text()
+        self.assertIn('dm_run_context["chatEvent"] = {"roomId": room_id, "eventId": getattr(event, "event_id", None)}', src)
+        # the key is requested in main(), before the listener (and any run) starts
+        main_body = src[src.index("def main() -> None:"):]
+        self.assertLess(main_body.index("_acquire_plugin_run_key()"), main_body.index("asyncio.run(run_dm_listener())"))
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -4183,6 +4540,19 @@ class NonconformantTriggerReasonTest(unittest.TestCase):
         self.assertIsNone(entrypoint._nonconformant_trigger_reason(
             {"type": "cron", "events": ["a", "b"]}))
         self.assertIsNone(entrypoint._nonconformant_trigger_reason("not-a-dict"))
+
+    def test_branch_filter_validated_like_the_console(self):
+        # #2570 — mirror of branchFilterError in admin-console/api/branch-filter.js.
+        base = {"type": "github-event", "events": ["push"]}
+        for ok in (None, "", " , ", [], "main, feature/*", ["release-*", "**"], "v1.?"):
+            self.assertIsNone(entrypoint._nonconformant_trigger_reason({**base, "branchFilter": ok}), ok)
+        self.assertEqual(entrypoint._branch_filter_error("main, /"),
+                         'branchFilter entry "/" must not start or end with "/"')
+        self.assertIn("whitespace", entrypoint._nonconformant_trigger_reason(
+            {**base, "branchFilter": ["my branch"]}))
+        self.assertIn('"//"', entrypoint._branch_filter_error("a//b"))
+        self.assertIn("wildcards", entrypoint._branch_filter_error("***"))
+        self.assertIn("comma-separated", entrypoint._branch_filter_error(42))
 
 
 class BuildScopedKnowledge(unittest.TestCase):
@@ -5757,6 +6127,464 @@ class BgOrphanCorrectionDispatchPlacement(unittest.TestCase):
         call_site = body.index("_call_claude, send_body, room_id, correlation_id, blueprint_id")
         check_site = body.index('dm_run_context.get("_bgOrphaned")')
         self.assertLess(call_site, check_site)
+
+
+class DmKnowledgeHarvestWiring(unittest.TestCase):
+    """#2517 Phase 1: the interactive DM path must add the harvest-block
+    instruction to the per-turn prompt AND run the deterministic harvest after
+    the call, mirroring the per-invocation trigger path. `on_message` is a nested
+    async Matrix listener with no dedicated harness in this suite, so — like the
+    sibling placement guards above — the wiring facts are read off the module
+    source. Each is a SILENT failure otherwise: no block hint / no harvest call
+    means DM turns quietly stop feeding the shared knowledge base."""
+
+    SRC = _MODULE_PATH.read_text(encoding="utf-8")
+
+    def _dm_body(self):
+        start = self.SRC.index("async def on_message")
+        end = self.SRC.index("async def ", start + 1)
+        return self.SRC[start:end]
+
+    def test_block_hint_appended_to_the_prompt_before_the_invoke_event(self):
+        body = self._dm_body()
+        append_site = body.index(
+            "send_body += build_harvest_block_hint(_knowledge_autonomy_level())")
+        invoke_site = body.index('"type": "claude.invoke"')
+        # The prompt is mutated before the char-count is logged, so promptChars
+        # reflects what the model actually sees.
+        self.assertLess(append_site, invoke_site)
+
+    def test_harvest_runs_after_the_call_and_before_the_reply_fallback(self):
+        body = self._dm_body()
+        call_site = body.index(
+            "_call_claude, send_body, room_id, correlation_id, blueprint_id")
+        harvest_site = body.index(
+            "_harvest_shared_lessons, result, correlation_id")
+        fallback_site = body.index("reply = result if (result and result.strip())")
+        # After the call (so there is a reply to strip) and before the empty
+        # fallback (so the fallback sees the stripped text).
+        self.assertLess(call_site, harvest_site)
+        self.assertLess(harvest_site, fallback_site)
+
+    def test_harvest_uses_the_dm_turns_correlation_id(self):
+        # The concept keys DM lessons on the Matrix event id of the message that
+        # started the turn — the same `correlation_id` used everywhere else here.
+        body = self._dm_body()
+        self.assertIn("_harvest_shared_lessons, result, correlation_id", body)
+
+
+class DmSessionIdleSeconds(unittest.TestCase):
+    """#2518: DM_SESSION_IDLE_MINUTES resolution — configurable, sane default,
+    disable switch, and a floor so a tiny mis-set value can't fire between two
+    turns of one live conversation."""
+
+    fn = staticmethod(entrypoint._dm_session_idle_seconds)
+
+    def _with(self, value):
+        env = {} if value is None else {"DM_SESSION_IDLE_MINUTES": value}
+        with patch.dict(os.environ, env, clear=False):
+            if value is None:
+                os.environ.pop("DM_SESSION_IDLE_MINUTES", None)
+            return self.fn()
+
+    def test_default_is_twenty_minutes(self):
+        self.assertEqual(self._with(None), 20 * 60)
+
+    def test_malformed_falls_back_to_default(self):
+        self.assertEqual(self._with("not-a-number"), 20 * 60)
+
+    def test_custom_value_is_honoured(self):
+        self.assertEqual(self._with("30"), 30 * 60)
+
+    def test_zero_or_negative_disables(self):
+        self.assertEqual(self._with("0"), 0)
+        self.assertEqual(self._with("-5"), 0)
+
+    def test_small_positive_is_floored_at_60s(self):
+        # 0.1 min = 6s would be reckless; floored to 60s.
+        self.assertEqual(self._with("0.1"), 60)
+
+
+class DmConsolidationDue(unittest.TestCase):
+    """#2518: the pure idle + new-activity decision. Encodes every AC the pass
+    fires (and every one it must not) on the two per-room timestamps."""
+
+    fn = staticmethod(entrypoint._dm_consolidation_due)
+    IDLE = 1200  # 20 min
+
+    def test_idle_with_new_activity_is_due(self):
+        st = {"lastActivityAt": 1000.0, "lastConsolidatedActivityAt": 0.0}
+        self.assertTrue(self.fn(st, 1000.0 + self.IDLE + 1, self.IDLE))
+
+    def test_not_yet_idle_is_not_due(self):
+        st = {"lastActivityAt": 1000.0, "lastConsolidatedActivityAt": 0.0}
+        self.assertFalse(self.fn(st, 1000.0 + self.IDLE - 1, self.IDLE))
+
+    def test_idle_but_nothing_new_since_last_consolidation_is_not_due(self):
+        # Already consolidated up to this exact activity → no repeat pass.
+        st = {"lastActivityAt": 1000.0, "lastConsolidatedActivityAt": 1000.0}
+        self.assertFalse(self.fn(st, 1000.0 + self.IDLE + 100, self.IDLE))
+
+    def test_new_activity_after_a_prior_consolidation_re_arms(self):
+        st = {"lastActivityAt": 2000.0, "lastConsolidatedActivityAt": 1000.0}
+        self.assertTrue(self.fn(st, 2000.0 + self.IDLE + 1, self.IDLE))
+
+    def test_never_active_room_is_not_due(self):
+        self.assertFalse(self.fn({}, 9_999_999.0, self.IDLE))
+
+    def test_disabled_idle_window_is_never_due(self):
+        st = {"lastActivityAt": 1000.0, "lastConsolidatedActivityAt": 0.0}
+        self.assertFalse(self.fn(st, 1000.0 + 999_999, 0))
+
+    def test_non_dict_state_is_not_due(self):
+        self.assertFalse(self.fn(None, 9_999_999.0, self.IDLE))
+
+
+class RenderConsolidationTranscript(unittest.TestCase):
+    """#2518: pure render of session-log events into a bounded User/Assistant
+    transcript, keeping the most recent turns within budget."""
+
+    fn = staticmethod(entrypoint.render_consolidation_transcript)
+
+    def test_renders_human_and_agent_turns_in_order(self):
+        events = [
+            {"type": "message.received", "body": "hello"},
+            {"type": "result", "result": "hi there"},
+            {"type": "message.received", "body": "bye"},
+        ]
+        out = self.fn(events)
+        self.assertEqual(out, "User: hello\n\nAssistant: hi there\n\nUser: bye")
+
+    def test_ignores_textless_and_non_dict_rows(self):
+        events = [
+            {"type": "claude.invoke", "promptChars": 5},
+            "not-a-dict",
+            {"type": "message.received", "body": "   "},
+            {"type": "result", "result": "kept"},
+        ]
+        self.assertEqual(self.fn(events), "Assistant: kept")
+
+    def test_keeps_the_most_recent_within_budget(self):
+        events = [{"type": "message.received", "body": "old"},
+                  {"type": "message.received", "body": "new"}]
+        # Budget only fits the last turn.
+        out = self.fn(events, max_chars=len("User: new"))
+        self.assertEqual(out, "User: new")
+
+    def test_empty_or_non_list_is_empty_string(self):
+        self.assertEqual(self.fn([]), "")
+        self.assertEqual(self.fn(None), "")
+
+
+class BuildConsolidationPrompt(unittest.TestCase):
+    """#2518: the consolidation prompt is reflection+harvest+silent, carries the
+    transcript, and — at autonomy >= 1 — ends with the same ```knowledge block
+    instruction the runtime harvests deterministically. At autonomy 0 the block
+    hint is empty (but the pass is gated off upstream anyway)."""
+
+    fn = staticmethod(entrypoint.build_consolidation_prompt)
+
+    def test_contains_transcript_and_reflection_instructions(self):
+        out = self.fn("User: hi\n\nAssistant: yo", 1)
+        self.assertIn("User: hi", out)
+        self.assertIn("memory/log.md", out)
+        self.assertIn("knowledge search", out)
+        self.assertIn("post NOTHING", out)
+
+    def test_appends_the_harvest_block_hint_at_autonomy_1(self):
+        out = self.fn("x", 1)
+        self.assertIn("```knowledge", out)
+        self.assertTrue(out.endswith(entrypoint.build_harvest_block_hint(1)))
+
+    def test_no_block_hint_at_autonomy_0(self):
+        out = self.fn("x", 0)
+        self.assertNotIn("```knowledge", out)
+
+    def test_non_string_transcript_is_tolerated(self):
+        # Never raises on a bad window (defensive).
+        self.assertIn("END TRANSCRIPT", self.fn(None, 1))
+
+
+class DmConsolidationBlockHarvest(unittest.TestCase):
+    """#2518: a consolidation reply's ```knowledge block is recorded via the SAME
+    deterministic harvest primitive as every other run (dedup/parse parity), and
+    the stripped text is what would be discarded."""
+
+    def test_block_is_parsed_and_stripped(self):
+        reply = (
+            "internal reflection notes\n\n"
+            "```knowledge\n"
+            '{"kind": "fact", "text": "The DM listener process is long-lived"}\n'
+            "```"
+        )
+        entries = entrypoint.parse_harvest_block(reply)
+        self.assertEqual(entries,
+                         [{"kind": "fact",
+                           "text": "The DM listener process is long-lived"}])
+        self.assertEqual(entrypoint.strip_harvest_block(reply),
+                         "internal reflection notes")
+
+
+class DmConsolidationWiring(unittest.TestCase):
+    """#2518: the consolidation pass must be wired into run_dm_listener with all
+    its gates. Like the sibling Phase-1 guard, `run_dm_listener` is a nested async
+    Matrix listener with no harness here, so the load-bearing wiring facts are
+    read off the module source. Each would be a SILENT regression: a dropped gate
+    means a pass fires when it must not (maintenance, autonomy 0), or moves the
+    --resume pointer, or never runs at all."""
+
+    SRC = _MODULE_PATH.read_text(encoding="utf-8")
+
+    def _listener_body(self):
+        start = self.SRC.index("async def run_dm_listener")
+        return self.SRC[start:]
+
+    def test_activity_is_stamped_on_human_message(self):
+        body = self._listener_body()
+        # Stamped before the workspace gate so a message during a held gate re-arms.
+        stamp = body.index('dm_activity.setdefault(room_id, {})["lastActivityAt"]')
+        gate = body.index("workspace_gate.chat_full()")
+        self.assertLess(stamp, gate)
+
+    def test_consolidation_uses_call_claude_once_with_no_resume(self):
+        body = self._listener_body()
+        # resume_id positional is None → the room's --resume pointer is untouched.
+        self.assertIn(
+            "_call_claude_once, prompt, room_id, correlation_id, None,", body)
+        # And it must NOT write a session pointer from the consolidation path.
+        consol = body[body.index("async def _consolidate_room"):
+                      body.index("async def consolidation_loop")]
+        self.assertNotIn("_write_session_pointer", consol)
+
+    def test_consolidation_harvests_and_posts_nothing(self):
+        body = self._listener_body()
+        consol = body[body.index("async def _consolidate_room"):
+                      body.index("async def consolidation_loop")]
+        self.assertIn("_harvest_shared_lessons, text, correlation_id", consol)
+        # A silent pass never calls send_formatted.
+        self.assertNotIn("send_formatted", consol)
+
+    def test_consolidation_serializes_on_the_workspace_gate(self):
+        body = self._listener_body()
+        consol = body[body.index("async def _consolidate_room"):
+                      body.index("async def consolidation_loop")]
+        self.assertIn("workspace_gate.acquire()", consol)
+
+    def test_loop_gates_on_autonomy_and_maintenance(self):
+        body = self._listener_body()
+        loop = body[body.index("async def consolidation_loop"):
+                    body.index("async def save_token_callback")]
+        self.assertIn("_knowledge_autonomy_level() < 1", loop)
+        self.assertIn("_fetch_maintenance_active", loop)
+        self.assertIn("_dm_consolidation_due", loop)
+
+    def test_loop_task_is_started_and_cancelled(self):
+        body = self._listener_body()
+        self.assertIn("consolidation_task = asyncio.create_task(consolidation_loop())",
+                      body)
+        self.assertIn("consolidation_task.cancel()", body)
+
+
+
+class PoolInstanceSessionPolicy(unittest.TestCase):
+    """#2595: which runs share a pool instance's one lifetime session."""
+
+    def test_pool_instance_trigger_and_chat_share_the_session(self):
+        cfg = {"sessionPolicy": "per-invocation", "poolInstance": True}
+        self.assertTrue(entrypoint._pool_instance_session(cfg))
+        self.assertTrue(entrypoint._pool_instance_session(
+            cfg, {"id": "t1", "type": "github-event"}))
+        self.assertTrue(entrypoint._pool_instance_session(
+            cfg, {"id": "t1", "type": "cron"}))
+
+    def test_loop_iterations_stay_fresh_even_on_a_pool_instance(self):
+        cfg = {"sessionPolicy": "per-invocation", "poolInstance": True}
+        self.assertFalse(entrypoint._pool_instance_session(
+            cfg, {"id": "l1", "type": "loop"}))
+
+    def test_non_pooled_agents_are_unaffected(self):
+        for cfg in ({}, {"sessionPolicy": "per-invocation"},
+                    {"sessionPolicy": "persistent"},
+                    {"poolInstance": "true"}, None):
+            self.assertFalse(entrypoint._pool_instance_session(
+                cfg, {"id": "t1", "type": "github-event"}))
+
+
+class PoolInstanceSessionContinuity(unittest.IsolatedAsyncioTestCase):
+    """#2595: a pool instance's triggered runs create, resume and move the DM
+    room's session pointer (AC1/2/4), still carry the learn hint and harvest
+    (AC9), and a stale pointer falls back to a fresh session with a visible
+    notice. Non-pooled agents keep today's behaviour (AC8), and a loop on a
+    pool instance stays fresh."""
+
+    DM_ROOM = "!dm:local"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workdir = Path(self._tmp.name)
+        self.calls = []  # (prompt, room_id, resume_id)
+        self.next_sessions = ["sess-1", "sess-2", "sess-3"]
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _fake_once(self, fail_resume=False):
+        def once(prompt, room_id, correlation_id, resume_id, blueprint_id,
+                 timeout_sec, run_context=None):
+            self.calls.append((prompt, room_id, resume_id))
+            if resume_id and fail_resume:
+                raise subprocess.CalledProcessError(
+                    1, "claude", stderr="No conversation found with session ID")
+            return "done", (resume_id or self.next_sessions.pop(0))
+        return once
+
+    def _scheduler(self):
+        return entrypoint.TriggerScheduler(
+            client=AsyncMock(), agent_id="agent-1", user_id="@agent-1:local",
+            send_formatted=AsyncMock(return_value="$evt"), blueprint_id=None,
+        )
+
+    async def _fire(self, scheduler, cfg, trigger, once, harvest=None):
+        harvest = harvest or unittest.mock.Mock(side_effect=lambda text, cid: text)
+        patches = [
+            patch.object(entrypoint, "_agent_workdir", return_value=self.workdir),
+            patch.object(entrypoint, "_get_push_client", return_value=None),
+            patch.object(entrypoint, "_load_dm_room_id", return_value=self.DM_ROOM),
+            patch.object(entrypoint, "_load_dm_agent_config", return_value=cfg),
+            patch.object(entrypoint, "_base_run_context",
+                         side_effect=lambda: {"agentId": "agent-1"}),
+            patch.object(entrypoint, "_new_session", return_value={"id": "s1"}),
+            patch.object(entrypoint, "_bump_active"),
+            patch.object(entrypoint, "_append_event"),
+            patch.object(entrypoint, "_knowledge_autonomy_level", return_value=1),
+            patch.object(entrypoint, "_harvest_shared_lessons", harvest),
+            patch.object(entrypoint, "_rebuild_knowledge_digest"),
+            patch.object(entrypoint, "_rebuild_scoped_knowledge"),
+            patch.object(entrypoint, "_write_last_response_at"),
+            patch.object(entrypoint, "_call_claude_once", once),
+            patch.object(scheduler, "_post_trigger_notice", AsyncMock()),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            await scheduler._execute_inner(trigger, None)
+        finally:
+            for p in patches:
+                p.stop()
+        return harvest
+
+    def _pointer(self, room_id=None):
+        f = self.workdir / "sessions" / f"{room_id or self.DM_ROOM}.current.json"
+        return json.loads(f.read_text())["sessionId"] if f.exists() else None
+
+    POOL = {"sessionPolicy": "per-invocation", "poolInstance": True}
+    TRIGGER = {"id": "t1", "type": "github-event", "prompt": "Rework."}
+
+    async def test_first_trigger_creates_and_second_resumes_the_session(self):
+        scheduler = self._scheduler()
+        once = self._fake_once()
+        await self._fire(scheduler, self.POOL, self.TRIGGER, once)
+        self.assertIsNone(self.calls[0][2])          # AC1: fresh first run …
+        self.assertEqual(self._pointer(), "sess-1")  # … recorded as current
+        await self._fire(scheduler, self.POOL, self.TRIGGER, once)
+        self.assertEqual(self.calls[1][2], "sess-1")  # AC2: resumed
+        self.assertEqual(self._pointer(), "sess-1")
+
+    async def test_trigger_after_a_chat_turn_resumes_the_chat_session(self):
+        # AC4: the chat turn wrote the DM pointer; the trigger continues it.
+        entrypoint_workdir = patch.object(entrypoint, "_agent_workdir",
+                                          return_value=self.workdir)
+        with entrypoint_workdir, patch.object(entrypoint, "_get_push_client",
+                                              return_value=None):
+            entrypoint._write_session_pointer(self.DM_ROOM, "chat-sess")
+        await self._fire(self._scheduler(), self.POOL, self.TRIGGER,
+                         self._fake_once())
+        self.assertEqual(self.calls[0][2], "chat-sess")
+
+    async def test_trigger_posting_to_another_room_still_uses_the_dm_session(self):
+        trigger = dict(self.TRIGGER, roomId="!team:local")
+        await self._fire(self._scheduler(), self.POOL, trigger, self._fake_once())
+        self.assertEqual(self.calls[0][1], "!team:local")  # logs/posts there
+        self.assertEqual(self._pointer(), "sess-1")        # DM pointer moved
+        self.assertIsNone(self._pointer("!team:local"))
+
+    async def test_learn_hint_and_harvest_still_run_on_every_resumed_run(self):
+        scheduler = self._scheduler()
+        once = self._fake_once()
+        await self._fire(scheduler, self.POOL, self.TRIGGER, once)
+        harvest = await self._fire(scheduler, self.POOL, self.TRIGGER, once)
+        self.assertIn("```knowledge", self.calls[1][0])  # AC9
+        harvest.assert_called_once()
+
+    async def test_stale_pointer_falls_back_fresh_with_a_visible_notice(self):
+        with patch.object(entrypoint, "_agent_workdir", return_value=self.workdir), \
+                patch.object(entrypoint, "_get_push_client", return_value=None):
+            entrypoint._write_session_pointer(self.DM_ROOM, "gone")
+        scheduler = self._scheduler()
+        await self._fire(scheduler, self.POOL, self.TRIGGER,
+                         self._fake_once(fail_resume=True))
+        self.assertEqual([c[2] for c in self.calls], ["gone", None])
+        self.assertEqual(self._pointer(), "sess-1")
+        posted = [c.args[1] for c in scheduler._send_formatted.await_args_list]
+        self.assertIn(entrypoint.POOL_SESSION_RESTARTED_NOTICE, posted)
+
+    async def test_loop_on_a_pool_instance_stays_fresh_and_leaves_the_pointer(self):
+        with patch.object(entrypoint, "_agent_workdir", return_value=self.workdir), \
+                patch.object(entrypoint, "_get_push_client", return_value=None):
+            entrypoint._write_session_pointer(self.DM_ROOM, "chat-sess")
+        await self._fire(self._scheduler(), self.POOL,
+                         {"id": "l1", "type": "loop", "prompt": "x"},
+                         self._fake_once())
+        self.assertIsNone(self.calls[0][2])
+        self.assertEqual(self._pointer(), "chat-sess")
+
+    async def test_non_pooled_per_invocation_never_touches_the_pointer(self):
+        # AC8 regression: a regular per-invocation agent starts fresh and
+        # neither reads nor moves the DM pointer.
+        with patch.object(entrypoint, "_agent_workdir", return_value=self.workdir), \
+                patch.object(entrypoint, "_get_push_client", return_value=None):
+            entrypoint._write_session_pointer(self.DM_ROOM, "chat-sess")
+        await self._fire(self._scheduler(), {"sessionPolicy": "per-invocation"},
+                         self.TRIGGER, self._fake_once())
+        self.assertIsNone(self.calls[0][2])
+        self.assertEqual(self._pointer(), "chat-sess")
+
+    async def test_persistent_agent_still_resumes_its_trigger_room_pointer(self):
+        # AC8 regression: persistent keeps resuming the trigger room's pointer.
+        with patch.object(entrypoint, "_agent_workdir", return_value=self.workdir), \
+                patch.object(entrypoint, "_get_push_client", return_value=None):
+            entrypoint._write_session_pointer(self.DM_ROOM, "chat-sess")
+        await self._fire(self._scheduler(), {}, self.TRIGGER, self._fake_once())
+        self.assertEqual(self.calls[0][2], "chat-sess")
+
+
+class PoolInstanceDmSessionWiring(unittest.TestCase):
+    """#2595 AC3: a chat turn on a pool instance resumes the instance's one
+    session through the DM pointer and says so when it could not. `on_message`
+    is a nested listener with no harness, so — like DmKnowledgeHarvestWiring —
+    the wiring is read off the module source."""
+
+    SRC = _MODULE_PATH.read_text(encoding="utf-8")
+
+    def _dm_body(self):
+        start = self.SRC.index("async def on_message")
+        end = self.SRC.index("async def ", start + 1)
+        return self.SRC[start:end]
+
+    def test_chat_turn_passes_the_dm_pointer_room_for_a_pool_instance(self):
+        body = self._dm_body()
+        self.assertIn(
+            "dm_instance_session = _pool_instance_session(_load_dm_agent_config())",
+            body)
+        self.assertIn(
+            "(_load_dm_room_id() or room_id) if dm_instance_session else None,",
+            body)
+
+    def test_chat_turn_surfaces_a_restarted_session(self):
+        body = self._dm_body()
+        self.assertIn('dm_instance_session and dm_run_context.get("_resumeFellBack")',
+                      body)
+        self.assertIn("POOL_SESSION_RESTARTED_NOTICE", body)
 
 
 if __name__ == "__main__":

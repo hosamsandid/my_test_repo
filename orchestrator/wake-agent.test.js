@@ -57,7 +57,8 @@ test('validateWakeRequest: rejects malformed requests', () => {
 
 test('validateWakeRequest: a request body carries no repo, label or work item', () => {
   // The whole point of the endpoint (§5): target-LESS. A caller that sends
-  // flow-emit's fields must not have them silently honoured here.
+  // label hand-off fields (repo/label/target) must not have them silently
+  // honoured here.
   const r = validateWakeRequest({
     fromAgentId: 'a', toAgentId: 'b',
     repo: 'org/repo', label: 'ready', target: { kind: 'issue', number: 7 },

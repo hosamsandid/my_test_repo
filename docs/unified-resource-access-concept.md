@@ -1,6 +1,7 @@
 # Unified Resource Access Model — Concept
 
-Status: **Design** (not yet implemented). Supersedes the ad-hoc scoping split
+Status: **Implemented** — epic #2361 shipped it behind the `AEE_RESOURCE_ACCESS_V2`
+flag; #2445 removed the flag, so this model is the only behaviour. Supersedes the ad-hoc scoping split
 across Model Providers, SSH keys and GitHub tokens. Relates to and refines
 `personal-credentials-concept.md`, `decentralised-access-concept.md`,
 `assist-model-selection-concept.md`, `credentials.md`, `model-providers.md`.
@@ -321,7 +322,8 @@ unknown (a spike gates activation, not the decision).
 
 ## 14. Amendment (2026-09-22): the team-of-one → multi-user transition (#2360)
 
-Context this amendment builds on (all shipped behind `AEE_RESOURCE_ACCESS_V2`):
+Context this amendment builds on (first shipped behind the `AEE_RESOURCE_ACCESS_V2`
+flag, which #2445 removed — this model is now the only behaviour):
 the **#2360 re-key** made a provider's `team` scope mean a **set of Agent Teams**
 (`scope:'team'`, `teamId` = primary, `teamIds[]` = the co-owned set — usable by
 any agent in any team in the set, manageable by any set-team admin, a clone
@@ -351,7 +353,7 @@ env default is a single field, and the runtime lend keys on the **owner's** squa
 membership (which still passes), so once a second human joins, **their agents (and
 the shared team agents operated on their behalf) silently run on the first
 member's personal seat/key.** Resolution splits by identity (decided 2026-09-22,
-implemented behind `AEE_RESOURCE_ACCESS_V2`):
+implemented as the default behaviour since #2445):
 
 - **subscription / oauth (`human`) — HARD (E9 enforcement).** Sharing a single-user
   seat with other members is forbidden by ToS (§ E9). Two guards, single-sourced
@@ -385,7 +387,7 @@ only ever legal for api-key — a subscription can never become `team` — and i
 silently change billing/ownership semantics, so it is left as an explicit,
 deliberate manual act.)
 
-**Implemented touchpoints (all flag-gated):**
+**Implemented touchpoints:**
 - `orchestrator/provider-lend-policy.js` ↔ `admin-console/api/provider-lend-policy.js`
   — the pure classifier (byte-identical, `provider-lend-policy.test.js` parity guard).
 - `orchestrator/orchestrator.js` `personalOauthLendBlockOnMembershipAdd` + the

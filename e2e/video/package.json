@@ -19,20 +19,20 @@
     "render:iban-story": "npm run prep:shots && npm run prep:audio && cross-env DISABLE_TELEMETRY=true node --import tsx revideo/render.ts example-iban-story iban-story-walkthrough.mp4 && node scripts/mux-narration.mjs out/final/iban-story-walkthrough.mp4 out/final/iban-story-walkthrough.mp4 scripts/iban-story.narration.json"
   },
   "dependencies": {
-    "@revideo/2d": "0.10.4",
-    "@revideo/core": "0.10.4",
-    "@revideo/ffmpeg": "0.10.4",
+    "@revideo/2d": "0.11.0",
+    "@revideo/core": "0.11.0",
+    "@revideo/ffmpeg": "0.11.0",
     "@revideo/renderer": "0.11.0",
-    "@revideo/vite-plugin": "0.10.4"
+    "@revideo/vite-plugin": "0.11.0"
   },
   "devDependencies": {
     "@revideo/cli": "0.11.0",
-    "@revideo/ui": "^0.10.4",
-    "@types/node": "^22.0.0",
-    "cross-env": "^7.0.3",
+    "@revideo/ui": "^0.11.0",
+    "@types/node": "^26.6.3",
+    "cross-env": "^10.1.0",
     "patch-package": "^8.0.0",
-    "tsx": "^4.19.0",
-    "typescript": "5.4.5"
+    "tsx": "^4.23.15",
+    "typescript": "7.0.2"
   },
   "overrides": {
     "uuid": "^14.0.1"

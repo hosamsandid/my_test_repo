@@ -5,8 +5,9 @@
 // The poller sees an agent's own writes come back as events: an issue it
 // created is an `issue_created`, a field it set is a `field_changed`, a comment
 // it posted is a `comment_added`. Jira cannot tell them apart from a human's —
-// every write is made with the Team Admin's API token, so `author` is that
-// admin either way (docs/jira-plugin-events-implementation.md §1.3, §1.11). The
+// every write is made with a human's API token (the team's service account in
+// an automated run, the chat sender's own token in a chat turn), so `author` is
+// a human either way (docs/jira-plugin-events-implementation.md §1.3, §1.11). The
 // broker is the one party that knows what it wrote, so it records each write
 // here and the extractors stamp `origin: agent | human` from it (§2.4) — the
 // field a trigger routes on to avoid an agent waking itself.

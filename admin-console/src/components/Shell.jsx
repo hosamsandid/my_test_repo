@@ -3,8 +3,8 @@ import { useNavigate, useLocation } from 'react-router';
 import {
   Users, Zap, Sparkles, Server,
   ChevronLeft, ChevronRight, ChevronDown,
-  Boxes, Key, KeyRound, MessageCircle, Github, GitBranch,
-  Rocket, Users2, Wand2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle,
+  Boxes, Key, MessageCircle, Github, GitBranch,
+  Rocket, Users2, Wand2, Brain, History, Wrench, UserCog, BarChart3, Puzzle, Plus, HelpCircle, Gauge, KeyRound,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useAgentStatuses } from '../context/AgentStatusesContext.jsx';
@@ -13,9 +13,8 @@ import { loadManuallyMessagedIds } from '../pages/agent-chat/agent-back-notifica
 import { canAccessCredentialPages } from '../pages/credential-scope-view';
 import {
   filterItems, filterSections, activeGroupKey, mergeCollapsed,
-  mostSpecificActivePath, consolidateCredentialNav,
+  mostSpecificActivePath,
 } from './nav-model';
-import { useResourceAccessV2 } from '../context/ResourceAccessContext';
 import {
   PLUGINS_CHANGED_EVENT, buildPluginNav, pluginsNeedingScopes,
 } from './plugin-nav';
@@ -138,29 +137,32 @@ const NAV_GROUPS = [
     // "build a team, then fill it in" reading order — Flows first, then the
     // templates, skills and knowledge a team draws on.
     { path: '/flows',        label: 'Flows',               Icon: GitBranch },
-    // Flow Control's nav entry is removed here (#2147, step 1 of 2) — the page,
-    // route, help and backend all stay; only the sidebar entry goes. #2145 is
-    // step 2, re-shipping the board as an installable, team-grantable plugin.
+    // Flow Control board — restored to the sidebar for WIP transparency: it is
+    // the one place that shows which tickets are in flight, which dispatches are
+    // held behind a full WIP limit, and the Force-dispatch action. (It had been
+    // hidden under #2147 pending a re-ship as a plugin (#2145); with admission
+    // control always on, an operator needs a reachable view of what it holds.)
+    { path: '/flow-control', label: 'Flow Control',        Icon: Gauge },
     { path: '/role-templates', label: 'Agent Templates',   Icon: UserCog, adminOnly: true },
     { path: '/skills',       label: 'Skills',              Icon: Zap },
     { path: '/knowledge',    label: 'Knowledge',           Icon: Brain },
   ]},
   // Ordered by a typical setup flow: pick a Model Provider first, then the
-  // credentials (SSH keys / GitHub tokens / personal), then MCP servers (an env
+  // credentials (SSH keys / GitHub tokens), then MCP servers (an env
   // may reference them) — and finally the GitHub Event Log, which only makes
   // sense once an environment exists. The general-purpose "Working
   // Environments" entry is gone (#2170): a team edits its own environment from
   // the Agent Chat Settings tab now, which needs no sidebar entry of its own.
   { key: 'connections', section: 'Connections', items: [
-    { path: '/models',        label: 'Model Providers',      Icon: Sparkles, credAdmin: true },
-    { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key,      credAdmin: true },
-    { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github,   credAdmin: true },
-    // My Credentials (#1568) — personal credential self-service, visible to every
-    // authenticated human (no credAdmin gate). Under AEE_RESOURCE_ACCESS_V2 this
-    // entry is dissolved by `consolidateCredentialNav` (its self-service folds
-    // into SSH Keys / GitHub Tokens, which then open to all); it stays here for
-    // the flag-off path.
-    { path: '/my-credentials', label: 'My Credentials',      Icon: KeyRound },
+    // #2360: the credential pages are open to every authenticated user — the
+    // former My Credentials self-service folds into them, rows filtered
+    // server-side (`visibleCredential` / `providerReadVisible`).
+    { path: '/models',        label: 'Model Providers',      Icon: Sparkles },
+    { path: '/ssh-keys',      label: 'SSH Keys',             Icon: Key },
+    { path: '/github-tokens', label: 'GitHub Tokens',        Icon: Github },
+    // #2562: every member's OWN plugin credentials (Jira: e-mail + API token
+    // used when they chat with an agent) — always self-service, never adminOnly.
+    { path: '/plugin-tokens', label: 'Plugin Tokens',        Icon: KeyRound },
     { path: '/mcp',           label: 'MCP Servers',          Icon: Server,   adminOnly: true },
     { path: '/github-events', label: 'GitHub Event Log',     Icon: History },
   ]},
@@ -235,20 +237,14 @@ export default function Shell({ children }) {
   const sidebarWidth = collapsed ? 'var(--eb-sidebar-collapsed)' : 'var(--eb-sidebar-width)';
 
   // Hide admin-only nav entries (Skills, MCP, Maintenance Mode, …) from
-  // non-System-Admins (#584 AC8). The credential pages (SSH Keys, GitHub Tokens,
-  // #798; Model Providers, #800) use a looser `credAdmin` gate: visible to
-  // System Admins AND any Team Admin, so a team can self-serve its credentials
-  // and model providers. Backend route guards (App.jsx) and the scoped API back
-  // this up — defence-in-depth, not the only enforcement. Gating is unchanged by
-  // the #1595 re-grouping; a group or bottom cluster left empty renders no header.
+  // non-System-Admins (#584 AC8). Backend route guards (App.jsx) and the scoped
+  // API back this up — defence-in-depth, not the only enforcement. Gating is
+  // unchanged by the #1595 re-grouping; a group or bottom cluster left empty
+  // renders no header.
   const canSeeCreds = canAccessCredentialPages(user);
   const gate = { admin: !!user?.admin, canSeeCreds };
   const topItems = filterItems(NAV_TOP, gate);
-  // #2360: under AEE_RESOURCE_ACCESS_V2 the credential pages are consolidated —
-  // My Credentials is dissolved and SSH Keys / GitHub Tokens open to every user
-  // (personal self-service folds into them). Off the flag this is a no-op.
-  const resourceAccessV2 = useResourceAccessV2();
-  const groups = filterSections(consolidateCredentialNav(NAV_GROUPS, { v2: resourceAccessV2 }), gate);
+  const groups = filterSections(NAV_GROUPS, gate);
 
   // Dynamic nav entries for UI-bearing plugins that are installed AND either
   // granted to a scope the caller can see (Network Plan epic #1554, Phase 2) or

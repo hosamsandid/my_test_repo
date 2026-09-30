@@ -20,6 +20,7 @@ const {
 const matrix = require('./matrix');
 const auth = require('./auth');
 const audit = require('./audit');
+const { chatUploadBaseName, uniqueFileName } = require('./chat-upload-name');
 const internalAuthClient = require('./internal-auth-client');
 const githubEventLog = require('./github-event-log');
 const clientErrorLog = require('./client-error-log');
@@ -69,8 +70,6 @@ const { resolveGlobalFlag: resolveEnvGlobalFlag, isGlobalEnvironment, isGlobalCr
 const { isTemplateEnvironment, resolveTemplateFlag, copyEnvironmentStructure } = require('./environment-template');
 const { validateCloneSource, describeClonedCredentialNeeds } = require('./team-clone');
 const { resolveAuthEnabled, authModeLogLine, singleUserElevationWarning } = require('./auth-mode');
-const { resolvePoolsEnabled, poolsModeLogLine } = require('./pools-mode');
-const { resolveResourceAccessV2, resourceAccessModeLogLine } = require('./resource-access-mode');
 // One-time migration of legacy records onto the unified model (#2359). Pure
 // classifier; the routes below supply the store reads/writes + the gate.
 const resourceMigration = require('./resource-migration');
@@ -115,10 +114,16 @@ const {
 const { buildKnowledgeGraph, summarizeKnowledge, parseScope, selectReviewQueue, overlayStatuses, overlayValidity, overlayLoadTriggers } = require('./knowledge-graph');
 const knowledgeSuggestions = require('./knowledge-suggestions');
 const knowledgeLinks = require('./knowledge-links');
-const { buildProcessTemplate, validateProcessTemplate, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
+const { applyPushedBy } = require('./push-producer-filter');
+const { normalizeBranchFilter } = require('./branch-filter');
+const { buildProcessTemplate, validateProcessTemplate, coerceImportBundle, templateToCustomRoles, buildMemberFromTemplate, liftTriggerEmits, expandGithubChannels, expandDataFlowSteps, normalizeLegacyReview, isChannelTrigger, expandWakeHandoffs, isWakeHandoffTrigger, stampDerivedActivation, emptyDraftBundle, deriveUniqueDraftId, applyDerivedPromptBlocks, normalizeHumans, pruneOrphanHumanConsumes, remapHumanConsumesFrom, normalizeHillClimb, normalizeWipLimit, normalizeAutoDispatch, normalizePool, poolConfigError, rawTriggerError, launchedLoopConflict, outcomesWiringContext } = require('./process-template');
 const { injectDerivedTriggerRepo } = require('./derived-trigger-repo');
+const { rederiveTeamDataFlow } = require('./derived-data-flow');
 const { guardCredentialRefChange } = require('./credential-ref-guard');
 const { classifyGithubHealth, rollUpGithubHealth } = require('./github-health-view');
+const { presentEffectiveIdentity } = require('./effective-github-identity');
+const { scopeRepoStatus, findRepoStatus } = require('./github-repo-status-scope');
+const { scopePendingQueue } = require('./pending-queue-scope');
 const { checkGithubTokenRequirement } = require('./env-token-requirement');
 const { pairRepositorySshKeyChanges } = require('./repo-sshkey-pairing');
 const { buildCredentialDescriptor } = require('./credential-descriptor');
@@ -132,7 +137,9 @@ const { normalizeTemplatePorts } = require('./catalog-ports');
 const agentTemplateStore = require('./agent-templates-store');
 const extractTemplate = require('./extract-template');
 const { runCopilot, isCopilotAborted, classifyTurnFailure, sanitizeCopilotHistory, readFormatDoc, readPromptAddendum, measureCopilotSystemPrompt, SYSTEM_PROMPT_CHAR_LIMIT } = require('./flow-copilot');
+const { copilotHistoryAccess, readTeamCopilotHistory, writeTeamCopilotHistory } = require('./team-copilot-history');
 const { httpPostStreamText } = require('./anthropic-transport');
+const { planInternalTransportMigration } = require('./internal-transport-migration');
 const createHelperChatHandler = require('./helper-chat/handler');
 const { heuristicPortSuggestion, buildPortSuggestionRequest, parsePortSuggestion } = require('./port-suggestion');
 const { buildHillClimbAnalystRequest, parseHillClimbCards } = require('./hill-climb-analyst');
@@ -153,7 +160,6 @@ const skillDeletion = require('./skill-deletion');
 const skillMerge = require('./skill-merge');
 const skillImport = require('./skill-import');
 const skillGrantValidate = require('./skill-grant-validate');
-const { buildSetupStatus } = require('./setup-status');
 const { orderedArchiveNames, baseRoomOfSessionFile } = require('./session-archives');
 const { createTranscribeRoute } = require('./transcribe.js');
 const { validateSuffix, suggestSuffix: generateSuffix, applyLabelSuffix } = require('./label-suffix');
@@ -287,15 +293,6 @@ const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 // upgrades keeps today's behaviour (every principal is the implicit System
 // Admin) until an operator activates multi-user mode explicitly. See auth-mode.js.
 const AUTH_ENABLED = resolveAuthEnabled(process.env);
-// Agent-pool parallelism/autoscaling kill switch (#2302). Off by default —
-// the mechanism still needs teardown/reaping polish, so an upgraded stack
-// keeps the UI visible-but-disabled until an operator opts in explicitly.
-const POOLS_ENABLED = resolvePoolsEnabled(process.env);
-// Unified resource-access model switch (#2356, concept #2349). Off by default —
-// the redesign (PR4–PR7) lands "dark" behind this flag so an upgraded stack
-// keeps today's scoping/visibility/runtime resolution until an operator opts in
-// explicitly. See resource-access-mode.js.
-const RESOURCE_ACCESS_V2 = resolveResourceAccessV2(process.env);
 const STATIC_DIR = path.join(__dirname, '..', 'dist');
 const PODMAN_SOCK = process.env.PODMAN_SOCK_PATH || '/var/run/podman.sock';
 
@@ -581,18 +578,72 @@ app.get('/api/github-events', (req, res) => {
     until: req.query.until,
     limit: Number(req.query.limit) || undefined,
   });
-  const nameCache = new Map();
-  const agentName = (agentId) => {
-    if (!nameCache.has(agentId)) {
-      const cfg = readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
-      nameCache.set(agentId, cfg?.name || agentId);
+  const configCache = new Map();
+  const readConfig = (agentId) => {
+    if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) return null;
+    if (!configCache.has(agentId)) {
+      configCache.set(agentId, readJsonFile(path.join(AGENTS_DIR, path.basename(agentId), 'config.json'), null));
     }
-    return nameCache.get(agentId);
+    return configCache.get(agentId);
   };
+  const agentName = (agentId) => readConfig(agentId)?.name || agentId;
   res.json(entries.map((e) => ({
     ...e,
-    outcomes: (e.outcomes || []).map((o) => ({ ...o, agentName: agentName(o.agentId) })),
+    // #2596: a pooled delivery also names/links the instance that ran it.
+    outcomes: (e.outcomes || []).map((o) => githubEventLog.projectPoolInstance(
+      { ...o, agentName: agentName(o.agentId) }, readConfig,
+    )),
   })));
+});
+
+// #2537: the GitHub poller's per-repository status — is each repository the
+// platform knows about being listened to, and if not, why. The orchestrator
+// builds it from the poller's own plan + runtime state (one source of truth);
+// here it is only cut down to what the caller may see (AC9, pure
+// github-repo-status-scope.js). Read-only; no GitHub request is made.
+async function fetchPollerRepoStatus() {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  const r = await fetch(`${orchestratorUrl}/internal/github-poller/repo-status`);
+  const body = await r.json().catch(() => null);
+  if (!r.ok || !body || body.ok !== true) {
+    throw new Error((body && body.error) || `orchestrator returned ${r.status}`);
+  }
+  return body;
+}
+
+app.get('/api/github-events/repo-status', async (req, res) => {
+  let body;
+  try {
+    body = await fetchPollerRepoStatus();
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: `poller status unavailable: ${err.message}` });
+  }
+  const scope = getScope(req);
+  let repos;
+  if (scope.all) {
+    repos = scopeRepoStatus(body.repos, { all: true });
+  } else {
+    const visibleAgentIds = new Set();
+    const visibleEnvIds = new Set();
+    for (const id of listAgentDirs()) {
+      const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+      if (!cfg || !visibleAgent(scope, agentMetaForScope(cfg))) continue;
+      visibleAgentIds.add(id);
+      if (cfg.environmentId) visibleEnvIds.add(cfg.environmentId);
+    }
+    for (const envId of listEnvironmentIds()) {
+      const env = loadEnvironment(envId);
+      if (env && visibleEnvironment(scope, env)) visibleEnvIds.add(env.id);
+    }
+    repos = scopeRepoStatus(body.repos, { visibleAgentIds, visibleEnvIds });
+  }
+  res.json({
+    ok: true,
+    generatedAt: body.generatedAt,
+    pollIntervalMs: body.pollIntervalMs,
+    lastTickAt: body.lastTickAt,
+    repos,
+  });
 });
 
 // Pending-triggers dispatch queue — operator visibility & control (#724).
@@ -600,9 +651,15 @@ app.get('/api/github-events', (req, res) => {
 // PROCESSED events); this surfaces the UPSTREAM live queue of entries enqueued
 // but not yet drained by the agent. All three are thin proxies to the
 // orchestrator, which owns the per-agent pending-triggers.json files and runs
-// the read/cancel in its single event loop (race-free, no file lock). Gated by
-// the auth gate mounted above, consistent with the other agent-internal
-// endpoints (AC11).
+// the read/cancel in its single event loop (race-free, no file lock).
+//
+// AUTHORIZED since #2119 (Flow Control §4.6): the queue is an operator surface,
+// so it carries the same management bar as the #2102 reassignment below. The
+// list is cut to the agents (and WIP lanes) the caller may manage
+// (`pending-queue-scope.js`); detail and cancel refuse an agent the caller may
+// not manage (`resolveManageableAgentDir`). A Team Member no longer sees their
+// team's queue — its payloads are trigger prompts and raw webhook bodies, and
+// cancelling an entry silently drops work.
 //
 //  - GET  /api/pending-queue                    → aggregated, read-only view (AC1/AC3)
 //  - GET  /api/agents/:id/pending/:entryId       → full entry incl. payload (detail on demand)
@@ -614,7 +671,13 @@ app.get('/api/pending-queue', async (req, res) => {
   try {
     const r = await fetch(`${orchestratorUrl}/internal/pending-queue`);
     const body = await r.json().catch(() => ({ ok: false, error: 'invalid orchestrator response' }));
-    return res.status(r.status).json(body);
+    if (!r.ok || !body || body.ok !== true) return res.status(r.status).json(body);
+    const scope = getScope(req);
+    return res.status(r.status).json(scopePendingQueue(body, {
+      canManageAgentId: (agentId) => AGENT_ID_RE.test(agentId) && canManageAgent(
+        scope, agentMetaForScope(readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null) || {})),
+      canManageTeamId: (teamId) => canManageTeam(scope, teamId),
+    }));
   } catch (err) {
     return res.status(502).json({ ok: false, error: `orchestrator unreachable: ${err.message}` });
   }
@@ -625,6 +688,7 @@ app.get('/api/agents/:id/pending/:entryId', async (req, res) => {
   if (!AGENT_ID_RE.test(id) || !PENDING_ENTRY_ID_RE.test(entryId)) {
     return res.status(400).json({ ok: false, error: 'Invalid agent id or entry id' });
   }
+  if (!resolveManageableAgentDir(req, res, id)) return;
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/pending/${encodeURIComponent(entryId)}`);
@@ -640,6 +704,7 @@ app.delete('/api/agents/:id/pending/:entryId', async (req, res) => {
   if (!AGENT_ID_RE.test(id) || !PENDING_ENTRY_ID_RE.test(entryId)) {
     return res.status(400).json({ ok: false, error: 'Invalid agent id or entry id' });
   }
+  if (!resolveManageableAgentDir(req, res, id)) return;
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   try {
     const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(id)}/pending/${encodeURIComponent(entryId)}`, { method: 'DELETE' });
@@ -657,22 +722,15 @@ app.delete('/api/agents/:id/pending/:entryId', async (req, res) => {
 //  - GET  /api/agents/:id/pending/:entryId/reassign-targets → eligible targets
 //  - POST /api/agents/:id/pending/:entryId/reassign          → move it
 //
-// UNLIKE the three read/cancel routes above, these are AUTHORIZED. A
+// Like the three read/cancel routes above (#2119), these are AUTHORIZED. A
 // reassignment injects work into another agent's queue — operator-initiated
 // trigger firing at a distance — and #2041 §7/D9 already decided that manually
 // firing a trigger is Team-Admin-only, on the reasoning that an autonomous run
-// is not attributable to a person the way a chat message is. So the capability
-// does not ship ungated, even though its read/cancel neighbours currently are.
+// is not attributable to a person the way a chat message is.
 //
 // The gate runs on BOTH agents (AC5): managing the source is the right to take
 // the entry away, managing the target is the right to make it run something.
 // Holding one is not holding the other.
-//
-// The pre-existing absence of authorization on `GET /api/pending-queue` and the
-// cancel route is real and out of scope here — it belongs to the #2041 P2
-// enforcement sweep, which owns the ungated-route inventory. FLAGGED FOR THE P2
-// OWNER: any signed-in user can currently read every agent's queue and cancel
-// any entry in it.
 function resolveManageableAgentDir(req, res, id) {
   if (!AGENT_ID_RE.test(id)) {
     res.status(400).json({ ok: false, error: 'Invalid agent id' });
@@ -787,6 +845,16 @@ function requireUsageAdmin(req, res) {
   return scope;
 }
 
+// Registered agents that are NOT auto-scaled pool instances (#2585): the
+// `agent` grouping folds instance usage into the main agent, and this list
+// keeps a look-alike id (a hand-created `…-i<n>` member) from being folded.
+function usageNonInstanceAgentIds() {
+  return listAgentDirs().filter((id) => {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    return !(cfg && cfg.poolInstance);
+  });
+}
+
 app.get('/api/usage/summary', (req, res) => {
   const scope = requireUsageAdmin(req, res);
   if (!scope) return;
@@ -798,7 +866,9 @@ app.get('/api/usage/summary', (req, res) => {
   const secondaryGroupBy = req.query.secondaryGroupBy;
   let records = usageLog.readRecords({ since });
   records = narrowUsageRecords(records, scope, usageTeamParam(req));
-  res.json(summarize(records, { since, until, groupBy, secondaryGroupBy }));
+  res.json(summarize(records, {
+    since, until, groupBy, secondaryGroupBy, nonInstanceAgentIds: usageNonInstanceAgentIds(),
+  }));
 });
 
 // Flat export of the statistics view (#656 phase 3): one row per invocation ×
@@ -816,6 +886,7 @@ function sendExport(req, res, kind, records, prEvents) {
     records, prEvents,
     since: since || null, until: until || null,
     groupBy: req.query.groupBy, secondaryGroupBy: req.query.secondaryGroupBy,
+    nonInstanceAgentIds: kind === 'summary' ? usageNonInstanceAgentIds() : null,
   });
   const stamp = new Date().toISOString().slice(0, 10);
   res.setHeader('Content-Type', out.contentType);
@@ -1126,13 +1197,12 @@ function applyCredentialPatch({ res, cred, scope, body, inUse, label }) {
       const env = loadEnvironment(inUse);
       const envTeam = (env && env.teamId) || 'default';
       const candidate = { ...cred, scope: next.scope, teamId: next.teamId, assignedTeamIds: next.assignedTeamIds };
-      // A GLOBAL SERVICE credential (#2357, behind AEE_RESOURCE_ACCESS_V2) is
-      // reachable by every team, so reassigning INTO global can never orphan a
-      // referencing environment — widen the guard to admit it, mirroring the
-      // global-provider composition at the provider call sites (never in the
-      // generic predicate). Legacy behaviour unchanged while the flag is off.
+      // A GLOBAL SERVICE credential (#2357) is reachable by every team, so
+      // reassigning INTO global can never orphan a referencing environment —
+      // widen the guard to admit it, mirroring the global-provider composition
+      // at the provider call sites (never in the generic predicate).
       if (!credentialVisibleToTeam(candidate, envTeam)
-          && !(RESOURCE_ACCESS_V2 && isGlobalCredential(candidate))) {
+          && !isGlobalCredential(candidate)) {
         res.status(409).json({
           error: `${label} is used by environment '${inUse}' (team '${envTeam}'); reassignment would orphan it. Detach it first.`,
         });
@@ -1708,10 +1778,19 @@ function llmTokenPreview(token) {
   return `…${tail}`;
 }
 
+// Strip ALL whitespace, not just the ends. A subscription setup-token copied
+// out of a line-wrapped terminal can carry an embedded newline/space that
+// survives `.trim()` and corrupts the Bearer Authorization header ("Header
+// 'Authorization' has invalid value"). LLM tokens (api-key or oauth-token)
+// never contain internal whitespace, so this is always safe.
+function sanitizeLlmToken(token) {
+  return String(token || '').replace(/\s+/g, '');
+}
+
 function readLlmEndpointToken(authTokenId) {
   if (!authTokenId) return '';
   try {
-    return fs.readFileSync(path.join(LLM_KEYS_DIR, authTokenId), 'utf8').trim();
+    return sanitizeLlmToken(fs.readFileSync(path.join(LLM_KEYS_DIR, authTokenId), 'utf8'));
   } catch {
     return '';
   }
@@ -1719,7 +1798,7 @@ function readLlmEndpointToken(authTokenId) {
 
 function writeLlmEndpointToken(authTokenId, token) {
   const p = path.join(LLM_KEYS_DIR, authTokenId);
-  fs.writeFileSync(p, token, { mode: 0o600 });
+  fs.writeFileSync(p, sanitizeLlmToken(token), { mode: 0o600 });
   try { fs.chmodSync(p, 0o600); } catch { /* best effort */ }
 }
 
@@ -2092,21 +2171,6 @@ app.post('/api/maintenance-mode/deactivate', (req, res) => {
   res.json(maintenanceMode.getStatus());
 });
 
-/* ─── Agent pools feature flag (#2302) ──────────────────────────────── */
-// Read once at boot from AEE_POOLS_ENABLED; the SPA fetches this once to
-// decide whether to show the Parallelism surface or the disabled/"Coming
-// Soon" treatment of the Scaling controls.
-app.get('/api/pools-mode', (req, res) => {
-  res.json({ enabled: POOLS_ENABLED });
-});
-
-/* ─── Unified resource-access feature flag (#2356) ───────────────────── */
-// Read once at boot from AEE_RESOURCE_ACCESS_V2; the SPA fetches this once to
-// decide whether to render the redesigned identity/scope credential surfaces
-// (PR7) or the current tier controls. Off by default — the redesign lands dark.
-app.get('/api/resource-access-mode', (req, res) => {
-  res.json({ enabled: RESOURCE_ACCESS_V2 });
-});
 
 /* ─── Client error telemetry (#1974) ────────────────────────────────── */
 // The console's React error boundaries post one report per contained render
@@ -2133,20 +2197,6 @@ app.post('/api/client-errors', clientErrorLimiter, (req, res) => {
   // (the Logs page streams it) — the JSONL file is the durable copy.
   console.warn(clientErrorLog.logLine(built.event));
   res.status(204).end();
-});
-
-/* ─── Setup Status ──────────────────────────────────────────────────── */
-
-app.get('/api/setup/status', (req, res) => {
-  const llmEndpoints = readJsonFile(LLM_ENDPOINTS_INDEX, []);
-  const sshKeys      = readJsonFile(SSH_KEYS_INDEX, []);
-  const ghTokens     = readJsonFile(GH_TOKENS_INDEX, []);
-
-  res.json(buildSetupStatus({
-    llmCount: llmEndpoints.length,
-    sshCount: sshKeys.length,
-    ghCount: ghTokens.length,
-  }));
 });
 
 /* ─── Agents ────────────────────────────────────────────────────────── */
@@ -2410,15 +2460,6 @@ function memberRepoFullName(cfg) {
   } catch { return null; }
 }
 
-// A derived data-flow trigger is one the `expandDataFlowSteps` derivation owns:
-// it carries the `dataFlow` marker and the canonical `<consumer>-on-push-<up>`
-// id. Manually-authored data-flow triggers (arbitrary ids) don't match and are
-// preserved untouched by reconciliation. Kept in sync with process-template.js.
-function isDerivedDataFlowTrigger(t, memberId) {
-  return t && t.dataFlow === true && typeof t.id === 'string'
-    && t.id.startsWith(`${memberId}-on-push-`);
-}
-
 // Re-derive the functional data-flow push triggers for a whole team from its
 // members' declarative ports (`dataFlow.{dependsOn,inputs,outputs}`), mirroring
 // what `expandDataFlowSteps` does at materialise time. This is what makes a live
@@ -2440,18 +2481,10 @@ async function reconcileTeamDataFlow(teamId) {
   }
   if (members.length === 0) return;
 
-  // Strip the previously-derived triggers so expandDataFlowSteps regenerates the
-  // full current set from the ports (a plain no-op leaves stale ones behind).
-  const roles = members.map(m => ({
-    id: m.id,
-    displayName: m.displayName,
-    inputs: Array.isArray(m.df.inputs) ? m.df.inputs : [],
-    outputs: Array.isArray(m.df.outputs) ? m.df.outputs : [],
-    dependsOn: Array.isArray(m.df.dependsOn) ? m.df.dependsOn : [],
-    triggers: m.triggers.filter(t => !isDerivedDataFlowTrigger(t, m.id)),
-  }));
-  const expanded = expandDataFlowSteps({ roles }).roles;
-  const byId = new Map(expanded.map(r => [r.id, r]));
+  // Strip the previously-derived triggers (full-id AND role-key ids) so
+  // expandDataFlowSteps regenerates the full current set from the ports (a plain
+  // no-op leaves stale ones behind) — see derived-data-flow.js.
+  const derived = rederiveTeamDataFlow(teamId, members);
   const norm = (arr) => JSON.stringify([...arr].sort((a, b) => (a.id < b.id ? -1 : 1)));
 
   for (const m of members) {
@@ -2460,10 +2493,7 @@ async function reconcileTeamDataFlow(teamId) {
     // (#446). Content-compare (order-insensitive on id) so we write when the
     // wiring OR its preserved activatedAt genuinely changed — but skip a pure
     // no-op, which would bump triggers.json mtime for nothing.
-    const next = injectDerivedTriggerRepo(
-      stampDerivedActivation(byId.get(m.id)?.triggers || [], m.triggers),
-      m.repo,
-    );
+    const next = injectDerivedTriggerRepo(derived.get(m.id) || [], m.repo);
     if (norm(next) === norm(m.triggers)) continue;
     try { await putTriggers(m.id, next); notifyAgentReload(m.id); }
     catch { /* best-effort — never break the originating request */ }
@@ -2734,6 +2764,35 @@ function notifyAgentReseed(agentId, paths) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ paths }),
   }).catch(() => {});
+}
+
+// Apply an MCP server change to where the agent reads it (#2289). Unlike the
+// best-effort notifiers around it this one is AWAITED: the save response
+// reports, per agent, whether the change landed (applied / stored until the
+// agent next starts / pending until it is materialised / kept its own override
+// / failed and why), so the console never claims a change it could not make.
+// `kind` is 'agents' (one agent) or 'environments' (every agent bound to it).
+// An unreachable orchestrator is reported as a failure, never thrown.
+async function applyMcpChange(kind, id) {
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/${kind}/${encodeURIComponent(id)}/apply-mcp`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(30_000),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body.ok) return { ok: false, error: body.error || `orchestrator returned ${r.status}` };
+    return {
+      ok: true,
+      applied: body.applied || [],
+      stored: body.stored || [],
+      pending: body.pending || [],
+      keptOverride: body.keptOverride || [],
+      failed: body.failed || [],
+    };
+  } catch (err) {
+    return { ok: false, error: `could not reach the orchestrator (${err.message})` };
+  }
 }
 
 // Best-effort: after an environment's spawn-time credentials change (today: the
@@ -3279,12 +3338,6 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
         // reconcileTeamGithubChannels re-stamps the claim the author just turned
         // off. Only the non-default is persisted.
         ...(c.autoClaim === false ? { autoClaim: false } : {}),
-        // Internal-channel transport (#1194) — must survive the live port write so
-        // reconcileTeamGithubChannels re-derives an internal (poller-excluded)
-        // listener. Only meaningful on a labelled, non-human channel; anything else
-        // stays poller-delivered, so a stray `transport` on those is dropped here.
-        ...(c.transport === 'internal' && typeof c.label === 'string' && c.label.trim() && c.gate !== 'human'
-          ? { transport: 'internal' } : {}),
       }));
     if (norm.length) fresh.channels = norm; else delete fresh.channels;
     channelsChanged = true;
@@ -3304,6 +3357,9 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // Team-member inheritance toggles. `null` means "switch to inherit"
   // (delete the field); a string / array means "set the override".
   let promptOverrideChanged = false;
+  // #2289: an MCP override change (incl. switching back to inherit) is applied
+  // to the agent's workspace below, not left for a re-creation that never comes.
+  const mcpOverrideBefore = JSON.stringify(fresh.mcpServersOverride ?? null);
   if (fresh.role === 'team-member') {
     // System-prompt mode (#1511). An explicit `promptMode` selects one of the
     // three modes; an older client that sends only `systemPrompt` is mapped the
@@ -3476,7 +3532,11 @@ app.put('/api/agents/:id', apiLimiter, async (req, res) => {
   // (#185 Phase 2). On the shared volume the agent re-reads config.json on its
   // next action anyway, so this is just a harmless idempotent re-sync there.
   notifyAgentReload(id);
-  res.json({ id, ...fresh });
+  // Awaited after the write so the report reflects what the agent now reads.
+  const mcpApply = JSON.stringify(fresh.mcpServersOverride ?? null) !== mcpOverrideBefore
+    ? await applyMcpChange('agents', id)
+    : undefined;
+  res.json({ id, ...fresh, ...(mcpApply ? { mcpApply } : {}) });
 });
 
 /* ─── Reset agent to stub state ─────────────────────────────────────── */
@@ -5334,8 +5394,7 @@ const requireAgentManage = createAgentManageGate({
 function providerVisible(scope, ep) {
   return isGlobalProvider(ep) || visibleCredential(scope, ep);
 }
-// READ visibility for the Model Providers LIST + single read GET (#2360, behind
-// AEE_RESOURCE_ACCESS_V2). The page is opened to every authenticated user, so a
+// READ visibility for the Model Providers LIST + single read GET (#2360). The page is opened to every authenticated user, so a
 // caller must see the providers they can actually USE — on top of `providerVisible`
 // (global + own personal + team/system they ADMINISTER), also the team/system
 // providers of teams they are a MEMBER of (their agents run on these), READ-ONLY.
@@ -5344,10 +5403,10 @@ function providerVisible(scope, ep) {
 // (`maskLlmEndpointForCaller` keys the token mask on `visibleCredential`, not on
 // this), and the client renders a non-manageable row read-only (a lock, no
 // edit/delete — `canManageProviderClient`). The mutating/action routes stay on
-// `providerVisible` (manage). Off the flag this IS `providerVisible`.
+// `providerVisible` (manage).
 function providerReadVisible(scope, ep) {
   if (providerVisible(scope, ep)) return true;
-  if (!RESOURCE_ACCESS_V2 || !scope || !ep) return false;
+  if (!scope || !ep) return false;
   const member = scope.teamIds; // Set of the caller's member team ids (squad ids)
   if (!member || member.size === 0) return false;
   const inMember = (id) => member.has(String(id));
@@ -5364,7 +5423,7 @@ function providerReadVisible(scope, ep) {
 }
 function providerUsableByTeam(ep, teamId, agentTeamId) {
   if (isGlobalProvider(ep) || credentialVisibleToTeam(ep, teamId)) return true;
-  // Unified resource access model (§7/§8, #2357) — behind AEE_RESOURCE_ACCESS_V2.
+  // Unified resource access model (§7/§8, #2357).
   // A team may also consume a member's PERSONAL provider as a live LEND (personal
   // api-key gateway, or a subscription seat) while that member belongs to the
   // team. This is the third arm of "usable by team T", and it is what fixes the
@@ -5372,7 +5431,6 @@ function providerUsableByTeam(ep, teamId, agentTeamId) {
   // (this set, via usableEndpointsForTeam) and the team-settings default dropdown
   // (PR7, same set) now compute the identical selectable set, so a provider the
   // team's agents already run on can no longer be missing as the team default.
-  // Dark until the operator opts in; legacy behaviour is byte-identical otherwise.
   //
   // The lend's membership check is keyed on the AGENT TEAM (squad) id
   // (`resolveAgentTeam`), NOT `teamId` — which is the vestigial credential-axis
@@ -5382,7 +5440,7 @@ function providerUsableByTeam(ep, teamId, agentTeamId) {
   // tenant space would silently never match. `credentialVisibleToTeam` above
   // keeps using `teamId` — that is how legacy team-scoped providers are stamped,
   // unchanged.
-  if (!RESOURCE_ACCESS_V2 || !agentTeamId) return false;
+  if (!agentTeamId) return false;
   // #2360 re-key + multi-team: a TEAM-scoped provider belongs to a SET of AGENT
   // teams (`teamIds`, falling back to the legacy single `teamId`) and is usable
   // by any agent in any of them — this is what makes "Team = the Agent Team(s)"
@@ -5423,10 +5481,10 @@ function providerTeamSet(ep) {
 // Co-owned management (#2360, decision A): a team provider is manageable by the
 // admin of ANY team in its set (or a System Admin) — so a cloned team's admin can
 // manage a provider shared with them too. Non-team providers defer to
-// canManageCredential. Gated by the flag; off it, legacy (primary-only) behaviour.
+// canManageCredential.
 function canManageProvider(scope, ep) {
   if (scope && scope.all) return true;
-  if (RESOURCE_ACCESS_V2 && ep && ep.scope === 'team') {
+  if (ep && ep.scope === 'team') {
     return providerTeamSet(ep).some(t => canManageTeam(scope, t));
   }
   return canManageCredential(scope, ep);
@@ -5437,10 +5495,10 @@ function canManageProvider(scope, ep) {
 // the team can actually use it — the whole point of "a clone keeps a working
 // provider without duplicating it". Best-effort + idempotent + dangling-safe: a
 // stale team id (team creation later fails) simply never matches at consumption,
-// so it is harmless; a failure here never blocks team creation. Gated by the
-// flag; global/personal providers are left untouched (global already serves all).
+// so it is harmless; a failure here never blocks team creation. Global/personal
+// providers are left untouched (global already serves all).
 function ensureTeamOnEnvProvider(env, teamAgentId) {
-  if (!RESOURCE_ACCESS_V2 || !env || !env.llmEndpointId || !teamAgentId) return;
+  if (!env || !env.llmEndpointId || !teamAgentId) return;
   try {
     const list = listLlmEndpoints();
     const ep = list.find(e => e.id === env.llmEndpointId);
@@ -5544,7 +5602,7 @@ app.get('/api/agents/:id/model-options', (req, res) => {
   // 'block' = a subscription seat that shouldn't back a multi-user team (a legacy
   // state — new ones are refused at membership-add). null otherwise. UX only —
   // never gates the run. `resolveAgentTeam(cfg)` is the squad id the lend is keyed on.
-  const providerRisk = (RESOURCE_ACCESS_V2 && endpoint)
+  const providerRisk = endpoint
     ? personalDefaultTransitionRisk({ provider: endpoint, humanMemberCount: teamHumanMemberCount(resolveAgentTeam(cfg)) })
     : null;
   res.json({
@@ -6141,6 +6199,48 @@ app.get('/api/agents/:agentId/context/download', apiLimiter, async (req, res) =>
   res.end(buf);
 });
 
+/* ─── Agent GitHub-event activity (#2525) ───────────────────────────── */
+
+// The Agent Chat "Events" tab: every GitHub event that reached THIS agent's
+// subscriptions — delivered, digested or dropped with its reason. Filtered
+// server-side over the whole window (AC11), never a client filter over the
+// global log's newest-N page. Read-class: a Team Member may view it (D9).
+app.get('/api/agents/:agentId/github-events', (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ error: 'Invalid agent id' });
+  res.json(githubEventLog.queryAgentEntries({
+    agentId,
+    since: req.query.since,
+    until: req.query.until,
+    limit: Number(req.query.limit) || undefined,
+  }));
+});
+
+// "Fire again" on a dropped wake (#2525 AC5): re-delivers a `wake-already-armed`
+// / `throttle` / `internal-dedup` drop with the same trigger prompt. Firing a
+// trigger is Team-Admin-only (MANUAL_FIRE_RULE, team-member-boundary.js), so it
+// carries requireAgentManage. Every decision — refirability, item state, the
+// at-most-once lock — lives in the orchestrator; the console only stamps the
+// authenticated actor (never the body's say-so) and proxies.
+app.post('/api/agents/:agentId/github-events/refire', apiLimiter, requireAgentManage, async (req, res) => {
+  const { agentId } = req.params;
+  if (!AGENT_ID_RE.test(agentId)) return res.status(400).json({ ok: false, error: 'Invalid agent id' });
+  const { eventId, triggerId } = req.body || {};
+  const actor = (req.user && (req.user.username || req.user.email || req.user.sub)) || null;
+  const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
+  try {
+    const r = await fetch(`${orchestratorUrl}/internal/agents/${encodeURIComponent(agentId)}/github-events/refire`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eventId, triggerId, actor }),
+    });
+    const body = await r.json().catch(() => ({ ok: false, error: 'invalid orchestrator response' }));
+    return res.status(r.status).json(body);
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
 /* ─── Agent Triggers ────────────────────────────────────────────────── */
 
 app.get('/api/agents/:id/triggers', (req, res) => {
@@ -6179,6 +6279,12 @@ app.get('/api/scripts/:name', apiLimiter, async (req, res) => {
 // new full array and PUTs it through the orchestrator, which persists it and
 // signals the agent (SIGUSR2) to re-pull. We read the current array via
 // controlOrAgentPath so it works on both the shared and isolated layouts.
+// #2571: the producer filter's same-team check reads agent configs by id.
+function readAgentConfigForFilter(agentId) {
+  if (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId)) return null;
+  return readJsonFile(path.join(AGENTS_DIR, agentId, 'config.json'), null);
+}
+
 async function putTriggers(agentId, triggers) {
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || 'http://orchestrator:4002';
   const r = await fetch(
@@ -6214,11 +6320,20 @@ app.post('/api/agents/:id/triggers', apiLimiter, async (req, res) => {
   // direct API) can persist a non-conformant listener unchallenged again.
   const te = rawTriggerError(newTrigger);
   if (te) return res.status(400).json({ error: te });
-  // Internal-channel transport (#1174): a mistyped value would silently leave
-  // the listener poller-delivered while the producer runs `aee-emit` — checked
-  // here (route-level), mirroring validateProcessTemplate's bundle check.
-  const tpe = triggerTransportError(newTrigger);
-  if (tpe) return res.status(400).json({ error: tpe });
+  // A legacy `transport` is tolerated and dropped (the internal transport was
+  // removed in #2578 — every label listener is poller-delivered).
+  delete newTrigger.transport;
+  // Push branch filter (#2570): persisted in its normalized array form (or
+  // absent = every branch), validated by rawTriggerError above.
+  normalizeBranchFilter(newTrigger);
+  // "Pushed by agent" producer filter (#2571): same-team agent ids on push
+  // triggers only.
+  const pbf = applyPushedBy(newTrigger, { ownerId: id, lookupAgent: readAgentConfigForFilter });
+  if (pbf.error) return res.status(400).json({ error: pbf.error });
+  if (pbf.trigger !== newTrigger) {
+    delete newTrigger.pushedBy;
+    Object.assign(newTrigger, pbf.trigger);
+  }
   // At most one active chat-launched loop per agent (#1020 AC8). A launched
   // loop is a one-off run; a second launch while one runs would race two
   // runners, so reject it — the composer reflects the running state and
@@ -6272,9 +6387,19 @@ app.put('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) => {
   // UNCHANGED (the LegacyMultiEventNote migration flow keeps working).
   const te = rawTriggerError(merged, prev);
   if (te) return res.status(400).json({ error: te });
-  // Internal-channel transport (#1174) — same route-level check as POST.
-  const tpe = triggerTransportError(merged);
-  if (tpe) return res.status(400).json({ error: tpe });
+  // Legacy `transport` (#2578) — dropped as on POST, including one lingering
+  // on the stored trigger, so an edit never re-persists it.
+  delete merged.transport;
+  // Push branch filter (#2570) — normalized as on POST; a blank/null value
+  // clears a stored filter.
+  normalizeBranchFilter(merged);
+  // Producer filter (#2571) — same route-level check as POST; `null` clears it.
+  const pbf = applyPushedBy(merged, { ownerId: id, lookupAgent: readAgentConfigForFilter });
+  if (pbf.error) return res.status(400).json({ error: pbf.error });
+  if (pbf.trigger !== merged) {
+    delete merged.pushedBy;
+    Object.assign(merged, pbf.trigger);
+  }
   if (merged.type === 'github-event') {
     const now = new Date().toISOString();
     // Refresh the activation horizon on a disable→enable flip so a
@@ -6356,22 +6481,6 @@ app.delete('/api/agents/:id/triggers/:triggerId', apiLimiter, async (req, res) =
   }
   res.status(204).end();
 });
-
-// Internal-channel transport (#1174): value + shape hygiene for a trigger write.
-// The failure mode of a bad value is silent (the listener stays in the poller
-// plan and `aee-emit` wakes nobody), so it is rejected, not tolerated. Kept
-// route-level — the bundle-side twin lives in validateProcessTemplate.
-function triggerTransportError(t) {
-  if (t.transport === undefined) return null;
-  if (t.transport !== 'internal' && t.transport !== 'github') {
-    return "transport must be 'internal' or 'github'";
-  }
-  if (t.transport === 'internal'
-      && !(t.type === 'github-event' && typeof t.labelFilter === 'string' && t.labelFilter.trim())) {
-    return "transport 'internal' requires a github-event label listener (labelFilter)";
-  }
-  return null;
-}
 
 // A trigger write on a team member changes WHO CONSUMES its siblings' labels —
 // re-render the team's generated Outcomes blocks (#1007). Best-effort: a
@@ -6528,12 +6637,15 @@ app.get('/api/process/graph', (req, res) => {
 // Build a graph from an imported bundle (no persistence) so the canvas can
 // render it as a blueprint (#334). Reuses the same pure builder.
 app.post('/api/process/graph', (req, res) => {
-  const raw = req.body && req.body.processTemplate;
+  // Repair safe cross-field inconsistencies before validating (#2579) so a
+  // small, mechanically-fixable defect in an imported bundle no longer hard-fails
+  // the render; `coercions` surfaces every repair applied.
+  const { bundle: coerced, warnings: coercions } = coerceImportBundle(req.body && req.body.processTemplate);
   // Drafts (#345) may be empty works-in-progress.
-  const v = validateProcessTemplate(raw, { allowEmptyRoles: true });
+  const v = validateProcessTemplate(coerced, { allowEmptyRoles: true });
   if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
   // Map legacy pr-review roles (#347) onto the #380 channel ports so old drafts render.
-  const bundle = liftTriggerEmits(normalizeLegacyReview(raw));
+  const bundle = liftTriggerEmits(normalizeLegacyReview(coerced));
   const agents = bundle.roles.map(r => ({
     id: r.id, role: 'template', displayName: r.displayName || r.id,
     sessionPolicy: r.sessionPolicy || 'persistent',
@@ -6551,6 +6663,8 @@ app.post('/api/process/graph', (req, res) => {
     // The bundle's own registries are the authority: labels for gate/brake
     // classification (#928), humans for the named-role bindings (#987).
     humans: Array.isArray(bundle.humans) ? bundle.humans : [],
+    // Auto-repairs applied on import (#2579) — non-fatal, surfaced to the client.
+    ...(coercions.length ? { coercions } : {}),
     ...buildProcessGraph(agents, { labels: bundle.labels, humans: bundle.humans }),
   });
 });
@@ -7466,6 +7580,18 @@ app.get('/api/knowledge/stream', (req, res) => {
 
 const KNOWLEDGE_SUGGESTIONS_DIR = path.join(WORKSPACE, 'knowledge-suggestions');
 
+// #2592: domainId → current display name, from the team's domain taxonomy
+// (/workspace/teams/<teamId>/knowledge-domains.json, owned by the orchestrator).
+function readTeamDomainNames(teamId) {
+  const out = new Map();
+  if (!AGENT_ID_RE.test(teamId)) return out;
+  const doc = readJsonFile(path.join(WORKSPACE, 'teams', path.basename(teamId), 'knowledge-domains.json'), null);
+  for (const d of (doc && Array.isArray(doc.domains) ? doc.domains : [])) {
+    if (d && typeof d.id === 'string' && typeof d.name === 'string' && d.name) out.set(d.id, d.name);
+  }
+  return out;
+}
+
 function readCandidateStore(teamId) {
   if (!AGENT_ID_RE.test(teamId)) return [];
   const arr = readJsonFile(path.join(KNOWLEDGE_SUGGESTIONS_DIR, `${path.basename(teamId)}.json`), []);
@@ -7487,9 +7613,21 @@ app.get('/api/knowledge/promotion-suggestions', (req, res) => {
   // existing team-tier skill (the default promotion home), so the dialog can
   // pre-select "extend" with that target. Default stays "create new" (null).
   const eligible = eligibleExtendSkills(scope, teamId, 'team');
+  // #2592: current domain names (a renamed domain relabels its card without waiting
+  // for the next collector pass).
+  const domainNames = readTeamDomainNames(teamId);
   const suggestions = rows.map(c => {
     const view = knowledgeSuggestions.promotionSuggestionView(c, c.draft);
-    view.matchedSkill = knowledgeSuggestions.matchExistingSkill(c, eligible);
+    if (knowledgeSuggestions.isDomainCard(c)) {
+      // A domain card targets THE domain skill — never a text-matched neighbour.
+      // The skill may have appeared since the card was raised → extend it.
+      const onDisk = view.domainSkill && eligible.find(s => s && s.name === view.domainSkill);
+      view.matchedSkill = onDisk ? { name: view.domainSkill, tier: 'team' } : null;
+      view.mode = onDisk ? 'extend' : 'create';
+    } else {
+      view.matchedSkill = knowledgeSuggestions.matchExistingSkill(c, eligible);
+    }
+    if (view.domainId && domainNames.has(view.domainId)) view.domainName = domainNames.get(view.domainId);
     if (c.dismissReason) view.dismissReason = c.dismissReason;
     if (c.dismissedAt) view.dismissedAt = c.dismissedAt;
     if (c.staleAt) view.staleAt = c.staleAt;
@@ -7779,6 +7917,13 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     const v = knowledgeSuggestions.validateExtension(req.body);
     if (!v.ok) return res.status(400).json({ error: v.error });
 
+    // #2592: a domain card may only extend its own domain skill.
+    const dc = knowledgeSuggestions.checkDomainCardTarget(
+      req.body.suggestionId ? readCandidateStore(teamId).find(c => c && c.id === req.body.suggestionId) : null,
+      { name: v.targetName, to: v.to },
+    );
+    if (!dc.ok) return res.status(400).json({ error: dc.error });
+
     const target = resolveExtendTarget(teamId, v.to, v.targetName);
     if (target.error) return res.status(target.notFound ? 404 : 400).json({ error: target.error });
 
@@ -7874,6 +8019,12 @@ app.post('/api/knowledge/promote', heavyLimiter, async (req, res) => {
     ? readCandidateStore(teamId).find(c => c && c.id === req.body.suggestionId) || null
     : null)
     || (v.from === 'team' ? adHocCandidate(teamId, v.entryIds) : null);
+
+  // #2592: a domain card may only create its own domain skill (never a lesson-named one).
+  const dc = knowledgeSuggestions.checkDomainCardTarget(
+    req.body.suggestionId ? cand : null, { name: v.name, to: v.to },
+  );
+  if (!dc.ok) return res.status(400).json({ error: dc.error });
 
   // Destination dir by target tier (same containment guards as promote-to-global).
   let dstDir;
@@ -8321,6 +8472,7 @@ app.get('/api/knowledge/gates', (req, res) => {
     repositories: teamRepositories(env),
     githubTokenId: env && typeof env.githubTokenId === 'string' ? env.githubTokenId : '',
     decayHorizonDays: knowledgeSuggestions.resolveDecayHorizonDays(env), // #919
+    domainSkillThreshold: knowledgeSuggestions.resolveDomainSkillThreshold(env), // #2592
   });
 });
 
@@ -8342,6 +8494,31 @@ app.put('/api/knowledge/decay', apiLimiter, async (req, res) => {
     const out = await r.json().catch(() => ({}));
     if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'decay config update failed' });
     res.json({ ok: true, decayHorizonDays: days });
+  } catch (err) {
+    res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// Set the per-team first-skill threshold of the domain → skill pipeline (#2592,
+// AC12): a domain's FIRST skill needs >= minLessons converged lessons from
+// >= minAgents distinct agents. Same per-team knowledge-config writer as decay.
+app.put('/api/knowledge/domain-skill-threshold', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  const teamId = typeof req.body?.teamId === 'string' ? req.body.teamId : '';
+  const minLessons = Number(req.body?.minLessons);
+  const minAgents = Number(req.body?.minAgents);
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'teamId is required' });
+  if (!knowledgeTeamVisible(scope, teamId)) return res.status(403).json({ error: 'forbidden' });
+  if (!Number.isInteger(minLessons) || minLessons < 1 || minLessons > 100) return res.status(400).json({ error: 'minLessons must be an integer 1..100' });
+  if (!Number.isInteger(minAgents) || minAgents < 1 || minAgents > 50) return res.status(400).json({ error: 'minAgents must be an integer 1..50' });
+  try {
+    const r = await fetch(`${ORCH_URL()}/internal/knowledge/config`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ teamId, config: { domainSkillThreshold: { minLessons, minAgents } } }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok || !out.ok) return res.status(502).json({ error: (out && out.error) || 'threshold update failed' });
+    res.json({ ok: true, domainSkillThreshold: { minLessons, minAgents } });
   } catch (err) {
     res.status(502).json({ error: `orchestrator unreachable: ${err.message}` });
   }
@@ -8443,6 +8620,12 @@ app.post('/api/knowledge/domains', apiLimiter, async (req, res) => {
       body: JSON.stringify(forward),
     });
     const out = await r.json().catch(() => ({}));
+    // #2592 (AC10): growing the taxonomy at/over the skill budget needs an explicit
+    // confirmation — pass the 409 through so the panel can ask and re-send with
+    // `overBudgetConfirmed: true`. Nothing was written.
+    if (r.status === 409 && out && out.error === 'over-budget') {
+      return res.status(409).json({ ok: false, error: 'over-budget', added: out.added, budget: out.budget });
+    }
     if (!r.ok || !out.ok) return res.status(400).json({ error: (out && out.error) || 'domain op failed' });
     const payload = { ok: true, doc: out.doc, budget: out.budget, proposed: out.proposed, fallback: out.fallback };
     if (assistTarget) payload.meta = assistMeta(assistTarget); // "which key paid for this" (#1211 §4.5)
@@ -8804,6 +8987,49 @@ app.get('/api/teams/:teamId/tickets', apiLimiter, async (req, res) => {
   if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
   try {
     const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/tickets`);
+    const data = await resp.json().catch(() => ({}));
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// GET /api/teams/:teamId/flow-board — the lean Flow Control board (#2573):
+// stages from the flow graph, one row per work item a team agent took part
+// in, running sessions, pools and human blocks. Visibility-only like
+// `tickets`; `?refresh=1` is forwarded (the orchestrator's single-flight cache
+// otherwise serves a sweep younger than its TTL). `canManage` tells the page
+// whether to offer the pool switches and the column configuration.
+app.get('/api/teams/:teamId/flow-board', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!visibleTeam(scope, teamId)) return res.status(404).json({ error: 'Team not found' });
+  const qs = req.query && req.query.refresh === '1' ? '?refresh=1' : '';
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-board${qs}`);
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) data.canManage = !!canManageTeam(scope, teamId);
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+});
+
+// POST /api/teams/:teamId/flow-board-config — save the optional per-team
+// column configuration (rename/merge/hide stages, done retention). A team
+// setting, so gated like every other team mutation (`canManageTeam`).
+app.post('/api/teams/:teamId/flow-board-config', apiLimiter, async (req, res) => {
+  const teamId = req.params.teamId;
+  if (!AGENT_ID_RE.test(teamId)) return res.status(400).json({ error: 'Invalid team id' });
+  const scope = getScope(req);
+  if (!canManageTeam(scope, teamId)) return denyAdmin(res, 'You may not manage this team');
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/teams/${encodeURIComponent(teamId)}/flow-board-config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config: req.body && req.body.config }),
+    });
     const data = await resp.json().catch(() => ({}));
     return res.status(resp.status).json(data);
   } catch (err) {
@@ -9271,11 +9497,14 @@ app.post('/api/teams/:teamId/enable', apiLimiter, async (req, res) => {
  * (roles may carry inputs/outputs/dependsOn) through the unified model so the
  * draft editor renders label + dependency + artifact edges and unified lints. */
 app.post('/api/flows/graph', (req, res) => {
-  const raw = req.body && req.body.processTemplate;
-  const v = validateProcessTemplate(raw, { allowEmptyRoles: true });
+  // Repair safe cross-field inconsistencies before validating (#2579) so an
+  // imported bundle with a small, mechanically-fixable defect still renders
+  // instead of hard-failing; `coercions` reports every repair applied.
+  const { bundle: coerced, warnings: coercions } = coerceImportBundle(req.body && req.body.processTemplate);
+  const v = validateProcessTemplate(coerced, { allowEmptyRoles: true });
   if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
   // Map legacy pr-review roles (#347) onto the #380 channel ports so old drafts render.
-  const bundle = liftTriggerEmits(normalizeLegacyReview(raw));
+  const bundle = liftTriggerEmits(normalizeLegacyReview(coerced));
   const flow = processTemplateToUnified(bundle);
   const bundleHumans = Array.isArray(bundle.humans) ? bundle.humans : [];
   res.json({
@@ -9285,6 +9514,8 @@ app.post('/api/flows/graph', (req, res) => {
     // The bundle's own registries drive gate/brake classification (#928) and the
     // named human-role bindings (#987).
     humans: bundleHumans,
+    // Auto-repairs applied on import (#2579) — non-fatal, surfaced to the client.
+    ...(coercions.length ? { coercions } : {}),
     ...buildUnifiedGraph(flow.nodes, flow.edges, { labels: flow.labels, humans: bundleHumans }),
   });
 });
@@ -9359,6 +9590,12 @@ app.get('/api/process/template', (req, res) => {
       // (e.g. Developer → Code Reviewer "PR"). buildProcessTemplate reduces the
       // member-id `from` to a portable role key via remapChannel.
       ...(Array.isArray(cfg.channels) && cfg.channels.length ? { channels: cfg.channels } : {}),
+      // Agent instance pools (#2246): the member's opt-in pooling config. It MUST
+      // ride the exported ROLE — buildProcessTemplate's `normalizePool(r.pool)`
+      // only serializes what it is given, so without this the pooled role exports
+      // as unpooled and a team with `autoDispatch`/`wipLimit` re-imports as an
+      // invalid bundle (autoDispatch enabled, no pooled role — #2579).
+      ...(cfg.pool && typeof cfg.pool === 'object' ? { pool: cfg.pool } : {}),
     });
     // `channels` rides along so a channel's `gate: 'human'` classifies its routing
     // label as a gate in the exported registry too (#928).
@@ -9383,6 +9620,43 @@ app.get('/api/process/template', (req, res) => {
     // The Flow Supervisor's opt-in (#2247) rides along on the team agent, same as above.
     autoDispatch: teamAutoDispatch,
   }));
+});
+
+/* ─── Live-team Copilot history (#2556, AC11/AC16) ─────────────────────
+ * The chat a live team's Copilot panel shows, shared by everyone who may
+ * edit the team and hidden from everyone else. Stored beside (not inside) the
+ * team agent's config.json — see team-copilot-history.js — so persisting a
+ * turn never re-derives triggers or respawns a member. Both verbs use the
+ * live-edit gate (canManageAgent on the team agent), the same one every
+ * Apply write already passes through. */
+function teamCopilotHistoryGate(req, res) {
+  const { teamId } = req.params;
+  if (!AGENT_ID_RE.test(teamId)) { res.status(400).json({ error: 'Invalid team id' }); return null; }
+  const teamCfg = readJsonFile(path.join(AGENTS_DIR, teamId, 'config.json'), null);
+  const scope = getScope(req);
+  const meta = teamCfg ? agentMetaForScope(teamCfg) : null;
+  const access = copilotHistoryAccess({
+    teamCfg,
+    visible: !!meta && visibleAgent(scope, meta),
+    canEdit: !!meta && canManageAgent(scope, meta),
+  });
+  if (access === 'not-found') { res.status(404).json({ error: 'Team not found' }); return null; }
+  if (access === 'forbidden') { res.status(403).json({ error: 'forbidden', code: 'forbidden' }); return null; }
+  return teamId;
+}
+
+app.get('/api/teams/:teamId/copilot-history', apiLimiter, (req, res) => {
+  const teamId = teamCopilotHistoryGate(req, res);
+  if (!teamId) return;
+  res.json({ messages: readTeamCopilotHistory(AGENTS_DIR, teamId) });
+});
+
+app.put('/api/teams/:teamId/copilot-history', apiLimiter, (req, res) => {
+  const teamId = teamCopilotHistoryGate(req, res);
+  if (!teamId) return;
+  const messages = writeTeamCopilotHistory(AGENTS_DIR, teamId, req.body, writeJsonAtomic);
+  if (!messages) return res.status(400).json({ error: 'body must be { messages: [...] }' });
+  res.json({ messages });
 });
 
 /* ─── Flow Copilot (#1068/#1070, spec #1047) ────────────────────────────
@@ -10155,7 +10429,7 @@ function pluginUiProxy(req, res) {
 }
 
 app.all('/plugins/:id/ui', spaLimiter, auth.requireAuth, pluginUiProxy);
-app.all('/plugins/:id/ui/*', spaLimiter, auth.requireAuth, pluginUiProxy);
+app.all('/plugins/:id/ui/*path', spaLimiter, auth.requireAuth, pluginUiProxy);
 
 /* ─── Process drafts (Process Canvas v2, #344) ──────────────────────────
  * A draft is an editable process-template bundle that exists before any team
@@ -10275,12 +10549,16 @@ app.post('/api/process/drafts', apiLimiter, (req, res) => {
   // Seed from an imported bundle if provided, else an empty skeleton.
   let bundle = emptyDraftBundle(name);
   if (req.body?.processTemplate) {
-    const v = validateProcessTemplate(req.body.processTemplate, { allowEmptyRoles: true });
+    // Repair safe cross-field inconsistencies before validating (#2579) so an
+    // older/leaky export still seeds a draft instead of being rejected; the
+    // draft is then persisted already-consistent.
+    const { bundle: coerced } = coerceImportBundle(req.body.processTemplate);
+    const v = validateProcessTemplate(coerced, { allowEmptyRoles: true });
     if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
     // Strip the access fields off an imported bundle (#2068): an exported and
     // re-imported draft belongs to the importer, and must never carry a foreign
     // access set in.
-    bundle = { ...draftAccess.stripAccessFields(req.body.processTemplate), name };
+    bundle = { ...draftAccess.stripAccessFields(coerced), name };
   }
   // AC1 — `createdBy` is resolved from the authenticated caller, never from the
   // request body (the `PUT /api/me/preferences` rule), and the access set starts
@@ -12773,7 +13051,7 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
   // onto the entry for team scope.
   let providerTeamIds = null;
   const wantGlobalBody = req.body?.global === true;
-  if (RESOURCE_ACCESS_V2 && !wantGlobalBody && req.body?.scope === 'team') {
+  if (!wantGlobalBody && req.body?.scope === 'team') {
     const setRes = resolveProviderTeamSet(scope, req.body, req.body.teamId);
     if (setRes.error) return res.status(setRes.status || 400).json({ error: setRes.error, ...(setRes.code ? { code: setRes.code } : {}) });
     ownership = { scope: 'team', teamId: setRes.teamIds[0], assignedTeamIds: [] };
@@ -12790,14 +13068,10 @@ app.post('/api/llm-endpoints', apiLimiter, async (req, res) => {
   const globalGate = resolveGlobalFlag({ wantGlobal: req.body?.global, currentGlobal: false, scopeAll: scope.all, isOauth, hasSingleUserAck: complianceAck === true });
   if (globalGate.error) return res.status(globalGate.status).json({ error: globalGate.error, code: globalGate.code });
   if (globalGate.global) { ownership = { scope: 'system', teamId: null, assignedTeamIds: [] }; providerTeamIds = null; }
-  // #2360 (behind AEE_RESOURCE_ACCESS_V2): a subscription (oauth) provider acts
-  // as ONE person, so it must be Personal, or Global via the single-user escape
-  // hatch — NEVER team-shared (concept §5 / E9: lending one seat to a team would
-  // silently share it). This was deferred from PR2 #2353 because refusing
-  // team/system oauth before the form offered personal/global would have broken
-  // the subscription-create flow; PR7 offers those, so the rule is enforced now.
-  // Off the flag, the legacy flow is unchanged.
-  if (RESOURCE_ACCESS_V2 && isOauth && !globalGate.global && ownership.scope !== 'personal') {
+  // #2360: a subscription (oauth) provider acts as ONE person, so it must be
+  // Personal, or Global via the single-user escape hatch — NEVER team-shared
+  // (concept §5 / E9: lending one seat to a team would silently share it).
+  if (isOauth && !globalGate.global && ownership.scope !== 'personal') {
     return res.status(400).json({
       error: 'A subscription (oauth) provider must be personal or global, never team-shared.',
       code: 'oauth-not-team',
@@ -12908,64 +13182,36 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   let ownership = { scope: cur.scope, teamId: cur.teamId, assignedTeamIds: cur.assignedTeamIds };
   let nextTeamIds = Array.isArray(current.teamIds) ? current.teamIds.map(String) : undefined;
 
-  if (RESOURCE_ACCESS_V2) {
-    // New model: the desired TIER (personal / team / global) from the ownership
-    // payload. Changing the tier stays System-Admin-only (canReassignCredential);
-    // but editing a team provider's SET while STAYING team-scoped is co-owned
-    // self-service (the manage gate above already authorised the caller).
-    const currentTier = current.global === true ? 'global' : (cur.scope === 'personal' ? 'personal' : 'team');
-    const desiredTier = (b.global === true) ? 'global'
-      : (b.scope === 'personal') ? 'personal'
-      : ('scope' in b ? 'team' : currentTier);
-    if (desiredTier !== currentTier && !canReassignCredential(scope)) {
-      return res.status(403).json({ error: "forbidden: only a System Admin may change a provider's ownership tier", code: 'forbidden' });
-    }
-    if (desiredTier === 'personal') {
-      // #2358/#2360 (bug): a personal provider MUST carry its owner's userId, or
-      // it matches nobody in the owner-only visibility filter — it vanishes from
-      // the list AND becomes unmanageable (personal has no admin bypass). This
-      // branch built the ownership object by hand and dropped the owner, so
-      // `next.userId` below fell back through `ownership.userId (undefined) ||
-      // current.userId (null for a former team/global provider) || null` to null.
-      // Resolve it the same way the create path does: stamp the acting caller,
-      // reject a foreign owner, and validate the user exists.
-      try { ownership = resolveCredentialOwnership({ scope: 'personal', userId: b.userId }, scope.userId); }
-      catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
-      nextTeamIds = undefined;
-    }
-    else if (desiredTier === 'global') { ownership = { scope: 'system', teamId: null, assignedTeamIds: [] }; nextTeamIds = undefined; }
-    else {
-      const setRes = resolveProviderTeamSet(scope, b, b.teamId || cur.teamId);
-      if (setRes.error) return res.status(setRes.status || 400).json({ error: setRes.error, ...(setRes.code ? { code: setRes.code } : {}) });
-      ownership = { scope: 'team', teamId: setRes.teamIds[0], assignedTeamIds: [] };
-      nextTeamIds = setRes.teamIds;
-    }
-  } else {
-    // Legacy (flag off): any ownership field is an admin-only reassign, unchanged.
-    const reassigning = ('scope' in b) || ('teamId' in b) || ('assignedTeamIds' in b);
-    if (reassigning) {
-      if (!canReassignCredential(scope)) {
-        return res.status(403).json({ error: 'forbidden: only a System Admin may reassign a provider', code: 'forbidden' });
-      }
-      try {
-        ownership = resolveCredentialOwnership({
-          scope: 'scope' in b ? b.scope : cur.scope,
-          teamId: b.teamId,
-          assignedTeamIds: b.assignedTeamIds,
-        });
-      } catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
-      const inUse = llmEndpointInUse(current.id);
-      if (inUse) {
-        const env = loadEnvironment(inUse);
-        const envTeam = (env && env.teamId) || 'default';
-        const candidate = { ...current, scope: ownership.scope, teamId: ownership.teamId, assignedTeamIds: ownership.assignedTeamIds };
-        if (!providerUsableByTeam(candidate, envTeam)) {
-          return res.status(409).json({
-            error: `Provider is used by environment '${inUse}' (team '${envTeam}'); reassignment would orphan it. Detach it first.`,
-          });
-        }
-      }
-    }
+  // New model: the desired TIER (personal / team / global) from the ownership
+  // payload. Changing the tier stays System-Admin-only (canReassignCredential);
+  // but editing a team provider's SET while STAYING team-scoped is co-owned
+  // self-service (the manage gate above already authorised the caller).
+  const currentTier = current.global === true ? 'global' : (cur.scope === 'personal' ? 'personal' : 'team');
+  const desiredTier = (b.global === true) ? 'global'
+    : (b.scope === 'personal') ? 'personal'
+    : ('scope' in b ? 'team' : currentTier);
+  if (desiredTier !== currentTier && !canReassignCredential(scope)) {
+    return res.status(403).json({ error: "forbidden: only a System Admin may change a provider's ownership tier", code: 'forbidden' });
+  }
+  if (desiredTier === 'personal') {
+    // #2358/#2360 (bug): a personal provider MUST carry its owner's userId, or
+    // it matches nobody in the owner-only visibility filter — it vanishes from
+    // the list AND becomes unmanageable (personal has no admin bypass). This
+    // branch built the ownership object by hand and dropped the owner, so
+    // `next.userId` below fell back through `ownership.userId (undefined) ||
+    // current.userId (null for a former team/global provider) || null` to null.
+    // Resolve it the same way the create path does: stamp the acting caller,
+    // reject a foreign owner, and validate the user exists.
+    try { ownership = resolveCredentialOwnership({ scope: 'personal', userId: b.userId }, scope.userId); }
+    catch (err) { return res.status(err.status || 400).json({ error: err.message }); }
+    nextTeamIds = undefined;
+  }
+  else if (desiredTier === 'global') { ownership = { scope: 'system', teamId: null, assignedTeamIds: [] }; nextTeamIds = undefined; }
+  else {
+    const setRes = resolveProviderTeamSet(scope, b, b.teamId || cur.teamId);
+    if (setRes.error) return res.status(setRes.status || 400).json({ error: setRes.error, ...(setRes.code ? { code: setRes.code } : {}) });
+    ownership = { scope: 'team', teamId: setRes.teamIds[0], assignedTeamIds: [] };
+    nextTeamIds = setRes.teamIds;
   }
 
   // The effective auth type after this update. Switching to subscription auth
@@ -13013,7 +13259,7 @@ app.put('/api/llm-endpoints/:id', apiLimiter, async (req, res) => {
   // #2360: same oauth rule as the create path — a subscription provider must be
   // personal or global, never team-shared. Applies to the EFFECTIVE auth type
   // after this update, so switching an existing team provider to oauth is caught.
-  if (RESOURCE_ACCESS_V2 && isOauth && !globalGate.global && ownership.scope !== 'personal') {
+  if (isOauth && !globalGate.global && ownership.scope !== 'personal') {
     return res.status(400).json({
       error: 'A subscription (oauth) provider must be personal or global, never team-shared.',
       code: 'oauth-not-team',
@@ -13170,17 +13416,13 @@ app.delete('/api/llm-endpoints/:id', apiLimiter, (req, res) => {
 
 // ── Unified-access migration (#2359): dry-run report + admin-confirmed apply ──
 //
-// System-Admin-only and gated by AEE_RESOURCE_ACCESS_V2 (the redesign lands
-// dark). The report is READ-ONLY — it enumerates every legacy record still on
+// System-Admin-only. The report is READ-ONLY — it enumerates every legacy record still on
 // the removed `system`+assignedTeamIds axis or lacking an `identity`, with an
 // auto-suggested identity + tier. NOTHING changes until an admin POSTs a
 // per-record decision (decision §12.8), and `identity` is immutable once set
 // (§12.5, enforced in resource-migration.js). An un-migrated record keeps
 // resolving through the existing read-compat path meanwhile.
 app.get('/api/resource-migration', (req, res) => {
-  if (!RESOURCE_ACCESS_V2) {
-    return res.status(404).json({ error: 'not found', code: 'resource-access-v2-disabled' });
-  }
   const scope = getScope(req);
   if (!scope.all) return res.status(403).json({ error: 'forbidden: the resource migration is System-Admin-only', code: 'forbidden' });
   res.json(resourceMigration.planResourceMigration({
@@ -13191,9 +13433,6 @@ app.get('/api/resource-migration', (req, res) => {
 });
 
 app.post('/api/resource-migration/apply', apiLimiter, (req, res) => {
-  if (!RESOURCE_ACCESS_V2) {
-    return res.status(404).json({ error: 'not found', code: 'resource-access-v2-disabled' });
-  }
   const scope = getScope(req);
   if (!scope.all) return res.status(403).json({ error: 'forbidden: the resource migration is System-Admin-only', code: 'forbidden' });
   const decisions = Array.isArray(req.body && req.body.decisions) ? req.body.decisions : null;
@@ -13238,13 +13477,10 @@ app.post('/api/resource-migration/apply', apiLimiter, (req, res) => {
 // (canDeleteCredential, PR3) but never see-secret / use. This lists every
 // personal resource MASKED (name, owner, created, fingerprint/authType — never
 // the secret) so the admin can decide to delete one via the existing per-kind
-// DELETE routes (which already gate on canDeleteCredential). System-Admin-only,
-// behind the flag. Read-only + secret-free — no discovery of a secret, only of
+// DELETE routes (which already gate on canDeleteCredential). System-Admin-only.
+// Read-only + secret-free — no discovery of a secret, only of
 // its existence, exactly what §6 allows.
 app.get('/api/admin/personal-resources', (req, res) => {
-  if (!RESOURCE_ACCESS_V2) {
-    return res.status(404).json({ error: 'not found', code: 'resource-access-v2-disabled' });
-  }
   const scope = getScope(req);
   if (!scope.all) return res.status(403).json({ error: 'forbidden: the governance Resources view is System-Admin-only', code: 'forbidden' });
   res.json({
@@ -13389,10 +13625,23 @@ function llmProbeTarget(baseUrl, token, authType) {
 // of declaring the whole provider broken. See llm-probe-fallback.js for the
 // (unit-tested, pure) response classification.
 async function probeMessagesFallback(baseUrl, headers, system = null, opts = {}) {
-  const url = buildCountTokensUrl(baseUrl);
+  // Route choice: the api-key Azure fallback (#2306) uses the free count_tokens
+  // route. Subscription-OAuth (#2448) MUST use the real /v1/messages route —
+  // Anthropic accepts JWT/OAuth bearer tokens there but rejects them on
+  // count_tokens with "401 jwt auth is not yet supported on count_tokens",
+  // which the classifier would otherwise mis-read as a rejected token. The
+  // messages route stays free here because the intentionally-invalid placeholder
+  // model 404s during model resolution — after auth is validated, before any
+  // inference — so no tokens are ever billed (a 404 not_found_error is treated
+  // as auth-OK by classifyMessagesFallback under { oauth: true }).
+  const useMessages = Boolean(opts.messagesRoute);
+  const url = useMessages ? buildMessagesUrl(baseUrl) : buildCountTokensUrl(baseUrl);
   const payload = {
     model: PROBE_PLACEHOLDER_MODEL,
     messages: [{ role: 'user', content: 'ping' }],
+    // /v1/messages requires max_tokens; count_tokens rejects it. Kept tiny — the
+    // placeholder model 404s before generation, so the value is never exercised.
+    ...(useMessages ? { max_tokens: 1 } : {}),
     // Subscription-OAuth probes present the Claude Code identity so they
     // authenticate exactly like real CLI traffic (#2448); the api-key Azure
     // fallback (#2306) passes no system and its payload is unchanged.
@@ -13418,7 +13667,7 @@ async function probeLlmEndpointTest(baseUrl, token, authType) {
   // count_tokens messages route the OAuth flow actually authenticates.
   if (isOauthAuthType(normalizeAuthType(authType))) {
     const headers = token ? oauthProbeHeaders(token) : {};
-    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true });
+    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true, messagesRoute: true });
     return {
       ok: fallback.ok,
       url: fallback.url,
@@ -13466,7 +13715,7 @@ async function probeLlmEndpointDiscover(baseUrl, token, authType) {
     // treated as auth-OK regardless of body shape — otherwise Discover could
     // report "check the Base URL" while Test reports success for the same valid
     // provider (and the Base URL isn't even operator-editable for OAuth).
-    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true });
+    const fallback = await probeMessagesFallback(ANTHROPIC_DIRECT_BASE, headers, OAUTH_PROBE_SYSTEM, { oauth: true, messagesRoute: true });
     return oauthDiscoverResult(fallback);
   }
   const { url, headers } = llmProbeTarget(baseUrl, token, authType);
@@ -14877,22 +15126,6 @@ function readGithubTokenValue(tokenId) {
   catch { return null; }
 }
 
-// #2324: does any ENABLED agent bound to this env carry an ENABLED github-event
-// trigger for `fullName`? Polled and internal listeners both gate on the repo, so
-// both count. Mirrors the poller's subscriber test without importing it.
-function envHasRepoSubscriber(envId, fullName) {
-  let dirs = [];
-  try { dirs = listAgentDirs(); } catch { return false; }
-  for (const id of dirs) {
-    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
-    if (!cfg || cfg.environmentId !== envId || cfg.enabled === false) continue;
-    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
-    if (!Array.isArray(triggers)) continue;
-    if (triggers.some(t => t && t.type === 'github-event' && t.enabled !== false && t.repo === fullName)) return true;
-  }
-  return false;
-}
-
 // #2324: a cheap authenticated probe of one repo. Returns { status, rateLimited }.
 // Any network/timeout error → status undefined (classifier → 'unknown'), never a throw.
 async function probeGithubRepo(fullName, token) {
@@ -14918,7 +15151,7 @@ async function probeGithubRepo(fullName, token) {
 }
 
 // #2324 (epic #2325): the GitHub-integration health of an environment's repos —
-// token present? valid? a subscriber? — so the console can show WHY events aren't
+// token present? valid? polled by the poller (#2537)? — so the console can show WHY events aren't
 // arriving instead of the operator having to read the poller log. Same visibility
 // as reading the environment; the token value never leaves the server.
 app.get('/api/environments/:id/github-health', apiLimiter, async (req, res) => {
@@ -14932,20 +15165,116 @@ app.get('/api/environments/:id/github-health', apiLimiter, async (req, res) => {
   const repos = Array.isArray(env.repositories) ? env.repositories.filter((r) => r && r.url) : [];
   const hasToken = !!env.githubTokenId;
   const token = hasToken ? readGithubTokenValue(env.githubTokenId) : null;
+  // #2537 AC8: "events are polled" comes from the poller's own status, not a
+  // console-side estimate. Unavailable → null → the classifier says so.
+  let pollerRepos = null;
+  if (repos.length > 0) {
+    try { pollerRepos = (await fetchPollerRepoStatus()).repos; } catch { pollerRepos = null; }
+  }
   const out = [];
   for (const r of repos) {
     let fullName = null;
     try { const p = parseGitHubUrl(r.url); fullName = `${p.org}/${p.repo}`; } catch { /* unparseable url */ }
-    const hasSubscriber = fullName ? envHasRepoSubscriber(env.id, fullName) : null;
+    const pollerStatus = findRepoStatus(pollerRepos, fullName || r.url);
     let probeStatus; let rateLimited = false;
     if (hasToken && token && fullName) {
       const probe = await probeGithubRepo(fullName, token);
       probeStatus = probe.status; rateLimited = probe.rateLimited;
     }
-    out.push({ url: r.url, fullName, ...classifyGithubHealth({ hasToken, hasSubscriber, probeStatus, rateLimited }) });
+    out.push({ url: r.url, fullName, ...classifyGithubHealth({ hasToken, probeStatus, rateLimited, pollerStatus, envId: env.id }) });
   }
   res.json({ envId: env.id, tokenId: env.githubTokenId || null, repos: out, rollUp: rollUpGithubHealth(out) });
 });
+
+// #2560: the EFFECTIVE baseline GitHub token / SSH key of an agent (in practice a
+// team) — whose credential its containers are started with, for every
+// autonomous run and every in-container `gh`/`git` call. The decision comes
+// from the orchestrator's own spawn-time resolver (describeBaselineCredential),
+// so this display cannot drift from the runtime; effective-github-identity.js
+// only redacts it for the caller (never another person's personal-credential
+// metadata). Same visibility as the agent itself.
+app.get('/api/agents/:id/effective-credentials', apiLimiter, async (req, res) => {
+  const { id } = req.params;
+  if (!AGENT_ID_RE.test(id)) return res.status(400).json({ error: 'Invalid agent id' });
+  const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+  const scope = getScope(req);
+  if (!cfg || !visibleAgent(scope, agentMetaForScope(cfg))) return res.status(404).json({ error: 'Agent not found' });
+  let described;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/agents/${encodeURIComponent(id)}/effective-credentials`);
+    described = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(resp.status === 404 ? 404 : 502).json({ error: described.error || 'orchestrator error' });
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+  res.json({ agentId: id, teamId: described.teamId || null, environmentId: described.environmentId || null, ...presentEffectiveIdentityFor(scope, described) });
+});
+
+// #2560 AC4/AC5: the Agent Teams whose baseline identity the CALLER currently is
+// (they are its current Team Admin), each with both credentials as the runtime
+// now resolves them. The personal GitHub Tokens / SSH Keys pages call this right
+// after the caller adds or deletes a personal credential to say which teams now
+// use it — or what those teams fell back to. Always the caller's own teams.
+app.get('/api/me/baseline-teams', apiLimiter, async (req, res) => {
+  const scope = getScope(req);
+  if (!scope?.userId) return res.json({ teams: [] });
+  let data;
+  try {
+    const resp = await fetch(`${ORCH_URL()}/internal/owners/${encodeURIComponent(scope.userId)}/baseline-teams`);
+    data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(502).json({ error: data.error || 'orchestrator error' });
+  } catch (err) {
+    return res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+  const teams = (Array.isArray(data.teams) ? data.teams : []).map((t) => ({
+    agentId: t.agentId,
+    displayName: t.displayName || t.agentId,
+    ...presentEffectiveIdentityFor(scope, t),
+  }));
+  res.json({ teams });
+});
+
+// #2562: the caller's OWN personal plugin credentials (Jira: their e-mail + API
+// token, used when THEY chat with an agent). The user id always comes from the
+// session — there is no route that names another user, so nobody (System Admins
+// included) can read or change someone else's. The orchestrator returns
+// metadata only (set/unset, a preview, when); values are never read back.
+async function proxyMyPluginCredentials(req, res, method, pluginId) {
+  const scope = getScope(req);
+  if (!scope?.userId) return res.status(403).json({ error: 'Personal plugin credentials need a signed-in user' });
+  const url = `${ORCH_URL()}/internal/users/${encodeURIComponent(scope.userId)}/plugin-credentials`
+    + (pluginId ? `/${encodeURIComponent(pluginId)}` : '');
+  try {
+    const opts = { method };
+    if (method === 'PUT') {
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = JSON.stringify({ values: (req.body && typeof req.body.values === 'object' && req.body.values) || {} });
+    }
+    const resp = await fetch(url, opts);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return res.status(resp.status === 400 || resp.status === 404 ? resp.status : 502).json({ error: data.error || 'orchestrator error' });
+    const { userId: _omit, ...rest } = data;
+    res.json(rest);
+  } catch (err) {
+    res.status(502).json({ error: `Orchestrator unreachable: ${err.message}` });
+  }
+}
+
+app.get('/api/me/plugin-credentials', apiLimiter, (req, res) => proxyMyPluginCredentials(req, res, 'GET', null));
+app.put('/api/me/plugin-credentials/:pluginId', apiLimiter, (req, res) => proxyMyPluginCredentials(req, res, 'PUT', req.params.pluginId));
+app.delete('/api/me/plugin-credentials/:pluginId', apiLimiter, (req, res) => proxyMyPluginCredentials(req, res, 'DELETE', req.params.pluginId));
+
+function presentEffectiveIdentityFor(scope, described) {
+  const users = usersById();
+  const ghNames = new Map(listGithubTokens().map((t) => [t.id, t.name || null]));
+  const sshNames = new Map(listSshKeys().map((k) => [k.id, k.name || null]));
+  return presentEffectiveIdentity(described, {
+    callerUserId: scope?.userId || null,
+    userLabel: (uid) => users.get(uid)?.displayName || null,
+    githubName: (cid) => ghNames.get(cid) || null,
+    sshName: (cid) => sshNames.get(cid) || null,
+  });
+}
 
 app.post('/api/environments', heavyLimiter, (req, res) => {
   // `skills` is accepted-and-discarded: the skill grant is team-owned
@@ -15364,6 +15693,7 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
     }
   }
   if (githubTokenId !== undefined) env.githubTokenId = githubTokenId || null;
+  const prevMcpServers = JSON.stringify(env.mcpServers || []);
   if (mcpServers !== undefined) {
     try {
       env.mcpServers = normalizeMcpServersInput(mcpServers);
@@ -15396,6 +15726,13 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   }
   env.updatedAt = new Date().toISOString();
   saveEnvironment(env.id, env);
+  // #2289: an MCP set change reaches every bound agent now — rewritten into its
+  // workspace, read on its next turn — instead of only agents created later.
+  // Awaited, and run before any respawn below so a restarted container starts
+  // on the new set; the per-agent outcome goes back in the response.
+  const mcpApply = JSON.stringify(env.mcpServers || []) !== prevMcpServers
+    ? await applyMcpChange('environments', env.id)
+    : undefined;
   // Spawn-time bindings (GitHub PAT, LLM provider/model, the container image) are
   // baked into each agent container at start, so a change only takes effect on
   // respawn. Respawn the env's running agents whenever any of them changed —
@@ -15428,7 +15765,7 @@ app.put('/api/environments/:id', apiLimiter, async (req, res) => {
   // AC7: the save is already committed at this point. Whatever the caller does
   // with `previousRepositories` — offer, decline, crash — the environment stays
   // persisted exactly as submitted; no path here rolls it back.
-  res.json({ ...env, previousRepositories: prevRepositories });
+  res.json({ ...env, previousRepositories: prevRepositories, ...(mcpApply ? { mcpApply } : {}) });
 });
 
 app.delete('/api/environments/:id', apiLimiter, (req, res) => {
@@ -16098,20 +16435,20 @@ function providerUsableAtCreation(ep, { creatorUserId, teamId } = {}) {
 // default model (or, as a backstop, the first entry in its catalogue) becomes
 // the env-level default. The user can change either later.
 //
-// §14 / E10 follow-up (behind AEE_RESOURCE_ACCESS_V2): a blind `endpoints[0]`
+// §14 / E10 follow-up: a blind `endpoints[0]`
 // could bind a provider the creator/team cannot actually use — a FOREIGN personal
 // provider (whose token the team would then silently run on: the orchestrator has
 // no runtime lend-gate), or a stranger's subscription. When a preference context
 // is supplied, prefer — in registry order, so an operator's intended ordering
 // still wins among usable ones — the first endpoint USABLE by the creator at
 // creation (`providerUsableAtCreation`), and only fall back to `endpoints[0]` when
-// none is usable (never make creation worse than today). Flag OFF, or no context,
-// is byte-identical to the legacy blind pick.
+// none is usable (never make creation worse than today). No context is the
+// legacy blind pick.
 function pickDefaultLlmBinding(pref) {
   const endpoints = listLlmEndpoints();
   if (endpoints.length === 0) return { llmEndpointId: null, defaultModelId: null };
   let ep = endpoints[0];
-  if (RESOURCE_ACCESS_V2 && pref && pref.creatorUserId) {
+  if (pref && pref.creatorUserId) {
     const usable = endpoints.find(e => providerUsableAtCreation(e, pref));
     if (usable) ep = usable;
     else console.warn(`[api] no model provider is usable by the creator of '${pref.teamId || 'agent'}' — falling back to the first registered endpoint`);
@@ -16423,7 +16760,15 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
   // They are resolved exactly like catalog templates by the materialisation
   // loop below (var substitution over prompt + triggers).
   let customRolesRaw = Array.isArray(body.customRoles) ? body.customRoles : [];
+  let importCoercions = [];
   if (body.processTemplate) {
+    // Repair safe cross-field inconsistencies before validating (#2579) and reuse
+    // the coerced bundle for EVERY downstream read (stages/labels/humans/wipLimit/
+    // autoDispatch below), so an older/leaky export materialises consistently
+    // instead of being rejected outright.
+    const coerced = coerceImportBundle(body.processTemplate);
+    body.processTemplate = coerced.bundle;
+    importCoercions = coerced.warnings;
     const v = validateProcessTemplate(body.processTemplate);
     if (!v.ok) return res.status(400).json({ error: `Invalid processTemplate: ${v.error}` });
     // Expand GitHub channels (#380) into consumer github-event triggers + the
@@ -16909,7 +17254,10 @@ app.post('/api/teams', heavyLimiter, async (req, res) => {
         .filter(p => !toCreate.some(c => c.memberId === p.memberId))
         .map(p => p.memberId),
       dms: created.dms,
-      ...(suffixWarnings.length ? { warnings: suffixWarnings } : {}),
+      // Suffix collisions + any import auto-repairs (#2579) share the one
+      // non-fatal `warnings` channel.
+      ...((suffixWarnings.length || importCoercions.length)
+        ? { warnings: [...importCoercions, ...suffixWarnings] } : {}),
     });
 
     // Phase E — label provisioning (best-effort, after response sent).
@@ -17146,7 +17494,13 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
   // Inline roles (parity with POST /api/teams): either `customRoles` or a whole
   // `processTemplate` bundle (Process Canvas import / wizard Process step, #422).
   let customRolesRaw = Array.isArray(body.customRoles) ? body.customRoles : [];
+  let importCoercions = [];
   if (body.processTemplate) {
+    // Repair safe cross-field inconsistencies before validating (#2579), reusing
+    // the coerced bundle for every downstream read — parity with POST /api/teams.
+    const coerced = coerceImportBundle(body.processTemplate);
+    body.processTemplate = coerced.bundle;
+    importCoercions = coerced.warnings;
     const v = validateProcessTemplate(body.processTemplate);
     if (!v.ok) return fail(400, `Invalid processTemplate: ${v.error}`);
     customRolesRaw = templateToCustomRoles(
@@ -17678,7 +18032,10 @@ app.post('/api/teams/stream', heavyLimiter, async (req, res) => {
           .filter(p => !toCreate.some(c => c.memberId === p.memberId))
           .map(p => p.memberId),
         dms: created.dms,
-        ...(suffixWarnings.length ? { warnings: [...suffixWarnings, ...provWarn] } : (provWarn.length ? { warnings: provWarn } : {})),
+        // Import auto-repairs (#2579) + suffix collisions + label-provisioning
+        // warnings all share the one non-fatal `warnings` channel.
+        ...((importCoercions.length || suffixWarnings.length || provWarn.length)
+          ? { warnings: [...importCoercions, ...suffixWarnings, ...provWarn] } : {}),
       },
     });
     res.end();
@@ -17885,10 +18242,9 @@ app.post('/api/ssh-keys', apiLimiter, (req, res) => {
     assignedTeamIds: ownership.assignedTeamIds,
     ...(ownership.userId ? { userId: ownership.userId } : {}),
     // Identity class (unified access model §2): a personal key is one person's
-    // identity (human); a team/system key is a shared service credential. Behind
-    // AEE_RESOURCE_ACCESS_V2 the client may mark a personal key `service` (a
-    // private bot key) — resolveStampedIdentity enforces the legal combos (#2360).
-    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity, v2: RESOURCE_ACCESS_V2 }),
+    // identity (human); a team/system key is a shared service credential. The
+    // client may mark a personal key `service` (a private bot key) — resolveStampedIdentity enforces the legal combos (#2360).
+    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity }),
     fingerprint: sshKeyFingerprint(trimmed),
     createdAt: new Date().toISOString(),
   };
@@ -17945,8 +18301,8 @@ app.post('/api/ssh-keys/generate', heavyLimiter, (req, res) => {
     assignedTeamIds: ownership.assignedTeamIds,
     ...(ownership.userId ? { userId: ownership.userId } : {}),
     // Identity class (unified access model §2): personal → human, else service;
-    // behind AEE_RESOURCE_ACCESS_V2 a personal key may be marked service (#2360).
-    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity, v2: RESOURCE_ACCESS_V2 }),
+    // a personal key may be marked service (#2360).
+    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity }),
     fingerprint: sshFingerprintFromPubBlob(pubBlob),
     createdAt: new Date().toISOString(),
   };
@@ -18113,9 +18469,8 @@ app.post('/api/github-tokens', apiLimiter, (req, res) => {
     ...(ownership.userId ? { userId: ownership.userId } : {}),
     // Identity class (unified access model §2): a personal token is one person's
     // identity (human); a team/system token is a shared service credential (e.g. a
-    // machine-user PAT). Behind AEE_RESOURCE_ACCESS_V2 the client may mark a
-    // personal token `service` (a private bot PAT) — legal combos enforced (#2360).
-    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity, v2: RESOURCE_ACCESS_V2 }),
+    // machine-user PAT). The client may mark a personal token `service` (a private bot PAT) — legal combos enforced (#2360).
+    identity: resolveStampedIdentity({ scope: ownership.scope, requestedIdentity: req.body?.identity }),
     preview: githubTokenPreview(trimmed),
     fingerprint: githubTokenFingerprint(trimmed),
     createdAt: new Date().toISOString(),
@@ -20872,28 +21227,14 @@ app.post('/api/agents/:agentId/context/upload', heavyLimiter, requireAgentIdPara
   res.json({ uploaded, ...(errors.length ? { errors } : {}) });
 });
 
-// Return a filename that doesn't yet exist in `dir`, appending " (n)" before
-// the extension on collision so a second upload of `report.pdf` becomes
-// `report (2).pdf` rather than clobbering the first. The " ()" chars are within
-// the upload filename allowlist, so the result is still a legal workspace name.
-function uniqueFileName(dir, name) {
-  if (!fs.existsSync(path.join(dir, name))) return name;
-  const ext = path.extname(name);
-  const base = name.slice(0, name.length - ext.length);
-  for (let n = 2; n < 10000; n++) {
-    const candidate = `${base} (${n})${ext}`;
-    if (!fs.existsSync(path.join(dir, candidate))) return candidate;
-  }
-  return `${base} (${Date.now()})${ext}`;
-}
-
 // Chat attachments: files dropped or picked directly in the chat composer land
 // in a dedicated, server-controlled `chat-uploads/` directory (the client can't
 // choose the path) and are referenced in the message body as
 // `@chat-uploads/<name>`. The agent's cwd is its workspace root, so that token
 // resolves to a file it can open. Mirrors the workspace/upload handler's multer
-// config + filename sanitisation, but auto-creates the target dir and de-dupes
-// colliding names.
+// config + filename sanitisation, but auto-creates the target dir, renames
+// generic pasted-image names to a UTC timestamp and de-dupes colliding names
+// with a `-<n>` suffix (chat-upload-name.js, #2568).
 const CHAT_UPLOADS_DIR = 'chat-uploads';
 app.post('/api/agents/:agentId/chat-upload', heavyLimiter, requireAgentIdParam, uploadFiles, (req, res) => {
   const { agentId } = req.params;
@@ -20932,13 +21273,15 @@ app.post('/api/agents/:agentId/chat-upload', heavyLimiter, requireAgentIdParam, 
 
   const uploaded = [];
   const errors = [];
+  const now = new Date();
   for (const file of req.files) {
-    const safeName = path.basename(file.originalname).replace(/[^\w\-. ()[\]]/g, '_').trim();
-    if (!safeName) {
+    const safeName = path.basename(file.originalname || '').replace(/[^\w\-. ()[\]]/g, '_').trim();
+    const baseName = chatUploadBaseName(safeName, file.mimetype, now);
+    if (!baseName) {
       errors.push({ name: file.originalname, error: 'Invalid filename' });
       continue;
     }
-    const finalName = uniqueFileName(targetDir, safeName);
+    const finalName = uniqueFileName(targetDir, baseName);
     const destPath = path.join(targetDir, finalName);
     // Defence-in-depth: the dest must stay strictly inside the agent root.
     if (!destPath.startsWith(agentRoot + path.sep)) {
@@ -21230,7 +21573,7 @@ app.get('/api/agents/:agentId/session/:roomId/stream', (req, res) => {
 
 /* ─── SPA fallback ──────────────────────────────────────────────────── */
 
-app.get('*', spaLimiter, (req, res) => {
+app.get('*path', spaLimiter, (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });
   res.sendFile(path.join(STATIC_DIR, 'index.html'));
 });
@@ -21290,14 +21633,51 @@ function sweepExportStaging() {
   if (swept > 0) console.log(`[Admin] Swept ${swept} leftover export staging dir(s)`);
 }
 
+// Startup sweep for the removed internal transport (#2578). Drops the dead
+// `transport` field from every agent's config.json `channels[]` and
+// triggers.json, then re-reconciles each affected team so its derived listeners
+// and `## Outcomes` blocks (which used to tell producers to run `aee-emit`) are
+// re-rendered. The decision is the pure planInternalTransportMigration; this is
+// only the I/O. Best-effort and idempotent: a failed putTriggers (e.g. the
+// orchestrator is still starting) is counted, not thrown, and a rerun — the
+// retry below or the next start — picks up whatever is left.
+async function sweepInternalTransport() {
+  const agents = [];
+  for (const id of listAgentDirs()) {
+    const cfg = readJsonFile(path.join(AGENTS_DIR, id, 'config.json'), null);
+    const triggers = readJsonFile(controlOrAgentPath(id, 'triggers.json'), []);
+    let prompt = null;
+    try { prompt = fs.readFileSync(path.join(AGENTS_DIR, id, 'AGENT-PROMPT.md'), 'utf8'); } catch { /* none */ }
+    agents.push({ id, cfg, triggers, prompt });
+  }
+  const plan = planInternalTransportMigration(agents);
+  let failed = 0;
+  for (const { id, cfg } of plan.configs) {
+    try { writeJsonAtomic(path.join(AGENTS_DIR, id, 'config.json'), cfg); } catch { failed++; }
+  }
+  for (const { id, triggers } of plan.triggers) {
+    try { await putTriggers(id, triggers); notifyAgentReload(id); } catch { failed++; }
+  }
+  for (const teamId of plan.teamIds) {
+    try {
+      await reconcileTeamGithubChannels(teamId);
+      await reconcileTeamOutcomes(teamId);
+    } catch { failed++; }
+  }
+  if (plan.configs.length || plan.triggers.length || plan.teamIds.length) {
+    console.log(`[Admin] Internal-transport sweep (#2578): ${plan.configs.length} config(s), `
+      + `${plan.triggers.length} trigger file(s), ${plan.teamIds.length} team(s) re-reconciled`
+      + (failed ? `, ${failed} write(s) failed — retried later` : ''));
+  }
+  return { failed };
+}
+
 app.listen(4000, '0.0.0.0', () => {
   console.log('[Admin] Listening on :4000');
   // State the authorization mode explicitly (#1457) — and, in single-user mode,
   // warn when named user records exist, since each of them signs in with full
   // visibility while the flag is off.
   console.log(`[Admin] ${authModeLogLine(process.env)}`);
-  console.log(`[Admin] ${poolsModeLogLine(process.env)}`);
-  console.log(`[Admin] ${resourceAccessModeLogLine(process.env)}`);
   try {
     const warning = singleUserElevationWarning(readJsonFile(USERS_INDEX, []), process.env);
     if (warning) console.warn(`[Admin] ${warning}`);
@@ -21305,5 +21685,12 @@ app.listen(4000, '0.0.0.0', () => {
   try { backfillSkillManifests(); } catch (err) { console.error(`[Admin] Skill manifest backfill failed: ${err.message}`); }
   try { sweepExportStaging(); } catch (err) { console.error(`[Admin] Export staging sweep failed: ${err.message}`); }
   try { backfillDraftAccess(); } catch (err) { console.error(`[Admin] Draft access backfill failed: ${err.message}`); }
+  // Async (triggers go through the orchestrator). The orchestrator may still be
+  // starting beside us, so a sweep with failed writes is retried once a minute
+  // later; anything still left is picked up on the next start.
+  const logSweepError = (err) => console.error(`[Admin] Internal-transport sweep failed: ${err.message}`);
+  sweepInternalTransport().then(({ failed }) => {
+    if (failed) setTimeout(() => { sweepInternalTransport().catch(logSweepError); }, 60_000).unref();
+  }).catch(logSweepError);
   try { startLlmHealthPoller(); } catch (err) { console.error(`[Admin] Model Provider health poller failed to start: ${err.message}`); }
 });

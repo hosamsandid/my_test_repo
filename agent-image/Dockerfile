@@ -11,7 +11,7 @@
 # (or `docker pull python:3.12-slim` then `docker inspect --format '{{index .RepoDigests 0}}'`).
 # Same pattern for the digest-pinned toolchain variants and the SHA-pinned GitHub
 # Actions in .github/workflows/*.yml — see docs/supply-chain-pins.md.
-FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS aee-base
+FROM python:3.14-slim@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2 AS aee-base
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -92,6 +92,15 @@ RUN chmod +x /opt/ace/scripts/aee-artifact \
 RUN chmod +x /opt/ace/scripts/gh-as-agent \
     && ln -sf /opt/ace/scripts/gh-as-agent /usr/local/bin/gh-as-agent
 
+# `gh` itself is wrapped (#2559): /usr/local/bin precedes /usr/bin on PATH, so
+# agents' `gh …` reaches `aee-gh`, which forwards a live chat turn's GitHub
+# WRITES to the orchestrator to run under the chat sender's personal token (the
+# secret never enters the container) and execs the real /usr/bin/gh for
+# everything else — reads, local commands and every autonomous run.
+ENV AEE_REAL_GH=/usr/bin/gh
+RUN chmod +x /opt/ace/scripts/aee-gh \
+    && ln -sf /opt/ace/scripts/aee-gh /usr/local/bin/gh
+
 # `knowledge` — record + query the shared team Knowledge Base (Shared Agent
 # Learning). On PATH so agents call it directly: `knowledge search` (offline
 # search over the synced working copy) and `knowledge add` (append a durable,
@@ -100,23 +109,31 @@ RUN chmod +x /opt/ace/scripts/gh-as-agent \
 RUN chmod +x /opt/ace/scripts/knowledge \
     && ln -sf /opt/ace/scripts/knowledge /usr/local/bin/knowledge
 
-# `aee-emit` — announce a label hand-off over the internal channel (#1173).
-# On PATH so agents wired with `transport: 'internal'` deliver their wake via
-# the orchestrator queue (enqueue first, GitHub label mirrored as decoration)
-# instead of the lossy Events-API round trip. Fail-closed when the
-# orchestrator is unreachable — a manual `gh` label can't wake an internal
-# listener, so the CLI never falls back to it.
+# `aee-emit` — DEPRECATED compatibility shim (#2578), kept for one release so
+# agents whose authored prompts still say `aee-emit` keep handing off. It no
+# longer talks to the orchestrator: it just applies the label on the issue / PR
+# (`gh … --add-label`, creating the label if missing) and the GitHub poller
+# delivers it like any other label. Remove in the release after #2578.
 RUN chmod +x /opt/ace/scripts/aee-emit \
     && ln -sf /opt/ace/scripts/aee-emit /usr/local/bin/aee-emit
 
 # `aee-wake` — hand off directly to a wired same-team agent (#2030). The
-# target-LESS sibling of `aee-emit`: no label, no issue/PR, no GitHub trace, so
-# the platform's own event log is the audit trail. Diverges from `aee-emit`
-# deliberately by failing LOUD (exit 1) on an unknown / self / cross-team
-# target — a `wakeAgent` target is an explicitly wired role, so reaching nobody
-# is a wiring bug rather than an ambiguous outcome.
+# target-LESS alternative to a label hand-off: no label, no issue/PR, no GitHub
+# trace, so the platform's own event log is the audit trail. Fails LOUD
+# (exit 1) on an unknown / self / cross-team target — a `wakeAgent` target is
+# an explicitly wired role, so reaching nobody is a wiring bug rather than an
+# ambiguous outcome. (Labelled hand-offs are plain GitHub labels delivered by
+# the poller; `aee-emit` survives only as the deprecated shim above.)
 RUN chmod +x /opt/ace/scripts/aee-wake \
     && ln -sf /opt/ace/scripts/aee-wake /usr/local/bin/aee-wake
+
+# `aee-ask` — put a structured decision to the human and pause the run (#2523).
+# The only way an agent asks a structured question (the former MCP server was
+# removed in #1719): it writes the question to the per-turn sentinel file the
+# entrypoint hands it via AEE_ASK_FILE, and the entrypoint posts it as the
+# turn's terminal quick-reply message. No network, no MCP.
+RUN chmod +x /opt/ace/scripts/aee-ask \
+    && ln -sf /opt/ace/scripts/aee-ask /usr/local/bin/aee-ask
 
 # `usage` — read-only view of this agent's / its team's token usage (#679). On
 # PATH so agents call it directly: `usage me` / `usage team` query the
@@ -141,13 +158,6 @@ RUN mkdir -p /opt/aee
 ENV PATH="${PATH}:/opt/aee/plugin-bin"
 
 ENV NODE_ENV=production
-
-# LOCAL OPT-OUT: this environment's Claude Code managed policy blocks MCP servers,
-# so the bundled aee-ask server is refused and every agent turn exits non-zero.
-# The flow does not use AskUserQuestion, so we skip injecting the MCP server.
-# Remove this line once the enterprise policy allowlists MCP (the entrypoint gate
-# defaults to off, so upstream behaviour is unchanged without it).
-ENV AEE_DISABLE_ASK_MCP=1
 
 ENTRYPOINT ["python3", "/opt/ace/scripts/agent-entrypoint.py"]
 

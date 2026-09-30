@@ -21,7 +21,7 @@ export const BREADCRUMBS = {
   '/environment-templates': 'Environment Templates',
   '/ssh-keys':     'SSH Keys',
   '/github-tokens': 'GitHub Tokens',
-  '/my-credentials': 'My Credentials',
+  '/plugin-tokens': 'Plugin Tokens',
   '/skills':       'Skills Registry',
   '/role-templates': 'Agent Templates',
   '/github-events': 'GitHub Event Log',

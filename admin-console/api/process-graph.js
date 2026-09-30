@@ -203,9 +203,6 @@ function triggerView(t) {
     // editor can render the claim badge and the read-only claim readout.
     const c = claimView(t);
     if (c) v.claim = c;
-    // Internal-channel transport (#1174) — carried so the editor's trigger
-    // readout and the edge dialog can show/toggle the delivery path.
-    if (t.transport === 'internal') v.transport = 'internal';
   } else if (t.type === 'cron') {
     v.cron = t.cron || null;
   } else if (t.type === 'once') {
@@ -534,9 +531,6 @@ function buildProcessGraph(agents, options) {
         // Claim (#958) rides on the listener edge so the renderer can badge it.
         const cv = claimView(t);
         const clm = cv ? { claim: cv } : {};
-        // Internal-channel transport (#1174) rides on the edge so the canvas
-        // can style the delivery path and the edge dialog can toggle it.
-        const tpt = t.transport === 'internal' ? { transport: 'internal' } : {};
         const kind = classify(key);
         if (kind === 'gate') gateSet.add(key);
         if (kind === 'gate' || kind === 'brake') {
@@ -560,11 +554,11 @@ function buildProcessGraph(agents, options) {
             // whether a human sets it, so it's drawn as an orphan listener
             // (advisory lint) — a human applying the label still fires it at
             // runtime; this is only about what the static graph can prove.
-            edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true, ...evs, ...clm, ...tpt });
+            edges.push({ from: null, to: n.id, label: key, kind, triggerId: t.id, orphan: true, ...evs, ...clm });
           } else {
             for (const s of emitters) {
               const oc = ocOf(key, s);
-              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, ...(oc ? { outcome: oc } : {}), ...evs, ...clm, ...tpt });
+              edges.push({ from: s, to: n.id, label: key, kind, triggerId: t.id, ...(oc ? { outcome: oc } : {}), ...evs, ...clm });
             }
           }
         }
@@ -847,11 +841,6 @@ function computeHumanTouchpoints(nodes, edges, humanIds) {
   return out.sort(compareHumanTouchpoints);
 }
 
-// Edge kinds whose `label` field holds an actual label TOKEN (#2032). `timer`
-// carries a cron expression, `webhook` a description, `loop`/`wake`/`delivery`
-// carry no label at all — so a label-name index must not read them.
-const LABEL_EDGE_KINDS = new Set(['agent', 'gate', 'brake', 'label', 'review']);
-
 // Advisory wiring checks (#333) — surfaced as a panel + inline badges, never
 // block saving. Derived purely from the built nodes/edges.
 //
@@ -901,23 +890,6 @@ function computeLints(nodes, edges, classifier) {
   for (const label of unboundBrake) {
     lints.push({ code: 'unbound-brake', severity: 'info', label,
       message: `brake label \`${label}\` pauses for a human but no human role decides it — wire a human role.` });
-  }
-  // Internal-channel candidate (#1175, advisory). A pure agent→agent label
-  // hand-off delivered by the poller inherits the Events-API failure modes
-  // (narrow window, restart loss, throttle/burst) that internal delivery
-  // avoids — suggest the Delivery toggle. `info` only: poller delivery also
-  // means a HUMAN applying the label wakes the listener, which some flows
-  // want, so this is a hint, never a defect. Gate/brake/orphan/human-bound
-  // edges are exempt by construction (kind 'agent' + both endpoints agents).
-  const internalCandidates = new Set();
-  for (const e of edges) {
-    if (e.kind !== 'agent' || e.orphan || e.transport === 'internal') continue;
-    if (e.from == null || e.to == null || !e.triggerId || !e.label) continue;
-    const key = `${e.to} ${e.label} ${e.triggerId}`;
-    if (internalCandidates.has(key)) continue;
-    internalCandidates.add(key);
-    lints.push({ code: 'internal-channel-candidate', severity: 'info', label: e.label, nodeId: e.to,
-      message: `\`${e.to}\` is woken by \`${e.label}\` via GitHub events — an agent-to-agent hand-off can use internal delivery (Delivery toggle on the edge) for lossless, low-latency wakes; the label stays mirrored on GitHub.` });
   }
   // ── direct hand-off checks (#2032, direct-agent-handoff concept §12 P3) ────
   //
@@ -971,56 +943,11 @@ function computeLints(nodes, edges, classifier) {
       }
     }
   }
-  // Direct-hand-off candidate (#2032, concept §11). The next rung above
-  // `internal-channel-candidate`: an agent→agent label edge that ALREADY opted
-  // out of GitHub delivery, whose label is read by nobody else — one producer,
-  // one consumer, no gate, no brake, on no other edge in the graph. Then the
-  // label token exists only to route this one pair, and a direct hand-off does
-  // that with no label to invent and no work item to hang it on.
-  //
-  // `info` only, and the message states what you give up: the label (and the
-  // `:wip`/`:completed` claim states derived from it) stop appearing on the
-  // issue/PR, so a flow whose label IS the human-readable process state should
-  // keep it — that is exactly the §11 "a human tracks this state" row.
-  const labelProducers = new Map(); // label -> Set(producerId)
-  const labelConsumers = new Map(); // label -> Set(consumerId)
-  const labelReadElsewhere = new Set(); // label seen on a non agent→agent edge
-  for (const e of edges) {
-    // Only the kinds whose `label` is a LABEL TOKEN. A `timer` edge's label is
-    // a cron expression and a `webhook` edge's is a description, so counting
-    // them here would let an unrelated string claim a label name; `external`
-    // edges carry a raw GitHub event key for the same reason.
-    if (!e.label || e.external || !LABEL_EDGE_KINDS.has(e.kind)) continue;
-    if (e.kind === 'agent' && !e.orphan && e.from != null && e.to != null) {
-      if (!labelProducers.has(e.label)) labelProducers.set(e.label, new Set());
-      labelProducers.get(e.label).add(e.from);
-      if (!labelConsumers.has(e.label)) labelConsumers.set(e.label, new Set());
-      labelConsumers.get(e.label).add(e.to);
-      continue;
-    }
-    // Anything else touching the label means somebody besides this pair reads
-    // or writes it: a human gate/brake/delivery edge, an orphan listener a
-    // person may satisfy by hand, or a dead-end emit.
-    labelReadElsewhere.add(e.label);
-  }
-  const handoffCandidates = new Set();
-  for (const e of edges) {
-    if (e.kind !== 'agent' || e.orphan || e.transport !== 'internal') continue;
-    if (e.from == null || e.to == null || !e.triggerId || !e.label) continue;
-    if (isHumanGate(e.label) || isBrake(e.label)) continue;
-    if (labelReadElsewhere.has(e.label)) continue;
-    if ((labelProducers.get(e.label) || new Set()).size !== 1) continue;
-    if ((labelConsumers.get(e.label) || new Set()).size !== 1) continue;
-    // `\0` separator like `internalCandidates` above — three ids joined by a
-    // character none of them can contain. Written as the ESCAPE, not as a raw
-    // control byte: the raw ones already in this file are what make it read as
-    // git-binary (and therefore grep-invisible), so no more are added.
-    const key = `${e.from}\0${e.to}\0${e.label}`;
-    if (handoffCandidates.has(key)) continue;
-    handoffCandidates.add(key);
-    lints.push({ code: 'direct-handoff-candidate', severity: 'info', label: e.label, nodeId: e.from,
-      message: `\`${e.label}\` only routes \`${e.from}\` → \`${e.to}\` and nobody else reads it — a direct hand-off needs no label at all. Keep the label if a person tracks this state on the issue/PR: a hand-off puts nothing there, so the \`${e.label}:wip\`/\`:completed\` states go with it.` });
-  }
+  // The former `direct-handoff-candidate` hint (#2032) only ever fired on edges
+  // that had already opted out of GitHub delivery via the internal transport.
+  // With that transport removed (#2578) every labelled edge is poller-delivered
+  // — which is what lets a HUMAN wake the listener by re-applying the label — so
+  // suggesting "drop the label" on it would skip exactly that property. Retired.
   // GitHub-channel wiring checks (#380). A producer whose PR/issue nobody
   // consumes, and a channel that points at a role which doesn't produce that
   // artifact, are both advisory smells.

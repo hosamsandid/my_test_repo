@@ -197,6 +197,9 @@ export function FlowCopilotProvider({ children }) {
         lints: Array.isArray(body.lints) ? body.lints : [],
         ok: !!body.ok,
         bundle: body.bundle,
+        // The bundle the turn was asked to change — a live-team apply diffs
+        // against it and refuses when the team has moved on since (#2556).
+        baseBundle: bundle || null,
         graph,
         model: body.model || null,
         finishedAt: Date.now(),

@@ -2,192 +2,123 @@
 id: flow-control
 routes: ["/flow-control"]
 title: Flow Control
-summary: A board showing where every ticket of one Agent Team actually is — its lifecycle stage, the agent that owns it, how long it has been stuck and what is blocking it — derived from GitHub evidence rather than from the labels the flow set.
+summary: A live view of one Agent Team — which agent is working on what right now, where a person has to step in, and how far each work item has come through the team's own flow.
 seeAlso:
   - { label: "Flows", to: "/flows" }
   - { label: "GitHub Event Log", to: "/github-events" }
 askPrompts:
-  - "Why does this ticket say In review when the labels say it is done?"
-  - "What does the conflict blocker mean and who fixes it?"
-  - "Why is a ticket sitting in Ready and nothing is happening?"
-  - "What is the difference between a stage and a blocker?"
-  - "Why is a lane empty when I know there is work in it?"
-  - "How often is this board refreshed?"
-  - "Can I fix something from this page?"
-  - "What does Force dispatch do?"
+  - "Why is an issue I know about not on the board?"
+  - "Where do the columns come from?"
   - "What is the difference between Pause and Drain?"
+  - "Why does a row say no agent is scheduled to continue?"
+  - "How long do finished items stay on the board?"
+  - "Can I rename or merge the stages?"
+  - "What does Force dispatch do?"
 ---
 
 ## What the Flow Control board shows
 
-One **Agent Team**, one board. Each card is a work item — a GitHub issue, or a
-pull request with no issue behind it — and each column is a **lifecycle stage**.
-Pick the team from the selector; **Refresh** re-runs the sweep.
+One **Agent Team**, one board, three areas from top to bottom:
 
-The board reads the **ticket ledger** (`GET /api/teams/<id>/tickets`), which
-derives each item's state from what GitHub actually shows: is the PR open, does
-it merge, did the checks pass, was a review submitted, is the issue closed.
+1. **Working now** — every agent run in progress, and how busy each pooled
+   role is.
+2. **Needs you** — work items that are stuck until a person acts. This area is
+   hidden when nothing needs you.
+3. **In progress** — one row per work item, with the stage it is in and how
+   long it has been there.
 
-**That is the whole point, and it is worth being blunt about it.** The stall this
-subsystem exists to prevent was invisible precisely *because* the labels said
-"done" while GitHub said "open and conflicting". So wherever a label and a
-GitHub fact disagree, the fact wins — and the disagreement is itself reported as
-the `Claimed done` blocker. A card on this board can never show `Done` because
-somebody set a `:completed` label; it shows `Done` when the PR merged or the
-issue closed.
+**Only work the team took part in appears.** An issue or pull request is on
+the board once a team agent was woken on it, created it or pushed to it — or,
+for an issue, once a person released it to the team (whichever comes first).
+The untouched backlog, Dependabot pull requests and other people's PRs are not
+shown. When there is nothing to show, the board says **Nothing in progress**.
 
-Two consequences follow:
+**Refreshing.** The board refreshes itself every 30 seconds while
+**Auto-refresh** is on (your choice is remembered for you on this browser).
+The header shows when it was last updated; **Refresh** fetches a new snapshot
+right away. GitHub is asked at most once per load and viewers share the
+result, so the board stays fast.
 
-- A ticket whose flow **lied** appears in its real stage with a blocker, not in
-  the last stage its labels claimed.
-- Nothing here is authored. Stage names, lane membership and ownership are
-  derived from the team's own flow graph, so a team with a completely different
-  label vocabulary gets the same nine stages.
+### When the board is empty, stale or missing something
 
-**The ticket ledger itself is read-only.** There is no repair button on the
-board: a card's stage and blocker are derived from GitHub evidence, never set
-by a click. Acting on a ticket's own state is a person's job today — follow
-the deep links to the issue or the PR.
-
-There is one thing on this page that *does* act: the **Pool controls** panel
-below the board (pause/drain a pooled role, force-dispatch a held ticket). It
-changes who is admitted to run, never a ticket's own derived stage.
-
-### When the board is empty, or missing something
-
-- **Maintenance mode** pauses the sweep; the board says so rather than showing a
+- **Maintenance mode** pauses the board; it says so rather than showing a
   stale picture.
-- A team whose environment binds **no GitHub repository** has nothing to
-  reconcile, and the board says that too.
-- A **partial sweep** (one repository unreadable, an API error) is reported as a
-  banner and the remaining tickets are still shown — a degraded board, never a
-  blank one.
-- An empty **column** is not a fault. The board keeps every stage visible,
-  because where work is *not* is as informative as where it is.
+- A team whose environment binds **no GitHub repository** has nothing to show,
+  and the board says that too.
+- **GitHub unreachable**: the board keeps the last state it knew, shows when
+  that was, and warns you that it is not current.
+- A **finished** item stays in **Done** for 24 hours (a team can change that —
+  see *Changing the columns*), then drops off.
 
-## The lifecycle stages
+## Who is working right now
 
-Nine stages, in flow order. They are positions in the team's own graph, not
-label names:
+Each line is a run in progress: the **role**, the **instance** number for a
+pooled role, the **issue or pull request** it works on, and **how long it has
+been running**. Agents that are idle are not listed. A run whose item has just
+closed keeps its line until it ends, but never adds a row to the board.
 
-| Stage | What it means |
+A **pooled** role (one that starts a separate instance per work item) shows
+how busy it is — for example **2 of 3 busy** — and its controls.
+
+## Pause, Drain and Switch on
+
+The buttons on a pooled role change whether it takes **new** work. They never
+stop a run that is already going.
+
+- **Pause** — Pause: running instances finish their current work. New work waits in a queue and starts when you click Resume.
+- **Drain** — Drain: running instances finish their current work, new work waits, and the role switches itself Off once the last one is done. Click Switch on to start it again.
+- **Resume** — Resume: start taking new work again. Anything that waited while paused starts now.
+- **Switch on** — Switch on: start taking new work again. Anything that waited while the role was off starts now.
+
+Use **Pause** for a short stop you will undo yourself. Use **Drain** to wind a
+role down: while it drains the line reads **Draining, n still running**; when
+the last run finishes it reads **Off**. Nothing is lost either way — work that
+arrives meanwhile waits and is counted as *waiting*.
+
+**Force dispatch** appears for work held because the team's limit on work in
+progress is full. It starts that one item now, past the limit, without
+changing the limit.
+
+## Where you are needed
+
+A row lands here when no agent will move it forward on its own. The reason is
+spelled out, together with how long it has been waiting:
+
+| Reason | What to do |
 |---|---|
-| **Backlog** | No flow label yet — nothing has picked this up. |
-| **Refining** | Parked on a human gate before dispatch. |
-| **Ready** | Dispatched on an entry label, not claimed yet. |
-| **In dev** | Claimed by the producing agent; no review under way. |
-| **In review** | A PR exists and a reviewing stage is active. |
-| **Rework** | Changes were requested — back with the author. |
-| **Doc** | One hop before the terminal stage. |
-| **Mergeable** | The deepest active stage reaches a terminal consumer, or the PR is approved and green. |
-| **Done** | The PR merged, or the issue is closed. |
+| **flagged for a human** | An agent asked for help — read its last comment. |
+| **conflict with base** | Resolve the merge conflict, or wake the team's conflict role. |
+| **waiting for approval** | The flow hands this to a person — review and approve. |
+| **approved — waiting for merge** | Merge it. |
+| **checks failing** | Look at the failing checks. |
+| **no agent is scheduled to continue** | The last agent finished and nothing picks it up — check the flow on the Flows page. |
 
-"Entry lane", "terminal" and "one hop before" are read off the graph: an entry
-label is a wake label no consumer emits, a terminal consumer is one that emits
-nothing and opens no PR. Nothing in the board matches on a literal label token.
+## The stages
 
-The small age on each card is **time in the current stage**, not the ticket's
-total age — a week-old ticket that moved an hour ago reads as an hour.
+The columns come from the team's own flow on the **Flows** page: **Ready**,
+then one stage per role in hand-off order, then **Done**. A team with a
+different flow gets different stages; nothing depends on label names. A role
+that appears on several paths is shown once, at its first position, and pooled
+instances count as their role.
 
-## Blockers and what to do about them
+An issue and the pull requests its agents opened form **one row** — no
+"Closes #…" needed. With several PRs for one issue, the row follows the most
+advanced open one. A pull request an agent opened without an issue gets its
+own row.
 
-A blocker is **orthogonal to the stage**: a ticket can be `In review` *and*
-conflicting, or `Mergeable` *and* waiting for somebody to press merge. Only the
-most actionable one is shown as a badge; hover it for the specific detail.
+Each row shows its **current stage**, whether an agent is **working** on it or
+it is **up next**, and the **time in that stage** — not the item's total age.
 
-| Blocker | What it means | Who clears it |
-|---|---|---|
-| **Superseded** | Every file this PR adds is already in the base branch — it looks like a duplicate. | A person: closing work is never automatic. |
-| **Claimed done** | The completing stage set none of its declared outgoing labels while its PR is still open. | Re-dispatch the stage that lied. |
-| **Conflict** | The PR conflicts with its base branch. | A person: a merge resolution is a judgement call. |
-| **Stale base** | It text-merges, but fails against the current base. | A rebase and re-run — mechanical. |
-| **CI red** | Required checks are failing. | Re-dispatch the author. |
-| **Approved, not merged** | Approved and green, still sitting open. | Nudge whoever merges. |
-| **Orphaned** | The active label has no listener at all — the flow graph itself is wrong. | A person: fix the wiring on the Flows page. |
-| **Unclaimed** | The wake was never claimed; it may have been lost. | Re-deliver the wake. |
-| **Stalled** | No activity past the threshold — the run likely died. | Re-dispatch. |
-| **Needs a human** | Parked on a human gate. | You. |
+Rows read like the pipeline, **top to bottom**: **Ready** first, then each
+stage in hand-off order. Within a stage the item that entered it most recently
+is on top, so an item that moves on appears at the top of the next stage's
+block. **Done** items sit at the bottom, the most recently finished first. An
+item that needs you keeps its place in this order.
 
-A person icon marks the rows whose resolution is a judgement call rather than a
-re-run. Ordering inside a column is most-actionable first: blocked before
-healthy, then by how serious the blocker is, then by how long it has been stuck.
+## Changing the columns
 
-Two deliberate refusals are worth knowing, because they look like missing
-findings: `Superseded` **declines** when GitHub returned an incomplete file
-index for the base branch, and a PR whose mergeability GitHub is still computing
-is reported as unknown rather than guessed. A false accusation of duplicated
-work costs more than a missed one.
-
-## The epic roll-up
-
-Above the board, one line per epic — `Epic #2112: 3 done · 1 blocked · 2 in
-progress · 4 waiting`. The epic is parsed from each ticket's own body, so a
-ticket that names no epic is counted in no roll-up.
-
-The four buckets are mutually exclusive and cover every ticket in the epic, so
-they always add up to its total:
-
-- **done** — the stage is `Done`.
-- **blocked** — anything with a blocker that is not already done. A blocker
-  recorded against merged work is history, not a call to action, so `Done` wins.
-- **in progress** — `In dev`, `In review`, `Rework`, `Doc` or `Mergeable`.
-- **waiting** — `Backlog`, `Refining` or `Ready`: nothing is working on it.
-
-Epics are listed most-blocked first, so the one needing attention is leftmost.
-
-## Pool controls
-
-Below the board, two panels appear for a team with at least one **pooled**
-role (`pool.enabled` — a role that auto-scales one ephemeral instance per
-ticket instead of working one at a time).
-
-**Pooled roles.** One row per pooled role: how many instances are running now
-(and, if the role has a `maxInstances` cap, how many it's allowed), and its
-current state.
-
-- **Pause** — stop starting new instances for this role. Anything already
-  running keeps running to completion; nothing new starts until you Resume.
-- **Drain** — the same effect as Pause (nothing new starts), used when the
-  intent is to wind the role down rather than pick it back up shortly — for
-  example before disabling pooling on it entirely. There is no functional
-  difference between the two today; pick whichever name matches your intent.
-- **Resume** — clears Pause/Drain; the role goes back to starting new
-  instances normally.
-
-Pausing or draining a role affects **new** dispatch only: a ticket already
-being worked keeps its instance, and a redelivered event for that same ticket
-still finds it. Both the label-triggered path and the autonomous Flow
-Supervisor honor the pause — neither starts a new instance for a paused role.
-A brand-new ticket that would have triggered a paused role isn't dropped
-either: it's held and automatically dispatched the moment you Resume the
-role.
-
-**Held on the WIP limit.** One row per dispatch currently on hold because the
-team's `wipLimit` (the cap on how many tickets flow at once) is already full.
-Each row shows which ticket and which agent is waiting. **Force dispatch**
-starts it right now anyway, past the limit — a deliberate, one-off override
-for when you know it's safe to run one more than usual. It does not change
-the limit itself: the next ticket to finish still frees a slot exactly as it
-would have.
-
-## Pool instance lanes
-
-Below Pool controls, one lane per pooled role's live and held work — the
-read-only counterpart to the buttons above. Nothing here can be clicked;
-it exists so you can *see* what the pool is doing, not just change it.
-
-Each lane is tagged one of three ways:
-
-- **Running** — a real instance is working this ticket right now.
-- **Held** — no instance has started yet, because another instance of the
-  same role is already working a ticket from the **same epic**. Every pooled
-  role always serializes same-epic work (it is never disabled), so this is
-  the one contention reason worth naming on its own; the lane names which
-  running ticket it is waiting behind.
-- **Timed out** — an instance ran past the role's configured hard-timeout
-  budget and is being torn down.
-
-A ticket held on the team's `wipLimit` instead of on same-epic contention is
-not repeated here — the **Held on the WIP limit** panel above already shows
-it, and a ticket can only be in one of these two waiting states at a time.
-This panel has no Refresh of its own; it reloads with the rest of the board.
+Team Admins can open **Columns** to adjust the automatic stages for their
+team: **rename** a stage, **merge** it into another one (its items are then
+shown there), or **hide** it (its items appear in the stage before it). The
+same dialog sets how long finished items stay in **Done**. Without a saved
+configuration the stages are derived automatically.

@@ -29,7 +29,7 @@ function isNonEmptyString(v) {
 // Build one normalised audit record. Returns null when a required field is
 // missing (a malformed call is never silently logged as a valid one). `ts` is
 // supplied by the caller (ISO 8601) so this stays pure/clock-free.
-function buildPluginAuditLine({ ts, pluginId, scopeId, agentId, subcommand, outcome, detail } = {}) {
+function buildPluginAuditLine({ ts, pluginId, scopeId, agentId, subcommand, outcome, detail, identity, interactive } = {}) {
   if (!isNonEmptyString(ts)) return null;
   if (!isNonEmptyString(pluginId)) return null;
   if (!isNonEmptyString(scopeId)) return null;
@@ -44,6 +44,13 @@ function buildPluginAuditLine({ ts, pluginId, scopeId, agentId, subcommand, outc
     outcome: OUTCOMES.includes(outcome) ? outcome : 'ok',
   };
   if (isNonEmptyString(detail)) line.detail = detail;
+  // Optional (#2562): WHOSE credential served the call — a platform user id
+  // for a person's own credential, "service-account" for the team's — and
+  // whether it was a live chat turn. Absent for brokers without a person tier.
+  if (isNonEmptyString(identity)) {
+    line.identity = identity;
+    line.interactive = interactive === true;
+  }
   return line;
 }
 

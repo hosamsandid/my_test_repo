@@ -25,6 +25,8 @@ const {
   resolvePromotionGates,
   resolveSkillResyncMode,
   knowledgeCurationConfig,
+  normalizeDomainSkillThreshold,
+  DEFAULT_DOMAIN_SKILL_THRESHOLD,
   buildHarvestHint,
   TEAM_KNOWLEDGE_KEYS,
   mergeTeamKnowledgeConfig,
@@ -374,6 +376,8 @@ test('knowledgeCurationConfig: clamp + legacy default', () => {
     domainRouting: true, skillBudget: 12, synthesizeSkills: false,
     // #781: distillation cadence — X amendments before a distillation is due.
     distillAfterAmendments: 5,
+    // #2592: a domain's FIRST skill needs >=3 converged lessons from >=2 agents.
+    domainSkillThreshold: { minLessons: 3, minAgents: 2 },
   });
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { distillAfterAmendments: 8 } }).distillAfterAmendments, 8);
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { distillAfterAmendments: 0 } }).distillAfterAmendments, 5);
@@ -388,12 +392,31 @@ test('knowledgeCurationConfig: clamp + legacy default', () => {
   assert.equal(knowledgeCurationConfig({ knowledgeCuration: { autoThemeMinLessons: -2 } }).autoThemeMinLessons, 4);
 });
 
+test('domainSkillThreshold: normalised, and the team override wins over the global knob (#2592 AC12)', () => {
+  assert.deepEqual(normalizeDomainSkillThreshold(undefined), { minLessons: 3, minAgents: 2 });
+  assert.deepEqual(normalizeDomainSkillThreshold({ minLessons: 5, minAgents: 1 }), { minLessons: 5, minAgents: 1 });
+  assert.deepEqual(normalizeDomainSkillThreshold({ minLessons: 0, minAgents: 2.5 }), { minLessons: 3, minAgents: 2 });
+  assert.deepEqual(normalizeDomainSkillThreshold({ minLessons: '4', minAgents: 999 }), { minLessons: 4, minAgents: 2 });
+  assert.deepEqual(
+    knowledgeCurationConfig({ knowledgeCuration: { domainSkillThreshold: { minLessons: 6 } } }).domainSkillThreshold,
+    { minLessons: 6, minAgents: 2 },
+  );
+  assert.deepEqual(
+    knowledgeCurationConfig({
+      knowledgeCuration: { domainSkillThreshold: { minLessons: 6 } },
+      domainSkillThreshold: { minLessons: 2, minAgents: 3 },
+    }).domainSkillThreshold,
+    { minLessons: 2, minAgents: 3 },
+  );
+  assert.deepEqual(DEFAULT_DOMAIN_SKILL_THRESHOLD, { minLessons: 3, minAgents: 2 });
+});
+
 // --- mergeTeamKnowledgeConfig (#570) ----------------------------------------
 
 test('TEAM_KNOWLEDGE_KEYS covers exactly the per-team groups', () => {
   assert.deepEqual(
     [...TEAM_KNOWLEDGE_KEYS].sort(),
-    ['decayHorizonDays', 'knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore', 'skillResyncMode'],
+    ['decayHorizonDays', 'domainSkillThreshold', 'knowledgeAutonomy', 'knowledgePromotionGates', 'knowledgeReview', 'knowledgeStore', 'skillResyncMode'],
   );
 });
 

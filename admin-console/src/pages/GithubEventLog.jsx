@@ -7,16 +7,18 @@ import PageHelpButton from '../components/PageHelpButton';
 import WhenCell from '../components/WhenCell';
 import RowContextMenu from '../components/RowContextMenu';
 import ConfirmDialog from '../components/ConfirmDialog';
-import { buildTriggerCorrelationId, isSessionOutcome } from './github-event-session';
+import { buildTriggerCorrelationId, sessionLinkTarget, reapedInstanceNotice } from './github-event-session';
 import {
-  kindLabel, kindTooltip, entryDetail, entryHoverDetail, labelChip, totalPending,
+  kindLabel, kindTooltip, entryDetail, entryHoverDetail, labelChip, totalPending, totalHeld,
   pendingRowMenu, reassignPickerState, reassignTargetLabel, pendingReassignError, pendingReassignSuccess,
 } from './pending-queue-view';
-import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip } from './event-outcome-view';
-import { eventLabel } from './agent-chat/trigger-summary';
+import { OUTCOME_LEGEND, outcomeTooltip, noMatchTooltip, refireNote } from './event-outcome-view';
+import { OUTCOME_TONES, NO_MATCH_LABEL, outcomePresentation } from './event-outcome-presentation';
+import { eventLabel, eventFilterText } from './agent-chat/trigger-summary';
 import { workItemTypeLabel } from './github-event-log-type';
 import { isHandoffRow, handoffNote, handoffNoteDisplay, handoffTitleHint } from './github-event-handoff-view';
 import { GITHUB_EVENTS_HELP_SECTIONS } from './github-events-help-sections';
+import GithubRepoStatus from './GithubRepoStatus';
 
 /* ── Time-range presets ────────────────────────────────────────────── */
 const RANGE_PRESETS = [
@@ -36,75 +38,127 @@ const controlStyle = {
   fontFamily: 'inherit',
 };
 
-/* ── Outcome chip ──────────────────────────────────────────────────── */
-// Semantics: delivered = success (it worked as intended), dropped = muted
-// (a protection layer did its job on purpose, not an error), digest =
-// info (bundled, not lost), no matching trigger = warning (worth an
-// admin's attention — "nobody's listening" per issue #469 AC #4).
-function OutcomeChip({ outcome, eventId, onOpenSession }) {
-  let bg, color, label;
-  // wakeLabel is set when the subscriber's labelFilter matched (#1846). null
-  // means any-label listener; undefined means a legacy row or a drop before
-  // the label gate (history-horizon). Show it only when it's a real string.
-  const wakeSuffix = typeof outcome.wakeLabel === 'string' ? ` (${outcome.wakeLabel})` : '';
-  if (outcome.status === 'delivered') {
-    bg = 'var(--eb-status-success-bg)';
-    color = 'var(--eb-status-success)';
-    label = `delivered${wakeSuffix} → ${outcome.agentName || outcome.agentId}`;
-  } else if (outcome.status === 'digest') {
-    bg = 'var(--eb-status-info-bg)';
-    color = 'var(--eb-status-info)';
-    label = `digested${wakeSuffix} → ${outcome.agentName || outcome.agentId}`;
-  } else {
-    bg = 'var(--eb-bg-elevated)';
-    color = 'var(--eb-text-secondary)';
-    label = `dropped (${outcome.reason || 'unknown'})${wakeSuffix} → ${outcome.agentName || outcome.agentId}`;
-  }
+/* ── Outcome line (#2524) ──────────────────────────────────────────────
+   Each outcome is a plain text line — no pill border/background, since a
+   rounded pill cannot contain the multi-line text a long outcome wraps into.
+   The status is carried by a leading marker (shape + colour, see
+   event-outcome-presentation.js) hung outside the wrapping text, so wrapped
+   lines align under the text and never under the marker. */
+const outcomeLineStyle = {
+  display: 'flex',
+  alignItems: 'baseline',
+  gap: 6,
+  fontSize: 'var(--eb-text-xs)',
+  lineHeight: 1.4,
+  maxWidth: '100%',
+  minWidth: 0,
+};
+const outcomeMarkerStyle = { flex: 'none', fontSize: '0.85em' };
+// Wrap within the bounded Outcomes column (#1898): the label wraps at its
+// spaces, and a long unbroken token (e.g. a long agent id) breaks rather than
+// overflowing and forcing a horizontal scrollbar.
+const outcomeTextStyle = {
+  minWidth: 0,
+  whiteSpace: 'normal',
+  overflowWrap: 'anywhere',
+  wordBreak: 'break-word',
+};
 
-  const baseStyle = {
-    display: 'inline-block',
-    padding: '1px 6px',
-    borderRadius: 'var(--eb-radius-full)',
-    fontSize: 'var(--eb-text-xs)',
-    fontWeight: 'var(--eb-font-medium)',
-    background: bg, color,
-    border: `1px solid ${color}`,
-    // Wrap within the bounded Outcomes column (#1898): the label wraps at its
-    // spaces, and a long unbroken token (e.g. a long agent id) breaks rather
-    // than overflowing and forcing a horizontal scrollbar (AC5/AC6). Capped at
-    // the cell width so no single chip can widen the table.
-    whiteSpace: 'normal',
-    overflowWrap: 'anywhere',
-    wordBreak: 'break-word',
-    maxWidth: '100%',
-  };
+function OutcomeMarker({ marker, color }) {
+  return <span aria-hidden="true" style={{ ...outcomeMarkerStyle, color }}>{marker}</span>;
+}
+
+function OutcomeLine({ outcome, eventId, onOpenSession, onOpenChat, refireNote = null }) {
+  const [hover, setHover] = useState(false);
+  const [showReaped, setShowReaped] = useState(false);
+  const { label, marker, markerColor, textColor } = outcomePresentation(outcome, { refired: !!refireNote });
 
   // Only a `delivered` outcome that carries a triggerId maps to a real Claude
   // session, so only those become an activatable control (AC1/AC2). Everything
-  // else stays a plain, non-interactive status chip.
-  const explain = outcomeTooltip(outcome);
+  // else stays plain, non-interactive text. A pooled delivery (#2596) links the
+  // per-ticket instance that ran it, or — once that instance is reaped — says
+  // so instead of silently opening the pooled role's chat.
+  const explain = refireNote ? `${refireNote} ${outcomeTooltip(outcome)}` : outcomeTooltip(outcome);
   const correlationId = buildTriggerCorrelationId(outcome.triggerId, eventId);
-  if (isSessionOutcome(outcome) && correlationId && onOpenSession) {
+  const target = sessionLinkTarget(outcome);
+  if (target && target.kind === 'reaped' && correlationId) {
+    const notice = reapedInstanceNotice(target);
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+        <button
+          type="button"
+          onClick={() => setShowReaped(v => !v)}
+          aria-expanded={showReaped}
+          title={`${explain}\n\n${notice}`}
+          style={{
+            ...outcomeLineStyle,
+            background: 'none',
+            border: 'none',
+            padding: 0,
+            margin: 0,
+            textAlign: 'left',
+            fontFamily: 'inherit',
+            cursor: 'pointer',
+            color: textColor,
+          }}
+        >
+          <OutcomeMarker marker={marker} color={markerColor} />
+          <span style={{ ...outcomeTextStyle, textDecoration: 'underline dotted', textUnderlineOffset: 2 }}>{label} (instance removed)</span>
+        </button>
+        {showReaped && (
+          <div role="status" style={{ ...outcomeTextStyle, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)', paddingLeft: 14 }}>
+            {notice}
+            {target.poolRoleId && onOpenChat && (
+              <>
+                {' '}
+                <button
+                  type="button"
+                  onClick={() => onOpenChat(target.poolRoleId)}
+                  style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', cursor: 'pointer', color: 'var(--eb-accent-primary)', textDecoration: 'underline' }}
+                >
+                  Open the pooled role's chat ({target.poolRoleName})
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (target && target.kind === 'agent' && correlationId && onOpenSession) {
     return (
       <button
         type="button"
-        onClick={() => onOpenSession(outcome.agentId, correlationId)}
-        aria-label={`Open session for ${outcome.agentName || outcome.agentId}`}
+        onClick={() => onOpenSession(target.agentId, correlationId)}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        aria-label={`Open session for ${outcome.instanceId ? (outcome.instanceName || outcome.instanceId) : (outcome.agentName || outcome.agentId)}`}
         title={`${explain}\n\nClick to open the session this event triggered.`}
         style={{
-          ...baseStyle,
-          cursor: 'pointer',
+          ...outcomeLineStyle,
+          // Reset the native button chrome so it reads as a text link.
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          margin: 0,
+          textAlign: 'left',
           fontFamily: 'inherit',
-          textDecoration: 'underline',
-          textUnderlineOffset: 2,
+          cursor: 'pointer',
+          color: hover ? 'var(--eb-accent-hover)' : 'var(--eb-accent-primary)',
         }}
       >
-        {label}
+        <OutcomeMarker marker={marker} color={markerColor} />
+        <span style={{ ...outcomeTextStyle, textDecoration: 'underline', textUnderlineOffset: 2 }}>{label}</span>
       </button>
     );
   }
 
-  return <span style={baseStyle} title={explain || undefined}>{label}</span>;
+  return (
+    <div style={{ ...outcomeLineStyle, color: textColor }} title={explain || undefined}>
+      <OutcomeMarker marker={marker} color={markerColor} />
+      <span style={outcomeTextStyle}>{label}</span>
+    </div>
+  );
 }
 
 /* ── Work-item cell (#1827) ────────────────────────────────────────────
@@ -236,25 +290,17 @@ function shortRef(ref) {
   return ref.replace(/^refs\/heads\//, '').replace(/^refs\/tags\//, '');
 }
 
-function NoMatchBadge() {
+// Same plain-text line as an outcome (#2524), marked as a warning.
+function NoMatchLine() {
+  const { marker, markerColor, textColor } = OUTCOME_TONES.noMatch;
   return (
-    <span
+    <div
       title={noMatchTooltip()}
-      style={{
-        display: 'inline-block',
-        padding: '1px 6px',
-        borderRadius: 'var(--eb-radius-full)',
-        fontSize: 'var(--eb-text-xs)',
-        fontWeight: 'var(--eb-font-medium)',
-        background: 'var(--eb-status-warning-bg)',
-        color: 'var(--eb-status-warning)',
-        border: '1px solid var(--eb-status-warning)',
-        whiteSpace: 'nowrap',
-        cursor: 'help',
-      }}
+      style={{ ...outcomeLineStyle, color: textColor, fontWeight: 'var(--eb-font-medium)', cursor: 'help' }}
     >
-      nobody's listening
-    </span>
+      <OutcomeMarker marker={marker} color={markerColor} />
+      <span style={outcomeTextStyle}>{NO_MATCH_LABEL}</span>
+    </div>
   );
 }
 
@@ -313,6 +359,12 @@ function ProcessedEventsView() {
     if (!agentId || !correlationId) return;
     navigate(`/chats/${encodeURIComponent(agentId)}?session=${encodeURIComponent(correlationId)}`);
   }, [navigate]);
+  // The pooled role's own chat, offered when the instance that ran an event
+  // has been reaped (#2596 AC5) — no session preselected, it did not run there.
+  const openChat = useCallback((agentId) => {
+    if (!agentId) return;
+    navigate(`/chats/${encodeURIComponent(agentId)}`);
+  }, [navigate]);
 
   const since = useMemo(() => {
     const preset = RANGE_PRESETS.find(r => r.key === rangeKey) || RANGE_PRESETS[0];
@@ -321,6 +373,11 @@ function ProcessedEventsView() {
 
   const url = `/api/github-events?since=${encodeURIComponent(since)}&limit=2000`;
   const { data, loading, error, refetch } = useApi(url);
+  // Repository status (#2537): fetched here so the one Refresh button reloads
+  // both the status area and the table.
+  const repoStatus = useApi('/api/github-events/repo-status');
+  const refetchRepoStatus = repoStatus.refetch;
+  const refreshAll = useCallback(() => { refetch(); refetchRepoStatus(); }, [refetch, refetchRepoStatus]);
 
   // Flatten the work-item fields onto each row (#1827) so the DataTable's
   // text filter and sort — both key-based (row[col.key]) — reach the number
@@ -385,15 +442,16 @@ function ProcessedEventsView() {
       // #2442: the raw event key ("pull_request.opened") is no longer shown — only
       // the friendly name ("PR opened"). Search the friendly name, keeping the raw
       // key matchable too so an operator who knows the API vocabulary still finds it.
-      filterValue: (v) => [eventLabel(v), typeof v === 'string' ? v : ''].filter(Boolean).join(' ') },
+      filterValue: eventFilterText },
     { key: 'actor', label: 'Actor', render: v => v || '—' },
     { key: 'outcomes', label: 'Outcomes', sortable: false, wrap: true, render: (v, row) => {
-      if (row.noMatchingTrigger) return <NoMatchBadge />;
+      if (row.noMatchingTrigger) return <NoMatchLine />;
       const list = Array.isArray(v) ? v : [];
+      // One outcome per line (#2524), spaced so each reads on its own.
       return (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, minWidth: 0 }}>
           {list.map((o, i) => (
-            <OutcomeChip key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} />
+            <OutcomeLine key={i} outcome={o} eventId={row.eventId} onOpenSession={openSession} onOpenChat={openChat} refireNote={refireNote(row)} />
           ))}
         </div>
       );
@@ -428,7 +486,7 @@ function ProcessedEventsView() {
         <select value={rangeKey} onChange={e => setRangeKey(e.target.value)} style={controlStyle}>
           {RANGE_PRESETS.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
         </select>
-        <button onClick={refetch} style={{ ...controlStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
+        <button onClick={refreshAll} style={{ ...controlStyle, display: 'flex', alignItems: 'center', gap: 'var(--eb-space-1)', cursor: 'pointer' }}>
           <RefreshCw size={14} /> Refresh
         </button>
         <PageHelpButton
@@ -439,6 +497,8 @@ function ProcessedEventsView() {
         />
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
+
+      <GithubRepoStatus data={repoStatus.data} error={repoStatus.error} />
 
       {loading ? (
         <div style={{ height: 200, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />
@@ -565,6 +625,7 @@ const REFUSAL_COPY = {
   'event-not-subscribed': 'does not subscribe to this event type',
   'history-horizon': "the event predates its trigger's subscription window",
   'label-filter': 'its trigger subscribes to a different label',
+  'branch-filter': 'its trigger only reacts to pushes on other branches',
 };
 
 /* ── Label chip for a pending entry (#2101 AC7) ───────────────────
@@ -729,14 +790,81 @@ function AgentPendingGroup({ group, onCancel, onReassign, busyId }) {
   );
 }
 
+/* ── Held-by-WIP group (#2114 transparency) ─────────────────────────────
+   A dispatch the poller "delivered" but the admission lane HELD because the
+   team's wipLimit was reached. These never reach an agent's pending file, so
+   they were invisible in this tab before — the exact "delivered here, nothing
+   when I click the agent" gap. Read-only: the one place that mutates a held
+   dispatch (Force dispatch) is the Flow Control board, linked below. */
+function HeldByWipGroup({ group, onOpenBoard }) {
+  const rows = useMemo(() => (group.entries || []).map(e => ({
+    ...e,
+    workItemNumber: e.workItem && e.workItem.number != null ? e.workItem.number : null,
+    workItemTitle: e.workItem ? e.workItem.title : null,
+  })), [group.entries]);
+
+  const COLS = [
+    { key: 'kind', label: 'Kind', sortable: false, render: v => <KindBadge kind={v} />, filterValue: v => kindLabel(v) },
+    { key: 'workItemNumber', label: 'Work item', wrap: true, render: (_v, row) => (
+      <PendingWorkItemCell workItem={row.workItem} repo={row.repo} />
+    ) },
+    { key: 'workItemTitle', label: 'Title', wrap: true, render: v => <TitleCell title={v} /> },
+    { key: 'detail', label: 'Details', sortable: false, wrap: true, render: (_v, row) => {
+      const d = entryDetail(row);
+      const chip = row.label ? <PendingLabelChip label={row.label} /> : null;
+      if (!d && !chip) return <span style={{ color: 'var(--eb-text-secondary)' }}>—</span>;
+      return (
+        <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 'var(--eb-space-2)', flexWrap: 'wrap', fontSize: 'var(--eb-text-xs)' }}>
+          {d && <span>{d}</span>}
+          {chip}
+        </span>
+      );
+    } },
+    { key: 'heldAt', label: 'Held since', render: v => <WhenCell iso={v} /> },
+  ];
+
+  return (
+    <div style={{
+      border: '1px solid var(--eb-status-warning, #d97706)',
+      borderRadius: 'var(--eb-radius-lg)',
+      padding: 'var(--eb-space-3)',
+      display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--eb-space-2)' }}>
+        <span style={{ fontWeight: 'var(--eb-font-semibold)' }}>{group.agentName || group.agentId}</span>
+        {group.agentName && group.agentName !== group.agentId && (
+          <span style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-xs)', fontFamily: 'var(--eb-font-mono)' }}>{group.agentId}</span>
+        )}
+        <span style={{ marginLeft: 'auto', color: 'var(--eb-status-warning, #d97706)', fontSize: 'var(--eb-text-sm)' }}>
+          {group.count} held · WIP limit {group.wipLimit ?? '—'}
+        </span>
+      </div>
+      <DataTable columns={COLS} data={rows} pageSize={10} getRowKey={(r) => r.id} emptyText="No held entries." />
+      <div style={{ fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+        Waiting for a free slot on this flow&apos;s WIP limit. It fires automatically when capacity frees, or you can{' '}
+        <button
+          type="button"
+          onClick={onOpenBoard}
+          style={{ background: 'none', border: 'none', padding: 0, color: 'var(--eb-accent, #2563eb)', cursor: 'pointer', textDecoration: 'underline', font: 'inherit' }}
+        >
+          force-dispatch it on the Flow Control board
+        </button>.
+      </div>
+    </div>
+  );
+}
+
 /* ── Live pending-queue view (fed by /api/pending-queue) ───────────── */
 function PendingQueueView() {
+  const navigate = useNavigate();
   const { data, loading, error, refetch } = useApi('/api/pending-queue');
   const [busyId, setBusyId] = useState(null);
   const [notice, setNotice] = useState(null);
 
   const groups = (data && Array.isArray(data.agents)) ? data.agents : [];
   const total = totalPending(data);
+  const heldGroups = (data && Array.isArray(data.held)) ? data.held : [];
+  const heldCount = totalHeld(data);
 
   const onCancel = useCallback(async (agentId, entryId) => {
     if (!agentId || !entryId) return;
@@ -819,13 +947,18 @@ function PendingQueueView() {
           style={{ flexShrink: 0 }}
         />
         {!loading && <span style={{ color: 'var(--eb-text-secondary)', fontSize: 'var(--eb-text-sm)' }}>{total} entr{total === 1 ? 'y' : 'ies'} waiting</span>}
+        {!loading && heldCount > 0 && (
+          <span style={{ color: 'var(--eb-status-warning, #d97706)', fontSize: 'var(--eb-text-sm)' }}>
+            · {heldCount} held by WIP limit
+          </span>
+        )}
         {notice && <span style={{ color: noticeColor, fontSize: 'var(--eb-text-sm)' }}>{notice.text}</span>}
         {error && <span style={{ color: 'var(--eb-status-error)', fontSize: 'var(--eb-text-sm)' }}>Failed to load: {error}</span>}
       </div>
 
       {loading ? (
         <div style={{ height: 160, background: 'var(--eb-bg-elevated)', borderRadius: 'var(--eb-radius-lg)' }} />
-      ) : groups.length === 0 ? (
+      ) : (groups.length === 0 && heldGroups.length === 0) ? (
         <div style={{
           padding: 'var(--eb-space-6)',
           textAlign: 'center',
@@ -846,6 +979,20 @@ function PendingQueueView() {
               busyId={busyId}
             />
           ))}
+          {heldGroups.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--eb-space-2)', marginTop: 'var(--eb-space-2)' }}>
+              <div style={{ fontSize: 'var(--eb-text-sm)', fontWeight: 'var(--eb-font-semibold)', color: 'var(--eb-status-warning, #d97706)' }}>
+                Held by WIP limit
+              </div>
+              <p style={{ margin: 0, fontSize: 'var(--eb-text-xs)', color: 'var(--eb-text-secondary)' }}>
+                These dispatches were accepted but are waiting for a free slot on their flow&apos;s Work-in-Progress limit.
+                They fire automatically as capacity frees — nothing is lost.
+              </p>
+              {heldGroups.map(g => (
+                <HeldByWipGroup key={`held-${g.agentId}`} group={g} onOpenBoard={() => navigate('/flow-control')} />
+              ))}
+            </div>
+          )}
         </div>
       )}
       {reassign && (

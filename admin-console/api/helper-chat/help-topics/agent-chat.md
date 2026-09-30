@@ -274,8 +274,8 @@ rows. It expands/collapses and remembers your choice the same way a team group
 does, and stays empty (no sub-list at all) while the role has nothing live. Each
 instance row is an ordinary agent: its status dot follows the same activity poll,
 and clicking it opens its own chat/session log exactly like any other member —
-they are just as ephemeral as the role that spawned them, so a row can disappear
-once its instance is torn down.
+a row disappears once its instance is torn down. Its triggered runs and your chat
+share one session.
 
 **Adding an agent** is done from the page header, not the list. **New Agent**
 (top right) hands over to the create launcher, where *Configure an agent
@@ -396,9 +396,9 @@ your earlier choice stays marked.
 
 The rail on the right holds everything about the agent that is not the
 conversation. Toggle it with **Cmd/Ctrl+Shift+L** or the chevron in its tab
-strip; it can also collapse to a strip of icons. Two of its tabs are
-conditional: **Outcomes** appears only for an agent that belongs to a team, and
-**Settings** only when you are allowed to manage that agent.
+strip; it can also collapse to a strip of icons. Three of its tabs are
+conditional: **Events** (agents with a GitHub-event trigger), **Outcomes**
+(team members) and **Settings** (if you may manage the agent).
 
 This rail is an **ordinary-agent** surface. Selecting a **team** in the left
 list — its own row, not one of its members — does not open a narrower version
@@ -501,8 +501,8 @@ switch / update / discard actions.
 
 ### The other tabs
 
-**Triggers**, **Outcomes**, **Knowledge** and **Settings** are the remaining
-tabs; each has its own chapter below.
+**Triggers**, **Events**, **Outcomes**, **Knowledge** and **Settings** are the
+remaining tabs; each has its own chapter below.
 
 ## Triggers — when the agent wakes on its own
 
@@ -529,12 +529,13 @@ time it passes and every `cron` whose time it crosses.
 ### A GitHub event fires regardless of who caused it
 
 A GitHub-event or data-flow wake does **not** know whether the change is relevant
-to this agent, and it fires for **the agent's own pushes** too. So the wake
-instruction should tell the agent to `git pull` first, decide whether the change
-concerns it, and answer `[PASS]` when there is nothing to do. There is
-deliberately **no source filtering** anywhere in the delivery path — loop
-protection is frequency-based (a per-conversation throttle and a burst digest),
-so relevance is the agent's job, not the trigger's.
+to this agent, and it fires for **the agent's own pushes** too, unless a push
+trigger's **Pushed by** filter names the producers (a Flow-editor data-flow
+hand-off names its upstream). So the wake instruction should tell the agent to
+`git pull`, decide whether the change concerns it, and answer `[PASS]` when there
+is nothing to do. Beyond that filter there is **no source filtering** — loop
+protection is frequency-based (throttle and burst digest), so relevance is the
+agent's job.
 
 A label listener can additionally **claim** its wake label on fire (`ready` →
 `ready:wip`), which makes work-in-progress visible on GitHub and is rolled back
@@ -609,6 +610,14 @@ A loop holds the workspace for its whole duration, not between iterations:
 - A long loop with many queued chat messages sheds the newest ones with a visible
   notice rather than flooding the room when it ends.
 - Maintenance Mode pauses both firing and draining.
+
+## Events — what reached the agent from GitHub
+
+GitHub events that reached this agent's triggers (up to 7 days) and the outcome — delivered (**Session** opens the run), digested or
+dropped with the reason. On a *wake-already-armed*, *throttle* or
+*internal-dedup* drop an agent manager can **Fire again**: the agent is woken
+now with the same prompt. Refused if the item is merged/closed, the wake label
+is gone, or it was already re-fired.
 
 ## Outcomes — what the agent signals when a run ends
 
@@ -748,7 +757,7 @@ belongs to this team):
 | **Repositories** | Zero or more repos, cloned into a member's workspace when that member is created. Each row can bind its own SSH key for a private SSH URL; a private HTTPS URL needs the *GitHub Token* select instead. Selecting an SSH key on a row whose URL is a `github.com` HTTPS (or bare) URL rewrites it to its canonical `git@github.com:org/repo.git` SSH form so the reachability check and clone use the key — non-github and already-SSH URLs are left as typed. Mark a repository *Read-only* to clone it for reference only — it is still cloned, but members are told not to commit or push to it. |
 | **Model provider** | Optional override — members start on this provider and its default model instead of the global `.env` fallback. |
 | **Toolchain** | Optional — which container image members are spawned from, picked from the System-Admin-registered list. Absent means the default image. |
-| **MCP servers** | Optional server + credential pairs from the MCP registry, materialised into each member's `.claude/settings.json` at seed time. |
+| **MCP servers** | Optional server + credential pairs from the MCP registry, applied to members on save, from their next turn. |
 | **Additional context** | Optional text appended to every member's `CLAUDE.md`. |
 
 **Skills** and **Plugins** carry the team's own grant — the same fields the

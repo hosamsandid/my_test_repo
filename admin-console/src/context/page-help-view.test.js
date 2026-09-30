@@ -16,9 +16,7 @@ import {
   topicActions,
   CONTEXT_KEYS,
   OVERLAY_SETTINGS,
-  OVERLAY_SETUP_WIZARD,
   helpContextKeys,
-  contextAlias,
   resolveHelpContext,
   contextLabel,
   panelZIndex,
@@ -219,15 +217,6 @@ test('AC3: the active wizard step wins, and falls back to the wizard topic', () 
   assert.equal(resolveHelpContext(CTX_PAYLOAD, { route: '/wizard/team', step: 'process' }).topic.id, 'step-process');
 });
 
-test('AC2: a first-run wizard step resolves through its alias, with no duplicate prose', () => {
-  assert.equal(contextAlias('wizard:setup#llm'), '/models');
-  const hit = resolveHelpContext(CTX_PAYLOAD, { route: '/', overlay: OVERLAY_SETUP_WIZARD, step: 'llm' });
-  assert.equal(hit.topic.id, 'models');
-  assert.equal(hit.key, 'wizard:setup#llm');
-  // /ssh-keys has no topic in this payload → nothing to show rather than empty.
-  assert.equal(resolveHelpContext(CTX_PAYLOAD, { overlay: OVERLAY_SETUP_WIZARD, step: 'ssh-key' }), null);
-});
-
 test('pageHelpState takes a context object as well as a pathname, and reports the key', () => {
   const s = pageHelpState(CTX_PAYLOAD, { route: '/knowledge', overlay: OVERLAY_SETTINGS });
   assert.equal(s.topic.id, 'settings');
@@ -293,7 +282,6 @@ test('both copies build the same candidate list for every registered context', (
     { route: '/knowledge', overlay: OVERLAY_SETTINGS, step: 'model' },
     { route: '/team-setup', step: 'process' },
     { route: '/wizard/team', step: 'process' },
-    { route: '/', overlay: OVERLAY_SETUP_WIZARD, step: 'ssh-key' },
     { route: '/chats/agent-1' },
     {},
   ];

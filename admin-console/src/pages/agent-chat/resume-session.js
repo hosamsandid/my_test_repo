@@ -15,7 +15,8 @@ export const RESUME_MESSAGE =
 
 // A finished session is resumable only when it is a DM session that observed a
 // real Claude session-ID (Open Question A → DM only; per-invocation triggered
-// runs deliberately don't persist a pointer, so they carry no resumable id).
+// runs deliberately don't persist a pointer, so they carry no resumable id; a
+// pool instance's triggered runs continue its DM session instead, #2595).
 // Fallback entries with no session-ID (early-error runs, correlationId-keyed —
 // see session-history.js) can't be resumed.
 export function canResumeSession(session) {

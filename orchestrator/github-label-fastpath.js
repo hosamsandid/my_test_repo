@@ -15,19 +15,25 @@
 // elsewhere (GitHub web UI, CI) and DEDUPS against a marker so it doesn't wake
 // the same agent twice.
 //
-// This is the sibling of flow-emit.js (agent→agent internal hand-offs). The
-// delivery side is largely the same (synthesize a poller-shaped event →
-// enqueue); only the MATCHING side differs: flow-emit matches
-// `transport: 'internal'` listeners, this matches the ordinary
-// **poller-subscribed** `transport: 'github'` listeners — no trigger config
-// change (AC5). Reuses flow-emit's `eventKeyForKind` so the two paths speak the
-// same event vocabulary.
+// The delivery side synthesizes a poller-shaped event and enqueues it; the
+// MATCHING side selects the ordinary **poller-subscribed** listeners — no
+// trigger config change (AC5). (The agent→agent internal transport that used
+// to share this vocabulary was removed in #2578: every labelled hand-off is
+// now an ordinary poller-delivered github-event trigger.)
 //
 // fs-free so the delivery contract is unit-testable (`node --test`): request
 // validation, listener matching, and the synthesized event shape. All I/O
 // (queue write, marker store, event log) stays in orchestrator.js.
 
-const { eventKeyForKind, TARGET_KINDS } = require('./flow-emit');
+const { listensTo } = require('./event-key-aliases');
+
+const TARGET_KINDS = ['issue', 'pr'];
+
+// The poller event key a target kind maps to. A label-apply is always a
+// "labeled" action — that is the whole vocabulary of a label hand-off.
+function eventKeyForKind(kind) {
+  return kind === 'pr' ? 'pull_request.labeled' : 'issues.labeled';
+}
 
 // Validate the request body into `{ok: true, value}` or `{ok: false, error}`.
 // Shape: { repo: "owner/name", number, kind?: issue|pr (default issue), label,
@@ -59,12 +65,11 @@ function validateLabelAppliedRequest(body) {
 
 // Resolve which poller-subscribed triggers a label-apply wakes. `agents` is
 // [{agentId, enabled, triggers}]. The gates mirror the poller's plan builder
-// EXACTLY (`pollerSubscribes`: type/enabled/transport≠internal/repo/events) plus
-// the label-name filter (absent/blank labelFilter = any label, the poller's
-// legacy semantics). This is the same predicate `_fanOutBatch` uses — never
-// `matchInternalListeners`, which is `transport: 'internal'` only. The target
-// trigger stays `transport: 'github'`. Returns [{agentId, triggerId}] in agent
-// order.
+// EXACTLY (`pollerSubscribes`: type/enabled/repo/events) plus the label-name
+// filter (absent/blank labelFilter = any label, the poller's legacy
+// semantics). This is the same predicate `_fanOutBatch` uses. A legacy
+// `transport` field on a trigger is ignored (#2578). Returns
+// [{agentId, triggerId}] in agent order.
 function matchPollerListeners({ repo, label, kind }, agents) {
   const key = eventKeyForKind(kind);
   const out = [];
@@ -72,9 +77,8 @@ function matchPollerListeners({ repo, label, kind }, agents) {
     if (!a || a.enabled === false || !Array.isArray(a.triggers)) continue;
     for (const t of a.triggers) {
       if (!t || t.type !== 'github-event' || t.enabled === false) continue;
-      if (t.transport === 'internal') continue; // poller-subscribed listeners only
       if (t.repo !== repo) continue;
-      if (!Array.isArray(t.events) || !t.events.includes(key)) continue;
+      if (!Array.isArray(t.events) || !listensTo(t.events, key)) continue;
       const filter = typeof t.labelFilter === 'string' && t.labelFilter.trim();
       if (filter && filter !== label) continue;
       out.push({ agentId: a.agentId, triggerId: t.id });
@@ -88,7 +92,7 @@ function matchPollerListeners({ repo, label, kind }, agents) {
 // (`_claim_plan` in agent-entrypoint.py — reads `github.repo` +
 // `payload.issue.number` / `payload.pull_request.number`) work byte-compatibly.
 // `actor` carries the human who applied the label (via the plugin) — plainly,
-// not the `agent:` prefix flow-emit uses for an agent producer.
+// never an `agent:`-prefixed producer id.
 function buildSyntheticEvent({ repo, label, kind, number, title, closesIssues, actor, eventId, now }) {
   const subject = {
     number,
@@ -116,10 +120,37 @@ function buildSyntheticEvent({ repo, label, kind, number, title, closesIssues, a
   };
 }
 
+// The pending-queue entry for one listener — the same `{triggerId, github}`
+// shape the poller's `_enqueue` writes (the drain doesn't branch on origin),
+// plus `source: 'internal'` so log readers and operators can tell the
+// delivery path apart (callers may override `source`, e.g. the Flow
+// Supervisor). #2151: also stamps `wakeLabel` from the synthesized event's
+// own label — the matched listener filter and the synthetic
+// `payload.label.name` always agree (`matchPollerListeners` only forwards a
+// listener whose filter is absent or equals the applied label), so reading it
+// off the event needs no extra parameter and stays byte-identical to what
+// callers already log as `wakeLabel` for the event-log outcome.
+function buildPendingEntry(triggerId, key, ghEvent) {
+  return {
+    triggerId,
+    source: 'internal',
+    wakeLabel: ghEvent.payload?.label?.name ?? null,
+    github: {
+      event: key,
+      eventId: ghEvent.id,
+      repo: ghEvent.repo?.name,
+      actor: ghEvent.actor?.login,
+      createdAt: ghEvent.created_at,
+      payload: ghEvent.payload,
+    },
+  };
+}
+
 module.exports = {
   TARGET_KINDS,
   eventKeyForKind,
   validateLabelAppliedRequest,
   matchPollerListeners,
   buildSyntheticEvent,
+  buildPendingEntry,
 };

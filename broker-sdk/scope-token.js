@@ -31,6 +31,15 @@ const crypto = require('crypto');
 // orchestrator-only routes on it via `internalPushEndpoint` (endpoints.js).
 const INTERNAL_SCOPE_ID = '_internal';
 
+// #2562: the reserved scope a broker mints for its credential-grant request to
+// the orchestrator (`orchestrator/plugin-scope.js` GRANT_SCOPE_PREFIX). A granted
+// agent's workspace token can never carry it, so only the broker can ask whose
+// credential a CLI call may use.
+const GRANT_SCOPE_PREFIX = '_grant-';
+function grantScopeId(scopeId) {
+  return `${GRANT_SCOPE_PREFIX}${scopeId}`;
+}
+
 function sign(pluginId, scopeId, secret) {
   return crypto
     .createHmac('sha256', secret)
@@ -91,4 +100,4 @@ function verifyScopeToken(headerOrReq, secret) {
   return verify(token, secret);
 }
 
-module.exports = { mint, verify, verifyScopeToken, INTERNAL_SCOPE_ID };
+module.exports = { mint, verify, verifyScopeToken, INTERNAL_SCOPE_ID, GRANT_SCOPE_PREFIX, grantScopeId };

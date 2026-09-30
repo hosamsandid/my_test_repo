@@ -121,3 +121,19 @@ test('resolveScopeId never yields the reserved id — under either granularity, 
   // …but the member's own id is still fine at agent granularity
   assert.equal(resolveScopeId({ id: 'agent-x', parentTeamId: '_internal' }, 'agent'), 'agent-x');
 });
+
+// ── `_grant-<scope>` is the broker's credential-grant token, never an agent's (#2562, review B1)
+
+const { GRANT_SCOPE_PREFIX, scopeIdFromGrantScope } = require('./plugin-scope');
+
+test('the grant scope prefix is reserved and maps back to its team/agent scope', () => {
+  assert.equal(GRANT_SCOPE_PREFIX, '_grant-');
+  assert.equal(isReservedScopeId('_grant-team-1'), true);
+  assert.equal(scopeIdFromGrantScope('_grant-team-1'), 'team-1');
+  assert.equal(scopeIdFromGrantScope('team-1'), null, 'a workspace scope is not a grant scope');
+  assert.equal(scopeIdFromGrantScope('_grant-'), null);
+  assert.equal(scopeIdFromGrantScope('_grant-_internal'), null);
+  assert.equal(scopeIdFromGrantScope(null), null);
+  assert.equal(resolveScopeId({ id: '_grant-team-1' }, 'team'), null);
+  assert.equal(resolveScopeId({ id: 'agent-x', parentTeamId: '_grant-team-1' }, 'team'), null);
+});

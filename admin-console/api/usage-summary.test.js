@@ -227,6 +227,84 @@ test('secondaryGroupBy is ignored (output identical) when absent, unknown or equ
 // agent-facing read-only usage query reuses one aggregation implementation.
 // This guard is the twin of orchestrator/usage-summary.test.js — either side
 // editing usage-summary.js without the other fails both suites.
+// ── #2585: auto-scaled pool instances fold into their main agent ─────────────
+const T = 'agent-studio-2-0';
+function poolRec(agentId, tokens, extra = {}) {
+  return {
+    ts: '2026-09-29T10:00:00Z', agentId, teamId: T, provider: 'p1', providerTier: 'global',
+    tokens, modelUsage: { 'claude-x': tokens }, ...extra,
+  };
+}
+const POOL_RECORDS = [
+  poolRec(`${T}-developer`, { input: 1, output: 2, cacheCreationInput: 3, cacheReadInput: 4 }),
+  // Legacy (pre-#2585) instance records: no `poolOf` key — folded by naming.
+  poolRec(`${T}-developer-i2556`, { input: 10, output: 20, cacheCreationInput: 30, cacheReadInput: 40 }),
+  poolRec(`${T}-developer-i2573`, { input: 100, output: 200, cacheCreationInput: 300, cacheReadInput: 400 }, { providerTier: 'team' }),
+  // Stamped instance record: `poolOf` is authoritative.
+  poolRec(`${T}-developer-i2289`, { input: 5, output: 5, cacheCreationInput: 5, cacheReadInput: 5 }, { poolOf: `${T}-developer` }),
+  // Look-alikes that are no pool instance.
+  poolRec(`${T}-developer-conflicts`, { input: 7, output: 0, cacheCreationInput: 0, cacheReadInput: 0 }),
+  poolRec(`${T}-helper-i7`, { input: 8, output: 0, cacheCreationInput: 0, cacheReadInput: 0 }, { poolOf: null }),
+  poolRec(`${T}-manual-i3`, { input: 9, output: 0, cacheCreationInput: 0, cacheReadInput: 0 }),
+  // Another team's id that merely ends in -i<n>, not under its own team prefix.
+  { ...poolRec('solo-i4', { input: 11, output: 0, cacheCreationInput: 0, cacheReadInput: 0 }), teamId: 'other' },
+];
+
+function rowOf(res, key) {
+  return res.groups.find((g) => g.key === key);
+}
+
+test('#2585 AC1/AC2: agent grouping folds pool instances into the main agent with summed classes', () => {
+  const res = summarize(POOL_RECORDS, { groupBy: 'agent', nonInstanceAgentIds: [`${T}-manual-i3`] });
+  assert.ok(!res.groups.some((g) => /-i(2556|2573|2289)$/.test(g.key)), 'no instance row survives');
+  assert.deepEqual(rowOf(res, `${T}-developer`), {
+    key: `${T}-developer`,
+    tokens: { input: 116, output: 227, cacheCreationInput: 338, cacheReadInput: 449, total: 1130 },
+    invocations: 4,
+  });
+});
+
+test('#2585 AC3: folding needs no registry — a main agent with no own runs still gets one row', () => {
+  const onlyInstances = POOL_RECORDS.slice(1, 3);
+  const res = summarize(onlyInstances, { groupBy: 'agent' });
+  assert.deepEqual(res.groups.map((g) => [g.key, g.invocations]), [[`${T}-developer`, 2]]);
+});
+
+test('#2585 AC8: look-alike ids that are no pool instance keep their own row', () => {
+  const res = summarize(POOL_RECORDS, { groupBy: 'agent', nonInstanceAgentIds: new Set([`${T}-manual-i3`]) });
+  for (const id of [`${T}-developer-conflicts`, `${T}-helper-i7`, `${T}-manual-i3`, 'solo-i4']) {
+    assert.equal(rowOf(res, id)?.invocations, 1, id);
+  }
+  assert.equal(rowOf(res, `${T}-helper`), undefined);
+  assert.equal(rowOf(res, `${T}-manual`), undefined);
+  assert.equal(rowOf(res, 'solo'), undefined);
+});
+
+test('#2585 AC4: grand totals and non-agent groupings are unchanged by folding', () => {
+  const unfolded = POOL_RECORDS.map((r) => ({ ...r, poolOf: null }));
+  for (const groupBy of ['agent', 'team', 'user', 'model', 'provider', 'providerTier', 'day']) {
+    const folded = summarize(POOL_RECORDS, { groupBy });
+    const raw = summarize(unfolded, { groupBy });
+    assert.deepEqual(folded.totals, raw.totals, groupBy);
+    if (groupBy !== 'agent') assert.deepEqual(folded.groups, raw.groups, groupBy);
+  }
+  const res = summarize(POOL_RECORDS, { groupBy: 'agent' });
+  const sum = res.groups.reduce((s, g) => s + g.tokens.total, 0);
+  assert.equal(sum, res.totals.total);
+});
+
+test('#2585 AC5: agent as the secondary grouping folds instances too', () => {
+  const res = summarize(POOL_RECORDS, { groupBy: 'providerTier', secondaryGroupBy: 'agent' });
+  const global = rowOf(res, 'global');
+  const team = rowOf(res, 'team');
+  assert.ok(!res.groups.some((g) => g.subgroups.some((s) => /-i(2556|2573|2289)$/.test(s.key))));
+  assert.equal(global.subgroups.find((s) => s.key === `${T}-developer`).invocations, 3);
+  assert.deepEqual(team.subgroups.map((s) => [s.key, s.invocations]), [[`${T}-developer`, 1]]);
+  // agent × model fans over the model split under the folded key as well
+  const byModel = summarize(POOL_RECORDS, { groupBy: 'agent', secondaryGroupBy: 'model' });
+  assert.equal(rowOf(byModel, `${T}-developer`).subgroups[0].tokens.total, 1130);
+});
+
 test('two-sided guard: admin-console canonical is byte-identical to orchestrator copy', () => {
   const here = fs.readFileSync(path.join(__dirname, 'usage-summary.js'));
   const there = fs.readFileSync(path.join(__dirname, '..', '..', 'orchestrator', 'usage-summary.js'));

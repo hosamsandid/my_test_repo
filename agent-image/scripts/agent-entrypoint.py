@@ -338,6 +338,34 @@ RESUME_UNAVAILABLE_NOTICE = (
 )
 
 
+# Shown in the room when a pool instance's one lifetime session (#2595) could
+# not be resumed (snapshot gone, e.g. lost with the container) and the run had
+# to start a fresh one — the break must be visible, never silent.
+POOL_SESSION_RESTARTED_NOTICE = (
+    "_(My previous session for this work item could not be resumed — the saved "
+    "conversation snapshot is no longer available. I continued in a new "
+    "session, so I don't remember earlier runs beyond what is on disk.)_"
+)
+
+
+def _pool_instance_session(cfg: dict | None, trigger: dict | None = None) -> bool:
+    """True when this run belongs to a pool instance's single lifetime session
+    (#2595).
+
+    A pool instance (`poolInstance: true`) exists for exactly one work item and
+    is reaped when it is done, so every trigger run and every chat turn resume
+    ONE Claude session through the DM room's session pointer — instead of the
+    fresh, pointer-less session `per-invocation` gives a triggered run. Loop
+    iterations are the exception: they rely on a fresh context per iteration
+    by design. Non-pooled agents are unaffected (False).
+    """
+    if not isinstance(cfg, dict) or cfg.get("poolInstance") is not True:
+        return False
+    if isinstance(trigger, dict) and trigger.get("type") == "loop":
+        return False
+    return True
+
+
 def _session_pointer_file(room_id: str) -> Path:
     return _agent_workdir() / "sessions" / f"{room_id}.current.json"
 
@@ -897,6 +925,130 @@ def _internal_headers(extra: dict | None = None) -> dict:
     return headers
 
 
+# ---- plugin run identity (#2562) ----
+#
+# A plugin broker that holds per-PERSON credentials (Jira) must know whether a
+# CLI call belongs to a chat turn — and whose — or to an autonomous run, in a
+# way nothing inside this container can forge (the Claude subprocess and every
+# Bash command it runs share this container). The runner is the only process
+# that reads Matrix, so it DECLARES each Claude run to the orchestrator with a
+# per-container RUN KEY:
+#
+#   • fetched ONCE, in main(), before any Claude run exists; the orchestrator
+#     hands out one key per container generation and revokes it on any second
+#     request — so a copy a tool call tries to mint later only disables plugin
+#     identity (fail closed), it never yields a working key;
+#   • kept in this process's memory only — never env, never disk — and the
+#     process is marked non-dumpable so a same-user child cannot read it via
+#     /proc/<pid>/mem (residual assumption: no CAP_SYS_PTRACE in the container);
+#   • a chat declaration names only the Matrix room + event; the orchestrator
+#     reads the SENDER from the homeserver itself.
+#
+# Every step is best-effort for the run: a failed declaration never blocks a
+# turn, it only means plugin calls in that turn are refused.
+_PLUGIN_RUN_KEY: str | None = None
+_PR_SET_DUMPABLE = 4
+
+
+def _make_non_dumpable() -> bool:
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) == 0
+    except Exception:  # noqa: BLE001 — non-Linux / no libc: nothing to harden
+        return False
+
+
+def _plugin_identity_post(route: str, body: dict, timeout: float = 10) -> tuple[int, dict]:
+    """POST to an agent-scoped plugin-identity route. → (status, json). A
+    connection that never reached the orchestrator raises ConnectionRefusedError;
+    every other failure comes back as (0, {})."""
+    caller = os.environ.get("AEE_AGENT_CALLER_TOKEN", "")
+    agent_id = os.environ.get("AGENT_ID", "")
+    base = os.environ.get("ORCHESTRATOR_INTERNAL_URL", "http://localhost:4002").rstrip("/")
+    url = f"{base}/internal/agents/{urllib.parse.quote(agent_id, safe='')}{route}"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        method="POST",
+        headers=_internal_headers({"Content-Type": "application/json", "X-AEE-Agent-Caller": caller}),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode() or "{}")
+        except ValueError:
+            return e.code, {}
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, ConnectionRefusedError):
+            raise e.reason
+        return 0, {}
+    except (OSError, ValueError):
+        return 0, {}
+
+
+def _acquire_plugin_run_key(attempts: int = 5, delay_sec: float = 2.0) -> bool:
+    """Fetch this container's run key — once. Retried ONLY while the connection
+    is refused outright (the request provably never arrived); any answer, and
+    any ambiguous failure, is final: asking again would revoke the key."""
+    global _PLUGIN_RUN_KEY
+    if not os.environ.get("AEE_AGENT_CALLER_TOKEN") or not os.environ.get("AGENT_ID"):
+        return False
+    _make_non_dumpable()
+    for i in range(max(1, attempts)):
+        try:
+            status, out = _plugin_identity_post("/run-key", {})
+        except ConnectionRefusedError:
+            if i + 1 < attempts:
+                time.sleep(delay_sec)
+            continue
+        key = out.get("key") if status == 200 and isinstance(out, dict) else None
+        if isinstance(key, str) and key:
+            _PLUGIN_RUN_KEY = key
+            return True
+        print(f"[Runner] plugin run key refused (HTTP {status} {out.get('reason') if isinstance(out, dict) else ''}) "
+              "— plugin calls that need a person's identity will be refused", file=sys.stderr)
+        return False
+    print("[Runner] plugin run key: orchestrator unreachable", file=sys.stderr)
+    return False
+
+
+def _plugin_run_declaration(run_context: dict | None) -> dict:
+    """The declaration body for one Claude run: `chat` iff the run context
+    names the Matrix event that started it (set only by the DM handler),
+    otherwise `autonomous` (triggers, loops, hand-offs, consolidation)."""
+    chat = run_context.get("chatEvent") if isinstance(run_context, dict) else None
+    if isinstance(chat, dict) and chat.get("roomId") and chat.get("eventId"):
+        return {"kind": "chat", "roomId": str(chat["roomId"]), "eventId": str(chat["eventId"])}
+    return {"kind": "autonomous"}
+
+
+def _plugin_run_begin(run_context: dict | None) -> str | None:
+    if not _PLUGIN_RUN_KEY:
+        return None
+    body = {"key": _PLUGIN_RUN_KEY, **_plugin_run_declaration(run_context)}
+    try:
+        status, out = _plugin_identity_post("/runs", body)
+    except ConnectionRefusedError:
+        status, out = 0, {}
+    run_id = out.get("runId") if status == 200 and isinstance(out, dict) else None
+    if not run_id:
+        print(f"[Runner] plugin run declaration ({body['kind']}) refused: HTTP {status} "
+              f"{out.get('reason') if isinstance(out, dict) else ''}", file=sys.stderr)
+    return run_id
+
+
+def _plugin_run_end(run_id: str | None) -> None:
+    if not run_id or not _PLUGIN_RUN_KEY:
+        return
+    try:
+        _plugin_identity_post("/runs/end", {"key": _PLUGIN_RUN_KEY, "runId": run_id})
+    except ConnectionRefusedError:
+        pass
+
+
 _push_client: _StatePushClient | None = None
 
 # ---- durable usage-record spool (#654) ----
@@ -1341,55 +1493,64 @@ def _map_stream_json_line(line: str, correlation_id: str,
     return events
 
 
-# ---- AskUserQuestion → chat message (#447, reachable via bundled MCP #1712) ----
+# ---- AskUserQuestion → chat message (#447) ----
 #
 # `AskUserQuestion` is Claude Code's structured "ask the human a question" tool.
 # Its *built-in* form is interactive-TTY-only: in the `-p`/print mode every agent
 # turn runs in (a single non-interactive process, stdin closed) the CLI removes it
 # from the model's tool set entirely, so the model can never emit it — adding it to
 # --allowedTools / --tools does not help (the tool is filtered before permissions
-# are consulted). To close that gap (#1712) the runner instead offers an
-# identically-shaped `AskUserQuestion` tool from a bundled, dependency-free stdio
-# MCP server (`ask-user-mcp.py`) via --mcp-config, so it *is* available to the
-# model headlessly. When the model calls it the tool_use surfaces in the stream as
-# `mcp__aee-ask__AskUserQuestion`; the MCP tool returns a short "end your turn and
-# wait" instruction so the turn completes cleanly (a normal success `result`, the
-# session stays coherent for --resume) rather than erroring. We intercept that
-# tool_use, render the question(s) into a readable chat message (+ the #1663
-# quick-reply payload), and post it instead of the model's reply. The user's next
-# chat message then continues the resumed session — the answer arrives as a normal,
-# context-bearing turn. The bare-name match is kept so an interactive/legacy
-# built-in emission is handled identically.
+# are consulted). Agents therefore ask through the `aee-ask` CLI (#2523, below),
+# the only supported mechanism — the runner deliberately registers no MCP server
+# of its own for this (#1719). Should an `AskUserQuestion` tool_use still appear
+# (an interactive/legacy built-in emission, or an MCP-namespaced one from a
+# server the environment's settings.json provides), it is intercepted, rendered
+# into a readable chat message (+ the #1663 quick-reply payload) and posted
+# instead of the model's reply. The user's next chat message then continues the
+# resumed session — the answer arrives as a normal, context-bearing turn.
 _ASK_USER_QUESTION_TOOL = "AskUserQuestion"
-# The bundled MCP server that re-supplies the tool headlessly, the key it is
-# registered under, and the resulting namespaced tool name the model calls.
-_ASK_USER_MCP_SERVER = SCRIPTS_DIR / "ask-user-mcp.py"
-_ASK_USER_MCP_KEY = "aee-ask"
-_ASK_USER_MCP_TOOL = f"mcp__{_ASK_USER_MCP_KEY}__{_ASK_USER_QUESTION_TOOL}"
-# In environments where Claude Code managed policy restricts MCP servers, the
-# bundled aee-ask server is refused and `claude` exits non-zero on every turn.
-# Operators who know their environment forbids MCP can set AEE_DISABLE_ASK_MCP=1
-# to skip injecting it; the agent then runs without the headless AskUserQuestion
-# tool instead of failing. Default off -> behaviour unchanged.
-_ASK_MCP_DISABLED = os.environ.get("AEE_DISABLE_ASK_MCP", "").strip().lower() in (
-    "1", "true", "yes", "on",
-)
 
 
-def _ask_user_mcp_config() -> str:
-    """Inline --mcp-config JSON registering the bundled AskUserQuestion server.
+# ---- aee-ask CLI facade (#2523) ----
+#
+# The one way an agent asks a structured question (#1719). The `aee-ask` CLI
+# validates its own arguments and writes an AskUserQuestion-shaped
+# `{"questions": [...]}` JSON to a per-invocation sentinel file whose path the
+# runner hands it via AEE_ASK_FILE. The runner never parses the Bash command
+# string: it keys on the sentinel's presence (checked after every tool_result
+# and once more after the CLI exits), then routes the payload through the same
+# render/persist path as the tool_use intercept. Per-invocation (not one fixed
+# path) so a concurrent DM turn and trigger run in the same container can never
+# pick up each other's question.
+_ASK_FILE_ENV = "AEE_ASK_FILE"
 
-    Passed alongside (not instead of) any env-provisioned MCP servers in the
-    agent's settings.json — without --strict-mcp-config the CLI merges the two.
-    """
-    return json.dumps({
-        "mcpServers": {
-            _ASK_USER_MCP_KEY: {
-                "command": "python3",
-                "args": [str(_ASK_USER_MCP_SERVER)],
-            }
-        }
-    })
+
+def _ask_sentinel_path(invocation_id: str) -> Path:
+    """Run-scoped sentinel path the `aee-ask` CLI writes for this invocation."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", invocation_id or "") or uuid.uuid4().hex
+    return _agent_workdir() / STATE_DIR / "ask" / f"{safe}.json"
+
+
+def _read_ask_sentinel(path: Path) -> dict | None:
+    """The queued `{"questions": [...]}` payload, or None when there is no
+    sentinel or it carries nothing usable (a torn/garbled file is ignored rather
+    than surfaced as a half-rendered question)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and isinstance(data.get("questions"), list) and data["questions"]:
+        return data
+    return None
+
+
+def _clear_ask_sentinel(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"[Runner] could not remove ask sentinel {path}: {exc}", file=sys.stderr)
 
 
 def _is_ask_user_question_tool(name) -> bool:
@@ -1462,11 +1623,12 @@ def _ask_user_question_payload(tool_input) -> dict | None:
     so a Matrix client that cannot render the buttons still sees the full
     question + options as text (graceful degradation, AC8).
 
-    MVP is single-choice (D1): a `multiSelect: true` question is deliberately
-    omitted from the interactive payload — it still reaches the human as the text
-    body, and the UI leaves it as plain text (AC4). Each option gets a stable
-    `optionId` (`<questionIndex>:<optionIndex>`) unique within the message so the
-    clicked answer can carry a structured identifier back (AC2 / D2).
+    A `multiSelect: true` question is carried with `"multiSelect": true` so the
+    UI renders toggleable options plus a Submit button, and its answer carries
+    every selected label (#2523 — supersedes the single-choice-only MVP of
+    #1663 D1). Each option gets a stable `optionId`
+    (`<questionIndex>:<optionIndex>`) unique within the message so the clicked
+    answer can carry a structured identifier back (AC2 / D2).
     """
     if not isinstance(tool_input, dict):
         return None
@@ -1478,8 +1640,6 @@ def _ask_user_question_payload(tool_input) -> dict | None:
     for qi, q in enumerate(questions):
         if not isinstance(q, dict):
             continue
-        if q.get("multiSelect") is True:
-            continue  # single-choice only in the MVP (D1)
         options = q.get("options")
         if not isinstance(options, list):
             continue
@@ -1498,6 +1658,8 @@ def _ask_user_question_payload(tool_input) -> dict | None:
         if not out_options:
             continue
         qentry: dict = {"questionId": f"q{qi}", "options": out_options}
+        if q.get("multiSelect") is True:
+            qentry["multiSelect"] = True
         header = q.get("header")
         if isinstance(header, str) and header.strip():
             qentry["header"] = header.strip()
@@ -1509,6 +1671,45 @@ def _ask_user_question_payload(tool_input) -> dict | None:
     if not out_questions:
         return None
     return {"version": 1, "questions": out_questions}
+
+
+_ASK_ANSWER_FIELD = "io.aee.ask-answer"
+_ASK_ANSWER_MAX_LABELS = 50
+
+
+def _ask_answer_prompt(body: str, content) -> str:
+    """The resume prompt for a human's quick-reply answer (#2523).
+
+    A single-choice answer's chat body is already the chosen label, so it is
+    passed through unchanged. A multi-select answer carries its selections as
+    `labels` (on the answer itself, or per entry of a multi-question
+    `answers[]`); its visible body only joins them with ", ", which is ambiguous
+    when a label contains a comma. For those, rebuild the prompt from the
+    structured labels so every selected answer reaches the model as its own
+    line. Anything malformed falls back to the plain body.
+    """
+    if not isinstance(content, dict):
+        return body
+    answer = content.get(_ASK_ANSWER_FIELD)
+    if not isinstance(answer, dict):
+        return body
+    entries = answer.get("answers") if isinstance(answer.get("answers"), list) else [answer]
+    entries = [e for e in entries if isinstance(e, dict)]
+    if not any(isinstance(e.get("labels"), list) for e in entries):
+        return body
+
+    blocks: list[str] = []
+    for e in entries:
+        raw = e.get("labels") if isinstance(e.get("labels"), list) else [e.get("label")]
+        labels = [l.strip() for l in raw[:_ASK_ANSWER_MAX_LABELS]
+                  if isinstance(l, str) and l.strip()]
+        if not labels:
+            return body
+        blocks.append("\n".join(f"- {l}" for l in labels))
+    if len(blocks) == 1:
+        return "My answer to your question (selected options):\n" + blocks[0]
+    return "My answers to your questions (selected options, in question order):\n" + "\n".join(
+        f"Question {i}:\n{b}" for i, b in enumerate(blocks, 1))
 
 
 # ---- status.json ----
@@ -1556,13 +1757,18 @@ def _persist_running_sessions() -> None:
 
 def _new_session(session_type: str, *, room_id: str | None = None, label: str = "",
                  trigger_type: str | None = None, trigger_id: str | None = None,
-                 correlation_id: str | None = None) -> dict:
+                 correlation_id: str | None = None,
+                 work_item: dict | None = None) -> dict:
     """Build a running-session descriptor for _bump_active. Fields mirror the
     legacy Node writer so RunningSessionsPanel renders them unchanged.
 
     `correlation_id` is the id stamped on this run's session-log rows, letting
     the admin console scope one session's log even when sessions share a room
-    (#543)."""
+    (#543).
+
+    `work_item` (`{repo, kind, number}`, #2573) names the issue/PR a GitHub-
+    triggered run is working on, so the Flow Control board can list "who is
+    working on what" without guessing from the trigger label."""
     return {
         "id": uuid.uuid4().hex,
         "type": session_type,
@@ -1572,7 +1778,26 @@ def _new_session(session_type: str, *, room_id: str | None = None, label: str = 
         "roomId": room_id,
         "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
         "correlationId": correlation_id,
+        "workItem": work_item,
     }
+
+
+def _session_work_item(gh: dict | None) -> dict | None:
+    """The `{repo, kind, number}` a GitHub-triggered run works on (#2573) —
+    derived from the same poller ctx block `_usage_github_and_key` reads. A PR
+    wins over an issue (a PR comment event carries both shapes). None for a
+    non-GitHub run or an event naming no issue/PR (push)."""
+    block, _ = _usage_github_and_key(gh)
+    if not block or not block.get("repo"):
+        return None
+    if block.get("prNumber") is not None:
+        return {"repo": block["repo"], "kind": "pr", "number": block["prNumber"]}
+    if block.get("issueNumber") is not None:
+        payload = gh.get("payload") if isinstance(gh.get("payload"), dict) else {}
+        issue = payload.get("issue") if isinstance(payload.get("issue"), dict) else {}
+        kind = "pr" if issue.get("pull_request") else "issue"
+        return {"repo": block["repo"], "kind": kind, "number": block["issueNumber"]}
+    return None
 
 
 def _bump_active(delta: int, session: dict | None = None) -> None:
@@ -2430,6 +2655,179 @@ def _harvest_shared_lessons(text: str, correlation_id: str) -> str:
         return text
 
 
+# ---- End-of-session consolidation harvest for interactive DMs (issue #2518) ---
+#
+# Phase 1 (#2517) harvests per DM turn — opportunistic but fragmentary. This
+# Phase 2 pass looks at a whole (recent) idle session ONCE: when a DM room has
+# been quiet for the configured interval AND had real activity since the last
+# consolidation, a dedicated non-interactive run reflects over the transcript to
+# record durable, coherent lessons and tidy the private `memory/*.md` notebook —
+# and posts NOTHING to the room. Gated on autonomy >= 1 (KB on), skipped in
+# Maintenance Mode, serialized on the WorkspaceGate, and driven through
+# `_call_claude_once` so the room's `--resume` session pointer is never moved.
+# The idle/new-activity decision and the prompt assembly are pure helpers below
+# (unit tested); the timer/loop that fires them lives in `run_dm_listener`.
+
+_DM_SESSION_IDLE_MINUTES_DEFAULT = 20
+
+
+def _dm_session_idle_seconds() -> int:
+    """Idle window (seconds) after which an inactive DM room is consolidated.
+
+    Configured via ``DM_SESSION_IDLE_MINUTES`` (default 20). A value <= 0
+    disables the consolidation pass entirely (returns 0). Any positive value is
+    honoured but floored at 60 s so a mis-set tiny value can't fire a
+    consolidation between two turns of one live conversation. A missing or
+    malformed value falls back to the default."""
+    raw = os.environ.get("DM_SESSION_IDLE_MINUTES")
+    try:
+        minutes = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        minutes = _DM_SESSION_IDLE_MINUTES_DEFAULT
+    if minutes <= 0:
+        return 0
+    return max(60, int(minutes * 60))
+
+
+def _dm_consolidation_due(state, now: float, idle_seconds: int) -> bool:
+    """Decide whether a DM room's session should be consolidated now (pure).
+
+    ``state`` is the per-room activity record: ``lastActivityAt`` (epoch seconds
+    of the most recent human message OR agent reply, 0 if none) and
+    ``lastConsolidatedActivityAt`` (the ``lastActivityAt`` captured at the last
+    consolidation, 0 if never). Due iff the feature is enabled, the room has seen
+    activity, it has been idle for at least ``idle_seconds``, AND there is new
+    activity since the last consolidation. The last clause is what makes an idle
+    room with nothing new a no-op and guarantees exactly one pass per session:
+    the caller sets ``lastConsolidatedActivityAt = lastActivityAt`` after firing,
+    so it only re-arms once a fresh turn bumps ``lastActivityAt`` again."""
+    if idle_seconds <= 0:
+        return False
+    if not isinstance(state, dict):
+        return False
+    last_activity = state.get("lastActivityAt") or 0.0
+    if last_activity <= 0:
+        return False
+    if (now - last_activity) < idle_seconds:
+        return False
+    last_consolidated = state.get("lastConsolidatedActivityAt") or 0.0
+    return last_activity > last_consolidated
+
+
+def render_consolidation_transcript(events, max_chars: int = 12000) -> str:
+    """Render the recent session events into a compact User/Assistant transcript
+    for the consolidation prompt (pure). Keeps the MOST RECENT turns within the
+    ~``max_chars`` budget (~3k tokens, aligned with the digest philosophy) —
+    older turns are dropped from the front. Recognises the two text-bearing
+    session-log events: ``message.received`` (human ``body``) and ``result``
+    (the agent's final ``result`` text). Robust to non-dict / text-less rows."""
+    turns = []
+    for ev in events if isinstance(events, list) else []:
+        if not isinstance(ev, dict):
+            continue
+        t = ev.get("type")
+        if t == "message.received":
+            body = ev.get("body")
+            if isinstance(body, str) and body.strip():
+                turns.append("User: " + body.strip())
+        elif t == "result":
+            r = ev.get("result")
+            if isinstance(r, str) and r.strip():
+                turns.append("Assistant: " + r.strip())
+    # Accumulate from the newest backwards so the kept window is the tail.
+    kept: list[str] = []
+    total = 0
+    for turn in reversed(turns):
+        add = len(turn) + (2 if kept else 0)  # "\n\n" join cost
+        if kept and total + add > max_chars:
+            break
+        kept.append(turn)
+        total += add
+    kept.reverse()
+    return "\n\n".join(kept)
+
+
+def build_consolidation_prompt(transcript_window: str, autonomy_level: int) -> str:
+    """Assemble the end-of-session consolidation / reflection prompt (pure, #2518).
+
+    Reflection + harvest ONLY: the run records durable, coherent lessons that
+    only become clear at the end of a working session, consolidates the private
+    ``memory/*.md`` notebook, and stays SILENT — its reply is discarded, treated
+    like a ``[PASS]``. The fenced ```knowledge block instruction
+    (``build_harvest_block_hint``) is appended so the runtime harvests the block
+    deterministically, exactly as every other run does; it also carries the
+    "knowledge search first to avoid restating" contract that dedups against the
+    Phase 1 per-turn harvest."""
+    window = transcript_window if isinstance(transcript_window, str) else ""
+    base = (
+        "You are running an automated END-OF-SESSION CONSOLIDATION pass over a "
+        "direct-message working session that has just gone idle. There is NO "
+        "human reading right now and you must post NOTHING user-facing — your "
+        "reply is discarded. This is a reflection/harvest run, not a chat turn.\n\n"
+        "Do exactly two things, quietly:\n"
+        "1. Reflect over the whole recent transcript below and consolidate your "
+        "private episodic memory: update memory/context.md, memory/log.md and the "
+        "other memory/*.md files with a concise, coherent summary of what "
+        "happened and any durable lessons that only became clear across the "
+        "session. Update entries in place — never duplicate an existing one.\n"
+        "2. Capture durable, team-useful lessons (project conventions, "
+        "environment facts, key entities) for the shared knowledge base. Run "
+        'knowledge search "<topic>" FIRST so you never restate something already '
+        "recorded earlier this session or by a teammate.\n\n"
+        "Keep it tight: record only what holds BEYOND this one session — no "
+        "chat-specific or one-off detail. If there is nothing durable to "
+        "consolidate, just make no changes.\n\n"
+        "--- RECENT SESSION TRANSCRIPT (oldest first, may be truncated) ---\n"
+        f"{window}\n"
+        "--- END TRANSCRIPT ---"
+    )
+    return base + build_harvest_block_hint(autonomy_level)
+
+
+def _read_session_events_tail(room_id: str, max_lines: int = 400) -> list:
+    """Read the last ``max_lines`` JSON events from a room's session log
+    (``sessions/<roomId>.jsonl``), oldest-first. Best-effort: a missing or
+    unreadable file yields ``[]`` and never raises. Malformed lines are skipped.
+    IO shell around the pure ``render_consolidation_transcript``."""
+    try:
+        path = _session_log_file(room_id)
+        if not path.exists():
+            return []
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines[-max_lines:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def _fetch_maintenance_active() -> bool:
+    """Best-effort platform Maintenance-Mode check (blocking; call via
+    ``asyncio.to_thread``). Mirrors ``TriggerScheduler._maintenance_active``'s
+    fail-open-to-inactive posture — the state file lives outside this agent's
+    mounted subtree, so we ask the orchestrator over the internal channel. Any
+    failure reads as "not active"; the consolidation caller re-checks each tick,
+    so a transient miss just defers, never fires, a pass during maintenance."""
+    try:
+        url = f"{ORCHESTRATOR_INTERNAL_URL.rstrip('/')}/internal/maintenance-mode"
+        req = urllib.request.Request(url, method="GET", headers=_internal_headers())
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status != 200:
+                return False
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        return bool(isinstance(data, dict) and data.get("active"))
+    except Exception:
+        return False
+
+
 # ---- Claude invocation (stream-json + session resumption) ----
 
 def _resolve_model_arg() -> str | None:
@@ -2461,15 +2859,11 @@ def _base_claude_args(prompt: str, memory_hint: str, model_arg: str | None) -> l
         args.extend(["--model", model_arg])
     tools = ["Bash(*)", "Read(*)", "Write(*)", "Edit(*)",
              "Glob(*)", "Grep(*)", "Task(*)", "WebFetch(*)", "WebSearch(*)"]
-    if not _ASK_MCP_DISABLED:
-        # AskUserQuestion, offered headlessly via the bundled MCP server (#1712);
-        # its tool_use is intercepted and turned into a paused chat question
-        # rather than executed for real.
-        tools.append(_ASK_USER_MCP_TOOL)
+    # No --mcp-config / --strict-mcp-config here (#1719): structured questions
+    # go through the `aee-ask` CLI via Bash, and MCP servers the environment's
+    # settings.json provides keep loading through the CLI's normal merge.
     for tool in tools:
         args.extend(["--allowedTools", tool])
-    if not _ASK_MCP_DISABLED:
-        args.extend(["--mcp-config", _ask_user_mcp_config()])
     return args
 
 
@@ -3049,6 +3443,19 @@ def _enqueue_bg_orphan_correction(agent_id: str, room_id: str,
 def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                       resume_id: str | None, blueprint_id: str | None,
                       timeout_sec: int, run_context: dict | None = None) -> tuple[str, str | None]:
+    """Run claude once, declared to the orchestrator as a chat or autonomous
+    run for its whole lifetime (#2562 — see _plugin_run_begin)."""
+    plugin_run_id = _plugin_run_begin(run_context)
+    try:
+        return _call_claude_once_inner(prompt, room_id, correlation_id, resume_id,
+                                       blueprint_id, timeout_sec, run_context)
+    finally:
+        _plugin_run_end(plugin_run_id)
+
+
+def _call_claude_once_inner(prompt: str, room_id: str, correlation_id: str,
+                            resume_id: str | None, blueprint_id: str | None,
+                            timeout_sec: int, run_context: dict | None = None) -> tuple[str, str | None]:
     """Run claude once. Returns (final_text, observed_session_id).
 
     Raises CalledProcessError on non-zero exit. Sets module-level
@@ -3097,6 +3504,12 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     env["AEE_ACTING_SENDER"] = _acting_sender_env_value(run_context)
     if resume_id:
         env["KNOWLEDGE_SESSION_ID"] = resume_id
+    # `aee-ask` sentinel for THIS invocation (#2523): the CLI writes the queued
+    # question here, the stream loop below picks it up. Cleared first so a stale
+    # file from a crashed earlier run can never surface as a fresh question.
+    ask_sentinel = _ask_sentinel_path(f"{correlation_id or 'run'}-{uuid.uuid4().hex[:8]}")
+    _clear_ask_sentinel(ask_sentinel)
+    env[_ASK_FILE_ENV] = str(ask_sentinel)
 
     # Git context for the usage record (#654): capture HEAD before the run so the
     # record can show what this invocation moved. Best-effort — never blocks the run.
@@ -3140,6 +3553,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     assistant_chunks: list[str] = []
     stderr_chunks: list[str] = []
     ask_question_input: dict | None = None  # first AskUserQuestion tool input (#447)
+    ask_via_cli = False  # question came from the `aee-ask` sentinel (#2523)
     context_usage: dict = {}  # last assistant-message usage this invocation (#509)
     bg_task_events: list[dict] = []  # raw background-task payloads for orphan detection
     # Coalesce the CLI's high-frequency thinking_tokens ticks into a throttled
@@ -3148,7 +3562,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
 
     def handle_line(line: str) -> None:
         nonlocal final_result, observed_session, ask_question_input, result_event
-        nonlocal last_api_status
+        nonlocal last_api_status, ask_via_cli
         for ev in _map_stream_json_line(line, correlation_id, context_usage,
                                         requested_model=model_arg):
             if (ev.get("type") == "system_event"
@@ -3189,6 +3603,30 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
                     and ask_question_input is None
                     and isinstance(ev.get("input"), dict)):
                 ask_question_input = ev["input"]
+            elif (ev.get("type") == "tool_result"
+                    and ask_question_input is None):
+                # Keyed on the sentinel's presence, not on parsing the Bash
+                # command: the CLI has already validated + serialised it.
+                queued = _read_ask_sentinel(ask_sentinel)
+                if queued is not None:
+                    ask_question_input = queued
+                    ask_via_cli = True
+                    # Hard end (#2523, design decision on the issue): stop the
+                    # process the moment the sentinel appears. At this point the
+                    # CLI is waiting on the model's next API response, so no
+                    # further tool has started — ending here (rather than on a
+                    # later tool_use, which Claude Code has already begun
+                    # executing when we see it) keeps the question the terminal
+                    # message with nothing run after it. The session transcript
+                    # already holds this tool_result, so `--resume` still works;
+                    # the cost is no `result` event / usage record for the turn.
+                    # The rc != 0 path below posts the question.
+                    print("[Runner] aee-ask question captured — ending the turn",
+                          file=sys.stderr)
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
 
     def drain_stderr():
         try:
@@ -3225,6 +3663,15 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
         tail = tt_throttle.flush()
         if tail is not None:
             _append_event(room_id, tail)
+        # Last look for an `aee-ask` sentinel whose tool_result never reached the
+        # stream (the race the ticket names), then consume it so it can never
+        # leak into a later turn.
+        if ask_question_input is None:
+            queued = _read_ask_sentinel(ask_sentinel)
+            if queued is not None:
+                ask_question_input = queued
+                ask_via_cli = True
+        _clear_ask_sentinel(ask_sentinel)
 
     rc = proc.returncode
     stderr_blob = "".join(stderr_chunks)
@@ -3280,7 +3727,7 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
     # run_context by reference (same channel as `_loopOutputTokens` above) so the
     # DM path can attach it as `io.aee.ask-question` on the posted message without
     # widening the return signature. None when the question is not renderable as
-    # single-choice buttons (e.g. multiSelect) — the text body still carries it.
+    # quick-reply options — the text body still carries it.
     if ask_reply is not None and isinstance(run_context, dict):
         run_context["_askQuestion"] = _ask_user_question_payload(ask_question_input)
 
@@ -3289,7 +3736,8 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
         _user_stop_requested = False
         if ask_reply is not None and not was_user_stop:
             print("[Runner] AskUserQuestion captured — posting question to chat "
-                  "instead of the tool error", file=sys.stderr)
+                  "instead of the tool error"
+                  + (" (via aee-ask)" if ask_via_cli else ""), file=sys.stderr)
             return ask_reply, observed_session
         err = subprocess.CalledProcessError(rc, "claude", output=None, stderr=stderr_blob)
         err.user_aborted = was_user_stop  # type: ignore[attr-defined]
@@ -3330,15 +3778,23 @@ def _call_claude_once(prompt: str, room_id: str, correlation_id: str,
 
 def _call_claude(prompt: str, room_id: str, correlation_id: str,
                  blueprint_id: str | None, timeout_sec: int = CLAUDE_TIMEOUT_SEC,
-                 run_context: dict | None = None) -> str:
-    """Drive _call_claude_once with --resume retry-on-stale-session logic."""
+                 run_context: dict | None = None,
+                 pointer_room_id: str | None = None) -> str:
+    """Drive _call_claude_once with --resume retry-on-stale-session logic.
+
+    `pointer_room_id` names the room whose session pointer is read and moved
+    (default: `room_id`, where the run logs and posts). A pool instance
+    (#2595) passes its DM room so a trigger posting elsewhere still continues
+    the instance's one session. When a stale pointer forces a fresh session,
+    `run_context["_resumeFellBack"]` is set so the caller can say so."""
+    pointer_room = pointer_room_id or room_id
     # Pyramid level 1 guarantee: the digest CLAUDE.md @-imports is current for
     # this run (per-invocation agents see the team state on every run).
     _rebuild_knowledge_digest()
     # Level 1.5 (#917): task-scoped knowledge for THIS prompt — the one place
     # in the whole system where the task text and the KB meet.
     _rebuild_scoped_knowledge(prompt)
-    resume_id, resume_requested = _read_session_pointer_full(room_id)
+    resume_id, resume_requested = _read_session_pointer_full(pointer_room)
     if resume_id:
         try:
             text, observed = _call_claude_once(
@@ -3346,14 +3802,14 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
                 run_context,
             )
             if observed:
-                _write_session_pointer(room_id, observed)
+                _write_session_pointer(pointer_room, observed)
             return text
         except subprocess.CalledProcessError as err:
             if getattr(err, "user_aborted", False):
                 raise
             blob = (str(err.stderr or "") + " " + str(err)).lower()
             if "session" in blob or "resume" in blob or "not found" in blob:
-                _clear_session_pointer(room_id)
+                _clear_session_pointer(pointer_room)
                 # An explicit resume (#574) must NOT silently fall back to a
                 # fresh empty session (AC6) — the user chose *this* snapshot, so
                 # tell them it's gone and let them decide, rather than answering
@@ -3369,12 +3825,14 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
                     f"[Runner] --resume {resume_id} failed; retrying without resume",
                     file=sys.stderr,
                 )
+                if run_context is not None:
+                    run_context["_resumeFellBack"] = True
                 text, observed = _call_claude_once(
                     prompt, room_id, correlation_id, None, blueprint_id, timeout_sec,
                     run_context,
                 )
                 if observed:
-                    _write_session_pointer(room_id, observed)
+                    _write_session_pointer(pointer_room, observed)
                 return text
             raise
 
@@ -3383,7 +3841,7 @@ def _call_claude(prompt: str, room_id: str, correlation_id: str,
         run_context,
     )
     if observed:
-        _write_session_pointer(room_id, observed)
+        _write_session_pointer(pointer_room, observed)
     return text
 
 
@@ -3618,6 +4076,39 @@ def _postcondition_verdict(kind, facts: dict | None) -> tuple[bool, str]:
     return True, ""
 
 
+def _branch_filter_error(raw) -> str | None:
+    """Push-trigger branch filter (#2570) — a mirror of `branchFilterError` in
+    admin-console/api/branch-filter.js (matching lives in
+    orchestrator/branch-filter.js; keep them in sync). None/absent/blank = no
+    filter (valid). Otherwise a comma-separated string or a list of strings
+    whose entries could each name a branch."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str) and not (
+        isinstance(raw, list) and all(isinstance(v, str) for v in raw)
+    ):
+        return "branchFilter must be a comma-separated string or an array of branch names"
+    parts = raw.split(",") if isinstance(raw, str) else [p for v in raw for p in v.split(",")]
+    seen: list[str] = []
+    for part in parts:
+        entry = part.strip()
+        if not entry or entry in seen:
+            continue
+        seen.append(entry)
+        if re.search(r"[\s\x00-\x1f\x7f]", entry):
+            why = "contains whitespace or a control character"
+        elif entry.startswith("/") or entry.endswith("/"):
+            why = 'must not start or end with "/"'
+        elif "//" in entry:
+            why = 'must not contain "//"'
+        elif "***" in entry:
+            why = 'only "*" and "**" are wildcards'
+        else:
+            continue
+        return f'branchFilter entry "{entry}" {why}'
+    return None
+
+
 def _nonconformant_trigger_reason(trigger) -> str | None:
     """Raw-layer wiring guard (#1006, concept §4.8) — a DOCUMENTED MIRROR of
     `rawTriggerError` in admin-console/api/process-template.js (the orchestrator
@@ -3639,6 +4130,9 @@ def _nonconformant_trigger_reason(trigger) -> str | None:
             f"it listens on {len(events)} events ({', '.join(map(str, events))}) — "
             "a github-event trigger carries exactly ONE event; create one trigger per event"
         )
+    branch_error = _branch_filter_error(trigger.get("branchFilter"))
+    if branch_error:
+        return branch_error
     claim = trigger.get("claim")
     if claim is None:
         return None
@@ -6264,7 +6758,7 @@ class TriggerScheduler:
             # which the Events API can collapse onto an arbitrary one of
             # several labels applied in the same action. Consumption ladder,
             # first truthy wins: the pending entry's own stamped `wakeLabel`
-            # (set by every writer — poller, flow-emit, reassign — to the
+            # (set by every writer — poller, label fast-path, reassign — to the
             # matched `labelFilter`; covers the reported bug) → the trigger's
             # own `labelFilter` (covers an entry queued before the stamp
             # existed, #2151 AC5) → `payload.label.name` (the only correct
@@ -6595,6 +7089,10 @@ class TriggerScheduler:
         cfg = _load_dm_agent_config()
         session_policy = cfg.get("sessionPolicy")
         is_per_invocation = session_policy == "per-invocation"
+        # A pool instance (#2595) is still per-invocation for everything else
+        # (learn hint, harvest, autonomy) but resumes its one lifetime session
+        # instead of starting fresh — shared with its chat via the DM pointer.
+        instance_session = _pool_instance_session(cfg, trigger)
 
         # Build the prompt — order mirrors agent-runner.js:874-914.
         task_body = trigger.get("prompt", "")
@@ -6765,6 +7263,7 @@ class TriggerScheduler:
             "trigger", room_id=room_id, label=str(tid),
             trigger_type=trigger.get("type"), trigger_id=tid,
             correlation_id=correlation_id,
+            work_item=_session_work_item(gh),
         )
         _bump_active(+1, session)
         try:
@@ -6780,7 +7279,9 @@ class TriggerScheduler:
             # Per-invocation runs MUST NOT read or write the per-room session
             # pointer — otherwise the DM's resume id gets stolen. Bypass the
             # _call_claude wrapper for that case and call _call_claude_once
-            # directly with resume_id=None.
+            # directly with resume_id=None. A pool instance is the exception
+            # (#2595): its DM pointer IS the instance's one session, so its
+            # triggers resume and move it exactly like its chat turns do.
             #
             # The claude invocation gets one retry on transient failure: the
             # triggering event is already consumed at this point, so giving up
@@ -6791,7 +7292,14 @@ class TriggerScheduler:
             while True:
                 attempt += 1
                 try:
-                    if is_per_invocation:
+                    if instance_session:
+                        result = await asyncio.to_thread(
+                            _call_claude,
+                            prompt, room_id, correlation_id, self._blueprint_id,
+                            timeout_sec, run_context,
+                            _load_dm_room_id() or room_id,
+                        )
+                    elif is_per_invocation:
                         result, _observed = await asyncio.to_thread(
                             _call_claude_once,
                             prompt, room_id, correlation_id, None,
@@ -7001,6 +7509,20 @@ class TriggerScheduler:
             except Exception:
                 pass
 
+        # A pool instance whose one session could not be resumed (#2595) says
+        # so in the room — even when the run itself then reports `[PASS]`.
+        if instance_session and run_context.get("_resumeFellBack"):
+            try:
+                _append_event(room_id, {
+                    "type": "system_event",
+                    "subtype": "pool-session-restarted",
+                    "correlationId": correlation_id,
+                })
+                await self._send_formatted(room_id, POOL_SESSION_RESTARTED_NOTICE)
+            except Exception as exc:
+                print(f"[Runner:{self._agent_id}] Could not post session-restart "
+                      f"notice for {tid}: {exc}", file=sys.stderr)
+
         # Deterministic KB harvest (issue #602): record the structured
         # ```knowledge block the run emitted, then drop it from the reply. Only
         # per-invocation runs carry the block instruction.
@@ -7049,8 +7571,8 @@ class TriggerScheduler:
         )
 
 
-# Base address of the orchestrator's internal API, used by the flow-emit and
-# wake helpers above. The BriefingPack claim loop that also lived here — a
+# Base address of the orchestrator's internal API, used by the wake helpers
+# above. The BriefingPack claim loop that also lived here — a
 # 30 s poll of /internal/orchestrators/{AGENT_ID}/claim-tick that DM'd a nudge
 # when a pack transitioned to `status: dispatched` — was removed in #1967:
 # the route went with epic #1961 Phase 1, and `role: "orchestrator"` is a
@@ -7133,6 +7655,13 @@ async def run_dm_listener() -> None:
     # so both paths share the *same* gate: chat turns queue behind a running
     # loop or an in-flight trigger, and vice versa, in the one workspace.
     workspace_gate = WorkspaceGate()
+    # End-of-session consolidation harvest (#2518): per-room activity clock.
+    # room_id -> {"lastActivityAt": epoch, "lastConsolidatedActivityAt": epoch}.
+    # In-memory for this listener process — a restart resets it, so no
+    # consolidation fires until fresh activity arrives, which is the desired
+    # best-effort posture. Bumped on every human message and every agent reply
+    # (see on_message); drained by the consolidation_loop timer below.
+    dm_activity: dict[str, dict] = {}
 
     async def joined_members(room_id: str) -> list[str]:
         cached = member_cache.get(room_id)
@@ -7212,6 +7741,13 @@ async def run_dm_listener() -> None:
         if not await is_human_sender(room_id, sender):
             return
 
+        # End-of-session consolidation (#2518): stamp this room's activity clock
+        # at the moment a human message ARRIVES — before the workspace gate, so a
+        # message that lands while a consolidation (or loop) holds the gate still
+        # re-arms the next session's pass. Turn end is stamped again after the
+        # reply is posted below.
+        dm_activity.setdefault(room_id, {})["lastActivityAt"] = time.time()
+
         # #1157: a chat turn is a workspace-touching run, so it serializes on
         # the same agent-wide gate as triggers and loops — it no longer runs
         # concurrently with them in the one clone. While a loop (or another
@@ -7257,7 +7793,11 @@ async def run_dm_listener() -> None:
             # trigger prompts are deliberately untouched (out of scope).
             known_commands = _list_slash_command_tokens(
                 _agent_workdir() / ".claude" / "commands")
-            prepared = _prepare_chat_prompt(body, known_commands)
+            # A multi-select quick-reply answer (#2523) is resumed with every
+            # selected label from its structured `io.aee.ask-answer`.
+            content = (getattr(event, "source", None) or {}).get("content")
+            prepared = _prepare_chat_prompt(_ask_answer_prompt(body, content),
+                                            known_commands)
             send_body = prepared["prompt"]
             if prepared["isSlash"]:
                 _append_event(room_id, {
@@ -7272,6 +7812,14 @@ async def run_dm_listener() -> None:
                     f"/{prepared['command']}",
                     file=sys.stderr,
                 )
+
+            # Deterministic KB harvest for interactive DMs (issue #2517, Phase 1):
+            # ask this turn to END its reply with a fenced ```knowledge block, the
+            # same instruction the per-invocation trigger path adds via learn_hint.
+            # Appended to the per-turn prompt (NOT folded into _build_memory_hint)
+            # so the byte-identical parity with orchestrator/prompt-assembly.js's
+            # buildMemoryHint stays untouched. Empty below autonomy 1 → no change.
+            send_body += build_harvest_block_hint(_knowledge_autonomy_level())
 
             _append_event(room_id, {
                 "type": "claude.invoke",
@@ -7292,6 +7840,13 @@ async def run_dm_listener() -> None:
             # to a platform account at ingest; a trigger/loop run leaves the key
             # absent, which is what makes it fall back to the agent's owner.
             dm_run_context["requestedBy"] = {"matrixUserId": sender}
+            # Plugin identity (#2562): the Matrix event that started this turn.
+            # Only the event is named; the orchestrator reads its sender from
+            # the homeserver, so nothing here can choose whose credential runs.
+            dm_run_context["chatEvent"] = {"roomId": room_id, "eventId": getattr(event, "event_id", None)}
+            # A pool instance (#2595) continues its one lifetime session — the
+            # same DM pointer its triggered runs resume and move.
+            dm_instance_session = _pool_instance_session(_load_dm_agent_config())
             try:
                 # claude invocation is blocking — run it off the event loop so
                 # matrix-nio can keep syncing (otherwise no follow-on messages
@@ -7299,9 +7854,20 @@ async def run_dm_listener() -> None:
                 result = await asyncio.to_thread(
                     _call_claude, send_body, room_id, correlation_id, blueprint_id,
                     CLAUDE_TIMEOUT_SEC, dm_run_context,
+                    (_load_dm_room_id() or room_id) if dm_instance_session else None,
                 )
             finally:
                 _bump_active(-1, session)
+
+            # Deterministic KB harvest for interactive DMs (issue #2517, Phase 1):
+            # parse the ```knowledge block this turn emitted, record each lesson in
+            # the shared KB, and strip the block so the user never sees it — the
+            # same runtime step the per-invocation path runs. Strip BEFORE the
+            # empty/whitespace fallback below so it sees the stripped text.
+            # Internally no-ops (and returns the text unchanged) below autonomy 1.
+            result = await asyncio.to_thread(
+                _harvest_shared_lessons, result, correlation_id
+            )
 
             # Runtime self-correction for orphaned background tasks (#2277): a
             # chat/DM turn is never itself a correction (that only ever arrives
@@ -7340,9 +7906,20 @@ async def run_dm_listener() -> None:
                     "misconfigured or the run was interrupted — check the agent container logs.)_"
                 )
 
+            # A pool instance whose one session could not be resumed (#2595)
+            # says so rather than answering as if it remembered.
+            if dm_instance_session and dm_run_context.get("_resumeFellBack"):
+                _append_event(room_id, {
+                    "type": "system_event",
+                    "subtype": "pool-session-restarted",
+                    "correlationId": correlation_id,
+                })
+                reply = f"{POOL_SESSION_RESTARTED_NOTICE}\n\n{reply}"
+
             # If the run paused on an AskUserQuestion, carry the structured
             # options to the console so it can render clickable quick-reply
-            # buttons (#1663). Absent / multiSelect → plain text reply only.
+            # buttons (#1663; multi-select toggles + Submit, #2523). Absent →
+            # plain text reply only.
             ask_question = dm_run_context.get("_askQuestion")
             extra_content = (
                 {"io.aee.ask-question": ask_question}
@@ -7359,6 +7936,9 @@ async def run_dm_listener() -> None:
                 raise
 
             _write_last_response_at()
+            # Consolidation (#2518): stamp turn-end so the idle clock counts from
+            # the reply, not the incoming message.
+            dm_activity.setdefault(room_id, {})["lastActivityAt"] = time.time()
             _append_event(room_id, {
                 "type": "message.posted",
                 "correlationId": correlation_id,
@@ -7406,6 +7986,102 @@ async def run_dm_listener() -> None:
         finally:
             workspace_gate.release_chat_turn()
 
+    async def _consolidate_room(room_id: str, state: dict,
+                                idle_seconds: int) -> None:
+        """Run one end-of-session consolidation pass for an idle DM room (#2518).
+
+        Serializes on the shared workspace gate, feeds a reflection/harvest-only
+        prompt over the recent transcript through the NON-INTERACTIVE
+        `_call_claude_once` (so the room's `--resume` pointer is never moved),
+        harvests the emitted ```knowledge block, and posts NOTHING. Best-effort:
+        any failure is logged and the room is still marked consolidated up to the
+        snapshot so the pass fires exactly once per session."""
+        # Snapshot the activity we're consolidating up to. Marked done in the
+        # finally regardless of outcome (like a [PASS]); a turn arriving mid-run
+        # bumps lastActivityAt past this and re-arms the next session's pass.
+        snapshot = state.get("lastActivityAt") or 0.0
+        correlation_id = f"consolidation:{uuid.uuid4().hex}"
+        # #1157: take the one workspace gate so this never overlaps a live chat
+        # turn, a trigger, or a loop iteration in the single clone.
+        async with workspace_gate.acquire():
+            # A turn may have landed while we queued for the gate — re-check
+            # under the gate so a room that is active again is left alone
+            # ("not while a turn is in flight" AC).
+            if not _dm_consolidation_due(dm_activity.get(room_id),
+                                         time.time(), idle_seconds):
+                return
+            try:
+                events = await asyncio.to_thread(_read_session_events_tail, room_id)
+                window = render_consolidation_transcript(events)
+                if not window.strip():
+                    print(f"[Runner:{agent_id}] consolidation: empty transcript "
+                          f"for {room_id}, skipping", file=sys.stderr)
+                    return
+                prompt = build_consolidation_prompt(
+                    window, _knowledge_autonomy_level())
+                print(f"[Runner:{agent_id}] DM session consolidation for {room_id} "
+                      f"({len(window)} transcript chars)", file=sys.stderr)
+                # resume_id=None → fresh non-interactive run; the reply is
+                # harvested for its ```knowledge block then DISCARDED (silent).
+                text, _observed = await asyncio.to_thread(
+                    _call_claude_once, prompt, room_id, correlation_id, None,
+                    blueprint_id, CLAUDE_TIMEOUT_SEC, _base_run_context(),
+                )
+                await asyncio.to_thread(
+                    _harvest_shared_lessons, text, correlation_id)
+            except Exception as exc:  # never break the listener
+                print(f"[Runner:{agent_id}] consolidation failed for {room_id}: "
+                      f"{exc}", file=sys.stderr)
+            finally:
+                cur = dm_activity.get(room_id)
+                if isinstance(cur, dict):
+                    cur["lastConsolidatedActivityAt"] = max(
+                        cur.get("lastConsolidatedActivityAt") or 0.0, snapshot)
+
+    async def consolidation_loop() -> None:
+        """Timer that fires `_consolidate_room` for DM rooms that have gone idle
+        with new activity since their last consolidation (#2518). Fully gated on
+        the KB being on (autonomy >= 1) and on Maintenance Mode; both are
+        re-checked every tick so a live change takes effect without a restart."""
+        idle_seconds = _dm_session_idle_seconds()
+        if idle_seconds <= 0:
+            print(f"[Runner:{agent_id}] DM session consolidation disabled "
+                  f"(DM_SESSION_IDLE_MINUTES<=0)", file=sys.stderr)
+            return
+        # Poll frequently enough to be responsive, cheaply — a fraction of the
+        # idle window, clamped to [15s, 60s].
+        check_interval = min(60.0, max(15.0, idle_seconds / 4))
+        while not _shutdown.is_set():
+            try:
+                await asyncio.sleep(check_interval)
+            except asyncio.CancelledError:
+                break
+            if _shutdown.is_set():
+                break
+            # No KB checkout / autonomy 0 → the whole pass is a no-op (AC).
+            if _knowledge_autonomy_level() < 1:
+                continue
+            now = time.time()
+            due = [rid for rid, st in list(dm_activity.items())
+                   if _dm_consolidation_due(st, now, idle_seconds)]
+            if not due:
+                continue
+            # Never fire in Maintenance Mode — leave the rooms due for after it.
+            try:
+                if await asyncio.to_thread(_fetch_maintenance_active):
+                    continue
+            except Exception:
+                pass
+            for room_id in due:
+                if _shutdown.is_set():
+                    break
+                st = dm_activity.get(room_id)
+                # Re-check under the current clock: a turn may have landed
+                # between the scan and here, making it no longer idle.
+                if not _dm_consolidation_due(st, time.time(), idle_seconds):
+                    continue
+                await _consolidate_room(room_id, st, idle_seconds)
+
     async def save_token_callback(response):
         if isinstance(response, SyncResponse) and response.next_batch:
             _save_next_batch(response.next_batch)
@@ -7445,6 +8121,11 @@ async def run_dm_listener() -> None:
             )
             scheduler = None
 
+    # End-of-session consolidation timer (#2518). A standalone background task —
+    # independent of the trigger scheduler so it runs even if the scheduler fails
+    # to start — that fires a silent harvest/reflection pass for idle DM rooms.
+    consolidation_task = asyncio.create_task(consolidation_loop())
+
     _DM_LOOP_RUNNING = True
     sync_fail_streak = 0
     try:
@@ -7473,6 +8154,12 @@ async def run_dm_listener() -> None:
                 await asyncio.sleep(2)
     finally:
         _DM_LOOP_RUNNING = False
+        if not consolidation_task.done():
+            consolidation_task.cancel()
+            try:
+                await consolidation_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if scheduler is not None:
             try:
                 await scheduler.stop()
@@ -7539,7 +8226,7 @@ def _migrate_state_dir(workspace: Path) -> None:
 def _setup_plugin_cli_env() -> None:
     """Make this agent's granted plugin CLIs runnable (#1547).
 
-    Built-in CLIs (`aee-artifact`, `knowledge`, `aee-emit`, …) are symlinked into
+    Built-in CLIs (`aee-artifact`, `knowledge`, `aee-wake`, …) are symlinked into
     /usr/local/bin at image build time. Plugin CLIs cannot be: they are seeded
     per agent into `<workspace>/.agent-studio/bin` when a plugin is GRANTED, which
     is a live file sync with no respawn (concept §4.5).
@@ -7602,6 +8289,9 @@ def main() -> None:
     ).parse_args()
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    # Before any Claude run can exist (#2562): the one run-key request.
+    _acquire_plugin_run_key()
 
     asyncio.run(run_dm_listener())
 

@@ -13,7 +13,7 @@
 // The scan runs in BOTH directions, and the second one is the point:
 //
 //   table → source   no entry in the matrix names a route api.js dropped
-//   source → table   no route api.js registers in the three scanned families
+//   source → table   no route api.js registers in the scanned families
 //                    is missing from the matrix
 //
 // The second direction is what makes AC3 deliverable. There is no manual
@@ -107,7 +107,7 @@ function gateOf(route) {
 
 test('the scan finds routes at all (the guard is not vacuous)', () => {
   assert.ok(ROUTES.length >= 20,
-    `expected the three scanned families to hold 20+ routes, found ${ROUTES.length} — the scan regex needs re-pointing`);
+    `expected the scanned families to hold 20+ routes, found ${ROUTES.length} — the scan regex needs re-pointing`);
 });
 
 test('table → source: every route in the matrix is registered by api.js', () => {
@@ -160,16 +160,16 @@ test('AC1/AC4: every manage-class route carries a manage gate', () => {
 
 test('the gate split is counted, so drift in either direction fails', () => {
   // Counts rather than "at least one": a refactor that quietly moves a route
-  // from the middleware to nothing, or adds an eleventh manage route without a
+  // from the middleware to nothing, or adds a twelfth manage route without a
   // gate, would otherwise still satisfy a per-route existence check.
   const tally = { middleware: 0, inline: 0, none: 0 };
   for (const r of manageRoutes()) {
     const scanned = ROUTES.find(s => key(s) === key(r));
     tally[gateOf(scanned) || 'none'] += 1;
   }
-  assert.deepEqual(tally, { middleware: 7, inline: 3, none: 0 },
-    'expected the 7 workspace/context writes on requireAgentManage and the 3 '
-    + 'trigger mutations on the pre-existing denyUnlessCanManageAgent');
+  assert.deepEqual(tally, { middleware: 8, inline: 3, none: 0 },
+    'expected the 7 workspace/context writes and the #2525 github-events refire on '
+    + 'requireAgentManage, and the 3 trigger mutations on the pre-existing denyUnlessCanManageAgent');
 });
 
 test('AC2: no read-class route carries the manage gate', () => {

@@ -7,7 +7,9 @@ import {
   summarizeGithubEventTrigger,
   summarizeLoopTrigger,
   claimBodyFor,
-  transportBodyFor,
+  pushedByIds,
+  pushedByBodyFor,
+  summarizePushSchedule,
   summarizeLoopEdge,
   hasClaim,
   summarizeClaimEdge,
@@ -257,35 +259,6 @@ test('isStandingSubscription: the chat Triggers list excludes every loop (#1020 
   assert.equal(isStandingSubscription(null), false);
 });
 
-/* ── #1189: delivery-transport body for a github-event label listener ────── */
-
-test('transportBodyFor: a label listener writes an explicit value (github too, to clear on toggle-off)', () => {
-  assert.equal(
-    transportBodyFor({ showTransport: true, transport: 'internal', isEdit: true, priorTransport: undefined }),
-    'internal');
-  // Toggling internal → github must write 'github' explicitly so the PUT merge
-  // clears a stored 'internal' rather than leaving it in place.
-  assert.equal(
-    transportBodyFor({ showTransport: true, transport: 'github', isEdit: true, priorTransport: 'internal' }),
-    'github');
-});
-
-test('transportBodyFor: a plain non-label trigger keeps no transport key', () => {
-  assert.equal(
-    transportBodyFor({ showTransport: false, transport: 'github', isEdit: false, priorTransport: undefined }),
-    undefined);
-});
-
-test('transportBodyFor: a no-longer-label listener with a stale transport is cleared to github on edit', () => {
-  assert.equal(
-    transportBodyFor({ showTransport: false, transport: 'github', isEdit: true, priorTransport: 'internal' }),
-    'github');
-  // …but a create with no label listener still omits it.
-  assert.equal(
-    transportBodyFor({ showTransport: false, transport: 'internal', isEdit: false, priorTransport: undefined }),
-    undefined);
-});
-
 // ── platform-synthesized event keys (#2032) ─────────────────────────────────
 
 test('eventLabel renders the direct-hand-off key in plain language', () => {
@@ -308,4 +281,35 @@ test('plugin.event reads in plain language and is not a subscribable github even
   assert.equal(eventLabel('plugin.event'), 'plugin event');
   assert.equal(GITHUB_EVENT_OPTIONS.some(o => o.value === 'plugin.event'), false);
   assert.equal(INTERNAL_EVENT_LABELS.has('plugin.event'), true);
+});
+
+// ── #2571: "pushed by agent" producer filter ────────────────────────────────
+
+test('pushedByIds: clean de-duplicated list, [] when unset (#2571)', () => {
+  assert.deepEqual(pushedByIds({}), []);
+  assert.deepEqual(pushedByIds({ pushedBy: [' t1-spec', 't1-spec', '', 3] }), ['t1-spec']);
+});
+
+test('pushedByBodyFor: picked agents are sent; plain push with none stays field-less (AC1/AC7)', () => {
+  assert.deepEqual(pushedByBodyFor({ isPush: true, selected: ['a', 'a', 'b'], isEdit: false }), ['a', 'b']);
+  assert.equal(pushedByBodyFor({ isPush: true, isDataFlow: false, selected: [], isEdit: false }), undefined);
+  assert.equal(pushedByBodyFor({ isPush: true, selected: [], isEdit: true, priorPushedBy: undefined }), undefined);
+});
+
+test('pushedByBodyFor: clearing a stored filter or a data-flow filter sends [] (explicit any push)', () => {
+  assert.deepEqual(pushedByBodyFor({ isPush: true, selected: [], isEdit: true, priorPushedBy: ['a'] }), []);
+  assert.deepEqual(pushedByBodyFor({ isPush: true, isDataFlow: true, selected: [], isEdit: false }), []);
+});
+
+test('pushedByBodyFor: switching away from push clears a stored filter', () => {
+  assert.equal(pushedByBodyFor({ isPush: false, selected: ['a'], isEdit: true, priorPushedBy: ['a'] }), null);
+  assert.equal(pushedByBodyFor({ isPush: false, selected: [], isEdit: true, priorPushedBy: undefined }), undefined);
+  assert.equal(pushedByBodyFor({ isPush: false, selected: ['a'], isEdit: false }), undefined);
+});
+
+test('summarizePushSchedule: names the producers when a filter is set (AC9)', () => {
+  const nameOf = (id) => ({ 't1-spec': 'Specifier' })[id];
+  assert.equal(summarizePushSchedule({ repo: 'o/r', pushedBy: ['t1-spec'] }, nameOf), 'wakes on push from Specifier to o/r');
+  assert.equal(summarizePushSchedule({ repo: 'o/r', pushedBy: ['t1-spec', 't1-x'] }, nameOf), 'wakes on push from Specifier, t1-x to o/r');
+  assert.equal(summarizePushSchedule({ pushedBy: [] }), 'wakes on push to the team repo');
 });

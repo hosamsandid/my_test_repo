@@ -545,6 +545,14 @@ test('sanitizeCopilotHistory whitelists fields, demotes proposed, drops junk row
   ]);
 });
 
+test('sanitizeCopilotHistory keeps a live-team apply result (#2556)', () => {
+  const out = sanitizeCopilotHistory({
+    messages: [{ role: 'assistant', summary: 's', ok: true, status: 'partial', result: 'Partly applied: 1 change(s) applied, 1 failed.' }],
+  });
+  assert.equal(out.messages[0].status, 'partial');
+  assert.equal(out.messages[0].result, 'Partly applied: 1 change(s) applied, 1 failed.');
+});
+
 test('sanitizeCopilotHistory caps at the last N turns and rejects malformed input', () => {
   const many = Array.from({ length: 30 }, (_, i) => ({ role: 'user', content: `m${i}` }));
   const out = sanitizeCopilotHistory({ messages: many });

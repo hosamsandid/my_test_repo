@@ -105,13 +105,15 @@ inlines at most 20 of *its own* transitions; when it had more it carries
 
 The plugin seeds a small command-line tool into a granted agent's workspace.
 All Jira access stays server-side in the broker; the agent never sees the token.
+Chats run as the **sender** (own **Plugin Tokens** entry, else refused);
+watching and automated runs use the team's service account.
 
 | Command | |
 |---|---|
 | `aee-jira inbox` / `aee-jira inbox --consume <id>…` | the queued events of the whole team (peek); `--consume` drains exactly the ids named — use the ids from your own wake (`id`, or `events[].id` in a digest), never a teammate's |
 | `aee-jira list --project KAN [--status "Ready for Dev"]`, `aee-jira show KAN-6 [--fields "Team"]` | read issues (`show` also lists any attachments, the `parent`/epic key so you can traverse Story→Epic, and `availableTransitions` — the moves reachable from the issue's current status, so you can `transition --to` one without guessing). `--fields` additionally reads **custom fields** by their Jira name (e.g. `Team`) — an empty field comes back as `null`, so you can tell unset from set |
-| `aee-jira statuses --project KAN` | every workflow status the project supports, grouped by issue type — the full set the workflow allows, independent of any one issue's current state (for planning / checking what a workflow supports) |
-| `aee-jira search --jql "<JQL>" [--fields …] [--limit N]` | run any JQL the team's credential is allowed — for filters `list` can't express (a `created` range, an empty custom field, a summary match). Scoped to the team's bound site & projects; read-only, shaped like `list`. A `--fields` name that isn't a standard column is read as a custom field and rides alongside the row |
+| `aee-jira statuses --project KAN` | every workflow status the project supports, grouped by issue type — the full set the workflow allows, independent of any one issue's current state |
+| `aee-jira search --jql "<JQL>" [--fields …] [--limit N]` | run any JQL the credential allows — for filters `list` can't express (a `created` range, an empty custom field, a summary match). Scoped to the team's bound site & projects; read-only, shaped like `list`. A `--fields` name that isn't a standard column is read as a custom field and rides alongside the row |
 | `aee-jira attachment get KAN-6 <id> [--out PATH]` | fetch one attachment's content by id (from `show`) — text prints inline, binary is saved to a workspace path |
 | `aee-jira attachment add KAN-6 <path> [<path>…]` | upload one or more local files as new attachments — each path becomes a separate attachment (Jira never overwrites); paths are checked to exist before any upload, and the result reports per-file success/failure with each created id |
 | `aee-jira comment KAN-6 --body "…"` | add a comment |
@@ -122,6 +124,9 @@ All Jira access stays server-side in the broker; the agent never sees the token.
 | `aee-jira sprint list --board "<board name>"` | list a Scrum board's sprints (id, name, state, start/end), the board resolved by its human-readable name. Read-only |
 | `aee-jira sprint create --board "<board name>" --name "<name>" --start <date> --end <date>` | create one future sprint on the board (a Scrum board has only one active sprint) |
 | `aee-jira sprint bulk-create --board "<board name>" --name-template "<tmpl>" --until <date>` | pre-create a whole run of future sprints up to a target date in one call — each `--cadence-days` long (default 7, weekly Mon–Sun), continuing by default from the board's latest existing sprint (`--start` overrides / is required when the board has none). `--name-template` computes each name off the sprint's Monday: `{MMM}`/`{MMMM}` month, `{MM}`/`{M}`, `{YYYY}`/`{YY}`, `{DD}`/`{D}`, `{weekOfMonth}` (Nth-weekday-of-month), `{n}` (batch index) — the month is the Monday's month even when the week crosses into the next month (`Acc2.0 Oct_4` then `Acc2.0 Nov_1`). Per-sprint success/failure reported |
+| `aee-jira sprint close --board "<board name>" [--sprint-id <id>]` | complete (close) the board's active sprint (`--sprint-id` closes a specific one). Reports the count of issues left incomplete — they stay on the closed sprint |
+| `aee-jira sprint start --board "<board name>" [--sprint-id <id>]` | start (activate) the board's next future sprint (`--sprint-id` for a specific one). Refused if the board already has an active sprint or the sprint has no dates |
+| `aee-jira sprint advance --board "<board name>" [--close-id <id>] [--start-id <id>]` | roll the board over in one call: close the active sprint, then start the next future one — each half reported separately, so a partial result is visible (exit 1 on a partial) |
 
 A good wake instruction says exactly that sequence: *"Take the issue key(s) and
 event id(s) from the event payload, run `aee-jira inbox --consume <id>…` for

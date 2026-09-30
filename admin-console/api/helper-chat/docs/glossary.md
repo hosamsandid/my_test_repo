@@ -146,8 +146,8 @@ repository from launching a flood of sessions.
 ### Session policy
 Whether a triggered run continues the previous conversation or starts fresh.
 `persistent` (default) resumes; `per-invocation` starts a clean session each time and
-asks the agent to write down what it learned first. Chats with a human always keep
-continuity, regardless of this setting.
+asks the agent to write down what it learned first. Chats always keep continuity;
+a pool instance keeps one session for its triggers and chat (#2595).
 
 ### Label
 A GitHub label used as a coordination signal. An agent **emits** a label to announce it
@@ -238,6 +238,7 @@ left this one alone — different surface, different act.
 The same choice is offered for a single member added to a live team (#1958): Agent Chat's
 **Add member…** carries its own **Materialize now** checkbox — ticked by default here,
 because one member is not dozens — so a stub can also be created long after its team was.
+The Flow editor's live-team **Add agent** has it unticked (#2558).
 
 ---
 
@@ -338,7 +339,7 @@ formerly `.aee/` — is now **`.agent-studio/`** (an upgraded agent is migrated
 automatically, keeping all state). What deliberately **remains** "AEE" is purely
 *internal* and not surfaced in the file tree: the `AEE_*` operator environment
 variables, the `aee.*` container labels, and the `io.aee.*` agent↔console wire
-keys. The `aee-…` command-line tools (`aee-artifact`, `aee-emit`, `aee-podman`,
+keys. The `aee-…` command-line tools (`aee-artifact`, `aee-podman`,
 `aee-test`, …) keep their names for now; retiring the CLI prefix is tracked
 separately (a plugin-ecosystem convention decision, out of scope for the
 directory rename).

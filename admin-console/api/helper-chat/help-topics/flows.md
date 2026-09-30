@@ -210,6 +210,13 @@ from the design rather than another way to change it. Buttons that do not apply
 to the current scope are not shown at all, and a button that is disabled says
 why on hover.
 
+On a live team, **Add agent** has a **Materialize now** checkbox, **off** by
+default: the new agent is created as a **stub** — prompt and triggers only, no
+repository cloned, nothing running — so sketching in another role stays fast.
+It appears under *Not materialized yet* in Agent Chat, where **Materialize**
+provisions it later. Tick the box to provision it right away; the button reads
+*Add agent (stub)* while it is off, and a note after adding says which happened.
+
 ## Wiring hand-offs: the edge chooser
 
 Agents do not call each other. An agent finishes with an **Outcome**, the
@@ -258,9 +265,9 @@ queue. It is **what a human can see afterwards**.
 
 A direct hand-off has some deliberate limits. Its target must be another agent
 **on the same team** — never a person, because a hand-off is delivered to the
-target's queue and a human role has none, and never the producer itself. It also
-carries no *Delivery* choice: unlike a label, which can travel either over
-GitHub events or internally, a direct hand-off is internal by construction.
+target's queue and a human role has none, and never the producer itself. Unlike a
+label, which always travels through GitHub, a direct hand-off is delivered by
+the platform itself.
 
 The dialog offers a **note** — a sentence about what you are handing over. Two
 things are worth knowing about it. It reaches the consumer as *context to
@@ -296,22 +303,14 @@ directory still hands over correctly. And an artifact hand-off is a *wake*, not
 a start-gate: nothing blocks a downstream agent from running, it is simply told
 there is something to read.
 
-### Internal delivery vs the poller
+### How a label hand-off is delivered
 
-A label hand-off between two agents carries a **Delivery** choice:
-
-- **Via GitHub events** — the wake rides the GitHub Events API and is delivered
-  by the poller, roughly every 30 seconds.
-- **Direct (internal)** — the orchestrator delivers the wake itself. The
-  producing agent announces the label with `aee-emit`, the consumer is queued
-  immediately, and the label is *still* stamped onto GitHub as visible status.
-
-Internal delivery has no polling latency and cannot lose an event to the API's
-event window, so it is the better default for agent-to-agent hand-offs, and the
-generated flows use it. It is deliberately **not** offered for human gates and
-brakes: a person applies those on GitHub, so only the poller can see them. A
-pull-request or issue channel may go internal only when it is labelled and
-agent-set — the channel *opening* an artifact always stays poller-delivered.
+Every label hand-off travels through GitHub. The producing agent applies the
+label on the issue or pull request, and the GitHub poller wakes the consumer —
+within one poll interval, roughly 30 seconds. The label on GitHub is the single
+source of truth: a person re-applying the same label wakes the consumer exactly
+like an agent does, and every wake shows up in the **GitHub Event Log**. (The
+former *Direct (internal)* delivery option was removed in #2578.)
 
 ## Human gates, brakes and named human roles
 
@@ -460,17 +459,17 @@ You keep steering it: follow-up messages refine the proposal rather than
 starting over. Each proposal is checked before you can accept it, and one with
 error-level findings cannot be applied — steer with another message instead.
 
-On a **live team** the Copilot still works, but it never edits the team
-directly: it opens the team as a draft and continues the conversation there.
-That is deliberate — a chat turn is not something that should reach running
-agents.
+On a **live team** the Copilot edits the team itself. **Apply to team…** first
+opens a confirmation listing each change (added, changed, removed) and anything
+*not applied*; confirmed changes reach running agents at once. Each
+removal is its own opt-in checkbox. New roles become stubs unless you
+tick *Materialize now*. If the team changed meanwhile, Apply is
+blocked — **Regenerate**. Only editors can chat and apply; they share the
+history. **Edit as draft** stays available, but *Extend team* only adds roles
+that don't exist yet.
 
-A large flow can take a while, and a single generation that runs too long
-would otherwise fail outright. When that happens the Copilot generates the
-flow in two steps on its own — the roles first, then the wiring that connects
-them — and shows *Generating in parts…* while it does; you do nothing
-differently and the result is the same proposal, checked the same way. If a
-turn still cannot finish in time, the error card says so in plain language and
-suggests describing the flow in smaller parts or switching to a faster assist
-model under **Settings → Model**, with the raw technical detail tucked behind a
-*Technical detail* expander rather than shown as the headline.
+A large flow can take a while. If a generation would run too long, the
+Copilot builds it in two steps — roles first, then the wiring — showing
+*Generating in parts…*; the result is the same checked proposal. If a turn
+still times out, the error card suggests smaller requests or a faster assist
+model under **Settings → Model**, with the raw detail behind *Technical detail*.

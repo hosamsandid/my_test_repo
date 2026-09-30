@@ -36,13 +36,13 @@ const {
 } = require("./knowledge-store");
 const knowledgeSync = require("./knowledge-sync");
 const { createKeyedMutex } = require("./keyed-mutex");
-const flowEmit = require("./flow-emit");
 const wakeAgent = require("./wake-agent");
 const pluginEvent = require("./plugin-event");
 const pluginScopeToken = require("./plugin-scope-token");
 const labelFastPath = require("./github-label-fastpath");
 const { LabelDedupMarkers } = require("./label-dedup-markers");
 const githubEventLog = require("./github-event-log");
+const githubRefire = require("./github-refire");
 const internalAuth = require("./internal-auth");
 
 // Internal-API authentication for :4002 (#1456, GOV-PLATFORM-2). Resolved ONCE
@@ -78,8 +78,12 @@ const knowledgeConvergence = require("./knowledge-convergence");
 const knowledgeCurator = require("./knowledge-curator");
 const knowledgeDomains = require("./knowledge-domains");
 const knowledgeRouting = require("./knowledge-routing");
+const knowledgeDomainSkills = require("./knowledge-domain-skills");
 const knowledgeDistillation = require("./knowledge-distillation");
 const knowledgeConsolidation = require("./knowledge-consolidation");
+// Candidate-store rows that are not lesson content: never assigned to a domain or
+// folded into a domain skill by Consolidate (#2592).
+const CONSOLIDATION_NON_LESSON_SOURCES = new Set([knowledgeDomainSkills.DOMAIN_CARD_SOURCE, 'domain-proposal', 'decay']);
 const knowledgeCleanup = require("./knowledge-cleanup");
 const knowledgeRetrieval = require("./knowledge-retrieval");
 const knowledgeDecay = require("./knowledge-decay");
@@ -93,13 +97,7 @@ const { PROMPT_MODES, resolvePromptMode, composeMemberPrompt } = require("./prom
 const { createLlmAuthFlowManager } = require("./llm-auth-flow");
 const agentGitOps = require("./agent-git-ops");
 const credentialResolution = require("./credential-resolution");
-// Unified resource-access model switch (#2356, epic #2361, concept #2349).
-// Off by default: the redesign's runtime resolution (the global service
-// credential fallback below) and lifecycle sweeps (PR5) stay dark until an
-// operator opts in — an upgraded stack keeps today's behaviour byte-identical.
-// See resource-access-mode.js (byte-mirrored in admin-console/api).
-const { resolveResourceAccessV2, resourceAccessModeLogLine } = require("./resource-access-mode");
-const RESOURCE_ACCESS_V2 = resolveResourceAccessV2(process.env);
+const chatGithubWrite = require("./chat-github-write");
 // §14 / E10 (#2360): pure policy for a personal provider used as a team default
 // across the team-of-one → multi-user transition. Byte-mirrored in admin-console.
 const { personalDefaultTransitionRisk } = require("./provider-lend-policy");
@@ -112,6 +110,7 @@ const gitPanelOps = require("./git-panel-ops");
 const { resolveCloneTarget } = require("./clone-target");
 const { assessConversionEligibility, planTeamConversion, planTeamOfOneCreation } = require("./team-conversion");
 const teamOfOneMigration = require("./team-of-one-migration");
+const pushAttribution = require("./push-attribution");
 const { nextAvailableAgentId, suggestFreeAgentId } = require("./agent-id-resolution");
 const { syncAgentRepoPlan, summarizeRepoResults, repoDivergence } = require("./repo-sync");
 // Agent-scoped repositories (#2067): a repository attached to ONE agent,
@@ -166,7 +165,8 @@ const { effectiveSkills, migrateSkillGrant, planSkillSync, planAgentGrantEdit, p
 const { effectivePlugins, planAgentPluginGrantEdit, planPluginSync, pluginGrantFor, normalizeGrantList } = require("./plugin-grants");
 const { planWorkspaceSync, planCliRefresh } = require("./plugin-sync");
 const { resolveAgentStateDir } = require("./agent-state-dir");
-const { resolveScopeId } = require("./plugin-scope");
+const mcpSeed = require("./mcp-seed");
+const { resolveScopeId, scopeIdFromGrantScope } = require("./plugin-scope");
 const pluginRegistry = require("./plugin-registry");
 const pluginRuntime = require("./plugin-runtime");
 const { resolveScopeGithubCredentials, buildTeamFlowLabels } = require("./plugin-github-creds");
@@ -174,6 +174,7 @@ const { resolveScopeGithubCredentials, buildTeamFlowLabels } = require("./plugin
 // manifest's `credentials[]` real: a Team Admin sets values in the console,
 // stored 0600, pushed to the broker server-side — no secret in code or env.
 const { PluginCredentialStore } = require("./plugin-credential-store");
+const pluginRunIdentity = require("./plugin-run-identity");
 const { createPluginCredentialWiring } = require("./plugin-credential-routes");
 const { assertGranularityGrantable, defaultGranularity } = require("./plugin-manifest");
 const pluginReconcile = require("./plugin-reconcile");
@@ -206,9 +207,11 @@ const { buildTicketLedger } = require("./ticket-reconciler");
 const ticketReconcileSweep = require("./ticket-reconcile-sweep");
 const agentPool = require("./agent-pool");
 const flowSupervisor = require("./flow-supervisor");
+const flowBoard = require("./flow-board");
 const recurringPoolSource = require("./recurring-pool-source");
 const predictedPaths = require("./predicted-paths");
 const poolInstanceLanes = require("./pool-instance-lanes");
+const provisioningSweep = require("./provisioning-sweep");
 
 // ── Read-write context mount helpers (writing into a mounted host folder) ──
 // A caller path is RELATIVE to /context. For a single legacy folder the mount
@@ -403,7 +406,12 @@ function resolveLlmBinding(endpointId, modelPin, { context } = {}) {
   let token = "";
   if (ep.authTokenId) {
     try {
-      token = fs.readFileSync(path.join(LLM_KEYS_DIR, ep.authTokenId), "utf8").trim();
+      // Strip ALL whitespace, not just the ends: a subscription setup-token
+      // copied out of a line-wrapped terminal can carry an embedded newline/
+      // space that survives `.trim()` and corrupts the Authorization header
+      // ("Header 'Authorization' has invalid value"). LLM tokens never contain
+      // internal whitespace, so this is safe for both api-key and oauth-token.
+      token = fs.readFileSync(path.join(LLM_KEYS_DIR, ep.authTokenId), "utf8").replace(/\s+/g, "");
     } catch (err) {
       console.error(`[Orchestrator] Cannot read LLM token for endpoint ${ep.id}: ${err.message}`);
     }
@@ -444,7 +452,7 @@ function readLlmEndpointRecord(id) {
   }
 }
 
-// §14 / E10 (behind AEE_RESOURCE_ACCESS_V2): adding a SECOND human to a squad
+// §14 / E10: adding a SECOND human to a squad
 // whose shared model-provider default is a personal SUBSCRIPTION (oauth) seat
 // would silently share a single-user seat (E9, Anthropic Consumer Terms) — a
 // HARD refusal at the membership boundary. A personal API-KEY default is only
@@ -452,7 +460,7 @@ function readLlmEndpointRecord(id) {
 // Returns { message } to refuse, or null to proceed. Fail-open: any read error
 // (or a non-squad human team) skips the guard — it must never break a legit add.
 function personalOauthLendBlockOnMembershipAdd(teamId, newUserId) {
-  if (!RESOURCE_ACCESS_V2 || !teamId || !newUserId) return null;
+  if (!teamId || !newUserId) return null;
   try {
     const current = teamsStore.listMemberships({ teamId });
     const already = current.some(m => m && m.userId === newUserId);
@@ -663,6 +671,20 @@ function startAgentProcess(config) {
   // respawn paths (env credential change, owner credential change, single-agent
   // respawn) go through startAgentProcess, and changing the secret invalidates
   // every outstanding token at once.
+  // Plugin caller identity (#2562): a new container generation forgets the
+  // previous run key and every run it declared, and the container gets the
+  // HMAC caller token its plugin CLIs send ("this is agent <id>" — never a
+  // person; see plugin-run-identity.js). Signed with the plugin registry
+  // secret, so it works whether or not INTERNAL_API_TOKEN is armed.
+  pluginRunRegistry.resetAgent(id);
+  try {
+    const callerToken = pluginRunIdentity.mintCallerToken(id, pluginRuntime.signingSecret());
+    if (callerToken) childEnv.AEE_AGENT_CALLER_TOKEN = callerToken;
+  } catch (err) {
+    delete childEnv.AEE_AGENT_CALLER_TOKEN;
+    console.warn(`[Orchestrator] no plugin caller token for ${id}: ${err.message}`);
+  }
+
   const agentInternalToken = internalAuth.mintAgentToken(id, internalAuthConfig.agentTokenSecret);
   if (agentInternalToken) childEnv.AEE_INTERNAL_TOKEN = agentInternalToken;
   else delete childEnv.AEE_INTERNAL_TOKEN;
@@ -859,6 +881,7 @@ function startAgentProcess(config) {
 function stopAgentProcess(id) {
   const proc = agentProcesses.get(id);
   if (!proc) return;
+  pluginRunRegistry.resetAgent(id); // #2562 — the container's run key dies with it
   proc.kill('SIGTERM');
   agentProcesses.delete(id);
   console.log(`[Orchestrator] Stopped process for agent ${id}`);
@@ -1480,6 +1503,46 @@ function backfillTriggerHorizonStamps() {
   }
 }
 
+// #2571 AC6: derived data-flow triggers (Flow-editor hand-offs, `dataFlow:
+// true`) that predate the "pushed by agent" producer filter get one naming
+// exactly their upstream, so a push by another role, another Agent Team on the
+// same repo, a human or a knowledge-base sync stops waking them. Manually-
+// authored push triggers (no `dataFlow` marker) are never touched, nor is a
+// trigger that already carries a `pushedBy` (even an explicit `[]` = any push).
+// Idempotent; runs on every start.
+function migrateDataFlowProducerFilters() {
+  const teamCache = new Map();
+  const teamOfAgent = (agentId) => {
+    if (!teamCache.has(agentId)) teamCache.set(agentId, pushAttribution.teamOf(loadAgentConfig(agentId)));
+    return teamCache.get(agentId);
+  };
+  let migrated = 0;
+  for (const id of listAgentIds()) {
+    const p = controlOrPoolPath(id, "triggers.json");
+    if (!fs.existsSync(p)) continue;
+    const teamId = teamOfAgent(id);
+    if (!teamId) continue;
+    let triggers, mtimeIso;
+    try {
+      triggers = JSON.parse(fs.readFileSync(p, "utf8"));
+      mtimeIso = fs.statSync(p).mtime.toISOString();
+    } catch (err) {
+      console.error(`[Orchestrator] Producer-filter migration: skipping ${id}: ${err.message}`);
+      continue;
+    }
+    const { triggers: next, changed } = pushAttribution.migrateDataFlowProducerFilter(triggers, {
+      memberId: id, teamId, teamOfAgent, horizon: mtimeIso,
+    });
+    if (changed.length === 0) continue;
+    saveTriggers(id, next);
+    migrated++;
+    console.log(`[Orchestrator] Producer filter set on data-flow trigger(s) of ${id}: ${changed.join(", ")}`);
+  }
+  if (migrated > 0) {
+    console.log(`[Orchestrator] Producer-filter migration updated ${migrated} agent(s)`);
+  }
+}
+
 // Resolve the owning (human) Team for a newly created resource. An explicit id
 // must reference an existing team; absence falls back to the default team.
 function resolveOwnerTeamId(teamId) {
@@ -1777,7 +1840,7 @@ function _flowGithubGetJson(apiPath, token) {
 
 // #1897 AC8: best-effort resolution of an issue/PR title for a synthetic
 // internal-delivery event. The trigger notice shows `[#N](url): <title>` when
-// the title is known; internal-transport (flow-emit) and plugin-fast-path
+// the title is known; label-fast-path (plugin / Flow Supervisor)
 // deliveries synthesize a minimal `{number, html_url}` subject with NO title
 // (only poller-delivered PRs are enriched today), so we fetch it here with the
 // repo's team token — exactly as the poller does for PRs. Never throws and
@@ -1788,8 +1851,8 @@ function _flowGithubGetJson(apiPath, token) {
 // strict `parseCloses` (closes/fixes/resolves #N + `issue-N` branch) costs no
 // extra call — the same "no second request" the poller's `_enrichPullRequestPayload`
 // relies on. `closesIssues` matters for #2114 admission control: `entryTicketRef`
-// keys "same-ticket" off it, so a synthetic PR event built by flow-emit.js /
-// github-label-fastpath.js MUST carry it or an internal/label-fast-path
+// keys "same-ticket" off it, so a synthetic PR event built by
+// github-label-fastpath.js MUST carry it or a label-fast-path
 // reviewer-wake mis-keys as a new ticket and deadlocks at `wipLimit: 1`. Using
 // the STRICT closing-keyword parse here (not a loose issue↔PR link) is
 // deliberate: entry attribution must not merge two separate tickets.
@@ -1843,13 +1906,17 @@ async function wakeGithubLabelListeners({ repo, number, kind, label, actor, sour
     eventId: `intlbl:${crypto.randomBytes(6).toString('hex')}`,
     now,
   });
+  // #2596: per-listener enqueue verdict, read back for the log outcome below.
+  const decisions = new Map();
   for (const l of listeners) {
     // Enqueue first (immediate wake), then arm the dedup marker so the
     // poller's later delivery of the same label is dropped.
+    const decision = {};
     enqueuePending(l.agentId, {
-      ...flowEmit.buildPendingEntry(l.triggerId, key, ghEvent),
+      ...labelFastPath.buildPendingEntry(l.triggerId, key, ghEvent),
       source,
-    });
+    }, { decision });
+    decisions.set(l, decision);
     labelDedupMarkers.add({
       agentId: l.agentId, triggerId: l.triggerId,
       repo, kind, number, label, appliedAt: now,
@@ -1864,10 +1931,10 @@ async function wakeGithubLabelListeners({ repo, number, kind, label, actor, sour
   githubEventLog.record({
     ...githubEventLog.buildEventEntry({
       ghEvent, repoFullName: repo, key,
-      outcomes: listeners.map((l) => ({
+      outcomes: listeners.map((l) => githubEventLog.applyPoolDecision({
         agentId: l.agentId, triggerId: l.triggerId,
         status: 'delivered', reason: null, digest: false, wakeLabel: label,
-      })),
+      }, decisions.get(l))),
     }),
     source,
   });
@@ -1876,6 +1943,141 @@ async function wakeGithubLabelListeners({ repo, number, kind, label, actor, sour
       `[Orchestrator] label-fastpath: ${repo}#${number} +${label} matched no poller listener`);
   }
   return { listeners };
+}
+
+// ── Manual "Fire again" for a dropped GitHub wake (#2525) ─────────────────
+// The poller instance, published once it is constructed at startup so the
+// re-fire can re-arm its wake key (null until then / in unit tests).
+let githubPollerRef = null;
+// In-flight re-fires, keyed (event, agent, trigger). The concurrent half of the
+// at-most-once guarantee (AC9): a double-click or two users clicking at once
+// hit this before any await. The persisted half is the logged re-fire row.
+const githubRefireInFlight = new Set();
+
+// The raw issue/PR object (state, merged, labels, title, body) for the re-fire's
+// state check (AC8). Null on any failure — the caller refuses rather than
+// guesses.
+async function fetchWorkItemRaw(repoFullName, kind, number) {
+  try {
+    const tokenId = resolveRepoGithubTokenId(repoFullName);
+    if (!tokenId) return null;
+    const token = fs.readFileSync(path.join(GH_TOKENS_DIR, tokenId), "utf8").trim();
+    const apiPath = kind === "pr"
+      ? `/repos/${repoFullName}/pulls/${number}`
+      : `/repos/${repoFullName}/issues/${number}`;
+    return await _flowGithubGetJson(apiPath, token);
+  } catch (err) {
+    console.error(`[Orchestrator] refire: state fetch failed for ${repoFullName}#${number}: ${err.message}`);
+    return null;
+  }
+}
+
+// Is the session a twin delivery started still running or still queued? An
+// `internal-dedup` drop whose twin is live must not be re-fired (#2525 edge
+// case) — the agent is already working on exactly this wake.
+function githubTwinStillActive(agentId, twin) {
+  if (!twin) return false;
+  const correlationId = githubRefire.triggerCorrelationId(twin.triggerId, twin.eventId);
+  try {
+    const reg = JSON.parse(fs.readFileSync(agentStatePath(agentId, "running-sessions.json"), "utf8"));
+    if (Array.isArray(reg) && reg.some((r) => r && r.correlationId === correlationId)) return true;
+  } catch { /* no running sessions */ }
+  try {
+    const pending = JSON.parse(fs.readFileSync(pendingPath(agentId), "utf8"));
+    if (Array.isArray(pending) && pending.some((e) => e && e.github && String(e.github.eventId) === twin.eventId)) return true;
+  } catch { /* nothing queued */ }
+  return false;
+}
+
+// Re-deliver one dropped (event, agent, trigger) wake. Returns `{status, body}`.
+// A human override: enqueued straight onto the agent's queue (so no poller gate
+// — throttle, edge dedup, internal dedup — can drop it), touching no other
+// event's throttle bucket or dedup marker (AC5b).
+async function refireGithubEvent({ agentId, eventId, triggerId, actor }) {
+  const lockKey = githubRefire.refireKey({ eventId, agentId, triggerId });
+  if (githubRefireInFlight.has(lockKey)) {
+    return { status: 409, body: { ok: false, code: "in-progress", error: "This event is already being fired again." } };
+  }
+  githubRefireInFlight.add(lockKey);
+  try {
+    const entries = githubEventLog.readEntries();
+    const found = githubRefire.findDroppedOutcome(entries, { eventId, agentId, triggerId });
+    const prior = githubRefire.findPriorRefire(entries, { eventId, agentId, triggerId });
+    const trigger = (loadTriggers(agentId) || []).find((t) => t && t.id === triggerId) || null;
+    const plan = githubRefire.planRefire({
+      found, prior, trigger,
+      agentEnabled: loadAgentConfig(agentId)?.enabled !== false,
+      retentionCutoffMs: Date.now() - githubEventLog.RETENTION_DAYS * 24 * 60 * 60 * 1000,
+    });
+    if (!plan.ok) return { status: plan.status, body: { ok: false, code: plan.code, error: plan.error, refire: plan.refire || null } };
+    const { entry, outcome } = found;
+    const { wakeLabel, workItem } = plan;
+
+    if (outcome.reason === "internal-dedup") {
+      const twin = githubRefire.findTwinDelivery(entries, { entry, agentId, triggerId, wakeLabel });
+      if (githubTwinStillActive(agentId, twin)) {
+        return {
+          status: 409,
+          body: {
+            ok: false, code: "twin-active", twin,
+            error: "The earlier delivery of this wake is still running (or queued) — open that session instead of firing again.",
+          },
+        };
+      }
+    }
+
+    const detail = await fetchWorkItemRaw(entry.repo, workItem.kind, workItem.number);
+    const state = githubRefire.checkItemState(detail, { kind: workItem.kind, wakeLabel });
+    if (!state.ok) return { status: state.status, body: { ok: false, code: state.code, error: state.error } };
+
+    const now = new Date().toISOString();
+    const title = typeof detail.title === "string" && detail.title ? detail.title : null;
+    const closesIssues = workItem.kind === "pr"
+      ? prEventsLog.parseCloses(detail.body, detail.head && detail.head.ref)
+      : [];
+    const key = entry.event;
+    const ghEvent = githubRefire.buildRefireEvent({
+      entry, wakeLabel, title, closesIssues, actor,
+      eventId: `refire:${crypto.randomBytes(6).toString("hex")}`,
+      now,
+    });
+    const logFields = githubRefire.buildRefireLogFields({ entry, outcome, actor });
+    const decision = {};
+    const ok = enqueuePending(agentId, githubRefire.buildRefirePendingEntry({
+      triggerId, key, ghEvent, wakeLabel, refireOf: logFields.refireOf,
+    }), { decision });
+    if (!ok) {
+      return { status: 500, body: { ok: false, code: "enqueue-failed", error: "Could not queue the wake for the agent." } };
+    }
+    // Keep the edge dedup as a normal delivery leaves it (AC10): the wake label
+    // is present (checked above), so it is armed — a later duplicate of the
+    // same label is still dropped as `wake-already-armed`.
+    if (githubPollerRef && wakeLabel && typeof key === "string" && key.endsWith(".labeled")) {
+      githubPollerRef.armWake({ repo: entry.repo, triggerId, kind: workItem.kind, number: workItem.number, label: wakeLabel });
+    }
+    const logEntry = {
+      ...githubEventLog.buildEventEntry({
+        ghEvent, repoFullName: entry.repo, key,
+        outcomes: [githubEventLog.applyPoolDecision(
+          { agentId, triggerId, status: "delivered", reason: null, digest: false, wakeLabel }, decision)],
+      }),
+      ...logFields,
+    };
+    githubEventLog.record(logEntry);
+    console.log(
+      `[Orchestrator] refire: ${entry.repo}#${workItem.number} ${key} (${eventId}, was ${outcome.reason}) ` +
+      `→ agent=${agentId} trigger=${triggerId} by ${actor || "console"} as ${ghEvent.id}`);
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        refire: githubRefire.refireSummary(logEntry),
+        correlationId: githubRefire.triggerCorrelationId(triggerId, ghEvent.id),
+      },
+    };
+  } finally {
+    githubRefireInFlight.delete(lockKey);
+  }
 }
 
 function _flowLiftEmits(cfgEmits, triggers) {
@@ -1918,6 +2120,14 @@ function _flowTeamMembers(teamId) {
       // run legitimate — the detector drops the output-missing expectation.
       outcomes: cfg.outcomes || null,
       triggers,
+      // Flow Control board (#2573): the consumed channels name hand-offs, and a
+      // pool instance must count as its role (additive — the anomaly detector
+      // and the ticket ledger ignore these).
+      channels: Array.isArray(cfg.channels) ? cfg.channels : [],
+      poolInstance: !!cfg.poolInstance,
+      poolOf: cfg.poolOf || null,
+      poolItem: cfg.poolItem != null ? cfg.poolItem : null,
+      poolRepo: cfg.poolRepo || null,
     });
     if (cfg.environmentId) envIds.add(cfg.environmentId);
   }
@@ -2303,6 +2513,376 @@ async function computeTeamTicketLedger(teamId, { now = Date.now() } = {}) {
   };
 }
 
+// ── Flow Control board (#2573, concept Amendment 3) ─────────────────────────
+//
+// The lean "who is working on what" board. Unlike the ticket ledger above
+// (≈7 GitHub calls per open PR, sequential), this is ONE list sweep per repo —
+// open issues, open PRs, recently closed items, and a single GraphQL query for
+// every open PR's mergeability/review/check rollup — all repos in parallel.
+// Everything else comes from the platform's own logs (event log, PR-link log,
+// running sessions), so the reference team (~60 open PRs) renders in well
+// under 2 s. The ledger and `/tickets` are untouched (#2117 still reads them).
+
+// A GitHub GraphQL POST, GET-helper's sibling. `/api/v3` (GHE) maps to
+// `/api/graphql`; api.github.com to `/graphql`.
+function _flowGithubGraphql(query, variables, token) {
+  const { resolveGithubApiTarget } = require("./github-api-base");
+  const api = resolveGithubApiTarget();
+  const gqlPath = /\/v3$/.test(api.basePath) ? api.basePath.replace(/\/v3$/, "/graphql") : `${api.basePath}/graphql`;
+  const payload = JSON.stringify({ query, variables });
+  return new Promise((resolve, reject) => {
+    const req = api.transport.request(
+      {
+        hostname: api.hostname,
+        port: api.port,
+        path: gqlPath,
+        method: "POST",
+        headers: {
+          "User-Agent": "agent-studio-poller",
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload),
+          Authorization: `Bearer ${token}`,
+        },
+        timeout: 15_000,
+      },
+      (resp) => {
+        let body = "";
+        resp.on("data", (c) => (body += c));
+        resp.on("end", () => {
+          if (resp.statusCode !== 200) return reject(new Error(`GitHub graphql → HTTP ${resp.statusCode}`));
+          try {
+            const json = JSON.parse(body);
+            if (!json || !json.data) return reject(new Error("GitHub graphql → no data"));
+            resolve(json.data);
+          } catch (err) {
+            reject(new Error(`GitHub graphql → bad JSON: ${err.message}`));
+          }
+        });
+      },
+    );
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error("GitHub graphql → timeout")));
+    req.end(payload);
+  });
+}
+
+const FLOW_BOARD_PR_STATUS_QUERY = `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:100,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number mergeable reviewDecision commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}`;
+
+// Up to `maxPages` pages of a list endpoint, stopping at the first short page.
+async function _flowGithubGetPages(apiPath, token, maxPages) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const sep = apiPath.includes("?") ? "&" : "?";
+    const batch = await _flowGithubGetJson(`${apiPath}${sep}per_page=100&page=${page}`, token);
+    if (!Array.isArray(batch)) break;
+    out.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return out;
+}
+
+const _labelList = (labels) =>
+  (Array.isArray(labels) ? labels : []).map((l) => (typeof l === "string" ? l : l && l.name)).filter(Boolean);
+
+// One repo's snapshot in the board's input shape. Throws only when the repo is
+// unreachable altogether (the open-issues list failed); the PR list, closed
+// list and GraphQL rollup each degrade on their own.
+async function _flowBoardSweepRepo(repo, token, { sinceIso }) {
+  const [owner, name] = repo.split("/");
+  const seg = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+  const warnings = [];
+  const [openIssues, openPrs, closed, gql] = await Promise.all([
+    _flowGithubGetPages(`${seg}/issues?state=open&sort=updated&direction=desc`, token, 3),
+    _flowGithubGetPages(`${seg}/pulls?state=open&sort=updated&direction=desc`, token, 2).catch((err) => {
+      warnings.push(`${repo}: pulls: ${err.message}`);
+      return [];
+    }),
+    _flowGithubGetPages(`${seg}/issues?state=closed&sort=updated&direction=desc&since=${encodeURIComponent(sinceIso)}`, token, 2).catch((err) => {
+      warnings.push(`${repo}: closed items: ${err.message}`);
+      return [];
+    }),
+    _flowGithubGraphql(FLOW_BOARD_PR_STATUS_QUERY, { owner, name }, token).catch((err) => {
+      warnings.push(`${repo}: PR status: ${err.message}`);
+      return null;
+    }),
+  ]);
+  const status = new Map();
+  const nodes = gql && gql.repository && gql.repository.pullRequests && gql.repository.pullRequests.nodes;
+  for (const n of Array.isArray(nodes) ? nodes : []) {
+    if (!n || n.number == null) continue;
+    const c = n.commits && n.commits.nodes && n.commits.nodes[0];
+    status.set(Number(n.number), {
+      mergeable: n.mergeable || null,
+      reviewDecision: n.reviewDecision || null,
+      checks: flowBoard.checksState(c && c.commit && c.commit.statusCheckRollup && c.commit.statusCheckRollup.state),
+    });
+  }
+  const issues = [];
+  const prs = [];
+  for (const it of [...openIssues, ...closed]) {
+    if (!it || it.number == null) continue;
+    const base = {
+      repo, number: it.number, title: it.title || "", url: it.html_url || null,
+      state: it.state === "closed" ? "closed" : "open", labels: _labelList(it.labels),
+      body: typeof it.body === "string" ? it.body : "", author: (it.user && it.user.login) || null,
+      createdAt: it.created_at || null, updatedAt: it.updated_at || null, closedAt: it.closed_at || null,
+    };
+    if (!it.pull_request) issues.push(base);
+    else if (base.state === "closed") {
+      const mergedAt = it.pull_request.merged_at || null;
+      prs.push({ ...base, merged: !!mergedAt, mergedAt });
+    }
+    // Open PRs come from the pulls list below (it carries the head branch).
+  }
+  for (const p of openPrs) {
+    if (!p || p.number == null) continue;
+    const st = status.get(Number(p.number)) || {};
+    const body = typeof p.body === "string" ? p.body : "";
+    const headRef = (p.head && p.head.ref) || null;
+    prs.push({
+      repo, number: p.number, title: p.title || "", url: p.html_url || null, state: "open",
+      labels: _labelList(p.labels), body, author: (p.user && p.user.login) || null, draft: !!p.draft,
+      createdAt: p.created_at || null, updatedAt: p.updated_at || null, headRef,
+      closes: prEventsLog.parseCloses(body, headRef),
+      mergeable: st.mergeable || null, reviewDecision: st.reviewDecision || null, checks: st.checks || null,
+    });
+  }
+  return { issues, prs, warnings };
+}
+
+// Every running session of the team's agents (pooled and not). The registry is
+// what the agent itself pushes (#185) — an idle agent has an empty one.
+function _flowBoardSessions(members) {
+  const out = [];
+  for (const m of members) {
+    let reg = [];
+    try {
+      reg = JSON.parse(fs.readFileSync(agentStatePath(m.id, "running-sessions.json"), "utf8"));
+    } catch {
+      reg = [];
+    }
+    for (const session of Array.isArray(reg) ? reg : []) {
+      if (session && typeof session === "object") out.push({ agentId: m.id, session });
+    }
+  }
+  return out;
+}
+
+// How many of a pooled role's instances are still doing something: a running
+// session, or a dispatch already queued to it. The drain → off test.
+function _poolRoleBusyCount(roleFullId) {
+  let busy = 0;
+  for (const id of _liveInstanceIdsForRole(roleFullId)) {
+    let reg = [];
+    try {
+      reg = JSON.parse(fs.readFileSync(agentStatePath(id, "running-sessions.json"), "utf8"));
+    } catch {
+      reg = [];
+    }
+    const status = _readInstanceStatus(id);
+    if ((Array.isArray(reg) && reg.length) || (status && status.state === "busy") || readPendingEntries(id).length) busy++;
+  }
+  return busy;
+}
+
+// #2573 AC13: a `draining` role whose last instance has finished switches
+// itself `off`. Run by the periodic pool sweep and on every board/pool-control
+// read, so the board never shows a finished drain as still draining.
+function settlePoolDrains(teamId) {
+  const control = loadPoolControl(teamId);
+  let changed = false;
+  for (const role of _teamPooledRoles(teamId)) {
+    const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
+    const state = agentPool.poolControlState(control, roleId);
+    if (state !== "draining") continue;
+    if (agentPool.settleDrain(state, _poolRoleBusyCount(role.id)) === "off") {
+      control[roleId] = { state: "off", changedAt: new Date().toISOString() };
+      changed = true;
+      console.log(`[AgentPool] ${teamId}: ${roleId} finished draining — switched off`);
+    }
+  }
+  if (changed) savePoolControl(teamId, control);
+  return control;
+}
+
+// Per-team board configuration (column renames/merges/hides, done retention).
+// Operator runtime config beside pool-control, kept out of the bundle.
+function flowBoardConfigPath(teamId) {
+  return controlOrPoolPath(teamId, "flow-board.json");
+}
+
+function loadFlowBoardConfig(teamId) {
+  try {
+    return flowBoard.normalizeBoardConfig(JSON.parse(fs.readFileSync(flowBoardConfigPath(teamId), "utf8")));
+  } catch {
+    return flowBoard.normalizeBoardConfig(null);
+  }
+}
+
+async function computeTeamFlowBoard(teamId, { now = Date.now() } = {}) {
+  const teamCfg = loadAgentConfig(teamId) || {};
+  const labels = Array.isArray(teamCfg.labels) ? teamCfg.labels : [];
+  const config = loadFlowBoardConfig(teamId);
+  const { members, envIds } = _flowTeamMembers(teamId);
+  const repoToken = _flowRepoTokens(envIds);
+  const sinceIso = new Date(now - config.doneRetentionHours * 3600 * 1000).toISOString();
+
+  const warnings = [];
+  const github = { issues: [], prs: [] };
+  const swept = await Promise.all(
+    [...repoToken].map(([repo, token]) =>
+      _flowBoardSweepRepo(repo, token, { sinceIso }).then(
+        (r) => ({ repo, ...r }),
+        (err) => ({ repo, error: err.message }),
+      ),
+    ),
+  );
+  let reached = 0;
+  for (const r of swept) {
+    if (r.error) {
+      warnings.push(`${r.repo}: ${r.error}`);
+      continue;
+    }
+    reached++;
+    github.issues.push(...r.issues);
+    github.prs.push(...r.prs);
+    warnings.push(...r.warnings);
+  }
+
+  const team = new Set(members.map((m) => m.id));
+  const teamPrefix = `${teamId}-`;
+  const ours = (agentId) => typeof agentId === "string" && (team.has(agentId) || agentId.startsWith(teamPrefix));
+  let events = [];
+  try {
+    events = githubEventLog.readEntries().filter(
+      (e) => e && Array.isArray(e.outcomes) && e.outcomes.some((o) => o && ours(o.agentId)),
+    );
+  } catch {
+    events = [];
+  }
+  let prRecords = [];
+  try {
+    prRecords = _readPrEventRecords().filter((r) => r && (r.teamId === teamId || ours(r.agentId)));
+  } catch {
+    prRecords = [];
+  }
+
+  const control = settlePoolDrains(teamId);
+  const pausedHold = loadPausedHold(teamId);
+  const pools = _teamPooledRoles(teamId).map((role) => {
+    const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
+    const c = control[roleId] || null;
+    return {
+      agentId: role.id,
+      roleId,
+      displayName: role.cfg.displayName || roleId,
+      maxInstances: role.pool.maxInstances,
+      state: agentPool.poolControlState(control, roleId),
+      changedAt: c ? c.changedAt : null,
+      held: (pausedHold[roleId] || []).length,
+      instances: _liveInstanceIdsForRole(role.id).map((instanceId) => ({ instanceId })),
+    };
+  });
+
+  const board = flowBoard.buildFlowBoard({
+    members, labels, teamId, config, github, events, prRecords,
+    sessions: _flowBoardSessions(members), pools, now,
+  });
+  const lane = loadAdmissionLane(teamId);
+  const held = lane.held.map((h) => ({
+    id: admissionControl.heldIdentity(h.agentId, h.entry),
+    agentId: h.agentId,
+    ticket: h.ticket,
+    heldAt: h.heldAt,
+  }));
+  return {
+    teamId,
+    generatedAt: new Date(now).toISOString(),
+    repos: [...repoToken.keys()],
+    // Every repo unreachable (or rate-limited) — the caller keeps showing the
+    // last good snapshot rather than an empty board.
+    githubUnreachable: repoToken.size > 0 && reached === 0,
+    warnings,
+    config,
+    held,
+    ...board,
+  };
+}
+
+// The PR-link log's reader lives in the admin console (`admin-console/api/
+// pr-events-log.js`); the orchestrator only ever wrote it. A local mirror of
+// that reader over the same directory — day files, one JSON record per line.
+function _readPrEventRecords() {
+  const dir = prEventsLog.PR_EVENTS_LOG_DIR;
+  let files = [];
+  try {
+    // The log is kept indefinitely; the board only needs the recent past
+    // (a PR still open after a quarter is a human's, not a flow's, problem).
+    files = fs.readdirSync(dir).filter((f) => /^pr-events-\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)).sort().slice(-90);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const f of files) {
+    let content = "";
+    try {
+      content = fs.readFileSync(path.join(dir, f), "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of content.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        out.push(JSON.parse(line));
+      } catch {
+        /* torn line */
+      }
+    }
+  }
+  return out;
+}
+
+// Single-flight + short TTL per team: every viewer of the board shares one
+// sweep, and a page load triggers at most one (AC11). On a failed or
+// unreachable sweep the last good snapshot is served, flagged stale.
+const FLOW_BOARD_TTL_MS = 15_000;
+const _flowBoardCache = new Map(); // teamId -> { at, result, inflight }
+
+async function getTeamFlowBoard(teamId, { refresh = false } = {}) {
+  let entry = _flowBoardCache.get(teamId);
+  if (!entry) {
+    entry = { at: 0, result: null, inflight: null };
+    _flowBoardCache.set(teamId, entry);
+  }
+  if (entry.inflight) return entry.inflight;
+  if (!refresh && entry.result && Date.now() - entry.at < FLOW_BOARD_TTL_MS) return entry.result;
+  entry.inflight = (async () => {
+    try {
+      const result = await computeTeamFlowBoard(teamId);
+      if (result.githubUnreachable && entry.result) {
+        return {
+          ...entry.result,
+          stale: true,
+          warning: `GitHub is unreachable — showing the last known state from ${entry.result.generatedAt}.`,
+          warnings: result.warnings,
+        };
+      }
+      const fresh = { ...result, stale: false, warning: result.githubUnreachable ? "GitHub is unreachable — only running sessions are shown." : null };
+      entry.result = fresh;
+      entry.at = Date.now();
+      return fresh;
+    } catch (err) {
+      if (entry.result) {
+        return { ...entry.result, stale: true, warning: `Could not refresh (${err.message}) — showing the last known state from ${entry.result.generatedAt}.` };
+      }
+      throw err;
+    } finally {
+      entry.inflight = null;
+    }
+  })();
+  return entry.inflight;
+}
+
 // ── Agent instance pools: reap (#2246, epic #2251 Phase 1) ──────────────────
 //
 // D4: a slot is held until completion; the *container* is reaped when its run
@@ -2513,6 +3093,12 @@ async function poolReapSweepTeam(teamId, now = Date.now()) {
       }
     }
   }
+  // #2573: a finished drain switches its role off.
+  try {
+    settlePoolDrains(teamId);
+  } catch (err) {
+    console.warn(`[AgentPool] ${teamId}: drain settle failed: ${err.message}`);
+  }
   // Gap 4: prune archived pool session logs past retainLogsMs. Best-effort,
   // same tick — a failure here never blocks the reap above.
   try {
@@ -2612,18 +3198,27 @@ async function admissionSweepTeam(teamId) {
     }
     repos.push(repo);
 
-    // Which in-flight tickets an open PR references. Deliberately the LOOSE
-    // `prsForIssue` linkage (a `#n` mention or an issue number in the branch),
-    // not the strict closing-keyword parse the poller stamps onto an event
-    // payload: the two directions have opposite safe sides. On the event side a
-    // strict link decides which lane slot a dispatch takes, so a false positive
-    // would merge two genuinely separate tickets; here a false positive only
-    // keeps a ticket in flight LONGER, which is the conservative direction for a
-    // WIP limit. `prsForIssue`'s own header states the same fail-safe reasoning.
+    // Which in-flight tickets an open PR CLOSES. This uses the STRICT
+    // `parseCloses` (closes/fixes/resolves #N in the body + `issue-N` in the
+    // head branch) — the SAME parse the poller stamps onto an event payload and
+    // that `entryTicketRef` keys a lane slot on at admit time. Keep-alive and
+    // admit therefore agree on what "a PR belongs to a ticket" means.
+    //
+    // The earlier LOOSE `prsForIssue` linkage (any `#n` mention anywhere in the
+    // body) was catastrophic here, not conservative: a Dependabot PR inlines
+    // upstream changelogs full of foreign `owner/repo#N` references (e.g.
+    // `actions/checkout#2521`), which matched local tickets and pinned them in
+    // the lane forever — freezing the whole flow with no free slot. A WIP limit
+    // that can be frozen by an unrelated dependency bump is worse than one that
+    // occasionally releases a ticket early, so the safe side is the strict parse
+    // (verified against the real #2516 body — see admission-control tests).
     const ticketNumbers = lane.inFlight.filter((t) => t.repo === repo).map((t) => t.number);
     const prByNumber = new Map();
     for (const pr of Array.isArray(openPrs) ? openPrs : []) prByNumber.set(Number(pr.number), pr);
-    const closesFor = (pr) => ticketNumbers.filter((n) => flowAnomalySweep.prsForIssue([pr], n).length > 0);
+    const closesFor = (pr) => {
+      const closes = prEventsLog.parseCloses(pr && pr.body, pr && pr.head && pr.head.ref);
+      return ticketNumbers.filter((n) => closes.includes(n));
+    };
 
     for (const it of Array.isArray(issues) ? issues : []) {
       const kind = flowAnomalySweep.objectKind(it);
@@ -2647,8 +3242,8 @@ async function admissionSweepTeam(teamId) {
   });
   const promoted = admissionControl.promoteHeld({ lane: reconciled.lane, wipLimit });
 
-  // Enqueue FIRST, persist the lane second — the same ordering the
-  // internal-channel emit uses (concept §4.2 step 3). A crash between the two
+  // Enqueue FIRST, persist the lane second — the same ordering the label
+  // fast-path and wake-agent use (the hand-off first, bookkeeping second). A crash between the two
   // re-delivers a dispatch the queue already holds, which the claim label and
   // the poller's own re-delivery tolerate; the reverse order would drop it from
   // the hold queue without ever putting it anywhere, and losing work is the one
@@ -3133,6 +3728,111 @@ async function recurringPoolSweepTeam(teamId, { now = Date.now() } = {}) {
   return (reaped.length || dispatched.length) ? { teamId, reaped, dispatched } : null;
 }
 
+// #2493 — the age past which a still-`_provisioning` config is treated as stuck.
+// Env-overridable; falls back to the pure module's conservative 10-minute default.
+const PROVISIONING_STUCK_MS = Math.max(
+  1,
+  Number(process.env.AEE_PROVISIONING_STUCK_MS) || provisioningSweep.PROVISIONING_STUCK_MS,
+);
+
+// #2493 — the stuck-`_provisioning` reaper. Pure decisions in provisioning-sweep.js
+// (unit-tested); this is the impure half — scan, reap, record.
+//
+// Deliberately a FLAT scan of every agent id, NOT the per-team enumeration the
+// other sweeps use: a standalone half-create (`resolveAndReserveAgentId`'s
+// placeholder) has no parent team at all, and a team-member / pool-instance
+// leftover (`addTeamMember`) is found by the very same scan — so one pass covers
+// both creation paths (AC4). Reaps through the ordinary DELETE /internal/agents/:id
+// route (`_internalSelfDelete`), so a leftover gets the identical config + Matrix
+// user + workspace + container + plugin-scope teardown every other delete gets —
+// covering the partial-artifact edge case without a hand-rolled second cleanup
+// path. Best-effort and awaited sequentially; a per-agent failure is logged and
+// never escapes. NOT maintenance-gated, matching poolReapSweepTeam — clearing out
+// a stuck leftover is never "starting" new work. Idempotency (edge case 2) comes
+// from two layers: the tick's overlap guard (a slow sweep never stacks) and the
+// DELETE route removing config.json in its fast phase, so the next scan no longer
+// sees a record whose teardown is still finishing in the background.
+async function provisioningReapSweep(now = Date.now(), { thresholdMs = PROVISIONING_STUCK_MS } = {}) {
+  let ids = [];
+  try {
+    ids = listAgentIds();
+  } catch (err) {
+    console.warn(`[Provisioning] agent enumeration failed: ${err.message}`);
+    return;
+  }
+  for (const id of ids) {
+    let cfg = null;
+    try {
+      cfg = loadAgentConfig(id);
+    } catch {
+      continue;
+    }
+    if (!cfg || cfg._provisioning !== true) continue;
+
+    // Prefer the explicit `_provisioningAt` stamp; fall back to the config file's
+    // mtime for a leftover written before that stamp existed.
+    let fileMtimeMs = null;
+    try {
+      fileMtimeMs = fs.statSync(path.join(agentDir(id), "config.json")).mtimeMs;
+    } catch { /* stat failed — provisioningAgeMs falls back to the stamp alone */ }
+
+    const ageMs = provisioningSweep.provisioningAgeMs(
+      { provisioningAt: cfg._provisioningAt, fileMtimeMs },
+      now,
+    );
+    if (!provisioningSweep.isStuckProvisioning(cfg, ageMs, thresholdMs)) continue; // AC5: never a live in-flight attempt
+
+    const origin = provisioningSweep.provisioningOrigin(cfg);
+    console.warn(`[Provisioning] ${id} stuck at _provisioning:true for ${ageMs}ms (origin=${origin}) — reaping`);
+
+    let status = null;
+    try {
+      status = await _internalSelfDelete(id);
+    } catch (err) {
+      console.warn(`[Provisioning] reap request for ${id} threw: ${err.message}`);
+    }
+    // 200 = torn down; 404 = already gone (a background teardown from a prior
+    // tick finished it) — both mean the leftover is resolved.
+    const reaped = status === 200 || status === 404;
+
+    // AC3: never silent — one operator-visible row whether the reap succeeded or
+    // the delete route was unreachable/refused, so a persistent failure is
+    // auditable instead of a config that quietly reappears every tick. The
+    // github-event-log write is itself best-effort and must never abort the sweep.
+    try {
+      const eventId = `provsweep:${crypto.randomBytes(6).toString("hex")}`;
+      const ghEvent = provisioningSweep.buildProvisioningSweepLogEvent({
+        agentId: id, eventId, now: new Date(now).toISOString(),
+      });
+      githubEventLog.record({
+        ...githubEventLog.buildEventEntry({
+          ghEvent,
+          repoFullName: null,
+          key: provisioningSweep.PROVISIONING_SWEEP_KEY,
+          outcomes: [{ agentId: id, triggerId: null, status: reaped ? "reaped" : "reap-failed", reason: null, digest: false }],
+        }),
+        source: "provisioning-sweep",
+        emittedBy: "provisioning-sweep",
+        ...provisioningSweep.buildProvisioningSweepLogFields({
+          agentId: id,
+          origin,
+          ageMs,
+          action: reaped ? "reaped" : "reap-failed",
+          error: reaped ? null : `delete route returned ${status === null ? "no response" : status}`,
+        }),
+      });
+    } catch (err) {
+      console.warn(`[Provisioning] event-log record for ${id} failed: ${err.message}`);
+    }
+
+    if (reaped) {
+      console.log(`[Provisioning] reaped stuck ${id} (origin=${origin})`);
+    } else {
+      console.warn(`[Provisioning] reap of ${id} did not confirm (status=${status}) — next tick will retry`);
+    }
+  }
+}
+
 // ============================================================
 // Hill-climbing loop Phase 1 (#1222): per-team run-metrics collector.
 // Concept `docs/hill-climbing-agent-concept.md` §3.1/§4/§7. The deterministic
@@ -3552,6 +4252,13 @@ function enrichUsageRecord(agentId, record) {
     }
     out.roleId = roleId || cfg.role || null;
   }
+  // Pool instance → main agent (#2585), stamped from the orchestrator's own
+  // config and always written (self-asserted values are overwritten): the
+  // Token Usage `agent` grouping folds instances under `poolOf`, and an explicit
+  // `null` keeps a look-alike id (`…-i<n>` that is no instance) from folding
+  // even after that agent is gone. Instances are reaped, so this is the only
+  // point where the link is still known for certain.
+  out.poolOf = cfg.poolInstance && typeof cfg.poolOf === "string" && cfg.poolOf ? cfg.poolOf : null;
   if (out.provider == null) {
     const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
     // A per-agent provider override wins over the environment binding.
@@ -3736,6 +4443,10 @@ const pluginCredentialWiring = createPluginCredentialWiring({
   log: (m) => console.warn(m),
 });
 const { pushDeclaredScopeCredentials } = pluginCredentialWiring;
+// Which run (chat turn → whose, or autonomous) each agent's plugin calls belong
+// to (#2562). In memory on purpose: an orchestrator restart respawns every
+// container, and each new runner fetches a fresh key.
+const pluginRunRegistry = new pluginRunIdentity.RunRegistry();
 
 // Re-seed any granted plugin CLI whose workspace copy no longer matches the
 // registry (plugin-sync.js `planCliRefresh`). The grant sync copies the CLI
@@ -4303,8 +5014,8 @@ function seedAgentWorkspace(id, env, opts = {}) {
   // 3. Patch absolute /workspace/ paths in seeded memory
   patchSeededPaths(dest);
 
-  // 4. Materialize MCP server config into the agent's own .claude/settings.json.
-  //    Team-members may override the team-env's MCP list — pass `opts.mcpServersOverride`
+  // 4. Materialize MCP server config into the agent's own `.mcp.json` (+ its
+  //    approval in .claude/settings.json — see seedAgentMcpServers). Team-members may override the team-env's MCP list — pass `opts.mcpServersOverride`
   //    (an array of { serverId, credentialId }) to use it instead of `env.mcpServers`.
   //    The override is verbatim, no merge.
   const mcpRefs = Array.isArray(opts.mcpServersOverride)
@@ -4390,119 +5101,59 @@ function seedAgentWorkspace(id, env, opts = {}) {
   return { seeded: true, warnings, clones };
 }
 
-// For each {serverId, credentialId} ref attached to the environment (or its
-// team-member override), load the server.json template, substitute the
-// `${credential}` placeholder with the secret read from the credentials store,
-// and write the merged stanza into the agent's own `.claude/settings.json`
-// under `mcpServers[<serverId>]`. Per-agent isolation: pool-level MCP config
-// is no longer consulted at runtime.
+// Materialize an agent's MCP servers into its workspace (#2289): each
+// {serverId, credentialId} ref (the environment's list, or a team-member's
+// verbatim override) is resolved against the registry and the credentials
+// store, and the stanzas are RECONCILED into `.mcp.json` + the
+// `enabledMcpjsonServers` approval list in `.claude/settings.json` — the two
+// files Claude Code actually reads (it ignores `mcpServers` in settings.json).
+// Reconciling means a dropped server is removed and an empty set applies, while
+// entries the platform never seeded are left alone; see mcp-seed.js. Used by
+// the one-time seed and by every later re-application (applyAgentMcp).
 function seedAgentMcpServers(dest, mcpRefs, warnings) {
-  const seeded = [];
-  if (!Array.isArray(mcpRefs) || mcpRefs.length === 0) return seeded;
+  return writeAgentMcp(dest, mcpRefs, warnings).seeded;
+}
 
-  const settingsPath = path.join(dest, ".claude", "settings.json");
-  let settings = {};
-  try {
-    if (fs.existsSync(settingsPath)) {
-      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) || {};
-    }
-  } catch (err) {
-    warnings.push(`mcp: cannot parse existing .claude/settings.json — overwriting (${err.message})`);
-    settings = {};
+function writeAgentMcp(dest, mcpRefs, warnings) {
+  const { stanzas } = mcpSeed.buildMcpStanzas(mcpRefs, {
+    serversDir: MCP_SERVERS_DIR,
+    credentialsKeysDir: MCP_CREDENTIALS_KEYS_DIR,
+  }, warnings);
+  return mcpSeed.writeAgentMcpConfig(dest, stanzas, warnings, { stateDir: resolveAgentStateDir(dest) });
+}
+
+// Re-apply one agent's effective MCP set to its live workspace (#2289 D2):
+// rewrite the two files on the pool subpath, then mirror them into the agent's
+// dedicated volume when it has one. No restart — `claude` re-reads both files
+// on its next turn. A stub has no workspace yet and picks the set up at its
+// first seed; that is reported, not treated as an error.
+async function applyAgentMcp(id) {
+  const cfg = loadAgentConfig(id);
+  if (!cfg) return { id, status: "failed", detail: "agent not found" };
+  if (!cfg.token) return { id, status: "pending" };
+  const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  const warnings = [];
+  const write = writeAgentMcp(agentDir(id), mcpSeed.effectiveMcpRefs(cfg, env), warnings);
+  for (const w of warnings) console.warn(`[Orchestrator] MCP apply warning for ${id}: ${w}`);
+  const reseed = write.ok ? await reseedAgent(id, mcpSeed.MCP_RESEED_PATHS) : null;
+  const outcome = mcpSeed.describeApplyOutcome(id, write, reseed);
+  console.log(`[Orchestrator] MCP apply ${id}: ${outcome.status}${outcome.servers ? ` (${outcome.servers.join(",") || "none"})` : ""}`);
+  return { ...outcome, warnings };
+}
+
+// An environment's MCP list changed (#2289 D3): re-apply it to every
+// materialized agent bound to the environment, except those carrying their own
+// override (left untouched). Each agent's effective set is re-derived from its
+// config at apply time, so an override created meanwhile still wins.
+async function applyEnvironmentMcp(envId) {
+  const plan = mcpSeed.planEnvironmentMcpApply(listAgentConfigs(), envId);
+  const outcomes = [];
+  for (const { id, action } of plan) {
+    if (action !== "apply") { outcomes.push({ id, status: action }); continue; }
+    try { outcomes.push(await applyAgentMcp(id)); }
+    catch (err) { outcomes.push({ id, status: "failed", detail: err.message }); }
   }
-  if (!settings.mcpServers || typeof settings.mcpServers !== "object") settings.mcpServers = {};
-
-  for (const ref of mcpRefs) {
-    const serverId = ref?.serverId;
-    const credId = ref?.credentialId || null;
-    if (!serverId || !/^[a-z0-9-]+$/.test(serverId)) {
-      warnings.push(`mcp: invalid serverId in env ref: ${JSON.stringify(ref)}`);
-      continue;
-    }
-    const serverPath = path.join(MCP_SERVERS_DIR, serverId, "server.json");
-    let server;
-    try {
-      server = JSON.parse(fs.readFileSync(serverPath, "utf8"));
-    } catch (err) {
-      warnings.push(`mcp: server '${serverId}' not found in registry (${err.message})`);
-      continue;
-    }
-
-    let secret = "";
-    if (credId) {
-      if (!/^[a-z0-9-]+$/.test(credId)) {
-        warnings.push(`mcp: invalid credentialId for server '${serverId}': ${credId}`);
-        continue;
-      }
-      try {
-        secret = fs.readFileSync(path.join(MCP_CREDENTIALS_KEYS_DIR, credId), "utf8").trim();
-      } catch (err) {
-        warnings.push(`mcp: cannot read credential '${credId}' for server '${serverId}' (${err.message})`);
-        continue;
-      }
-    }
-
-    // Different transports carry the substitution template under different
-    // keys: stdio servers get `env` (process environment), http/sse servers
-    // get `headers` (HTTP request headers). The substitution mechanics are
-    // identical — only the destination key changes.
-    const transport = server.transport || "stdio";
-    if (!["stdio", "http", "sse"].includes(transport)) {
-      warnings.push(`mcp: server '${serverId}' has unsupported transport '${transport}'`);
-      continue;
-    }
-    const tplKey = transport === "stdio" ? "env" : "headers";
-    const template = (server[tplKey] && typeof server[tplKey] === "object") ? server[tplKey] : {};
-
-    const resolved = {};
-    let placeholderUsed = false;
-    for (const [k, v] of Object.entries(template)) {
-      if (typeof v !== "string") { resolved[k] = v; continue; }
-      if (v.includes("${credential}")) {
-        placeholderUsed = true;
-        if (!secret) {
-          warnings.push(`mcp: server '${serverId}' ${tplKey} key '${k}' uses \${credential} but no credential is bound`);
-          // Drop the key rather than leak the literal placeholder into the agent.
-          continue;
-        }
-        resolved[k] = v.split("${credential}").join(secret);
-      } else {
-        resolved[k] = v;
-      }
-    }
-    if (!placeholderUsed && credId) {
-      warnings.push(`mcp: server '${serverId}' has a credential bound but no \${credential} placeholder in ${tplKey} — credential ignored`);
-    }
-
-    // Stanza shape per Claude Code's MCP config schema:
-    //   stdio   → { command, args, env }                  (no `type` field — stdio is the default)
-    //   http    → { type: "http", url, headers }
-    //   sse     → { type: "sse",  url, headers }
-    let stanza;
-    if (transport === "stdio") {
-      stanza = {
-        command: server.command,
-        args: Array.isArray(server.args) ? server.args : [],
-        env: resolved,
-      };
-    } else {
-      stanza = {
-        type: transport,
-        url: server.url,
-        headers: resolved,
-      };
-    }
-    settings.mcpServers[serverId] = stanza;
-    seeded.push(serverId);
-  }
-
-  try {
-    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-  } catch (err) {
-    warnings.push(`mcp: cannot write .claude/settings.json (${err.message})`);
-  }
-  return seeded;
+  return { envId, ...mcpSeed.summarizeMcpApply(outcomes) };
 }
 
 // Clone every repository attached to an environment. Errors are pushed to the
@@ -4929,7 +5580,9 @@ async function gracefulPoolTeardown(id, cfg) {
       const archiveRoot = path.join(HILL_CLIMB_TEAMS_DIR, seg, "pool-archive", id);
       const archiveDir = path.join(archiveRoot, "sessions");
       fs.mkdirSync(path.dirname(archiveDir), { recursive: true });
-      fs.cpSync(sessionsDir, archiveDir, { recursive: true });
+      // The transcript is archived, the resumable session pointer is not
+      // (#2595 AC10) — it dies with the instance.
+      fs.cpSync(sessionsDir, archiveDir, { recursive: true, filter: agentPool.isArchivableSessionPath });
       fs.writeFileSync(
         path.join(archiveRoot, "archived-at.json"),
         JSON.stringify({ archivedAt: new Date().toISOString() }),
@@ -5661,8 +6314,7 @@ function materializeAgentSshKey(id, env, childEnv, cfg) {
   const agentCfgPath = path.join(agentSshDir, "config");
   const agentKnownHosts = path.join(agentSshDir, "known_hosts");
 
-  const repos = Array.isArray(env?.repositories) ? env.repositories : [];
-  const sharedSshKeyId = repos.find((r) => r && r.sshKeyId)?.sshKeyId;
+  const sharedSshKeyId = baselineSharedSshKeyId(env);
   // Baseline resolution (#2177/#2212, epic #2166 B5) — mirrors the GH_TOKEN
   // bake above: prefer the team's current team-admin's personal SSH key over
   // the environment's raw shared deploy key, so a directly-run `git`/`gh`
@@ -5910,13 +6562,11 @@ function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) 
     sharedCredentialId: env?.githubTokenId || null,
     kind: "GitHub token",
     interactive,
-    // Unified model §8 (#2357, behind AEE_RESOURCE_ACCESS_V2): a global service
+    // Unified model §8 (#2357): a global service
     // token is the last-resort service fallback when the env has no binding.
     // Never rescues an attributed write that must 424 — it only fills a "shared"
     // slot that was already reachable.
-    globalServiceCredentialId: RESOURCE_ACCESS_V2
-      ? credentialResolution.selectGlobalServiceCredentialId(tokenIndex) : null,
-    resourceAccessV2: RESOURCE_ACCESS_V2,
+    globalServiceCredentialId: credentialResolution.selectGlobalServiceCredentialId(tokenIndex),
   });
   if (decision.refuse) {
     const e = new Error(decision.refuse.message);
@@ -5925,6 +6575,19 @@ function resolveAttributedGithubToken(id, env, operation, actingSenderMatrixId) 
     throw e;
   }
   return { githubTokenId: decision.credentialId };
+}
+
+// The credential a live chat turn's in-container `gh` WRITE runs under
+// (#2559) — issues, comments, reviews, labels, `gh api` writes, forwarded by
+// the agent image's `gh` shim. An untrusted/unresolvable sender keeps the
+// container's baseline identity (`{ baseline: true }`, the shim then runs `gh`
+// locally exactly as before), mirroring push/PR's non-refusing path for such a
+// sender. A trusted sender goes through the SAME resolution push/PR use, as the
+// `review` attributed operation: their personal token, or the refusal.
+function resolveChatGithubWriteToken(id, env, actingSenderMatrixId) {
+  const cfg = loadAgentConfig(id) || {};
+  if (resolveActingSenderUserId(actingSenderMatrixId, cfg) == null) return { baseline: true };
+  return resolveAttributedGithubToken(id, env, "review", actingSenderMatrixId);
 }
 
 // SSH-key sibling of `resolveAttributedGithubToken` (#2175 B3) — the "SSH
@@ -5953,10 +6616,8 @@ function resolveAttributedSshKey(id, sharedSshKeyId, operation, actingSenderMatr
     kind: "SSH key",
     interactive,
     // Unified model §8 (#2357): a global service deploy key is the last-resort
-    // service fallback when the repo/env carries no key (behind the flag).
-    globalServiceCredentialId: RESOURCE_ACCESS_V2
-      ? credentialResolution.selectGlobalServiceCredentialId(keyIndex) : null,
-    resourceAccessV2: RESOURCE_ACCESS_V2,
+    // service fallback when the repo/env carries no key.
+    globalServiceCredentialId: credentialResolution.selectGlobalServiceCredentialId(keyIndex),
   });
   if (decision.refuse) {
     const e = new Error(decision.refuse.message);
@@ -5996,23 +6657,24 @@ function resolveAttributedSshKey(id, sharedSshKeyId, operation, actingSenderMatr
 function resolveBaselineGithubTokenId(cfg, env) {
   const sharedCredentialId = env?.githubTokenId || null;
   if (!cfg) return sharedCredentialId;
-  const ownerId = credentialResolution.resolveBaselineOwnerId(cfg, { loadAgentConfig, ...loadBaselineDeps() });
-  const tokenIndex = loadGithubTokenIndex();
-  const liveUserGate = loadLiveUserGate();
-  const personal = credentialResolution.findPersonalCredentialState(tokenIndex, ownerId, undefined, liveUserGate);
-  const decision = credentialResolution.resolveCredential({
-    operation: "spawn",
-    ownerId,
-    personalCredential: personal.entry,
-    personalCredentialPresent: personal.present,
-    personalCredentialOrphaned: personal.orphaned,
-    sharedCredentialId,
+  return describeBaselineGithubToken(cfg, env).credentialId;
+}
+
+// The full baseline decision behind `resolveBaselineGithubTokenId` — tier,
+// baseline owner, orphan state (#2560). The spawn-time bake above and the
+// console's effective-identity display (`GET /internal/agents/:id/effective-
+// credentials`) both go through here, so what the console shows is what the
+// container is started with.
+function describeBaselineGithubToken(cfg, env) {
+  return credentialResolution.describeBaselineCredential({
+    cfg,
+    loadAgentConfig,
+    ...loadBaselineDeps(),
+    index: loadGithubTokenIndex(),
+    liveUsers: loadLiveUserGate(),
+    sharedCredentialId: env?.githubTokenId || null,
     kind: "GitHub token",
-    globalServiceCredentialId: RESOURCE_ACCESS_V2
-      ? credentialResolution.selectGlobalServiceCredentialId(tokenIndex) : null,
-    resourceAccessV2: RESOURCE_ACCESS_V2,
   });
-  return decision.credentialId || null;
 }
 
 // SSH-key sibling of `resolveBaselineGithubTokenId` (#2212 review finding —
@@ -6025,23 +6687,39 @@ function resolveBaselineGithubTokenId(cfg, env) {
 // first repo carrying one), not "any key somewhere on the environment".
 function resolveBaselineSshKeyId(cfg, sharedSshKeyId) {
   if (!cfg) return sharedSshKeyId || null;
-  const ownerId = credentialResolution.resolveBaselineOwnerId(cfg, { loadAgentConfig, ...loadBaselineDeps() });
-  const keyIndex = loadSshKeyIndex();
-  const liveUserGate = loadLiveUserGate();
-  const personal = credentialResolution.findPersonalCredentialState(keyIndex, ownerId, undefined, liveUserGate);
-  const decision = credentialResolution.resolveCredential({
-    operation: "spawn",
-    ownerId,
-    personalCredential: personal.entry,
-    personalCredentialPresent: personal.present,
-    personalCredentialOrphaned: personal.orphaned,
+  return describeBaselineSshKey(cfg, sharedSshKeyId).credentialId;
+}
+
+// SSH-key sibling of `describeBaselineGithubToken` (#2560).
+function describeBaselineSshKey(cfg, sharedSshKeyId) {
+  return credentialResolution.describeBaselineCredential({
+    cfg,
+    loadAgentConfig,
+    ...loadBaselineDeps(),
+    index: loadSshKeyIndex(),
+    liveUsers: loadLiveUserGate(),
     sharedCredentialId: sharedSshKeyId || null,
     kind: "SSH key",
-    globalServiceCredentialId: RESOURCE_ACCESS_V2
-      ? credentialResolution.selectGlobalServiceCredentialId(keyIndex) : null,
-    resourceAccessV2: RESOURCE_ACCESS_V2,
   });
-  return decision.credentialId || null;
+}
+
+// The environment's own ("team") SSH key the baseline falls back to: the first
+// repository carrying one — the key `materializeAgentSshKey` has always picked.
+function baselineSharedSshKeyId(env) {
+  const repos = Array.isArray(env?.repositories) ? env.repositories : [];
+  return repos.find((r) => r && r.sshKeyId)?.sshKeyId || null;
+}
+
+// Both baseline credentials of one agent, described (#2560) — what the
+// console's effective-identity display renders for a team.
+function describeAgentBaselineCredentials(cfg) {
+  const env = cfg?.environmentId ? loadEnvironment(cfg.environmentId) : null;
+  return {
+    teamId: resolveAgentTeam(cfg),
+    environmentId: env?.id || null,
+    github: describeBaselineGithubToken(cfg, env),
+    ssh: describeBaselineSshKey(cfg, baselineSharedSshKeyId(env)),
+  };
 }
 
 // ── Shared team Knowledge Base (Shared Agent Learning, Phase 1) ──────────────
@@ -6763,6 +7441,17 @@ function writeTeamKnowledgeConfig(teamId, patch) {
     const days = Number(src.decayHorizonDays);
     if (!Number.isInteger(days) || days < 0 || days > 3650) throw new Error('decayHorizonDays must be an integer 0..3650 (0 = off)');
     clean.decayHorizonDays = days;
+  }
+
+  // #2592 (AC12): the first-skill threshold of the domain → skill pipeline.
+  if ('domainSkillThreshold' in src) {
+    const raw = src.domainSkillThreshold;
+    if (!raw || typeof raw !== 'object') throw new Error('domainSkillThreshold must be an object');
+    const lessons = Number(raw.minLessons);
+    const agents = Number(raw.minAgents);
+    if (!Number.isInteger(lessons) || lessons < 1 || lessons > 100) throw new Error('domainSkillThreshold.minLessons must be an integer 1..100');
+    if (!Number.isInteger(agents) || agents < 1 || agents > 50) throw new Error('domainSkillThreshold.minAgents must be an integer 1..50');
+    clean.domainSkillThreshold = { minLessons: lessons, minAgents: agents };
   }
 
   if (!Object.keys(clean).length) throw new Error('no valid knowledge-config keys in patch');
@@ -7693,9 +8382,27 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
   // #780: canonicalIds routed to a domain (amendment) or parked unrouted this pass —
   // excluded from the single-lesson candidate path so they don't also raise a card.
   let domainRoutedCanonicalIds = new Set();
+  // #2592: true once the domain → skill pipeline owns this team's skill growth.
+  let domainMode = false;
   if (level >= 2) {
-    const { digestRouting, graduateAtAgents } = knowledgeCurationConfig(env);
-    if (digestRouting) {
+    // #2592: resolve the team's domains FIRST. In domain mode every converged
+    // cluster belongs to the domain pipeline — including a 2–3-agent convention/fact
+    // the #779 digest gate would otherwise park as digest-only, so the first-skill
+    // threshold (default >=3 lessons from >=2 agents) actually sees them. The digest
+    // gate only runs for a team without domains (the pre-#2592 flow).
+    const { domainRouting, skillBudget, digestRouting, graduateAtAgents } = knowledgeCurationConfig(env);
+    let domains = [];
+    if (domainRouting) {
+      try {
+        domains = ensureTeamDomains(teamId, now);
+      } catch (err) {
+        console.warn(`[Orchestrator] domain list for '${teamId}' failed: ${err.message}`);
+        domains = [];
+      }
+    }
+    domainMode = domains.length > 0;
+
+    if (digestRouting && !domainMode) {
       try {
         const routed = knowledgeConvergence.planDigestRouting(eligibleClusters, curCandidates, {
           threshold: convergenceThreshold, graduateAtAgents, teamId, now,
@@ -7712,38 +8419,25 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
       }
     }
 
-    // #780 domain routing (skill-aggregation Phase 2): classify each remaining
-    // candidate cluster against the team's persistent domains. A cluster that fits
-    // a domain becomes an AMENDMENT review card ("Add to <skill>") instead of a new
-    // micro-skill; a cluster that fits no domain is parked in the UNROUTED pool and
-    // never spawns its own skill — only accumulated mass raises a new-domain
-    // proposal (always a review card, budget-aware). Both classes are excluded from
-    // the single-lesson candidate + create-new auto-promotion paths below, so the
-    // inbox shows a few decidable amendments rather than dozens of new-skill cards.
-    // No-op for a team with no confirmed domains (routing bias only kicks in once a
-    // taxonomy exists) — existing teams are unaffected until they seed/bootstrap.
-    const { domainRouting, skillBudget } = knowledgeCurationConfig(env);
-    if (domainRouting) {
+    // #2592 domain → skill pipeline (supersedes the #780 per-lesson amendment
+    // cards): once the team has domains, every converged cluster is routed to a
+    // domain and grows that domain's ONE living skill (auto-applied at level 3
+    // with an `auto` team>team gate, else one card per domain). In this mode no
+    // lesson-named path runs at all (AC5) — see _runDomainSkillPipeline. A team with
+    // no domains keeps the pre-#2592 flow below.
+    if (domainMode) {
       try {
-        const domains = ensureTeamDomains(teamId, now);
-        if (domains.length > 0 && candidateClusters.length > 0) {
-          // entry tags[] (read by nothing before #780) feed the routing heuristic.
-          const tagsByEntryId = {};
-          for (const e of shardEntries) {
-            if (e && e.id && Array.isArray(e.tags) && e.tags.length) tagsByEntryId[e.id] = e.tags;
-          }
-          domainRoutedCanonicalIds = _routeDomains(teamId, env, domains, candidateClusters, {
-            skillBudget, now, tagsByEntryId,
-          });
-          if (domainRoutedCanonicalIds.size > 0) {
-            candidateClusters = candidateClusters.filter(
-              (c) => c && !domainRoutedCanonicalIds.has(c.canonicalId),
-            );
-            curCandidates = readKnowledgeCandidates(teamId);
-          }
+        // entry tags[] feed the routing heuristic.
+        const tagsByEntryId = {};
+        for (const e of shardEntries) {
+          if (e && e.id && Array.isArray(e.tags) && e.tags.length) tagsByEntryId[e.id] = e.tags;
         }
+        domainRoutedCanonicalIds = await _runDomainSkillPipeline(teamId, env, domains, eligibleClusters, {
+          level, convergenceThreshold, skillBudget, now, tagsByEntryId,
+        });
+        curCandidates = readKnowledgeCandidates(teamId);
       } catch (err) {
-        console.warn(`[Orchestrator] domain routing for '${teamId}' failed: ${err.message}`);
+        console.warn(`[Orchestrator] domain skill pipeline for '${teamId}' failed: ${err.message}`);
       }
     }
   }
@@ -7757,7 +8451,17 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     ? eligibleClusters.filter((c) => c && !domainRoutedCanonicalIds.has(c.canonicalId))
     : eligibleClusters;
 
-  if (level >= 3) {
+  if (domainMode) {
+    // #2592: the pipeline above already created/extended/raised everything; only the
+    // level-3 distillation of grown skills still runs (AC9).
+    if (level >= 3) {
+      try {
+        await autoDistillStep(teamId, env, { now });
+      } catch (err) {
+        console.warn(`[Orchestrator] auto-distill for '${teamId}' failed: ${err.message}`);
+      }
+    }
+  } else if (level >= 3) {
     // #779: the per-pass cap is shared across auto-extend + convergence promotions +
     // theme promotions. Auto-extend runs FIRST and claims its matched clusters so
     // they don't also spawn a brand-new skill; then create-new promotion on the
@@ -7793,7 +8497,7 @@ async function runConvergenceCollector(teamId, envArg, opts = {}) {
     // #780 AC4: resolve each theme's best-matching domain so it is named after the
     // domain (not a lesson-slug). Read-only — never seeds domains here; when the
     // team has no taxonomy the resolver is null and naming stays lesson-slug (the
-    // backward-compatible no-op). Reuses the same heuristic classifier as _routeDomains.
+    // backward-compatible no-op). Reuses the same heuristic domain classifier.
     let resolveThemeDomain = null;
     try {
       const themeDomains = readTeamDomainsDoc(teamId).domains;
@@ -8237,10 +8941,13 @@ async function autoPromoteStep(teamId, env, clusters, candidates, { convergenceT
       continue;
     }
     const promotedCand = { ...item.candidate, status: "promoted", resolvedAt: now, promotedBy: "curator" };
-    // Idempotent: never clobber an existing skill — just settle the candidate so
-    // it is not retried every pass.
+    // Idempotent: never clobber an existing skill. #2592 (G6): fold the lesson into
+    // it instead, and settle the candidate only once its ids are in that skill's
+    // provenance — never on the strength of a name match alone.
     if (fs.existsSync(path.join(dir, "SKILL.md"))) {
-      byId.set(item.candidate.id, promotedCand);
+      if (_foldIntoExistingSkill(teamId, item.name, item.candidate, now)) {
+        byId.set(item.candidate.id, { ...promotedCand, extendedInto: item.name });
+      }
       continue;
     }
     const prov = knowledgeCurator.curatorSkillProvenance({
@@ -8293,6 +9000,36 @@ async function autoPromoteStep(teamId, env, clusters, candidates, { convergenceT
     }]);
   }
   return promotedSkills.length;
+}
+
+// #2592 (G6): fold a candidate into an EXISTING team skill without a separate
+// review — heuristic append of any new statements + provenance union (the counter
+// only moves when content was added). Returns true only when every one of the
+// candidate's entry ids is in the skill's provenance afterwards, i.e. when the
+// caller may mark it promoted (AC8).
+function _foldIntoExistingSkill(teamId, name, candidate, now) {
+  const doc = _readTeamSkillDoc(teamId, name);
+  if (!doc) return false;
+  let domain = null;
+  try {
+    domain = readTeamDomainsDoc(teamId).domains.find((d) => knowledgeDomains.domainSkillName(d) === name) || null;
+  } catch { domain = null; }
+  const fold = knowledgeDomainSkills.foldIntoSkill({
+    existingMd: doc.skillMd, existingProv: doc.provenance, candidate, name, domain, teamId, now,
+  });
+  try {
+    if (fold.added) {
+      fs.writeFileSync(path.join(doc.dir, "SKILL.md"), fold.skillMd.endsWith("\n") ? fold.skillMd : fold.skillMd + "\n");
+    }
+    fs.writeFileSync(path.join(doc.dir, "provenance.json"), JSON.stringify(fold.provenance, null, 2));
+    if (fold.added) skillManifest.stampSkillDir(doc.dir, { name, by: "curator", action: "extended", now });
+  } catch (err) {
+    console.warn(`[Orchestrator] fold into existing skill '${name}' (team ${teamId}) failed: ${err.message}`);
+    return false;
+  }
+  const covered = new Set(Array.isArray(fold.provenance.entryIds) ? fold.provenance.entryIds : []);
+  const ids = Array.isArray(candidate && candidate.entryIds) ? candidate.entryIds : [];
+  return ids.length > 0 && ids.every((id) => covered.has(id));
 }
 
 // Shared finalize for a batch of curator auto-promotions (convergence clusters or
@@ -8373,9 +9110,12 @@ function autoPromoteThemesStep(teamId, env, clusters, candidates, { relatedThres
       continue;
     }
     const promotedCand = { ...item.candidate, status: "promoted", resolvedAt: now, promotedBy: "curator" };
-    // Idempotent: never clobber an existing skill — just settle the candidate.
+    // Idempotent: never clobber an existing skill. #2592 (G6): fold into it and
+    // settle only once the theme's ids are in its provenance.
     if (fs.existsSync(path.join(dir, "SKILL.md"))) {
-      byId.set(item.candidate.id, promotedCand);
+      if (_foldIntoExistingSkill(teamId, item.name, item.candidate, now)) {
+        byId.set(item.candidate.id, { ...promotedCand, extendedInto: item.name });
+      }
       continue;
     }
     const prov = knowledgeCurator.curatorThemeSkillProvenance({
@@ -8408,76 +9148,189 @@ function autoPromoteThemesStep(teamId, env, clusters, candidates, { relatedThres
 // provenance.json (the same lineage signal admin-console eligibleExtendSkills uses).
 // Best-effort + tolerant: an unreadable dir/provenance yields an empty entryIds set,
 // never throws. Returns [] when the team has no skill pool yet.
-// #780: route this pass's candidate clusters against the team's domains. Persists
-// amendment review cards ("Add to <skill>"), unrouted-pool rows, and a new-domain
-// proposal card (budget-aware); emits the `domain-routing` feed event. Returns the
-// set of canonicalIds it claimed (amendments + unrouted) so the caller excludes
-// them from the single-lesson candidate + create-new auto-promotion paths — the
-// core flood-reduction move. Best-effort: any failure leaves the pass untouched.
-function _routeDomains(teamId, env, domains, candidateClusters, { skillBudget, now, tagsByEntryId } = {}) {
-  const claimed = new Set();
-  const cands = (Array.isArray(candidateClusters) ? candidateClusters : [])
-    .map((c) => knowledgeConvergence.toCandidate(c, { teamId, now }));
-  if (cands.length === 0) return claimed;
+// #2592: the domain → skill pipeline — every domain grows into exactly ONE living
+// skill. Replaces the #780 per-lesson amendment cards:
+//
+//   1. Only CONVERGED clusters are routed (AC7). Each new / re-evaluable one is
+//      classified by lineage, then ONE batched LLM call per pass for the rest, with
+//      the keyword heuristic as the fallback (AC6); the method is kept per row.
+//   2. Routed lessons are parked `domain-queued`; lessons no domain fits are parked
+//      `unrouted` (digest only, D5) and feed the singleton new-domain proposal.
+//   3. Per domain: extend its skill if it exists, else create it once the first-
+//      skill threshold is met (D2). Level 3 + an `auto` team>team gate applies that
+//      directly (shared per-pass cap); otherwise ONE open card per domain (D1).
+//   4. A queued lesson is only settled once its ids are in the skill's provenance (AC8).
+//
+// Returns the set of canonicalIds it claimed so the caller keeps them out of every
+// lesson-named path. Best-effort per step; a failure leaves the rows for next pass.
+async function _runDomainSkillPipeline(teamId, env, domains, clusters, {
+  level, convergenceThreshold, skillBudget, now, tagsByEntryId,
+} = {}) {
+  const converged = (Array.isArray(clusters) ? clusters : [])
+    .filter((c) => c && knowledgeConvergence.crossesConvergence(c, convergenceThreshold));
+  const cands = converged.map((c) => knowledgeConvergence.toCandidate(c, { teamId, now }));
+  const domainsVersion = readTeamDomainsDoc(teamId).updatedAt || null;
+  const domainIds = new Set(domains.map((d) => d.id));
+
+  let rows = readKnowledgeCandidates(teamId);
+  const inputs = knowledgeDomainSkills.planRoutingInputs(cands, rows, { domainIds, domainsVersion });
 
   const existingSkills = readTeamSkillsForMatch(teamId);
   const skillEntryIdsByDomain = {};
   for (const d of domains) {
-    const sn = knowledgeDomains.domainSkillName(d);
-    const sk = existingSkills.find((s) => s.name === sn);
+    const sk = existingSkills.find((s) => s.name === knowledgeDomains.domainSkillName(d));
     if (sk) skillEntryIdsByDomain[d.id] = sk.entryIds;
   }
-  const budget = knowledgeDomains.skillBudgetState(existingSkills.map((s) => s.name), { cap: skillBudget });
-
-  const plan = knowledgeRouting.planDomainRouting(cands, domains, {
+  const binding = resolveAssistBindingForTeam(teamId); // #1213: team-billed provider
+  const routing = await knowledgeRouting.classifyClustersToDomains(inputs.toClassify, domains, {
+    classify: (request) => _synthesizeSkillMd(env, request, binding),
     skillEntryIdsByDomain,
     tagsByEntryId: tagsByEntryId || {},
-    budgetOver: budget.over,
-    teamId,
-    now,
   });
 
-  const rows = readKnowledgeCandidates(teamId);
   const byId = new Map(rows.filter((r) => r && r.id).map((r) => [r.id, r]));
-  const tracked = (id) => {
-    const r = byId.get(id);
-    return r && ['open', 'promoted', 'dismissed'].includes(r.status);
-  };
+  for (const r of routing.routed) {
+    byId.set(r.candidate.id, knowledgeDomainSkills.queuedRow(r.candidate, { domainId: r.domainId, via: r.via, now }));
+  }
+  for (const u of routing.unrouted) {
+    byId.set(u.candidate.id, knowledgeDomainSkills.unroutedRow(u.candidate, { via: u.via, domainsVersion, now }));
+  }
+  // Legacy per-lesson amendment cards fold into their domain's queue.
+  for (const m of inputs.migrate) {
+    byId.set(m.id, knowledgeDomainSkills.queuedRow(m, { domainId: m.domainId, via: m.routedVia, now }));
+  }
+  // A grown cluster (new id, same canonicalId) stays in its domain and replaces its
+  // older pending row, so the queue holds one row per lesson (review B2).
+  for (const g of inputs.regrown) {
+    byId.set(g.candidate.id, knowledgeDomainSkills.queuedRow(g.candidate, { domainId: g.domainId, via: g.via, now }));
+  }
+  for (const s of inputs.supersede) {
+    const prev = byId.get(s.id);
+    if (prev) byId.set(s.id, { ...prev, status: "superseded", supersededBy: s.supersededBy, supersededAt: now });
+  }
+  rows = [...byId.values()];
 
-  for (const a of plan.amendments) {
-    if (a.candidate && a.candidate.canonicalId) claimed.add(a.candidate.canonicalId);
-    if (tracked(a.candidate.id)) continue;
-    byId.set(a.candidate.id, {
-      ...a.candidate,
-      status: 'open',
-      source: 'convergence',
-      autoDrafted: true,
-      extendMode: true,
-      domainId: a.domainId,
-      routedVia: a.via,
-      matchedSkill: { name: a.skill, tier: 'team' },
-    });
-  }
-  for (const c of plan.unrouted) {
-    if (c && c.canonicalId) claimed.add(c.canonicalId);
-    if (tracked(c.id)) continue;
-    // Parked pool row (never rendered as an open card) — accumulates toward a
-    // new-domain proposal; keyed by the same stable id so a grown set re-evaluates.
-    byId.set(c.id, { ...c, status: 'unrouted', routedAt: now });
-  }
-  // FIX-A: keep at most ONE open new-domain proposal card (a singleton per team,
-  // upserted; operator dismissal respected; legacy dp-<hash> pile collapsed). The
-  // decision is a pure, unit-tested helper in knowledge-routing.
-  const reconciledRows = knowledgeRouting.reconcileDomainProposal([...byId.values()], {
-    proposal: plan.newDomainProposal,
-    teamId,
-    teamSegment: knowledgeFeed.safeTeamSegment(teamId),
-    now,
+  // New-domain proposal over the whole unrouted pool (budget-aware, §3.5).
+  const budget = knowledgeDomains.skillBudgetState(existingSkills.map((s) => s.name), { cap: skillBudget });
+  const unroutedPool = rows.filter((r) => r && r.status === "unrouted");
+  const proposal = unroutedPool.length && knowledgeRouting.newDomainQualifies(unroutedPool)
+    ? { unrouted: unroutedPool, budgetBlocked: !!budget.over, reason: budget.over ? "over-budget" : "mass-threshold" }
+    : null;
+  rows = knowledgeRouting.reconcileDomainProposal(rows, {
+    proposal, teamId, teamSegment: knowledgeFeed.safeTeamSegment(teamId), now,
   });
+  writeKnowledgeCandidates(teamId, rows);
+  if (routing.routed.length || routing.unrouted.length || proposal) {
+    appendKnowledgeEvents([{
+      type: "domain-routing", ts: now, teamId,
+      method: routing.method, llmCalls: routing.llmCalls,
+      amendmentCount: routing.routed.length, unroutedCount: routing.unrouted.length,
+      newDomainProposed: !!proposal, budgetBlocked: proposal ? proposal.budgetBlocked : false,
+      samples: routing.routed.slice(0, 5).map((r) => ({ id: r.candidate.id, skill: r.skill, via: r.via, text: r.candidate.text })),
+    }]);
+  }
 
-  writeKnowledgeCandidates(teamId, reconciledRows);
-  if (plan.batch) appendKnowledgeEvents([plan.batch]);
-  return claimed;
+  // Per-domain work: apply (level 3 + auto gate) or one card per domain.
+  const gates = resolvePromotionGates(env);
+  const autoApply = level >= 3 && gates["team>team"] === "auto";
+  const { maxAutoPromotionsPerPass, domainSkillThreshold, synthesizeSkills } = knowledgeCurationConfig(env);
+  const plan = knowledgeDomainSkills.planDomainSkillWork(
+    rows.filter((r) => r && r.status === knowledgeDomainSkills.QUEUED_STATUS), domains, {
+      existingSkillNames: new Set(existingSkills.map((s) => s.name)),
+      threshold: domainSkillThreshold,
+      autoApply,
+      cap: maxAutoPromotionsPerPass,
+    });
+
+  const created = [];
+  const extended = [];
+  for (const item of plan.apply) {
+    try {
+      const res = await _applyDomainSkillWork(teamId, env, item, { now, binding, synthesizeSkills });
+      if (!res) continue;
+      const settle = knowledgeDomainSkills.settleCoveredRows(readKnowledgeCandidates(teamId), item.bundle.lessonIds, res.entryIds, {
+        resolvedAt: now, promotedBy: "curator",
+        ...(res.mode === "create" ? { promotedInto: item.skillName } : { extendedInto: item.skillName }),
+      });
+      writeKnowledgeCandidates(teamId, settle.rows);
+      if (settle.uncovered.length) {
+        console.warn(`[Orchestrator] domain skill '${item.skillName}' (team ${teamId}): ${settle.uncovered.length} lesson(s) not in provenance — left queued`);
+      }
+      (res.mode === "create" ? created : extended).push({ name: item.skillName, entryIds: item.bundle.entryIds });
+    } catch (err) {
+      console.warn(`[Orchestrator] domain skill '${item.skillName}' for team ${teamId} failed: ${err.message}`);
+    }
+  }
+  writeKnowledgeCandidates(teamId, knowledgeDomainSkills.reconcileDomainCards(readKnowledgeCandidates(teamId), plan.cards, {
+    teamId, now, gateReason: level >= 3 ? "gated" : undefined,
+  }));
+  _finalizePromotedSkills(teamId, env, created, now);
+  _finalizeExtendedSkills(teamId, env, extended, now);
+  return inputs.claimedCanonicalIds;
+}
+
+// Write one domain's skill: create it (domain-named, provenance = every lesson id)
+// or fold the queued lessons into it. Returns { mode, entryIds } — the provenance
+// ids now on disk — or null when nothing could be written.
+async function _applyDomainSkillWork(teamId, env, item, { now, binding, synthesizeSkills } = {}) {
+  const name = item.skillName;
+  const dir = _teamSkillDir(teamId, name);
+  if (!dir) {
+    console.warn(`[Orchestrator] domain skill: unsafe skill dir for '${name}'`);
+    return null;
+  }
+  const writeDoc = (md, prov) => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "SKILL.md"), md.endsWith("\n") ? md : md + "\n");
+    fs.writeFileSync(path.join(dir, "provenance.json"), JSON.stringify(prov, null, 2));
+  };
+  const doc = _readTeamSkillDoc(teamId, name);
+  if (!doc) {
+    const draft = knowledgeDomainSkills.domainSkillDraft(item.domain, item.bundle);
+    const synth = await _resolveSkillMd(env, {
+      heuristicMd: draft.skillMd,
+      request: knowledgeCurator.buildSkillSynthesisRequest(item.bundle, { domain: item.domain }),
+      synthesize: synthesizeSkills,
+      frontmatter: { name, description: draft.description },
+      binding,
+    });
+    const prov = knowledgeDomainSkills.domainSkillProvenance({ teamId, domain: item.domain, bundle: item.bundle, now });
+    writeDoc(synth.skillMd, prov);
+    try { skillManifest.stampSkillDir(dir, { name, by: "curator", action: "promoted", now, note: synth.note || undefined }); }
+    catch (err) { console.warn(`[Orchestrator] domain skill: stamp '${name}' failed: ${err.message}`); }
+    return { mode: "create", entryIds: prov.entryIds };
+  }
+  const fold = knowledgeDomainSkills.foldIntoSkill({
+    existingMd: doc.skillMd, existingProv: doc.provenance, candidate: item.bundle,
+    name, domain: item.domain, teamId, now,
+  });
+  let md = fold.skillMd;
+  let synthesised = false;
+  if (fold.added && synthesizeSkills) {
+    const synth = await _resolveSkillMd(env, {
+      heuristicMd: fold.skillMd,
+      request: knowledgeCurator.buildSkillExtensionSynthesisRequest(doc.skillMd, item.bundle, { domain: item.domain }),
+      synthesize: true,
+      frontmatter: { name, description: fold.description },
+      binding,
+    });
+    md = synth.skillMd;
+    synthesised = synth.synthesised === true;
+  }
+  if (fold.added) {
+    writeDoc(md, fold.provenance);
+    const n = item.bundle.lessonCount;
+    try {
+      skillManifest.stampSkillDir(dir, {
+        name, by: "curator", action: "extended", now,
+        note: `folded ${n} ${n === 1 ? "lesson" : "lessons"} (${synthesised ? "LLM-synthesised" : "heuristic, un-synthesised"})`,
+      });
+    } catch (err) { console.warn(`[Orchestrator] domain skill: stamp '${name}' failed: ${err.message}`); }
+  } else {
+    // Nothing new to say, but the lessons now belong to this skill (AC8).
+    fs.writeFileSync(path.join(dir, "provenance.json"), JSON.stringify(fold.provenance, null, 2));
+  }
+  return { mode: "extend", entryIds: fold.provenance.entryIds };
 }
 
 // #780 §3.3: best-effort LLM synthesis transport for a SKILL.md write. Uses the
@@ -8637,9 +9490,12 @@ async function autoExtendStep(teamId, env, clusters, candidates, existingSkills,
     // frontmatter on extension; an existing description is preserved (E5).
     const ext = knowledgeCurator.curatorSkillExtension(doc.skillMd, item.candidate, { name: item.target.name });
     if (!ext.added) {
-      // No genuinely new content (all lessons already present) — settle the
-      // candidate as promoted so it isn't retried, but write nothing.
-      byId.set(item.candidate.id, { ...item.candidate, status: "promoted", resolvedAt: now, promotedBy: "curator", extendedInto: item.target.name });
+      // No genuinely new content (all lessons already present). #2592 (G6): the
+      // lesson still has to end up in the skill's provenance before it may be
+      // marked promoted — union the ids, leave the document alone.
+      if (_foldIntoExistingSkill(teamId, item.target.name, item.candidate, now)) {
+        byId.set(item.candidate.id, { ...item.candidate, status: "promoted", resolvedAt: now, promotedBy: "curator", extendedInto: item.target.name });
+      }
       continue;
     }
     const prov = knowledgeCurator.curatorExtendProvenance({
@@ -8918,6 +9774,31 @@ async function agentGitPush(id, env, body = {}) {
   return _repoGitQueue(repo.repoPath, () => _agentGitPushLocked(id, repo, req, gitEnv, body));
 }
 
+// #2571: record which agent is pushing which (repo, branch, head) so the GitHub
+// poller can attribute the resulting PushEvent (all agents share one PAT, so the
+// event's actor cannot). Recorded BEFORE the push, from the local branch head
+// the push is about to publish, so no poll can see the event ahead of its
+// record; a failed push leaves a harmless entry for a sha never on the remote.
+// Best-effort — attribution only matters to triggers with a `pushedBy` filter.
+async function _recordAgentPush(id, repo, branch, run) {
+  try {
+    const repoFull = prEventsLog.repoFullName(repo.url);
+    if (!repoFull) return;
+    const head = (await run(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim();
+    const cfg = loadAgentConfig(id) || {};
+    pushAttribution.defaultStore().record({
+      repo: repoFull,
+      branch,
+      head,
+      agentId: id,
+      teamId: pushAttribution.teamOf(cfg),
+      poolOf: cfg.poolInstance ? cfg.poolOf || null : null,
+    });
+  } catch (err) {
+    console.warn(`[Orchestrator] push attribution for ${id} (${branch}) not recorded: ${err.message}`);
+  }
+}
+
 async function _agentGitPushLocked(id, repo, req, gitEnv, body) {
   const run = (args, timeout = 30_000) =>
     _execRepo("git", args, { cwd: repo.repoPath, env: gitEnv, timeout });
@@ -8937,6 +9818,7 @@ async function _agentGitPushLocked(id, repo, req, gitEnv, body) {
   if (req.setUpstream) pushArgs.push("--set-upstream");
   pushArgs.push(req.remote, branch);
 
+  await _recordAgentPush(id, repo, branch, run);
   try {
     const stdout = await run(pushArgs);
     // PR-link record (#655 §4.2): a bare branch push carries no PR number, but
@@ -9030,6 +9912,7 @@ async function _agentCreatePrLocked(id, env, repo, title, base, gitEnv, body, gi
   }
 
   // Ensure the branch exists on the remote before gh reads it.
+  await _recordAgentPush(id, repo, head, run);
   try {
     await run(["push", "--set-upstream", "origin", head]);
   } catch (err) {
@@ -9818,12 +10701,19 @@ function resolveAdmissionFlow(agentId) {
   return wipLimit === null ? null : { teamId, wipLimit };
 }
 
-function enqueuePending(agentId, entry, { admissionChecked = false } = {}) {
-  // The gate sits here rather than at each of the five producers (poller
-  // fan-out, flow-emit, the label fast-path, wake-agent, the hook server)
+function enqueuePending(agentId, entry, { admissionChecked = false, decision = null } = {}) {
+  // The gate sits here rather than at each of the four producers (poller
+  // fan-out, the label fast-path, wake-agent, the hook server)
   // because this function is the queue's single writer: one seam cannot be
   // bypassed by a producer added later. `admissionChecked` is the promotion
   // path re-entering with a dispatch the lane has already admitted.
+  //
+  // `decision`, when passed, is an out-parameter the caller reads to log the
+  // TRUE outcome of this dispatch — `held` (waiting behind a full WIP lane) vs
+  // delivered — with `wipLimit`/`ticketKey` for the message. The return value
+  // stays a plain boolean (see the held branch's note), so this is purely
+  // additive: no existing caller is affected.
+  if (decision) decision.held = false;
   if (!admissionChecked) {
     const flow = resolveAdmissionFlow(agentId);
     if (flow) {
@@ -9835,16 +10725,23 @@ function enqueuePending(agentId, entry, { admissionChecked = false } = {}) {
           `[Admission] ${flow.teamId}: held dispatch for ${agentId} (${d.ticketKey}) — ` +
           `wipLimit ${flow.wipLimit} reached; it fires when capacity frees`,
         );
+        if (decision) {
+          decision.held = true;
+          decision.reason = 'wip';
+          decision.wipLimit = flow.wipLimit;
+          decision.ticketKey = d.ticketKey;
+        }
         // TRUE, not false: the dispatch is durably recorded and WILL fire. A
         // `false` here means "nothing anywhere has this event" (#2030) and would
-        // make an `aee-emit` producer report a delivery failure for work that is
+        // make an `aee-wake` producer report a delivery failure for work that is
         // merely queued behind a full lane.
         return true;
       }
     }
   }
   // Agent instance pools (#2246): route onto the item-keyed instance.
-  const pooled = routePooledDispatch(agentId, entry); // #2281: held already durable
+  // #2596: `decision` also learns the pool instance it lands on (or the hold).
+  const pooled = routePooledDispatch(agentId, entry, decision); // #2281: held already durable
   if (pooled) {
     if (pooled.held) return true;
     if (pooled.spawning) return true;
@@ -9867,17 +10764,18 @@ function enqueuePending(agentId, entry, { admissionChecked = false } = {}) {
     console.error(`[Orchestrator] Cannot enqueue pending for ${agentId}: ${err.message}`);
     // Additive (#2030): report the failure so a caller that has no other trace
     // to fall back on can refuse rather than confirm. Every pre-existing caller
-    // ignores the return value and is unaffected — a label emit still has its
-    // mirrored GitHub label as evidence, but a direct hand-off leaves nothing
+    // ignores the return value and is unaffected — a label hand-off still has
+    // its GitHub label as evidence, but a direct hand-off leaves nothing
     // anywhere, so "enqueued" must not be reported for a write that failed.
     return false;
   }
   return true;
 }
 
-// #1173: pick the GitHub token an internal-channel emit uses to mirror its
-// label — the first environment whose repositories contain the repo, the same
-// first-env-wins rule the poller's plan applies. null when no env covers it.
+// #1173: pick the GitHub token the orchestrator uses for its own REST calls on
+// a repo (label stamps, title/PR-detail fetches) — the first environment whose
+// repositories contain the repo, the same first-env-wins rule the poller's
+// plan applies. null when no env covers it.
 function resolveRepoGithubTokenId(repoFullName) {
   const { parseRepoFullName } = require("./github-poller");
   const { githubApiBase, DEFAULT_GITHUB_API_BASE } = require("./github-api-base");
@@ -9935,10 +10833,9 @@ async function _lookupPoolReworkRef(repoFullName, itemKey) {
   }
 }
 
-// #1173: mirror a label onto an issue/PR after an internal-channel delivery.
-// Decoration only — the wake already went through the queue, so every failure
-// here becomes a returned warning, never a delivery failure (concept §4.2
-// step 3: enqueue first, stamp second). The add endpoint doesn't reliably
+// #1173: apply a label onto an issue/PR on the platform's behalf (today: the
+// pool reaper's `needs-human`). Best-effort — every failure here becomes a
+// returned warning, never a thrown error. The add endpoint doesn't reliably
 // auto-create labels, so on a failed add the label is created (422 = already
 // exists, e.g. a lost race — fine) and the add retried once, mirroring the
 // runner's claim-swap behavior.
@@ -9971,7 +10868,7 @@ async function stampMirrorLabel(repoFullName, number, label, warnings) {
     if (!resp.ok) {
       await fetch(`${base}/repos/${repoFullName}/labels`, {
         method: "POST", headers,
-        body: JSON.stringify({ name: label, color: "ededed", description: "internal-channel mirror label" }),
+        body: JSON.stringify({ name: label, color: "ededed", description: "label applied by the platform" }),
       }).catch(() => {});
       resp = await addLabel();
     }
@@ -10018,7 +10915,57 @@ function aggregatePendingQueue() {
     });
     total += entries.length;
   }
-  return { agents: groups, total };
+  // Held-by-WIP dispatches (#2114) live in each team's admission lane, NOT in
+  // any agent's pending-triggers.json — so before this they were invisible in
+  // the Pending queue even though the GitHub Event Log logged them "delivered".
+  // Surface them here as a first-class section so a dispatch held behind a full
+  // lane is never invisible: an operator can see WHICH agent's WHICH ticket is
+  // waiting, and on which flow's limit.
+  const held = aggregateHeldDispatches();
+  return {
+    agents: groups,
+    total,
+    held: held.groups,
+    heldTotal: held.total,
+  };
+}
+
+// Every admission-lane `held[]` entry across all teams, grouped by the agent it
+// is held for and carrying the flow's wipLimit + the ticket it belongs to. The
+// `entry.id` each held entry already carries (stamped at hold time) is what the
+// board's Force-dispatch acts on; `heldIdentity` is the board's own key.
+function aggregateHeldDispatches() {
+  const byAgent = new Map();
+  let total = 0;
+  for (const teamId of listAgentIds().sort()) {
+    let teamCfg = null;
+    try { teamCfg = loadAgentConfig(teamId); } catch { continue; }
+    if (!teamCfg || teamCfg.role !== "team") continue;
+    const wipLimit = admissionControl.limitInForce(teamCfg.wipLimit);
+    const lane = loadAdmissionLane(teamId);
+    const heldEntries = Array.isArray(lane.held) ? lane.held : [];
+    for (const h of heldEntries) {
+      if (!h || !h.entry || typeof h.agentId !== "string") continue;
+      let cur = byAgent.get(h.agentId);
+      if (!cur) {
+        let name = h.agentId;
+        try { name = (loadAgentConfig(h.agentId) || {}).name || h.agentId; } catch { /* stub/ephemeral */ }
+        cur = { agentId: h.agentId, agentName: name, teamId, wipLimit, count: 0, entries: [] };
+        byAgent.set(h.agentId, cur);
+      }
+      cur.entries.push({
+        ...pendingQueue.summarizeEntry(h.entry),
+        heldByWip: true,
+        wipLimit,
+        ticket: typeof h.ticket === "string" ? h.ticket : null,
+        heldAt: typeof h.heldAt === "string" ? h.heldAt : null,
+        forceId: admissionControl.heldIdentity(h.agentId, h.entry),
+      });
+      cur.count += 1;
+      total += 1;
+    }
+  }
+  return { groups: [...byAgent.values()], total };
 }
 
 // The full (un-summarised) entry for on-demand detail — includes the GitHub
@@ -10353,7 +11300,13 @@ async function spawnPoolInstance(teamId, templateCfg, instanceId, itemKey, { rep
 // unchanged) or `{ targetId, spawning }` — `spawning: true` means the caller
 // should treat the dispatch as durably admitted (it will land the moment the
 // async spawn above finishes) rather than write it anywhere itself.
-function routePooledDispatch(agentId, entry) {
+//
+// `out` (#2596) is `enqueuePending`'s optional `decision` out-parameter: it
+// learns the instance the dispatch lands on (`instanceId` — deterministic per
+// work item, so known even while spawning) or, for a pause/drain/off hold,
+// `held` with reason `pool-<state>`, so the GitHub Event Log links the
+// instance that ran the event instead of the role template.
+function routePooledDispatch(agentId, entry, out = null) {
   let cfg = null;
   try {
     cfg = loadAgentConfig(agentId);
@@ -10389,6 +11342,9 @@ function routePooledDispatch(agentId, entry) {
     // An ordinary `max-instances` refusal is unaffected — that ticket is
     // still governed by the team's admission lane/reconcile tick, which is
     // what already promotes it once a slot frees.
+    if (out && agentPool.POOL_CONTROL_STATES.includes(decision.reason)) {
+      Object.assign(out, { held: true, reason: `pool-${decision.reason}` }); // #2596
+    }
     if (agentPool.POOL_CONTROL_STATES.includes(decision.reason)) {
       const held = agentPool.normalizePausedHold(loadPausedHold(teamId));
       held[roleId] = [...(held[roleId] || []), { agentId, entry, heldAt: new Date().toISOString() }];
@@ -10402,6 +11358,7 @@ function routePooledDispatch(agentId, entry) {
     console.warn(`[AgentPool] ${agentId}: refused to spawn ${decision.instanceId} (${decision.reason})`);
     return null;
   }
+  if (out) out.instanceId = decision.instanceId;
   if (decision.action === 'reuse') {
     return { targetId: decision.instanceId, spawning: false };
   }
@@ -10502,7 +11459,11 @@ class Orchestrator {
   // few lines later in `createAgent`.
   resolveAndReserveAgentId(baseId) {
     const id = nextAvailableAgentId(baseId, isAgentIdTaken);
-    const placeholder = { id, role: 'agent', enabled: false, _provisioning: true };
+    // `_provisioningAt` (#2493) stamps WHEN the half-created state began so the
+    // stuck-provisioning reaper can tell a stalled attempt from one that simply
+    // hasn't finished yet (provisioning-sweep.js). Cleared, with `_provisioning`,
+    // on the success path.
+    const placeholder = { id, role: 'agent', enabled: false, _provisioning: true, _provisioningAt: new Date().toISOString() };
     saveAgentConfig(id, placeholder);
     this.agentConfigs.set(id, { config: placeholder });
     return id;
@@ -10813,6 +11774,9 @@ class Orchestrator {
       teamId: ownerTeamId,
       enabled: false,
       _provisioning: true,
+      // #2493 — see resolveAndReserveAgentId: WHEN the half-created state began,
+      // so the stuck-provisioning reaper never touches a live in-flight add.
+      _provisioningAt: new Date().toISOString(),
     });
 
     const password = `agent-${memberId}-${Date.now()}`;
@@ -12180,7 +13144,7 @@ class Orchestrator {
       // No-op when the dedicated volume is absent (#185 item 5).
       if (PER_AGENT_VOLUME) {
         await reseedPerAgentVolume(
-          id, ['CLAUDE.md', 'AGENT-PROMPT.md', '.claude/settings.json', 'skills'],
+          id, ['CLAUDE.md', 'AGENT-PROMPT.md', '.claude/settings.json', '.mcp.json', 'skills'],
         ).catch(err => console.warn(`[Orchestrator] re-enable reseed ${id}: ${err.message}`));
       }
       startAgentProcess(updated);
@@ -12513,9 +13477,8 @@ class Orchestrator {
   // reset to INHERIT (env default / .env / a global service credential — never
   // "set but dead"), the affected agents respawned, and the reset logged. The
   // RESOURCE is KEPT — still theirs, still usable in their other teams; only the
-  // BINDING is thrown out. Gated by AEE_RESOURCE_ACCESS_V2 at the caller (the
-  // memberships DELETE arm) — off the flag this never runs and removal behaves
-  // exactly as today. Best-effort per item; a summary is returned for the caller.
+  // BINDING is thrown out. Called from the memberships DELETE arm. Best-effort
+  // per item; a summary is returned for the caller.
   //
   // Writing environment.json here is the one place the orchestrator writes an
   // env file (normally console-owned) — deliberate, and the same class of
@@ -12709,6 +13672,9 @@ class Orchestrator {
       ...this._deletePersonalCredentials(loadSshKeyIndex(), SSH_KEYS_INDEX, SSH_KEYS_DIR, target, 'ssh-key'),
       ...this._deletePersonalCredentials(loadGithubTokenIndex(), path.join(GH_TOKENS_DIR, 'index.json'), GH_TOKENS_DIR, target, 'github-token'),
       ...this._deletePersonalCredentials(loadLlmEndpointsIndex(), LLM_ENDPOINTS_INDEX, LLM_KEYS_DIR, target, 'model-provider', (e) => e.authTokenId),
+      // Personal PLUGIN credentials (#2562 — e.g. their own Jira token): one
+      // document per plugin, keyed by the user id.
+      ...pluginCredentialStore.deleteAllPersonalForUser(target).map((pluginId) => ({ id: pluginId, kind: 'plugin-credential' })),
     ];
 
     if (paused.length || deletedCredentials.length) {
@@ -13690,6 +14656,7 @@ class Orchestrator {
       enabled: true,
     };
     delete newConfig._provisioning;
+    delete newConfig._provisioningAt; // #2493 — clear the stuck-reaper stamp alongside the flag
 
     if (role === "team-member") {
       newConfig.parentTeamId = parentTeamId;
@@ -14126,13 +15093,13 @@ async function handleTeamsAdminApi(req, res) {
           // team's last admin, and validated by the store.
           successorUserId: parsed.searchParams.get('successorUserId') || undefined,
         });
-        // #2358 E1 (behind AEE_RESOURCE_ACCESS_V2): the lend ends when the owner
+        // #2358 E1: the lend ends when the owner
         // leaves the team. Sweep any team binding that pointed at one of their
         // personal resources, reset it to inherit, and respawn the affected
         // agents. Best-effort — a sweep failure never fails the removal (which
         // already succeeded above); it is logged and surfaced in the response.
         let sweep = null;
-        if (RESOURCE_ACCESS_V2 && orchestratorSingleton) {
+        if (orchestratorSingleton) {
           try {
             sweep = await orchestratorSingleton.sweepMembershipBindings(memberTeamId, memberUserId);
           } catch (err) {
@@ -14209,6 +15176,8 @@ async function main() {
   // carries the `teamId` the D6 owner resolution keys on (#2077).
   migrateOwnershipModel();
   backfillTriggerHorizonStamps();
+  // After the horizon backfill, so a rewrite here never moves a horizon.
+  migrateDataFlowProducerFilters();
 
   const orchestrator = new Orchestrator();
   // Module-level handle for free-function callers that need instance methods
@@ -15670,7 +16639,12 @@ async function main() {
         const cfg = loadAgentConfig(id);
         const teamId = cfg ? agentKnowledgeTeamId(cfg) : null;
         const records = usageLog.readRecords({ since });
-        const result = usageQuery.buildUsageQuery(records, { scope, agentId: id, teamId, since, until, groupBy });
+        // Registered non-instance agents are never folded into another
+        // agent's figure (#2585), even when their id looks like an instance's.
+        const nonInstanceAgentIds = listAgentConfigs()
+          .filter(({ cfg: c }) => !(c && c.poolInstance))
+          .map(({ id: aid }) => aid);
+        const result = usageQuery.buildUsageQuery(records, { scope, agentId: id, teamId, since, until, groupBy, nonInstanceAgentIds });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (err) {
@@ -15784,91 +16758,6 @@ async function main() {
       return;
     }
 
-    // ── Internal-channel emit (#1173, epic #1172) ─────────────────────────
-    // A producer agent announces "label L set on issue/PR #n of repo R"
-    // (via the `aee-emit` CLI) and the wake is delivered directly to every
-    // `transport: 'internal'` listener — enqueue FIRST, then mirror the label
-    // onto GitHub as decoration (best-effort). Internal-transport triggers
-    // are excluded from the poller plan (`pollerSubscribes`), so the mirror
-    // stamp can never double-deliver. docs/internal-channels-concept.md §4.2.
-    if (req.method === 'POST' && req.url === '/internal/flow-emit') {
-      let body = '';
-      req.on('data', (d) => { body += d; if (body.length > 1_000_000) req.destroy(); });
-      req.on('end', async () => {
-        let parsed;
-        try {
-          parsed = flowEmit.validateEmitRequest(JSON.parse(body || '{}'));
-        } catch (err) {
-          parsed = { ok: false, error: err.message };
-        }
-        if (!parsed.ok) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: parsed.error }));
-          return;
-        }
-        try {
-          const { agentId, repo, label, target } = parsed.value;
-          const key = flowEmit.eventKeyForKind(target.kind);
-          const agents = listAgentIds().map((aid) => ({
-            agentId: aid,
-            enabled: loadAgentConfig(aid)?.enabled !== false,
-            triggers: loadTriggers(aid),
-          }));
-          const listeners = flowEmit.matchInternalListeners(
-            { repo, label, kind: target.kind }, agents);
-          // #1897 AC8: resolve the title best-effort so the notice isn't blank.
-          // #2114: also carry the PR's closesIssues (from the same fetch) so the
-          // admission gate keys this hand-off to the issue's ticket, not a new one.
-          const { title, closesIssues } = await fetchWorkItemDetail(repo, target.kind, target.number);
-          const ghEvent = flowEmit.buildSyntheticEvent({
-            repo, label, kind: target.kind, number: target.number, title, closesIssues,
-            producerId: agentId,
-            eventId: `int:${crypto.randomBytes(6).toString('hex')}`,
-            now: new Date().toISOString(),
-          });
-          for (const l of listeners) {
-            enqueuePending(l.agentId, flowEmit.buildPendingEntry(l.triggerId, key, ghEvent));
-            console.log(
-              `[Orchestrator] flow-emit: ${repo}#${target.number} +${label} ` +
-              `by ${agentId} → agent=${l.agentId} trigger=${l.triggerId}`);
-          }
-          const warnings = [];
-          const labelStamped = await stampMirrorLabel(repo, target.number, label, warnings);
-          // Same transparency log the poller writes, tagged with the delivery
-          // path — internal and polled events share one operator timeline.
-          githubEventLog.record({
-            ...githubEventLog.buildEventEntry({
-              ghEvent, repoFullName: repo, key,
-              outcomes: listeners.map((l) => ({
-                agentId: l.agentId, triggerId: l.triggerId,
-                status: 'delivered', reason: null, digest: false,
-              })),
-            }),
-            source: 'internal',
-            emittedBy: agentId,
-          });
-          if (listeners.length === 0) {
-            console.log(
-              `[Orchestrator] flow-emit: ${repo}#${target.number} +${label} ` +
-              `by ${agentId} matched no internal listener (label ${labelStamped ? 'stamped' : 'NOT stamped'})`);
-          }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            ok: true,
-            matched: listeners.length,
-            listeners,
-            labelStamped,
-            warnings,
-          }));
-        } catch (err) {
-          console.error(`[Orchestrator] flow-emit error: ${err.message}`);
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: err.message }));
-        }
-      });
-      return;
-    }
-
     // ── Direct agent-to-agent hand-off (#2030) ────────────────────────────
     // A producer agent says "dear agent, take this over" (via the `aee-wake`
     // CLI) and the wake is delivered straight into the target's durable queue
@@ -15908,7 +16797,7 @@ async function main() {
             res.end(JSON.stringify({ ok: false, reason: resolved.reason }));
             return;
           }
-          // Enqueue first, log second — the same ordering flow-emit uses: the
+          // Enqueue first, log second — the same ordering the label fast-path uses: the
           // hand-off is what must not be lost, and the log is best-effort.
           const enqueued = enqueuePending(resolved.agentId, wakeAgent.buildWakeEntry({
             from: fromAgentId, note, teamId: resolved.teamId,
@@ -15962,6 +16851,136 @@ async function main() {
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }
       });
+      return;
+    }
+
+    // ── plugin run identity (#2562) ─────────────────────────────────────────
+    // The agent RUNNER's side of "who is this plugin call acting for": it
+    // fetches its per-container run key once (first request per container
+    // generation wins, a second one revokes it) and declares every Claude run
+    // it starts. A chat declaration names only the Matrix event; the sender is
+    // read from the homeserver here. Every route also requires the agent's
+    // caller token for `:id`. Pure core + rationale: plugin-run-identity.js.
+    const runKeyMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/run-key$/);
+    const runBeginMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/runs$/);
+    const runEndMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/runs\/end$/);
+    if (runKeyMatch || runBeginMatch || runEndMatch) {
+      const id = decodeURIComponent((runKeyMatch || runBeginMatch || runEndMatch)[1]);
+      let callerAgent = null;
+      try {
+        callerAgent = pluginRunIdentity.verifyCallerToken(
+          String(req.headers['x-aee-agent-caller'] || ''), pluginRuntime.signingSecret());
+      } catch { callerAgent = null; }
+      if (callerAgent !== id) {
+        sendJson(res, 401, { ok: false, reason: 'bad-caller-token' });
+        return;
+      }
+      readBody(req).then(async (body) => {
+        const payload = body && typeof body === 'object' ? body : {};
+        if (runKeyMatch) {
+          const r = pluginRunRegistry.issueKey(id);
+          if (!r.ok) console.warn(`[Orchestrator] run-key for ${id} refused (${r.reason}) — plugin identity revoked until the agent restarts`);
+          return sendJson(res, r.ok ? 200 : 409, r.ok ? { ok: true, key: r.key } : { ok: false, reason: r.reason });
+        }
+        if (runEndMatch) {
+          const r = pluginRunRegistry.end(id, payload.key, payload.runId);
+          return sendJson(res, r.ok || r.reason === undefined ? 200 : 403, r);
+        }
+        let run = { kind: payload.kind };
+        if (payload.kind === 'chat') {
+          const cfg = loadAgentConfig(id);
+          const roomId = typeof payload.roomId === 'string' ? payload.roomId : '';
+          const eventId = typeof payload.eventId === 'string' ? payload.eventId : '';
+          if (!cfg || !cfg.token || !roomId || !eventId) return sendJson(res, 400, { ok: false, reason: 'bad-chat-run' });
+          let event = null;
+          try {
+            const r = await fetch(
+              `${HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`,
+              { headers: { Authorization: `Bearer ${cfg.token}` }, signal: AbortSignal.timeout(10_000) });
+            event = r.ok ? await r.json() : null;
+          } catch { event = null; }
+          const decided = pluginRunIdentity.chatSenderFromEvent(event, { roomId, agentMatrixId: cfg.userId, now: Date.now() });
+          if (!decided.ok) {
+            console.warn(`[Orchestrator] chat run declaration for ${id} refused: ${decided.reason}`);
+            return sendJson(res, 403, decided);
+          }
+          run = { kind: 'chat', roomId, eventId, sender: decided.sender };
+        }
+        const r = pluginRunRegistry.begin(id, payload.key, run);
+        return sendJson(res, r.ok ? 200 : 403, r);
+      }).catch((err) => { if (!res.headersSent) sendJson(res, 400, { ok: false, error: err.message }); });
+      return;
+    }
+
+    // POST /internal/plugin-credential-grant (#2562), Authorization: Bearer
+    // <plugin scope token>, body { callerToken }. A broker with a per-person
+    // credential tier asks, for ONE CLI call, which credential it may use:
+    // the team's service account (autonomous run) or the chat sender's own
+    // (a chat turn) — or a refusal. Everything is re-derived per call: the
+    // run, the sender's team membership, the stored personal values. Personal
+    // values are returned for this one call and never pushed or cached.
+    if (req.method === 'POST' && req.url === '/internal/plugin-credential-grant') {
+      const auth = req.headers['authorization'] || '';
+      const token = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7) : '';
+      let scope = null;
+      try { scope = pluginScopeToken.verify(token, pluginRuntime.signingSecret()); } catch { scope = null; }
+      if (!scope || !scope.pluginId || !scope.scopeId) {
+        sendJson(res, 401, { ok: false, code: 'bad-token' });
+        return;
+      }
+      // Only the broker's reserved grant token — never the team scope token a
+      // granted agent holds in its workspace (it would let a chat turn fetch
+      // the sender's personal secret into the container, AC10).
+      const scopeId = scopeIdFromGrantScope(scope.scopeId);
+      if (!scopeId) {
+        sendJson(res, 403, { ok: false, code: 'grant-token-required' });
+        return;
+      }
+      readBody(req).then((body) => {
+        const { pluginId } = scope;
+        let agentId = null;
+        try { agentId = pluginRunIdentity.verifyCallerToken(String((body && body.callerToken) || ''), pluginRuntime.signingSecret()); } catch { agentId = null; }
+        if (!agentId) {
+          return sendJson(res, 403, {
+            ok: false, code: 'caller-token-required',
+            message: 'Refused: this call carries no valid agent identity. The plugin CLI in this workspace may be outdated — it is refreshed on the next plugin reconcile.',
+          });
+        }
+        const cfg = loadAgentConfig(agentId);
+        let grant = null;
+        try { grant = cfg ? pluginGrantFor(effectivePlugins(cfg, loadAgentConfig), pluginId) : null; } catch { grant = null; }
+        if (!grant || resolveScopeId(cfg, grant.scopeGranularity) !== scopeId) {
+          return sendJson(res, 403, { ok: false, code: 'caller-not-in-scope', message: `Refused: agent ${agentId} is not granted ${pluginId} in this scope.` });
+        }
+        const entry = pluginRegistry.readPluginManifest(pluginId);
+        const manifest = entry && entry.ok ? entry.manifest : null;
+        const active = pluginRunRegistry.active(agentId);
+        let senderUserId = null;
+        let personalValues = null;
+        if (active.ok && active.run.kind === 'chat') {
+          // Fresh trust check on EVERY call — a sender removed from the team
+          // mid-turn is refused on their next action.
+          senderUserId = resolveActingSenderUserId(active.run.sender, cfg);
+          if (senderUserId) {
+            try { personalValues = (pluginCredentialStore.readPersonal(pluginId, senderUserId) || {}).values || null; }
+            catch { personalValues = null; }
+          }
+        }
+        const d = pluginRunIdentity.decideCredentialGrant({
+          active,
+          senderUserId,
+          personalValues,
+          personalKeys: (manifest && manifest.personalCredentials) || [],
+          pluginName: (manifest && manifest.name) || pluginId,
+        });
+        const who = d.ok ? (d.mode === 'personal' ? `person ${d.userId}` : 'service account') : `refused (${d.code})`;
+        console.log(`[Orchestrator] plugin-credential-grant ${pluginId}/${scopeId} agent=${agentId} → ${who}`);
+        if (!d.ok) return sendJson(res, d.status, { ok: false, code: d.code, message: d.message, agentId });
+        return sendJson(res, 200, {
+          ok: true, mode: d.mode, interactive: d.interactive, agentId,
+          ...(d.mode === 'personal' ? { userId: d.userId, values: d.values } : {}),
+        });
+      }).catch((err) => { if (!res.headersSent) sendJson(res, 400, { ok: false, error: err.message }); });
       return;
     }
 
@@ -16069,7 +17088,7 @@ async function main() {
     // POLLER-SUBSCRIBED listener directly and leave a dedup marker so the
     // poller drops the later duplicate. The label itself is unchanged on GitHub
     // (the human already applied it) — this path does NOT stamp any label. The
-    // target trigger stays transport:'github' (no config change).
+    // target trigger needs no config change.
     //
     // #2247: the same wake half is reused by the Flow Supervisor's auto-dispatch
     // — see `wakeGithubLabelListeners` below, which THIS handler is now a thin
@@ -16102,6 +17121,102 @@ async function main() {
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }
       });
+      return;
+    }
+
+    // ── Manual "Fire again" (#2525) ───────────────────────────────────────
+    // POST /internal/agents/:id/github-events/refire { eventId, triggerId, actor }.
+    // The console calls this from the agent's Events tab after its own
+    // manage-gate (AC7); `actor` is stamped there from the session.
+    const refireMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/github-events\/refire$/);
+    if (refireMatch) {
+      const id = decodeURIComponent(refireMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 100_000) req.destroy(); });
+      req.on('end', async () => {
+        let parsed;
+        try {
+          parsed = githubRefire.validateRefireRequest(JSON.parse(body || '{}'));
+        } catch (err) {
+          parsed = { ok: false, error: err.message };
+        }
+        if (!parsed.ok) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: parsed.error }));
+          return;
+        }
+        try {
+          const { status, body: out } = await refireGithubEvent({ agentId: id, ...parsed.value });
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(out));
+        } catch (err) {
+          console.error(`[Orchestrator] refire error: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Effective baseline GitHub identity (#2560) ────────────────────────
+    // Which GitHub token / SSH key an agent's container is started with, and
+    // from which tier (Team Admin's personal credential / the environment's
+    // own / a global service credential / none) — computed by the SAME
+    // `describeBaseline*` functions the spawn path uses. Returns credential
+    // ids and the baseline owner's user id only; the console decides what a
+    // given caller may see of that (never another person's secret metadata).
+    const effectiveCredsMatch = req.method === 'GET' && req.url.match(/^\/internal\/agents\/([^/]+)\/effective-credentials$/);
+    if (effectiveCredsMatch) {
+      const id = decodeURIComponent(effectiveCredsMatch[1]);
+      if (!isSafePathSeg(id)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'bad agent id' }));
+        return;
+      }
+      try {
+        const cfg = loadAgentConfig(id);
+        if (!cfg) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'agent not found' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, agentId: id, ...describeAgentBaselineCredentials(cfg) }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+      return;
+    }
+
+    // The teams whose baseline identity a given human currently IS (#2560):
+    // every `role: 'team'` agent whose resolved baseline owner is `:userId`,
+    // with both credentials described. The console calls this right after
+    // that human adds or deletes a personal GitHub token / SSH key to tell
+    // them which teams now use it — or what those teams fell back to.
+    const ownerBaselineMatch = req.method === 'GET' && req.url.match(/^\/internal\/owners\/([^/]+)\/baseline-teams$/);
+    if (ownerBaselineMatch) {
+      const userId = decodeURIComponent(ownerBaselineMatch[1]);
+      try {
+        const teams = [];
+        for (const aid of listAgentIds()) {
+          const cfg = loadAgentConfig(aid);
+          if (!cfg || cfg.role !== 'team') continue;
+          const described = describeAgentBaselineCredentials(cfg);
+          if (described.github.ownerId !== userId && described.ssh.ownerId !== userId) continue;
+          teams.push({ agentId: aid, displayName: cfg.displayName || aid, ...described });
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, teams }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
       return;
     }
 
@@ -16204,6 +17319,26 @@ async function main() {
       try {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, ...aggregatePendingQueue() }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+      return;
+    }
+
+    // ── GitHub repository status (#2537) ──────────────────────────────────
+    // Read-only, unscoped: per repository, is the poller listening and if not,
+    // why. Built from the poller's own plan + runtime state; the console
+    // applies the viewer's visibility. Never carries a token value.
+    if (req.method === 'GET' && req.url.split('?')[0] === '/internal/github-poller/repo-status') {
+      try {
+        if (!githubPollerRef) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'GitHub poller not started' }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, ...githubPollerRef.repoStatusSnapshot() }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: err.message }));
@@ -16342,6 +17477,40 @@ async function main() {
           res.end(JSON.stringify({ ok: true, ...result }));
         } catch (err) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // ── Re-apply MCP servers (#2289) ──────────────────────────────────────
+    // After the admin changes an agent's own MCP override, or an environment's
+    // MCP list, it asks us to rewrite the affected workspaces' `.mcp.json` +
+    // settings approval and mirror them into running agents' volumes — no
+    // restart, the change lands on each agent's next turn. The response is the
+    // per-agent outcome (applied / stored / pending / keptOverride / failed),
+    // which the admin passes back to the console rather than swallowing.
+    const mcpApplyMatch = req.method === 'POST'
+      && req.url.match(/^\/internal\/(agents|environments)\/([^/]+)\/apply-mcp$/);
+    if (mcpApplyMatch) {
+      const kind = mcpApplyMatch[1];
+      const targetId = decodeURIComponent(mcpApplyMatch[2]);
+      req.resume();
+      req.on('end', async () => {
+        if (!isSafePathSeg(targetId)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'bad id' }));
+          return;
+        }
+        try {
+          const result = kind === 'agents'
+            ? { agentId: targetId, ...mcpSeed.summarizeMcpApply([await applyAgentMcp(targetId)]) }
+            : await applyEnvironmentMcp(targetId);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+          console.error(`[Orchestrator] MCP apply for ${kind}/${targetId} failed: ${err.message}`);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: err.message }));
         }
       });
@@ -17171,6 +18340,61 @@ async function main() {
       return;
     }
 
+    // ── Chat-attributed `gh` write (#2559) ──────────────────────────────────
+    // The agent image's `gh` shim forwards a live chat turn's GitHub WRITE here
+    // so it runs under the chat sender's personal credential without that
+    // secret ever entering the container (see chat-github-write.js). Agent-
+    // facing allowlist, `own` scope — same as git/push and git/pr.
+    const ghWriteMatch = req.method === 'POST' && req.url.match(/^\/internal\/agents\/([^/]+)\/github\/gh$/);
+    if (ghWriteMatch) {
+      const id = decodeURIComponent(ghWriteMatch[1]);
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', async () => {
+        let parsed = {};
+        try { parsed = JSON.parse(body || '{}'); } catch { /* {} */ }
+        try {
+          const cfg = loadAgentConfig(id);
+          if (!cfg) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: `Agent '${id}' not found` }));
+            return;
+          }
+          const env = cfg.environmentId ? loadEnvironment(cfg.environmentId) : null;
+          const result = await chatGithubWrite.runChatGithubWrite({
+            body: parsed,
+            resolveToken: (sender) => resolveChatGithubWriteToken(id, env, sender),
+            readToken: (tokenId) => chatGithubWrite.readGithubToken(GH_TOKENS_DIR, tokenId),
+          });
+          if (result.mode === 'attributed') {
+            // The validated command only — never `gh api`'s agent-supplied endpoint.
+            console.log(`[Orchestrator] chat gh ${chatGithubWrite.commandKey(parsed.args).slice(0, 80)} for ${id} → exit ${result.exitCode}`);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          const msg = errorMessage(err);
+          // Same status/code contract as git/push and git/pr: 424 + stable code
+          // for the personal-credential refusal (nothing was written).
+          const payload = { ok: false, error: msg };
+          let status = 500;
+          if (err && err.personalCredentialRequired) {
+            status = 424;
+            payload.code = err.refusalCode || 'personal-credential-required';
+          } else if (err && err.noGithubToken) {
+            status = 424;
+            payload.code = 'no-github-token';
+          } else if (err && err.badRequest) {
+            status = 400;
+          }
+          console.warn(`[Orchestrator] chat gh write for ${id}: ${msg}`);
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(payload));
+        }
+      });
+      return;
+    }
+
     // ── Deterministic Workspace Git panel action (issue #648) ────────────────
     // switch / update / discard for one repo in an agent's workspace, executed
     // server-side (no LLM). The admin-console proxy re-checks running state
@@ -17390,7 +18614,25 @@ async function main() {
               touched = list[i];
               wrote = true;
             }
-            if (wrote) writeKnowledgeCandidates(teamId, list);
+            // #2592 (AC3/AC8): accepting a domain card settles the queued lessons
+            // it listed — but only those whose ids are now in the written skill's
+            // provenance. The rest stay queued; on the next pass the (promoted)
+            // domain card re-opens for them (buildDomainCard).
+            let next = list;
+            if (!dismiss && !undismiss && p.skill && typeof p.skill.name === 'string') {
+              const cards = list.filter((c) => c && idList.includes(c.id) && knowledgeDomainSkills.isDomainCard(c));
+              const doc = cards.length ? _readTeamSkillDoc(teamId, p.skill.name) : null;
+              const provIds = doc && Array.isArray(doc.provenance.entryIds) ? doc.provenance.entryIds : [];
+              for (const card of cards) {
+                const settle = knowledgeDomainSkills.settleCoveredRows(next, card.lessonIds, provIds, {
+                  resolvedAt: new Date().toISOString(), promotedBy: 'operator',
+                  ...(isExtend ? { extendedInto: p.skill.name } : { promotedInto: p.skill.name }),
+                });
+                next = settle.rows;
+                wrote = wrote || settle.settled.length > 0;
+              }
+            }
+            if (wrote) writeKnowledgeCandidates(teamId, next);
           } else if (!dismiss && !undismiss && entryIds.length > 0) {
             // Promotion without a stored suggestion (manual combine, agent→team
             // lift): record a synthetic promoted row so the collector's promoted
@@ -17505,6 +18747,17 @@ async function main() {
             res.end(JSON.stringify({ ok: true, doc, budget: budgetOf(), ...extra }));
           };
           const doc = readTeamDomainsDoc(teamId);
+          // #2592 (AC10): every domain becomes one skill — growing the taxonomy at
+          // or over the soft skill budget needs an explicit confirmation. Without it
+          // nothing is written; the console asks and re-sends with the flag.
+          if (p.overBudgetConfirmed !== true) {
+            const gate = knowledgeDomains.domainGrowthNeedsConfirmation(doc, op, p, budgetOf());
+            if (gate.needed) {
+              res.writeHead(409, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'over-budget', added: gate.added, budget: budgetOf() }));
+              return;
+            }
+          }
           let r;
           switch (op) {
             case 'read':
@@ -17607,7 +18860,10 @@ async function main() {
           const buildPlan = () => {
             const domains = readTeamDomainsDoc(teamId).domains;
             const skills = readTeamSkillsForMatch(teamId);
-            const openCands = (readKnowledgeCandidates(teamId) || []).filter((c) => c && c.status === 'open');
+            // #2592: a domain card, a new-domain proposal or a decay card is not lesson
+            // content to fold — only real lesson cards are assigned to domains.
+            const openCands = (readKnowledgeCandidates(teamId) || []).filter((c) => c && c.status === 'open'
+              && !CONSOLIDATION_NON_LESSON_SOURCES.has(c.source));
             const skillEntryIdsByDomain = {};
             for (const d of domains) {
               const sk = skills.find((s) => s.name === knowledgeDomains.domainSkillName(d));
@@ -17643,7 +18899,25 @@ async function main() {
             appendKnowledgeEvents([knowledgeConsolidation.consolidationEvent(stepStatus, {
               teamId, domain: dom ? { id: dom.domainId, name: dom.name } : null, skill: dom ? dom.skill : null, now,
             })]);
-            return ok({ state });
+            // #2592 AC11: an accepted domain also folds its pending lesson cards into
+            // the domain skill — they are parked on the domain's queue and the
+            // collector pass creates/extends the ONE domain skill (or raises the
+            // domain's single card when the team>team gate is not `auto`).
+            let queued = 0;
+            if (stepStatus === 'accepted' && dom && Array.isArray(dom.candidateIds) && dom.candidateIds.length) {
+              const want = new Set(dom.candidateIds);
+              const rows = readKnowledgeCandidates(teamId).map((r) => {
+                if (!r || !want.has(r.id) || r.status !== 'open' || CONSOLIDATION_NON_LESSON_SOURCES.has(r.source)) return r;
+                queued += 1;
+                return knowledgeDomainSkills.queuedRow(r, { domainId: dom.domainId, via: 'consolidation', now });
+              });
+              if (queued > 0) {
+                writeKnowledgeCandidates(teamId, rows);
+                runConvergenceCollector(teamId, null, { force: true })
+                  .catch((err) => console.warn(`[Orchestrator] consolidation fold collector for '${teamId}' failed: ${err.message}`));
+              }
+            }
+            return ok({ state, queued });
           }
           if (op === 'route-remaining') {
             const prev = readConsolidationState(teamId);
@@ -18262,6 +19536,70 @@ async function main() {
       return;
     }
 
+    // GET /internal/teams/:teamId/flow-board — the lean Flow Control board
+    // (#2573): stages from the flow graph, one row per work item a team agent
+    // took part in, running sessions, pools and human blocks. Served from a
+    // per-team single-flight cache (`?refresh=1` forces a new sweep); on a
+    // GitHub outage the last good snapshot comes back flagged `stale`.
+    // Maintenance-gated like `tickets`: the sweep is a poll.
+    const flowBoardMatch = req.method === 'GET' &&
+      req.url.match(/^\/internal\/teams\/([^/?]+)\/flow-board(\?.*)?$/);
+    if (flowBoardMatch) {
+      const teamId = decodeURIComponent(flowBoardMatch[1]);
+      const refresh = /[?&]refresh=1(?:&|$)/.test(flowBoardMatch[2] || '');
+      (async () => {
+        try {
+          const cfg = loadAgentConfig(teamId);
+          if (!cfg || cfg.role !== 'team') {
+            return sendJson(res, 404, { error: 'agent team not found' });
+          }
+          const maint = readMaintenanceState();
+          if (maint && maint.active) {
+            return sendJson(res, 200, {
+              teamId, maintenance: true, stages: [], rows: [], needsHuman: [], sessions: [], pools: [],
+              generatedAt: new Date().toISOString(),
+            });
+          }
+          const result = await getTeamFlowBoard(teamId, { refresh });
+          return sendJson(res, 200, { maintenance: false, ...result });
+        } catch (err) {
+          console.error(`[Orchestrator] flow-board error for ${teamId}: ${err.message}`);
+          return sendJson(res, 500, { error: err.message });
+        }
+      })();
+      return;
+    }
+
+    // GET/POST /internal/teams/:teamId/flow-board-config — the optional
+    // per-team column configuration (rename/merge/hide stages, done
+    // retention). Without one, the automatic derivation applies.
+    const flowBoardConfigMatch = (req.method === 'GET' || req.method === 'POST') &&
+      req.url.match(/^\/internal\/teams\/([^/?]+)\/flow-board-config(?:\?.*)?$/);
+    if (flowBoardConfigMatch) {
+      const teamId = decodeURIComponent(flowBoardConfigMatch[1]);
+      const cfg = loadAgentConfig(teamId);
+      if (!cfg || cfg.role !== 'team') {
+        return sendJson(res, 404, { error: 'agent team not found' });
+      }
+      if (req.method === 'GET') return sendJson(res, 200, { teamId, config: loadFlowBoardConfig(teamId) });
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 50_000) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const parsed = JSON.parse(body || '{}');
+          const config = flowBoard.normalizeBoardConfig(parsed && parsed.config);
+          const p = flowBoardConfigPath(teamId);
+          fs.mkdirSync(path.dirname(p), { recursive: true });
+          fs.writeFileSync(p, JSON.stringify(config, null, 2));
+          _flowBoardCache.delete(teamId);
+          return sendJson(res, 200, { teamId, config });
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      });
+      return;
+    }
+
     // GET /internal/teams/:teamId/pool-control — board data for #2250 Phase 5:
     // every pooled role's live pause/drain state + instance count, plus the
     // team's admission-lane `held` entries (each carrying an `id` — the same
@@ -18277,7 +19615,7 @@ async function main() {
         if (!cfg || cfg.role !== 'team') {
           return sendJson(res, 404, { error: 'agent team not found' });
         }
-        const control = loadPoolControl(teamId);
+        const control = settlePoolDrains(teamId);
         const roles = _teamPooledRoles(teamId).map((role) => {
           const roleId = agentPool.roleIdFromMemberId(role.id, teamId);
           return {
@@ -18914,6 +20252,16 @@ async function main() {
       return;
     }
 
+    // GET /internal/users/:userId/plugin-credentials, PUT/DELETE
+    // …/plugin-credentials/:pluginId — a person's OWN plugin credentials
+    // (#2562). The console proxy pins :userId to the signed-in caller.
+    if (/^\/internal\/users\/[^/]+\/plugin-credentials(?:\/[^/]+)?$/.test((req.url || '').split('?')[0])) {
+      pluginCredentialWiring
+        .handlePersonalCredentialRoute(req, res, { sendJson, readBody })
+        .catch((err) => { if (!res.headersSent) sendJson(res, 500, { error: err.message }); });
+      return;
+    }
+
     // POST /internal/teams/:teamId/plugins/{activate,deactivate}
     // Body: { pluginId, scopeGranularity?, includeMembers? }
     const teamPluginMatch = req.method === 'POST' &&
@@ -19258,9 +20606,6 @@ async function main() {
   internalApi.listen(4002, '0.0.0.0', () =>
     console.log('[Orchestrator] Internal API listening on :4002')
   );
-  // Surface the unified resource-access mode at boot so it is never a guess
-  // (mirrors the admin-console boot log; #2356/#2357).
-  console.log(`[Orchestrator] ${resourceAccessModeLogLine(process.env)}`);
 
   // ============================================================
   // Webhook server — receives HTTP triggers from external systems
@@ -19420,7 +20765,10 @@ async function main() {
     triggersPath: (agentId) => controlOrPoolPath(agentId, 'triggers.json'),
     onMergedPr: postPrTokenComment, // #678 Phase 3 item 2: PR-merge token comment
     labelMarkers: labelDedupMarkers, // #1858 internal fast-path dedup (shared with the label-applied endpoint)
+    // #2571: who pushed a (repo, ref, head) — recorded by gh-as-agent push/pr.
+    lookupPushProducer: (q) => pushAttribution.defaultStore().lookup(q),
   });
+  githubPollerRef = ghPoller; // #2525: the manual re-fire re-arms through it; #2537: repo status
   ghPoller.start();
 
   // ============================================================
@@ -19657,6 +21005,35 @@ async function main() {
   };
   const poolReapTimer = setInterval(runPoolReapTick, POOL_REAP_TICK_INTERVAL_MS);
   if (typeof poolReapTimer.unref === "function") poolReapTimer.unref();
+
+  // ============================================================
+  // #2493 — stuck-`_provisioning` reaper tick. Detects agent configs that have
+  // held `_provisioning:true` past `PROVISIONING_STUCK_MS` — a half-created
+  // leftover from a provisioning step that threw after the config was written —
+  // and reaps them (config + partial Matrix/workspace/container artifacts) via
+  // the ordinary delete route, recording an operator-visible row per action.
+  // Its own tick, like the pool-reap above: it is not team-scoped (a standalone
+  // half-create has no team) and covers ordinary agent creation as well as pool
+  // spawns (AC4). NOT maintenance-gated — reaping a stuck leftover is cleanup,
+  // never "starting" work, matching the admission/pool-reap ticks. Costs one
+  // directory scan per interval for an installation with nothing stuck.
+  // ============================================================
+  const PROVISIONING_REAP_TICK_INTERVAL_MS = Number(process.env.AEE_PROVISIONING_REAP_TICK_INTERVAL_MS || 60_000);
+  let provisioningReapBusy = false;
+  const runProvisioningReapTick = async () => {
+    if (provisioningReapBusy) return; // overlap guard — a slow sweep must not stack (edge case 2: no double-act)
+    provisioningReapBusy = true;
+    try {
+      await provisioningReapSweep();
+    } catch (err) {
+      // Never let the sweep escape the timer — the next tick retries.
+      console.warn(`[Provisioning] reap sweep failed: ${err.message}`);
+    } finally {
+      provisioningReapBusy = false;
+    }
+  };
+  const provisioningReapTimer = setInterval(runProvisioningReapTick, PROVISIONING_REAP_TICK_INTERVAL_MS);
+  if (typeof provisioningReapTimer.unref === "function") provisioningReapTimer.unref();
 
   // ============================================================
   // Agent Pools — Phase 2 (#2247): the Flow Supervisor's reconcile tick.

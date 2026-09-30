@@ -31,7 +31,7 @@ When a new agent is created with an environment, the orchestrator:
 1. Seeds `.claude/` and `memory/` from the skill-pool volume
 2. Copies the agent's granted skills into the workspace (resolved team-pool-first, then global — the grant lives on the team or agent, not on the environment)
 3. Clones the configured repositories — SSH repos use the bound SSH key; HTTPS GitHub repos use the environment's GitHub token
-4. Materialises the environment's MCP server references into the agent's `.claude/settings.json`
+4. Materialises the environment's MCP server references into the agent's `.mcp.json`
 5. Assembles a merged `CLAUDE.md` from the base template, the environment section, and the agent's own prompt
 
 This means all agents in the same environment share the same repository and credential access — but each gets an independent workspace and memory that evolves separately from that point on.
@@ -74,6 +74,9 @@ is the scope and what follows from it:
   push` / `gh-as-agent pr` deliver to it exactly as to an environment repository,
   reusing the same SSH key or GitHub token (#2464). When the environment also has
   repositories, `--repo <name>` is required to disambiguate.
+- A **`github-event` trigger** on it fires like one on an environment repository:
+  the poller watches it with this environment's GitHub token (#2528), and the
+  trigger editor offers it marked *this agent only*.
 - Only a user who may **manage** the agent can attach or remove one; a chat-only
   user sees the list but no action.
 - Removing it **deletes the working copy**, and the confirmation names the
@@ -169,8 +172,7 @@ repo was previously resolved only at materialise time — so a repo added to, sw
 on, or removed from a live environment left those triggers pointing at the old
 repo (or at none, in which case the poller silently skipped them). Adding, swapping
 or removing the primary repo now re-resolves it on the live agents, so the poller
-starts (or stops) polling within ~30s with no respawn; `transport: 'internal'`
-listeners are left untouched. This runs on the save itself — independent of the
+starts (or stops) polling within ~30s with no respawn. This runs on the save itself — independent of the
 propagation offer above, and never failing it.
 
 ## Editing from a team's Settings tab

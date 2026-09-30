@@ -323,3 +323,15 @@ export function totalPending(data) {
   if (!Array.isArray(data.agents)) return 0;
   return data.agents.reduce((n, g) => n + (Array.isArray(g.entries) ? g.entries.length : 0), 0);
 }
+
+// Total dispatches held behind a full admission lane (#2114). These do NOT live
+// in any agent's pending-triggers.json — they sit in a team's admission lane —
+// so before the pending-queue surfaced them they were invisible everywhere in
+// the UI even though the GitHub Event Log recorded them "delivered". Defensive
+// against a payload from an older orchestrator that has no `held` field.
+export function totalHeld(data) {
+  if (!data) return 0;
+  if (typeof data.heldTotal === 'number') return data.heldTotal;
+  if (!Array.isArray(data.held)) return 0;
+  return data.held.reduce((n, g) => n + (Array.isArray(g.entries) ? g.entries.length : 0), 0);
+}

@@ -276,12 +276,6 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
         const claimable = !!(c.label && c.label.trim());
         const autoClaim = c.autoClaim !== false;
         const claim = claimable ? (derivedChannelTrigger(derived, c)?.claim || null) : null;
-        // Delivery transport (#1194): a labelled, agent-set channel may opt into
-        // internal delivery (poller-excluded, woken by aee-emit). Like the claim
-        // opt-out, the flag lives on the PORT (the derived trigger is regenerated).
-        // A human gate stays poller-only — a person sets the label on GitHub.
-        const internalable = claimable && c.gate !== 'human';
-        const internal = c.transport === 'internal';
         return (
           <InputRow key={key} busy={busy === key}
             icon={c.artifact === 'pr' ? <GitPullRequest size={14} /> : <CircleDot size={14} />}
@@ -309,28 +303,6 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
                         color: 'var(--eb-text-muted)', cursor: 'pointer', font: 'inherit',
                         fontSize: 'var(--eb-text-xs)', textDecoration: 'underline' }}>
                       {autoClaim ? 'disable' : 'enable'}
-                    </button>
-                  ) : null}
-                </>
-              ) : null}
-              {/* Delivery transport (#1194) — read-out + inline toggle, mirroring
-                  the claim opt-out. Shown only for a labelled, agent-set channel. */}
-              {internalable ? (
-                <>
-                  {' · '}
-                  {internal
-                    ? <span title="Woken directly by the orchestrator (the producer runs aee-emit); the label is still mirrored onto GitHub as visible status.">⚡ internal</span>
-                    : <span style={{ color: 'var(--eb-text-muted)' }}>via GitHub</span>}
-                  {ops.updateChannel ? (
-                    <button type="button" disabled={busy === key}
-                      onClick={() => run(key, () => ops.updateChannel(node.id, { ...c, transport: internal ? undefined : 'internal' }))}
-                      title={internal
-                        ? 'Switch back to GitHub-poller delivery for this listener.'
-                        : 'Deliver this wake directly over the internal channel (label mirrored to GitHub).'}
-                      style={{ marginLeft: 6, background: 'none', border: 'none', padding: 0,
-                        color: 'var(--eb-text-muted)', cursor: 'pointer', font: 'inherit',
-                        fontSize: 'var(--eb-text-xs)', textDecoration: 'underline' }}>
-                      {internal ? 'use GitHub' : 'make internal'}
                     </button>
                   ) : null}
                 </>
@@ -434,7 +406,7 @@ function InputsPanel({ node, peers, dupLints, labels, ops, onChanged, focus }) {
       {editTrigger && (
         <SidePanel open onClose={closeEdits} title="Edit input" width="520px">
           <TriggerForm agentId={node.id} ops={ops} initialValues={editTrigger} saving={savingEdit}
-            labels={labels} onSave={saveTriggerEdit} onCancel={closeEdits} />
+            onSave={saveTriggerEdit} onCancel={closeEdits} />
         </SidePanel>
       )}
 

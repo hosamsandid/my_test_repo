@@ -40,6 +40,9 @@ export const REDIRECTS = {
   // tab). The System-Admin catalog that replaced its other half is the NEW
   // `/environment-templates` route, not a redirect target.
   '/environments': '/chats',
+  // `/my-credentials` joined them in #2445: the page is dissolved and its
+  // personal self-service folded into SSH Keys / GitHub Tokens.
+  '/my-credentials': '/ssh-keys',
 };
 
 // Dynamic routes collapse to a canonical parent for topic resolution. A null
@@ -53,9 +56,8 @@ const DYNAMIC = [
 // ─── Non-route help contexts (E17 #1892, docs/helper-chat-concept.md §3.2) ───
 //
 // Not every help-worthy surface is a route: the Settings dialog is an overlay on
-// top of one, the first-run setup wizard is rendered *instead of* the Shell, and
-// a wizard step is a sub-state of a single route. So the panel's context widens
-// from a bare pathname to `{ route, overlay, step }`, and a topic claims a
+// top of one, and a wizard step is a sub-state of a single route. So the panel's
+// context widens from a bare pathname to `{ route, overlay, step }`, and a topic claims a
 // namespaced key (`modal:settings`, `/team-setup#process`) in the very same
 // `routes:` front-matter list it claims a pathname in.
 //
@@ -66,10 +68,6 @@ export const CONTEXT_KEYS = {
   'modal:settings#behavior': { label: 'Settings · Behavior' },
   'modal:settings#model': { label: 'Settings · Model' },
   'modal:settings#display': { label: 'Settings · Display' },
-  'wizard:setup': { label: 'First-run setup' },
-  'wizard:setup#llm': { label: 'First-run · Model Provider', alias: '/models' },
-  'wizard:setup#ssh-key': { label: 'First-run · SSH Key', alias: '/ssh-keys' },
-  'wizard:setup#gh-token': { label: 'First-run · GitHub Token', alias: '/github-tokens' },
   '/team-setup#process': { label: 'Agent Team Wizard · Process' },
   '/team-setup#environment': { label: 'Agent Team Wizard · Environment' },
   '/team-setup#team': { label: 'Agent Team Wizard · Team' },
@@ -151,7 +149,6 @@ export const CONTEXT_KEYS = {
 
 // The overlay ids the app publishes, as constants so a call site cannot typo one.
 export const OVERLAY_SETTINGS = 'modal:settings';
-export const OVERLAY_SETUP_WIZARD = 'wizard:setup';
 export const OVERLAY_SKILL_DETAIL = 'modal:skill-detail';
 export const OVERLAY_SKILLS_MERGE = 'modal:skills-merge';
 export const OVERLAY_KNOWLEDGE_CONFIG = 'modal:knowledge-config';
@@ -260,8 +257,8 @@ export function helpContextKeys(context) {
   return out;
 }
 
-// The route a context key delegates to, or '' — how the first-run wizard's steps
-// reuse the topics the console pages already own (no duplicate prose, AC2).
+// The route a context key delegates to, or '' — how a surface can reuse the topic
+// a console page already owns (no duplicate prose, #1892 AC2).
 export function contextAlias(key) {
   const entry = CONTEXT_KEYS[String(key || '')];
   return (entry && typeof entry.alias === 'string') ? entry.alias : '';

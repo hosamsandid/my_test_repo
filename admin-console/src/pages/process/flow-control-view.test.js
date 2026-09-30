@@ -5,447 +5,259 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  LIFECYCLE_STAGES,
-  TICKET_STATES,
-  BLOCKERS,
-  stageInfo,
-  stageIndex,
-  blockerInfo,
-  synthesizeUrl,
-  deepLinks,
-  ticketCard,
-  groupIntoLanes,
-  bucketFor,
-  epicRollups,
-  rollupSummary,
-  boardSummary,
-  poolControlRows,
-  heldRows,
-  poolLaneRoleRows,
+  formatDuration,
+  since,
+  updatedAgo,
+  itemRef,
+  rowView,
+  sessionView,
+  poolView,
+  needsYouView,
+  boardView,
+  EMPTY_TEXT,
+  POOL_ACTION_TOOLTIPS,
+  AUTO_REFRESH_MS,
+  autoRefreshKey,
+  readAutoRefresh,
+  writeAutoRefresh,
+  configFormRows,
+  configFromForm,
 } from './flow-control-view.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const RECONCILER = path.join(here, '..', '..', '..', '..', 'orchestrator', 'ticket-reconciler.js');
+const HELP_TOPIC = path.join(here, '..', '..', '..', 'api', 'helper-chat', 'help-topics', 'flow-control.md');
 
-// A ledger row in the shape `buildTicketLedger` emits. Only the fields the view
-// reads are spelled out; `over` supplies the case under test.
+const NOW = Date.parse('2026-09-29T12:00:00Z');
+const ago = (mins) => new Date(NOW - mins * 60_000).toISOString();
+
+const STAGES = [
+  { id: 'ready', label: 'Ready', roles: [] },
+  { id: 't-dev', label: 'Developer', roles: ['t-dev'] },
+  { id: 't-rev', label: 'Code Reviewer', roles: ['t-rev'] },
+  { id: 'done', label: 'Done', roles: [] },
+];
+
 const row = (over = {}) => ({
-  ticketId: 'acme/repo#2116',
-  repo: 'acme/repo',
-  kind: 'issue',
-  number: 2116,
-  title: 'Flow Control board',
-  url: 'https://github.com/acme/repo/issues/2116',
-  epicId: 2112,
-  lane: 'ready-2',
-  state: 'in-review',
-  stateSince: '2026-09-08T18:00:00.000Z',
-  ageInStateMs: 90 * 60000,
-  ownerAgentId: 'team-code-reviewer',
-  blocker: null,
-  blockers: [],
-  reasonDetail: null,
-  needsHuman: false,
-  severity: 'info',
-  prNumber: 2127,
-  prState: 'open',
-  prLinkage: 'closes',
-  labels: ['ready-2:completed', 'ready-for-review'],
-  anomalies: [],
-  recurrence: 0,
-  evidence: [
-    { type: 'issue', text: '#2116', url: 'https://github.com/acme/repo/issues/2116' },
-    { type: 'pr', text: '#2127', url: 'https://github.com/acme/repo/pull/2127' },
-  ],
+  id: 'o/r#7',
+  title: 'Add the thing',
+  url: 'https://gh/o/r/issues/7',
+  issue: { repo: 'o/r', number: 7, url: 'https://gh/o/r/issues/7' },
+  prs: [{ repo: 'o/r', number: 70, url: 'https://gh/o/r/pull/70', state: 'open' }],
+  stageId: 't-rev',
+  stageIndex: 2,
+  status: 'working',
+  agentId: 't-rev',
+  since: ago(75),
+  done: false,
+  needsHuman: null,
   ...over,
 });
 
-// ── AC2: state never comes from raw labels ──────────────────────────────────
-//
-// The strongest possible form of "it cannot show a false Done" is not a
-// source-text assertion (which a single-word slug would make a false-positive
-// generator) but a behavioural one: the labels array is not an input at all.
+// ── durations ──────────────────────────────────────────────────────────────
 
-test('AC2: the card is identical with the labels array removed entirely', () => {
-  const withLabels = row({ labels: ['ready-2:completed', 'ready-to-merge', 'done'] });
-  const without = row();
-  delete without.labels;
-  assert.deepEqual(ticketCard(without), ticketCard(withLabels));
+test('formatDuration: compact, comparable units', () => {
+  assert.equal(formatDuration(20_000), 'under 1m');
+  assert.equal(formatDuration(4 * 60_000), '4m');
+  assert.equal(formatDuration(60 * 60_000), '1h');
+  assert.equal(formatDuration(190 * 60_000), '3h 10m');
+  assert.equal(formatDuration(53 * 3600_000), '2d 5h');
+  assert.equal(formatDuration(null), '');
+  assert.equal(formatDuration(-5), '');
 });
 
-test('AC2: labels claiming completion cannot produce a Done card', () => {
-  // The §1 stall exactly: every label says the work finished, GitHub says the PR
-  // is open and conflicting. The board must show the reconciler's truth.
-  const lying = row({
-    labels: ['ready-2:completed', 'ready-for-review:completed', 'ready-to-merge:completed'],
-    state: 'in-review',
-    blocker: 'claimed-done-not-merged',
-    severity: 'warning',
-    reasonDetail: 'the completing stage set none of its declared outgoing labels.',
-  });
-  const card = ticketCard(lying);
-  assert.equal(card.state, 'in-review');
-  assert.equal(card.stateLabel, 'In review');
-  assert.equal(card.blockerLabel, 'Claimed done');
-
-  const lanes = groupIntoLanes([lying]);
-  assert.equal(lanes.find((l) => l.state === 'done').count, 0, 'no false Done');
-  assert.equal(lanes.find((l) => l.state === 'in-review').count, 1);
+test('since / updatedAgo: relative to an injected now; junk is blank', () => {
+  assert.equal(since(ago(12), NOW), '12m');
+  assert.equal(since('nope', NOW), '');
+  assert.equal(updatedAgo(new Date(NOW - 2000).toISOString(), NOW), 'Updated just now');
+  assert.equal(updatedAgo(new Date(NOW - 42_000).toISOString(), NOW), 'Updated 42s ago');
+  assert.equal(updatedAgo(ago(3), NOW), 'Updated 3m ago');
+  assert.equal(updatedAgo(null, NOW), '');
 });
 
-// ── drift guards against the reconciler ─────────────────────────────────────
-
-test('TICKET_STATES is byte-for-byte the reconciler\'s own list, in order', () => {
-  // The browser bundle cannot require from orchestrator/, so the list is
-  // duplicated (same reasoning as working-env-repo-diff.test.js). A stage the
-  // reconciler can emit but the board does not know would silently land every
-  // such ticket in the trailing "Other" lane.
-  const src = fs.readFileSync(RECONCILER, 'utf8');
-  const at = src.indexOf('const TICKET_STATES = Object.freeze([');
-  assert.ok(at > 0, 'TICKET_STATES must be declared in the expected form');
-  const end = src.indexOf(']);', at);
-  assert.ok(end > at, 'TICKET_STATES must terminate');
-  const canonical = [...src.slice(at, end).matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
-  assert.ok(canonical.length >= 5, 'the extraction must actually find states');
-  assert.deepEqual([...TICKET_STATES], canonical);
+test('itemRef: short on a single-repo board, qualified across repos', () => {
+  assert.equal(itemRef('o/r', 12, true), '#12');
+  assert.equal(itemRef('o/r', 12, false), 'o/r#12');
+  assert.equal(itemRef('o/r', null, true), '');
 });
 
-test('BLOCKERS covers every reason code the reconciler can emit', () => {
-  const src = fs.readFileSync(RECONCILER, 'utf8');
-  const at = src.indexOf('const BLOCKER_CODES = Object.freeze([');
-  assert.ok(at > 0, 'BLOCKER_CODES must be declared in the expected form');
-  const end = src.indexOf(']);', at);
-  const canonical = [...src.slice(at, end).matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
-  assert.ok(canonical.length >= 5, 'the extraction must actually find codes');
-  const missing = canonical.filter((c) => !BLOCKERS[c]);
-  assert.deepEqual(missing, [], 'a code with no entry renders as a bare slug on the badge');
-  // …and nothing invented on this side either.
-  assert.deepEqual(Object.keys(BLOCKERS).filter((c) => !canonical.includes(c)), []);
+// ── rows (AC4, AC5) ────────────────────────────────────────────────────────
+
+test('rowView: one row carries the issue and its PRs, the current stage and time in stage', () => {
+  const v = rowView(row(), STAGES, { now: NOW });
+  assert.equal(v.ref, '#7');
+  assert.deepEqual(v.prs.map((p) => p.label), ['PR #70']);
+  assert.equal(v.stageLabel, 'Code Reviewer');
+  assert.equal(v.inStage, '1h 15m');
+  assert.deepEqual(v.steps.map((s) => s.state), ['past', 'past', 'current', 'future']);
+  assert.equal(v.statusText, 'working');
 });
 
-test('the drift guards are not vacuous — a wrong list is reported', () => {
-  const canonical = ['backlog', 'ready', 'done'];
-  assert.notDeepEqual(['backlog', 'done', 'ready'], canonical, 'order is part of the claim');
-  assert.notDeepEqual(['backlog', 'ready'], canonical, 'a missing state is a failure');
+test('rowView: a PR-only row has no issue ref; a done row marks every step past', () => {
+  const pr = rowView(row({ issue: null, stageId: 'done', stageIndex: 3, status: 'done', done: true }), STAGES, { now: NOW });
+  assert.equal(pr.ref, '');
+  assert.equal(pr.issueUrl, null);
+  assert.ok(pr.steps.every((s) => s.state === 'past'));
 });
 
-// ── stages ──────────────────────────────────────────────────────────────────
-
-test('every stage has a label and a blurb, and the order is the flow order', () => {
-  for (const s of LIFECYCLE_STAGES) {
-    assert.ok(s.label && s.label !== s.state, `${s.state} needs a human label`);
-    assert.ok(s.blurb.length > 10, `${s.state} needs a blurb`);
-  }
-  assert.ok(stageIndex('backlog') < stageIndex('in-dev'));
-  assert.ok(stageIndex('in-dev') < stageIndex('mergeable'));
-  assert.ok(stageIndex('mergeable') < stageIndex('done'));
-});
-
-test('an unknown state degrades to itself rather than throwing', () => {
-  assert.equal(stageInfo('quantum').label, 'quantum');
-  assert.equal(stageIndex('quantum'), -1);
-  assert.equal(blockerInfo('meteorite').label, 'meteorite');
-});
-
-// ── AC3: deep links ─────────────────────────────────────────────────────────
-
-test('AC3: an issue ticket links to both its issue and its PR', () => {
-  const { issueUrl, prUrl } = deepLinks(row());
-  assert.equal(issueUrl, 'https://github.com/acme/repo/issues/2116');
-  assert.equal(prUrl, 'https://github.com/acme/repo/pull/2127');
-});
-
-test('AC3: a PR-kind ticket links to the PR and claims no issue it does not have', () => {
-  const pr = row({
-    kind: 'pr', number: 2127, url: 'https://github.com/acme/repo/pull/2127', prNumber: 2127,
-    evidence: [{ type: 'pr', text: '#2127', url: 'https://github.com/acme/repo/pull/2127' }],
-  });
-  const { issueUrl, prUrl } = deepLinks(pr);
-  assert.equal(prUrl, 'https://github.com/acme/repo/pull/2127');
-  assert.equal(issueUrl, null, 'inventing an issue link would 404');
-});
-
-test('AC3: a PR whose url GitHub did not return is synthesized from the repo', () => {
-  const t = row({ evidence: [{ type: 'pr', text: '#2127', url: null }] });
-  assert.equal(deepLinks(t).prUrl, 'https://github.com/acme/repo/pull/2127');
-});
-
-test('AC3: an unusable repo degrades to no link rather than a broken one', () => {
-  assert.equal(synthesizeUrl('not-a-repo', 'pr', 5), null);
-  assert.equal(synthesizeUrl(null, 'pr', 5), null);
-  assert.equal(synthesizeUrl('acme/repo', 'pr', undefined), null);
-  const t = row({ repo: 'not-a-repo', evidence: [] , url: null });
-  assert.deepEqual(deepLinks(t), { issueUrl: null, prUrl: null });
-});
-
-test('AC3: no PR at all yields no PR link, and the issue link survives', () => {
-  const t = row({ prNumber: null, prState: null, evidence: [{ type: 'issue', text: '#2116', url: 'https://gh/i/2116' }] });
-  assert.equal(deepLinks(t).prUrl, null);
-  // The row's own `url` is the canonical link for the row's own object, so it
-  // wins over the evidence entry that describes the same issue.
-  assert.equal(deepLinks(t).issueUrl, 'https://github.com/acme/repo/issues/2116');
-  assert.equal(deepLinks(row({ url: null, prNumber: null, evidence: [{ type: 'issue', text: '#2116', url: 'https://gh/i/2116' }] })).issueUrl, 'https://gh/i/2116');
-});
-
-// ── AC1: the card carries state / owner / age / blocker ─────────────────────
-
-test('AC1: the card projects state, owner, age and blocker from the ledger row', () => {
-  const card = ticketCard(row({
-    blocker: 'conflict', severity: 'warning', needsHuman: false,
-    reasonDetail: 'the PR conflicts with its base branch.',
-  }));
-  assert.equal(card.stateLabel, 'In review');
-  assert.equal(card.owner, 'team-code-reviewer');
-  assert.equal(card.age, '1h');
-  assert.equal(card.blocker, 'conflict');
-  assert.equal(card.blockerLabel, 'Conflict');
-  assert.equal(card.reasonDetail, 'the PR conflicts with its base branch.');
-  assert.equal(card.severity, 'warning');
-  assert.match(card.color, /warning/);
-  assert.equal(card.ref, '#2116');
-  assert.equal(card.epicId, 2112);
-});
-
-test('a PR-kind card labels its reference as a PR', () => {
-  assert.equal(ticketCard(row({ kind: 'pr', number: 2127 })).ref, 'PR #2127');
-});
-
-test('an unblocked ticket carries no blocker presentation at all', () => {
-  const card = ticketCard(row());
-  assert.equal(card.blocker, null);
-  assert.equal(card.blockerLabel, null);
-  assert.equal(card.blockerBlurb, null);
-  assert.equal(card.needsHuman, false);
-});
-
-// ── swimlanes ───────────────────────────────────────────────────────────────
-
-test('groupIntoLanes returns one lane per stage, empty ones included', () => {
-  const lanes = groupIntoLanes([row()]);
-  assert.equal(lanes.length, TICKET_STATES.length);
-  assert.deepEqual(lanes.map((l) => l.state), [...TICKET_STATES]);
-  assert.equal(lanes.find((l) => l.state === 'backlog').count, 0);
-});
-
-test('groupIntoLanes can drop empty lanes on request', () => {
-  const lanes = groupIntoLanes([row()], { includeEmpty: false });
-  assert.deepEqual(lanes.map((l) => l.state), ['in-review']);
-});
-
-test('groupIntoLanes preserves the ledger\'s most-actionable-first order', () => {
-  // `compareTickets` already sorted these; re-sorting in the view would discard
-  // the reconciler's ranking, which is the only ordering an operator can act on.
-  const tickets = [
-    row({ number: 1, ticketId: '#1', blocker: 'conflict' }),
-    row({ number: 2, ticketId: '#2', blocker: 'ci-red' }),
-    row({ number: 3, ticketId: '#3' }),
+test('rowView: the step list is exactly the team\'s own stages — no fixed vocabulary', () => {
+  const kitchen = [
+    { id: 'ready', label: 'Ready' }, { id: 'k-chef', label: 'Chef' },
+    { id: 'k-taster', label: 'Taster' }, { id: 'done', label: 'Done' },
   ];
-  const lane = groupIntoLanes(tickets).find((l) => l.state === 'in-review');
-  assert.deepEqual(lane.tickets.map((c) => c.number), [1, 2, 3]);
-  assert.equal(lane.count, 3);
-  assert.equal(lane.blocked, 2);
+  const v = rowView(row({ stageId: 'k-chef', stageIndex: undefined }), kitchen, { now: NOW });
+  assert.deepEqual(v.steps.map((s) => s.label), ['Ready', 'Chef', 'Taster', 'Done']);
+  assert.equal(v.stageLabel, 'Chef');
 });
 
-test('a state the console does not know lands in Other, never dropped', () => {
-  const lanes = groupIntoLanes([row({ state: 'teleported' })]);
-  const other = lanes.find((l) => l.state === 'other');
-  assert.equal(other.count, 1);
-  assert.equal(lanes.reduce((n, l) => n + l.count, 0), 1, 'nothing is lost');
-});
+// ── area ① (AC7, AC13) ─────────────────────────────────────────────────────
 
-test('groupIntoLanes tolerates junk input', () => {
-  assert.equal(groupIntoLanes(null).length, TICKET_STATES.length);
-  assert.equal(groupIntoLanes([null, undefined]).reduce((n, l) => n + l.count, 0), 0);
-});
-
-// ── epic roll-up ────────────────────────────────────────────────────────────
-
-test('bucketFor is exhaustive and mutually exclusive over state × blocker', () => {
-  const buckets = new Set();
-  let n = 0;
-  for (const state of [...TICKET_STATES, 'teleported']) {
-    for (const blocker of [null, 'conflict', 'needs-human']) {
-      const b = bucketFor(ticketCard(row({ state, blocker })));
-      assert.ok(['done', 'blocked', 'inProgress', 'waiting'].includes(b), `${state}/${blocker} → ${b}`);
-      buckets.add(b);
-      n += 1;
-    }
-  }
-  assert.equal(buckets.size, 4, 'every bucket is reachable');
-  assert.equal(n, (TICKET_STATES.length + 1) * 3);
-});
-
-test('a blocker recorded against merged work is history, not a call to action', () => {
-  assert.equal(bucketFor(ticketCard(row({ state: 'done', blocker: 'conflict' }))), 'done');
-});
-
-test('the four roll-up counts always sum to the total', () => {
-  const tickets = [...TICKET_STATES, 'teleported'].flatMap((state, i) => ([
-    row({ number: 100 + i, epicId: 2112, state }),
-    row({ number: 200 + i, epicId: 2112, state, blocker: 'ci-red' }),
-  ]));
-  const [roll] = epicRollups(tickets);
-  assert.equal(roll.epicId, 2112);
-  assert.equal(roll.done + roll.blocked + roll.inProgress + roll.waiting, roll.total);
-  assert.equal(roll.total, tickets.length);
-});
-
-test('epicRollups groups by epic, skips epic-less tickets, and ranks blocked first', () => {
-  const rolls = epicRollups([
-    row({ number: 1, epicId: 41, state: 'done' }),
-    row({ number: 2, epicId: 41, state: 'done' }),
-    row({ number: 3, epicId: 41, state: 'ready' }),
-    row({ number: 4, epicId: 99, state: 'in-dev', blocker: 'conflict' }),
-    row({ number: 5, epicId: null }),
-  ]);
-  assert.deepEqual(rolls.map((r) => r.epicId), [99, 41], 'most blocked first');
-  assert.equal(rolls.find((r) => r.epicId === 41).total, 3);
-  assert.equal(rolls.reduce((n, r) => n + r.total, 0), 4, 'the epic-less ticket is not counted');
-});
-
-test('rollupSummary reads like the concept\'s example and drops zero buckets', () => {
-  assert.equal(
-    rollupSummary({ done: 3, blocked: 1, inProgress: 2, waiting: 4 }),
-    '3 done · 1 blocked · 2 in progress · 4 waiting',
+test('sessionView: role, instance, work item and running time', () => {
+  const v = sessionView({
+    id: 's1', agentId: 't-dev-i7', roleLabel: 'Developer', instance: 7,
+    issue: { repo: 'o/r', number: 7 }, title: 'Add the thing', startedAt: ago(9),
+  }, { now: NOW });
+  assert.deepEqual(
+    { role: v.role, instance: v.instance, item: v.item, running: v.running },
+    { role: 'Developer', instance: '#7', item: '#7', running: '9m' },
   );
-  assert.equal(rollupSummary({ done: 4, blocked: 0, inProgress: 0, waiting: 0 }), '4 done');
-  assert.equal(rollupSummary({ done: 0, blocked: 0, inProgress: 0, waiting: 0 }), '');
+  const prOnly = sessionView({ agentId: 't-rev', roleLabel: 'Code Reviewer', issue: null, prs: [{ repo: 'o/r', number: 70 }], startedAt: ago(1) }, { now: NOW });
+  assert.equal(prOnly.item, 'PR #70');
+  assert.equal(prOnly.instance, null);
 });
 
-test('epicRollups counts the tickets that need a human', () => {
-  const [roll] = epicRollups([
-    row({ number: 1, epicId: 7, blocker: 'needs-human', needsHuman: true }),
-    row({ number: 2, epicId: 7 }),
+test('poolView: running shows "x of y busy" with Pause and Drain', () => {
+  const v = poolView({ roleId: 'developer', label: 'Developer', busy: 2, capacity: 3, state: 'running' });
+  assert.equal(v.occupancy, '2 of 3 busy');
+  assert.equal(v.stateText, null);
+  assert.deepEqual(v.actions.map((a) => [a.label, a.nextState]), [['Pause', 'paused'], ['Drain', 'draining']]);
+});
+
+test('poolView: Draining counts what still runs, then Off offers Switch on', () => {
+  const draining = poolView({ roleId: 'developer', busy: 2, capacity: 3, state: 'draining' });
+  assert.equal(draining.stateText, 'Draining, 2 still running');
+  assert.deepEqual(draining.actions.map((a) => a.label), ['Switch on']);
+  const off = poolView({ roleId: 'developer', busy: 0, capacity: 3, state: 'off', held: 4 });
+  assert.equal(off.stateText, 'Off · 4 waiting');
+  assert.deepEqual(off.actions.map((a) => [a.label, a.nextState]), [['Switch on', 'running']]);
+});
+
+test('poolView: Paused differs from Draining — it resumes, it never switches off', () => {
+  const v = poolView({ roleId: 'developer', busy: 1, capacity: null, state: 'paused', held: 1 });
+  assert.equal(v.occupancy, '1 busy');
+  assert.equal(v.stateText, 'Paused, 1 still running · 1 waiting');
+  assert.deepEqual(v.actions.map((a) => a.label), ['Resume']);
+});
+
+// ── AC14: tooltips a newcomer understands, and the help topic agrees ───────
+
+test('each Pause/Drain/Resume/Switch-on tooltip says what happens to running work, new work, and how to undo', () => {
+  const { pause, drain, resume, switchOn } = POOL_ACTION_TOOLTIPS;
+  for (const t of [pause, drain]) {
+    assert.match(t, /running instances finish/i, 'running work');
+    assert.match(t, /new work waits/i, 'new work');
+  }
+  assert.match(pause, /Resume/);
+  assert.match(drain, /Off/);
+  assert.match(drain, /Switch on/);
+  for (const t of [resume, switchOn]) assert.match(t, /starts now/);
+  assert.ok(Object.values(POOL_ACTION_TOOLTIPS).every((t) => !/wipLimit|pool-control|instance id/i.test(t)), 'no jargon');
+});
+
+test('help-topics/flow-control.md quotes every tooltip verbatim', () => {
+  const topic = fs.readFileSync(HELP_TOPIC, 'utf8').replace(/\s+/g, ' ');
+  for (const [key, text] of Object.entries(POOL_ACTION_TOOLTIPS)) {
+    assert.ok(topic.includes(text), `the help topic must say exactly what the ${key} tooltip says: "${text}"`);
+  }
+});
+
+// ── area ② (AC8) ───────────────────────────────────────────────────────────
+
+test('needsYouView: plain reason and waiting time', () => {
+  const v = needsYouView({ id: 'o/r#61', title: 'Fix', issue: null, prs: [{ repo: 'o/r', number: 61 }], reason: 'conflict with base', since: ago(130) }, { now: NOW });
+  assert.deepEqual({ ref: v.ref, reason: v.reason, waiting: v.waiting }, { ref: 'PR #61', reason: 'conflict with base', waiting: '2h 10m' });
+});
+
+// ── the whole board (AC8, AC10, empty/degraded states) ─────────────────────
+
+test('boardView: area ② is null when nothing needs a person; empty board reads "Nothing in progress"', () => {
+  const v = boardView({ stages: STAGES, rows: [], needsHuman: [], sessions: [], pools: [], repos: ['o/r'], generatedAt: ago(0) }, NOW);
+  assert.equal(v.needsYou, null);
+  assert.equal(v.empty, true);
+  assert.equal(v.emptyText, 'Nothing in progress');
+  assert.equal(EMPTY_TEXT, 'Nothing in progress');
+});
+
+test('boardView: stale snapshot keeps its rows and surfaces the warning', () => {
+  const v = boardView({
+    stages: STAGES, rows: [row()], needsHuman: [{ id: 'o/r#7', reason: 'checks failing', since: ago(5), issue: { repo: 'o/r', number: 7 } }],
+    repos: ['o/r'], generatedAt: ago(10), stale: true, warning: 'GitHub is unreachable — showing the last known state from X.',
+  }, NOW);
+  assert.equal(v.rows.length, 1);
+  assert.equal(v.stale, true);
+  assert.match(v.warning, /unreachable/);
+  assert.equal(v.needsYou.length, 1);
+});
+
+test('boardView: qualifies refs only on a multi-repo board; flags a team without a repository', () => {
+  const multi = boardView({ stages: STAGES, rows: [row()], repos: ['o/r', 'o/s'], generatedAt: ago(0) }, NOW);
+  assert.equal(multi.rows[0].ref, 'o/r#7');
+  const none = boardView({ stages: STAGES, rows: [], repos: [], generatedAt: ago(0) }, NOW);
+  assert.equal(none.noRepos, true);
+  const maint = boardView({ maintenance: true, repos: [], generatedAt: ago(0) }, NOW);
+  assert.equal(maint.noRepos, false);
+  assert.equal(maint.maintenance, true);
+});
+
+test('boardView: none of the removed surfaces are produced (AC10)', () => {
+  const v = boardView({ stages: STAGES, rows: [row()], repos: ['o/r'], generatedAt: ago(0) }, NOW);
+  for (const gone of ['summary', 'epics', 'rollups', 'backlog', 'openPrs', 'lanes']) {
+    assert.ok(!(gone in v), `"${gone}" must not come back`);
+  }
+});
+
+// ── AC12: auto-refresh, remembered per user ────────────────────────────────
+
+function memoryStore() {
+  const m = new Map();
+  return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)) };
+}
+
+test('auto-refresh: every 30 s, on by default, remembered per user', () => {
+  assert.equal(AUTO_REFRESH_MS, 30_000);
+  const store = memoryStore();
+  assert.equal(autoRefreshKey('ada'), 'flowControl.autoRefresh.ada');
+  assert.equal(autoRefreshKey(null), 'flowControl.autoRefresh.anon');
+  assert.equal(readAutoRefresh('ada', store), true);
+  writeAutoRefresh('ada', false, store);
+  assert.equal(readAutoRefresh('ada', store), false);
+  assert.equal(readAutoRefresh('bob', store), true, 'one user\'s choice never leaks to another');
+  writeAutoRefresh('ada', true, store);
+  assert.equal(readAutoRefresh('ada', store), true);
+});
+
+test('auto-refresh: an unreadable store falls back to on', () => {
+  const broken = { getItem() { throw new Error('denied'); }, setItem() { throw new Error('denied'); } };
+  assert.equal(readAutoRefresh('ada', broken), true);
+  assert.doesNotThrow(() => writeAutoRefresh('ada', false, broken));
+});
+
+// ── AC6 / AC9: column configuration ────────────────────────────────────────
+
+test('configFormRows / configFromForm: round-trip rename, merge, hide and retention; blanks drop out', () => {
+  const roles = [{ id: 't-dev', label: 'Developer' }, { id: 't-rev', label: 'Code Reviewer' }, { id: 't-rew', label: 'Reworker' }];
+  const config = { doneRetentionHours: 48, stages: { 't-rev': { label: 'Review' }, 't-rew': { mergeInto: 't-rev' } } };
+  const form = configFormRows(roles, config);
+  assert.deepEqual(form.map((r) => [r.id, r.derivedLabel, r.label, r.hidden, r.mergeInto]), [
+    ['t-dev', 'Developer', '', false, ''],
+    ['t-rev', 'Code Reviewer', 'Review', false, ''],
+    ['t-rew', 'Reworker', '', false, 't-rev'],
   ]);
-  assert.equal(roll.needsHuman, 1);
-});
-
-// ── header ──────────────────────────────────────────────────────────────────
-
-test('boardSummary counts the header figures and surfaces the banner conditions', () => {
-  const s = boardSummary({
-    generatedAt: '2026-09-08T20:00:00.000Z',
-    swept: 12,
-    repos: ['acme/repo'],
-    errors: ['acme/other: 403'],
-    tickets: [
-      row({ number: 1 }),
-      row({ number: 2, blocker: 'conflict', severity: 'warning' }),
-      row({ number: 3, blocker: 'needs-human', needsHuman: true }),
-      row({ number: 4, state: 'done' }),
-    ],
+  form[0].hidden = true;
+  form[1].label = '  ';
+  assert.deepEqual(configFromForm(form, '48'), {
+    doneRetentionHours: 48,
+    stages: { 't-dev': { hidden: true }, 't-rew': { mergeInto: 't-rev' } },
   });
-  assert.equal(s.total, 4);
-  assert.equal(s.blocked, 2);
-  assert.equal(s.needsHuman, 1);
-  assert.equal(s.done, 1);
-  assert.equal(s.epics, 1);
-  assert.equal(s.swept, 12);
-  assert.equal(s.maintenance, false);
-  assert.equal(s.noRepos, false);
-  assert.deepEqual(s.errors, ['acme/other: 403']);
-});
-
-test('boardSummary reports maintenance and the repo-less team', () => {
-  assert.equal(boardSummary({ maintenance: true, tickets: [] }).maintenance, true);
-  assert.equal(boardSummary({ repos: [], tickets: [] }).noRepos, true);
-  // Maintenance already explains the empty board, so the repo banner stands down.
-  assert.equal(boardSummary({ maintenance: true, repos: [], tickets: [] }).noRepos, false);
-});
-
-test('boardSummary survives a missing or malformed payload', () => {
-  for (const data of [null, undefined, {}, { tickets: null }, { tickets: [null] }]) {
-    const s = boardSummary(data);
-    assert.equal(s.total, 0);
-    assert.deepEqual(s.errors, []);
-  }
-});
-
-// ── pool controls (#2250 Phase 5) ──────────────────────────────────────────
-
-test('poolControlRows normalizes fields and sorts alphabetically by role id', () => {
-  const rows = poolControlRows({
-    roles: [
-      { roleId: 'reviewer', agentId: 'acme-reviewer', displayName: 'Reviewer', maxInstances: 2, liveInstanceCount: 1, state: 'running' },
-      { roleId: 'developer', agentId: 'acme-developer', displayName: 'Developer', maxInstances: null, liveInstanceCount: 3, state: 'paused' },
-    ],
-  });
-  assert.deepEqual(rows.map((r) => r.roleId), ['developer', 'reviewer']);
-  assert.equal(rows[0].state, 'paused');
-  assert.equal(rows[0].maxInstances, null);
-  assert.equal(rows[1].maxInstances, 2);
-});
-
-test('poolControlRows defaults an unrecognised/missing state to running', () => {
-  const rows = poolControlRows({ roles: [{ roleId: 'x', state: 'bogus' }, { roleId: 'y' }] });
-  assert.equal(rows[0].state, 'running');
-  assert.equal(rows[1].state, 'running');
-});
-
-test('poolControlRows survives a missing or malformed payload', () => {
-  for (const data of [null, undefined, {}, { roles: null }]) {
-    assert.deepEqual(poolControlRows(data), []);
-  }
-});
-
-test('heldRows splits the ticket ref for display and sorts oldest-held first', () => {
-  const rows = heldRows({
-    held: [
-      { id: 'b', agentId: 'acme-developer-i2', ticket: 'acme/repo#5', heldAt: '2026-09-14T10:00:00.000Z' },
-      { id: 'a', agentId: 'acme-developer-i1', ticket: 'acme/repo#2', heldAt: '2026-09-14T09:00:00.000Z' },
-    ],
-  });
-  assert.deepEqual(rows.map((r) => r.id), ['a', 'b']);
-  assert.equal(rows[0].repo, 'acme/repo');
-  assert.equal(rows[0].number, 2);
-});
-
-test('heldRows survives a missing/malformed payload and an unparseable ticket ref', () => {
-  for (const data of [null, undefined, {}, { held: null }]) {
-    assert.deepEqual(heldRows(data), []);
-  }
-  const rows = heldRows({ held: [{ id: 'x', ticket: null }] });
-  assert.equal(rows[0].repo, null);
-  assert.equal(rows[0].number, null);
-});
-
-// ── pool instance lanes (#2273) ────────────────────────────────────────────
-
-test('poolLaneRoleRows normalizes each role and its lanes, sorted alphabetically by role id', () => {
-  const rows = poolLaneRoleRows({
-    roles: [
-      {
-        roleId: 'reviewer', agentId: 'acme-reviewer', displayName: 'Reviewer', maxInstances: 2,
-        lanes: [{ instanceId: 'acme-reviewer-i407', ticketId: 'acme/repo#407', repo: 'acme/repo', number: 407, epicId: null, status: 'running', spawnedAt: '2026-09-14T09:00:00.000Z', sameEpicAs: null }],
-      },
-      {
-        roleId: 'developer', agentId: 'acme-developer', displayName: 'Developer', maxInstances: 4,
-        lanes: [
-          { instanceId: 'acme-developer-i412', ticketId: 'acme/repo#412', repo: 'acme/repo', number: 412, epicId: 100, status: 'running', spawnedAt: '2026-09-14T08:00:00.000Z', sameEpicAs: null },
-          { instanceId: null, ticketId: 'acme/repo#421', repo: 'acme/repo', number: 421, epicId: 100, status: 'held-same-epic', spawnedAt: null, sameEpicAs: 'acme/repo#412' },
-        ],
-      },
-    ],
-  });
-  assert.deepEqual(rows.map((r) => r.roleId), ['developer', 'reviewer']);
-  assert.equal(rows[0].lanes.length, 2);
-  assert.equal(rows[0].lanes[1].status, 'held-same-epic');
-  assert.equal(rows[0].lanes[1].sameEpicAs, 'acme/repo#412');
-  assert.equal(rows[1].lanes[0].status, 'running');
-});
-
-test('poolLaneRoleRows defaults an unrecognised/missing lane status to running', () => {
-  const rows = poolLaneRoleRows({
-    roles: [{ roleId: 'x', lanes: [{ ticketId: 't#1', status: 'bogus' }, { ticketId: 't#2' }] }],
-  });
-  assert.equal(rows[0].lanes[0].status, 'running');
-  assert.equal(rows[0].lanes[1].status, 'running');
-});
-
-test('poolLaneRoleRows survives a missing or malformed payload', () => {
-  for (const data of [null, undefined, {}, { roles: null }]) {
-    assert.deepEqual(poolLaneRoleRows(data), []);
-  }
-  const rows = poolLaneRoleRows({ roles: [{ roleId: 'x', lanes: null }] });
-  assert.deepEqual(rows[0].lanes, []);
+  assert.equal(configFromForm([], 'x').doneRetentionHours, 24);
+  assert.deepEqual(configFromForm([{ id: 'a', mergeInto: 'a' }], 24).stages, {}, 'merging into itself is no merge');
 });

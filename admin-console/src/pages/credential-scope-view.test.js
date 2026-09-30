@@ -5,9 +5,7 @@ import {
   normalizeCredential,
   isPersonalCredential,
   teamsById,
-  credentialScopeLabel,
   credentialOwnershipLabel,
-  creatableScopes,
   defaultOwnership,
   ownershipPayload,
   ownershipFromRecord,
@@ -64,62 +62,20 @@ test('teamsById maps id → name', () => {
   assert.deepEqual(teamsById([{ id: 'a', name: 'Alpha' }, { id: 'b' }]), { a: 'Alpha', b: 'b' });
 });
 
-test('credentialScopeLabel: team-scoped', () => {
-  const l = credentialScopeLabel({ scope: 'team', teamId: 'payments' }, names);
-  assert.equal(l.scope, 'team');
-  assert.equal(l.label, 'Team');
-  assert.equal(l.detail, 'Payments');
-});
-
-test('credentialScopeLabel: system assigned to teams', () => {
-  const l = credentialScopeLabel({ scope: 'system', assignedTeamIds: ['payments', 'risk'] }, names);
-  assert.equal(l.scope, 'system');
-  assert.deepEqual(l.teams, ['Payments', 'Risk']);
-  assert.equal(l.detail, 'Payments, Risk');
-});
-
-test('credentialScopeLabel: system assigned to zero teams → Unassigned', () => {
-  const l = credentialScopeLabel({ scope: 'system', assignedTeamIds: [] }, names);
-  assert.equal(l.detail, 'Unassigned');
-  assert.deepEqual(l.teams, []);
-});
-
-test('credentialScopeLabel: personal → Personal / Private to you', () => {
-  const l = credentialScopeLabel({ scope: 'personal', userId: 'u-1' }, names);
-  assert.equal(l.scope, 'personal');
-  assert.equal(l.label, 'Personal');
-  assert.equal(l.detail, 'Private to you');
-  assert.deepEqual(l.teams, []);
-});
-
-test('creatableScopes: sysadmin gets both, team admin only team', () => {
-  assert.deepEqual(creatableScopes({ isSysAdmin: true }), ['system', 'team']);
-  assert.deepEqual(creatableScopes({ isSysAdmin: false }), ['team']);
-});
-
-test('defaultOwnership: sysadmin → team/default; team admin → first admin team', () => {
-  assert.deepEqual(defaultOwnership({ isSysAdmin: true }), { scope: 'team', teamId: 'default', assignedTeamIds: [] });
+test('defaultOwnership: sysadmin → team/default; team admin → first admin team (service identity)', () => {
+  assert.deepEqual(defaultOwnership({ isSysAdmin: true }),
+    { scope: 'team', teamId: 'default', assignedTeamIds: [], identity: IDENTITY_SERVICE });
   assert.deepEqual(defaultOwnership({ isSysAdmin: false, adminTeamIds: ['payments', 'risk'] }),
-    { scope: 'team', teamId: 'payments', assignedTeamIds: [] });
+    { scope: 'team', teamId: 'payments', assignedTeamIds: [], identity: IDENTITY_SERVICE });
 });
 
-test('defaultOwnership: under v2 a plain member (no admin teams) defaults to personal/human (#2360 consolidation)', () => {
+test('defaultOwnership: a plain member (no admin teams) defaults to personal/human (#2360 consolidation)', () => {
   // The consolidated SSH/GitHub-token pages open to every user; a caller who can
   // only ever create a personal credential must land on it, not on an unfillable
   // team picker.
   assert.deepEqual(
-    defaultOwnership({ isSysAdmin: false, adminTeamIds: [], v2: true }),
+    defaultOwnership({ isSysAdmin: false, adminTeamIds: [] }),
     { scope: 'personal', teamId: null, assignedTeamIds: [], identity: IDENTITY_HUMAN },
-  );
-  // A team admin still defaults to their team (service); a sysadmin to team/default.
-  assert.deepEqual(
-    defaultOwnership({ isSysAdmin: false, adminTeamIds: ['payments'], v2: true }),
-    { scope: 'team', teamId: 'payments', assignedTeamIds: [], identity: IDENTITY_SERVICE },
-  );
-  // Off the flag the plain-member shape is byte-identical to before (team, empty).
-  assert.deepEqual(
-    defaultOwnership({ isSysAdmin: false, adminTeamIds: [], v2: false }),
-    { scope: 'team', teamId: '', assignedTeamIds: [] },
   );
 });
 
@@ -332,29 +288,22 @@ test('creatableScopesForIdentity intersects identity legality with caller author
   assert.deepEqual(creatableScopesForIdentity(IDENTITY_HUMAN, { kind: 'ssh-key', isSysAdmin: true }), ['personal']);
 });
 
-// ── v2 ownership carry: identity in default/from-record/payload (#2360) ─────
+// ── ownership carry: identity in from-record/payload (#2360) ─────────────────
 
-test('defaultOwnership(v2) adds a service identity; off v2 the shape is unchanged', () => {
-  assert.deepEqual(defaultOwnership({ isSysAdmin: true }), { scope: 'team', teamId: 'default', assignedTeamIds: [] });
-  assert.deepEqual(defaultOwnership({ isSysAdmin: true, v2: true }),
-    { scope: 'team', teamId: 'default', assignedTeamIds: [], identity: 'service' });
-});
-
-test('ownershipFromRecord(v2) opens on the record identity; off v2 no identity', () => {
+test('ownershipFromRecord opens a credential on the record identity; an environment (no kind) carries none', () => {
   const rec = { id: 'k', scope: 'personal', userId: 'u-1', identity: 'service' };
-  assert.equal(ownershipFromRecord(rec, { v2: false, kind: 'ssh-key' }).identity, undefined);
-  assert.equal(ownershipFromRecord(rec, { v2: true, kind: 'ssh-key' }).identity, 'service');
+  assert.equal(ownershipFromRecord(rec, { kind: 'ssh-key' }).identity, 'service');
+  assert.equal(ownershipFromRecord({ scope: 'system', assignedTeamIds: [] }, { isSysAdmin: true }).identity, undefined);
   // A legacy record (no stamp) infers per kind: a personal ssh key → human.
-  assert.equal(ownershipFromRecord({ scope: 'personal', userId: 'u' }, { v2: true, kind: 'ssh-key' }).identity, 'human');
+  assert.equal(ownershipFromRecord({ scope: 'personal', userId: 'u' }, { kind: 'ssh-key' }).identity, 'human');
 });
 
-test('ownershipPayload(v2) carries identity and round-trips a personal scope', () => {
-  // off v2 — unchanged, no identity, personal not emitted from scope-tabs
+test('ownershipPayload carries identity when present and round-trips a personal scope', () => {
+  // an environment state (no identity) — no identity sent
   assert.deepEqual(ownershipPayload({ scope: 'team', teamId: 't' }), { scope: 'team', teamId: 't' });
-  // on v2 — identity carried
-  assert.deepEqual(ownershipPayload({ scope: 'team', teamId: 't', identity: 'service' }, { v2: true }),
+  assert.deepEqual(ownershipPayload({ scope: 'team', teamId: 't', identity: 'service' }),
     { scope: 'team', teamId: 't', identity: 'service' });
-  // on v2 — a personal credential marked service round-trips as its own tier
-  assert.deepEqual(ownershipPayload({ scope: 'personal', identity: 'service' }, { v2: true }),
+  // a personal credential marked service round-trips as its own tier
+  assert.deepEqual(ownershipPayload({ scope: 'personal', identity: 'service' }),
     { scope: 'personal', identity: 'service' });
 });

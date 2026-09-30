@@ -7,6 +7,7 @@ import { buildGroups, groupKey, orderModel, filterModel, stubSectionLabel, poolI
 import { teamMembershipIndicator, membershipsByTeam, fitAdminNames } from './team-membership-view.js';
 import { computeTeamAttention } from '../../context/agent-statuses.js';
 import { agentState, isChatOpenable } from '../agent-lifecycle/agent-lifecycle-menu.js';
+import { revealPlan } from './reveal-agent.js';
 
 // Re-exported so `AgentChat` can populate the filter dropdown without importing
 // the model module directly (the grouping logic used to live in this file).
@@ -139,6 +140,7 @@ export default function AgentList({
   memberships = EMPTY_MEMBERSHIPS,
   directory = EMPTY_MEMBERSHIPS,
   viewerId = null,
+  revealRequest = null,
 }) {
   // Index memberships by team id once per membership change (#2381). Rebuilds
   // only when the polled `memberships` array identity changes — the hook keeps
@@ -305,6 +307,27 @@ export default function AgentList({
     });
   }, []);
 
+  // #2521: a just-created agent the page asked to reveal. Its team group is
+  // expanded here (persisted like a manual toggle — the user is being shown
+  // the team, so leaving it open is what they would do anyway); the stub
+  // section and the row's scroll-into-view are handled by the components that
+  // own them, keyed on `revealId`. Only the target row gets a truthy `reveal`,
+  // so the memoized rows elsewhere are untouched.
+  const revealId = revealRequest?.id || null;
+  const revealTeamId = useMemo(
+    () => (revealId ? (agents || []).find(a => a.id === revealId)?.parentTeamId || null : null),
+    [revealId, agents],
+  );
+  useEffect(() => {
+    if (!revealRequest) return;
+    const target = (agents || []).find(a => a.id === revealRequest.id) || null;
+    const { groupKey: key } = revealPlan(target, filter);
+    if (!key) return;
+    setCollapsedMap(prev => (prev[key] === true ? { ...prev, [key]: false } : prev));
+    // Re-run per request, not per roster tick: `agents` is read, not tracked.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealRequest]);
+
   return (
     // A uniform `--eb-space-2` gutter around the whole list so the rounded team
     // blocks (`TEAM_BLOCK_STYLE`) breathe on every side by the SAME amount that
@@ -335,6 +358,7 @@ export default function AgentList({
           teamMemberships={membershipMap.get(group.id) || EMPTY_MEMBERSHIPS}
           directory={directory}
           viewerId={viewerId}
+          revealId={group.id === revealTeamId ? revealId : null}
         />
       ))}
 
@@ -356,6 +380,7 @@ export default function AgentList({
               dragKey={agent.id}
               dragEnabled={canReorder && visibleSingles.length > 1}
               onRequestMenu={onRequestMenu}
+              reveal={agent.id === revealId}
             />
           ))}
         </>
@@ -395,6 +420,7 @@ const GroupSection = React.memo(function GroupSection({
   teamMemberships,
   directory,
   viewerId,
+  revealId = null,
 }) {
   const Icon = Users;
   const stubs = group.stubs || [];
@@ -499,6 +525,7 @@ const GroupSection = React.memo(function GroupSection({
             dragKey={agent.id}
             dragEnabled={memberDragEnabled}
             onRequestMenu={onRequestMenu}
+            reveal={agent.id === revealId}
           />
           {/*
            * A pooled role's live instances (#2297), nested directly under it —
@@ -535,6 +562,7 @@ const GroupSection = React.memo(function GroupSection({
           onSelect={onSelect}
           busyIds={busyIds}
           onRequestMenu={onRequestMenu}
+          revealId={revealId}
         />
       )}
     </div>
@@ -558,8 +586,14 @@ const GroupSection = React.memo(function GroupSection({
  * it is: `groupEnvironmentName` keeps reading the header + active members only,
  * so adding stubs to a team can never flip an existing group's hoist.
  */
-function StubSection({ stubs, groupEnv, selectedAgentId, onSelect, busyIds, onRequestMenu }) {
-  const [collapsed, setCollapsed] = useState(true);
+function StubSection({ stubs, groupEnv, selectedAgentId, onSelect, busyIds, onRequestMenu, revealId = null }) {
+  // Collapsed by default — except when it holds the agent the page was asked
+  // to reveal (#2521 AC6: a just-created stub first agent must be visible).
+  const holdsReveal = !!revealId && stubs.some(s => s.id === revealId);
+  const [collapsed, setCollapsed] = useState(!holdsReveal);
+  useEffect(() => {
+    if (holdsReveal) setCollapsed(false);
+  }, [holdsReveal]);
   const [hovered, setHovered] = useState(false);
   const label = stubSectionLabel(stubs.length);
   return (
@@ -610,6 +644,7 @@ function StubSection({ stubs, groupEnv, selectedAgentId, onSelect, busyIds, onRe
           indent
           busy={busyIds.has(agent.id)}
           onRequestMenu={onRequestMenu}
+          reveal={agent.id === revealId}
         />
       ))}
     </>
@@ -1049,9 +1084,17 @@ const STATUS_DOT = {
 // actually pays off: a status poll re-renders only the rows whose
 // `activityState` string changed, not the whole list. The per-row click
 // closures are built inside — they only matter when the row does re-render.
-const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activityState = 'idle', environmentName = null, indent = false, busy = false, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu }) {
+const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activityState = 'idle', environmentName = null, indent = false, busy = false, onReorder, drag, dragScope, dragKey, dragEnabled, onRequestMenu, reveal = false }) {
   const Icon = iconForRole(agent.role);
   const [hovered, setHovered] = useState(false);
+
+  // #2521: the row the page was asked to reveal scrolls itself into view —
+  // on mount too, which is what covers a row that only renders once its
+  // group or stub section has been expanded for the reveal.
+  const rowRef = useRef(null);
+  useEffect(() => {
+    if (reveal) rowRef.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [reveal]);
 
   // A disabled agent is only ever in this list because the caller opted in
   // (#1928 AC6); a stub, because the chat always asks for them (#1957). Both
@@ -1076,6 +1119,7 @@ const AgentRow = React.memo(function AgentRow({ agent, selected, onSelect, activ
 
   return (
     <button
+      ref={rowRef}
       role="option"
       aria-selected={selected}
       aria-disabled={!openable || undefined}
